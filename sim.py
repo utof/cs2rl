@@ -151,6 +151,8 @@ class NavGraph:
         Falls back to graph connectivity if vis_matrix not yet built.
         Returns False for any unknown area_id rather than raising KeyError.
         """
+        if area_i == area_j:
+            return True
         if area_i not in self._id_to_idx or area_j not in self._id_to_idx:
             return False
         if self.vis_matrix is not None:
@@ -526,8 +528,68 @@ class Dust2Env(ParallelEnv):
                 agent.area_id = target_area
                 agent.is_moving = True
 
-        # 3. Check round timeout (shooting/bomb checks added in Tasks 6-8)
-        if s.round_ticks_left <= 0 and not s.round_over:
+        # 4. Process shoot actions (simultaneous)
+        for i, aid in enumerate(self.possible_agents):
+            agent = s.agents[i]
+            if not agent.alive:
+                continue
+            action = actions.get(aid, np.array([0, 0, 0, 0]))
+            if int(action[1]) == 0 or agent.shoot_cd > 0:
+                continue
+
+            # Fire
+            agent.shoot_cd = SHOOT_COOLDOWN
+            agent.fired_this_tick = True
+
+            # Determine facing ray direction
+            dx = np.cos(agent.facing)
+            dy = np.sin(agent.facing)
+
+            # Find enemies along ray — use vis_matrix as proxy
+            enemy_team = 1 - agent.team
+            enemies_alive = [a for a in s.agents if a.team == enemy_team and a.alive]
+
+            best_enemy = None
+            best_dist = LASER_RANGE
+
+            for enemy in enemies_alive:
+                # Check LOS via vis_matrix (same area always visible)
+                if not self.nav_graph.can_see(agent.area_id, enemy.area_id):
+                    continue
+
+                rel = enemy.pos[:2] - agent.pos[:2]
+                dist = np.linalg.norm(rel)
+                if dist > LASER_RANGE or dist == 0:
+                    continue
+
+                # Check angular alignment with facing direction (within ~45° cone)
+                rel_norm = rel / dist
+                dot = rel_norm[0] * dx + rel_norm[1] * dy
+                if dot < 0.7:
+                    continue
+
+                if dist < best_dist:
+                    best_dist = dist
+                    best_enemy = enemy
+
+            if best_enemy is not None:
+                best_enemy.hp -= LASER_DAMAGE
+                if best_enemy.hp <= 0:
+                    best_enemy.alive = False
+                    best_enemy.hp = 0
+                    kills_this_tick.append((agent.agent_id, best_enemy.agent_id))
+
+        # 5. Check round end conditions
+        t_alive = [a for a in s.agents if a.team == 0 and a.alive]
+        ct_alive = [a for a in s.agents if a.team == 1 and a.alive]
+
+        if not t_alive and not s.round_over:
+            s.round_over = True
+            s.winner = 1
+        elif not ct_alive and not s.round_over:
+            s.round_over = True
+            s.winner = 0
+        elif s.round_ticks_left <= 0 and not s.round_over:
             s.round_over = True
             s.winner = 1  # CT wins on timeout
 
@@ -611,3 +673,29 @@ if __name__ == "__main__":
             assert np.isfinite(ob).all(), f"{aid}: NaN after movement"
 
         print("Movement test PASSED")
+
+    if "--test-shoot" in sys.argv:
+        env = Dust2Env()
+        obs, _ = env.reset(seed=1)
+
+        # Force t0 and ct0 into the same area
+        t0_agent = env.state.agents[0]
+        ct0_agent = env.state.agents[5]
+        ct0_agent.area_id = t0_agent.area_id
+
+        # Move ct0 slightly ahead in t0's facing direction so the shot connects
+        dx_face = np.cos(t0_agent.facing)
+        dy_face = np.sin(t0_agent.facing)
+        ct0_agent.pos = t0_agent.pos + np.array([dx_face * 50, dy_face * 50, 0.0])
+
+        # T agent 0 shoots, all others stand still
+        actions = {aid: np.array([0, 0, 0, 0]) for aid in env.agents}
+        actions["t0"] = np.array([0, 1, 0, 0])  # shoot
+
+        initial_ct0_hp = ct0_agent.hp
+        env.step(actions)
+
+        assert env.state.agents[5].hp < initial_ct0_hp or not env.state.agents[5].alive, \
+            "Shooting in same area should deal damage"
+
+        print("Shoot test PASSED")
