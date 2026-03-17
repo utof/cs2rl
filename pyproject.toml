@@ -1,0 +1,17 @@
+[project]
+name = "cs2rl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "awpy>=2.0.2",
+    "gymnasium>=0.29.0",
+    "networkx>=3.3",
+    "numpy>=1.26.0",
+    "pettingzoo>=1.24.0",
+    "rerun-sdk>=0.21.0",
+    "shapely>=2.0.4",
+    "stable-baselines3>=2.3.0",
+    "supersuit>=3.9.0",
+]

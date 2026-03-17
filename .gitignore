@@ -1,0 +1,6 @@
+vis_cache.npy
+checkpoints/
+recordings/
+__pycache__/
+*.pyc
+.venv/
