@@ -164,6 +164,60 @@ class NavGraph:
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return []
 
+    def build_vis_matrix(self):
+        """Build and cache the N×N visibility matrix."""
+        import os
+        import time
+        from shapely.geometry import LineString
+
+        nav_mtime = os.path.getmtime(self._nav_path) if hasattr(self, '_nav_path') else 0
+
+        if os.path.exists(self._cache_path):
+            cache_mtime = os.path.getmtime(self._cache_path)
+            if cache_mtime > nav_mtime:
+                self.vis_matrix = np.load(self._cache_path)
+                print(f"[NavGraph] Loaded visibility matrix from cache ({self.N}×{self.N})")
+                return
+
+        print(f"[NavGraph] Building visibility matrix ({self.N}×{self.N})... "
+              f"(this takes 2-5 min, cached after)")
+        t0 = time.time()
+
+        vis = np.zeros((self.N, self.N), dtype=bool)
+        centroids = [self.centroids[aid] for aid in self.area_ids]
+
+        for i in range(self.N):
+            if i % 100 == 0:
+                elapsed = time.time() - t0
+                eta = (elapsed / max(i, 1)) * (self.N - i)
+                print(f"  [{i}/{self.N}] elapsed={elapsed:.0f}s ETA={eta:.0f}s")
+
+            cx, cy = centroids[i]
+
+            for j in range(i, self.N):
+                if i == j:
+                    vis[i][j] = True
+                    continue
+
+                dx, dy = centroids[j]
+                ray = LineString([(cx, cy), (dx, dy)])
+
+                candidates = self._wall_strtree.query(ray)
+
+                blocked = False
+                for k in candidates:
+                    wall = self._wall_lines[k]
+                    if ray.crosses(wall):
+                        blocked = True
+                        break
+
+                vis[i][j] = vis[j][i] = not blocked
+
+        self.vis_matrix = vis
+        np.save(self._cache_path, vis)
+        elapsed = time.time() - t0
+        print(f"[NavGraph] Visibility matrix built in {elapsed:.0f}s, cached to {self._cache_path}")
+
 
 # ── SECTION: Tests ────────────────────────────────────────────────────────
 
@@ -181,3 +235,14 @@ if __name__ == "__main__":
             f"NavGraph test PASSED — {len(nav.graph.nodes)} nodes, "
             f"{len(nav.wall_segments)} wall segments"
         )
+
+    if "--test-vis" in sys.argv:
+        nav = NavGraph("C:/Users/vboxuser/.awpy/navs/de_dust2.json")
+        nav.build_vis_matrix()
+        assert nav.vis_matrix is not None
+        assert nav.vis_matrix.shape == (nav.N, nav.N)
+        assert np.array_equal(nav.vis_matrix, nav.vis_matrix.T), "vis matrix not symmetric"
+        assert nav.vis_matrix[0, 0] == True
+        true_frac = nav.vis_matrix.sum() / nav.vis_matrix.size
+        assert 0.005 < true_frac < 0.95, f"suspicious vis fraction: {true_frac:.2f}"
+        print(f"Visibility test PASSED — {true_frac:.1%} of pairs are visible")
