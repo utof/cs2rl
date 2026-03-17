@@ -406,7 +406,7 @@ class Dust2Env(ParallelEnv):
         obs[4] = np.cos(agent.facing)
         obs[5] = agent.hp / 100.0
         obs[6] = float(agent.has_bomb if team == 0 else agent.has_kit)
-        obs[7] = 1.0 if agent.shoot_cd == 0 else (agent.shoot_cd / SHOOT_COOLDOWN)
+        obs[7] = 1.0 if agent.shoot_cd == 0 else (1.0 - agent.shoot_cd / SHOOT_COOLDOWN)
 
         teammates = [a for a in s.agents if a.team == team and a.agent_id != agent.agent_id]
         for i, tm in enumerate(teammates[:4]):
