@@ -453,12 +453,87 @@ class Dust2Env(ParallelEnv):
         return np.clip(obs, -1.0, 1.0)
 
     def step(self, actions: dict):
-        """Stub — implemented in Task 4."""
-        obs = {aid: self._compute_obs(i) for i, aid in enumerate(self.possible_agents)}
+        s = self.state
+        s.tick += 1
+        s.round_ticks_left -= 1
+
+        # Pre-initialize accumulators (later tasks will populate these)
+        kills_this_tick = []
+        bomb_just_planted = False
+        bomb_just_defused = False
+        _bomb_planter_id = -1
+        _bomb_defuser_id = -1
+
+        # 1. Decrement cooldowns
+        for agent in s.agents:
+            if agent.shoot_cd > 0:
+                agent.shoot_cd -= 1
+            agent.fired_this_tick = False
+            agent.is_moving = False
+
+        # 2. Process movement for all alive agents simultaneously
+        DIR_VECTORS = {
+            0: np.array([0.0, 0.0]),
+            1: np.array([0.0, 1.0]),    # N
+            2: np.array([1.0, 1.0]),    # NE
+            3: np.array([1.0, 0.0]),    # E
+            4: np.array([1.0, -1.0]),   # SE
+            5: np.array([0.0, -1.0]),   # S
+            6: np.array([-1.0, -1.0]),  # SW
+            7: np.array([-1.0, 0.0]),   # W
+            8: np.array([-1.0, 1.0]),   # NW
+        }
+
+        for i, aid in enumerate(self.possible_agents):
+            agent = s.agents[i]
+            if not agent.alive:
+                continue
+            action = actions.get(aid, np.array([0, 0, 0, 0]))
+            move_dir = int(action[0])
+
+            if move_dir == 0:
+                continue
+
+            direction = DIR_VECTORS[move_dir]
+            norm = np.linalg.norm(direction)
+            if norm > 0:
+                direction = direction / norm
+
+            delta = direction * MOVE_SPEED * DT
+            target_pos = agent.pos[:2] + delta
+
+            # Update facing from movement direction
+            agent.facing = np.arctan2(direction[1], direction[0])
+
+            # Find target area
+            target_area = self.nav_graph.get_area(target_pos)
+
+            # Move only if target area is connected to current area (or same area)
+            if (target_area == agent.area_id or
+                    self.nav_graph.graph.has_edge(agent.area_id, target_area)):
+                agent.pos = np.array([target_pos[0], target_pos[1], agent.pos[2]])
+                agent.area_id = target_area
+                agent.is_moving = True
+
+        # 3. Check round timeout (shooting/bomb checks added in Tasks 6-8)
+        if s.round_ticks_left <= 0 and not s.round_over:
+            s.round_over = True
+            s.winner = 1  # CT wins on timeout
+
+        # Compute outputs
+        self.agents = [aid for i, aid in enumerate(self.possible_agents)
+                       if s.agents[i].alive]
+
+        obs = {aid: self._compute_obs(i)
+               for i, aid in enumerate(self.possible_agents) if s.agents[i].alive}
         rewards = {aid: 0.0 for aid in self.agents}
-        terms = {aid: False for aid in self.agents}
-        truncs = {aid: False for aid in self.agents}
-        infos = {aid: {} for aid in self.agents}
+        terms = {aid: s.round_over for aid in self.possible_agents}
+        truncs = {aid: False for aid in self.possible_agents}
+        infos = {aid: {} for aid in self.possible_agents}
+
+        if self._record_fn:
+            self._record_fn(s, s.tick, rewards)
+
         return obs, rewards, terms, truncs, infos
 
     def render(self):
@@ -502,3 +577,26 @@ if __name__ == "__main__":
             assert ob.shape == (71,), f"{agent_id}: shape {ob.shape} != (71,)"
             assert np.isfinite(ob).all(), f"{agent_id}: NaN in reset obs"
         print("Env init test PASSED")
+
+    if "--test-movement" in sys.argv:
+        env = Dust2Env()
+        obs, _ = env.reset(seed=0)
+        initial_pos = {aid: env.state.agents[i].pos.copy()
+                       for i, aid in enumerate(env.possible_agents)}
+
+        # Action: move North (action[0]=1) for all agents
+        actions = {aid: np.array([1, 0, 0, 0]) for aid in env.agents}
+        obs, rewards, terms, truncs, infos = env.step(actions)
+
+        moved_pos = {aid: env.state.agents[i].pos for i, aid in enumerate(env.possible_agents)}
+
+        any_moved = any(
+            not np.allclose(initial_pos[aid], moved_pos[aid])
+            for aid in env.possible_agents
+        )
+        assert any_moved, "No agents moved after movement action"
+
+        for aid, ob in obs.items():
+            assert np.isfinite(ob).all(), f"{aid}: NaN after movement"
+
+        print("Movement test PASSED")
