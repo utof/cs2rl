@@ -48,6 +48,11 @@ class NavGraph:
             c = area.centroid
             self.centroids[aid] = np.array([c.x, c.y], dtype=np.float32)
 
+        # Pre-built (N, 2) matrix for vectorised nearest-centroid lookups
+        self._centroid_matrix: np.ndarray = np.array(
+            [self.centroids[aid] for aid in self.area_ids], dtype=np.float32
+        )  # shape (N, 2)
+
         # ── Build networkx graph ───────────────────────────────────────────
         # nx.Graph (undirected): a small fraction of CS2 nav connections are
         # one-way (~5/20 in a sample), but the nav mesh is overwhelmingly
@@ -135,9 +140,10 @@ class NavGraph:
         for idx in candidate_indices:
             if self._area_polys[idx].contains(pt):
                 return self.area_ids[idx]
-        # Fallback: nearest centroid (always returns a valid area_id)
-        dists = [np.linalg.norm(pos_xy - self.centroids[aid]) for aid in self.area_ids]
-        return self.area_ids[int(np.argmin(dists))]
+        # Fallback: nearest centroid — vectorised over all N areas
+        diff = self._centroid_matrix - pos_xy  # (N, 2)
+        idx = int(np.argmin((diff * diff).sum(axis=1)))
+        return self.area_ids[idx]
 
     def can_see(self, area_i: int, area_j: int) -> bool:
         """Return True if area_i can see area_j (requires vis_matrix from Task 2).
@@ -239,6 +245,25 @@ ENEMY_MEMORY_TICKS  = 32
 
 MAP_X_MIN, MAP_X_MAX = -2476.0, 2000.0
 MAP_Y_MIN, MAP_Y_MAX = -1050.0, 3420.0
+
+# Precomputed reciprocals for _norm_xy — avoids repeated division inside step()
+_INV_MAP_X_RANGE = 2.0 / (MAP_X_MAX - MAP_X_MIN)
+_INV_MAP_Y_RANGE = 2.0 / (MAP_Y_MAX - MAP_Y_MIN)
+_MAP_X_OFFSET    = (MAP_X_MAX + MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN)
+_MAP_Y_OFFSET    = (MAP_Y_MAX + MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN)
+
+# Direction vectors for movement actions (built once at import time)
+_DIR_VECTORS = {
+    0: np.array([0.0,  0.0]),
+    1: np.array([0.0,  1.0]),    # N
+    2: np.array([0.7071067811865476,  0.7071067811865476]),  # NE (pre-normalised)
+    3: np.array([1.0,  0.0]),    # E
+    4: np.array([0.7071067811865476, -0.7071067811865476]),  # SE
+    5: np.array([0.0, -1.0]),    # S
+    6: np.array([-0.7071067811865476, -0.7071067811865476]),  # SW
+    7: np.array([-1.0, 0.0]),    # W
+    8: np.array([-0.7071067811865476,  0.7071067811865476]),  # NW
+}
 
 # ── SECTION: Dataclasses ───────────────────────────────────────────────────
 
@@ -390,9 +415,10 @@ class Dust2Env(ParallelEnv):
         )
 
     def _norm_xy(self, pos):
-        nx = (pos[0] - MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN) * 2 - 1
-        ny = (pos[1] - MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN) * 2 - 1
-        return np.array([nx, ny], dtype=np.float32)
+        return np.array([
+            pos[0] * _INV_MAP_X_RANGE - _MAP_X_OFFSET,
+            pos[1] * _INV_MAP_Y_RANGE - _MAP_Y_OFFSET,
+        ], dtype=np.float32)
 
     def _compute_obs(self, agent_idx: int) -> np.ndarray:
         obs = np.zeros(71, dtype=np.float32)
@@ -472,18 +498,6 @@ class Dust2Env(ParallelEnv):
             agent.is_moving = False
 
         # 2. Process movement for all alive agents simultaneously
-        DIR_VECTORS = {
-            0: np.array([0.0, 0.0]),
-            1: np.array([0.0, 1.0]),    # N
-            2: np.array([1.0, 1.0]),    # NE
-            3: np.array([1.0, 0.0]),    # E
-            4: np.array([1.0, -1.0]),   # SE
-            5: np.array([0.0, -1.0]),   # S
-            6: np.array([-1.0, -1.0]),  # SW
-            7: np.array([-1.0, 0.0]),   # W
-            8: np.array([-1.0, 1.0]),   # NW
-        }
-
         for i, aid in enumerate(self.possible_agents):
             agent = s.agents[i]
             if not agent.alive:
@@ -494,10 +508,7 @@ class Dust2Env(ParallelEnv):
             if move_dir == 0:
                 continue
 
-            direction = DIR_VECTORS[move_dir]
-            norm = np.linalg.norm(direction)
-            if norm > 0:
-                direction = direction / norm
+            direction = _DIR_VECTORS[move_dir]  # pre-normalised at module level
 
             delta = direction * MOVE_SPEED * DT
             target_pos = agent.pos[:2] + delta
