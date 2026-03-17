@@ -593,6 +593,60 @@ class Dust2Env(ParallelEnv):
             s.round_over = True
             s.winner = 1  # CT wins on timeout
 
+        # 6. Process plant/defuse actions
+        for i, aid in enumerate(self.possible_agents):
+            agent = s.agents[i]
+            if not agent.alive:
+                continue
+            action = actions.get(aid, np.array([0, 0, 0, 0]))
+            if int(action[2]) == 0:
+                continue
+
+            # T planting
+            if agent.team == 0 and agent.has_bomb and not s.bomb_planted:
+                if agent.area_id in self.bombsite_areas:
+                    if s.bomb_being_planted_by == -1:
+                        s.bomb_being_planted_by = agent.agent_id
+                        s.bomb_plant_ticks = 0
+                    if s.bomb_being_planted_by == agent.agent_id:
+                        s.bomb_plant_ticks += 1
+                        if s.bomb_plant_ticks >= BOMB_PLANT_TIME:
+                            s.bomb_planted = True
+                            s.bomb_area_id = agent.area_id
+                            s.bomb_pos = agent.pos.copy()
+                            s.bomb_ticks_left = BOMB_TIMER
+                            s.bomb_being_planted_by = -1
+                            agent.has_bomb = False
+                            bomb_just_planted = True
+                            _bomb_planter_id = agent.agent_id
+                else:
+                    # Left site — cancel plant
+                    if s.bomb_being_planted_by == agent.agent_id:
+                        s.bomb_being_planted_by = -1
+                        s.bomb_plant_ticks = 0
+
+            # CT defusing
+            elif agent.team == 1 and s.bomb_planted:
+                if agent.area_id == s.bomb_area_id:
+                    defuse_time = BOMB_DEFUSE_KIT if agent.has_kit else BOMB_DEFUSE_TIME
+                    if s.bomb_being_defused_by == -1:
+                        s.bomb_being_defused_by = agent.agent_id
+                        s.bomb_defuse_ticks = 0
+                    if s.bomb_being_defused_by == agent.agent_id:
+                        s.bomb_defuse_ticks += 1
+                        if s.bomb_defuse_ticks >= defuse_time:
+                            s.round_over = True
+                            s.winner = 1
+                            bomb_just_defused = True
+                            _bomb_defuser_id = agent.agent_id
+
+        # 7. Bomb timer countdown
+        if s.bomb_planted and not s.round_over:
+            s.bomb_ticks_left -= 1
+            if s.bomb_ticks_left <= 0:
+                s.round_over = True
+                s.winner = 0
+
         # 10. Update enemy memory per agent (sound + vision)
         sounds = self._compute_sounds(s)
         for i, agent in enumerate(s.agents):
@@ -606,7 +660,39 @@ class Dust2Env(ParallelEnv):
 
         obs = {aid: self._compute_obs(i)
                for i, aid in enumerate(self.possible_agents) if s.agents[i].alive}
-        rewards = {aid: 0.0 for aid in self.agents}
+
+        # 9. Compute rewards
+        rewards = {aid: 0.0 for aid in self.possible_agents}
+
+        if s.round_over:
+            for i, aid in enumerate(self.possible_agents):
+                agent = s.agents[i]
+                if agent.alive:
+                    if s.winner == agent.team:
+                        rewards[aid] += 1.0
+                    else:
+                        rewards[aid] -= 1.0
+
+        for killer_id, victim_id in kills_this_tick:
+            killer_aid = (f"t{killer_id}" if killer_id < 5 else f"ct{killer_id - 5}")
+            victim_aid  = (f"t{victim_id}" if victim_id < 5 else f"ct{victim_id - 5}")
+            rewards[killer_aid] += 0.3
+            rewards[victim_aid] -= 0.1
+
+        if bomb_just_planted:
+            planter_aid = f"t{_bomb_planter_id}"
+            rewards[planter_aid] += 0.2
+
+        if bomb_just_defused:
+            defuser_aid = f"ct{_bomb_defuser_id - 5}"
+            rewards[defuser_aid] += 0.2
+
+        # Survival bonus (first half of round, no bomb planted)
+        if not s.bomb_planted and s.round_ticks_left > ROUND_TIME * 0.5:
+            for i, aid in enumerate(self.possible_agents):
+                if s.agents[i].alive:
+                    rewards[aid] += 0.0001
+
         terms = {aid: s.round_over for aid in self.possible_agents}
         truncs = {aid: False for aid in self.possible_agents}
         infos = {aid: {} for aid in self.possible_agents}
@@ -750,6 +836,30 @@ if __name__ == "__main__":
             f"Expected no visibility for distant enemies, got {visible_flags}"
 
         print("Obs masking test PASSED")
+
+    if "--test-bomb" in sys.argv:
+        env = Dust2Env()
+        obs, _ = env.reset(seed=2)
+
+        # Force T bomb carrier onto bombsite A
+        bomber = next(a for a in env.state.agents if a.has_bomb)
+        site_area = env.a_site_areas[0]
+        bomber.area_id = site_area
+        bomber.pos = np.array([*env.nav_graph.centroids[site_area], 0.0])
+
+        # Hold plant for required ticks
+        planted = False
+        for _ in range(BOMB_PLANT_TIME + 5):
+            actions = {aid: np.array([0, 0, 0, 0]) for aid in env.agents}
+            actions[f"t{bomber.agent_id}"] = np.array([0, 0, 1, 0])  # plant action
+            obs, rewards, terms, truncs, infos = env.step(actions)
+            if env.state.bomb_planted:
+                planted = True
+                break
+
+        assert planted, "Bomb should have been planted after holding plant action"
+        assert env.state.bomb_area_id == site_area
+        print("Bomb plant test PASSED")
 
     if "--test-shoot" in sys.argv:
         env = Dust2Env()
