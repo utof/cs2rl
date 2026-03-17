@@ -101,6 +101,83 @@ def record_episode(checkpoint_path=None):
     print(f"[Record] View with: python -m rerun {save_path}")
 
 
+# ── SECTION: Training ─────────────────────────────────────────────────────
+
+import os
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
+
+TRAINING_CONFIG = dict(
+    learning_rate=3e-4,
+    n_steps=2048,
+    batch_size=512,
+    n_epochs=10,
+    gamma=0.99,
+    gae_lambda=0.95,
+    clip_range=0.2,
+    ent_coef=0.01,
+    vf_coef=0.5,
+    max_grad_norm=0.5,
+    policy_kwargs=dict(net_arch=[256, 256, 128]),
+    verbose=1,
+)
+CHECKPOINT_EVERY  = 100_000
+OPPONENT_UPDATE   = 50_000
+
+
+class OpponentPoolCallback(BaseCallback):
+    """Saves policy to opponent pool every N timesteps."""
+
+    def __init__(self, update_freq: int, pool_dir: str = "checkpoints/pool"):
+        super().__init__()
+        self.update_freq = update_freq
+        self.pool_dir = pool_dir
+        self._last_update = 0
+        os.makedirs(pool_dir, exist_ok=True)
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last_update >= self.update_freq:
+            path = os.path.join(self.pool_dir, f"step_{self.num_timesteps}.zip")
+            self.model.save(path)
+            self._last_update = self.num_timesteps
+            print(f"[OpponentPool] Saved {path}")
+        return True
+
+
+def train(args):
+    from supersuit import pettingzoo_env_to_vec_env_v1, concat_vec_envs_v1
+
+    os.makedirs("checkpoints", exist_ok=True)
+    n_envs = 8
+
+    print(f"[Train] Creating {n_envs} parallel envs...")
+
+    def make_vec():
+        env = Dust2Env()
+        env = pettingzoo_env_to_vec_env_v1(env)
+        return env
+
+    vec_env = concat_vec_envs_v1(
+        make_vec(), n_envs, num_cpus=1, base_class="stable_baselines3"
+    )
+
+    model = PPO("MlpPolicy", vec_env, **TRAINING_CONFIG)
+
+    callbacks = [
+        CheckpointCallback(
+            save_freq=CHECKPOINT_EVERY,
+            save_path="checkpoints/",
+            name_prefix="cs2rl",
+        ),
+        OpponentPoolCallback(update_freq=OPPONENT_UPDATE),
+    ]
+
+    print(f"[Train] Starting PPO for {args.timesteps:,} timesteps...")
+    model.learn(total_timesteps=args.timesteps, callback=callbacks)
+    model.save("checkpoints/final.zip")
+    print("[Train] Done. Saved checkpoints/final.zip")
+
+
 # ── SECTION: CLI ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -116,7 +193,7 @@ if __name__ == "__main__":
     if args.smoke:
         smoke_test()
     elif args.train:
-        print("Training not implemented yet — run --smoke first")
+        train(args)
     elif args.record:
         record_episode(checkpoint_path=args.checkpoint)
     elif args.eval:

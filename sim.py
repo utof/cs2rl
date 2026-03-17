@@ -320,7 +320,8 @@ NAV_PATH   = "C:/Users/vboxuser/.awpy/navs/de_dust2.json"
 CACHE_PATH = "vis_cache.npy"
 
 class Dust2Env(ParallelEnv):
-    metadata = {"name": "dust2_v0"}
+    metadata = {"name": "dust2_v0", "render_modes": []}
+    render_mode = None
 
     def __init__(self, nav_path=NAV_PATH, cache_path=CACHE_PATH, record_fn=None):
         super().__init__()
@@ -897,3 +898,17 @@ if __name__ == "__main__":
             "Shooting in same area should deal damage"
 
         print("Shoot test PASSED")
+
+    if "--test-sb3-wrap" in sys.argv:
+        from supersuit import pettingzoo_env_to_vec_env_v1, concat_vec_envs_v1
+
+        env = Dust2Env()
+        vec_env = pettingzoo_env_to_vec_env_v1(env)
+        vec_env = concat_vec_envs_v1(vec_env, 1, num_cpus=1, base_class="stable_baselines3")
+
+        obs = vec_env.reset()
+        # obs might be (obs_arr, infos) tuple in newer gymnasium versions
+        if isinstance(obs, tuple):
+            obs = obs[0]
+        assert obs.shape[1] == 71, f"Expected obs dim 71, got {obs.shape}"
+        print(f"SB3 wrap test PASSED — obs shape: {obs.shape}")
