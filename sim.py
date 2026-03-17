@@ -594,6 +594,17 @@ class Dust2Env(ParallelEnv):
             s.winner = 1  # CT wins on timeout
 
         # 6. Process plant/defuse actions
+        # Clear defuse state if the defuser stopped or left
+        if s.bomb_being_defused_by != -1:
+            defuser = next((a for a in s.agents if a.agent_id == s.bomb_being_defused_by), None)
+            defuser_aid = (f"ct{s.bomb_being_defused_by - 5}")
+            defuser_action = actions.get(defuser_aid, np.array([0, 0, 0, 0]))
+            if (defuser is None or not defuser.alive or
+                    defuser.area_id != s.bomb_area_id or
+                    int(defuser_action[2]) == 0):
+                s.bomb_being_defused_by = -1
+                s.bomb_defuse_ticks = 0
+
         for i, aid in enumerate(self.possible_agents):
             agent = s.agents[i]
             if not agent.alive:
