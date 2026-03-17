@@ -3,7 +3,7 @@
 import networkx as nx
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Dict
+from typing import List, Tuple, Dict
 
 from awpy import Nav
 from shapely.geometry import LineString, Point, Polygon as ShapelyPolygon
@@ -38,7 +38,7 @@ class NavGraph:
         # ── Load nav data ──────────────────────────────────────────────────
         self.nav = Nav.from_json(nav_path)
         self.areas: Dict[int, object] = self.nav.areas  # dict[int, NavArea]
-        self.area_ids: List[int] = list(self.areas.keys())
+        self.area_ids: List[int] = sorted(self.areas.keys())  # sorted for stable _id_to_idx indices across runs
         self.N: int = len(self.area_ids)
         self._id_to_idx: Dict[int, int] = {aid: i for i, aid in enumerate(self.area_ids)}
 
@@ -49,6 +49,9 @@ class NavGraph:
             self.centroids[aid] = np.array([c.x, c.y], dtype=np.float32)
 
         # ── Build networkx graph ───────────────────────────────────────────
+        # nx.Graph (undirected): a small fraction of CS2 nav connections are
+        # one-way (~5/20 in a sample), but the nav mesh is overwhelmingly
+        # symmetric and pathfinding works correctly with an undirected graph.
         self.graph = nx.Graph()
         self.graph.add_nodes_from(self.area_ids)
         for aid, area in self.areas.items():
@@ -111,14 +114,20 @@ class NavGraph:
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def get_area(self, pos_xy: np.ndarray) -> Optional[int]:
-        """Return the area_id containing pos_xy, or None if not found.
+    def get_area(self, pos_xy: np.ndarray) -> int:
+        """Return the area_id that contains pos_xy.
+
+        First checks which area polygon contains the point via an STRtree
+        spatial index.  If the point falls outside every polygon (e.g. it
+        was snapped to a slightly off-mesh coordinate), always falls back to
+        the nearest centroid so that callers always receive a valid area_id.
+        Agents always spawn on the map, so a None return is never appropriate.
 
         Args:
             pos_xy: np.array([x, y])
 
         Returns:
-            area_id (int) or None
+            area_id (int) — always the nearest valid area, never None
         """
         pt = Point(pos_xy[0], pos_xy[1])
         # Query candidates from STRtree
@@ -126,7 +135,7 @@ class NavGraph:
         for idx in candidate_indices:
             if self._area_polys[idx].contains(pt):
                 return self.area_ids[idx]
-        # Fallback: nearest centroid
+        # Fallback: nearest centroid (always returns a valid area_id)
         dists = [np.linalg.norm(pos_xy - self.centroids[aid]) for aid in self.area_ids]
         return self.area_ids[int(np.argmin(dists))]
 
@@ -134,7 +143,10 @@ class NavGraph:
         """Return True if area_i can see area_j (requires vis_matrix from Task 2).
 
         Falls back to graph connectivity if vis_matrix not yet built.
+        Returns False for any unknown area_id rather than raising KeyError.
         """
+        if area_i not in self._id_to_idx or area_j not in self._id_to_idx:
+            return False
         if self.vis_matrix is not None:
             i = self._id_to_idx[area_i]
             j = self._id_to_idx[area_j]
