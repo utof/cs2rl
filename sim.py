@@ -593,6 +593,13 @@ class Dust2Env(ParallelEnv):
             s.round_over = True
             s.winner = 1  # CT wins on timeout
 
+        # 10. Update enemy memory per agent (sound + vision)
+        sounds = self._compute_sounds(s)
+        for i, agent in enumerate(s.agents):
+            if not agent.alive:
+                continue
+            self._update_enemy_memory(agent, s, sounds)
+
         # Compute outputs
         self.agents = [aid for i, aid in enumerate(self.possible_agents)
                        if s.agents[i].alive]
@@ -608,6 +615,54 @@ class Dust2Env(ParallelEnv):
             self._record_fn(s, s.tick, rewards)
 
         return obs, rewards, terms, truncs, infos
+
+    def _compute_sounds(self, s: GameState) -> list:
+        sounds = []
+        for agent in s.agents:
+            if not agent.alive:
+                continue
+            if agent.is_moving:
+                sounds.append(SoundEvent(
+                    source_pos=agent.pos.copy(),
+                    source_id=agent.agent_id,
+                    radius=FOOTSTEP_RADIUS,
+                    type="footstep",
+                ))
+            if agent.fired_this_tick:
+                sounds.append(SoundEvent(
+                    source_pos=agent.pos.copy(),
+                    source_id=agent.agent_id,
+                    radius=GUNSHOT_RADIUS,
+                    type="shot",
+                ))
+        return sounds
+
+    def _update_enemy_memory(self, agent: AgentState, gs: GameState, sounds: list):
+        # NOTE: parameter named `gs` to avoid collision with any local var `s`
+        enemy_team = 1 - agent.team
+        enemies = [a for a in gs.agents if a.team == enemy_team]
+
+        for enemy in enemies:
+            if not enemy.alive:
+                if enemy.agent_id in agent.enemy_memory:
+                    area, _ = agent.enemy_memory[enemy.agent_id]
+                    agent.enemy_memory[enemy.agent_id] = (area, -9999)  # stale = dead
+                continue
+
+            can_see = self.nav_graph.can_see(agent.area_id, enemy.area_id)
+            can_hear = any(
+                snd.source_id == enemy.agent_id and
+                np.linalg.norm(agent.pos[:2] - snd.source_pos[:2]) <= snd.radius
+                for snd in sounds
+                if snd.source_id // 5 != agent.agent_id // 5  # enemy team only
+            )
+
+            if can_see or can_hear:
+                agent.enemy_memory[enemy.agent_id] = (enemy.area_id, gs.tick)
+            else:
+                last_tick = agent.enemy_memory.get(enemy.agent_id, (None, -9999))[1]
+                if last_tick >= 0 and gs.tick - last_tick > ENEMY_MEMORY_TICKS:
+                    agent.enemy_memory.pop(enemy.agent_id, None)
 
     def render(self):
         pass
@@ -673,6 +728,28 @@ if __name__ == "__main__":
             assert np.isfinite(ob).all(), f"{aid}: NaN after movement"
 
         print("Movement test PASSED")
+
+    if "--test-obs-masking" in sys.argv:
+        env = Dust2Env()
+        obs, _ = env.reset(seed=5)
+
+        # Move all CT agents far from T agents
+        for ct in env.state.agents[5:]:
+            ct.area_id = env.ct_spawn_areas[0]
+            ct.pos = np.array([*env.nav_graph.centroids[env.ct_spawn_areas[0]], 0.0])
+
+        # Clear all enemy memory for t0
+        env.state.agents[0].enemy_memory = {}
+
+        obs_t0 = env._compute_obs(0)
+
+        # Enemy slots should be zeroed (no memory, no LOS)
+        enemy_obs = obs_t0[28:63]   # 5 enemies × 7 = 35 floats
+        visible_flags = [enemy_obs[i*7 + 5] for i in range(5)]
+        assert all(f == 0.0 for f in visible_flags), \
+            f"Expected no visibility for distant enemies, got {visible_flags}"
+
+        print("Obs masking test PASSED")
 
     if "--test-shoot" in sys.argv:
         env = Dust2Env()
