@@ -661,7 +661,7 @@ class Dust2Env(ParallelEnv):
                 agent.enemy_memory[enemy.agent_id] = (enemy.area_id, gs.tick)
             else:
                 last_tick = agent.enemy_memory.get(enemy.agent_id, (None, -9999))[1]
-                if last_tick >= 0 and gs.tick - last_tick > ENEMY_MEMORY_TICKS:
+                if last_tick >= 0 and gs.tick - last_tick >= ENEMY_MEMORY_TICKS:
                     agent.enemy_memory.pop(enemy.agent_id, None)
 
     def render(self):
