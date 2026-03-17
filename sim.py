@@ -219,6 +219,251 @@ class NavGraph:
         print(f"[NavGraph] Visibility matrix built in {elapsed:.0f}s, cached to {self._cache_path}")
 
 
+# ── SECTION: Constants ─────────────────────────────────────────────────────
+
+MOVE_SPEED          = 250
+TICK_RATE           = 64
+DT                  = 1.0 / TICK_RATE
+LASER_DAMAGE        = 100
+LASER_RANGE         = 3000
+SHOOT_COOLDOWN      = 10
+BOMB_PLANT_TIME     = int(3.2 * TICK_RATE)
+BOMB_DEFUSE_TIME    = 10 * TICK_RATE
+BOMB_DEFUSE_KIT     = 5 * TICK_RATE
+BOMB_TIMER          = int(40 * TICK_RATE)
+ROUND_TIME          = int(115 * TICK_RATE)
+FOOTSTEP_RADIUS     = 800
+GUNSHOT_RADIUS      = 2000
+BOMB_BEEP_RADIUS    = 1500
+ENEMY_MEMORY_TICKS  = 32
+
+MAP_X_MIN, MAP_X_MAX = -2476.0, 2000.0
+MAP_Y_MIN, MAP_Y_MAX = -1050.0, 3420.0
+
+# ── SECTION: Dataclasses ───────────────────────────────────────────────────
+
+@dataclass
+class AgentState:
+    agent_id:    int
+    team:        int          # 0 = T, 1 = CT
+    pos:         np.ndarray   # [x, y, z] HU
+    area_id:     int
+    facing:      float        # radians, 0 = +X
+    hp:          int
+    alive:       bool
+    has_bomb:    bool
+    has_kit:     bool
+    shoot_cd:    int
+    is_moving:   bool
+    fired_this_tick: bool
+    enemy_memory: dict = field(default_factory=dict)  # {enemy_id: (area_id, tick)}
+
+@dataclass
+class GameState:
+    tick:                  int
+    agents:                list
+    bomb_planted:          bool
+    bomb_carrier_id:       int
+    bomb_area_id:          int
+    bomb_pos:              np.ndarray
+    bomb_ticks_left:       int
+    bomb_being_planted_by: int
+    bomb_plant_ticks:      int
+    bomb_being_defused_by: int
+    bomb_defuse_ticks:     int
+    round_ticks_left:      int
+    round_over:            bool
+    winner:                int   # 0=T, 1=CT, -1=ongoing
+
+@dataclass
+class SoundEvent:
+    source_pos: np.ndarray
+    source_id:  int
+    radius:     float
+    type:       str
+
+# ── SECTION: Dust2Env ──────────────────────────────────────────────────────
+
+from pettingzoo import ParallelEnv
+import gymnasium
+from gymnasium import spaces
+import pathlib
+
+NAV_PATH   = "C:/Users/vboxuser/.awpy/navs/de_dust2.json"
+CACHE_PATH = "vis_cache.npy"
+
+class Dust2Env(ParallelEnv):
+    metadata = {"name": "dust2_v0"}
+
+    def __init__(self, nav_path=NAV_PATH, cache_path=CACHE_PATH, record_fn=None):
+        super().__init__()
+        self.nav_graph = NavGraph(nav_path, cache_path)
+        self.nav_graph.build_vis_matrix()
+
+        self._calibrate_map_bounds()
+        self._identify_special_areas()
+
+        self.possible_agents = [f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)]
+        self.agents = list(self.possible_agents)
+        self._record_fn = record_fn
+        self.state: GameState = None
+
+    def _calibrate_map_bounds(self):
+        global MAP_X_MIN, MAP_X_MAX, MAP_Y_MIN, MAP_Y_MAX
+        xs = [c[0] for c in self.nav_graph.centroids.values()]
+        ys = [c[1] for c in self.nav_graph.centroids.values()]
+        MAP_X_MIN, MAP_X_MAX = min(xs), max(xs)
+        MAP_Y_MIN, MAP_Y_MAX = min(ys), max(ys)
+        print(f"[Dust2Env] Map bounds: X=[{MAP_X_MIN:.0f},{MAP_X_MAX:.0f}] Y=[{MAP_Y_MIN:.0f},{MAP_Y_MAX:.0f}]")
+
+    def _identify_special_areas(self):
+        A_SITE  = np.array([720.0, 2600.0])
+        B_SITE  = np.array([-1278.0, 820.0])
+        T_SPAWN = np.array([-500.0, -300.0])
+        CT_SPAWN= np.array([800.0, 3100.0])
+
+        def areas_near(target, radius=400):
+            return [aid for aid, c in self.nav_graph.centroids.items()
+                    if np.linalg.norm(c - target) < radius]
+
+        self.a_site_areas  = areas_near(A_SITE,  400) or [self.nav_graph.area_ids[0]]
+        self.b_site_areas  = areas_near(B_SITE,  400) or [self.nav_graph.area_ids[1]]
+        self.t_spawn_areas = areas_near(T_SPAWN, 600) or [self.nav_graph.area_ids[2]]
+        self.ct_spawn_areas= areas_near(CT_SPAWN,600) or [self.nav_graph.area_ids[3]]
+        self.bombsite_areas= set(self.a_site_areas + self.b_site_areas)
+
+        print(f"[Dust2Env] A-site: {len(self.a_site_areas)} areas, B-site: {len(self.b_site_areas)} areas")
+
+    def observation_space(self, agent):
+        return spaces.Box(low=-1.0, high=1.0, shape=(71,), dtype=np.float32)
+
+    def action_space(self, agent):
+        return spaces.MultiDiscrete([9, 2, 2, 2])
+
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            np.random.seed(seed)
+        self.agents = list(self.possible_agents)
+        self.state = self._make_initial_state()
+        obs = {aid: self._compute_obs(i) for i, aid in enumerate(self.possible_agents)}
+        infos = {aid: {} for aid in self.possible_agents}
+        return obs, infos
+
+    def _make_initial_state(self):
+        agents = []
+        bomb_carrier = np.random.randint(0, 5)
+
+        for i in range(5):
+            spawn_area = self.t_spawn_areas[i % len(self.t_spawn_areas)]
+            centroid = self.nav_graph.centroids[spawn_area]
+            agents.append(AgentState(
+                agent_id=i, team=0,
+                pos=np.array([centroid[0], centroid[1], 0.0]),
+                area_id=spawn_area,
+                facing=0.0, hp=100, alive=True,
+                has_bomb=(i == bomb_carrier),
+                has_kit=False, shoot_cd=0,
+                is_moving=False, fired_this_tick=False,
+            ))
+
+        for i in range(5):
+            spawn_area = self.ct_spawn_areas[i % len(self.ct_spawn_areas)]
+            centroid = self.nav_graph.centroids[spawn_area]
+            agents.append(AgentState(
+                agent_id=5+i, team=1,
+                pos=np.array([centroid[0], centroid[1], 0.0]),
+                area_id=spawn_area,
+                facing=np.pi, hp=100, alive=True,
+                has_bomb=False,
+                has_kit=(np.random.random() < 0.5),
+                shoot_cd=0, is_moving=False, fired_this_tick=False,
+            ))
+
+        return GameState(
+            tick=0, agents=agents,
+            bomb_planted=False, bomb_carrier_id=bomb_carrier,
+            bomb_area_id=-1, bomb_pos=np.zeros(3),
+            bomb_ticks_left=0,
+            bomb_being_planted_by=-1, bomb_plant_ticks=0,
+            bomb_being_defused_by=-1, bomb_defuse_ticks=0,
+            round_ticks_left=ROUND_TIME, round_over=False, winner=-1,
+        )
+
+    def _norm_xy(self, pos):
+        nx = (pos[0] - MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN) * 2 - 1
+        ny = (pos[1] - MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN) * 2 - 1
+        return np.array([nx, ny], dtype=np.float32)
+
+    def _compute_obs(self, agent_idx: int) -> np.ndarray:
+        obs = np.zeros(71, dtype=np.float32)
+        s = self.state
+        agent = s.agents[agent_idx]
+        team = agent.team
+
+        obs[0] = float(team)
+        obs[1:3] = self._norm_xy(agent.pos)
+        obs[3] = np.sin(agent.facing)
+        obs[4] = np.cos(agent.facing)
+        obs[5] = agent.hp / 100.0
+        obs[6] = float(agent.has_bomb if team == 0 else agent.has_kit)
+        obs[7] = 1.0 if agent.shoot_cd == 0 else (agent.shoot_cd / SHOOT_COOLDOWN)
+
+        teammates = [a for a in s.agents if a.team == team and a.agent_id != agent.agent_id]
+        for i, tm in enumerate(teammates[:4]):
+            base = 8 + i * 5
+            obs[base:base+2] = self._norm_xy(tm.pos)
+            obs[base+2] = np.sin(tm.facing)
+            obs[base+3] = np.cos(tm.facing)
+            obs[base+4] = tm.hp / 100.0 if tm.alive else 0.0
+
+        enemy_team = 1 - team
+        enemies = sorted([a for a in s.agents if a.team == enemy_team], key=lambda a: a.agent_id)
+        for i, en in enumerate(enemies[:5]):
+            base = 28 + i * 7
+            mem = agent.enemy_memory.get(en.agent_id)
+            can_see = self.nav_graph.can_see(agent.area_id, en.area_id) if en.alive else False
+
+            if mem is None and not can_see:
+                continue
+
+            if mem is not None:
+                mem_area, last_tick = mem
+                mem_centroid = self.nav_graph.centroids.get(mem_area, agent.pos[:2])
+                obs[base:base+2] = self._norm_xy(mem_centroid)
+                obs[base+2] = np.sin(en.facing)
+                obs[base+3] = np.cos(en.facing)
+                obs[base+4] = en.hp / 100.0 if en.alive else 0.0
+                obs[base+5] = 1.0 if can_see else 0.0
+                freshness = (max(0, ENEMY_MEMORY_TICKS - (s.tick - last_tick)) / ENEMY_MEMORY_TICKS
+                             if last_tick >= 0 else 0.0)
+                obs[base+6] = freshness
+
+        obs[63] = float(s.bomb_planted)
+        if s.bomb_planted:
+            obs[64:66] = self._norm_xy(s.bomb_pos[:2])
+            obs[66] = s.bomb_ticks_left / BOMB_TIMER
+        else:
+            obs[64:66] = -1.0
+            obs[66] = 0.0
+        obs[67] = s.round_ticks_left / ROUND_TIME
+        obs[68] = sum(1 for a in s.agents if a.team == 0 and a.alive) / 5.0
+        obs[69] = sum(1 for a in s.agents if a.team == 1 and a.alive) / 5.0
+        obs[70] = float(agent.area_id in self.bombsite_areas)
+
+        return np.clip(obs, -1.0, 1.0)
+
+    def step(self, actions: dict):
+        """Stub — implemented in Task 4."""
+        obs = {aid: self._compute_obs(i) for i, aid in enumerate(self.possible_agents)}
+        rewards = {aid: 0.0 for aid in self.agents}
+        terms = {aid: False for aid in self.agents}
+        truncs = {aid: False for aid in self.agents}
+        infos = {aid: {} for aid in self.agents}
+        return obs, rewards, terms, truncs, infos
+
+    def render(self):
+        pass
+
 # ── SECTION: Tests ────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -246,3 +491,14 @@ if __name__ == "__main__":
         true_frac = nav.vis_matrix.sum() / nav.vis_matrix.size
         assert 0.005 < true_frac < 0.95, f"suspicious vis fraction: {true_frac:.2f}"
         print(f"Visibility test PASSED — {true_frac:.1%} of pairs are visible")
+
+    if "--test-env-init" in sys.argv:
+        env = Dust2Env()
+        assert hasattr(env, 'possible_agents')
+        assert len(env.possible_agents) == 10
+        obs, infos = env.reset(seed=42)
+        assert len(obs) == 10, f"Expected 10 obs, got {len(obs)}"
+        for agent_id, ob in obs.items():
+            assert ob.shape == (71,), f"{agent_id}: shape {ob.shape} != (71,)"
+            assert np.isfinite(ob).all(), f"{agent_id}: NaN in reset obs"
+        print("Env init test PASSED")
