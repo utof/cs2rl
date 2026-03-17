@@ -55,6 +55,52 @@ def smoke_test():
         print("INFO: Acceptable speed. Target is >5000 for training.")
 
 
+# ── SECTION: Record Episode ────────────────────────────────────────────────
+
+def record_episode(checkpoint_path=None):
+    import os
+    from viz import init_recording, log_navmesh, log_tick
+    from sim import ROUND_TIME
+
+    os.makedirs("recordings", exist_ok=True)
+    save_path = "recordings/latest.rrd"
+
+    print(f"[Record] Initialising rerun recording -> {save_path}")
+    init_recording(save_path=save_path)
+
+    def record_fn(state, tick, rewards):
+        log_tick(state, tick, rewards)
+
+    env = Dust2Env(record_fn=record_fn)
+    log_navmesh(env.nav_graph)
+
+    obs, _ = env.reset(seed=0)
+
+    if checkpoint_path:
+        from stable_baselines3 import PPO
+        model = PPO.load(checkpoint_path)
+        print(f"[Record] Loaded checkpoint: {checkpoint_path}")
+    else:
+        model = None
+
+    done = False
+    step_count = 0
+    while not done and step_count < ROUND_TIME * 2:
+        if model:
+            obs_arr = np.stack([obs[aid] for aid in env.possible_agents])
+            acts, _ = model.predict(obs_arr, deterministic=True)
+            actions = {aid: acts[i] for i, aid in enumerate(env.possible_agents)}
+        else:
+            actions = {aid: env.action_space(aid).sample() for aid in env.agents}
+
+        obs, rewards, terms, truncs, infos = env.step(actions)
+        step_count += 1
+        done = all(terms.get(aid, False) for aid in env.possible_agents)
+
+    print(f"[Record] Episode complete ({step_count} ticks). Saved to {save_path}")
+    print(f"[Record] View with: python -m rerun {save_path}")
+
+
 # ── SECTION: CLI ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -72,7 +118,7 @@ if __name__ == "__main__":
     elif args.train:
         print("Training not implemented yet — run --smoke first")
     elif args.record:
-        print("Recording not implemented yet")
+        record_episode(checkpoint_path=args.checkpoint)
     elif args.eval:
         print("Eval not implemented yet")
     else:
