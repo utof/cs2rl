@@ -193,6 +193,14 @@ class Dust2CEnv(pufferlib.PufferEnv):
         _lib.env_init(ctypes.byref(self._c_env), ctypes.byref(self._sd),
                       ctypes.c_uint32(seed), ctypes.c_float(team_spirit))
 
+        # Pre-create numpy views of C buffers — avoids recreating each step
+        self._obs_view  = np.frombuffer(self._c_env.observations, dtype=np.float32).reshape(N_AGENTS, OBS_DIM)
+        self._rew_view  = np.frombuffer(self._c_env.rewards,      dtype=np.float32)
+        self._term_view = np.frombuffer(self._c_env.terminals,    dtype=np.int8)
+
+        # Pre-create flat actions buffer for faster copying
+        self._actions_flat = np.zeros(N_AGENTS * 4, dtype=np.int32)
+
     @property
     def unwrapped(self):
         return self
@@ -200,18 +208,18 @@ class Dust2CEnv(pufferlib.PufferEnv):
     def reset(self, seed=None):
         # seed is accepted for API compatibility but C RNG is set at env_init time
         _lib.env_reset(ctypes.byref(self._c_env))
-        self.observations[:] = np.frombuffer(
-            self._c_env.observations, dtype=np.float32).reshape(N_AGENTS, OBS_DIM)
+        np.copyto(self.observations, self._obs_view)
         return self.observations, {}
 
     def step(self, actions):
-        flat = np.asarray(actions, dtype=np.int32).flatten()
-        ctypes.memmove(self._c_env.actions, flat.ctypes.data, flat.nbytes)
+        # Convert and flatten actions directly to pre-allocated buffer
+        actions_arr = np.asarray(actions, dtype=np.int32)
+        self._actions_flat[:] = actions_arr.ravel()
+        ctypes.memmove(self._c_env.actions, self._actions_flat.ctypes.data, self._actions_flat.nbytes)
         _lib.env_step(ctypes.byref(self._c_env))
-        self.observations[:] = np.frombuffer(
-            self._c_env.observations, dtype=np.float32).reshape(N_AGENTS, OBS_DIM)
-        self.rewards[:]     = np.frombuffer(self._c_env.rewards,   dtype=np.float32)
-        self.terminals[:]   = np.frombuffer(self._c_env.terminals, dtype=np.int8).astype(bool)
+        np.copyto(self.observations, self._obs_view)
+        np.copyto(self.rewards, self._rew_view)
+        np.copyto(self.terminals, self._term_view.view(np.bool_))
         self.truncations[:] = False
         return self.observations, self.rewards, self.terminals, self.truncations, {}
 
