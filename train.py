@@ -56,6 +56,7 @@ def smoke_test():
     sps = step_count / elapsed
 
     print(f"SMOKE TEST PASSED — {sps:.0f} steps/sec")
+    assert sps >= 500, f"Smoke test FAILED: {sps:.0f} steps/sec is below the 500 minimum — profile step() with cProfile."
     if sps < 500:
         print("WARNING: Very slow (<500 steps/sec). Profile step() with cProfile.")
     elif sps < 5000:
