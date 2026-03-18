@@ -10,6 +10,7 @@ dependencies = [
     "networkx>=3.3",
     "numpy>=1.26.0",
     "pettingzoo>=1.24.0",
+    "pufferlib>=3.0.0",
     "pwd-stub; sys_platform == 'win32'",
     "rerun-sdk>=0.21.0",
     "sample-factory[pettingzoo-envs]",
