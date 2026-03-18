@@ -133,6 +133,20 @@ CHECKPOINT_EVERY  = 100_000
 OPPONENT_UPDATE   = 50_000
 
 
+# ── SECTION: Sample Factory env registration ──────────────────────────────
+
+from sample_factory.algo.utils.context import global_env_registry
+from sample_factory.envs.pettingzoo_envs import PettingZooParallelEnv
+
+
+def _make_cs2_env(full_env_name: str, cfg=None, env_config=None, render_mode=None) -> PettingZooParallelEnv:
+    """Factory function registered with Sample Factory."""
+    return PettingZooParallelEnv(Dust2Env())
+
+
+global_env_registry()["cs2-dust2"] = _make_cs2_env
+
+
 class OpponentPoolCallback(BaseCallback):
     """Saves policy to opponent pool every N timesteps."""
 
