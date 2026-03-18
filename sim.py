@@ -352,6 +352,11 @@ _DIR_VECTORS = {
     8: np.array([-0.7071067811865476, 0.7071067811865476]),  # NW
 }
 
+# Team Spirit: controls individual↔team reward blending (annealed 0→1 during training).
+# WARNING: uses module-level global — only process-safe when num_cpus=1 in train.py.
+# If num_cpus > 1 is ever needed, replace with multiprocessing.Value.
+_TEAM_SPIRIT: float = 0.0
+
 # ── SECTION: Dataclasses ───────────────────────────────────────────────────
 
 
@@ -921,6 +926,32 @@ class Dust2Env(ParallelEnv):
                     )
                 )
         return sounds
+
+    def _potential(self, gs: "GameState", team: int) -> float:
+        """Compute potential Φ(s, team) for potential-based reward shaping.
+
+        Φ reflects game-state advantage via alive count, HP, and site control.
+        Used as F(s,a,s') = γΦ(s') − Φ(s) per Ng et al. ICML 1999.
+        Only counts alive agents — dead agents contribute 0 HP and 0 site presence.
+        """
+        opp = 1 - team
+        alive_team = sum(1 for a in gs.agents if a.team == team and a.alive)
+        alive_opp  = sum(1 for a in gs.agents if a.team == opp  and a.alive)
+        hp_team    = sum(a.hp for a in gs.agents if a.team == team and a.alive)
+        hp_opp     = sum(a.hp for a in gs.agents if a.team == opp  and a.alive)
+        site_team  = sum(
+            1 for a in gs.agents
+            if a.team == team and a.alive and a.area_id in self.bombsite_areas
+        )
+        site_opp   = sum(
+            1 for a in gs.agents
+            if a.team == opp and a.alive and a.area_id in self.bombsite_areas
+        )
+        return (
+            (alive_team - alive_opp)  * 0.3
+            + (hp_team  - hp_opp)     / 500.0
+            + (site_team - site_opp)  * 0.2
+        )
 
     def _update_enemy_memory(self, agent: AgentState, gs: GameState, sounds: list):
         # NOTE: parameter named `gs` to avoid collision with any local var `s`
