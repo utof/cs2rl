@@ -1,5 +1,6 @@
 # ── SECTION: NavGraph ──────────────────────────────────────────────────────
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
@@ -89,9 +90,15 @@ class NavGraph:
 
         # Pre-built (N, 3) matrix for 3D snapping (spawn slots need z to avoid floor mismatches)
         self._centroid_matrix_3d: np.ndarray = np.array(
-            [[self.areas[aid].centroid.x,
-              self.areas[aid].centroid.y,
-              self.areas[aid].centroid.z] for aid in self.area_ids], dtype=np.float32
+            [
+                [
+                    self.areas[aid].centroid.x,
+                    self.areas[aid].centroid.y,
+                    self.areas[aid].centroid.z,
+                ]
+                for aid in self.area_ids
+            ],
+            dtype=np.float32,
         )  # shape (N, 3)
 
         # ── Build networkx graph ───────────────────────────────────────────
@@ -110,6 +117,13 @@ class NavGraph:
 
         # ── Build area spatial index ───────────────────────────────────────
         self._area_polys, self._area_strtree = self._build_area_index()
+
+        # ── Rasterized grid for O(1) position lookup ───────────────────────
+        # Replaces per-step Shapely Point+STRtree+contains in get_area_if_on_mesh.
+        self._grid_cache_path = (
+            cache_path.replace(".npy", "_grid.npy") if cache_path else None
+        )
+        self._build_pos_grid()
 
         # ── Visibility matrix (built in Task 2) ───────────────────────────
         self.vis_matrix = None
@@ -158,6 +172,94 @@ class NavGraph:
         strtree = STRtree(polys)
         return polys, strtree
 
+    def _build_pos_grid(self, cell_size: float = 4.0):
+        """Build a rasterized 2D grid mapping (gx, gy) → area_idx for O(1) lookups.
+
+        Replaces per-step Shapely Point + STRtree + contains chain in
+        get_area_if_on_mesh.  Cached to disk alongside the vis matrix.
+
+        Grid cell (gx, gy) covers the square [x_min + gx*cell, y_min + gy*cell].
+        Value is the index into self.area_ids, or -1 for off-mesh.
+        """
+        import os
+
+        import shapely as sh
+
+        nav_mtime = (
+            os.path.getmtime(self._nav_path) if hasattr(self, "_nav_path") else 0
+        )
+        cache = self._grid_cache_path
+
+        if cache and os.path.exists(cache):
+            if os.path.getmtime(cache) > nav_mtime:
+                data = np.load(cache, allow_pickle=True).item()
+                self._grid_cell_size = float(data["cell"])
+                self._grid_inv_cell = 1.0 / self._grid_cell_size
+                self._grid_x_min = float(data["x_min"])
+                self._grid_y_min = float(data["y_min"])
+                self._grid_w = int(data["w"])
+                self._grid_h = int(data["h"])
+                self._pos_grid = data["grid"]
+                print(
+                    f"[NavGraph] Loaded position grid {self._grid_w}×{self._grid_h} from cache"
+                )
+                return
+
+        all_bounds = np.array([p.bounds for p in self._area_polys])  # (N, 4)
+        x_min = float(all_bounds[:, 0].min()) - cell_size
+        y_min = float(all_bounds[:, 1].min()) - cell_size
+        x_max = float(all_bounds[:, 2].max()) + cell_size
+        y_max = float(all_bounds[:, 3].max()) + cell_size
+
+        W = int(np.ceil((x_max - x_min) / cell_size)) + 1
+        H = int(np.ceil((y_max - y_min) / cell_size)) + 1
+        inv = 1.0 / cell_size
+
+        # Cell centres
+        xs = x_min + (np.arange(W) + 0.5) * cell_size  # (W,)
+        ys = y_min + (np.arange(H) + 0.5) * cell_size  # (H,)
+
+        grid = np.full((H, W), -1, dtype=np.int32)
+        for i, poly in enumerate(self._area_polys):
+            minx, miny, maxx, maxy = poly.bounds
+            gx0 = max(0, int((minx - x_min) * inv))
+            gx1 = min(W - 1, int((maxx - x_min) * inv) + 1)
+            gy0 = max(0, int((miny - y_min) * inv))
+            gy1 = min(H - 1, int((maxy - y_min) * inv) + 1)
+            if gx1 < gx0 or gy1 < gy0:
+                continue
+            cxs = xs[gx0 : gx1 + 1]
+            cys = ys[gy0 : gy1 + 1]
+            xx, yy = np.meshgrid(cxs, cys)
+            inside = sh.contains_xy(poly, xx.ravel(), yy.ravel()).reshape(xx.shape)
+            grid[gy0 : gy1 + 1, gx0 : gx1 + 1][inside] = i
+
+        self._grid_cell_size = cell_size
+        self._grid_inv_cell = inv
+        self._grid_x_min = x_min
+        self._grid_y_min = y_min
+        self._grid_w = W
+        self._grid_h = H
+        self._pos_grid = grid
+
+        coverage = (grid >= 0).mean()
+        print(
+            f"[NavGraph] Built position grid {W}×{H} (cell={cell_size}u, {coverage:.1%} coverage)"
+        )
+
+        if cache:
+            np.save(
+                cache,
+                {
+                    "cell": cell_size,
+                    "x_min": x_min,
+                    "y_min": y_min,
+                    "w": W,
+                    "h": H,
+                    "grid": grid,
+                },
+            )
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def get_area(self, pos_xy: np.ndarray) -> int:
@@ -193,6 +295,22 @@ class NavGraph:
             if self._area_polys[idx].contains(pt):
                 return True
         return False
+
+    def get_area_if_on_mesh(self, pos_xy: np.ndarray):
+        """Combined get_area + is_on_mesh — O(1) rasterized grid lookup.
+
+        Returns (area_id, True) if pos_xy is inside a nav polygon.
+        Returns (None, False) if the point is outside the mesh.
+
+        Uses a precomputed raster grid built at init (no Shapely overhead per call).
+        """
+        gx = int((pos_xy[0] - self._grid_x_min) * self._grid_inv_cell)
+        gy = int((pos_xy[1] - self._grid_y_min) * self._grid_inv_cell)
+        if 0 <= gx < self._grid_w and 0 <= gy < self._grid_h:
+            idx = self._pos_grid[gy, gx]
+            if idx >= 0:
+                return self.area_ids[idx], True
+        return None, False
 
     def can_see(self, area_i: int, area_j: int) -> bool:
         """Return True if area_i can see area_j (requires vis_matrix from Task 2).
@@ -315,16 +433,16 @@ class NavGraph:
 # ── SECTION: Constants ─────────────────────────────────────────────────────
 
 MOVE_SPEED = 250
-TICK_RATE = 64
+TICK_RATE = 16
 DT = 1.0 / TICK_RATE
 LASER_DAMAGE = 100
 LASER_RANGE = 3000
 SHOOT_COOLDOWN = 10
-BOMB_PLANT_TIME = int(3.2 * TICK_RATE)
+BOMB_PLANT_TIME = int(1.2 * TICK_RATE)
 BOMB_DEFUSE_TIME = 10 * TICK_RATE
 BOMB_DEFUSE_KIT = 5 * TICK_RATE
 BOMB_TIMER = int(40 * TICK_RATE)
-ROUND_TIME = int(11 * TICK_RATE)
+ROUND_TIME = int(40 * TICK_RATE)
 FOOTSTEP_RADIUS = 800
 GUNSHOT_RADIUS = 2000
 BOMB_BEEP_RADIUS = 1500
@@ -351,6 +469,10 @@ _DIR_VECTORS = {
     7: np.array([-1.0, 0.0]),  # W
     8: np.array([-0.7071067811865476, 0.7071067811865476]),  # NW
 }
+# Pre-scaled delta per direction — avoids multiplying every step
+_DELTA_VECTORS = {k: v * (MOVE_SPEED * DT) for k, v in _DIR_VECTORS.items()}
+# Pre-computed facing angle per direction — avoids np.arctan2 every step
+_DIR_FACING = {k: math.atan2(float(v[1]), float(v[0])) for k, v in _DIR_VECTORS.items()}
 
 # Team Spirit: controls individual↔team reward blending (annealed 0→1 during training).
 # WARNING: uses module-level global — only process-safe when num_cpus=1 in train.py.
@@ -419,7 +541,9 @@ class Dust2Env(ParallelEnv):
     metadata = {"name": "dust2_v0", "render_modes": []}
     render_mode = None
 
-    def __init__(self, nav_path=NAV_PATH, cache_path=CACHE_PATH, record_fn=None, team_spirit=None):
+    def __init__(
+        self, nav_path=NAV_PATH, cache_path=CACHE_PATH, record_fn=None, team_spirit=None
+    ):
         super().__init__()
         self.nav_graph = NavGraph(nav_path, cache_path)
         self.nav_graph.build_vis_matrix()
@@ -458,17 +582,17 @@ class Dust2Env(ParallelEnv):
         """
         if len(xyz) >= 3:
             pt = np.array(xyz[:3], dtype=np.float32)
-            diff = self.nav_graph._centroid_matrix_3d - pt   # (N, 3)
+            diff = self.nav_graph._centroid_matrix_3d - pt  # (N, 3)
         else:
             pt = np.array(xyz[:2], dtype=np.float32)
-            diff = self.nav_graph._centroid_matrix - pt       # (N, 2)
+            diff = self.nav_graph._centroid_matrix - pt  # (N, 2)
         idx = int(np.argmin((diff * diff).sum(axis=1)))
         return self.nav_graph.area_ids[idx]
 
     def _areas_near(self, xy, radius: float):
         """Return all area_ids within radius of 2D position xy, sorted by distance."""
         pt = np.array(xy[:2], dtype=np.float32)
-        diff = self.nav_graph._centroid_matrix - pt   # (N, 2)
+        diff = self.nav_graph._centroid_matrix - pt  # (N, 2)
         dists = np.sqrt((diff * diff).sum(axis=1))
         order = np.argsort(dists)
         return [self.nav_graph.area_ids[i] for i in order if dists[i] < radius]
@@ -476,24 +600,37 @@ class Dust2Env(ParallelEnv):
     def _identify_special_areas(self):
         # CS2 setpos_exact spawn slots (from Valve competitive map data, with z)
         T_SPAWN_SLOTS = [
-            ( -881, -754,  120), ( -841, -808,  117), ( -776, -843,  117),
-            ( -715, -808,  116), ( -680, -754,  120), ( -557, -738,  122),
-            ( -522, -795,  117), ( -460, -836,  117), ( -396, -806,  117),
-            ( -357, -755,  120), ( -233, -754,  114), ( -193, -808,  109),
-            ( -128, -843,   95), (  -67, -808,   84), (  -32, -754,   79),
+            (-881, -754, 120),
+            (-841, -808, 117),
+            (-776, -843, 117),
+            (-715, -808, 116),
+            (-680, -754, 120),
+            (-557, -738, 122),
+            (-522, -795, 117),
+            (-460, -836, 117),
+            (-396, -806, 117),
+            (-357, -755, 120),
+            (-233, -754, 114),
+            (-193, -808, 109),
+            (-128, -843, 95),
+            (-67, -808, 84),
+            (-32, -754, 79),
         ]
         CT_SPAWN_SLOTS = [
-            (160, 2370, -120), (182, 2439, -121), (258, 2481, -121),
-            (334, 2434, -120), (351, 2353, -120),
+            (160, 2370, -120),
+            (182, 2439, -121),
+            (258, 2481, -121),
+            (334, 2434, -120),
+            (351, 2353, -120),
         ]
         # Bombsite centers (CS2 in-game coords, verified 20-27u from nearest nav area)
-        A_SITE = (1200.0, 2400.0,  100.0)
-        B_SITE = (-1530.0, 2600.0,   5.0)
+        A_SITE = (1200.0, 2400.0, 100.0)
+        B_SITE = (-1530.0, 2600.0, 5.0)
 
         # Spawn: snap each individual slot to its nearest nav area.
         # This guarantees agents land at actual spawn box positions, not
         # arbitrary areas that happen to share a low area_id.
-        self.t_spawn_areas  = [self._snap_to_nav(s) for s in T_SPAWN_SLOTS]
+        self.t_spawn_areas = [self._snap_to_nav(s) for s in T_SPAWN_SLOTS]
         self.ct_spawn_areas = [self._snap_to_nav(s) for s in CT_SPAWN_SLOTS]
 
         # Bombsites: all areas sorted by distance from site centre (closest first).
@@ -501,10 +638,12 @@ class Dust2Env(ParallelEnv):
         self.b_site_areas = self._areas_near(B_SITE, 600)
         self.bombsite_areas = set(self.a_site_areas + self.b_site_areas)
 
-        print(f"[Dust2Env] T-spawn: {len(self.t_spawn_areas)} slots  "
-              f"CT-spawn: {len(self.ct_spawn_areas)} slots  "
-              f"A-site: {len(self.a_site_areas)} areas  "
-              f"B-site: {len(self.b_site_areas)} areas")
+        print(
+            f"[Dust2Env] T-spawn: {len(self.t_spawn_areas)} slots  "
+            f"CT-spawn: {len(self.ct_spawn_areas)} slots  "
+            f"A-site: {len(self.a_site_areas)} areas  "
+            f"B-site: {len(self.b_site_areas)} areas"
+        )
 
     def observation_space(self, agent):
         return spaces.Box(low=-1.0, high=1.0, shape=(71,), dtype=np.float32)
@@ -512,12 +651,47 @@ class Dust2Env(ParallelEnv):
     def action_space(self, agent):
         return spaces.MultiDiscrete([9, 2, 2, 2])
 
+    def _build_vis10(self, s) -> np.ndarray:
+        """Build a (10, 10) bool matrix of inter-agent visibility for this tick.
+
+        Called once after movement so area_ids are final.  Reused by the shoot
+        loop, enemy-memory update, and obs computation — avoids ~150 individual
+        can_see() dict lookups per step.
+        """
+        _vm = self.nav_graph.vis_matrix
+        _iix = self.nav_graph._id_to_idx
+        if _vm is not None:
+            idxs = np.array([_iix.get(s.agents[k].area_id, 0) for k in range(10)])
+            vis10 = _vm[np.ix_(idxs, idxs)]  # (10,10) bool slice — one C-level op
+            np.fill_diagonal(vis10, True)
+        else:
+            vis10 = np.zeros((10, 10), dtype=bool)
+            np.fill_diagonal(vis10, True)
+        return vis10
+
+    def _build_obs_context(self, s):
+        """Compute shared values for _compute_obs — called once per tick.
+
+        Returns (alive_t, alive_ct, vis10) where:
+          alive_t  = fraction of T-side agents alive (float)
+          alive_ct = fraction of CT-side agents alive (float)
+          vis10    = (10, 10) bool numpy array: vis10[i, j] = can_see this tick
+        """
+        alive_t = sum(1 for a in s.agents if a.team == 0 and a.alive) / 5.0
+        alive_ct = sum(1 for a in s.agents if a.team == 1 and a.alive) / 5.0
+        vis10 = self._build_vis10(s)
+        return alive_t, alive_ct, vis10
+
     def reset(self, seed=None, options=None):
         if seed is not None:
             np.random.seed(seed)
         self.agents = list(self.possible_agents)
         self.state = self._make_initial_state()
-        obs = {aid: self._compute_obs(i) for i, aid in enumerate(self.possible_agents)}
+        alive_t, alive_ct, vis10 = self._build_obs_context(self.state)
+        obs = {
+            aid: self._compute_obs(i, alive_t, alive_ct, vis10)
+            for i, aid in enumerate(self.possible_agents)
+        }
         infos = {aid: {} for aid in self.possible_agents}
         return obs, infos
 
@@ -591,40 +765,59 @@ class Dust2Env(ParallelEnv):
             dtype=np.float32,
         )
 
-    def _compute_obs(self, agent_idx: int) -> np.ndarray:
+    def _compute_obs(
+        self, agent_idx: int, alive_t: float, alive_ct: float, vis10: np.ndarray
+    ) -> np.ndarray:
+        """Build the 71-float observation vector for agent at agent_idx.
+
+        Parameters pre-computed by step() once per tick to avoid redundant work:
+          alive_t  -- fraction of T-side agents alive (computed once, shared across all 10 obs)
+          alive_ct -- fraction of CT-side agents alive
+          vis10    -- (10, 10) bool array: vis10[i, j] = can agent i see agent j this tick
+        """
         obs = np.zeros(71, dtype=np.float32)
         s = self.state
         agent = s.agents[agent_idx]
         team = agent.team
 
+        # ── Self features ──────────────────────────────────────────────────
         obs[0] = float(team)
-        obs[1:3] = self._norm_xy(agent.pos)
-        obs[3] = np.sin(agent.facing)
-        obs[4] = np.cos(agent.facing)
+        # Inline _norm_xy — avoids creating a numpy array on each call
+        obs[1] = agent.pos[0] * _INV_MAP_X_RANGE - _MAP_X_OFFSET
+        obs[2] = agent.pos[1] * _INV_MAP_Y_RANGE - _MAP_Y_OFFSET
+        obs[3] = math.sin(agent.facing)
+        obs[4] = math.cos(agent.facing)
         obs[5] = agent.hp / 100.0
         obs[6] = float(agent.has_bomb if team == 0 else agent.has_kit)
         obs[7] = 1.0 if agent.shoot_cd == 0 else (1.0 - agent.shoot_cd / SHOOT_COOLDOWN)
 
-        teammates = [
-            a for a in s.agents if a.team == team and a.agent_id != agent.agent_id
-        ]
-        for i, tm in enumerate(teammates[:4]):
-            base = 8 + i * 5
-            obs[base : base + 2] = self._norm_xy(tm.pos)
-            obs[base + 2] = np.sin(tm.facing)
-            obs[base + 3] = np.cos(tm.facing)
+        # ── Teammate features ──────────────────────────────────────────────
+        # Agents are stored in agent_id order: team-0 = s.agents[0:5], team-1 = s.agents[5:10]
+        tm_start = 0 if team == 0 else 5
+        tm_count = 0
+        for j in range(tm_start, tm_start + 5):
+            if j == agent_idx:
+                continue
+            tm = s.agents[j]
+            base = 8 + tm_count * 5
+            obs[base] = tm.pos[0] * _INV_MAP_X_RANGE - _MAP_X_OFFSET
+            obs[base + 1] = tm.pos[1] * _INV_MAP_Y_RANGE - _MAP_Y_OFFSET
+            obs[base + 2] = math.sin(tm.facing)
+            obs[base + 3] = math.cos(tm.facing)
             obs[base + 4] = tm.hp / 100.0 if tm.alive else 0.0
+            tm_count += 1
+            if tm_count == 4:
+                break
 
-        enemy_team = 1 - team
-        enemies = sorted(
-            [a for a in s.agents if a.team == enemy_team], key=lambda a: a.agent_id
-        )
-        for i, en in enumerate(enemies[:5]):
+        # ── Enemy features ─────────────────────────────────────────────────
+        # Enemies are the opposite team slice — already in agent_id order, no sort needed.
+        en_start = 5 if team == 0 else 0
+        for i in range(5):
+            en = s.agents[en_start + i]
+            en_idx = en_start + i
             base = 28 + i * 7
             mem = agent.enemy_memory.get(en.agent_id)
-            can_see = (
-                self.nav_graph.can_see(agent.area_id, en.area_id) if en.alive else False
-            )
+            can_see = vis10[agent_idx, en_idx] if en.alive else False
 
             if mem is None and not can_see:
                 continue
@@ -632,9 +825,10 @@ class Dust2Env(ParallelEnv):
             if mem is not None:
                 mem_area, last_tick = mem
                 mem_centroid = self.nav_graph.centroids.get(mem_area, agent.pos[:2])
-                obs[base : base + 2] = self._norm_xy(mem_centroid)
-                obs[base + 2] = np.sin(en.facing)
-                obs[base + 3] = np.cos(en.facing)
+                obs[base] = mem_centroid[0] * _INV_MAP_X_RANGE - _MAP_X_OFFSET
+                obs[base + 1] = mem_centroid[1] * _INV_MAP_Y_RANGE - _MAP_Y_OFFSET
+                obs[base + 2] = math.sin(en.facing)
+                obs[base + 3] = math.cos(en.facing)
                 obs[base + 4] = en.hp / 100.0 if en.alive else 0.0
                 obs[base + 5] = 1.0 if can_see else 0.0
                 freshness = (
@@ -645,19 +839,22 @@ class Dust2Env(ParallelEnv):
                 )
                 obs[base + 6] = freshness
 
+        # ── Global features ────────────────────────────────────────────────
         obs[63] = float(s.bomb_planted)
         if s.bomb_planted:
-            obs[64:66] = self._norm_xy(s.bomb_pos[:2])
+            obs[64] = s.bomb_pos[0] * _INV_MAP_X_RANGE - _MAP_X_OFFSET
+            obs[65] = s.bomb_pos[1] * _INV_MAP_Y_RANGE - _MAP_Y_OFFSET
             obs[66] = s.bomb_ticks_left / BOMB_TIMER
         else:
-            obs[64:66] = -1.0
+            obs[64] = -1.0
+            obs[65] = -1.0
             obs[66] = 0.0
         obs[67] = s.round_ticks_left / ROUND_TIME
-        obs[68] = sum(1 for a in s.agents if a.team == 0 and a.alive) / 5.0
-        obs[69] = sum(1 for a in s.agents if a.team == 1 and a.alive) / 5.0
+        obs[68] = alive_t
+        obs[69] = alive_ct
         obs[70] = float(agent.area_id in self.bombsite_areas)
 
-        return np.clip(obs, -1.0, 1.0)
+        return obs
 
     def step(self, actions: dict):
         s = self.state
@@ -691,27 +888,34 @@ class Dust2Env(ParallelEnv):
             if move_dir == 0:
                 continue
 
-            direction = _DIR_VECTORS[move_dir]  # pre-normalised at module level
-
-            delta = direction * MOVE_SPEED * DT
-            target_pos = agent.pos[:2] + delta
+            delta = _DELTA_VECTORS[move_dir]  # pre-scaled at module level
+            target_x = agent.pos[0] + delta[0]
+            target_y = agent.pos[1] + delta[1]
 
             # Update facing from movement direction
-            agent.facing = np.arctan2(direction[1], direction[0])
+            agent.facing = _DIR_FACING[move_dir]
 
             # Find target area — only accept moves that land inside the nav mesh
-            target_area = self.nav_graph.get_area(target_pos)
-            can_move = self.nav_graph.is_on_mesh(target_pos) and (
+            target_area, on_mesh = self.nav_graph.get_area_if_on_mesh(
+                (target_x, target_y)
+            )
+            can_move = on_mesh and (
                 target_area == agent.area_id
                 or self.nav_graph.graph.has_edge(agent.area_id, target_area)
             )
 
             if can_move:
-                agent.pos = np.array([target_pos[0], target_pos[1], agent.pos[2]])
+                agent.pos[0] = target_x
+                agent.pos[1] = target_y
                 agent.area_id = target_area
                 agent.is_moving = True
 
+        # Build vis10 once after movement (area_ids are final for rest of this tick).
+        # vis10[i, j] = True if agent i can see agent j; reused in shoot, memory, obs.
+        _vis10 = self._build_vis10(s)
+
         # 4. Process shoot actions (simultaneous)
+        _LASER_RANGE_SQ = LASER_RANGE * LASER_RANGE
         for i, aid in enumerate(self.possible_agents):
             agent = s.agents[i]
             if not agent.alive:
@@ -725,25 +929,27 @@ class Dust2Env(ParallelEnv):
             agent.fired_this_tick = True
 
             # Determine facing ray direction
-            dx = np.cos(agent.facing)
-            dy = np.sin(agent.facing)
+            dx = math.cos(agent.facing)
+            dy = math.sin(agent.facing)
 
-            # Find enemies along ray — use vis_matrix as proxy
-            enemy_team = 1 - agent.team
-            enemies_alive = [a for a in s.agents if a.team == enemy_team and a.alive]
-
+            # Find enemies along ray — use pre-built vis10 (no per-enemy dict lookup)
+            en_start = 5 if agent.team == 0 else 0
             best_enemy = None
             best_dist = LASER_RANGE
 
-            for enemy in enemies_alive:
-                # Check LOS via vis_matrix (same area always visible)
-                if not self.nav_graph.can_see(agent.area_id, enemy.area_id):
+            for en_j in range(en_start, en_start + 5):
+                enemy = s.agents[en_j]
+                if not enemy.alive:
+                    continue
+                # Check LOS via vis10 (built after movement, no dict lookup)
+                if not _vis10[i, en_j]:
                     continue
 
                 rel = enemy.pos[:2] - agent.pos[:2]
-                dist = np.linalg.norm(rel)
-                if dist > LASER_RANGE or dist == 0:
+                dist_sq = rel[0] * rel[0] + rel[1] * rel[1]
+                if dist_sq > _LASER_RANGE_SQ or dist_sq == 0:
                     continue
+                dist = dist_sq**0.5
 
                 # Check angular alignment with facing direction (within ~45° cone)
                 rel_norm = rel / dist
@@ -848,18 +1054,29 @@ class Dust2Env(ParallelEnv):
 
         # 10. Update enemy memory per agent (sound + vision)
         sounds = self._compute_sounds(s)
+        # Pre-group sounds by source_id — avoids iterating all sounds for each
+        # agent-enemy pair; _update_enemy_memory does a O(1) dict lookup instead.
+        sounds_by_src: dict = {}
+        for snd in sounds:
+            sounds_by_src.setdefault(snd.source_id, []).append(
+                (snd.source_pos[0], snd.source_pos[1], snd.radius * snd.radius)
+            )
         for i, agent in enumerate(s.agents):
             if not agent.alive:
                 continue
-            self._update_enemy_memory(agent, s, sounds)
+            self._update_enemy_memory(agent, s, sounds_by_src, _vis10)
 
         # Compute outputs
         self.agents = [
             aid for i, aid in enumerate(self.possible_agents) if s.agents[i].alive
         ]
 
+        # Build obs context (alive counts + vis10 already built above, reuse it)
+        alive_t = sum(1 for a in s.agents if a.team == 0 and a.alive) / 5.0
+        alive_ct = sum(1 for a in s.agents if a.team == 1 and a.alive) / 5.0
+        vis10 = _vis10
         obs = {
-            aid: self._compute_obs(i)
+            aid: self._compute_obs(i, alive_t, alive_ct, vis10)
             for i, aid in enumerate(self.possible_agents)
             if s.agents[i].alive
         }
@@ -912,16 +1129,14 @@ class Dust2Env(ParallelEnv):
         if _ts > 0.0:
             for team in (0, 1):
                 alive_aids = [
-                    aid for i, aid in enumerate(self.possible_agents)
+                    aid
+                    for i, aid in enumerate(self.possible_agents)
                     if s.agents[i].team == team and s.agents[i].alive
                 ]
                 if alive_aids:
                     team_avg = float(np.mean([rewards[aid] for aid in alive_aids]))
                     for aid in alive_aids:
-                        rewards[aid] = (
-                            (1.0 - _ts) * rewards[aid]
-                            + _ts * team_avg
-                        )
+                        rewards[aid] = (1.0 - _ts) * rewards[aid] + _ts * team_avg
 
         terms = {aid: s.round_over for aid in self.possible_agents}
         truncs = {aid: False for aid in self.possible_agents}
@@ -963,45 +1178,58 @@ class Dust2Env(ParallelEnv):
         Φ reflects game-state advantage via alive count, HP, and site control.
         Used as F(s,a,s') = γΦ(s') − Φ(s) per Ng et al. ICML 1999.
         Only counts alive agents — dead agents contribute 0 HP and 0 site presence.
+        Single pass over 10 agents instead of 6 separate sum() calls.
         """
-        opp = 1 - team
-        alive_team = sum(1 for a in gs.agents if a.team == team and a.alive)
-        alive_opp  = sum(1 for a in gs.agents if a.team == opp  and a.alive)
-        hp_team    = sum(a.hp for a in gs.agents if a.team == team and a.alive)
-        hp_opp     = sum(a.hp for a in gs.agents if a.team == opp  and a.alive)
-        site_team  = sum(
-            1 for a in gs.agents
-            if a.team == team and a.alive and a.area_id in self.bombsite_areas
-        )
-        site_opp   = sum(
-            1 for a in gs.agents
-            if a.team == opp and a.alive and a.area_id in self.bombsite_areas
-        )
+        alive_t = alive_o = hp_t = hp_o = site_t = site_o = 0
+        _sites = self.bombsite_areas
+        for a in gs.agents:
+            if not a.alive:
+                continue
+            if a.team == team:
+                alive_t += 1
+                hp_t += a.hp
+                if a.area_id in _sites:
+                    site_t += 1
+            else:
+                alive_o += 1
+                hp_o += a.hp
+                if a.area_id in _sites:
+                    site_o += 1
         return (
-            (alive_team - alive_opp)  * 0.3
-            + (hp_team  - hp_opp)     / 500.0
-            + (site_team - site_opp)  * 0.2
+            (alive_t - alive_o) * 0.3 + (hp_t - hp_o) / 500.0 + (site_t - site_o) * 0.2
         )
 
-    def _update_enemy_memory(self, agent: AgentState, gs: GameState, sounds: list):
+    def _update_enemy_memory(
+        self, agent: AgentState, gs: GameState, sounds_by_src: dict, vis10: np.ndarray
+    ):
         # NOTE: parameter named `gs` to avoid collision with any local var `s`
+        # sounds_by_src: dict[source_id -> list[(sx, sy, radius_sq)]]
+        # vis10: pre-built (10, 10) bool inter-agent visibility for this tick
+        agent_idx = agent.agent_id  # 0-9; matches axis in vis10
         enemy_team = 1 - agent.team
-        enemies = [a for a in gs.agents if a.team == enemy_team]
+        en_start = 5 if agent.team == 0 else 0
+        ax = agent.pos[0]
+        ay = agent.pos[1]
 
-        for enemy in enemies:
+        for en_j in range(en_start, en_start + 5):
+            enemy = gs.agents[en_j]
             if not enemy.alive:
                 if enemy.agent_id in agent.enemy_memory:
                     area, _ = agent.enemy_memory[enemy.agent_id]
                     agent.enemy_memory[enemy.agent_id] = (area, -9999)  # stale = dead
                 continue
 
-            can_see = self.nav_graph.can_see(agent.area_id, enemy.area_id)
-            can_hear = any(
-                snd.source_id == enemy.agent_id
-                and np.linalg.norm(agent.pos[:2] - snd.source_pos[:2]) <= snd.radius
-                for snd in sounds
-                if snd.source_id // 5 != agent.agent_id // 5  # enemy team only
-            )
+            can_see = vis10[agent_idx, en_j]
+            can_hear = False
+            if not can_see:
+                enemy_sounds = sounds_by_src.get(enemy.agent_id)
+                if enemy_sounds:
+                    for sx, sy, radius_sq in enemy_sounds:
+                        dx = ax - sx
+                        dy = ay - sy
+                        if dx * dx + dy * dy <= radius_sq:
+                            can_hear = True
+                            break
 
             if can_see or can_hear:
                 agent.enemy_memory[enemy.agent_id] = (enemy.area_id, gs.tick)

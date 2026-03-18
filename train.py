@@ -266,7 +266,7 @@ def train(args):
     argv = [
         "--env", "cs2-dust2",
         "--algo", "APPO",
-        "--experiment", "cs2rl",
+        "--experiment", args.experiment,
         "--train_dir", args.train_dir,
         "--num_workers", str(args.num_workers),
         "--num_envs_per_worker", str(args.num_envs_per_worker),
@@ -280,6 +280,7 @@ def train(args):
         "--max_grad_norm", "0.5",
         "--train_for_env_steps", str(args.timesteps),
         "--save_every_sec", "3600",
+        "--device", args.device,
     ]
 
     parser, _ = parse_sf_args(argv=argv)
@@ -313,6 +314,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers",         type=int, default=8)
     parser.add_argument("--num_envs_per_worker", type=int, default=8)
     parser.add_argument("--train_dir",           type=str, default="checkpoints")
+    parser.add_argument("--experiment",          type=str, default="cs2rl")
+    parser.add_argument("--device",              type=str, default="cpu")
     args = parser.parse_args()
 
     if args.smoke:
