@@ -3,7 +3,7 @@
 
 Usage:
   python train.py --smoke       # sanity check: 1000 steps, no crash, print steps/sec
-  python train.py --train       # full APPO self-play training (Sample Factory)
+  python train.py --train       # full PPO self-play training (PufferLib 3.0)
   python train.py --record      # run 1 episode, save rerun recording (random policy)
 """
 
@@ -13,13 +13,13 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
-import multiprocessing
+import multiprocessing as mp
 import time
+from pathlib import Path
 import numpy as np
 import gymnasium as gym
 from sim import Dust2Env
-from sample_factory.algo.utils.context import global_env_registry
-from sample_factory.envs.pettingzoo_envs import PettingZooParallelEnv
+
 
 # ── SECTION: Smoke Test ────────────────────────────────────────────────────
 
@@ -106,16 +106,13 @@ TRAINING_CONFIG = dict(
     gamma=0.99,  # used by PBRS shaping in sim.py and test_reward.py
 )
 
-CHECKPOINT_EVERY = 100_000
 
-
-# ── SECTION: TeamSpirit callback (SB3-shim + SF daemon) ───────────────────
+# ── SECTION: TeamSpirit callback (legacy shim — kept for tests) ────────────
 
 class TeamSpiritCallback:
     """Linearly anneals sim._TEAM_SPIRIT 0→1 over anneal_steps env steps.
 
     _on_step() is the SB3-shim used by tests.
-    The SF training loop uses _make_daemon_thread() instead.
     """
 
     def __init__(self, anneal_steps: int = 5_000_000):
@@ -127,274 +124,208 @@ class TeamSpiritCallback:
         _sim._TEAM_SPIRIT = min(1.0, self.num_timesteps / self.anneal_steps)
         return True
 
-    def _make_daemon_thread(self, runner, shared_ts):
-        """Returns a stop Event for a started daemon thread that polls runner.
-
-        shared_ts: multiprocessing.Value('f', 0.0) captured by the env factory
-        closure so all SF worker processes see annealing updates in real time.
-        """
-        import threading
-
-        stop = threading.Event()
-
-        def _loop():
-            # total_env_steps_since_resume is the attr confirmed in Runner source
-            steps_attr = next(
-                (a for a in ("total_env_steps_since_resume", "env_steps", "total_env_steps")
-                 if hasattr(runner, a)),
-                None,
-            )
-            while not stop.is_set():
-                raw = getattr(runner, steps_attr, 0) if steps_attr else 0
-                # env_steps is a dict[PolicyID, int]; total_env_steps_since_resume is int
-                steps = sum(raw.values()) if isinstance(raw, dict) else (raw or 0)
-                shared_ts.value = min(1.0, steps / self.anneal_steps)
-                stop.wait(timeout=1.0)
-
-        threading.Thread(target=_loop, daemon=True, name="TeamSpiritAnneal").start()
-        return stop
-
-    @staticmethod
-    def stop_daemon(stop_event):
-        stop_event.set()
-
-
-# OpponentPoolCallback removed — SF handles checkpoints via --save_every_steps.
 
 _team_spirit_cb = TeamSpiritCallback(anneal_steps=5_000_000)
 
 
-# ── SECTION: Sample Factory env registration ──────────────────────────────
+# ── SECTION: PufferLib env factory ─────────────────────────────────────────
+
+def make_env(team_spirit=None):
+    """Create a PettingZooPufferEnv wrapping Dust2Env."""
+    import pufferlib
+    from pufferlib.emulation import PettingZooPufferEnv
+    raw_env = Dust2Env(team_spirit=team_spirit)
+    return PettingZooPufferEnv(env=raw_env)
 
 
-class _MultiDiscreteTupleWrapper:
-    """Converts MultiDiscrete action space to Tuple[Discrete] for SF compatibility.
+# ── SECTION: Policy ────────────────────────────────────────────────────────
 
-    SF's action distribution code supports Discrete, Tuple, and Box but not
-    MultiDiscrete.  This wrapper converts on both sides transparently.
-
-    Wraps a PettingZoo ParallelEnv (not a gym.Env), so we don't inherit from
-    gym.Wrapper — just delegate everything.
-    """
-
-    def __init__(self, env):
-        self._orig_env = env
-
-    @property
-    def unwrapped(self):
-        return self._orig_env
-
-    def action_space(self, agent):
-        md = self._orig_env.action_space(agent)
-        return gym.spaces.Tuple([gym.spaces.Discrete(int(n)) for n in md.nvec])
-
-    def observation_space(self, agent):
-        return self._orig_env.observation_space(agent)
-
-    def step(self, actions):
-        # Convert tuple actions back to numpy arrays for the underlying env
-        converted = {}
-        for aid, act in actions.items():
-            if isinstance(act, (tuple, list)):
-                converted[aid] = np.array([int(a) for a in act], dtype=np.int64)
-            else:
-                converted[aid] = act
-        return self._orig_env.step(converted)
-
-    def reset(self, **kwargs):
-        return self._orig_env.reset(**kwargs)
-
-    def render(self):
-        return self._orig_env.render()
-
-    def close(self):
-        return self._orig_env.close()
-
-    @property
-    def possible_agents(self):
-        return self._orig_env.possible_agents
-
-    @property
-    def agents(self):
-        return self._orig_env.agents
-
-    @property
-    def max_num_agents(self):
-        return self._orig_env.max_num_agents
-
-    @property
-    def metadata(self):
-        return self._orig_env.metadata
-
-    @property
-    def render_mode(self):
-        return getattr(self._orig_env, "render_mode", None)
-
-
-class _CS2EnvFactory:
-    """Picklable SF env factory.
-
-    Defined at module level so multiprocessing.spawn can pickle it.
-    When team_spirit is a multiprocessing.Value, all SF worker processes share
-    the same underlying memory and see daemon-thread annealing updates in real time.
-    """
-
-    def __init__(self, team_spirit=None):
-        self.team_spirit = team_spirit
-
-    def __call__(self, full_env_name: str, cfg=None, env_config=None, render_mode=None):
-        cfg = cfg or {}  # SF's create_env does `"episode_counter" in cfg` before calling us
-        return PettingZooParallelEnv(_MultiDiscreteTupleWrapper(Dust2Env(team_spirit=self.team_spirit)))
-
-
-global_env_registry()["cs2-dust2"] = _CS2EnvFactory()  # module-level (no shared value)
-
-
-def _patch_sample_factory_scalar_outputs():
-    """Normalize size-1 policy outputs for non-batched sampling rollout buffers.
-
-    Sample Factory stores some scalar outputs as shape-(1,) arrays before writing
-    them into scalar trajectory buffer slots. Newer NumPy rejects that assignment
-    with "setting an array element with a sequence", so we squeeze these values
-    to true scalars/0-D tensors first.
-    """
+def build_policy(vecenv, device):
     import torch
-    from sample_factory.algo.utils.tensor_dict import TensorDict
+    import torch.nn as nn
+    import pufferlib.pytorch
 
-    if getattr(TensorDict, "_cs2rl_scalar_patch", False):
-        return
+    obs_dim = vecenv.driver_env.single_observation_space.shape[0]  # 71
+    hidden = 256
 
-    def _patched_set_data_func(self, x, index, new_data):
-        if isinstance(new_data, (dict, TensorDict)):
-            for new_data_key, new_data_value in new_data.items():
-                self._set_data_func(x.get(new_data_key), index, new_data_value)
-            return
+    class Dust2Policy(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.hidden_size = hidden  # required by PufferLib LSTM logic
 
-        if torch.is_tensor(x):
-            if isinstance(new_data, torch.Tensor):
-                t = new_data
-            elif isinstance(new_data, np.ndarray):
-                t = torch.from_numpy(new_data)
+            self.encoder = nn.Sequential(
+                pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
+                nn.ReLU(),
+                pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
+                nn.ReLU(),
+            )
+            self.lstm = nn.LSTM(hidden, hidden, batch_first=False)
+            for name, p in self.lstm.named_parameters():
+                if 'bias' in name:
+                    nn.init.constant_(p, 0)
+                elif 'weight' in name:
+                    nn.init.orthogonal_(p, gain=1.0)
+
+            # Separate heads for MultiDiscrete([9,2,2,2])
+            self.action_heads = nn.ModuleList([
+                pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
+                for n in [9, 2, 2, 2]
+            ])
+            self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
+
+        def get_value(self, x, lstm_state=None, done=None):
+            hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
+            return self.value_head(hidden_out), lstm_state
+
+        def get_action_and_value(self, x, lstm_state=None, done=None, action=None):
+            hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
+            logits = [head(hidden_out) for head in self.action_heads]
+
+            # MultiCategorical distribution
+            dists = [torch.distributions.Categorical(logits=l) for l in logits]
+            if action is None:
+                action = torch.stack([d.sample() for d in dists], dim=-1)
+
+            log_prob = sum(d.log_prob(action[..., i]) for i, d in enumerate(dists))
+            entropy  = sum(d.entropy() for d in dists)
+            value    = self.value_head(hidden_out)
+            return action, log_prob, entropy, value, lstm_state
+
+        def _forward_core(self, x, lstm_state, done):
+            h = self.encoder(x.float())
+            # lstm expects (seq, batch, features)
+            if lstm_state is not None:
+                h, lstm_state = self.lstm(
+                    h.unsqueeze(0),
+                    (
+                        (1.0 - done).view(1, -1, 1) * lstm_state[0],
+                        (1.0 - done).view(1, -1, 1) * lstm_state[1],
+                    )
+                )
+                h = h.squeeze(0)
             else:
-                raise ValueError(f"Type {type(new_data)} not supported in set_data_func")
+                h, lstm_state = self.lstm(h.unsqueeze(0))
+                h = h.squeeze(0)
+            return h, lstm_state
 
-            if x[index].ndim == 0 and t.numel() == 1:
-                t = t.reshape(())
-            x[index].copy_(t)
-            return
-
-        if isinstance(x, np.ndarray):
-            if isinstance(new_data, torch.Tensor):
-                n = new_data.cpu().numpy()
-            elif isinstance(new_data, np.ndarray):
-                n = new_data
-            else:
-                raise ValueError(f"Type {type(new_data)} not supported in set_data_func")
-
-            if np.asarray(x[index]).ndim == 0 and np.asarray(n).size == 1:
-                n = np.asarray(n).reshape(())
-            x[index] = n
-            return
-
-    TensorDict._set_data_func = _patched_set_data_func
-    TensorDict._cs2rl_scalar_patch = True
+    return Dust2Policy().to(device)
 
 
-_patch_sample_factory_scalar_outputs()
-
-
-def _resolve_device(device: str) -> str:
-    if device != "auto":
-        return device
-
-    try:
-        import torch
-
-        return "gpu" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        return "cpu"
-
-
-def _resolve_worker_num_splits(num_envs_per_worker: int) -> int:
-    return 2 if num_envs_per_worker > 1 and num_envs_per_worker % 2 == 0 else 1
-
-
-# ── SECTION: SF training ───────────────────────────────────────────────────
+# ── SECTION: PufferLib training ────────────────────────────────────────────
 
 def train(args):
-    """Run APPO training via Sample Factory."""
-    from sample_factory.cfg.arguments import parse_sf_args, parse_full_cfg
-    from sample_factory.train import make_runner
+    """Run PPO training via PufferLib 3.0."""
+    import torch
+    import pufferlib.vector
+    from pufferlib.pufferl import PuffeRL
 
-    os.makedirs(args.train_dir, exist_ok=True)
-    device = _resolve_device(args.device)
-    worker_num_splits = _resolve_worker_num_splits(args.num_envs_per_worker)
+    device = args.device
 
-    print("[Train] Pre-building vis cache (one-time)...")
-    _warmup = Dust2Env()
-    del _warmup
-    print(f"[Train] Using Sample Factory device: {device}")
-    print(f"[Train] Using worker_num_splits={worker_num_splits}")
+    # Shared team spirit value — all envs read it at episode start
+    shared_ts = mp.Value('f', 0.0)
 
-    argv = [
-        "--env", "cs2-dust2",
-        "--algo", "APPO",
-        "--experiment", args.experiment,
-        "--train_dir", args.train_dir,
-        "--num_workers", str(args.num_workers),
-        "--num_envs_per_worker", str(args.num_envs_per_worker),
-        "--worker_num_splits", str(worker_num_splits),
-        "--batch_size", str(args.batch_size),
-        "--num_batches_per_epoch", str(args.num_batches_per_epoch),
-        "--num_epochs", str(args.num_epochs),
-        "--rollout", str(args.rollout),
-        "--gamma", str(TRAINING_CONFIG["gamma"]),
-        "--gae_lambda", "0.95",
-        "--exploration_loss_coeff", "0.01",
-        "--max_grad_norm", "0.5",
-        "--train_for_env_steps", str(args.timesteps),
-        "--save_every_sec", str(args.save_every_sec),
-        "--device", device,
-    ]
+    def env_factory(*args, buf=None, seed=None, **kwargs):
+        from pufferlib.emulation import PettingZooPufferEnv
+        raw_env = Dust2Env(team_spirit=shared_ts)
+        return PettingZooPufferEnv(env=raw_env, buf=buf, seed=seed or 0)
 
-    parser, _ = parse_sf_args(argv=argv)
-    cfg = parse_full_cfg(parser, argv=argv)
-    cfg, runner = make_runner(cfg)
-    runner.init()
+    print(f"[Train] Creating {args.num_envs} vectorised envs...")
+    vecenv = pufferlib.vector.make(
+        env_factory,
+        num_envs=args.num_envs,
+        backend=pufferlib.vector.Serial,
+    )
 
-    shared_ts = multiprocessing.get_context("spawn").Value("f", 0.0)
-    global_env_registry()["cs2-dust2"] = _CS2EnvFactory(shared_ts)
+    print(f"[Train] Building policy on device={device}...")
+    policy = build_policy(vecenv, device)
 
-    stop_event = _team_spirit_cb._make_daemon_thread(runner, shared_ts)
-    try:
-        print(f"[Train] Starting SF APPO for {args.timesteps:,} env steps...")
-        runner.run()
-    finally:
-        TeamSpiritCallback.stop_daemon(stop_event)
+    train_config = {
+        # Core PPO
+        'env': 'cs2-dust2',
+        'device': device,
+        'seed': args.seed,
+        'total_timesteps': args.timesteps,
+        'batch_size': 8192,
+        'bptt_horizon': 32,
+        'minibatch_size': 2048,
+        'max_minibatch_size': 2048,
+        'update_epochs': 4,
+        'learning_rate': 3e-4,
+        'gamma': 0.99,
+        'gae_lambda': 0.95,
+        'clip_coef': 0.1,
+        'vf_coef': 0.5,
+        'vf_clip_coef': 0.1,
+        'ent_coef': 0.01,
+        'max_grad_norm': 0.5,
+        'use_rnn': True,
+        # Extras required by PuffeRL constructor
+        'compile': False,
+        'compile_mode': 'default',
+        'compile_fullgraph': False,
+        'cpu_offload': False,
+        'torch_deterministic': False,
+        'optimizer': 'adam',
+        'adam_beta1': 0.9,
+        'adam_beta2': 0.999,
+        'adam_eps': 1e-8,
+        'anneal_lr': True,
+        'checkpoint_interval': 200,
+        'data_dir': args.checkpoint_dir,
+        'precision': 'float32',
+        'prio_alpha': 0.0,
+        'prio_beta0': 1.0,
+        'vtrace_rho_clip': 1.0,
+        'vtrace_c_clip': 1.0,
+    }
 
+    trainer = PuffeRL(train_config, vecenv, policy)
+
+    save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
+    last_save = time.time()
+
+    print(f"[Train] Starting PufferLib PPO for {args.timesteps:,} env steps...")
+    while trainer.epoch < trainer.total_epochs:
+        trainer.evaluate()
+        logs = trainer.train()
+
+        # Team spirit annealing: 0→1 over 5M steps
+        ts_val = min(1.0, trainer.global_step / 5_000_000)
+        shared_ts.value = ts_val
+
+        if time.time() - last_save > args.save_every_sec:
+            save_path.parent.mkdir(exist_ok=True)
+            torch.save(policy.state_dict(), save_path)
+            last_save = time.time()
+            print(f"Saved checkpoint to {save_path}")
+
+        if trainer.epoch % 10 == 0:
+            sps = logs.get('SPS', 0) if isinstance(logs, dict) else 0
+            ret = logs.get('return', 0) if isinstance(logs, dict) else 0
+            print(f"Epoch {trainer.epoch} | SPS: {sps:.0f} | Return: {ret:.3f} | TS: {ts_val:.3f}")
+
+    trainer.close()
     print("[Train] Done.")
 
 
 # ── SECTION: CLI ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import torch
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--smoke",               action="store_true")
-    parser.add_argument("--train",               action="store_true")
-    parser.add_argument("--record",              action="store_true")
-    parser.add_argument("--eval",                action="store_true")
-    parser.add_argument("--checkpoint",          type=str, default=None)
-    parser.add_argument("--timesteps",           type=int, default=10_000_000)
-    parser.add_argument("--num_workers",         type=int, default=8)
-    parser.add_argument("--num_envs_per_worker", type=int, default=8)
-    parser.add_argument("--batch_size",          type=int, default=512)
-    parser.add_argument("--num_batches_per_epoch", type=int, default=1)
-    parser.add_argument("--num_epochs",          type=int, default=4)
-    parser.add_argument("--rollout",             type=int, default=64)
-    parser.add_argument("--save_every_sec",      type=int, default=3600)
-    parser.add_argument("--train_dir",           type=str, default="checkpoints")
-    parser.add_argument("--experiment",          type=str, default="cs2rl")
-    parser.add_argument("--device",              type=str, choices=("auto", "cpu", "gpu"), default="cpu")
+    parser.add_argument("--smoke",          action="store_true")
+    parser.add_argument("--train",          action="store_true")
+    parser.add_argument("--record",         action="store_true")
+    parser.add_argument("--eval",           action="store_true")
+    parser.add_argument("--checkpoint",     type=str, default=None)
+    parser.add_argument("--timesteps",      type=int, default=10_000_000)
+    parser.add_argument("--num_envs",       type=int, default=64)
+    parser.add_argument("--seed",           type=int, default=1)
+    parser.add_argument("--device",         type=str,
+                        default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument("--save_every_sec", type=int, default=300)
+    parser.add_argument("--checkpoint_dir", type=str, default='checkpoints')
     args = parser.parse_args()
 
     if args.smoke:
