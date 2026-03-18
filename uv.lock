@@ -209,7 +209,7 @@ dependencies = [
     { name = "networkx" },
     { name = "numpy" },
     { name = "pettingzoo" },
-    { name = "pwd-stub" },
+    { name = "pwd-stub", marker = "sys_platform == 'win32'" },
     { name = "rerun-sdk" },
     { name = "sample-factory" },
     { name = "shapely" },
@@ -227,9 +227,9 @@ requires-dist = [
     { name = "networkx", specifier = ">=3.3" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "pettingzoo", specifier = ">=1.24.0" },
-    { name = "pwd-stub", editable = "pwd_stub" },
+    { name = "pwd-stub", marker = "sys_platform == 'win32'", editable = "pwd_stub" },
     { name = "rerun-sdk", specifier = ">=0.21.0" },
-    { name = "sample-factory", extras = ["pettingzoo-envs"], git = "https://github.com/alex-petrenko/sample-factory.git?rev=master" },
+    { name = "sample-factory", extras = ["pettingzoo-envs"], git = "https://github.com/alex-petrenko/sample-factory.git?rev=8b354943a8b04e2fbb7c7c8f35ea3fed195dd631" },
     { name = "shapely", specifier = ">=2.0.4" },
 ]
 
@@ -1260,7 +1260,7 @@ wheels = [
 [[package]]
 name = "sample-factory"
 version = "2.1.3"
-source = { git = "https://github.com/alex-petrenko/sample-factory.git?rev=master#8b354943a8b04e2fbb7c7c8f35ea3fed195dd631" }
+source = { git = "https://github.com/alex-petrenko/sample-factory.git?rev=8b354943a8b04e2fbb7c7c8f35ea3fed195dd631#8b354943a8b04e2fbb7c7c8f35ea3fed195dd631" }
 dependencies = [
     { name = "colorlog" },
     { name = "filelock" },

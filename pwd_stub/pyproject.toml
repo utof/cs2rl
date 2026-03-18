@@ -8,4 +8,4 @@ version = "0.0.1"
 description = "Windows stub for the Unix pwd module"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+include = ["pwd.py"]
