@@ -250,6 +250,75 @@ class _CS2EnvFactory:
 global_env_registry()["cs2-dust2"] = _CS2EnvFactory()  # module-level (no shared value)
 
 
+def _patch_sample_factory_scalar_outputs():
+    """Normalize size-1 policy outputs for non-batched sampling rollout buffers.
+
+    Sample Factory stores some scalar outputs as shape-(1,) arrays before writing
+    them into scalar trajectory buffer slots. Newer NumPy rejects that assignment
+    with "setting an array element with a sequence", so we squeeze these values
+    to true scalars/0-D tensors first.
+    """
+    import torch
+    from sample_factory.algo.utils.tensor_dict import TensorDict
+
+    if getattr(TensorDict, "_cs2rl_scalar_patch", False):
+        return
+
+    def _patched_set_data_func(self, x, index, new_data):
+        if isinstance(new_data, (dict, TensorDict)):
+            for new_data_key, new_data_value in new_data.items():
+                self._set_data_func(x.get(new_data_key), index, new_data_value)
+            return
+
+        if torch.is_tensor(x):
+            if isinstance(new_data, torch.Tensor):
+                t = new_data
+            elif isinstance(new_data, np.ndarray):
+                t = torch.from_numpy(new_data)
+            else:
+                raise ValueError(f"Type {type(new_data)} not supported in set_data_func")
+
+            if x[index].ndim == 0 and t.numel() == 1:
+                t = t.reshape(())
+            x[index].copy_(t)
+            return
+
+        if isinstance(x, np.ndarray):
+            if isinstance(new_data, torch.Tensor):
+                n = new_data.cpu().numpy()
+            elif isinstance(new_data, np.ndarray):
+                n = new_data
+            else:
+                raise ValueError(f"Type {type(new_data)} not supported in set_data_func")
+
+            if np.asarray(x[index]).ndim == 0 and np.asarray(n).size == 1:
+                n = np.asarray(n).reshape(())
+            x[index] = n
+            return
+
+    TensorDict._set_data_func = _patched_set_data_func
+    TensorDict._cs2rl_scalar_patch = True
+
+
+_patch_sample_factory_scalar_outputs()
+
+
+def _resolve_device(device: str) -> str:
+    if device != "auto":
+        return device
+
+    try:
+        import torch
+
+        return "gpu" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def _resolve_worker_num_splits(num_envs_per_worker: int) -> int:
+    return 2 if num_envs_per_worker > 1 and num_envs_per_worker % 2 == 0 else 1
+
+
 # ── SECTION: SF training ───────────────────────────────────────────────────
 
 def train(args):
@@ -258,10 +327,14 @@ def train(args):
     from sample_factory.train import make_runner
 
     os.makedirs(args.train_dir, exist_ok=True)
+    device = _resolve_device(args.device)
+    worker_num_splits = _resolve_worker_num_splits(args.num_envs_per_worker)
 
     print("[Train] Pre-building vis cache (one-time)...")
     _warmup = Dust2Env()
     del _warmup
+    print(f"[Train] Using Sample Factory device: {device}")
+    print(f"[Train] Using worker_num_splits={worker_num_splits}")
 
     argv = [
         "--env", "cs2-dust2",
@@ -270,17 +343,18 @@ def train(args):
         "--train_dir", args.train_dir,
         "--num_workers", str(args.num_workers),
         "--num_envs_per_worker", str(args.num_envs_per_worker),
-        "--batch_size", "512",
-        "--num_batches_per_epoch", "1",
-        "--num_epochs", "4",
-        "--rollout", "64",
+        "--worker_num_splits", str(worker_num_splits),
+        "--batch_size", str(args.batch_size),
+        "--num_batches_per_epoch", str(args.num_batches_per_epoch),
+        "--num_epochs", str(args.num_epochs),
+        "--rollout", str(args.rollout),
         "--gamma", str(TRAINING_CONFIG["gamma"]),
         "--gae_lambda", "0.95",
         "--exploration_loss_coeff", "0.01",
         "--max_grad_norm", "0.5",
         "--train_for_env_steps", str(args.timesteps),
-        "--save_every_sec", "3600",
-        "--device", args.device,
+        "--save_every_sec", str(args.save_every_sec),
+        "--device", device,
     ]
 
     parser, _ = parse_sf_args(argv=argv)
@@ -288,7 +362,7 @@ def train(args):
     cfg, runner = make_runner(cfg)
     runner.init()
 
-    shared_ts = multiprocessing.Value('f', 0.0)
+    shared_ts = multiprocessing.get_context("spawn").Value("f", 0.0)
     global_env_registry()["cs2-dust2"] = _CS2EnvFactory(shared_ts)
 
     stop_event = _team_spirit_cb._make_daemon_thread(runner, shared_ts)
@@ -313,9 +387,14 @@ if __name__ == "__main__":
     parser.add_argument("--timesteps",           type=int, default=10_000_000)
     parser.add_argument("--num_workers",         type=int, default=8)
     parser.add_argument("--num_envs_per_worker", type=int, default=8)
+    parser.add_argument("--batch_size",          type=int, default=512)
+    parser.add_argument("--num_batches_per_epoch", type=int, default=1)
+    parser.add_argument("--num_epochs",          type=int, default=4)
+    parser.add_argument("--rollout",             type=int, default=64)
+    parser.add_argument("--save_every_sec",      type=int, default=3600)
     parser.add_argument("--train_dir",           type=str, default="checkpoints")
     parser.add_argument("--experiment",          type=str, default="cs2rl")
-    parser.add_argument("--device",              type=str, default="cpu")
+    parser.add_argument("--device",              type=str, choices=("auto", "cpu", "gpu"), default="cpu")
     args = parser.parse_args()
 
     if args.smoke:
