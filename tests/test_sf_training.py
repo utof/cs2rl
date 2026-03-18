@@ -1,4 +1,5 @@
-import subprocess, sys, os, pytest
+import multiprocessing
+import subprocess, sys, os, time, pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -32,3 +33,27 @@ def test_team_spirit_daemon_logic():
         assert _sim._TEAM_SPIRIT == pytest.approx(expected, abs=1e-5), (
             f"steps={steps}: expected {expected}, got {_sim._TEAM_SPIRIT}"
         )
+
+
+def test_team_spirit_daemon_updates_shared_value():
+    """Daemon thread updates a multiprocessing.Value within 3 seconds."""
+    from train import TeamSpiritCallback
+
+    shared_ts = multiprocessing.Value('f', 0.0)
+    cb = TeamSpiritCallback(anneal_steps=5_000_000)
+
+    class MockRunner:
+        total_env_steps_since_resume = 2_500_000
+
+    stop = cb._make_daemon_thread(MockRunner(), shared_ts)
+    try:
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if shared_ts.value > 0.0:
+                break
+            time.sleep(0.05)
+        assert shared_ts.value == pytest.approx(0.5, abs=1e-5), (
+            f"Expected ~0.5 after 3s, got {shared_ts.value}"
+        )
+    finally:
+        cb.stop_daemon(stop)

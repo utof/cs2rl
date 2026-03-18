@@ -23,6 +23,10 @@ def test_registered_env_obs_shape():
     env = create_env("cs2-dust2", cfg={}, env_config=None)
     obs, _ = env.reset()
     assert len(obs) == 10, f"Expected 10 agents, got {len(obs)}"
+    # PettingZooParallelEnv returns obs as a numpy array indexed by agent order.
+    # possible_agents order: t0..t4 then ct0..ct4.
+    agent_ids = [f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)]
     for i, ob in enumerate(obs):
-        assert ob.shape == (71,), f"agent[{i}] shape {ob.shape} != (71,)"
-        assert np.isfinite(ob).all(), f"agent[{i}] has NaN in reset obs"
+        aid = agent_ids[i] if i < len(agent_ids) else i
+        assert ob.shape == (71,), f"{aid} shape {ob.shape} != (71,)"
+        assert np.isfinite(ob).all(), f"{aid} has NaN in reset obs"

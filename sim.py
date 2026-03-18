@@ -419,7 +419,7 @@ class Dust2Env(ParallelEnv):
     metadata = {"name": "dust2_v0", "render_modes": []}
     render_mode = None
 
-    def __init__(self, nav_path=NAV_PATH, cache_path=CACHE_PATH, record_fn=None):
+    def __init__(self, nav_path=NAV_PATH, cache_path=CACHE_PATH, record_fn=None, team_spirit=None):
         super().__init__()
         self.nav_graph = NavGraph(nav_path, cache_path)
         self.nav_graph.build_vis_matrix()
@@ -432,6 +432,7 @@ class Dust2Env(ParallelEnv):
         ]
         self.agents = list(self.possible_agents)
         self._record_fn = record_fn
+        self._team_spirit_shared = team_spirit  # multiprocessing.Value or None
         self.state: GameState = None
 
     def _calibrate_map_bounds(self):
@@ -901,7 +902,14 @@ class Dust2Env(ParallelEnv):
 
         # Team Spirit blending — OpenAI Five pattern (τ=0: individual, τ=1: team avg)
         # Averages over ALIVE agents only; dead agents receive 0.0 reward unchanged.
-        if _TEAM_SPIRIT > 0.0:
+        # Use the process-safe shared value when available (set by train.py's daemon
+        # thread via multiprocessing.Value so all SF worker processes see the same τ).
+        _ts = (
+            self._team_spirit_shared.value
+            if self._team_spirit_shared is not None
+            else _TEAM_SPIRIT
+        )
+        if _ts > 0.0:
             for team in (0, 1):
                 alive_aids = [
                     aid for i, aid in enumerate(self.possible_agents)
@@ -911,8 +919,8 @@ class Dust2Env(ParallelEnv):
                     team_avg = float(np.mean([rewards[aid] for aid in alive_aids]))
                     for aid in alive_aids:
                         rewards[aid] = (
-                            (1.0 - _TEAM_SPIRIT) * rewards[aid]
-                            + _TEAM_SPIRIT * team_avg
+                            (1.0 - _ts) * rewards[aid]
+                            + _ts * team_avg
                         )
 
         terms = {aid: s.round_over for aid in self.possible_agents}
