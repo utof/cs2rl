@@ -89,12 +89,7 @@ def record_episode(checkpoint_path=None):
     done = False
     step_count = 0
     while not done and step_count < ROUND_TIME * 2:
-        if model:
-            obs_arr = np.stack([obs[aid] for aid in env.possible_agents])
-            acts, _ = model.predict(obs_arr, deterministic=True)
-            actions = {aid: acts[i] for i, aid in enumerate(env.possible_agents)}
-        else:
-            actions = {aid: env.action_space(aid).sample() for aid in env.agents}
+        actions = {aid: env.action_space(aid).sample() for aid in env.agents}
 
         obs, rewards, terms, truncs, infos = env.step(actions)
         step_count += 1
@@ -104,135 +99,201 @@ def record_episode(checkpoint_path=None):
     print(f"[Record] View with: python -m rerun {save_path}")
 
 
-# ── SECTION: Training ─────────────────────────────────────────────────────
-
-class BaseCallback:
-    """Stub — replaced by SF callback mechanism in Task 4."""
-    def __init__(self):
-        self.num_timesteps: int = 0
-    def _on_step(self) -> bool:
-        return True
-
+# ── SECTION: Training config ───────────────────────────────────────────────
 
 TRAINING_CONFIG = dict(
-    learning_rate=3e-4,
-    n_steps=2048,
-    batch_size=512,
-    n_epochs=10,
-    gamma=0.99,
-    gae_lambda=0.95,
-    clip_range=0.2,
-    ent_coef=0.01,
-    vf_coef=0.5,
-    max_grad_norm=0.5,
-    policy_kwargs=dict(net_arch=[256, 256, 128]),
-    verbose=1,
-    device="cuda",
+    gamma=0.99,  # used by PBRS shaping in sim.py and test_reward.py
 )
-CHECKPOINT_EVERY  = 100_000
-OPPONENT_UPDATE   = 50_000
+
+CHECKPOINT_EVERY = 100_000
 
 
-# ── SECTION: Sample Factory env registration ──────────────────────────────
+# ── SECTION: TeamSpirit callback (SB3-shim + SF daemon) ───────────────────
 
-from sample_factory.algo.utils.context import global_env_registry
-from sample_factory.envs.pettingzoo_envs import PettingZooParallelEnv
+class TeamSpiritCallback:
+    """Linearly anneals sim._TEAM_SPIRIT 0→1 over anneal_steps env steps.
 
-
-def _make_cs2_env(full_env_name: str, cfg=None, env_config=None, render_mode=None) -> PettingZooParallelEnv:
-    """Factory function registered with Sample Factory."""
-    return PettingZooParallelEnv(Dust2Env())
-
-
-global_env_registry()["cs2-dust2"] = _make_cs2_env
-
-
-class OpponentPoolCallback(BaseCallback):
-    """Saves policy to opponent pool every N timesteps."""
-
-    def __init__(self, update_freq: int, pool_dir: str = "checkpoints/pool"):
-        super().__init__()
-        self.update_freq = update_freq
-        self.pool_dir = pool_dir
-        self._last_update = 0
-        os.makedirs(pool_dir, exist_ok=True)
-
-    def _on_step(self) -> bool:
-        if self.num_timesteps - self._last_update >= self.update_freq:
-            path = os.path.join(self.pool_dir, f"step_{self.num_timesteps}.zip")
-            self.model.save(path)
-            self._last_update = self.num_timesteps
-            print(f"[OpponentPool] Saved {path}")
-        return True
-
-
-class TeamSpiritCallback(BaseCallback):
-    """Linearly anneals sim._TEAM_SPIRIT from 0.0 to 1.0 over anneal_steps.
-
-    Uses module-level global — safe only with num_cpus=1 in concat_vec_envs_v1.
+    _on_step() is the SB3-shim used by tests.
+    The SF training loop uses _make_daemon_thread() instead.
     """
 
     def __init__(self, anneal_steps: int = 5_000_000):
-        super().__init__()
         self.anneal_steps = anneal_steps
+        self.num_timesteps: int = 0  # set by tests
 
     def _on_step(self) -> bool:
         import sim as _sim
         _sim._TEAM_SPIRIT = min(1.0, self.num_timesteps / self.anneal_steps)
         return True
 
+    def _make_daemon_thread(self, runner):
+        """Returns a stop Event for a started daemon thread that polls runner."""
+        import threading, sim as _sim
+
+        stop = threading.Event()
+
+        def _loop():
+            # total_env_steps_since_resume is the attr confirmed in Runner source
+            steps_attr = next(
+                (a for a in ("total_env_steps_since_resume", "env_steps", "total_env_steps")
+                 if hasattr(runner, a)),
+                None,
+            )
+            while not stop.is_set():
+                raw = getattr(runner, steps_attr, 0) if steps_attr else 0
+                # env_steps is a dict[PolicyID, int]; total_env_steps_since_resume is int
+                steps = sum(raw.values()) if isinstance(raw, dict) else (raw or 0)
+                _sim._TEAM_SPIRIT = min(1.0, steps / self.anneal_steps)
+                stop.wait(timeout=1.0)
+
+        threading.Thread(target=_loop, daemon=True, name="TeamSpiritAnneal").start()
+        return stop
+
+    @staticmethod
+    def stop_daemon(stop_event):
+        stop_event.set()
+
+
+# OpponentPoolCallback removed — SF handles checkpoints via --save_every_steps.
+
+_team_spirit_cb = TeamSpiritCallback(anneal_steps=5_000_000)
+
+
+# ── SECTION: Sample Factory env registration ──────────────────────────────
+
+import gymnasium as gym
+from sample_factory.algo.utils.context import global_env_registry
+from sample_factory.envs.pettingzoo_envs import PettingZooParallelEnv
+
+
+class _MultiDiscreteTupleWrapper:
+    """Converts MultiDiscrete action space to Tuple[Discrete] for SF compatibility.
+
+    SF's action distribution code supports Discrete, Tuple, and Box but not
+    MultiDiscrete.  This wrapper converts on both sides transparently.
+
+    Wraps a PettingZoo ParallelEnv (not a gym.Env), so we don't inherit from
+    gym.Wrapper — just delegate everything.
+    """
+
+    def __init__(self, env):
+        self._orig_env = env
+
+    def action_space(self, agent):
+        md = self._orig_env.action_space(agent)
+        return gym.spaces.Tuple([gym.spaces.Discrete(int(n)) for n in md.nvec])
+
+    def observation_space(self, agent):
+        return self._orig_env.observation_space(agent)
+
+    def step(self, actions):
+        # Convert tuple actions back to numpy arrays for the underlying env
+        converted = {}
+        for aid, act in actions.items():
+            if isinstance(act, (tuple, list)):
+                converted[aid] = np.array([int(a) for a in act], dtype=np.int64)
+            else:
+                converted[aid] = act
+        return self._orig_env.step(converted)
+
+    def reset(self, **kwargs):
+        return self._orig_env.reset(**kwargs)
+
+    def render(self):
+        return self._orig_env.render()
+
+    def close(self):
+        return self._orig_env.close()
+
+    @property
+    def possible_agents(self):
+        return self._orig_env.possible_agents
+
+    @property
+    def agents(self):
+        return self._orig_env.agents
+
+    @property
+    def max_num_agents(self):
+        return self._orig_env.max_num_agents
+
+    @property
+    def metadata(self):
+        return self._orig_env.metadata
+
+    @property
+    def render_mode(self):
+        return getattr(self._orig_env, "render_mode", None)
+
+
+def _make_cs2_env(full_env_name: str, cfg=None, env_config=None, render_mode=None) -> PettingZooParallelEnv:
+    """Factory function registered with Sample Factory."""
+    return PettingZooParallelEnv(_MultiDiscreteTupleWrapper(Dust2Env()))
+
+
+global_env_registry()["cs2-dust2"] = _make_cs2_env
+
+
+# ── SECTION: SF training ───────────────────────────────────────────────────
 
 def train(args):
-    from supersuit import pettingzoo_env_to_vec_env_v1, concat_vec_envs_v1
+    """Run APPO training via Sample Factory."""
+    from sample_factory.cfg.arguments import parse_sf_args, parse_full_cfg
+    from sample_factory.train import make_runner
 
-    os.makedirs("checkpoints", exist_ok=True)
+    os.makedirs(args.train_dir, exist_ok=True)
 
-    # Pre-build vis cache once before spawning parallel envs to avoid race conditions
     print("[Train] Pre-building vis cache (one-time)...")
     _warmup = Dust2Env()
     del _warmup
 
-    n_envs = 8
-
-    print(f"[Train] Creating {n_envs} parallel envs...")
-
-    def make_vec():
-        env = Dust2Env()
-        env = pettingzoo_env_to_vec_env_v1(env)
-        return env
-
-    vec_env = concat_vec_envs_v1(
-        make_vec, n_envs, num_cpus=1, base_class="stable_baselines3"
-    )
-
-    model = PPO("MlpPolicy", vec_env, **TRAINING_CONFIG)
-
-    callbacks = [
-        CheckpointCallback(
-            save_freq=CHECKPOINT_EVERY,
-            save_path="checkpoints/",
-            name_prefix="cs2rl",
-        ),
-        OpponentPoolCallback(update_freq=OPPONENT_UPDATE),
-        TeamSpiritCallback(anneal_steps=5_000_000),
+    argv = [
+        "--env", "cs2-dust2",
+        "--algo", "APPO",
+        "--experiment", "cs2rl",
+        "--train_dir", args.train_dir,
+        "--num_workers", str(args.num_workers),
+        "--num_envs_per_worker", str(args.num_envs_per_worker),
+        "--batch_size", "512",
+        "--num_batches_per_epoch", "1",
+        "--num_epochs", "4",
+        "--rollout", "64",
+        "--gamma", str(TRAINING_CONFIG["gamma"]),
+        "--gae_lambda", "0.95",
+        "--exploration_loss_coeff", "0.01",
+        "--max_grad_norm", "0.5",
+        "--train_for_env_steps", str(args.timesteps),
+        "--save_every_sec", "3600",
     ]
 
-    print(f"[Train] Starting PPO for {args.timesteps:,} timesteps...")
-    model.learn(total_timesteps=args.timesteps, callback=callbacks)
-    model.save("checkpoints/final.zip")
-    print("[Train] Done. Saved checkpoints/final.zip")
+    parser, _ = parse_sf_args(argv=argv)
+    cfg = parse_full_cfg(parser, argv=argv)
+    cfg, runner = make_runner(cfg)
+    runner.init()
+
+    stop_event = _team_spirit_cb._make_daemon_thread(runner)
+    try:
+        print(f"[Train] Starting SF APPO for {args.timesteps:,} env steps...")
+        runner.run()
+    finally:
+        TeamSpiritCallback.stop_daemon(stop_event)
+
+    print("[Train] Done.")
 
 
 # ── SECTION: CLI ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--smoke",      action="store_true")
-    parser.add_argument("--train",      action="store_true")
-    parser.add_argument("--record",     action="store_true")
-    parser.add_argument("--eval",       action="store_true")
-    parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--timesteps",  type=int, default=10_000_000)
+    parser.add_argument("--smoke",               action="store_true")
+    parser.add_argument("--train",               action="store_true")
+    parser.add_argument("--record",              action="store_true")
+    parser.add_argument("--eval",                action="store_true")
+    parser.add_argument("--checkpoint",          type=str, default=None)
+    parser.add_argument("--timesteps",           type=int, default=10_000_000)
+    parser.add_argument("--num_workers",         type=int, default=8)
+    parser.add_argument("--num_envs_per_worker", type=int, default=8)
+    parser.add_argument("--train_dir",           type=str, default="checkpoints")
     args = parser.parse_args()
 
     if args.smoke:
