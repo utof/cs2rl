@@ -1,13 +1,43 @@
 # ── SECTION: NavGraph ──────────────────────────────────────────────────────
 
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple
+
 import networkx as nx
 import numpy as np
-from dataclasses import dataclass, field
-from typing import List, Tuple, Dict
-
 from awpy import Nav
-from shapely.geometry import LineString, Point, Polygon as ShapelyPolygon
+from shapely.geometry import Point
+from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.strtree import STRtree
+
+# ── Multiprocessing workers for vis matrix (must be module-level to be picklable) ──
+
+_vc = None  # per-worker VisibilityChecker instance
+
+
+def _vis_worker_init(tri_path_str: str):
+    """Runs once per worker process — loads VisibilityChecker into a module global."""
+    global _vc
+    from pathlib import Path
+
+    from awpy.visibility import VisibilityChecker
+
+    _vc = VisibilityChecker(path=Path(tri_path_str))
+
+
+def _vis_compute_rows(row_indices: list, pts: list) -> dict:
+    """Computes upper-triangle visibility for each row in row_indices.
+
+    Returns {i: [bool for j in range(i+1, N)]} using the worker-local _vc.
+    """
+    N = len(pts)
+    result = {}
+    for i in row_indices:
+        upper = []
+        for j in range(i + 1, N):
+            upper.append(_vc.is_visible(pts[i], pts[j]))
+        result[i] = upper
+    return result
 
 
 class NavGraph:
@@ -38,9 +68,13 @@ class NavGraph:
         # ── Load nav data ──────────────────────────────────────────────────
         self.nav = Nav.from_json(nav_path)
         self.areas: Dict[int, object] = self.nav.areas  # dict[int, NavArea]
-        self.area_ids: List[int] = sorted(self.areas.keys())  # sorted for stable _id_to_idx indices across runs
+        self.area_ids: List[int] = sorted(
+            self.areas.keys()
+        )  # sorted for stable _id_to_idx indices across runs
         self.N: int = len(self.area_ids)
-        self._id_to_idx: Dict[int, int] = {aid: i for i, aid in enumerate(self.area_ids)}
+        self._id_to_idx: Dict[int, int] = {
+            aid: i for i, aid in enumerate(self.area_ids)
+        }
 
         # ── Compute centroids ──────────────────────────────────────────────
         self.centroids: Dict[int, np.ndarray] = {}
@@ -53,6 +87,13 @@ class NavGraph:
             [self.centroids[aid] for aid in self.area_ids], dtype=np.float32
         )  # shape (N, 2)
 
+        # Pre-built (N, 3) matrix for 3D snapping (spawn slots need z to avoid floor mismatches)
+        self._centroid_matrix_3d: np.ndarray = np.array(
+            [[self.areas[aid].centroid.x,
+              self.areas[aid].centroid.y,
+              self.areas[aid].centroid.z] for aid in self.area_ids], dtype=np.float32
+        )  # shape (N, 3)
+
         # ── Build networkx graph ───────────────────────────────────────────
         # nx.Graph (undirected): a small fraction of CS2 nav connections are
         # one-way (~5/20 in a sample), but the nav mesh is overwhelmingly
@@ -64,15 +105,10 @@ class NavGraph:
                 if neighbor_id in self.areas:
                     self.graph.add_edge(aid, neighbor_id)
 
-        # ── Extract wall segments ──────────────────────────────────────────
+        # ── Extract wall segments (kept for --test-navgraph) ──────────────
         self.wall_segments = self._extract_wall_segments()
 
-        # ── Build spatial indices ──────────────────────────────────────────
-        self._wall_lines: List[LineString] = [
-            LineString(seg) for seg in self.wall_segments
-        ]
-        self._wall_strtree = STRtree(self._wall_lines) if self._wall_lines else STRtree([])
-
+        # ── Build area spatial index ───────────────────────────────────────
         self._area_polys, self._area_strtree = self._build_area_index()
 
         # ── Visibility matrix (built in Task 2) ───────────────────────────
@@ -80,7 +116,9 @@ class NavGraph:
 
     # ── Wall segment extraction ────────────────────────────────────────────
 
-    def _extract_wall_segments(self) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    def _extract_wall_segments(
+        self,
+    ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
         """Extract boundary edges — edges shared by exactly one area polygon."""
         edge_count: Dict[Tuple, int] = {}
 
@@ -89,7 +127,10 @@ class NavGraph:
             n = len(corners)
             for i in range(n):
                 p1 = (round(corners[i].x, 4), round(corners[i].y, 4))
-                p2 = (round(corners[(i + 1) % n].x, 4), round(corners[(i + 1) % n].y, 4))
+                p2 = (
+                    round(corners[(i + 1) % n].x, 4),
+                    round(corners[(i + 1) % n].y, 4),
+                )
                 # Canonical form: smaller point first
                 edge = (min(p1, p2), max(p1, p2))
                 edge_count[edge] = edge_count.get(edge, 0) + 1
@@ -181,77 +222,113 @@ class NavGraph:
             return []
 
     def build_vis_matrix(self):
-        """Build and cache the N×N visibility matrix."""
+        """Build and cache the N×N visibility matrix using awpy VisibilityChecker + real .tri geometry.
+
+        Parallelised: one worker process per CPU core, each loading its own VisibilityChecker
+        instance once (via ProcessPoolExecutor initializer), then processing a share of rows.
+        """
         import os
         import time
-        from shapely.geometry import LineString
+        from concurrent.futures import ProcessPoolExecutor, as_completed
 
-        nav_mtime = os.path.getmtime(self._nav_path) if hasattr(self, '_nav_path') else 0
+        from awpy.data import TRIS_DIR
+
+        nav_mtime = (
+            os.path.getmtime(self._nav_path) if hasattr(self, "_nav_path") else 0
+        )
 
         if os.path.exists(self._cache_path):
             cache_mtime = os.path.getmtime(self._cache_path)
             if cache_mtime > nav_mtime:
                 self.vis_matrix = np.load(self._cache_path)
-                print(f"[NavGraph] Loaded visibility matrix from cache ({self.N}×{self.N})")
+                print(
+                    f"[NavGraph] Loaded visibility matrix from cache ({self.N}×{self.N})"
+                )
                 return
 
-        print(f"[NavGraph] Building visibility matrix ({self.N}×{self.N})... "
-              f"(this takes 2-5 min, cached after)")
+        tri_path = TRIS_DIR / "de_dust2.tri"
+        if not tri_path.exists():
+            raise FileNotFoundError(
+                f".tri file not found at {tri_path}\nDownload it with:  awpy get tris"
+            )
+
+        pts = [
+            (
+                float(self.areas[aid].centroid.x),
+                float(self.areas[aid].centroid.y),
+                float(self.areas[aid].centroid.z),
+            )
+            for aid in self.area_ids
+        ]
+
+        n_workers = os.cpu_count() or 4
+        # ~8 tasks per worker for good load-balancing without excessive IPC overhead
+        chunk_size = max(1, self.N // (n_workers * 8))
+        chunks = [
+            list(range(i, min(i + chunk_size, self.N)))
+            for i in range(0, self.N, chunk_size)
+        ]
+
+        print(
+            f"[NavGraph] Building {self.N}×{self.N} vis matrix "
+            f"({n_workers} workers, {len(chunks)} chunks)..."
+        )
+        print(
+            f"[NavGraph] Workers initialising VisibilityChecker in parallel (~40s)..."
+        )
         t0 = time.time()
 
-        vis = np.zeros((self.N, self.N), dtype=bool)
-        centroids = [self.centroids[aid] for aid in self.area_ids]
-
-        for i in range(self.N):
-            if i % 100 == 0:
+        partial_rows: dict = {}
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            initializer=_vis_worker_init,
+            initargs=(str(tri_path),),
+        ) as executor:
+            futures = [
+                executor.submit(_vis_compute_rows, chunk, pts) for chunk in chunks
+            ]
+            for fut in as_completed(futures):
+                partial_rows.update(fut.result())
+                done = len(partial_rows)
                 elapsed = time.time() - t0
-                eta = (elapsed / max(i, 1)) * (self.N - i)
-                print(f"  [{i}/{self.N}] elapsed={elapsed:.0f}s ETA={eta:.0f}s")
+                eta = (elapsed / done) * (self.N - done) if done else 0
+                print(
+                    f"  [{done}/{self.N} rows] {elapsed:.0f}s elapsed, ETA {eta:.0f}s"
+                )
 
-            cx, cy = centroids[i]
-
-            for j in range(i, self.N):
-                if i == j:
-                    vis[i][j] = True
-                    continue
-
-                dx, dy = centroids[j]
-                ray = LineString([(cx, cy), (dx, dy)])
-
-                candidates = self._wall_strtree.query(ray)
-
-                blocked = False
-                for k in candidates:
-                    wall = self._wall_lines[k]
-                    if ray.crosses(wall):
-                        blocked = True
-                        break
-
-                vis[i][j] = vis[j][i] = not blocked
+        vis = np.zeros((self.N, self.N), dtype=bool)
+        for i in range(self.N):
+            vis[i][i] = True
+            for j_off, val in enumerate(partial_rows.get(i, [])):
+                j = i + j_off + 1
+                if val:
+                    vis[i][j] = vis[j][i] = True
 
         self.vis_matrix = vis
         np.save(self._cache_path, vis)
         elapsed = time.time() - t0
-        print(f"[NavGraph] Visibility matrix built in {elapsed:.0f}s, cached to {self._cache_path}")
+        print(
+            f"[NavGraph] Visibility matrix built in {elapsed:.0f}s, cached to {self._cache_path}"
+        )
 
 
 # ── SECTION: Constants ─────────────────────────────────────────────────────
 
-MOVE_SPEED          = 250
-TICK_RATE           = 64
-DT                  = 1.0 / TICK_RATE
-LASER_DAMAGE        = 100
-LASER_RANGE         = 3000
-SHOOT_COOLDOWN      = 10
-BOMB_PLANT_TIME     = int(3.2 * TICK_RATE)
-BOMB_DEFUSE_TIME    = 10 * TICK_RATE
-BOMB_DEFUSE_KIT     = 5 * TICK_RATE
-BOMB_TIMER          = int(40 * TICK_RATE)
-ROUND_TIME          = int(115 * TICK_RATE)
-FOOTSTEP_RADIUS     = 800
-GUNSHOT_RADIUS      = 2000
-BOMB_BEEP_RADIUS    = 1500
-ENEMY_MEMORY_TICKS  = 32
+MOVE_SPEED = 250
+TICK_RATE = 64
+DT = 1.0 / TICK_RATE
+LASER_DAMAGE = 100
+LASER_RANGE = 3000
+SHOOT_COOLDOWN = 10
+BOMB_PLANT_TIME = int(3.2 * TICK_RATE)
+BOMB_DEFUSE_TIME = 10 * TICK_RATE
+BOMB_DEFUSE_KIT = 5 * TICK_RATE
+BOMB_TIMER = int(40 * TICK_RATE)
+ROUND_TIME = int(11 * TICK_RATE)
+FOOTSTEP_RADIUS = 800
+GUNSHOT_RADIUS = 2000
+BOMB_BEEP_RADIUS = 1500
+ENEMY_MEMORY_TICKS = 32
 
 MAP_X_MIN, MAP_X_MAX = -2476.0, 2000.0
 MAP_Y_MIN, MAP_Y_MAX = -1050.0, 3420.0
@@ -259,73 +336,79 @@ MAP_Y_MIN, MAP_Y_MAX = -1050.0, 3420.0
 # Precomputed reciprocals for _norm_xy — avoids repeated division inside step()
 _INV_MAP_X_RANGE = 2.0 / (MAP_X_MAX - MAP_X_MIN)
 _INV_MAP_Y_RANGE = 2.0 / (MAP_Y_MAX - MAP_Y_MIN)
-_MAP_X_OFFSET    = (MAP_X_MAX + MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN)
-_MAP_Y_OFFSET    = (MAP_Y_MAX + MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN)
+_MAP_X_OFFSET = (MAP_X_MAX + MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN)
+_MAP_Y_OFFSET = (MAP_Y_MAX + MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN)
 
 # Direction vectors for movement actions (built once at import time)
 _DIR_VECTORS = {
-    0: np.array([0.0,  0.0]),
-    1: np.array([0.0,  1.0]),    # N
-    2: np.array([0.7071067811865476,  0.7071067811865476]),  # NE (pre-normalised)
-    3: np.array([1.0,  0.0]),    # E
+    0: np.array([0.0, 0.0]),
+    1: np.array([0.0, 1.0]),  # N
+    2: np.array([0.7071067811865476, 0.7071067811865476]),  # NE (pre-normalised)
+    3: np.array([1.0, 0.0]),  # E
     4: np.array([0.7071067811865476, -0.7071067811865476]),  # SE
-    5: np.array([0.0, -1.0]),    # S
+    5: np.array([0.0, -1.0]),  # S
     6: np.array([-0.7071067811865476, -0.7071067811865476]),  # SW
-    7: np.array([-1.0, 0.0]),    # W
-    8: np.array([-0.7071067811865476,  0.7071067811865476]),  # NW
+    7: np.array([-1.0, 0.0]),  # W
+    8: np.array([-0.7071067811865476, 0.7071067811865476]),  # NW
 }
 
 # ── SECTION: Dataclasses ───────────────────────────────────────────────────
 
+
 @dataclass
 class AgentState:
-    agent_id:    int
-    team:        int          # 0 = T, 1 = CT
-    pos:         np.ndarray   # [x, y, z] HU
-    area_id:     int
-    facing:      float        # radians, 0 = +X
-    hp:          int
-    alive:       bool
-    has_bomb:    bool
-    has_kit:     bool
-    shoot_cd:    int
-    is_moving:   bool
+    agent_id: int
+    team: int  # 0 = T, 1 = CT
+    pos: np.ndarray  # [x, y, z] HU
+    area_id: int
+    facing: float  # radians, 0 = +X
+    hp: int
+    alive: bool
+    has_bomb: bool
+    has_kit: bool
+    shoot_cd: int
+    is_moving: bool
     fired_this_tick: bool
     enemy_memory: dict = field(default_factory=dict)  # {enemy_id: (area_id, tick)}
 
+
 @dataclass
 class GameState:
-    tick:                  int
-    agents:                list
-    bomb_planted:          bool
-    bomb_carrier_id:       int
-    bomb_area_id:          int
-    bomb_pos:              np.ndarray
-    bomb_ticks_left:       int
+    tick: int
+    agents: list
+    bomb_planted: bool
+    bomb_carrier_id: int
+    bomb_area_id: int
+    bomb_pos: np.ndarray
+    bomb_ticks_left: int
     bomb_being_planted_by: int
-    bomb_plant_ticks:      int
+    bomb_plant_ticks: int
     bomb_being_defused_by: int
-    bomb_defuse_ticks:     int
-    round_ticks_left:      int
-    round_over:            bool
-    winner:                int   # 0=T, 1=CT, -1=ongoing
+    bomb_defuse_ticks: int
+    round_ticks_left: int
+    round_over: bool
+    winner: int  # 0=T, 1=CT, -1=ongoing
+
 
 @dataclass
 class SoundEvent:
     source_pos: np.ndarray
-    source_id:  int
-    radius:     float
-    type:       str
+    source_id: int
+    radius: float
+    type: str
+
 
 # ── SECTION: Dust2Env ──────────────────────────────────────────────────────
 
-from pettingzoo import ParallelEnv
-import gymnasium
-from gymnasium import spaces
 import pathlib
 
-NAV_PATH   = "C:/Users/vboxuser/.awpy/navs/de_dust2.json"
+import gymnasium
+from gymnasium import spaces
+from pettingzoo import ParallelEnv
+
+NAV_PATH = "C:/Users/vboxuser/.awpy/navs/de_dust2.json"
 CACHE_PATH = "vis_cache.npy"
+
 
 class Dust2Env(ParallelEnv):
     metadata = {"name": "dust2_v0", "render_modes": []}
@@ -339,7 +422,9 @@ class Dust2Env(ParallelEnv):
         self._calibrate_map_bounds()
         self._identify_special_areas()
 
-        self.possible_agents = [f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)]
+        self.possible_agents = [f"t{i}" for i in range(5)] + [
+            f"ct{i}" for i in range(5)
+        ]
         self.agents = list(self.possible_agents)
         self._record_fn = record_fn
         self.state: GameState = None
@@ -353,30 +438,67 @@ class Dust2Env(ParallelEnv):
         MAP_Y_MIN, MAP_Y_MAX = min(ys), max(ys)
         _INV_MAP_X_RANGE = 2.0 / (MAP_X_MAX - MAP_X_MIN)
         _INV_MAP_Y_RANGE = 2.0 / (MAP_Y_MAX - MAP_Y_MIN)
-        _MAP_X_OFFSET    = (MAP_X_MAX + MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN)
-        _MAP_Y_OFFSET    = (MAP_Y_MAX + MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN)
-        print(f"[Dust2Env] Map bounds: X=[{MAP_X_MIN:.0f},{MAP_X_MAX:.0f}] Y=[{MAP_Y_MIN:.0f},{MAP_Y_MAX:.0f}]")
+        _MAP_X_OFFSET = (MAP_X_MAX + MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN)
+        _MAP_Y_OFFSET = (MAP_Y_MAX + MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN)
+        print(
+            f"[Dust2Env] Map bounds: X=[{MAP_X_MIN:.0f},{MAP_X_MAX:.0f}] Y=[{MAP_Y_MIN:.0f},{MAP_Y_MAX:.0f}]"
+        )
+
+    def _snap_to_nav(self, xyz) -> int:
+        """Return the area_id whose centroid is nearest to xyz.
+
+        Uses 3D distance when z is provided (len >= 3) so spawn slots on
+        different floor levels (e.g. CT spawn vs catwalk) don't cross-snap.
+        """
+        if len(xyz) >= 3:
+            pt = np.array(xyz[:3], dtype=np.float32)
+            diff = self.nav_graph._centroid_matrix_3d - pt   # (N, 3)
+        else:
+            pt = np.array(xyz[:2], dtype=np.float32)
+            diff = self.nav_graph._centroid_matrix - pt       # (N, 2)
+        idx = int(np.argmin((diff * diff).sum(axis=1)))
+        return self.nav_graph.area_ids[idx]
+
+    def _areas_near(self, xy, radius: float):
+        """Return all area_ids within radius of 2D position xy, sorted by distance."""
+        pt = np.array(xy[:2], dtype=np.float32)
+        diff = self.nav_graph._centroid_matrix - pt   # (N, 2)
+        dists = np.sqrt((diff * diff).sum(axis=1))
+        order = np.argsort(dists)
+        return [self.nav_graph.area_ids[i] for i in order if dists[i] < radius]
 
     def _identify_special_areas(self):
-        A_SITE   = np.array([550.0,   2580.0])
-        B_SITE   = np.array([-1620.0,  250.0])
-        T_SPAWN  = np.array([-860.0,  -800.0])
-        CT_SPAWN = np.array([200.0,   2900.0])
+        # CS2 setpos_exact spawn slots (from Valve competitive map data, with z)
+        T_SPAWN_SLOTS = [
+            ( -881, -754,  120), ( -841, -808,  117), ( -776, -843,  117),
+            ( -715, -808,  116), ( -680, -754,  120), ( -557, -738,  122),
+            ( -522, -795,  117), ( -460, -836,  117), ( -396, -806,  117),
+            ( -357, -755,  120), ( -233, -754,  114), ( -193, -808,  109),
+            ( -128, -843,   95), (  -67, -808,   84), (  -32, -754,   79),
+        ]
+        CT_SPAWN_SLOTS = [
+            (160, 2370, -120), (182, 2439, -121), (258, 2481, -121),
+            (334, 2434, -120), (351, 2353, -120),
+        ]
+        # Bombsite centers (CS2 in-game coords, verified 20-27u from nearest nav area)
+        A_SITE = (1200.0, 2400.0,  100.0)
+        B_SITE = (-1530.0, 2600.0,   5.0)
 
-        def areas_near(target, radius=500):
-            return [aid for aid, c in self.nav_graph.centroids.items()
-                    if np.linalg.norm(c - target) < radius]
+        # Spawn: snap each individual slot to its nearest nav area.
+        # This guarantees agents land at actual spawn box positions, not
+        # arbitrary areas that happen to share a low area_id.
+        self.t_spawn_areas  = [self._snap_to_nav(s) for s in T_SPAWN_SLOTS]
+        self.ct_spawn_areas = [self._snap_to_nav(s) for s in CT_SPAWN_SLOTS]
 
-        self.a_site_areas   = areas_near(A_SITE,   500) or [self.nav_graph.area_ids[0]]
-        self.b_site_areas   = areas_near(B_SITE,   500) or [self.nav_graph.area_ids[1]]
-        self.t_spawn_areas  = areas_near(T_SPAWN,  800) or [self.nav_graph.area_ids[2]]
-        self.ct_spawn_areas = areas_near(CT_SPAWN, 800) or [self.nav_graph.area_ids[3]]
+        # Bombsites: all areas sorted by distance from site centre (closest first).
+        self.a_site_areas = self._areas_near(A_SITE, 600)
+        self.b_site_areas = self._areas_near(B_SITE, 600)
         self.bombsite_areas = set(self.a_site_areas + self.b_site_areas)
 
-        print(f"[Dust2Env] A-site: {len(self.a_site_areas)} areas, "
-              f"B-site: {len(self.b_site_areas)} areas, "
-              f"T-spawn: {len(self.t_spawn_areas)} areas, "
-              f"CT-spawn: {len(self.ct_spawn_areas)} areas")
+        print(f"[Dust2Env] T-spawn: {len(self.t_spawn_areas)} slots  "
+              f"CT-spawn: {len(self.ct_spawn_areas)} slots  "
+              f"A-site: {len(self.a_site_areas)} areas  "
+              f"B-site: {len(self.b_site_areas)} areas")
 
     def observation_space(self, agent):
         return spaces.Box(low=-1.0, high=1.0, shape=(71,), dtype=np.float32)
@@ -399,45 +521,69 @@ class Dust2Env(ParallelEnv):
 
         for i in range(5):
             spawn_area = self.t_spawn_areas[i % len(self.t_spawn_areas)]
-            centroid = self.nav_graph.centroids[spawn_area]
-            agents.append(AgentState(
-                agent_id=i, team=0,
-                pos=np.array([centroid[0], centroid[1], 0.0]),
-                area_id=spawn_area,
-                facing=0.0, hp=100, alive=True,
-                has_bomb=(i == bomb_carrier),
-                has_kit=False, shoot_cd=0,
-                is_moving=False, fired_this_tick=False,
-            ))
+            c = self.nav_graph.areas[spawn_area].centroid
+            agents.append(
+                AgentState(
+                    agent_id=i,
+                    team=0,
+                    pos=np.array([c.x, c.y, c.z], dtype=np.float32),
+                    area_id=spawn_area,
+                    facing=0.0,
+                    hp=100,
+                    alive=True,
+                    has_bomb=(i == bomb_carrier),
+                    has_kit=False,
+                    shoot_cd=0,
+                    is_moving=False,
+                    fired_this_tick=False,
+                )
+            )
 
         for i in range(5):
             spawn_area = self.ct_spawn_areas[i % len(self.ct_spawn_areas)]
-            centroid = self.nav_graph.centroids[spawn_area]
-            agents.append(AgentState(
-                agent_id=5+i, team=1,
-                pos=np.array([centroid[0], centroid[1], 0.0]),
-                area_id=spawn_area,
-                facing=np.pi, hp=100, alive=True,
-                has_bomb=False,
-                has_kit=(np.random.random() < 0.5),
-                shoot_cd=0, is_moving=False, fired_this_tick=False,
-            ))
+            c = self.nav_graph.areas[spawn_area].centroid
+            agents.append(
+                AgentState(
+                    agent_id=5 + i,
+                    team=1,
+                    pos=np.array([c.x, c.y, c.z], dtype=np.float32),
+                    area_id=spawn_area,
+                    facing=np.pi,
+                    hp=100,
+                    alive=True,
+                    has_bomb=False,
+                    has_kit=(np.random.random() < 0.5),
+                    shoot_cd=0,
+                    is_moving=False,
+                    fired_this_tick=False,
+                )
+            )
 
         return GameState(
-            tick=0, agents=agents,
-            bomb_planted=False, bomb_carrier_id=bomb_carrier,
-            bomb_area_id=-1, bomb_pos=np.zeros(3),
+            tick=0,
+            agents=agents,
+            bomb_planted=False,
+            bomb_carrier_id=bomb_carrier,
+            bomb_area_id=-1,
+            bomb_pos=np.zeros(3),
             bomb_ticks_left=0,
-            bomb_being_planted_by=-1, bomb_plant_ticks=0,
-            bomb_being_defused_by=-1, bomb_defuse_ticks=0,
-            round_ticks_left=ROUND_TIME, round_over=False, winner=-1,
+            bomb_being_planted_by=-1,
+            bomb_plant_ticks=0,
+            bomb_being_defused_by=-1,
+            bomb_defuse_ticks=0,
+            round_ticks_left=ROUND_TIME,
+            round_over=False,
+            winner=-1,
         )
 
     def _norm_xy(self, pos):
-        return np.array([
-            pos[0] * _INV_MAP_X_RANGE - _MAP_X_OFFSET,
-            pos[1] * _INV_MAP_Y_RANGE - _MAP_Y_OFFSET,
-        ], dtype=np.float32)
+        return np.array(
+            [
+                pos[0] * _INV_MAP_X_RANGE - _MAP_X_OFFSET,
+                pos[1] * _INV_MAP_Y_RANGE - _MAP_Y_OFFSET,
+            ],
+            dtype=np.float32,
+        )
 
     def _compute_obs(self, agent_idx: int) -> np.ndarray:
         obs = np.zeros(71, dtype=np.float32)
@@ -453,20 +599,26 @@ class Dust2Env(ParallelEnv):
         obs[6] = float(agent.has_bomb if team == 0 else agent.has_kit)
         obs[7] = 1.0 if agent.shoot_cd == 0 else (1.0 - agent.shoot_cd / SHOOT_COOLDOWN)
 
-        teammates = [a for a in s.agents if a.team == team and a.agent_id != agent.agent_id]
+        teammates = [
+            a for a in s.agents if a.team == team and a.agent_id != agent.agent_id
+        ]
         for i, tm in enumerate(teammates[:4]):
             base = 8 + i * 5
-            obs[base:base+2] = self._norm_xy(tm.pos)
-            obs[base+2] = np.sin(tm.facing)
-            obs[base+3] = np.cos(tm.facing)
-            obs[base+4] = tm.hp / 100.0 if tm.alive else 0.0
+            obs[base : base + 2] = self._norm_xy(tm.pos)
+            obs[base + 2] = np.sin(tm.facing)
+            obs[base + 3] = np.cos(tm.facing)
+            obs[base + 4] = tm.hp / 100.0 if tm.alive else 0.0
 
         enemy_team = 1 - team
-        enemies = sorted([a for a in s.agents if a.team == enemy_team], key=lambda a: a.agent_id)
+        enemies = sorted(
+            [a for a in s.agents if a.team == enemy_team], key=lambda a: a.agent_id
+        )
         for i, en in enumerate(enemies[:5]):
             base = 28 + i * 7
             mem = agent.enemy_memory.get(en.agent_id)
-            can_see = self.nav_graph.can_see(agent.area_id, en.area_id) if en.alive else False
+            can_see = (
+                self.nav_graph.can_see(agent.area_id, en.area_id) if en.alive else False
+            )
 
             if mem is None and not can_see:
                 continue
@@ -474,14 +626,18 @@ class Dust2Env(ParallelEnv):
             if mem is not None:
                 mem_area, last_tick = mem
                 mem_centroid = self.nav_graph.centroids.get(mem_area, agent.pos[:2])
-                obs[base:base+2] = self._norm_xy(mem_centroid)
-                obs[base+2] = np.sin(en.facing)
-                obs[base+3] = np.cos(en.facing)
-                obs[base+4] = en.hp / 100.0 if en.alive else 0.0
-                obs[base+5] = 1.0 if can_see else 0.0
-                freshness = (max(0, ENEMY_MEMORY_TICKS - (s.tick - last_tick)) / ENEMY_MEMORY_TICKS
-                             if last_tick >= 0 else 0.0)
-                obs[base+6] = freshness
+                obs[base : base + 2] = self._norm_xy(mem_centroid)
+                obs[base + 2] = np.sin(en.facing)
+                obs[base + 3] = np.cos(en.facing)
+                obs[base + 4] = en.hp / 100.0 if en.alive else 0.0
+                obs[base + 5] = 1.0 if can_see else 0.0
+                freshness = (
+                    max(0, ENEMY_MEMORY_TICKS - (s.tick - last_tick))
+                    / ENEMY_MEMORY_TICKS
+                    if last_tick >= 0
+                    else 0.0
+                )
+                obs[base + 6] = freshness
 
         obs[63] = float(s.bomb_planted)
         if s.bomb_planted:
@@ -537,10 +693,9 @@ class Dust2Env(ParallelEnv):
 
             # Find target area — only accept moves that land inside the nav mesh
             target_area = self.nav_graph.get_area(target_pos)
-            can_move = (
-                self.nav_graph.is_on_mesh(target_pos) and
-                (target_area == agent.area_id or
-                 self.nav_graph.graph.has_edge(agent.area_id, target_area))
+            can_move = self.nav_graph.is_on_mesh(target_pos) and (
+                target_area == agent.area_id
+                or self.nav_graph.graph.has_edge(agent.area_id, target_area)
             )
 
             if can_move:
@@ -616,12 +771,17 @@ class Dust2Env(ParallelEnv):
         # 6. Process plant/defuse actions
         # Clear defuse state if the defuser stopped or left
         if s.bomb_being_defused_by != -1:
-            defuser = next((a for a in s.agents if a.agent_id == s.bomb_being_defused_by), None)
-            defuser_aid = (f"ct{s.bomb_being_defused_by - 5}")
+            defuser = next(
+                (a for a in s.agents if a.agent_id == s.bomb_being_defused_by), None
+            )
+            defuser_aid = f"ct{s.bomb_being_defused_by - 5}"
             defuser_action = actions.get(defuser_aid, np.array([0, 0, 0, 0]))
-            if (defuser is None or not defuser.alive or
-                    defuser.area_id != s.bomb_area_id or
-                    int(defuser_action[2]) == 0):
+            if (
+                defuser is None
+                or not defuser.alive
+                or defuser.area_id != s.bomb_area_id
+                or int(defuser_action[2]) == 0
+            ):
                 s.bomb_being_defused_by = -1
                 s.bomb_defuse_ticks = 0
 
@@ -686,11 +846,15 @@ class Dust2Env(ParallelEnv):
             self._update_enemy_memory(agent, s, sounds)
 
         # Compute outputs
-        self.agents = [aid for i, aid in enumerate(self.possible_agents)
-                       if s.agents[i].alive]
+        self.agents = [
+            aid for i, aid in enumerate(self.possible_agents) if s.agents[i].alive
+        ]
 
-        obs = {aid: self._compute_obs(i)
-               for i, aid in enumerate(self.possible_agents) if s.agents[i].alive}
+        obs = {
+            aid: self._compute_obs(i)
+            for i, aid in enumerate(self.possible_agents)
+            if s.agents[i].alive
+        }
 
         # 9. Compute rewards
         rewards = {aid: 0.0 for aid in self.possible_agents}
@@ -705,8 +869,8 @@ class Dust2Env(ParallelEnv):
                         rewards[aid] -= 1.0
 
         for killer_id, victim_id in kills_this_tick:
-            killer_aid = (f"t{killer_id}" if killer_id < 5 else f"ct{killer_id - 5}")
-            victim_aid  = (f"t{victim_id}" if victim_id < 5 else f"ct{victim_id - 5}")
+            killer_aid = f"t{killer_id}" if killer_id < 5 else f"ct{killer_id - 5}"
+            victim_aid = f"t{victim_id}" if victim_id < 5 else f"ct{victim_id - 5}"
             rewards[killer_aid] += 0.3
             rewards[victim_aid] -= 0.1
 
@@ -739,19 +903,23 @@ class Dust2Env(ParallelEnv):
             if not agent.alive:
                 continue
             if agent.is_moving:
-                sounds.append(SoundEvent(
-                    source_pos=agent.pos.copy(),
-                    source_id=agent.agent_id,
-                    radius=FOOTSTEP_RADIUS,
-                    type="footstep",
-                ))
+                sounds.append(
+                    SoundEvent(
+                        source_pos=agent.pos.copy(),
+                        source_id=agent.agent_id,
+                        radius=FOOTSTEP_RADIUS,
+                        type="footstep",
+                    )
+                )
             if agent.fired_this_tick:
-                sounds.append(SoundEvent(
-                    source_pos=agent.pos.copy(),
-                    source_id=agent.agent_id,
-                    radius=GUNSHOT_RADIUS,
-                    type="shot",
-                ))
+                sounds.append(
+                    SoundEvent(
+                        source_pos=agent.pos.copy(),
+                        source_id=agent.agent_id,
+                        radius=GUNSHOT_RADIUS,
+                        type="shot",
+                    )
+                )
         return sounds
 
     def _update_enemy_memory(self, agent: AgentState, gs: GameState, sounds: list):
@@ -768,8 +936,8 @@ class Dust2Env(ParallelEnv):
 
             can_see = self.nav_graph.can_see(agent.area_id, enemy.area_id)
             can_hear = any(
-                snd.source_id == enemy.agent_id and
-                np.linalg.norm(agent.pos[:2] - snd.source_pos[:2]) <= snd.radius
+                snd.source_id == enemy.agent_id
+                and np.linalg.norm(agent.pos[:2] - snd.source_pos[:2]) <= snd.radius
                 for snd in sounds
                 if snd.source_id // 5 != agent.agent_id // 5  # enemy team only
             )
@@ -783,6 +951,7 @@ class Dust2Env(ParallelEnv):
 
     def render(self):
         pass
+
 
 # ── SECTION: Tests ────────────────────────────────────────────────────────
 
@@ -806,7 +975,9 @@ if __name__ == "__main__":
         nav.build_vis_matrix()
         assert nav.vis_matrix is not None
         assert nav.vis_matrix.shape == (nav.N, nav.N)
-        assert np.array_equal(nav.vis_matrix, nav.vis_matrix.T), "vis matrix not symmetric"
+        assert np.array_equal(nav.vis_matrix, nav.vis_matrix.T), (
+            "vis matrix not symmetric"
+        )
         assert nav.vis_matrix[0, 0] == True
         true_frac = nav.vis_matrix.sum() / nav.vis_matrix.size
         assert 0.005 < true_frac < 0.95, f"suspicious vis fraction: {true_frac:.2f}"
@@ -814,7 +985,7 @@ if __name__ == "__main__":
 
     if "--test-env-init" in sys.argv:
         env = Dust2Env()
-        assert hasattr(env, 'possible_agents')
+        assert hasattr(env, "possible_agents")
         assert len(env.possible_agents) == 10
         obs, infos = env.reset(seed=42)
         assert len(obs) == 10, f"Expected 10 obs, got {len(obs)}"
@@ -826,14 +997,18 @@ if __name__ == "__main__":
     if "--test-movement" in sys.argv:
         env = Dust2Env()
         obs, _ = env.reset(seed=0)
-        initial_pos = {aid: env.state.agents[i].pos.copy()
-                       for i, aid in enumerate(env.possible_agents)}
+        initial_pos = {
+            aid: env.state.agents[i].pos.copy()
+            for i, aid in enumerate(env.possible_agents)
+        }
 
         # Action: move North (action[0]=1) for all agents
         actions = {aid: np.array([1, 0, 0, 0]) for aid in env.agents}
         obs, rewards, terms, truncs, infos = env.step(actions)
 
-        moved_pos = {aid: env.state.agents[i].pos for i, aid in enumerate(env.possible_agents)}
+        moved_pos = {
+            aid: env.state.agents[i].pos for i, aid in enumerate(env.possible_agents)
+        }
 
         any_moved = any(
             not np.allclose(initial_pos[aid], moved_pos[aid])
@@ -853,7 +1028,8 @@ if __name__ == "__main__":
         # Move all CT agents far from T agents
         for ct in env.state.agents[5:]:
             ct.area_id = env.ct_spawn_areas[0]
-            ct.pos = np.array([*env.nav_graph.centroids[env.ct_spawn_areas[0]], 0.0])
+            c = env.nav_graph.areas[env.ct_spawn_areas[0]].centroid
+            ct.pos = np.array([c.x, c.y, c.z], dtype=np.float32)
 
         # Clear all enemy memory for t0
         env.state.agents[0].enemy_memory = {}
@@ -861,10 +1037,11 @@ if __name__ == "__main__":
         obs_t0 = env._compute_obs(0)
 
         # Enemy slots should be zeroed (no memory, no LOS)
-        enemy_obs = obs_t0[28:63]   # 5 enemies × 7 = 35 floats
-        visible_flags = [enemy_obs[i*7 + 5] for i in range(5)]
-        assert all(f == 0.0 for f in visible_flags), \
+        enemy_obs = obs_t0[28:63]  # 5 enemies × 7 = 35 floats
+        visible_flags = [enemy_obs[i * 7 + 5] for i in range(5)]
+        assert all(f == 0.0 for f in visible_flags), (
             f"Expected no visibility for distant enemies, got {visible_flags}"
+        )
 
         print("Obs masking test PASSED")
 
@@ -913,17 +1090,20 @@ if __name__ == "__main__":
         initial_ct0_hp = ct0_agent.hp
         env.step(actions)
 
-        assert env.state.agents[5].hp < initial_ct0_hp or not env.state.agents[5].alive, \
-            "Shooting in same area should deal damage"
+        assert (
+            env.state.agents[5].hp < initial_ct0_hp or not env.state.agents[5].alive
+        ), "Shooting in same area should deal damage"
 
         print("Shoot test PASSED")
 
     if "--test-sb3-wrap" in sys.argv:
-        from supersuit import pettingzoo_env_to_vec_env_v1, concat_vec_envs_v1
+        from supersuit import concat_vec_envs_v1, pettingzoo_env_to_vec_env_v1
 
         vec_env = concat_vec_envs_v1(
             lambda: pettingzoo_env_to_vec_env_v1(Dust2Env()),
-            1, num_cpus=1, base_class="stable_baselines3"
+            1,
+            num_cpus=1,
+            base_class="stable_baselines3",
         )
 
         obs = vec_env.reset()

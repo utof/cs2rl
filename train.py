@@ -64,7 +64,7 @@ def smoke_test():
 
 def record_episode(checkpoint_path=None):
     import os
-    from viz import init_recording, log_navmesh, log_tick
+    from viz import init_recording, log_navmesh, log_tick, log_trimap
     from sim import ROUND_TIME
 
     os.makedirs("recordings", exist_ok=True)
@@ -77,6 +77,7 @@ def record_episode(checkpoint_path=None):
         log_tick(state, tick, rewards)
 
     env = Dust2Env(record_fn=record_fn)
+    log_trimap()
     log_navmesh(env.nav_graph)
 
     obs, _ = env.reset(seed=0)
