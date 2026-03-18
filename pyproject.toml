@@ -3,7 +3,7 @@ name = "cs2rl"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "awpy>=2.0.2",
     "gymnasium>=0.29.0",
@@ -11,12 +11,22 @@ dependencies = [
     "numpy>=1.26.0",
     "pettingzoo>=1.24.0",
     "rerun-sdk>=0.21.0",
+    "sample-factory[pettingzoo]>=2.1.0",
     "shapely>=2.0.4",
-    "stable-baselines3>=2.3.0",
-    "supersuit>=3.9.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
 ]
+
+[tool.uv]
+# sample-factory 2.1.1 metadata says numpy<2.0 but works fine with numpy 2.x;
+# override the numpy upper bound so it is compatible with awpy>=2.0.2
+override-dependencies = [
+    "numpy>=2.0.0",
+]
+# faster-fifo has no Windows binary releases; pre-built wheel stored locally.
+# Build with: INCLUDE=".../anaconda3/Library/include;$INCLUDE" CONDA_PREFIX=".../anaconda3" \
+#   uv sync --no-build-isolation-package faster-fifo
+find-links = ["wheelhouse"]
