@@ -82,12 +82,9 @@ def record_episode(checkpoint_path=None):
 
     obs, _ = env.reset(seed=0)
 
+    model = None
     if checkpoint_path:
-        from stable_baselines3 import PPO
-        model = PPO.load(checkpoint_path)
-        print(f"[Record] Loaded checkpoint: {checkpoint_path}")
-    else:
-        model = None
+        print("[Record] WARNING: SB3 checkpoint loading removed; using random policy.")
 
     done = False
     step_count = 0
@@ -109,8 +106,13 @@ def record_episode(checkpoint_path=None):
 
 # ── SECTION: Training ─────────────────────────────────────────────────────
 
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
+class BaseCallback:
+    """Stub — replaced by SF callback mechanism in Task 4."""
+    def __init__(self):
+        self.num_timesteps: int = 0
+    def _on_step(self) -> bool:
+        return True
+
 
 TRAINING_CONFIG = dict(
     learning_rate=3e-4,
