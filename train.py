@@ -3,9 +3,8 @@
 
 Usage:
   python train.py --smoke       # sanity check: 1000 steps, no crash, print steps/sec
-  python train.py --train       # full PPO self-play training
-  python train.py --record      # run 1 episode, save rerun recording
-  python train.py --eval --checkpoint checkpoints/latest.zip
+  python train.py --train       # full APPO self-play training (Sample Factory)
+  python train.py --record      # run 1 episode, save rerun recording (random policy)
 """
 
 import os
@@ -16,7 +15,10 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 import argparse
 import time
 import numpy as np
+import gymnasium as gym
 from sim import Dust2Env
+from sample_factory.algo.utils.context import global_env_registry
+from sample_factory.envs.pettingzoo_envs import PettingZooParallelEnv
 
 # ── SECTION: Smoke Test ────────────────────────────────────────────────────
 
@@ -131,6 +133,11 @@ class TeamSpiritCallback:
         import threading, sim as _sim
 
         stop = threading.Event()
+        # NOTE: This daemon updates sim._TEAM_SPIRIT only in the main process.
+        # SF worker processes are spawned separately and maintain their own copy of
+        # this module global, so they see a static _TEAM_SPIRIT = 0.0 throughout
+        # training. True inter-process annealing requires a multiprocessing.Value
+        # or SF reward-shaping hooks — tracked as a future improvement.
 
         def _loop():
             # total_env_steps_since_resume is the attr confirmed in Runner source
@@ -161,10 +168,6 @@ _team_spirit_cb = TeamSpiritCallback(anneal_steps=5_000_000)
 
 # ── SECTION: Sample Factory env registration ──────────────────────────────
 
-import gymnasium as gym
-from sample_factory.algo.utils.context import global_env_registry
-from sample_factory.envs.pettingzoo_envs import PettingZooParallelEnv
-
 
 class _MultiDiscreteTupleWrapper:
     """Converts MultiDiscrete action space to Tuple[Discrete] for SF compatibility.
@@ -178,6 +181,10 @@ class _MultiDiscreteTupleWrapper:
 
     def __init__(self, env):
         self._orig_env = env
+
+    @property
+    def unwrapped(self):
+        return self._orig_env
 
     def action_space(self, agent):
         md = self._orig_env.action_space(agent)
