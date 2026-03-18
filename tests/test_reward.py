@@ -75,23 +75,17 @@ def test_pbrs_shaping_positive_on_kill():
     """The PBRS shaping component alone is positive for T when CT is killed."""
     env = Dust2Env()
     obs, _ = env.reset(seed=3)
-    t0  = env.state.agents[0]
-    ct0 = env.state.agents[5]
-    # Place ct0 directly in front of t0 in the same nav area
-    ct0.area_id = t0.area_id
-    dx, dy = np.cos(t0.facing), np.sin(t0.facing)
-    ct0.pos = t0.pos + np.array([dx * 50, dy * 50, 0.0])
 
+    # Directly verify shaping math: killing CT always increases T potential,
+    # so shaping = γΦ(after) − Φ(before) must be positive.
+    # We don't rely on step() to produce the kill — we manipulate state directly.
     phi_before_t = env._potential(env.state, 0)
-    actions = {aid: np.array([0, 0, 0, 0]) for aid in env.agents}
-    actions["t0"] = np.array([0, 1, 0, 0])
-    env.step(actions)
-
-    if not env.state.agents[5].alive:
-        phi_after_t = env._potential(env.state, 0)
-        gamma = TRAINING_CONFIG["gamma"]
-        shaping = gamma * phi_after_t - phi_before_t
-        assert shaping > 0, f"Killing CT gives negative shaping: {shaping:.4f}"
+    env.state.agents[5].alive = False
+    env.state.agents[5].hp = 0
+    phi_after_t = env._potential(env.state, 0)
+    gamma = TRAINING_CONFIG["gamma"]
+    shaping = gamma * phi_after_t - phi_before_t
+    assert shaping > 0, f"Killing CT gives negative shaping: {shaping:.4f}"
 
 
 def test_team_spirit_zero_unchanged():

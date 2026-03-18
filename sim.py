@@ -891,9 +891,9 @@ class Dust2Env(ParallelEnv):
 
         # Potential-based reward shaping — Ng et al. ICML 1999
         # F(s,a,s') = γΦ(s') − Φ(s) preserves the optimal policy.
-        # γ matches TRAINING_CONFIG["gamma"] imported in train.py; approximation
-        # is acceptable here since sim.py doesn't import train.py.
-        _PBRS_GAMMA = 0.998
+        # γ matches TRAINING_CONFIG["gamma"]=0.99; kept as a local literal to
+        # avoid a circular import (sim.py cannot import train.py).
+        _PBRS_GAMMA = 0.99
         phi_after = {0: self._potential(s, 0), 1: self._potential(s, 1)}
         for i, aid in enumerate(self.possible_agents):
             agent = s.agents[i]
