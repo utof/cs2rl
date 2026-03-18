@@ -150,6 +150,22 @@ class OpponentPoolCallback(BaseCallback):
         return True
 
 
+class TeamSpiritCallback(BaseCallback):
+    """Linearly anneals sim._TEAM_SPIRIT from 0.0 to 1.0 over anneal_steps.
+
+    Uses module-level global — safe only with num_cpus=1 in concat_vec_envs_v1.
+    """
+
+    def __init__(self, anneal_steps: int = 5_000_000):
+        super().__init__()
+        self.anneal_steps = anneal_steps
+
+    def _on_step(self) -> bool:
+        import sim as _sim
+        _sim._TEAM_SPIRIT = min(1.0, self.num_timesteps / self.anneal_steps)
+        return True
+
+
 def train(args):
     from supersuit import pettingzoo_env_to_vec_env_v1, concat_vec_envs_v1
 
@@ -182,6 +198,7 @@ def train(args):
             name_prefix="cs2rl",
         ),
         OpponentPoolCallback(update_freq=OPPONENT_UPDATE),
+        TeamSpiritCallback(anneal_steps=5_000_000),
     ]
 
     print(f"[Train] Starting PPO for {args.timesteps:,} timesteps...")

@@ -131,3 +131,29 @@ def test_team_spirit_one_equalizes_alive_team():
         assert all(abs(r - ct_rewards[0]) < 1e-5 for r in ct_rewards), (
             f"CT alive rewards not equal at τ=1: {dict(zip(ct_alive, ct_rewards))}"
         )
+
+
+def test_team_spirit_callback_anneals():
+    """TeamSpiritCallback linearly anneals sim._TEAM_SPIRIT from 0→1."""
+    from train import TeamSpiritCallback
+
+    sim_module._TEAM_SPIRIT = 0.0
+    cb = TeamSpiritCallback(anneal_steps=1_000_000)
+
+    cb.num_timesteps = 0
+    cb._on_step()
+    assert sim_module._TEAM_SPIRIT == pytest.approx(0.0, abs=1e-6)
+
+    cb.num_timesteps = 500_000
+    cb._on_step()
+    assert sim_module._TEAM_SPIRIT == pytest.approx(0.5, abs=1e-3)
+
+    cb.num_timesteps = 1_000_000
+    cb._on_step()
+    assert sim_module._TEAM_SPIRIT == pytest.approx(1.0, abs=1e-3)
+
+    cb.num_timesteps = 2_000_000
+    cb._on_step()
+    assert sim_module._TEAM_SPIRIT == pytest.approx(1.0, abs=1e-3), (
+        "team_spirit must not exceed 1.0 after anneal_steps"
+    )
