@@ -145,6 +145,14 @@ class NavGraph:
         idx = int(np.argmin((diff * diff).sum(axis=1)))
         return self.area_ids[idx]
 
+    def is_on_mesh(self, pos_xy: np.ndarray) -> bool:
+        """Return True only if pos_xy falls inside a known nav polygon."""
+        pt = Point(pos_xy[0], pos_xy[1])
+        for idx in self._area_strtree.query(pt):
+            if self._area_polys[idx].contains(pt):
+                return True
+        return False
+
     def can_see(self, area_i: int, area_j: int) -> bool:
         """Return True if area_i can see area_j (requires vis_matrix from Task 2).
 
@@ -338,29 +346,37 @@ class Dust2Env(ParallelEnv):
 
     def _calibrate_map_bounds(self):
         global MAP_X_MIN, MAP_X_MAX, MAP_Y_MIN, MAP_Y_MAX
+        global _INV_MAP_X_RANGE, _INV_MAP_Y_RANGE, _MAP_X_OFFSET, _MAP_Y_OFFSET
         xs = [c[0] for c in self.nav_graph.centroids.values()]
         ys = [c[1] for c in self.nav_graph.centroids.values()]
         MAP_X_MIN, MAP_X_MAX = min(xs), max(xs)
         MAP_Y_MIN, MAP_Y_MAX = min(ys), max(ys)
+        _INV_MAP_X_RANGE = 2.0 / (MAP_X_MAX - MAP_X_MIN)
+        _INV_MAP_Y_RANGE = 2.0 / (MAP_Y_MAX - MAP_Y_MIN)
+        _MAP_X_OFFSET    = (MAP_X_MAX + MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN)
+        _MAP_Y_OFFSET    = (MAP_Y_MAX + MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN)
         print(f"[Dust2Env] Map bounds: X=[{MAP_X_MIN:.0f},{MAP_X_MAX:.0f}] Y=[{MAP_Y_MIN:.0f},{MAP_Y_MAX:.0f}]")
 
     def _identify_special_areas(self):
-        A_SITE  = np.array([720.0, 2600.0])
-        B_SITE  = np.array([-1278.0, 820.0])
-        T_SPAWN = np.array([-500.0, -300.0])
-        CT_SPAWN= np.array([800.0, 3100.0])
+        A_SITE   = np.array([550.0,   2580.0])
+        B_SITE   = np.array([-1620.0,  250.0])
+        T_SPAWN  = np.array([-860.0,  -800.0])
+        CT_SPAWN = np.array([200.0,   2900.0])
 
-        def areas_near(target, radius=400):
+        def areas_near(target, radius=500):
             return [aid for aid, c in self.nav_graph.centroids.items()
                     if np.linalg.norm(c - target) < radius]
 
-        self.a_site_areas  = areas_near(A_SITE,  400) or [self.nav_graph.area_ids[0]]
-        self.b_site_areas  = areas_near(B_SITE,  400) or [self.nav_graph.area_ids[1]]
-        self.t_spawn_areas = areas_near(T_SPAWN, 600) or [self.nav_graph.area_ids[2]]
-        self.ct_spawn_areas= areas_near(CT_SPAWN,600) or [self.nav_graph.area_ids[3]]
-        self.bombsite_areas= set(self.a_site_areas + self.b_site_areas)
+        self.a_site_areas   = areas_near(A_SITE,   500) or [self.nav_graph.area_ids[0]]
+        self.b_site_areas   = areas_near(B_SITE,   500) or [self.nav_graph.area_ids[1]]
+        self.t_spawn_areas  = areas_near(T_SPAWN,  800) or [self.nav_graph.area_ids[2]]
+        self.ct_spawn_areas = areas_near(CT_SPAWN, 800) or [self.nav_graph.area_ids[3]]
+        self.bombsite_areas = set(self.a_site_areas + self.b_site_areas)
 
-        print(f"[Dust2Env] A-site: {len(self.a_site_areas)} areas, B-site: {len(self.b_site_areas)} areas")
+        print(f"[Dust2Env] A-site: {len(self.a_site_areas)} areas, "
+              f"B-site: {len(self.b_site_areas)} areas, "
+              f"T-spawn: {len(self.t_spawn_areas)} areas, "
+              f"CT-spawn: {len(self.ct_spawn_areas)} areas")
 
     def observation_space(self, agent):
         return spaces.Box(low=-1.0, high=1.0, shape=(71,), dtype=np.float32)
@@ -519,12 +535,15 @@ class Dust2Env(ParallelEnv):
             # Update facing from movement direction
             agent.facing = np.arctan2(direction[1], direction[0])
 
-            # Find target area
+            # Find target area — only accept moves that land inside the nav mesh
             target_area = self.nav_graph.get_area(target_pos)
+            can_move = (
+                self.nav_graph.is_on_mesh(target_pos) and
+                (target_area == agent.area_id or
+                 self.nav_graph.graph.has_edge(agent.area_id, target_area))
+            )
 
-            # Move only if target area is connected to current area (or same area)
-            if (target_area == agent.area_id or
-                    self.nav_graph.graph.has_edge(agent.area_id, target_area)):
+            if can_move:
                 agent.pos = np.array([target_pos[0], target_pos[1], agent.pos[2]])
                 agent.area_id = target_area
                 agent.is_moving = True
@@ -902,9 +921,10 @@ if __name__ == "__main__":
     if "--test-sb3-wrap" in sys.argv:
         from supersuit import pettingzoo_env_to_vec_env_v1, concat_vec_envs_v1
 
-        env = Dust2Env()
-        vec_env = pettingzoo_env_to_vec_env_v1(env)
-        vec_env = concat_vec_envs_v1(vec_env, 1, num_cpus=1, base_class="stable_baselines3")
+        vec_env = concat_vec_envs_v1(
+            lambda: pettingzoo_env_to_vec_env_v1(Dust2Env()),
+            1, num_cpus=1, base_class="stable_baselines3"
+        )
 
         obs = vec_env.reset()
         # obs might be (obs_arr, infos) tuple in newer gymnasium versions

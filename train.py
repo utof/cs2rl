@@ -8,6 +8,11 @@ Usage:
   python train.py --eval --checkpoint checkpoints/latest.zip
 """
 
+import os
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import argparse
 import time
 import numpy as np
@@ -103,7 +108,6 @@ def record_episode(checkpoint_path=None):
 
 # ── SECTION: Training ─────────────────────────────────────────────────────
 
-import os
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
@@ -120,6 +124,7 @@ TRAINING_CONFIG = dict(
     max_grad_norm=0.5,
     policy_kwargs=dict(net_arch=[256, 256, 128]),
     verbose=1,
+    device="cuda",
 )
 CHECKPOINT_EVERY  = 100_000
 OPPONENT_UPDATE   = 50_000
@@ -148,6 +153,12 @@ def train(args):
     from supersuit import pettingzoo_env_to_vec_env_v1, concat_vec_envs_v1
 
     os.makedirs("checkpoints", exist_ok=True)
+
+    # Pre-build vis cache once before spawning parallel envs to avoid race conditions
+    print("[Train] Pre-building vis cache (one-time)...")
+    _warmup = Dust2Env()
+    del _warmup
+
     n_envs = 8
 
     print(f"[Train] Creating {n_envs} parallel envs...")
@@ -158,7 +169,7 @@ def train(args):
         return env
 
     vec_env = concat_vec_envs_v1(
-        make_vec(), n_envs, num_cpus=1, base_class="stable_baselines3"
+        make_vec, n_envs, num_cpus=1, base_class="stable_baselines3"
     )
 
     model = PPO("MlpPolicy", vec_env, **TRAINING_CONFIG)
