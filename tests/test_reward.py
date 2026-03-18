@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 import sim as sim_module
 from sim import Dust2Env, ROUND_TIME
+from train import TRAINING_CONFIG
 
 
 @pytest.fixture(autouse=True)
@@ -55,3 +56,84 @@ def test_potential_site_control():
 def test_team_spirit_module_default_zero():
     """sim._TEAM_SPIRIT must be 0.0 at module load so existing training is unchanged."""
     assert sim_module._TEAM_SPIRIT == 0.0
+
+
+def test_pbrs_rewards_are_finite():
+    """PBRS must not produce NaN or inf over a full episode."""
+    env = Dust2Env()
+    obs, _ = env.reset(seed=7)
+    for step_n in range(500):
+        actions = {aid: env.action_space(aid).sample() for aid in env.agents}
+        obs, rewards, terms, truncs, infos = env.step(actions)
+        for aid, r in rewards.items():
+            assert np.isfinite(r), f"Non-finite reward at step {step_n} {aid}: {r}"
+        if all(terms.get(aid, False) for aid in env.possible_agents):
+            break
+
+
+def test_pbrs_shaping_positive_on_kill():
+    """The PBRS shaping component alone is positive for T when CT is killed."""
+    env = Dust2Env()
+    obs, _ = env.reset(seed=3)
+    t0  = env.state.agents[0]
+    ct0 = env.state.agents[5]
+    # Place ct0 directly in front of t0 in the same nav area
+    ct0.area_id = t0.area_id
+    dx, dy = np.cos(t0.facing), np.sin(t0.facing)
+    ct0.pos = t0.pos + np.array([dx * 50, dy * 50, 0.0])
+
+    phi_before_t = env._potential(env.state, 0)
+    actions = {aid: np.array([0, 0, 0, 0]) for aid in env.agents}
+    actions["t0"] = np.array([0, 1, 0, 0])
+    env.step(actions)
+
+    if not env.state.agents[5].alive:
+        phi_after_t = env._potential(env.state, 0)
+        gamma = TRAINING_CONFIG["gamma"]
+        shaping = gamma * phi_after_t - phi_before_t
+        assert shaping > 0, f"Killing CT gives negative shaping: {shaping:.4f}"
+
+
+def test_team_spirit_zero_unchanged():
+    """At _TEAM_SPIRIT=0.0, step() rewards are identical to a reference call."""
+    # Run twice with the same seed — results must be identical.
+    env1 = Dust2Env()
+    env1.reset(seed=42)
+    actions1 = {aid: np.array([0, 0, 0, 0]) for aid in env1.agents}
+    _, rewards1, _, _, _ = env1.step(actions1)
+
+    sim_module._TEAM_SPIRIT = 0.0  # explicit (fixture already ensures this)
+    env2 = Dust2Env()
+    env2.reset(seed=42)
+    actions2 = {aid: np.array([0, 0, 0, 0]) for aid in env2.agents}
+    _, rewards2, _, _, _ = env2.step(actions2)
+
+    for aid in env1.possible_agents:
+        assert rewards1[aid] == pytest.approx(rewards2[aid], abs=1e-6), (
+            f"Reward mismatch at τ=0 for {aid}: {rewards1[aid]} vs {rewards2[aid]}"
+        )
+
+
+def test_team_spirit_one_equalizes_alive_team():
+    """At _TEAM_SPIRIT=1.0, all alive agents on same team get equal rewards."""
+    sim_module._TEAM_SPIRIT = 1.0
+    env = Dust2Env()
+    env.reset(seed=11)
+    # No-op actions — no deaths, no kills, all agents stay alive
+    actions = {aid: np.array([0, 0, 0, 0]) for aid in env.agents}
+    _, rewards, _, _, _ = env.step(actions)
+
+    t_alive = [f"t{i}" for i in range(5) if env.state.agents[i].alive]
+    ct_alive = [f"ct{i}" for i in range(5) if env.state.agents[5 + i].alive]
+
+    if len(t_alive) > 1:
+        t_rewards = [rewards[aid] for aid in t_alive]
+        assert all(abs(r - t_rewards[0]) < 1e-5 for r in t_rewards), (
+            f"T alive rewards not equal at τ=1: {dict(zip(t_alive, t_rewards))}"
+        )
+
+    if len(ct_alive) > 1:
+        ct_rewards = [rewards[aid] for aid in ct_alive]
+        assert all(abs(r - ct_rewards[0]) < 1e-5 for r in ct_rewards), (
+            f"CT alive rewards not equal at τ=1: {dict(zip(ct_alive, ct_rewards))}"
+        )

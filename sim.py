@@ -660,6 +660,8 @@ class Dust2Env(ParallelEnv):
 
     def step(self, actions: dict):
         s = self.state
+        # Capture pre-action potential before ANY state mutation
+        phi_before = {0: self._potential(s, 0), 1: self._potential(s, 1)}
         s.tick += 1
         s.round_ticks_left -= 1
 
@@ -868,10 +870,7 @@ class Dust2Env(ParallelEnv):
             for i, aid in enumerate(self.possible_agents):
                 agent = s.agents[i]
                 if agent.alive:
-                    if s.winner == agent.team:
-                        rewards[aid] += 1.0
-                    else:
-                        rewards[aid] -= 1.0
+                    rewards[aid] += 1.0 if s.winner == agent.team else -1.0
 
         for killer_id, victim_id in kills_this_tick:
             killer_aid = f"t{killer_id}" if killer_id < 5 else f"ct{killer_id - 5}"
@@ -880,18 +879,41 @@ class Dust2Env(ParallelEnv):
             rewards[victim_aid] -= 0.1
 
         if bomb_just_planted:
-            planter_aid = f"t{_bomb_planter_id}"
-            rewards[planter_aid] += 0.2
+            rewards[f"t{_bomb_planter_id}"] += 0.2
 
         if bomb_just_defused:
-            defuser_aid = f"ct{_bomb_defuser_id - 5}"
-            rewards[defuser_aid] += 0.2
+            rewards[f"ct{_bomb_defuser_id - 5}"] += 0.2
 
-        # Survival bonus (first half of round, no bomb planted)
         if not s.bomb_planted and s.round_ticks_left > ROUND_TIME * 0.5:
             for i, aid in enumerate(self.possible_agents):
                 if s.agents[i].alive:
                     rewards[aid] += 0.0001
+
+        # Potential-based reward shaping — Ng et al. ICML 1999
+        # F(s,a,s') = γΦ(s') − Φ(s) preserves the optimal policy.
+        # γ matches TRAINING_CONFIG["gamma"] imported in train.py; approximation
+        # is acceptable here since sim.py doesn't import train.py.
+        _PBRS_GAMMA = 0.998
+        phi_after = {0: self._potential(s, 0), 1: self._potential(s, 1)}
+        for i, aid in enumerate(self.possible_agents):
+            agent = s.agents[i]
+            rewards[aid] += _PBRS_GAMMA * phi_after[agent.team] - phi_before[agent.team]
+
+        # Team Spirit blending — OpenAI Five pattern (τ=0: individual, τ=1: team avg)
+        # Averages over ALIVE agents only; dead agents receive 0.0 reward unchanged.
+        if _TEAM_SPIRIT > 0.0:
+            for team in (0, 1):
+                alive_aids = [
+                    aid for i, aid in enumerate(self.possible_agents)
+                    if s.agents[i].team == team and s.agents[i].alive
+                ]
+                if alive_aids:
+                    team_avg = float(np.mean([rewards[aid] for aid in alive_aids]))
+                    for aid in alive_aids:
+                        rewards[aid] = (
+                            (1.0 - _TEAM_SPIRIT) * rewards[aid]
+                            + _TEAM_SPIRIT * team_avg
+                        )
 
         terms = {aid: s.round_over for aid in self.possible_agents}
         truncs = {aid: False for aid in self.possible_agents}
