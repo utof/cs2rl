@@ -1,0 +1,11 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pwd-stub"
+version = "0.0.1"
+description = "Windows stub for the Unix pwd module"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

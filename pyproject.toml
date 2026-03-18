@@ -10,8 +10,9 @@ dependencies = [
     "networkx>=3.3",
     "numpy>=1.26.0",
     "pettingzoo>=1.24.0",
+    "pwd-stub",
     "rerun-sdk>=0.21.0",
-    "sample-factory[pettingzoo]>=2.1.0",
+    "sample-factory[pettingzoo-envs]",
     "shapely>=2.0.4",
 ]
 
@@ -30,3 +31,12 @@ override-dependencies = [
 # Build with: INCLUDE=".../anaconda3/Library/include;$INCLUDE" CONDA_PREFIX=".../anaconda3" \
 #   uv sync --no-build-isolation-package faster-fifo
 find-links = ["wheelhouse"]
+
+[tool.uv.sources]
+sample-factory = { git = "https://github.com/alex-petrenko/sample-factory.git", rev = "master" }
+pwd-stub = { workspace = true }
+
+[tool.uv.workspace]
+members = [
+    "pwd_stub",
+]
