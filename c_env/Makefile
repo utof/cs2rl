@@ -5,5 +5,6 @@ TARGET  = dust2_env.so
 $(TARGET): dust2_env.c dust2_env.h
 	$(CC) $(CFLAGS) -shared -o $(TARGET) dust2_env.c -lm
 
+.PHONY: clean
 clean:
 	rm -f $(TARGET)

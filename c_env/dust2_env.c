@@ -40,18 +40,18 @@ void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_spirit) {
     float d = spd * 0.7071067811865476f;
     env->delta_x[0]=0;   env->delta_y[0]=0;
     env->delta_x[1]=0;   env->delta_y[1]=spd;
-    env->delta_x[2]=spd; env->delta_y[2]=spd;
+    env->delta_x[2]=0;   env->delta_y[2]=0;   /* placeholder — overwritten below */
     env->delta_x[3]=spd; env->delta_y[3]=0;
-    env->delta_x[4]=spd; env->delta_y[4]=-spd;
+    env->delta_x[4]=0;   env->delta_y[4]=0;   /* placeholder — overwritten below */
     env->delta_x[5]=0;   env->delta_y[5]=-spd;
-    env->delta_x[6]=-spd;env->delta_y[6]=-spd;
+    env->delta_x[6]=0;   env->delta_y[6]=0;   /* placeholder — overwritten below */
     env->delta_x[7]=-spd;env->delta_y[7]=0;
-    env->delta_x[8]=-spd;env->delta_y[8]=spd;
-    /* Fix diagonals to pre-normalised magnitude */
-    env->delta_x[2]=d; env->delta_y[2]=d;
-    env->delta_x[4]=d; env->delta_y[4]=-d;
-    env->delta_x[6]=-d;env->delta_y[6]=-d;
-    env->delta_x[8]=-d;env->delta_y[8]=d;
+    env->delta_x[8]=0;   env->delta_y[8]=0;   /* placeholder — overwritten below */
+    /* Diagonals at pre-normalised magnitude */
+    env->delta_x[2]= d; env->delta_y[2]= d;
+    env->delta_x[4]= d; env->delta_y[4]=-d;
+    env->delta_x[6]=-d; env->delta_y[6]=-d;
+    env->delta_x[8]=-d; env->delta_y[8]= d;
     /* Facing angles per move_dir (radians) */
     env->dir_facing[0]=0;
     env->dir_facing[1]=1.5707963f;   /* π/2  N  */
@@ -151,6 +151,10 @@ void env_step(Dust2Env* env) {
         if (!a->alive) continue;
         int move_dir = env->actions[i * 4 + 0];
         if (move_dir == 0) continue;
+        /* bounds check — prevent UB on bad action values */
+        if (move_dir < 0 || move_dir > 8) continue;
+        /* area_idx guard — prevent negative-index UB in adjacency lookup */
+        if (a->area_idx < 0) continue;
 
         float tx = a->x + env->delta_x[move_dir];
         float ty = a->y + env->delta_y[move_dir];
@@ -256,71 +260,73 @@ void env_step(Dust2Env* env) {
         if (g->bomb_ticks_left <= 0) { g->round_over = 1; g->winner = 0; }
     }
 
-    /* Step 9: bomb plant/defuse */
-    /* Clear defuse if defuser stopped/moved/died */
-    if (g->bomb_being_defused_by != -1) {
-        AgentState* def = &g->agents[g->bomb_being_defused_by];
-        if (!def->alive
-            || def->area_idx != g->bomb_area_idx
-            || env->actions[g->bomb_being_defused_by * 4 + 2] == 0) {
-            g->bomb_being_defused_by = -1;
-            g->bomb_defuse_ticks     = 0;
+    /* Step 9: bomb plant/defuse — skip entirely if round already decided */
+    if (!g->round_over) {
+        /* Clear defuse if defuser stopped/moved/died */
+        if (g->bomb_being_defused_by != -1) {
+            AgentState* def = &g->agents[g->bomb_being_defused_by];
+            if (!def->alive
+                || def->area_idx != g->bomb_area_idx
+                || env->actions[g->bomb_being_defused_by * 4 + 2] == 0) {
+                g->bomb_being_defused_by = -1;
+                g->bomb_defuse_ticks     = 0;
+            }
         }
-    }
 
-    for (int i = 0; i < N_AGENTS; i++) {
-        AgentState* a = &g->agents[i];
-        if (!a->alive) continue;
-        if (env->actions[i * 4 + 2] == 0) continue;
+        for (int i = 0; i < N_AGENTS; i++) {
+            AgentState* a = &g->agents[i];
+            if (!a->alive) continue;
+            if (env->actions[i * 4 + 2] == 0) continue;
 
-        if (a->team == 0 && a->has_bomb && !g->bomb_planted) {
-            /* T planting */
-            if (a->area_idx >= 0 && sd->bombsite_by_idx[a->area_idx]) {
-                if (g->bomb_being_planted_by == -1) {
-                    g->bomb_being_planted_by = i;
-                    g->bomb_plant_ticks      = 0;
-                }
-                if (g->bomb_being_planted_by == i) {
-                    g->bomb_plant_ticks++;
-                    if (g->bomb_plant_ticks >= BOMB_PLANT_TIME) {
-                        g->bomb_planted          = 1;
-                        g->bomb_area_idx         = a->area_idx;
-                        g->bomb_x                = a->x;
-                        g->bomb_y                = a->y;
-                        g->bomb_z                = a->z;
-                        g->bomb_ticks_left       = BOMB_TIMER;
+            if (a->team == 0 && a->has_bomb && !g->bomb_planted) {
+                /* T planting */
+                if (a->area_idx >= 0 && sd->bombsite_by_idx[a->area_idx]) {
+                    if (g->bomb_being_planted_by == -1) {
+                        g->bomb_being_planted_by = i;
+                        g->bomb_plant_ticks      = 0;
+                    }
+                    if (g->bomb_being_planted_by == i) {
+                        g->bomb_plant_ticks++;
+                        if (g->bomb_plant_ticks >= BOMB_PLANT_TIME) {
+                            g->bomb_planted          = 1;
+                            g->bomb_area_idx         = a->area_idx;
+                            g->bomb_x                = a->x;
+                            g->bomb_y                = a->y;
+                            g->bomb_z                = a->z;
+                            g->bomb_ticks_left       = BOMB_TIMER;
+                            g->bomb_being_planted_by = -1;
+                            a->has_bomb              = 0;
+                            bomb_just_planted        = 1;
+                            bomb_planter_id          = i;
+                        }
+                    }
+                } else {
+                    if (g->bomb_being_planted_by == i) {
                         g->bomb_being_planted_by = -1;
-                        a->has_bomb              = 0;
-                        bomb_just_planted        = 1;
-                        bomb_planter_id          = i;
+                        g->bomb_plant_ticks      = 0;
                     }
                 }
-            } else {
-                if (g->bomb_being_planted_by == i) {
-                    g->bomb_being_planted_by = -1;
-                    g->bomb_plant_ticks      = 0;
-                }
-            }
-        } else if (a->team == 1 && g->bomb_planted) {
-            /* CT defusing */
-            if (a->area_idx == g->bomb_area_idx) {
-                int defuse_time = a->has_kit ? BOMB_DEFUSE_KIT : BOMB_DEFUSE_TIME;
-                if (g->bomb_being_defused_by == -1) {
-                    g->bomb_being_defused_by = i;
-                    g->bomb_defuse_ticks     = 0;
-                }
-                if (g->bomb_being_defused_by == i) {
-                    g->bomb_defuse_ticks++;
-                    if (g->bomb_defuse_ticks >= defuse_time) {
-                        g->round_over     = 1;
-                        g->winner         = 1;
-                        bomb_just_defused = 1;
-                        bomb_defuser_id   = i;
+            } else if (a->team == 1 && g->bomb_planted) {
+                /* CT defusing */
+                if (a->area_idx == g->bomb_area_idx) {
+                    int defuse_time = a->has_kit ? BOMB_DEFUSE_KIT : BOMB_DEFUSE_TIME;
+                    if (g->bomb_being_defused_by == -1) {
+                        g->bomb_being_defused_by = i;
+                        g->bomb_defuse_ticks     = 0;
+                    }
+                    if (g->bomb_being_defused_by == i) {
+                        g->bomb_defuse_ticks++;
+                        if (g->bomb_defuse_ticks >= defuse_time) {
+                            g->round_over     = 1;
+                            g->winner         = 1;
+                            bomb_just_defused = 1;
+                            bomb_defuser_id   = i;
+                        }
                     }
                 }
             }
         }
-    }
+    } /* end !round_over guard for Step 9 */
 
     /* Step 10: enemy memory update (vision + sound) */
     for (int i = 0; i < N_AGENTS; i++) {
@@ -507,4 +513,4 @@ void env_step(Dust2Env* env) {
     }
 }
 
-void env_close(Dust2Env* env) { /* no-op */ }
+void env_close(Dust2Env* env) { (void)env; /* no-op */ }
