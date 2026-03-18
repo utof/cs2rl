@@ -12,7 +12,7 @@ def test_reset_returns_10_obs():
     from c_env.wrapper import make_env
     env = make_env(seed=0)
     obs, info = env.reset()
-    assert obs is not None
+    assert obs.shape == (10, 71)
 
 
 def test_step_returns_shapes():

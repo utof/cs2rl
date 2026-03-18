@@ -105,6 +105,12 @@ class Dust2EnvC(ctypes.Structure):
     ]
 
 
+# Sanity-check struct sizes match the C layout — catches future drift early
+assert ctypes.sizeof(AgentStateC) == 76, \
+    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 76)"
+assert ctypes.sizeof(GameStateC) == 816, \
+    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 816)"
+
 _lib.env_init.argtypes  = [ctypes.POINTER(Dust2EnvC), ctypes.POINTER(StaticDataC),
                             ctypes.c_uint32, ctypes.c_float]
 _lib.env_init.restype   = None
@@ -161,10 +167,12 @@ def build_static_data(nav_graph, area_adjacency, bombsite_mask,
 
     id2idx = nav_graph._id_to_idx
     sd.n_t_spawns = len(t_spawn_areas)
+    assert len(t_spawn_areas) <= 15, f"t_spawn_areas overflow: {len(t_spawn_areas)} > 15"
     for i, aid in enumerate(t_spawn_areas):
         sd.t_spawns[i] = id2idx[aid]
 
     sd.n_ct_spawns = len(ct_spawn_areas)
+    assert len(ct_spawn_areas) <= 5, f"ct_spawn_areas overflow: {len(ct_spawn_areas)} > 5"
     for i, aid in enumerate(ct_spawn_areas):
         sd.ct_spawns[i] = id2idx[aid]
 
@@ -190,10 +198,11 @@ class Dust2CEnv(pufferlib.PufferEnv):
         return self
 
     def reset(self, seed=None):
+        # seed is accepted for API compatibility but C RNG is set at env_init time
         _lib.env_reset(ctypes.byref(self._c_env))
         self.observations[:] = np.frombuffer(
             self._c_env.observations, dtype=np.float32).reshape(N_AGENTS, OBS_DIM)
-        return self.observations, []
+        return self.observations, {}
 
     def step(self, actions):
         flat = np.asarray(actions, dtype=np.int32).flatten()
@@ -204,7 +213,7 @@ class Dust2CEnv(pufferlib.PufferEnv):
         self.rewards[:]     = np.frombuffer(self._c_env.rewards,   dtype=np.float32)
         self.terminals[:]   = np.frombuffer(self._c_env.terminals, dtype=np.int8).astype(bool)
         self.truncations[:] = False
-        return self.observations, self.rewards, self.terminals, self.truncations, []
+        return self.observations, self.rewards, self.terminals, self.truncations, {}
 
     def set_team_spirit(self, value: float):
         self._c_env.team_spirit = float(value)
