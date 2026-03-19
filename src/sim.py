@@ -455,6 +455,7 @@ _DIR_VECTORS = {
 _DELTA_VECTORS = {k: v * (MOVE_SPEED * DT) for k, v in _DIR_VECTORS.items()}
 # Pre-computed facing angle per direction — avoids np.arctan2 every step
 _DIR_FACING = {k: math.atan2(float(v[1]), float(v[0])) for k, v in _DIR_VECTORS.items()}
+MAX_TURN_SPEED_RAD = math.pi / 4  # 45 degrees per tick — max facing rotation rate
 
 # Team Spirit: controls individual↔team reward blending (annealed 0→1 during training).
 # WARNING: uses module-level global — only process-safe when num_cpus=1 in train.py.

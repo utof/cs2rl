@@ -46,6 +46,7 @@ typedef struct {
     int      n_t_spawns;
     int32_t  ct_spawns[5];
     int      n_ct_spawns;
+    float    max_turn_speed; /* max facing change per tick (radians)       */
 } StaticData;
 
 /* ── Per-agent state ── */

@@ -91,6 +91,7 @@ class StaticDataC(ctypes.Structure):
         ("n_t_spawns", ctypes.c_int),
         ("ct_spawns", ctypes.c_int32 * 5),
         ("n_ct_spawns", ctypes.c_int),
+        ("max_turn_speed", ctypes.c_float),
     ]
 
 
@@ -252,6 +253,7 @@ def build_static_data(map_data: MapData):
         sd.delta_x[i] = float(delta[0])
         sd.delta_y[i] = float(delta[1])
         sd.dir_facing[i] = float(sim._DIR_FACING[i])
+    sd.max_turn_speed = float(sim.MAX_TURN_SPEED_RAD)
 
     id2idx = {int(aid): i for i, aid in enumerate(map_data.area_ids)}
     t_spawn_areas = map_data.t_spawn_areas

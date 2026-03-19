@@ -290,10 +290,24 @@ void env_step(Dust2Env* env, const int32_t* actions) {
             continue;
         }
 
-        a->x         = tx;
-        a->y         = ty;
-        a->area_idx  = target_idx;
-        a->facing    = sd->dir_facing[move_dir];
+        a->x        = tx;
+        a->y        = ty;
+        a->area_idx = target_idx;
+        /* Smooth turn: clamp facing change to max_turn_speed radians/tick */
+        {
+            float target = sd->dir_facing[move_dir];
+            float diff   = target - a->facing;
+            /* Normalise diff to [-π, π] */
+            while (diff > 3.14159265f)
+                diff -= 6.28318530f;
+            while (diff < -3.14159265f)
+                diff += 6.28318530f;
+            if (fabsf(diff) <= sd->max_turn_speed) {
+                a->facing = target;
+            } else {
+                a->facing += (diff > 0.0f ? 1.0f : -1.0f) * sd->max_turn_speed;
+            }
+        }
         a->is_moving = 1;
     }
 
