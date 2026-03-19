@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 import sim as sim_module
-from sim import ROUND_TIME, Dust2Env
+from sim import Dust2Env
 from train import TRAINING_CONFIG
 
 
@@ -124,13 +124,13 @@ def test_team_spirit_one_equalizes_alive_team():
     if len(t_alive) > 1:
         t_rewards = [rewards[aid] for aid in t_alive]
         assert all(abs(r - t_rewards[0]) < 1e-5 for r in t_rewards), (
-            f"T alive rewards not equal at τ=1: {dict(zip(t_alive, t_rewards))}"
+            f"T alive rewards not equal at τ=1: {dict(zip(t_alive, t_rewards, strict=True))}"
         )
 
     if len(ct_alive) > 1:
         ct_rewards = [rewards[aid] for aid in ct_alive]
         assert all(abs(r - ct_rewards[0]) < 1e-5 for r in ct_rewards), (
-            f"CT alive rewards not equal at τ=1: {dict(zip(ct_alive, ct_rewards))}"
+            f"CT alive rewards not equal at τ=1: {dict(zip(ct_alive, ct_rewards, strict=True))}"
         )
 
 

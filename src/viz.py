@@ -1,6 +1,6 @@
 """CS2 RL Sim — rerun.io visualization.
 
-Imported ONLY when --record is passed to train.py.
+Imported ONLY when --record is passed to src/train.py.
 Zero rerun dependency during training.
 """
 

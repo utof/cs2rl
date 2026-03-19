@@ -1,9 +1,8 @@
 """Parity test: C env must produce same rewards and terminals as Python env."""
 
 import numpy as np
-import pytest
 
-from sim import CACHE_PATH, INVALID_AREA_ID, NAV_PATH, STALE_MEMORY_TICK, TEAM_SIZE, Dust2Env
+from sim import INVALID_AREA_ID, STALE_MEMORY_TICK, TEAM_SIZE, Dust2Env
 
 
 def _make_c_env():

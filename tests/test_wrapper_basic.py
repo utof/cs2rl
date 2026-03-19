@@ -1,11 +1,10 @@
 """Wrapper smoke test — env init, reset, step return correct shapes."""
 
 import numpy as np
-import pytest
 
 
 def test_import_wrapper():
-    from c_env.wrapper import Dust2CEnv, build_static_data
+    from c_env.wrapper import Dust2CEnv
 
     assert Dust2CEnv is not None
 
@@ -45,7 +44,6 @@ def test_make_env_honors_external_buffers():
 
     from c_env.wrapper import make_env
 
-    single_obs = gymnasium.spaces.Box(low=-1.0, high=1.0, shape=(71,), dtype=np.float32)
     single_action = gymnasium.spaces.MultiDiscrete([9, 2, 2, 2])
     joint_action = pufferlib.spaces.joint_space(single_action, 10)
     buf = {

@@ -3,11 +3,12 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+TRAIN_SCRIPT = REPO_ROOT / "src" / "train.py"
 
 
 def run_train_command(*args, timeout=180):
     return subprocess.run(
-        [sys.executable, "train.py", *args],
+        [sys.executable, str(TRAIN_SCRIPT), *args],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

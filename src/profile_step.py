@@ -5,7 +5,7 @@ changes. It benchmarks the same environment at several layers so regressions
 are easy to localize:
 
 - Python env step() in `sim.py`
-- Native C wrapper step() in `c_env/wrapper.py`
+- Native C wrapper step() in `src/c_env/wrapper.py`
 - Native C wrapper with external/shared buffers (PufferLib-like path)
 - Raw `env_step()` C kernel without Python-side wrapper work
 - A deliberately "bad" benchmark path that does `terms.any()` + manual reset
@@ -14,9 +14,9 @@ It also captures `cProfile` summaries for the Python and wrapper paths and
 writes machine-readable JSON reports for regression tracking.
 
 Examples:
-    uv run python profile_step.py
-    uv run python profile_step.py --steps 30000 --action-mode noop
-    uv run python profile_step.py --action-mode random --no-cprofile
+    uv run python src/profile_step.py
+    uv run python src/profile_step.py --steps 30000 --action-mode noop
+    uv run python src/profile_step.py --action-mode random --no-cprofile
 """
 
 from __future__ import annotations
@@ -193,7 +193,7 @@ def _collect_low_hanging_fruit(benchmarks: dict[str, BenchResult]) -> list[str]:
         notes.append(
             "C wrapper overhead is significant relative to the raw kernel; inspect "
             "action marshaling, "
-            "buffer syncing, and terminal/reset handling in c_env/wrapper.py."
+            "buffer syncing, and terminal/reset handling in src/c_env/wrapper.py."
         )
     if shared < wrapper * 0.9:
         notes.append(

@@ -2,10 +2,10 @@
 """CS2 RL Sim — training entry point.
 
 Usage:
-  python train.py --smoke       # sanity check: 20k native-env steps, no crash, print steps/sec
-  python train.py --train       # full PPO self-play training (PufferLib 3.0)
-  python train.py --record      # run 1 episode, save rerun recording (random policy)
-  python train.py --eval        # evaluate a checkpoint across many seeds
+  python src/train.py --smoke       # sanity check: 20k native-env steps, no crash, print steps/sec
+  python src/train.py --train       # full PPO self-play training (PufferLib 3.0)
+  python src/train.py --record      # run 1 episode, save rerun recording (random policy)
+  python src/train.py --eval        # evaluate a checkpoint across many seeds
 """
 
 import os

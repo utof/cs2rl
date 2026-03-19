@@ -11,11 +11,11 @@ import pytest
 def test_c_env_smoke():
     from c_env.wrapper import make_env
 
-    so = Path("c_env/dust2_env.so")
-    src = Path("c_env/dust2_env.c")
-    assert so.exists(), "dust2_env.so missing — run make -C c_env/"
+    so = Path("src/c_env/dust2_env.so")
+    src = Path("src/c_env/dust2_env.c")
+    assert so.exists(), "dust2_env.so missing — run make -C src/c_env/"
     assert so.stat().st_mtime >= src.stat().st_mtime, (
-        "dust2_env.so is older than dust2_env.c — run make -C c_env/"
+        "dust2_env.so is older than dust2_env.c — run make -C src/c_env/"
     )
 
     env = make_env(seed=42)

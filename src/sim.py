@@ -66,7 +66,9 @@ class NavGraph:
         _cache_path  -- stored vis cache path
     """
 
-    def __init__(self, nav_path: str, cache_path: str = "vis_cache.npy"):
+    def __init__(self, nav_path: str, cache_path: str | None = None):
+        if cache_path is None:
+            cache_path = str(pathlib.Path(__file__).with_name("vis_cache.npy"))
         self._nav_path = nav_path
         self._cache_path = cache_path
 
@@ -912,7 +914,7 @@ def _resolve_nav_path(map_name: str = "de_dust2") -> str:
 
 
 NAV_PATH = _resolve_nav_path()
-CACHE_PATH = "vis_cache.npy"
+CACHE_PATH = str(pathlib.Path(__file__).with_name("vis_cache.npy"))
 
 
 class Dust2Env(ParallelEnv):
