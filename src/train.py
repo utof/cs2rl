@@ -75,13 +75,15 @@ def smoke_test():
 # ── SECTION: Shared eval / record helpers ──────────────────────────────────
 
 
-def make_puffer_env(team_spirit=None, record_fn=None, buf=None, seed=0, episode_stats=True):
+def make_puffer_env(
+    team_spirit=None, record_fn=None, buf=None, seed=0, episode_stats=True, map_data=None
+):
     """Create the native C PufferEnv used by smoke/train/eval."""
     from c_env.wrapper import make_env as make_c_env
 
     if record_fn is not None:
         raise ValueError("record_fn is only supported by the Python recording env")
-    return make_c_env(seed=seed, team_spirit=team_spirit, buf=buf)
+    return make_c_env(seed=seed, team_spirit=team_spirit, buf=buf, map_data=map_data)
 
 
 def load_policy_from_checkpoint(checkpoint_path, device):
@@ -233,6 +235,7 @@ def record_episode(
     seed=0,
     policy_mode="auto",
     save_path=str(RECORDINGS_DIR / "latest.rrd"),
+    map_data=None,
 ):
     from c_env.wrapper import make_env as make_c_env
     from sim import CACHE_PATH, NAV_PATH, _load_dust2_static_data
@@ -243,10 +246,13 @@ def record_episode(
 
     print(f"[Record] Initialising rerun recording -> {save_path}")
     init_recording(save_path=str(save_path))
-    static = _load_dust2_static_data(NAV_PATH, CACHE_PATH)
-    env = make_c_env(seed=seed, auto_reset=False)
-    log_trimap()
-    log_navmesh(static["nav_graph"])
+    env = make_c_env(seed=seed, auto_reset=False, map_data=map_data)
+    if map_data is None:
+        static = _load_dust2_static_data(NAV_PATH, CACHE_PATH)
+        log_trimap()
+        log_navmesh(static["nav_graph"])
+    else:
+        print("[Record] Simple map — skipping 3D geometry (no awpy nav graph)")
 
     obs, _ = env.reset(seed=seed)
 
@@ -413,8 +419,8 @@ class TeamSpiritCallback:
 # ── SECTION: PufferLib env factory ─────────────────────────────────────────
 
 
-def make_env(team_spirit=None):
-    return make_puffer_env(team_spirit=team_spirit)
+def make_env(team_spirit=None, map_data=None):
+    return make_puffer_env(team_spirit=team_spirit, map_data=map_data)
 
 
 # ── SECTION: Policy ────────────────────────────────────────────────────────
@@ -535,8 +541,10 @@ def train(args):
     # Shared team spirit value — all envs read it at episode start
     shared_ts = mp.Value("f", 0.0)
 
-    def env_factory(*args, buf=None, seed=None, **kwargs):
-        return make_puffer_env(team_spirit=shared_ts, buf=buf, seed=seed or 0)
+    _map_data = args.map_data
+
+    def env_factory(*_args, buf=None, seed=None, **kwargs):
+        return make_puffer_env(team_spirit=shared_ts, buf=buf, seed=seed or 0, map_data=_map_data)
 
     backend_name = args.vec_backend.lower()
     if backend_name == "multiprocessing":
@@ -643,6 +651,11 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--simple-map",
+        action="store_true",
+        help="Use the built-in 5-room simple map instead of dust2",
+    )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--record", action="store_true")
@@ -672,6 +685,14 @@ if __name__ == "__main__":
 
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    if args.simple_map:
+        from map import make_simple_map
+
+        args.map_data = make_simple_map()
+        print("[Map] Using simple 5-room map")
+    else:
+        args.map_data = None
+
     if args.smoke:
         smoke_test()
     elif args.train:
@@ -683,6 +704,7 @@ if __name__ == "__main__":
             seed=args.seed,
             policy_mode=args.record_policy,
             save_path=args.record_out,
+            map_data=args.map_data,
         )
     elif args.eval:
         evaluate_checkpoint(
