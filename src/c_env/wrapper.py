@@ -271,7 +271,15 @@ def build_static_data(map_data: MapData):
 
 class Dust2CEnv(pufferlib.PufferEnv):
     def __init__(
-        self, sd, refs, seed=0, team_spirit=0.0, buf=None, nav_graph=None, auto_reset=True
+        self,
+        sd,
+        refs,
+        seed=0,
+        team_spirit=0.0,
+        buf=None,
+        nav_graph=None,
+        auto_reset=True,
+        map_data=None,
     ):
         self.single_observation_space = gymnasium.spaces.Box(
             low=-1.0, high=1.0, shape=(OBS_DIM,), dtype=np.float32
@@ -283,6 +291,7 @@ class Dust2CEnv(pufferlib.PufferEnv):
         self._sd = sd
         self._refs = refs  # keep alive — prevents GC of numpy backing arrays
         self.nav_graph = nav_graph
+        self.map_data = map_data
         self._auto_reset = bool(auto_reset)
         self._uses_external_buffers = buf is not None
         self._c_env = Dust2EnvC()
@@ -481,4 +490,5 @@ def make_env(seed=0, team_spirit=0.0, auto_reset=True, buf=None, map_data=None):
         buf=buf,
         nav_graph=md.nav_graph,
         auto_reset=auto_reset,
+        map_data=md,
     )
