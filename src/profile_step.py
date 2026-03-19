@@ -4,13 +4,12 @@ This script is meant to be rerun whenever `sim.py`, `c_env`, or the wrapper
 changes. It benchmarks the same environment at several layers so regressions
 are easy to localize:
 
-- Python env step() in `sim.py`
 - Native C wrapper step() in `src/c_env/wrapper.py`
 - Native C wrapper with external/shared buffers (PufferLib-like path)
 - Raw `env_step()` C kernel without Python-side wrapper work
 - A deliberately "bad" benchmark path that does `terms.any()` + manual reset
 
-It also captures `cProfile` summaries for the Python and wrapper paths and
+It also captures `cProfile` summaries for the wrapper path and
 writes machine-readable JSON reports for regression tracking.
 
 Examples:
@@ -36,14 +35,9 @@ import numpy as np
 from c_env.wrapper import ACTION_DIM, N_AGENTS, OBS_DIM, _lib
 from c_env.wrapper import make_env as make_c_env
 from paths import LOGS_DIR
-from sim import Dust2Env
 
 REPORT_DIR = LOGS_DIR / "profiles"
 NOOP_ACTION_C = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
-NOOP_ACTION_PY = {
-    aid: np.zeros(ACTION_DIM, dtype=np.int32)
-    for aid in [*(f"t{i}" for i in range(5)), *(f"ct{i}" for i in range(5))]
-}
 
 
 @dataclass
@@ -112,26 +106,6 @@ def _extract_profile_rows(pr: cProfile.Profile, sort_by: str, top_n: int) -> lis
     return items[:top_n]
 
 
-def _make_python_stepper(seed: int, action_mode: str):
-    env = Dust2Env()
-    env.reset(seed=seed)
-    action_spaces = {aid: env.action_space(aid) for aid in env.possible_agents}
-
-    def step():
-        if action_mode == "random":
-            actions = {
-                aid: np.asarray(action_spaces[aid].sample(), dtype=np.int32) for aid in env.agents
-            }
-        else:
-            actions = NOOP_ACTION_PY
-
-        _obs, _rewards, terms, _truncs, _infos = env.step(actions)
-        if all(terms.get(aid, False) for aid in env.possible_agents):
-            env.reset(seed=seed)
-
-    return step
-
-
 def _make_c_wrapper_stepper(seed: int, action_mode: str, external_buf: bool = False):
     env = make_c_env(seed=seed, buf=_build_external_buf() if external_buf else None)
     env.reset(seed=seed)
@@ -187,7 +161,6 @@ def _collect_low_hanging_fruit(benchmarks: dict[str, BenchResult]) -> list[str]:
     wrapper = benchmarks["c_wrapper"].sps
     shared = benchmarks["c_wrapper_shared_buf"].sps
     manual = benchmarks["c_wrapper_manual_reset"].sps
-    python = benchmarks["python_env"].sps
 
     if wrapper < raw * 0.8:
         notes.append(
@@ -207,12 +180,6 @@ def _collect_low_hanging_fruit(benchmarks: dict[str, BenchResult]) -> list[str]:
             "reset when profiling "
             "the native auto-reset env."
         )
-    if python < wrapper * 0.5:
-        notes.append(
-            "The Python sim is far slower than the native path; start with the top "
-            "cumulative cProfile rows "
-            "from sim.py for the next optimization pass."
-        )
     return notes
 
 
@@ -228,7 +195,6 @@ def _write_reports(report: dict[str, Any], report_dir: Path) -> tuple[Path, Path
 
 def _print_summary(
     benchmarks: dict[str, BenchResult],
-    python_profile: dict[str, list[dict[str, Any]]] | None,
     wrapper_profile: dict[str, list[dict[str, Any]]] | None,
     notes: list[str],
     latest_path: Path,
@@ -236,7 +202,6 @@ def _print_summary(
 ):
     print("\n=== BENCHMARKS ===")
     for key in (
-        "python_env",
         "c_wrapper",
         "c_wrapper_shared_buf",
         "c_wrapper_manual_reset",
@@ -252,11 +217,9 @@ def _print_summary(
     raw = benchmarks["c_raw_kernel"].sps
     wrapper = benchmarks["c_wrapper"].sps
     shared = benchmarks["c_wrapper_shared_buf"].sps
-    python = benchmarks["python_env"].sps
     print("\n=== RATIOS ===")
     print(f"wrapper/raw_c          {wrapper / raw:10.3f}")
     print(f"shared_buf/wrapper     {shared / wrapper:10.3f}")
-    print(f"python/wrapper         {python / wrapper:10.3f}")
 
     if notes:
         print("\n=== LOW-HANGING FRUIT ===")
@@ -279,7 +242,6 @@ def _print_summary(
                 f"cum={row['cumulative_seconds']:.4f}s  calls={row['total_calls']}"
             )
 
-    print_profile_block("PYTHON ENV", python_profile)
     print_profile_block("C WRAPPER", wrapper_profile)
 
     print("\n=== REPORTS ===")
@@ -300,12 +262,6 @@ def main():
     args = parser.parse_args()
 
     benchmarks = {
-        "python_env": _run_benchmark(
-            "python_env",
-            lambda: _make_python_stepper(args.seed, args.action_mode),
-            args.steps,
-            args.warmup,
-        ),
         "c_wrapper": _run_benchmark(
             "c_wrapper",
             lambda: _make_c_wrapper_stepper(args.seed, args.action_mode, external_buf=False),
@@ -332,14 +288,8 @@ def main():
         ),
     }
 
-    python_profile = None
     wrapper_profile = None
     if not args.no_cprofile:
-        python_profile = _profile_loop(
-            _make_python_stepper(args.seed, args.action_mode),
-            args.profile_steps,
-            args.profile_top,
-        )
         wrapper_profile = _profile_loop(
             _make_c_wrapper_stepper(args.seed, args.action_mode, external_buf=False),
             args.profile_steps,
@@ -358,7 +308,6 @@ def main():
         },
         "benchmarks": {name: asdict(result) for name, result in benchmarks.items()},
         "profiles": {
-            "python_env": python_profile,
             "c_wrapper": wrapper_profile,
         },
         "notes": notes,
@@ -366,7 +315,6 @@ def main():
     latest_path, archive_path = _write_reports(report, args.report_dir)
     _print_summary(
         benchmarks,
-        python_profile,
         wrapper_profile,
         notes,
         latest_path,

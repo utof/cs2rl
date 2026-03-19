@@ -20,7 +20,6 @@ from sim import (
     _T_SPAWN_SLOTS,
     TEAM_SIZE,
     NavGraph,
-    _apply_map_bounds,
     _areas_near,
     _build_area_adjacency,
     _compute_area_distance_to_targets,
@@ -68,11 +67,7 @@ _CS2_MAP_CACHE: dict = {}
 
 
 def make_cs2_map(nav_path: str, cache_path: str) -> MapData:
-    """Build MapData from the real dust2 nav mesh.
-
-    Calls sim._apply_map_bounds() as a side-effect so that Dust2Env (Python env)
-    stays in sync — required while test_c_parity / test_env_feasibility exist.
-    """
+    """Build MapData from the real dust2 nav mesh."""
     key = (nav_path, cache_path)
     cached = _CS2_MAP_CACHE.get(key)
     if cached is not None:
@@ -157,7 +152,6 @@ def make_cs2_map(nav_path: str, cache_path: str) -> MapData:
     )
 
     _CS2_MAP_CACHE[key] = map_data
-    _apply_map_bounds(map_bounds)  # keep Dust2Env (Python env) in sync
 
     print(f"[MapData] Map bounds: X=[{x_min:.0f},{x_max:.0f}] Y=[{y_min:.0f},{y_max:.0f}]")
     print(
