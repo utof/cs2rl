@@ -22,6 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
+from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
+
 OBS_DIM = 71
 
 AGENT_IDS = tuple([f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)])
@@ -230,18 +232,17 @@ def record_episode(
     device="cpu",
     seed=0,
     policy_mode="auto",
-    save_path="recordings/latest.rrd",
+    save_path=str(RECORDINGS_DIR / "latest.rrd"),
 ):
-    import os
-
     from c_env.wrapper import make_env as make_c_env
     from sim import CACHE_PATH, NAV_PATH, _load_dust2_static_data
     from viz import init_recording, log_navmesh, log_tick, log_trimap
 
-    os.makedirs("recordings", exist_ok=True)
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"[Record] Initialising rerun recording -> {save_path}")
-    init_recording(save_path=save_path)
+    init_recording(save_path=str(save_path))
     static = _load_dust2_static_data(NAV_PATH, CACHE_PATH)
     env = make_c_env(seed=seed, auto_reset=False)
     log_trimap()
@@ -629,7 +630,7 @@ def train(args):
         shared_ts.value = ts_val
 
         if time.time() - last_save > args.save_every_sec:
-            save_path.parent.mkdir(exist_ok=True)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(policy.state_dict(), save_path)
             last_save = time.time()
             print(f"Saved checkpoint to {save_path}")
@@ -655,11 +656,11 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--save_every_sec", type=int, default=300)
-    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    parser.add_argument("--checkpoint_dir", type=str, default=str(CHECKPOINTS_DIR))
     parser.add_argument("--vec-backend", type=str, default="multiprocessing")
     parser.add_argument("--vec-num-workers", type=int, default=0)
     parser.add_argument("--vec-overwork", action="store_true")
-    parser.add_argument("--record-out", type=str, default="recordings/latest.rrd")
+    parser.add_argument("--record-out", type=str, default=str(RECORDINGS_DIR / "latest.rrd"))
     parser.add_argument(
         "--record-policy", type=str, choices=("auto", "random", "sample", "greedy"), default="auto"
     )

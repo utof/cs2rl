@@ -35,9 +35,10 @@ import numpy as np
 
 from c_env.wrapper import ACTION_DIM, N_AGENTS, OBS_DIM, _lib
 from c_env.wrapper import make_env as make_c_env
+from paths import LOGS_DIR
 from sim import Dust2Env
 
-REPORT_DIR = Path("logs/profiles")
+REPORT_DIR = LOGS_DIR / "profiles"
 NOOP_ACTION_C = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
 NOOP_ACTION_PY = {
     aid: np.zeros(ACTION_DIM, dtype=np.int32)
