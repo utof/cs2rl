@@ -1,6 +1,7 @@
 # ── SECTION: NavGraph ──────────────────────────────────────────────────────
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
@@ -547,16 +548,160 @@ def _areas_near(nav_graph: NavGraph, xy, radius: float):
     return [nav_graph.area_ids[i] for i in order if dists[i] < radius]
 
 
+def _nearest_area_candidates(nav_graph: NavGraph, xyz, limit: int = 64):
+    if len(xyz) >= 3:
+        pt = np.asarray(xyz[:3], dtype=np.float32)
+        diff = nav_graph._centroid_matrix_3d - pt
+    else:
+        pt = np.asarray(xyz[:2], dtype=np.float32)
+        diff = nav_graph._centroid_matrix - pt
+
+    order = np.argsort((diff * diff).sum(axis=1))
+    return [nav_graph.area_ids[i] for i in order[:limit]]
+
+
+def _select_distinct_spawn_areas(
+    nav_graph: NavGraph,
+    slots,
+    count: int,
+    required_targets=None,
+    area_adjacency=None,
+    candidate_limit: int = 64,
+):
+    selected = []
+    used = set()
+    targets = tuple(required_targets or ())
+
+    for slot in slots:
+        for area_id in _nearest_area_candidates(nav_graph, slot, limit=candidate_limit):
+            if area_id in used:
+                continue
+            if targets and area_adjacency is not None:
+                if not _area_reaches_any_target(nav_graph, area_adjacency, area_id, targets):
+                    continue
+            elif targets and not any(nav_graph.path(area_id, target) for target in targets):
+                continue
+
+            selected.append(area_id)
+            used.add(area_id)
+            break
+
+        if len(selected) >= count:
+            return selected
+
+    raise ValueError(
+        f"Failed to select {count} distinct spawn areas from {len(slots)} slots"
+    )
+
+
 def _build_area_adjacency(nav_graph: NavGraph) -> np.ndarray:
+    """Build the executable XY adjacency used by the simplified movement model.
+
+    Raw nav connections can include vertical/one-way links that are valid for the
+    Source navmesh, but are not directly traversable in this sim because movement
+    is a 2D point step over the rasterized walkable surface. Derive adjacency from
+    neighboring on-mesh raster cells so pathfinding matches the areas agents can
+    actually enter via get_area_if_on_mesh + fixed XY moves.
+    """
     adj = np.zeros((nav_graph.N, nav_graph.N), dtype=bool)
     np.fill_diagonal(adj, True)
-    id_to_idx = nav_graph._id_to_idx
-    for src, dst in nav_graph.graph.edges():
-        i = id_to_idx[src]
-        j = id_to_idx[dst]
-        adj[i, j] = True
-        adj[j, i] = True
+
+    grid = nav_graph._pos_grid
+    height, width = grid.shape
+    offsets = (
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    )
+
+    for dy, dx in offsets:
+        src_y0 = max(0, -dy)
+        src_y1 = min(height, height - dy) if dy >= 0 else height
+        src_x0 = max(0, -dx)
+        src_x1 = min(width, width - dx) if dx >= 0 else width
+
+        dst_y0 = max(0, dy)
+        dst_y1 = min(height, height + dy) if dy <= 0 else height
+        dst_x0 = max(0, dx)
+        dst_x1 = min(width, width + dx) if dx <= 0 else width
+
+        src = grid[src_y0:src_y1, src_x0:src_x1]
+        dst = grid[dst_y0:dst_y1, dst_x0:dst_x1]
+        mask = (src >= 0) & (dst >= 0) & (src != dst)
+        if not np.any(mask):
+            continue
+
+        src_idx = src[mask]
+        dst_idx = dst[mask]
+        adj[src_idx, dst_idx] = True
+        adj[dst_idx, src_idx] = True
+
     return adj
+
+
+def _area_reaches_any_target(
+    nav_graph: NavGraph,
+    area_adjacency: np.ndarray,
+    start_area: int,
+    targets,
+) -> bool:
+    target_ids = [target for target in targets if target in nav_graph._id_to_idx]
+    if not target_ids:
+        return False
+
+    start_idx = nav_graph._id_to_idx.get(start_area)
+    if start_idx is None:
+        return False
+
+    target_mask = np.zeros(nav_graph.N, dtype=bool)
+    target_mask[[nav_graph._id_to_idx[target] for target in target_ids]] = True
+
+    stack = [start_idx]
+    seen = np.zeros(nav_graph.N, dtype=bool)
+    seen[start_idx] = True
+
+    while stack:
+        idx = stack.pop()
+        if target_mask[idx]:
+            return True
+
+        neighbors = np.flatnonzero(area_adjacency[idx] & ~seen)
+        if neighbors.size == 0:
+            continue
+        seen[neighbors] = True
+        stack.extend(int(nbr) for nbr in neighbors)
+
+    return False
+
+
+def _compute_area_distance_to_targets(
+    nav_graph: NavGraph,
+    area_adjacency: np.ndarray,
+    targets,
+):
+    target_ids = [target for target in targets if target in nav_graph._id_to_idx]
+    dist = np.full(nav_graph.N, np.inf, dtype=np.float32)
+    if not target_ids:
+        return dist
+
+    q = deque()
+    for target in target_ids:
+        idx = nav_graph._id_to_idx[target]
+        dist[idx] = 0.0
+        q.append(idx)
+
+    while q:
+        idx = q.popleft()
+        next_dist = dist[idx] + 1.0
+        neighbors = np.flatnonzero(area_adjacency[idx])
+        for nbr in neighbors:
+            nbr = int(nbr)
+            if next_dist >= dist[nbr]:
+                continue
+            dist[nbr] = next_dist
+            q.append(nbr)
+
+    return dist
 
 
 def _load_dust2_static_data(nav_path: str, cache_path: str):
@@ -572,11 +717,31 @@ def _load_dust2_static_data(nav_path: str, cache_path: str):
     ys = [c[1] for c in nav_graph.centroids.values()]
     map_bounds = (min(xs), max(xs), min(ys), max(ys))
 
-    t_spawn_areas = [_snap_to_nav(nav_graph, slot) for slot in _T_SPAWN_SLOTS]
-    ct_spawn_areas = [_snap_to_nav(nav_graph, slot) for slot in _CT_SPAWN_SLOTS]
     a_site_areas = _areas_near(nav_graph, _A_SITE, 600)
     b_site_areas = _areas_near(nav_graph, _B_SITE, 600)
     bombsite_areas = set(a_site_areas + b_site_areas)
+    bombsite_targets = tuple(bombsite_areas)
+    area_adjacency = _build_area_adjacency(nav_graph)
+    bombsite_area_distance = _compute_area_distance_to_targets(
+        nav_graph,
+        area_adjacency,
+        bombsite_targets,
+    )
+
+    t_spawn_areas = _select_distinct_spawn_areas(
+        nav_graph,
+        _T_SPAWN_SLOTS,
+        TEAM_SIZE,
+        required_targets=bombsite_targets,
+        area_adjacency=area_adjacency,
+    )
+    ct_spawn_areas = _select_distinct_spawn_areas(
+        nav_graph,
+        _CT_SPAWN_SLOTS,
+        TEAM_SIZE,
+        required_targets=bombsite_targets,
+        area_adjacency=area_adjacency,
+    )
 
     max_area_id = max(nav_graph.area_ids)
     bombsite_mask = np.zeros(max_area_id + 1, dtype=bool)
@@ -585,6 +750,17 @@ def _load_dust2_static_data(nav_path: str, cache_path: str):
     centroid_lookup = np.zeros((max_area_id + 1, 2), dtype=np.float32)
     for area_id, centroid in nav_graph.centroids.items():
         centroid_lookup[area_id] = centroid
+
+    bombsite_distance_lookup = np.full(max_area_id + 1, np.inf, dtype=np.float32)
+    for area_id in nav_graph.area_ids:
+        bombsite_distance_lookup[area_id] = bombsite_area_distance[
+            nav_graph._id_to_idx[area_id]
+        ]
+    finite_dist = bombsite_distance_lookup[np.isfinite(bombsite_distance_lookup)]
+    bombsite_distance_scale = 0.0
+    if finite_dist.size:
+        max_dist = float(finite_dist.max())
+        bombsite_distance_scale = 1.0 / max_dist if max_dist > 0 else 0.0
 
     static = {
         "nav_graph": nav_graph,
@@ -596,7 +772,9 @@ def _load_dust2_static_data(nav_path: str, cache_path: str):
         "bombsite_areas": bombsite_areas,
         "bombsite_mask": bombsite_mask,
         "centroid_lookup": centroid_lookup,
-        "area_adjacency": _build_area_adjacency(nav_graph),
+        "bombsite_distance_lookup": bombsite_distance_lookup,
+        "bombsite_distance_scale": bombsite_distance_scale,
+        "area_adjacency": area_adjacency,
     }
     _DUST2_STATIC_CACHE[key] = static
 
@@ -606,8 +784,8 @@ def _load_dust2_static_data(nav_path: str, cache_path: str):
         f"Y=[{map_bounds[2]:.0f},{map_bounds[3]:.0f}]"
     )
     print(
-        f"[Dust2Env] T-spawn: {len(t_spawn_areas)} slots  "
-        f"CT-spawn: {len(ct_spawn_areas)} slots  "
+        f"[Dust2Env] T-spawn: {len(t_spawn_areas)} areas  "
+        f"CT-spawn: {len(ct_spawn_areas)} areas  "
         f"A-site: {len(a_site_areas)} areas  "
         f"B-site: {len(b_site_areas)} areas"
     )
@@ -781,6 +959,8 @@ class Dust2Env(ParallelEnv):
         self.bombsite_areas = static["bombsite_areas"]
         self._bombsite_mask = static["bombsite_mask"]
         self._centroid_lookup = static["centroid_lookup"]
+        self._bombsite_distance_lookup = static["bombsite_distance_lookup"]
+        self._bombsite_distance_scale = static["bombsite_distance_scale"]
         self._area_adjacency = static["area_adjacency"]
 
         self.possible_agents = list(_POSSIBLE_AGENTS)
@@ -790,92 +970,6 @@ class Dust2Env(ParallelEnv):
         self._actions_buf = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int64)
         self._vis10_indices = np.zeros(N_AGENTS, dtype=np.int32)
         self.state: GameState = None
-
-    def _calibrate_map_bounds(self):
-        global MAP_X_MIN, MAP_X_MAX, MAP_Y_MIN, MAP_Y_MAX
-        global _INV_MAP_X_RANGE, _INV_MAP_Y_RANGE, _MAP_X_OFFSET, _MAP_Y_OFFSET
-        xs = [c[0] for c in self.nav_graph.centroids.values()]
-        ys = [c[1] for c in self.nav_graph.centroids.values()]
-        MAP_X_MIN, MAP_X_MAX = min(xs), max(xs)
-        MAP_Y_MIN, MAP_Y_MAX = min(ys), max(ys)
-        _INV_MAP_X_RANGE = 2.0 / (MAP_X_MAX - MAP_X_MIN)
-        _INV_MAP_Y_RANGE = 2.0 / (MAP_Y_MAX - MAP_Y_MIN)
-        _MAP_X_OFFSET = (MAP_X_MAX + MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN)
-        _MAP_Y_OFFSET = (MAP_Y_MAX + MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN)
-        print(
-            f"[Dust2Env] Map bounds: X=[{MAP_X_MIN:.0f},{MAP_X_MAX:.0f}] Y=[{MAP_Y_MIN:.0f},{MAP_Y_MAX:.0f}]"
-        )
-
-    def _snap_to_nav(self, xyz) -> int:
-        """Return the area_id whose centroid is nearest to xyz.
-
-        Uses 3D distance when z is provided (len >= 3) so spawn slots on
-        different floor levels (e.g. CT spawn vs catwalk) don't cross-snap.
-        """
-        if len(xyz) >= 3:
-            pt = np.array(xyz[:3], dtype=np.float32)
-            diff = self.nav_graph._centroid_matrix_3d - pt  # (N, 3)
-        else:
-            pt = np.array(xyz[:2], dtype=np.float32)
-            diff = self.nav_graph._centroid_matrix - pt  # (N, 2)
-        idx = int(np.argmin((diff * diff).sum(axis=1)))
-        return self.nav_graph.area_ids[idx]
-
-    def _areas_near(self, xy, radius: float):
-        """Return all area_ids within radius of 2D position xy, sorted by distance."""
-        pt = np.array(xy[:2], dtype=np.float32)
-        diff = self.nav_graph._centroid_matrix - pt  # (N, 2)
-        dists = np.sqrt((diff * diff).sum(axis=1))
-        order = np.argsort(dists)
-        return [self.nav_graph.area_ids[i] for i in order if dists[i] < radius]
-
-    def _identify_special_areas(self):
-        # CS2 setpos_exact spawn slots (from Valve competitive map data, with z)
-        T_SPAWN_SLOTS = [
-            (-881, -754, 120),
-            (-841, -808, 117),
-            (-776, -843, 117),
-            (-715, -808, 116),
-            (-680, -754, 120),
-            (-557, -738, 122),
-            (-522, -795, 117),
-            (-460, -836, 117),
-            (-396, -806, 117),
-            (-357, -755, 120),
-            (-233, -754, 114),
-            (-193, -808, 109),
-            (-128, -843, 95),
-            (-67, -808, 84),
-            (-32, -754, 79),
-        ]
-        CT_SPAWN_SLOTS = [
-            (160, 2370, -120),
-            (182, 2439, -121),
-            (258, 2481, -121),
-            (334, 2434, -120),
-            (351, 2353, -120),
-        ]
-        # Bombsite centers (CS2 in-game coords, verified 20-27u from nearest nav area)
-        A_SITE = (1200.0, 2400.0, 100.0)
-        B_SITE = (-1530.0, 2600.0, 5.0)
-
-        # Spawn: snap each individual slot to its nearest nav area.
-        # This guarantees agents land at actual spawn box positions, not
-        # arbitrary areas that happen to share a low area_id.
-        self.t_spawn_areas = [self._snap_to_nav(s) for s in T_SPAWN_SLOTS]
-        self.ct_spawn_areas = [self._snap_to_nav(s) for s in CT_SPAWN_SLOTS]
-
-        # Bombsites: all areas sorted by distance from site centre (closest first).
-        self.a_site_areas = self._areas_near(A_SITE, 600)
-        self.b_site_areas = self._areas_near(B_SITE, 600)
-        self.bombsite_areas = set(self.a_site_areas + self.b_site_areas)
-
-        print(
-            f"[Dust2Env] T-spawn: {len(self.t_spawn_areas)} slots  "
-            f"CT-spawn: {len(self.ct_spawn_areas)} slots  "
-            f"A-site: {len(self.a_site_areas)} areas  "
-            f"B-site: {len(self.b_site_areas)} areas"
-        )
 
     def observation_space(self, agent):
         return spaces.Box(low=-1.0, high=1.0, shape=(71,), dtype=np.float32)
@@ -1113,6 +1207,15 @@ class Dust2Env(ParallelEnv):
         bomb_just_defused = False
         _bomb_planter_id = -1
         _bomb_defuser_id = -1
+        timed_out = False
+        blocked_moves_t = 0
+        blocked_moves_ct = 0
+        action_hist = {
+            "move": np.zeros(9, dtype=np.int32),
+            "shoot": np.zeros(2, dtype=np.int32),
+            "use": np.zeros(2, dtype=np.int32),
+            "last": np.zeros(2, dtype=np.int32),
+        }
 
         # 1. Decrement cooldowns
         for agent in s.agents:
@@ -1121,7 +1224,17 @@ class Dust2Env(ParallelEnv):
             agent.fired_this_tick = False
             agent.is_moving = False
 
-        # 2. Process movement for all alive agents simultaneously
+        # 2. Collect action stats and process movement for all alive agents simultaneously
+        for i, aid in enumerate(self.possible_agents):
+            agent = s.agents[i]
+            if not agent.alive:
+                continue
+            action = actions_buf[i]
+            action_hist["move"][int(action[0])] += 1
+            action_hist["shoot"][int(action[1])] += 1
+            action_hist["use"][int(action[2])] += 1
+            action_hist["last"][int(action[3])] += 1
+
         area_id_to_idx = self.nav_graph._id_to_idx
         area_adjacency = self._area_adjacency
         for i, aid in enumerate(self.possible_agents):
@@ -1154,6 +1267,11 @@ class Dust2Env(ParallelEnv):
                 agent.pos[1] = target_y
                 agent.area_id = target_area
                 agent.is_moving = True
+            else:
+                if agent.team == 0:
+                    blocked_moves_t += 1
+                else:
+                    blocked_moves_ct += 1
 
         # Build vis10 once after movement (area_ids are final for rest of this tick).
         # vis10[i, j] = True if agent i can see agent j; reused in shoot, memory, obs.
@@ -1230,9 +1348,6 @@ class Dust2Env(ParallelEnv):
         elif not ct_alive and not s.round_over:
             s.round_over = True
             s.winner = 0
-        elif s.round_ticks_left <= 0 and not s.round_over:
-            s.round_over = True
-            s.winner = 1  # CT wins on timeout
 
         # 6. Process plant/defuse actions
         # Clear defuse state if the defuser stopped or left
@@ -1300,6 +1415,11 @@ class Dust2Env(ParallelEnv):
                 s.round_over = True
                 s.winner = 0
 
+        if s.round_ticks_left <= 0 and not s.round_over and not s.bomb_planted:
+            s.round_over = True
+            s.winner = 1  # CT wins on timeout before a plant
+            timed_out = True
+
         # 10. Update enemy memory (vision + direct sound checks from current agent state).
         for i, agent in enumerate(s.agents):
             if not agent.alive:
@@ -1342,11 +1462,6 @@ class Dust2Env(ParallelEnv):
         if bomb_just_defused:
             rewards[f"ct{_bomb_defuser_id - 5}"] += 0.2
 
-        if not s.bomb_planted and s.round_ticks_left > ROUND_TIME * 0.5:
-            for i, aid in enumerate(self.possible_agents):
-                if s.agents[i].alive:
-                    rewards[aid] += 0.0001
-
         # Potential-based reward shaping — Ng et al. ICML 1999
         # F(s,a,s') = γΦ(s') − Φ(s) preserves the optimal policy.
         # γ matches TRAINING_CONFIG["gamma"]=0.99; kept as a local literal to
@@ -1380,7 +1495,34 @@ class Dust2Env(ParallelEnv):
 
         terms = {aid: s.round_over for aid in self.possible_agents}
         truncs = {aid: False for aid in self.possible_agents}
-        infos = {aid: {} for aid in self.possible_agents}
+        kills_t = sum(1 for killer_id, _ in kills_this_tick if killer_id < TEAM_SIZE)
+        kills_ct = len(kills_this_tick) - kills_t
+        step_info = {
+            "bomb_planted": int(bomb_just_planted),
+            "bomb_defused": int(bomb_just_defused),
+            "kills_t": int(kills_t),
+            "kills_ct": int(kills_ct),
+            "blocked_moves_t": int(blocked_moves_t),
+            "blocked_moves_ct": int(blocked_moves_ct),
+        }
+        for action_name, counts in action_hist.items():
+            for idx, count in enumerate(counts):
+                step_info[f"action_{action_name}_{idx}"] = int(count)
+
+        if s.round_over:
+            step_info.update(
+                {
+                    "winner": int(s.winner),
+                    "winner_t": int(s.winner == 0),
+                    "winner_ct": int(s.winner == 1),
+                    "timed_out": int(timed_out),
+                    "alive_t_end": int(t_alive),
+                    "alive_ct_end": int(ct_alive),
+                    "round_length": int(s.tick),
+                }
+            )
+
+        infos = {aid: dict(step_info) for aid in self.possible_agents}
 
         if self._record_fn:
             self._record_fn(s, s.tick, rewards)
@@ -1415,13 +1557,15 @@ class Dust2Env(ParallelEnv):
     def _potential(self, gs: "GameState", team: int) -> float:
         """Compute potential Φ(s, team) for potential-based reward shaping.
 
-        Φ reflects game-state advantage via alive count, HP, and site control.
+        Φ reflects game-state advantage via alive count, HP, site control, and
+        T bomb-carrier progress toward the nearest bombsite.
         Used as F(s,a,s') = γΦ(s') − Φ(s) per Ng et al. ICML 1999.
         Only counts alive agents — dead agents contribute 0 HP and 0 site presence.
         Single pass over 10 agents instead of 6 separate sum() calls.
         """
         alive_t = alive_o = hp_t = hp_o = site_t = site_o = 0
         bombsite_mask = self._bombsite_mask
+        bomb_carrier_area = INVALID_AREA_ID
         for a in gs.agents:
             if not a.alive:
                 continue
@@ -1435,8 +1579,22 @@ class Dust2Env(ParallelEnv):
                 hp_o += a.hp
                 if a.area_id < bombsite_mask.size and bombsite_mask[a.area_id]:
                     site_o += 1
+            if a.team == 0 and a.has_bomb:
+                bomb_carrier_area = a.area_id
+
+        bomb_progress = 0.0
+        if not gs.bomb_planted and bomb_carrier_area != INVALID_AREA_ID:
+            if bomb_carrier_area < self._bombsite_distance_lookup.size:
+                dist = float(self._bombsite_distance_lookup[bomb_carrier_area])
+                if np.isfinite(dist):
+                    closeness = 1.0 - dist * self._bombsite_distance_scale
+                    bomb_progress = max(0.0, closeness) * 0.3
+                    if team == 1:
+                        bomb_progress = -bomb_progress
+
         return (
             (alive_t - alive_o) * 0.3 + (hp_t - hp_o) / 500.0 + (site_t - site_o) * 0.2
+            + bomb_progress
         )
 
     def _update_enemy_memory(self, agent: AgentState, gs: GameState, vis10: np.ndarray):

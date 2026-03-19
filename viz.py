@@ -8,9 +8,6 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 
-from sim import BOMB_TIMER, ROUND_TIME, GameState, NavGraph
-
-
 def init_recording(save_path: str = None):
     rr.init("cs2rl", spawn=(save_path is None))
     if save_path:
@@ -83,7 +80,7 @@ def log_trimap():
     print(f"[viz] Logged {len(indices):,} floor triangles to map/geometry")
 
 
-def log_navmesh(nav_graph: NavGraph):
+def log_navmesh(nav_graph):
     """Log nav mesh polygons + bombsite markers. Called once at startup.
 
     In rerun, toggle map/navmesh vs map/geometry (tri) via the entity tree eye icons.
@@ -122,7 +119,7 @@ def log_navmesh(nav_graph: NavGraph):
     rr.log("map/sites/b", rr.Points3D([[-1530, 2600, 5]], colors=[[255, 120, 0]], radii=[60]))
 
 
-def log_tick(game_state: GameState, tick: int, rewards: dict):
+def log_tick(game_state, tick: int, rewards: dict):
     # rerun 0.30.2 API: rr.set_time(timeline, sequence=value)
     rr.set_time("tick", sequence=tick)
 

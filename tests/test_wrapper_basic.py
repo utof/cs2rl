@@ -23,3 +23,41 @@ def test_step_returns_shapes():
     obs, rewards, terms, truncs, info = env.step(actions)
     assert len(rewards) == 10
     assert len(terms) == 10
+
+
+def test_snapshot_state_exposes_agents():
+    from c_env.wrapper import make_env
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+    state = env.snapshot_state()
+    assert len(state.agents) == 10
+    assert state.agents[0].pos.shape == (3,)
+
+
+def test_make_env_honors_external_buffers():
+    import gymnasium
+    import pufferlib
+    from c_env.wrapper import make_env
+
+    single_obs = gymnasium.spaces.Box(low=-1.0, high=1.0, shape=(71,), dtype=np.float32)
+    single_action = gymnasium.spaces.MultiDiscrete([9, 2, 2, 2])
+    joint_action = pufferlib.spaces.joint_space(single_action, 10)
+    buf = {
+        "observations": np.zeros((10, 71), dtype=np.float32),
+        "rewards": np.zeros(10, dtype=np.float32),
+        "terminals": np.zeros(10, dtype=bool),
+        "truncations": np.zeros(10, dtype=bool),
+        "masks": np.ones(10, dtype=bool),
+        "actions": np.zeros(joint_action.shape, dtype=np.int32),
+    }
+
+    env = make_env(seed=0, buf=buf)
+    obs, _ = env.reset()
+    assert obs is buf["observations"]
+
+    actions = np.zeros((10, 4), dtype=np.int32)
+    obs, rewards, terms, truncs, _ = env.step(actions)
+    assert obs is buf["observations"]
+    assert rewards is buf["rewards"]
+    assert terms is buf["terminals"]
+    assert truncs is buf["truncations"]
