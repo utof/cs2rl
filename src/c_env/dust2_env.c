@@ -298,10 +298,10 @@ void env_step(Dust2Env* env, const int32_t* actions) {
             float target = sd->dir_facing[move_dir];
             float diff   = target - a->facing;
             /* Normalise diff to [-π, π] */
-            while (diff > 3.14159265f)
-                diff -= 6.28318530f;
-            while (diff < -3.14159265f)
-                diff += 6.28318530f;
+            while (diff > (float)M_PI)
+                diff -= 2.0f * (float)M_PI;
+            while (diff < -(float)M_PI)
+                diff += 2.0f * (float)M_PI;
             if (fabsf(diff) <= sd->max_turn_speed) {
                 a->facing = target;
             } else {
