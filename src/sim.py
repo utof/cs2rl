@@ -502,6 +502,30 @@ _B_SITE = (-1530.0, 2600.0, 5.0)
 _DUST2_STATIC_CACHE = {}
 
 
+def _resolve_nav_path(map_name: str = "de_dust2") -> str:
+    override = os.environ.get("CS2RL_NAV_PATH")
+    if override:
+        return override
+
+    candidates = [
+        pathlib.Path.home() / ".awpy" / "navs" / f"{map_name}.json",
+        pathlib.Path(os.path.expanduser("~")) / ".awpy" / "navs" / f"{map_name}.json",
+    ]
+
+    if os.name != "nt":
+        candidates.extend(pathlib.Path("/mnt/c/Users").glob(f"*/.awpy/navs/{map_name}.json"))
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    return str(candidates[0])
+
+
+NAV_PATH = _resolve_nav_path()
+CACHE_PATH = str(pathlib.Path(__file__).with_name("vis_cache.npy"))
+
+
 def _apply_map_bounds(bounds):
     global MAP_X_MIN, MAP_X_MAX, MAP_Y_MIN, MAP_Y_MAX
     global _INV_MAP_X_RANGE, _INV_MAP_Y_RANGE, _MAP_X_OFFSET, _MAP_Y_OFFSET
@@ -883,30 +907,6 @@ class GameState:
 
 
 # ── SECTION: Dust2Env ──────────────────────────────────────────────────────
-
-
-def _resolve_nav_path(map_name: str = "de_dust2") -> str:
-    override = os.environ.get("CS2RL_NAV_PATH")
-    if override:
-        return override
-
-    candidates = [
-        pathlib.Path.home() / ".awpy" / "navs" / f"{map_name}.json",
-        pathlib.Path(os.path.expanduser("~")) / ".awpy" / "navs" / f"{map_name}.json",
-    ]
-
-    if os.name != "nt":
-        candidates.extend(pathlib.Path("/mnt/c/Users").glob(f"*/.awpy/navs/{map_name}.json"))
-
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-
-    return str(candidates[0])
-
-
-NAV_PATH = _resolve_nav_path()
-CACHE_PATH = str(pathlib.Path(__file__).with_name("vis_cache.npy"))
 
 
 class Dust2Env(ParallelEnv):
