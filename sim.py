@@ -1,13 +1,16 @@
 # ── SECTION: NavGraph ──────────────────────────────────────────────────────
 
 import math
+import os
+import pathlib
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
 
 import networkx as nx
 import numpy as np
 from awpy import Nav
+from gymnasium import spaces
+from pettingzoo import ParallelEnv
 from shapely.geometry import Point
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.strtree import STRtree
@@ -69,15 +72,15 @@ class NavGraph:
 
         # ── Load nav data ──────────────────────────────────────────────────
         self.nav = Nav.from_json(nav_path)
-        self.areas: Dict[int, object] = self.nav.areas  # dict[int, NavArea]
-        self.area_ids: List[int] = sorted(
+        self.areas: dict[int, object] = self.nav.areas  # dict[int, NavArea]
+        self.area_ids: list[int] = sorted(
             self.areas.keys()
         )  # sorted for stable _id_to_idx indices across runs
         self.N: int = len(self.area_ids)
-        self._id_to_idx: Dict[int, int] = {aid: i for i, aid in enumerate(self.area_ids)}
+        self._id_to_idx: dict[int, int] = {aid: i for i, aid in enumerate(self.area_ids)}
 
         # ── Compute centroids ──────────────────────────────────────────────
-        self.centroids: Dict[int, np.ndarray] = {}
+        self.centroids: dict[int, np.ndarray] = {}
         for aid, area in self.areas.items():
             c = area.centroid
             self.centroids[aid] = np.array([c.x, c.y], dtype=np.float32)
@@ -129,9 +132,9 @@ class NavGraph:
 
     def _extract_wall_segments(
         self,
-    ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
         """Extract boundary edges — edges shared by exactly one area polygon."""
-        edge_count: Dict[Tuple, int] = {}
+        edge_count: dict[tuple, int] = {}
 
         for area in self.areas.values():
             corners = area.corners
@@ -322,7 +325,7 @@ class NavGraph:
         # Fallback: connected in graph
         return self.graph.has_edge(area_i, area_j) or area_i == area_j
 
-    def path(self, area_i: int, area_j: int) -> List[int]:
+    def path(self, area_i: int, area_j: int) -> list[int]:
         """Return shortest path of area_ids from area_i to area_j.
 
         Returns empty list if no path exists.
@@ -333,7 +336,9 @@ class NavGraph:
             return []
 
     def build_vis_matrix(self):
-        """Build and cache the N×N visibility matrix using awpy VisibilityChecker + real .tri geometry.
+        """Build and cache the N×N visibility matrix.
+
+        Uses awpy VisibilityChecker with real .tri geometry.
 
         Parallelised: one worker process per CPU core, each loading its own VisibilityChecker
         instance once (via ProcessPoolExecutor initializer), then processing a share of rows.
@@ -377,7 +382,7 @@ class NavGraph:
             f"[NavGraph] Building {self.N}×{self.N} vis matrix "
             f"({n_workers} workers, {len(chunks)} chunks)..."
         )
-        print(f"[NavGraph] Workers initialising VisibilityChecker in parallel (~40s)...")
+        print("[NavGraph] Workers initialising VisibilityChecker in parallel (~40s)...")
         t0 = time.time()
 
         partial_rows: dict = {}
@@ -885,13 +890,6 @@ class SoundEvent:
 
 # ── SECTION: Dust2Env ──────────────────────────────────────────────────────
 
-import os
-import pathlib
-
-import gymnasium
-from gymnasium import spaces
-from pettingzoo import ParallelEnv
-
 
 def _resolve_nav_path(map_name: str = "de_dust2") -> str:
     override = os.environ.get("CS2RL_NAV_PATH")
@@ -1199,7 +1197,7 @@ class Dust2Env(ParallelEnv):
             agent.is_moving = False
 
         # 2. Collect action stats and process movement for all alive agents simultaneously
-        for i, aid in enumerate(self.possible_agents):
+        for i, _aid in enumerate(self.possible_agents):
             agent = s.agents[i]
             if not agent.alive:
                 continue
@@ -1211,7 +1209,7 @@ class Dust2Env(ParallelEnv):
 
         area_id_to_idx = self.nav_graph._id_to_idx
         area_adjacency = self._area_adjacency
-        for i, aid in enumerate(self.possible_agents):
+        for i, _aid in enumerate(self.possible_agents):
             agent = s.agents[i]
             if not agent.alive:
                 continue
@@ -1252,7 +1250,7 @@ class Dust2Env(ParallelEnv):
 
         # 4. Process shoot actions (simultaneous)
         _LASER_RANGE_SQ = LASER_RANGE * LASER_RANGE
-        for i, aid in enumerate(self.possible_agents):
+        for i, _aid in enumerate(self.possible_agents):
             agent = s.agents[i]
             if not agent.alive:
                 continue
@@ -1335,7 +1333,7 @@ class Dust2Env(ParallelEnv):
                 s.bomb_being_defused_by = -1
                 s.bomb_defuse_ticks = 0
 
-        for i, aid in enumerate(self.possible_agents):
+        for i, _aid in enumerate(self.possible_agents):
             agent = s.agents[i]
             if not agent.alive:
                 continue
@@ -1394,7 +1392,7 @@ class Dust2Env(ParallelEnv):
             timed_out = True
 
         # 10. Update enemy memory (vision + direct sound checks from current agent state).
-        for i, agent in enumerate(s.agents):
+        for _i, agent in enumerate(s.agents):
             if not agent.alive:
                 continue
             self._update_enemy_memory(agent, s, _vis10)
@@ -1629,7 +1627,7 @@ if __name__ == "__main__":
         assert nav.vis_matrix is not None
         assert nav.vis_matrix.shape == (nav.N, nav.N)
         assert np.array_equal(nav.vis_matrix, nav.vis_matrix.T), "vis matrix not symmetric"
-        assert nav.vis_matrix[0, 0] == True
+        assert nav.vis_matrix[0, 0]
         true_frac = nav.vis_matrix.sum() / nav.vis_matrix.size
         assert 0.005 < true_frac < 0.95, f"suspicious vis fraction: {true_frac:.2f}"
         print(f"Visibility test PASSED — {true_frac:.1%} of pairs are visible")
@@ -1742,20 +1740,3 @@ if __name__ == "__main__":
         )
 
         print("Shoot test PASSED")
-
-    if "--test-sb3-wrap" in sys.argv:
-        from supersuit import concat_vec_envs_v1, pettingzoo_env_to_vec_env_v1
-
-        vec_env = concat_vec_envs_v1(
-            lambda: pettingzoo_env_to_vec_env_v1(Dust2Env()),
-            1,
-            num_cpus=1,
-            base_class="stable_baselines3",
-        )
-
-        obs = vec_env.reset()
-        # obs might be (obs_arr, infos) tuple in newer gymnasium versions
-        if isinstance(obs, tuple):
-            obs = obs[0]
-        assert obs.shape[1] == 71, f"Expected obs dim 71, got {obs.shape}"
-        print(f"SB3 wrap test PASSED — obs shape: {obs.shape}")

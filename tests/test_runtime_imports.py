@@ -1,9 +1,8 @@
 import importlib
 
 
-def test_sample_factory_importable():
-    import sample_factory  # noqa: F401
-    from sample_factory.envs.pettingzoo_envs import PettingZooParallelEnv  # noqa: F401
+def test_pufferlib_importable():
+    import pufferlib  # noqa: F401
 
 
 def test_sb3_absent():

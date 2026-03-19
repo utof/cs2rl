@@ -4,8 +4,10 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
+@pytest.mark.performance
 def test_c_env_smoke():
     from c_env.wrapper import make_env
 

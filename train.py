@@ -2,7 +2,7 @@
 """CS2 RL Sim — training entry point.
 
 Usage:
-  python train.py --smoke       # sanity check: 1000 steps, no crash, print steps/sec
+  python train.py --smoke       # sanity check: 20k native-env steps, no crash, print steps/sec
   python train.py --train       # full PPO self-play training (PufferLib 3.0)
   python train.py --record      # run 1 episode, save rerun recording (random policy)
   python train.py --eval        # evaluate a checkpoint across many seeds
@@ -35,29 +35,39 @@ ACTION_HEAD_SIZES = (9, 2, 2, 2)
 def smoke_test():
     print("[Smoke] Initialising environment...")
     env = make_puffer_env(seed=42)
-    obs, _ = env.reset(seed=42)
+    try:
+        obs, _ = env.reset(seed=42)
 
-    assert obs.shape == (10, 71), f"Expected obs shape (10, 71), got {obs.shape}"
-    assert np.isfinite(obs).all(), "NaN in initial obs"
+        assert obs.shape == (10, 71), f"Expected obs shape (10, 71), got {obs.shape}"
+        assert np.isfinite(obs).all(), "NaN in initial obs"
 
-    steps = 20_000
-    actions = np.zeros((10, 4), dtype=np.int32)
-    print(f"[Smoke] Running {steps} steps...")
-    t0 = time.perf_counter()
-    step_count = 0
+        steps = 20_000
+        actions = np.zeros((10, 4), dtype=np.int32)
+        print(f"[Smoke] Running {steps} steps...")
+        t0 = time.perf_counter()
+        step_count = 0
 
-    for step_n in range(steps):
-        obs, rewards, terms, truncs, infos = env.step(actions)
+        for step_n in range(steps):
+            obs, rewards, terms, truncs, infos = env.step(actions)
 
-        assert np.isfinite(obs).all(), f"NaN at step {step_n}"
+            assert obs.shape == (10, 71), f"Unexpected obs shape at step {step_n}: {obs.shape}"
+            assert rewards.shape == (10,), (
+                f"Unexpected reward shape at step {step_n}: {rewards.shape}"
+            )
+            assert terms.shape == (10,), f"Unexpected term shape at step {step_n}: {terms.shape}"
+            assert truncs.shape == (10,), f"Unexpected trunc shape at step {step_n}: {truncs.shape}"
+            assert np.isfinite(obs).all(), f"NaN in obs at step {step_n}"
+            assert np.isfinite(rewards).all(), f"NaN in rewards at step {step_n}"
 
-        step_count += 1
+            step_count += 1
 
-    elapsed = time.perf_counter() - t0
-    sps = step_count / elapsed
+        elapsed = time.perf_counter() - t0
+        sps = step_count / elapsed
 
-    print(f"SMOKE TEST PASSED — {sps:.0f} steps/sec")
-    assert sps >= 100_000, f"Smoke test FAILED: {sps:.0f} steps/sec is below the 100_000 target"
+        print(f"[Smoke] Completed {step_count} steps at {sps:.0f} steps/sec")
+        print("[Smoke] Throughput gate lives in: uv run pytest tests/smoke_test.py -q -s")
+    finally:
+        env.close()
 
 
 # ── SECTION: Shared eval / record helpers ──────────────────────────────────
@@ -361,7 +371,7 @@ def evaluate_checkpoint(
         f"blocked_moves_ct_per_round={metrics['blocked_moves_ct'] / episodes:.2f}"
     )
 
-    for head_name, counts in zip(ACTION_HEAD_NAMES, action_hist):
+    for head_name, counts in zip(ACTION_HEAD_NAMES, action_hist, strict=True):
         print(f"[Eval] {format_histogram_line(head_name, counts)}")
 
     top_joint = joint_hist.most_common(5)
@@ -454,7 +464,7 @@ def build_policy(vecenv, device):
             logits = [head(hidden_out) for head in self.action_heads]
 
             # MultiCategorical distribution
-            dists = [torch.distributions.Categorical(logits=l) for l in logits]
+            dists = [torch.distributions.Categorical(logits=head_logits) for head_logits in logits]
             if action is None:
                 action = torch.stack([d.sample() for d in dists], dim=-1)
 
@@ -634,8 +644,6 @@ def train(args):
 # ── SECTION: CLI ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import torch
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--train", action="store_true")
@@ -645,9 +653,7 @@ if __name__ == "__main__":
     parser.add_argument("--timesteps", type=int, default=10_000_000)
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument(
-        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
-    )
+    parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--save_every_sec", type=int, default=300)
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     parser.add_argument("--vec-backend", type=str, default="multiprocessing")
@@ -662,6 +668,11 @@ if __name__ == "__main__":
         "--eval-policy", type=str, choices=("auto", "random", "sample", "greedy"), default="auto"
     )
     args = parser.parse_args()
+
+    if args.device is None:
+        import torch
+
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if args.smoke:
         smoke_test()
