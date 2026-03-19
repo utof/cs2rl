@@ -1,8 +1,9 @@
 # tests/test_reward.py
 import numpy as np
 import pytest
+
 import sim as sim_module
-from sim import Dust2Env, ROUND_TIME
+from sim import ROUND_TIME, Dust2Env
 from train import TRAINING_CONFIG
 
 

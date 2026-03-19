@@ -3,12 +3,16 @@
 Run with:
     uv run python profile_step.py
 """
+
 import cProfile
-import pstats
 import io
+import pstats
 import time
+
 import numpy as np
+
 from sim import Dust2Env
+
 
 def run_steps(n=2000):
     env = Dust2Env()
@@ -20,6 +24,7 @@ def run_steps(n=2000):
         if all(terms.get(aid, False) for aid in env.possible_agents):
             obs, _ = env.reset()
             action_spaces = {aid: env.action_space(aid) for aid in env.possible_agents}
+
 
 if __name__ == "__main__":
     print("Warming up environment (vis matrix build/load)...")

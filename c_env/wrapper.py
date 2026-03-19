@@ -1,26 +1,29 @@
 import ctypes
-from dataclasses import dataclass
-import numpy as np
 import subprocess
-import gymnasium
-import pufferlib
+from dataclasses import dataclass
 from pathlib import Path
 
+import gymnasium
+import numpy as np
+import pufferlib
+
 _DIR = Path(__file__).parent
-_SO  = _DIR / "dust2_env.so"
+_SO = _DIR / "dust2_env.so"
 _SRC = _DIR / "dust2_env.c"
 _HDR = _DIR / "dust2_env.h"
+
 
 def _ensure_built():
     newest_src = max(_SRC.stat().st_mtime, _HDR.stat().st_mtime)
     if not _SO.exists() or _SO.stat().st_mtime < newest_src:
         subprocess.run(["make", "-C", str(_DIR)], check=True)
 
+
 _ensure_built()
 _lib = ctypes.CDLL(str(_SO))
 
 N_AGENTS = 10
-OBS_DIM  = 71
+OBS_DIM = 71
 ACTION_DIM = 4
 _STATIC_DATA_CACHE = {}
 
@@ -46,152 +49,165 @@ class VizGameState:
 
 class StaticDataC(ctypes.Structure):
     _fields_ = [
-        ("N",               ctypes.c_int),
-        ("vis_matrix",      ctypes.POINTER(ctypes.c_int8)),
-        ("raster_grid",     ctypes.POINTER(ctypes.c_int32)),
-        ("adjacency",       ctypes.POINTER(ctypes.c_int8)),
-        ("centroid_xy",     ctypes.POINTER(ctypes.c_float)),
-        ("area_ids",        ctypes.POINTER(ctypes.c_int32)),
-        ("bombsite_mask",   ctypes.POINTER(ctypes.c_int8)),
+        ("N", ctypes.c_int),
+        ("vis_matrix", ctypes.POINTER(ctypes.c_int8)),
+        ("raster_grid", ctypes.POINTER(ctypes.c_int32)),
+        ("adjacency", ctypes.POINTER(ctypes.c_int8)),
+        ("centroid_xy", ctypes.POINTER(ctypes.c_float)),
+        ("area_ids", ctypes.POINTER(ctypes.c_int32)),
+        ("bombsite_mask", ctypes.POINTER(ctypes.c_int8)),
         ("bombsite_by_idx", ctypes.POINTER(ctypes.c_int8)),
-        ("bombsite_dist",   ctypes.POINTER(ctypes.c_float)),
-        ("grid_w",          ctypes.c_int),
-        ("grid_h",          ctypes.c_int),
-        ("max_area_id",     ctypes.c_int),
-        ("grid_x_min",      ctypes.c_float),
-        ("grid_y_min",      ctypes.c_float),
-        ("grid_inv_cell",   ctypes.c_float),
-        ("inv_x_range",     ctypes.c_float),
-        ("inv_y_range",     ctypes.c_float),
-        ("x_offset",        ctypes.c_float),
-        ("y_offset",        ctypes.c_float),
+        ("bombsite_dist", ctypes.POINTER(ctypes.c_float)),
+        ("grid_w", ctypes.c_int),
+        ("grid_h", ctypes.c_int),
+        ("max_area_id", ctypes.c_int),
+        ("grid_x_min", ctypes.c_float),
+        ("grid_y_min", ctypes.c_float),
+        ("grid_inv_cell", ctypes.c_float),
+        ("inv_x_range", ctypes.c_float),
+        ("inv_y_range", ctypes.c_float),
+        ("x_offset", ctypes.c_float),
+        ("y_offset", ctypes.c_float),
         ("bombsite_dist_scale", ctypes.c_float),
-        ("laser_damage",    ctypes.c_int32),
-        ("laser_range",     ctypes.c_float),
-        ("laser_range_sq",  ctypes.c_float),
-        ("shoot_cooldown",  ctypes.c_int32),
+        ("laser_damage", ctypes.c_int32),
+        ("laser_range", ctypes.c_float),
+        ("laser_range_sq", ctypes.c_float),
+        ("shoot_cooldown", ctypes.c_int32),
         ("bomb_plant_time", ctypes.c_int32),
         ("bomb_defuse_time", ctypes.c_int32),
         ("bomb_defuse_kit", ctypes.c_int32),
-        ("bomb_timer",      ctypes.c_int32),
-        ("round_time",      ctypes.c_int32),
+        ("bomb_timer", ctypes.c_int32),
+        ("round_time", ctypes.c_int32),
         ("footstep_radius_sq", ctypes.c_float),
         ("gunshot_radius_sq", ctypes.c_float),
         ("enemy_memory_ticks", ctypes.c_int32),
         ("stale_memory_tick", ctypes.c_int32),
-        ("pbrs_gamma",      ctypes.c_float),
-        ("delta_x",         ctypes.c_float * 9),
-        ("delta_y",         ctypes.c_float * 9),
-        ("dir_facing",      ctypes.c_float * 9),
-        ("t_spawns",        ctypes.c_int32 * 15),
-        ("n_t_spawns",      ctypes.c_int),
-        ("ct_spawns",       ctypes.c_int32 * 5),
-        ("n_ct_spawns",     ctypes.c_int),
+        ("pbrs_gamma", ctypes.c_float),
+        ("delta_x", ctypes.c_float * 9),
+        ("delta_y", ctypes.c_float * 9),
+        ("dir_facing", ctypes.c_float * 9),
+        ("t_spawns", ctypes.c_int32 * 15),
+        ("n_t_spawns", ctypes.c_int),
+        ("ct_spawns", ctypes.c_int32 * 5),
+        ("n_ct_spawns", ctypes.c_int),
     ]
 
 
 class AgentStateC(ctypes.Structure):
     _fields_ = [
-        ("x",               ctypes.c_float),
-        ("y",               ctypes.c_float),
-        ("z",               ctypes.c_float),
-        ("area_idx",        ctypes.c_int32),
-        ("facing",          ctypes.c_float),
-        ("hp",              ctypes.c_int32),
-        ("shoot_cd",        ctypes.c_int32),
-        ("alive",           ctypes.c_int8),
-        ("has_bomb",        ctypes.c_int8),
-        ("has_kit",         ctypes.c_int8),
-        ("team",            ctypes.c_int8),
-        ("is_moving",       ctypes.c_int8),
+        ("x", ctypes.c_float),
+        ("y", ctypes.c_float),
+        ("z", ctypes.c_float),
+        ("area_idx", ctypes.c_int32),
+        ("facing", ctypes.c_float),
+        ("hp", ctypes.c_int32),
+        ("shoot_cd", ctypes.c_int32),
+        ("alive", ctypes.c_int8),
+        ("has_bomb", ctypes.c_int8),
+        ("has_kit", ctypes.c_int8),
+        ("team", ctypes.c_int8),
+        ("is_moving", ctypes.c_int8),
         ("fired_this_tick", ctypes.c_int8),
-        ("enemy_mem_idx",   ctypes.c_int32 * 5),
-        ("enemy_mem_tick",  ctypes.c_int32 * 5),
+        ("enemy_mem_idx", ctypes.c_int32 * 5),
+        ("enemy_mem_tick", ctypes.c_int32 * 5),
     ]
 
 
 class GameStateC(ctypes.Structure):
     _fields_ = [
-        ("tick",                   ctypes.c_int32),
-        ("round_ticks_left",       ctypes.c_int32),
-        ("agents",                 AgentStateC * 10),
-        ("bomb_planted",           ctypes.c_int8),
-        ("round_over",             ctypes.c_int8),
-        ("winner",                 ctypes.c_int32),
-        ("bomb_carrier_id",        ctypes.c_int32),
-        ("bomb_area_idx",          ctypes.c_int32),
-        ("bomb_x",                 ctypes.c_float),
-        ("bomb_y",                 ctypes.c_float),
-        ("bomb_z",                 ctypes.c_float),
-        ("bomb_ticks_left",        ctypes.c_int32),
-        ("bomb_being_planted_by",  ctypes.c_int32),
-        ("bomb_plant_ticks",       ctypes.c_int32),
-        ("bomb_being_defused_by",  ctypes.c_int32),
-        ("bomb_defuse_ticks",      ctypes.c_int32),
+        ("tick", ctypes.c_int32),
+        ("round_ticks_left", ctypes.c_int32),
+        ("agents", AgentStateC * 10),
+        ("bomb_planted", ctypes.c_int8),
+        ("round_over", ctypes.c_int8),
+        ("winner", ctypes.c_int32),
+        ("bomb_carrier_id", ctypes.c_int32),
+        ("bomb_area_idx", ctypes.c_int32),
+        ("bomb_x", ctypes.c_float),
+        ("bomb_y", ctypes.c_float),
+        ("bomb_z", ctypes.c_float),
+        ("bomb_ticks_left", ctypes.c_int32),
+        ("bomb_being_planted_by", ctypes.c_int32),
+        ("bomb_plant_ticks", ctypes.c_int32),
+        ("bomb_being_defused_by", ctypes.c_int32),
+        ("bomb_defuse_ticks", ctypes.c_int32),
     ]
 
 
 class StepStatsC(ctypes.Structure):
     _fields_ = [
-        ("bomb_planted",    ctypes.c_int32),
-        ("bomb_defused",    ctypes.c_int32),
-        ("kills_t",         ctypes.c_int32),
-        ("kills_ct",        ctypes.c_int32),
+        ("bomb_planted", ctypes.c_int32),
+        ("bomb_defused", ctypes.c_int32),
+        ("kills_t", ctypes.c_int32),
+        ("kills_ct", ctypes.c_int32),
         ("blocked_moves_t", ctypes.c_int32),
         ("blocked_moves_ct", ctypes.c_int32),
-        ("winner",          ctypes.c_int32),
-        ("winner_t",        ctypes.c_int32),
-        ("winner_ct",       ctypes.c_int32),
-        ("timed_out",       ctypes.c_int32),
-        ("alive_t_end",     ctypes.c_int32),
-        ("alive_ct_end",    ctypes.c_int32),
-        ("round_length",    ctypes.c_int32),
-        ("action_move",     ctypes.c_int32 * 9),
-        ("action_shoot",    ctypes.c_int32 * 2),
-        ("action_use",      ctypes.c_int32 * 2),
-        ("action_last",     ctypes.c_int32 * 2),
+        ("winner", ctypes.c_int32),
+        ("winner_t", ctypes.c_int32),
+        ("winner_ct", ctypes.c_int32),
+        ("timed_out", ctypes.c_int32),
+        ("alive_t_end", ctypes.c_int32),
+        ("alive_ct_end", ctypes.c_int32),
+        ("round_length", ctypes.c_int32),
+        ("action_move", ctypes.c_int32 * 9),
+        ("action_shoot", ctypes.c_int32 * 2),
+        ("action_use", ctypes.c_int32 * 2),
+        ("action_last", ctypes.c_int32 * 2),
     ]
 
 
 class Dust2EnvC(ctypes.Structure):
     _fields_ = [
-        ("sd",           ctypes.POINTER(StaticDataC)),
-        ("game",         GameStateC),
-        ("step_stats",   StepStatsC),
+        ("sd", ctypes.POINTER(StaticDataC)),
+        ("game", GameStateC),
+        ("step_stats", StepStatsC),
         ("episode_stats", StepStatsC),
         ("observations", ctypes.c_float * (N_AGENTS * OBS_DIM)),
-        ("rewards",      ctypes.c_float * N_AGENTS),
-        ("terminals",    ctypes.c_int8  * N_AGENTS),
-        ("truncations",  ctypes.c_int8  * N_AGENTS),
-        ("team_spirit",  ctypes.c_float),
-        ("rng",          ctypes.c_uint32),
+        ("rewards", ctypes.c_float * N_AGENTS),
+        ("terminals", ctypes.c_int8 * N_AGENTS),
+        ("truncations", ctypes.c_int8 * N_AGENTS),
+        ("team_spirit", ctypes.c_float),
+        ("rng", ctypes.c_uint32),
     ]
 
 
 # Sanity-check struct sizes match the C layout — catches future drift early
-assert ctypes.sizeof(AgentStateC) == 76, \
+assert ctypes.sizeof(AgentStateC) == 76, (
     f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 76)"
-assert ctypes.sizeof(GameStateC) == 816, \
+)
+assert ctypes.sizeof(GameStateC) == 816, (
     f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 816)"
+)
 
-_lib.env_init.argtypes  = [ctypes.POINTER(Dust2EnvC), ctypes.POINTER(StaticDataC),
-                            ctypes.c_uint32, ctypes.c_float]
-_lib.env_init.restype   = None
+_lib.env_init.argtypes = [
+    ctypes.POINTER(Dust2EnvC),
+    ctypes.POINTER(StaticDataC),
+    ctypes.c_uint32,
+    ctypes.c_float,
+]
+_lib.env_init.restype = None
 _lib.env_reset.argtypes = [ctypes.POINTER(Dust2EnvC)]
-_lib.env_reset.restype  = None
-_lib.env_step.argtypes  = [ctypes.POINTER(Dust2EnvC), ctypes.c_void_p]
-_lib.env_step.restype   = None
+_lib.env_reset.restype = None
+_lib.env_step.argtypes = [ctypes.POINTER(Dust2EnvC), ctypes.c_void_p]
+_lib.env_step.restype = None
 _lib.env_close.argtypes = [ctypes.POINTER(Dust2EnvC)]
-_lib.env_close.restype  = None
+_lib.env_close.restype = None
 
 
-def build_static_data(nav_graph, area_adjacency, bombsite_mask,
-                      t_spawn_areas, ct_spawn_areas,
-                      bombsite_distance_lookup, bombsite_distance_scale):
+def build_static_data(
+    nav_graph,
+    area_adjacency,
+    bombsite_mask,
+    t_spawn_areas,
+    ct_spawn_areas,
+    bombsite_distance_lookup,
+    bombsite_distance_scale,
+):
     """Build StaticDataC from Python nav data. Returns (sd, refs).
     Caller must keep refs alive to prevent GC of backing numpy arrays."""
     import sim
-    sd   = StaticDataC()
+
+    sd = StaticDataC()
     refs = []
 
     def ptr(arr, dtype, ctype):
@@ -199,51 +215,50 @@ def build_static_data(nav_graph, area_adjacency, bombsite_mask,
         refs.append(a)
         return a.ctypes.data_as(ctypes.POINTER(ctype))
 
-    sd.N              = nav_graph.N
-    sd.vis_matrix     = ptr(nav_graph.vis_matrix,        np.int8,    ctypes.c_int8)
-    sd.raster_grid    = ptr(nav_graph._pos_grid,         np.int32,   ctypes.c_int32)
-    sd.adjacency      = ptr(area_adjacency,              np.int8,    ctypes.c_int8)
-    sd.centroid_xy    = ptr(nav_graph._centroid_matrix,  np.float32, ctypes.c_float)
+    sd.N = nav_graph.N
+    sd.vis_matrix = ptr(nav_graph.vis_matrix, np.int8, ctypes.c_int8)
+    sd.raster_grid = ptr(nav_graph._pos_grid, np.int32, ctypes.c_int32)
+    sd.adjacency = ptr(area_adjacency, np.int8, ctypes.c_int8)
+    sd.centroid_xy = ptr(nav_graph._centroid_matrix, np.float32, ctypes.c_float)
 
-    area_ids_arr      = np.array(nav_graph.area_ids, dtype=np.int32)
-    sd.area_ids       = ptr(area_ids_arr,                np.int32,   ctypes.c_int32)
+    area_ids_arr = np.array(nav_graph.area_ids, dtype=np.int32)
+    sd.area_ids = ptr(area_ids_arr, np.int32, ctypes.c_int32)
 
     bm = bombsite_mask.astype(np.int8)
-    sd.bombsite_mask  = ptr(bm,                          np.int8,    ctypes.c_int8)
-    sd.bombsite_dist  = ptr(bombsite_distance_lookup,    np.float32, ctypes.c_float)
+    sd.bombsite_mask = ptr(bm, np.int8, ctypes.c_int8)
+    sd.bombsite_dist = ptr(bombsite_distance_lookup, np.float32, ctypes.c_float)
 
-    by_idx = np.array([
-        int(bm[aid]) if 0 <= aid < len(bm) else 0
-        for aid in nav_graph.area_ids
-    ], dtype=np.int8)
-    sd.bombsite_by_idx = ptr(by_idx,                     np.int8,    ctypes.c_int8)
+    by_idx = np.array(
+        [int(bm[aid]) if 0 <= aid < len(bm) else 0 for aid in nav_graph.area_ids], dtype=np.int8
+    )
+    sd.bombsite_by_idx = ptr(by_idx, np.int8, ctypes.c_int8)
 
-    sd.grid_w         = nav_graph._grid_w
-    sd.grid_h         = nav_graph._grid_h
-    sd.max_area_id    = max(nav_graph.area_ids)
-    sd.grid_x_min     = float(nav_graph._grid_x_min)
-    sd.grid_y_min     = float(nav_graph._grid_y_min)
-    sd.grid_inv_cell  = float(nav_graph._grid_inv_cell)
+    sd.grid_w = nav_graph._grid_w
+    sd.grid_h = nav_graph._grid_h
+    sd.max_area_id = max(nav_graph.area_ids)
+    sd.grid_x_min = float(nav_graph._grid_x_min)
+    sd.grid_y_min = float(nav_graph._grid_y_min)
+    sd.grid_inv_cell = float(nav_graph._grid_inv_cell)
 
-    sd.inv_x_range    = float(sim._INV_MAP_X_RANGE)
-    sd.inv_y_range    = float(sim._INV_MAP_Y_RANGE)
-    sd.x_offset       = float(sim._MAP_X_OFFSET)
-    sd.y_offset       = float(sim._MAP_Y_OFFSET)
+    sd.inv_x_range = float(sim._INV_MAP_X_RANGE)
+    sd.inv_y_range = float(sim._INV_MAP_Y_RANGE)
+    sd.x_offset = float(sim._MAP_X_OFFSET)
+    sd.y_offset = float(sim._MAP_Y_OFFSET)
     sd.bombsite_dist_scale = float(bombsite_distance_scale)
-    sd.laser_damage   = int(sim.LASER_DAMAGE)
-    sd.laser_range    = float(sim.LASER_RANGE)
+    sd.laser_damage = int(sim.LASER_DAMAGE)
+    sd.laser_range = float(sim.LASER_RANGE)
     sd.laser_range_sq = float(sim.LASER_RANGE * sim.LASER_RANGE)
     sd.shoot_cooldown = int(sim.SHOOT_COOLDOWN)
     sd.bomb_plant_time = int(sim.BOMB_PLANT_TIME)
     sd.bomb_defuse_time = int(sim.BOMB_DEFUSE_TIME)
     sd.bomb_defuse_kit = int(sim.BOMB_DEFUSE_KIT)
-    sd.bomb_timer     = int(sim.BOMB_TIMER)
-    sd.round_time     = int(sim.ROUND_TIME)
+    sd.bomb_timer = int(sim.BOMB_TIMER)
+    sd.round_time = int(sim.ROUND_TIME)
     sd.footstep_radius_sq = float(sim.FOOTSTEP_RADIUS * sim.FOOTSTEP_RADIUS)
     sd.gunshot_radius_sq = float(sim.GUNSHOT_RADIUS * sim.GUNSHOT_RADIUS)
     sd.enemy_memory_ticks = int(sim.ENEMY_MEMORY_TICKS)
     sd.stale_memory_tick = int(sim.STALE_MEMORY_TICK)
-    sd.pbrs_gamma     = float(0.99)
+    sd.pbrs_gamma = 0.99
     for i in range(9):
         delta = sim._DELTA_VECTORS[i]
         sd.delta_x[i] = float(delta[0])
@@ -265,15 +280,18 @@ def build_static_data(nav_graph, area_adjacency, bombsite_mask,
 
 
 class Dust2CEnv(pufferlib.PufferEnv):
-    def __init__(self, sd, refs, seed=0, team_spirit=0.0, buf=None, nav_graph=None, auto_reset=True):
+    def __init__(
+        self, sd, refs, seed=0, team_spirit=0.0, buf=None, nav_graph=None, auto_reset=True
+    ):
         self.single_observation_space = gymnasium.spaces.Box(
-            low=-1.0, high=1.0, shape=(OBS_DIM,), dtype=np.float32)
+            low=-1.0, high=1.0, shape=(OBS_DIM,), dtype=np.float32
+        )
         self.single_action_space = gymnasium.spaces.MultiDiscrete([9, 2, 2, 2])
         self.num_agents = N_AGENTS
         super().__init__(buf)
 
-        self._sd    = sd
-        self._refs  = refs   # keep alive — prevents GC of numpy backing arrays
+        self._sd = sd
+        self._refs = refs  # keep alive — prevents GC of numpy backing arrays
         self.nav_graph = nav_graph
         self._auto_reset = bool(auto_reset)
         self._uses_external_buffers = buf is not None
@@ -286,13 +304,19 @@ class Dust2CEnv(pufferlib.PufferEnv):
             init_team_spirit = 0.0
         else:
             init_team_spirit = float(team_spirit)
-        _lib.env_init(self._c_env_p, ctypes.byref(self._sd),
-                      ctypes.c_uint32(seed), ctypes.c_float(init_team_spirit))
+        _lib.env_init(
+            self._c_env_p,
+            ctypes.byref(self._sd),
+            ctypes.c_uint32(seed),
+            ctypes.c_float(init_team_spirit),
+        )
 
         # Pre-create numpy views of C buffers — avoids recreating each step
-        self._obs_view  = np.frombuffer(self._c_env.observations, dtype=np.float32).reshape(N_AGENTS, OBS_DIM)
-        self._rew_view  = np.frombuffer(self._c_env.rewards,      dtype=np.float32)
-        self._term_view = np.frombuffer(self._c_env.terminals,    dtype=np.bool_)
+        self._obs_view = np.frombuffer(self._c_env.observations, dtype=np.float32).reshape(
+            N_AGENTS, OBS_DIM
+        )
+        self._rew_view = np.frombuffer(self._c_env.rewards, dtype=np.float32)
+        self._term_view = np.frombuffer(self._c_env.terminals, dtype=np.bool_)
         self._trunc_view = np.frombuffer(self._c_env.truncations, dtype=np.bool_)
         if not self._uses_external_buffers:
             self.observations = self._obs_view

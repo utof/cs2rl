@@ -9,17 +9,18 @@ Usage:
 """
 
 import os
+
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
-from collections import Counter
 import multiprocessing as mp
 import time
+from collections import Counter
 from pathlib import Path
+
 import numpy as np
-import gymnasium as gym
 
 OBS_DIM = 71
 
@@ -29,6 +30,7 @@ ACTION_HEAD_SIZES = (9, 2, 2, 2)
 
 
 # ── SECTION: Smoke Test ────────────────────────────────────────────────────
+
 
 def smoke_test():
     print("[Smoke] Initialising environment...")
@@ -55,12 +57,11 @@ def smoke_test():
     sps = step_count / elapsed
 
     print(f"SMOKE TEST PASSED — {sps:.0f} steps/sec")
-    assert sps >= 100_000, (
-        f"Smoke test FAILED: {sps:.0f} steps/sec is below the 100_000 target"
-    )
+    assert sps >= 100_000, f"Smoke test FAILED: {sps:.0f} steps/sec is below the 100_000 target"
 
 
 # ── SECTION: Shared eval / record helpers ──────────────────────────────────
+
 
 def make_puffer_env(team_spirit=None, record_fn=None, buf=None, seed=0, episode_stats=True):
     """Create the native C PufferEnv used by smoke/train/eval."""
@@ -118,8 +119,8 @@ def update_obs_buffer(obs_buffer, obs, terms=None, truncs=None):
 
 
 def select_policy_actions(policy, obs_buffer, active_agents, device, policy_state, policy_mode):
-    import torch
     import pufferlib.pytorch
+    import torch
 
     if policy_mode == "random":
         raise ValueError("Random action selection should bypass select_policy_actions")
@@ -139,8 +140,8 @@ def select_policy_actions(policy, obs_buffer, active_agents, device, policy_stat
 
 
 def select_policy_actions_native(policy, obs, device, policy_state, policy_mode):
-    import torch
     import pufferlib.pytorch
+    import torch
 
     if policy_mode == "random":
         raise ValueError("Random action selection should bypass select_policy_actions_native")
@@ -209,14 +210,23 @@ def format_train_status(epoch, ts_val, logs):
 
 # ── SECTION: Record Episode ────────────────────────────────────────────────
 
+
 def rewards_array_to_dict(rewards):
     return {aid: float(rewards[i]) for i, aid in enumerate(AGENT_IDS)}
 
-def record_episode(checkpoint_path=None, device="cpu", seed=0, policy_mode="auto", save_path="recordings/latest.rrd"):
+
+def record_episode(
+    checkpoint_path=None,
+    device="cpu",
+    seed=0,
+    policy_mode="auto",
+    save_path="recordings/latest.rrd",
+):
     import os
-    from viz import init_recording, log_navmesh, log_tick, log_trimap
+
     from c_env.wrapper import make_env as make_c_env
-    from sim import NAV_PATH, CACHE_PATH, _load_dust2_static_data
+    from sim import CACHE_PATH, NAV_PATH, _load_dust2_static_data
+    from viz import init_recording, log_navmesh, log_tick, log_trimap
 
     os.makedirs("recordings", exist_ok=True)
 
@@ -261,7 +271,10 @@ def record_episode(checkpoint_path=None, device="cpu", seed=0, policy_mode="auto
 
 # ── SECTION: Checkpoint evaluation ─────────────────────────────────────────
 
-def evaluate_checkpoint(checkpoint_path=None, device="cpu", start_seed=0, num_episodes=50, policy_mode="auto"):
+
+def evaluate_checkpoint(
+    checkpoint_path=None, device="cpu", start_seed=0, num_episodes=50, policy_mode="auto"
+):
     from sim import ROUND_TIME
 
     policy = None
@@ -285,7 +298,9 @@ def evaluate_checkpoint(checkpoint_path=None, device="cpu", start_seed=0, num_ep
             if policy_mode == "random":
                 actions = np.asarray(env.action_space.sample(), dtype=np.int32)
             else:
-                actions = select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
+                actions = select_policy_actions_native(
+                    policy, obs, device, policy_state, policy_mode
+                )
 
             for action in actions:
                 for head_idx, action_value in enumerate(action):
@@ -366,6 +381,7 @@ TRAINING_CONFIG = dict(
 
 # ── SECTION: TeamSpirit callback (legacy shim — kept for tests) ────────────
 
+
 class TeamSpiritCallback:
     """Linearly anneals sim._TEAM_SPIRIT 0→1 over anneal_steps env steps.
 
@@ -378,6 +394,7 @@ class TeamSpiritCallback:
 
     def _on_step(self) -> bool:
         import sim as _sim
+
         _sim._TEAM_SPIRIT = min(1.0, self.num_timesteps / self.anneal_steps)
         return True
 
@@ -387,16 +404,18 @@ _team_spirit_cb = TeamSpiritCallback(anneal_steps=5_000_000)
 
 # ── SECTION: PufferLib env factory ─────────────────────────────────────────
 
+
 def make_env(team_spirit=None):
     return make_puffer_env(team_spirit=team_spirit)
 
 
 # ── SECTION: Policy ────────────────────────────────────────────────────────
 
+
 def build_policy(vecenv, device):
+    import pufferlib.pytorch
     import torch
     import torch.nn as nn
-    import pufferlib.pytorch
 
     driver_env = getattr(vecenv, "driver_env", vecenv)
     obs_dim = driver_env.single_observation_space.shape[0]  # 71
@@ -415,16 +434,15 @@ def build_policy(vecenv, device):
             )
             self.lstm = nn.LSTM(hidden, hidden, batch_first=False)
             for name, p in self.lstm.named_parameters():
-                if 'bias' in name:
+                if "bias" in name:
                     nn.init.constant_(p, 0)
-                elif 'weight' in name:
+                elif "weight" in name:
                     nn.init.orthogonal_(p, gain=1.0)
 
             # Separate heads for MultiDiscrete([9,2,2,2])
-            self.action_heads = nn.ModuleList([
-                pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
-                for n in [9, 2, 2, 2]
-            ])
+            self.action_heads = nn.ModuleList(
+                [pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01) for n in [9, 2, 2, 2]]
+            )
             self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
 
         def get_value(self, x, lstm_state=None, done=None):
@@ -441,8 +459,8 @@ def build_policy(vecenv, device):
                 action = torch.stack([d.sample() for d in dists], dim=-1)
 
             log_prob = sum(d.log_prob(action[..., i]) for i, d in enumerate(dists))
-            entropy  = sum(d.entropy() for d in dists)
-            value    = self.value_head(hidden_out)
+            entropy = sum(d.entropy() for d in dists)
+            value = self.value_head(hidden_out)
             return action, log_prob, entropy, value, lstm_state
 
         def forward_eval(self, x, state):
@@ -484,7 +502,7 @@ def build_policy(vecenv, device):
                     (
                         (1.0 - done).view(1, -1, 1) * lstm_state[0],
                         (1.0 - done).view(1, -1, 1) * lstm_state[1],
-                    )
+                    ),
                 )
                 h = h.squeeze(0)
             else:
@@ -497,16 +515,17 @@ def build_policy(vecenv, device):
 
 # ── SECTION: PufferLib training ────────────────────────────────────────────
 
+
 def train(args):
     """Run PPO training via PufferLib 3.0."""
-    import torch
     import pufferlib.vector
+    import torch
     from pufferlib.pufferl import PuffeRL
 
     device = args.device
 
     # Shared team spirit value — all envs read it at episode start
-    shared_ts = mp.Value('f', 0.0)
+    shared_ts = mp.Value("f", 0.0)
 
     def env_factory(*args, buf=None, seed=None, **kwargs):
         return make_puffer_env(team_spirit=shared_ts, buf=buf, seed=seed or 0)
@@ -547,42 +566,42 @@ def train(args):
 
     train_config = {
         # Core PPO
-        'env': 'cs2-dust2',
-        'device': device,
-        'seed': args.seed,
-        'total_timesteps': args.timesteps,
-        'batch_size': 20480,   # must be >= num_envs * agents_per_env * bptt_horizon = 64*10*32
-        'bptt_horizon': 32,
-        'minibatch_size': 4096,
-        'max_minibatch_size': 4096,
-        'update_epochs': 4,
-        'learning_rate': 3e-4,
-        'gamma': 0.99,
-        'gae_lambda': 0.95,
-        'clip_coef': 0.1,
-        'vf_coef': 0.5,
-        'vf_clip_coef': 0.1,
-        'ent_coef': 0.01,
-        'max_grad_norm': 0.5,
-        'use_rnn': True,
+        "env": "cs2-dust2",
+        "device": device,
+        "seed": args.seed,
+        "total_timesteps": args.timesteps,
+        "batch_size": 20480,  # must be >= num_envs * agents_per_env * bptt_horizon = 64*10*32
+        "bptt_horizon": 32,
+        "minibatch_size": 4096,
+        "max_minibatch_size": 4096,
+        "update_epochs": 4,
+        "learning_rate": 3e-4,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "clip_coef": 0.1,
+        "vf_coef": 0.5,
+        "vf_clip_coef": 0.1,
+        "ent_coef": 0.01,
+        "max_grad_norm": 0.5,
+        "use_rnn": True,
         # Extras required by PuffeRL constructor
-        'compile': False,
-        'compile_mode': 'default',
-        'compile_fullgraph': False,
-        'cpu_offload': False,
-        'torch_deterministic': False,
-        'optimizer': 'adam',
-        'adam_beta1': 0.9,
-        'adam_beta2': 0.999,
-        'adam_eps': 1e-8,
-        'anneal_lr': True,
-        'checkpoint_interval': 200,
-        'data_dir': args.checkpoint_dir,
-        'precision': 'float32',
-        'prio_alpha': 0.0,
-        'prio_beta0': 1.0,
-        'vtrace_rho_clip': 1.0,
-        'vtrace_c_clip': 1.0,
+        "compile": False,
+        "compile_mode": "default",
+        "compile_fullgraph": False,
+        "cpu_offload": False,
+        "torch_deterministic": False,
+        "optimizer": "adam",
+        "adam_beta1": 0.9,
+        "adam_beta2": 0.999,
+        "adam_eps": 1e-8,
+        "anneal_lr": True,
+        "checkpoint_interval": 200,
+        "data_dir": args.checkpoint_dir,
+        "precision": "float32",
+        "prio_alpha": 0.0,
+        "prio_beta0": 1.0,
+        "vtrace_rho_clip": 1.0,
+        "vtrace_c_clip": 1.0,
     }
 
     trainer = PuffeRL(train_config, vecenv, policy)
@@ -618,25 +637,30 @@ if __name__ == "__main__":
     import torch
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--smoke",          action="store_true")
-    parser.add_argument("--train",          action="store_true")
-    parser.add_argument("--record",         action="store_true")
-    parser.add_argument("--eval",           action="store_true")
-    parser.add_argument("--checkpoint",     type=str, default=None)
-    parser.add_argument("--timesteps",      type=int, default=10_000_000)
-    parser.add_argument("--num_envs",       type=int, default=64)
-    parser.add_argument("--seed",           type=int, default=1)
-    parser.add_argument("--device",         type=str,
-                        default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--train", action="store_true")
+    parser.add_argument("--record", action="store_true")
+    parser.add_argument("--eval", action="store_true")
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--timesteps", type=int, default=10_000_000)
+    parser.add_argument("--num_envs", type=int, default=64)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
+    )
     parser.add_argument("--save_every_sec", type=int, default=300)
-    parser.add_argument("--checkpoint_dir", type=str, default='checkpoints')
-    parser.add_argument("--vec-backend",    type=str, default="multiprocessing")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    parser.add_argument("--vec-backend", type=str, default="multiprocessing")
     parser.add_argument("--vec-num-workers", type=int, default=0)
-    parser.add_argument("--vec-overwork",   action="store_true")
-    parser.add_argument("--record-out",     type=str, default="recordings/latest.rrd")
-    parser.add_argument("--record-policy",  type=str, choices=("auto", "random", "sample", "greedy"), default="auto")
-    parser.add_argument("--eval-episodes",  type=int, default=50)
-    parser.add_argument("--eval-policy",    type=str, choices=("auto", "random", "sample", "greedy"), default="auto")
+    parser.add_argument("--vec-overwork", action="store_true")
+    parser.add_argument("--record-out", type=str, default="recordings/latest.rrd")
+    parser.add_argument(
+        "--record-policy", type=str, choices=("auto", "random", "sample", "greedy"), default="auto"
+    )
+    parser.add_argument("--eval-episodes", type=int, default=50)
+    parser.add_argument(
+        "--eval-policy", type=str, choices=("auto", "random", "sample", "greedy"), default="auto"
+    )
     args = parser.parse_args()
 
     if args.smoke:

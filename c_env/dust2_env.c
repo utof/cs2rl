@@ -2,10 +2,10 @@
 #include <stdlib.h>
 
 static uint32_t xorshift32(uint32_t* state) {
-    uint32_t x = *state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
+    uint32_t x  = *state;
+    x          ^= x << 13;
+    x          ^= x >> 17;
+    x          ^= x << 5;
     return (*state = x);
 }
 
@@ -14,7 +14,8 @@ static void clear_stats(StepStats* stats) {
     stats->winner = -1;
 }
 
-static inline void count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size) {
+static inline void
+count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size) {
     if ((unsigned int)value < (unsigned int)size) {
         step_counts[value]++;
         episode_counts[value]++;
@@ -22,16 +23,16 @@ static inline void count_action(int32_t* step_counts, int32_t* episode_counts, i
 }
 
 static float _potential(Dust2Env* env, int team) {
-    float alive_t = 0.0f, alive_o = 0.0f;
-    float hp_t = 0.0f, hp_o = 0.0f;
-    float site_t = 0.0f, site_o = 0.0f;
-    float bomb_progress = 0.0f;
-    int bomb_carrier_area_id = INVALID_AREA_IDX;
-    StaticData* sd = env->sd;
+    float       alive_t = 0.0f, alive_o = 0.0f;
+    float       hp_t = 0.0f, hp_o = 0.0f;
+    float       site_t = 0.0f, site_o = 0.0f;
+    float       bomb_progress        = 0.0f;
+    int         bomb_carrier_area_id = INVALID_AREA_IDX;
+    StaticData* sd                   = env->sd;
 
     for (int i = 0; i < N_AGENTS; i++) {
-        AgentState* a = &env->game.agents[i];
-        int area_id = INVALID_AREA_IDX;
+        AgentState* a       = &env->game.agents[i];
+        int         area_id = INVALID_AREA_IDX;
         if (!a->alive) {
             continue;
         }
@@ -42,13 +43,13 @@ static float _potential(Dust2Env* env, int team) {
 
         if (a->team == team) {
             alive_t += 1.0f;
-            hp_t += (float)a->hp;
+            hp_t    += (float)a->hp;
             if (a->area_idx >= 0 && sd->bombsite_by_idx[a->area_idx]) {
                 site_t += 1.0f;
             }
         } else {
             alive_o += 1.0f;
-            hp_o += (float)a->hp;
+            hp_o    += (float)a->hp;
             if (a->area_idx >= 0 && sd->bombsite_by_idx[a->area_idx]) {
                 site_o += 1.0f;
             }
@@ -59,9 +60,8 @@ static float _potential(Dust2Env* env, int team) {
         }
     }
 
-    if (!env->game.bomb_planted
-            && bomb_carrier_area_id != INVALID_AREA_IDX
-            && bomb_carrier_area_id <= sd->max_area_id) {
+    if (!env->game.bomb_planted && bomb_carrier_area_id != INVALID_AREA_IDX &&
+        bomb_carrier_area_id <= sd->max_area_id) {
         float dist = sd->bombsite_dist[bomb_carrier_area_id];
         if (isfinite(dist)) {
             float closeness = 1.0f - dist * sd->bombsite_dist_scale;
@@ -75,16 +75,14 @@ static float _potential(Dust2Env* env, int team) {
         }
     }
 
-    return (alive_t - alive_o) * 0.3f
-         + (hp_t - hp_o) / 500.0f
-         + (site_t - site_o) * 0.2f
-         + bomb_progress;
+    return (alive_t - alive_o) * 0.3f + (hp_t - hp_o) / 500.0f + (site_t - site_o) * 0.2f +
+           bomb_progress;
 }
 
 void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_spirit) {
     memset(env, 0, sizeof(Dust2Env));
-    env->sd = sd;
-    env->rng = seed ? seed : 1;
+    env->sd          = sd;
+    env->rng         = seed ? seed : 1;
     env->team_spirit = team_spirit;
     clear_stats(&env->step_stats);
     clear_stats(&env->episode_stats);
@@ -92,7 +90,7 @@ void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_spirit) {
 
 void env_reset(Dust2Env* env) {
     StaticData* sd = env->sd;
-    GameState* g = &env->game;
+    GameState*  g  = &env->game;
 
     memset(g, 0, sizeof(GameState));
     memset(env->observations, 0, sizeof(env->observations));
@@ -102,52 +100,52 @@ void env_reset(Dust2Env* env) {
     clear_stats(&env->step_stats);
     clear_stats(&env->episode_stats);
 
-    g->round_ticks_left = sd->round_time;
-    g->winner = -1;
-    g->bomb_area_idx = INVALID_AREA_IDX;
+    g->round_ticks_left      = sd->round_time;
+    g->winner                = -1;
+    g->bomb_area_idx         = INVALID_AREA_IDX;
     g->bomb_being_planted_by = -1;
     g->bomb_being_defused_by = -1;
 
     int bomb_carrier = (int)(xorshift32(&env->rng) % TEAM_SIZE);
 
     for (int i = 0; i < TEAM_SIZE; i++) {
-        int sidx = (int)(xorshift32(&env->rng) % sd->n_t_spawns);
-        int area_idx = sd->t_spawns[sidx];
-        AgentState* a = &g->agents[i];
+        int         sidx     = (int)(xorshift32(&env->rng) % sd->n_t_spawns);
+        int         area_idx = sd->t_spawns[sidx];
+        AgentState* a        = &g->agents[i];
 
         memset(a, 0, sizeof(AgentState));
-        a->x = sd->centroid_xy[area_idx * 2];
-        a->y = sd->centroid_xy[area_idx * 2 + 1];
+        a->x        = sd->centroid_xy[area_idx * 2];
+        a->y        = sd->centroid_xy[area_idx * 2 + 1];
         a->area_idx = area_idx;
-        a->facing = sd->dir_facing[3];
-        a->hp = 100;
-        a->alive = 1;
+        a->facing   = sd->dir_facing[3];
+        a->hp       = 100;
+        a->alive    = 1;
         a->has_bomb = (i == bomb_carrier) ? 1 : 0;
-        a->team = 0;
+        a->team     = 0;
 
         for (int s = 0; s < TEAM_SIZE; s++) {
-            a->enemy_mem_idx[s] = INVALID_AREA_IDX;
+            a->enemy_mem_idx[s]  = INVALID_AREA_IDX;
             a->enemy_mem_tick[s] = sd->stale_memory_tick;
         }
     }
 
     for (int i = 0; i < TEAM_SIZE; i++) {
-        int sidx = (int)(xorshift32(&env->rng) % sd->n_ct_spawns);
-        int area_idx = sd->ct_spawns[sidx];
-        AgentState* a = &g->agents[TEAM_SIZE + i];
+        int         sidx     = (int)(xorshift32(&env->rng) % sd->n_ct_spawns);
+        int         area_idx = sd->ct_spawns[sidx];
+        AgentState* a        = &g->agents[TEAM_SIZE + i];
 
         memset(a, 0, sizeof(AgentState));
-        a->x = sd->centroid_xy[area_idx * 2];
-        a->y = sd->centroid_xy[area_idx * 2 + 1];
+        a->x        = sd->centroid_xy[area_idx * 2];
+        a->y        = sd->centroid_xy[area_idx * 2 + 1];
         a->area_idx = area_idx;
-        a->facing = sd->dir_facing[7];
-        a->hp = 100;
-        a->alive = 1;
-        a->has_kit = (xorshift32(&env->rng) & 1U) ? 1 : 0;
-        a->team = 1;
+        a->facing   = sd->dir_facing[7];
+        a->hp       = 100;
+        a->alive    = 1;
+        a->has_kit  = (xorshift32(&env->rng) & 1U) ? 1 : 0;
+        a->team     = 1;
 
         for (int s = 0; s < TEAM_SIZE; s++) {
-            a->enemy_mem_idx[s] = INVALID_AREA_IDX;
+            a->enemy_mem_idx[s]  = INVALID_AREA_IDX;
             a->enemy_mem_tick[s] = sd->stale_memory_tick;
         }
     }
@@ -157,19 +155,19 @@ void env_reset(Dust2Env* env) {
 
 void env_step(Dust2Env* env, const int32_t* actions) {
     StaticData* sd = env->sd;
-    GameState* g = &env->game;
-    StepStats* ss = &env->step_stats;
-    StepStats* es = &env->episode_stats;
-    float phi_before[2];
-    int8_t vis10[N_AGENTS][N_AGENTS];
-    int kills[N_AGENTS][2];
-    int n_kills = 0;
-    int bomb_just_planted = 0;
-    int bomb_planter_id = -1;
-    int bomb_just_defused = 0;
-    int bomb_defuser_id = -1;
-    int t_alive = 0;
-    int ct_alive = 0;
+    GameState*  g  = &env->game;
+    StepStats*  ss = &env->step_stats;
+    StepStats*  es = &env->episode_stats;
+    float       phi_before[2];
+    int8_t      vis10[N_AGENTS][N_AGENTS];
+    int         kills[N_AGENTS][2];
+    int         n_kills           = 0;
+    int         bomb_just_planted = 0;
+    int         bomb_planter_id   = -1;
+    int         bomb_just_defused = 0;
+    int         bomb_defuser_id   = -1;
+    int         t_alive           = 0;
+    int         ct_alive          = 0;
 
     phi_before[0] = _potential(env, 0);
     phi_before[1] = _potential(env, 1);
@@ -183,30 +181,30 @@ void env_step(Dust2Env* env, const int32_t* actions) {
         if (a->shoot_cd > 0) {
             a->shoot_cd--;
         }
-        a->is_moving = 0;
+        a->is_moving       = 0;
         a->fired_this_tick = 0;
     }
 
     for (int i = 0; i < N_AGENTS; i++) {
         AgentState* a = &g->agents[i];
-        int move_dir;
-        int shoot;
-        int use;
-        int last;
-        int gx;
-        int gy;
-        int target_idx;
-        float tx;
-        float ty;
+        int         move_dir;
+        int         shoot;
+        int         use;
+        int         last;
+        int         gx;
+        int         gy;
+        int         target_idx;
+        float       tx;
+        float       ty;
 
         if (!a->alive) {
             continue;
         }
 
         move_dir = actions[i * ACTION_DIM + 0];
-        shoot = actions[i * ACTION_DIM + 1];
-        use = actions[i * ACTION_DIM + 2];
-        last = actions[i * ACTION_DIM + 3];
+        shoot    = actions[i * ACTION_DIM + 1];
+        use      = actions[i * ACTION_DIM + 2];
+        last     = actions[i * ACTION_DIM + 3];
 
         count_action(ss->action_move, es->action_move, move_dir, 9);
         count_action(ss->action_shoot, es->action_shoot, shoot, 2);
@@ -255,30 +253,28 @@ void env_step(Dust2Env* env, const int32_t* actions) {
             continue;
         }
 
-        a->x = tx;
-        a->y = ty;
-        a->area_idx = target_idx;
-        a->facing = sd->dir_facing[move_dir];
+        a->x         = tx;
+        a->y         = ty;
+        a->area_idx  = target_idx;
+        a->facing    = sd->dir_facing[move_dir];
         a->is_moving = 1;
     }
 
     for (int i = 0; i < N_AGENTS; i++) {
         for (int j = 0; j < N_AGENTS; j++) {
-            int ai = g->agents[i].area_idx;
-            int aj = g->agents[j].area_idx;
-            vis10[i][j] = (ai >= 0 && aj >= 0)
-                ? sd->vis_matrix[ai * sd->N + aj]
-                : 0;
+            int ai      = g->agents[i].area_idx;
+            int aj      = g->agents[j].area_idx;
+            vis10[i][j] = (ai >= 0 && aj >= 0) ? sd->vis_matrix[ai * sd->N + aj] : 0;
         }
     }
 
     for (int i = 0; i < N_AGENTS; i++) {
         AgentState* a = &g->agents[i];
-        int en_start;
+        int         en_start;
         AgentState* best_enemy = NULL;
-        float dx;
-        float dy;
-        float best_dist;
+        float       dx;
+        float       dy;
+        float       best_dist;
 
         if (!a->alive) {
             continue;
@@ -287,40 +283,40 @@ void env_step(Dust2Env* env, const int32_t* actions) {
             continue;
         }
 
-        a->shoot_cd = sd->shoot_cooldown;
+        a->shoot_cd        = sd->shoot_cooldown;
         a->fired_this_tick = 1;
-        dx = cosf(a->facing);
-        dy = sinf(a->facing);
-        en_start = (a->team == 0) ? TEAM_SIZE : 0;
-        best_dist = sd->laser_range;
+        dx                 = cosf(a->facing);
+        dy                 = sinf(a->facing);
+        en_start           = (a->team == 0) ? TEAM_SIZE : 0;
+        best_dist          = sd->laser_range;
 
         for (int ej = en_start; ej < en_start + TEAM_SIZE; ej++) {
             AgentState* en = &g->agents[ej];
-            float rx;
-            float ry;
-            float dist_sq;
-            float dist;
-            float dot;
+            float       rx;
+            float       ry;
+            float       dist_sq;
+            float       dist;
+            float       dot;
 
             if (!en->alive || !vis10[i][ej]) {
                 continue;
             }
 
-            rx = en->x - a->x;
-            ry = en->y - a->y;
+            rx      = en->x - a->x;
+            ry      = en->y - a->y;
             dist_sq = rx * rx + ry * ry;
             if (dist_sq > sd->laser_range_sq || dist_sq == 0.0f) {
                 continue;
             }
 
             dist = sqrtf(dist_sq);
-            dot = (rx / dist) * dx + (ry / dist) * dy;
+            dot  = (rx / dist) * dx + (ry / dist) * dy;
             if (dot < 0.7f) {
                 continue;
             }
 
             if (dist < best_dist) {
-                best_dist = dist;
+                best_dist  = dist;
                 best_enemy = en;
             }
         }
@@ -328,7 +324,7 @@ void env_step(Dust2Env* env, const int32_t* actions) {
         if (best_enemy != NULL) {
             best_enemy->hp -= sd->laser_damage;
             if (best_enemy->hp <= 0) {
-                best_enemy->hp = 0;
+                best_enemy->hp    = 0;
                 best_enemy->alive = 0;
                 if (n_kills < N_AGENTS) {
                     kills[n_kills][0] = i;
@@ -343,24 +339,25 @@ void env_step(Dust2Env* env, const int32_t* actions) {
         if (!g->agents[i].alive) {
             continue;
         }
-        if (g->agents[i].team == 0) t_alive++;
-        else ct_alive++;
+        if (g->agents[i].team == 0)
+            t_alive++;
+        else
+            ct_alive++;
     }
     if (!t_alive && !g->round_over) {
         g->round_over = 1;
-        g->winner = 1;
+        g->winner     = 1;
     } else if (!ct_alive && !g->round_over) {
         g->round_over = 1;
-        g->winner = 0;
+        g->winner     = 0;
     }
 
     if (!g->round_over && g->bomb_being_defused_by != -1) {
         AgentState* def = &g->agents[g->bomb_being_defused_by];
-        if (!def->alive
-                || def->area_idx != g->bomb_area_idx
-                || actions[g->bomb_being_defused_by * ACTION_DIM + 2] == 0) {
+        if (!def->alive || def->area_idx != g->bomb_area_idx ||
+            actions[g->bomb_being_defused_by * ACTION_DIM + 2] == 0) {
             g->bomb_being_defused_by = -1;
-            g->bomb_defuse_ticks = 0;
+            g->bomb_defuse_ticks     = 0;
         }
     }
 
@@ -375,43 +372,43 @@ void env_step(Dust2Env* env, const int32_t* actions) {
                 if (a->area_idx >= 0 && sd->bombsite_by_idx[a->area_idx]) {
                     if (g->bomb_being_planted_by == -1) {
                         g->bomb_being_planted_by = i;
-                        g->bomb_plant_ticks = 0;
+                        g->bomb_plant_ticks      = 0;
                     }
                     if (g->bomb_being_planted_by == i) {
                         g->bomb_plant_ticks++;
                         if (g->bomb_plant_ticks >= sd->bomb_plant_time) {
-                            g->bomb_planted = 1;
-                            g->bomb_area_idx = a->area_idx;
-                            g->bomb_x = a->x;
-                            g->bomb_y = a->y;
-                            g->bomb_z = a->z;
-                            g->bomb_ticks_left = sd->bomb_timer;
+                            g->bomb_planted          = 1;
+                            g->bomb_area_idx         = a->area_idx;
+                            g->bomb_x                = a->x;
+                            g->bomb_y                = a->y;
+                            g->bomb_z                = a->z;
+                            g->bomb_ticks_left       = sd->bomb_timer;
                             g->bomb_being_planted_by = -1;
-                            a->has_bomb = 0;
-                            bomb_just_planted = 1;
-                            bomb_planter_id = i;
-                            ss->bomb_planted = 1;
+                            a->has_bomb              = 0;
+                            bomb_just_planted        = 1;
+                            bomb_planter_id          = i;
+                            ss->bomb_planted         = 1;
                             es->bomb_planted++;
                         }
                     }
                 } else if (g->bomb_being_planted_by == i) {
                     g->bomb_being_planted_by = -1;
-                    g->bomb_plant_ticks = 0;
+                    g->bomb_plant_ticks      = 0;
                 }
             } else if (a->team == 1 && g->bomb_planted && a->area_idx == g->bomb_area_idx) {
                 int defuse_time = a->has_kit ? sd->bomb_defuse_kit : sd->bomb_defuse_time;
                 if (g->bomb_being_defused_by == -1) {
                     g->bomb_being_defused_by = i;
-                    g->bomb_defuse_ticks = 0;
+                    g->bomb_defuse_ticks     = 0;
                 }
                 if (g->bomb_being_defused_by == i) {
                     g->bomb_defuse_ticks++;
                     if (g->bomb_defuse_ticks >= defuse_time) {
-                        g->round_over = 1;
-                        g->winner = 1;
+                        g->round_over     = 1;
+                        g->winner         = 1;
                         bomb_just_defused = 1;
-                        bomb_defuser_id = i;
-                        ss->bomb_defused = 1;
+                        bomb_defuser_id   = i;
+                        ss->bomb_defused  = 1;
                         es->bomb_defused++;
                     }
                 }
@@ -423,20 +420,20 @@ void env_step(Dust2Env* env, const int32_t* actions) {
         g->bomb_ticks_left--;
         if (g->bomb_ticks_left <= 0) {
             g->round_over = 1;
-            g->winner = 0;
+            g->winner     = 0;
         }
     }
 
     if (g->round_ticks_left <= 0 && !g->round_over && !g->bomb_planted) {
         g->round_over = 1;
-        g->winner = 1;
+        g->winner     = 1;
         ss->timed_out = 1;
         es->timed_out = 1;
     }
 
     for (int i = 0; i < N_AGENTS; i++) {
         AgentState* a = &g->agents[i];
-        int en_start;
+        int         en_start;
 
         if (!a->alive) {
             continue;
@@ -444,10 +441,10 @@ void env_step(Dust2Env* env, const int32_t* actions) {
 
         en_start = (a->team == 0) ? TEAM_SIZE : 0;
         for (int slot = 0; slot < TEAM_SIZE; slot++) {
-            int ej = en_start + slot;
+            int         ej = en_start + slot;
             AgentState* en = &g->agents[ej];
-            int can_see;
-            int can_hear = 0;
+            int         can_see;
+            int         can_hear = 0;
 
             if (!en->alive) {
                 if (a->enemy_mem_idx[slot] != INVALID_AREA_IDX) {
@@ -458,8 +455,8 @@ void env_step(Dust2Env* env, const int32_t* actions) {
 
             can_see = vis10[i][ej];
             if (!can_see) {
-                float rx = a->x - en->x;
-                float ry = a->y - en->y;
+                float rx      = a->x - en->x;
+                float ry      = a->y - en->y;
                 float dist_sq = rx * rx + ry * ry;
                 if (en->is_moving && dist_sq <= sd->footstep_radius_sq) {
                     can_hear = 1;
@@ -469,12 +466,12 @@ void env_step(Dust2Env* env, const int32_t* actions) {
             }
 
             if (can_see || can_hear) {
-                a->enemy_mem_idx[slot] = en->area_idx;
+                a->enemy_mem_idx[slot]  = en->area_idx;
                 a->enemy_mem_tick[slot] = g->tick;
             } else {
                 int last_tick = a->enemy_mem_tick[slot];
                 if (last_tick >= 0 && g->tick - last_tick >= sd->enemy_memory_ticks) {
-                    a->enemy_mem_idx[slot] = INVALID_AREA_IDX;
+                    a->enemy_mem_idx[slot]  = INVALID_AREA_IDX;
                     a->enemy_mem_tick[slot] = sd->stale_memory_tick;
                 }
             }
@@ -482,15 +479,15 @@ void env_step(Dust2Env* env, const int32_t* actions) {
     }
 
     {
-        float alive_t_frac = t_alive / (float)TEAM_SIZE;
+        float alive_t_frac  = t_alive / (float)TEAM_SIZE;
         float alive_ct_frac = ct_alive / (float)TEAM_SIZE;
 
         for (int i = 0; i < N_AGENTS; i++) {
-            float* obs = &env->observations[i * OBS_DIM];
-            AgentState* a = &g->agents[i];
-            int tm_start;
-            int tm_count = 0;
-            int en_start;
+            float*      obs = &env->observations[i * OBS_DIM];
+            AgentState* a   = &g->agents[i];
+            int         tm_start;
+            int         tm_count = 0;
+            int         en_start;
 
             memset(obs, 0, OBS_DIM * sizeof(float));
 
@@ -501,19 +498,17 @@ void env_step(Dust2Env* env, const int32_t* actions) {
             obs[4] = cosf(a->facing);
             obs[5] = a->hp / 100.0f;
             obs[6] = (float)(a->team == 0 ? a->has_bomb : a->has_kit);
-            obs[7] = (a->shoot_cd == 0)
-                ? 1.0f
-                : 1.0f - a->shoot_cd / (float)sd->shoot_cooldown;
+            obs[7] = (a->shoot_cd == 0) ? 1.0f : 1.0f - a->shoot_cd / (float)sd->shoot_cooldown;
 
             tm_start = (a->team == 0) ? 0 : TEAM_SIZE;
             for (int j = tm_start; j < tm_start + TEAM_SIZE; j++) {
                 AgentState* tm;
-                int base;
+                int         base;
                 if (j == i) {
                     continue;
                 }
-                tm = &g->agents[j];
-                base = 8 + tm_count * 5;
+                tm            = &g->agents[j];
+                base          = 8 + tm_count * 5;
                 obs[base + 0] = tm->x * sd->inv_x_range - sd->x_offset;
                 obs[base + 1] = tm->y * sd->inv_y_range - sd->y_offset;
                 obs[base + 2] = sinf(tm->facing);
@@ -527,12 +522,12 @@ void env_step(Dust2Env* env, const int32_t* actions) {
 
             en_start = (a->team == 0) ? TEAM_SIZE : 0;
             for (int slot = 0; slot < TEAM_SIZE; slot++) {
-                AgentState* en = &g->agents[en_start + slot];
-                int base = 28 + slot * 7;
-                int mem_idx = a->enemy_mem_idx[slot];
-                int mem_tick = a->enemy_mem_tick[slot];
-                int can_see = en->alive ? vis10[i][en_start + slot] : 0;
-                float freshness = 0.0f;
+                AgentState* en        = &g->agents[en_start + slot];
+                int         base      = 28 + slot * 7;
+                int         mem_idx   = a->enemy_mem_idx[slot];
+                int         mem_tick  = a->enemy_mem_tick[slot];
+                int         can_see   = en->alive ? vis10[i][en_start + slot] : 0;
+                float       freshness = 0.0f;
 
                 if (mem_idx == INVALID_AREA_IDX && !can_see) {
                     continue;
@@ -540,17 +535,18 @@ void env_step(Dust2Env* env, const int32_t* actions) {
 
                 if (mem_idx != INVALID_AREA_IDX) {
                     obs[base + 0] = sd->centroid_xy[mem_idx * 2] * sd->inv_x_range - sd->x_offset;
-                    obs[base + 1] = sd->centroid_xy[mem_idx * 2 + 1] * sd->inv_y_range - sd->y_offset;
+                    obs[base + 1] =
+                        sd->centroid_xy[mem_idx * 2 + 1] * sd->inv_y_range - sd->y_offset;
                 }
                 obs[base + 2] = sinf(en->facing);
                 obs[base + 3] = cosf(en->facing);
                 obs[base + 4] = en->alive ? en->hp / 100.0f : 0.0f;
                 obs[base + 5] = (float)can_see;
                 if (mem_tick >= 0) {
-                    int age = g->tick - mem_tick;
+                    int age   = g->tick - mem_tick;
                     freshness = (age < sd->enemy_memory_ticks)
-                        ? (sd->enemy_memory_ticks - age) / (float)sd->enemy_memory_ticks
-                        : 0.0f;
+                                    ? (sd->enemy_memory_ticks - age) / (float)sd->enemy_memory_ticks
+                                    : 0.0f;
                 }
                 obs[base + 6] = freshness;
             }
@@ -600,15 +596,15 @@ void env_step(Dust2Env* env, const int32_t* actions) {
         phi_after[0] = _potential(env, 0);
         phi_after[1] = _potential(env, 1);
         for (int i = 0; i < N_AGENTS; i++) {
-            env->rewards[i] += sd->pbrs_gamma * phi_after[g->agents[i].team]
-                             - phi_before[g->agents[i].team];
+            env->rewards[i] +=
+                sd->pbrs_gamma * phi_after[g->agents[i].team] - phi_before[g->agents[i].team];
         }
     }
 
     if (env->team_spirit > 0.0f) {
         for (int team = 0; team < 2; team++) {
             float sum = 0.0f;
-            int cnt = 0;
+            int   cnt = 0;
             for (int i = 0; i < N_AGENTS; i++) {
                 if (g->agents[i].alive && g->agents[i].team == team) {
                     sum += env->rewards[i];
@@ -617,7 +613,7 @@ void env_step(Dust2Env* env, const int32_t* actions) {
             }
             if (cnt > 0) {
                 float mean = sum / (float)cnt;
-                float ts = env->team_spirit;
+                float ts   = env->team_spirit;
                 for (int i = 0; i < N_AGENTS; i++) {
                     if (g->agents[i].alive && g->agents[i].team == team) {
                         env->rewards[i] = (1.0f - ts) * env->rewards[i] + ts * mean;
@@ -628,23 +624,23 @@ void env_step(Dust2Env* env, const int32_t* actions) {
     }
 
     if (g->round_over) {
-        ss->winner = g->winner;
-        ss->winner_t = (g->winner == 0);
-        ss->winner_ct = (g->winner == 1);
-        ss->alive_t_end = t_alive;
+        ss->winner       = g->winner;
+        ss->winner_t     = (g->winner == 0);
+        ss->winner_ct    = (g->winner == 1);
+        ss->alive_t_end  = t_alive;
         ss->alive_ct_end = ct_alive;
         ss->round_length = g->tick;
 
-        es->winner = g->winner;
-        es->winner_t = (g->winner == 0);
-        es->winner_ct = (g->winner == 1);
-        es->alive_t_end = t_alive;
+        es->winner       = g->winner;
+        es->winner_t     = (g->winner == 0);
+        es->winner_ct    = (g->winner == 1);
+        es->alive_t_end  = t_alive;
         es->alive_ct_end = ct_alive;
         es->round_length = g->tick;
     }
 
     for (int i = 0; i < N_AGENTS; i++) {
-        env->terminals[i] = g->round_over;
+        env->terminals[i]   = g->round_over;
         env->truncations[i] = 0;
     }
 }

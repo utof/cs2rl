@@ -8,6 +8,7 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 
+
 def init_recording(save_path: str = None):
     rr.init("cs2rl", spawn=(save_path is None))
     if save_path:
@@ -37,9 +38,7 @@ def log_trimap():
 
     tri_path = TRIS_DIR / "de_dust2.tri"
     if not tri_path.exists():
-        print(
-            "[viz] .tri file not found — skipping 3D map geometry. Run: awpy get tris"
-        )
+        print("[viz] .tri file not found — skipping 3D map geometry. Run: awpy get tris")
         return
 
     print("[viz] Loading .tri geometry for 3D map render...")
@@ -95,25 +94,28 @@ def log_navmesh(nav_graph):
             continue
         cx = np.mean([c.x for c in corners])
         cy = np.mean([c.y for c in corners])
-        cz = np.mean([getattr(c, 'z', 0.0) for c in corners])
+        cz = np.mean([getattr(c, "z", 0.0) for c in corners])
 
         c_idx = vtx_idx
         vertices.append([cx, cy, cz])
         vtx_idx += 1
 
         for corner in corners:
-            vertices.append([corner.x, corner.y, getattr(corner, 'z', 0.0)])
+            vertices.append([corner.x, corner.y, getattr(corner, "z", 0.0)])
 
         n = len(corners)
         for i in range(n):
             triangles.append([c_idx, c_idx + 1 + i, c_idx + 1 + (i + 1) % n])
         vtx_idx += n
 
-    rr.log("map/navmesh", rr.Mesh3D(
-        vertex_positions=np.array(vertices, dtype=np.float32),
-        triangle_indices=np.array(triangles, dtype=np.uint32),
-        vertex_colors=np.full((len(vertices), 3), [60, 100, 80], dtype=np.uint8),
-    ))
+    rr.log(
+        "map/navmesh",
+        rr.Mesh3D(
+            vertex_positions=np.array(vertices, dtype=np.float32),
+            triangle_indices=np.array(triangles, dtype=np.uint32),
+            vertex_colors=np.full((len(vertices), 3), [60, 100, 80], dtype=np.uint8),
+        ),
+    )
 
     rr.log("map/sites/a", rr.Points3D([[1200, 2400, 100]], colors=[[255, 120, 0]], radii=[60]))
     rr.log("map/sites/b", rr.Points3D([[-1530, 2600, 5]], colors=[[255, 120, 0]], radii=[60]))
@@ -162,9 +164,7 @@ def log_tick(game_state, tick: int, rewards: dict):
     if game_state.bomb_planted:
         rr.log(
             "bomb",
-            rr.Points3D(
-                positions=[game_state.bomb_pos], colors=[[255, 200, 0]], radii=[24.0]
-            ),
+            rr.Points3D(positions=[game_state.bomb_pos], colors=[[255, 200, 0]], radii=[24.0]),
         )
 
     for agent_id_str, rew in rewards.items():

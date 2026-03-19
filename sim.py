@@ -74,9 +74,7 @@ class NavGraph:
             self.areas.keys()
         )  # sorted for stable _id_to_idx indices across runs
         self.N: int = len(self.area_ids)
-        self._id_to_idx: Dict[int, int] = {
-            aid: i for i, aid in enumerate(self.area_ids)
-        }
+        self._id_to_idx: Dict[int, int] = {aid: i for i, aid in enumerate(self.area_ids)}
 
         # ── Compute centroids ──────────────────────────────────────────────
         self.centroids: Dict[int, np.ndarray] = {}
@@ -121,9 +119,7 @@ class NavGraph:
 
         # ── Rasterized grid for O(1) position lookup ───────────────────────
         # Replaces per-step Shapely Point+STRtree+contains in get_area_if_on_mesh.
-        self._grid_cache_path = (
-            cache_path.replace(".npy", "_grid.npy") if cache_path else None
-        )
+        self._grid_cache_path = cache_path.replace(".npy", "_grid.npy") if cache_path else None
         self._build_pos_grid()
 
         # ── Visibility matrix (built in Task 2) ───────────────────────────
@@ -186,9 +182,7 @@ class NavGraph:
 
         import shapely as sh
 
-        nav_mtime = (
-            os.path.getmtime(self._nav_path) if hasattr(self, "_nav_path") else 0
-        )
+        nav_mtime = os.path.getmtime(self._nav_path) if hasattr(self, "_nav_path") else 0
         cache = self._grid_cache_path
 
         if cache and os.path.exists(cache):
@@ -201,9 +195,7 @@ class NavGraph:
                 self._grid_w = int(data["w"])
                 self._grid_h = int(data["h"])
                 self._pos_grid = data["grid"]
-                print(
-                    f"[NavGraph] Loaded position grid {self._grid_w}×{self._grid_h} from cache"
-                )
+                print(f"[NavGraph] Loaded position grid {self._grid_w}×{self._grid_h} from cache")
                 return
 
         all_bounds = np.array([p.bounds for p in self._area_polys])  # (N, 4)
@@ -352,17 +344,13 @@ class NavGraph:
 
         from awpy.data import TRIS_DIR
 
-        nav_mtime = (
-            os.path.getmtime(self._nav_path) if hasattr(self, "_nav_path") else 0
-        )
+        nav_mtime = os.path.getmtime(self._nav_path) if hasattr(self, "_nav_path") else 0
 
         if os.path.exists(self._cache_path):
             cache_mtime = os.path.getmtime(self._cache_path)
             if cache_mtime > nav_mtime:
                 self.vis_matrix = np.load(self._cache_path, mmap_mode="r")
-                print(
-                    f"[NavGraph] Loaded visibility matrix from cache ({self.N}×{self.N})"
-                )
+                print(f"[NavGraph] Loaded visibility matrix from cache ({self.N}×{self.N})")
                 return
 
         tri_path = TRIS_DIR / "de_dust2.tri"
@@ -383,18 +371,13 @@ class NavGraph:
         n_workers = os.cpu_count() or 4
         # ~8 tasks per worker for good load-balancing without excessive IPC overhead
         chunk_size = max(1, self.N // (n_workers * 8))
-        chunks = [
-            list(range(i, min(i + chunk_size, self.N)))
-            for i in range(0, self.N, chunk_size)
-        ]
+        chunks = [list(range(i, min(i + chunk_size, self.N))) for i in range(0, self.N, chunk_size)]
 
         print(
             f"[NavGraph] Building {self.N}×{self.N} vis matrix "
             f"({n_workers} workers, {len(chunks)} chunks)..."
         )
-        print(
-            f"[NavGraph] Workers initialising VisibilityChecker in parallel (~40s)..."
-        )
+        print(f"[NavGraph] Workers initialising VisibilityChecker in parallel (~40s)...")
         t0 = time.time()
 
         partial_rows: dict = {}
@@ -403,17 +386,13 @@ class NavGraph:
             initializer=_vis_worker_init,
             initargs=(str(tri_path),),
         ) as executor:
-            futures = [
-                executor.submit(_vis_compute_rows, chunk, pts) for chunk in chunks
-            ]
+            futures = [executor.submit(_vis_compute_rows, chunk, pts) for chunk in chunks]
             for fut in as_completed(futures):
                 partial_rows.update(fut.result())
                 done = len(partial_rows)
                 elapsed = time.time() - t0
                 eta = (elapsed / done) * (self.N - done) if done else 0
-                print(
-                    f"  [{done}/{self.N} rows] {elapsed:.0f}s elapsed, ETA {eta:.0f}s"
-                )
+                print(f"  [{done}/{self.N} rows] {elapsed:.0f}s elapsed, ETA {eta:.0f}s")
 
         vis = np.zeros((self.N, self.N), dtype=bool)
         for i in range(self.N):
@@ -426,9 +405,7 @@ class NavGraph:
         self.vis_matrix = vis
         np.save(self._cache_path, vis)
         elapsed = time.time() - t0
-        print(
-            f"[NavGraph] Visibility matrix built in {elapsed:.0f}s, cached to {self._cache_path}"
-        )
+        print(f"[NavGraph] Visibility matrix built in {elapsed:.0f}s, cached to {self._cache_path}")
 
 
 # ── SECTION: Constants ─────────────────────────────────────────────────────
@@ -589,9 +566,7 @@ def _select_distinct_spawn_areas(
         if len(selected) >= count:
             return selected
 
-    raise ValueError(
-        f"Failed to select {count} distinct spawn areas from {len(slots)} slots"
-    )
+    raise ValueError(f"Failed to select {count} distinct spawn areas from {len(slots)} slots")
 
 
 def _build_area_adjacency(nav_graph: NavGraph) -> np.ndarray:
@@ -609,9 +584,14 @@ def _build_area_adjacency(nav_graph: NavGraph) -> np.ndarray:
     grid = nav_graph._pos_grid
     height, width = grid.shape
     offsets = (
-        (-1, -1), (-1, 0), (-1, 1),
-        (0, -1),           (0, 1),
-        (1, -1),  (1, 0),  (1, 1),
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
     )
 
     for dy, dx in offsets:
@@ -753,9 +733,7 @@ def _load_dust2_static_data(nav_path: str, cache_path: str):
 
     bombsite_distance_lookup = np.full(max_area_id + 1, np.inf, dtype=np.float32)
     for area_id in nav_graph.area_ids:
-        bombsite_distance_lookup[area_id] = bombsite_area_distance[
-            nav_graph._id_to_idx[area_id]
-        ]
+        bombsite_distance_lookup[area_id] = bombsite_area_distance[nav_graph._id_to_idx[area_id]]
     finite_dist = bombsite_distance_lookup[np.isfinite(bombsite_distance_lookup)]
     bombsite_distance_scale = 0.0
     if finite_dist.size:
@@ -843,6 +821,7 @@ class EnemyMemoryStore:
         self.area.fill(INVALID_AREA_ID)
         self.tick.fill(STALE_MEMORY_TICK)
 
+
 # ── SECTION: Dataclasses ───────────────────────────────────────────────────
 
 
@@ -906,8 +885,8 @@ class SoundEvent:
 
 # ── SECTION: Dust2Env ──────────────────────────────────────────────────────
 
-import pathlib
 import os
+import pathlib
 
 import gymnasium
 from gymnasium import spaces
@@ -925,9 +904,7 @@ def _resolve_nav_path(map_name: str = "de_dust2") -> str:
     ]
 
     if os.name != "nt":
-        candidates.extend(
-            pathlib.Path("/mnt/c/Users").glob(f"*/.awpy/navs/{map_name}.json")
-        )
+        candidates.extend(pathlib.Path("/mnt/c/Users").glob(f"*/.awpy/navs/{map_name}.json"))
 
     for candidate in candidates:
         if candidate.exists():
@@ -944,9 +921,7 @@ class Dust2Env(ParallelEnv):
     metadata = {"name": "dust2_v0", "render_modes": []}
     render_mode = None
 
-    def __init__(
-        self, nav_path=NAV_PATH, cache_path=CACHE_PATH, record_fn=None, team_spirit=None
-    ):
+    def __init__(self, nav_path=NAV_PATH, cache_path=CACHE_PATH, record_fn=None, team_spirit=None):
         super().__init__()
         static = _load_dust2_static_data(nav_path, cache_path)
         self.nav_graph = static["nav_graph"]
@@ -1161,8 +1136,7 @@ class Dust2Env(ParallelEnv):
                 obs[base + 4] = en.hp / 100.0 if en.alive else 0.0
                 obs[base + 5] = 1.0 if can_see else 0.0
                 freshness = (
-                    max(0, ENEMY_MEMORY_TICKS - (s.tick - last_tick))
-                    / ENEMY_MEMORY_TICKS
+                    max(0, ENEMY_MEMORY_TICKS - (s.tick - last_tick)) / ENEMY_MEMORY_TICKS
                     if last_tick >= 0
                     else 0.0
                 )
@@ -1255,12 +1229,11 @@ class Dust2Env(ParallelEnv):
             agent.facing = _DIR_FACING[move_dir]
 
             # Find target area — only accept moves that land inside the nav mesh
-            target_area, on_mesh = self.nav_graph.get_area_if_on_mesh(
-                (target_x, target_y)
+            target_area, on_mesh = self.nav_graph.get_area_if_on_mesh((target_x, target_y))
+            can_move = (
+                on_mesh
+                and area_adjacency[area_id_to_idx[agent.area_id], area_id_to_idx[target_area]]
             )
-            can_move = on_mesh and area_adjacency[
-                area_id_to_idx[agent.area_id], area_id_to_idx[target_area]
-            ]
 
             if can_move:
                 agent.pos[0] = target_x
@@ -1427,9 +1400,7 @@ class Dust2Env(ParallelEnv):
             self._update_enemy_memory(agent, s, _vis10)
 
         # Compute outputs
-        self.agents = [
-            aid for i, aid in enumerate(self.possible_agents) if s.agents[i].alive
-        ]
+        self.agents = [aid for i, aid in enumerate(self.possible_agents) if s.agents[i].alive]
 
         # Build obs context (alive counts + vis10 already built above, reuse it)
         alive_t = t_alive / TEAM_SIZE
@@ -1477,9 +1448,7 @@ class Dust2Env(ParallelEnv):
         # Use the process-safe shared value when available (set by train.py's daemon
         # thread via multiprocessing.Value so all SF worker processes see the same τ).
         _ts = (
-            self._team_spirit_shared.value
-            if self._team_spirit_shared is not None
-            else _TEAM_SPIRIT
+            self._team_spirit_shared.value if self._team_spirit_shared is not None else _TEAM_SPIRIT
         )
         if _ts > 0.0:
             for team in (0, 1):
@@ -1593,7 +1562,9 @@ class Dust2Env(ParallelEnv):
                         bomb_progress = -bomb_progress
 
         return (
-            (alive_t - alive_o) * 0.3 + (hp_t - hp_o) / 500.0 + (site_t - site_o) * 0.2
+            (alive_t - alive_o) * 0.3
+            + (hp_t - hp_o) / 500.0
+            + (site_t - site_o) * 0.2
             + bomb_progress
         )
 
@@ -1645,9 +1616,7 @@ if __name__ == "__main__":
     if "--test-navgraph" in sys.argv:
         nav = NavGraph(NAV_PATH)
         assert nav.graph is not None, "graph not built"
-        assert len(nav.graph.nodes) > 100, (
-            f"expected >100 nodes, got {len(nav.graph.nodes)}"
-        )
+        assert len(nav.graph.nodes) > 100, f"expected >100 nodes, got {len(nav.graph.nodes)}"
         assert len(nav.wall_segments) > 0, "no wall segments extracted"
         print(
             f"NavGraph test PASSED — {len(nav.graph.nodes)} nodes, "
@@ -1659,9 +1628,7 @@ if __name__ == "__main__":
         nav.build_vis_matrix()
         assert nav.vis_matrix is not None
         assert nav.vis_matrix.shape == (nav.N, nav.N)
-        assert np.array_equal(nav.vis_matrix, nav.vis_matrix.T), (
-            "vis matrix not symmetric"
-        )
+        assert np.array_equal(nav.vis_matrix, nav.vis_matrix.T), "vis matrix not symmetric"
         assert nav.vis_matrix[0, 0] == True
         true_frac = nav.vis_matrix.sum() / nav.vis_matrix.size
         assert 0.005 < true_frac < 0.95, f"suspicious vis fraction: {true_frac:.2f}"
@@ -1682,21 +1649,17 @@ if __name__ == "__main__":
         env = Dust2Env()
         obs, _ = env.reset(seed=0)
         initial_pos = {
-            aid: env.state.agents[i].pos.copy()
-            for i, aid in enumerate(env.possible_agents)
+            aid: env.state.agents[i].pos.copy() for i, aid in enumerate(env.possible_agents)
         }
 
         # Action: move North (action[0]=1) for all agents
         actions = {aid: np.array([1, 0, 0, 0]) for aid in env.agents}
         obs, rewards, terms, truncs, infos = env.step(actions)
 
-        moved_pos = {
-            aid: env.state.agents[i].pos for i, aid in enumerate(env.possible_agents)
-        }
+        moved_pos = {aid: env.state.agents[i].pos for i, aid in enumerate(env.possible_agents)}
 
         any_moved = any(
-            not np.allclose(initial_pos[aid], moved_pos[aid])
-            for aid in env.possible_agents
+            not np.allclose(initial_pos[aid], moved_pos[aid]) for aid in env.possible_agents
         )
         assert any_moved, "No agents moved after movement action"
 
@@ -1774,9 +1737,9 @@ if __name__ == "__main__":
         initial_ct0_hp = ct0_agent.hp
         env.step(actions)
 
-        assert (
-            env.state.agents[5].hp < initial_ct0_hp or not env.state.agents[5].alive
-        ), "Shooting in same area should deal damage"
+        assert env.state.agents[5].hp < initial_ct0_hp or not env.state.agents[5].alive, (
+            "Shooting in same area should deal damage"
+        )
 
         print("Shoot test PASSED")
 

@@ -4,11 +4,11 @@
 #include <math.h>
 
 /* ── Constants ───────────────────────────────────────────────────────────── */
-#define TEAM_SIZE          5
-#define N_AGENTS           10
-#define OBS_DIM            71
-#define ACTION_DIM         4
-#define INVALID_AREA_IDX   (-1)
+#define TEAM_SIZE 5
+#define N_AGENTS 10
+#define OBS_DIM 71
+#define ACTION_DIM 4
+#define INVALID_AREA_IDX (-1)
 
 /* ── Static data (owned by Python numpy arrays, pointer shared across instances) ── */
 typedef struct {
@@ -42,37 +42,39 @@ typedef struct {
     float    delta_x[9];
     float    delta_y[9];
     float    dir_facing[9];
-    int32_t  t_spawns[15];   int n_t_spawns;
-    int32_t  ct_spawns[5];   int n_ct_spawns;
+    int32_t  t_spawns[15];
+    int      n_t_spawns;
+    int32_t  ct_spawns[5];
+    int      n_ct_spawns;
 } StaticData;
 
 /* ── Per-agent state ── */
 typedef struct {
-    float    x, y, z;
-    int32_t  area_idx;           /* 0-based index; INVALID_AREA_IDX=-1            */
-    float    facing;             /* radians, 0=+X                                 */
-    int32_t  hp;
-    int32_t  shoot_cd;
-    int8_t   alive;
-    int8_t   has_bomb;
-    int8_t   has_kit;
-    int8_t   team;               /* 0=T, 1=CT                                     */
-    int8_t   is_moving;          /* set by movement; read by sound system          */
-    int8_t   fired_this_tick;    /* set by shoot; read by sound system             */
-    int32_t  enemy_mem_idx[5];   /* area_idx of last known pos; INVALID_AREA_IDX  */
-    int32_t  enemy_mem_tick[5];  /* tick when recorded; STALE_MEMORY_TICK=-9999   */
+    float   x, y, z;
+    int32_t area_idx; /* 0-based index; INVALID_AREA_IDX=-1            */
+    float   facing;   /* radians, 0=+X                                 */
+    int32_t hp;
+    int32_t shoot_cd;
+    int8_t  alive;
+    int8_t  has_bomb;
+    int8_t  has_kit;
+    int8_t  team;              /* 0=T, 1=CT                                     */
+    int8_t  is_moving;         /* set by movement; read by sound system          */
+    int8_t  fired_this_tick;   /* set by shoot; read by sound system             */
+    int32_t enemy_mem_idx[5];  /* area_idx of last known pos; INVALID_AREA_IDX  */
+    int32_t enemy_mem_tick[5]; /* tick when recorded; STALE_MEMORY_TICK=-9999   */
 } AgentState;
 
 /* ── Game state ── */
 typedef struct {
     int32_t    tick;
     int32_t    round_ticks_left;
-    AgentState agents[10];        /* agents[0..4]=T, agents[5..9]=CT              */
+    AgentState agents[10]; /* agents[0..4]=T, agents[5..9]=CT              */
     int8_t     bomb_planted;
     int8_t     round_over;
-    int32_t    winner;            /* 0=T, 1=CT, -1=ongoing                        */
-    int32_t    bomb_carrier_id;   /* agent index 0-4 (T side only)                */
-    int32_t    bomb_area_idx;     /* INVALID_AREA_IDX until planted               */
+    int32_t    winner;          /* 0=T, 1=CT, -1=ongoing                        */
+    int32_t    bomb_carrier_id; /* agent index 0-4 (T side only)                */
+    int32_t    bomb_area_idx;   /* INVALID_AREA_IDX until planted               */
     float      bomb_x, bomb_y, bomb_z;
     int32_t    bomb_ticks_left;
     int32_t    bomb_being_planted_by; /* agent index or -1 */
@@ -104,7 +106,7 @@ typedef struct {
 
 /* ── Full environment (one per parallel instance) ── */
 typedef struct {
-    StaticData* sd;                    /* shared pointer, never freed by C        */
+    StaticData* sd; /* shared pointer, never freed by C        */
     GameState   game;
     StepStats   step_stats;
     StepStats   episode_stats;

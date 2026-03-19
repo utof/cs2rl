@@ -1,15 +1,18 @@
 """Wrapper smoke test — env init, reset, step return correct shapes."""
+
 import numpy as np
 import pytest
 
 
 def test_import_wrapper():
     from c_env.wrapper import Dust2CEnv, build_static_data
+
     assert Dust2CEnv is not None
 
 
 def test_reset_returns_10_obs():
     from c_env.wrapper import make_env
+
     env = make_env(seed=0)
     obs, info = env.reset()
     assert obs.shape == (10, 71)
@@ -17,6 +20,7 @@ def test_reset_returns_10_obs():
 
 def test_step_returns_shapes():
     from c_env.wrapper import make_env
+
     env = make_env(seed=0)
     env.reset()
     actions = np.zeros((10, 4), dtype=np.int32)
@@ -27,6 +31,7 @@ def test_step_returns_shapes():
 
 def test_snapshot_state_exposes_agents():
     from c_env.wrapper import make_env
+
     env = make_env(seed=0, auto_reset=False)
     env.reset()
     state = env.snapshot_state()
@@ -37,6 +42,7 @@ def test_snapshot_state_exposes_agents():
 def test_make_env_honors_external_buffers():
     import gymnasium
     import pufferlib
+
     from c_env.wrapper import make_env
 
     single_obs = gymnasium.spaces.Box(low=-1.0, high=1.0, shape=(71,), dtype=np.float32)

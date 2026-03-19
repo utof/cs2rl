@@ -1,9 +1,9 @@
-from collections import deque
 import math
+from collections import deque
 
 import numpy as np
 
-from sim import BOMB_PLANT_TIME, Dust2Env, LASER_RANGE, TEAM_SIZE, _DELTA_VECTORS
+from sim import _DELTA_VECTORS, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE, Dust2Env
 
 
 def _bfs_area_path(env: Dust2Env, start_area: int, goal_areas) -> list[int]:

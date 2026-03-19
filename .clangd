@@ -1,0 +1,8 @@
+CompileFlags:
+  Add:
+    - -xc
+    - -std=c99
+    - -Ic_env
+Diagnostics:
+  ClangTidy:
+    FastCheckFilter: Strict

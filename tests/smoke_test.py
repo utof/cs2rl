@@ -1,18 +1,20 @@
 """Smoke test for C environment — asserts SPS, shapes, no NaN."""
+
 import time
-import numpy as np
-import pytest
 from pathlib import Path
+
+import numpy as np
 
 
 def test_c_env_smoke():
     from c_env.wrapper import make_env
 
-    so  = Path("c_env/dust2_env.so")
+    so = Path("c_env/dust2_env.so")
     src = Path("c_env/dust2_env.c")
     assert so.exists(), "dust2_env.so missing — run make -C c_env/"
-    assert so.stat().st_mtime >= src.stat().st_mtime, \
+    assert so.stat().st_mtime >= src.stat().st_mtime, (
         "dust2_env.so is older than dust2_env.c — run make -C c_env/"
+    )
 
     env = make_env(seed=42)
     obs, _ = env.reset()
@@ -23,8 +25,8 @@ def test_c_env_smoke():
     actions = np.zeros((10, 4), dtype=np.int32)
     for step in range(256):
         obs, rew, terms, truncs, _ = env.step(actions)
-        assert np.isfinite(obs).all(),  f"NaN/Inf in obs at warmup step {step}"
-        assert np.isfinite(rew).all(),  f"NaN/Inf in rewards at warmup step {step}"
+        assert np.isfinite(obs).all(), f"NaN/Inf in obs at warmup step {step}"
+        assert np.isfinite(rew).all(), f"NaN/Inf in rewards at warmup step {step}"
 
     steps = 20_000
     t0 = time.perf_counter()
