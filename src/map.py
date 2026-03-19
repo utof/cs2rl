@@ -166,15 +166,28 @@ def make_cs2_map(nav_path: str, cache_path: str) -> MapData:
 # ── Simple map definition ────────────────────────────────────────────────────
 # Each room: (area_idx, x0, y0, x1, y1)  — coordinates are world-space floats.
 SIMPLE_ROOMS = [
-    (0, 0, 0, 400, 300),  # T spawn
-    (1, 400, 0, 800, 300),  # mid corridor
-    (2, 800, 0, 1200, 300),  # bombsite A
-    (3, 400, 300, 800, 600),  # CT spawn
-    (4, 0, 300, 400, 600),  # flank
+    # T-spawn cluster (areas 0–4) — placed ABOVE the approach corridor (y > 384)
+    (0, 0, 416, 256, 672),  # T-spawn-A
+    (1, 256, 416, 512, 672),  # T-spawn-B
+    (2, 0, 672, 256, 928),  # T-spawn-C
+    (3, 256, 672, 512, 928),  # T-spawn-D
+    (4, 0, 928, 512, 1184),  # T-spawn-E
+    # T-side approach corridor — narrow horizontal band
+    (5, 400, 192, 800, 416),  # T-corridor
+    # Bombsite — narrow horizontal band matching corridor height
+    (6, 800, 192, 1100, 416),  # Bombsite
+    # CT-side approach corridor — narrow horizontal band
+    (7, 1100, 192, 1500, 416),  # CT-corridor
+    # CT-spawn cluster (areas 8–12) — placed ABOVE the approach corridor (y > 416)
+    (8, 1500, 416, 1756, 672),  # CT-spawn-A
+    (9, 1756, 416, 2012, 672),  # CT-spawn-B
+    (10, 1500, 672, 1756, 928),  # CT-spawn-C
+    (11, 1756, 672, 2012, 928),  # CT-spawn-D
+    (12, 1500, 928, 2012, 1184),  # CT-spawn-E
 ]
-SIMPLE_T_SPAWNS = [0]  # area_idx (== area_id for simple maps)
-SIMPLE_CT_SPAWNS = [3]
-SIMPLE_BOMBSITES = [2]
+SIMPLE_T_SPAWNS = [0, 1, 2, 3, 4]
+SIMPLE_CT_SPAWNS = [8, 9, 10, 11, 12]
+SIMPLE_BOMBSITES = [6]
 
 
 def make_simple_map(

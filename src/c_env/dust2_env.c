@@ -108,8 +108,27 @@ void env_reset(Dust2Env* env) {
 
     int bomb_carrier = (int)(xorshift32(&env->rng) % TEAM_SIZE);
 
+    /* Build a shuffled index list for T-spawns so each agent gets a unique area
+       when n_t_spawns >= TEAM_SIZE. */
+    int t_perm[TEAM_SIZE];
+    for (int i = 0; i < TEAM_SIZE; i++)
+        t_perm[i] = i;
+    if (sd->n_t_spawns >= TEAM_SIZE) {
+        for (int i = TEAM_SIZE - 1; i > 0; i--) {
+            int j     = (int)(xorshift32(&env->rng) % (i + 1));
+            int tmp   = t_perm[i];
+            t_perm[i] = t_perm[j];
+            t_perm[j] = tmp;
+        }
+    }
+
     for (int i = 0; i < TEAM_SIZE; i++) {
-        int         sidx     = (int)(xorshift32(&env->rng) % sd->n_t_spawns);
+        int sidx;
+        if (sd->n_t_spawns >= TEAM_SIZE) {
+            sidx = t_perm[i];
+        } else {
+            sidx = (int)(xorshift32(&env->rng) % sd->n_t_spawns);
+        }
         int         area_idx = sd->t_spawns[sidx];
         AgentState* a        = &g->agents[i];
 
@@ -129,8 +148,26 @@ void env_reset(Dust2Env* env) {
         }
     }
 
+    /* Build a shuffled index list for CT-spawns similarly. */
+    int ct_perm[TEAM_SIZE];
+    for (int i = 0; i < TEAM_SIZE; i++)
+        ct_perm[i] = i;
+    if (sd->n_ct_spawns >= TEAM_SIZE) {
+        for (int i = TEAM_SIZE - 1; i > 0; i--) {
+            int j      = (int)(xorshift32(&env->rng) % (i + 1));
+            int tmp    = ct_perm[i];
+            ct_perm[i] = ct_perm[j];
+            ct_perm[j] = tmp;
+        }
+    }
+
     for (int i = 0; i < TEAM_SIZE; i++) {
-        int         sidx     = (int)(xorshift32(&env->rng) % sd->n_ct_spawns);
+        int sidx;
+        if (sd->n_ct_spawns >= TEAM_SIZE) {
+            sidx = ct_perm[i];
+        } else {
+            sidx = (int)(xorshift32(&env->rng) % sd->n_ct_spawns);
+        }
         int         area_idx = sd->ct_spawns[sidx];
         AgentState* a        = &g->agents[TEAM_SIZE + i];
 
