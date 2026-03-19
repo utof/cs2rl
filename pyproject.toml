@@ -12,7 +12,6 @@ dependencies = [
     "pettingzoo>=1.24.0",
     "pufferlib>=3.0.0",
     "rerun-sdk>=0.21.0",
-    "sample-factory[pettingzoo-envs]",
     "shapely>=2.0.4",
 ]
 
@@ -23,16 +22,10 @@ dev = [
 ]
 
 [tool.uv]
-# sample-factory 2.1.1 metadata says numpy<2.0 but works fine with numpy 2.x;
-# override the numpy upper bound so it is compatible with awpy>=2.0.2
+# Keep numpy>=2 available for the current awpy stack in this repo.
 override-dependencies = [
     "numpy>=2.0.0",
 ]
-
-[tool.uv.sources]
-# PyPI 2.1.1 omits pettingzoo_envs.py; use git source at 2.1.3 commit until a fixed PyPI release.
-# To update: check PyPI for sample-factory with pettingzoo-envs extra, then remove this git source.
-sample-factory = { git = "https://github.com/alex-petrenko/sample-factory.git", rev = "8b354943a8b04e2fbb7c7c8f35ea3fed195dd631" }
 
 [tool.ruff]
 line-length = 100
