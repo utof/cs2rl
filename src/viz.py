@@ -127,10 +127,9 @@ def log_simple_map(map_data):
     Called once at recording startup when map_data is not the real dust2 map.
     Toggle map/rooms in the Rerun entity tree.
     """
-    import importlib
+    from map import SIMPLE_ROOMS
 
-    rooms_mod = importlib.import_module("map")
-    rooms = rooms_mod.SIMPLE_ROOMS  # list of (idx, x0, y0, x1, y1)
+    rooms = SIMPLE_ROOMS  # list of (idx, x0, y0, x1, y1)
 
     t_spawns = set(map_data.t_spawn_areas)
     ct_spawns = set(map_data.ct_spawn_areas)
