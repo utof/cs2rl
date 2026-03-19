@@ -121,6 +121,69 @@ def log_navmesh(nav_graph):
     rr.log("map/sites/b", rr.Points3D([[-1530, 2600, 5]], colors=[[255, 120, 0]], radii=[60]))
 
 
+def log_simple_map(map_data):
+    """Log simple-map room rectangles as flat floor quads + site/spawn markers.
+
+    Called once at recording startup when map_data is not the real dust2 map.
+    Toggle map/rooms in the Rerun entity tree.
+    """
+    import importlib
+
+    rooms_mod = importlib.import_module("map")
+    rooms = rooms_mod.SIMPLE_ROOMS  # list of (idx, x0, y0, x1, y1)
+
+    t_spawns = set(map_data.t_spawn_areas)
+    ct_spawns = set(map_data.ct_spawn_areas)
+    bombsites = set(int(i) for i, v in enumerate(map_data.bombsite_by_idx) if v)
+
+    vertices = []
+    triangles = []
+    colors = []
+    base = 0
+
+    for idx, x0, y0, x1, y1 in rooms:
+        z = 0.0
+        quad = [
+            [x0, y0, z],
+            [x1, y0, z],
+            [x1, y1, z],
+            [x0, y1, z],
+        ]
+        vertices.extend(quad)
+        triangles.append([base, base + 1, base + 2])
+        triangles.append([base, base + 2, base + 3])
+        if idx in t_spawns:
+            c = [180, 80, 80]  # red tint — T-side
+        elif idx in ct_spawns:
+            c = [80, 80, 180]  # blue tint — CT-side
+        elif idx in bombsites:
+            c = [200, 140, 40]  # orange — bombsite
+        else:
+            c = [100, 110, 100]  # grey — corridor/mid
+        colors.extend([c, c, c, c])
+        base += 4
+
+    rr.log(
+        "map/rooms",
+        rr.Mesh3D(
+            vertex_positions=np.array(vertices, dtype=np.float32),
+            triangle_indices=np.array(triangles, dtype=np.uint32),
+            vertex_colors=np.array(colors, dtype=np.uint8),
+        ),
+    )
+
+    # Bombsite markers
+    for i, v in enumerate(map_data.bombsite_by_idx):
+        if v:
+            cx, cy = float(map_data.centroids[i, 0]), float(map_data.centroids[i, 1])
+            rr.log(
+                "map/sites/bombsite",
+                rr.Points3D([[cx, cy, 10]], colors=[[255, 120, 0]], radii=[40]),
+            )
+
+    print(f"[viz] Logged {len(rooms)} simple-map rooms to map/rooms")
+
+
 def log_tick(game_state, tick: int, rewards: dict):
     # rerun 0.30.2 API: rr.set_time(timeline, sequence=value)
     rr.set_time("tick", sequence=tick)

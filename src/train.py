@@ -252,7 +252,9 @@ def record_episode(
         log_trimap()
         log_navmesh(static["nav_graph"])
     else:
-        print("[Record] Simple map — skipping 3D geometry (no awpy nav graph)")
+        from viz import log_simple_map
+
+        log_simple_map(env.map_data)
 
     obs, _ = env.reset(seed=seed)
 
