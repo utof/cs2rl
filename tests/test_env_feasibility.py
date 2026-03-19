@@ -1,14 +1,21 @@
-import math
+# tests/test_env_feasibility.py
 from collections import deque
 
 import numpy as np
 
-from sim import _DELTA_VECTORS, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE, Dust2Env
+from c_env.wrapper import make_env
+from sim import _DELTA_VECTORS, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
 
 
-def _bfs_area_path(env: Dust2Env, start_area: int, goal_areas) -> list[int]:
+def _bombsite_areas(env):
+    return {
+        int(aid) for i, aid in enumerate(env.map_data.area_ids) if env.map_data.bombsite_by_idx[i]
+    }
+
+
+def _bfs_area_path(nav_graph, adjacency, start_area: int, goal_areas) -> list[int]:
     goal_areas = set(goal_areas)
-    id_to_idx = env.nav_graph._id_to_idx
+    id_to_idx = nav_graph._id_to_idx
     q = deque([start_area])
     prev = {start_area: None}
     found = None
@@ -18,10 +25,9 @@ def _bfs_area_path(env: Dust2Env, start_area: int, goal_areas) -> list[int]:
         if cur in goal_areas:
             found = cur
             break
-
         cur_idx = id_to_idx[cur]
-        for nbr_idx in np.flatnonzero(env._area_adjacency[cur_idx]):
-            nbr_area = env.nav_graph.area_ids[int(nbr_idx)]
+        for nbr_idx in np.flatnonzero(adjacency[cur_idx]):
+            nbr_area = nav_graph.area_ids[int(nbr_idx)]
             if nbr_area == cur or nbr_area in prev:
                 continue
             prev[nbr_area] = cur
@@ -39,58 +45,54 @@ def _bfs_area_path(env: Dust2Env, start_area: int, goal_areas) -> list[int]:
     return path
 
 
-def _step_state(env: Dust2Env, state, move: int):
+def _step_state(nav_graph, adjacency, state, move: int):
     area_id, x, y = state
     delta = _DELTA_VECTORS[move]
     tx = x + float(delta[0])
     ty = y + float(delta[1])
-    target_area, on_mesh = env.nav_graph.get_area_if_on_mesh((tx, ty))
+    target_area, on_mesh = nav_graph.get_area_if_on_mesh((tx, ty))
     if not on_mesh:
         return None
-
-    i = env.nav_graph._id_to_idx[area_id]
-    j = env.nav_graph._id_to_idx[target_area]
-    if not env._area_adjacency[i, j]:
+    i = nav_graph._id_to_idx[area_id]
+    j = nav_graph._id_to_idx[target_area]
+    if not adjacency[i, j]:
         return None
-
     return target_area, round(tx, 3), round(ty, 3)
 
 
-def _plan_transition(env: Dust2Env, start_state, target_area: int, max_depth: int = 32):
+def _plan_transition(nav_graph, adjacency, start_state, target_area: int, max_depth: int = 32):
     q = deque([(start_state, [])])
     seen = {start_state}
-
     while q:
         state, path = q.popleft()
         if state[0] == target_area:
             return path, state
         if len(path) >= max_depth:
             continue
-
         for move in range(1, 9):
-            nxt = _step_state(env, state, move)
+            nxt = _step_state(nav_graph, adjacency, state, move)
             if nxt is None or nxt in seen:
                 continue
             seen.add(nxt)
             q.append((nxt, path + [move]))
-
     return None, None
 
 
-def _plan_route_to_bombsite(env: Dust2Env, bomber_idx: int):
-    bomber = env.state.agents[bomber_idx]
-    start_state = (
-        bomber.area_id,
-        round(float(bomber.pos[0]), 3),
-        round(float(bomber.pos[1]), 3),
-    )
-    area_path = _bfs_area_path(env, bomber.area_id, env.bombsite_areas)
-    assert area_path, f"No executable area path from spawn area {bomber.area_id}"
+def _plan_route_to_bombsite(env, bomber_idx: int):
+    nav_graph = env.nav_graph
+    adjacency = env.map_data.adjacency
+    bombsites = _bombsite_areas(env)
+    ca = env._c_env.game.agents[bomber_idx]
+    area_id = int(env.map_data.area_ids[ca.area_idx])
+    start_state = (area_id, round(float(ca.x), 3), round(float(ca.y), 3))
+
+    area_path = _bfs_area_path(nav_graph, adjacency, area_id, bombsites)
+    assert area_path, f"No executable area path from spawn area {area_id}"
 
     cur_state = start_state
     all_moves = []
     for target_area in area_path[1:]:
-        moves, cur_state = _plan_transition(env, cur_state, target_area)
+        moves, cur_state = _plan_transition(nav_graph, adjacency, cur_state, target_area)
         assert moves is not None, f"Failed local transition {cur_state[0]} -> {target_area}"
         all_moves.extend(moves)
 
@@ -98,63 +100,76 @@ def _plan_route_to_bombsite(env: Dust2Env, bomber_idx: int):
 
 
 def test_spawn_areas_are_distinct_and_site_reachable():
-    env = Dust2Env()
-    env.reset(seed=42)
+    env = make_env()
+    env.reset()
+    nav_graph = env.nav_graph
+    adjacency = env.map_data.adjacency
+    bombsites = _bombsite_areas(env)
+    t_spawn_areas = env.map_data.t_spawn_areas
+    ct_spawn_areas = env.map_data.ct_spawn_areas
 
-    assert len(env.t_spawn_areas) == TEAM_SIZE
-    assert len(env.ct_spawn_areas) == TEAM_SIZE
-    assert len(set(env.t_spawn_areas)) == TEAM_SIZE
-    assert len(set(env.ct_spawn_areas)) == TEAM_SIZE
+    assert len(t_spawn_areas) == TEAM_SIZE
+    assert len(ct_spawn_areas) == TEAM_SIZE
+    assert len(set(t_spawn_areas)) == TEAM_SIZE
+    assert len(set(ct_spawn_areas)) == TEAM_SIZE
 
-    for spawn_area in env.t_spawn_areas:
-        path = _bfs_area_path(env, spawn_area, env.bombsite_areas)
+    for spawn_area in t_spawn_areas:
+        path = _bfs_area_path(nav_graph, adjacency, spawn_area, bombsites)
         assert path, f"T spawn area {spawn_area} cannot reach any bombsite"
+
+    env.close()
 
 
 def test_scripted_bomber_can_reach_site_and_plant():
-    env = Dust2Env()
-    env.reset(seed=42)
-
-    for agent in env.state.agents:
-        agent.has_bomb = False
+    env = make_env()
+    env.reset()
+    bombsites = _bombsite_areas(env)
 
     bomber_idx = 4
-    env.state.bomb_carrier_id = bomber_idx
-    env.state.agents[bomber_idx].has_bomb = True
+    for i in range(10):
+        env._c_env.game.agents[i].has_bomb = 0
+    env._c_env.game.agents[bomber_idx].has_bomb = 1
+    env._c_env.game.bomb_carrier_id = bomber_idx
 
     moves, final_site_area = _plan_route_to_bombsite(env, bomber_idx)
-    assert len(moves) < env.state.round_ticks_left, "Route exceeds round budget"
+    assert len(moves) < env._c_env.game.round_ticks_left, "Route exceeds round budget"
 
     for move in moves:
-        actions = {aid: np.array([0, 0, 0, 0], dtype=np.int64) for aid in env.agents}
-        actions[f"t{bomber_idx}"][0] = move
+        actions = np.zeros((10, 4), dtype=np.int64)
+        actions[bomber_idx, 0] = move
         env.step(actions)
 
-    assert env.state.agents[bomber_idx].area_id == final_site_area
-    assert env.state.agents[bomber_idx].area_id in env.bombsite_areas
+    bomber = env._c_env.game.agents[bomber_idx]
+    assert int(env.map_data.area_ids[bomber.area_idx]) == final_site_area
+    assert int(env.map_data.area_ids[bomber.area_idx]) in bombsites
 
     for _ in range(BOMB_PLANT_TIME):
-        actions = {aid: np.array([0, 0, 0, 0], dtype=np.int64) for aid in env.agents}
-        actions[f"t{bomber_idx}"][2] = 1
-        _, _, _, _, infos = env.step(actions)
-        if env.state.bomb_planted:
+        actions = np.zeros((10, 4), dtype=np.int64)
+        actions[bomber_idx, 2] = 1
+        env.step(actions)
+        if env._c_env.game.bomb_planted:
             break
 
-    assert env.state.bomb_planted, "Bomber failed to plant after reaching bombsite"
-    assert infos[f"t{bomber_idx}"]["bomb_planted"] == 1
+    assert env._c_env.game.bomb_planted, "Bomber failed to plant after reaching bombsite"
+    env.close()
 
 
 def test_controlled_visible_agents_can_kill():
-    env = Dust2Env()
-    env.reset(seed=1)
+    import math
+
+    env = make_env(auto_reset=False)
+    env.reset()
+    nav_graph = env.nav_graph
+    id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
 
     pair = None
-    for i, area_i in enumerate(env.nav_graph.area_ids[:400]):
-        for area_j in env.nav_graph.area_ids[i + 1 : i + 200]:
-            if not env.nav_graph.can_see(area_i, area_j):
+    area_ids = nav_graph.area_ids
+    for i, area_i in enumerate(area_ids[:400]):
+        for area_j in area_ids[i + 1 : i + 200]:
+            if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
                 continue
-            dx = env.nav_graph.centroids[area_j][0] - env.nav_graph.centroids[area_i][0]
-            dy = env.nav_graph.centroids[area_j][1] - env.nav_graph.centroids[area_i][1]
+            dx = nav_graph.centroids[area_j][0] - nav_graph.centroids[area_i][0]
+            dy = nav_graph.centroids[area_j][1] - nav_graph.centroids[area_i][1]
             dist = float((dx * dx + dy * dy) ** 0.5)
             if 50 < dist < LASER_RANGE * 0.5:
                 pair = (area_i, area_j)
@@ -165,67 +180,82 @@ def test_controlled_visible_agents_can_kill():
     assert pair is not None, "Failed to find a visible test pair"
     area_t, area_ct = pair
 
-    for agent in env.state.agents:
-        agent.alive = False
-        agent.hp = 0
+    for i in range(10):
+        ca = env._c_env.game.agents[i]
+        ca.alive = 0
+        ca.hp = 0
 
-    t_agent = env.state.agents[0]
-    ct_agent = env.state.agents[5]
-    t_centroid = env.nav_graph.areas[area_t].centroid
-    ct_centroid = env.nav_graph.areas[area_ct].centroid
+    t_centroid = nav_graph.centroids[area_t]
+    ct_centroid = nav_graph.centroids[area_ct]
 
-    t_agent.alive = True
+    t_agent = env._c_env.game.agents[0]
+    ct_agent = env._c_env.game.agents[5]
+
+    t_agent.alive = 1
     t_agent.hp = 100
-    t_agent.area_id = area_t
-    t_agent.pos[:] = (t_centroid.x, t_centroid.y, t_centroid.z)
-    ct_agent.alive = True
+    t_agent.area_idx = id2idx[area_t]
+    t_agent.x = float(t_centroid[0])
+    t_agent.y = float(t_centroid[1])
+    t_agent.z = 0.0
+
+    ct_agent.alive = 1
     ct_agent.hp = 100
-    ct_agent.area_id = area_ct
-    ct_agent.pos[:] = (ct_centroid.x, ct_centroid.y, ct_centroid.z)
+    ct_agent.area_idx = id2idx[area_ct]
+    ct_agent.x = float(ct_centroid[0])
+    ct_agent.y = float(ct_centroid[1])
+    ct_agent.z = 0.0
 
-    t_agent.facing = math.atan2(ct_agent.pos[1] - t_agent.pos[1], ct_agent.pos[0] - t_agent.pos[0])
-    ct_agent.facing = math.atan2(t_agent.pos[1] - ct_agent.pos[1], t_agent.pos[0] - ct_agent.pos[0])
+    t_agent.facing = math.atan2(ct_agent.y - t_agent.y, ct_agent.x - t_agent.x)
+    ct_agent.facing = math.atan2(t_agent.y - ct_agent.y, t_agent.x - ct_agent.x)
 
-    actions = {
-        "t0": np.array([0, 1, 0, 0], dtype=np.int64),
-        "ct0": np.array([0, 0, 0, 0], dtype=np.int64),
-    }
-    _, rewards, _, _, infos = env.step(actions)
+    actions = np.zeros((10, 4), dtype=np.int64)
+    actions[0, 1] = 1  # t0 shoots
+    _, rewards, _, _, _ = env.step(actions)
 
-    assert not env.state.agents[5].alive
-    assert infos["t0"]["kills_t"] == 1
-    assert rewards["t0"] > 0
+    assert not bool(env._c_env.game.agents[5].alive)
+    assert rewards[0] > 0
+
+    env.close()
 
 
 def test_fixed_seed_agents_can_leave_spawn():
-    env = Dust2Env()
-    env.reset(seed=42)
+    env = make_env()
+    env.reset()
+    nav_graph = env.nav_graph
+    adjacency = env.map_data.adjacency
+    bombsites = _bombsite_areas(env)
+    t_spawn_areas = env.map_data.t_spawn_areas
 
-    for agent_idx, agent in enumerate(env.state.agents):
-        if agent.team == 0:
-            goals = env.bombsite_areas
-            aid = f"t{agent_idx}"
+    for agent_idx in range(10):
+        ca = env._c_env.game.agents[agent_idx]
+        area_id = int(env.map_data.area_ids[ca.area_idx])
+        start_x, start_y = float(ca.x), float(ca.y)
+
+        if agent_idx < TEAM_SIZE:
+            goals = bombsites
         else:
-            goals = env.t_spawn_areas
-            aid = f"ct{agent_idx - TEAM_SIZE}"
+            goals = set(t_spawn_areas)
 
-        path = _bfs_area_path(env, agent.area_id, goals)
-        assert len(path) >= 2, f"No route out of spawn for {aid}"
+        path = _bfs_area_path(nav_graph, adjacency, area_id, goals)
+        assert len(path) >= 2, f"No route out of spawn for agent {agent_idx}"
 
-        start_area = agent.area_id
-        start_pos = agent.pos.copy()
-        state = (start_area, round(float(start_pos[0]), 3), round(float(start_pos[1]), 3))
-        moves, _ = _plan_transition(env, state, path[1], max_depth=16)
-        assert moves, f"No local exit plan from spawn for {aid}"
+        start_state = (area_id, round(start_x, 3), round(start_y, 3))
+        moves, _ = _plan_transition(nav_graph, adjacency, start_state, path[1], max_depth=16)
+        assert moves, f"No local exit plan from spawn for agent {agent_idx}"
 
-        solo_env = Dust2Env()
-        solo_env.reset(seed=42)
+        # Both make_env() calls default to seed=0, so agents start at identical positions.
+        solo_env = make_env()
+        solo_env.reset()
         for move in moves:
-            actions = {name: np.array([0, 0, 0, 0], dtype=np.int64) for name in solo_env.agents}
-            actions[aid][0] = move
+            actions = np.zeros((10, 4), dtype=np.int64)
+            actions[agent_idx, 0] = move
             solo_env.step(actions)
 
-        moved_agent = solo_env.state.agents[agent_idx]
-        assert moved_agent.area_id != start_area or not np.allclose(
-            moved_agent.pos[:2], start_pos[:2]
-        ), f"{aid} failed to leave spawn"
+        moved = solo_env._c_env.game.agents[agent_idx]
+        moved_area_id = int(solo_env.map_data.area_ids[moved.area_idx])
+        assert moved_area_id != area_id or not np.allclose(
+            [moved.x, moved.y], [start_x, start_y]
+        ), f"agent {agent_idx} failed to leave spawn"
+        solo_env.close()
+
+    env.close()
