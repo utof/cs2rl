@@ -4,7 +4,6 @@ recordings/
 __pycache__/
 *.pyc
 .venv/
-wheelhouse/*.whl
 logs
 resources
 *.so

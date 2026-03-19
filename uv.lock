@@ -8,10 +8,6 @@ resolution-markers = [
 ]
 
 [manifest]
-members = [
-    "cs2rl",
-    "pwd-stub",
-]
 overrides = [{ name = "numpy", specifier = ">=2.0.0" }]
 
 [[package]]
@@ -289,7 +285,6 @@ dependencies = [
     { name = "numpy" },
     { name = "pettingzoo" },
     { name = "pufferlib" },
-    { name = "pwd-stub", marker = "sys_platform == 'win32'" },
     { name = "rerun-sdk" },
     { name = "sample-factory" },
     { name = "shapely" },
@@ -309,7 +304,6 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "pettingzoo", specifier = ">=1.24.0" },
     { name = "pufferlib", specifier = ">=3.0.0" },
-    { name = "pwd-stub", marker = "sys_platform == 'win32'", editable = "pwd_stub" },
     { name = "rerun-sdk", specifier = ">=0.21.0" },
     { name = "sample-factory", extras = ["pettingzoo-envs"], git = "https://github.com/alex-petrenko/sample-factory.git?rev=8b354943a8b04e2fbb7c7c8f35ea3fed195dd631" },
     { name = "shapely", specifier = ">=2.0.4" },
@@ -1444,11 +1438,6 @@ dependencies = [
     { name = "wandb" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7c/e1/5292f9b69c6263707b40ba04a87e6b9bcc177281d31092f77afd90c412f1/pufferlib-3.0.0.tar.gz", hash = "sha256:7df3a3e3f5f894d78d2a1f5374097890aec01473183e748abefe4f3faa10eaa9", size = 60681266, upload-time = "2025-06-23T15:47:14.626Z" }
-
-[[package]]
-name = "pwd-stub"
-version = "0.0.1"
-source = { editable = "pwd_stub" }
 
 [[package]]
 name = "pyarrow"
