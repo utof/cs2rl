@@ -8,6 +8,7 @@ import numpy as np
 import pufferlib
 
 import sim
+from map import MapData, make_cs2_map
 from sim import ACTION_DIM, N_AGENTS, OBS_DIM
 
 _DIR = Path(__file__).parent
@@ -194,16 +195,8 @@ _lib.env_close.argtypes = [ctypes.POINTER(Dust2EnvC)]
 _lib.env_close.restype = None
 
 
-def build_static_data(
-    nav_graph,
-    area_adjacency,
-    bombsite_mask,
-    t_spawn_areas,
-    ct_spawn_areas,
-    bombsite_distance_lookup,
-    bombsite_distance_scale,
-):
-    """Build StaticDataC from Python nav data. Returns (sd, refs).
+def build_static_data(map_data: MapData):
+    """Build StaticDataC from a MapData. Returns (sd, refs).
     Caller must keep refs alive to prevent GC of backing numpy arrays."""
     sd = StaticDataC()
     refs = []
@@ -213,36 +206,33 @@ def build_static_data(
         refs.append(a)
         return a.ctypes.data_as(ctypes.POINTER(ctype))
 
-    sd.N = nav_graph.N
-    sd.vis_matrix = ptr(nav_graph.vis_matrix, np.int8, ctypes.c_int8)
-    sd.raster_grid = ptr(nav_graph._pos_grid, np.int32, ctypes.c_int32)
-    sd.adjacency = ptr(area_adjacency, np.int8, ctypes.c_int8)
-    sd.centroid_xy = ptr(nav_graph._centroid_matrix, np.float32, ctypes.c_float)
+    sd.N = map_data.N
+    sd.vis_matrix = ptr(map_data.vis_matrix, np.int8, ctypes.c_int8)
+    sd.raster_grid = ptr(map_data.grid, np.int32, ctypes.c_int32)
+    sd.adjacency = ptr(map_data.adjacency, np.int8, ctypes.c_int8)
+    sd.centroid_xy = ptr(map_data.centroids, np.float32, ctypes.c_float)
+    sd.area_ids = ptr(map_data.area_ids, np.int32, ctypes.c_int32)
+    sd.bombsite_mask = ptr(map_data.bombsite_mask, np.int8, ctypes.c_int8)
+    sd.bombsite_by_idx = ptr(map_data.bombsite_by_idx, np.int8, ctypes.c_int8)
+    sd.bombsite_dist = ptr(map_data.bombsite_dist, np.float32, ctypes.c_float)
 
-    area_ids_arr = np.array(nav_graph.area_ids, dtype=np.int32)
-    sd.area_ids = ptr(area_ids_arr, np.int32, ctypes.c_int32)
+    sd.grid_w = map_data.grid.shape[1]
+    sd.grid_h = map_data.grid.shape[0]
+    sd.max_area_id = int(map_data.area_ids.max())
+    sd.grid_x_min = float(map_data.grid_x_min)
+    sd.grid_y_min = float(map_data.grid_y_min)
+    sd.grid_inv_cell = float(1.0 / map_data.grid_cell_size)
 
-    bm = bombsite_mask.astype(np.int8)
-    sd.bombsite_mask = ptr(bm, np.int8, ctypes.c_int8)
-    sd.bombsite_dist = ptr(bombsite_distance_lookup, np.float32, ctypes.c_float)
+    inv_x = 2.0 / (map_data.x_max - map_data.x_min)
+    inv_y = 2.0 / (map_data.y_max - map_data.y_min)
+    x_off = (map_data.x_max + map_data.x_min) / (map_data.x_max - map_data.x_min)
+    y_off = (map_data.y_max + map_data.y_min) / (map_data.y_max - map_data.y_min)
+    sd.inv_x_range = float(inv_x)
+    sd.inv_y_range = float(inv_y)
+    sd.x_offset = float(x_off)
+    sd.y_offset = float(y_off)
 
-    by_idx = np.array(
-        [int(bm[aid]) if 0 <= aid < len(bm) else 0 for aid in nav_graph.area_ids], dtype=np.int8
-    )
-    sd.bombsite_by_idx = ptr(by_idx, np.int8, ctypes.c_int8)
-
-    sd.grid_w = nav_graph._grid_w
-    sd.grid_h = nav_graph._grid_h
-    sd.max_area_id = max(nav_graph.area_ids)
-    sd.grid_x_min = float(nav_graph._grid_x_min)
-    sd.grid_y_min = float(nav_graph._grid_y_min)
-    sd.grid_inv_cell = float(nav_graph._grid_inv_cell)
-
-    sd.inv_x_range = float(sim._INV_MAP_X_RANGE)
-    sd.inv_y_range = float(sim._INV_MAP_Y_RANGE)
-    sd.x_offset = float(sim._MAP_X_OFFSET)
-    sd.y_offset = float(sim._MAP_Y_OFFSET)
-    sd.bombsite_dist_scale = float(bombsite_distance_scale)
+    sd.bombsite_dist_scale = float(map_data.bombsite_dist_scale)
     sd.laser_damage = int(sim.LASER_DAMAGE)
     sd.laser_range = float(sim.LASER_RANGE)
     sd.laser_range_sq = float(sim.LASER_RANGE * sim.LASER_RANGE)
@@ -263,7 +253,9 @@ def build_static_data(
         sd.delta_y[i] = float(delta[1])
         sd.dir_facing[i] = float(sim._DIR_FACING[i])
 
-    id2idx = nav_graph._id_to_idx
+    id2idx = {int(aid): i for i, aid in enumerate(map_data.area_ids)}
+    t_spawn_areas = map_data.t_spawn_areas
+    ct_spawn_areas = map_data.ct_spawn_areas
     sd.n_t_spawns = len(t_spawn_areas)
     assert len(t_spawn_areas) <= 15, f"t_spawn_areas overflow: {len(t_spawn_areas)} > 15"
     for i, aid in enumerate(t_spawn_areas):
@@ -467,31 +459,26 @@ def _load_c_static_bundle():
     if bundle is not None:
         return bundle
 
-    static = sim._load_dust2_static_data(*key)
-    nav = static["nav_graph"]
-    sd, refs = build_static_data(
-        nav,
-        static["area_adjacency"],
-        static["bombsite_mask"],
-        static["t_spawn_areas"],
-        static["ct_spawn_areas"],
-        static["bombsite_distance_lookup"],
-        static["bombsite_distance_scale"],
-    )
-    bundle = (sd, tuple(refs), nav)
+    md = make_cs2_map(sim.NAV_PATH, sim.CACHE_PATH)
+    sd, refs = build_static_data(md)
+    bundle = (sd, tuple(refs), md)
     _STATIC_DATA_CACHE[key] = bundle
     return bundle
 
 
-def make_env(seed=0, team_spirit=0.0, auto_reset=True, buf=None):
+def make_env(seed=0, team_spirit=0.0, auto_reset=True, buf=None, map_data=None):
     """Load static data and return a ready-to-use Dust2CEnv."""
-    sd, refs, nav = _load_c_static_bundle()
+    if map_data is None:
+        sd, refs, md = _load_c_static_bundle()
+    else:
+        md = map_data
+        sd, refs = build_static_data(md)
     return Dust2CEnv(
         sd,
         refs,
         seed=seed,
         team_spirit=team_spirit,
         buf=buf,
-        nav_graph=nav,
+        nav_graph=md.nav_graph,
         auto_reset=auto_reset,
     )
