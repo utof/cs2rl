@@ -7,6 +7,9 @@ import gymnasium
 import numpy as np
 import pufferlib
 
+import sim
+from sim import ACTION_DIM, N_AGENTS, OBS_DIM
+
 _DIR = Path(__file__).parent
 _SO = _DIR / "dust2_env.so"
 _SRC = _DIR / "dust2_env.c"
@@ -22,9 +25,6 @@ def _ensure_built():
 _ensure_built()
 _lib = ctypes.CDLL(str(_SO))
 
-N_AGENTS = 10
-OBS_DIM = 71
-ACTION_DIM = 4
 _STATIC_DATA_CACHE = {}
 
 
@@ -205,8 +205,6 @@ def build_static_data(
 ):
     """Build StaticDataC from Python nav data. Returns (sd, refs).
     Caller must keep refs alive to prevent GC of backing numpy arrays."""
-    import sim
-
     sd = StaticDataC()
     refs = []
 
@@ -464,8 +462,6 @@ class Dust2CEnv(pufferlib.PufferEnv):
 
 
 def _load_c_static_bundle():
-    import sim
-
     key = (sim.NAV_PATH, sim.CACHE_PATH)
     bundle = _STATIC_DATA_CACHE.get(key)
     if bundle is not None:

@@ -410,9 +410,6 @@ class TeamSpiritCallback:
         return True
 
 
-_team_spirit_cb = TeamSpiritCallback(anneal_steps=5_000_000)
-
-
 # ── SECTION: PufferLib env factory ─────────────────────────────────────────
 
 

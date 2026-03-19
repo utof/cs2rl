@@ -882,14 +882,6 @@ class GameState:
     winner: int  # 0=T, 1=CT, -1=ongoing
 
 
-@dataclass
-class SoundEvent:
-    source_pos: np.ndarray
-    source_id: int
-    radius: float
-    type: str
-
-
 # ── SECTION: Dust2Env ──────────────────────────────────────────────────────
 
 
@@ -1498,31 +1490,6 @@ class Dust2Env(ParallelEnv):
 
         return obs, rewards, terms, truncs, infos
 
-    def _compute_sounds(self, s: GameState) -> list:
-        sounds = []
-        for agent in s.agents:
-            if not agent.alive:
-                continue
-            if agent.is_moving:
-                sounds.append(
-                    SoundEvent(
-                        source_pos=agent.pos.copy(),
-                        source_id=agent.agent_id,
-                        radius=FOOTSTEP_RADIUS,
-                        type="footstep",
-                    )
-                )
-            if agent.fired_this_tick:
-                sounds.append(
-                    SoundEvent(
-                        source_pos=agent.pos.copy(),
-                        source_id=agent.agent_id,
-                        radius=GUNSHOT_RADIUS,
-                        type="shot",
-                    )
-                )
-        return sounds
-
     def _potential(self, gs: "GameState", team: int) -> float:
         """Compute potential Φ(s, team) for potential-based reward shaping.
 
@@ -1681,6 +1648,7 @@ if __name__ == "__main__":
         # Clear all enemy memory for t0
         env.state.agents[0].enemy_memory = {}
 
+        # FIXME: _compute_obs now requires (agent_idx, alive_t, alive_ct, vis10) — update this call
         obs_t0 = env._compute_obs(0)
 
         # Enemy slots should be zeroed (no memory, no LOS)
