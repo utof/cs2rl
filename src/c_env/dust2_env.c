@@ -631,7 +631,7 @@ void env_step(Dust2Env* env, const int32_t* actions) {
     if (!g->round_over) {
         for (int i = 0; i < N_AGENTS; i++) {
             if (g->agents[i].alive && actions[i * ACTION_DIM + 0] == 0) {
-                env->rewards[i] -= 0.002f;
+                env->rewards[i] -= 0.0005f;
             }
         }
     }
