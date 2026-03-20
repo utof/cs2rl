@@ -1017,9 +1017,9 @@ def train(args):
     policy = build_policy(vecenv, device)
 
     agents_per_env = 10
-    bptt_horizon = 128  # was 64; Phase 3.2 increase
+    bptt_horizon = 64
     batch_size = args.num_envs * agents_per_env * bptt_horizon
-    # batch_size = 128 * 10 * 128 = 163840 → 163840 / 8192 = 20 minibatches per epoch
+    # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
 
     train_config = {
         # Core PPO
