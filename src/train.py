@@ -26,6 +26,24 @@ from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
 OBS_DIM = 71
 
+
+def resolve_run_name(name: str) -> str:
+    """Return a run name prefixed with DDMMYY-N- where N is the count of existing
+    checkpoint dirs that already start with today's date prefix."""
+    from datetime import date
+
+    today = date.today()
+    date_prefix = today.strftime("%d%m%y")  # e.g. "200326"
+    checkpoints_dir = CHECKPOINTS_DIR
+    count = 0
+    if checkpoints_dir.exists():
+        prefix = date_prefix + "-"
+        count = sum(
+            1 for d in checkpoints_dir.iterdir() if d.is_dir() and d.name.startswith(prefix)
+        )
+    return f"{date_prefix}-{count}-{name}"
+
+
 AGENT_IDS = tuple([f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)])
 ACTION_HEAD_NAMES = ("move", "shoot", "use", "last")
 ACTION_HEAD_SIZES = (9, 2, 2, 2)
@@ -540,8 +558,13 @@ def train(args):
 
     device = args.device
 
+    if getattr(args, "name", None):
+        resolved_name = resolve_run_name(args.name)
+        args.checkpoint_dir = str(CHECKPOINTS_DIR / resolved_name)
+        print(f"[Train] Run name resolved to: {resolved_name}")
+
     # Shared team spirit value — all envs read it at episode start
-    shared_ts = mp.Value("f", 0.0)
+    shared_ts = mp.Value("f", 0.3)
 
     _map_data = args.map_data
 
@@ -632,8 +655,8 @@ def train(args):
         trainer.evaluate()
         logs = trainer.train()
 
-        # Team spirit annealing: 0→1 over 5M steps
-        ts_val = min(1.0, trainer.global_step / 5_000_000)
+        # Team spirit annealing: 0.3→1 over 5M steps
+        ts_val = min(1.0, 0.3 + trainer.global_step / 5_000_000)
         shared_ts.value = ts_val
 
         if time.time() - last_save > args.save_every_sec:
@@ -646,6 +669,12 @@ def train(args):
             print(format_train_status(trainer.epoch, ts_val, logs))
 
     trainer.close()
+
+    # Final checkpoint save
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(policy.state_dict(), save_path)
+    print(f"[Train] Final checkpoint saved to {save_path}")
+
     print("[Train] Done.")
 
 
@@ -654,9 +683,9 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--simple-map",
+        "--dust2",
         action="store_true",
-        help="Use the built-in 5-room simple map instead of dust2",
+        help="Use the full dust2 map instead of the default simple 5-room map",
     )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--train", action="store_true")
@@ -680,6 +709,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--eval-policy", type=str, choices=("auto", "random", "sample", "greedy"), default="auto"
     )
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help=(
+            "Run name; auto-prefixed with DDMMYY-N- where N = count of existing checkpoint dirs "
+            "starting with today's date. E.g. --name 1M-ct → '200326-3-1M-ct'."
+        ),
+    )
     args = parser.parse_args()
 
     if args.device is None:
@@ -687,25 +725,51 @@ if __name__ == "__main__":
 
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    if args.simple_map:
+    if args.dust2:
+        args.map_data = None
+        print("[Map] Using dust2 map")
+    else:
         from map import make_simple_map
 
         args.map_data = make_simple_map()
         print("[Map] Using simple 5-room map")
-    else:
-        args.map_data = None
 
     if args.smoke:
         smoke_test()
     elif args.train:
         train(args)
     elif args.record:
+        record_checkpoint = args.checkpoint
+        record_save_path = args.record_out
+        if getattr(args, "name", None):
+            import re
+
+            name_arg = args.name
+            # If already fully resolved (starts with DDMMYY-N- pattern), use as-is
+            if re.match(r"^\d{6}-\d+-", name_arg):
+                resolved = name_arg
+            else:
+                # Find the most recently modified checkpoint dir ending with -<name>
+                suffix = f"-{name_arg}"
+                candidates = (
+                    [d for d in CHECKPOINTS_DIR.iterdir() if d.is_dir() and d.name.endswith(suffix)]
+                    if CHECKPOINTS_DIR.exists()
+                    else []
+                )
+                if not candidates:
+                    raise FileNotFoundError(
+                        f"No checkpoint dir in {CHECKPOINTS_DIR} ending with '{suffix}'"
+                    )
+                resolved = max(candidates, key=lambda d: os.path.getmtime(d)).name
+            record_checkpoint = str(CHECKPOINTS_DIR / resolved / "dust2_policy.pt")
+            record_save_path = str(RECORDINGS_DIR / f"{resolved}.rrd")
+            print(f"[Record] Resolved run name: {resolved}")
         record_episode(
-            checkpoint_path=args.checkpoint,
+            checkpoint_path=record_checkpoint,
             device=args.device,
             seed=args.seed,
             policy_mode=args.record_policy,
-            save_path=args.record_out,
+            save_path=record_save_path,
             map_data=args.map_data,
         )
     elif args.eval:

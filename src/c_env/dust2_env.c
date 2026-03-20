@@ -27,6 +27,7 @@ static float _potential(Dust2Env* env, int team) {
     float       hp_t = 0.0f, hp_o = 0.0f;
     float       site_t = 0.0f, site_o = 0.0f;
     float       bomb_progress        = 0.0f;
+    float       nav_approach         = 0.0f;
     int         bomb_carrier_area_id = INVALID_AREA_IDX;
     StaticData* sd                   = env->sd;
 
@@ -46,6 +47,16 @@ static float _potential(Dust2Env* env, int team) {
             hp_t    += (float)a->hp;
             if (a->area_idx >= 0 && sd->bombsite_by_idx[a->area_idx]) {
                 site_t += 1.0f;
+            }
+            /* Navigation shaping: reward every alive agent for being close to bombsite */
+            if (area_id != INVALID_AREA_IDX && area_id <= sd->max_area_id) {
+                float dist = sd->bombsite_dist[area_id];
+                if (isfinite(dist)) {
+                    float closeness = 1.0f - dist * sd->bombsite_dist_scale;
+                    if (closeness < 0.0f)
+                        closeness = 0.0f;
+                    nav_approach += closeness;
+                }
             }
         } else {
             alive_o += 1.0f;
@@ -75,8 +86,9 @@ static float _potential(Dust2Env* env, int team) {
         }
     }
 
+    float nav_weight = (team == 1) ? 0.15f : 0.04f;
     return (alive_t - alive_o) * 0.3f + (hp_t - hp_o) / 500.0f + (site_t - site_o) * 0.2f +
-           bomb_progress;
+           bomb_progress + nav_approach * nav_weight;
 }
 
 void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_spirit) {
@@ -649,6 +661,22 @@ void env_step(Dust2Env* env, const int32_t* actions) {
     }
     if (bomb_just_defused && bomb_defuser_id >= 0) {
         env->rewards[bomb_defuser_id] += 0.2f;
+    }
+
+    /* Small cost per shot fired — discourages infinite spray at walls */
+    for (int i = 0; i < N_AGENTS; i++) {
+        if (env->game.agents[i].alive && env->game.agents[i].fired_this_tick) {
+            env->rewards[i] -= 0.005f;
+        }
+    }
+
+    /* CT survival micro-reward: gives CTs incentive to stay alive long enough to learn */
+    if (!g->round_over) {
+        for (int i = TEAM_SIZE; i < N_AGENTS; i++) {
+            if (g->agents[i].alive) {
+                env->rewards[i] += 0.001f;
+            }
+        }
     }
 
     {
