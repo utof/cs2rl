@@ -271,6 +271,34 @@ def build_static_data(map_data: MapData):
     return sd, refs
 
 
+class RunningMeanStd:
+    """Online running mean and variance (Welford's algorithm, parallel batch update).
+
+    Tracks statistics per observation feature over all agent×step samples seen
+    so far.  Thread-/process-local — each worker env maintains its own stats,
+    which independently converge to the same distribution.
+    """
+
+    def __init__(self, shape, epsilon: float = 1e-4):
+        self.mean = np.zeros(shape, dtype=np.float64)
+        self.var = np.ones(shape, dtype=np.float64)
+        self.count = epsilon
+
+    def update(self, x: np.ndarray):
+        """Update from a batch of samples (shape: [N, *feature_dims])."""
+        batch_mean = np.mean(x, axis=0, dtype=np.float64)
+        batch_var = np.var(x, axis=0, dtype=np.float64)
+        batch_count = x.shape[0]
+        delta = batch_mean - self.mean
+        tot = self.count + batch_count
+        self.mean = self.mean + delta * batch_count / tot
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + np.square(delta) * self.count * batch_count / tot
+        self.var = M2 / tot
+        self.count = tot
+
+
 class Dust2CEnv(pufferlib.PufferEnv):
     def __init__(
         self,
@@ -282,6 +310,7 @@ class Dust2CEnv(pufferlib.PufferEnv):
         nav_graph=None,
         auto_reset=True,
         map_data=None,
+        normalize_obs: bool = True,
     ):
         self.single_observation_space = gymnasium.spaces.Box(
             low=-1.0, high=1.0, shape=(OBS_DIM,), dtype=np.float32
@@ -331,6 +360,11 @@ class Dust2CEnv(pufferlib.PufferEnv):
         self._terminal_terminals = np.empty(N_AGENTS, dtype=bool)
         self._terminal_truncations = np.empty(N_AGENTS, dtype=bool)
         self._empty_infos = []
+
+        # Observation normalisation — RunningMeanStd per feature, clip to [-5, 5]
+        self._normalize_obs = normalize_obs
+        if normalize_obs:
+            self._obs_rms = RunningMeanStd(shape=(OBS_DIM,))
 
     @property
     def unwrapped(self):
@@ -422,8 +456,18 @@ class Dust2CEnv(pufferlib.PufferEnv):
         np.copyto(self._actions_scratch, actions_arr, casting="no")
         return self._actions_scratch, self._actions_scratch_addr
 
+    def _normalize_obs_inplace(self, obs: np.ndarray) -> None:
+        """Update running stats and normalise *obs* in-place, clipping to [-5, 5]."""
+        self._obs_rms.update(obs)
+        std = np.sqrt(self._obs_rms.var.astype(np.float32) + 1e-8)
+        mean = self._obs_rms.mean.astype(np.float32)
+        obs[:] = np.clip((obs - mean) / std, -5.0, 5.0)
+
     def _sync_outputs(self):
         if not self._uses_external_buffers:
+            if self._normalize_obs:
+                # self.observations IS self._obs_view (C buffer) — safe to modify in-place
+                self._normalize_obs_inplace(self.observations)
             return
         self._sync_observations()
         np.copyto(self.rewards, self._rew_view)
@@ -433,6 +477,8 @@ class Dust2CEnv(pufferlib.PufferEnv):
     def _sync_observations(self):
         if self._uses_external_buffers:
             np.copyto(self.observations, self._obs_view)
+        if self._normalize_obs:
+            self._normalize_obs_inplace(self.observations)
 
     def _build_terminal_info(self):
         stats = self._c_env.episode_stats
@@ -477,7 +523,7 @@ def _load_c_static_bundle():
     return bundle
 
 
-def make_env(seed=0, team_spirit=0.0, auto_reset=True, buf=None, map_data=None):
+def make_env(seed=0, team_spirit=0.0, auto_reset=True, buf=None, map_data=None, normalize_obs=True):
     """Load static data and return a ready-to-use Dust2CEnv."""
     if map_data is None:
         sd, refs, md = _load_c_static_bundle()
@@ -493,4 +539,5 @@ def make_env(seed=0, team_spirit=0.0, auto_reset=True, buf=None, map_data=None):
         nav_graph=md.nav_graph,
         auto_reset=auto_reset,
         map_data=md,
+        normalize_obs=normalize_obs,
     )
