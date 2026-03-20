@@ -9,8 +9,10 @@ dependencies = [
     "gymnasium>=0.29.0",
     "networkx>=3.3",
     "numpy>=1.26.0",
+    "nvidia-ml-py>=13.590.48",
     "pettingzoo>=1.24.0",
     "pufferlib>=3.0.0",
+    "pynvml>=13.0.1",
     "rerun-sdk>=0.21.0",
     "shapely>=2.0.4",
 ]

@@ -262,8 +262,10 @@ dependencies = [
     { name = "gymnasium" },
     { name = "networkx" },
     { name = "numpy" },
+    { name = "nvidia-ml-py" },
     { name = "pettingzoo" },
     { name = "pufferlib" },
+    { name = "pynvml" },
     { name = "rerun-sdk" },
     { name = "shapely" },
 ]
@@ -280,8 +282,10 @@ requires-dist = [
     { name = "gymnasium", specifier = ">=0.29.0" },
     { name = "networkx", specifier = ">=3.3" },
     { name = "numpy", specifier = ">=1.26.0" },
+    { name = "nvidia-ml-py", specifier = ">=13.590.48" },
     { name = "pettingzoo", specifier = ">=1.24.0" },
     { name = "pufferlib", specifier = ">=3.0.0" },
+    { name = "pynvml", specifier = ">=13.0.1" },
     { name = "rerun-sdk", specifier = ">=0.21.0" },
     { name = "shapely", specifier = ">=2.0.4" },
 ]
