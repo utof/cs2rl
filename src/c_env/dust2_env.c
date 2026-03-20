@@ -477,7 +477,7 @@ void env_step(Dust2Env* env, const int32_t* actions) {
 
     if (g->round_ticks_left <= 0 && !g->round_over && !g->bomb_planted) {
         g->round_over = 1;
-        g->winner     = 1;
+        g->winner     = -1;
         ss->timed_out = 1;
         es->timed_out = 1;
     }
@@ -614,6 +614,15 @@ void env_step(Dust2Env* env, const int32_t* actions) {
     }
 
     memset(env->rewards, 0, N_AGENTS * sizeof(float));
+
+    /* Inaction cost: discourage agents from standing still during active play */
+    if (!g->round_over) {
+        for (int i = 0; i < N_AGENTS; i++) {
+            if (g->agents[i].alive && actions[i * ACTION_DIM + 0] == 0) {
+                env->rewards[i] -= 0.002f;
+            }
+        }
+    }
 
     if (g->round_over) {
         for (int i = 0; i < N_AGENTS; i++) {
