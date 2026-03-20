@@ -588,18 +588,18 @@ def train(args):
         "device": device,
         "seed": args.seed,
         "total_timesteps": args.timesteps,
-        "batch_size": 20480,  # must be >= num_envs * agents_per_env * bptt_horizon = 64*10*32
-        "bptt_horizon": 32,
+        "batch_size": 40960,  # must be >= num_envs * agents_per_env * bptt_horizon = 64*10*64
+        "bptt_horizon": 64,
         "minibatch_size": 4096,
         "max_minibatch_size": 4096,
-        "update_epochs": 4,
+        "update_epochs": 2,
         "learning_rate": 3e-4,
         "gamma": 0.99,
         "gae_lambda": 0.95,
         "clip_coef": 0.1,
         "vf_coef": 0.5,
         "vf_clip_coef": 0.1,
-        "ent_coef": 0.01,
+        "ent_coef": 0.1,
         "max_grad_norm": 0.5,
         "use_rnn": True,
         # Extras required by PuffeRL constructor
