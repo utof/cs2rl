@@ -617,18 +617,19 @@ def train(args):
         "total_timesteps": args.timesteps,
         "batch_size": batch_size,
         "bptt_horizon": bptt_horizon,
-        "minibatch_size": 4096,
-        "max_minibatch_size": 4096,
-        "update_epochs": 2,
+        "minibatch_size": 8192,
+        "max_minibatch_size": 8192,
+        "update_epochs": 3,
         "learning_rate": 3e-4,
-        "gamma": 0.99,
+        "gamma": 0.999,
         "gae_lambda": 0.95,
-        "clip_coef": 0.1,
+        "clip_coef": 0.15,
         "vf_coef": 0.5,
-        "vf_clip_coef": 0.1,
+        "vf_clip_coef": None,
         "ent_coef": 0.1,
         "max_grad_norm": 0.5,
         "use_rnn": True,
+        "weight_decay": 1e-4,
         # Extras required by PuffeRL constructor
         "compile": False,
         "compile_mode": "default",
@@ -659,8 +660,8 @@ def train(args):
         trainer.evaluate()
         logs = trainer.train()
 
-        # Team spirit annealing: 0.3→1 over 5M steps
-        ts_val = min(1.0, 0.3 + trainer.global_step / 5_000_000)
+        # Team spirit annealing: 0.3→0.7 over 5M steps
+        ts_val = min(0.7, 0.3 + trainer.global_step / 5_000_000)
         shared_ts.value = ts_val
 
         if time.time() - last_save > args.save_every_sec:
