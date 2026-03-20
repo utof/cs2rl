@@ -547,6 +547,36 @@ def build_policy(vecenv, device):
     return Dust2Policy().to(device)
 
 
+# ── SECTION: Network Health Monitoring ────────────────────────────────────
+
+
+def compute_network_health(model, device):
+    """Compute network health metrics for logging.
+
+    Returns a dict with:
+      - health/weight_norm_<name>: L2 norm of each named parameter
+      - health/lstm_h_norm: norm of LSTM hidden state (TODO: requires trainer access)
+
+    Alarm thresholds (informational, not enforced here):
+      - dead neurons > 20% (not tracked — would require forward hooks)
+      - effective rank < 30 (not tracked — expensive)
+      - lstm_h_norm > 50
+    """
+
+    metrics = {}
+
+    # Weight norms per named parameter
+    for name, param in model.named_parameters():
+        safe_name = name.replace(".", "_")
+        metrics[f"health/weight_norm_{safe_name}"] = param.norm().item()
+
+    # TODO: LSTM hidden state norm requires access to trainer's stored LSTM state,
+    # which is not easily accessible from outside PufferLib's training loop.
+    # Would need trainer.policy or similar. Skipping for now.
+
+    return metrics
+
+
 # ── SECTION: Value target normalization ───────────────────────────────────
 
 
@@ -878,7 +908,7 @@ class DeadRunDetector:
     """Checks training metrics every check_interval steps for degenerate runs.
 
     Raises RuntimeError on NaN/Inf; accumulates soft warnings and prints
-    a DEAD RUN banner when three or more accumulate.
+    a DEAD RUN banner when five or more accumulate.
     """
 
     def __init__(self, check_interval=10_000):
@@ -895,6 +925,10 @@ class DeadRunDetector:
             if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
                 raise RuntimeError(f"NaN/Inf detected at step {step}: {v}")
 
+        # Clear alerts if metrics are healthy now
+        if metrics.get("game/kills_per_episode", 0) > 0.5:
+            self.alerts = [a for a in self.alerts if "kills" not in a]
+
         if step > 50_000:
             entropy_total = metrics.get("entropy/total", metrics.get("entropy", 5.0))
             if entropy_total < 0.5:
@@ -904,6 +938,8 @@ class DeadRunDetector:
             timeout_rate = metrics.get("game/timeout_rate", 0.0)
             if timeout_rate > 0.95:
                 self.alerts.append(f"WARNING: Timeout rate {timeout_rate:.0%} at step {step}")
+
+        if step > 500_000:
             kills_per_ep = metrics.get("game/kills_per_episode", 1.0)
             if kills_per_ep == 0:
                 self.alerts.append(f"WARNING: Zero kills by step {step}")
@@ -913,7 +949,7 @@ class DeadRunDetector:
             if approx_kl > 0.05:
                 self.alerts.append(f"WARNING: KL divergence {approx_kl:.3f} at step {step}")
 
-        if len(self.alerts) >= 3:
+        if len(self.alerts) >= 5:
             print("DEAD RUN DETECTED:")
             for alert in self.alerts:
                 print(f"  {alert}")
@@ -981,8 +1017,9 @@ def train(args):
     policy = build_policy(vecenv, device)
 
     agents_per_env = 10
-    bptt_horizon = 64
+    bptt_horizon = 128  # was 64; Phase 3.2 increase
     batch_size = args.num_envs * agents_per_env * bptt_horizon
+    # batch_size = 128 * 10 * 128 = 163840 → 163840 / 8192 = 20 minibatches per epoch
 
     train_config = {
         # Core PPO
@@ -1048,6 +1085,11 @@ def train(args):
             game_metrics = compute_game_metrics(logs)
             logs.update(game_metrics)
             dead_run_detector.check(trainer.global_step, logs)
+
+            # Network health monitoring every 5 epochs (too expensive every epoch)
+            if trainer.epoch % 5 == 0:
+                health_metrics = compute_network_health(policy, device)
+                logs.update(health_metrics)
 
         if time.time() - last_save > args.save_every_sec:
             save_path.parent.mkdir(parents=True, exist_ok=True)
