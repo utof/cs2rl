@@ -605,14 +605,18 @@ def train(args):
     print(f"[Train] Building policy on device={device}...")
     policy = build_policy(vecenv, device)
 
+    agents_per_env = 10
+    bptt_horizon = 64
+    batch_size = args.num_envs * agents_per_env * bptt_horizon
+
     train_config = {
         # Core PPO
         "env": "cs2-dust2",
         "device": device,
         "seed": args.seed,
         "total_timesteps": args.timesteps,
-        "batch_size": 40960,  # must be >= num_envs * agents_per_env * bptt_horizon = 64*10*64
-        "bptt_horizon": 64,
+        "batch_size": batch_size,
+        "bptt_horizon": bptt_horizon,
         "minibatch_size": 4096,
         "max_minibatch_size": 4096,
         "update_epochs": 2,
@@ -693,7 +697,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval", action="store_true")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--timesteps", type=int, default=10_000_000)
-    parser.add_argument("--num_envs", type=int, default=64)
+    parser.add_argument("--num_envs", type=int, default=128)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--save_every_sec", type=int, default=300)
