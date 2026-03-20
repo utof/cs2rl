@@ -651,6 +651,7 @@ def train(args):
     }
 
     trainer = PuffeRL(train_config, vecenv, policy)
+    trainer.optimizer.param_groups[0]['weight_decay'] = 1e-4
 
     save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
     last_save = time.time()
