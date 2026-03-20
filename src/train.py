@@ -577,6 +577,14 @@ def _patch_trainer_with_return_norm(trainer):
     _ret_var = torch.ones(1, device=device)
     _ret_count = torch.zeros(1, device=device)
 
+    # ── ADAPTIVE ENTROPY (Lagrangian / SAC-style alpha) ────────────────────
+    max_entropy = np.log(9) + 3 * np.log(2)  # ≈ 4.276 for MultiDiscrete([9,2,2,2])
+    target_entropy = 0.5 * max_entropy  # ≈ 2.14
+    entropy_floor = 0.3 * max_entropy  # collapse threshold
+    log_alpha = torch.zeros(1, requires_grad=True, device=device)
+    alpha_optimizer = torch.optim.Adam([log_alpha], lr=1e-4)
+    # ──────────────────────────────────────────────────────────────────────
+
     def _update_return_stats(returns_flat):
         nonlocal _ret_mean, _ret_var, _ret_count
         with torch.no_grad():
@@ -723,20 +731,46 @@ def _patch_trainer_with_return_norm(trainer):
             else:
                 v_loss = 0.5 * v_loss_unclipped.mean()
 
-            entropy_loss = entropy.mean()
+            current_entropy = entropy.mean()
 
-            loss = pg_loss + config["vf_coef"] * v_loss - config["ent_coef"] * entropy_loss
+            # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
+            alpha = log_alpha.exp()
+            alpha_loss = -(log_alpha * (current_entropy - target_entropy).detach()).mean()
+            alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            alpha_optimizer.step()
+
+            # Entropy floor: prevent collapse
+            effective_alpha = alpha.detach()
+            if current_entropy.item() < entropy_floor:
+                effective_alpha = torch.clamp(effective_alpha, min=0.5)
+
+            entropy_loss = -effective_alpha * current_entropy
+            # ──────────────────────────────────────────────────────────────
+
+            loss = pg_loss + config["vf_coef"] * v_loss + entropy_loss
             self.amp_context.__enter__()
 
             # Denormalize before writing back so advantage computation stays in raw scale
             std = (_ret_var + 1e-8).sqrt()
             self.values[idx] = newvalue.detach().float() * std + _ret_mean
 
+            # ── PER-HEAD ENTROPY ──────────────────────────────────────────
+            with torch.no_grad():
+                _dists = [torch.distributions.Categorical(logits=lgt) for lgt in logits]
+                _head_names = ["move", "shoot", "use", "last"]
+                for _hi, (_hn, _hd) in enumerate(zip(_head_names, _dists, strict=True)):
+                    losses[f"entropy/{_hn}"] += _hd.entropy().mean().item() / self.total_minibatches
+            losses["entropy/total"] += current_entropy.item() / self.total_minibatches
+            # ──────────────────────────────────────────────────────────────
+
             # Logging
             profile("train_misc", epoch)
             losses["policy_loss"] += pg_loss.item() / self.total_minibatches
             losses["value_loss"] += v_loss.item() / self.total_minibatches
-            losses["entropy"] += entropy_loss.item() / self.total_minibatches
+            losses["entropy"] += current_entropy.item() / self.total_minibatches
+            losses["alpha"] += alpha.detach().item() / self.total_minibatches
+            losses["alpha_loss"] += alpha_loss.item() / self.total_minibatches
             losses["old_approx_kl"] += old_approx_kl.item() / self.total_minibatches
             losses["approx_kl"] += approx_kl.item() / self.total_minibatches
             losses["clipfrac"] += clipfrac.item() / self.total_minibatches
@@ -762,6 +796,7 @@ def _patch_trainer_with_return_norm(trainer):
         losses["explained_variance"] = explained_var.item()
         losses["ret_mean"] = _ret_mean.item()
         losses["ret_std"] = (_ret_var + 1e-8).sqrt().item()
+        losses["log_alpha"] = log_alpha.item()
 
         profile.end()
         logs = None
@@ -786,6 +821,103 @@ def _patch_trainer_with_return_norm(trainer):
     trainer.train = types.MethodType(_train_with_return_norm, trainer)
     print("[Train] Value target normalization enabled (running mean/std of returns).")
     return trainer
+
+
+# ── SECTION: Game Metrics Dashboard ───────────────────────────────────────
+
+
+def compute_game_metrics(logs):
+    """Extract and normalize game metrics from the training logs dict.
+
+    The C env exposes per-episode stats as ``environment/<key>`` entries in
+    the logs dict returned by PufferLib's ``mean_and_log()``.  Values are
+    already averaged over the collection window, so most just need re-keying
+    and minor arithmetic.
+
+    Returns a flat dict with ``game/*`` and ``actions/*`` keys ready to be
+    merged back into logs for W&B or stdout.
+    """
+    if not isinstance(logs, dict):
+        return {}
+
+    def _get(key, default=0.0):
+        return logs.get(f"environment/{key}", logs.get(key, default))
+
+    winner_t = _get("winner_t", 0.0)
+    winner_ct = _get("winner_ct", 0.0)
+    timed_out = _get("timed_out", 0.0)
+    kills_t = _get("kills_t", 0.0)
+    kills_ct = _get("kills_ct", 0.0)
+    bomb_planted = _get("bomb_planted", 0.0)
+    round_length = _get("round_length", 0.0)
+
+    # win rates: already normalised per-episode by PufferLib's mean_and_log
+    game_metrics = {
+        "game/win_rate_t": winner_t,
+        "game/win_rate_ct": winner_ct,
+        "game/timeout_rate": timed_out,
+        "game/kills_per_episode": kills_t + kills_ct,
+        "game/bomb_plant_rate": bomb_planted,
+        "game/avg_episode_length": round_length,
+    }
+
+    # actions/use_at_site_frac — logged directly by the C env if available
+    use_at_site = _get("use_at_site_frac", None)
+    if use_at_site is not None:
+        game_metrics["actions/use_at_site_frac"] = use_at_site
+
+    return game_metrics
+
+
+# ── SECTION: Dead Run Detector ─────────────────────────────────────────────
+
+
+class DeadRunDetector:
+    """Checks training metrics every check_interval steps for degenerate runs.
+
+    Raises RuntimeError on NaN/Inf; accumulates soft warnings and prints
+    a DEAD RUN banner when three or more accumulate.
+    """
+
+    def __init__(self, check_interval=10_000):
+        self.check_interval = check_interval
+        self.alerts = []
+
+    def check(self, step, metrics):
+        """Return True if the run appears dead (enough alerts accumulated)."""
+        if step < self.check_interval:
+            return False
+
+        # Critical: NaN / Inf in any float metric
+        for v in metrics.values():
+            if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                raise RuntimeError(f"NaN/Inf detected at step {step}: {v}")
+
+        if step > 50_000:
+            entropy_total = metrics.get("entropy/total", metrics.get("entropy", 5.0))
+            if entropy_total < 0.5:
+                self.alerts.append(
+                    f"CRITICAL: Entropy collapsed to {entropy_total:.2f} at step {step}"
+                )
+            timeout_rate = metrics.get("game/timeout_rate", 0.0)
+            if timeout_rate > 0.95:
+                self.alerts.append(f"WARNING: Timeout rate {timeout_rate:.0%} at step {step}")
+            kills_per_ep = metrics.get("game/kills_per_episode", 1.0)
+            if kills_per_ep == 0:
+                self.alerts.append(f"WARNING: Zero kills by step {step}")
+
+        if step > 100_000:
+            approx_kl = metrics.get("approx_kl", 0.0)
+            if approx_kl > 0.05:
+                self.alerts.append(f"WARNING: KL divergence {approx_kl:.3f} at step {step}")
+
+        if len(self.alerts) >= 3:
+            print("DEAD RUN DETECTED:")
+            for alert in self.alerts:
+                print(f"  {alert}")
+            return True
+
+        return False
 
 
 # ── SECTION: PufferLib training ────────────────────────────────────────────
@@ -867,7 +999,7 @@ def train(args):
         "clip_coef": 0.15,
         "vf_coef": 0.5,
         "vf_clip_coef": None,
-        "ent_coef": 0.1,
+        "ent_coef": 0.01,  # fallback; adaptive alpha overrides this in the patched train method
         "max_grad_norm": 0.5,
         "target_kl": 0.015,
         "use_rnn": True,
@@ -899,6 +1031,8 @@ def train(args):
     save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
     last_save = time.time()
 
+    dead_run_detector = DeadRunDetector()
+
     print(f"[Train] Starting PufferLib PPO for {args.timesteps:,} env steps...")
     while trainer.epoch < trainer.total_epochs:
         trainer.evaluate()
@@ -907,6 +1041,11 @@ def train(args):
         # Team spirit annealing: 0.3→0.7 over 5M steps
         ts_val = min(0.7, 0.3 + trainer.global_step / 5_000_000)
         shared_ts.value = ts_val
+
+        if isinstance(logs, dict):
+            game_metrics = compute_game_metrics(logs)
+            logs.update(game_metrics)
+            dead_run_detector.check(trainer.global_step, logs)
 
         if time.time() - last_save > args.save_every_sec:
             save_path.parent.mkdir(parents=True, exist_ok=True)
