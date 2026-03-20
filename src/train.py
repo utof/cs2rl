@@ -563,13 +563,13 @@ def _patch_trainer_with_return_norm(trainer):
     needed (unlike PopArt) because we don't use the raw value for anything
     outside the loss.
     """
+    import time
     import types
+    from collections import defaultdict
 
+    import pufferlib.pytorch
     import torch
     from pufferlib.pufferl import compute_puff_advantage
-    import pufferlib.pytorch
-    from collections import defaultdict
-    import time
 
     # Running stats for return normalization (Welford-style, torch tensors)
     device = trainer.config["device"]
@@ -608,33 +608,39 @@ def _patch_trainer_with_return_norm(trainer):
     def _train_with_return_norm(self):
         profile = self.profile
         epoch = self.epoch
-        profile('train', epoch)
+        profile("train", epoch)
         losses = defaultdict(float)
         config = self.config
-        device = config['device']
+        device = config["device"]
 
-        b0 = config['prio_beta0']
-        a = config['prio_alpha']
-        clip_coef = config['clip_coef']
-        vf_clip = config['vf_clip_coef']
+        b0 = config["prio_beta0"]
+        a = config["prio_alpha"]
+        clip_coef = config["clip_coef"]
+        vf_clip = config["vf_clip_coef"]
         anneal_beta = b0 + (1 - b0) * a * self.epoch / self.total_epochs
         self.ratio[:] = 1
 
         for mb in range(self.total_minibatches):
-            profile('train_misc', epoch, nest=True)
+            profile("train_misc", epoch, nest=True)
             self.amp_context.__enter__()
 
             shape = self.values.shape
             advantages = torch.zeros(shape, device=device)
             advantages = compute_puff_advantage(
-                self.values, self.rewards, self.terminals, self.ratio, advantages,
-                config['gamma'], config['gae_lambda'],
-                config['vtrace_rho_clip'], config['vtrace_c_clip'],
+                self.values,
+                self.rewards,
+                self.terminals,
+                self.ratio,
+                advantages,
+                config["gamma"],
+                config["gae_lambda"],
+                config["vtrace_rho_clip"],
+                config["vtrace_c_clip"],
             )
 
-            profile('train_copy', epoch)
+            profile("train_copy", epoch)
             adv = advantages.abs().sum(axis=1)
-            prio_weights = torch.nan_to_num(adv ** a, 0, 0, 0)
+            prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
             prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
             mb_prio = (self.segments * prio_probs[idx, None]) ** -anneal_beta
@@ -643,8 +649,6 @@ def _patch_trainer_with_return_norm(trainer):
             mb_logprobs = self.logprobs[idx]
             mb_rewards = self.rewards[idx]
             mb_terminals = self.terminals[idx]
-            mb_truncations = self.truncations[idx]
-            mb_ratio = self.ratio[idx]
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
@@ -657,8 +661,8 @@ def _patch_trainer_with_return_norm(trainer):
             mb_values_norm = (mb_values - _ret_mean) / (_ret_var + 1e-8).sqrt()
             # ──────────────────────────────────────────────────────────────
 
-            profile('train_forward', epoch)
-            if not config['use_rnn']:
+            profile("train_forward", epoch)
+            if not config["use_rnn"]:
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
 
             state = dict(
@@ -672,7 +676,7 @@ def _patch_trainer_with_return_norm(trainer):
                 logits, action=mb_actions
             )
 
-            profile('train_misc', epoch)
+            profile("train_misc", epoch)
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
             logratio = newlogprob - mb_logprobs
             ratio = logratio.exp()
@@ -681,13 +685,24 @@ def _patch_trainer_with_return_norm(trainer):
             with torch.no_grad():
                 old_approx_kl = (-logratio).mean()
                 approx_kl = ((ratio - 1) - logratio).mean()
-                clipfrac = ((ratio - 1.0).abs() > config['clip_coef']).float().mean()
+                clipfrac = ((ratio - 1.0).abs() > config["clip_coef"]).float().mean()
+
+            # Early stopping: stop update if KL divergence exceeds target
+            target_kl = config.get("target_kl", None)
+            if target_kl is not None and approx_kl.item() > target_kl:
+                break
 
             adv = advantages[idx]
             adv = compute_puff_advantage(
-                mb_values, mb_rewards, mb_terminals, ratio, adv,
-                config['gamma'], config['gae_lambda'],
-                config['vtrace_rho_clip'], config['vtrace_c_clip'],
+                mb_values,
+                mb_rewards,
+                mb_terminals,
+                ratio,
+                adv,
+                config["gamma"],
+                config["gae_lambda"],
+                config["vtrace_rho_clip"],
+                config["vtrace_c_clip"],
             )
             adv = mb_advantages
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -710,50 +725,48 @@ def _patch_trainer_with_return_norm(trainer):
 
             entropy_loss = entropy.mean()
 
-            loss = pg_loss + config['vf_coef'] * v_loss - config['ent_coef'] * entropy_loss
+            loss = pg_loss + config["vf_coef"] * v_loss - config["ent_coef"] * entropy_loss
             self.amp_context.__enter__()
 
             # Denormalize before writing back so advantage computation stays in raw scale
             std = (_ret_var + 1e-8).sqrt()
-            self.values[idx] = (newvalue.detach().float() * std + _ret_mean)
+            self.values[idx] = newvalue.detach().float() * std + _ret_mean
 
             # Logging
-            profile('train_misc', epoch)
-            losses['policy_loss'] += pg_loss.item() / self.total_minibatches
-            losses['value_loss'] += v_loss.item() / self.total_minibatches
-            losses['entropy'] += entropy_loss.item() / self.total_minibatches
-            losses['old_approx_kl'] += old_approx_kl.item() / self.total_minibatches
-            losses['approx_kl'] += approx_kl.item() / self.total_minibatches
-            losses['clipfrac'] += clipfrac.item() / self.total_minibatches
-            losses['importance'] += ratio.mean().item() / self.total_minibatches
+            profile("train_misc", epoch)
+            losses["policy_loss"] += pg_loss.item() / self.total_minibatches
+            losses["value_loss"] += v_loss.item() / self.total_minibatches
+            losses["entropy"] += entropy_loss.item() / self.total_minibatches
+            losses["old_approx_kl"] += old_approx_kl.item() / self.total_minibatches
+            losses["approx_kl"] += approx_kl.item() / self.total_minibatches
+            losses["clipfrac"] += clipfrac.item() / self.total_minibatches
+            losses["importance"] += ratio.mean().item() / self.total_minibatches
 
             # Learn on accumulated minibatches
-            profile('learn', epoch)
+            profile("learn", epoch)
             loss.backward()
             if (mb + 1) % self.accumulate_minibatches == 0:
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config["max_grad_norm"])
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
         # Reprioritize experience
-        profile('train_misc', epoch)
-        if config['anneal_lr']:
+        profile("train_misc", epoch)
+        if config["anneal_lr"]:
             self.scheduler.step()
 
         y_pred = self.values.flatten()
         y_true = advantages.flatten() + self.values.flatten()
         var_y = y_true.var()
-        explained_var = (
-            torch.nan if var_y == 0 else 1 - (y_true - y_pred).var() / var_y
-        )
-        losses['explained_variance'] = explained_var.item()
-        losses['ret_mean'] = _ret_mean.item()
-        losses['ret_std'] = (_ret_var + 1e-8).sqrt().item()
+        explained_var = torch.nan if var_y == 0 else 1 - (y_true - y_pred).var() / var_y
+        losses["explained_variance"] = explained_var.item()
+        losses["ret_mean"] = _ret_mean.item()
+        losses["ret_std"] = (_ret_var + 1e-8).sqrt().item()
 
         profile.end()
         logs = None
         self.epoch += 1
-        done_training = self.global_step >= config['total_timesteps']
+        done_training = self.global_step >= config["total_timesteps"]
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
             self.losses = losses
@@ -763,9 +776,9 @@ def _patch_trainer_with_return_norm(trainer):
             self.last_log_step = self.global_step
             profile.clear()
 
-        if self.epoch % config['checkpoint_interval'] == 0 or done_training:
+        if self.epoch % config["checkpoint_interval"] == 0 or done_training:
             self.save_checkpoint()
-            self.msg = f'Checkpoint saved at update {self.epoch}'
+            self.msg = f"Checkpoint saved at update {self.epoch}"
 
         return logs
 
@@ -848,7 +861,7 @@ def train(args):
         "minibatch_size": 8192,
         "max_minibatch_size": 8192,
         "update_epochs": 3,
-        "learning_rate": 3e-4,
+        "learning_rate": 2e-4,
         "gamma": 0.999,
         "gae_lambda": 0.95,
         "clip_coef": 0.15,
@@ -856,6 +869,7 @@ def train(args):
         "vf_clip_coef": None,
         "ent_coef": 0.1,
         "max_grad_norm": 0.5,
+        "target_kl": 0.015,
         "use_rnn": True,
         "weight_decay": 1e-4,
         # Extras required by PuffeRL constructor
@@ -879,7 +893,7 @@ def train(args):
     }
 
     trainer = PuffeRL(train_config, vecenv, policy)
-    trainer.optimizer.param_groups[0]['weight_decay'] = 1e-4
+    trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
     _patch_trainer_with_return_norm(trainer)
 
     save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
