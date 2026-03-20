@@ -737,7 +737,7 @@ def _patch_trainer_with_return_norm(trainer):
 
             # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
             alpha = log_alpha.exp()
-            alpha_loss = -(log_alpha * (current_entropy - target_entropy).detach()).mean()
+            alpha_loss = (log_alpha * (current_entropy - target_entropy).detach()).mean()
             alpha_optimizer.zero_grad()
             alpha_loss.backward()
             alpha_optimizer.step()
@@ -995,7 +995,7 @@ def train(args):
         "minibatch_size": 8192,
         "max_minibatch_size": 8192,
         "update_epochs": 3,
-        "learning_rate": 2e-4,
+        "learning_rate": 3e-4,
         "gamma": 0.999,
         "gae_lambda": 0.95,
         "clip_coef": 0.15,
@@ -1003,7 +1003,7 @@ def train(args):
         "vf_clip_coef": None,
         "ent_coef": 0.1,  # fallback; adaptive alpha overrides this in the patched train method
         "max_grad_norm": 0.5,
-        "target_kl": 0.015,
+        "target_kl": 0.03,
         "use_rnn": True,
         "weight_decay": 1e-4,
         # Extras required by PuffeRL constructor
