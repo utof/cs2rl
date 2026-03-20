@@ -172,12 +172,12 @@ SIMPLE_ROOMS = [
     (2, 0, 672, 256, 928),  # T-spawn-C
     (3, 256, 672, 512, 928),  # T-spawn-D
     (4, 0, 928, 512, 1184),  # T-spawn-E
-    # T-side approach corridor — narrow horizontal band
-    (5, 400, 192, 800, 416),  # T-corridor
-    # Bombsite — narrow horizontal band matching corridor height
+    # T-side approach corridor — extends south to y=512 to overlap T-spawn-B
+    (5, 400, 192, 800, 512),  # T-corridor
+    # Bombsite — narrow horizontal band
     (6, 800, 192, 1100, 416),  # Bombsite
-    # CT-side approach corridor — narrow horizontal band
-    (7, 1100, 192, 1500, 416),  # CT-corridor
+    # CT-side approach corridor — extends east to x=1600 and south to y=512 to overlap CT-spawn-A
+    (7, 1100, 192, 1600, 512),  # CT-corridor
     # CT-spawn cluster (areas 8–12) — placed ABOVE the approach corridor (y > 416)
     (8, 1500, 416, 1756, 672),  # CT-spawn-A
     (9, 1756, 416, 2012, 672),  # CT-spawn-B
@@ -233,8 +233,10 @@ def make_simple_map(
         row1 = int(np.ceil((y1 - y_min) / cell_size))
         grid[row0:row1, col0:col1] = idx
 
-    # 4. Adjacency: two areas are adjacent if any of their raster cells are 8-neighbors
+    # 4. Adjacency: two areas are adjacent if any of their raster cells are 8-neighbors.
+    # Diagonal must be True: movement within the same area is always valid.
     adjacency = np.zeros((N, N), dtype=bool)
+    np.fill_diagonal(adjacency, True)
     rows, cols = np.where(grid >= 0)
     for r, c in zip(rows.tolist(), cols.tolist(), strict=True):
         a = grid[r, c]
