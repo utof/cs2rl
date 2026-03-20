@@ -605,9 +605,6 @@ def _patch_trainer_with_return_norm(trainer):
         std = (_ret_var + 1e-8).sqrt()
         return (mb_returns - _ret_mean) / std
 
-    # Capture original train method
-    _orig_train = trainer.__class__.train.__wrapped__ if hasattr(trainer.__class__.train, '__wrapped__') else trainer.__class__.train
-
     def _train_with_return_norm(self):
         profile = self.profile
         epoch = self.epoch
@@ -701,19 +698,24 @@ def _patch_trainer_with_return_norm(trainer):
             pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
             newvalue = newvalue.view(mb_returns_norm.shape)
-            v_clipped = mb_values_norm + torch.clamp(
-                newvalue - mb_values_norm, -vf_clip, vf_clip
-            )
             v_loss_unclipped = (newvalue - mb_returns_norm) ** 2
-            v_loss_clipped = (v_clipped - mb_returns_norm) ** 2
-            v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+            if vf_clip is not None:
+                v_clipped = mb_values_norm + torch.clamp(
+                    newvalue - mb_values_norm, -vf_clip, vf_clip
+                )
+                v_loss_clipped = (v_clipped - mb_returns_norm) ** 2
+                v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+            else:
+                v_loss = 0.5 * v_loss_unclipped.mean()
 
             entropy_loss = entropy.mean()
 
             loss = pg_loss + config['vf_coef'] * v_loss - config['ent_coef'] * entropy_loss
             self.amp_context.__enter__()
 
-            self.values[idx] = newvalue.detach().float()
+            # Denormalize before writing back so advantage computation stays in raw scale
+            std = (_ret_var + 1e-8).sqrt()
+            self.values[idx] = (newvalue.detach().float() * std + _ret_mean)
 
             # Logging
             profile('train_misc', epoch)
@@ -745,6 +747,8 @@ def _patch_trainer_with_return_norm(trainer):
             torch.nan if var_y == 0 else 1 - (y_true - y_pred).var() / var_y
         )
         losses['explained_variance'] = explained_var.item()
+        losses['ret_mean'] = _ret_mean.item()
+        losses['ret_std'] = (_ret_var + 1e-8).sqrt().item()
 
         profile.end()
         logs = None

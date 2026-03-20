@@ -312,8 +312,10 @@ class Dust2CEnv(pufferlib.PufferEnv):
         map_data=None,
         normalize_obs: bool = True,
     ):
+        # Observation space bounds depend on normalization setting
+        obs_bounds = (-5.0, 5.0) if normalize_obs else (-1.0, 1.0)
         self.single_observation_space = gymnasium.spaces.Box(
-            low=-1.0, high=1.0, shape=(OBS_DIM,), dtype=np.float32
+            low=obs_bounds[0], high=obs_bounds[1], shape=(OBS_DIM,), dtype=np.float32
         )
         self.single_action_space = gymnasium.spaces.MultiDiscrete([9, 2, 2, 2])
         self.num_agents = N_AGENTS
@@ -363,6 +365,7 @@ class Dust2CEnv(pufferlib.PufferEnv):
 
         # Observation normalisation — RunningMeanStd per feature, clip to [-5, 5]
         self._normalize_obs = normalize_obs
+        self._obs_rms = None  # Initialized unconditionally; set to RunningMeanStd if normalize_obs=True
         if normalize_obs:
             self._obs_rms = RunningMeanStd(shape=(OBS_DIM,))
 
@@ -458,6 +461,8 @@ class Dust2CEnv(pufferlib.PufferEnv):
 
     def _normalize_obs_inplace(self, obs: np.ndarray) -> None:
         """Update running stats and normalise *obs* in-place, clipping to [-5, 5]."""
+        if self._obs_rms is None:
+            return
         self._obs_rms.update(obs)
         std = np.sqrt(self._obs_rms.var.astype(np.float32) + 1e-8)
         mean = self._obs_rms.mean.astype(np.float32)
@@ -467,6 +472,8 @@ class Dust2CEnv(pufferlib.PufferEnv):
         if not self._uses_external_buffers:
             if self._normalize_obs:
                 # self.observations IS self._obs_view (C buffer) — safe to modify in-place
+                # because C code (dust2_env.c) only WRITES to observations[], never reads from it.
+                # Each step, C populates observations from raw game state, then we normalize in-place.
                 self._normalize_obs_inplace(self.observations)
             return
         self._sync_observations()
