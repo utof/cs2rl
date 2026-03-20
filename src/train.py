@@ -581,7 +581,9 @@ def _patch_trainer_with_return_norm(trainer):
     max_entropy = np.log(9) + 3 * np.log(2)  # ≈ 4.276 for MultiDiscrete([9,2,2,2])
     target_entropy = 0.5 * max_entropy  # ≈ 2.14
     entropy_floor = 0.3 * max_entropy  # collapse threshold
-    log_alpha = torch.zeros(1, requires_grad=True, device=device)
+    import math
+
+    log_alpha = torch.tensor([math.log(0.1)], requires_grad=True, device=device)
     alpha_optimizer = torch.optim.Adam([log_alpha], lr=1e-4)
     # ──────────────────────────────────────────────────────────────────────
 
@@ -999,7 +1001,7 @@ def train(args):
         "clip_coef": 0.15,
         "vf_coef": 0.5,
         "vf_clip_coef": None,
-        "ent_coef": 0.01,  # fallback; adaptive alpha overrides this in the patched train method
+        "ent_coef": 0.1,  # fallback; adaptive alpha overrides this in the patched train method
         "max_grad_norm": 0.5,
         "target_kl": 0.015,
         "use_rnn": True,
