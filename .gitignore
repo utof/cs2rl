@@ -1,3 +1,4 @@
+.worktrees/
 **/*.npy
 outputs/checkpoints/
 outputs/recordings/
