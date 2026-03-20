@@ -210,13 +210,16 @@ void env_step(Dust2Env* env, const int32_t* actions) {
     float       phi_before[2];
     int8_t      vis10[N_AGENTS][N_AGENTS];
     int         kills[N_AGENTS][2];
-    int         n_kills           = 0;
-    int         bomb_just_planted = 0;
-    int         bomb_planter_id   = -1;
-    int         bomb_just_defused = 0;
-    int         bomb_defuser_id   = -1;
-    int         t_alive           = 0;
-    int         ct_alive          = 0;
+    int         n_kills                  = 0;
+    int         bomb_just_planted        = 0;
+    int         bomb_planter_id          = -1;
+    int         bomb_just_defused        = 0;
+    int         bomb_defuser_id          = -1;
+    int         t_alive                  = 0;
+    int         ct_alive                 = 0;
+    int8_t      bombsite_entry_bonus[5]  = {0};    /* 1 if agent earned entry bonus this tick */
+    float       plant_progress_reward[5] = {0.0f}; /* per-tick plant progress per T-agent */
+    int8_t      plant_interrupted[5]     = {0};    /* 1 if plant was interrupted with progress */
 
     phi_before[0] = _potential(env, 0);
     phi_before[1] = _potential(env, 1);
@@ -433,12 +436,18 @@ void env_step(Dust2Env* env, const int32_t* actions) {
 
             if (a->team == 0 && a->has_bomb && !g->bomb_planted) {
                 if (a->area_idx >= 0 && sd->bombsite_by_idx[a->area_idx]) {
+                    /* One-time bombsite entry bonus */
+                    if (!g->bombsite_entered[i]) {
+                        g->bombsite_entered[i]  = 1;
+                        bombsite_entry_bonus[i] = 1;
+                    }
                     if (g->bomb_being_planted_by == -1) {
                         g->bomb_being_planted_by = i;
                         g->bomb_plant_ticks      = 0;
                     }
                     if (g->bomb_being_planted_by == i) {
                         g->bomb_plant_ticks++;
+                        plant_progress_reward[i] = 0.05f; /* per-tick plant progress reward */
                         if (g->bomb_plant_ticks >= sd->bomb_plant_time) {
                             g->bomb_planted          = 1;
                             g->bomb_area_idx         = a->area_idx;
@@ -455,6 +464,10 @@ void env_step(Dust2Env* env, const int32_t* actions) {
                         }
                     }
                 } else if (g->bomb_being_planted_by == i) {
+                    if (g->bomb_plant_ticks > 0) {
+                        plant_interrupted[i] =
+                            1; /* interrupted plant penalty applied post-memset */
+                    }
                     g->bomb_being_planted_by = -1;
                     g->bomb_plant_ticks      = 0;
                 }
@@ -622,6 +635,24 @@ void env_step(Dust2Env* env, const int32_t* actions) {
             obs[68] = alive_t_frac;
             obs[69] = alive_ct_frac;
             obs[70] = (a->area_idx >= 0) ? (float)sd->bombsite_by_idx[a->area_idx] : 0.0f;
+
+            /* obs[71]: plant state for bomb carrier */
+            {
+                float plant_state = 0.0f;
+                if (a->team == 0 && a->has_bomb && !g->bomb_planted) {
+                    int at_site = (a->area_idx >= 0) ? sd->bombsite_by_idx[a->area_idx] : 0;
+                    if (!at_site) {
+                        plant_state = 0.33f; /* has bomb, not at site */
+                    } else if (g->bomb_being_planted_by == i && g->bomb_plant_ticks > 0) {
+                        /* actively planting with progress */
+                        plant_state = 0.67f + 0.33f * ((float)g->bomb_plant_ticks /
+                                                       (float)sd->bomb_plant_time);
+                    } else {
+                        plant_state = 0.67f; /* at site, not yet planting or progress=0 */
+                    }
+                }
+                obs[71] = plant_state;
+            }
         }
     }
 
@@ -656,8 +687,20 @@ void env_step(Dust2Env* env, const int32_t* actions) {
         }
     }
 
+    /* Bomb carrier subgoal rewards */
+    for (int i = 0; i < TEAM_SIZE; i++) {
+        if (bombsite_entry_bonus[i]) {
+            env->rewards[i] += 0.3f; /* one-time bombsite entry bonus */
+        }
+        env->rewards[i] += plant_progress_reward[i]; /* per-tick plant progress */
+        if (plant_interrupted[i]) {
+            env->rewards[i] -= 0.1f; /* interrupted plant penalty */
+        }
+    }
+
     if (bomb_just_planted && bomb_planter_id >= 0) {
         env->rewards[bomb_planter_id] += 0.2f;
+        env->rewards[bomb_planter_id] += 3.0f; /* plant completion bonus */
     }
     if (bomb_just_defused && bomb_defuser_id >= 0) {
         env->rewards[bomb_defuser_id] += 0.2f;

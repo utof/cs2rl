@@ -24,7 +24,7 @@ import numpy as np
 
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
-OBS_DIM = 71
+OBS_DIM = 72
 
 
 def resolve_run_name(name: str) -> str:
@@ -58,7 +58,7 @@ def smoke_test():
     try:
         obs, _ = env.reset(seed=42)
 
-        assert obs.shape == (10, 71), f"Expected obs shape (10, 71), got {obs.shape}"
+        assert obs.shape == (10, OBS_DIM), f"Expected obs shape (10, {OBS_DIM}), got {obs.shape}"
         assert np.isfinite(obs).all(), "NaN in initial obs"
 
         steps = 20_000
@@ -70,7 +70,7 @@ def smoke_test():
         for step_n in range(steps):
             obs, rewards, terms, truncs, infos = env.step(actions)
 
-            assert obs.shape == (10, 71), f"Unexpected obs shape at step {step_n}: {obs.shape}"
+            assert obs.shape == (10, OBS_DIM), f"Unexpected obs shape at step {step_n}: {obs.shape}"
             assert rewards.shape == (10,), (
                 f"Unexpected reward shape at step {step_n}: {rewards.shape}"
             )

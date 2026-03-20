@@ -21,7 +21,7 @@ def test_c_env_smoke():
     env = make_env(seed=42)
     obs, _ = env.reset()
 
-    assert obs.shape == (10, 71), f"Expected obs shape (10, 71), got {obs.shape}"
+    assert obs.shape == (10, 72), f"Expected obs shape (10, 72), got {obs.shape}"
     assert np.isfinite(obs).all(), "NaN/Inf in initial obs"
 
     actions = np.zeros((10, 4), dtype=np.int32)

@@ -9,7 +9,7 @@
 /* ── Constants ───────────────────────────────────────────────────────────── */
 #define TEAM_SIZE 5
 #define N_AGENTS 10
-#define OBS_DIM 71
+#define OBS_DIM 72
 #define ACTION_DIM 4
 #define INVALID_AREA_IDX (-1)
 
@@ -85,6 +85,7 @@ typedef struct {
     int32_t    bomb_plant_ticks;
     int32_t    bomb_being_defused_by; /* agent index or -1 */
     int32_t    bomb_defuse_ticks;
+    int8_t     bombsite_entered[5]; /* per-T-agent flag: 1 if entered bombsite this round */
 } GameState;
 
 /* ── Per-step stats exported for Python-side episode aggregation ─────────── */

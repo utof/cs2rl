@@ -14,7 +14,7 @@ def test_reset_returns_10_obs():
 
     env = make_env(seed=0)
     obs, info = env.reset()
-    assert obs.shape == (10, 71)
+    assert obs.shape == (10, 72)
 
 
 def test_step_returns_shapes():
@@ -47,7 +47,7 @@ def test_make_env_honors_external_buffers():
     single_action = gymnasium.spaces.MultiDiscrete([9, 2, 2, 2])
     joint_action = pufferlib.spaces.joint_space(single_action, 10)
     buf = {
-        "observations": np.zeros((10, 71), dtype=np.float32),
+        "observations": np.zeros((10, 72), dtype=np.float32),
         "rewards": np.zeros(10, dtype=np.float32),
         "terminals": np.zeros(10, dtype=bool),
         "truncations": np.zeros(10, dtype=bool),

@@ -133,6 +133,7 @@ class GameStateC(ctypes.Structure):
         ("bomb_plant_ticks", ctypes.c_int32),
         ("bomb_being_defused_by", ctypes.c_int32),
         ("bomb_defuse_ticks", ctypes.c_int32),
+        ("bombsite_entered", ctypes.c_int8 * 5),
     ]
 
 
@@ -177,8 +178,8 @@ class Dust2EnvC(ctypes.Structure):
 assert ctypes.sizeof(AgentStateC) == 76, (
     f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 76)"
 )
-assert ctypes.sizeof(GameStateC) == 816, (
-    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 816)"
+assert ctypes.sizeof(GameStateC) == 824, (
+    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 824)"
 )
 
 _lib.env_init.argtypes = [
@@ -365,7 +366,8 @@ class Dust2CEnv(pufferlib.PufferEnv):
 
         # Observation normalisation — RunningMeanStd per feature, clip to [-5, 5]
         self._normalize_obs = normalize_obs
-        self._obs_rms = None  # Initialized unconditionally; set to RunningMeanStd if normalize_obs=True
+        # Initialized unconditionally; set to RunningMeanStd if normalize_obs=True
+        self._obs_rms = None
         if normalize_obs:
             self._obs_rms = RunningMeanStd(shape=(OBS_DIM,))
 
@@ -473,7 +475,7 @@ class Dust2CEnv(pufferlib.PufferEnv):
             if self._normalize_obs:
                 # self.observations IS self._obs_view (C buffer) — safe to modify in-place
                 # because C code (dust2_env.c) only WRITES to observations[], never reads from it.
-                # Each step, C populates observations from raw game state, then we normalize in-place.
+                # Each step, C populates observations from raw game state, then normalize in-place.
                 self._normalize_obs_inplace(self.observations)
             return
         self._sync_observations()
