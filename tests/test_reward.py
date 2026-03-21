@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from c_env.wrapper import make_env
+from c_env.cs2_env import make_env
 def test_pbrs_rewards_are_finite():
     """PBRS must not produce NaN or inf over a full episode."""
     env = make_env()

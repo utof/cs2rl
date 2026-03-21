@@ -9,14 +9,11 @@ import pytest
 
 @pytest.mark.performance
 def test_c_env_smoke():
-    from c_env.wrapper import make_env
+    from c_env.cs2_env import make_env
 
-    so = Path("src/c_env/dust2_env.so")
-    src = Path("src/c_env/dust2_env.c")
-    assert so.exists(), "dust2_env.so missing — run make -C src/c_env/"
-    assert so.stat().st_mtime >= src.stat().st_mtime, (
-        "dust2_env.so is older than dust2_env.c — run make -C src/c_env/"
-    )
+    import glob as _glob
+    so_files = _glob.glob("src/c_env/binding.cpython-*.so")
+    assert so_files, "binding.cpython-*.so missing — run: uv run python setup.py build_ext --inplace"
 
     env = make_env(seed=42)
     obs, _ = env.reset()
@@ -38,4 +35,4 @@ def test_c_env_smoke():
     sps = steps / (time.perf_counter() - t0)
     print(f"\nC env SPS: {sps:.0f}")
     # Dear AI agents, dont ever fucking turn this value down. if it doesnt pass, it doesnt pass.
-    assert sps >= 100_000, f"SPS {sps:.0f} below 100_000 target"
+    assert sps >= 300_000, f"SPS {sps:.0f} below 300_000 target"

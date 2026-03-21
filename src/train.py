@@ -100,7 +100,7 @@ def make_puffer_env(
     team_spirit=None, record_fn=None, buf=None, seed=0, episode_stats=True, map_data=None
 ):
     """Create the native C PufferEnv used by smoke/train/eval."""
-    from c_env.wrapper import make_env as make_c_env
+    from c_env.cs2_env import make_env as make_c_env
 
     if record_fn is not None:
         raise ValueError("record_fn is only supported by the Python recording env")
@@ -263,7 +263,7 @@ def record_episode(
     save_path=str(RECORDINGS_DIR / "latest.rrd"),
     map_data=None,
 ):
-    from c_env.wrapper import make_env as make_c_env
+    from c_env.cs2_env import make_env as make_c_env
     from nav import CACHE_PATH, NAV_PATH
     from map import make_cs2_map
     from viz import init_recording, log_navmesh, log_tick, log_trimap

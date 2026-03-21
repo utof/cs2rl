@@ -3,7 +3,7 @@ from collections import deque
 
 import numpy as np
 
-from c_env.wrapper import make_env
+from c_env.cs2_env import make_env
 from nav import _DELTA_VECTORS, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
 
 
