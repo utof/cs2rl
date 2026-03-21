@@ -4,13 +4,13 @@ import numpy as np
 
 
 def test_import_wrapper():
-    from c_env.wrapper import Dust2CEnv
+    from c_env.cs2_env import Cs2Env
 
-    assert Dust2CEnv is not None
+    assert Cs2Env is not None
 
 
 def test_reset_returns_10_obs():
-    from c_env.wrapper import make_env
+    from c_env.cs2_env import make_env
 
     env = make_env(seed=0)
     obs, info = env.reset()
@@ -18,7 +18,7 @@ def test_reset_returns_10_obs():
 
 
 def test_step_returns_shapes():
-    from c_env.wrapper import make_env
+    from c_env.cs2_env import make_env
 
     env = make_env(seed=0)
     env.reset()
@@ -29,7 +29,7 @@ def test_step_returns_shapes():
 
 
 def test_snapshot_state_exposes_agents():
-    from c_env.wrapper import make_env
+    from c_env.cs2_env import make_env
 
     env = make_env(seed=0, auto_reset=False)
     env.reset()
@@ -42,7 +42,7 @@ def test_make_env_honors_external_buffers():
     import gymnasium
     import pufferlib
 
-    from c_env.wrapper import make_env
+    from c_env.cs2_env import make_env
 
     single_action = gymnasium.spaces.MultiDiscrete([9, 2, 2, 2])
     joint_action = pufferlib.spaces.joint_space(single_action, 10)

@@ -8,6 +8,12 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 
+@pytest.fixture(scope="session")
+def make_map():
+    from map import make_simple_map
+    return make_simple_map()
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
