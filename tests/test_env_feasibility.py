@@ -4,7 +4,7 @@ from collections import deque
 import numpy as np
 
 from c_env.wrapper import make_env
-from sim import _DELTA_VECTORS, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
+from nav import _DELTA_VECTORS, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
 
 
 def _bombsite_areas(env):

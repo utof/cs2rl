@@ -457,10 +457,6 @@ _DELTA_VECTORS = {k: v * (MOVE_SPEED * DT) for k, v in _DIR_VECTORS.items()}
 _DIR_FACING = {k: math.atan2(float(v[1]), float(v[0])) for k, v in _DIR_VECTORS.items()}
 MAX_TURN_SPEED_RAD = math.pi / 4  # 45 degrees per tick — max facing rotation rate
 
-# Team Spirit: controls individual↔team reward blending (annealed 0→1 during training).
-# WARNING: uses module-level global — only process-safe when num_cpus=1 in train.py.
-# If num_cpus > 1 is ever needed, replace with multiprocessing.Value.
-_TEAM_SPIRIT: float = 0.0
 N_AGENTS = 10
 TEAM_SIZE = 5
 OBS_DIM = 72
@@ -497,7 +493,6 @@ _CT_SPAWN_SLOTS = (
 )
 _A_SITE = (1200.0, 2400.0, 100.0)
 _B_SITE = (-1530.0, 2600.0, 5.0)
-_DUST2_STATIC_CACHE = {}
 
 
 def _resolve_nav_path(map_name: str = "de_dust2") -> str:
@@ -701,77 +696,3 @@ def _compute_area_distance_to_targets(
 
     return dist
 
-
-def _load_dust2_static_data(nav_path: str, cache_path: str):
-    key = (nav_path, cache_path)
-    static = _DUST2_STATIC_CACHE.get(key)
-    if static is not None:
-        return static
-
-    nav_graph = NavGraph(nav_path, cache_path)
-    nav_graph.build_vis_matrix()
-
-    xs = [c[0] for c in nav_graph.centroids.values()]
-    ys = [c[1] for c in nav_graph.centroids.values()]
-    map_bounds = (min(xs), max(xs), min(ys), max(ys))
-
-    a_site_areas = _areas_near(nav_graph, _A_SITE, 600)
-    b_site_areas = _areas_near(nav_graph, _B_SITE, 600)
-    bombsite_areas = set(a_site_areas + b_site_areas)
-    bombsite_targets = tuple(bombsite_areas)
-    area_adjacency = _build_area_adjacency(nav_graph)
-    bombsite_area_distance = _compute_area_distance_to_targets(
-        nav_graph,
-        area_adjacency,
-        bombsite_targets,
-    )
-
-    t_spawn_areas = _select_distinct_spawn_areas(
-        nav_graph,
-        _T_SPAWN_SLOTS,
-        TEAM_SIZE,
-        required_targets=bombsite_targets,
-        area_adjacency=area_adjacency,
-    )
-    ct_spawn_areas = _select_distinct_spawn_areas(
-        nav_graph,
-        _CT_SPAWN_SLOTS,
-        TEAM_SIZE,
-        required_targets=bombsite_targets,
-        area_adjacency=area_adjacency,
-    )
-
-    max_area_id = max(nav_graph.area_ids)
-    bombsite_mask = np.zeros(max_area_id + 1, dtype=bool)
-    bombsite_mask[np.asarray(list(bombsite_areas), dtype=np.int32)] = True
-
-    centroid_lookup = np.zeros((max_area_id + 1, 2), dtype=np.float32)
-    for area_id, centroid in nav_graph.centroids.items():
-        centroid_lookup[area_id] = centroid
-
-    bombsite_distance_lookup = np.full(max_area_id + 1, np.inf, dtype=np.float32)
-    for area_id in nav_graph.area_ids:
-        bombsite_distance_lookup[area_id] = bombsite_area_distance[nav_graph._id_to_idx[area_id]]
-    finite_dist = bombsite_distance_lookup[np.isfinite(bombsite_distance_lookup)]
-    bombsite_distance_scale = 0.0
-    if finite_dist.size:
-        max_dist = float(finite_dist.max())
-        bombsite_distance_scale = 1.0 / max_dist if max_dist > 0 else 0.0
-
-    static = {
-        "nav_graph": nav_graph,
-        "map_bounds": map_bounds,
-        "t_spawn_areas": t_spawn_areas,
-        "ct_spawn_areas": ct_spawn_areas,
-        "a_site_areas": a_site_areas,
-        "b_site_areas": b_site_areas,
-        "bombsite_areas": bombsite_areas,
-        "bombsite_mask": bombsite_mask,
-        "centroid_lookup": centroid_lookup,
-        "bombsite_distance_lookup": bombsite_distance_lookup,
-        "bombsite_distance_scale": bombsite_distance_scale,
-        "area_adjacency": area_adjacency,
-    }
-    _DUST2_STATIC_CACHE[key] = static
-
-    return static

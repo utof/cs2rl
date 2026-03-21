@@ -264,7 +264,8 @@ def record_episode(
     map_data=None,
 ):
     from c_env.wrapper import make_env as make_c_env
-    from sim import CACHE_PATH, NAV_PATH, _load_dust2_static_data
+    from nav import CACHE_PATH, NAV_PATH
+    from map import make_cs2_map
     from viz import init_recording, log_navmesh, log_tick, log_trimap
 
     save_path = Path(save_path)
@@ -274,9 +275,9 @@ def record_episode(
     init_recording(save_path=str(save_path))
     env = make_c_env(seed=seed, auto_reset=False, map_data=map_data)
     if map_data is None:
-        static = _load_dust2_static_data(NAV_PATH, CACHE_PATH)
+        md = make_cs2_map(NAV_PATH, CACHE_PATH)
         log_trimap()
-        log_navmesh(static["nav_graph"])
+        log_navmesh(md.nav_graph)
     else:
         from viz import log_simple_map
 
@@ -320,7 +321,7 @@ def record_episode(
 def evaluate_checkpoint(
     checkpoint_path=None, device="cpu", start_seed=0, num_episodes=50, policy_mode="auto"
 ):
-    from sim import ROUND_TIME
+    from nav import ROUND_TIME
 
     policy = None
     policy_mode = resolve_policy_mode(checkpoint_path, policy_mode)
@@ -422,26 +423,6 @@ def evaluate_checkpoint(
 TRAINING_CONFIG = dict(
     gamma=0.99,  # used by PBRS shaping in sim.py and test_reward.py
 )
-
-
-# ── SECTION: TeamSpirit callback (legacy shim — kept for tests) ────────────
-
-
-class TeamSpiritCallback:
-    """Linearly anneals sim._TEAM_SPIRIT 0→1 over anneal_steps env steps.
-
-    _on_step() is the SB3-shim used by tests.
-    """
-
-    def __init__(self, anneal_steps: int = 5_000_000):
-        self.anneal_steps = anneal_steps
-        self.num_timesteps: int = 0  # set by tests
-
-    def _on_step(self) -> bool:
-        import sim as _sim
-
-        _sim._TEAM_SPIRIT = min(1.0, self.num_timesteps / self.anneal_steps)
-        return True
 
 
 # ── SECTION: PufferLib env factory ─────────────────────────────────────────

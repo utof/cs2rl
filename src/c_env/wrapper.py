@@ -9,9 +9,9 @@ import gymnasium
 import numpy as np
 import pufferlib
 
-import sim
+import nav as sim
 from map import MapData, make_cs2_map
-from sim import ACTION_DIM, N_AGENTS, OBS_DIM
+from nav import ACTION_DIM, N_AGENTS, OBS_DIM
 
 _DIR = Path(__file__).parent
 _SO = _DIR / "dust2_env.so"

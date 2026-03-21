@@ -2,7 +2,6 @@
 import numpy as np
 import pytest
 
-import sim as sim_module
 from c_env.wrapper import make_env
 def test_pbrs_rewards_are_finite():
     """PBRS must not produce NaN or inf over a full episode."""

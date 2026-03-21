@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from sim import (
+from nav import (
     _A_SITE,
     _B_SITE,
     _CT_SPAWN_SLOTS,
