@@ -1158,13 +1158,18 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     opp_logits, _ = past_policy.forward_eval(o_device[opp_mask], past_state)
                     opp_action, opp_logprob, _ = pufferlib.pytorch.sample_logits(opp_logits)
 
-                    # Write back updated past-policy LSTM states
-                    past_lstm_h[env_id.start][opp_mask] = past_state["lstm_h"]
-                    past_lstm_c[env_id.start][opp_mask] = past_state["lstm_c"]
+                    # Write back updated past-policy LSTM states (cast from fp16 if needed)
+                    past_lstm_h[env_id.start][opp_mask] = past_state["lstm_h"].to(
+                        past_lstm_h[env_id.start].dtype
+                    )
+                    past_lstm_c[env_id.start][opp_mask] = past_state["lstm_c"].to(
+                        past_lstm_c[env_id.start].dtype
+                    )
 
                     # Replace opponent slots in action & logprob buffers
-                    action[opp_idx] = opp_action
-                    logprob[opp_idx] = opp_logprob
+                    # Cast to destination dtype (amp_context may yield fp16)
+                    action[opp_idx] = opp_action.to(action.dtype)
+                    logprob[opp_idx] = opp_logprob.to(logprob.dtype)
                 # ──────────────────────────────────────────────────────────
 
             profile("eval_copy", epoch)
