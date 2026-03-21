@@ -15,8 +15,11 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
+import json
 import multiprocessing as mp
+import random
 import time
+import types
 from collections import Counter
 from pathlib import Path
 
@@ -958,6 +961,277 @@ class DeadRunDetector:
         return False
 
 
+# ── SECTION: Self-Play ─────────────────────────────────────────────────────
+
+
+class SelfPlayManager:
+    """Manages a pool of past checkpoints for self-play training.
+
+    Every save_every_epochs epochs (or when the hero team win_rate > win_threshold),
+    the current policy is saved to a pool.  With probability p_past, a random past
+    checkpoint is used to supply actions for the *opponent* team during rollout
+    collection.  This prevents the co-adaptation collapse that arises when both
+    teams train against only the latest version of each other.
+
+    Agent layout (per env, 10 agents total):
+        slots 0-4  → T team
+        slots 5-9  → CT team
+    """
+
+    AGENTS_PER_ENV = 10
+    T_SLOTS = slice(0, 5)
+    CT_SLOTS = slice(5, 10)
+
+    def __init__(
+        self,
+        pool_size: int = 15,
+        p_past: float = 0.3,
+        save_every_epochs: int = 25,
+        win_threshold: float = 0.6,
+        phase_length: int = 50,
+    ):
+        self.pool: list[Path] = []
+        self.pool_size = pool_size
+        self.p_past = p_past
+        self.save_every_epochs = save_every_epochs
+        self.win_threshold = win_threshold
+        self.phase_length = phase_length
+        self.opponent_team = "ct"  # CT is opponent first; T learns to attack
+        self._milestone_count = 0
+
+    def maybe_save(
+        self,
+        policy,
+        checkpoint_dir: Path,
+        epoch: int,
+        win_rate_t: float,
+        win_rate_ct: float,
+    ):
+        """Save current policy to the pool if conditions are met."""
+        import torch
+
+        hero_win = win_rate_t if self.opponent_team == "ct" else win_rate_ct
+        if epoch % self.save_every_epochs == 0 or hero_win > self.win_threshold:
+            path = checkpoint_dir / f"sp_{epoch:06d}.pt"
+            torch.save(policy.state_dict(), path)
+            self._add_to_pool(path)
+            self._milestone_count += 1
+            print(
+                f"[SelfPlay] Saved checkpoint → {path.name}  "
+                f"(pool={len(self.pool)}, hero_win={hero_win:.2f})"
+            )
+
+    def _add_to_pool(self, path: Path):
+        self.pool.append(path)
+        if len(self.pool) > self.pool_size:
+            # Keep every 5th entry as milestone; evict the most recent non-milestone
+            non_milestones = [i for i in range(len(self.pool) - 1) if i % 5 != 0]
+            evict = non_milestones[-1] if non_milestones else 0
+            evicted = self.pool.pop(evict)
+            if evicted.exists():
+                evicted.unlink(missing_ok=True)
+
+    def maybe_switch_teams(self, epoch: int):
+        if epoch > 0 and epoch % self.phase_length == 0:
+            old = self.opponent_team
+            self.opponent_team = "ct" if self.opponent_team == "t" else "t"
+            print(f"[SelfPlay] Epoch {epoch}: opponent {old} → {self.opponent_team}")
+
+    def should_use_past(self) -> bool:
+        return bool(self.pool) and random.random() < self.p_past
+
+    def load_past_policy(self, device, vecenv):
+        """Load a random past checkpoint. Returns the policy module or None."""
+        import torch
+
+        if not self.pool:
+            return None
+        path = random.choice(self.pool)
+        if not path.exists():
+            self.pool.remove(path)
+            return None
+        policy = build_policy(vecenv, device)
+        state_dict = torch.load(path, map_location=device, weights_only=True)
+        policy.load_state_dict(state_dict)
+        policy.eval()
+        return policy
+
+    def get_opponent_mask(self, batch_n: int, device) -> "torch.Tensor":
+        """Bool mask of shape (batch_n,): True for every opponent-team agent slot."""
+        import torch
+
+        n_envs = batch_n // self.AGENTS_PER_ENV
+        mask = torch.zeros(batch_n, dtype=torch.bool, device=device)
+        slots = self.CT_SLOTS if self.opponent_team == "ct" else self.T_SLOTS
+        for e in range(n_envs):
+            base = e * self.AGENTS_PER_ENV
+            mask[base + slots.start : base + slots.stop] = True
+        return mask
+
+
+def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
+    """Monkey-patch trainer.evaluate() to inject past-policy actions for the opponent team.
+
+    For each evaluation epoch SelfPlayManager.should_use_past() decides (once) whether
+    to activate self-play.  When active, a random past checkpoint is loaded and its
+    actions+logprobs replace the current-policy outputs for the opponent-team slots in
+    the rollout buffer.  The current policy's LSTM state is updated normally; the past
+    policy has its own independent LSTM state tensors.
+
+    Training (trainer.train()) sees the overridden actions as if they came from the
+    current policy at collection time.  The importance ratio (π_new / π_old) is
+    well-defined because we store the *past* policy's logprobs as π_old.
+    """
+    import pufferlib
+    import pufferlib.pytorch
+    import torch
+
+    # Past-policy LSTM state — same dict structure as trainer.lstm_h
+    # key → (agents_per_batch, hidden_size)
+    past_lstm_h = {k: torch.zeros_like(v) for k, v in trainer.lstm_h.items()}
+    past_lstm_c = {k: torch.zeros_like(v) for k, v in trainer.lstm_h.items()}
+
+    def _evaluate_with_selfplay(self):
+        profile = self.profile
+        epoch = self.epoch
+        profile("eval", epoch)
+        profile("eval_misc", epoch, nest=True)
+
+        cfg = self.config
+        dev = cfg["device"]
+
+        if cfg["use_rnn"]:
+            for k in self.lstm_h:
+                self.lstm_h[k].zero_()
+                self.lstm_c[k].zero_()
+
+        # ── Decide self-play for this epoch ────────────────────────────────
+        use_past = self_play_mgr.should_use_past()
+        past_policy = None
+        if use_past:
+            past_policy = self_play_mgr.load_past_policy(dev, self.vecenv)
+            use_past = past_policy is not None
+
+        if use_past:
+            for k in past_lstm_h:
+                past_lstm_h[k].zero_()
+                past_lstm_c[k].zero_()
+        # ───────────────────────────────────────────────────────────────────
+
+        self.full_rows = 0
+        while self.full_rows < self.segments:
+            profile("env", epoch)
+            o, r, d, t, info, env_id, mask = self.vecenv.recv()
+
+            profile("eval_misc", epoch)
+            env_id = slice(env_id[0], env_id[-1] + 1)
+            self.global_step += int(mask.sum())
+
+            profile("eval_copy", epoch)
+            o = torch.as_tensor(o)
+            o_device = o.to(dev)
+            r = torch.as_tensor(r).to(dev)
+            d = torch.as_tensor(d).to(dev)
+
+            profile("eval_forward", epoch)
+            with torch.no_grad(), self.amp_context:
+                state = dict(reward=r, done=d, env_id=env_id, mask=mask)
+                if cfg["use_rnn"]:
+                    state["lstm_h"] = self.lstm_h[env_id.start]
+                    state["lstm_c"] = self.lstm_c[env_id.start]
+
+                logits, value = self.policy.forward_eval(o_device, state)
+                action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                r = torch.clamp(r, -1, 1)
+
+                # ── SELF-PLAY: override opponent-team actions ───────────────
+                if use_past:
+                    batch_n = o_device.shape[0]
+                    opp_mask = self_play_mgr.get_opponent_mask(batch_n, dev)
+                    opp_idx = torch.where(opp_mask)[0]
+
+                    past_state = {
+                        "done": d[opp_mask],
+                        "lstm_h": past_lstm_h[env_id.start][opp_mask],
+                        "lstm_c": past_lstm_c[env_id.start][opp_mask],
+                    }
+                    opp_logits, _ = past_policy.forward_eval(o_device[opp_mask], past_state)
+                    opp_action, opp_logprob, _ = pufferlib.pytorch.sample_logits(opp_logits)
+
+                    # Write back updated past-policy LSTM states
+                    past_lstm_h[env_id.start][opp_mask] = past_state["lstm_h"]
+                    past_lstm_c[env_id.start][opp_mask] = past_state["lstm_c"]
+
+                    # Replace opponent slots in action & logprob buffers
+                    action[opp_idx] = opp_action
+                    logprob[opp_idx] = opp_logprob
+                # ──────────────────────────────────────────────────────────
+
+            profile("eval_copy", epoch)
+            with torch.no_grad():
+                if cfg["use_rnn"]:
+                    self.lstm_h[env_id.start] = state["lstm_h"]
+                    self.lstm_c[env_id.start] = state["lstm_c"]
+
+                seq_pos = self.ep_lengths[env_id.start].item()
+                batch_rows = slice(
+                    self.ep_indices[env_id.start].item(),
+                    1 + self.ep_indices[env_id.stop - 1].item(),
+                )
+
+                if cfg["cpu_offload"]:
+                    self.observations[batch_rows, seq_pos] = o
+                else:
+                    self.observations[batch_rows, seq_pos] = o_device
+
+                self.actions[batch_rows, seq_pos] = action
+                self.logprobs[batch_rows, seq_pos] = logprob
+                self.rewards[batch_rows, seq_pos] = r
+                self.terminals[batch_rows, seq_pos] = d.float()
+                self.values[batch_rows, seq_pos] = value.flatten()
+
+                self.ep_lengths[env_id] += 1
+                if seq_pos + 1 >= cfg["bptt_horizon"]:
+                    num_full = env_id.stop - env_id.start
+                    self.ep_indices[env_id] = (
+                        self.free_idx + torch.arange(num_full, device=dev).int()
+                    )
+                    self.ep_lengths[env_id] = 0
+                    self.free_idx += num_full
+                    self.full_rows += num_full
+
+                action = action.cpu().numpy()
+                if isinstance(logits, torch.distributions.Normal):
+                    import numpy as _np
+
+                    lo, hi = self.vecenv.action_space.low, self.vecenv.action_space.high
+                    action = _np.clip(action, lo, hi)
+
+            profile("eval_misc", epoch)
+            for i in info:
+                for k, v in pufferlib.unroll_nested_dict(i):
+                    if isinstance(v, np.ndarray):
+                        v = v.tolist()
+                    elif isinstance(v, (list, tuple)):
+                        self.stats[k].extend(v)
+                    else:
+                        self.stats[k].append(v)
+
+            profile("env", epoch)
+            self.vecenv.send(action)
+
+        profile("eval_misc", epoch)
+        self.free_idx = self.total_agents
+        self.ep_indices = torch.arange(self.total_agents, device=dev, dtype=torch.int32)
+        self.ep_lengths.zero_()
+        profile.end()
+        return self.stats
+
+    trainer.evaluate = types.MethodType(_evaluate_with_selfplay, trainer)
+    print("[Train] Self-play evaluate patch enabled.")
+    return trainer
+
+
 # ── SECTION: PufferLib training ────────────────────────────────────────────
 
 
@@ -967,12 +1241,40 @@ def train(args):
     import torch
     from pufferlib.pufferl import PuffeRL
 
+    # Load .env from repo root if present (sets WANDB_* vars picked up by wandb)
+    _env_file = Path(__file__).parent.parent / ".env"
+    if _env_file.exists():
+        for _line in _env_file.read_text().splitlines():
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
     device = args.device
 
     if getattr(args, "name", None):
         resolved_name = resolve_run_name(args.name)
         args.checkpoint_dir = str(CHECKPOINTS_DIR / resolved_name)
         print(f"[Train] Run name resolved to: {resolved_name}")
+
+    run_label = Path(args.checkpoint_dir).name
+
+    # ── W&B init ────────────────────────────────────────────────────────────
+    wandb_run = None
+    if getattr(args, "wandb", False):
+        import wandb
+
+        wandb_run = wandb.init(
+            project=getattr(args, "wandb_project", "cs2rl"),
+            entity=getattr(args, "wandb_entity", None) or None,
+            name=run_label,
+        )
+        print(f"[Train] W&B run: {wandb_run.url}")
+
+    # ── JSONL metrics file ───────────────────────────────────────────────────
+    metrics_path = Path(args.checkpoint_dir) / "metrics.jsonl"
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    _metrics_file = metrics_path.open("a")
 
     # Shared team spirit value — all envs read it at episode start
     shared_ts = mp.Value("f", 0.3)
@@ -1067,6 +1369,19 @@ def train(args):
     trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
     _patch_trainer_with_return_norm(trainer)
 
+    # ── Self-play setup ──────────────────────────────────────────────────────
+    self_play_mgr = None
+    if getattr(args, "self_play", True):
+        self_play_mgr = SelfPlayManager(
+            pool_size=15,
+            p_past=0.3,
+            save_every_epochs=25,  # ~2M steps per save at batch_size=81920
+            win_threshold=0.6,
+            phase_length=50,  # switch opponent team every ~4M steps
+        )
+        _patch_trainer_with_selfplay(trainer, self_play_mgr)
+    # ────────────────────────────────────────────────────────────────────────
+
     save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
     last_save = time.time()
 
@@ -1091,6 +1406,36 @@ def train(args):
                 health_metrics = compute_network_health(policy, device)
                 logs.update(health_metrics)
 
+            # ── Self-play bookkeeping ────────────────────────────────────────
+            if self_play_mgr is not None:
+                self_play_mgr.maybe_switch_teams(trainer.epoch)
+                win_rate_t = logs.get("environment/winner_t", 0.0)
+                win_rate_ct = logs.get("environment/winner_ct", 0.0)
+                self_play_mgr.maybe_save(
+                    policy,
+                    Path(args.checkpoint_dir),
+                    trainer.epoch,
+                    win_rate_t,
+                    win_rate_ct,
+                )
+                logs["self_play/pool_size"] = float(len(self_play_mgr.pool))
+                logs["self_play/opponent_team"] = float(
+                    self_play_mgr.opponent_team == "ct"
+                )  # 1.0 = CT opponent, 0.0 = T opponent
+            # ────────────────────────────────────────────────────────────────
+
+            # ── Persist metrics ──────────────────────────────────────────────
+            log_entry = {
+                "step": trainer.global_step,
+                "epoch": trainer.epoch,
+                "team_spirit": ts_val,
+                **{k: v for k, v in logs.items() if isinstance(v, (int, float))},
+            }
+            _metrics_file.write(json.dumps(log_entry) + "\n")
+            _metrics_file.flush()
+            if wandb_run is not None:
+                wandb_run.log(log_entry, step=trainer.global_step)
+
         if time.time() - last_save > args.save_every_sec:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(policy.state_dict(), save_path)
@@ -1106,6 +1451,11 @@ def train(args):
     save_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(policy.state_dict(), save_path)
     print(f"[Train] Final checkpoint saved to {save_path}")
+
+    _metrics_file.close()
+    print(f"[Train] Metrics saved to {metrics_path}")
+    if wandb_run is not None:
+        wandb_run.finish()
 
     print("[Train] Done.")
 
@@ -1149,6 +1499,15 @@ if __name__ == "__main__":
             "Run name; auto-prefixed with DDMMYY-N- where N = count of existing checkpoint dirs "
             "starting with today's date. E.g. --name 1M-ct → '200326-3-1M-ct'."
         ),
+    )
+    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb-project", type=str, default="cs2rl", dest="wandb_project")
+    parser.add_argument("--wandb-entity", type=str, default="", dest="wandb_entity")
+    parser.add_argument(
+        "--no-self-play",
+        action="store_false",
+        dest="self_play",
+        help="Disable self-play (both teams always use current policy)",
     )
     args = parser.parse_args()
 
