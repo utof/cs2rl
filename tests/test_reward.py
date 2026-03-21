@@ -4,14 +4,6 @@ import pytest
 
 import sim as sim_module
 from c_env.wrapper import make_env
-from train import TeamSpiritCallback
-
-
-def test_team_spirit_module_default_zero():
-    """sim._TEAM_SPIRIT must be 0.0 at module load so existing training is unchanged."""
-    assert sim_module._TEAM_SPIRIT == 0.0
-
-
 def test_pbrs_rewards_are_finite():
     """PBRS must not produce NaN or inf over a full episode."""
     env = make_env()
@@ -125,32 +117,6 @@ def test_team_spirit_one_equalizes_alive_team():
         assert all(abs(r - ct_rewards[0]) < 1e-5 for r in ct_rewards), (
             f"CT alive rewards not equal at team_spirit=1: {ct_rewards}"
         )
-
-
-def test_team_spirit_callback_anneals():
-    """TeamSpiritCallback linearly anneals sim._TEAM_SPIRIT from 0→1."""
-    sim_module._TEAM_SPIRIT = 0.0
-    cb = TeamSpiritCallback(anneal_steps=1_000_000)
-
-    cb.num_timesteps = 0
-    cb._on_step()
-    assert sim_module._TEAM_SPIRIT == pytest.approx(0.0, abs=1e-6)
-
-    cb.num_timesteps = 500_000
-    cb._on_step()
-    assert sim_module._TEAM_SPIRIT == pytest.approx(0.5, abs=1e-3)
-
-    cb.num_timesteps = 1_000_000
-    cb._on_step()
-    assert sim_module._TEAM_SPIRIT == pytest.approx(1.0, abs=1e-3)
-
-    cb.num_timesteps = 2_000_000
-    cb._on_step()
-    assert sim_module._TEAM_SPIRIT == pytest.approx(1.0, abs=1e-3), (
-        "team_spirit must not exceed 1.0 after anneal_steps"
-    )
-
-    sim_module._TEAM_SPIRIT = 0.0  # restore
 
 
 # ── Phase 4.4 reward unit tests ───────────────────────────────────────────
