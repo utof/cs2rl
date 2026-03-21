@@ -998,6 +998,7 @@ class SelfPlayManager:
         self.phase_length = phase_length
         self.opponent_team = "ct"  # CT is opponent first; T learns to attack
         self._milestone_count = 0
+        self._last_save_epoch = -1
 
     def maybe_save(
         self,
@@ -1011,11 +1012,17 @@ class SelfPlayManager:
         import torch
 
         hero_win = win_rate_t if self.opponent_team == "ct" else win_rate_ct
-        if epoch % self.save_every_epochs == 0 or hero_win > self.win_threshold:
+        # Schedule: every save_every_epochs epochs, OR when hero is dominating
+        # (win_threshold) but only if enough epochs have passed since last save.
+        since_last = epoch - self._last_save_epoch
+        scheduled = epoch % self.save_every_epochs == 0
+        dominant = hero_win > self.win_threshold and since_last >= self.save_every_epochs // 2
+        if scheduled or dominant:
             path = checkpoint_dir / f"sp_{epoch:06d}.pt"
             torch.save(policy.state_dict(), path)
             self._add_to_pool(path)
             self._milestone_count += 1
+            self._last_save_epoch = epoch
             print(
                 f"[SelfPlay] Saved checkpoint → {path.name}  "
                 f"(pool={len(self.pool)}, hero_win={hero_win:.2f})"
@@ -1370,6 +1377,19 @@ def train(args):
         "vtrace_c_clip": 1.0,
     }
 
+    # ── Resume from checkpoint ───────────────────────────────────────────────
+    resume_path = getattr(args, "resume", None)
+    if resume_path:
+        import torch as _torch
+
+        resume_path = Path(resume_path)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        state_dict = _torch.load(resume_path, map_location=device, weights_only=True)
+        policy.load_state_dict(state_dict)
+        print(f"[Train] Resumed from checkpoint: {resume_path}")
+    # ────────────────────────────────────────────────────────────────────────
+
     trainer = PuffeRL(train_config, vecenv, policy)
     trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
     _patch_trainer_with_return_norm(trainer)
@@ -1384,6 +1404,15 @@ def train(args):
             win_threshold=0.6,
             phase_length=50,  # switch opponent team every ~4M steps
         )
+        # Pre-seed pool with resume checkpoint so the first opponents are
+        # already competent rather than near-random early-training snapshots.
+        if resume_path and resume_path.exists():
+            import shutil as _shutil
+
+            seed_path = Path(args.checkpoint_dir) / "sp_seed.pt"
+            _shutil.copy2(resume_path, seed_path)
+            self_play_mgr._add_to_pool(seed_path)
+            print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
         _patch_trainer_with_selfplay(trainer, self_play_mgr)
     # ────────────────────────────────────────────────────────────────────────
 
@@ -1479,6 +1508,13 @@ if __name__ == "__main__":
     parser.add_argument("--record", action="store_true")
     parser.add_argument("--eval", action="store_true")
     parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        metavar="CHECKPOINT",
+        help="Load policy weights from .pt file before training (optimizer state not restored)",
+    )
     parser.add_argument("--timesteps", type=int, default=10_000_000)
     parser.add_argument("--num_envs", type=int, default=128)
     parser.add_argument("--seed", type=int, default=1)
