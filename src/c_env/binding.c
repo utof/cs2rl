@@ -154,7 +154,9 @@ static PyObject *py_init(PyObject *self, PyObject *args) {
 static PyObject *py_reset(PyObject *self, PyObject *args) {
     PyObject *cap;
     if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
-    env_reset((Dust2Env *)PyCapsule_GetPointer(cap, NULL));
+    Dust2Env *env = (Dust2Env *)PyCapsule_GetPointer(cap, NULL);
+    if (!env) { PyErr_SetString(PyExc_ValueError, "invalid capsule"); return NULL; }
+    env_reset(env);
     Py_RETURN_NONE;
 }
 
@@ -163,6 +165,7 @@ static PyObject *py_step(PyObject *self, PyObject *args) {
     PyObject *cap, *actions_o;
     if (!PyArg_ParseTuple(args, "OO", &cap, &actions_o)) return NULL;
     Dust2Env *env = (Dust2Env *)PyCapsule_GetPointer(cap, NULL);
+    if (!env) { PyErr_SetString(PyExc_ValueError, "invalid capsule"); return NULL; }
     env_step(env, (const int32_t *)PyArray_DATA((PyArrayObject *)actions_o));
     Py_RETURN_NONE;
 }
@@ -181,6 +184,7 @@ static PyObject *py_get_buffers(PyObject *self, PyObject *args) {
     PyObject *cap;
     if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
     Dust2Env *env = (Dust2Env *)PyCapsule_GetPointer(cap, NULL);
+    if (!env) { PyErr_SetString(PyExc_ValueError, "invalid capsule"); return NULL; }
     return Py_BuildValue("(KKKK)",
         (unsigned long long)(uintptr_t)env->observations,
         (unsigned long long)(uintptr_t)env->rewards,
