@@ -115,13 +115,16 @@ def load_policy_from_checkpoint(checkpoint_path, device):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     print(f"[Policy] Loading checkpoint -> {checkpoint_path}")
+    state_dict = torch.load(checkpoint_path, map_location=device)
+
+    # Infer obs_dim from checkpoint to handle checkpoints trained with different obs sizes
+    ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
     policy_env = make_puffer_env()
     try:
-        policy = build_policy(policy_env, device)
+        policy = build_policy(policy_env, device, obs_dim_override=ckpt_obs_dim)
     finally:
         policy_env.close()
 
-    state_dict = torch.load(checkpoint_path, map_location=device)
     policy.load_state_dict(state_dict)
     policy.eval()
     return policy
@@ -182,6 +185,8 @@ def select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
         raise ValueError("Random action selection should bypass select_policy_actions_native")
 
     obs_t = torch.as_tensor(obs, device=device)
+    if hasattr(policy, "obs_dim") and obs_t.shape[-1] != policy.obs_dim:
+        obs_t = obs_t[..., : policy.obs_dim]
     with torch.no_grad():
         logits, _ = policy.forward_eval(obs_t, policy_state)
         if policy_mode == "sample":
@@ -449,19 +454,24 @@ def make_env(team_spirit=None, map_data=None):
 # ── SECTION: Policy ────────────────────────────────────────────────────────
 
 
-def build_policy(vecenv, device):
+def build_policy(vecenv, device, obs_dim_override=None):
     import pufferlib.pytorch
     import torch
     import torch.nn as nn
 
     driver_env = getattr(vecenv, "driver_env", vecenv)
-    obs_dim = driver_env.single_observation_space.shape[0]  # 71
+    obs_dim = (
+        obs_dim_override
+        if obs_dim_override is not None
+        else driver_env.single_observation_space.shape[0]
+    )
     hidden = 256
 
     class Dust2Policy(nn.Module):
         def __init__(self):
             super().__init__()
             self.hidden_size = hidden  # required by PufferLib LSTM logic
+            self.obs_dim = obs_dim
 
             self.encoder = nn.Sequential(
                 pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),

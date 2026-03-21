@@ -122,10 +122,10 @@ def log_navmesh(nav_graph):
 
 
 def log_simple_map(map_data):
-    """Log simple-map room rectangles as flat floor quads + site/spawn markers.
+    """Log simple-map room rectangles as flat floor quads + walls + site/spawn markers.
 
     Called once at recording startup when map_data is not the real dust2 map.
-    Toggle map/rooms in the Rerun entity tree.
+    Toggle map/rooms and map/walls in the Rerun entity tree.
     """
     from map import SIMPLE_ROOMS
 
@@ -171,6 +171,49 @@ def log_simple_map(map_data):
         ),
     )
 
+    # ── Walls: vertical quads for each room's 4 perimeter edges ────────────
+    # Rooms connect via overlapping regions (not shared exact edges), so we
+    # can't detect doorways from edge counts. Instead draw the full perimeter
+    # of every room as vertical wall quads (z=0 → WALL_H). Overlapping wall
+    # faces at connections are fine — they still look like a 3D maze from any
+    # non-top-down angle.
+    WALL_H = 150.0
+    WALL_COLOR = [220, 210, 180]  # warm off-white
+
+    w_verts = []
+    w_tris = []
+    w_base = 0
+    for _, x0, y0, x1, y1 in rooms:
+        # 4 edges of the rectangle: bottom, right, top, left
+        edges = [
+            ((x0, y0), (x1, y0)),
+            ((x1, y0), (x1, y1)),
+            ((x1, y1), (x0, y1)),
+            ((x0, y1), (x0, y0)),
+        ]
+        for (ax, ay), (bx, by) in edges:
+            # Vertical quad: 4 corners
+            w_verts += [
+                [ax, ay, 0.0],
+                [bx, by, 0.0],
+                [bx, by, WALL_H],
+                [ax, ay, WALL_H],
+            ]
+            w_tris += [
+                [w_base, w_base + 1, w_base + 2],
+                [w_base, w_base + 2, w_base + 3],
+            ]
+            w_base += 4
+
+    rr.log(
+        "map/walls",
+        rr.Mesh3D(
+            vertex_positions=np.array(w_verts, dtype=np.float32),
+            triangle_indices=np.array(w_tris, dtype=np.uint32),
+            vertex_colors=np.full((len(w_verts), 3), WALL_COLOR, dtype=np.uint8),
+        ),
+    )
+
     # Bombsite markers
     for i, v in enumerate(map_data.bombsite_by_idx):
         if v:
@@ -180,7 +223,7 @@ def log_simple_map(map_data):
                 rr.Points3D([[cx, cy, 10]], colors=[[255, 120, 0]], radii=[40]),
             )
 
-    print(f"[viz] Logged {len(rooms)} simple-map rooms to map/rooms")
+    print(f"[viz] Logged {len(rooms)} simple-map rooms + {len(rooms) * 4} wall quads")
 
 
 def log_tick(game_state, tick: int, rewards: dict):
@@ -202,13 +245,17 @@ def log_tick(game_state, tick: int, rewards: dict):
                     labels=[f"{'[B]' if agent.has_bomb else ''}{agent.hp}hp"],
                 ),
             )
-            dx = np.cos(agent.facing) * 80
-            dy = np.sin(agent.facing) * 80
+            dx = np.cos(agent.facing) * 120
+            dy = np.sin(agent.facing) * 120
+            # facing == aim direction: shooting uses cosf/sinf(facing) as the ray
+            aim_color = [min(c + 80, 255) for c in color]  # brighter than body
             rr.log(
-                f"{entity}/facing",
+                f"{entity}/aim",
                 rr.LineStrips3D(
                     [[agent.pos.tolist(), (agent.pos + [dx, dy, 0]).tolist()]],
-                    colors=[color],
+                    colors=[aim_color],
+                    radii=[4.0],
+                    labels=["aim"],
                 ),
             )
         else:
