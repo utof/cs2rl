@@ -3,7 +3,7 @@ project(cs2rl_binding C)
 
 find_package(Python COMPONENTS Interpreter Development.Module NumPy REQUIRED)
 
-python_add_library(binding MODULE binding.c dust2_env.c WITH_SOABI)
+python_add_library(binding MODULE binding.c cs2_env.c WITH_SOABI)
 
 target_include_directories(binding PRIVATE ${Python_NumPy_INCLUDE_DIRS})
 

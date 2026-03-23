@@ -12,7 +12,7 @@
 #include <numpy/arrayobject.h>
 #include <stdlib.h>
 #include <string.h>
-#include "dust2_env.h"
+#include "cs2_env.h"
 
 /* Single heap allocation holding both Dust2Env and its StaticData.
  * env is first field so &benv == &benv->env — Python's env_ptr extracts this address. */
