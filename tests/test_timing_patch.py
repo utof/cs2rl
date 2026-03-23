@@ -21,9 +21,6 @@ class _FakeTrainer:
 
 
 def test_timing_patch_records_positive_values():
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
     from train import _patch_trainer_with_timing
 
     trainer = _FakeTrainer()
@@ -39,9 +36,6 @@ def test_timing_patch_records_positive_values():
 
 
 def test_timing_patch_preserves_train_return_value():
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
     from train import _patch_trainer_with_timing
 
     trainer = _FakeTrainer()

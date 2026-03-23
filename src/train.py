@@ -584,22 +584,20 @@ def _patch_trainer_with_timing(trainer):
     Both values are also written into the logs dict returned by train() as
     timing/collect_ms and timing/update_ms for W&B / metrics.jsonl logging.
     """
-    import time as _time
-
     trainer._timing = {"collect_ms": 0.0, "update_ms": 0.0}
     _orig_evaluate = trainer.evaluate
     _orig_train = trainer.train
 
     def _timed_evaluate(*args, **kwargs):
-        t0 = _time.perf_counter()
+        t0 = time.perf_counter()
         result = _orig_evaluate(*args, **kwargs)
-        trainer._timing["collect_ms"] = (_time.perf_counter() - t0) * 1000.0
+        trainer._timing["collect_ms"] = (time.perf_counter() - t0) * 1000.0
         return result
 
     def _timed_train(*args, **kwargs):
-        t0 = _time.perf_counter()
+        t0 = time.perf_counter()
         result = _orig_train(*args, **kwargs)
-        trainer._timing["update_ms"] = (_time.perf_counter() - t0) * 1000.0
+        trainer._timing["update_ms"] = (time.perf_counter() - t0) * 1000.0
         if isinstance(result, dict):
             result["timing/collect_ms"] = trainer._timing["collect_ms"]
             result["timing/update_ms"] = trainer._timing["update_ms"]
