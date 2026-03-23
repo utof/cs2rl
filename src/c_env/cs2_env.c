@@ -489,9 +489,7 @@ void env_step(Dust2Env* env, const int32_t* actions) {
 
     compute_observations(env, t_alive, ct_alive, vis10);
 
-    compute_rewards(env, t_alive, ct_alive, phi_before, kills, n_kills, bombsite_entry_bonus,
-                    plant_progress_reward, plant_interrupted, bomb_just_planted, bomb_planter_id,
-                    bomb_just_defused, bomb_defuser_id);
+    memset(env->rewards, 0, N_AGENTS * sizeof(float));
 
     /* Inaction cost: discourage agents from standing still during active play */
     if (!g->round_over) {
@@ -501,6 +499,10 @@ void env_step(Dust2Env* env, const int32_t* actions) {
             }
         }
     }
+
+    compute_rewards(env, t_alive, ct_alive, phi_before, kills, n_kills, bombsite_entry_bonus,
+                    plant_progress_reward, plant_interrupted, bomb_just_planted, bomb_planter_id,
+                    bomb_just_defused, bomb_defuser_id);
 }
 
 void env_close(Dust2Env* env) {

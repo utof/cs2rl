@@ -91,8 +91,6 @@ static void compute_rewards(
     StepStats*  ss = &env->step_stats;
     StepStats*  es = &env->episode_stats;
 
-    memset(env->rewards, 0, N_AGENTS * sizeof(float));
-
     if (g->round_over) {
         for (int i = 0; i < N_AGENTS; i++) {
             if (g->agents[i].alive) {
