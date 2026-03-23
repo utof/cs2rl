@@ -1422,7 +1422,6 @@ def train(args):
     trainer = PuffeRL(train_config, vecenv, policy)
     trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
     _patch_trainer_with_return_norm(trainer)
-    _patch_trainer_with_timing(trainer)
 
     # ── Self-play setup ──────────────────────────────────────────────────────
     self_play_mgr = None
@@ -1444,6 +1443,8 @@ def train(args):
             self_play_mgr._add_to_pool(seed_path)
             print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
         _patch_trainer_with_selfplay(trainer, self_play_mgr)
+    # timing is the outermost wrapper so it sees all evaluate() calls regardless of selfplay
+    _patch_trainer_with_timing(trainer)
     # ────────────────────────────────────────────────────────────────────────
 
     save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
@@ -1507,7 +1508,8 @@ def train(args):
             print(f"Saved checkpoint to {save_path}")
 
         if isinstance(logs, dict):
-            print(format_train_status(trainer.epoch, ts_val, logs))
+            if trainer.epoch % 10 == 0:
+                print(format_train_status(trainer.epoch, ts_val, logs))
             print(
                 f"[Timing] collect={trainer._timing['collect_ms']:.0f}ms  "
                 f"update={trainer._timing['update_ms']:.0f}ms  "
