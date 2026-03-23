@@ -1,15 +1,15 @@
 """Performance profiler for the Dust2 simulation stack.
 
-This script is meant to be rerun whenever `sim.py`, `c_env`, or the wrapper
+This script is meant to be rerun whenever `nav.py`, `c_env`, or the binding
 changes. It benchmarks the same environment at several layers so regressions
 are easy to localize:
 
-- Native C wrapper step() in `src/c_env/wrapper.py`
-- Native C wrapper with external/shared buffers (PufferLib-like path)
-- Raw `env_step()` C kernel without Python-side wrapper work
-- A deliberately "bad" benchmark path that does `terms.any()` + manual reset
+- cs2_env: full Cs2Env.step() wrapper path
+- cs2_env_shared_buf: same, with external/shared buffers (PufferLib-like path)
+- cs2_env_manual_reset: wrapper with explicit terms.any() + manual reset
+- binding_direct: binding.step() called directly — minimal Python overhead
 
-It also captures `cProfile` summaries for the wrapper path and
+It also captures `cProfile` summaries for the cs2_env path and
 writes machine-readable JSON reports for regression tracking.
 
 Examples:
@@ -32,8 +32,8 @@ from typing import Any
 
 import numpy as np
 
-from c_env.wrapper import ACTION_DIM, N_AGENTS, OBS_DIM, _lib
-from c_env.wrapper import make_env as make_c_env
+from c_env.cs2_env import make_env as make_c_env
+from nav import ACTION_DIM, N_AGENTS, OBS_DIM
 from paths import LOGS_DIR
 
 REPORT_DIR = LOGS_DIR / "profiles"
@@ -106,7 +106,7 @@ def _extract_profile_rows(pr: cProfile.Profile, sort_by: str, top_n: int) -> lis
     return items[:top_n]
 
 
-def _make_c_wrapper_stepper(seed: int, action_mode: str, external_buf: bool = False):
+def _make_cs2_env_stepper(seed: int, action_mode: str, external_buf: bool = False):
     env = make_c_env(seed=seed, buf=_build_external_buf() if external_buf else None)
     env.reset(seed=seed)
     joint_space = env.action_space
@@ -121,8 +121,8 @@ def _make_c_wrapper_stepper(seed: int, action_mode: str, external_buf: bool = Fa
     return step
 
 
-def _make_c_manual_reset_stepper(seed: int):
-    env = make_c_env(seed=seed)
+def _make_cs2_env_manual_reset_stepper(seed: int):
+    env = make_c_env(seed=seed, auto_reset=False)
     env.reset(seed=seed)
 
     def step():
@@ -133,15 +133,17 @@ def _make_c_manual_reset_stepper(seed: int):
     return step
 
 
-def _make_raw_c_stepper(seed: int):
-    env = make_c_env(seed=seed)
+def _make_binding_direct_stepper(seed: int):
+    import binding  # available after cs2_env import adds src/c_env/ to sys.path
+
+    env = make_c_env(seed=seed, auto_reset=False)
     env.reset(seed=seed)
-    action_addr = int(NOOP_ACTION_C.ctypes.data)
+    capsule = env._capsule
 
     def step():
-        _lib.env_step(env._c_env_p, action_addr)
+        binding.step(capsule, NOOP_ACTION_C)
         if env._c_env.game.round_over:
-            _lib.env_reset(env._c_env_p)
+            binding.reset(capsule)
 
     return step
 
@@ -157,28 +159,25 @@ def _run_benchmark(name: str, stepper_factory, steps: int, warmup: int) -> Bench
 
 def _collect_low_hanging_fruit(benchmarks: dict[str, BenchResult]) -> list[str]:
     notes = []
-    raw = benchmarks["c_raw_kernel"].sps
-    wrapper = benchmarks["c_wrapper"].sps
-    shared = benchmarks["c_wrapper_shared_buf"].sps
-    manual = benchmarks["c_wrapper_manual_reset"].sps
+    raw = benchmarks["binding_direct"].sps
+    wrapper = benchmarks["cs2_env"].sps
+    shared = benchmarks["cs2_env_shared_buf"].sps
+    manual = benchmarks["cs2_env_manual_reset"].sps
 
     if wrapper < raw * 0.8:
         notes.append(
-            "C wrapper overhead is significant relative to the raw kernel; inspect "
-            "action marshaling, "
-            "buffer syncing, and terminal/reset handling in src/c_env/wrapper.py."
+            "Cs2Env wrapper overhead is significant relative to binding_direct; inspect "
+            "action marshaling, buffer syncing, and terminal/reset handling in cs2_env.py."
         )
     if shared < wrapper * 0.9:
         notes.append(
             "Shared-buffer mode is materially slower than the internal-buffer path; "
-            "external output copies "
-            "are a likely low-hanging fruit."
+            "external output copies are a likely low-hanging fruit."
         )
     if manual < wrapper * 0.9:
         notes.append(
             "Benchmark harness overhead is distorting SPS; avoid terms.any() + manual "
-            "reset when profiling "
-            "the native auto-reset env."
+            "reset when profiling the native auto-reset env."
         )
     return notes
 
@@ -202,10 +201,10 @@ def _print_summary(
 ):
     print("\n=== BENCHMARKS ===")
     for key in (
-        "c_wrapper",
-        "c_wrapper_shared_buf",
-        "c_wrapper_manual_reset",
-        "c_raw_kernel",
+        "cs2_env",
+        "cs2_env_shared_buf",
+        "cs2_env_manual_reset",
+        "binding_direct",
     ):
         result = benchmarks[key]
         print(
@@ -214,12 +213,12 @@ def _print_summary(
             f"{result.seconds:7.3f}s total"
         )
 
-    raw = benchmarks["c_raw_kernel"].sps
-    wrapper = benchmarks["c_wrapper"].sps
-    shared = benchmarks["c_wrapper_shared_buf"].sps
+    raw = benchmarks["binding_direct"].sps
+    wrapper = benchmarks["cs2_env"].sps
+    shared = benchmarks["cs2_env_shared_buf"].sps
     print("\n=== RATIOS ===")
-    print(f"wrapper/raw_c          {wrapper / raw:10.3f}")
-    print(f"shared_buf/wrapper     {shared / wrapper:10.3f}")
+    print(f"cs2_env/binding_direct {wrapper / raw:10.3f}")
+    print(f"shared_buf/cs2_env     {shared / wrapper:10.3f}")
 
     if notes:
         print("\n=== LOW-HANGING FRUIT ===")
@@ -242,7 +241,7 @@ def _print_summary(
                 f"cum={row['cumulative_seconds']:.4f}s  calls={row['total_calls']}"
             )
 
-    print_profile_block("C WRAPPER", wrapper_profile)
+    print_profile_block("CS2_ENV", wrapper_profile)
 
     print("\n=== REPORTS ===")
     print(f"- latest:  {latest_path}")
@@ -262,27 +261,27 @@ def main():
     args = parser.parse_args()
 
     benchmarks = {
-        "c_wrapper": _run_benchmark(
-            "c_wrapper",
-            lambda: _make_c_wrapper_stepper(args.seed, args.action_mode, external_buf=False),
+        "cs2_env": _run_benchmark(
+            "cs2_env",
+            lambda: _make_cs2_env_stepper(args.seed, args.action_mode, external_buf=False),
             args.steps,
             args.warmup,
         ),
-        "c_wrapper_shared_buf": _run_benchmark(
-            "c_wrapper_shared_buf",
-            lambda: _make_c_wrapper_stepper(args.seed, args.action_mode, external_buf=True),
+        "cs2_env_shared_buf": _run_benchmark(
+            "cs2_env_shared_buf",
+            lambda: _make_cs2_env_stepper(args.seed, args.action_mode, external_buf=True),
             args.steps,
             args.warmup,
         ),
-        "c_wrapper_manual_reset": _run_benchmark(
-            "c_wrapper_manual_reset",
-            lambda: _make_c_manual_reset_stepper(args.seed),
+        "cs2_env_manual_reset": _run_benchmark(
+            "cs2_env_manual_reset",
+            lambda: _make_cs2_env_manual_reset_stepper(args.seed),
             args.steps,
             args.warmup,
         ),
-        "c_raw_kernel": _run_benchmark(
-            "c_raw_kernel",
-            lambda: _make_raw_c_stepper(args.seed),
+        "binding_direct": _run_benchmark(
+            "binding_direct",
+            lambda: _make_binding_direct_stepper(args.seed),
             args.steps,
             args.warmup,
         ),
@@ -291,7 +290,7 @@ def main():
     wrapper_profile = None
     if not args.no_cprofile:
         wrapper_profile = _profile_loop(
-            _make_c_wrapper_stepper(args.seed, args.action_mode, external_buf=False),
+            _make_cs2_env_stepper(args.seed, args.action_mode, external_buf=False),
             args.profile_steps,
             args.profile_top,
         )
@@ -308,7 +307,7 @@ def main():
         },
         "benchmarks": {name: asdict(result) for name, result in benchmarks.items()},
         "profiles": {
-            "c_wrapper": wrapper_profile,
+            "cs2_env": wrapper_profile,
         },
         "notes": notes,
     }
