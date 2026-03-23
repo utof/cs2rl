@@ -1551,7 +1551,7 @@ if __name__ == "__main__":
         help="Load policy weights from .pt file before training (optimizer state not restored)",
     )
     parser.add_argument("--timesteps", type=int, default=10_000_000)
-    parser.add_argument("--num_envs", type=int, default=128)
+    parser.add_argument("--num_envs", type=int, default=256)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--save_every_sec", type=int, default=300)
