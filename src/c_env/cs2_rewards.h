@@ -73,7 +73,6 @@ static float _potential(Dust2Env* env, int team) {
 
 static void compute_rewards(
     Dust2Env*  env,
-    const int32_t* actions,
     int        t_alive,
     int        ct_alive,
     float      phi_before[2],
@@ -93,15 +92,6 @@ static void compute_rewards(
     StepStats*  es = &env->episode_stats;
 
     memset(env->rewards, 0, N_AGENTS * sizeof(float));
-
-    /* Inaction cost: discourage agents from standing still during active play */
-    if (!g->round_over) {
-        for (int i = 0; i < N_AGENTS; i++) {
-            if (g->agents[i].alive && actions[i * ACTION_DIM + 0] == 0) {
-                env->rewards[i] -= 0.0005f;
-            }
-        }
-    }
 
     if (g->round_over) {
         for (int i = 0; i < N_AGENTS; i++) {
