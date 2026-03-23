@@ -49,4 +49,10 @@ def test_timing_patch_preserves_train_return_value():
 
     trainer.evaluate()
     logs = trainer.train()
-    assert logs == {"SPS": 1000, "timing/collect_ms": logs["timing/collect_ms"], "timing/update_ms": logs["timing/update_ms"]}
+    # Verify the original SPS value is preserved
+    assert logs["SPS"] == 1000
+    # Verify timing keys were injected with positive values
+    assert logs["timing/collect_ms"] > 0
+    assert logs["timing/update_ms"] > 0
+    # Verify no other unexpected keys were added
+    assert set(logs.keys()) == {"SPS", "timing/collect_ms", "timing/update_ms"}

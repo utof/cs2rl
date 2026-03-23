@@ -1506,7 +1506,7 @@ def train(args):
             last_save = time.time()
             print(f"Saved checkpoint to {save_path}")
 
-        if trainer.epoch % 10 == 0 and isinstance(logs, dict):
+        if isinstance(logs, dict):
             print(format_train_status(trainer.epoch, ts_val, logs))
             print(
                 f"[Timing] collect={trainer._timing['collect_ms']:.0f}ms  "
