@@ -571,6 +571,44 @@ def compute_network_health(model, device):
     return metrics
 
 
+# ── SECTION: Timing patch ─────────────────────────────────────────────────
+
+
+def _patch_trainer_with_timing(trainer):
+    """Monkey-patch trainer.evaluate() and trainer.train() to record wall-clock timing.
+
+    After each call, trainer._timing holds:
+        collect_ms  — ms spent in evaluate() (env stepping + rollout collection)
+        update_ms   — ms spent in train() (forward + backward + optimizer step)
+
+    Both values are also written into the logs dict returned by train() as
+    timing/collect_ms and timing/update_ms for W&B / metrics.jsonl logging.
+    """
+    import time as _time
+
+    trainer._timing = {"collect_ms": 0.0, "update_ms": 0.0}
+    _orig_evaluate = trainer.evaluate
+    _orig_train = trainer.train
+
+    def _timed_evaluate(*args, **kwargs):
+        t0 = _time.perf_counter()
+        result = _orig_evaluate(*args, **kwargs)
+        trainer._timing["collect_ms"] = (_time.perf_counter() - t0) * 1000.0
+        return result
+
+    def _timed_train(*args, **kwargs):
+        t0 = _time.perf_counter()
+        result = _orig_train(*args, **kwargs)
+        trainer._timing["update_ms"] = (_time.perf_counter() - t0) * 1000.0
+        if isinstance(result, dict):
+            result["timing/collect_ms"] = trainer._timing["collect_ms"]
+            result["timing/update_ms"] = trainer._timing["update_ms"]
+        return result
+
+    trainer.evaluate = _timed_evaluate
+    trainer.train = _timed_train
+
+
 # ── SECTION: Value target normalization ───────────────────────────────────
 
 
@@ -1384,6 +1422,7 @@ def train(args):
     trainer = PuffeRL(train_config, vecenv, policy)
     trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
     _patch_trainer_with_return_norm(trainer)
+    _patch_trainer_with_timing(trainer)
 
     # ── Self-play setup ──────────────────────────────────────────────────────
     self_play_mgr = None
@@ -1469,6 +1508,11 @@ def train(args):
 
         if trainer.epoch % 10 == 0 and isinstance(logs, dict):
             print(format_train_status(trainer.epoch, ts_val, logs))
+            print(
+                f"[Timing] collect={trainer._timing['collect_ms']:.0f}ms  "
+                f"update={trainer._timing['update_ms']:.0f}ms  "
+                f"SPS={logs.get('SPS', 0):.0f}"
+            )
 
     trainer.close()
 
