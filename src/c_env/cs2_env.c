@@ -1,8 +1,8 @@
 #include "cs2_env.h"
-#include "cs2_combat.h"
 #include "cs2_observations.h"
 #include "cs2_movement.h"
 #include "cs2_rewards.h"
+#include "cs2_combat.h"
 #include <stdlib.h>
 
 static uint32_t xorshift32(uint32_t* state) {
