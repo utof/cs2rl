@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
+export UV_PYTHON=python3.12
 
 if [ -x ".git/hooks/pre-commit.local" ]; then
     .git/hooks/pre-commit.local || exit 1
