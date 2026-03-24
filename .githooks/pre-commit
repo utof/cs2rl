@@ -4,6 +4,10 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+if [ -x ".git/hooks/pre-commit.local" ]; then
+    .git/hooks/pre-commit.local || exit 1
+fi
+
 mapfile -t staged_files < <(git diff --cached --name-only --diff-filter=ACMR)
 
 if [ "${#staged_files[@]}" -eq 0 ]; then
