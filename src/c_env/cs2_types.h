@@ -161,3 +161,12 @@ typedef struct {
     uint32_t    rng;
     int8_t  masks[N_AGENTS * ACTION_MASK_DIM];
 } Dust2Env;
+
+/* ── RNG utility (available to all headers) ─────────────────────────────── */
+static inline uint32_t xorshift32(uint32_t* state) {
+    uint32_t x  = *state;
+    x          ^= x << 13;
+    x          ^= x >> 17;
+    x          ^= x << 5;
+    return (*state = x);
+}
