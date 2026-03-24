@@ -4,7 +4,7 @@ from collections import deque
 import numpy as np
 
 from c_env.cs2_env import make_env
-from nav import _DELTA_VECTORS, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE, ACTION_DIM
+from nav import _DELTA_VECTORS, ACTION_DIM, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
 
 
 def _bombsite_areas(env):
@@ -131,6 +131,11 @@ def test_scripted_bomber_can_reach_site_and_plant():
     env._c_env.game.agents[bomber_idx].has_bomb = 1
     env._c_env.game.bomb_carrier_id = bomber_idx
 
+    # Switch bomber to knife (250 u/s) so BFS delta vectors match movement speed
+    env._c_env.game.agents[bomber_idx].weapon_slot = 2
+    env._c_env.game.agents[bomber_idx].weapon_slot_target = 2
+    env._c_env.game.agents[bomber_idx].switch_ticks = 0
+
     moves, final_site_area = _plan_route_to_bombsite(env, bomber_idx)
     assert len(moves) < env._c_env.game.round_ticks_left, "Route exceeds round budget"
 
@@ -199,7 +204,7 @@ def test_controlled_visible_agents_can_kill():
     t_agent.z = 0.0
 
     ct_agent.alive = 1
-    ct_agent.hp = 1   # low HP so any hit kills
+    ct_agent.hp = 1  # low HP so any hit kills
     ct_agent.armor = 0
     ct_agent.area_idx = id2idx[area_ct]
     ct_agent.x = float(ct_centroid[0])
