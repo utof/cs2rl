@@ -4,7 +4,7 @@ from collections import deque
 import numpy as np
 
 from c_env.cs2_env import make_env
-from nav import _DELTA_VECTORS, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
+from nav import _DELTA_VECTORS, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE, ACTION_DIM
 
 
 def _bombsite_areas(env):
@@ -135,7 +135,7 @@ def test_scripted_bomber_can_reach_site_and_plant():
     assert len(moves) < env._c_env.game.round_ticks_left, "Route exceeds round budget"
 
     for move in moves:
-        actions = np.zeros((10, 4), dtype=np.int64)
+        actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
         actions[bomber_idx, 0] = move
         env.step(actions)
 
@@ -144,8 +144,8 @@ def test_scripted_bomber_can_reach_site_and_plant():
     assert int(env.map_data.area_ids[bomber.area_idx]) in bombsites
 
     for _ in range(BOMB_PLANT_TIME):
-        actions = np.zeros((10, 4), dtype=np.int64)
-        actions[bomber_idx, 2] = 1
+        actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+        actions[bomber_idx, 5] = 1  # use action (head index 5) to plant bomb
         env.step(actions)
         if env._c_env.game.bomb_planted:
             break
@@ -199,17 +199,26 @@ def test_controlled_visible_agents_can_kill():
     t_agent.z = 0.0
 
     ct_agent.alive = 1
-    ct_agent.hp = 100
+    ct_agent.hp = 1   # low HP so any hit kills
+    ct_agent.armor = 0
     ct_agent.area_idx = id2idx[area_ct]
     ct_agent.x = float(ct_centroid[0])
     ct_agent.y = float(ct_centroid[1])
     ct_agent.z = 0.0
 
-    t_agent.facing = math.atan2(ct_agent.y - t_agent.y, ct_agent.x - t_agent.x)
-    ct_agent.facing = math.atan2(t_agent.y - ct_agent.y, t_agent.x - ct_agent.x)
+    # Compute aim bucket corresponding to desired facing angle
+    def _facing_to_aim(angle):
+        normalized = angle % (2 * math.pi)
+        if normalized < 0:
+            normalized += 2 * math.pi
+        return int(normalized * 16 / (2 * math.pi)) % 16
 
-    actions = np.zeros((10, 4), dtype=np.int64)
-    actions[0, 1] = 1  # t0 shoots
+    t_facing = math.atan2(ct_agent.y - t_agent.y, ct_agent.x - t_agent.x)
+    t_agent.facing = t_facing
+
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[0, 1] = _facing_to_aim(t_facing)  # aim at CT (head index 1)
+    actions[0, 2] = 1  # t0 shoots (shoot is head index 2)
     _, rewards, _, _, _ = env.step(actions)
 
     assert not bool(env._c_env.game.agents[5].alive)
@@ -247,7 +256,7 @@ def test_fixed_seed_agents_can_leave_spawn():
         solo_env = make_env()
         solo_env.reset()
         for move in moves:
-            actions = np.zeros((10, 4), dtype=np.int64)
+            actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
             actions[agent_idx, 0] = move
             solo_env.step(actions)
 

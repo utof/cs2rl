@@ -27,7 +27,7 @@ import numpy as np
 
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
-OBS_DIM = 72
+OBS_DIM = 104
 
 
 def resolve_run_name(name: str) -> str:
@@ -48,8 +48,8 @@ def resolve_run_name(name: str) -> str:
 
 
 AGENT_IDS = tuple([f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)])
-ACTION_HEAD_NAMES = ("move", "shoot", "use", "last")
-ACTION_HEAD_SIZES = (9, 2, 2, 2)
+ACTION_HEAD_NAMES = ("move", "aim", "shoot", "use", "weapon", "reload", "crouch")
+ACTION_HEAD_SIZES = (9, 16, 2, 2, 3, 2, 2)
 
 
 # ── SECTION: Smoke Test ────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ def smoke_test():
         assert np.isfinite(obs).all(), "NaN in initial obs"
 
         steps = 20_000
-        actions = np.zeros((10, 4), dtype=np.int32)
+        actions = np.zeros((10, len(ACTION_HEAD_SIZES)), dtype=np.int32)
         print(f"[Smoke] Running {steps} steps...")
         t0 = time.perf_counter()
         step_count = 0
@@ -467,9 +467,9 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 elif "weight" in name:
                     nn.init.orthogonal_(p, gain=1.0)
 
-            # Separate heads for MultiDiscrete([9,2,2,2])
+            # Separate heads for MultiDiscrete([9,16,2,2,3,2,2])
             self.action_heads = nn.ModuleList(
-                [pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01) for n in [9, 2, 2, 2]]
+                [pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01) for n in ACTION_HEAD_SIZES]
             )
             self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
 
@@ -638,7 +638,7 @@ def _patch_trainer_with_return_norm(trainer):
     _ret_count = torch.zeros(1, device=device)
 
     # ── ADAPTIVE ENTROPY (Lagrangian / SAC-style alpha) ────────────────────
-    max_entropy = np.log(9) + 3 * np.log(2)  # ≈ 4.276 for MultiDiscrete([9,2,2,2])
+    max_entropy = sum(np.log(n) for n in ACTION_HEAD_SIZES)  # for MultiDiscrete([9,16,2,2,3,2,2])
     target_entropy = 0.5 * max_entropy  # ≈ 2.14
     entropy_floor = 0.3 * max_entropy  # collapse threshold
     import math

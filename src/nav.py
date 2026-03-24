@@ -459,8 +459,8 @@ MAX_TURN_SPEED_RAD = math.pi / 4  # 45 degrees per tick — max facing rotation 
 
 N_AGENTS = 10
 TEAM_SIZE = 5
-OBS_DIM = 72
-ACTION_DIM = 4
+OBS_DIM = 104
+ACTION_DIM = 7
 INVALID_AREA_ID = -1
 STALE_MEMORY_TICK = -9999
 _NOOP_ACTION = np.zeros(ACTION_DIM, dtype=np.int64)

@@ -3,13 +3,18 @@ import numpy as np
 import pytest
 
 from c_env.cs2_env import make_env
+from nav import ACTION_DIM
+
+_ACTION_HEAD_SIZES = [9, 16, 2, 2, 3, 2, 2]
+
+
 def test_pbrs_rewards_are_finite():
     """PBRS must not produce NaN or inf over a full episode."""
     env = make_env()
     env.reset()
     rng = np.random.default_rng(7)
     for step_n in range(500):
-        actions = rng.integers([9, 2, 2, 2], size=(10, 4)).astype(np.int64)
+        actions = rng.integers(_ACTION_HEAD_SIZES, size=(10, ACTION_DIM)).astype(np.int64)
         _, rewards, terms, _, _ = env.step(actions)
         for i, r in enumerate(rewards):
             assert np.isfinite(r), f"Non-finite reward at step {step_n} agent {i}: {r}"
@@ -58,15 +63,23 @@ def test_pbrs_shaping_positive_on_kill():
     t.x, t.y, t.z = float(t_c[0]), float(t_c[1]), 0.0
 
     ct.alive = 1
-    ct.hp = 100
+    ct.hp = 1   # low HP so any hit kills
+    ct.armor = 0
     ct.area_idx = id2idx[area_ct]
     ct.x, ct.y, ct.z = float(ct_c[0]), float(ct_c[1]), 0.0
 
-    t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
-    ct.facing = math.atan2(t.y - ct.y, t.x - ct.x)
+    # Compute aim bucket so the env sets facing from the action (not directly)
+    def _facing_to_aim(angle):
+        normalized = angle % (2 * math.pi)
+        if normalized < 0:
+            normalized += 2 * math.pi
+        return int(normalized * 16 / (2 * math.pi)) % 16
 
-    actions = np.zeros((10, 4), dtype=np.int64)
-    actions[0, 1] = 1  # t0 shoots
+    t_facing = math.atan2(ct.y - t.y, ct.x - t.x)
+
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[0, 1] = _facing_to_aim(t_facing)  # aim at CT (head index 1)
+    actions[0, 2] = 1  # t0 shoots (shoot is head index 2)
     _, rewards, _, _, _ = env.step(actions)
 
     assert rewards[0] > 0, f"Killing CT gives non-positive reward: {rewards[0]:.4f}"
@@ -77,7 +90,7 @@ def test_team_spirit_zero_unchanged():
     """At team_spirit=0.0, two identical-seed envs produce identical rewards."""
     env1 = make_env(seed=42)
     env1.reset()
-    actions = np.zeros((10, 4), dtype=np.int64)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, rewards1, _, _, _ = env1.step(actions)
     env1.close()
 
@@ -98,7 +111,7 @@ def test_team_spirit_one_equalizes_alive_team():
     """At team_spirit=1.0, all alive agents on the same team get equal rewards."""
     env = make_env(seed=11, team_spirit=1.0)
     env.reset()
-    actions = np.zeros((10, 4), dtype=np.int64)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, rewards, _, _, _ = env.step(actions)
     env.close()
 
@@ -127,7 +140,7 @@ def test_idle_penalty():
     env.reset()
 
     # All agents idle (move action = 0)
-    actions = np.zeros((10, 4), dtype=np.int64)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, rewards, _, _, _ = env.step(actions)
 
     # Every alive agent should have received the -0.0005 idle penalty.
@@ -153,7 +166,7 @@ def test_win_terminal_reward():
         env._c_env.game.agents[i].alive = 0
         env._c_env.game.agents[i].hp = 0
 
-    actions = np.zeros((10, 4), dtype=np.int64)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, rewards, terms, _, _ = env.step(actions)
 
     # T agents (indices 0-4) are alive and should receive +1 terminal bonus.
@@ -200,8 +213,8 @@ def test_bomb_entry_bonus():
     bomber.z = 0.0
 
     # Step with use=1 — the C env checks use action to trigger entry bonus
-    actions = np.zeros((10, 4), dtype=np.int64)
-    actions[0, 2] = 1  # use action required to trigger bombsite_entered check
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[0, 5] = 1  # use action (head index 5) required to trigger bombsite_entered check
     _, rewards, _, _, _ = env.step(actions)
 
     # Reward for agent 0 must include the +0.3 bombsite entry bonus
@@ -244,9 +257,9 @@ def test_plant_progress_reward():
     env._c_env.game.bomb_being_planted_by = bomber_idx
     env._c_env.game.bomb_plant_ticks = 1  # already started (not tick 0)
 
-    # use=1 to continue planting
-    actions = np.zeros((10, 4), dtype=np.int64)
-    actions[bomber_idx, 2] = 1
+    # use=1 to continue planting (head index 5)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[bomber_idx, 5] = 1
     _, rewards, _, _, _ = env.step(actions)
 
     # The per-tick plant progress reward is +0.05

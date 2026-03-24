@@ -15,8 +15,16 @@ def _make_env(map_data=None):
 
 
 def test_binding_functions_present():
-    for name in ("init", "reset", "step", "close", "get_buffers"):
+    for name in ("init", "reset", "step", "close", "get_buffers", "get_masks"):
         assert hasattr(binding, name), f"binding.{name} missing"
+
+
+def test_get_masks_returns_nonzero_ptr(make_map):
+    _, env = _make_env(map_data=make_map)
+    binding.reset(env._capsule)
+    ptr = binding.get_masks(env._capsule)
+    assert isinstance(ptr, int)
+    assert ptr != 0
 
 
 def test_get_buffers_returns_four_ints(make_map):

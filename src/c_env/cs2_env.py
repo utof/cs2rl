@@ -92,21 +92,37 @@ class StaticDataC(ctypes.Structure):
 
 class AgentStateC(ctypes.Structure):
     _fields_ = [
-        ("x", ctypes.c_float),
-        ("y", ctypes.c_float),
-        ("z", ctypes.c_float),
-        ("area_idx", ctypes.c_int32),
-        ("facing", ctypes.c_float),
-        ("hp", ctypes.c_int32),
-        ("shoot_cd", ctypes.c_int32),
-        ("alive", ctypes.c_int8),
-        ("has_bomb", ctypes.c_int8),
-        ("has_kit", ctypes.c_int8),
-        ("team", ctypes.c_int8),
-        ("is_moving", ctypes.c_int8),
-        ("fired_this_tick", ctypes.c_int8),
-        ("enemy_mem_idx", ctypes.c_int32 * 5),
-        ("enemy_mem_tick", ctypes.c_int32 * 5),
+        ("x",                  ctypes.c_float),
+        ("y",                  ctypes.c_float),
+        ("z",                  ctypes.c_float),
+        ("area_idx",           ctypes.c_int32),
+        ("facing",             ctypes.c_float),
+        ("hp",                 ctypes.c_int32),
+        ("fire_cd",            ctypes.c_int32),
+        ("alive",              ctypes.c_int8),
+        ("has_bomb",           ctypes.c_int8),
+        ("has_kit",            ctypes.c_int8),
+        ("team",               ctypes.c_int8),
+        ("is_moving",          ctypes.c_int8),
+        ("fired_this_tick",    ctypes.c_int8),
+        ("_pad0",              ctypes.c_int8 * 2),
+        ("enemy_mem_idx",      ctypes.c_int32 * 5),
+        ("enemy_mem_tick",     ctypes.c_int32 * 5),
+        # Phase 4b additions
+        ("vx",                 ctypes.c_float),
+        ("vy",                 ctypes.c_float),
+        ("is_crouching",       ctypes.c_int8),
+        ("_pad1",              ctypes.c_int8 * 3),
+        ("crouch_cd",          ctypes.c_int32),
+        ("armor",              ctypes.c_int32),
+        ("has_helmet",         ctypes.c_int8),
+        ("weapon_slot",        ctypes.c_int8),
+        ("weapon_slot_target", ctypes.c_int8),
+        ("_pad2",              ctypes.c_int8 * 1),
+        ("ammo_clip",          ctypes.c_int32 * 3),
+        ("ammo_reserve",       ctypes.c_int32 * 3),
+        ("reload_ticks",       ctypes.c_int32),
+        ("switch_ticks",       ctypes.c_int32),
     ]
 
 
@@ -129,6 +145,8 @@ class GameStateC(ctypes.Structure):
         ("bomb_being_defused_by", ctypes.c_int32),
         ("bomb_defuse_ticks", ctypes.c_int32),
         ("bombsite_entered", ctypes.c_int8 * 5),
+        ("bomb_is_dropped",  ctypes.c_int8),
+        ("_pad_gs",          ctypes.c_int8 * 2),
     ]
 
 
@@ -150,31 +168,36 @@ class StepStatsC(ctypes.Structure):
         ("action_move", ctypes.c_int32 * 9),
         ("action_shoot", ctypes.c_int32 * 2),
         ("action_use", ctypes.c_int32 * 2),
-        ("action_last", ctypes.c_int32 * 2),
+        ("action_last",   ctypes.c_int32 * 2),
+        ("action_aim",    ctypes.c_int32 * 16),
+        ("action_reload", ctypes.c_int32 * 2),
+        ("action_weapon", ctypes.c_int32 * 3),
+        ("action_crouch", ctypes.c_int32 * 2),
     ]
 
 
 class Dust2EnvC(ctypes.Structure):
     _fields_ = [
-        ("sd", ctypes.POINTER(StaticDataC)),
-        ("game", GameStateC),
-        ("step_stats", StepStatsC),
-        ("episode_stats", StepStatsC),
+        ("sd",           ctypes.POINTER(StaticDataC)),
+        ("game",         GameStateC),
+        ("step_stats",   StepStatsC),
+        ("episode_stats",StepStatsC),
         ("observations", ctypes.c_float * (N_AGENTS * OBS_DIM)),
-        ("rewards", ctypes.c_float * N_AGENTS),
-        ("terminals", ctypes.c_int8 * N_AGENTS),
-        ("truncations", ctypes.c_int8 * N_AGENTS),
-        ("team_spirit", ctypes.c_float),
-        ("rng", ctypes.c_uint32),
+        ("rewards",      ctypes.c_float * N_AGENTS),
+        ("terminals",    ctypes.c_int8  * N_AGENTS),
+        ("truncations",  ctypes.c_int8  * N_AGENTS),
+        ("team_spirit",  ctypes.c_float),
+        ("rng",          ctypes.c_uint32),
+        ("masks",        ctypes.c_int8  * (N_AGENTS * 36)),
     ]
 
 
 # Sanity-check struct sizes match the C layout — catches future drift early
-assert ctypes.sizeof(AgentStateC) == 76, (
-    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 76)"
+assert ctypes.sizeof(AgentStateC) == 132, (
+    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 132)"
 )
-assert ctypes.sizeof(GameStateC) == 824, (
-    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 824)"
+assert ctypes.sizeof(GameStateC) == 1384, (
+    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1384)"
 )
 
 # ctypes helper to extract raw pointer from PyCapsule
@@ -200,9 +223,9 @@ class Cs2Env(pufferlib.PufferEnv):
         map_data=None,
     ):
         self.single_observation_space = gymnasium.spaces.Box(
-            low=-1.0, high=1.0, shape=(OBS_DIM,), dtype=np.float32
+            low=-5.0, high=5.0, shape=(OBS_DIM,), dtype=np.float32
         )
-        self.single_action_space = gymnasium.spaces.MultiDiscrete([9, 2, 2, 2])
+        self.single_action_space = gymnasium.spaces.MultiDiscrete([9, 16, 2, 2, 3, 2, 2])
         self.num_agents = N_AGENTS
         super().__init__(buf)
 
@@ -288,6 +311,11 @@ class Cs2Env(pufferlib.PufferEnv):
 
         # Zero-copy NumPy views into C buffers
         obs_ptr, rew_ptr, term_ptr, trunc_ptr = binding.get_buffers(self._capsule)
+        masks_ptr = binding.get_masks(self._capsule)
+        self._masks_view = np.frombuffer(
+            (ctypes.c_int8 * (N_AGENTS * 36)).from_address(masks_ptr),
+            dtype=np.int8,
+        ).reshape(N_AGENTS, 36)
         self._obs_view = np.frombuffer(
             (ctypes.c_float * (N_AGENTS * OBS_DIM)).from_address(obs_ptr),
             dtype=np.float32,
@@ -433,6 +461,14 @@ class Cs2Env(pufferlib.PufferEnv):
             summary[f"action_shoot_{idx}"] = int(stats.action_shoot[idx])
             summary[f"action_use_{idx}"] = int(stats.action_use[idx])
             summary[f"action_last_{idx}"] = int(stats.action_last[idx])
+        for idx in range(16):
+            summary[f"action_aim_{idx}"] = int(stats.action_aim[idx])
+        for idx in range(2):
+            summary[f"action_reload_{idx}"] = int(stats.action_reload[idx])
+        for idx in range(3):
+            summary[f"action_weapon_{idx}"] = int(stats.action_weapon[idx])
+        for idx in range(2):
+            summary[f"action_crouch_{idx}"] = int(stats.action_crouch[idx])
         summary.update(
             {
                 "winner": int(stats.winner),

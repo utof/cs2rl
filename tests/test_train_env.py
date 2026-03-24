@@ -18,7 +18,7 @@ def test_make_env_alias_steps_without_nan():
     env = train.make_env()
     try:
         obs, _ = env.reset(seed=7)
-        actions = np.zeros((10, 4), dtype=np.int32)
+        actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
         next_obs, rewards, terms, truncs, info = env.step(actions)
 
         assert obs.shape == (10, train.OBS_DIM)

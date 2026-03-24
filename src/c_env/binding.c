@@ -192,12 +192,22 @@ static PyObject *py_get_buffers(PyObject *self, PyObject *args) {
         (unsigned long long)(uintptr_t)env->truncations);
 }
 
+/* ── binding.get_masks(capsule) -> int (pointer as int) ── */
+static PyObject *py_get_masks(PyObject *self, PyObject *args) {
+    PyObject *cap;
+    if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
+    Dust2Env *env = (Dust2Env *)PyCapsule_GetPointer(cap, NULL);
+    if (!env) { PyErr_SetString(PyExc_ValueError, "invalid capsule"); return NULL; }
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)env->masks);
+}
+
 static PyMethodDef binding_methods[] = {
     {"init",        py_init,        METH_VARARGS, "Init env, return capsule"},
     {"reset",       py_reset,       METH_VARARGS, "Reset env"},
     {"step",        py_step,        METH_VARARGS, "Step env"},
     {"close",       py_close,       METH_VARARGS, "Close env"},
     {"get_buffers", py_get_buffers, METH_VARARGS, "Get buffer addresses as ints"},
+    {"get_masks",   py_get_masks,   METH_VARARGS, "Get masks buffer address as int"},
     {NULL, NULL, 0, NULL},
 };
 
