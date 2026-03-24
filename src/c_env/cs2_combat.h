@@ -40,11 +40,11 @@ static void process_combat(
         if (!a->alive) {
             continue;
         }
-        if (actions[i * ACTION_DIM + 1] == 0 || a->shoot_cd > 0) {
+        if (actions[i * ACTION_DIM + 1] == 0 || a->fire_cd > 0) {
             continue;
         }
 
-        a->shoot_cd        = sd->shoot_cooldown;
+        a->fire_cd         = 10;
         a->fired_this_tick = 1;
         dx                 = cosf(a->facing);
         dy                 = sinf(a->facing);

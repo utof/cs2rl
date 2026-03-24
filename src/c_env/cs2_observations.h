@@ -28,7 +28,7 @@ static void compute_observations(
         obs[4] = cosf(a->facing);
         obs[5] = a->hp / 100.0f;
         obs[6] = (float)(a->team == 0 ? a->has_bomb : a->has_kit);
-        obs[7] = (a->shoot_cd == 0) ? 1.0f : 1.0f - a->shoot_cd / (float)sd->shoot_cooldown;
+        obs[7] = (a->fire_cd == 0) ? 1.0f : 1.0f - a->fire_cd / 10.0f;
 
         tm_start = (a->team == 0) ? 0 : TEAM_SIZE;
         for (int j = tm_start; j < tm_start + TEAM_SIZE; j++) {

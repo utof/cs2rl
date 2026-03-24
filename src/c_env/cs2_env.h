@@ -72,8 +72,8 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
 
     for (int i = 0; i < N_AGENTS; i++) {
         AgentState* a = &g->agents[i];
-        if (a->shoot_cd > 0) {
-            a->shoot_cd--;
+        if (a->fire_cd > 0) {
+            a->fire_cd--;
         }
         a->is_moving       = 0;
         a->fired_this_tick = 0;

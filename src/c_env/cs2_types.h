@@ -10,9 +10,25 @@
 /* ── Constants ─────────────────────────────────────────────────────────── */
 #define TEAM_SIZE 5
 #define N_AGENTS 10
-#define OBS_DIM 72
-#define ACTION_DIM 4
+#define OBS_DIM            104
+#define ACTION_DIM           7
+#define ACTION_MASK_DIM     36   /* 9+16+2+2+3+2+2 */
+#define WEAPON_SWITCH_TICKS  8   /* ~0.5s at 16 Hz */
+#define CROUCH_COOLDOWN_TICKS 7  /* ~0.4s at 16 Hz */
 #define INVALID_AREA_IDX (-1)
+
+/* ── Weapon definition (compile-time table in cs2_weapons.h) ── */
+typedef struct {
+    int     type;           /* WEAPON_RIFLE=0, WEAPON_PISTOL=1, WEAPON_KNIFE=2 */
+    float   base_damage;
+    float   armor_pen;      /* 0.0-1.0 */
+    int32_t cycle_ticks;
+    int32_t mag_size;       /* -1 for knife (infinite) */
+    int32_t reserve_mags;   /* -1 for knife */
+    int32_t reload_ticks;
+    float   move_speed;     /* units/second at this weapon */
+    float   range_modifier; /* damage falloff per 500 units */
+} WeaponDef;
 
 /* ── Static data (owned by Python numpy arrays, pointer shared across instances) ── */
 typedef struct {
@@ -59,15 +75,29 @@ typedef struct {
     int32_t area_idx; /* 0-based index; INVALID_AREA_IDX=-1            */
     float   facing;   /* radians, 0=+X                                 */
     int32_t hp;
-    int32_t shoot_cd;
+    int32_t fire_cd;       /* was shoot_cd */
     int8_t  alive;
     int8_t  has_bomb;
     int8_t  has_kit;
     int8_t  team;              /* 0=T, 1=CT                                     */
     int8_t  is_moving;         /* set by movement; read by sound system          */
     int8_t  fired_this_tick;   /* set by shoot; read by sound system             */
+    int8_t  _pad0[2];      /* explicit padding to int32 boundary */
     int32_t enemy_mem_idx[5];  /* area_idx of last known pos; INVALID_AREA_IDX  */
     int32_t enemy_mem_tick[5]; /* tick when recorded; STALE_MEMORY_TICK=-9999   */
+    /* Phase 4b additions — appended to preserve existing field offsets */
+    float   vx, vy;
+    int8_t  is_crouching;
+    int8_t  _pad1[3];
+    int32_t crouch_cd;
+    int32_t armor;
+    int8_t  has_helmet;
+    int8_t  weapon_slot;   /* 0=rifle, 1=pistol, 2=knife */
+    int8_t  _pad2[2];
+    int32_t ammo_clip[3];
+    int32_t ammo_reserve[3];
+    int32_t reload_ticks;
+    int32_t switch_ticks;
 } AgentState;
 
 /* ── Game state ── */
@@ -87,6 +117,8 @@ typedef struct {
     int32_t    bomb_being_defused_by; /* agent index or -1 */
     int32_t    bomb_defuse_ticks;
     int8_t     bombsite_entered[5]; /* per-T-agent flag: 1 if entered bombsite this round */
+    int8_t  bomb_is_dropped;   /* 1 when bomb on ground */
+    int8_t  _pad_gs[2];        /* pad to 4-byte boundary */
 } GameState;
 
 /* ── Per-step stats exported for Python-side episode aggregation ─────────── */
@@ -108,6 +140,10 @@ typedef struct {
     int32_t action_shoot[2];
     int32_t action_use[2];
     int32_t action_last[2];
+    int32_t action_aim[16];
+    int32_t action_reload[2];
+    int32_t action_weapon[3];
+    int32_t action_crouch[2];
 } StepStats;
 
 /* ── Full environment (one per parallel instance) ── */
@@ -122,4 +158,5 @@ typedef struct {
     int8_t      truncations[N_AGENTS]; /* always 0                                */
     float       team_spirit;
     uint32_t    rng;
+    int8_t  masks[N_AGENTS * ACTION_MASK_DIM];
 } Dust2Env;
