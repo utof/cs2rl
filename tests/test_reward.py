@@ -1,6 +1,5 @@
 # tests/test_reward.py
 import numpy as np
-import pytest
 
 from c_env.cs2_env import make_env
 from nav import ACTION_DIM
@@ -63,7 +62,7 @@ def test_pbrs_shaping_positive_on_kill():
     t.x, t.y, t.z = float(t_c[0]), float(t_c[1]), 0.0
 
     ct.alive = 1
-    ct.hp = 1   # low HP so any hit kills
+    ct.hp = 1  # low HP so any hit kills
     ct.armor = 0
     ct.area_idx = id2idx[area_ct]
     ct.x, ct.y, ct.z = float(ct_c[0]), float(ct_c[1]), 0.0
@@ -266,3 +265,125 @@ def test_plant_progress_reward():
     assert rewards[bomber_idx] >= 0.04, (
         f"Plant progress reward missing: agent {bomber_idx} reward = {rewards[bomber_idx]:.4f}"
     )
+
+
+# ── Phase 5 reward-externalization tests ──────────────────────────────────────
+
+
+def test_kill_reward_weight_is_configurable():
+    """make_env(reward_kill=X) scales the kill reward; zero-out all other weights
+    so the kill reward is the only non-zero contribution."""
+    import math
+
+    env = make_env(
+        reward_kill=0.9,
+        reward_death=0.0,
+        reward_win=0.0,
+        reward_bombsite_entry=0.0,
+        reward_plant_bonus=0.0,
+        reward_plant_base=0.0,
+        reward_plant_progress_scale=0.0,
+        reward_plant_interrupted=0.0,
+        reward_defuse=0.0,
+        reward_shot_penalty=0.0,
+        reward_ct_survival=0.0,
+        reward_inaction=0.0,
+        pbrs_alive_weight=0.0,
+        pbrs_hp_weight=0.0,
+        pbrs_site_weight=0.0,
+        pbrs_bomb_progress_weight=0.0,
+        pbrs_nav_weight_t=0.0,
+        pbrs_nav_weight_ct=0.0,
+        auto_reset=False,
+    )
+    env.reset()
+    id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
+    nav = env.nav_graph
+
+    pair = None
+    for i, area_i in enumerate(nav.area_ids[:400]):
+        for area_j in nav.area_ids[i + 1 : i + 200]:
+            if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
+                continue
+            dx = nav.centroids[area_j][0] - nav.centroids[area_i][0]
+            dy = nav.centroids[area_j][1] - nav.centroids[area_i][1]
+            if 50 < float((dx * dx + dy * dy) ** 0.5) < 1500:
+                pair = (area_i, area_j)
+                break
+        if pair is not None:
+            break
+    assert pair is not None
+
+    area_t, area_ct = pair
+    for i in range(10):
+        env._c_env.game.agents[i].alive = 0
+        env._c_env.game.agents[i].hp = 0
+
+    t = env._c_env.game.agents[0]
+    ct = env._c_env.game.agents[5]
+    tc = nav.centroids[area_t]
+    ctc = nav.centroids[area_ct]
+
+    t.alive = 1
+    t.hp = 100
+    t.armor = 0
+    t.area_idx = id2idx[area_t]
+    t.x = float(tc[0])
+    t.y = float(tc[1])
+    t.z = 0.0
+    ct.alive = 1
+    ct.hp = 1
+    ct.armor = 0
+    ct.area_idx = id2idx[area_ct]
+    ct.x = float(ctc[0])
+    ct.y = float(ctc[1])
+    ct.z = 0.0
+
+    def _aim(angle):
+        n = angle % (2 * math.pi)
+        if n < 0:
+            n += 2 * math.pi
+        return int(n * 16 / (2 * math.pi)) % 16
+
+    t_facing = math.atan2(ct.y - t.y, ct.x - t.x)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[0, 1] = _aim(t_facing)
+    actions[0, 2] = 1
+    _, rewards, _, _, _ = env.step(actions)
+
+    # With all weights zeroed except reward_kill=0.9, killer reward must be ≈0.9
+    assert abs(rewards[0] - 0.9) < 0.05, f"Expected kill reward ≈0.9, got {rewards[0]:.4f}"
+    env.close()
+
+
+def test_reward_components_logged_in_terminal_info():
+    """_build_terminal_info must include the 8 reward component keys."""
+    EXPECTED_KEYS = {
+        "reward_win",
+        "reward_kills",
+        "reward_deaths",
+        "reward_bomb",
+        "reward_pbrs",
+        "reward_shots",
+        "reward_survival",
+        "reward_inaction",
+    }
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+
+    # Run until episode ends
+    rng = np.random.default_rng(1)
+    info = {}
+    for _ in range(1000):
+        actions = rng.integers([9, 16, 2, 2, 3, 2, 2], size=(10, ACTION_DIM)).astype(np.int64)
+        _, _, terms, _, infos = env.step(actions)
+        for d in infos:
+            if d:
+                info = d
+                break
+        if terms.all():
+            break
+
+    missing = EXPECTED_KEYS - set(info.keys())
+    assert not missing, f"Missing reward component keys in terminal info: {missing}"
+    env.close()
