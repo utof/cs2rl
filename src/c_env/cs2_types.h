@@ -93,7 +93,8 @@ typedef struct {
     int32_t armor;
     int8_t  has_helmet;
     int8_t  weapon_slot;   /* 0=rifle, 1=pistol, 2=knife */
-    int8_t  _pad2[2];
+    int8_t  weapon_slot_target; /* pending slot after switch completes */
+    int8_t  _pad2[1];
     int32_t ammo_clip[3];
     int32_t ammo_reserve[3];
     int32_t reload_ticks;
