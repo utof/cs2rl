@@ -1,5 +1,6 @@
 #pragma once
 #include "cs2_types.h"
+#include "cs2_weapons.h"
 
 static void compute_observations(
     Dust2Env* env,
@@ -9,103 +10,168 @@ static void compute_observations(
 {
     StaticData* sd            = env->sd;
     GameState*  g             = &env->game;
-    float       alive_t_frac  = t_alive / (float)TEAM_SIZE;
-    float       alive_ct_frac = ct_alive / (float)TEAM_SIZE;
+    float       map_diag;
+    {
+        float xr = 1.0f / sd->inv_x_range; /* x range */
+        float yr = 1.0f / sd->inv_y_range;
+        map_diag = sqrtf(xr*xr + yr*yr);
+    }
 
     for (int i = 0; i < N_AGENTS; i++) {
         float*      obs = &env->observations[i * OBS_DIM];
         AgentState* a   = &g->agents[i];
-        int         tm_start;
-        int         tm_count = 0;
-        int         en_start;
 
         memset(obs, 0, OBS_DIM * sizeof(float));
 
-        obs[0] = (float)a->team;
-        obs[1] = a->x * sd->inv_x_range - sd->x_offset;
-        obs[2] = a->y * sd->inv_y_range - sd->y_offset;
-        obs[3] = sinf(a->facing);
-        obs[4] = cosf(a->facing);
-        obs[5] = a->hp / 100.0f;
-        obs[6] = (float)(a->team == 0 ? a->has_bomb : a->has_kit);
-        obs[7] = (a->fire_cd == 0) ? 1.0f : 1.0f - a->fire_cd / 10.0f;
+        /* ── Self state (0-22) ── */
+        int slot = a->weapon_slot;
+        const WeaponDef* def = &WEAPON_DEFS[slot];
+        obs[0]  = a->hp / 100.0f;
+        obs[1]  = a->armor / 100.0f;
+        obs[2]  = (float)a->has_helmet;
+        obs[3]  = a->x * sd->inv_x_range - sd->x_offset;
+        obs[4]  = a->y * sd->inv_y_range - sd->y_offset;
+        obs[5]  = 0.0f; /* z placeholder */
+        obs[6]  = (map_diag > 0.0f) ? a->vx / 250.0f : 0.0f;
+        obs[7]  = (map_diag > 0.0f) ? a->vy / 250.0f : 0.0f;
+        obs[8]  = 0.0f; /* vz placeholder */
+        obs[9]  = sinf(a->facing);
+        obs[10] = cosf(a->facing);
+        obs[11] = (float)a->is_crouching;
+        obs[12] = (slot == 0) ? 1.0f : 0.0f;
+        obs[13] = (slot == 1) ? 1.0f : 0.0f;
+        obs[14] = (slot == 2) ? 1.0f : 0.0f;
+        obs[15] = (def->mag_size > 0)
+                  ? a->ammo_clip[slot] / (float)def->mag_size : 1.0f;
+        obs[16] = (def->reserve_mags > 0)
+                  ? a->ammo_reserve[slot] / (float)def->reserve_mags : 1.0f;
+        obs[17] = (a->reload_ticks > 0) ? 1.0f : 0.0f;
+        obs[18] = (a->reload_ticks > 0 && def->reload_ticks > 0)
+                  ? (def->reload_ticks - a->reload_ticks) / (float)def->reload_ticks : 0.0f;
+        obs[19] = (a->fire_cd > 0 && def->cycle_ticks > 0)
+                  ? a->fire_cd / (float)def->cycle_ticks : 0.0f;
+        obs[20] = (float)(a->team == 0 && a->has_bomb);
+        obs[21] = (float)a->alive;
+        obs[22] = (float)(a->team == 0);
 
-        tm_start = (a->team == 0) ? 0 : TEAM_SIZE;
-        for (int j = tm_start; j < tm_start + TEAM_SIZE; j++) {
-            AgentState* tm;
-            int         base;
-            if (j == i) {
-                continue;
+        /* ── Teammates (23-50): 4 × 7 ── */
+        int tm_start = (a->team == 0) ? 0 : TEAM_SIZE;
+        int tm_count = 0;
+        for (int j = tm_start; j < tm_start + TEAM_SIZE && tm_count < 4; j++) {
+            if (j == i) continue;
+            AgentState* tm = &g->agents[j];
+            int base = 23 + tm_count * 7;
+            if (tm->alive) {
+                float dx = tm->x - a->x, dy = tm->y - a->y;
+                obs[base+0] = (map_diag > 0.0f) ? dx / map_diag : 0.0f;
+                obs[base+1] = (map_diag > 0.0f) ? dy / map_diag : 0.0f;
+                obs[base+2] = 0.0f; /* z placeholder */
+                obs[base+3] = tm->hp / 100.0f;
+                obs[base+4] = 1.0f;
+                float angle = atan2f(dy, dx);
+                obs[base+5] = sinf(angle);
+                obs[base+6] = cosf(angle);
             }
-            tm            = &g->agents[j];
-            base          = 8 + tm_count * 5;
-            obs[base + 0] = tm->x * sd->inv_x_range - sd->x_offset;
-            obs[base + 1] = tm->y * sd->inv_y_range - sd->y_offset;
-            obs[base + 2] = sinf(tm->facing);
-            obs[base + 3] = cosf(tm->facing);
-            obs[base + 4] = tm->alive ? tm->hp / 100.0f : 0.0f;
+            /* dead teammate: all zeros (already memset) */
             tm_count++;
-            if (tm_count == TEAM_SIZE - 1) {
-                break;
+        }
+
+        /* ── Enemies (51-90): 5 × 8 ── */
+        int en_start = (a->team == 0) ? TEAM_SIZE : 0;
+        /* Sort by distance — simple insertion sort over 5 elements */
+        int   order[TEAM_SIZE];
+        float dists[TEAM_SIZE];
+        for (int s = 0; s < TEAM_SIZE; s++) {
+            order[s] = en_start + s;
+            AgentState* en = &g->agents[order[s]];
+            float dx = en->x - a->x, dy = en->y - a->y;
+            dists[s] = dx*dx + dy*dy;
+        }
+        for (int s = 1; s < TEAM_SIZE; s++) {
+            int   ko = order[s];
+            float kd = dists[s];
+            int t = s - 1;
+            while (t >= 0 && dists[t] > kd) {
+                order[t+1] = order[t]; dists[t+1] = dists[t]; t--;
+            }
+            order[t+1] = ko; dists[t+1] = kd;
+        }
+        for (int slot2 = 0; slot2 < TEAM_SIZE; slot2++) {
+            int ej        = order[slot2];
+            AgentState* en = &g->agents[ej];
+            int base      = 51 + slot2 * 8;
+            int mem_s     = ej - en_start;
+            int can_see   = en->alive ? vis10[i][ej] : 0;
+
+            obs[base+4] = (float)en->alive;
+            obs[base+3] = (float)can_see;
+
+            if (can_see) {
+                float dx = en->x - a->x, dy = en->y - a->y;
+                float dist = sqrtf(dx*dx + dy*dy);
+                obs[base+0] = (map_diag > 0.0f) ? dx / map_diag : 0.0f;
+                obs[base+1] = (map_diag > 0.0f) ? dy / map_diag : 0.0f;
+                obs[base+2] = 0.0f; /* z placeholder */
+                float angle  = atan2f(dy, dx);
+                obs[base+5] = sinf(angle);
+                obs[base+6] = cosf(angle);
+                obs[base+7] = (map_diag > 0.0f) ? dist / map_diag : 0.0f;
+            } else if (a->enemy_mem_idx[mem_s] != INVALID_AREA_IDX) {
+                /* Use last-known position from memory */
+                float mx = sd->centroid_xy[a->enemy_mem_idx[mem_s] * 2]     - a->x;
+                float my = sd->centroid_xy[a->enemy_mem_idx[mem_s] * 2 + 1] - a->y;
+                obs[base+0] = (map_diag > 0.0f) ? mx / map_diag : 0.0f;
+                obs[base+1] = (map_diag > 0.0f) ? my / map_diag : 0.0f;
             }
         }
 
-        en_start = (a->team == 0) ? TEAM_SIZE : 0;
-        for (int slot = 0; slot < TEAM_SIZE; slot++) {
-            AgentState* en        = &g->agents[en_start + slot];
-            int         base      = 28 + slot * 7;
-            int         mem_idx   = a->enemy_mem_idx[slot];
-            int         mem_tick  = a->enemy_mem_tick[slot];
-            int         can_see   = en->alive ? vis10[i][en_start + slot] : 0;
-            float       freshness = 0.0f;
-
-            if (mem_idx == INVALID_AREA_IDX && !can_see) {
-                continue;
-            }
-
-            if (mem_idx != INVALID_AREA_IDX) {
-                obs[base + 0] = sd->centroid_xy[mem_idx * 2] * sd->inv_x_range - sd->x_offset;
-                obs[base + 1] =
-                    sd->centroid_xy[mem_idx * 2 + 1] * sd->inv_y_range - sd->y_offset;
-            }
-            obs[base + 2] = sinf(en->facing);
-            obs[base + 3] = cosf(en->facing);
-            obs[base + 4] = en->alive ? en->hp / 100.0f : 0.0f;
-            obs[base + 5] = (float)can_see;
-            if (mem_tick >= 0) {
-                int age   = g->tick - mem_tick;
-                freshness = (age < sd->enemy_memory_ticks)
-                                ? (sd->enemy_memory_ticks - age) / (float)sd->enemy_memory_ticks
-                                : 0.0f;
-            }
-            obs[base + 6] = freshness;
+        /* ── Global / bomb (91-103) ── */
+        obs[91] = g->round_ticks_left / (float)sd->round_time;
+        /* bomb status one-hot (92-95) */
+        int carrier = g->bomb_carrier_id;
+        if (!g->bomb_planted && !g->bomb_is_dropped) {
+            if (carrier == i)                       obs[92] = 1.0f; /* carried by self */
+            else if (carrier >= 0 && a->team == 0)  obs[93] = 1.0f; /* carried by teammate */
+        } else if (g->bomb_is_dropped) {
+            obs[94] = 1.0f;
+        } else if (g->bomb_planted) {
+            obs[95] = 1.0f;
         }
-
-        obs[63] = (float)g->bomb_planted;
-        obs[64] = g->bomb_planted ? g->bomb_x * sd->inv_x_range - sd->x_offset : -1.0f;
-        obs[65] = g->bomb_planted ? g->bomb_y * sd->inv_y_range - sd->y_offset : -1.0f;
-        obs[66] = g->bomb_planted ? g->bomb_ticks_left / (float)sd->bomb_timer : 0.0f;
-        obs[67] = g->round_ticks_left / (float)sd->round_time;
-        obs[68] = alive_t_frac;
-        obs[69] = alive_ct_frac;
-        obs[70] = (a->area_idx >= 0) ? (float)sd->bombsite_by_idx[a->area_idx] : 0.0f;
-
-        /* obs[71]: plant state for bomb carrier */
+        /* bomb position (96-98) */
+        if (g->bomb_planted || g->bomb_is_dropped) {
+            float bx = g->bomb_x - a->x, by = g->bomb_y - a->y;
+            obs[96] = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
+            obs[97] = (map_diag > 0.0f) ? by / map_diag : 0.0f;
+        } else if (carrier >= 0 && a->team == 0 && carrier != i) {
+            /* Teammate carrying: show their position */
+            float bx = g->agents[carrier].x - a->x;
+            float by = g->agents[carrier].y - a->y;
+            obs[96] = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
+            obs[97] = (map_diag > 0.0f) ? by / map_diag : 0.0f;
+        }
+        obs[98]  = 0.0f; /* z placeholder */
+        obs[99]  = g->bomb_planted
+                   ? g->bomb_ticks_left / (float)sd->bomb_timer : 0.0f;
+        obs[100] = (g->bomb_being_planted_by >= 0 && sd->bomb_plant_time > 0)
+                   ? g->bomb_plant_ticks / (float)sd->bomb_plant_time : 0.0f;
+        /* obs[101]: defuse progress — extract to avoid GCC statement-expression */
         {
-            float plant_state = 0.0f;
-            if (a->team == 0 && a->has_bomb && !g->bomb_planted) {
-                int at_site = (a->area_idx >= 0) ? sd->bombsite_by_idx[a->area_idx] : 0;
-                if (!at_site) {
-                    plant_state = 0.33f; /* has bomb, not at site */
-                } else if (g->bomb_being_planted_by == i && g->bomb_plant_ticks > 0) {
-                    /* actively planting with progress */
-                    plant_state = 0.67f + 0.33f * ((float)g->bomb_plant_ticks /
-                                                   (float)sd->bomb_plant_time);
-                } else {
-                    plant_state = 0.67f; /* at site, not yet planting or progress=0 */
-                }
+            float defuse_prog = 0.0f;
+            if (g->bomb_being_defused_by >= 0) {
+                AgentState* def2 = &g->agents[g->bomb_being_defused_by];
+                int dtime = def2->has_kit ? sd->bomb_defuse_kit : sd->bomb_defuse_time;
+                if (dtime > 0)
+                    defuse_prog = g->bomb_defuse_ticks / (float)dtime;
             }
-            obs[71] = plant_state;
+            obs[101] = defuse_prog;
+        }
+        obs[102] = t_alive / (float)TEAM_SIZE;
+        obs[103] = ct_alive / (float)TEAM_SIZE;
+
+        /* Clip all obs to (-5, 5) */
+        for (int k = 0; k < OBS_DIM; k++) {
+            if      (obs[k] >  5.0f) obs[k] =  5.0f;
+            else if (obs[k] < -5.0f) obs[k] = -5.0f;
         }
     }
 }
