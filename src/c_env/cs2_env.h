@@ -72,14 +72,53 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
 
     for (int i = 0; i < N_AGENTS; i++) {
         AgentState* a = &g->agents[i];
-        if (a->fire_cd > 0) {
-            a->fire_cd--;
+        /* Tick weapon state (fire_cd, reload, switch, crouch_cd) */
+        if (a->alive) tick_weapon(a);
+
+        /* Complete a weapon switch when switch_ticks just hit 0 */
+        if (a->alive && a->switch_ticks == 0 &&
+            a->weapon_slot != a->weapon_slot_target) {
+            a->weapon_slot = a->weapon_slot_target;
         }
+
         a->is_moving       = 0;
         a->fired_this_tick = 0;
     }
 
     process_movement(env, actions, ss, es);
+
+    /* Parse non-movement action heads */
+    for (int i = 0; i < N_AGENTS; i++) {
+        AgentState* a = &g->agents[i];
+        if (!a->alive) continue;
+
+        int aim_act    = actions[i * ACTION_DIM + 1];
+        int shoot_act  = actions[i * ACTION_DIM + 2];
+        int reload_act = actions[i * ACTION_DIM + 3];
+        int wswitch    = actions[i * ACTION_DIM + 4];
+        /* use (5) and crouch (6) handled in cs2_bomb.h and cs2_movement.h */
+
+        /* Aim: set facing from 16-bin angle */
+        if (aim_act >= 0 && aim_act < 16) {
+            a->facing = (aim_act / 16.0f) * 2.0f * (float)M_PI;
+        }
+        count_action(ss->action_aim, es->action_aim, aim_act, 16);
+        count_action(ss->action_shoot, es->action_shoot, shoot_act, 2);
+
+        /* Reload */
+        if (reload_act == 1) try_start_reload(a);
+        count_action(ss->action_reload, es->action_reload, reload_act, 2);
+
+        /* Weapon switch: 1=switch_to_primary(0), 2=switch_to_secondary(1) */
+        if (wswitch == 1 && a->weapon_slot != 0) {
+            a->weapon_slot_target = 0;
+            try_weapon_switch(a, 0);
+        } else if (wswitch == 2 && a->weapon_slot != 1) {
+            a->weapon_slot_target = 1;
+            try_weapon_switch(a, 1);
+        }
+        count_action(ss->action_weapon, es->action_weapon, wswitch, 3);
+    }
 
     build_vis_matrix(g, sd, vis10);
     process_combat(env, actions, vis10, kills, &n_kills, ss, es);
@@ -137,6 +176,45 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
     compute_rewards(env, t_alive, ct_alive, phi_before, kills, n_kills, bombsite_entry_bonus,
                     plant_progress_reward, plant_interrupted, bomb_just_planted, bomb_planter_id,
                     bomb_just_defused, bomb_defuser_id);
+
+    /* Compute action masks for next step */
+    memset(env->masks, 1, sizeof(env->masks)); /* default: all valid */
+    for (int i = 0; i < N_AGENTS; i++) {
+        int8_t*     m = &env->masks[i * ACTION_MASK_DIM];
+        AgentState* a = &g->agents[i];
+        /* Offsets in mask array: move=0..8, aim=9..24, shoot=25..26,
+           reload=27..28, wswitch=29..31, use=32..33, crouch=34..35 */
+        if (!a->alive) {
+            memset(m, 0, ACTION_MASK_DIM); /* dead: nothing valid */
+            m[0] = 1; /* stop is always valid */
+            continue;
+        }
+        int slot = a->weapon_slot;
+        const WeaponDef* def = &WEAPON_DEFS[slot];
+        /* Shoot mask (offset 25+) */
+        int can_shoot = (a->fire_cd == 0 && a->reload_ticks == 0 && a->switch_ticks == 0);
+        m[25 + 1] = (int8_t)can_shoot;  /* shoot=yes */
+        /* Reload mask (offset 27+) */
+        int can_reload = (def->mag_size > 0
+                         && a->ammo_clip[slot] < def->mag_size
+                         && a->ammo_reserve[slot] > 0
+                         && a->reload_ticks == 0
+                         && a->switch_ticks == 0);
+        m[27 + 1] = (int8_t)can_reload;
+        /* Weapon switch mask (offset 29+): mask already-held weapon option */
+        if (slot == 0) m[29 + 1] = 0; /* already rifle: switch_to_primary masked */
+        if (slot == 1) m[29 + 2] = 0; /* already pistol: switch_to_secondary masked */
+        if (a->switch_ticks > 0) { m[29+1] = 0; m[29+2] = 0; } /* in-progress: no new switch */
+        /* Use mask (offset 32+): T-use requires bomb zone; CT-use requires planted bomb nearby */
+        if (a->team == 0 && a->has_bomb && !g->bomb_planted) {
+            int at_site = (a->area_idx >= 0) ? sd->bombsite_by_idx[a->area_idx] : 0;
+            if (!at_site) m[32 + 1] = 0;
+        } else if (a->team == 1 && g->bomb_planted) {
+            if (a->area_idx != g->bomb_area_idx) m[32 + 1] = 0;
+        } else {
+            m[32 + 1] = 0; /* no valid use in any other state */
+        }
+    }
 }
 
 static void env_close(Dust2Env* env) {
