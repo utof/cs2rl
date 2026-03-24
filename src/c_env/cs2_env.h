@@ -101,6 +101,20 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
         g->winner     = 0;
     }
 
+    /* Drop bomb if carrier was killed */
+    {
+        AgentState* carrier = (g->bomb_carrier_id >= 0 && g->bomb_carrier_id < TEAM_SIZE)
+                              ? &g->agents[g->bomb_carrier_id] : NULL;
+        if (carrier && !carrier->alive && !g->bomb_planted && !g->bomb_is_dropped) {
+            g->bomb_x          = carrier->x;
+            g->bomb_y          = carrier->y;
+            g->bomb_z          = carrier->z;
+            carrier->has_bomb  = 0;
+            g->bomb_carrier_id = -1;
+            g->bomb_is_dropped = 1;
+        }
+    }
+
     process_bomb(env, actions, bombsite_entry_bonus, plant_progress_reward, plant_interrupted,
                  &bomb_just_planted, &bomb_planter_id, &bomb_just_defused, &bomb_defuser_id,
                  ss, es);

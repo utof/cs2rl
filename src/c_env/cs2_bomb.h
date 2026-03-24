@@ -13,7 +13,7 @@ static void process_bomb(Dust2Env* env, const int32_t* actions,
     if (!g->round_over && g->bomb_being_defused_by != -1) {
         AgentState* def = &g->agents[g->bomb_being_defused_by];
         if (!def->alive || def->area_idx != g->bomb_area_idx ||
-            actions[g->bomb_being_defused_by * ACTION_DIM + 2] == 0) {
+            actions[g->bomb_being_defused_by * ACTION_DIM + 5] == 0) {
             g->bomb_being_defused_by = -1;
             g->bomb_defuse_ticks     = 0;
         }
@@ -22,7 +22,7 @@ static void process_bomb(Dust2Env* env, const int32_t* actions,
     if (!g->round_over) {
         for (int i = 0; i < N_AGENTS; i++) {
             AgentState* a = &g->agents[i];
-            if (!a->alive || actions[i * ACTION_DIM + 2] == 0) {
+            if (!a->alive || actions[i * ACTION_DIM + 5] == 0) {
                 continue;
             }
 
@@ -81,6 +81,25 @@ static void process_bomb(Dust2Env* env, const int32_t* actions,
                     }
                 }
             }
+        }
+    }
+
+    /* Dropped-bomb pickup: alive T agents auto-pick up if within 32 units */
+    if (!g->bomb_planted && g->bomb_is_dropped && !g->round_over) {
+        float best_dist = 32.0f * 32.0f; /* compare dist_sq to radius_sq */
+        int   best_t    = -1;
+        for (int i = 0; i < TEAM_SIZE; i++) {
+            AgentState* a = &g->agents[i];
+            if (!a->alive) continue;
+            float dx = a->x - g->bomb_x;
+            float dy = a->y - g->bomb_y;
+            float d  = dx*dx + dy*dy;
+            if (d <= best_dist) { best_dist = d; best_t = i; }
+        }
+        if (best_t >= 0) {
+            g->agents[best_t].has_bomb = 1;
+            g->bomb_carrier_id        = best_t;
+            g->bomb_is_dropped        = 0;
         }
     }
 
