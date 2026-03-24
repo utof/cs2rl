@@ -1,13 +1,6 @@
 #pragma once
 #include "cs2_types.h"
-
-static uint32_t xorshift32(uint32_t* state) {
-    uint32_t x  = *state;
-    x          ^= x << 13;
-    x          ^= x >> 17;
-    x          ^= x << 5;
-    return (*state = x);
-}
+#include "cs2_player.h"
 
 static void clear_stats(StepStats* stats) {
     memset(stats, 0, sizeof(StepStats));
@@ -42,20 +35,8 @@ static void spawn_team(GameState* g, StaticData* sd, uint32_t* rng, int team,
         a->x        = sd->centroid_xy[area_idx * 2];
         a->y        = sd->centroid_xy[area_idx * 2 + 1];
         a->area_idx = area_idx;
-        a->facing   = sd->dir_facing[team == 0 ? 3 : 7];
-        a->hp       = 100;
-        a->alive    = 1;
-        a->team     = (int8_t)team;
-        if (team == 0) {
-            a->has_bomb = (i == bomb_carrier) ? 1 : 0;
-        } else {
-            a->has_kit = (xorshift32(rng) & 1U) ? 1 : 0;
-        }
 
-        for (int s = 0; s < TEAM_SIZE; s++) {
-            a->enemy_mem_idx[s]  = INVALID_AREA_IDX;
-            a->enemy_mem_tick[s] = sd->stale_memory_tick;
-        }
+        init_agent(a, team, i, bomb_carrier, rng, sd);
     }
 }
 
