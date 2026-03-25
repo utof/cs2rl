@@ -87,6 +87,24 @@ class StaticDataC(ctypes.Structure):
         ("ct_spawns", ctypes.c_int32 * 5),
         ("n_ct_spawns", ctypes.c_int),
         ("max_turn_speed", ctypes.c_float),
+        ("reward_win", ctypes.c_float),
+        ("reward_kill", ctypes.c_float),
+        ("reward_death", ctypes.c_float),
+        ("reward_bombsite_entry", ctypes.c_float),
+        ("reward_plant_bonus", ctypes.c_float),
+        ("reward_plant_base", ctypes.c_float),
+        ("reward_plant_progress_scale", ctypes.c_float),
+        ("reward_plant_interrupted", ctypes.c_float),
+        ("reward_defuse", ctypes.c_float),
+        ("reward_shot_penalty", ctypes.c_float),
+        ("reward_ct_survival", ctypes.c_float),
+        ("reward_inaction", ctypes.c_float),
+        ("pbrs_alive_weight", ctypes.c_float),
+        ("pbrs_hp_weight", ctypes.c_float),
+        ("pbrs_site_weight", ctypes.c_float),
+        ("pbrs_bomb_progress_weight", ctypes.c_float),
+        ("pbrs_nav_weight_t", ctypes.c_float),
+        ("pbrs_nav_weight_ct", ctypes.c_float),
     ]
 
 
@@ -206,6 +224,12 @@ assert ctypes.sizeof(AgentStateC) == 132, (
 )
 assert ctypes.sizeof(GameStateC) == 1384, (
     f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1384)"
+)
+assert ctypes.sizeof(StepStatsC) == 236, (
+    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 236)"
+)
+assert ctypes.sizeof(Dust2EnvC) == 6456, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6456)"
 )
 
 # ctypes helper to extract raw pointer from PyCapsule
