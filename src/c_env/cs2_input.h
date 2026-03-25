@@ -19,17 +19,16 @@ static int _camera_relative_move_bin(int w, int a, int s, int d, float yaw, Stat
 
     /* Rotate into world space by yaw.
      * Camera forward = (cosf(yaw), sinf(yaw)) in sim XY.
-     * dy=forward(W/S), dx=strafe(D/A) → world = fwd*dy + right*dx */
-    float world_dx = dy * cosf(yaw) + dx * sinf(yaw);
-    float world_dy = dy * sinf(yaw) - dx * cosf(yaw);
+     * right = (-sinf(yaw), cosf(yaw))
+     */
+    float world_dx = dy * cosf(yaw) - dx * sinf(yaw);
+    float world_dy = dy * sinf(yaw) + dx * cosf(yaw);
     float desired  = atan2f(world_dy, world_dx);
 
-    /* Find closest bin in sd->dir_facing[1..8] */
     int   best      = 1;
     float best_diff = 1e9f;
     for (int i = 1; i < 9; i++) {
         float diff = sd->dir_facing[i] - desired;
-        /* Wrap to [-π, π] */
         while (diff > (float)M_PI)
             diff -= 2.0f * (float)M_PI;
         while (diff < -(float)M_PI)
