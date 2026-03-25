@@ -59,33 +59,31 @@ static float _potential(Dust2Env* env, int team) {
             if (closeness < 0.0f) {
                 closeness = 0.0f;
             }
-            bomb_progress = closeness * 0.3f;
+            bomb_progress = closeness * sd->pbrs_bomb_progress_weight;
             if (team == 1) {
                 bomb_progress = -bomb_progress;
             }
         }
     }
 
-    float nav_weight = (team == 1) ? 0.15f : 0.04f;
-    return (alive_t - alive_o) * 0.3f + (hp_t - hp_o) / 500.0f + (site_t - site_o) * 0.2f +
-           bomb_progress + nav_approach * nav_weight;
+    float nav_weight = (team == 1) ? sd->pbrs_nav_weight_ct : sd->pbrs_nav_weight_t;
+    return (alive_t - alive_o) * sd->pbrs_alive_weight + (hp_t - hp_o) * sd->pbrs_hp_weight +
+           (site_t - site_o) * sd->pbrs_site_weight + bomb_progress + nav_approach * nav_weight;
 }
 
-static void compute_rewards(
-    Dust2Env*  env,
-    int        t_alive,
-    int        ct_alive,
-    float      phi_before[2],
-    int        kills[N_AGENTS][2],
-    int        n_kills,
-    int8_t     bombsite_entry_bonus[TEAM_SIZE],
-    float      plant_progress_reward[TEAM_SIZE],
-    int8_t     plant_interrupted[TEAM_SIZE],
-    int        bomb_just_planted,
-    int        bomb_planter_id,
-    int        bomb_just_defused,
-    int        bomb_defuser_id)
-{
+static void compute_rewards(Dust2Env* env,
+                            int       t_alive,
+                            int       ct_alive,
+                            float     phi_before[2],
+                            int       kills[N_AGENTS][2],
+                            int       n_kills,
+                            int8_t    bombsite_entry_bonus[TEAM_SIZE],
+                            float     plant_progress_reward[TEAM_SIZE],
+                            int8_t    plant_interrupted[TEAM_SIZE],
+                            int       bomb_just_planted,
+                            int       bomb_planter_id,
+                            int       bomb_just_defused,
+                            int       bomb_defuser_id) {
     StaticData* sd = env->sd;
     GameState*  g  = &env->game;
     StepStats*  ss = &env->step_stats;
@@ -94,14 +92,21 @@ static void compute_rewards(
     if (g->round_over) {
         for (int i = 0; i < N_AGENTS; i++) {
             if (g->agents[i].alive) {
-                env->rewards[i] += (g->winner == g->agents[i].team) ? 1.0f : -1.0f;
+                float w = (g->winner == g->agents[i].team) ? sd->reward_win : -sd->reward_win;
+                env->rewards[i] += w;
+                ss->reward_win  += w;
+                es->reward_win  += w;
             }
         }
     }
 
     for (int k = 0; k < n_kills; k++) {
-        env->rewards[kills[k][0]] += 0.3f;
-        env->rewards[kills[k][1]] -= 0.1f;
+        env->rewards[kills[k][0]] += sd->reward_kill;
+        ss->reward_kills          += sd->reward_kill;
+        es->reward_kills          += sd->reward_kill;
+        env->rewards[kills[k][1]] -= sd->reward_death;
+        ss->reward_deaths         -= sd->reward_death;
+        es->reward_deaths         -= sd->reward_death;
         if (kills[k][0] < TEAM_SIZE) {
             ss->kills_t++;
             es->kills_t++;
@@ -114,26 +119,38 @@ static void compute_rewards(
     /* Bomb carrier subgoal rewards */
     for (int i = 0; i < TEAM_SIZE; i++) {
         if (bombsite_entry_bonus[i]) {
-            env->rewards[i] += 0.3f; /* one-time bombsite entry bonus */
+            env->rewards[i] += sd->reward_bombsite_entry;
+            ss->reward_bomb += sd->reward_bombsite_entry;
+            es->reward_bomb += sd->reward_bombsite_entry;
         }
         env->rewards[i] += plant_progress_reward[i]; /* per-tick plant progress */
+        ss->reward_bomb += plant_progress_reward[i];
+        es->reward_bomb += plant_progress_reward[i];
         if (plant_interrupted[i]) {
-            env->rewards[i] -= 0.1f; /* interrupted plant penalty */
+            env->rewards[i] -= sd->reward_plant_interrupted;
+            ss->reward_bomb -= sd->reward_plant_interrupted;
+            es->reward_bomb -= sd->reward_plant_interrupted;
         }
     }
 
     if (bomb_just_planted && bomb_planter_id >= 0) {
-        env->rewards[bomb_planter_id] += 0.2f;
-        env->rewards[bomb_planter_id] += 3.0f; /* plant completion bonus */
+        float pb                       = sd->reward_plant_base + sd->reward_plant_bonus;
+        env->rewards[bomb_planter_id] += pb;
+        ss->reward_bomb               += pb;
+        es->reward_bomb               += pb;
     }
     if (bomb_just_defused && bomb_defuser_id >= 0) {
-        env->rewards[bomb_defuser_id] += 0.2f;
+        env->rewards[bomb_defuser_id] += sd->reward_defuse;
+        ss->reward_bomb               += sd->reward_defuse;
+        es->reward_bomb               += sd->reward_defuse;
     }
 
     /* Small cost per shot fired — discourages infinite spray at walls */
     for (int i = 0; i < N_AGENTS; i++) {
         if (env->game.agents[i].alive && env->game.agents[i].fired_this_tick) {
-            env->rewards[i] -= 0.005f;
+            env->rewards[i]  -= sd->reward_shot_penalty;
+            ss->reward_shots -= sd->reward_shot_penalty;
+            es->reward_shots -= sd->reward_shot_penalty;
         }
     }
 
@@ -141,7 +158,9 @@ static void compute_rewards(
     if (!g->round_over) {
         for (int i = TEAM_SIZE; i < N_AGENTS; i++) {
             if (g->agents[i].alive) {
-                env->rewards[i] += 0.001f;
+                env->rewards[i]     += sd->reward_ct_survival;
+                ss->reward_survival += sd->reward_ct_survival;
+                es->reward_survival += sd->reward_ct_survival;
             }
         }
     }
@@ -151,8 +170,11 @@ static void compute_rewards(
         phi_after[0] = _potential(env, 0);
         phi_after[1] = _potential(env, 1);
         for (int i = 0; i < N_AGENTS; i++) {
-            env->rewards[i] +=
+            float pbrs =
                 sd->pbrs_gamma * phi_after[g->agents[i].team] - phi_before[g->agents[i].team];
+            env->rewards[i] += pbrs;
+            ss->reward_pbrs += pbrs;
+            es->reward_pbrs += pbrs;
         }
     }
 
