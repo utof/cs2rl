@@ -1,4 +1,8 @@
 build/
+build_demo/
+CMakeFiles/
+CMakeCache.txt
+src/c_env/nav_data.h
 .worktrees/
 .env
 **/*.npy
