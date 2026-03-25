@@ -224,22 +224,172 @@ static void update_camera(Client* cl, Dust2Env* env, float alpha) {
     cl->camera.target   = (Vector3){eye_x + dir_x, eye_y + dir_y, eye_z + dir_z};
 }
 
-/* Stub c_render — replaced in Task 7 */
+/* ── draw_floor ─────────────────────────────────────────────────────────── */
+static void draw_floor(Dust2Env* env) {
+    StaticData* sd = env->sd;
+    for (int i = 0; i < sd->N; i++) {
+        float cx = sd->centroid_xy[i * 2 + 0];
+        float cy = sd->centroid_xy[i * 2 + 1];
+        /* Color by bombsite */
+        Color c;
+        if (sd->bombsite_by_idx[i])
+            c = (Color){180, 100, 30, 200}; /* orange = bombsite  */
+        else
+            c = (Color){80, 80, 80, 200};   /* grey   = other     */
+        /* Simple fixed-size tile; real bounds come from nav_data.h in cs2_demo */
+        DrawPlane((Vector3){cx, 0.0f, cy}, (Vector2){256.0f, 256.0f}, c);
+    }
+}
+
+/* ── draw_walls ──────────────────────────────────────────────────────────── */
+static void draw_walls(Dust2Env* env) {
+    WallList* wl = &env->sd->wall_list;
+    for (int i = 0; i < wl->count; i++) {
+        Wall* w   = &wl->walls[i];
+        float cx  = (w->x0 + w->x1) * 0.5f;
+        float cy  = (w->y0 + w->y1) * 0.5f;
+        float len = sqrtf((w->x1 - w->x0) * (w->x1 - w->x0) + (w->y1 - w->y0) * (w->y1 - w->y0));
+        /* Wall midpoint; Raylib Y=up */
+        Vector3 pos = {cx, w->height * 0.5f, cy};
+        /* Axis-aligned: horizontal wall = extends along X, vertical = extends along Z */
+        int   horizontal = fabsf(w->y1 - w->y0) < 1.0f;
+        float wx         = horizontal ? len : WALL_DEPTH;
+        float wz         = horizontal ? WALL_DEPTH : len;
+        DrawCube(pos, wx, w->height, wz, (Color){140, 140, 160, 255});
+        DrawCubeWires(pos, wx, w->height, wz, (Color){80, 80, 100, 255});
+    }
+}
+
+/* ── draw_agents ─────────────────────────────────────────────────────────── */
+static void draw_agents(Dust2Env* env, Client* cl, float alpha) {
+    for (int i = 0; i < N_AGENTS; i++) {
+        if (i == cl->human_agent_idx)
+            continue; /* don't draw own body in first-person */
+
+        float x     = _lerp(cl->prev[i].x, cl->curr[i].x, alpha);
+        float y     = _lerp(cl->prev[i].y, cl->curr[i].y, alpha);
+        float fa    = _lerp_angle(cl->prev[i].facing, cl->curr[i].facing, alpha);
+        int   alive = cl->curr[i].alive;
+
+        /* Team color: T=orange, CT=blue; dead agents are dark */
+        Color body_col, head_col;
+        if (!alive) {
+            body_col = head_col = (Color){40, 40, 40, 128};
+        } else if (cl->curr[i].team == 0) {
+            body_col = (Color){220, 120, 30, 255}; /* T = orange */
+            head_col = (Color){255, 160, 60, 255};
+        } else {
+            body_col = (Color){30, 80, 200, 255}; /* CT = blue */
+            head_col = (Color){60, 130, 255, 255};
+        }
+
+        /* Body cylinder: base at floor, top 96 units */
+        DrawCylinder((Vector3){x, 0.0f, y}, 12.0f, 12.0f, 96.0f, 8, body_col);
+        /* Head sphere: at 108 units */
+        DrawSphere((Vector3){x, 108.0f, y}, 16.0f, head_col);
+
+        /* Aim direction line from head */
+        if (alive) {
+            float aim_x = x + cosf(fa) * 60.0f;
+            float aim_z = y + sinf(fa) * 60.0f;
+            DrawLine3D((Vector3){x, 108.0f, y},
+                       (Vector3){aim_x, 108.0f, aim_z},
+                       (Color){255, 255, 0, 200});
+        }
+
+        /* Bomb indicator above carrier */
+        if (cl->curr[i].has_bomb && alive) {
+            DrawSphere((Vector3){x, 130.0f, y}, 8.0f, YELLOW);
+        }
+    }
+}
+
+/* ── draw_bomb ────────────────────────────────────────────────────────────── */
+static void draw_bomb(Dust2Env* env, Client* cl, float alpha) {
+    (void)cl;
+    (void)alpha;
+    GameState* g = &env->game;
+    if (g->bomb_is_dropped || g->bomb_planted) {
+        float bx = g->bomb_x;
+        float by = g->bomb_y;
+        float bz = g->bomb_z;
+        /* Pulse red when planted */
+        Color col;
+        if (g->bomb_planted) {
+            float pulse = 0.5f + 0.5f * sinf((float)g->tick * 0.5f);
+            col         = (Color){255, (uint8_t)(30 * (1.0f - pulse)), 0, 255};
+        } else {
+            col = YELLOW;
+        }
+        DrawSphere((Vector3){bx, bz + 10.0f, by}, 12.0f, col);
+        DrawSphereWires((Vector3){bx, bz + 10.0f, by}, 12.0f, 8, 8, (Color){255, 255, 0, 200});
+    }
+}
+
+/* ── draw_hud ────────────────────────────────────────────────────────────── */
+static void draw_hud(Client* cl, Dust2Env* env) {
+    GameState*  g   = &env->game;
+    int         idx = (cl->human_agent_idx >= 0) ? cl->human_agent_idx : 0;
+    AgentState* a   = &g->agents[idx];
+
+    /* Crosshair */
+    int cx = cl->width / 2, cy = cl->height / 2;
+    DrawLine(cx - 10, cy, cx + 10, cy, WHITE);
+    DrawLine(cx, cy - 10, cx, cy + 10, WHITE);
+
+    /* Health bar */
+    int hp = a->alive ? a->hp : 0;
+    DrawRectangle(10, cl->height - 30, 200, 20, DARKGRAY);
+    DrawRectangle(10, cl->height - 30, hp * 2, 20, (Color){0, 200, 0, 255});
+    DrawText(TextFormat("HP: %d", hp), 15, cl->height - 28, 16, WHITE);
+
+    /* Weapon / ammo */
+    int         slot     = (int)a->weapon_slot;
+    int         ammo     = (slot >= 0 && slot < 3) ? a->ammo_clip[slot] : 0;
+    int         resrv    = (slot >= 0 && slot < 3) ? a->ammo_reserve[slot] : 0;
+    const char* wnames[] = {"RIFLE", "PISTOL", "KNIFE"};
+    const char* wname    = (slot >= 0 && slot < 3) ? wnames[slot] : "???";
+    DrawText(
+        TextFormat("%s %d/%d", wname, ammo, resrv), cl->width - 150, cl->height - 30, 16, WHITE);
+
+    /* Bomb timer */
+    if (g->bomb_planted) {
+        int secs = g->bomb_ticks_left / 16;
+        DrawText(TextFormat("BOMB: %ds", secs), cl->width / 2 - 40, 10, 24, RED);
+    }
+
+    /* Round timer */
+    int rt = g->round_ticks_left / 16;
+    DrawText(
+        TextFormat("%d:%02d", rt / 60, rt % 60), cl->width / 2 - 20, cl->height - 55, 20, WHITE);
+
+    /* Human / spectate indicator */
+    if (cl->human_agent_idx >= 0)
+        DrawText("HUMAN CONTROL", 10, 10, 18, GREEN);
+    else
+        DrawText("SPECTATE", 10, 10, 18, GRAY);
+}
+
+/* ── c_render — full implementation ─────────────────────────────────────── */
 void c_render(Client* cl, Dust2Env* env) {
-    float t     = (float)GetTime();
-    float alpha = (float)((t - cl->last_step_time) * 16.0);
+    double now   = GetTime();
+    float  alpha = (float)((now - cl->last_step_time) * 16.0);
     if (alpha > 1.0f)
         alpha = 1.0f;
+
     update_camera(cl, env, alpha);
 
     BeginDrawing();
-    ClearBackground((Color){30, 30, 40, 255});
+    ClearBackground((Color){20, 20, 30, 255});
+
     BeginMode3D(cl->camera);
-    /* TODO: draw calls in Task 7 */
-    DrawGrid(20, 100.0f);
+    draw_floor(env);
+    draw_walls(env);
+    draw_agents(env, cl, alpha);
+    draw_bomb(env, cl, alpha);
     EndMode3D();
-    DrawFPS(10, 10);
-    if (cl->human_agent_idx >= 0)
-        DrawText("HUMAN CONTROL", 10, 30, 20, GREEN);
+
+    draw_hud(cl, env);
+    DrawFPS(10, cl->height - 20);
     EndDrawing();
 }
