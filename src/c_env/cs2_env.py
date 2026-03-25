@@ -10,7 +10,7 @@ import numpy as np
 import pufferlib
 
 import nav
-from map import MapData, make_cs2_map
+from map import make_cs2_map
 from nav import ACTION_DIM, N_AGENTS, OBS_DIM, ROUND_TIME
 
 _DIR = Path(__file__).parent
@@ -18,8 +18,8 @@ if str(_DIR) not in sys.path:
     sys.path.insert(0, str(_DIR))
 import binding  # noqa: E402
 
-
 # ── Viz dataclasses (used by snapshot_state) ─────────────────────────────────
+
 
 @dataclass
 class VizAgentState:
@@ -92,37 +92,37 @@ class StaticDataC(ctypes.Structure):
 
 class AgentStateC(ctypes.Structure):
     _fields_ = [
-        ("x",                  ctypes.c_float),
-        ("y",                  ctypes.c_float),
-        ("z",                  ctypes.c_float),
-        ("area_idx",           ctypes.c_int32),
-        ("facing",             ctypes.c_float),
-        ("hp",                 ctypes.c_int32),
-        ("fire_cd",            ctypes.c_int32),
-        ("alive",              ctypes.c_int8),
-        ("has_bomb",           ctypes.c_int8),
-        ("has_kit",            ctypes.c_int8),
-        ("team",               ctypes.c_int8),
-        ("is_moving",          ctypes.c_int8),
-        ("fired_this_tick",    ctypes.c_int8),
-        ("_pad0",              ctypes.c_int8 * 2),
-        ("enemy_mem_idx",      ctypes.c_int32 * 5),
-        ("enemy_mem_tick",     ctypes.c_int32 * 5),
+        ("x", ctypes.c_float),
+        ("y", ctypes.c_float),
+        ("z", ctypes.c_float),
+        ("area_idx", ctypes.c_int32),
+        ("facing", ctypes.c_float),
+        ("hp", ctypes.c_int32),
+        ("fire_cd", ctypes.c_int32),
+        ("alive", ctypes.c_int8),
+        ("has_bomb", ctypes.c_int8),
+        ("has_kit", ctypes.c_int8),
+        ("team", ctypes.c_int8),
+        ("is_moving", ctypes.c_int8),
+        ("fired_this_tick", ctypes.c_int8),
+        ("_pad0", ctypes.c_int8 * 2),
+        ("enemy_mem_idx", ctypes.c_int32 * 5),
+        ("enemy_mem_tick", ctypes.c_int32 * 5),
         # Phase 4b additions
-        ("vx",                 ctypes.c_float),
-        ("vy",                 ctypes.c_float),
-        ("is_crouching",       ctypes.c_int8),
-        ("_pad1",              ctypes.c_int8 * 3),
-        ("crouch_cd",          ctypes.c_int32),
-        ("armor",              ctypes.c_int32),
-        ("has_helmet",         ctypes.c_int8),
-        ("weapon_slot",        ctypes.c_int8),
+        ("vx", ctypes.c_float),
+        ("vy", ctypes.c_float),
+        ("is_crouching", ctypes.c_int8),
+        ("_pad1", ctypes.c_int8 * 3),
+        ("crouch_cd", ctypes.c_int32),
+        ("armor", ctypes.c_int32),
+        ("has_helmet", ctypes.c_int8),
+        ("weapon_slot", ctypes.c_int8),
         ("weapon_slot_target", ctypes.c_int8),
-        ("_pad2",              ctypes.c_int8 * 1),
-        ("ammo_clip",          ctypes.c_int32 * 3),
-        ("ammo_reserve",       ctypes.c_int32 * 3),
-        ("reload_ticks",       ctypes.c_int32),
-        ("switch_ticks",       ctypes.c_int32),
+        ("_pad2", ctypes.c_int8 * 1),
+        ("ammo_clip", ctypes.c_int32 * 3),
+        ("ammo_reserve", ctypes.c_int32 * 3),
+        ("reload_ticks", ctypes.c_int32),
+        ("switch_ticks", ctypes.c_int32),
     ]
 
 
@@ -145,8 +145,8 @@ class GameStateC(ctypes.Structure):
         ("bomb_being_defused_by", ctypes.c_int32),
         ("bomb_defuse_ticks", ctypes.c_int32),
         ("bombsite_entered", ctypes.c_int8 * 5),
-        ("bomb_is_dropped",  ctypes.c_int8),
-        ("_pad_gs",          ctypes.c_int8 * 2),
+        ("bomb_is_dropped", ctypes.c_int8),
+        ("_pad_gs", ctypes.c_int8 * 2),
     ]
 
 
@@ -168,27 +168,35 @@ class StepStatsC(ctypes.Structure):
         ("action_move", ctypes.c_int32 * 9),
         ("action_shoot", ctypes.c_int32 * 2),
         ("action_use", ctypes.c_int32 * 2),
-        ("action_last",   ctypes.c_int32 * 2),
-        ("action_aim",    ctypes.c_int32 * 16),
+        ("action_last", ctypes.c_int32 * 2),
+        ("action_aim", ctypes.c_int32 * 16),
         ("action_reload", ctypes.c_int32 * 2),
         ("action_weapon", ctypes.c_int32 * 3),
         ("action_crouch", ctypes.c_int32 * 2),
+        ("reward_win", ctypes.c_float),
+        ("reward_kills", ctypes.c_float),
+        ("reward_deaths", ctypes.c_float),
+        ("reward_bomb", ctypes.c_float),
+        ("reward_pbrs", ctypes.c_float),
+        ("reward_shots", ctypes.c_float),
+        ("reward_survival", ctypes.c_float),
+        ("reward_inaction", ctypes.c_float),
     ]
 
 
 class Dust2EnvC(ctypes.Structure):
     _fields_ = [
-        ("sd",           ctypes.POINTER(StaticDataC)),
-        ("game",         GameStateC),
-        ("step_stats",   StepStatsC),
-        ("episode_stats",StepStatsC),
+        ("sd", ctypes.POINTER(StaticDataC)),
+        ("game", GameStateC),
+        ("step_stats", StepStatsC),
+        ("episode_stats", StepStatsC),
         ("observations", ctypes.c_float * (N_AGENTS * OBS_DIM)),
-        ("rewards",      ctypes.c_float * N_AGENTS),
-        ("terminals",    ctypes.c_int8  * N_AGENTS),
-        ("truncations",  ctypes.c_int8  * N_AGENTS),
-        ("team_spirit",  ctypes.c_float),
-        ("rng",          ctypes.c_uint32),
-        ("masks",        ctypes.c_int8  * (N_AGENTS * 36)),
+        ("rewards", ctypes.c_float * N_AGENTS),
+        ("terminals", ctypes.c_int8 * N_AGENTS),
+        ("truncations", ctypes.c_int8 * N_AGENTS),
+        ("team_spirit", ctypes.c_float),
+        ("rng", ctypes.c_uint32),
+        ("masks", ctypes.c_int8 * (N_AGENTS * 36)),
     ]
 
 
@@ -221,6 +229,24 @@ class Cs2Env(pufferlib.PufferEnv):
         nav_graph=None,
         auto_reset=True,
         map_data=None,
+        reward_win=1.0,
+        reward_kill=0.3,
+        reward_death=0.1,
+        reward_bombsite_entry=0.3,
+        reward_plant_bonus=3.0,
+        reward_plant_base=0.2,
+        reward_plant_progress_scale=0.05,
+        reward_plant_interrupted=0.1,
+        reward_defuse=0.2,
+        reward_shot_penalty=0.005,
+        reward_ct_survival=0.001,
+        reward_inaction=0.0005,
+        pbrs_alive_weight=0.3,
+        pbrs_hp_weight=0.002,
+        pbrs_site_weight=0.2,
+        pbrs_bomb_progress_weight=0.3,
+        pbrs_nav_weight_t=0.04,
+        pbrs_nav_weight_ct=0.15,
     ):
         self.single_observation_space = gymnasium.spaces.Box(
             low=-5.0, high=5.0, shape=(OBS_DIM,), dtype=np.float32
@@ -248,14 +274,14 @@ class Cs2Env(pufferlib.PufferEnv):
         def _arr(a, dtype):
             return np.ascontiguousarray(a.astype(dtype, copy=False).flatten())
 
-        vis_matrix      = _arr(md.vis_matrix, np.int8)
-        raster_grid     = _arr(md.grid, np.int32)
-        adjacency       = _arr(md.adjacency, np.int8)
-        centroid_xy     = _arr(md.centroids, np.float32)
-        area_ids        = _arr(md.area_ids, np.int32)
-        bombsite_mask   = _arr(md.bombsite_mask, np.int8)
+        vis_matrix = _arr(md.vis_matrix, np.int8)
+        raster_grid = _arr(md.grid, np.int32)
+        adjacency = _arr(md.adjacency, np.int8)
+        centroid_xy = _arr(md.centroids, np.float32)
+        area_ids = _arr(md.area_ids, np.int32)
+        bombsite_mask = _arr(md.bombsite_mask, np.int8)
         bombsite_by_idx = _arr(md.bombsite_by_idx, np.int8)
-        bombsite_dist   = _arr(md.bombsite_dist, np.float32)
+        bombsite_dist = _arr(md.bombsite_dist, np.float32)
 
         inv_x = 2.0 / (md.x_max - md.x_min)
         inv_y = 2.0 / (md.y_max - md.y_min)
@@ -263,45 +289,93 @@ class Cs2Env(pufferlib.PufferEnv):
         y_off = (md.y_max + md.y_min) / (md.y_max - md.y_min)
 
         id2idx = {int(aid): i for i, aid in enumerate(md.area_ids)}
-        t_spawns  = np.array([id2idx[a] for a in md.t_spawn_areas],  dtype=np.int32)
+        t_spawns = np.array([id2idx[a] for a in md.t_spawn_areas], dtype=np.int32)
         ct_spawns = np.array([id2idx[a] for a in md.ct_spawn_areas], dtype=np.int32)
-        delta_x    = np.array([float(nav._DELTA_VECTORS[k][0]) for k in range(9)], dtype=np.float32)
-        delta_y    = np.array([float(nav._DELTA_VECTORS[k][1]) for k in range(9)], dtype=np.float32)
+        delta_x = np.array([float(nav._DELTA_VECTORS[k][0]) for k in range(9)], dtype=np.float32)
+        delta_y = np.array([float(nav._DELTA_VECTORS[k][1]) for k in range(9)], dtype=np.float32)
         dir_facing = np.array([float(nav._DIR_FACING[k]) for k in range(9)], dtype=np.float32)
 
         # Keep refs alive — prevents GC of backing numpy arrays
         self._refs = [
-            vis_matrix, raster_grid, adjacency, centroid_xy,
-            area_ids, bombsite_mask, bombsite_by_idx, bombsite_dist,
-            t_spawns, ct_spawns, delta_x, delta_y, dir_facing,
+            vis_matrix,
+            raster_grid,
+            adjacency,
+            centroid_xy,
+            area_ids,
+            bombsite_mask,
+            bombsite_by_idx,
+            bombsite_dist,
+            t_spawns,
+            ct_spawns,
+            delta_x,
+            delta_y,
+            dir_facing,
         ]
 
         # Call binding.init() — positional order matches C format string
         self._capsule = binding.init(
-            vis_matrix, raster_grid, adjacency, centroid_xy,           # 0-3
-            area_ids, bombsite_mask, bombsite_by_idx, bombsite_dist,   # 4-7
-            int(md.N), int(md.grid.shape[1]), int(md.grid.shape[0]),  # 8-10: N, grid_w, grid_h
-            int(md.area_ids.max()),                                     # 11: max_area_id
-            float(md.grid_x_min), float(md.grid_y_min),               # 12-13
-            float(1.0 / md.grid_cell_size),                            # 14: grid_inv_cell
-            float(inv_x), float(inv_y), float(x_off), float(y_off),   # 15-18
-            float(md.bombsite_dist_scale),                             # 19
-            int(nav.LASER_DAMAGE),                                      # 20
-            float(nav.LASER_RANGE), float(nav.LASER_RANGE * nav.LASER_RANGE),  # 21-22
-            int(nav.SHOOT_COOLDOWN), int(nav.BOMB_PLANT_TIME),         # 23-24
-            int(nav.BOMB_DEFUSE_TIME), int(nav.BOMB_DEFUSE_KIT),       # 25-26
-            int(nav.BOMB_TIMER), int(nav.ROUND_TIME),                  # 27-28
-            float(nav.FOOTSTEP_RADIUS * nav.FOOTSTEP_RADIUS),          # 29
-            float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),            # 30
-            int(nav.ENEMY_MEMORY_TICKS), int(nav.STALE_MEMORY_TICK),  # 31-32
-            float(0.99),                                                # 33: pbrs_gamma
-            delta_x, delta_y, dir_facing, t_spawns,                   # 34-37
-            int(len(md.t_spawn_areas)),                                 # 38: n_t_spawns
-            ct_spawns,                                                  # 39
-            int(len(md.ct_spawn_areas)),                               # 40: n_ct_spawns
-            float(nav.MAX_TURN_SPEED_RAD),                             # 41
-            int(seed) & 0xFFFFFFFF,                                    # 42: seed (uint32)
-            float(init_team_spirit),                                   # 43
+            vis_matrix,
+            raster_grid,
+            adjacency,
+            centroid_xy,  # 0-3
+            area_ids,
+            bombsite_mask,
+            bombsite_by_idx,
+            bombsite_dist,  # 4-7
+            int(md.N),
+            int(md.grid.shape[1]),
+            int(md.grid.shape[0]),  # 8-10: N, grid_w, grid_h
+            int(md.area_ids.max()),  # 11: max_area_id
+            float(md.grid_x_min),
+            float(md.grid_y_min),  # 12-13
+            float(1.0 / md.grid_cell_size),  # 14: grid_inv_cell
+            float(inv_x),
+            float(inv_y),
+            float(x_off),
+            float(y_off),  # 15-18
+            float(md.bombsite_dist_scale),  # 19
+            int(nav.LASER_DAMAGE),  # 20
+            float(nav.LASER_RANGE),
+            float(nav.LASER_RANGE * nav.LASER_RANGE),  # 21-22
+            int(nav.SHOOT_COOLDOWN),
+            int(nav.BOMB_PLANT_TIME),  # 23-24
+            int(nav.BOMB_DEFUSE_TIME),
+            int(nav.BOMB_DEFUSE_KIT),  # 25-26
+            int(nav.BOMB_TIMER),
+            int(nav.ROUND_TIME),  # 27-28
+            float(nav.FOOTSTEP_RADIUS * nav.FOOTSTEP_RADIUS),  # 29
+            float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),  # 30
+            int(nav.ENEMY_MEMORY_TICKS),
+            int(nav.STALE_MEMORY_TICK),  # 31-32
+            0.99,  # 33: pbrs_gamma
+            delta_x,
+            delta_y,
+            dir_facing,
+            t_spawns,  # 34-37
+            int(len(md.t_spawn_areas)),  # 38: n_t_spawns
+            ct_spawns,  # 39
+            int(len(md.ct_spawn_areas)),  # 40: n_ct_spawns
+            float(nav.MAX_TURN_SPEED_RAD),  # 41
+            int(seed) & 0xFFFFFFFF,  # 42: seed (uint32)
+            float(init_team_spirit),  # 43
+            float(reward_win),  # 44
+            float(reward_kill),  # 45
+            float(reward_death),  # 46
+            float(reward_bombsite_entry),  # 47
+            float(reward_plant_bonus),  # 48
+            float(reward_plant_base),  # 49
+            float(reward_plant_progress_scale),  # 50
+            float(reward_plant_interrupted),  # 51
+            float(reward_defuse),  # 52
+            float(reward_shot_penalty),  # 53
+            float(reward_ct_survival),  # 54
+            float(reward_inaction),  # 55
+            float(pbrs_alive_weight),  # 56
+            float(pbrs_hp_weight),  # 57
+            float(pbrs_site_weight),  # 58
+            float(pbrs_bomb_progress_weight),  # 59
+            float(pbrs_nav_weight_t),  # 60
+            float(pbrs_nav_weight_ct),  # 61
         )
 
         # ctypes overlay of the C-allocated Dust2Env (tests + snapshot only)
@@ -332,14 +406,14 @@ class Cs2Env(pufferlib.PufferEnv):
 
         if not self._uses_external_buffers:
             self.observations = self._obs_view
-            self.rewards      = self._rew_view
-            self.terminals    = self._term_view
-            self.truncations  = self._trunc_view
+            self.rewards = self._rew_view
+            self.terminals = self._term_view
+            self.truncations = self._trunc_view
 
-        self._actions_shape   = (N_AGENTS, ACTION_DIM)
+        self._actions_shape = (N_AGENTS, ACTION_DIM)
         self._actions_scratch = np.zeros(self._actions_shape, dtype=np.int32)
-        self._terminal_rewards     = np.empty(N_AGENTS, dtype=np.float32)
-        self._terminal_terminals   = np.empty(N_AGENTS, dtype=bool)
+        self._terminal_rewards = np.empty(N_AGENTS, dtype=np.float32)
+        self._terminal_terminals = np.empty(N_AGENTS, dtype=bool)
         self._terminal_truncations = np.empty(N_AGENTS, dtype=bool)
         self._empty_infos = []
 
@@ -480,13 +554,49 @@ class Cs2Env(pufferlib.PufferEnv):
                 "round_length": int(stats.round_length),
             }
         )
+        summary.update(
+            {
+                "reward_win": float(stats.reward_win),
+                "reward_kills": float(stats.reward_kills),
+                "reward_deaths": float(stats.reward_deaths),
+                "reward_bomb": float(stats.reward_bomb),
+                "reward_pbrs": float(stats.reward_pbrs),
+                "reward_shots": float(stats.reward_shots),
+                "reward_survival": float(stats.reward_survival),
+                "reward_inaction": float(stats.reward_inaction),
+            }
+        )
         return summary
 
 
 # ── make_env ──────────────────────────────────────────────────────────────────
 
 
-def make_env(seed=0, team_spirit=0.0, auto_reset=True, buf=None, map_data=None):
+def make_env(
+    seed=0,
+    team_spirit=0.0,
+    auto_reset=True,
+    buf=None,
+    map_data=None,
+    reward_win=1.0,
+    reward_kill=0.3,
+    reward_death=0.1,
+    reward_bombsite_entry=0.3,
+    reward_plant_bonus=3.0,
+    reward_plant_base=0.2,
+    reward_plant_progress_scale=0.05,
+    reward_plant_interrupted=0.1,
+    reward_defuse=0.2,
+    reward_shot_penalty=0.005,
+    reward_ct_survival=0.001,
+    reward_inaction=0.0005,
+    pbrs_alive_weight=0.3,
+    pbrs_hp_weight=0.002,
+    pbrs_site_weight=0.2,
+    pbrs_bomb_progress_weight=0.3,
+    pbrs_nav_weight_t=0.04,
+    pbrs_nav_weight_ct=0.15,
+):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
         key = (nav.NAV_PATH, nav.CACHE_PATH)
@@ -503,4 +613,22 @@ def make_env(seed=0, team_spirit=0.0, auto_reset=True, buf=None, map_data=None):
         nav_graph=md.nav_graph,
         auto_reset=auto_reset,
         map_data=md,
+        reward_win=reward_win,
+        reward_kill=reward_kill,
+        reward_death=reward_death,
+        reward_bombsite_entry=reward_bombsite_entry,
+        reward_plant_bonus=reward_plant_bonus,
+        reward_plant_base=reward_plant_base,
+        reward_plant_progress_scale=reward_plant_progress_scale,
+        reward_plant_interrupted=reward_plant_interrupted,
+        reward_defuse=reward_defuse,
+        reward_shot_penalty=reward_shot_penalty,
+        reward_ct_survival=reward_ct_survival,
+        reward_inaction=reward_inaction,
+        pbrs_alive_weight=pbrs_alive_weight,
+        pbrs_hp_weight=pbrs_hp_weight,
+        pbrs_site_weight=pbrs_site_weight,
+        pbrs_bomb_progress_weight=pbrs_bomb_progress_weight,
+        pbrs_nav_weight_t=pbrs_nav_weight_t,
+        pbrs_nav_weight_ct=pbrs_nav_weight_ct,
     )
