@@ -99,8 +99,10 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
         int wswitch    = actions[i * ACTION_DIM + 4];
         /* use (5) and crouch (6) handled in cs2_bomb.h and cs2_movement.h */
 
-        /* Aim: set facing from 16-bin angle */
-        if (aim_act >= 0 && aim_act < 16) {
+        /* Aim: continuous for human, 16-bin for RL agents */
+        if (a->human_controlled) {
+            a->facing = a->aim_rad;
+        } else if (aim_act >= 0 && aim_act < 16) {
             a->facing = (aim_act / 16.0f) * 2.0f * (float)M_PI;
         }
         count_action(ss->action_aim, es->action_aim, aim_act, 16);
