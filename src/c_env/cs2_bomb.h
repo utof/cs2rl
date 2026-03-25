@@ -45,8 +45,7 @@ static void process_bomb(Dust2Env*      env,
                     if (g->bomb_being_planted_by == i) {
                         g->bomb_plant_ticks++;
                         plant_progress_reward[i] =
-                            env->sd
-                                ->reward_plant_progress_scale; /* per-tick plant progress reward */
+                            sd->reward_plant_progress_scale; /* per-tick plant progress reward */
                         if (g->bomb_plant_ticks >= sd->bomb_plant_time) {
                             g->bomb_planted          = 1;
                             g->bomb_area_idx         = a->area_idx;
