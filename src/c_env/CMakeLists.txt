@@ -16,7 +16,10 @@ target_link_libraries(binding PRIVATE m)
 
 install(TARGETS binding DESTINATION .)
 
-# ── Phase 6: standalone Raylib demo ──────────────────────────────────────────
+# ── Phase 6: standalone Raylib demo (off by default — does not affect pip install) ──
+
+option(BUILD_CS2_DEMO "Build the standalone Raylib cs2 demo" OFF)
+if(BUILD_CS2_DEMO)
 
 include(FetchContent)
 FetchContent_Declare(raylib
@@ -37,3 +40,5 @@ target_include_directories(cs2_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(cs2_demo PRIVATE raylib m)
 target_compile_definitions(cs2_demo PRIVATE PLATFORM_DESKTOP)
 target_compile_options(cs2_demo PRIVATE -O2 -Wall -g -std=c99)
+
+endif()  # BUILD_CS2_DEMO
