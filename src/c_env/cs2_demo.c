@@ -2,7 +2,7 @@
 #include "cs2_env.h"
 #include "nav_data.h"
 #include "cs2_render.h"
-/* cs2_input.h will exist after Task 8 — include then */
+#include "cs2_input.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -101,7 +101,8 @@ int main(int argc, char** argv) {
         double now = GetTime();
         if (now >= next_step) {
             snapshot_prev(cl, &env);
-            /* human_input will be added in Task 8 */
+            if (human_idx >= 0)
+                human_input(cl, &env, actions);
             env_step(&env, actions);
             snapshot_curr(cl, &env);
             cl->last_step_time  = now;
