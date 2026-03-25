@@ -16,7 +16,7 @@ from nav import ACTION_DIM, N_AGENTS, OBS_DIM, ROUND_TIME
 _DIR = Path(__file__).parent
 if str(_DIR) not in sys.path:
     sys.path.insert(0, str(_DIR))
-import binding  # noqa: E402
+import binding                         # noqa: E402
 
 # ── Viz dataclasses (used by snapshot_state) ─────────────────────────────────
 
@@ -126,7 +126,7 @@ class AgentStateC(ctypes.Structure):
         ("_pad0", ctypes.c_int8 * 2),
         ("enemy_mem_idx", ctypes.c_int32 * 5),
         ("enemy_mem_tick", ctypes.c_int32 * 5),
-        # Phase 4b additions
+                                                       # Phase 4b additions
         ("vx", ctypes.c_float),
         ("vy", ctypes.c_float),
         ("is_crouching", ctypes.c_int8),
@@ -141,6 +141,10 @@ class AgentStateC(ctypes.Structure):
         ("ammo_reserve", ctypes.c_int32 * 3),
         ("reload_ticks", ctypes.c_int32),
         ("switch_ticks", ctypes.c_int32),
+                                                       # Phase 6 additions
+        ("human_controlled", ctypes.c_uint8),
+        ("_pad3", ctypes.c_int8 * 3),
+        ("aim_rad", ctypes.c_float),
     ]
 
 
@@ -215,22 +219,19 @@ class Dust2EnvC(ctypes.Structure):
         ("team_spirit", ctypes.c_float),
         ("rng", ctypes.c_uint32),
         ("masks", ctypes.c_int8 * (N_AGENTS * 36)),
+        ("client", ctypes.c_void_p),                                   # Client* — NULL during training
     ]
 
 
 # Sanity-check struct sizes match the C layout — catches future drift early
-assert ctypes.sizeof(AgentStateC) == 132, (
-    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 132)"
-)
-assert ctypes.sizeof(GameStateC) == 1384, (
-    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1384)"
-)
+assert ctypes.sizeof(AgentStateC) == 140, (
+    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 140)")
+assert ctypes.sizeof(GameStateC) == 1464, (
+    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1464)")
 assert ctypes.sizeof(StepStatsC) == 236, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 236)"
-)
-assert ctypes.sizeof(Dust2EnvC) == 6456, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6456)"
-)
+    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 236)")
+assert ctypes.sizeof(Dust2EnvC) == 6544, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6544)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -240,11 +241,11 @@ _PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
 # Module-level cache for map data
 _ENV_CACHE: dict = {}
 
-
 # ── Cs2Env ────────────────────────────────────────────────────────────────────
 
 
 class Cs2Env(pufferlib.PufferEnv):
+
     def __init__(
         self,
         seed=0,
@@ -272,9 +273,10 @@ class Cs2Env(pufferlib.PufferEnv):
         pbrs_nav_weight_t=0.04,
         pbrs_nav_weight_ct=0.15,
     ):
-        self.single_observation_space = gymnasium.spaces.Box(
-            low=-5.0, high=5.0, shape=(OBS_DIM,), dtype=np.float32
-        )
+        self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
+                                                             high=5.0,
+                                                             shape=(OBS_DIM, ),
+                                                             dtype=np.float32)
         self.single_action_space = gymnasium.spaces.MultiDiscrete([9, 16, 2, 2, 3, 2, 2])
         self.num_agents = N_AGENTS
         super().__init__(buf)
@@ -341,65 +343,65 @@ class Cs2Env(pufferlib.PufferEnv):
             vis_matrix,
             raster_grid,
             adjacency,
-            centroid_xy,  # 0-3
+            centroid_xy,                                               # 0-3
             area_ids,
             bombsite_mask,
             bombsite_by_idx,
-            bombsite_dist,  # 4-7
+            bombsite_dist,                                             # 4-7
             int(md.N),
             int(md.grid.shape[1]),
-            int(md.grid.shape[0]),  # 8-10: N, grid_w, grid_h
-            int(md.area_ids.max()),  # 11: max_area_id
+            int(md.grid.shape[0]),                                     # 8-10: N, grid_w, grid_h
+            int(md.area_ids.max()),                                    # 11: max_area_id
             float(md.grid_x_min),
-            float(md.grid_y_min),  # 12-13
-            float(1.0 / md.grid_cell_size),  # 14: grid_inv_cell
+            float(md.grid_y_min),                                      # 12-13
+            float(1.0 / md.grid_cell_size),                            # 14: grid_inv_cell
             float(inv_x),
             float(inv_y),
             float(x_off),
-            float(y_off),  # 15-18
-            float(md.bombsite_dist_scale),  # 19
-            int(nav.LASER_DAMAGE),  # 20
+            float(y_off),                                              # 15-18
+            float(md.bombsite_dist_scale),                             # 19
+            int(nav.LASER_DAMAGE),                                     # 20
             float(nav.LASER_RANGE),
-            float(nav.LASER_RANGE * nav.LASER_RANGE),  # 21-22
+            float(nav.LASER_RANGE * nav.LASER_RANGE),                  # 21-22
             int(nav.SHOOT_COOLDOWN),
-            int(nav.BOMB_PLANT_TIME),  # 23-24
+            int(nav.BOMB_PLANT_TIME),                                  # 23-24
             int(nav.BOMB_DEFUSE_TIME),
-            int(nav.BOMB_DEFUSE_KIT),  # 25-26
+            int(nav.BOMB_DEFUSE_KIT),                                  # 25-26
             int(nav.BOMB_TIMER),
-            int(nav.ROUND_TIME),  # 27-28
-            float(nav.FOOTSTEP_RADIUS * nav.FOOTSTEP_RADIUS),  # 29
-            float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),  # 30
+            int(nav.ROUND_TIME),                                       # 27-28
+            float(nav.FOOTSTEP_RADIUS * nav.FOOTSTEP_RADIUS),          # 29
+            float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),            # 30
             int(nav.ENEMY_MEMORY_TICKS),
-            int(nav.STALE_MEMORY_TICK),  # 31-32
-            0.99,  # 33: pbrs_gamma
+            int(nav.STALE_MEMORY_TICK),                                # 31-32
+            0.99,                                                      # 33: pbrs_gamma
             delta_x,
             delta_y,
             dir_facing,
-            t_spawns,  # 34-37
-            int(len(md.t_spawn_areas)),  # 38: n_t_spawns
-            ct_spawns,  # 39
-            int(len(md.ct_spawn_areas)),  # 40: n_ct_spawns
-            float(nav.MAX_TURN_SPEED_RAD),  # 41
-            int(seed) & 0xFFFFFFFF,  # 42: seed (uint32)
-            float(init_team_spirit),  # 43
-            float(reward_win),  # 44
-            float(reward_kill),  # 45
-            float(reward_death),  # 46
-            float(reward_bombsite_entry),  # 47
-            float(reward_plant_bonus),  # 48
-            float(reward_plant_base),  # 49
-            float(reward_plant_progress_scale),  # 50
-            float(reward_plant_interrupted),  # 51
-            float(reward_defuse),  # 52
-            float(reward_shot_penalty),  # 53
-            float(reward_ct_survival),  # 54
-            float(reward_inaction),  # 55
-            float(pbrs_alive_weight),  # 56
-            float(pbrs_hp_weight),  # 57
-            float(pbrs_site_weight),  # 58
-            float(pbrs_bomb_progress_weight),  # 59
-            float(pbrs_nav_weight_t),  # 60
-            float(pbrs_nav_weight_ct),  # 61
+            t_spawns,                                                  # 34-37
+            int(len(md.t_spawn_areas)),                                # 38: n_t_spawns
+            ct_spawns,                                                 # 39
+            int(len(md.ct_spawn_areas)),                               # 40: n_ct_spawns
+            float(nav.MAX_TURN_SPEED_RAD),                             # 41
+            int(seed) & 0xFFFFFFFF,                                    # 42: seed (uint32)
+            float(init_team_spirit),                                   # 43
+            float(reward_win),                                         # 44
+            float(reward_kill),                                        # 45
+            float(reward_death),                                       # 46
+            float(reward_bombsite_entry),                              # 47
+            float(reward_plant_bonus),                                 # 48
+            float(reward_plant_base),                                  # 49
+            float(reward_plant_progress_scale),                        # 50
+            float(reward_plant_interrupted),                           # 51
+            float(reward_defuse),                                      # 52
+            float(reward_shot_penalty),                                # 53
+            float(reward_ct_survival),                                 # 54
+            float(reward_inaction),                                    # 55
+            float(pbrs_alive_weight),                                  # 56
+            float(pbrs_hp_weight),                                     # 57
+            float(pbrs_site_weight),                                   # 58
+            float(pbrs_bomb_progress_weight),                          # 59
+            float(pbrs_nav_weight_t),                                  # 60
+            float(pbrs_nav_weight_ct),                                 # 61
         )
 
         # ctypes overlay of the C-allocated Dust2Env (tests + snapshot only)
@@ -418,15 +420,12 @@ class Cs2Env(pufferlib.PufferEnv):
             (ctypes.c_float * (N_AGENTS * OBS_DIM)).from_address(obs_ptr),
             dtype=np.float32,
         ).reshape(N_AGENTS, OBS_DIM)
-        self._rew_view = np.frombuffer(
-            (ctypes.c_float * N_AGENTS).from_address(rew_ptr), dtype=np.float32
-        )
-        self._term_view = np.frombuffer(
-            (ctypes.c_bool * N_AGENTS).from_address(term_ptr), dtype=np.bool_
-        )
-        self._trunc_view = np.frombuffer(
-            (ctypes.c_bool * N_AGENTS).from_address(trunc_ptr), dtype=np.bool_
-        )
+        self._rew_view = np.frombuffer((ctypes.c_float * N_AGENTS).from_address(rew_ptr),
+                                       dtype=np.float32)
+        self._term_view = np.frombuffer((ctypes.c_bool * N_AGENTS).from_address(term_ptr),
+                                        dtype=np.bool_)
+        self._trunc_view = np.frombuffer((ctypes.c_bool * N_AGENTS).from_address(trunc_ptr),
+                                         dtype=np.bool_)
 
         if not self._uses_external_buffers:
             self.observations = self._obs_view
@@ -501,8 +500,7 @@ class Cs2Env(pufferlib.PufferEnv):
                     alive=bool(agent.alive),
                     has_bomb=bool(agent.has_bomb),
                     has_kit=bool(agent.has_kit),
-                )
-            )
+                ))
         return VizGameState(
             agents=agents,
             bomb_planted=bool(g.bomb_planted),
@@ -514,12 +512,8 @@ class Cs2Env(pufferlib.PufferEnv):
             self._c_env.team_spirit = float(self._team_spirit_shared.value)
 
     def _prepare_actions(self, actions):
-        if (
-            isinstance(actions, np.ndarray)
-            and actions.dtype == np.int32
-            and actions.shape == self._actions_shape
-            and actions.flags.c_contiguous
-        ):
+        if (isinstance(actions, np.ndarray) and actions.dtype == np.int32
+                and actions.shape == self._actions_shape and actions.flags.c_contiguous):
             return actions
 
         actions_arr = np.asarray(actions, dtype=np.int32)
@@ -567,29 +561,25 @@ class Cs2Env(pufferlib.PufferEnv):
             summary[f"action_weapon_{idx}"] = int(stats.action_weapon[idx])
         for idx in range(2):
             summary[f"action_crouch_{idx}"] = int(stats.action_crouch[idx])
-        summary.update(
-            {
-                "winner": int(stats.winner),
-                "winner_t": int(stats.winner_t),
-                "winner_ct": int(stats.winner_ct),
-                "timed_out": int(stats.timed_out),
-                "alive_t_end": int(stats.alive_t_end),
-                "alive_ct_end": int(stats.alive_ct_end),
-                "round_length": int(stats.round_length),
-            }
-        )
-        summary.update(
-            {
-                "reward_win": float(stats.reward_win),
-                "reward_kills": float(stats.reward_kills),
-                "reward_deaths": float(stats.reward_deaths),
-                "reward_bomb": float(stats.reward_bomb),
-                "reward_pbrs": float(stats.reward_pbrs),
-                "reward_shots": float(stats.reward_shots),
-                "reward_survival": float(stats.reward_survival),
-                "reward_inaction": float(stats.reward_inaction),
-            }
-        )
+        summary.update({
+            "winner": int(stats.winner),
+            "winner_t": int(stats.winner_t),
+            "winner_ct": int(stats.winner_ct),
+            "timed_out": int(stats.timed_out),
+            "alive_t_end": int(stats.alive_t_end),
+            "alive_ct_end": int(stats.alive_ct_end),
+            "round_length": int(stats.round_length),
+        })
+        summary.update({
+            "reward_win": float(stats.reward_win),
+            "reward_kills": float(stats.reward_kills),
+            "reward_deaths": float(stats.reward_deaths),
+            "reward_bomb": float(stats.reward_bomb),
+            "reward_pbrs": float(stats.reward_pbrs),
+            "reward_shots": float(stats.reward_shots),
+            "reward_survival": float(stats.reward_survival),
+            "reward_inaction": float(stats.reward_inaction),
+        })
         return summary
 
 

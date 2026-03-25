@@ -8,27 +8,39 @@
 #endif
 
 /* ── Constants ─────────────────────────────────────────────────────────── */
-#define TEAM_SIZE 5
-#define N_AGENTS 10
-#define OBS_DIM 104
-#define ACTION_DIM 7
-#define ACTION_MASK_DIM 36      /* 9+16+2+2+3+2+2 */
-#define WEAPON_SWITCH_TICKS 8   /* ~0.5s at 16 Hz */
-#define CROUCH_COOLDOWN_TICKS 7 /* ~0.4s at 16 Hz */
-#define INVALID_AREA_IDX (-1)
+#define TEAM_SIZE             5
+#define N_AGENTS              10
+#define OBS_DIM               104
+#define ACTION_DIM            7
+#define ACTION_MASK_DIM       36 /* 9+16+2+2+3+2+2 */
+#define WEAPON_SWITCH_TICKS   8  /* ~0.5s at 16 Hz */
+#define CROUCH_COOLDOWN_TICKS 7  /* ~0.4s at 16 Hz */
+#define INVALID_AREA_IDX      (-1)
 
 /* ── Weapon definition (compile-time table in cs2_weapons.h) ── */
 typedef struct {
-    int     type; /* WEAPON_RIFLE=0, WEAPON_PISTOL=1, WEAPON_KNIFE=2 */
+    int     type;           /* WEAPON_RIFLE=0, WEAPON_PISTOL=1, WEAPON_KNIFE=2 */
     float   base_damage;
-    float   armor_pen; /* 0.0-1.0 */
+    float   armor_pen;      /* 0.0-1.0 */
     int32_t cycle_ticks;
-    int32_t mag_size;     /* -1 for knife (infinite) */
-    int32_t reserve_mags; /* -1 for knife */
+    int32_t mag_size;       /* -1 for knife (infinite) */
+    int32_t reserve_mags;   /* -1 for knife */
     int32_t reload_ticks;
     float   move_speed;     /* units/second at this weapon */
     float   range_modifier; /* damage falloff per 500 units */
 } WeaponDef;
+
+/* ── Renderer wall geometry ── */
+typedef struct {
+    float x0, y0, x1, y1; /* segment endpoints in world space (sim XY coords) */
+    float height;         /* extrusion height in world units */
+} Wall;
+
+typedef struct {
+    Wall* walls;
+    int   count;
+    int   capacity;
+} WallList;
 
 /* ── Static data (owned by Python numpy arrays, pointer shared across instances) ── */
 typedef struct {
@@ -86,6 +98,8 @@ typedef struct {
     float pbrs_bomb_progress_weight;   /* bomb-closeness scale in _potential */
     float pbrs_nav_weight_t;           /* T-side nav approach weight */
     float pbrs_nav_weight_ct;          /* CT-side nav approach weight */
+    /* Phase 6: renderer wall list — populated by build_walls_from_nav(), C-demo only */
+    WallList wall_list;
 } StaticData;
 
 /* ── Per-agent state ── */
@@ -94,7 +108,7 @@ typedef struct {
     int32_t area_idx; /* 0-based index; INVALID_AREA_IDX=-1            */
     float   facing;   /* radians, 0=+X                                 */
     int32_t hp;
-    int32_t fire_cd; /* was shoot_cd */
+    int32_t fire_cd;  /* was shoot_cd */
     int8_t  alive;
     int8_t  has_bomb;
     int8_t  has_kit;
@@ -118,6 +132,10 @@ typedef struct {
     int32_t ammo_reserve[3];
     int32_t reload_ticks;
     int32_t switch_ticks;
+    /* Phase 6 additions — appended to preserve existing field offsets */
+    uint8_t human_controlled; /* 1 = process_movement uses aim_rad, ignores actions[1] */
+    int8_t  _pad3[3];         /* explicit padding: 1 + 3 = 4 bytes → float alignment   */
+    float   aim_rad;          /* continuous facing angle set by human input (radians)   */
 } AgentState;
 
 /* ── Game state ── */
@@ -136,9 +154,9 @@ typedef struct {
     int32_t    bomb_plant_ticks;
     int32_t    bomb_being_defused_by; /* agent index or -1 */
     int32_t    bomb_defuse_ticks;
-    int8_t     bombsite_entered[5]; /* per-T-agent flag: 1 if entered bombsite this round */
-    int8_t     bomb_is_dropped;     /* 1 when bomb on ground */
-    int8_t     _pad_gs[2];          /* pad to 4-byte boundary */
+    int8_t     bombsite_entered[5];   /* per-T-agent flag: 1 if entered bombsite this round */
+    int8_t     bomb_is_dropped;       /* 1 when bomb on ground */
+    int8_t     _pad_gs[2];            /* pad to 4-byte boundary */
 } GameState;
 
 /* ── Per-step stats exported for Python-side episode aggregation ─────────── */
@@ -188,6 +206,8 @@ typedef struct {
     float       team_spirit;
     uint32_t    rng;
     int8_t      masks[N_AGENTS * ACTION_MASK_DIM];
+    /* Phase 6: renderer client — NULL during training, set by make_client() */
+    struct Client* client;
 } Dust2Env;
 
 /* ── RNG utility (available to all headers) ─────────────────────────────── */
