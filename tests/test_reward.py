@@ -1,10 +1,19 @@
 # tests/test_reward.py
+import math
+
 import numpy as np
 
 from c_env.cs2_env import make_env
 from nav import ACTION_DIM
 
 _ACTION_HEAD_SIZES = [9, 16, 2, 2, 3, 2, 2]
+
+
+def _facing_to_aim(angle):
+    normalized = angle % (2 * math.pi)
+    if normalized < 0:
+        normalized += 2 * math.pi
+    return int(normalized * 16 / (2 * math.pi)) % 16
 
 
 def test_pbrs_rewards_are_finite():
@@ -24,8 +33,6 @@ def test_pbrs_rewards_are_finite():
 
 def test_pbrs_shaping_positive_on_kill():
     """Killing an enemy produces a positive reward for the shooter."""
-    import math
-
     env = make_env(auto_reset=False)
     env.reset()
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
@@ -66,13 +73,6 @@ def test_pbrs_shaping_positive_on_kill():
     ct.armor = 0
     ct.area_idx = id2idx[area_ct]
     ct.x, ct.y, ct.z = float(ct_c[0]), float(ct_c[1]), 0.0
-
-    # Compute aim bucket so the env sets facing from the action (not directly)
-    def _facing_to_aim(angle):
-        normalized = angle % (2 * math.pi)
-        if normalized < 0:
-            normalized += 2 * math.pi
-        return int(normalized * 16 / (2 * math.pi)) % 16
 
     t_facing = math.atan2(ct.y - t.y, ct.x - t.x)
 
@@ -273,8 +273,6 @@ def test_plant_progress_reward():
 def test_kill_reward_weight_is_configurable():
     """make_env(reward_kill=X) scales the kill reward; zero-out all other weights
     so the kill reward is the only non-zero contribution."""
-    import math
-
     env = make_env(
         reward_kill=0.9,
         reward_death=0.0,
@@ -339,15 +337,9 @@ def test_kill_reward_weight_is_configurable():
     ct.y = float(ctc[1])
     ct.z = 0.0
 
-    def _aim(angle):
-        n = angle % (2 * math.pi)
-        if n < 0:
-            n += 2 * math.pi
-        return int(n * 16 / (2 * math.pi)) % 16
-
     t_facing = math.atan2(ct.y - t.y, ct.x - t.x)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 1] = _aim(t_facing)
+    actions[0, 1] = _facing_to_aim(t_facing)
     actions[0, 2] = 1
     _, rewards, _, _, _ = env.step(actions)
 
@@ -384,6 +376,7 @@ def test_reward_components_logged_in_terminal_info():
         if terms.all():
             break
 
+    assert info, "Episode did not terminate within 1000 steps; no terminal info captured"
     missing = EXPECTED_KEYS - set(info.keys())
     assert not missing, f"Missing reward component keys in terminal info: {missing}"
     env.close()
