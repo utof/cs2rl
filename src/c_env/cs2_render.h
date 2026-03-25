@@ -152,6 +152,8 @@ Client* make_client(Dust2Env* env, int human_agent_idx, const float* area_bounds
     InitWindow(cl->width, cl->height, "cs2rl - Phase 6");
     SetTargetFPS(60);
     DisableCursor();
+    /* Reset virtual cursor to center so first-frame delta is zero */
+    SetMousePosition(cl->width / 2, cl->height / 2);
 
     /* Init camera pointing in +X direction */
     cl->yaw   = 0.0f;
@@ -196,9 +198,14 @@ void c_close(Dust2Env* env) {
  */
 static void update_camera(Client* cl, Dust2Env* env, float alpha) {
 
-    Vector2 delta  = GetMouseDelta();
-    cl->yaw       += delta.x * MOUSE_SENSITIVITY;
-    cl->pitch     -= delta.y * MOUSE_SENSITIVITY;
+    /* Manual center-warp: more reliable than GetMouseDelta() in WSL2/X11
+     * where GLFW_CURSOR_DISABLED may not lock the cursor properly. */
+    Vector2 pos = GetMousePosition();
+    float   mdx = pos.x - (float)(cl->width / 2);
+    float   mdy = pos.y - (float)(cl->height / 2);
+    SetMousePosition(cl->width / 2, cl->height / 2);
+    cl->yaw   += mdx * MOUSE_SENSITIVITY;
+    cl->pitch -= mdy * MOUSE_SENSITIVITY;
     /* Clamp pitch to ±89° in radians */
     if (cl->pitch > 1.5533f)
         cl->pitch = 1.5533f;
