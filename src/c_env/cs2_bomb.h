@@ -1,12 +1,17 @@
 #pragma once
 #include "cs2_types.h"
 
-static void process_bomb(Dust2Env* env, const int32_t* actions,
-                         int8_t bombsite_entry_bonus[TEAM_SIZE],
-                         float plant_progress_reward[TEAM_SIZE],
-                         int8_t plant_interrupted[TEAM_SIZE], int* bomb_just_planted,
-                         int* bomb_planter_id, int* bomb_just_defused, int* bomb_defuser_id,
-                         StepStats* ss, StepStats* es) {
+static void process_bomb(Dust2Env*      env,
+                         const int32_t* actions,
+                         int8_t         bombsite_entry_bonus[TEAM_SIZE],
+                         float          plant_progress_reward[TEAM_SIZE],
+                         int8_t         plant_interrupted[TEAM_SIZE],
+                         int*           bomb_just_planted,
+                         int*           bomb_planter_id,
+                         int*           bomb_just_defused,
+                         int*           bomb_defuser_id,
+                         StepStats*     ss,
+                         StepStats*     es) {
     StaticData* sd = env->sd;
     GameState*  g  = &env->game;
 
@@ -39,7 +44,9 @@ static void process_bomb(Dust2Env* env, const int32_t* actions,
                     }
                     if (g->bomb_being_planted_by == i) {
                         g->bomb_plant_ticks++;
-                        plant_progress_reward[i] = 0.05f; /* per-tick plant progress reward */
+                        plant_progress_reward[i] =
+                            env->sd
+                                ->reward_plant_progress_scale; /* per-tick plant progress reward */
                         if (g->bomb_plant_ticks >= sd->bomb_plant_time) {
                             g->bomb_planted          = 1;
                             g->bomb_area_idx         = a->area_idx;
@@ -72,11 +79,11 @@ static void process_bomb(Dust2Env* env, const int32_t* actions,
                 if (g->bomb_being_defused_by == i) {
                     g->bomb_defuse_ticks++;
                     if (g->bomb_defuse_ticks >= defuse_time) {
-                        g->round_over       = 1;
-                        g->winner           = 1;
-                        *bomb_just_defused  = 1;
-                        *bomb_defuser_id    = i;
-                        ss->bomb_defused    = 1;
+                        g->round_over      = 1;
+                        g->winner          = 1;
+                        *bomb_just_defused = 1;
+                        *bomb_defuser_id   = i;
+                        ss->bomb_defused   = 1;
                         es->bomb_defused++;
                     }
                 }
@@ -90,16 +97,20 @@ static void process_bomb(Dust2Env* env, const int32_t* actions,
         int   best_t    = -1;
         for (int i = 0; i < TEAM_SIZE; i++) {
             AgentState* a = &g->agents[i];
-            if (!a->alive) continue;
+            if (!a->alive)
+                continue;
             float dx = a->x - g->bomb_x;
             float dy = a->y - g->bomb_y;
-            float d  = dx*dx + dy*dy;
-            if (d <= best_dist) { best_dist = d; best_t = i; }
+            float d  = dx * dx + dy * dy;
+            if (d <= best_dist) {
+                best_dist = d;
+                best_t    = i;
+            }
         }
         if (best_t >= 0) {
             g->agents[best_t].has_bomb = 1;
-            g->bomb_carrier_id        = best_t;
-            g->bomb_is_dropped        = 0;
+            g->bomb_carrier_id         = best_t;
+            g->bomb_is_dropped         = 0;
         }
     }
 
