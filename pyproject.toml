@@ -22,6 +22,7 @@ dev = [
     "ruff>=0.11.13",
     "pytest>=9.0.2",
     "cmake>=4.2.3",
+    "yapf>=0.43.0",
 ]
 
 [tool.uv]
@@ -41,3 +42,11 @@ select = ["E", "F", "I", "UP", "B"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
+
+[tool.yapf]
+based_on_style          = "pep8"
+column_limit            = 100
+# Snap trailing comments to the first column stop > longest line in the block.
+# Tune these stops to match typical line lengths in the codebase.
+spaces_before_comment   = "40, 56, 72"
+indent_width            = 4

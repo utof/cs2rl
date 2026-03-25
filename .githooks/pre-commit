@@ -30,9 +30,10 @@ for file in "${staged_files[@]}"; do
 done
 
 if [ "${#python_files[@]}" -gt 0 ]; then
-    echo "[pre-commit] Ruff fix/format on staged Python files..."
+    echo "[pre-commit] Ruff lint on staged Python files..."
     uv run ruff check --fix "${python_files[@]}"
-    uv run ruff format "${python_files[@]}"
+    echo "[pre-commit] YAPF format on staged Python files..."
+    uv run yapf --in-place "${python_files[@]}"
     git add -- "${python_files[@]}"
 fi
 

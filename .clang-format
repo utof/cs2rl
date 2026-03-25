@@ -17,8 +17,14 @@ AlignConsecutiveAssignments:
   AcrossComments: false
   AlignCompound: true
   PadOperators: true
-AlignTrailingComments: true
+AlignTrailingComments:
+  Kind:           Always
+  OverEmptyLines: 1
 SpacesBeforeTrailingComments: 2
+AlignConsecutiveMacros:
+  Enabled:          true
+  AcrossEmptyLines: false
+  AcrossComments:   false
 BinPackParameters: false
 BinPackArguments: false
 AllowShortFunctionsOnASingleLine: None
