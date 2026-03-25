@@ -9,7 +9,7 @@
 #define PLAYER_EYE_HEIGHT 64.0f  /* eye height above agent.z in world units */
 #define WALL_HEIGHT       128.0f /* wall extrusion height                   */
 #define WALL_DEPTH        8.0f   /* wall thickness                          */
-#define MOUSE_SENSITIVITY 0.002f /* mouse sensitivity for camera rotation   */
+#define MOUSE_SENSITIVITY 0.2f   /* mouse sensitivity for camera rotation   */
 #define WINDOW_W          1280
 #define WINDOW_H          720
 
@@ -30,6 +30,9 @@ typedef struct {
     double        last_step_time;  /* GetTime() at last sim tick */
     AgentSnapshot prev[N_AGENTS];
     AgentSnapshot curr[N_AGENTS];
+    Vector2       last_mouse;
+    int           mouse_init;
+    int           mouse_captured;
 } Client;
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -148,12 +151,14 @@ Client* make_client(Dust2Env* env, int human_agent_idx, const float* area_bounds
     cl->width           = WINDOW_W;
     cl->height          = WINDOW_H;
     cl->human_agent_idx = human_agent_idx;
+    cl->mouse_init      = 0;
+    cl->mouse_captured  = 0;
 
-    InitWindow(cl->width, cl->height, "cs2rl - Phase 6");
+    InitWindow(cl->width, cl->height, "cs2rl 250326");
     SetTargetFPS(60);
     DisableCursor();
     /* Reset virtual cursor to center so first-frame delta is zero */
-    SetMousePosition(cl->width / 2, cl->height / 2);
+    // SetMousePosition(cl->width / 2, cl->height / 2);
 
     /* Init camera pointing in +X direction */
     cl->yaw   = 0.0f;
@@ -197,15 +202,37 @@ void c_close(Dust2Env* env) {
  * For spectate (human_agent_idx < 0), camera follows agent 0.
  */
 static void update_camera(Client* cl, Dust2Env* env, float alpha) {
+    (void)env;
 
-    /* Manual center-warp: more reliable than GetMouseDelta() in WSL2/X11
-     * where GLFW_CURSOR_DISABLED may not lock the cursor properly. */
+    // Click window to "capture" for our fallback mode
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        DisableCursor();  // may fail on WSL, but try
+        HideCursor();     // separate from lock
+        cl->mouse_captured = 1;
+    }
+
+    // Escape releases cursor
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        EnableCursor();
+        ShowCursor();
+        cl->mouse_captured = 0;
+    }
+
     Vector2 pos = GetMousePosition();
-    float   mdx = pos.x - (float)(cl->width / 2);
-    float   mdy = pos.y - (float)(cl->height / 2);
-    SetMousePosition(cl->width / 2, cl->height / 2);
-    cl->yaw   += mdx * MOUSE_SENSITIVITY;
-    cl->pitch -= mdy * MOUSE_SENSITIVITY;
+    if (!cl->mouse_init) {
+        cl->last_mouse = pos;
+        cl->mouse_init = 1;
+    }
+
+    Vector2 md = {0};
+    if (cl->mouse_captured && IsWindowFocused()) {
+        md.x = pos.x - cl->last_mouse.x;
+        md.y = pos.y - cl->last_mouse.y;
+    }
+    cl->last_mouse = pos;
+
+    cl->yaw   += md.x * MOUSE_SENSITIVITY;
+    cl->pitch -= md.y * MOUSE_SENSITIVITY;
     /* Clamp pitch to ±89° in radians */
     if (cl->pitch > 1.5533f)
         cl->pitch = 1.5533f;
