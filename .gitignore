@@ -9,6 +9,7 @@ src/c_env/nav_data.h
 outputs/checkpoints/
 outputs/recordings/
 outputs/logs/
+deploy/models/
 __pycache__/
 *.pyc
 .venv/
