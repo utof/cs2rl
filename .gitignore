@@ -17,6 +17,8 @@ resources
 *.so
 .ruff_cache
 **/.vscode/settings.json
+deploy/CS2RLBot/bin/
+deploy/CS2RLBot/obj/
 
 
 
