@@ -1,25 +1,19 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
 
 namespace CS2RLBot;
 
 public sealed class PolicyInference : IDisposable
 {
-    // -------------------------------------------------------------------------
-    // LatencyTracker — nested, zero-alloc ring buffer for last 64 µs samples
-    // -------------------------------------------------------------------------
+    // ── LatencyTracker ────────────────────────────────────────────────────────
     public struct LatencyTracker
     {
         private readonly long[] _buf;
         private int _pos;
         private bool _full;
 
-        public LatencyTracker()
-        {
-            _buf = new long[64];
-            _pos = 0;
-            _full = false;
-        }
+        public LatencyTracker() { _buf = new long[64]; _pos = 0; _full = false; }
 
         public void Record(long us)
         {
@@ -34,31 +28,172 @@ public sealed class PolicyInference : IDisposable
             if (count == 0) return new LatencyStats(0, 0, 0);
             var sorted = _buf[..count].ToArray();
             Array.Sort(sorted);
-            long p50  = sorted[(int)(count * 0.50)];
-            long p99  = sorted[Math.Max(0, (int)(count * 0.99) - 1)];
-            long max  = sorted[count - 1];
+            long p50 = sorted[(int)(count * 0.50)];
+            long p99 = sorted[Math.Max(0, (int)(count * 0.99) - 1)];
+            long max = sorted[count - 1];
             return new LatencyStats(p50, p99, max);
         }
 
-        // Verify the tracker with known inputs. Returns null on success, error string on failure.
         public static string? SelfTest()
         {
             var t = new LatencyTracker();
-            // Record 64 values: 1..64 µs
             for (long i = 1; i <= 64; i++) t.Record(i);
             var s = t.GetStats();
-            if (s.MaxUs != 64)   return $"SelfTest: expected MaxUs=64, got {s.MaxUs}";
-            if (s.P50Us < 32 || s.P50Us > 33) return $"SelfTest: expected P50Us≈32, got {s.P50Us}";
-            // Ring wraps: record 65..128, oldest 1..64 should be evicted
+            if (s.MaxUs != 64) return $"SelfTest: MaxUs expected 64, got {s.MaxUs}";
+            if (s.P50Us < 32 || s.P50Us > 33) return $"SelfTest: P50Us expected ~32, got {s.P50Us}";
             for (long i = 65; i <= 128; i++) t.Record(i);
             var s2 = t.GetStats();
-            if (s2.MaxUs != 128) return $"SelfTest(wrap): expected MaxUs=128, got {s2.MaxUs}";
-            if (s2.P50Us < 96 || s2.P50Us > 97) return $"SelfTest(wrap): expected P50Us≈96, got {s2.P50Us}";
+            if (s2.MaxUs != 128) return $"SelfTest(wrap): MaxUs expected 128, got {s2.MaxUs}";
+            if (s2.P50Us < 96 || s2.P50Us > 97) return $"SelfTest(wrap): P50Us expected ~96, got {s2.P50Us}";
             return null;
         }
     }
 
-    public void Dispose() { }
+    // ── Fields ────────────────────────────────────────────────────────────────
+    private readonly InferenceSession _session;
+    private readonly RunOptions _runOptions;
+    private readonly ILogger _log;
+
+    // Dims — read from session metadata in ctor, never hardcoded
+    public readonly int ObsDim;
+    public readonly int HiddenDim;
+    public readonly int NumHeads;
+
+    // Pre-allocated input buffers (reused every inference call — zero alloc)
+    private readonly float[] _obs;
+    private readonly float[] _done   = new float[1];
+    private float[] _lstmH;
+    private float[] _lstmC;
+    private float[] _lstmHOut;
+    private float[] _lstmCOut;
+
+    // Pre-allocated logit output buffers
+    private readonly float[][] _actionLogits;
+
+    // Pinned OrtValue wrappers (created once at ctor)
+    private readonly OrtValue _obsOrt, _doneOrt, _lstmHOrt, _lstmCOrt;
+    private readonly OrtValue[] _outputOrts;
+    private readonly OrtValue[] _inputValues;
+    private readonly string[] _inputNames  = { "obs", "done", "lstm_h", "lstm_c" };
+    private readonly string[] _outputNames;
+
+    private LatencyTracker _latencyTracker = new();
+
+    // ── Constructor ───────────────────────────────────────────────────────────
+    public PolicyInference(string modelPath, int[] actionSizes, ILogger log)
+    {
+        _log = log;
+
+        var opts = new SessionOptions
+        {
+            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+            IntraOpNumThreads      = 1,
+            InterOpNumThreads      = 1,
+            ExecutionMode          = ExecutionMode.ORT_SEQUENTIAL,
+            EnableMemoryPattern    = true,
+            EnableCpuMemArena      = true,
+        };
+        opts.AddSessionConfigEntry("session.intra_op.allow_spinning", "0");
+        _session    = new InferenceSession(modelPath, opts);
+        _runOptions = new RunOptions();
+        opts.Dispose();
+
+        // Read dims from session metadata — no hardcoded values
+        var inMeta = _session.InputMetadata;
+        ObsDim    = (int)inMeta["obs"].Dimensions[1];       // obs shape: [1, obs_dim]
+        HiddenDim = (int)inMeta["lstm_h"].Dimensions[2];   // lstm_h shape: [1, 1, hidden_dim]
+        NumHeads  = actionSizes.Length;
+
+        // Output names straight from the session (NOT from JSON sidecar — it doesn't have them)
+        _outputNames = _session.OutputMetadata.Keys.ToArray();
+
+        // Allocate input buffers
+        _obs      = new float[ObsDim];
+        _lstmH    = new float[HiddenDim];
+        _lstmC    = new float[HiddenDim];
+        _lstmHOut = new float[HiddenDim];
+        _lstmCOut = new float[HiddenDim];
+
+        // Allocate logit output buffers
+        _actionLogits = new float[NumHeads][];
+        for (int i = 0; i < NumHeads; i++)
+            _actionLogits[i] = new float[actionSizes[i]];
+
+        // Pin input OrtValues (shapes must match export-time dynamic_axes)
+        _obsOrt   = OrtValue.CreateTensorValueFromMemory(_obs,   new long[] { 1, ObsDim });
+        _doneOrt  = OrtValue.CreateTensorValueFromMemory(_done,  new long[] { 1 });
+        _lstmHOrt = OrtValue.CreateTensorValueFromMemory(_lstmH, new long[] { 1, 1, HiddenDim });
+        _lstmCOrt = OrtValue.CreateTensorValueFromMemory(_lstmC, new long[] { 1, 1, HiddenDim });
+        _inputValues = new[] { _obsOrt, _doneOrt, _lstmHOrt, _lstmCOrt };
+
+        // Pin output OrtValues
+        _outputOrts = new OrtValue[NumHeads + 2]; // logits + h_out + c_out
+        for (int i = 0; i < NumHeads; i++)
+            _outputOrts[i] = OrtValue.CreateTensorValueFromMemory(
+                _actionLogits[i], new long[] { 1, actionSizes[i] });
+        _outputOrts[NumHeads]     = OrtValue.CreateTensorValueFromMemory(_lstmHOut, new long[] { 1, 1, HiddenDim });
+        _outputOrts[NumHeads + 1] = OrtValue.CreateTensorValueFromMemory(_lstmCOut, new long[] { 1, 1, HiddenDim });
+
+        _log.LogInformation(
+            "[CS2RLBot] PolicyInference init — model={Model} obs_dim={ObsDim} hidden_dim={HiddenDim} " +
+            "num_heads={NumHeads} outputs=[{Outputs}] ort_version={OrtVer}",
+            modelPath, ObsDim, HiddenDim, NumHeads,
+            string.Join(",", _outputNames),
+            typeof(InferenceSession).Assembly.GetName().Version);
+    }
+
+    // ── Inference ─────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Runs one inference step. Returns logit arrays (one per action head).
+    /// Caller must NOT hold onto the returned arrays across inference calls — they are reused.
+    /// </summary>
+    public float[][] RunInference(ReadOnlySpan<float> obs, bool isDone)
+    {
+        obs.CopyTo(_obs.AsSpan());
+        _done[0] = isDone ? 1f : 0f;
+
+        var sw = Stopwatch.GetTimestamp();
+        _session.Run(_runOptions, _inputNames, _inputValues, _outputNames, _outputOrts);
+        long elapsedUs = (Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency;
+
+        _latencyTracker.Record(elapsedUs);
+
+        if (elapsedUs > 1000)
+            _log.LogWarning("[CS2RLBot] Inference latency {Us}µs exceeded 1ms threshold", elapsedUs);
+
+        // Propagate LSTM state: output → input for next call
+        Buffer.BlockCopy(_lstmHOut, 0, _lstmH, 0, HiddenDim * sizeof(float));
+        Buffer.BlockCopy(_lstmCOut, 0, _lstmC, 0, HiddenDim * sizeof(float));
+
+        return _actionLogits;
+    }
+
+    // ── LSTM state ────────────────────────────────────────────────────────────
+    public void ResetLstmState()
+    {
+        // Log norm before clearing (useful for verifying state has been accumulating)
+        double norm = 0;
+        for (int i = 0; i < HiddenDim; i++) norm += _lstmH[i] * _lstmH[i];
+        _log.LogDebug("[CS2RLBot] ResetLstmState — \u2016h\u2016 before clear = {Norm:F4}", Math.Sqrt(norm));
+
+        Array.Clear(_lstmH);
+        Array.Clear(_lstmC);
+    }
+
+    // ── Stats ─────────────────────────────────────────────────────────────────
+    public LatencyStats GetStats() => _latencyTracker.GetStats();
+
+    // ── Dispose ───────────────────────────────────────────────────────────────
+    public void Dispose()
+    {
+        _obsOrt.Dispose();
+        _doneOrt.Dispose();
+        _lstmHOrt.Dispose();
+        _lstmCOrt.Dispose();
+        foreach (var o in _outputOrts) o.Dispose();
+        _runOptions.Dispose();
+        _session.Dispose();
+    }
 }
 
 public record struct LatencyStats(long P50Us, long P99Us, long MaxUs);
