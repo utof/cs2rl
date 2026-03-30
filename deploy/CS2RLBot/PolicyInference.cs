@@ -26,8 +26,10 @@ public sealed class PolicyInference : IDisposable
         {
             int count = _full ? 64 : _pos;
             if (count == 0) return new LatencyStats(0, 0, 0);
-            var sorted = _buf[..count].ToArray();
-            Array.Sort(sorted);
+            Span<long> sorted = stackalloc long[64];
+            _buf.AsSpan(0, count).CopyTo(sorted);
+            sorted = sorted[..count];
+            MemoryExtensions.Sort(sorted);
             long p50 = sorted[(int)(count * 0.50)];
             long p99 = sorted[Math.Max(0, (int)(count * 0.99) - 1)];
             long max = sorted[count - 1];
@@ -62,10 +64,10 @@ public sealed class PolicyInference : IDisposable
     // Pre-allocated input buffers (reused every inference call — zero alloc)
     private readonly float[] _obs;
     private readonly float[] _done   = new float[1];
-    private float[] _lstmH;
-    private float[] _lstmC;
-    private float[] _lstmHOut;
-    private float[] _lstmCOut;
+    private readonly float[] _lstmH;
+    private readonly float[] _lstmC;
+    private readonly float[] _lstmHOut;
+    private readonly float[] _lstmCOut;
 
     // Pre-allocated logit output buffers
     private readonly float[][] _actionLogits;
@@ -107,6 +109,21 @@ public sealed class PolicyInference : IDisposable
         // Output names straight from the session (NOT from JSON sidecar — it doesn't have them)
         _outputNames = _session.OutputMetadata.Keys.ToArray();
 
+        // I1 — validate that the last two output slots are the LSTM hidden states
+        if (_outputNames.Length != NumHeads + 2)
+            throw new InvalidOperationException(
+                $"[CS2RLBot] Expected {NumHeads + 2} output slots (NumHeads={NumHeads} + 2 LSTM states) " +
+                $"but session has {_outputNames.Length}. Actual outputs: [{string.Join(", ", _outputNames)}]");
+        for (int _vi = _outputNames.Length - 2; _vi < _outputNames.Length; _vi++)
+        {
+            var _vn = _outputNames[_vi].ToLowerInvariant();
+            if (!_vn.Contains("lstm") && !_vn.Contains("h_out") && !_vn.Contains("c_out"))
+                throw new InvalidOperationException(
+                    $"[CS2RLBot] Output slot {_vi} ('{_outputNames[_vi]}') does not look like an LSTM " +
+                    $"hidden-state output (expected name containing 'lstm', 'h_out', or 'c_out'). " +
+                    $"Actual outputs: [{string.Join(", ", _outputNames)}]");
+        }
+
         // Allocate input buffers
         _obs      = new float[ObsDim];
         _lstmH    = new float[HiddenDim];
@@ -119,20 +136,29 @@ public sealed class PolicyInference : IDisposable
         for (int i = 0; i < NumHeads; i++)
             _actionLogits[i] = new float[actionSizes[i]];
 
-        // Pin input OrtValues (shapes must match export-time dynamic_axes)
-        _obsOrt   = OrtValue.CreateTensorValueFromMemory(_obs,   new long[] { 1, ObsDim });
-        _doneOrt  = OrtValue.CreateTensorValueFromMemory(_done,  new long[] { 1 });
-        _lstmHOrt = OrtValue.CreateTensorValueFromMemory(_lstmH, new long[] { 1, 1, HiddenDim });
-        _lstmCOrt = OrtValue.CreateTensorValueFromMemory(_lstmC, new long[] { 1, 1, HiddenDim });
-        _inputValues = new[] { _obsOrt, _doneOrt, _lstmHOrt, _lstmCOrt };
+        // Pin input/output OrtValues (shapes must match export-time dynamic_axes)
+        // Wrapped in try/catch so that partial construction leaks no native handles (C1)
+        try
+        {
+            _obsOrt   = OrtValue.CreateTensorValueFromMemory(_obs,   new long[] { 1, ObsDim });
+            _doneOrt  = OrtValue.CreateTensorValueFromMemory(_done,  new long[] { 1 });
+            _lstmHOrt = OrtValue.CreateTensorValueFromMemory(_lstmH, new long[] { 1, 1, HiddenDim });
+            _lstmCOrt = OrtValue.CreateTensorValueFromMemory(_lstmC, new long[] { 1, 1, HiddenDim });
+            _inputValues = new[] { _obsOrt, _doneOrt, _lstmHOrt, _lstmCOrt };
 
-        // Pin output OrtValues
-        _outputOrts = new OrtValue[NumHeads + 2]; // logits + h_out + c_out
-        for (int i = 0; i < NumHeads; i++)
-            _outputOrts[i] = OrtValue.CreateTensorValueFromMemory(
-                _actionLogits[i], new long[] { 1, actionSizes[i] });
-        _outputOrts[NumHeads]     = OrtValue.CreateTensorValueFromMemory(_lstmHOut, new long[] { 1, 1, HiddenDim });
-        _outputOrts[NumHeads + 1] = OrtValue.CreateTensorValueFromMemory(_lstmCOut, new long[] { 1, 1, HiddenDim });
+            // Pin output OrtValues
+            _outputOrts = new OrtValue[NumHeads + 2]; // logits + h_out + c_out
+            for (int i = 0; i < NumHeads; i++)
+                _outputOrts[i] = OrtValue.CreateTensorValueFromMemory(
+                    _actionLogits[i], new long[] { 1, actionSizes[i] });
+            _outputOrts[NumHeads]     = OrtValue.CreateTensorValueFromMemory(_lstmHOut, new long[] { 1, 1, HiddenDim });
+            _outputOrts[NumHeads + 1] = OrtValue.CreateTensorValueFromMemory(_lstmCOut, new long[] { 1, 1, HiddenDim });
+        }
+        catch
+        {
+            this.Dispose();
+            throw;
+        }
 
         _log.LogInformation(
             "[CS2RLBot] PolicyInference init — model={Model} obs_dim={ObsDim} hidden_dim={HiddenDim} " +
@@ -186,13 +212,16 @@ public sealed class PolicyInference : IDisposable
     // ── Dispose ───────────────────────────────────────────────────────────────
     public void Dispose()
     {
+        // Null-tolerant: fields may be unset if the constructor threw (C1)
         _obsOrt.Dispose();
         _doneOrt.Dispose();
         _lstmHOrt.Dispose();
         _lstmCOrt.Dispose();
-        foreach (var o in _outputOrts) o.Dispose();
-        _runOptions.Dispose();
-        _session.Dispose();
+        if (_outputOrts != null)
+            foreach (var o in _outputOrts)
+                o.Dispose();
+        _runOptions?.Dispose();
+        _session?.Dispose();
     }
 }
 
