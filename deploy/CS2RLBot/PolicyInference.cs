@@ -72,10 +72,13 @@ public sealed class PolicyInference : IDisposable
     // Pre-allocated logit output buffers
     private readonly float[][] _actionLogits;
 
-    // Pinned OrtValue wrappers (created once at ctor)
-    private readonly OrtValue _obsOrt, _doneOrt, _lstmHOrt, _lstmCOrt;
-    private readonly OrtValue[] _outputOrts;
-    private readonly OrtValue[] _inputValues;
+    // Pinned OrtValue wrappers (created once at ctor, always non-null after successful construction)
+    private readonly OrtValue _obsOrt = null!;
+    private readonly OrtValue _doneOrt = null!;
+    private readonly OrtValue _lstmHOrt = null!;
+    private readonly OrtValue _lstmCOrt = null!;
+    private readonly OrtValue[] _outputOrts = null!;
+    private readonly OrtValue[] _inputValues = null!;
     private readonly string[] _inputNames  = { "obs", "done", "lstm_h", "lstm_c" };
     private readonly string[] _outputNames;
 
@@ -137,28 +140,39 @@ public sealed class PolicyInference : IDisposable
             _actionLogits[i] = new float[actionSizes[i]];
 
         // Pin input/output OrtValues (shapes must match export-time dynamic_axes)
-        // Wrapped in try/catch so that partial construction leaks no native handles (C1)
+        // Use local nullable variables so that partial construction never calls Dispose on
+        // an uninitialized handle; assign to readonly fields only after all succeed (C1)
+        OrtValue? obsOrt = null, doneOrt = null, lstmHOrt = null, lstmCOrt = null;
+        var outputOrts = new OrtValue[NumHeads + 2];
         try
         {
-            _obsOrt   = OrtValue.CreateTensorValueFromMemory(_obs,   new long[] { 1, ObsDim });
-            _doneOrt  = OrtValue.CreateTensorValueFromMemory(_done,  new long[] { 1 });
-            _lstmHOrt = OrtValue.CreateTensorValueFromMemory(_lstmH, new long[] { 1, 1, HiddenDim });
-            _lstmCOrt = OrtValue.CreateTensorValueFromMemory(_lstmC, new long[] { 1, 1, HiddenDim });
-            _inputValues = new[] { _obsOrt, _doneOrt, _lstmHOrt, _lstmCOrt };
+            obsOrt   = OrtValue.CreateTensorValueFromMemory(_obs,   new long[] { 1, ObsDim });
+            doneOrt  = OrtValue.CreateTensorValueFromMemory(_done,  new long[] { 1 });
+            lstmHOrt = OrtValue.CreateTensorValueFromMemory(_lstmH, new long[] { 1, 1, HiddenDim });
+            lstmCOrt = OrtValue.CreateTensorValueFromMemory(_lstmC, new long[] { 1, 1, HiddenDim });
 
             // Pin output OrtValues
-            _outputOrts = new OrtValue[NumHeads + 2]; // logits + h_out + c_out
             for (int i = 0; i < NumHeads; i++)
-                _outputOrts[i] = OrtValue.CreateTensorValueFromMemory(
+                outputOrts[i] = OrtValue.CreateTensorValueFromMemory(
                     _actionLogits[i], new long[] { 1, actionSizes[i] });
-            _outputOrts[NumHeads]     = OrtValue.CreateTensorValueFromMemory(_lstmHOut, new long[] { 1, 1, HiddenDim });
-            _outputOrts[NumHeads + 1] = OrtValue.CreateTensorValueFromMemory(_lstmCOut, new long[] { 1, 1, HiddenDim });
+            outputOrts[NumHeads]     = OrtValue.CreateTensorValueFromMemory(_lstmHOut, new long[] { 1, 1, HiddenDim });
+            outputOrts[NumHeads + 1] = OrtValue.CreateTensorValueFromMemory(_lstmCOut, new long[] { 1, 1, HiddenDim });
         }
         catch
         {
-            this.Dispose();
+            obsOrt?.Dispose(); doneOrt?.Dispose(); lstmHOrt?.Dispose(); lstmCOrt?.Dispose();
+            foreach (var o in outputOrts) o?.Dispose();
+            _runOptions?.Dispose();
+            _session?.Dispose();
             throw;
         }
+        // Assign to readonly fields only after all creations succeeded
+        _obsOrt   = obsOrt;
+        _doneOrt  = doneOrt;
+        _lstmHOrt = lstmHOrt;
+        _lstmCOrt = lstmCOrt;
+        _outputOrts  = outputOrts;
+        _inputValues = new[] { _obsOrt, _doneOrt, _lstmHOrt, _lstmCOrt };
 
         _log.LogInformation(
             "[CS2RLBot] PolicyInference init — model={Model} obs_dim={ObsDim} hidden_dim={HiddenDim} " +
@@ -212,14 +226,14 @@ public sealed class PolicyInference : IDisposable
     // ── Dispose ───────────────────────────────────────────────────────────────
     public void Dispose()
     {
-        // Null-tolerant: fields may be unset if the constructor threw (C1)
-        _obsOrt.Dispose();
-        _doneOrt.Dispose();
-        _lstmHOrt.Dispose();
-        _lstmCOrt.Dispose();
+        // Null-tolerant: fields are null! sentinels if the constructor threw before assignment (C1)
+        _obsOrt?.Dispose();
+        _doneOrt?.Dispose();
+        _lstmHOrt?.Dispose();
+        _lstmCOrt?.Dispose();
         if (_outputOrts != null)
             foreach (var o in _outputOrts)
-                o.Dispose();
+                o?.Dispose();
         _runOptions?.Dispose();
         _session?.Dispose();
     }
