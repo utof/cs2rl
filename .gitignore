@@ -19,6 +19,7 @@ resources
 **/.vscode/settings.json
 deploy/CS2RLBot/bin/
 deploy/CS2RLBot/obj/
+deploy/CS2RLBot_build/
 
 
 
