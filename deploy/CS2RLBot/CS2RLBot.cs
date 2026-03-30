@@ -64,6 +64,7 @@ public class CS2RLBotPlugin : BasePlugin
         else
         {
             Logger.LogInformation("[CS2RLBot] LatencyTracker self-test passed");
+            _slog.Information("[CS2RLBot] LatencyTracker self-test passed");
         }
 
         // 3. Read sidecar JSON
@@ -74,7 +75,7 @@ public class CS2RLBotPlugin : BasePlugin
             return;
         }
         using var stream = File.OpenRead(jsonPath);
-        var doc = JsonDocument.Parse(stream);
+        using var doc = JsonDocument.Parse(stream);
         _obsDim     = doc.RootElement.GetProperty("obs_dim").GetInt32();
         _actionSizes = doc.RootElement.GetProperty("action_sizes")
                          .EnumerateArray()
@@ -159,7 +160,8 @@ public class CS2RLBotPlugin : BasePlugin
                 float[][] logits = _policies[bot].RunInference(obs, isDone: false);
 
                 int[] cached = _cachedActions[bot];
-                for (int i = 0; i < logits.Length; i++)
+                int limit = Math.Min(logits.Length, cached.Length);
+                for (int i = 0; i < limit; i++)
                     cached[i] = ActionExecutor.Argmax(logits[i]);
 
                 _slog.Debug("[CS2RLBot] Inference tick={Tick} bot={Bot} actions=[{Actions}]",
