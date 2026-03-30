@@ -62,10 +62,13 @@ public sealed class ActionExecutor
         var ms = pawn.MovementServices;
         if (ms == null) return;
 
+        if (actions.Length < 7) return;
+
         ref ulong btns = ref ms.Buttons.ButtonStates[0];
 
         // ── Head 0: move (9 options) ─────────────────────────────────────────
-        var (set, clear) = MoveLUT[actions[0]];
+        int moveAction = Math.Clamp(actions[0], 0, MoveLUT.Length - 1);
+        var (set, clear) = MoveLUT[moveAction];
         btns = (btns & ~clear) | set;
 
         // ── Head 1: aim (16 bins) ────────────────────────────────────────────
@@ -81,8 +84,7 @@ public sealed class ActionExecutor
         float t   = Math.Clamp(_aimStep / 4f, 0f, 1f);
         float yaw = _prevYaw + t * (_targetYaw - _prevYaw); // lerp
         // Normalize to [-180, 180]
-        while (yaw >  180f) yaw -= 360f;
-        while (yaw < -180f) yaw += 360f;
+        yaw = yaw - 360f * MathF.Floor((yaw + 180f) / 360f);
         pawn.Teleport(null, new QAngle(pawn.EyeAngles.X, yaw, 0f), null);
 
         // ── Head 2: shoot (2) ────────────────────────────────────────────────
