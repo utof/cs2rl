@@ -97,18 +97,13 @@ public class CS2RLBotPlugin : BasePlugin
             "[CS2RLBot] Loaded config — obs_dim={ObsDim} action_sizes=[{Sizes}] model={Model}",
             _obsDim, string.Join(",", _actionSizes), _modelPath);
 
-        // 5. Register event handlers + tick listener
+        // 5. Register tick listener ([GameEventHandler] attributes handle event registration)
         RegisterListener<Listeners.OnTick>(OnTick);
-        RegisterEventHandler<EventRoundStart>(OnRoundStart);
-        RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
-        RegisterEventHandler<EventPlayerDeath>(OnPlayerDeath);
-        RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 
-        // 6. Suppress native bot AI
-        Server.ExecuteCommand("bot_stop 1");
-        Server.ExecuteCommand("bot_dont_shoot 1");
-
-        Logger.LogInformation("[CS2RLBot] Plugin loaded. bot_stop=1 bot_dont_shoot=1");
+        // 6. NOTE: bot_stop intentionally NOT set here — it prevents round timers from
+        // expiring (bots can't die), blocking EventRoundEnd. Native AI runs alongside
+        // plugin button writes for now. Phase 7D will re-evaluate once obs builder exists.
+        Logger.LogInformation("[CS2RLBot] Plugin loaded");
         _slog.Information("[CS2RLBot] Plugin loaded");
     }
 
