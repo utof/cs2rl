@@ -24,6 +24,7 @@ public class CS2RLBotPlugin : BasePlugin
 
     // ── Tick counter ──────────────────────────────────────────────────────────
     private int _tickCounter;
+    private bool _requestedInitialWarmupEnd;
 
     // ── Sidecar config ────────────────────────────────────────────────────────
     private string   _modelPath    = string.Empty;
@@ -130,6 +131,7 @@ public class CS2RLBotPlugin : BasePlugin
         _tickCounter++;
         bool isInferenceTick = (_tickCounter % 4  == 0); // 16 Hz
         bool isStatsTick     = (_tickCounter % 64 == 0); // ~1 Hz
+        bool shouldEndWarmup = false;
 
         foreach (var bot in GetControlledBots())
         {
@@ -146,6 +148,15 @@ public class CS2RLBotPlugin : BasePlugin
                     bot.PlayerName, bot.TeamNum);
                 _slog.Information("[CS2RLBot] Bot registered: {Name} team={Team}",
                     bot.PlayerName, bot.TeamNum);
+
+                // Dedicated casual startup still leaves the server in warmup until this
+                // command is issued after at least one bot exists. Doing it from config
+                // or during Load() fires too early, before bots are present.
+                if (!_requestedInitialWarmupEnd)
+                {
+                    _requestedInitialWarmupEnd = true;
+                    shouldEndWarmup = true;
+                }
             }
 
             if (isInferenceTick)
@@ -168,6 +179,13 @@ public class CS2RLBotPlugin : BasePlugin
             }
 
             _executors[bot].Execute(bot, pawn, _cachedActions[bot], isInferenceTick);
+        }
+
+        if (shouldEndWarmup)
+        {
+            Server.ExecuteCommand("mp_warmup_end");
+            Logger.LogInformation("[CS2RLBot] Requested mp_warmup_end after first bot registration");
+            _slog.Information("[CS2RLBot] Requested mp_warmup_end after first bot registration");
         }
 
         // Rolling latency stats — logged ~once per second
