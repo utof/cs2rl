@@ -1,5 +1,8 @@
 using System.Text.Json;
 using CounterStrikeSharp.API;
+using RayTraceAPI;  // CRayTraceInterface — resolved at runtime by CSS shared assembly loader
+                    // from counterstrikesharp/shared/RayTraceApi/ (see CS2RLBot.csproj comment).
+                    // Requires RayTraceImpl CSS plugin + RayTrace.so Metamod plugin on server.
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes;
 using CounterStrikeSharp.API.Core.Attributes.Registration;
