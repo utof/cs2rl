@@ -12,7 +12,7 @@ Formulas (from src/c_env/cs2_env.py:312-315):
     inv_y = 2.0 / (y_max - y_min)
     x_off = (x_max + x_min) / (x_max - x_min)
     y_off = (y_max + y_min) / (y_max - y_min)
-    map_diag = sqrt((1/inv_x)^2 + (1/inv_y)^2)
+    map_diag = sqrt((1/inv_x)^2 + (1/inv_y)^2)  # from src/c_env/cs2_observations.h:15-17
 
 IMPORTANT — normalization convention:
     The formula applied per-coordinate is:  norm = x * inv_range - offset
@@ -90,6 +90,7 @@ def export_mapdata(map_name: str) -> dict:
 
     # map_diag: Euclidean half-diagonal in world units, used to normalize
     # distances (e.g. entity-to-entity range) into a [0, 1]-ish range.
+    # Formula: cs2_observations.h:15-17
     map_diag = math.sqrt(xr * xr + yr * yr)
 
     print(f"[export_mapdata] Map bounds: X=[{md.x_min:.1f},{md.x_max:.1f}] Y=[{md.y_min:.1f},{md.y_max:.1f}]")
