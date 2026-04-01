@@ -168,11 +168,15 @@ def main():
     print("  ONNX check passed.")
 
     sidecar_path = output_path.with_suffix(".json")
+    # obs_version tags which observation schema was used at training time.
+    # The C# plugin reads this to validate it loaded the correct mapdata JSON.
+    # Must match OBS_VERSION in deploy/export_mapdata.py and the C# plugin constant.
     sidecar = {
         "checkpoint": str(checkpoint_path),
         "obs_dim": obs_dim,
         "hidden_dim": hidden_dim,
         "action_sizes": action_sizes,
+        "obs_version": "v1-104dim",
     }
     sidecar_path.write_text(json.dumps(sidecar, indent=2))
     print(f"Sidecar JSON written: {sidecar_path}")
