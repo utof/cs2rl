@@ -74,6 +74,8 @@ def build_model(state_dict: dict) -> tuple:
         nn.ReLU(),
     )
 
+    # num_layers=1: PufferLib trains single-layer LSTMs; multi-layer checkpoints will
+    # hit missing_keys below and raise. Change only if training config changes.
     lstm = nn.LSTM(input_size=hidden_dim, hidden_size=hidden_dim, num_layers=1, batch_first=False)
 
     action_heads = nn.ModuleList([nn.Linear(hidden_dim, sz) for sz in action_sizes])
@@ -94,6 +96,7 @@ def build_model(state_dict: dict) -> tuple:
 
 
 def main():
+    """CLI entry point — parse args, call load_and_wrap_policy, export ONNX + JSON sidecar."""
     parser = argparse.ArgumentParser(description="Export PufferLib LSTM policy to ONNX")
     parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint file")
     parser.add_argument(
@@ -155,7 +158,7 @@ def main():
         wrapper,
         (obs, done, lstm_h, lstm_c),
         str(output_path),
-        opset_version=17,
+        opset_version=17,  # opset 17: required for OnnxRuntime 1.16+ and dynamic shapes; don't lower
         dynamo=False,
         input_names=input_names,
         output_names=output_names,
