@@ -1,8 +1,9 @@
 using System.Text.Json;
 using CounterStrikeSharp.API;
-using RayTraceAPI;  // CRayTraceInterface — resolved at runtime by CSS shared assembly loader
-                    // from counterstrikesharp/shared/RayTraceApi/ (see CS2RLBot.csproj comment).
-                    // Requires RayTraceImpl CSS plugin + RayTrace.so Metamod plugin on server.
+using RayTraceAPI;  // FUNPLAY-pro-CS2/Ray-Trace v1.0.7 — exposes CRayTraceInterface for LOS traces.
+                    // Compile-time stub only; runtime assembly loaded by CSS from
+                    // addons/counterstrikesharp/shared/RayTraceApi.dll (see csproj Private=false comment).
+                    // Server must have RayTraceImpl (CSS plugin) + RayTrace.so (Metamod plugin) installed.
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes;
 using CounterStrikeSharp.API.Core.Attributes.Registration;

@@ -16,14 +16,13 @@
 
   <!-- Ray-Trace LOS raycasting — DLL-only, no NuGet package.
        Source: https://github.com/FUNPLAY-pro-CS2/Ray-Trace/releases/tag/v1.0.7
-       We reference the API stub (RayTraceApi.dll) from the shared/ folder of the
-       CSS-API release archive. The actual implementation lives in two server-side
-       pieces: RayTraceImpl (CSS plugin) and RayTrace.so (Metamod plugin).
-       Private=false: CounterStrikeSharp resolves RayTraceApi via its own shared
-       assembly loader at runtime (counterstrikesharp/shared/RayTraceApi/).
-       Setting Private=false prevents MSBuild from copying RayTraceApi.dll into
-       our plugin output folder, which would shadow the shared copy and break
-       cross-plugin type identity. -->
+       This reference is the compile-time API stub (RayTraceApi.dll from the CSS-API
+       release archive's shared/ folder). The actual implementation lives in two
+       server-side pieces: RayTraceImpl (CounterStrikeSharp plugin) + RayTrace.so (Metamod plugin).
+       Private=false: CSS loads the runtime assembly from
+       addons/counterstrikesharp/shared/RayTraceApi.dll via its shared loader.
+       Copying a second RayTraceApi.dll next to our plugin would shadow that shared
+       copy and break cross-plugin type identity — Private=false prevents that. -->
   <ItemGroup>
     <Reference Include="RayTraceApi">
       <HintPath>libs/RayTraceApi.dll</HintPath>
