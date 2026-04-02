@@ -240,21 +240,6 @@ internal sealed class ObservationBuilder
     }
 
     /// <summary>
-    /// Max reserve magazine count.
-    /// The sim tracks reserve_mags (number of spare magazines), not total bullet count.
-    /// CS2 weapons typically carry 2-4 extra mags. Knives carry 0.
-    /// </summary>
-    private static int GetMaxReserve(CBasePlayerWeapon weapon)
-    {
-        if (weapon.DesignerName is "weapon_knife" or "weapon_bayonet") return 0;
-        return weapon.DesignerName switch
-        {
-            "weapon_awp"   => 2,
-            "weapon_ssg08" => 2,
-            _              => 4,
-        };
-    }
-
     /// <summary>
     /// Reload progress in [0,1] since reloading started.
     /// CSS does not expose a reload-start-time field, so we record the time we first
@@ -380,8 +365,13 @@ internal sealed class ObservationBuilder
         float selfX = selfPawn.AbsOrigin?.X ?? 0f;
         float selfY = selfPawn.AbsOrigin?.Y ?? 0f;
 
-        // Build distance-sorted index array (mirrors sim's order[] array)
-        // Dead enemies are included in the sort — the sim sorts all 5 regardless of alive status.
+        // Build distance-sorted index array (mirrors sim's order[] array).
+        // The sim always reads en->x/en->y regardless of alive status. In CSS, a dead
+        // player's pawn may have null AbsOrigin (freed after death). When that happens we
+        // use float.MaxValue so the dead enemy sorts to the END rather than appearing at
+        // distance-zero (which would incorrectly rank it as the nearest enemy).
+        // Deviation from sim: sim sorts dead enemies by their last-known world position.
+        // Effect is minor — dead enemies have isAlive=false and canSee=false regardless.
         int[] order = new int[TeamSize];
         float[] distsSq = new float[TeamSize];
         for (int s = 0; s < TeamSize; s++)
@@ -390,9 +380,16 @@ internal sealed class ObservationBuilder
             if (s < enemies.Count)
             {
                 var ep = enemies[s].PlayerPawn?.Value?.AbsOrigin;
-                float dx = (ep?.X ?? selfX) - selfX;
-                float dy = (ep?.Y ?? selfY) - selfY;
-                distsSq[s] = dx * dx + dy * dy;
+                if (ep == null)
+                {
+                    distsSq[s] = float.MaxValue; // null origin → sort to end, not distance-zero
+                }
+                else
+                {
+                    float dx = ep.X - selfX;
+                    float dy = ep.Y - selfY;
+                    distsSq[s] = dx * dx + dy * dy;
+                }
             }
             else
             {
