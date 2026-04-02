@@ -155,23 +155,31 @@ internal sealed class ObservationBuilder
         _buf[14] = (slot == 2) ? 1f : 0f;
 
         // Ammo dims (15-19) — cs2_observations.h:44-52
+        // IMPORTANT: normalization uses WEAPON_DEFS slot-based constants, NOT per-weapon values.
+        // The sim's WEAPON_DEFS (cs2_weapons.h) uses one table per slot (rifle/pistol/knife),
+        // not per specific weapon. All rifles share mag_size=25, reserve_mags=3, cycle_ticks=2 (at 16Hz).
         if (weapon != null)
         {
-            // Cast to CCSWeaponBase for InReload and VData (CCSWeaponBaseVData).
-            // CBasePlayerWeapon also has a VData property but it returns CBasePlayerWeaponVData
-            // (no reload fields). CCSWeaponBase.VData shadows it and returns CCSWeaponBaseVData.
             var weaponBase = weapon.As<CCSWeaponBase>();
+            // Slot-based constants matching WEAPON_DEFS (cs2_weapons.h):
+            // rifle: mag=25, reserveMags=3, cycleTicks=8 (2×4 for 64Hz)
+            // pistol: mag=16, reserveMags=2, cycleTicks=12 (3×4 for 64Hz)
+            int slotMag     = slot == 0 ? 25 : (slot == 1 ? 16 : -1);
+            int slotResMags = slot == 0 ? 3  : (slot == 1 ? 2  : -1);
 
-            // MaxClip1 from VData is the authoritative clip size; fall back to lookup table
-            // only if VData is null (shouldn't happen for real weapons but guard defensively).
-            int maxClip    = weaponBase?.VData?.MaxClip1 ?? GetMaxClipFallback(weapon);
-            int maxReserve = GetMaxReserve(weapon);
+            // obs[15]: clip fraction — ammo_clip[slot] / def->mag_size (cs2_observations.h:44-45)
+            _buf[15] = slotMag > 0 ? weapon.Clip1 / (float)slotMag : 1f;
 
-            _buf[15] = maxClip    > 0 ? weapon.Clip1 / (float)maxClip    : 1f;
-            _buf[16] = maxReserve > 0 ? weapon.ReserveAmmo[0] / (float)maxReserve : 1f;
+            // obs[16]: reserve fraction — ammo_reserve[slot] / def->reserve_mags (cs2_observations.h:46-47)
+            // CSS ReserveAmmo[0] is total bullets; convert to mag count first:
+            //   magCount = ReserveAmmo[0] / actualClipSize  (per-weapon clip for unit conversion only)
+            int actualClip = weaponBase?.VData?.MaxClip1 ?? GetMaxClipFallback(weapon);
+            float reserveMagCount = actualClip > 0 ? weapon.ReserveAmmo[0] / (float)actualClip : 0f;
+            _buf[16] = slotResMags > 0 ? reserveMagCount / slotResMags : 0f;
+
             _buf[17] = (weaponBase?.InReload == true) ? 1f : 0f;
             _buf[18] = GetReloadProgress(weapon, weaponBase);
-            _buf[19] = GetFireCooldown(weapon);
+            _buf[19] = GetFireCooldown(weapon, slot);
         }
         // No active weapon → ammo dims stay 0.
 
@@ -278,16 +286,24 @@ internal sealed class ObservationBuilder
     }
 
     /// <summary>
-    /// Fire cooldown normalized to [0,1].
-    /// NextPrimaryAttackTick (int) is the server tick when the weapon can next fire.
-    /// Compare to Server.TickCount (not CurrentTime) — both are in ticks.
-    /// Normalized by 10 ticks (safe upper bound for 64-tick fire rate cycles).
+    /// Clear reload start-time cache. Call on RoundStart and RoundEnd to prevent
+    /// stale entries if weapon entity indices are reused across rounds.
     /// </summary>
-    private static float GetFireCooldown(CBasePlayerWeapon weapon)
+    public void ClearReloadCache() => _reloadStartTimes.Clear();
+
+    /// <summary>
+    /// Fire cooldown normalized to [0,1] using slot-based cycle_ticks from WEAPON_DEFS.
+    /// WEAPON_DEFS cycle_ticks at 16Hz: rifle=2, pistol=3, knife=0.
+    /// At 64Hz (CS2 server rate): multiply by 4 → rifle=8, pistol=12.
+    /// Verified: NextPrimaryAttackTick (int) compared to Server.TickCount (both in server ticks).
+    /// </summary>
+    private static float GetFireCooldown(CBasePlayerWeapon weapon, int weaponSlot)
     {
+        int cycleTicks64Hz = weaponSlot == 0 ? 8 : (weaponSlot == 1 ? 12 : 0);
+        if (cycleTicks64Hz == 0) return 0f; // knife has no fire cooldown
         int ticksRemaining = weapon.NextPrimaryAttackTick - Server.TickCount;
         if (ticksRemaining <= 0) return 0f;
-        return Math.Clamp(ticksRemaining / 10f, 0f, 1f);
+        return Math.Clamp(ticksRemaining / (float)cycleTicks64Hz, 0f, 1f);
     }
 
     /// <summary>
@@ -308,8 +324,9 @@ internal sealed class ObservationBuilder
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Teammates (dims 23-50): 4 × 7 — mirrors cs2_observations.h:57-77
-    // NOTE: slot order, NOT distance sorted (spec correction #3).
+    // ── Teammates (dims 23-50): 4×7 — mirrors cs2_observations.h:57-77 ──────
+    // Teammates are in slot order (spec correction #3: original spec said distance-sorted,
+    // but the header iterates in index order). Contrast: FillEnemies DOES sort by distance.
     // Dead teammates → slot stays zero (matches sim "dead teammate: all zeros").
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -355,20 +372,55 @@ internal sealed class ObservationBuilder
         List<CCSPlayerController> enemies,
         EnemyMemory               enemyMem)
     {
+        // ── Enemies (51-90): 5 × 8 — mirrors cs2_observations.h:79-126 ──────────
+        // IMPORTANT: enemies are sorted by distance (nearest = slot 0).
+        // This matches the sim's insertion sort at cs2_observations.h:82-98.
+        // Contrast with FillTeammates which uses slot order (spec correction #3).
+        // mem_s (EnemyMemory key) is the ORIGINAL team-slot index, not the distance rank.
         float selfX = selfPawn.AbsOrigin?.X ?? 0f;
         float selfY = selfPawn.AbsOrigin?.Y ?? 0f;
 
-        for (int slot = 0; slot < TeamSize; slot++)
+        // Build distance-sorted index array (mirrors sim's order[] array)
+        // Dead enemies are included in the sort — the sim sorts all 5 regardless of alive status.
+        int[] order = new int[TeamSize];
+        float[] distsSq = new float[TeamSize];
+        for (int s = 0; s < TeamSize; s++)
         {
-            int baseIdx = 51 + slot * 8;
-            var (lastPos, _, isAlive, canSee, everSeen) = enemyMem.Get(slot);
+            order[s] = s;
+            if (s < enemies.Count)
+            {
+                var ep = enemies[s].PlayerPawn?.Value?.AbsOrigin;
+                float dx = (ep?.X ?? selfX) - selfX;
+                float dy = (ep?.Y ?? selfY) - selfY;
+                distsSq[s] = dx * dx + dy * dy;
+            }
+            else
+            {
+                distsSq[s] = float.MaxValue; // empty slot → sorted to end
+            }
+        }
+        // Insertion sort (matches sim, fine for N=5)
+        for (int s = 1; s < TeamSize; s++)
+        {
+            int   ko = order[s];
+            float kd = distsSq[s];
+            int t = s - 1;
+            while (t >= 0 && distsSq[t] > kd) { order[t + 1] = order[t]; distsSq[t + 1] = distsSq[t]; t--; }
+            order[t + 1] = ko; distsSq[t + 1] = kd;
+        }
+
+        for (int distRank = 0; distRank < TeamSize; distRank++)
+        {
+            int   memSlot = order[distRank]; // original team-slot index → EnemyMemory key
+            int   baseIdx = 51 + distRank * 8;
+            var (lastPos, _, isAlive, canSee, everSeen) = enemyMem.Get(memSlot);
 
             _buf[baseIdx + 4] = isAlive ? 1f : 0f;
             _buf[baseIdx + 3] = canSee  ? 1f : 0f;
 
-            if (canSee && slot < enemies.Count)
+            if (canSee && memSlot < enemies.Count)
             {
-                var enemyPawn = enemies[slot].PlayerPawn?.Value;
+                var enemyPawn = enemies[memSlot].PlayerPawn?.Value;
                 if (enemyPawn?.AbsOrigin != null)
                 {
                     float dx   = enemyPawn.AbsOrigin.X - selfX;
@@ -387,7 +439,7 @@ internal sealed class ObservationBuilder
             else if (!canSee && everSeen && lastPos != null)
             {
                 // Use last-known position (stale). No angle/dist for stale — stays 0.
-                // This matches the sim's enemy_mem_idx branch (cs2_observations.h:119-124).
+                // Matches sim's enemy_mem_idx branch (cs2_observations.h:119-124).
                 float mx = lastPos.X - selfX;
                 float my = lastPos.Y - selfY;
                 _buf[baseIdx + 0] = ObsMath.NormRel(mx, _map.MapDiag);
