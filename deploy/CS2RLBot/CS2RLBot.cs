@@ -196,7 +196,12 @@ public class CS2RLBotPlugin : BasePlugin
         bool isStatsTick     = (_tickCounter % 64 == 0); // ~1 Hz
         bool shouldEndWarmup = false;
 
-        foreach (var bot in GetControlledBots())
+        // Materialize player lists once per tick — GetPlayers() is an O(N) server enumeration;
+        // calling it inside the bot loop would make the inference block O(N²).
+        var allPlayers = Utilities.GetPlayers().Where(p => p.IsValid && !p.IsHLTV).ToList();
+        var allBots    = allPlayers.Where(p => p.IsBot && !p.IsHLTV && p.PawnIsAlive).ToList();
+
+        foreach (var bot in allBots)
         {
             var pawn = bot.PlayerPawn?.Value;
             if (pawn == null) continue;
@@ -225,8 +230,7 @@ public class CS2RLBotPlugin : BasePlugin
 
             if (isInferenceTick)
             {
-                // Build enemy lists for this inference tick
-                var allBots = GetControlledBots().ToList();
+                // Build enemy lists for this inference tick — reuse allBots materialized above
                 var teammates = allBots
                     .Where(p => p != bot && p.TeamNum == bot.TeamNum)
                     .ToList();
@@ -248,9 +252,6 @@ public class CS2RLBotPlugin : BasePlugin
                 float[] obs;
                 if (_obsBuilder != null)
                 {
-                    var allPlayers = Utilities.GetPlayers()
-                        .Where(p => p.IsValid && !p.IsHLTV)
-                        .ToList();
                     // No single "RoundTimeRemaining" property in CSS — must compute from game rules
                     // RoundTime = configured duration (seconds); RoundStartTime = server time at round start
                     var grProxy = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules")
