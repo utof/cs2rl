@@ -145,8 +145,16 @@ public class CS2RLBotPlugin : BasePlugin
         _slog.Information("[CS2RLBot] ObsVersion match: {Ver}", _obsVersion);
 
         // Acquire Ray-Trace LOS interface — provided at runtime by RayTraceImpl (CSS plugin) + RayTrace.so (Metamod)
-        // Null at startup if RayTrace isn't deployed; EnemyMemory.Update handles null gracefully (skips LOS check)
-        _rayTrace = new PluginCapability<CRayTraceInterface>("raytrace:craytraceinterface").Get();
+        // PluginCapability.Get() throws KeyNotFoundException if the capability isn't registered yet (e.g. RayTraceImpl
+        // loads after CS2RLBot, or isn't deployed).  Catch and treat as "not available" rather than crashing Load().
+        try
+        {
+            _rayTrace = new PluginCapability<CRayTraceInterface>("raytrace:craytraceinterface").Get();
+        }
+        catch (KeyNotFoundException)
+        {
+            _rayTrace = null;
+        }
         if (_rayTrace == null)
             Logger.LogWarning("[CS2RLBot] RayTrace interface not available — LOS checks disabled. Deploy RayTraceImpl + RayTrace.so on server.");
         else
