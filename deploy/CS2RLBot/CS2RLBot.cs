@@ -196,10 +196,10 @@ public class CS2RLBotPlugin : BasePlugin
         bool isStatsTick     = (_tickCounter % 64 == 0); // ~1 Hz
         bool shouldEndWarmup = false;
 
-        // Materialize player lists once per tick — GetPlayers() is an O(N) server enumeration;
-        // calling it inside the bot loop would make the inference block O(N²).
+        // Materialize player lists once per tick — GetPlayers() is O(N); calling inside the bot
+        // loop would make inference O(N²). Filter: IsBot && !IsHLTV && IsValid && PawnIsAlive.
         var allPlayers = Utilities.GetPlayers().Where(p => p.IsValid && !p.IsHLTV).ToList();
-        var allBots    = allPlayers.Where(p => p.IsBot && !p.IsHLTV && p.PawnIsAlive).ToList();
+        var allBots    = allPlayers.Where(p => p.IsBot && p.PawnIsAlive).ToList(); // !IsHLTV already enforced by allPlayers
 
         foreach (var bot in allBots)
         {
@@ -422,10 +422,4 @@ public class CS2RLBotPlugin : BasePlugin
         return HookResult.Continue;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Helpers
-    // ─────────────────────────────────────────────────────────────────────────
-    private static IEnumerable<CCSPlayerController> GetControlledBots() =>
-        Utilities.GetPlayers()
-            .Where(p => p.IsBot && !p.IsHLTV && p.IsValid && p.PawnIsAlive);
 }
