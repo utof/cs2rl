@@ -1,39 +1,98 @@
+# setup.py — thin build shim that invokes `zig build` to compile binding.c.
+#
+# Why not pure CMake? Zig bundles its own C compiler + libc for all platforms,
+# so users need only `ziglang` (auto-installed by uv as a build dep) instead of
+# CMake + MSVC/GCC + vcpkg.
+#
+# Responsibility split:
+#   setup.py  — discovers Python/NumPy headers, finds zig binary, renames output
+#   build.zig — compiles binding.c with the correct flags
+import os
+import shutil
 import subprocess
+import sys
+import sysconfig
 from pathlib import Path
+
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
 
-class CMakeExtension(Extension):
+def _find_zig():
+    """Return argv prefix to invoke zig.
+
+    Priority:
+      1. PY_ZIG env var — explicit override (CI, custom installs)
+      2. sys.executable -m ziglang — auto-installed ziglang PyPI package
+         (ziglang does NOT put `zig` on PATH; it is invoked via -m)
+      3. `zig` on system PATH — fallback for developers with Zig installed manually
+    """
+    if pz := os.environ.get("PY_ZIG"):
+        return [pz]
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "ziglang", "version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return [sys.executable, "-m", "ziglang"]
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ["zig"]
+
+
+class ZigExtension(Extension):
     def __init__(self, name, source_dir=""):
         super().__init__(name, sources=[])
         self.source_dir = str(Path(source_dir).resolve())
 
 
-class CMakeBuild(build_ext):
+class ZigBuild(build_ext):
     def build_extension(self, ext):
-        build_dir = Path(self.build_temp) / ext.name
-        build_dir.mkdir(parents=True, exist_ok=True)
-        out_dir = Path(ext.source_dir).resolve()
-        lib_dir = Path(self.build_lib).resolve()
+        import numpy  # imported here so it's only required at build time
+
+        src     = Path(ext.source_dir)           # src/c_env/ (absolute)
+        out_dir = src                             # .so lands next to C sources
+        lib_dir = Path(self.build_lib).resolve()  # setuptools staging dir
         lib_dir.mkdir(parents=True, exist_ok=True)
+
+        zig            = _find_zig()
+        python_include = sysconfig.get_path("include")
+        numpy_include  = numpy.get_include()
+        # EXT_SUFFIX is the full suffix including SOABI + extension:
+        #   Linux:   .cpython-312-x86_64-linux-gnu.so
+        #   macOS:   .cpython-312-darwin.so
+        #   Windows: .cp312-win_amd64.pyd
+        ext_suffix  = sysconfig.get_config_var("EXT_SUFFIX")
+        link_python = "true" if sys.platform == "win32" else "false"
+
         subprocess.check_call(
-            [
-                "cmake",
-                ext.source_dir,
-                f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={out_dir}",
+            zig + [
+                "build",
+                f"-Dpython_include={python_include}",
+                f"-Dnumpy_include={numpy_include}",
+                f"-Dlink_python={link_python}",
             ],
-            cwd=build_dir,
+            cwd=src,
         )
-        subprocess.check_call(["cmake", "--build", "."], cwd=build_dir)
-        # Also copy to build/lib so setuptools --inplace copy step succeeds
-        import shutil
-        for so in out_dir.glob("binding*.so"):
-            shutil.copy2(so, lib_dir / so.name)
+
+        # Zig outputs libbinding.so (Linux/macOS) or binding.dll (Windows).
+        # Python requires the SOABI-suffixed name, e.g. binding.cpython-312-...so
+        zig_out = src / "zig-out" / "lib"
+        candidates = list(zig_out.glob("*binding*"))
+        if not candidates:
+            raise RuntimeError(
+                f"zig build produced no binding artifact in {zig_out}. "
+                "Check zig build output above for errors."
+            )
+        built     = candidates[0]
+        dest_name = f"binding{ext_suffix}"
+
+        shutil.copy2(built, out_dir / dest_name)
+        shutil.copy2(built, lib_dir / dest_name)
 
 
 setup(
     name="cs2rl-env",
-    ext_modules=[CMakeExtension("binding", source_dir="src/c_env")],
-    cmdclass={"build_ext": CMakeBuild},
+    ext_modules=[ZigExtension("binding", source_dir="src/c_env")],
+    cmdclass={"build_ext": ZigBuild},
 )

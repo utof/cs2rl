@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools", "ziglang>=0.14.0,<0.15"]
+requires = ["setuptools", "ziglang>=0.14.0,<0.15", "numpy>=1.26.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
