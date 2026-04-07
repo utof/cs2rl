@@ -85,3 +85,7 @@ dkms.conf
 # Zig build artifacts
 zig-out/
 .zig-cache/
+
+# Built Python extension (inplace build lands next to C sources)
+src/c_env/binding*.so
+src/c_env/binding*.pyd
