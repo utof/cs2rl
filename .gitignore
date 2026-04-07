@@ -82,3 +82,6 @@ dkms.conf
 
 ### Debug information files
 *.dwo
+# Zig build artifacts
+zig-out/
+.zig-cache/
