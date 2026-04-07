@@ -2,7 +2,7 @@
 //
 // Targets:
 //   (default)   binding   — CPython extension module (.so / .pyd)
-//   cs2_demo              — standalone Raylib demo (added via build.zig.zon, not yet present)
+//   cs2_demo              — standalone Raylib demo (requires X11 dev libs on Linux)
 //
 // Include paths are passed by setup.py as -D flags because Zig has no
 // equivalent of CMake's find_package(Python NumPy). This keeps discovery
@@ -68,4 +68,42 @@ pub fn build(b: *std.Build) void {
         lib.linkSystemLibrary("python3");
 
     b.installArtifact(lib);
+
+    // ── cs2_demo: standalone Raylib visualisation demo ─────────────────────
+    // Invoked explicitly: `zig build cs2_demo`
+    // NOT built by default (does not affect `uv sync` / pip install).
+    // Raylib is fetched from build.zig.zon on first run; subsequent runs use
+    // the Zig package cache (~/.cache/zig).
+    // Force X11 backend on Linux: wayland-scanner is often absent on dev/CI
+    // machines. The option name and enum literal `.X11` match raylib's own
+    // `b.option(LinuxDisplayBackend, "linux_display_backend", ...)` declaration.
+    // Zig 0.14 passes these as typed dependency options.
+    const raylib_dep    = b.dependency("raylib", .{
+        .target                = target,
+        .optimize              = .Debug,
+        .linux_display_backend = .X11,
+    });
+    const cs2_demo_step = b.step("cs2_demo", "Build the standalone Raylib cs2 demo");
+
+    const demo = b.addExecutable(.{
+        .name = "cs2_demo",
+        .root_module = b.createModule(.{
+            .target   = target,
+            .optimize = .Debug,
+        }),
+    });
+    demo.root_module.addCSourceFile(.{
+        .file  = b.path("cs2_demo.c"),
+        .flags = &.{ "-std=c99", "-O2", "-Wall", "-g" },
+    });
+    // cs2_demo.c includes cs2_types.h from the same directory
+    demo.root_module.addIncludePath(b.path("."));
+    demo.root_module.linkLibrary(raylib_dep.artifact("raylib"));
+    demo.linkLibC();
+
+    // Raylib's own build.zig handles platform link flags automatically:
+    // opengl32 + gdi32 + winmm on Windows, X11/GL on Linux, etc.
+
+    const install_demo = b.addInstallArtifact(demo, .{});
+    cs2_demo_step.dependOn(&install_demo.step);
 }
