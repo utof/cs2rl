@@ -20,8 +20,10 @@
         },
     },
 
-    // Explicit file list — only these are included when this package is
-    // consumed as a dependency. Keep in sync with actual source files.
+    // File list for publishing. This package is a leaf (not consumed as a Zig
+    // dependency by other packages), so .paths only needs to satisfy `zig build`.
+    // cs2_demo.c headers (cs2_env.h, nav_data.h, etc.) are not listed because
+    // this package is never published or depended on externally.
     .paths = .{
         "build.zig",
         "build.zig.zon",

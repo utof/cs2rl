@@ -78,6 +78,9 @@ pub fn build(b: *std.Build) void {
     // machines. The option name and enum literal `.X11` match raylib's own
     // `b.option(LinuxDisplayBackend, "linux_display_backend", ...)` declaration.
     // Zig 0.14 passes these as typed dependency options.
+    // .Debug is intentional — cs2_demo is a dev/visualisation tool, always
+    // built with debug info regardless of -Doptimize. The C flag -O2 below
+    // provides code-gen optimisation while preserving debug symbols (-g).
     const raylib_dep    = b.dependency("raylib", .{
         .target                = target,
         .optimize              = .Debug,
@@ -89,7 +92,7 @@ pub fn build(b: *std.Build) void {
         .name = "cs2_demo",
         .root_module = b.createModule(.{
             .target   = target,
-            .optimize = .Debug,
+            .optimize = .Debug, // intentional: see comment above raylib_dep
         }),
     });
     demo.root_module.addCSourceFile(.{
