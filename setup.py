@@ -75,13 +75,14 @@ class ZigBuild(build_ext):
             cwd=src,
         )
 
-        # Zig outputs libbinding.so (Linux/macOS) or binding.dll (Windows).
-        # Python requires the SOABI-suffixed name, e.g. binding.cpython-312-...so
-        zig_out = src / "zig-out" / "lib"
-        candidates = list(zig_out.glob("*binding*"))
+        # Zig outputs libbinding.so in zig-out/lib (Linux/macOS) or
+        # binding.dll in zig-out/bin (Windows — DLLs land in bin, not lib).
+        zig_out_lib = src / "zig-out" / "lib"
+        zig_out_bin = src / "zig-out" / "bin"
+        candidates = list(zig_out_lib.glob("*binding*")) + list(zig_out_bin.glob("*binding*"))
         if not candidates:
             raise RuntimeError(
-                f"zig build produced no binding artifact in {zig_out}. "
+                f"zig build produced no binding artifact in {zig_out_lib} or {zig_out_bin}. "
                 "Check zig build output above for errors."
             )
         built     = candidates[0]
