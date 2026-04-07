@@ -1,0 +1,71 @@
+// build.zig — Zig build script for the cs2rl C environment.
+//
+// Two targets:
+//   (default)   binding   — CPython extension module (.so / .pyd)
+//   cs2_demo              — standalone Raylib visualisation demo (see Task 4)
+//
+// Include paths are passed by setup.py as -D flags because Zig has no
+// equivalent of CMake's find_package(Python NumPy). This keeps discovery
+// in Python where sysconfig/numpy APIs are available.
+//
+// SOABI suffix (.cpython-312-x86_64-linux-gnu.so) is also handled by
+// setup.py after the build; Zig always outputs libbinding.so.
+//
+// Zig issue #9013: do NOT add a .version field to addSharedLibrary on
+// Windows — it causes a linker panic with versioned shared libs.
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target   = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    // ── Build options passed by setup.py shim ──────────────────────────────
+    // python_include: output of sysconfig.get_path("include")
+    // numpy_include:  output of numpy.get_include()
+    // link_python:    true on Windows only (symbols not pre-loaded in process)
+    const python_include = b.option([]const u8, "python_include",
+        "Python include directory (passed by setup.py)") orelse "";
+    const numpy_include  = b.option([]const u8, "numpy_include",
+        "NumPy include directory (passed by setup.py)")  orelse "";
+    const link_python    = b.option(bool, "link_python",
+        "Link libpython — required on Windows, wrong on Linux/macOS") orelse false;
+
+    // ── binding: CPython extension module ──────────────────────────────────
+    const lib = b.addSharedLibrary(.{
+        .name = "binding", // setup.py renames output to SOABI-suffixed name
+        .root_module = b.createModule(.{
+            .target   = target,
+            .optimize = optimize,
+        }),
+    });
+
+    lib.root_module.addCSourceFile(.{
+        .file  = b.path("binding.c"),
+        .flags = &.{
+            "-std=c99",
+            "-O3",
+            "-march=native", // safe: all users build from source, no .so committed
+            "-ffast-math",
+            "-Wall",
+            "-Wno-unused-function",
+        },
+    });
+
+    // Only add include paths when provided — empty string means build.zig
+    // was invoked directly (e.g. during development); headers must be on
+    // the system include path in that case.
+    if (python_include.len > 0)
+        lib.root_module.addSystemIncludePath(.{ .cwd_relative = python_include });
+    if (numpy_include.len > 0)
+        lib.root_module.addSystemIncludePath(.{ .cwd_relative = numpy_include });
+
+    lib.linkLibC();
+    lib.linkSystemLibrary("m");
+
+    // Windows: Python symbols are not pre-loaded via dlopen, must link explicitly.
+    // Linux/macOS: linking libpython causes double-load issues — do NOT add.
+    if (link_python)
+        lib.linkSystemLibrary("python3");
+
+    b.installArtifact(lib);
+}
