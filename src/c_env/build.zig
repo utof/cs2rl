@@ -1,8 +1,8 @@
 // build.zig — Zig build script for the cs2rl C environment.
 //
-// Two targets:
+// Targets:
 //   (default)   binding   — CPython extension module (.so / .pyd)
-//   cs2_demo              — standalone Raylib visualisation demo (see Task 4)
+//   cs2_demo              — standalone Raylib demo (added via build.zig.zon, not yet present)
 //
 // Include paths are passed by setup.py as -D flags because Zig has no
 // equivalent of CMake's find_package(Python NumPy). This keeps discovery
@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) void {
         .file  = b.path("binding.c"),
         .flags = &.{
             "-std=c99",
-            "-O3",
+            "-O3",           // intentional: C-level flag overrides -Doptimize for this file
             "-march=native", // safe: all users build from source, no .so committed
             "-ffast-math",
             "-Wall",
