@@ -13,6 +13,7 @@ deploy/models/
 deploy/mapdata/
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
 resources
 *.so
@@ -89,3 +90,4 @@ zig-out/
 # Built Python extension (inplace build lands next to C sources)
 src/c_env/binding*.so
 src/c_env/binding*.pyd
+CLAUDE.md
