@@ -26,6 +26,8 @@ bot_add_t
 bot_add_t
 bot_add_ct
 bot_add_ct
+bot_stop 1
+rcon_password cs2rl
 mp_roundtime 1.92
 mp_roundtime_defuse 1.92
 mp_round_restart_delay 5
@@ -68,4 +70,4 @@ echo "========================================"
 echo ""
 echo "RCON: uvx --from rcon rconshell -c ~/.cs2rl_rcon 127.0.0.1:27015"
 echo ""
-tail -f "$LOG"
+tail -f -n +1 "$LOG"

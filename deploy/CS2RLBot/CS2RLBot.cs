@@ -39,6 +39,7 @@ public class CS2RLBotPlugin : BasePlugin
     // ── Tick counter ──────────────────────────────────────────────────────────
     private int _tickCounter;
     private bool _requestedInitialWarmupEnd;
+    private bool _rayTraceAcquired;          // true once RayTrace capability resolved (Load or deferred)
 
     // ── Sidecar config ────────────────────────────────────────────────────────
     private string   _modelPath    = string.Empty;
@@ -156,11 +157,12 @@ public class CS2RLBotPlugin : BasePlugin
             _rayTrace = null;
         }
         if (_rayTrace == null)
-            Logger.LogWarning("[CS2RLBot] RayTrace interface not available — LOS checks disabled. Deploy RayTraceImpl + RayTrace.so on server.");
+            Logger.LogWarning("[CS2RLBot] RayTrace not available at Load() — will retry in OnTick (RayTraceImpl loads after CS2RLBot alphabetically).");
         else
         {
-            Logger.LogInformation("[CS2RLBot] RayTrace interface acquired");
-            _slog.Information("[CS2RLBot] RayTrace interface acquired");
+            _rayTraceAcquired = true;
+            Logger.LogInformation("[CS2RLBot] RayTrace interface acquired at Load()");
+            _slog.Information("[CS2RLBot] RayTrace interface acquired at Load()");
         }
 
         // Build ObservationBuilder — throws if obs_version mismatch (belt-and-suspenders)
@@ -171,9 +173,12 @@ public class CS2RLBotPlugin : BasePlugin
         // 5. Register tick listener ([GameEventHandler] attributes handle event registration)
         RegisterListener<Listeners.OnTick>(OnTick);
 
-        // 6. NOTE: bot_stop intentionally NOT set here — it prevents round timers from
-        // expiring (bots can't die), blocking EventRoundEnd. Native AI runs alongside
-        // plugin button writes for now. Phase 7D will re-evaluate once obs builder exists.
+        // 6. bot_stop 1 is issued in OnTick once the first bot registers (same timing as
+        // mp_warmup_end), where sv_cheats is guaranteed active. Also set in cs2rl_match.cfg.
+        // bot_stop suppresses native AI (buying, pathfinding, strategic movement).
+        // Tested: EventRoundEnd fires normally — bots can still be killed by players.
+        // NOTE: bot_stop also suppresses native weapon-firing; whether plugin Attack bit
+        // still fires weapons is an open research question (see research-brief Q2).
         Logger.LogInformation("[CS2RLBot] Plugin loaded");
         _slog.Information("[CS2RLBot] Plugin loaded");
     }
@@ -203,6 +208,27 @@ public class CS2RLBotPlugin : BasePlugin
         bool isInferenceTick = (_tickCounter % 4  == 0); // 16 Hz
         bool isStatsTick     = (_tickCounter % 64 == 0); // ~1 Hz
         bool shouldEndWarmup = false;
+
+        // Deferred RayTrace acquisition: CS2RLBot loads before RayTraceImpl (alphabetical CSS
+        // plugin order), so Load() gets null. Retry every ~1s for the first 10s of server life.
+        if (!_rayTraceAcquired && _tickCounter <= 640)
+        {
+            if (_tickCounter % 64 == 1)
+            {
+                try
+                {
+                    _rayTrace = new PluginCapability<CRayTraceInterface>("raytrace:craytraceinterface").Get();
+                }
+                catch (KeyNotFoundException) { /* still not registered */ }
+
+                if (_rayTrace != null)
+                {
+                    _rayTraceAcquired = true;
+                    Logger.LogInformation("[CS2RLBot] RayTrace interface acquired (deferred, tick={Tick})", _tickCounter);
+                    _slog.Information("[CS2RLBot] RayTrace interface acquired (deferred, tick={Tick})", _tickCounter);
+                }
+            }
+        }
 
         // Materialize player lists once per tick — GetPlayers() is O(N); calling inside the bot
         // loop would make inference O(N²). Filter: IsBot && !IsHLTV && IsValid && PawnIsAlive.
@@ -242,9 +268,10 @@ public class CS2RLBotPlugin : BasePlugin
                 var teammates = allBots
                     .Where(p => p != bot && p.TeamNum == bot.TeamNum)
                     .ToList();
-                // Enemies sorted by distance (nearest first) — ObservationBuilder reads them in this order
-                var enemies = allBots
-                    .Where(p => p.TeamNum != bot.TeamNum && p.TeamNum > 1)
+                // Enemies sorted by distance (nearest first) — includes human players so bots
+                // can see/react to humans during testing. Uses allPlayers, not allBots.
+                var enemies = allPlayers
+                    .Where(p => p != bot && p.TeamNum != bot.TeamNum && p.TeamNum > 1 && p.PawnIsAlive)
                     .OrderBy(p => {
                         var ep = p.PlayerPawn?.Value?.AbsOrigin;
                         var sp = pawn.AbsOrigin;
@@ -256,6 +283,32 @@ public class CS2RLBotPlugin : BasePlugin
 
                 // Update enemy memory (Ray-Trace LOS) before building obs — null rayTrace = no LOS, stale pos only
                 _enemyMemories[bot].Update(pawn, enemies, _rayTrace, _tickCounter);
+
+                // Diagnostic: log canSee + distances once per second per bot
+                if (isStatsTick)
+                {
+                    int seenCount = 0;
+                    for (int ei = 0; ei < Math.Min(enemies.Count, 5); ei++)
+                    {
+                        var (_, _, _, canSee, _) = _enemyMemories[bot].Get(ei);
+                        if (canSee) seenCount++;
+                    }
+                    var selfPos = pawn.AbsOrigin;
+                    float nearestDist = float.MaxValue;
+                    string nearestName = "none";
+                    foreach (var e in enemies)
+                    {
+                        var ep = e.PlayerPawn?.Value?.AbsOrigin;
+                        if (ep == null || selfPos == null) continue;
+                        float dx = ep.X - selfPos.X, dy = ep.Y - selfPos.Y, dz = ep.Z - selfPos.Z;
+                        float d = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
+                        if (d < nearestDist) { nearestDist = d; nearestName = e.PlayerName; }
+                    }
+                    _slog.Information(
+                        "[CS2RLBot] LOS bot={Bot} sees={Seen}/{Total} nearest={Name}@{Dist:F0}u rayTrace={HasRT}",
+                        bot.PlayerName, seenCount, enemies.Count, nearestName, nearestDist,
+                        _rayTrace != null ? "yes" : "NULL");
+                }
 
                 float[] obs;
                 if (_obsBuilder != null)

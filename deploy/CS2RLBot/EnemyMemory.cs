@@ -81,16 +81,26 @@ internal sealed class EnemyMemory
                 continue;
             }
 
-            // Ray-Trace LOS: fire a world-only ray from self origin to enemy origin.
-            // If the ray hits geometry (DidHit = Fraction < 1.0f), enemy is not visible.
+            // Ray-Trace LOS: fire a world-only ray from self eye to enemy eye.
+            // AbsOrigin is at feet level — must add ViewOffset to get eye position,
+            // otherwise the ray clips the floor and DidHit is always true.
             // If rayTrace is null (plugin still starting up), treat as not visible.
             bool canSee = false;
             if (rayTrace != null && selfPawn.AbsOrigin != null && enemyPawn.AbsOrigin != null)
             {
-                // TraceEndShape returns bool (hit anything); DidHit is computed: Fraction < 1.0f
+                // Eye position = AbsOrigin + ViewOffset (standing ~64u, crouching ~46u)
+                var selfEye = new Vector(
+                    selfPawn.AbsOrigin.X,
+                    selfPawn.AbsOrigin.Y,
+                    selfPawn.AbsOrigin.Z + (selfPawn.ViewOffset?.Z ?? 64f));
+                var enemyEye = new Vector(
+                    enemyPawn.AbsOrigin.X,
+                    enemyPawn.AbsOrigin.Y,
+                    enemyPawn.AbsOrigin.Z + (enemyPawn.ViewOffset?.Z ?? 64f));
+
                 rayTrace.TraceEndShape(
-                    selfPawn.AbsOrigin,
-                    enemyPawn.AbsOrigin,
+                    selfEye,
+                    enemyEye,
                     selfPawn,           // ignore self so the trace doesn't hit the bot's own hitbox
                     WorldOnlyTrace,
                     out var result);
