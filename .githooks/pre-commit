@@ -39,7 +39,10 @@ fi
 
 if [ "${#c_files[@]}" -gt 0 ]; then
     echo "[pre-commit] clang-format on staged C files..."
-    clang-format -i "${c_files[@]}"
+    # Use `uv run` to match ruff/yapf above — clang-format is pinned in
+    # pyproject.toml's dev group, so `uv sync` gives every contributor the
+    # same version without requiring apt/brew/uv-tool installs.
+    uv run clang-format -i "${c_files[@]}"
     git add -- "${c_files[@]}"
 fi
 

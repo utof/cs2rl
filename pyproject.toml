@@ -28,6 +28,11 @@ dev = [
     "ruff>=0.11.13",
     "pytest>=9.0.2",
     "yapf>=0.43.0",
+    # clang-format is the PyPI wheel that ships the `clang-format` binary —
+    # used by .githooks/pre-commit via `uv run clang-format`. Keeping it here
+    # means a fresh `uv sync` sets up the full hook toolchain in one step
+    # (no apt / brew / separate tool installs needed).
+    "clang-format>=20.1.0",
 ]
 
 [tool.uv]
