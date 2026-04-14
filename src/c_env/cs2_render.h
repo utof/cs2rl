@@ -68,68 +68,159 @@ static void _copy_agents_to_snapshot(Dust2Env* env, AgentSnapshot* snap) {
     }
 }
 
-/* ── Wall derivation from nav adjacency ──────────────────────────────────
+/* ── Wall derivation from nav geometry ──────────────────────────────────
  *
- * Each nav area has bounds [x0, y0, x1, y1] stored in area_bounds[idx*4+0..3].
- * We check each of the 4 edges of each area. An edge is a wall if no adjacent
- * area's bounds share (overlap) that edge's segment.
+ * Each nav area is an axis-aligned rectangle with bounds [x0,y0,x1,y1] in
+ * area_bounds[idx*4+0..3]. For each of the 4 edges of every area, we want
+ * to emit a wall only where no other area sits on the exterior side — i.e.
+ * the outer boundary of the union of all areas. Everything internal (even
+ * when coverage is partial, or when areas overlap in 2D) must not become a
+ * wall, since agents can walk across those boundaries.
+ *
+ * Algorithm (per edge):
+ *   1. The edge runs along a single varying axis over [seg_lo, seg_hi].
+ *   2. For each other area j, compute the sub-interval of the edge that j
+ *      covers from the exterior side (j's interior reaches strictly past
+ *      the edge line). Both "j abuts the edge from outside" and "j overlaps
+ *      across the edge line" count as coverage.
+ *   3. Subtract the union of those intervals from [seg_lo, seg_hi].
+ *   4. Emit the remaining gaps as wall segments.
+ *
+ * This replaces an older adjacency-matrix check that only accepted exact
+ * or fully-containing edge matches, which wrongly produced internal walls
+ * whenever adjacent areas had partial edge overlap or when areas overlapped
+ * in 2D (e.g. Dust2 nav where a corridor area straddles a room edge).
  *
  * Called once from make_client().
  */
+
+/* Edge-coverage interval, used while subtracting neighbor coverage. */
+typedef struct {
+    float lo, hi;
+} _WallIv;
+
+static int _wall_iv_cmp(const void* a, const void* b) {
+    float al = ((const _WallIv*)a)->lo;
+    float bl = ((const _WallIv*)b)->lo;
+    return (al > bl) - (al < bl);
+}
+
 static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
     WallList* wl = &sd->wall_list;
-    wl->capacity = sd->N * 4;
+    /* Worst case: each edge can be broken into up to N segments by N-1 gaps.
+     * Pad generously — this array is only alive for the lifetime of the demo. */
+    wl->capacity = sd->N * 4 * (sd->N + 1);
     wl->walls    = (Wall*)malloc(wl->capacity * sizeof(Wall));
     wl->count    = 0;
+
+    /* Tolerance for "on the edge line" vs. "strictly past it". Nav bounds are
+     * stored as exact floats on a coarse grid, so 1.0 unit is safely below any
+     * real spatial feature but above float round-off. */
+    const float EPS = 1.0f;
+
+    _WallIv* covs = (_WallIv*)malloc((size_t)sd->N * sizeof(_WallIv));
 
     for (int i = 0; i < sd->N; i++) {
         float x0i = area_bounds[i * 4 + 0], y0i = area_bounds[i * 4 + 1];
         float x1i = area_bounds[i * 4 + 2], y1i = area_bounds[i * 4 + 3];
 
-        /* 4 edges of area i: (left, right, bottom, top) as (ax0,ay0,ax1,ay1) */
-        float edges[4][4] = {
-            {x0i, y0i, x0i, y1i}, /* left   */
-            {x1i, y0i, x1i, y1i}, /* right  */
-            {x0i, y0i, x1i, y0i}, /* bottom */
-            {x0i, y1i, x1i, y1i}, /* top    */
-        };
-
+        /* 4 edges: 0=left(x=x0i), 1=right(x=x1i), 2=bottom(y=y0i), 3=top(y=y1i). */
         for (int e = 0; e < 4; e++) {
-            float ex0 = edges[e][0], ey0 = edges[e][1];
-            float ex1 = edges[e][2], ey1 = edges[e][3];
+            int   is_vertical = (e < 2);
+            float line        = is_vertical ? (e == 0 ? x0i : x1i) : (e == 2 ? y0i : y1i);
+            float seg_lo      = is_vertical ? y0i : x0i;
+            float seg_hi      = is_vertical ? y1i : x1i;
 
-            /* Check if any adjacent area shares (touches) this edge */
-            int shared = 0;
-            for (int j = 0; j < sd->N && !shared; j++) {
+            /* Collect every other area that covers this edge from the exterior
+             * side. "Exterior" is the halfspace opposite the area's interior:
+             *   left  edge → x <  x0i
+             *   right edge → x >  x1i
+             *   bottom    → y <  y0i
+             *   top       → y >  y1i
+             * Area j covers the edge line iff j's interior reaches across it
+             * (so j either abuts from outside, x0j==line, or straddles it). */
+            int ncov = 0;
+            for (int j = 0; j < sd->N; j++) {
                 if (j == i)
-                    continue;
-                if (!sd->adjacency[i * sd->N + j])
                     continue;
                 float x0j = area_bounds[j * 4 + 0], y0j = area_bounds[j * 4 + 1];
                 float x1j = area_bounds[j * 4 + 2], y1j = area_bounds[j * 4 + 3];
-                /* Adjacent area j shares the edge if it touches the same line segment */
-                int touches_x = (fabsf(x0j - ex0) < 1.0f && fabsf(x1j - ex1) < 1.0f) ||
-                                (fabsf(x0j - ex0) < 1.0f && fabsf(x1j - ex0) < 1.0f) ||
-                                (x0j <= ex0 + 1.0f && x1j >= ex1 - 1.0f);
-                int touches_y = (fabsf(y0j - ey0) < 1.0f && fabsf(y1j - ey1) < 1.0f) ||
-                                (fabsf(y0j - ey0) < 1.0f && fabsf(y1j - ey0) < 1.0f) ||
-                                (y0j <= ey0 + 1.0f && y1j >= ey1 - 1.0f);
-                /* Vertical edge: x values match, y range must overlap */
-                if (fabsf(ex0 - ex1) < 1.0f) { /* vertical edge */
-                    shared = (fabsf(x0j - ex0) < 1.0f || fabsf(x1j - ex0) < 1.0f) && touches_y;
-                } else {                       /* horizontal edge */
-                    shared = (fabsf(y0j - ey0) < 1.0f || fabsf(y1j - ey0) < 1.0f) && touches_x;
+
+                int   covers = 0;
+                float lo = 0.f, hi = 0.f;
+
+                if (e == 0) { /* left: exterior x<line */
+                    if (x0j < line - EPS && x1j >= line - EPS) {
+                        lo     = y0j;
+                        hi     = y1j;
+                        covers = 1;
+                    }
+                } else if (e == 1) { /* right: exterior x>line */
+                    if (x1j > line + EPS && x0j <= line + EPS) {
+                        lo     = y0j;
+                        hi     = y1j;
+                        covers = 1;
+                    }
+                } else if (e == 2) { /* bottom: exterior y<line */
+                    if (y0j < line - EPS && y1j >= line - EPS) {
+                        lo     = x0j;
+                        hi     = x1j;
+                        covers = 1;
+                    }
+                } else { /* top: exterior y>line */
+                    if (y1j > line + EPS && y0j <= line + EPS) {
+                        lo     = x0j;
+                        hi     = x1j;
+                        covers = 1;
+                    }
                 }
-                (void)touches_x;
-                (void)touches_y; /* suppress unused warnings if needed */
+
+                if (!covers)
+                    continue;
+                if (lo < seg_lo)
+                    lo = seg_lo;
+                if (hi > seg_hi)
+                    hi = seg_hi;
+                if (hi - lo > EPS) {
+                    covs[ncov].lo = lo;
+                    covs[ncov].hi = hi;
+                    ncov++;
+                }
             }
 
-            if (!shared && wl->count < wl->capacity) {
-                Wall w                 = {ex0, ey0, ex1, ey1, WALL_HEIGHT};
+            qsort(covs, (size_t)ncov, sizeof(_WallIv), _wall_iv_cmp);
+
+            /* Walk sorted coverage intervals; emit the gaps as walls. */
+            float cursor = seg_lo;
+            for (int k = 0; k < ncov; k++) {
+                float lo = covs[k].lo, hi = covs[k].hi;
+                if (lo > cursor + EPS) {
+                    if (wl->count < wl->capacity) {
+                        Wall w;
+                        if (is_vertical) {
+                            w = (Wall){line, cursor, line, lo, WALL_HEIGHT};
+                        } else {
+                            w = (Wall){cursor, line, lo, line, WALL_HEIGHT};
+                        }
+                        wl->walls[wl->count++] = w;
+                    }
+                }
+                if (hi > cursor)
+                    cursor = hi;
+            }
+            if (cursor < seg_hi - EPS && wl->count < wl->capacity) {
+                Wall w;
+                if (is_vertical) {
+                    w = (Wall){line, cursor, line, seg_hi, WALL_HEIGHT};
+                } else {
+                    w = (Wall){cursor, line, seg_hi, line, WALL_HEIGHT};
+                }
                 wl->walls[wl->count++] = w;
             }
         }
     }
+
+    free(covs);
 }
 
 /* ── Snapshot helpers (called by cs2_demo.c around each sim tick) ─────── */
