@@ -9,7 +9,7 @@
 #define PLAYER_EYE_HEIGHT 64.0f  /* eye height above agent.z in world units */
 #define WALL_HEIGHT       128.0f /* wall extrusion height                   */
 #define WALL_DEPTH        8.0f   /* wall thickness                          */
-#define MOUSE_SENSITIVITY 0.2f   /* mouse sensitivity for camera rotation   */
+#define MOUSE_SENSITIVITY 0.002f /* rad/px — tuned with raw per-frame pixel deltas */
 #define WINDOW_W          1280
 #define WINDOW_H          720
 
@@ -204,32 +204,42 @@ void c_close(Dust2Env* env) {
 static void update_camera(Client* cl, Dust2Env* env, float alpha) {
     (void)env;
 
-    // Click window to "capture" for our fallback mode
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        DisableCursor();  // may fail on WSL, but try
-        HideCursor();     // separate from lock
+    /* Manual center-warp mouse input. Rationale:
+     *   On WSL2 / some X11 configs, GLFW_CURSOR_DISABLED does NOT actually
+     *   lock the cursor to the window — the pointer drifts out and leaves
+     *   the window entirely. DisableCursor() alone is unreliable here.
+     *
+     *   Instead we every frame: read pos, take delta from window center,
+     *   then SetMousePosition(center). This keeps the pointer pinned even
+     *   when the backend's lock fails, and gives per-frame pixel deltas
+     *   that match the MOUSE_SENSITIVITY tuning (rad/px).
+     *
+     *   Click-to-capture semantics are preserved: only warp while captured.
+     *   On any 0→1 capture transition, warp once first so the pre-capture
+     *   cursor position doesn't leak into the first delta. */
+    const int cx = cl->width / 2;
+    const int cy = cl->height / 2;
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !cl->mouse_captured) {
+        DisableCursor(); /* best-effort; ignored if backend can't lock */
+        HideCursor();
         cl->mouse_captured = 1;
+        SetMousePosition(cx, cy); /* seed baseline — next frame delta = 0 */
     }
 
-    // Escape releases cursor
-    if (IsKeyPressed(KEY_ESCAPE)) {
+    if (IsKeyPressed(KEY_ESCAPE) && cl->mouse_captured) {
         EnableCursor();
         ShowCursor();
         cl->mouse_captured = 0;
     }
 
-    Vector2 pos = GetMousePosition();
-    if (!cl->mouse_init) {
-        cl->last_mouse = pos;
-        cl->mouse_init = 1;
-    }
-
     Vector2 md = {0};
     if (cl->mouse_captured && IsWindowFocused()) {
-        md.x = pos.x - cl->last_mouse.x;
-        md.y = pos.y - cl->last_mouse.y;
+        Vector2 pos = GetMousePosition();
+        md.x        = pos.x - (float)cx;
+        md.y        = pos.y - (float)cy;
+        SetMousePosition(cx, cy);
     }
-    cl->last_mouse = pos;
 
     cl->yaw   += md.x * MOUSE_SENSITIVITY;
     cl->pitch -= md.y * MOUSE_SENSITIVITY;
