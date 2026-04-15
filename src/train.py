@@ -871,7 +871,7 @@ def _patch_trainer_with_return_norm(trainer):
             # ── PER-HEAD ENTROPY ──────────────────────────────────────────
             with torch.no_grad():
                 _dists = [torch.distributions.Categorical(logits=lgt) for lgt in logits]
-                _head_names = ["move", "shoot", "use", "last"]
+                _head_names = ["move", "aim", "shoot", "reload", "weapon", "use", "crouch", "jump"]
                 for _hi, (_hn, _hd) in enumerate(zip(_head_names, _dists, strict=True)):
                     losses[f"entropy/{_hn}"] += _hd.entropy().mean().item() / self.total_minibatches
             losses["entropy/total"] += current_entropy.item() / self.total_minibatches
