@@ -4,6 +4,7 @@
 #include <math.h>
 #include <string.h>
 #include "raylib.h"
+#include "rlgl.h" /* rlSetClipPlanes — raylib's default far is 1000u, we need more */
 #include "cs2_types.h"
 
 #define PLAYER_EYE_HEIGHT 64.0f  /* eye height above agent.z in world units */
@@ -267,6 +268,12 @@ Client* make_client(Dust2Env* env, int human_agent_idx, const float* area_bounds
     InitWindow(cl->width, cl->height, "cs2rl 250326");
     SetTargetFPS(60);
     DisableCursor();
+    /* Push the far clip plane out. raylib's default projection caps at
+     * 1000 units, so on a ~2000-u-wide map (de_dust2) anything past
+     * ~1000 u from the camera clips to the background — the "void veil"
+     * players see mid-range. 8000 is well beyond the map diagonal and
+     * still leaves plenty of depth-buffer resolution at our agent scale. */
+    rlSetClipPlanes(0.1, 8000.0);
     /* Reset virtual cursor to center so first-frame delta is zero */
     // SetMousePosition(cl->width / 2, cl->height / 2);
 
