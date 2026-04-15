@@ -36,21 +36,19 @@ def resolve_run_name(name: str) -> str:
     from datetime import date
 
     today = date.today()
-    date_prefix = today.strftime("%d%m%y")  # e.g. "200326"
+    date_prefix = today.strftime("%d%m%y")                             # e.g. "200326"
     checkpoints_dir = CHECKPOINTS_DIR
     count = 0
     if checkpoints_dir.exists():
         prefix = date_prefix + "-"
-        count = sum(
-            1 for d in checkpoints_dir.iterdir() if d.is_dir() and d.name.startswith(prefix)
-        )
+        count = sum(1 for d in checkpoints_dir.iterdir()
+                    if d.is_dir() and d.name.startswith(prefix))
     return f"{date_prefix}-{count}-{name}"
 
 
 AGENT_IDS = tuple([f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)])
-ACTION_HEAD_NAMES = ("move", "aim", "shoot", "use", "weapon", "reload", "crouch")
-ACTION_HEAD_SIZES = (9, 16, 2, 2, 3, 2, 2)
-
+ACTION_HEAD_NAMES = ("move", "aim", "shoot", "use", "weapon", "reload", "crouch", "jump")
+ACTION_HEAD_SIZES = (9, 16, 2, 2, 3, 2, 2, 2)
 
 # ── SECTION: Smoke Test ────────────────────────────────────────────────────
 
@@ -74,11 +72,11 @@ def smoke_test():
             obs, rewards, terms, truncs, infos = env.step(actions)
 
             assert obs.shape == (10, OBS_DIM), f"Unexpected obs shape at step {step_n}: {obs.shape}"
-            assert rewards.shape == (10,), (
-                f"Unexpected reward shape at step {step_n}: {rewards.shape}"
-            )
-            assert terms.shape == (10,), f"Unexpected term shape at step {step_n}: {terms.shape}"
-            assert truncs.shape == (10,), f"Unexpected trunc shape at step {step_n}: {truncs.shape}"
+            assert rewards.shape == (10, ), (
+                f"Unexpected reward shape at step {step_n}: {rewards.shape}")
+            assert terms.shape == (10, ), f"Unexpected term shape at step {step_n}: {terms.shape}"
+            assert truncs.shape == (
+                10, ), f"Unexpected trunc shape at step {step_n}: {truncs.shape}"
             assert np.isfinite(obs).all(), f"NaN in obs at step {step_n}"
             assert np.isfinite(rewards).all(), f"NaN in rewards at step {step_n}"
 
@@ -96,9 +94,12 @@ def smoke_test():
 # ── SECTION: Shared eval / record helpers ──────────────────────────────────
 
 
-def make_puffer_env(
-    team_spirit=None, record_fn=None, buf=None, seed=0, episode_stats=True, map_data=None
-):
+def make_puffer_env(team_spirit=None,
+                    record_fn=None,
+                    buf=None,
+                    seed=0,
+                    episode_stats=True,
+                    map_data=None):
     """Create the native C PufferEnv used by smoke/train/eval."""
     from c_env.cs2_env import make_env as make_c_env
 
@@ -144,7 +145,7 @@ def init_policy_state(policy, device):
 
 
 def init_obs_buffer():
-    return {aid: np.zeros((OBS_DIM,), dtype=np.float32) for aid in AGENT_IDS}
+    return {aid: np.zeros((OBS_DIM, ), dtype=np.float32) for aid in AGENT_IDS}
 
 
 def update_obs_buffer(obs_buffer, obs, terms=None, truncs=None):
@@ -186,7 +187,7 @@ def select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
 
     obs_t = torch.as_tensor(obs, device=device)
     if hasattr(policy, "obs_dim") and obs_t.shape[-1] != policy.obs_dim:
-        obs_t = obs_t[..., : policy.obs_dim]
+        obs_t = obs_t[..., :policy.obs_dim]
     with torch.no_grad():
         logits, _ = policy.forward_eval(obs_t, policy_state)
         if policy_mode == "sample":
@@ -240,12 +241,10 @@ def format_train_status(epoch, ts_val, logs):
     kills_ct = logs.get("environment/kills_ct", 0.0)
     round_len = logs.get("environment/round_length", 0.0)
     move_1 = logs.get("environment/action_move_1", 0.0)
-    return (
-        f"Epoch {epoch} | SPS: {sps:.0f} | Timeout: {timeout:.3f} | "
-        f"TWin: {t_win:.3f} | CTWin: {ct_win:.3f} | Plant: {plant:.3f} | "
-        f"Kills(T/CT): {kills_t:.2f}/{kills_ct:.2f} | RoundLen: {round_len:.1f} | "
-        f"Move1: {move_1:.1f} | TS: {ts_val:.3f}"
-    )
+    return (f"Epoch {epoch} | SPS: {sps:.0f} | Timeout: {timeout:.3f} | "
+            f"TWin: {t_win:.3f} | CTWin: {ct_win:.3f} | Plant: {plant:.3f} | "
+            f"Kills(T/CT): {kills_t:.2f}/{kills_ct:.2f} | RoundLen: {round_len:.1f} | "
+            f"Move1: {move_1:.1f} | TS: {ts_val:.3f}")
 
 
 # ── SECTION: Record Episode ────────────────────────────────────────────────
@@ -256,16 +255,16 @@ def rewards_array_to_dict(rewards):
 
 
 def record_episode(
-    checkpoint_path=None,
-    device="cpu",
-    seed=0,
-    policy_mode="auto",
-    save_path=str(RECORDINGS_DIR / "latest.rrd"),
-    map_data=None,
+        checkpoint_path=None,
+        device="cpu",
+        seed=0,
+        policy_mode="auto",
+        save_path=str(RECORDINGS_DIR / "latest.rrd"),
+        map_data=None,
 ):
     from c_env.cs2_env import make_env as make_c_env
-    from nav import CACHE_PATH, NAV_PATH
     from map import make_cs2_map
+    from nav import CACHE_PATH, NAV_PATH
     from viz import init_recording, log_navmesh, log_tick, log_trimap
 
     save_path = Path(save_path)
@@ -308,8 +307,7 @@ def record_episode(
         done = bool(np.all(terms))
         if policy_state is not None:
             policy_state["done"] = policy_state["done"].new_tensor(
-                np.logical_or(terms, truncs).astype(np.float32)
-            )
+                np.logical_or(terms, truncs).astype(np.float32))
 
     print(f"[Record] Episode complete ({step_count} ticks). Saved to {save_path}")
     print(f"[Record] View with: python -m rerun {save_path}")
@@ -318,9 +316,11 @@ def record_episode(
 # ── SECTION: Checkpoint evaluation ─────────────────────────────────────────
 
 
-def evaluate_checkpoint(
-    checkpoint_path=None, device="cpu", start_seed=0, num_episodes=50, policy_mode="auto"
-):
+def evaluate_checkpoint(checkpoint_path=None,
+                        device="cpu",
+                        start_seed=0,
+                        num_episodes=50,
+                        policy_mode="auto"):
     from nav import ROUND_TIME
 
     policy = None
@@ -344,9 +344,8 @@ def evaluate_checkpoint(
             if policy_mode == "random":
                 actions = np.asarray(env.action_space.sample(), dtype=np.int32)
             else:
-                actions = select_policy_actions_native(
-                    policy, obs, device, policy_state, policy_mode
-                )
+                actions = select_policy_actions_native(policy, obs, device, policy_state,
+                                                       policy_mode)
 
             for action in actions:
                 for head_idx, action_value in enumerate(action):
@@ -367,8 +366,7 @@ def evaluate_checkpoint(
             done = bool(np.all(terms))
             if policy_state is not None:
                 policy_state["done"] = policy_state["done"].new_tensor(
-                    np.logical_or(terms, truncs).astype(np.float32)
-                )
+                    np.logical_or(terms, truncs).astype(np.float32))
 
             if done:
                 metrics["episodes"] += 1
@@ -382,30 +380,20 @@ def evaluate_checkpoint(
     episodes = max(1, metrics["episodes"])
     total_actions = sum(joint_hist.values())
 
-    print(
-        f"[Eval] checkpoint={checkpoint_path or 'None'} policy={policy_mode} "
-        f"episodes={metrics['episodes']} seeds={start_seed}..{start_seed + num_episodes - 1}"
-    )
-    print(
-        f"[Eval] timeout_rate={metrics['timed_out'] / episodes:.3f} "
-        f"t_win_rate={metrics['winner_t'] / episodes:.3f} "
-        f"ct_win_rate={metrics['winner_ct'] / episodes:.3f}"
-    )
-    print(
-        f"[Eval] plant_rate={metrics['bomb_planted'] / episodes:.3f} "
-        f"defuse_rate={metrics['bomb_defused'] / episodes:.3f} "
-        f"kills_t_per_round={metrics['kills_t'] / episodes:.3f} "
-        f"kills_ct_per_round={metrics['kills_ct'] / episodes:.3f}"
-    )
-    print(
-        f"[Eval] avg_round_length={metrics['round_length'] / episodes:.1f} "
-        f"avg_alive_t_end={metrics['alive_t_end'] / episodes:.2f} "
-        f"avg_alive_ct_end={metrics['alive_ct_end'] / episodes:.2f}"
-    )
-    print(
-        f"[Eval] blocked_moves_t_per_round={metrics['blocked_moves_t'] / episodes:.2f} "
-        f"blocked_moves_ct_per_round={metrics['blocked_moves_ct'] / episodes:.2f}"
-    )
+    print(f"[Eval] checkpoint={checkpoint_path or 'None'} policy={policy_mode} "
+          f"episodes={metrics['episodes']} seeds={start_seed}..{start_seed + num_episodes - 1}")
+    print(f"[Eval] timeout_rate={metrics['timed_out'] / episodes:.3f} "
+          f"t_win_rate={metrics['winner_t'] / episodes:.3f} "
+          f"ct_win_rate={metrics['winner_ct'] / episodes:.3f}")
+    print(f"[Eval] plant_rate={metrics['bomb_planted'] / episodes:.3f} "
+          f"defuse_rate={metrics['bomb_defused'] / episodes:.3f} "
+          f"kills_t_per_round={metrics['kills_t'] / episodes:.3f} "
+          f"kills_ct_per_round={metrics['kills_ct'] / episodes:.3f}")
+    print(f"[Eval] avg_round_length={metrics['round_length'] / episodes:.1f} "
+          f"avg_alive_t_end={metrics['alive_t_end'] / episodes:.2f} "
+          f"avg_alive_ct_end={metrics['alive_ct_end'] / episodes:.2f}")
+    print(f"[Eval] blocked_moves_t_per_round={metrics['blocked_moves_t'] / episodes:.2f} "
+          f"blocked_moves_ct_per_round={metrics['blocked_moves_ct'] / episodes:.2f}")
 
     for head_name, counts in zip(ACTION_HEAD_NAMES, action_hist, strict=True):
         print(f"[Eval] {format_histogram_line(head_name, counts)}")
@@ -421,9 +409,8 @@ def evaluate_checkpoint(
 # ── SECTION: Training config ───────────────────────────────────────────────
 
 TRAINING_CONFIG = dict(
-    gamma=0.99,  # used by PBRS shaping in sim.py and test_reward.py
+    gamma=0.99,                        # used by PBRS shaping in sim.py and test_reward.py
 )
-
 
 # ── SECTION: PufferLib env factory ─────────────────────────────────────────
 
@@ -441,14 +428,12 @@ def build_policy(vecenv, device, obs_dim_override=None):
     import torch.nn as nn
 
     driver_env = getattr(vecenv, "driver_env", vecenv)
-    obs_dim = (
-        obs_dim_override
-        if obs_dim_override is not None
-        else driver_env.single_observation_space.shape[0]
-    )
+    obs_dim = (obs_dim_override
+               if obs_dim_override is not None else driver_env.single_observation_space.shape[0])
     hidden = 256
 
     class Dust2Policy(nn.Module):
+
         def __init__(self):
             super().__init__()
             self.hidden_size = hidden  # required by PufferLib LSTM logic
@@ -467,10 +452,11 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 elif "weight" in name:
                     nn.init.orthogonal_(p, gain=1.0)
 
-            # Separate heads for MultiDiscrete([9,16,2,2,3,2,2])
-            self.action_heads = nn.ModuleList(
-                [pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01) for n in ACTION_HEAD_SIZES]
-            )
+            # Separate heads for MultiDiscrete(ACTION_HEAD_SIZES)
+            self.action_heads = nn.ModuleList([
+                pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
+                for n in ACTION_HEAD_SIZES
+            ])
             self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
 
         def get_value(self, x, lstm_state=None, done=None):
@@ -638,13 +624,14 @@ def _patch_trainer_with_return_norm(trainer):
     _ret_count = torch.zeros(1, device=device)
 
     # ── ADAPTIVE ENTROPY (Lagrangian / SAC-style alpha) ────────────────────
-    max_entropy = sum(np.log(n) for n in ACTION_HEAD_SIZES)  # for MultiDiscrete([9,16,2,2,3,2,2])
-    target_entropy = 0.5 * max_entropy  # ≈ 2.14
-    entropy_floor = 0.3 * max_entropy  # collapse threshold
+    max_entropy = sum(np.log(n) for n in ACTION_HEAD_SIZES)            # for MultiDiscrete([9,16,2,2,3,2,2])
+    target_entropy = 0.5 * max_entropy                                 # ≈ 2.14
+    entropy_floor = 0.3 * max_entropy                                  # collapse threshold
     import math
 
     log_alpha = torch.tensor([math.log(0.1)], requires_grad=True, device=device)
     alpha_optimizer = torch.optim.Adam([log_alpha], lr=1e-4)
+
     # ──────────────────────────────────────────────────────────────────────
 
     def _update_return_stats(returns_flat):
@@ -713,7 +700,7 @@ def _patch_trainer_with_return_norm(trainer):
             prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
             prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
-            mb_prio = (self.segments * prio_probs[idx, None]) ** -anneal_beta
+            mb_prio = (self.segments * prio_probs[idx, None])**-anneal_beta
             mb_obs = self.observations[idx]
             mb_actions = self.actions[idx]
             mb_logprobs = self.logprobs[idx]
@@ -742,9 +729,8 @@ def _patch_trainer_with_return_norm(trainer):
             )
 
             logits, newvalue = self.policy(mb_obs, state)
-            actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(
-                logits, action=mb_actions
-            )
+            actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits,
+                                                                           action=mb_actions)
 
             profile("train_misc", epoch)
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
@@ -783,12 +769,11 @@ def _patch_trainer_with_return_norm(trainer):
             pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
             newvalue = newvalue.view(mb_returns_norm.shape)
-            v_loss_unclipped = (newvalue - mb_returns_norm) ** 2
+            v_loss_unclipped = (newvalue - mb_returns_norm)**2
             if vf_clip is not None:
-                v_clipped = mb_values_norm + torch.clamp(
-                    newvalue - mb_values_norm, -vf_clip, vf_clip
-                )
-                v_loss_clipped = (v_clipped - mb_returns_norm) ** 2
+                v_clipped = mb_values_norm + torch.clamp(newvalue - mb_values_norm, -vf_clip,
+                                                         vf_clip)
+                v_loss_clipped = (v_clipped - mb_returns_norm)**2
                 v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
             else:
                 v_loss = 0.5 * v_loss_unclipped.mean()
@@ -963,8 +948,7 @@ class DeadRunDetector:
             entropy_total = metrics.get("entropy/total", metrics.get("entropy", 5.0))
             if entropy_total < 0.5:
                 self.alerts.append(
-                    f"CRITICAL: Entropy collapsed to {entropy_total:.2f} at step {step}"
-                )
+                    f"CRITICAL: Entropy collapsed to {entropy_total:.2f} at step {step}")
             timeout_rate = metrics.get("game/timeout_rate", 0.0)
             if timeout_rate > 0.95:
                 self.alerts.append(f"WARNING: Timeout rate {timeout_rate:.0%} at step {step}")
@@ -1023,7 +1007,7 @@ class SelfPlayManager:
         self.save_every_epochs = save_every_epochs
         self.win_threshold = win_threshold
         self.phase_length = phase_length
-        self.opponent_team = "ct"  # CT is opponent first; T learns to attack
+        self.opponent_team = "ct"      # CT is opponent first; T learns to attack
         self._milestone_count = 0
         self._last_save_epoch = -1
 
@@ -1050,10 +1034,8 @@ class SelfPlayManager:
             self._add_to_pool(path)
             self._milestone_count += 1
             self._last_save_epoch = epoch
-            print(
-                f"[SelfPlay] Saved checkpoint → {path.name}  "
-                f"(pool={len(self.pool)}, hero_win={hero_win:.2f})"
-            )
+            print(f"[SelfPlay] Saved checkpoint → {path.name}  "
+                  f"(pool={len(self.pool)}, hero_win={hero_win:.2f})")
 
     def _add_to_pool(self, path: Path):
         self.pool.append(path)
@@ -1099,7 +1081,7 @@ class SelfPlayManager:
         slots = self.CT_SLOTS if self.opponent_team == "ct" else self.T_SLOTS
         for e in range(n_envs):
             base = e * self.AGENTS_PER_ENV
-            mask[base + slots.start : base + slots.stop] = True
+            mask[base + slots.start:base + slots.stop] = True
         return mask
 
 
@@ -1194,11 +1176,9 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 
                     # Write back updated past-policy LSTM states (cast from fp16 if needed)
                     past_lstm_h[env_id.start][opp_mask] = past_state["lstm_h"].to(
-                        past_lstm_h[env_id.start].dtype
-                    )
+                        past_lstm_h[env_id.start].dtype)
                     past_lstm_c[env_id.start][opp_mask] = past_state["lstm_c"].to(
-                        past_lstm_c[env_id.start].dtype
-                    )
+                        past_lstm_c[env_id.start].dtype)
 
                     # Replace opponent slots in action & logprob buffers
                     # Cast to destination dtype (amp_context may yield fp16)
@@ -1232,9 +1212,8 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 self.ep_lengths[env_id] += 1
                 if seq_pos + 1 >= cfg["bptt_horizon"]:
                     num_full = env_id.stop - env_id.start
-                    self.ep_indices[env_id] = (
-                        self.free_idx + torch.arange(num_full, device=dev).int()
-                    )
+                    self.ep_indices[env_id] = (self.free_idx +
+                                               torch.arange(num_full, device=dev).int())
                     self.ep_lengths[env_id] = 0
                     self.free_idx += num_full
                     self.full_rows += num_full
@@ -1343,10 +1322,8 @@ def train(args):
     else:
         raise ValueError(f"Unsupported vec backend: {args.vec_backend}")
 
-    print(
-        f"[Train] Creating {args.num_envs} vectorised envs "
-        f"(backend={backend_name}, workers={num_workers})..."
-    )
+    print(f"[Train] Creating {args.num_envs} vectorised envs "
+          f"(backend={backend_name}, workers={num_workers})...")
     vecenv = pufferlib.vector.make(
         env_factory,
         num_envs=args.num_envs,
@@ -1363,7 +1340,7 @@ def train(args):
     # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
 
     train_config = {
-        # Core PPO
+                                                       # Core PPO
         "env": "cs2-dust2",
         "device": device,
         "seed": args.seed,
@@ -1379,12 +1356,12 @@ def train(args):
         "clip_coef": 0.15,
         "vf_coef": 0.5,
         "vf_clip_coef": None,
-        "ent_coef": 0.1,  # fallback; adaptive alpha overrides this in the patched train method
+        "ent_coef": 0.1,                               # fallback; adaptive alpha overrides this in the patched train method
         "max_grad_norm": 0.5,
         "target_kl": 0.03,
         "use_rnn": True,
         "weight_decay": 1e-4,
-        # Extras required by PuffeRL constructor
+                                                       # Extras required by PuffeRL constructor
         "compile": False,
         "compile_mode": "default",
         "compile_fullgraph": False,
@@ -1427,12 +1404,12 @@ def train(args):
         self_play_mgr = SelfPlayManager(
             pool_size=15,
             p_past=0.3,
-            save_every_epochs=25,  # ~2M steps per save at batch_size=81920
+            save_every_epochs=25,                      # ~2M steps per save at batch_size=81920
             win_threshold=0.6,
-            phase_length=50,  # switch opponent team every ~4M steps
+            phase_length=50,                           # switch opponent team every ~4M steps
         )
-        # Pre-seed pool with resume checkpoint so the first opponents are
-        # already competent rather than near-random early-training snapshots.
+                                                       # Pre-seed pool with resume checkpoint so the first opponents are
+                                                       # already competent rather than near-random early-training snapshots.
         if resume_path and resume_path.exists():
             import shutil as _shutil
 
@@ -1483,16 +1460,18 @@ def train(args):
                 )
                 logs["self_play/pool_size"] = float(len(self_play_mgr.pool))
                 logs["self_play/opponent_team"] = float(
-                    self_play_mgr.opponent_team == "ct"
-                )  # 1.0 = CT opponent, 0.0 = T opponent
-            # ────────────────────────────────────────────────────────────────
+                    self_play_mgr.opponent_team == "ct")               # 1.0 = CT opponent, 0.0 = T opponent
+                                                                       # ────────────────────────────────────────────────────────────────
 
             # ── Persist metrics ──────────────────────────────────────────────
             log_entry = {
                 "step": trainer.global_step,
                 "epoch": trainer.epoch,
                 "team_spirit": ts_val,
-                **{k: v for k, v in logs.items() if isinstance(v, (int, float))},
+                **{
+                    k: v
+                    for k, v in logs.items() if isinstance(v, (int, float))
+                },
             }
             _metrics_file.write(json.dumps(log_entry) + "\n")
             _metrics_file.flush()
@@ -1508,11 +1487,9 @@ def train(args):
         if isinstance(logs, dict):
             if trainer.epoch % 10 == 0:
                 print(format_train_status(trainer.epoch, ts_val, logs))
-            print(
-                f"[Timing] collect={trainer._timing['collect_ms']:.0f}ms  "
-                f"update={trainer._timing['update_ms']:.0f}ms  "
-                f"SPS={logs.get('SPS', 0):.0f}"
-            )
+            print(f"[Timing] collect={trainer._timing['collect_ms']:.0f}ms  "
+                  f"update={trainer._timing['update_ms']:.0f}ms  "
+                  f"SPS={logs.get('SPS', 0):.0f}")
 
     trainer.close()
 
@@ -1560,21 +1537,21 @@ if __name__ == "__main__":
     parser.add_argument("--vec-num-workers", type=int, default=0)
     parser.add_argument("--vec-overwork", action="store_true")
     parser.add_argument("--record-out", type=str, default=str(RECORDINGS_DIR / "latest.rrd"))
-    parser.add_argument(
-        "--record-policy", type=str, choices=("auto", "random", "sample", "greedy"), default="auto"
-    )
+    parser.add_argument("--record-policy",
+                        type=str,
+                        choices=("auto", "random", "sample", "greedy"),
+                        default="auto")
     parser.add_argument("--eval-episodes", type=int, default=50)
-    parser.add_argument(
-        "--eval-policy", type=str, choices=("auto", "random", "sample", "greedy"), default="auto"
-    )
+    parser.add_argument("--eval-policy",
+                        type=str,
+                        choices=("auto", "random", "sample", "greedy"),
+                        default="auto")
     parser.add_argument(
         "--name",
         type=str,
         default=None,
-        help=(
-            "Run name; auto-prefixed with DDMMYY-N- where N = count of existing checkpoint dirs "
-            "starting with today's date. E.g. --name 1M-ct → '200326-3-1M-ct'."
-        ),
+        help=("Run name; auto-prefixed with DDMMYY-N- where N = count of existing checkpoint dirs "
+              "starting with today's date. E.g. --name 1M-ct → '200326-3-1M-ct'."),
     )
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb-project", type=str, default="cs2rl", dest="wandb_project")
@@ -1618,15 +1595,12 @@ if __name__ == "__main__":
             else:
                 # Find the most recently modified checkpoint dir ending with -<name>
                 suffix = f"-{name_arg}"
-                candidates = (
-                    [d for d in CHECKPOINTS_DIR.iterdir() if d.is_dir() and d.name.endswith(suffix)]
-                    if CHECKPOINTS_DIR.exists()
-                    else []
-                )
+                candidates = ([
+                    d for d in CHECKPOINTS_DIR.iterdir() if d.is_dir() and d.name.endswith(suffix)
+                ] if CHECKPOINTS_DIR.exists() else [])
                 if not candidates:
                     raise FileNotFoundError(
-                        f"No checkpoint dir in {CHECKPOINTS_DIR} ending with '{suffix}'"
-                    )
+                        f"No checkpoint dir in {CHECKPOINTS_DIR} ending with '{suffix}'")
                 resolved = max(candidates, key=lambda d: os.path.getmtime(d)).name
             record_checkpoint = str(CHECKPOINTS_DIR / resolved / "dust2_policy.pt")
             record_save_path = str(RECORDINGS_DIR / f"{resolved}.rrd")

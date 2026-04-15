@@ -1,7 +1,8 @@
 """Wrapper smoke test — env init, reset, step return correct shapes."""
 
 import numpy as np
-from nav import OBS_DIM, ACTION_DIM
+
+from nav import ACTION_DIM, OBS_DIM
 
 
 def test_import_wrapper():
@@ -36,7 +37,7 @@ def test_snapshot_state_exposes_agents():
     env.reset()
     state = env.snapshot_state()
     assert len(state.agents) == 10
-    assert state.agents[0].pos.shape == (3,)
+    assert state.agents[0].pos.shape == (3, )
 
 
 def test_make_env_honors_external_buffers():
@@ -45,7 +46,7 @@ def test_make_env_honors_external_buffers():
 
     from c_env.cs2_env import make_env
 
-    single_action = gymnasium.spaces.MultiDiscrete([9, 16, 2, 2, 3, 2, 2])
+    single_action = gymnasium.spaces.MultiDiscrete([9, 16, 2, 2, 3, 2, 2, 2])
     joint_action = pufferlib.spaces.joint_space(single_action, 10)
     buf = {
         "observations": np.zeros((10, OBS_DIM), dtype=np.float32),

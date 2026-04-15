@@ -208,12 +208,17 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
         int8_t*     m = &env->masks[i * ACTION_MASK_DIM];
         AgentState* a = &g->agents[i];
         /* Offsets in mask array: move=0..8, aim=9..24, shoot=25..26,
-           reload=27..28, wswitch=29..31, use=32..33, crouch=34..35 */
+           reload=27..28, wswitch=29..31, use=32..33, crouch=34..35,
+           jump=36..37 */
         if (!a->alive) {
             memset(m, 0, ACTION_MASK_DIM); /* dead: nothing valid */
             m[0] = 1;                      /* stop is always valid */
             continue;
         }
+        /* Jump mask (offset 36+): no jump while airborne, on cooldown, or
+         * crouching. "no-jump" (m[36]) is always valid. */
+        if (a->is_airborne || a->jump_cd > 0 || a->is_crouching)
+            m[36 + 1] = 0;
         int              slot = a->weapon_slot;
         const WeaponDef* def  = &WEAPON_DEFS[slot];
         /* Shoot mask (offset 25+) */

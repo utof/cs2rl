@@ -12,8 +12,8 @@
 #define TEAM_SIZE             5
 #define N_AGENTS              10
 #define OBS_DIM               104
-#define ACTION_DIM            7
-#define ACTION_MASK_DIM       36 /* 9+16+2+2+3+2+2 */
+#define ACTION_DIM            8
+#define ACTION_MASK_DIM       38 /* 9+16+2+2+3+2+2+2 (last head is jump) */
 #define WEAPON_SWITCH_TICKS   8  /* ~0.5s at 16 Hz */
 #define CROUCH_COOLDOWN_TICKS 7  /* ~0.4s at 16 Hz */
 #define INVALID_AREA_IDX      (-1)
@@ -137,6 +137,11 @@ typedef struct {
     uint8_t human_controlled; /* 1 = process_movement uses aim_rad, ignores actions[1] */
     int8_t  _pad3[3];         /* explicit padding: 1 + 3 = 4 bytes → float alignment   */
     float   aim_rad;          /* continuous facing angle set by human input (radians)   */
+    /* Phase 7 additions (jump / vertical movement) — appended, never reorder. */
+    float   vz;          /* per-second vertical velocity (units/s)                    */
+    int8_t  is_airborne; /* 1 when z > 0 or vz != 0 — skips ground friction           */
+    int8_t  _pad4[3];    /* pad to int32 boundary                                     */
+    int32_t jump_cd;     /* ticks until another jump press is honoured (0 = bhop OK)  */
 } AgentState;
 
 /* ── Game state ── */
@@ -183,6 +188,7 @@ typedef struct {
     int32_t action_reload[2];
     int32_t action_weapon[3];
     int32_t action_crouch[2];
+    int32_t action_jump[2]; /* Phase 7: jump action head counter (appended) */
     /* ── Phase 5: episode-level reward component accumulators ── */
     float reward_win;      /* cumulative win/loss reward (all agents) */
     float reward_kills;    /* cumulative kill rewards */

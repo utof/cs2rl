@@ -11,14 +11,18 @@ count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size)
 }
 
 /* CS2 / CSGO competitive default movement cvars. Values verified against
- * Source SDK (movevars_shared) and widely cited movement analyses
- * (adrianb.io, SourceRuns wiki). At 16 Hz the ramp still takes ~0.18s
- * (≈3 ticks) to reach weapon max speed — same wall clock as 64 Hz Source.
- * The formula is frametime-correct; only the number of discrete speed
- * steps during the ramp differs. */
-#define SV_ACCELERATE_CS 5.5f  /* ground acceleration coefficient              */
-#define SV_FRICTION_CS   5.2f  /* ground friction coefficient                  */
-#define SV_STOPSPEED_CS  80.0f /* friction floor speed — amplifies decel below */
+ * Source SDK (movevars_shared, gamemovement.cpp) and widely cited movement
+ * analyses (adrianb.io, SourceRuns wiki). At 16 Hz the ground ramp still
+ * takes ~0.18s (≈3 ticks) to reach weapon max speed — same wall clock as
+ * 64 Hz Source. The air formula is tickrate-invariant because `addspeed`
+ * is capped by a fixed wishspeed (30), not a per-tick rate. */
+#define SV_ACCELERATE_CS    5.5f        /* ground acceleration coefficient               */
+#define SV_FRICTION_CS      5.2f        /* ground friction coefficient                   */
+#define SV_STOPSPEED_CS     80.0f       /* friction floor — amplifies decel below it     */
+#define SV_AIRACCELERATE_CS 12.0f       /* air acceleration coefficient                  */
+#define SV_AIR_MAX_WISHSPD  30.0f       /* wishspeed clamp for air addspeed — bhop key   */
+#define SV_GRAVITY_CS       800.0f      /* units/s² downward                             */
+#define SV_JUMP_IMPULSE_CS  301.993377f /* sqrt(2 * g * 57u) — 57u target jump height */
 
 /* Sim tick duration (seconds). The env runs at 16 Hz. Keeping this local
  * avoids a cross-header coupling for a single constant used only here. */
@@ -99,6 +103,9 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
         count_action(ss->action_crouch, es->action_crouch, crouch_act, 2);
 
         int valid_dir = (move_dir >= 1 && move_dir <= 8);
+        int jump_act  = actions[i * ACTION_DIM + 7];
+        count_action(ss->action_jump, es->action_jump, jump_act, 2);
+
         if (a->area_idx < 0) {
             if (a->team == 0) {
                 ss->blocked_moves_t++;
@@ -109,54 +116,110 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
             }
             a->vx = 0.0f;
             a->vy = 0.0f;
+            a->vz = 0.0f;
             continue;
         }
 
-        /* ── Step 1: friction (always, regardless of input). */
-        float vel_x = a->vx;
-        float vel_y = a->vy;
-        float speed = sqrtf(vel_x * vel_x + vel_y * vel_y);
-        if (speed > 0.0f) {
-            float control  = speed < SV_STOPSPEED_CS ? SV_STOPSPEED_CS : speed;
-            float drop     = control * SV_FRICTION_CS * DT_SIM_MOVE;
-            float newspeed = speed - drop;
-            if (newspeed < 0.0f)
-                newspeed = 0.0f;
-            float frac  = newspeed / speed;
-            vel_x      *= frac;
-            vel_y      *= frac;
-        }
+        /* Tick the jump cooldown regardless of input — so even if the bot
+         * spams jump it can't re-jump faster than jump_cd allows. We use 0
+         * cooldown in v1 for full bhop parity with CS's competitive default
+         * behaviour (the anti-bhop 1.1x clamp is not modelled yet). */
+        if (a->jump_cd > 0)
+            a->jump_cd--;
 
-        /* ── Step 2: accelerate toward facing-local wishdir (if any input).
-         * Humans sync aim_rad to the mouse every frame; bots use their
-         * discrete a->facing from the aim action. Both rotate the same
-         * local (right, forward) vector into world space, matching the
-         * cs2_render.h camera convention:
-         *   forward_world = (cos, sin),  right_world = (-sin, cos). */
+        /* Compute world-space wishdir from the facing-local bin + agent
+         * facing. Shared by both ground and air accel paths so W+D in the
+         * air behaves symmetrically with W+D on the ground. */
+        float wx = 0.0f, wy = 0.0f;
         if (valid_dir) {
             float facing = a->human_controlled ? a->aim_rad : a->facing;
             float fx     = _LOCAL_MOVE_X[move_dir];
             float fy     = _LOCAL_MOVE_Y[move_dir];
             float ca     = cosf(facing);
             float sa     = sinf(facing);
-            float wx     = fy * ca - fx * sa;
-            float wy     = fy * sa + fx * ca;
+            wx           = fy * ca - fx * sa;
+            wy           = fy * sa + fx * ca;
+        }
 
-            float wishspeed    = get_move_speed(a);
-            float currentspeed = vel_x * wx + vel_y * wy;
-            float addspeed     = wishspeed - currentspeed;
-            if (addspeed > 0.0f) {
-                float accelspeed = SV_ACCELERATE_CS * DT_SIM_MOVE * wishspeed;
-                if (accelspeed > addspeed)
-                    accelspeed = addspeed;
-                vel_x += accelspeed * wx;
-                vel_y += accelspeed * wy;
+        float vel_x     = a->vx;
+        float vel_y     = a->vy;
+        float vel_z     = a->vz;
+        float wishspeed = get_move_speed(a);
+
+        /* Jump initiation — press-edge only (integer bin). Gated on ground,
+         * no cooldown, not crouching. Matches Source's CheckJumpButton: the
+         * impulse overwrites vz (not additive), and horizontal velocity is
+         * preserved for running-jump continuity. */
+        if (jump_act == 1 && !a->is_airborne && a->jump_cd == 0 && !a->is_crouching) {
+            vel_z          = SV_JUMP_IMPULSE_CS;
+            a->is_airborne = 1;
+            /* jump_cd stays 0 to permit bhop re-jumps on landing tick. */
+        }
+
+        if (!a->is_airborne) {
+            /* ── Ground path ───────────────────────────────────────────────
+             * 1) Friction (always, regardless of input — releasing keys
+             *    smoothly decelerates instead of halting).
+             * 2) Ground accel toward wishdir, capping the projection onto
+             *    wishdir at the agent's weapon wishspeed. */
+            float speed = sqrtf(vel_x * vel_x + vel_y * vel_y);
+            if (speed > 0.0f) {
+                float control  = speed < SV_STOPSPEED_CS ? SV_STOPSPEED_CS : speed;
+                float drop     = control * SV_FRICTION_CS * DT_SIM_MOVE;
+                float newspeed = speed - drop;
+                if (newspeed < 0.0f)
+                    newspeed = 0.0f;
+                float frac  = newspeed / speed;
+                vel_x      *= frac;
+                vel_y      *= frac;
+            }
+            if (valid_dir) {
+                float currentspeed = vel_x * wx + vel_y * wy;
+                float addspeed     = wishspeed - currentspeed;
+                if (addspeed > 0.0f) {
+                    float accelspeed = SV_ACCELERATE_CS * DT_SIM_MOVE * wishspeed;
+                    if (accelspeed > addspeed)
+                        accelspeed = addspeed;
+                    vel_x += accelspeed * wx;
+                    vel_y += accelspeed * wy;
+                }
+            }
+        } else {
+            /* ── Air path ──────────────────────────────────────────────────
+             * Source's leapfrog gravity: half-step before accel, half-step
+             * after integration. Keeps apex timing accurate at our coarse
+             * 16 Hz tick (full-step introduces ~3% apex-height error).
+             *
+             * Air accelerate is the bhop/air-strafe mechanic: the
+             * per-tick addspeed budget is capped by `min(wishspeed, 30)`,
+             * so once your velocity's projection onto wishdir reaches 30
+             * u/s, no more speed is added in that direction — but motion
+             * perpendicular to velocity keeps accelerating, which is how
+             * strafing into mouse sweeps compounds forward speed. The
+             * accel *rate* uses the full uncapped wishspeed. */
+            vel_z -= 0.5f * SV_GRAVITY_CS * DT_SIM_MOVE;
+
+            if (valid_dir) {
+                float wishspd_capped =
+                    wishspeed < SV_AIR_MAX_WISHSPD ? wishspeed : SV_AIR_MAX_WISHSPD;
+                float currentspeed = vel_x * wx + vel_y * wy;
+                float addspeed     = wishspd_capped - currentspeed;
+                if (addspeed > 0.0f) {
+                    float accelspeed = SV_AIRACCELERATE_CS * DT_SIM_MOVE * wishspeed;
+                    if (accelspeed > addspeed)
+                        accelspeed = addspeed;
+                    vel_x += accelspeed * wx;
+                    vel_y += accelspeed * wy;
+                }
             }
         }
 
-        /* ── Step 3: integrate position, then test nav-grid / adjacency. */
+        /* ── Integrate position. XY/nav-grid collision logic is shared
+         * between ground and air. Z integrates freely (flat world, z=0
+         * ground plane); landing is resolved after. */
         float tx = a->x + vel_x * DT_SIM_MOVE;
         float ty = a->y + vel_y * DT_SIM_MOVE;
+        float tz = a->z + vel_z * DT_SIM_MOVE;
 
         int gx = (int)((tx - sd->grid_x_min) * sd->grid_inv_cell);
         int gy = (int)((ty - sd->grid_y_min) * sd->grid_inv_cell);
@@ -168,38 +231,61 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
                 ss->blocked_moves_ct++;
                 es->blocked_moves_ct++;
             }
-            a->vx = 0.0f;
-            a->vy = 0.0f;
-            continue;
+            /* Wall-stop: zero horizontal velocity but keep vz (still in air
+             * if airborne). Gravity keeps ticking below. */
+            vel_x = 0.0f;
+            vel_y = 0.0f;
+            tx    = a->x;
+            ty    = a->y;
+            goto apply_z_integration;
         }
-
-        int target_idx = sd->raster_grid[gy * sd->grid_w + gx];
-        /* Allow same-area movement (sub-cell step may not cross a boundary). */
-        if (target_idx < 0 ||
-            (target_idx != a->area_idx && !sd->adjacency[a->area_idx * sd->N + target_idx])) {
-            if (a->team == 0) {
-                ss->blocked_moves_t++;
-                es->blocked_moves_t++;
+        {
+            int target_idx = sd->raster_grid[gy * sd->grid_w + gx];
+            /* Allow same-area movement (sub-cell step may not cross a boundary). */
+            if (target_idx < 0 ||
+                (target_idx != a->area_idx && !sd->adjacency[a->area_idx * sd->N + target_idx])) {
+                if (a->team == 0) {
+                    ss->blocked_moves_t++;
+                    es->blocked_moves_t++;
+                } else {
+                    ss->blocked_moves_ct++;
+                    es->blocked_moves_ct++;
+                }
+                vel_x = 0.0f;
+                vel_y = 0.0f;
+                tx    = a->x;
+                ty    = a->y;
             } else {
-                ss->blocked_moves_ct++;
-                es->blocked_moves_ct++;
+                a->area_idx = target_idx;
+                a->x        = tx;
+                a->y        = ty;
             }
-            a->vx = 0.0f;
-            a->vy = 0.0f;
-            continue;
         }
 
-        a->x        = tx;
-        a->y        = ty;
-        a->area_idx = target_idx;
-        a->vx       = vel_x;
-        a->vy       = vel_y;
+    apply_z_integration:
+        /* Apply second half of gravity (leapfrog split) so velocity at
+         * start of next tick is correctly phase-aligned with position. */
+        if (a->is_airborne)
+            vel_z -= 0.5f * SV_GRAVITY_CS * DT_SIM_MOVE;
 
-        /* Footstep audibility: moving at ≥16 u/s (≈1 u/tick) and not crouching.
-         * Uses speed rather than "input pressed" so agents coasting on residual
-         * post-friction velocity still emit footsteps — matches CS behaviour. */
+        /* Landing: the world is currently flat at z=0. When the airborne
+         * agent's integrated z dips to or below the floor with non-positive
+         * vz, snap to ground and clear airborne state. */
+        a->z  = tz;
+        a->vx = vel_x;
+        a->vy = vel_y;
+        a->vz = vel_z;
+        if (a->is_airborne && a->z <= 0.0f && a->vz <= 0.0f) {
+            a->z           = 0.0f;
+            a->vz          = 0.0f;
+            a->is_airborne = 0;
+            /* No cooldown — bhop-style re-jump permitted on landing tick. */
+        }
+
+        /* Footstep audibility: moving at ≥16 u/s on the ground, not crouching.
+         * Airborne agents don't emit footsteps (they're in the air). */
         float sp_sq = vel_x * vel_x + vel_y * vel_y;
-        if (!a->is_crouching && sp_sq > (16.0f * 16.0f))
+        if (!a->is_crouching && !a->is_airborne && sp_sq > (16.0f * 16.0f))
             a->is_moving = 1;
     }
 }

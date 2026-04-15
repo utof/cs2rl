@@ -6,7 +6,7 @@ import numpy as np
 from c_env.cs2_env import make_env
 from nav import ACTION_DIM
 
-_ACTION_HEAD_SIZES = [9, 16, 2, 2, 3, 2, 2]
+_ACTION_HEAD_SIZES = [9, 16, 2, 2, 3, 2, 2, 2]
 
 
 def _facing_to_aim(angle):
@@ -41,12 +41,12 @@ def test_pbrs_shaping_positive_on_kill():
     nav = env.nav_graph
     pair = None
     for i, area_i in enumerate(nav.area_ids[:400]):
-        for area_j in nav.area_ids[i + 1 : i + 200]:
+        for area_j in nav.area_ids[i + 1:i + 200]:
             if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
                 continue
             dx = nav.centroids[area_j][0] - nav.centroids[area_i][0]
             dy = nav.centroids[area_j][1] - nav.centroids[area_i][1]
-            if 50 < float((dx * dx + dy * dy) ** 0.5) < 1500:
+            if 50 < float((dx * dx + dy * dy)**0.5) < 1500:
                 pair = (area_i, area_j)
                 break
         if pair is not None:
@@ -69,7 +69,7 @@ def test_pbrs_shaping_positive_on_kill():
     t.x, t.y, t.z = float(t_c[0]), float(t_c[1]), 0.0
 
     ct.alive = 1
-    ct.hp = 1  # low HP so any hit kills
+    ct.hp = 1                          # low HP so any hit kills
     ct.armor = 0
     ct.area_idx = id2idx[area_ct]
     ct.x, ct.y, ct.z = float(ct_c[0]), float(ct_c[1]), 0.0
@@ -77,8 +77,8 @@ def test_pbrs_shaping_positive_on_kill():
     t_facing = math.atan2(ct.y - t.y, ct.x - t.x)
 
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 1] = _facing_to_aim(t_facing)  # aim at CT (head index 1)
-    actions[0, 2] = 1  # t0 shoots (shoot is head index 2)
+    actions[0, 1] = _facing_to_aim(t_facing)           # aim at CT (head index 1)
+    actions[0, 2] = 1                                  # t0 shoots (shoot is head index 2)
     _, rewards, _, _, _ = env.step(actions)
 
     assert rewards[0] > 0, f"Killing CT gives non-positive reward: {rewards[0]:.4f}"
@@ -119,15 +119,14 @@ def test_team_spirit_one_equalizes_alive_team():
 
     if len(t_alive) > 1:
         t_rewards = [float(rewards[i]) for i in t_alive]
-        assert all(abs(r - t_rewards[0]) < 1e-5 for r in t_rewards), (
-            f"T alive rewards not equal at team_spirit=1: {t_rewards}"
-        )
+        assert all(abs(r - t_rewards[0]) < 1e-5
+                   for r in t_rewards), (f"T alive rewards not equal at team_spirit=1: {t_rewards}")
 
     if len(ct_alive) > 1:
         ct_rewards = [float(rewards[i]) for i in ct_alive]
-        assert all(abs(r - ct_rewards[0]) < 1e-5 for r in ct_rewards), (
-            f"CT alive rewards not equal at team_spirit=1: {ct_rewards}"
-        )
+        assert all(
+            abs(r - ct_rewards[0]) < 1e-5
+            for r in ct_rewards), (f"CT alive rewards not equal at team_spirit=1: {ct_rewards}")
 
 
 # ── Phase 4.4 reward unit tests ───────────────────────────────────────────
@@ -150,8 +149,7 @@ def test_idle_penalty():
             # The idle penalty alone is -0.0005; PBRS shaping should be small.
             # Verify the penalty is at most -0.0005 (PBRS can add to it).
             assert rewards[i] <= -0.0004, (
-                f"Agent {i} idle penalty smaller than expected: {rewards[i]:.6f}"
-            )
+                f"Agent {i} idle penalty smaller than expected: {rewards[i]:.6f}")
     env.close()
 
 
@@ -173,8 +171,7 @@ def test_win_terminal_reward():
     for i in range(5):
         if env._c_env.game.agents[i].alive or terms[i]:
             assert rewards[i] >= 0.9, (
-                f"T agent {i} should get +1 win bonus (>=0.9 after PBRS), got {rewards[i]:.4f}"
-            )
+                f"T agent {i} should get +1 win bonus (>=0.9 after PBRS), got {rewards[i]:.4f}")
     env.close()
 
 
@@ -213,7 +210,7 @@ def test_bomb_entry_bonus():
 
     # Step with use=1 — the C env checks use action to trigger entry bonus
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 5] = 1  # use action (head index 5) required to trigger bombsite_entered check
+    actions[0, 5] = 1                  # use action (head index 5) required to trigger bombsite_entered check
     _, rewards, _, _, _ = env.step(actions)
 
     # Reward for agent 0 must include the +0.3 bombsite entry bonus
@@ -245,7 +242,7 @@ def test_plant_progress_reward():
     bomber = env._c_env.game.agents[bomber_idx]
     bomber.has_bomb = 1
     env._c_env.game.bomb_carrier_id = bomber_idx
-    env._c_env.game.bombsite_entered[bomber_idx] = 1  # suppress entry bonus
+    env._c_env.game.bombsite_entered[bomber_idx] = 1   # suppress entry bonus
 
     bomber.area_idx = site_idx
     bomber.x = float(site_centroid[0])
@@ -254,7 +251,7 @@ def test_plant_progress_reward():
 
     # Start planting: set bomb_being_planted_by to bomber_idx and advance ticks
     env._c_env.game.bomb_being_planted_by = bomber_idx
-    env._c_env.game.bomb_plant_ticks = 1  # already started (not tick 0)
+    env._c_env.game.bomb_plant_ticks = 1               # already started (not tick 0)
 
     # use=1 to continue planting (head index 5)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
@@ -263,8 +260,7 @@ def test_plant_progress_reward():
 
     # The per-tick plant progress reward is +0.05
     assert rewards[bomber_idx] >= 0.04, (
-        f"Plant progress reward missing: agent {bomber_idx} reward = {rewards[bomber_idx]:.4f}"
-    )
+        f"Plant progress reward missing: agent {bomber_idx} reward = {rewards[bomber_idx]:.4f}")
 
 
 # ── Phase 5 reward-externalization tests ──────────────────────────────────────
@@ -300,12 +296,12 @@ def test_kill_reward_weight_is_configurable():
 
     pair = None
     for i, area_i in enumerate(nav.area_ids[:400]):
-        for area_j in nav.area_ids[i + 1 : i + 200]:
+        for area_j in nav.area_ids[i + 1:i + 200]:
             if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
                 continue
             dx = nav.centroids[area_j][0] - nav.centroids[area_i][0]
             dy = nav.centroids[area_j][1] - nav.centroids[area_i][1]
-            if 50 < float((dx * dx + dy * dy) ** 0.5) < 1500:
+            if 50 < float((dx * dx + dy * dy)**0.5) < 1500:
                 pair = (area_i, area_j)
                 break
         if pair is not None:
@@ -367,7 +363,7 @@ def test_reward_components_logged_in_terminal_info():
     rng = np.random.default_rng(1)
     info = {}
     for _ in range(1000):
-        actions = rng.integers([9, 16, 2, 2, 3, 2, 2], size=(10, ACTION_DIM)).astype(np.int64)
+        actions = rng.integers([9, 16, 2, 2, 3, 2, 2, 2], size=(10, ACTION_DIM)).astype(np.int64)
         _, _, terms, _, infos = env.step(actions)
         for d in infos:
             if d:

@@ -11,7 +11,7 @@ import pufferlib
 
 import nav
 from map import make_cs2_map
-from nav import ACTION_DIM, N_AGENTS, OBS_DIM, ROUND_TIME
+from nav import ACTION_DIM, ACTION_MASK_DIM, N_AGENTS, OBS_DIM, ROUND_TIME
 
 _DIR = Path(__file__).parent
 if str(_DIR) not in sys.path:
@@ -145,6 +145,11 @@ class AgentStateC(ctypes.Structure):
         ("human_controlled", ctypes.c_uint8),
         ("_pad3", ctypes.c_int8 * 3),
         ("aim_rad", ctypes.c_float),
+                                                       # Phase 7 additions (jump)
+        ("vz", ctypes.c_float),
+        ("is_airborne", ctypes.c_int8),
+        ("_pad4", ctypes.c_int8 * 3),
+        ("jump_cd", ctypes.c_int32),
     ]
 
 
@@ -195,6 +200,7 @@ class StepStatsC(ctypes.Structure):
         ("action_reload", ctypes.c_int32 * 2),
         ("action_weapon", ctypes.c_int32 * 3),
         ("action_crouch", ctypes.c_int32 * 2),
+        ("action_jump", ctypes.c_int32 * 2),
         ("reward_win", ctypes.c_float),
         ("reward_kills", ctypes.c_float),
         ("reward_deaths", ctypes.c_float),
@@ -218,20 +224,24 @@ class Dust2EnvC(ctypes.Structure):
         ("truncations", ctypes.c_int8 * N_AGENTS),
         ("team_spirit", ctypes.c_float),
         ("rng", ctypes.c_uint32),
-        ("masks", ctypes.c_int8 * (N_AGENTS * 36)),
+        ("masks", ctypes.c_int8 * (N_AGENTS * ACTION_MASK_DIM)),
         ("client", ctypes.c_void_p),                                   # Client* — NULL during training
     ]
 
 
-# Sanity-check struct sizes match the C layout — catches future drift early
-assert ctypes.sizeof(AgentStateC) == 140, (
-    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 140)")
-assert ctypes.sizeof(GameStateC) == 1464, (
-    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1464)")
-assert ctypes.sizeof(StepStatsC) == 236, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 236)")
-assert ctypes.sizeof(Dust2EnvC) == 6544, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6544)")
+# Sanity-check struct sizes match the C layout — catches future drift early.
+# Sizes updated for Phase 7 (jump): AgentState +12 bytes (vz, is_airborne,
+# pad, jump_cd), StepStats +8 bytes (action_jump[2]). GameState rolls up
+# the agent-array delta (10×12=120). Dust2EnvC rolls up game + 2× stats +
+# 20 bytes of added mask slots + alignment.
+assert ctypes.sizeof(AgentStateC) == 152, (
+    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 152)")
+assert ctypes.sizeof(GameStateC) == 1584, (
+    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1584)")
+assert ctypes.sizeof(StepStatsC) == 244, (
+    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 244)")
+assert ctypes.sizeof(Dust2EnvC) == 6696, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6696)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -277,7 +287,7 @@ class Cs2Env(pufferlib.PufferEnv):
                                                              high=5.0,
                                                              shape=(OBS_DIM, ),
                                                              dtype=np.float32)
-        self.single_action_space = gymnasium.spaces.MultiDiscrete([9, 16, 2, 2, 3, 2, 2])
+        self.single_action_space = gymnasium.spaces.MultiDiscrete([9, 16, 2, 2, 3, 2, 2, 2])
         self.num_agents = N_AGENTS
         super().__init__(buf)
 
@@ -413,9 +423,9 @@ class Cs2Env(pufferlib.PufferEnv):
         obs_ptr, rew_ptr, term_ptr, trunc_ptr = binding.get_buffers(self._capsule)
         masks_ptr = binding.get_masks(self._capsule)
         self._masks_view = np.frombuffer(
-            (ctypes.c_int8 * (N_AGENTS * 36)).from_address(masks_ptr),
+            (ctypes.c_int8 * (N_AGENTS * ACTION_MASK_DIM)).from_address(masks_ptr),
             dtype=np.int8,
-        ).reshape(N_AGENTS, 36)
+        ).reshape(N_AGENTS, ACTION_MASK_DIM)
         self._obs_view = np.frombuffer(
             (ctypes.c_float * (N_AGENTS * OBS_DIM)).from_address(obs_ptr),
             dtype=np.float32,
@@ -561,6 +571,8 @@ class Cs2Env(pufferlib.PufferEnv):
             summary[f"action_weapon_{idx}"] = int(stats.action_weapon[idx])
         for idx in range(2):
             summary[f"action_crouch_{idx}"] = int(stats.action_crouch[idx])
+        for idx in range(2):
+            summary[f"action_jump_{idx}"] = int(stats.action_jump[idx])
         summary.update({
             "winner": int(stats.winner),
             "winner_t": int(stats.winner_t),

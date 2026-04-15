@@ -33,6 +33,13 @@ typedef struct {
     Vector2       last_mouse;
     int           mouse_init;
     int           mouse_captured;
+    /* Render-frame key-edge latches. Raylib's IsKeyPressed only returns true
+     * on the single render frame the key transitions down, but input is
+     * sampled by human_input at the sim tick (16 Hz — every ~4 render
+     * frames). Without a latch, press-edges that land between sim ticks are
+     * silently dropped. Each per-frame poll sets the latch; the sim-tick
+     * sampler consumes it. */
+    int jump_pending;
 } Client;
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -334,6 +341,18 @@ static void update_camera(Client* cl, Dust2Env* env, float alpha) {
 
     cl->yaw   += md.x * MOUSE_SENSITIVITY;
     cl->pitch -= md.y * MOUSE_SENSITIVITY;
+
+    /* Latch press-edges for inputs that fire once per key-press — sampled
+     * every render frame, consumed at the next sim tick by human_input.
+     * Without this, a ~60 Hz render loop vs 16 Hz sim tick drops 3 out of
+     * 4 jump inputs because raylib's per-frame event (IsKeyPressed /
+     * GetMouseWheelMove) fires on exactly one render frame.
+     *
+     * Jump = mousewheel-down. GetMouseWheelMove() returns the wheel delta
+     * for this frame (positive = up, negative = down); we latch any
+     * negative tick as a jump request. */
+    if (GetMouseWheelMove() < 0.0f)
+        cl->jump_pending = 1;
     /* Clamp pitch to ±89° in radians */
     if (cl->pitch > 1.5533f)
         cl->pitch = 1.5533f;
@@ -403,6 +422,7 @@ static void draw_agents(Dust2Env* env, Client* cl, float alpha) {
 
         float x     = _lerp(cl->prev[i].x, cl->curr[i].x, alpha);
         float y     = _lerp(cl->prev[i].y, cl->curr[i].y, alpha);
+        float z     = _lerp(cl->prev[i].z, cl->curr[i].z, alpha);
         float fa    = _lerp_angle(cl->prev[i].facing, cl->curr[i].facing, alpha);
         int   alive = cl->curr[i].alive;
 
@@ -418,23 +438,24 @@ static void draw_agents(Dust2Env* env, Client* cl, float alpha) {
             head_col = (Color){60, 130, 255, 255};
         }
 
-        /* Body cylinder: base at floor, top 96 units */
-        DrawCylinder((Vector3){x, 0.0f, y}, 12.0f, 12.0f, 96.0f, 8, body_col);
-        /* Head sphere: at 108 units */
-        DrawSphere((Vector3){x, 108.0f, y}, 16.0f, head_col);
+        /* Agent rig offsets from feet: body extends 0→96, head at 108, bomb
+         * marker at 130. Agent z (ground or airborne) becomes the feet level,
+         * so a jumping agent visibly rises with their velocity. */
+        DrawCylinder((Vector3){x, z, y}, 12.0f, 12.0f, 96.0f, 8, body_col);
+        DrawSphere((Vector3){x, z + 108.0f, y}, 16.0f, head_col);
 
         /* Aim direction line from head */
         if (alive) {
             float aim_x = x + cosf(fa) * 60.0f;
             float aim_z = y + sinf(fa) * 60.0f;
-            DrawLine3D((Vector3){x, 108.0f, y},
-                       (Vector3){aim_x, 108.0f, aim_z},
+            DrawLine3D((Vector3){x, z + 108.0f, y},
+                       (Vector3){aim_x, z + 108.0f, aim_z},
                        (Color){255, 255, 0, 200});
         }
 
         /* Bomb indicator above carrier */
         if (cl->curr[i].has_bomb && alive) {
-            DrawSphere((Vector3){x, 130.0f, y}, 8.0f, YELLOW);
+            DrawSphere((Vector3){x, z + 130.0f, y}, 8.0f, YELLOW);
         }
     }
 }

@@ -245,7 +245,7 @@ public class CS2RLBotPlugin : BasePlugin
             {
                 _policies[bot]      = new PolicyInference(_modelPath, _actionSizes, Logger);
                 _executors[bot]     = new ActionExecutor();
-                _cachedActions[bot] = new int[7]; // always 7 slots; extras default to 0
+                _cachedActions[bot] = new int[8]; // 8 slots (move/aim/shoot/use/weapon/reload/crouch/jump); extras default to 0
                 _enemyMemories[bot] = new EnemyMemory();
                 Logger.LogInformation("[CS2RLBot] Bot registered: {Name} team={Team}",
                     bot.PlayerName, bot.TeamNum);

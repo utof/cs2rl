@@ -70,4 +70,11 @@ void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
     act[4] = IsKeyDown(KEY_ONE) ? 1 : IsKeyDown(KEY_TWO) ? 2 : 0; /* weapon */
     act[5] = IsKeyDown(KEY_E) ? 1 : 0;                            /* use (plant/defuse) */
     act[6] = IsKeyDown(KEY_LEFT_CONTROL) ? 1 : 0;                 /* crouch */
+    /* Jump: consume the mousewheel-down press-edge latched in update_camera.
+     * We can't poll GetMouseWheelMove directly here — this function only
+     * runs at sim-tick rate (~16 Hz) while the wheel event lives on one
+     * render frame out of ~4, so direct polling would silently drop 3/4
+     * of jump inputs. */
+    act[7]           = cl->jump_pending ? 1 : 0;
+    cl->jump_pending = 0;
 }

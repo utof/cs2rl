@@ -14,7 +14,7 @@ from shapely.strtree import STRtree
 
 # ── Multiprocessing workers for vis matrix (must be module-level to be picklable) ──
 
-_vc = None  # per-worker VisibilityChecker instance
+_vc = None                             # per-worker VisibilityChecker instance
 
 
 def _vis_worker_init(tri_path_str: str):
@@ -71,10 +71,9 @@ class NavGraph:
 
         # ── Load nav data ──────────────────────────────────────────────────
         self.nav = Nav.from_json(nav_path)
-        self.areas: dict[int, object] = self.nav.areas  # dict[int, NavArea]
+        self.areas: dict[int, object] = self.nav.areas                 # dict[int, NavArea]
         self.area_ids: list[int] = sorted(
-            self.areas.keys()
-        )  # sorted for stable _id_to_idx indices across runs
+            self.areas.keys())                                         # sorted for stable _id_to_idx indices across runs
         self.N: int = len(self.area_ids)
         self._id_to_idx: dict[int, int] = {aid: i for i, aid in enumerate(self.area_ids)}
 
@@ -85,22 +84,18 @@ class NavGraph:
             self.centroids[aid] = np.array([c.x, c.y], dtype=np.float32)
 
         # Pre-built (N, 2) matrix for vectorised nearest-centroid lookups
-        self._centroid_matrix: np.ndarray = np.array(
-            [self.centroids[aid] for aid in self.area_ids], dtype=np.float32
-        )  # shape (N, 2)
+        self._centroid_matrix: np.ndarray = np.array([self.centroids[aid] for aid in self.area_ids],
+                                                     dtype=np.float32)                               # shape (N, 2)
 
         # Pre-built (N, 3) matrix for 3D snapping (spawn slots need z to avoid floor mismatches)
         self._centroid_matrix_3d: np.ndarray = np.array(
-            [
-                [
-                    self.areas[aid].centroid.x,
-                    self.areas[aid].centroid.y,
-                    self.areas[aid].centroid.z,
-                ]
-                for aid in self.area_ids
-            ],
+            [[
+                self.areas[aid].centroid.x,
+                self.areas[aid].centroid.y,
+                self.areas[aid].centroid.z,
+            ] for aid in self.area_ids],
             dtype=np.float32,
-        )  # shape (N, 3)
+        )                                                              # shape (N, 3)
 
         # ── Build networkx graph ───────────────────────────────────────────
         # nx.Graph (undirected): a small fraction of CS2 nav connections are
@@ -129,9 +124,7 @@ class NavGraph:
 
     # ── Wall segment extraction ────────────────────────────────────────────
 
-    def _extract_wall_segments(
-        self,
-    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    def _extract_wall_segments(self, ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
         """Extract boundary edges — edges shared by exactly one area polygon."""
         edge_count: dict[tuple, int] = {}
 
@@ -200,7 +193,7 @@ class NavGraph:
                 print(f"[NavGraph] Loaded position grid {self._grid_w}×{self._grid_h} from cache")
                 return
 
-        all_bounds = np.array([p.bounds for p in self._area_polys])  # (N, 4)
+        all_bounds = np.array([p.bounds for p in self._area_polys])    # (N, 4)
         x_min = float(all_bounds[:, 0].min()) - cell_size
         y_min = float(all_bounds[:, 1].min()) - cell_size
         x_max = float(all_bounds[:, 2].max()) + cell_size
@@ -223,11 +216,11 @@ class NavGraph:
             gy1 = min(H - 1, int((maxy - y_min) * inv) + 1)
             if gx1 < gx0 or gy1 < gy0:
                 continue
-            cxs = xs[gx0 : gx1 + 1]
-            cys = ys[gy0 : gy1 + 1]
+            cxs = xs[gx0:gx1 + 1]
+            cys = ys[gy0:gy1 + 1]
             xx, yy = np.meshgrid(cxs, cys)
             inside = sh.contains_xy(poly, xx.ravel(), yy.ravel()).reshape(xx.shape)
-            grid[gy0 : gy1 + 1, gx0 : gx1 + 1][inside] = i
+            grid[gy0:gy1 + 1, gx0:gx1 + 1][inside] = i
 
         self._grid_cell_size = cell_size
         self._grid_inv_cell = inv
@@ -239,8 +232,7 @@ class NavGraph:
 
         coverage = (grid >= 0).mean()
         print(
-            f"[NavGraph] Built position grid {W}×{H} (cell={cell_size}u, {coverage:.1%} coverage)"
-        )
+            f"[NavGraph] Built position grid {W}×{H} (cell={cell_size}u, {coverage:.1%} coverage)")
 
         if cache:
             np.save(
@@ -279,7 +271,7 @@ class NavGraph:
             if self._area_polys[idx].contains(pt):
                 return self.area_ids[idx]
         # Fallback: nearest centroid — vectorised over all N areas
-        diff = self._centroid_matrix - pos_xy  # (N, 2)
+        diff = self._centroid_matrix - pos_xy          # (N, 2)
         idx = int(np.argmin((diff * diff).sum(axis=1)))
         return self.area_ids[idx]
 
@@ -360,35 +352,29 @@ class NavGraph:
         tri_path = TRIS_DIR / "de_dust2.tri"
         if not tri_path.exists():
             raise FileNotFoundError(
-                f".tri file not found at {tri_path}\nDownload it with:  awpy get tris"
-            )
+                f".tri file not found at {tri_path}\nDownload it with:  awpy get tris")
 
-        pts = [
-            (
-                float(self.areas[aid].centroid.x),
-                float(self.areas[aid].centroid.y),
-                float(self.areas[aid].centroid.z),
-            )
-            for aid in self.area_ids
-        ]
+        pts = [(
+            float(self.areas[aid].centroid.x),
+            float(self.areas[aid].centroid.y),
+            float(self.areas[aid].centroid.z),
+        ) for aid in self.area_ids]
 
         n_workers = os.cpu_count() or 4
         # ~8 tasks per worker for good load-balancing without excessive IPC overhead
         chunk_size = max(1, self.N // (n_workers * 8))
         chunks = [list(range(i, min(i + chunk_size, self.N))) for i in range(0, self.N, chunk_size)]
 
-        print(
-            f"[NavGraph] Building {self.N}×{self.N} vis matrix "
-            f"({n_workers} workers, {len(chunks)} chunks)..."
-        )
+        print(f"[NavGraph] Building {self.N}×{self.N} vis matrix "
+              f"({n_workers} workers, {len(chunks)} chunks)...")
         print("[NavGraph] Workers initialising VisibilityChecker in parallel (~40s)...")
         t0 = time.time()
 
         partial_rows: dict = {}
         with ProcessPoolExecutor(
-            max_workers=n_workers,
-            initializer=_vis_worker_init,
-            initargs=(str(tri_path),),
+                max_workers=n_workers,
+                initializer=_vis_worker_init,
+                initargs=(str(tri_path), ),
         ) as executor:
             futures = [executor.submit(_vis_compute_rows, chunk, pts) for chunk in chunks]
             for fut in as_completed(futures):
@@ -442,25 +428,27 @@ _MAP_Y_OFFSET = (MAP_Y_MAX + MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN)
 # Direction vectors for movement actions (built once at import time)
 _DIR_VECTORS = {
     0: np.array([0.0, 0.0]),
-    1: np.array([0.0, 1.0]),  # N
-    2: np.array([0.7071067811865476, 0.7071067811865476]),  # NE (pre-normalised)
-    3: np.array([1.0, 0.0]),  # E
-    4: np.array([0.7071067811865476, -0.7071067811865476]),  # SE
-    5: np.array([0.0, -1.0]),  # S
-    6: np.array([-0.7071067811865476, -0.7071067811865476]),  # SW
-    7: np.array([-1.0, 0.0]),  # W
-    8: np.array([-0.7071067811865476, 0.7071067811865476]),  # NW
+    1: np.array([0.0, 1.0]),                                           # N
+    2: np.array([0.7071067811865476, 0.7071067811865476]),             # NE (pre-normalised)
+    3: np.array([1.0, 0.0]),                                           # E
+    4: np.array([0.7071067811865476, -0.7071067811865476]),            # SE
+    5: np.array([0.0, -1.0]),                                          # S
+    6: np.array([-0.7071067811865476, -0.7071067811865476]),           # SW
+    7: np.array([-1.0, 0.0]),                                          # W
+    8: np.array([-0.7071067811865476, 0.7071067811865476]),            # NW
 }
-# Pre-scaled delta per direction — avoids multiplying every step
+                                                                       # Pre-scaled delta per direction — avoids multiplying every step
 _DELTA_VECTORS = {k: v * (MOVE_SPEED * DT) for k, v in _DIR_VECTORS.items()}
-# Pre-computed facing angle per direction — avoids np.arctan2 every step
+                                                                       # Pre-computed facing angle per direction — avoids np.arctan2 every step
 _DIR_FACING = {k: math.atan2(float(v[1]), float(v[0])) for k, v in _DIR_VECTORS.items()}
-MAX_TURN_SPEED_RAD = math.pi / 4  # 45 degrees per tick — max facing rotation rate
+MAX_TURN_SPEED_RAD = math.pi / 4                                       # 45 degrees per tick — max facing rotation rate
 
 N_AGENTS = 10
 TEAM_SIZE = 5
 OBS_DIM = 104
-ACTION_DIM = 7
+ACTION_DIM = 8
+# Must match ACTION_MASK_DIM in cs2_types.h: 9+16+2+2+3+2+2+2 = 38
+ACTION_MASK_DIM = 38
 INVALID_AREA_ID = -1
 STALE_MEMORY_TICK = -9999
 _NOOP_ACTION = np.zeros(ACTION_DIM, dtype=np.int64)
@@ -695,4 +683,3 @@ def _compute_area_distance_to_targets(
             q.append(nbr)
 
     return dist
-
