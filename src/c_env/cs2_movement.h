@@ -28,6 +28,29 @@ count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size)
  * avoids a cross-header coupling for a single constant used only here. */
 #define DT_SIM_MOVE (1.0f / 16.0f)
 
+/* Resolve an attempted XY position against the nav-mesh raster.
+ *
+ * Returns the destination area index if (tx, ty) is walkable from a->area_idx
+ * (i.e. on-grid, on-mesh, and the same area or an adjacency-graph neighbour),
+ * or -1 if the attempted step hits a wall / leaves the mesh.
+ *
+ * Shared by the axis-split wall-slide logic in process_movement: we first try
+ * the full diagonal step, and on block we retry each axis separately — so
+ * touching a wall while moving diagonally into it preserves the tangential
+ * velocity component instead of producing a full stop. */
+static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, float tx, float ty) {
+    int gx = (int)((tx - sd->grid_x_min) * sd->grid_inv_cell);
+    int gy = (int)((ty - sd->grid_y_min) * sd->grid_inv_cell);
+    if (gx < 0 || gx >= sd->grid_w || gy < 0 || gy >= sd->grid_h)
+        return -1;
+    int target_idx = sd->raster_grid[gy * sd->grid_w + gx];
+    if (target_idx < 0)
+        return -1;
+    if (target_idx != a->area_idx && !sd->adjacency[a->area_idx * sd->N + target_idx])
+        return -1;
+    return target_idx;
+}
+
 /* Facing-local unit vectors for 8-bin movement input: (right, forward) in
  * the agent's own frame. Order matches _wasd_to_local_bin in cs2_input.h:
  *   0=none, 1=W, 2=WD, 3=D, 4=SD, 5=S, 6=SA, 7=A, 8=WA
@@ -221,29 +244,35 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
         float ty = a->y + vel_y * DT_SIM_MOVE;
         float tz = a->z + vel_z * DT_SIM_MOVE;
 
-        int gx = (int)((tx - sd->grid_x_min) * sd->grid_inv_cell);
-        int gy = (int)((ty - sd->grid_y_min) * sd->grid_inv_cell);
-        if (gx < 0 || gx >= sd->grid_w || gy < 0 || gy >= sd->grid_h) {
-            if (a->team == 0) {
-                ss->blocked_moves_t++;
-                es->blocked_moves_t++;
+        /* Axis-split collision / wall sliding.
+         *
+         * First try the full diagonal step. If that's blocked, retry each
+         * axis in isolation and keep whichever component is unobstructed —
+         * so hugging a wall while pressing forward slides along the wall
+         * (tangential velocity preserved, normal velocity zeroed) instead
+         * of producing a dead-stop. Only when BOTH single-axis moves also
+         * fail (inside-corner or agent already wedged) do we register a
+         * blocked move and zero horizontal velocity entirely. */
+        int target_idx = _resolve_xy_collision(sd, a, tx, ty);
+        if (target_idx >= 0) {
+            a->x        = tx;
+            a->y        = ty;
+            a->area_idx = target_idx;
+        } else {
+            int idx_x = _resolve_xy_collision(sd, a, tx, a->y);
+            int idx_y = _resolve_xy_collision(sd, a, a->x, ty);
+            if (idx_x >= 0) {
+                /* Slide along X: tangent to a horizontal wall. */
+                a->x        = tx;
+                a->area_idx = idx_x;
+                vel_y       = 0.0f;
+            } else if (idx_y >= 0) {
+                /* Slide along Y: tangent to a vertical wall. */
+                a->y        = ty;
+                a->area_idx = idx_y;
+                vel_x       = 0.0f;
             } else {
-                ss->blocked_moves_ct++;
-                es->blocked_moves_ct++;
-            }
-            /* Wall-stop: zero horizontal velocity but keep vz (still in air
-             * if airborne). Gravity keeps ticking below. */
-            vel_x = 0.0f;
-            vel_y = 0.0f;
-            tx    = a->x;
-            ty    = a->y;
-            goto apply_z_integration;
-        }
-        {
-            int target_idx = sd->raster_grid[gy * sd->grid_w + gx];
-            /* Allow same-area movement (sub-cell step may not cross a boundary). */
-            if (target_idx < 0 ||
-                (target_idx != a->area_idx && !sd->adjacency[a->area_idx * sd->N + target_idx])) {
+                /* Fully stuck: count as a blocked move and stop. */
                 if (a->team == 0) {
                     ss->blocked_moves_t++;
                     es->blocked_moves_t++;
@@ -253,16 +282,9 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
                 }
                 vel_x = 0.0f;
                 vel_y = 0.0f;
-                tx    = a->x;
-                ty    = a->y;
-            } else {
-                a->area_idx = target_idx;
-                a->x        = tx;
-                a->y        = ty;
             }
         }
 
-    apply_z_integration:
         /* Apply second half of gravity (leapfrog split) so velocity at
          * start of next tick is correctly phase-aligned with position. */
         if (a->is_airborne)

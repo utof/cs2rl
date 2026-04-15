@@ -51,8 +51,14 @@ static void process_combat(Dust2Env*      env,
             continue;
 
         const WeaponDef* def = &WEAPON_DEFS[a->weapon_slot];
-        a->fire_cd           = def->cycle_ticks;
-        a->fired_this_tick   = 1;
+        /* Dry-fire: empty magazine + finite-ammo weapon. Skip the shot entirely
+         * — no trigger cooldown, no muzzle flash, no round consumed. Mirrors CS
+         * where pressing fire on an empty clip is a no-op until you reload. */
+        if (def->mag_size > 0 && a->ammo_clip[a->weapon_slot] <= 0)
+            continue;
+
+        a->fire_cd         = def->cycle_ticks;
+        a->fired_this_tick = 1;
         if (def->mag_size > 0)
             a->ammo_clip[a->weapon_slot]--; /* consume one round */
 

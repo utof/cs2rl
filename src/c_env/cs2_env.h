@@ -221,9 +221,14 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
             m[36 + 1] = 0;
         int              slot = a->weapon_slot;
         const WeaponDef* def  = &WEAPON_DEFS[slot];
-        /* Shoot mask (offset 25+) */
-        int can_shoot = (a->fire_cd == 0 && a->reload_ticks == 0 && a->switch_ticks == 0);
-        m[25 + 1]     = (int8_t)can_shoot; /* shoot=yes */
+        /* Shoot mask (offset 25+). Also gate on clip ammo: finite-ammo weapons
+         * dry-fire into a no-op when clip is empty, so the policy shouldn't
+         * see shoot=1 as a legal choice until reload finishes. Knife
+         * (mag_size < 0) is always shootable. */
+        int has_ammo = (def->mag_size < 0) || (a->ammo_clip[slot] > 0);
+        int can_shoot =
+            (a->fire_cd == 0 && a->reload_ticks == 0 && a->switch_ticks == 0 && has_ammo);
+        m[25 + 1] = (int8_t)can_shoot; /* shoot=yes */
         /* Reload mask (offset 27+) */
         int can_reload =
             (def->mag_size > 0 && a->ammo_clip[slot] < def->mag_size && a->ammo_reserve[slot] > 0 &&

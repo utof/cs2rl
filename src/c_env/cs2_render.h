@@ -197,6 +197,18 @@ static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
 
             qsort(covs, (size_t)ncov, sizeof(_WallIv), _wall_iv_cmp);
 
+            /* Push the wall segment WALL_DEPTH/2 into the exterior halfspace
+             * so its visible cube sits entirely outside the walkable area.
+             * Without this offset the cube is centred on the nav-area
+             * boundary and overlaps ~4u of walkable tile, letting the player
+             * visually clip into walls as they approach. Sign matches the
+             * edge type (see e=0..3 layout above): left/bottom push negative,
+             * right/top push positive along the normal axis. */
+            float ofs     = WALL_DEPTH * 0.5f;
+            float shift_x = is_vertical ? ((e == 0) ? -ofs : ofs) : 0.0f;
+            float shift_y = is_vertical ? 0.0f : ((e == 2) ? -ofs : ofs);
+            float eline   = line + (is_vertical ? shift_x : shift_y);
+
             /* Walk sorted coverage intervals; emit the gaps as walls. */
             float cursor = seg_lo;
             for (int k = 0; k < ncov; k++) {
@@ -205,9 +217,9 @@ static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
                     if (wl->count < wl->capacity) {
                         Wall w;
                         if (is_vertical) {
-                            w = (Wall){line, cursor, line, lo, WALL_HEIGHT};
+                            w = (Wall){eline, cursor, eline, lo, WALL_HEIGHT};
                         } else {
-                            w = (Wall){cursor, line, lo, line, WALL_HEIGHT};
+                            w = (Wall){cursor, eline, lo, eline, WALL_HEIGHT};
                         }
                         wl->walls[wl->count++] = w;
                     }
@@ -218,9 +230,9 @@ static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
             if (cursor < seg_hi - EPS && wl->count < wl->capacity) {
                 Wall w;
                 if (is_vertical) {
-                    w = (Wall){line, cursor, line, seg_hi, WALL_HEIGHT};
+                    w = (Wall){eline, cursor, eline, seg_hi, WALL_HEIGHT};
                 } else {
-                    w = (Wall){cursor, line, seg_hi, line, WALL_HEIGHT};
+                    w = (Wall){cursor, eline, seg_hi, eline, WALL_HEIGHT};
                 }
                 wl->walls[wl->count++] = w;
             }
