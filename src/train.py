@@ -18,6 +18,7 @@ import argparse
 import json
 import multiprocessing as mp
 import random
+import sys
 import time
 import types
 from collections import Counter
@@ -28,6 +29,59 @@ import numpy as np
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
 OBS_DIM = 104
+
+
+def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
+    """Construct the train_config dict identically to the training path.
+
+    Extracted so --dump-config can produce the exact same dict without
+    spinning up an env. Any future changes to training HPs must live here,
+    not duplicated in train(). Keep this byte-identical to what train()
+    used to build inline — scripts/run_experiment.py hashes this dict as
+    a fingerprint, so silent drift here invalidates experiment provenance.
+    """
+    return {
+                                                       # Core PPO
+        "env": "cs2-dust2",
+        "device": args.device,
+        "seed": args.seed,
+        "total_timesteps": args.timesteps,
+        "batch_size": batch_size,
+        "bptt_horizon": bptt_horizon,
+        "minibatch_size": 8192,
+        "max_minibatch_size": 8192,
+        "update_epochs": 3,
+        "learning_rate": 3e-4,
+        "gamma": 0.999,
+        "gae_lambda": 0.95,
+        "clip_coef": 0.15,
+        "vf_coef": 0.5,
+        "vf_clip_coef": None,
+                                                       # ent_coef is a fallback; adaptive alpha overrides this in the patched train method.
+        "ent_coef": 0.1,
+        "max_grad_norm": 0.5,
+        "target_kl": 0.03,
+        "use_rnn": True,
+        "weight_decay": 1e-4,
+                                                       # Extras required by PuffeRL constructor
+        "compile": False,
+        "compile_mode": "default",
+        "compile_fullgraph": False,
+        "cpu_offload": False,
+        "torch_deterministic": False,
+        "optimizer": "adam",
+        "adam_beta1": 0.9,
+        "adam_beta2": 0.999,
+        "adam_eps": 1e-8,
+        "anneal_lr": True,
+        "checkpoint_interval": 200,
+        "data_dir": args.checkpoint_dir,
+        "precision": "float32",
+        "prio_alpha": 0.0,
+        "prio_beta0": 1.0,
+        "vtrace_rho_clip": 1.0,
+        "vtrace_c_clip": 1.0,
+    }
 
 
 def resolve_run_name(name: str) -> str:
@@ -624,9 +678,10 @@ def _patch_trainer_with_return_norm(trainer):
     _ret_count = torch.zeros(1, device=device)
 
     # ── ADAPTIVE ENTROPY (Lagrangian / SAC-style alpha) ────────────────────
-    max_entropy = sum(np.log(n) for n in ACTION_HEAD_SIZES)            # for MultiDiscrete([9,16,2,2,3,2,2])
-    target_entropy = 0.5 * max_entropy                                 # ≈ 2.14
-    entropy_floor = 0.3 * max_entropy                                  # collapse threshold
+    # max_entropy derived from MultiDiscrete([9,16,2,2,3,2,2]).
+    max_entropy = sum(np.log(n) for n in ACTION_HEAD_SIZES)
+    target_entropy = 0.5 * max_entropy                 # ≈ 2.14
+    entropy_floor = 0.3 * max_entropy                  # collapse threshold
     import math
 
     log_alpha = torch.tensor([math.log(0.1)], requires_grad=True, device=device)
@@ -1339,47 +1394,17 @@ def train(args):
     batch_size = args.num_envs * agents_per_env * bptt_horizon
     # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
 
-    train_config = {
-                                                       # Core PPO
-        "env": "cs2-dust2",
-        "device": device,
-        "seed": args.seed,
-        "total_timesteps": args.timesteps,
-        "batch_size": batch_size,
-        "bptt_horizon": bptt_horizon,
-        "minibatch_size": 8192,
-        "max_minibatch_size": 8192,
-        "update_epochs": 3,
-        "learning_rate": 3e-4,
-        "gamma": 0.999,
-        "gae_lambda": 0.95,
-        "clip_coef": 0.15,
-        "vf_coef": 0.5,
-        "vf_clip_coef": None,
-        "ent_coef": 0.1,                               # fallback; adaptive alpha overrides this in the patched train method
-        "max_grad_norm": 0.5,
-        "target_kl": 0.03,
-        "use_rnn": True,
-        "weight_decay": 1e-4,
-                                                       # Extras required by PuffeRL constructor
-        "compile": False,
-        "compile_mode": "default",
-        "compile_fullgraph": False,
-        "cpu_offload": False,
-        "torch_deterministic": False,
-        "optimizer": "adam",
-        "adam_beta1": 0.9,
-        "adam_beta2": 0.999,
-        "adam_eps": 1e-8,
-        "anneal_lr": True,
-        "checkpoint_interval": 200,
-        "data_dir": args.checkpoint_dir,
-        "precision": "float32",
-        "prio_alpha": 0.0,
-        "prio_beta0": 1.0,
-        "vtrace_rho_clip": 1.0,
-        "vtrace_c_clip": 1.0,
-    }
+    train_config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
+
+    # Provenance dump — the fingerprint hash is captured at --dump-config time,
+    # this write is just for later inspection. Wrapped safely so a serialization
+    # hiccup never kills training. sort_keys=True makes the file byte-stable so
+    # diffing two runs' config.json shows only real HP changes.
+    try:
+        (Path(args.checkpoint_dir) / "config.json").write_text(
+            json.dumps(train_config, sort_keys=True, indent=2, default=str))
+    except Exception as _e:
+        print(f"[Train] WARN: failed to write config.json: {_e}")
 
     # ── Resume from checkpoint ───────────────────────────────────────────────
     resume_path = getattr(args, "resume", None)
@@ -1459,9 +1484,9 @@ def train(args):
                     win_rate_ct,
                 )
                 logs["self_play/pool_size"] = float(len(self_play_mgr.pool))
-                logs["self_play/opponent_team"] = float(
-                    self_play_mgr.opponent_team == "ct")               # 1.0 = CT opponent, 0.0 = T opponent
-                                                                       # ────────────────────────────────────────────────────────────────
+                # opponent_team flag: 1.0 = CT opponent, 0.0 = T opponent.
+                logs["self_play/opponent_team"] = float(self_play_mgr.opponent_team == "ct")
+                # ────────────────────────────────────────────────────────────
 
             # ── Persist metrics ──────────────────────────────────────────────
             log_entry = {
@@ -1532,7 +1557,19 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--save_every_sec", type=int, default=300)
-    parser.add_argument("--checkpoint_dir", type=str, default=str(CHECKPOINTS_DIR))
+    parser.add_argument(
+        "--checkpoint_dir",
+        "--checkpoint-dir",
+        type=str,
+        default=str(CHECKPOINTS_DIR),
+        dest="checkpoint_dir",
+    )
+    parser.add_argument(
+        "--dump-config",
+        action="store_true",
+        help=("Write <checkpoint_dir>/config.json with the train_config dict "
+              "and exit (no training)."),
+    )
     parser.add_argument("--vec-backend", type=str, default="multiprocessing")
     parser.add_argument("--vec-num-workers", type=int, default=0)
     parser.add_argument("--vec-overwork", action="store_true")
@@ -1563,6 +1600,30 @@ if __name__ == "__main__":
         help="Disable self-play (both teams always use current policy)",
     )
     args = parser.parse_args()
+
+    if args.dump_config:
+        # Zero-side-effect mode: write config.json and exit. Runs BEFORE device
+        # detection and map loading so no torch/map imports are triggered. This
+        # lets scripts/run_experiment.py fingerprint the HPs cheaply (no env,
+        # no CUDA probe). Keep this branch lean — anything imported here adds
+        # startup cost to every experiment launch.
+        if args.device is None:
+            args.device = "cpu"        # placeholder; never used for training
+
+        ckpt_dir = Path(args.checkpoint_dir)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        # Match the exact arithmetic in train() so the fingerprint dict is
+        # identical to what training will use.
+        agents_per_env = 10
+        bptt_horizon = 64
+        batch_size = args.num_envs * agents_per_env * bptt_horizon
+
+        cfg = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
+        (ckpt_dir / "config.json").write_text(json.dumps(cfg, sort_keys=True, indent=2,
+                                                         default=str))
+        print(f"[DumpConfig] Wrote {ckpt_dir / 'config.json'}")
+        sys.exit(0)
 
     if args.device is None:
         import torch
