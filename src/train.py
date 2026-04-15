@@ -69,8 +69,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "clip_coef": 0.14,
         "vf_coef": 0.5,
         "vf_clip_coef": None,
-                                                       # ent_coef fallback; adaptive alpha overrides in patched train.
-        "ent_coef": 0.1,
+        "ent_coef": 0.1,                               # fallback; adaptive alpha overrides
         "max_grad_norm": 0.5,
         "target_kl": 0.03,
         "use_rnn": True,
@@ -1443,8 +1442,6 @@ def train(args):
             win_threshold=0.6,
             phase_length=50,                           # switch opponent team every ~4M steps
         )
-                                                       # Pre-seed pool with resume checkpoint so first opponents are
-                                                       # competent rather than near-random early-training snapshots.
         if resume_path and resume_path.exists():
             import shutil as _shutil
 
