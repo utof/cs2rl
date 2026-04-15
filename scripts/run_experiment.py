@@ -349,6 +349,8 @@ def main_run(args) -> int:
             str(args.timesteps),
             "--checkpoint_dir",
             str(ckpt_dir),
+            "--vec-num-workers",
+            "1",
         ]
         if args.resume:
             train_cmd.extend(["--resume", args.resume])
