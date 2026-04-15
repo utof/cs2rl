@@ -31,14 +31,26 @@ from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 OBS_DIM = 104
 
 
+def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
+    """Return (agents_per_env, bptt_horizon, batch_size) used by both training
+    and --dump-config. Single source of truth so the fingerprint dict captured
+    pre-training cannot drift from what train() actually runs.
+    """
+    agents_per_env = 10
+    bptt_horizon = 64
+    batch_size = num_envs * agents_per_env * bptt_horizon
+    return agents_per_env, bptt_horizon, batch_size
+
+
 def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     """Construct the train_config dict identically to the training path.
 
     Extracted so --dump-config can produce the exact same dict without
     spinning up an env. Any future changes to training HPs must live here,
-    not duplicated in train(). Keep this byte-identical to what train()
-    used to build inline — scripts/run_experiment.py hashes this dict as
-    a fingerprint, so silent drift here invalidates experiment provenance.
+    not duplicated in train(). Keep this semantically identical to what
+    train() used to build inline — scripts/run_experiment.py hashes this
+    dict as a fingerprint, so silent drift here invalidates experiment
+    provenance.
     """
     return {
                                                        # Core PPO
@@ -57,7 +69,8 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "clip_coef": 0.15,
         "vf_coef": 0.5,
         "vf_clip_coef": None,
-                                                       # ent_coef is a fallback; adaptive alpha overrides this in the patched train method.
+                                                       # ent_coef is a fallback; adaptive alpha overrides this in the patched
+                                                       # train method.
         "ent_coef": 0.1,
         "max_grad_norm": 0.5,
         "target_kl": 0.03,
@@ -1389,9 +1402,7 @@ def train(args):
     print(f"[Train] Building policy on device={device}...")
     policy = build_policy(vecenv, device)
 
-    agents_per_env = 10
-    bptt_horizon = 64
-    batch_size = args.num_envs * agents_per_env * bptt_horizon
+    agents_per_env, bptt_horizon, batch_size = compute_batch_dims(args.num_envs)
     # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
 
     train_config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
@@ -1613,11 +1624,8 @@ if __name__ == "__main__":
         ckpt_dir = Path(args.checkpoint_dir)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        # Match the exact arithmetic in train() so the fingerprint dict is
-        # identical to what training will use.
-        agents_per_env = 10
-        bptt_horizon = 64
-        batch_size = args.num_envs * agents_per_env * bptt_horizon
+        # Shared helper with train() so the fingerprint dict can't drift.
+        _, bptt_horizon, batch_size = compute_batch_dims(args.num_envs)
 
         cfg = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
         (ckpt_dir / "config.json").write_text(json.dumps(cfg, sort_keys=True, indent=2,
