@@ -70,7 +70,10 @@ def env_fingerprint(
 ) -> dict:
     """Capture the env-shape fingerprint by grepping the named files.
 
-    Does not import anything from src/ — uses regex on file contents.
+    Returns {"obs_dim", "action_head_sizes", "reward_terms"}. Does NOT populate
+    "c_env_sha" — that's the orchestrator's job (see run_experiment.py step 4
+    of §5.1 in the design spec), which injects it before calling behavior_hash.
+    Kept split so this helper stays pure: regex over file contents, no git.
     """
     train_text = train_py_path.read_text()
     obs_m = _OBS_DIM_RE.search(train_text)
