@@ -150,7 +150,6 @@ def main_reappend_ledger(args) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_subparsers(dest="mode")
 
     p.add_argument("--tag", type=str)
     p.add_argument("--hypothesis", type=str)
