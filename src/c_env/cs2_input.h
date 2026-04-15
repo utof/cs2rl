@@ -5,41 +5,39 @@
 #include "cs2_types.h"
 #include "cs2_render.h"
 
-/* Camera-relative movement: find movement bin (1–8) that best matches
- * the desired direction given WASD keys and current camera yaw.
- * Returns 0 if no keys pressed (stop).
+/* WASD → facing-local 8-bin movement encoding. No yaw dependency:
+ * the actual world-space direction is reconstructed inside process_movement
+ * from this bin + the agent's continuous aim_rad, so rotating the mouse
+ * while a key is held smoothly rotates the movement direction instead of
+ * snapping to 45° world bins.
+ *
+ * Bin layout (compass in facing-local frame, 0=none):
+ *   1 W     2 WD    3 D    4 SD   5 S    6 SA   7 A    8 WA
+ *   fwd     fwd-R   right  bk-R   back   bk-L   left   fwd-L
+ *
+ * Opposing keys (W+S, A+D) cancel to 0 on that axis, matching Source.
  */
-static int _camera_relative_move_bin(int w, int a, int s, int d, float yaw, StaticData* sd) {
-    if (!w && !a && !s && !d)
+static int _wasd_to_local_bin(int w, int a, int s, int d) {
+    int fy = (w ? 1 : 0) - (s ? 1 : 0); /* +1=forward, -1=back */
+    int fx = (d ? 1 : 0) - (a ? 1 : 0); /* +1=right,   -1=left */
+
+    if (fx == 0 && fy == 0)
         return 0;
-
-    /* Desired direction in camera space: right=+x, forward=+y */
-    float dx = (float)(d - a);
-    float dy = (float)(w - s);
-
-    /* Rotate into world space by yaw.
-     * Camera forward = (cosf(yaw), sinf(yaw)) in sim XY.
-     * right = (-sinf(yaw), cosf(yaw))
-     */
-    float world_dx = dy * cosf(yaw) - dx * sinf(yaw);
-    float world_dy = dy * sinf(yaw) + dx * cosf(yaw);
-    float desired  = atan2f(world_dy, world_dx);
-
-    int   best      = 1;
-    float best_diff = 1e9f;
-    for (int i = 1; i < 9; i++) {
-        float diff = sd->dir_facing[i] - desired;
-        while (diff > (float)M_PI)
-            diff -= 2.0f * (float)M_PI;
-        while (diff < -(float)M_PI)
-            diff += 2.0f * (float)M_PI;
-        float abs_diff = fabsf(diff);
-        if (abs_diff < best_diff) {
-            best_diff = abs_diff;
-            best      = i;
-        }
-    }
-    return best;
+    if (fx == 0 && fy > 0)
+        return 1; /* W  */
+    if (fx > 0 && fy > 0)
+        return 2; /* WD */
+    if (fx > 0 && fy == 0)
+        return 3; /* D  */
+    if (fx > 0 && fy < 0)
+        return 4; /* SD */
+    if (fx == 0 && fy < 0)
+        return 5; /* S  */
+    if (fx < 0 && fy < 0)
+        return 6; /* SA */
+    if (fx < 0 && fy == 0)
+        return 7; /* A  */
+    return 8;     /* WA */
 }
 
 /* human_input — called once per sim tick (16 Hz).
@@ -59,9 +57,12 @@ void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
 
     int32_t* act = actions + idx * ACTION_DIM;
 
-    /* Movement — camera-relative WASD */
-    act[0] = _camera_relative_move_bin(
-        IsKeyDown(KEY_W), IsKeyDown(KEY_A), IsKeyDown(KEY_S), IsKeyDown(KEY_D), cl->yaw, env->sd);
+    /* Movement — WASD → facing-local 8-bin. Actual world direction is
+     * computed in process_movement() from this bin + agent->aim_rad, which
+     * keeps movement continuously aligned with the mouse. env->sd is no
+     * longer consulted here (bin layout is fixed, not nav-derived). */
+    act[0] =
+        _wasd_to_local_bin(IsKeyDown(KEY_W), IsKeyDown(KEY_A), IsKeyDown(KEY_S), IsKeyDown(KEY_D));
 
     act[1] = 0; /* aim bin unused — continuous aim via agent->aim_rad */
     act[2] = IsMouseButtonDown(MOUSE_BUTTON_LEFT) ? 1 : 0;        /* shoot  */
