@@ -279,3 +279,69 @@ def test_full_run_with_changed_file(tmp_path):
         check=True,
     ).stdout
     assert "exp/" in branches
+
+
+def test_reappend_ledger_replaces_row(tmp_path):
+    """--reappend-ledger re-reads summary.json and rewrites the ledger row."""
+    repo = _init_fake_repo(tmp_path)
+
+    exp_dir = repo / "outputs" / "experiments"
+    run_id = "150426-9-rerun"
+    rd = exp_dir / run_id
+    rd.mkdir(parents=True)
+    (rd / "summary.json").write_text(
+        json.dumps({
+            "run_id": run_id,
+            "verdict": "keep",
+            "notes": "v1",
+        }))
+
+    ledger = exp_dir / "results.jsonl"
+    ledger.write_text(json.dumps({"run_id": run_id, "verdict": "discard", "notes": "old"}) + "\n")
+
+    (rd / "summary.json").write_text(
+        json.dumps({
+            "run_id": run_id,
+            "verdict": "keep",
+            "notes": "edited",
+        }))
+
+    env = os.environ.copy()
+    env["CS2RL_REPO_ROOT"] = str(repo)
+    r = subprocess.run(
+        [sys.executable, str(RUN_EXP), "--reappend-ledger", run_id],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+    assert r.returncode == 0, r.stderr
+
+    rows = [json.loads(ln) for ln in ledger.read_text().splitlines() if ln.strip()]
+    assert len(rows) == 1
+    assert rows[0]["notes"] == "edited"
+    assert rows[0]["verdict"] == "keep"
+
+
+def test_reappend_ledger_no_lock(tmp_path):
+    """--reappend-ledger works even when .lock exists (bypasses precondition)."""
+    repo = _init_fake_repo(tmp_path)
+    exp_dir = repo / "outputs" / "experiments"
+    (exp_dir / ".lock").write_text("stale")
+    rd = exp_dir / "150426-0-x"
+    rd.mkdir(parents=True)
+    (rd / "summary.json").write_text(json.dumps({"run_id": "150426-0-x", "verdict": "keep"}))
+
+    env = os.environ.copy()
+    env["CS2RL_REPO_ROOT"] = str(repo)
+    r = subprocess.run(
+        [sys.executable, str(RUN_EXP), "--reappend-ledger", "150426-0-x"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+    assert r.returncode == 0
+    assert (exp_dir / ".lock").exists()

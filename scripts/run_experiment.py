@@ -430,7 +430,24 @@ def main_run(args) -> int:
 
 
 def main_reappend_ledger(args) -> int:
-    raise NotImplementedError("reappend-ledger implemented in Task 7")
+    """Thin ledger-only re-write mode (spec §5.3).
+
+    Reads the run's summary.json and upserts the row into results.jsonl.
+    Deliberately bypasses the lock, git preconditions, and branch ops so the
+    subagent can re-sync its edits after updating summary.json in place.
+    """
+    run_id = args.reappend_ledger
+    run_dir = EXPERIMENTS_DIR / run_id
+    summary_path = run_dir / "summary.json"
+    if not summary_path.exists():
+        print(f"summary.json not found: {summary_path}", file=sys.stderr)
+        return 2
+    row = json.loads(summary_path.read_text())
+    if row.get("run_id") != run_id:
+        print(f"run_id mismatch: {row.get('run_id')} vs {run_id}", file=sys.stderr)
+        return 2
+    exp_lib.ledger_upsert(LEDGER_PATH, row)
+    return 0
 
 
 def main() -> int:
