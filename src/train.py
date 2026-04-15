@@ -66,7 +66,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "learning_rate": 3e-4,
         "gamma": 0.999,
         "gae_lambda": 0.95,
-        "clip_coef": 0.14,
+        "clip_coef": 0.15,
         "vf_coef": 0.5,
         "vf_clip_coef": None,
         "ent_coef": 0.1,                               # fallback; adaptive alpha overrides
