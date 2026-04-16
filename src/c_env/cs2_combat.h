@@ -88,7 +88,7 @@ static void process_combat(Dust2Env*      env,
              * centre must be within the enemy's horizontal silhouette.
              * |rx*dy - ry*dx| is the 2D cross-product magnitude; since
              * (dx, dy) is unit length, it equals the perpendicular offset
-             * in world units. Replaces the old ~45° cone (dot >= 0.7). */
+             * in world units. */
             float perp = fabsf(rx * dy - ry * dx);
             if (perp > HIT_HALF_WIDTH)
                 continue;

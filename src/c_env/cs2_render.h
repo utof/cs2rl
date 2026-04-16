@@ -94,11 +94,6 @@ static void _copy_agents_to_snapshot(Dust2Env* env, AgentSnapshot* snap) {
  *   3. Subtract the union of those intervals from [seg_lo, seg_hi].
  *   4. Emit the remaining gaps as wall segments.
  *
- * This replaces an older adjacency-matrix check that only accepted exact
- * or fully-containing edge matches, which wrongly produced internal walls
- * whenever adjacent areas had partial edge overlap or when areas overlapped
- * in 2D (e.g. Dust2 nav where a corridor area straddles a room edge).
- *
  * Called once from make_client().
  */
 

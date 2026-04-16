@@ -5,7 +5,7 @@ using CounterStrikeSharp.API.Modules.Utils;
 namespace CS2RLBot;
 
 /// <summary>
-/// Translates 7 discrete action integers into CS2 bot inputs.
+/// Translates 8 discrete action integers into CS2 bot inputs.
 /// Stateful: owns aim interpolation state for one bot instance.
 /// </summary>
 public sealed class ActionExecutor
@@ -51,7 +51,7 @@ public sealed class ActionExecutor
     // ── Execute ───────────────────────────────────────────────────────────────
     /// <param name="bot">Needed for ExecuteClientCommandFromServer (weapon_switch).</param>
     /// <param name="pawn">Needed for movement, angle, button state writes.</param>
-    /// <param name="actions">7-element int array. Missing heads (from 4-head checkpoint) are 0.</param>
+    /// <param name="actions">8-element int array (move, aim, shoot, reload, weapon, use, crouch, jump).</param>
     /// <param name="isInferenceTick">True every 4th server tick (16 Hz). Controls aim target update + weapon_switch gate.</param>
     public void Execute(
         CCSPlayerController bot,
@@ -62,7 +62,7 @@ public sealed class ActionExecutor
         var ms = pawn.MovementServices;
         if (ms == null) return;
 
-        if (actions.Length < 7) return;
+        if (actions.Length < 8) return;
 
         ref ulong btns = ref ms.Buttons.ButtonStates[0];
 
@@ -101,19 +101,16 @@ public sealed class ActionExecutor
 
         // ── Head 4: weapon_switch (3): 0=none 1=primary 2=secondary ──────────
         // Only fire on inference ticks to avoid spamming the command buffer.
-        // With the current 4-head checkpoint, actions[4] is always 0 (no-op).
         if (isInferenceTick && actions[4] != 0)
             bot.ExecuteClientCommandFromServer(actions[4] == 1 ? "slot1" : "slot2");
 
         // ── Head 5: use (2) — plant/defuse ───────────────────────────────────
-        // With current 4-head checkpoint, actions[5] is always 0 (no-op).
         if (actions[5] == 1)
             btns |= (ulong)PlayerButtons.Use;
         else
             btns &= ~(ulong)PlayerButtons.Use;
 
         // ── Head 6: crouch (2) ───────────────────────────────────────────────
-        // With current 4-head checkpoint, actions[6] is always 0 (no-op).
         if (actions[6] == 1)
             btns |= (ulong)PlayerButtons.Duck;
         else

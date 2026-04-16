@@ -689,7 +689,7 @@ def _patch_trainer_with_return_norm(trainer):
     _ret_count = torch.zeros(1, device=device)
 
     # ── ADAPTIVE ENTROPY (Lagrangian / SAC-style alpha) ────────────────────
-    # max_entropy derived from MultiDiscrete([9,16,2,2,3,2,2]).
+    # max_entropy derived from MultiDiscrete([9,16,2,2,3,2,2,2]).
     max_entropy = sum(np.log(n) for n in ACTION_HEAD_SIZES)
     target_entropy = 0.5 * max_entropy                 # ≈ 2.14
     entropy_floor = 0.3 * max_entropy                  # collapse threshold

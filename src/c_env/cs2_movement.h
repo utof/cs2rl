@@ -119,13 +119,7 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
 
         /* Crouch (head 6) — hold-to-crouch, matching CS's +duck behaviour.
          * crouch_act directly sets the state each tick: holding the key
-         * keeps you crouched, releasing stands you back up. The old
-         * toggle-on-press-with-cooldown logic oscillated between crouched
-         * and standing while the key was held (every CROUCH_COOLDOWN_TICKS
-         * it re-fired because input samples `IsKeyDown` every tick, not a
-         * press-edge). crouch_cd is still ticked but no longer gates
-         * transitions — keeping it around so any existing consumers that
-         * read it don't break; can be removed alongside task 023 cleanup. */
+         * keeps you crouched, releasing stands you back up. */
         int crouch_act  = actions[i * ACTION_DIM + 6];
         a->is_crouching = (crouch_act == 1) ? 1 : 0;
         count_action(ss->action_crouch, es->action_crouch, crouch_act, 2);
