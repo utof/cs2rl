@@ -10,9 +10,9 @@ import numpy as np
 import pufferlib
 
 import nav
-from _action_spec import ACTION_HEAD_SIZES
+from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM
 from map import make_cs2_map
-from nav import ACTION_DIM, ACTION_MASK_DIM, N_AGENTS, OBS_DIM, ROUND_TIME
+from nav import N_AGENTS, OBS_DIM, ROUND_TIME
 
 _DIR = Path(__file__).parent
 if str(_DIR) not in sys.path:
@@ -226,7 +226,7 @@ class Dust2EnvC(ctypes.Structure):
         ("team_spirit", ctypes.c_float),
         ("rng", ctypes.c_uint32),
         ("masks", ctypes.c_int8 * (N_AGENTS * ACTION_MASK_DIM)),
-        ("client", ctypes.c_void_p),                                   # Client* — NULL during training
+        ("client", ctypes.c_void_p),                                   # Client* (NULL in training)
     ]
 
 
