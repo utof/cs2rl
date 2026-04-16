@@ -36,19 +36,17 @@ class LSTMPolicyONNXWrapper(nn.Module):
         self.action_heads = action_heads
 
     def forward(
-        self,
-        obs: torch.Tensor,       # [B, obs_dim]
-        done: torch.Tensor,      # [B]
-        lstm_h: torch.Tensor,    # [1, B, hidden]
-        lstm_c: torch.Tensor,    # [1, B, hidden]
+            self,
+            obs: torch.Tensor,                                         # [B, obs_dim]
+            done: torch.Tensor,                                        # [B]
+            lstm_h: torch.Tensor,                                      # [1, B, hidden]
+            lstm_c: torch.Tensor,                                      # [1, B, hidden]
     ):
-        h = self.encoder(obs.float())                           # [B, hidden]
-        h_unsq = h.unsqueeze(0)                                 # [1, B, hidden]
-        done_mask = (1.0 - done.float()).view(1, -1, 1)         # [1, B, 1]
-        h_out, (h_new, c_new) = self.lstm(
-            h_unsq, (done_mask * lstm_h, done_mask * lstm_c)
-        )
-        h_out = h_out.squeeze(0)                                # [B, hidden]
+        h = self.encoder(obs.float())                                  # [B, hidden]
+        h_unsq = h.unsqueeze(0)                                        # [1, B, hidden]
+        done_mask = (1.0 - done.float()).view(1, -1, 1)                # [1, B, 1]
+        h_out, (h_new, c_new) = self.lstm(h_unsq, (done_mask * lstm_h, done_mask * lstm_c))
+        h_out = h_out.squeeze(0)                                       # [B, hidden]
 
         logits = tuple(head(h_out) for head in self.action_heads)
         return logits + (h_new, c_new)
@@ -62,9 +60,8 @@ def build_model(state_dict: dict) -> tuple:
     obs_dim = state_dict["encoder.0.weight"].shape[1]
     hidden_dim = state_dict["encoder.0.weight"].shape[0]
 
-    num_heads = sum(
-        1 for k in state_dict if k.startswith("action_heads.") and k.endswith(".weight")
-    )
+    num_heads = sum(1 for k in state_dict
+                    if k.startswith("action_heads.") and k.endswith(".weight"))
     action_sizes = [state_dict[f"action_heads.{i}.weight"].shape[0] for i in range(num_heads)]
 
     encoder = nn.Sequential(
@@ -80,6 +77,13 @@ def build_model(state_dict: dict) -> tuple:
 
     action_heads = nn.ModuleList([nn.Linear(hidden_dim, sz) for sz in action_sizes])
 
+    # Detect multi-layer LSTM checkpoints early with a clear error
+    lstm_layer_keys = [k for k in state_dict if k.startswith("lstm.") and "l1" in k]
+    if lstm_layer_keys:
+        raise ValueError(f"Multi-layer LSTM detected in checkpoint (keys: {lstm_layer_keys[:3]}). "
+                         "export_policy.py assumes num_layers=1. Update the LSTM reconstruction if "
+                         "training config changed.")
+
     wrapper = LSTMPolicyONNXWrapper(encoder, lstm, action_heads)
     result = wrapper.load_state_dict(state_dict, strict=False)
 
@@ -88,7 +92,8 @@ def build_model(state_dict: dict) -> tuple:
     if unexpected:
         raise RuntimeError(f"Unexpected keys in checkpoint (architecture mismatch?): {unexpected}")
     if result.missing_keys:
-        raise RuntimeError(f"Missing keys — checkpoint does not match reconstructed model: {result.missing_keys}")
+        raise RuntimeError("Missing keys — checkpoint does not match "
+                           f"reconstructed model: {result.missing_keys}")
 
     wrapper.eval()
 
@@ -122,8 +127,7 @@ def main():
     if not isinstance(state_dict, dict):
         raise SystemExit(
             f"Expected a state_dict (dict), got {type(state_dict).__name__}. "
-            "If this is a full training checkpoint, extract the policy state_dict first."
-        )
+            "If this is a full training checkpoint, extract the policy state_dict first.")
 
     wrapper, obs_dim, hidden_dim, action_sizes = build_model(state_dict)
 
@@ -136,18 +140,28 @@ def main():
     lstm_c = torch.zeros(1, 1, hidden_dim)
 
     input_names = ["obs", "done", "lstm_h", "lstm_c"]
-    output_names = (
-        [f"logits_{i}" for i in range(len(action_sizes))]
-        + ["lstm_h_out", "lstm_c_out"]
-    )
+    output_names = ([f"logits_{i}"
+                     for i in range(len(action_sizes))] + ["lstm_h_out", "lstm_c_out"])
 
     dynamic_axes = {
-        "obs": {0: "batch"},
-        "done": {0: "batch"},
-        "lstm_h": {1: "batch"},
-        "lstm_c": {1: "batch"},
-        "lstm_h_out": {1: "batch"},
-        "lstm_c_out": {1: "batch"},
+        "obs": {
+            0: "batch"
+        },
+        "done": {
+            0: "batch"
+        },
+        "lstm_h": {
+            1: "batch"
+        },
+        "lstm_c": {
+            1: "batch"
+        },
+        "lstm_h_out": {
+            1: "batch"
+        },
+        "lstm_c_out": {
+            1: "batch"
+        },
     }
     for name in output_names:
         if name.startswith("logits_"):
@@ -158,7 +172,8 @@ def main():
         wrapper,
         (obs, done, lstm_h, lstm_c),
         str(output_path),
-        opset_version=17,  # opset 17: required for OnnxRuntime 1.16+ and dynamic shapes; don't lower
+                                       # opset 17: required for OnnxRuntime 1.16+ and dynamic shapes
+        opset_version=17,
         dynamo=False,
         input_names=input_names,
         output_names=output_names,
@@ -188,17 +203,13 @@ def main():
     print(f"  Path:    {output_path}")
     print("  Inputs:")
     for inp in model_proto.graph.input:
-        shape = [
-            (d.dim_param if d.dim_param else d.dim_value)
-            for d in inp.type.tensor_type.shape.dim
-        ]
+        shape = [(d.dim_param if d.dim_param else d.dim_value)
+                 for d in inp.type.tensor_type.shape.dim]
         print(f"    {inp.name}: {shape}")
     print("  Outputs:")
     for out in model_proto.graph.output:
-        shape = [
-            (d.dim_param if d.dim_param else d.dim_value)
-            for d in out.type.tensor_type.shape.dim
-        ]
+        shape = [(d.dim_param if d.dim_param else d.dim_value)
+                 for d in out.type.tensor_type.shape.dim]
         print(f"    {out.name}: {shape}")
 
 
