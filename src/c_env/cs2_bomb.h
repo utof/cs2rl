@@ -18,7 +18,7 @@ static void process_bomb(Dust2Env*      env,
     if (!g->round_over && g->bomb_being_defused_by != -1) {
         AgentState* def = &g->agents[g->bomb_being_defused_by];
         if (!def->alive || def->area_idx != g->bomb_area_idx ||
-            actions[g->bomb_being_defused_by * ACTION_DIM + 5] == 0) {
+            actions[g->bomb_being_defused_by * ACTION_DIM + HEAD_USE] == 0) {
             g->bomb_being_defused_by = -1;
             g->bomb_defuse_ticks     = 0;
         }
@@ -27,7 +27,7 @@ static void process_bomb(Dust2Env*      env,
     if (!g->round_over) {
         for (int i = 0; i < N_AGENTS; i++) {
             AgentState* a = &g->agents[i];
-            if (!a->alive || actions[i * ACTION_DIM + 5] == 0) {
+            if (!a->alive || actions[i * ACTION_DIM + HEAD_USE] == 0) {
                 continue;
             }
 

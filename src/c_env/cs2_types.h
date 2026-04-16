@@ -4,6 +4,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <assert.h>
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -13,10 +14,34 @@
 #define N_AGENTS              10
 #define OBS_DIM               104
 #define ACTION_DIM            8
-#define ACTION_MASK_DIM       38 /* 9+16+2+2+3+2+2+2 (last head is jump) */
-#define WEAPON_SWITCH_TICKS   8  /* ~0.5s at 16 Hz */
-#define CROUCH_COOLDOWN_TICKS 7  /* ~0.4s at 16 Hz */
+#define ACTION_MASK_DIM       38
+#define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */
+#define CROUCH_COOLDOWN_TICKS 7 /* ~0.4s at 16 Hz */
 #define INVALID_AREA_IDX      (-1)
+
+/* ── Action head spec (single source of truth for names, sizes, order) ── */
+enum ActionHead {
+    HEAD_MOVE   = 0,
+    HEAD_AIM    = 1,
+    HEAD_SHOOT  = 2,
+    HEAD_RELOAD = 3,
+    HEAD_WEAPON = 4,
+    HEAD_USE    = 5,
+    HEAD_CROUCH = 6,
+    HEAD_JUMP   = 7,
+};
+
+static const int   ACTION_HEAD_SIZES[] = {9, 16, 2, 2, 3, 2, 2, 2};
+static const char* ACTION_HEAD_NAMES[] = {
+    "move",
+    "aim",
+    "shoot",
+    "reload",
+    "weapon",
+    "use",
+    "crouch",
+    "jump",
+};
 
 /* ── Weapon definition (compile-time table in cs2_weapons.h) ── */
 typedef struct {

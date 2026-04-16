@@ -12,6 +12,8 @@ from shapely.geometry import Point
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.strtree import STRtree
 
+from _action_spec import ACTION_DIM    # derived from cs2_types.h
+
 # ── Multiprocessing workers for vis matrix (must be module-level to be picklable) ──
 
 _vc = None                             # per-worker VisibilityChecker instance
@@ -72,8 +74,8 @@ class NavGraph:
         # ── Load nav data ──────────────────────────────────────────────────
         self.nav = Nav.from_json(nav_path)
         self.areas: dict[int, object] = self.nav.areas                 # dict[int, NavArea]
-        self.area_ids: list[int] = sorted(
-            self.areas.keys())                                         # sorted for stable _id_to_idx indices across runs
+                                                                       # sorted for stable _id_to_idx indices across runs
+        self.area_ids: list[int] = sorted(self.areas.keys())
         self.N: int = len(self.area_ids)
         self._id_to_idx: dict[int, int] = {aid: i for i, aid in enumerate(self.area_ids)}
 
@@ -84,8 +86,11 @@ class NavGraph:
             self.centroids[aid] = np.array([c.x, c.y], dtype=np.float32)
 
         # Pre-built (N, 2) matrix for vectorised nearest-centroid lookups
-        self._centroid_matrix: np.ndarray = np.array([self.centroids[aid] for aid in self.area_ids],
-                                                     dtype=np.float32)                               # shape (N, 2)
+        # shape (N, 2)
+        self._centroid_matrix: np.ndarray = np.array(
+            [self.centroids[aid] for aid in self.area_ids],
+            dtype=np.float32,
+        )
 
         # Pre-built (N, 3) matrix for 3D snapping (spawn slots need z to avoid floor mismatches)
         self._centroid_matrix_3d: np.ndarray = np.array(
@@ -439,16 +444,15 @@ _DIR_VECTORS = {
 }
                                                                        # Pre-scaled delta per direction — avoids multiplying every step
 _DELTA_VECTORS = {k: v * (MOVE_SPEED * DT) for k, v in _DIR_VECTORS.items()}
-                                                                       # Pre-computed facing angle per direction — avoids np.arctan2 every step
+                                                                       # Pre-computed facing angle per direction
 _DIR_FACING = {k: math.atan2(float(v[1]), float(v[0])) for k, v in _DIR_VECTORS.items()}
-MAX_TURN_SPEED_RAD = math.pi / 4                                       # 45 degrees per tick — max facing rotation rate
+                                                                       # 45 degrees per tick — max facing rotation rate
+MAX_TURN_SPEED_RAD = math.pi / 4
 
 N_AGENTS = 10
 TEAM_SIZE = 5
 OBS_DIM = 104
-ACTION_DIM = 8
-# Must match ACTION_MASK_DIM in cs2_types.h: 9+16+2+2+3+2+2+2 = 38
-ACTION_MASK_DIM = 38
+
 INVALID_AREA_ID = -1
 STALE_MEMORY_TICK = -9999
 _NOOP_ACTION = np.zeros(ACTION_DIM, dtype=np.int64)

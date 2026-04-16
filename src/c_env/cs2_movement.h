@@ -114,18 +114,18 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
         if (!a->alive)
             continue;
 
-        int move_dir = actions[i * ACTION_DIM + 0];
+        int move_dir = actions[i * ACTION_DIM + HEAD_MOVE];
         count_action(ss->action_move, es->action_move, move_dir, 9);
 
         /* Crouch (head 6) — hold-to-crouch, matching CS's +duck behaviour.
          * crouch_act directly sets the state each tick: holding the key
          * keeps you crouched, releasing stands you back up. */
-        int crouch_act  = actions[i * ACTION_DIM + 6];
+        int crouch_act  = actions[i * ACTION_DIM + HEAD_CROUCH];
         a->is_crouching = (crouch_act == 1) ? 1 : 0;
         count_action(ss->action_crouch, es->action_crouch, crouch_act, 2);
 
         int valid_dir = (move_dir >= 1 && move_dir <= 8);
-        int jump_act  = actions[i * ACTION_DIM + 7];
+        int jump_act  = actions[i * ACTION_DIM + HEAD_JUMP];
         count_action(ss->action_jump, es->action_jump, jump_act, 2);
 
         if (a->area_idx < 0) {

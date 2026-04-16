@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
+from _action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES          # from cs2_types.h
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
 OBS_DIM = 104
@@ -112,8 +113,6 @@ def resolve_run_name(name: str) -> str:
 
 
 AGENT_IDS = tuple([f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)])
-ACTION_HEAD_NAMES = ("move", "aim", "shoot", "use", "weapon", "reload", "crouch", "jump")
-ACTION_HEAD_SIZES = (9, 16, 2, 2, 3, 2, 2, 2)
 
 # ── SECTION: Smoke Test ────────────────────────────────────────────────────
 

@@ -115,6 +115,12 @@ public sealed class ActionExecutor
             btns |= (ulong)PlayerButtons.Duck;
         else
             btns &= ~(ulong)PlayerButtons.Duck;
+
+        // ── Head 7: jump (2) ─────────────────────────────────────────────────
+        if (actions.Length > 7 && actions[7] == 1)
+            btns |= (ulong)PlayerButtons.Jump;
+        else
+            btns &= ~(ulong)PlayerButtons.Jump;
     }
 
     /// <summary>Returns the argmax of a logit array.</summary>

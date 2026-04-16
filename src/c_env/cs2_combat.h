@@ -46,7 +46,7 @@ static void process_combat(Dust2Env*      env,
         if (!a->alive)
             continue;
 
-        int shoot = actions[i * ACTION_DIM + 2];
+        int shoot = actions[i * ACTION_DIM + HEAD_SHOOT];
         if (shoot == 0 || a->fire_cd > 0 || a->reload_ticks > 0 || a->switch_ticks > 0)
             continue;
 

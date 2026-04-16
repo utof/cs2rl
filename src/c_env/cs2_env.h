@@ -11,6 +11,13 @@
 #include "cs2_round.h"
 
 static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_spirit) {
+    /* Verify ACTION_HEAD_SIZES stays in sync with ACTION_DIM/ACTION_MASK_DIM */
+    {
+        int sum = 0;
+        for (int h = 0; h < ACTION_DIM; h++)
+            sum += ACTION_HEAD_SIZES[h];
+        assert(sum == ACTION_MASK_DIM && "ACTION_MASK_DIM != sum(ACTION_HEAD_SIZES)");
+    }
     memset(env, 0, sizeof(Dust2Env));
     env->sd          = sd;
     env->rng         = seed ? seed : 1;
@@ -93,11 +100,11 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
         if (!a->alive)
             continue;
 
-        int aim_act    = actions[i * ACTION_DIM + 1];
-        int shoot_act  = actions[i * ACTION_DIM + 2];
-        int reload_act = actions[i * ACTION_DIM + 3];
-        int wswitch    = actions[i * ACTION_DIM + 4];
-        /* use (5) and crouch (6) handled in cs2_bomb.h and cs2_movement.h */
+        int aim_act    = actions[i * ACTION_DIM + HEAD_AIM];
+        int shoot_act  = actions[i * ACTION_DIM + HEAD_SHOOT];
+        int reload_act = actions[i * ACTION_DIM + HEAD_RELOAD];
+        int wswitch    = actions[i * ACTION_DIM + HEAD_WEAPON];
+        /* use and crouch handled in cs2_bomb.h and cs2_movement.h */
 
         /* Aim: continuous for human, 16-bin for RL agents */
         if (a->human_controlled) {
@@ -180,7 +187,7 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
     /* Inaction cost: discourage agents from standing still during active play */
     if (!g->round_over) {
         for (int i = 0; i < N_AGENTS; i++) {
-            if (g->agents[i].alive && actions[i * ACTION_DIM + 0] == 0) {
+            if (g->agents[i].alive && actions[i * ACTION_DIM + HEAD_MOVE] == 0) {
                 env->rewards[i]                    -= env->sd->reward_inaction;
                 env->step_stats.reward_inaction    -= env->sd->reward_inaction;
                 env->episode_stats.reward_inaction -= env->sd->reward_inaction;
@@ -202,57 +209,57 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
                     bomb_just_defused,
                     bomb_defuser_id);
 
+    /* Compute mask offsets from ACTION_HEAD_SIZES (derived, not hardcoded) */
+    int moff[ACTION_DIM];
+    moff[0] = 0;
+    for (int h = 1; h < ACTION_DIM; h++)
+        moff[h] = moff[h - 1] + ACTION_HEAD_SIZES[h - 1];
+
     /* Compute action masks for next step */
     memset(env->masks, 1, sizeof(env->masks)); /* default: all valid */
     for (int i = 0; i < N_AGENTS; i++) {
         int8_t*     m = &env->masks[i * ACTION_MASK_DIM];
         AgentState* a = &g->agents[i];
-        /* Offsets in mask array: move=0..8, aim=9..24, shoot=25..26,
-           reload=27..28, wswitch=29..31, use=32..33, crouch=34..35,
-           jump=36..37 */
         if (!a->alive) {
             memset(m, 0, ACTION_MASK_DIM); /* dead: nothing valid */
             m[0] = 1;                      /* stop is always valid */
             continue;
         }
-        /* Jump mask (offset 36+): no jump while airborne, on cooldown, or
-         * crouching. "no-jump" (m[36]) is always valid. */
+        /* Jump mask: no jump while airborne, on cooldown, or crouching */
         if (a->is_airborne || a->jump_cd > 0 || a->is_crouching)
-            m[36 + 1] = 0;
+            m[moff[HEAD_JUMP] + 1] = 0;
         int              slot = a->weapon_slot;
         const WeaponDef* def  = &WEAPON_DEFS[slot];
-        /* Shoot mask (offset 25+). Also gate on clip ammo: finite-ammo weapons
-         * dry-fire into a no-op when clip is empty, so the policy shouldn't
-         * see shoot=1 as a legal choice until reload finishes. Knife
-         * (mag_size < 0) is always shootable. */
+        /* Shoot mask: gate on cooldown, reload, switch, and ammo.
+         * Knife (mag_size < 0) is always shootable. */
         int has_ammo = (def->mag_size < 0) || (a->ammo_clip[slot] > 0);
         int can_shoot =
             (a->fire_cd == 0 && a->reload_ticks == 0 && a->switch_ticks == 0 && has_ammo);
-        m[25 + 1] = (int8_t)can_shoot; /* shoot=yes */
-        /* Reload mask (offset 27+) */
+        m[moff[HEAD_SHOOT] + 1] = (int8_t)can_shoot;
+        /* Reload mask */
         int can_reload =
             (def->mag_size > 0 && a->ammo_clip[slot] < def->mag_size && a->ammo_reserve[slot] > 0 &&
              a->reload_ticks == 0 && a->switch_ticks == 0);
-        m[27 + 1] = (int8_t)can_reload;
-        /* Weapon switch mask (offset 29+): mask already-held weapon option */
+        m[moff[HEAD_RELOAD] + 1] = (int8_t)can_reload;
+        /* Weapon switch mask: mask already-held weapon option */
         if (slot == 0)
-            m[29 + 1] = 0; /* already rifle: switch_to_primary masked */
+            m[moff[HEAD_WEAPON] + 1] = 0;
         if (slot == 1)
-            m[29 + 2] = 0; /* already pistol: switch_to_secondary masked */
+            m[moff[HEAD_WEAPON] + 2] = 0;
         if (a->switch_ticks > 0) {
-            m[29 + 1] = 0;
-            m[29 + 2] = 0;
-        } /* in-progress: no new switch */
-        /* Use mask (offset 32+): T-use requires bomb zone; CT-use requires planted bomb nearby */
+            m[moff[HEAD_WEAPON] + 1] = 0;
+            m[moff[HEAD_WEAPON] + 2] = 0;
+        }
+        /* Use mask: T needs bomb+bombsite; CT needs planted bomb nearby */
         if (a->team == 0 && a->has_bomb && !g->bomb_planted) {
             int at_site = (a->area_idx >= 0) ? sd->bombsite_by_idx[a->area_idx] : 0;
             if (!at_site)
-                m[32 + 1] = 0;
+                m[moff[HEAD_USE] + 1] = 0;
         } else if (a->team == 1 && g->bomb_planted) {
             if (a->area_idx != g->bomb_area_idx)
-                m[32 + 1] = 0;
+                m[moff[HEAD_USE] + 1] = 0;
         } else {
-            m[32 + 1] = 0; /* no valid use in any other state */
+            m[moff[HEAD_USE] + 1] = 0;
         }
     }
 }

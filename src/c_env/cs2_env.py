@@ -10,6 +10,7 @@ import numpy as np
 import pufferlib
 
 import nav
+from _action_spec import ACTION_HEAD_SIZES
 from map import make_cs2_map
 from nav import ACTION_DIM, ACTION_MASK_DIM, N_AGENTS, OBS_DIM, ROUND_TIME
 
@@ -288,7 +289,7 @@ class Cs2Env(pufferlib.PufferEnv):
                                                              high=5.0,
                                                              shape=(OBS_DIM, ),
                                                              dtype=np.float32)
-        self.single_action_space = gymnasium.spaces.MultiDiscrete([9, 16, 2, 2, 3, 2, 2, 2])
+        self.single_action_space = gymnasium.spaces.MultiDiscrete(list(ACTION_HEAD_SIZES))
         self.num_agents = N_AGENTS
         super().__init__(buf)
 
