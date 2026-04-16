@@ -442,11 +442,14 @@ _DIR_VECTORS = {
     7: np.array([-1.0, 0.0]),                                          # W
     8: np.array([-0.7071067811865476, 0.7071067811865476]),            # NW
 }
-                                                                       # Pre-scaled delta per direction — avoids multiplying every step
+
+# Pre-scaled delta per direction
 _DELTA_VECTORS = {k: v * (MOVE_SPEED * DT) for k, v in _DIR_VECTORS.items()}
-                                                                       # Pre-computed facing angle per direction
+
+# Pre-computed facing angle per direction
 _DIR_FACING = {k: math.atan2(float(v[1]), float(v[0])) for k, v in _DIR_VECTORS.items()}
-                                                                       # 45 degrees per tick — max facing rotation rate
+
+# 45 deg/tick max facing rotation rate
 MAX_TURN_SPEED_RAD = math.pi / 4
 
 N_AGENTS = 10

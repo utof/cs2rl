@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from _action_spec import ACTION_HEAD_SIZES
 from nav import ACTION_DIM, OBS_DIM
 
 
@@ -46,7 +47,7 @@ def test_make_env_honors_external_buffers():
 
     from c_env.cs2_env import make_env
 
-    single_action = gymnasium.spaces.MultiDiscrete([9, 16, 2, 2, 3, 2, 2, 2])
+    single_action = gymnasium.spaces.MultiDiscrete(list(ACTION_HEAD_SIZES))
     joint_action = pufferlib.spaces.joint_space(single_action, 10)
     buf = {
         "observations": np.zeros((10, OBS_DIM), dtype=np.float32),

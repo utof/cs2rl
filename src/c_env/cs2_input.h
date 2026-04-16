@@ -61,20 +61,20 @@ void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
      * computed in process_movement() from this bin + agent->aim_rad, which
      * keeps movement continuously aligned with the mouse. env->sd is no
      * longer consulted here (bin layout is fixed, not nav-derived). */
-    act[0] =
+    act[HEAD_MOVE] =
         _wasd_to_local_bin(IsKeyDown(KEY_W), IsKeyDown(KEY_A), IsKeyDown(KEY_S), IsKeyDown(KEY_D));
 
-    act[1] = 0; /* aim bin unused — continuous aim via agent->aim_rad */
-    act[2] = IsMouseButtonDown(MOUSE_BUTTON_LEFT) ? 1 : 0;        /* shoot  */
-    act[3] = IsKeyDown(KEY_R) ? 1 : 0;                            /* reload */
-    act[4] = IsKeyDown(KEY_ONE) ? 1 : IsKeyDown(KEY_TWO) ? 2 : 0; /* weapon */
-    act[5] = IsKeyDown(KEY_E) ? 1 : 0;                            /* use (plant/defuse) */
-    act[6] = IsKeyDown(KEY_LEFT_CONTROL) ? 1 : 0;                 /* crouch */
+    act[HEAD_AIM]    = 0; /* aim bin unused — continuous aim via agent->aim_rad */
+    act[HEAD_SHOOT]  = IsMouseButtonDown(MOUSE_BUTTON_LEFT) ? 1 : 0;
+    act[HEAD_RELOAD] = IsKeyDown(KEY_R) ? 1 : 0;
+    act[HEAD_WEAPON] = IsKeyDown(KEY_ONE) ? 1 : IsKeyDown(KEY_TWO) ? 2 : 0;
+    act[HEAD_USE]    = IsKeyDown(KEY_E) ? 1 : 0;
+    act[HEAD_CROUCH] = IsKeyDown(KEY_LEFT_CONTROL) ? 1 : 0;
     /* Jump: consume the mousewheel-down press-edge latched in update_camera.
      * We can't poll GetMouseWheelMove directly here — this function only
      * runs at sim-tick rate (~16 Hz) while the wheel event lives on one
      * render frame out of ~4, so direct polling would silently drop 3/4
      * of jump inputs. */
-    act[7]           = cl->jump_pending ? 1 : 0;
+    act[HEAD_JUMP]   = cl->jump_pending ? 1 : 0;
     cl->jump_pending = 0;
 }

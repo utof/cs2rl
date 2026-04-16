@@ -363,7 +363,7 @@ def test_reward_components_logged_in_terminal_info():
     rng = np.random.default_rng(1)
     info = {}
     for _ in range(1000):
-        actions = rng.integers([9, 16, 2, 2, 3, 2, 2, 2], size=(10, ACTION_DIM)).astype(np.int64)
+        actions = rng.integers(list(ACTION_HEAD_SIZES), size=(10, ACTION_DIM)).astype(np.int64)
         _, _, terms, _, infos = env.step(actions)
         for d in infos:
             if d:
