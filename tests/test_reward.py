@@ -5,8 +5,7 @@ import numpy as np
 
 from c_env.cs2_env import make_env
 from nav import ACTION_DIM
-
-_ACTION_HEAD_SIZES = [9, 16, 2, 2, 3, 2, 2, 2]
+from train import ACTION_HEAD_SIZES
 
 
 def _facing_to_aim(angle):
@@ -22,7 +21,7 @@ def test_pbrs_rewards_are_finite():
     env.reset()
     rng = np.random.default_rng(7)
     for step_n in range(500):
-        actions = rng.integers(_ACTION_HEAD_SIZES, size=(10, ACTION_DIM)).astype(np.int64)
+        actions = rng.integers(ACTION_HEAD_SIZES, size=(10, ACTION_DIM)).astype(np.int64)
         _, rewards, terms, _, _ = env.step(actions)
         for i, r in enumerate(rewards):
             assert np.isfinite(r), f"Non-finite reward at step {step_n} agent {i}: {r}"
@@ -210,7 +209,8 @@ def test_bomb_entry_bonus():
 
     # Step with use=1 — the C env checks use action to trigger entry bonus
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 5] = 1                  # use action (head index 5) required to trigger bombsite_entered check
+    # use action (head 5) triggers bombsite_entered check
+    actions[0, 5] = 1
     _, rewards, _, _, _ = env.step(actions)
 
     # Reward for agent 0 must include the +0.3 bombsite entry bonus
