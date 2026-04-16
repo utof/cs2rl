@@ -282,6 +282,7 @@ class Cs2Env(pufferlib.PufferEnv):
         pbrs_bomb_progress_weight=0.3,
         pbrs_nav_weight_t=0.04,
         pbrs_nav_weight_ct=0.15,
+        pbrs_gamma=0.99,
     ):
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
@@ -383,7 +384,7 @@ class Cs2Env(pufferlib.PufferEnv):
             float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),            # 30
             int(nav.ENEMY_MEMORY_TICKS),
             int(nav.STALE_MEMORY_TICK),                                # 31-32
-            0.99,                                                      # 33: pbrs_gamma
+            float(pbrs_gamma),                                         # 33: pbrs_gamma
             delta_x,
             delta_y,
             dir_facing,
@@ -622,6 +623,7 @@ def make_env(
     pbrs_bomb_progress_weight=0.3,
     pbrs_nav_weight_t=0.04,
     pbrs_nav_weight_ct=0.15,
+    pbrs_gamma=0.99,
 ):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
@@ -657,4 +659,5 @@ def make_env(
         pbrs_bomb_progress_weight=pbrs_bomb_progress_weight,
         pbrs_nav_weight_t=pbrs_nav_weight_t,
         pbrs_nav_weight_ct=pbrs_nav_weight_ct,
+        pbrs_gamma=pbrs_gamma,
     )
