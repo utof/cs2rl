@@ -7,7 +7,7 @@
  *          binding.get_buffers(capsule) -> (obs_ptr, rew_ptr, term_ptr, trunc_ptr)
  */
 #define PY_ARRAY_UNIQUE_SYMBOL cs2rl_binding_ARRAY_API
-#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+#define NPY_NO_DEPRECATED_API  NPY_1_7_API_VERSION
 #include <Python.h>
 #include <numpy/arrayobject.h>
 #include <stdlib.h>
@@ -61,28 +61,38 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
     float pbrs_alive_weight, pbrs_hp_weight, pbrs_site_weight;
     float pbrs_bomb_progress_weight, pbrs_nav_weight_t, pbrs_nav_weight_ct;
 
-    /* 62-arg format string — positions match StaticDataC._fields_ order from wrapper.py */
+    /* Batch 1 (RL overhaul): per-outcome win magnitudes — appended after reward_win
+     * to match the StaticData field order in cs2_types.h. */
+    float reward_win_t_detonation, reward_win_t_elimination;
+    float reward_win_ct_defuse, reward_win_ct_timeout, reward_win_ct_elimination;
+
+    /* 67-arg format string — positions match StaticDataC._fields_ order from cs2_env.py.
+     * Total: 8O + 4i + 8f + i + 2f + 6i + 2f + 2i + f + 4O + i + O + i + f + I + f
+     *      + f(reward_win) + 5f(Batch1) + 17f(Phase5-rest) = 67 args. */
     static const char FMT[] =
-        "OOOOOOOO"            /* 0-7:  vis_matrix, raster_grid, adjacency, centroid_xy,
-                                        area_ids, bombsite_mask, bombsite_by_idx, bombsite_dist */
-        "iiii"                /* 8-11: N, grid_w, grid_h, max_area_id */
-        "ffffffff"            /* 12-19: grid_x_min, grid_y_min, grid_inv_cell,
-                                         inv_x_range, inv_y_range, x_offset, y_offset, bombsite_dist_scale */
-        "i"                   /* 20: laser_damage */
-        "ff"                  /* 21-22: laser_range, laser_range_sq */
-        "iiiiii"              /* 23-28: shoot_cooldown, bomb_plant_time, bomb_defuse_time,
-                                         bomb_defuse_kit, bomb_timer, round_time */
-        "ff"                  /* 29-30: footstep_radius_sq, gunshot_radius_sq */
-        "ii"                  /* 31-32: enemy_memory_ticks, stale_memory_tick */
-        "f"                   /* 33: pbrs_gamma */
-        "OOOO"                /* 34-37: delta_x, delta_y, dir_facing, t_spawns (all arrays) */
-        "i"                   /* 38: n_t_spawns */
-        "O"                   /* 39: ct_spawns (array) */
-        "i"                   /* 40: n_ct_spawns */
-        "f"                   /* 41: max_turn_speed */
-        "I"                   /* 42: seed (unsigned int) */
-        "f"                   /* 43: team_spirit */
-        "ffffffffffffffffff"; /* 44-61: 18 reward weights (Phase 5) */
+        "OOOOOOOO"           /* 0-7:  vis_matrix, raster_grid, adjacency, centroid_xy,
+                                       area_ids, bombsite_mask, bombsite_by_idx, bombsite_dist */
+        "iiii"               /* 8-11: N, grid_w, grid_h, max_area_id */
+        "ffffffff"           /* 12-19: grid_x_min, grid_y_min, grid_inv_cell,
+                                        inv_x_range, inv_y_range, x_offset, y_offset, bombsite_dist_scale */
+        "i"                  /* 20: laser_damage */
+        "ff"                 /* 21-22: laser_range, laser_range_sq */
+        "iiiiii"             /* 23-28: shoot_cooldown, bomb_plant_time, bomb_defuse_time,
+                                        bomb_defuse_kit, bomb_timer, round_time */
+        "ff"                 /* 29-30: footstep_radius_sq, gunshot_radius_sq */
+        "ii"                 /* 31-32: enemy_memory_ticks, stale_memory_tick */
+        "f"                  /* 33: pbrs_gamma */
+        "OOOO"               /* 34-37: delta_x, delta_y, dir_facing, t_spawns (all arrays) */
+        "i"                  /* 38: n_t_spawns */
+        "O"                  /* 39: ct_spawns (array) */
+        "i"                  /* 40: n_ct_spawns */
+        "f"                  /* 41: max_turn_speed */
+        "I"                  /* 42: seed (unsigned int) */
+        "f"                  /* 43: team_spirit */
+        "f"                  /* 44: reward_win (legacy symmetric) */
+        "fffff"              /* 45-49: Batch 1 per-mechanism win magnitudes */
+        "fffffffffffffffff"; /* 50-66: 17 remaining Phase-5 reward weights
+                                        (reward_kill through pbrs_nav_weight_ct) */
 
     if (!PyArg_ParseTuple(args,
                           FMT,
@@ -131,6 +141,11 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
                           &seed,
                           &team_spirit,
                           &reward_win,
+                          &reward_win_t_detonation,
+                          &reward_win_t_elimination,
+                          &reward_win_ct_defuse,
+                          &reward_win_ct_timeout,
+                          &reward_win_ct_elimination,
                           &reward_kill,
                           &reward_death,
                           &reward_bombsite_entry,
@@ -207,7 +222,13 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
 
     sd->max_turn_speed = max_turn_speed;
 
-    sd->reward_win                  = reward_win;
+    sd->reward_win = reward_win;
+    /* Batch 1 (RL overhaul): per-outcome win magnitudes */
+    sd->reward_win_t_detonation     = reward_win_t_detonation;
+    sd->reward_win_t_elimination    = reward_win_t_elimination;
+    sd->reward_win_ct_defuse        = reward_win_ct_defuse;
+    sd->reward_win_ct_timeout       = reward_win_ct_timeout;
+    sd->reward_win_ct_elimination   = reward_win_ct_elimination;
     sd->reward_kill                 = reward_kill;
     sd->reward_death                = reward_death;
     sd->reward_bombsite_entry       = reward_bombsite_entry;

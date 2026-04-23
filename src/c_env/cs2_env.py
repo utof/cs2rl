@@ -88,7 +88,15 @@ class StaticDataC(ctypes.Structure):
         ("ct_spawns", ctypes.c_int32 * 5),
         ("n_ct_spawns", ctypes.c_int),
         ("max_turn_speed", ctypes.c_float),
+                                                                       # legacy symmetric — superseded by per-mechanism fields (Batch 1)
         ("reward_win", ctypes.c_float),
+                                                                       # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).
+                                                                       # Must stay in same order as StaticData in cs2_types.h.
+        ("reward_win_t_detonation", ctypes.c_float),                   # default 5.0
+        ("reward_win_t_elimination", ctypes.c_float),                  # default 3.0
+        ("reward_win_ct_defuse", ctypes.c_float),                      # default 5.0
+        ("reward_win_ct_timeout", ctypes.c_float),                     # default 4.0
+        ("reward_win_ct_elimination", ctypes.c_float),                 # default 3.0
         ("reward_kill", ctypes.c_float),
         ("reward_death", ctypes.c_float),
         ("reward_bombsite_entry", ctypes.c_float),
@@ -211,12 +219,12 @@ class StepStatsC(ctypes.Structure):
         ("reward_survival", ctypes.c_float),
         ("reward_inaction", ctypes.c_float),
                                                        # Batch 1 (RL overhaul): round-end win classification flags.
-                                                       # Cleared by round_reset (Task 2). Set by compute_rewards round-over
-                                                       # block (Task 3). Consumed by split_into_channels to route reward_win
-                                                       # into the objective channel on detonation/defuse, combat on elimination/timeout.
+                                                       # Cleared by round_reset (Task 2). Set by compute_rewards (Task 3).
+                                                       # Consumed by split_into_channels to route reward_win:
+                                                       #   detonation/defuse → objective channel; else → combat channel.
         ("win_by_detonation", ctypes.c_int8),          # 1 when bomb detonated (T wins)
         ("win_by_defuse", ctypes.c_int8),              # 1 when bomb was defused (CT wins)
-        ("_pad_ss_wins", ctypes.c_int8 * 2),           # pad to 4-byte boundary for alignment
+        ("_pad_ss_wins", ctypes.c_int8 * 2),           # pad to 4-byte boundary
     ]
 
 
@@ -293,6 +301,14 @@ class Cs2Env(pufferlib.PufferEnv):
         pbrs_nav_weight_t=0.04,
         pbrs_nav_weight_ct=0.15,
         pbrs_gamma=0.99,
+                                                                                # Batch 1 (RL overhaul): per-outcome win magnitudes.
+                                                                                # These supersede the symmetric reward_win at round end.
+                                                                                # Defaults chosen to make detonation/defuse > timeout > elimination.
+        reward_win_t_detonation=5.0,
+        reward_win_t_elimination=3.0,
+        reward_win_ct_defuse=5.0,
+        reward_win_ct_timeout=4.0,
+        reward_win_ct_elimination=3.0,
     ):
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
@@ -406,23 +422,28 @@ class Cs2Env(pufferlib.PufferEnv):
             int(seed) & 0xFFFFFFFF,                                    # 42: seed (uint32)
             float(init_team_spirit),                                   # 43
             float(reward_win),                                         # 44
-            float(reward_kill),                                        # 45
-            float(reward_death),                                       # 46
-            float(reward_bombsite_entry),                              # 47
-            float(reward_plant_bonus),                                 # 48
-            float(reward_plant_base),                                  # 49
-            float(reward_plant_progress_scale),                        # 50
-            float(reward_plant_interrupted),                           # 51
-            float(reward_defuse),                                      # 52
-            float(reward_shot_penalty),                                # 53
-            float(reward_ct_survival),                                 # 54
-            float(reward_inaction),                                    # 55
-            float(pbrs_alive_weight),                                  # 56
-            float(pbrs_hp_weight),                                     # 57
-            float(pbrs_site_weight),                                   # 58
-            float(pbrs_bomb_progress_weight),                          # 59
-            float(pbrs_nav_weight_t),                                  # 60
-            float(pbrs_nav_weight_ct),                                 # 61
+            float(reward_win_t_detonation),                            # 45: Batch 1 per-mechanism
+            float(reward_win_t_elimination),                           # 46
+            float(reward_win_ct_defuse),                               # 47
+            float(reward_win_ct_timeout),                              # 48
+            float(reward_win_ct_elimination),                          # 49
+            float(reward_kill),                                        # 50
+            float(reward_death),                                       # 51
+            float(reward_bombsite_entry),                              # 52
+            float(reward_plant_bonus),                                 # 53
+            float(reward_plant_base),                                  # 54
+            float(reward_plant_progress_scale),                        # 55
+            float(reward_plant_interrupted),                           # 56
+            float(reward_defuse),                                      # 57
+            float(reward_shot_penalty),                                # 58
+            float(reward_ct_survival),                                 # 59
+            float(reward_inaction),                                    # 60
+            float(pbrs_alive_weight),                                  # 61
+            float(pbrs_hp_weight),                                     # 62
+            float(pbrs_site_weight),                                   # 63
+            float(pbrs_bomb_progress_weight),                          # 64
+            float(pbrs_nav_weight_t),                                  # 65
+            float(pbrs_nav_weight_ct),                                 # 66
         )
 
         # ctypes overlay of the C-allocated Dust2Env (tests + snapshot only)
@@ -634,6 +655,12 @@ def make_env(
     pbrs_nav_weight_t=0.04,
     pbrs_nav_weight_ct=0.15,
     pbrs_gamma=0.99,
+                                                                       # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).
+    reward_win_t_detonation=5.0,
+    reward_win_t_elimination=3.0,
+    reward_win_ct_defuse=5.0,
+    reward_win_ct_timeout=4.0,
+    reward_win_ct_elimination=3.0,
 ):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
@@ -670,4 +697,9 @@ def make_env(
         pbrs_nav_weight_t=pbrs_nav_weight_t,
         pbrs_nav_weight_ct=pbrs_nav_weight_ct,
         pbrs_gamma=pbrs_gamma,
+        reward_win_t_detonation=reward_win_t_detonation,
+        reward_win_t_elimination=reward_win_t_elimination,
+        reward_win_ct_defuse=reward_win_ct_defuse,
+        reward_win_ct_timeout=reward_win_ct_timeout,
+        reward_win_ct_elimination=reward_win_ct_elimination,
     )

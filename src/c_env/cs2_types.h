@@ -106,12 +106,27 @@ typedef struct {
     int      n_ct_spawns;
     float    max_turn_speed; /* max facing change per tick (radians)       */
     /* ── Phase 5: reward weights (defaults match prior hardcoded values) ── */
-    float reward_win;            /* ±applied per alive agent at round end */
-    float reward_kill;           /* per kill */
-    float reward_death;          /* per death (stored positive, applied negative) */
-    float reward_bombsite_entry; /* one-time bonus for T bomb-carrier entering bombsite */
-    float reward_plant_bonus;    /* bomb plant completion */
-    float reward_plant_base;     /* base objective-action reward on plant (mirrors reward_defuse) */
+    float reward_win; /* ±applied per alive agent at round end (legacy; superseded by
+                       * per-mechanism fields below when Batch 1 routing is active) */
+    /* Batch 1 (RL overhaul): differential win rewards by outcome mechanism.
+     * Supersedes the symmetric reward_win at round end. Routing determined by
+     * win_by_detonation / win_by_defuse flags in StepStats (set in
+     * compute_rewards round-over block). Defaults set Python-side in Cs2Env.
+     *
+     * Pitfall: these must be added BEFORE wall_list (which C uses only for the
+     * renderer demo path) so the ctypes overlay in cs2_env.py stays in sync.
+     * The ctypes mirror (StaticDataC) does NOT include wall_list; appending
+     * here keeps ctypes field offsets valid. */
+    float reward_win_t_detonation;   /* default 5.0 — T wins by bomb detonation */
+    float reward_win_t_elimination;  /* default 3.0 — T wins by eliminating all CT (no plant) */
+    float reward_win_ct_defuse;      /* default 5.0 — CT wins by defusing a planted bomb */
+    float reward_win_ct_timeout;     /* default 4.0 — CT wins by round timer (bomb not planted) */
+    float reward_win_ct_elimination; /* default 3.0 — CT wins by eliminating all T pre-plant */
+    float reward_kill;               /* per kill */
+    float reward_death;              /* per death (stored positive, applied negative) */
+    float reward_bombsite_entry;     /* one-time bonus for T bomb-carrier entering bombsite */
+    float reward_plant_bonus;        /* bomb plant completion */
+    float reward_plant_base; /* base objective-action reward on plant (mirrors reward_defuse) */
     float reward_plant_progress_scale; /* per-tick plant progress */
     float reward_plant_interrupted;    /* interrupted-plant penalty (stored positive) */
     float reward_defuse;               /* defuse completion */
