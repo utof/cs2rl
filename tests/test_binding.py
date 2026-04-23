@@ -54,6 +54,21 @@ def test_close_idempotent(make_map):
     assert binding.close(env._capsule) is None
 
 
+def test_stepstats_has_win_type_flags(make_map):
+    """StepStats ctypes struct must expose win_by_detonation and win_by_defuse.
+    Accessor: env._c_env.step_stats (ctypes StepStatsC — not a numpy recarray;
+    binding.c has no StepStats dtype descriptor, ctypes is the Python-side mirror).
+    """
+    _, env = _make_env(map_data=make_map)
+    ss = env._c_env.step_stats
+    assert hasattr(ss, "win_by_detonation"), "StepStatsC missing win_by_detonation"
+    assert hasattr(ss, "win_by_defuse"), "StepStatsC missing win_by_defuse"
+    # At reset, both must be zero
+    env.reset()
+    assert int(ss.win_by_detonation) == 0
+    assert int(ss.win_by_defuse) == 0
+
+
 def test_human_controlled_uses_aim_rad_not_bin(make_map):
     """When human_controlled=1, facing must equal aim_rad, not the 16-bin quantized value."""
     _, env = _make_env(map_data=make_map)

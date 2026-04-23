@@ -210,6 +210,13 @@ class StepStatsC(ctypes.Structure):
         ("reward_shots", ctypes.c_float),
         ("reward_survival", ctypes.c_float),
         ("reward_inaction", ctypes.c_float),
+                                                       # Batch 1 (RL overhaul): round-end win classification flags.
+                                                       # Cleared by round_reset (Task 2). Set by compute_rewards round-over
+                                                       # block (Task 3). Consumed by split_into_channels to route reward_win
+                                                       # into the objective channel on detonation/defuse, combat on elimination/timeout.
+        ("win_by_detonation", ctypes.c_int8),          # 1 when bomb detonated (T wins)
+        ("win_by_defuse", ctypes.c_int8),              # 1 when bomb was defused (CT wins)
+        ("_pad_ss_wins", ctypes.c_int8 * 2),           # pad to 4-byte boundary for alignment
     ]
 
 
@@ -235,14 +242,16 @@ class Dust2EnvC(ctypes.Structure):
 # pad, jump_cd), StepStats +8 bytes (action_jump[2]). GameState rolls up
 # the agent-array delta (10×12=120). Dust2EnvC rolls up game + 2× stats +
 # 20 bytes of added mask slots + alignment.
+# Batch 1 (RL overhaul): StepStats +4 bytes (win_by_detonation, win_by_defuse,
+# _pad_ss_wins[2]). Dust2EnvC +8 bytes (2× StepStats).
 assert ctypes.sizeof(AgentStateC) == 152, (
     f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 152)")
 assert ctypes.sizeof(GameStateC) == 1584, (
     f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1584)")
-assert ctypes.sizeof(StepStatsC) == 244, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 244)")
-assert ctypes.sizeof(Dust2EnvC) == 6696, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6696)")
+assert ctypes.sizeof(StepStatsC) == 248, (
+    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 248)")
+assert ctypes.sizeof(Dust2EnvC) == 6704, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6704)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer

@@ -223,6 +223,14 @@ typedef struct {
     float reward_shots;    /* total shot penalties */
     float reward_survival; /* total CT survival micro-rewards */
     float reward_inaction; /* total inaction penalties */
+    /* Batch 1 (RL overhaul): round-end win classification flags.
+     * Cleared by round_reset (Task 2). Set by compute_rewards round-over
+     * block (Task 3). Consumed Python-side by split_into_channels to route
+     * reward_win into the objective channel on detonation/defuse, combat
+     * channel on elimination/timeout. */
+    int8_t win_by_detonation; /* 1 when round ended because bomb detonated (T wins) */
+    int8_t win_by_defuse;     /* 1 when round ended because bomb was defused (CT wins) */
+    int8_t _pad_ss_wins[2];   /* pad to 4-byte boundary for ctypes alignment */
 } StepStats;
 
 /* ── Full environment (one per parallel instance) ── */
