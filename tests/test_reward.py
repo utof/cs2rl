@@ -376,3 +376,44 @@ def test_reward_components_logged_in_terminal_info():
     missing = EXPECTED_KEYS - set(info.keys())
     assert not missing, f"Missing reward component keys in terminal info: {missing}"
     env.close()
+
+
+# ── Batch 1 Task 2: win-type flag lifecycle tests ─────────────────────────────
+
+
+def test_win_flags_cleared_on_round_reset():
+    """White-box: stuffing win_by_detonation/win_by_defuse to 1, then calling
+    env.reset(), must yield 0 for both fields.
+
+    Rationale for white-box approach (vs. driving to a real round end):
+    Task 3 (not yet implemented) is what sets these flags organically during
+    play. Testing against a live round-end would give a trivial pass (flags
+    never get set, so they stay 0) rather than a true FAIL→PASS cycle. By
+    force-setting the fields and asserting they are cleared, we get a
+    deterministic FAIL here (if the reset path were broken) and a PASS once
+    we confirm the existing memset in clear_stats() covers the new fields.
+
+    Implementation note: step_stats is a single StepStatsC struct on
+    Dust2EnvC (not per-team array). clear_stats() calls
+    memset(stats, 0, sizeof(StepStats)), which already zeroes every field
+    including the Batch-1-added win_by_detonation / win_by_defuse. No C
+    change is needed — this test confirms the existing bulk-zero is sufficient.
+    """
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+    ss = env._c_env.step_stats         # ctypes StepStatsC — single struct, not array-of-two
+
+    # Force-set both win-type flags to non-zero to simulate a previous round
+    # that ended by detonation or defuse.
+    ss.win_by_detonation = 1
+    ss.win_by_defuse = 1
+
+    # Round reset path: env.reset() calls clear_stats(&env->step_stats) which
+    # does memset(..., 0, sizeof(StepStats)) — must zero the new fields.
+    env.reset()
+
+    assert int(ss.win_by_detonation) == 0, (
+        f"win_by_detonation not cleared on round reset: {ss.win_by_detonation}")
+    assert int(
+        ss.win_by_defuse) == 0, (f"win_by_defuse not cleared on round reset: {ss.win_by_defuse}")
+    env.close()
