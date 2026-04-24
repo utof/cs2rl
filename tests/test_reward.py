@@ -765,13 +765,18 @@ def test_step_stats_in_info_flag_on_populates_view():
     assert "step_stats" in info[0]
     ss = info[0]["step_stats"]
     # Field surface required by split_into_channels (see train_helpers_batch1.py).
+    # After one step() the PBRS delta may be non-zero, so we assert readability + type
+    # rather than a specific value. Do NOT use `hasattr(ss, "_ss")` here: it is always
+    # True (StepStatsView.__slots__ guarantees _ss exists post-init), so an `or`-chained
+    # assertion would short-circuit and never touch the field list.
     for f in ("reward_win", "reward_kills", "reward_deaths", "reward_bomb", "reward_pbrs",
               "reward_shots", "reward_survival", "reward_inaction", "win_by_detonation",
               "win_by_defuse"):
-        assert hasattr(ss, "_ss") or f in ss or ss[f] is not None
-    # ndim==0 so split_into_channels's ndim==1 squeeze does not trigger.
+        val = ss[f]                    # raises AttributeError via __getitem__ if field is missing
+        assert isinstance(val, (int, float)), f"expected numeric for {f}, got {type(val).__name__}"
+                                       # ndim==0 so split_into_channels's ndim==1 squeeze does not trigger.
     assert ss.ndim == 0
-    # get() works with default.
+                                       # get() works with default.
     assert ss.get("nonexistent_field", "sentinel") == "sentinel"
     env.close()
 
