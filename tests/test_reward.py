@@ -459,8 +459,8 @@ def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_lef
 
     Use this helper for scenarios where round_over is already set before step()
     (detonation, elimination, timeout, and post-plant elimination edge-cases).
-    For ct_defuse, use `_setup_natural_defuse` instead — pre-setting round_over
-    blocks the defuse branch in process_bomb (cs2_bomb.h:27), so
+    For ct_defuse, see the standalone `test_natural_defuse` — pre-setting
+    round_over blocks the defuse branch in process_bomb (cs2_bomb.h:27), so
     bomb_just_defused would never fire and the spec-compliant classifier in
     compute_rewards (which requires bomb_just_defused=1 for defuse) would
     misclassify as elimination.
@@ -499,8 +499,10 @@ def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_lef
     "alive_teams,expected_mag",
     [
                                                                                       # T wins (winner == 0)
-        ("t_detonation", 0, 1, -1, 100, {0}, 5.0),                                    # bomb_planted, ticks<=0 → exploded
-        ("t_elimination", 0, 0, 0, 50, {0}, 3.0),                                     # no plant → killed all CT
+                                                                                      # t_detonation: bomb_planted, ticks<=0 → exploded.
+        ("t_detonation", 0, 1, -1, 100, {0}, 5.0),
+                                                                                      # t_elimination: no plant → killed all CT.
+        ("t_elimination", 0, 0, 0, 50, {0}, 3.0),
                                                                                       # CT wins (winner == 1)
                                                                                       # ct_defuse: tested in standalone test_natural_defuse (requires live T
                                                                                       # agent to skip elimination check; structurally different from the
