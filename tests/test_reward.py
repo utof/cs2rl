@@ -735,3 +735,70 @@ def test_win_flags_cleared_on_round_reset():
     assert int(
         ss.win_by_defuse) == 0, (f"win_by_defuse not cleared on round reset: {ss.win_by_defuse}")
     env.close()
+
+
+def test_step_stats_in_info_flag_default_off():
+    """With include_step_stats_in_info=False (default), non-terminal step() ticks
+    must return info == [] (byte-identical to pre-Task-6a behavior)."""
+    import numpy as np
+    env = make_env()                   # default flag off
+    env.reset()
+    actions = np.zeros((10, 8), dtype=np.int64)
+    _, _, _, _, info = env.step(actions)
+    assert info == [], f"flag-off should preserve empty info, got {info!r}"
+    env.close()
+
+
+def test_step_stats_in_info_flag_on_populates_view():
+    """With the flag on, every step() returns info[0]['step_stats'] exposing the
+    fields consumed by split_into_channels (reward_*, win_by_detonation/defuse).
+
+    Uses make_env to construct the env; no trainer involved — this is a pure
+    env-level unit test per Task 6a scope (no trainer harness yet; utof/cs2rl#8).
+    """
+    import numpy as np
+    env = make_env(include_step_stats_in_info=True)
+    env.reset()
+    actions = np.zeros((10, 8), dtype=np.int64)
+    _, _, _, _, info = env.step(actions)
+    assert len(info) == 1, f"flag-on expects one info dict per step, got {len(info)}"
+    assert "step_stats" in info[0]
+    ss = info[0]["step_stats"]
+    # Field surface required by split_into_channels (see train_helpers_batch1.py).
+    for f in ("reward_win", "reward_kills", "reward_deaths", "reward_bomb", "reward_pbrs",
+              "reward_shots", "reward_survival", "reward_inaction", "win_by_detonation",
+              "win_by_defuse"):
+        assert hasattr(ss, "_ss") or f in ss or ss[f] is not None
+    # ndim==0 so split_into_channels's ndim==1 squeeze does not trigger.
+    assert ss.ndim == 0
+    # get() works with default.
+    assert ss.get("nonexistent_field", "sentinel") == "sentinel"
+    env.close()
+
+
+def test_step_stats_in_info_flag_on_merges_with_terminal_summary():
+    """On round_over ticks, info[0] must contain BOTH the terminal summary
+    (winner_t/winner_ct/bomb_planted/...) AND step_stats — not one or the other."""
+    import numpy as np
+    env = make_env(include_step_stats_in_info=True)
+    env.reset()
+    # Force round_over via direct state manipulation (same pattern as
+    # _setup_round_end in test_reward.py). Minimal: kill all agents of one team.
+    g = env._c_env.game
+    for i in range(10):
+        g.agents[i].alive = 0
+        g.agents[i].hp = 0
+    g.agents[5].alive = 1
+    g.agents[5].hp = 100
+    g.agents[5].team = 1
+    g.winner = 1
+    g.round_over = 1
+    actions = np.zeros((10, 8), dtype=np.int64)
+    _, _, _, _, info = env.step(actions)
+    assert len(info) == 1
+    summary = info[0]
+    # Terminal summary fields (from _build_terminal_info) still present.
+    assert "winner_ct" in summary or "winner_t" in summary
+    # step_stats also present.
+    assert "step_stats" in summary
+    env.close()

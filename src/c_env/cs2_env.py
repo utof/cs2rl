@@ -88,10 +88,10 @@ class StaticDataC(ctypes.Structure):
         ("ct_spawns", ctypes.c_int32 * 5),
         ("n_ct_spawns", ctypes.c_int),
         ("max_turn_speed", ctypes.c_float),
-                                                                       # legacy symmetric — superseded by per-mechanism fields (Batch 1)
+                                                                       # legacy symmetric — superseded by per-mechanism fields (Batch 1)  # noqa: E501
         ("reward_win", ctypes.c_float),
-                                                                       # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).
-                                                                       # Must stay in same order as StaticData in cs2_types.h.
+                                                                       # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).  # noqa: E501
+                                                                       # Must stay in same order as StaticData in cs2_types.h.  # noqa: E501
         ("reward_win_t_detonation", ctypes.c_float),                   # default 5.0
         ("reward_win_t_elimination", ctypes.c_float),                  # default 3.0
         ("reward_win_ct_defuse", ctypes.c_float),                      # default 5.0
@@ -218,14 +218,39 @@ class StepStatsC(ctypes.Structure):
         ("reward_shots", ctypes.c_float),
         ("reward_survival", ctypes.c_float),
         ("reward_inaction", ctypes.c_float),
-                                                       # Batch 1 (RL overhaul): round-end win classification flags.
-                                                       # Cleared by round_reset (Task 2). Set by compute_rewards (Task 3).
-                                                       # Consumed by split_into_channels to route reward_win:
-                                                       #   detonation/defuse → objective channel; else → combat channel.
+                                                       # Batch 1 (RL overhaul): round-end win classification flags.  # noqa: E501
+                                                       # Cleared by round_reset (Task 2). Set by compute_rewards (Task 3).  # noqa: E501
+                                                       # Consumed by split_into_channels to route reward_win:  # noqa: E501
+                                                       #   detonation/defuse → objective channel; else → combat channel.  # noqa: E501
         ("win_by_detonation", ctypes.c_int8),          # 1 when bomb detonated (T wins)
         ("win_by_defuse", ctypes.c_int8),              # 1 when bomb was defused (CT wins)
         ("_pad_ss_wins", ctypes.c_int8 * 2),           # pad to 4-byte boundary
     ]
+
+
+class StepStatsView:
+    """Dict-like zero-copy view over a ctypes StepStatsC struct.
+
+    Cs2Env.step() returns a reference to this wrapper in info[0]["step_stats"]
+    when include_step_stats_in_info=True. The wrapper proxies __getitem__ to
+    attribute access on the underlying struct, so downstream consumers (e.g.
+    split_into_channels in src/train_helpers_batch1.py) can read fields by
+    name with zero per-tick allocation.
+
+    ndim is set to 0 so split_into_channels's length-1 squeeze (which only
+    fires for ndim==1 structured arrays) does not trigger on this wrapper.
+    """
+    __slots__ = ("_ss", )
+    ndim = 0                           # class attr so split_into_channels's ndim==1 check is False
+
+    def __init__(self, ss):
+        self._ss = ss
+
+    def __getitem__(self, key):
+        return getattr(self._ss, key)
+
+    def get(self, key, default=None):
+        return getattr(self._ss, key, default)
 
 
 class Dust2EnvC(ctypes.Structure):
@@ -275,40 +300,41 @@ _ENV_CACHE: dict = {}
 class Cs2Env(pufferlib.PufferEnv):
 
     def __init__(
-        self,
-        seed=0,
-        team_spirit=0.0,
-        buf=None,
-        nav_graph=None,
-        auto_reset=True,
-        map_data=None,
-        reward_win=1.0,
-        reward_kill=0.3,
-        reward_death=0.1,
-        reward_bombsite_entry=0.3,
-        reward_plant_bonus=3.0,
-        reward_plant_base=0.2,
-        reward_plant_progress_scale=0.05,
-        reward_plant_interrupted=0.1,
-        reward_defuse=0.2,
-        reward_shot_penalty=0.005,
-        reward_ct_survival=0.001,
-        reward_inaction=0.0005,
-        pbrs_alive_weight=0.3,
-        pbrs_hp_weight=0.002,
-        pbrs_site_weight=0.2,
-        pbrs_bomb_progress_weight=0.3,
-        pbrs_nav_weight_t=0.04,
-        pbrs_nav_weight_ct=0.15,
-        pbrs_gamma=0.99,
-                                                                                # Batch 1 (RL overhaul): per-outcome win magnitudes.
-                                                                                # These supersede the symmetric reward_win at round end.
-                                                                                # Defaults chosen to make detonation/defuse > timeout > elimination.
-        reward_win_t_detonation=5.0,
-        reward_win_t_elimination=3.0,
-        reward_win_ct_defuse=5.0,
-        reward_win_ct_timeout=4.0,
-        reward_win_ct_elimination=3.0,
+            self,
+            seed=0,
+            team_spirit=0.0,
+            buf=None,
+            nav_graph=None,
+            auto_reset=True,
+            map_data=None,
+            reward_win=1.0,
+            reward_kill=0.3,
+            reward_death=0.1,
+            reward_bombsite_entry=0.3,
+            reward_plant_bonus=3.0,
+            reward_plant_base=0.2,
+            reward_plant_progress_scale=0.05,
+            reward_plant_interrupted=0.1,
+            reward_defuse=0.2,
+            reward_shot_penalty=0.005,
+            reward_ct_survival=0.001,
+            reward_inaction=0.0005,
+            pbrs_alive_weight=0.3,
+            pbrs_hp_weight=0.002,
+            pbrs_site_weight=0.2,
+            pbrs_bomb_progress_weight=0.3,
+            pbrs_nav_weight_t=0.04,
+            pbrs_nav_weight_ct=0.15,
+            pbrs_gamma=0.99,
+                                                                                # Batch 1 (RL overhaul): per-outcome win magnitudes.  # noqa: E501
+                                                                                # These supersede the symmetric reward_win at round end.  # noqa: E501
+                                                                                # Defaults chosen to make detonation/defuse > timeout > elimination.  # noqa: E501
+            reward_win_t_detonation=5.0,
+            reward_win_t_elimination=3.0,
+            reward_win_ct_defuse=5.0,
+            reward_win_ct_timeout=4.0,
+            reward_win_ct_elimination=3.0,
+            include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)
     ):
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
@@ -481,6 +507,18 @@ class Cs2Env(pufferlib.PufferEnv):
         self._terminal_terminals = np.empty(N_AGENTS, dtype=bool)
         self._terminal_truncations = np.empty(N_AGENTS, dtype=bool)
         self._empty_infos = []
+        self._include_step_stats_in_info = bool(include_step_stats_in_info)
+        # Task 6a: optional per-tick step_stats view in info (see utof/cs2rl#7).
+        # Zero cost when flag is off; constructed once at init when flag is on.
+        # _nonterminal_infos is a pre-built list[dict] reused every non-terminal
+        # step to avoid per-tick allocation — the view object is a stable proxy
+        # over the ctypes struct, so the same reference is safe to return each tick.
+        if self._include_step_stats_in_info:
+            self._step_stats_view = StepStatsView(self._c_env.step_stats)
+            self._nonterminal_infos = [{"step_stats": self._step_stats_view}]
+        else:
+            self._step_stats_view = None
+            self._nonterminal_infos = self._empty_infos
 
     @property
     def unwrapped(self):
@@ -504,6 +542,10 @@ class Cs2Env(pufferlib.PufferEnv):
         truncations = self.truncations
         if bool(self._c_env.game.round_over):
             summary = self._build_terminal_info()
+            if self._include_step_stats_in_info:
+                # Task 6a: merge step_stats into the terminal summary dict so
+                # consumers see both round-end stats and per-tick stats in one dict.
+                summary["step_stats"] = self._step_stats_view
             infos = [summary]
             if self._auto_reset:
                 if not self._uses_external_buffers:
@@ -515,6 +557,10 @@ class Cs2Env(pufferlib.PufferEnv):
                     truncations = self._terminal_truncations
                 binding.reset(self._capsule)
                 self._sync_observations()
+        elif self._include_step_stats_in_info:
+            # Task 6a: non-terminal tick — return the pre-built singleton info list
+            # (no per-tick allocation; the StepStatsView proxies the live struct).
+            infos = self._nonterminal_infos
         return self.observations, rewards, terminals, truncations, infos
 
     def set_team_spirit(self, value: float):
@@ -631,36 +677,37 @@ class Cs2Env(pufferlib.PufferEnv):
 
 
 def make_env(
-    seed=0,
-    team_spirit=0.0,
-    auto_reset=True,
-    buf=None,
-    map_data=None,
-    reward_win=1.0,
-    reward_kill=0.3,
-    reward_death=0.1,
-    reward_bombsite_entry=0.3,
-    reward_plant_bonus=3.0,
-    reward_plant_base=0.2,
-    reward_plant_progress_scale=0.05,
-    reward_plant_interrupted=0.1,
-    reward_defuse=0.2,
-    reward_shot_penalty=0.005,
-    reward_ct_survival=0.001,
-    reward_inaction=0.0005,
-    pbrs_alive_weight=0.3,
-    pbrs_hp_weight=0.002,
-    pbrs_site_weight=0.2,
-    pbrs_bomb_progress_weight=0.3,
-    pbrs_nav_weight_t=0.04,
-    pbrs_nav_weight_ct=0.15,
-    pbrs_gamma=0.99,
-                                                                       # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).
-    reward_win_t_detonation=5.0,
-    reward_win_t_elimination=3.0,
-    reward_win_ct_defuse=5.0,
-    reward_win_ct_timeout=4.0,
-    reward_win_ct_elimination=3.0,
+        seed=0,
+        team_spirit=0.0,
+        auto_reset=True,
+        buf=None,
+        map_data=None,
+        reward_win=1.0,
+        reward_kill=0.3,
+        reward_death=0.1,
+        reward_bombsite_entry=0.3,
+        reward_plant_bonus=3.0,
+        reward_plant_base=0.2,
+        reward_plant_progress_scale=0.05,
+        reward_plant_interrupted=0.1,
+        reward_defuse=0.2,
+        reward_shot_penalty=0.005,
+        reward_ct_survival=0.001,
+        reward_inaction=0.0005,
+        pbrs_alive_weight=0.3,
+        pbrs_hp_weight=0.002,
+        pbrs_site_weight=0.2,
+        pbrs_bomb_progress_weight=0.3,
+        pbrs_nav_weight_t=0.04,
+        pbrs_nav_weight_ct=0.15,
+        pbrs_gamma=0.99,
+                                                                       # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).  # noqa: E501
+        reward_win_t_detonation=5.0,
+        reward_win_t_elimination=3.0,
+        reward_win_ct_defuse=5.0,
+        reward_win_ct_timeout=4.0,
+        reward_win_ct_elimination=3.0,
+        include_step_stats_in_info: bool = False,                      # Task 6a: forward to Cs2Env (utof/cs2rl#7)
 ):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
@@ -702,4 +749,5 @@ def make_env(
         reward_win_ct_defuse=reward_win_ct_defuse,
         reward_win_ct_timeout=reward_win_ct_timeout,
         reward_win_ct_elimination=reward_win_ct_elimination,
+        include_step_stats_in_info=include_step_stats_in_info,
     )
