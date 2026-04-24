@@ -1320,6 +1320,9 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     # if the bomb plants this tick, every row's current segment
                     # now contains an event. Flushed to _batch1_event_mask at
                     # the segment boundary below (see ~30 lines down).
+                    # bool(int(...)) is deliberate: stubs or numpy scalars may
+                    # not truthy-coerce cleanly; int() normalises to a Python
+                    # int first so bool() is guaranteed. Do not strip the cast.
                     if bool(int(ss.get("bomb_planted", 0))):
                         self._batch1_current_segment_has_event[row_start:row_end] = True
                     # Normalize per-channel (divide by running std), sum, compress.

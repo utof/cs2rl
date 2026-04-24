@@ -194,16 +194,31 @@ def test_event_mask_detects_injected_bomb_planted():
         real_recv = vecenv.recv
         injected = {"triggered": False}
 
+        # Whitelist the exact set of fields split_into_channels reads + the
+        # event trigger. Anything else raises KeyError so that if Task 4's
+        # routed-field list ever grows, this test fails loudly instead of
+        # silently returning 0 and painting a false-green picture.
+        from train_helpers_batch1 import (
+            _COMBAT_FIELDS,
+            _OBJECTIVE_FIELDS,
+            _POSITIONAL_FIELDS,
+        )
+        _ALLOWED_STUB_FIELDS = frozenset(_COMBAT_FIELDS + _OBJECTIVE_FIELDS + _POSITIONAL_FIELDS +
+                                         ("reward_win", "win_by_detonation", "win_by_defuse",
+                                          "bomb_planted"))
+
         class _StubStepStats:
-            """Dict-like stand-in. evaluate() calls ss.get('bomb_planted', 0)
-            which works on plain dicts. Other fields must also be gettable
-            because split_into_channels reads several StepStats fields; we
-            default everything else to 0 via a permissive .get."""
+            """Dict-like stand-in that mirrors ONLY the StepStats fields that
+            split_into_channels + this test's event detection actually read.
+            Unknown keys raise KeyError — a forcing function against silent
+            drift if the StepStats field list or channel router grows."""
 
             def get(self, key, default=0):
                 if key == "bomb_planted":
                     return 1
-                return default
+                if key in _ALLOWED_STUB_FIELDS:
+                    return 0
+                raise KeyError(key)
 
             def __getitem__(self, key):
                 return self.get(key, 0)
@@ -221,11 +236,17 @@ def test_event_mask_detects_injected_bomb_planted():
             return o, r, d, t, infos, ids, m
 
         vecenv.recv = stub_recv
-        trainer.evaluate()
+        try:
+            trainer.evaluate()
 
-        assert injected["triggered"], "stub never ran — recv wrapping failed"
-        assert trainer._batch1_event_mask.any().item(), (
-            "Task 7: injected bomb_planted=1 in env 0 did not propagate into "
-            "_batch1_event_mask after segment flush.")
+            assert injected["triggered"], "stub never ran — recv wrapping failed"
+            assert trainer._batch1_event_mask.any().item(), (
+                "Task 7: injected bomb_planted=1 in env 0 did not propagate into "
+                "_batch1_event_mask after segment flush.")
+        finally:
+            # Always restore recv — cleanup() below may or may not re-init the
+            # vecenv, and a leaked stub would poison fixture-shared state if
+            # any future test reuses the same trainer instance.
+            vecenv.recv = real_recv
     finally:
         cleanup()
