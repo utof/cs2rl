@@ -1203,7 +1203,16 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
     trainer._batch1_welford_positional = WelfordStd(prior_std=1.0, min_count=1000)
     # Segment-level event mask (populated by Task 7; init here so Task 6c's
     # tests don't fail on missing attr and Task 7 can start by just writing).
-    # total_agents (not num_envs) is the per-segment row count in PuffeRL 3.0.
+    # Dimension split:
+    #   _batch1_event_mask           — one bool PER SEGMENT (buffer row),
+    #                                   consumed when prio_probs sampling picks
+    #                                   which completed segments to replay.
+    #   _batch1_current_segment_has_event — one bool PER AGENT ROW (= total_agents),
+    #                                   live accumulator during rollout; OR'd
+    #                                   into the segment row when a segment closes.
+    # They're different shapes because one tracks "which rows in the finished
+    # buffer contain an event" and the other tracks "does the currently-rolling
+    # segment on this agent row contain an event yet".
     _dev = trainer.config["device"]
     trainer._batch1_event_mask = torch.zeros(trainer.segments, dtype=torch.bool, device=_dev)
     trainer._batch1_current_segment_has_event = torch.zeros(trainer.total_agents,

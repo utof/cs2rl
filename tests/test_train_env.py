@@ -56,9 +56,16 @@ def test_selfplay_patch_attaches_welford_and_event_mask():
     from train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        assert isinstance(trainer._batch1_welford_combat, WelfordStd)
-        assert isinstance(trainer._batch1_welford_objective, WelfordStd)
-        assert isinstance(trainer._batch1_welford_positional, WelfordStd)
+        # Pin config values too — a silent change to prior_std or min_count
+        # would alter warmup behaviour without tripping any existing test.
+        for w in (
+                trainer._batch1_welford_combat,
+                trainer._batch1_welford_objective,
+                trainer._batch1_welford_positional,
+        ):
+            assert isinstance(w, WelfordStd)
+            assert w.prior_std == 1.0
+            assert w.min_count == 1000
         assert hasattr(trainer, "_batch1_event_mask")
         assert hasattr(trainer, "_batch1_current_segment_has_event")
     finally:
