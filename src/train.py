@@ -704,12 +704,29 @@ def _patch_trainer_with_return_norm(trainer):
     # ── ADAPTIVE ENTROPY (Lagrangian / SAC-style alpha) ────────────────────
     # max_entropy derived from MultiDiscrete(ACTION_HEAD_SIZES).
     max_entropy = sum(np.log(n) for n in ACTION_HEAD_SIZES)
-    target_entropy = 0.5 * max_entropy                 # ≈ 2.14
-    entropy_floor = 0.3 * max_entropy                  # collapse threshold
+    # Task 9A: target_entropy is no longer a static scalar — it's recomputed
+    # each train() call from a linear ramp 0.7→0.5*max_entropy across
+    # [0, 10_000_000] global steps (see target_entropy_schedule). The live
+    # value lives in the closure-local _t9_target_entropy in
+    # _train_with_return_norm and on trainer._batch1_current_target_entropy.
+    entropy_floor = 0.3 * max_entropy  # collapse threshold
     import math
 
     log_alpha = torch.tensor([math.log(0.1)], requires_grad=True, device=device)
     alpha_optimizer = torch.optim.Adam([log_alpha], lr=1e-4)
+
+    # Task 9A/9B: trainer-level state for target_entropy schedule + log_alpha
+    # reset. Attached to the trainer (not closure-local) so:
+    #   - tests can inspect/pin _batch1_max_entropy and current_target_entropy
+    #   - the wandb log layer can read _batch1_current_target_entropy without
+    #     reaching into the closure of _train_with_return_norm.
+    # _batch1_log_alpha_reset_done is the idempotency flag for Task 9B —
+    # the first train() call after this patch is applied resets log_alpha to
+    # log(ent_coef); every later train() call leaves log_alpha alone so the
+    # SAC dual-gradient loop can do its job.
+    trainer._batch1_max_entropy = float(max_entropy)
+    trainer._batch1_log_alpha_reset_done = False
+    trainer._batch1_current_target_entropy = 0.7 * float(max_entropy)
 
     # ──────────────────────────────────────────────────────────────────────
 
@@ -755,6 +772,33 @@ def _patch_trainer_with_return_norm(trainer):
         vf_clip = config["vf_clip_coef"]
         anneal_beta = b0 + (1 - b0) * a * self.epoch / self.total_epochs
         self.ratio[:] = 1
+
+        # Task 9A: recompute target_entropy from the linear ramp once per
+        # train() call. WHY here (not inside the minibatch loop): the schedule
+        # is keyed on global_step which is fixed for the duration of a single
+        # train() call, so recomputing per-minibatch would burn cycles for no
+        # signal. We mirror the value onto trainer._batch1_current_target_entropy
+        # so the wandb log layer can read it without touching this closure.
+        # PITFALL: do NOT capture max_entropy from the outer closure here —
+        # use trainer._batch1_max_entropy. Closure capture would silently break
+        # if the patch were re-applied on the same trainer instance.
+        from train_helpers_batch1 import target_entropy_schedule
+        _t9_target_entropy = target_entropy_schedule(self.global_step,
+                                                     trainer._batch1_max_entropy,
+                                                     warmup_end=10_000_000)
+        trainer._batch1_current_target_entropy = float(_t9_target_entropy)
+
+        # Task 9B: one-shot log_alpha reset on the first train() call after
+        # this patch. WHY: the entropy schedule + log_alpha are coupled — the
+        # outer training loop can leave log_alpha at a stale value from a
+        # previous run / re-init, and we need a deterministic starting point
+        # of log(ent_coef) so the SAC dual-gradient loop converges from a
+        # known floor. The flag is on the trainer (not the closure) so a
+        # checkpoint-restored trainer that gets re-patched still resets once.
+        if not trainer._batch1_log_alpha_reset_done:
+            with torch.no_grad():
+                log_alpha.fill_(math.log(config["ent_coef"]))
+            trainer._batch1_log_alpha_reset_done = True
 
         # Task 8: raw event-segment fraction (mask mean) — computed once per
         # train() call because _batch1_event_mask doesn't change inside the
@@ -903,7 +947,11 @@ def _patch_trainer_with_return_norm(trainer):
 
             # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
             alpha = log_alpha.exp()
-            alpha_loss = (log_alpha * (current_entropy - target_entropy).detach()).mean()
+            # Task 9A: use the scheduled target_entropy (recomputed at top of
+            # this train() call) instead of the static fallback. _t9_target_entropy
+            # is a Python float; .detach() on a tensor minus a float is fine —
+            # autograd treats the float as a constant.
+            alpha_loss = (log_alpha * (current_entropy - _t9_target_entropy).detach()).mean()
             alpha_optimizer.zero_grad()
             alpha_loss.backward()
             alpha_optimizer.step()
@@ -948,7 +996,15 @@ def _patch_trainer_with_return_norm(trainer):
             profile("learn", epoch)
             loss.backward()
             if (mb + 1) % self.accumulate_minibatches == 0:
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config["max_grad_norm"])
+                # Task 9C: capture pre-clip grad norm. clip_grad_norm_ returns
+                # the total norm computed BEFORE clipping (PyTorch contract,
+                # see torch.nn.utils.clip_grad_norm_ docs). Storing it on the
+                # trainer makes it available to the log layer; the .item()
+                # call forces a host sync which is fine here because the
+                # caller already syncs via .item() on losses below.
+                _t9_grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(),
+                                                               config["max_grad_norm"])
+                trainer._batch1_grad_norm = float(_t9_grad_norm)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
@@ -965,6 +1021,27 @@ def _patch_trainer_with_return_norm(trainer):
         losses["ret_mean"] = _ret_mean.item()
         losses["ret_std"] = (_ret_var + 1e-8).sqrt().item()
         losses["log_alpha"] = log_alpha.item()
+
+        # Task 9C: expose per-train()-call metrics on the trainer for the
+        # wandb log layer. Captured here (not inside the minibatch loop)
+        # because the log layer reports one value per train() call, not
+        # per-minibatch — and effective_alpha / log_alpha are last-write-
+        # wins after the inner loop anyway.
+        # PITFALL: effective_alpha is bound inside the minibatch loop;
+        # Python keeps the last bound value visible at this scope so
+        # reading it here works. If total_minibatches were ever 0 this
+        # would NameError — but PuffeRL invariants guarantee >=1.
+        trainer._batch1_log_alpha = float(log_alpha.item())
+        trainer._batch1_effective_alpha = float(effective_alpha.detach().item())
+        # Welford std exposure: guard with getattr+fallback because
+        # _patch_trainer_with_selfplay (Task 6c, where these get attached)
+        # may not have been applied — preserves the no-selfplay code path.
+        _w_combat = getattr(trainer, "_batch1_welford_combat", None)
+        trainer._batch1_std_combat = (float(_w_combat.std()) if _w_combat is not None else 1.0)
+        _w_obj = getattr(trainer, "_batch1_welford_objective", None)
+        trainer._batch1_std_objective = (float(_w_obj.std()) if _w_obj is not None else 1.0)
+        _w_pos = getattr(trainer, "_batch1_welford_positional", None)
+        trainer._batch1_std_positional = (float(_w_pos.std()) if _w_pos is not None else 1.0)
 
         profile.end()
         logs = None

@@ -412,3 +412,138 @@ def test_event_oversample_fraction_exposed():
             f"(seg_count={seg_count}, expected_raw={expected_raw:.3f})")
     finally:
         cleanup()
+
+
+# ── Task 9: target_entropy schedule + log_alpha reset + Batch 1 metrics ────
+# These tests cover three sub-features added to _patch_trainer_with_return_norm:
+#   (A) target_entropy schedule — linear ramp 0.7→0.5 * max_entropy across
+#       global_step ∈ [0, 10_000_000]; constant after.
+#   (B) log_alpha reset — first train() after patch sets log_alpha to
+#       log(ent_coef); idempotent thereafter.
+#   (C) Metric exposure — log_alpha, effective_alpha, per-channel std,
+#       grad_norm exposed as trainer attributes for the wandb log layer.
+#
+# Each test applies _patch_trainer_with_return_norm explicitly because the
+# harness intentionally does NOT (Task 8 tests use the same pattern).
+
+
+def test_target_entropy_schedule_applied():
+    """Task 9A: trainer._batch1_current_target_entropy must follow the
+    linear ramp 0.7→0.5 * max_entropy across [0, 10M] global steps."""
+    import math
+
+    from train import ACTION_HEAD_SIZES, _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        _patch_trainer_with_return_norm(trainer)
+
+        expected_max = sum(math.log(n) for n in ACTION_HEAD_SIZES)
+        # Pin the run-constant first; if this drifts the schedule break too.
+        assert abs(trainer._batch1_max_entropy - expected_max) < 1e-9, (
+            f"Task 9A: _batch1_max_entropy={trainer._batch1_max_entropy} != "
+            f"sum(log(n) for n in ACTION_HEAD_SIZES)={expected_max}")
+
+        # evaluate() advances global_step by ~one rollout (batch_size); we
+        # need a populated rollout buffer for train() to be valid, so call
+        # evaluate() first and THEN pin global_step to the value we want
+        # the schedule to see. Without this re-pin, evaluate()'s side effect
+        # would mask the schedule check.
+        trainer.evaluate()
+
+        # Step 0: target = 0.7 * max
+        trainer.global_step = 0
+        trainer.train()
+        assert abs(trainer._batch1_current_target_entropy - 0.7 * expected_max) < 1e-5, (
+            f"Task 9A: at step 0 expected 0.7*max={0.7 * expected_max:.4f}, "
+            f"got {trainer._batch1_current_target_entropy:.4f}")
+
+        # Step 20M (past warmup_end=10M): target = 0.5 * max (constant after).
+        trainer.global_step = 20_000_000
+        trainer.train()
+        assert abs(trainer._batch1_current_target_entropy - 0.5 * expected_max) < 1e-5, (
+            f"Task 9A: at step 20M expected 0.5*max={0.5 * expected_max:.4f}, "
+            f"got {trainer._batch1_current_target_entropy:.4f}")
+
+        # Across the full ramp the value must stay <= max_entropy at every
+        # checked step. Upper-bound 0.7*max means it can never exceed max.
+        for step in (0, 1_000_000, 5_000_000, 10_000_000, 20_000_000):
+            trainer.global_step = step
+            trainer.train()
+            assert trainer._batch1_current_target_entropy <= expected_max + 1e-9, (
+                f"Task 9A: target_entropy={trainer._batch1_current_target_entropy} "
+                f"exceeded max_entropy={expected_max} at step={step}")
+    finally:
+        cleanup()
+
+
+def test_log_alpha_reset_at_batch_start():
+    """Task 9B: first train() call after _patch_trainer_with_return_norm
+    must reset log_alpha to log(ent_coef). Subsequent calls must NOT
+    re-reset (idempotent via the _batch1_log_alpha_reset_done flag)."""
+    import math
+
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        _patch_trainer_with_return_norm(trainer)
+
+        # Pre-train invariant: flag is False.
+        assert trainer._batch1_log_alpha_reset_done is False, (
+            "Task 9B: _batch1_log_alpha_reset_done should start False")
+
+        trainer.evaluate()
+        trainer.train()
+
+        # Flag flipped after first train().
+        assert trainer._batch1_log_alpha_reset_done is True, (
+            "Task 9B: _batch1_log_alpha_reset_done should be True after first train()")
+
+        # log_alpha is close to log(ent_coef). The 1e-3 tolerance covers a
+        # single alpha_optimizer.step() at lr=1e-4 — far less than ent_coef
+        # log magnitude — so this still pins "we reset" vs "we did not".
+        ent_coef = trainer.config["ent_coef"]
+        expected = math.log(ent_coef)
+        assert abs(trainer._batch1_log_alpha - expected) < 1e-3, (
+            f"Task 9B: _batch1_log_alpha={trainer._batch1_log_alpha:.6f} != "
+            f"log(ent_coef={ent_coef})={expected:.6f}")
+    finally:
+        cleanup()
+
+
+def test_batch1_metrics_exposed():
+    """Task 9C: after evaluate() + train() the trainer must expose every
+    Batch 1 metric the wandb log layer reads: log_alpha, effective_alpha,
+    per-channel std (combat/objective/positional), event_oversample_fraction
+    (set by Task 8), and grad_norm (pre-clip)."""
+    import math
+
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        _patch_trainer_with_return_norm(trainer)
+        trainer.evaluate()
+        trainer.train()
+
+        for name in (
+                "_batch1_log_alpha",
+                "_batch1_effective_alpha",
+                "_batch1_std_combat",
+                "_batch1_std_objective",
+                "_batch1_std_positional",
+                "_batch1_event_oversample_fraction",
+                "_batch1_grad_norm",
+        ):
+            assert hasattr(trainer, name), f"Task 9C: missing trainer.{name}"
+            v = getattr(trainer, name)
+            assert isinstance(
+                v, (int,
+                    float)), (f"Task 9C: trainer.{name} should be numeric, got {type(v).__name__}")
+            assert math.isfinite(v), f"Task 9C: trainer.{name}={v} not finite"
+    finally:
+        cleanup()
