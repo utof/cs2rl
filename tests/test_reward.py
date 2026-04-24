@@ -633,6 +633,18 @@ def test_natural_defuse():
 
     env.step(actions)
 
+    # Pin the load-bearing precondition: the decoy T must survive this step
+    # so process_combat's t_alive count stays positive and cs2_env.h:146's
+    # elimination guard does NOT fire before process_bomb. If a future
+    # process_combat change (passive chip damage, AoE, long-range hit) kills
+    # this T mid-step, the defuse branch gets skipped silently and the
+    # downstream reward assertions flip to the elimination magnitudes —
+    # this assertion points the failure at the real cause instead.
+    assert int(
+        g.agents[0].alive) == 1, ("decoy T agent must survive the step for natural defuse to fire; "
+                                  "if this trips, process_combat has grown side effects that break "
+                                  "test_natural_defuse's setup assumption")
+
     ss = env._c_env.step_stats
 
     # Classification flags: defuse fired, detonation did not.
