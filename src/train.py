@@ -1029,8 +1029,13 @@ def _patch_trainer_with_return_norm(trainer):
         # wins after the inner loop anyway.
         # PITFALL: effective_alpha is bound inside the minibatch loop;
         # Python keeps the last bound value visible at this scope so
-        # reading it here works. If total_minibatches were ever 0 this
-        # would NameError — but PuffeRL invariants guarantee >=1.
+        # reading it here works in the happy path. The real risk is the
+        # `target_kl` early-break path inside the loop: if minibatch 0
+        # exceeds the KL threshold and breaks before the alpha block
+        # binds effective_alpha, this read would NameError on the very
+        # first train() call. Same applies to _batch1_grad_norm captured
+        # at the optimizer-step site if accumulation never fires.
+        # Tracked: utof/cs2rl issue (early-break unbound state).
         trainer._batch1_log_alpha = float(log_alpha.item())
         trainer._batch1_effective_alpha = float(effective_alpha.detach().item())
         # Welford std exposure: guard with getattr+fallback because
