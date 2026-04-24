@@ -97,17 +97,22 @@ static void compute_rewards(Dust2Env* env,
          *     - detonation: bomb_planted && bomb_ticks_left <= 0 (bomb timer ran to zero)
          *     - elimination: otherwise (killed all CT, with or without planting attempt)
          *   CT win  (winner == 1):
-         *     - defuse: bomb_planted && bomb_ticks_left > 0 (bomb live when defused)
-         *     - elimination-preplant: !bomb_planted (killed all T before any plant)
+         *     - defuse: bomb_just_defused set this tick (cs2_bomb.h defuse branch)
+         *     - elimination: otherwise (killed all T, with bomb planted but not defused,
+         *       or before any plant)
          *   Timeout (winner == -1, timed_out flag set):
          *     - CT gets the timeout magnitude as a reward for surviving without a plant.
          *     - T agents receive -timeout magnitude as a penalty.
          *     - Note: the C env uses winner=-1 for this case, not winner=1.
          *
-         * We do NOT use bomb_just_defused here because round_over may be set
-         * before this block is reached in various code paths (tests set it
-         * directly; real play has it set by cs2_bomb). The winner+bomb_planted+
-         * bomb_ticks_left triple is sufficient and unambiguous.
+         * We classify CT-defuse via the bomb_just_defused argument (set by
+         * cs2_bomb.h only when the defuse branch actually completes). This is
+         * the spec-compliant path: the live-play sequence where CT kills the
+         * last T post-plant sets winner=1 in cs2_env.h before process_bomb
+         * has a chance to fire, so bomb_just_defused stays 0 and we correctly
+         * classify as elimination — NOT defuse. Tests that want to exercise
+         * defuse MUST drive process_bomb naturally (see
+         * _setup_natural_defuse in tests/test_reward.py).
          *
          * Sets StepStats.win_by_detonation / win_by_defuse for Python-side
          * channel routing: objective channel for detonation/defuse, combat
@@ -117,7 +122,7 @@ static void compute_rewards(Dust2Env* env,
         int ct_won    = (g->winner == 1);
         int timed_out = (g->winner == -1);
         int detonated = t_won && g->bomb_planted && (g->bomb_ticks_left <= 0);
-        int defused   = ct_won && g->bomb_planted;
+        int defused   = ct_won && bomb_just_defused;
 
         ss->win_by_detonation = detonated ? 1 : 0;
         ss->win_by_defuse     = defused ? 1 : 0;

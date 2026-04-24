@@ -457,8 +457,16 @@ def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_lef
     Sets one agent alive per team (agent 0 = T, agent 5 = CT) and marks the
     round over with the specified winner/bomb conditions. All other agents dead.
 
+    Use this helper for scenarios where round_over is already set before step()
+    (detonation, elimination, timeout, and post-plant elimination edge-cases).
+    For ct_defuse, use `_setup_natural_defuse` instead — pre-setting round_over
+    blocks the defuse branch in process_bomb (cs2_bomb.h:27), so
+    bomb_just_defused would never fire and the spec-compliant classifier in
+    compute_rewards (which requires bomb_just_defused=1 for defuse) would
+    misclassify as elimination.
+
     Args:
-        winner:          0=T wins, 1=CT wins
+        winner:          0=T wins, 1=CT wins, -1=timeout
         bomb_planted:    1 if bomb is planted
         bomb_ticks_left: remaining bomb timer (<=0 means detonated)
         round_ticks_left: remaining round timer
@@ -494,12 +502,20 @@ def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_lef
         ("t_detonation", 0, 1, -1, 100, {0}, 5.0),                                    # bomb_planted, ticks<=0 → exploded
         ("t_elimination", 0, 0, 0, 50, {0}, 3.0),                                     # no plant → killed all CT
                                                                                       # CT wins (winner == 1)
-                                                                                      # ct_defuse: bomb_planted=1, bomb_ticks_left>0 → bomb still live, CT defused it
-        ("ct_defuse", 1, 1, 50, 50, {1}, 5.0),
-                                                                                      # ct_elimination: !bomb_planted, winner=1 → T all dead before plant
+                                                                                      # ct_defuse: tested in standalone test_natural_defuse (requires live T
+                                                                                      # agent to skip elimination check; structurally different from the
+                                                                                      # pre-set-round_over cases below).
+                                                                                      # ct_elimination_preplant: !bomb_planted, winner=1 → T dead before plant.
+                                                                                      # bomb_just_defused=0 → elimination branch → 3.0.
         ("ct_elimination", 1, 0, 0, 50, {1}, 3.0),
-                                                                                      # Timeout (winner == -1): round timer expired, bomb never planted — CT tactical win.
-                                                                                      # C code sets winner=-1 and timed_out=1 for this case; we reward CT survivors.
+                                                                                      # ct_elimination_postplant: LIVE-PLAY EDGE — CT killed last T with bomb
+                                                                                      # planted but not defused. cs2_env.h:146-152 sets winner=1/round_over=1
+                                                                                      # when !t_alive, then process_bomb's defuse branch is skipped (round_over
+                                                                                      # guard), so bomb_just_defused stays 0. Must classify as elimination
+                                                                                      # (3.0), NOT defuse (5.0). _setup_round_end mirrors that live-play state.
+        ("ct_elimination_postplant", 1, 1, 50, 100, {1}, 3.0),
+                                                                                      # Timeout (winner == -1): round timer expired, no plant — CT tactical win.
+                                                                                      # C code sets winner=-1 and timed_out=1; we reward CT survivors.
         ("ct_timeout", -1, 0, 0, 0, {1}, 4.0),
     ])
 def test_differential_win_magnitudes(scenario, winner, bomb_planted, bomb_ticks_left,
@@ -510,23 +526,27 @@ def test_differential_win_magnitudes(scenario, winner, bomb_planted, bomb_ticks_
     step_stats.reward_win. With all other weights zeroed, the only contribution
     to reward_win is the per-mechanism win-reward block in compute_rewards.
 
+    All five scenarios pre-set round_over=1 via _setup_round_end; step() then
+    runs compute_rewards exactly once on the terminal state. This faithfully
+    represents live-play states where round_over is decided upstream
+    (detonation, elimination, timeout, post-plant elimination).
+
     Classification logic (mirrors compute_rewards round-over block):
       T win   (winner == 0): detonation if bomb_planted && ticks<=0, else elimination
-      CT win  (winner == 1): defuse if bomb_planted, else elimination-preplant
+      CT win  (winner == 1): defuse if bomb_just_defused, else elimination
       Timeout (winner == -1): timed_out flag set; CT gets ct_timeout reward
 
-    Pitfall on ct_defuse: we set round_over=1 before step(), so cs2_bomb.h
-    defuse logic does NOT fire — bomb_just_defused stays 0 in that path.
-    The C implementation must classify by winner/bomb state, not by the
-    bomb_just_defused local variable. winner=1 + bomb_planted=1 → defuse.
+    ct_defuse is excluded from this table because it requires a structurally
+    different setup (live T agents, round_over=0, process_bomb driving defuse
+    naturally). See test_natural_defuse for that case.
     """
     import numpy as np
     env = _make_zeroed_env()
     env.reset()
 
     _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_left, alive_teams)
-
     actions = np.zeros((10, 8), dtype=np.int64)
+
     _, _, _, _, _ = env.step(actions)
 
     ss = env._c_env.step_stats
@@ -535,6 +555,105 @@ def test_differential_win_magnitudes(scenario, winner, bomb_planted, bomb_ticks_
     actual = float(ss.reward_win)
     assert abs(actual - expected_mag) < 0.01, (
         f"Scenario '{scenario}': expected reward_win≈{expected_mag}, got {actual:.4f}")
+    env.close()
+
+
+def test_natural_defuse():
+    """CT-defuse outcome, driven end-to-end through process_bomb.
+
+    Unlike the parametrized magnitude tests (which pre-set round_over=1 and
+    exercise ONLY the classification branch of compute_rewards), this test
+    drives the full bomb-defuse code path:
+
+      process_combat (no kills) → elimination check (t_alive > 0, skipped)
+      → process_bomb defuse branch fires → bomb_just_defused=1, round_over=1,
+      winner=1 → compute_rewards sees ct_won && bomb_just_defused → defuse.
+
+    Why a dedicated test (not a parametrize row):
+      - ct_defuse is the only scenario where round_over is NOT pre-set; the
+        test must arrange alive T agents so cs2_env.h:146's elimination check
+        is skipped, then step once to let process_bomb complete the defuse.
+        That requires structurally different setup from the other cases.
+      - We assert multiple invariants (flag values, per-agent rewards for
+        winner and loser) that wouldn't fit cleanly in a parametrize row.
+
+    Pitfall avoided:
+      An earlier attempt killed all T agents in the defuse setup. That made
+      t_alive=0, triggering cs2_env.h:146's unconditional elimination path
+      (round_over=1, winner=1) BEFORE process_bomb could fire. The defuse
+      branch then got skipped (cs2_bomb.h:27 guard), bomb_just_defused stayed
+      0, and the scenario mis-classified as elimination (3.0). We keep at
+      least one T agent alive, placed at a non-bomb area so process_combat
+      does nothing (actions are zeroed → no shoot), to let process_bomb reach
+      the defuse gate.
+    """
+    import numpy as np
+
+    env = _make_zeroed_env()
+    env.reset()
+
+    g = env._c_env.game
+    sd = env._c_env.sd.contents
+
+    # Kill every agent first to zero the slate.
+    for i in range(10):
+        g.agents[i].alive = 0
+        g.agents[i].hp = 0
+
+    # Alive CT defuser at the bomb area (agent 5).
+    ct = g.agents[5]
+    ct.alive = 1
+    ct.hp = 100
+    ct.team = 1
+    ct.has_kit = 0                     # use no-kit defuse_time
+    ct.area_idx = 0                    # arbitrary valid area
+
+    # Alive T at a different area so process_combat doesn't kill them
+    # (zeroed actions → no shoot → no combat resolution). Having a T alive
+    # is REQUIRED to avoid the elimination check in cs2_env.h:146 firing
+    # before process_bomb runs.
+    t = g.agents[0]
+    t.alive = 1
+    t.hp = 100
+    t.team = 0
+    t.area_idx = 1                     # anywhere != ct.area_idx
+
+    # Bomb state: planted, live, co-located with the CT defuser, round open.
+    g.bomb_planted = 1
+    g.bomb_area_idx = ct.area_idx
+    g.bomb_ticks_left = 50             # plenty of bomb-timer headroom
+    g.round_ticks_left = 100           # round timer well above zero
+    g.round_over = 0                   # CRITICAL: leave the round open
+    g.winner = -1                      # ongoing
+
+    # Short-circuit the defuse timer so ONE step completes the defuse.
+    defuse_time = int(sd.bomb_defuse_time)
+    g.bomb_being_defused_by = 5
+    g.bomb_defuse_ticks = defuse_time - 1
+
+    # HEAD_USE (index 5) = 1 keeps the CT defusing this tick.
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[5, 5] = 1
+
+    env.step(actions)
+
+    ss = env._c_env.step_stats
+
+    # Classification flags: defuse fired, detonation did not.
+    assert int(ss.win_by_defuse) == 1, "win_by_defuse must be 1 after natural defuse"
+    assert int(ss.win_by_detonation) == 0, "win_by_detonation must be 0 after defuse"
+
+    # Per-agent rewards: CT gets +ct_defuse magnitude, T gets the penalty.
+    # _make_zeroed_env sets reward_win_ct_defuse=5.0.
+    ct_reward = float(env._c_env.rewards[5])
+    t_reward = float(env._c_env.rewards[0])
+    assert abs(ct_reward - 5.0) < 0.01, (f"CT defuser reward expected +5.0, got {ct_reward:.4f}")
+    assert abs(t_reward - (-5.0)) < 0.01, (f"T loser penalty expected -5.0, got {t_reward:.4f}")
+
+    # reward_win accumulator nets to zero (equal +mag and -mag with one of
+    # each team alive) — documents the accounting, doesn't gate correctness.
+    assert abs(float(ss.reward_win) - 0.0) < 0.01
+
     env.close()
 
 
