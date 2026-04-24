@@ -7,8 +7,10 @@ src/train.py.
 Functions:
     symlog(x):           sign-preserving log compression; bounds scale without hard cutoff
     symexp(x):           inverse of symlog
-    target_entropy_schedule(step, max_entropy, warmup_end=10_000_000):
-                         linear ramp from 0.7*max_entropy to 0.5*max_entropy over warmup_end steps
+    target_entropy_schedule(step, max_entropy, warmup_end=10_000_000,
+                             warmup_high_frac=0.7, base_frac=0.5):
+                         linear ramp from warmup_high_frac*max_entropy to base_frac*max_entropy
+                         over warmup_end steps; held constant after.
     split_into_channels(step_stats_view):
                          route StepStats reward fields into combat/objective/positional channels
                          using win_by_detonation / win_by_defuse flags
@@ -45,9 +47,9 @@ def target_entropy_schedule(
 ) -> float:
     """Linear ramp from `warmup_high_frac * max_entropy` at step 0 down to
     `base_frac * max_entropy` at step `warmup_end`; held constant after."""
-    if step >= warmup_end:
-        return base_frac * max_entropy
-    t = step / warmup_end
+    # Single branch: clamp t to [0, 1] so the linear formula yields
+    # base_frac * max_entropy at step >= warmup_end without a discontinuity.
+    t = min(step / warmup_end, 1.0)
     frac = warmup_high_frac + (base_frac - warmup_high_frac) * t
     return frac * max_entropy
 
@@ -61,14 +63,24 @@ _POSITIONAL_FIELDS = ("reward_pbrs", "reward_survival", "reward_inaction")
 def split_into_channels(step_stats: np.ndarray) -> dict[str, float]:
     """Route StepStats reward fields into combat/objective/positional channels.
 
+    Input: structured numpy array (0-d record OR shape (1,) length-1) with
+    float fields reward_{win,kills,deaths,bomb,pbrs,shots,survival,inaction}
+    and int8 flags win_by_{detonation,defuse}. The length-1 form arises
+    because test fixtures construct records via np.zeros(1, dtype=...); the
+    0-d form arises when the trainer indexes a per-env slice. Both are
+    accepted and produce identical output.
+
     reward_win is routed by mechanism:
       - win_by_detonation or win_by_defuse → objective
       - otherwise (elimination/timeout) → combat
 
-    Accepts either a 0-d structured array (single record) or a length-1
-    structured array — both arise in practice depending on the caller.
+    NOTE: only the 8 reward_* fields listed above are routed. If StepStats
+    gains a new reward_* field in a future batch, this helper will silently
+    ignore it (see utof/cs2rl#3 for a routing-drift guard).
     """
-    # Normalise to a 0-d record so field indexing always returns a scalar.
+    # Normalise a length-1 structured array (as produced by the spec's own
+    # test fixtures, e.g. `ss = np.zeros(1, dtype=[...])`) to a 0-d record
+    # so field indexing returns a scalar rather than a length-1 array.
     if step_stats.ndim == 1:
         step_stats = step_stats[0]
     combat = sum(float(step_stats[f]) for f in _COMBAT_FIELDS)
