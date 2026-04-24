@@ -15,8 +15,12 @@ Functions:
                          route StepStats reward fields into combat/objective/positional channels
                          using win_by_detonation / win_by_defuse flags
 
-All functions are stateless and deterministic. Welford running-std is
-implemented separately (see train.py inline class).
+Classes:
+    WelfordStd:          scalar online-std estimator with prior_std warmup fallback;
+                         Task 6 instantiates three (one per reward channel).
+
+All free functions are stateless and deterministic. WelfordStd carries
+per-instance running statistics — each channel needs its own instance.
 """
 from __future__ import annotations
 
