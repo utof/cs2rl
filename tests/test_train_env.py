@@ -112,3 +112,120 @@ def test_rewards_not_clamped_to_unit_range():
             f"positional={trainer._batch1_welford_positional.count - p0}")
     finally:
         cleanup()
+
+
+# ── Task 7: segment-level event-mask aggregation ──────────────────────────
+# These tests exercise the two code paths added by Task 7:
+#   (a) per-tick OR of bomb_planted into _batch1_current_segment_has_event
+#       (one bool per agent row), gated on step_stats being present.
+#   (b) flush of _batch1_current_segment_has_event → _batch1_event_mask at
+#       the segment boundary (every bptt_horizon ticks), keyed on the OLD
+#       ep_indices (before they get re-assigned for the next segment).
+#
+# Why two tests: (a) is a deterministic unit-level check that directly writes
+# the live accumulator and verifies the flush happens at the boundary — no
+# dependence on random bomb-plant timing. (b) is an integration check that
+# stubs the recv() payload so bomb_planted=1 appears in step_stats, verifying
+# the detection branch. We need both because the live accumulator could be
+# correct without detection, and detection could be correct without a flush.
+
+
+def test_event_mask_flushed_and_reset_at_segment_boundary():
+    """Task 7: pre-set the live accumulator for one agent row to True, then
+    run a full evaluate() round. After the segment closes, the corresponding
+    segment row in _batch1_event_mask must be True and the live accumulator
+    must be reset back to False.
+
+    Independent of bomb_planted plumbing — this exercises only the flush.
+    """
+
+    from train_test_harness import _build_trainer_for_test
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        # Force accumulator True for agent row 0 BEFORE evaluate() runs.
+        # We cache the segment index that row 0 will flush into — this is
+        # the value of trainer.ep_indices[0] at the moment the boundary hits,
+        # but at start-of-rollout it's trivially 0 (free_idx starts at 0 and
+        # ep_indices was initialised to arange(total_agents)).
+        pre_seg_idx = int(trainer.ep_indices[0].item())
+        trainer._batch1_current_segment_has_event.zero_()
+        trainer._batch1_current_segment_has_event[0] = True
+        trainer._batch1_event_mask.zero_()
+
+        trainer.evaluate()
+
+        # After one full evaluate() round all 320 agent rows flushed once, so
+        # the pre_seg_idx slot must reflect our True write.
+        assert bool(trainer._batch1_event_mask[pre_seg_idx].item()), (
+            "Task 7: live accumulator True for row 0 did not flush into "
+            f"_batch1_event_mask[{pre_seg_idx}] at segment boundary.")
+        # Live accumulator for row 0 must have been reset (it would only come
+        # back True if a real bomb_planted event happened for env 0 during
+        # the rollout, which is possible but not guaranteed — so we assert a
+        # weaker property: at least one row is False, proving the reset path
+        # is not a no-op. With a 64-tick rollout and random actions most envs
+        # see zero plants, so most rows will be False.)
+        assert not trainer._batch1_current_segment_has_event.all().item(), (
+            "Task 7: all live-accumulator rows True after evaluate() — the "
+            "reset at segment boundary appears to be missing.")
+    finally:
+        cleanup()
+
+
+def test_event_mask_detects_injected_bomb_planted():
+    """Task 7: when step_stats['bomb_planted']==1 arrives for any env during
+    the rollout, the event_mask must contain at least one True after the
+    segment flushes.
+
+    Strategy: wrap vecenv.recv() so that on the first call, env 0's
+    step_stats is a dict substitute with bomb_planted=1. Real step_stats are
+    StepStatsView proxies, but the evaluate() loop uses plain .get('bomb_planted')
+    which works on any Mapping. This avoids driving the C env to plant a bomb.
+    """
+
+    from train_test_harness import _build_trainer_for_test
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        # Baseline — ensure no stale event bits.
+        trainer._batch1_event_mask.zero_()
+        trainer._batch1_current_segment_has_event.zero_()
+
+        vecenv = trainer.vecenv
+        real_recv = vecenv.recv
+        injected = {"triggered": False}
+
+        class _StubStepStats:
+            """Dict-like stand-in. evaluate() calls ss.get('bomb_planted', 0)
+            which works on plain dicts. Other fields must also be gettable
+            because split_into_channels reads several StepStats fields; we
+            default everything else to 0 via a permissive .get."""
+
+            def get(self, key, default=0):
+                if key == "bomb_planted":
+                    return 1
+                return default
+
+            def __getitem__(self, key):
+                return self.get(key, 0)
+
+            ndim = 0
+
+        def stub_recv():
+            o, r, d, t, infos, ids, m = real_recv()
+            if not injected["triggered"] and len(infos) > 0:
+                # Replace env 0's info with a bomb_planted=1 payload. Leave
+                # other envs untouched so the rest of the rollout is normal.
+                infos = list(infos)
+                infos[0] = {"step_stats": _StubStepStats()}
+                injected["triggered"] = True
+            return o, r, d, t, infos, ids, m
+
+        vecenv.recv = stub_recv
+        trainer.evaluate()
+
+        assert injected["triggered"], "stub never ran — recv wrapping failed"
+        assert trainer._batch1_event_mask.any().item(), (
+            "Task 7: injected bomb_planted=1 in env 0 did not propagate into "
+            "_batch1_event_mask after segment flush.")
+    finally:
+        cleanup()

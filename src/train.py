@@ -1308,6 +1308,20 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     self._batch1_welford_combat.update(channels["combat"])
                     self._batch1_welford_objective.update(channels["objective"])
                     self._batch1_welford_positional.update(channels["positional"])
+                    # Task 7: OR the per-tick bomb_planted flag into the live
+                    # event accumulator for every agent row in this env. The
+                    # C side sets ss->bomb_planted only on the transition tick
+                    # (cs2_bomb.h:60 — guarded by `if g->bomb_plant_ticks >=
+                    # sd->bomb_plant_time`) and StepStats is cleared every step
+                    # via clear_stats(ss) at the top of cs2_env.h:75. So
+                    # step_stats['bomb_planted'] is already a per-tick delta
+                    # (1 only on the plant tick) — NO edge-trigger needed.
+                    # All 10 agent rows in an env share the same event state:
+                    # if the bomb plants this tick, every row's current segment
+                    # now contains an event. Flushed to _batch1_event_mask at
+                    # the segment boundary below (see ~30 lines down).
+                    if bool(int(ss.get("bomb_planted", 0))):
+                        self._batch1_current_segment_has_event[row_start:row_end] = True
                     # Normalize per-channel (divide by running std), sum, compress.
                     # Build the scalar sum on CPU (cheap — 3 floats) then broadcast
                     # to the 10-agent slice; avoids per-agent torch.tensor churn.
@@ -1377,6 +1391,20 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 self.ep_lengths[env_id] += 1
                 if seq_pos + 1 >= cfg["bptt_horizon"]:
                     num_full = env_id.stop - env_id.start
+                    # Task 7: flush the live event accumulator → segment mask
+                    # BEFORE overwriting ep_indices. Each agent row's current
+                    # segment index lives in self.ep_indices[env_id]; once we
+                    # reassign ep_indices to (free_idx + arange(num_full)) a
+                    # few lines down, the old segment index is lost. Clone
+                    # first, write to _batch1_event_mask at those OLD slots,
+                    # then reset the live accumulator so the next segment
+                    # starts clean. Pitfall: writing AFTER the re-index would
+                    # clobber freshly-allocated future segments (off-by-one
+                    # bug that would silently mark the wrong rollout rows).
+                    old_seg_indices = self.ep_indices[env_id].clone().long()
+                    self._batch1_event_mask[old_seg_indices] = (
+                        self._batch1_current_segment_has_event[env_id])
+                    self._batch1_current_segment_has_event[env_id] = False
                     self.ep_indices[env_id] = (self.free_idx +
                                                torch.arange(num_full, device=dev).int())
                     self.ep_lengths[env_id] = 0
