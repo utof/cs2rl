@@ -2,6 +2,7 @@ import numpy as np
 import torch
 
 from src.train_helpers_batch1 import (
+    WelfordStd,
     split_into_channels,
     symexp,
     symlog,
@@ -127,3 +128,32 @@ def test_split_routes_elimination_win_to_combat():
     c = split_into_channels(ss)
     assert c["combat"] >= 3.0
     assert c["objective"] < 0.01
+
+
+def test_welford_converges():
+    """After 10000 samples from N(0, 4), running std should be near 2.0."""
+    torch.manual_seed(0)
+    w = WelfordStd(prior_std=1.0, min_count=1000)
+    xs = torch.randn(10000) * 2.0
+    for x in xs:
+        w.update(x.item())
+    assert abs(w.std() - 2.0) < 0.1
+
+
+def test_welford_identity_before_min_count():
+    """Before min_count, normalize() must be identity (divide by prior_std=1.0)."""
+    w = WelfordStd(prior_std=1.0, min_count=1000)
+    w.update(100.0)
+    assert abs(w.normalize(torch.tensor(42.0)).item() - 42.0) < 1e-6
+
+
+def test_welford_independent_instances():
+    """Three instances must not share state."""
+    w1 = WelfordStd(prior_std=1.0, min_count=10)
+    w2 = WelfordStd(prior_std=1.0, min_count=10)
+    for _ in range(100):
+        w1.update(10.0)
+        w2.update(1.0)
+    # Constant inputs give zero variance (std() falls back to prior_std), so check
+    # that means differ — which proves the instances do not share internal state.
+    assert w1.mean != w2.mean

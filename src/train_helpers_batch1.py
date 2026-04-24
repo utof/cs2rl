@@ -94,3 +94,46 @@ def split_into_channels(step_stats: np.ndarray) -> dict[str, float]:
         combat += win
 
     return {"combat": combat, "objective": objective, "positional": positional}
+
+
+class WelfordStd:
+    """Welford's online std estimator, per-channel.
+
+    Prior seed: std = prior_std (default 1.0) until count reaches min_count;
+    this prevents a rare-event channel (few non-zero samples) from being
+    systematically down-weighted by a spuriously small std during warmup.
+
+    This is a scalar-only version; each channel gets its own instance.
+
+    Reference: https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
+    """
+
+    def __init__(self, prior_std: float = 1.0, min_count: int = 1000):
+        self.prior_std = prior_std
+        self.min_count = min_count
+        self.count = 0
+        self.mean = 0.0
+        self.m2 = 0.0                  # sum of squared diffs from current mean
+
+    def update(self, x: float) -> None:
+        self.count += 1
+        delta = x - self.mean
+        self.mean += delta / self.count
+        delta2 = x - self.mean
+        self.m2 += delta * delta2
+
+    def variance(self) -> float:
+        if self.count < 2:
+            return self.prior_std * self.prior_std
+        return self.m2 / (self.count - 1)
+
+    def std(self) -> float:
+        if self.count < self.min_count:
+            return self.prior_std
+        v = self.variance()
+        return float(v**0.5) if v > 0 else self.prior_std
+
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Return x / max(std, 1e-8). No mean subtraction (rewards are sign-meaningful)."""
+        s = self.std()
+        return x / max(s, 1e-8)
