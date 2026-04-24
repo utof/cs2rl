@@ -295,8 +295,6 @@ def test_kill_reward_weight_is_configurable():
         pbrs_bomb_progress_weight=0.0,
         pbrs_nav_weight_t=0.0,
         pbrs_nav_weight_ct=0.0,
-                                                       # Batch 1: zero per-mechanism win magnitudes so round-end win reward
-                                                       # does not contaminate the kill-reward isolation assertion.
         reward_win_t_detonation=0.0,
         reward_win_t_elimination=0.0,
         reward_win_ct_defuse=0.0,
@@ -496,28 +494,11 @@ def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_lef
 
 @pytest.mark.parametrize(
     "scenario,winner,bomb_planted,bomb_ticks_left,round_ticks_left,"
-    "alive_teams,expected_mag",
-    [
-                                                                                      # T wins (winner == 0)
-                                                                                      # t_detonation: bomb_planted, ticks<=0 → exploded.
+    "alive_teams,expected_mag", [
         ("t_detonation", 0, 1, -1, 100, {0}, 5.0),
-                                                                                      # t_elimination: no plant → killed all CT.
         ("t_elimination", 0, 0, 0, 50, {0}, 3.0),
-                                                                                      # CT wins (winner == 1)
-                                                                                      # ct_defuse: tested in standalone test_natural_defuse (requires live T
-                                                                                      # agent to skip elimination check; structurally different from the
-                                                                                      # pre-set-round_over cases below).
-                                                                                      # ct_elimination_preplant: !bomb_planted, winner=1 → T dead before plant.
-                                                                                      # bomb_just_defused=0 → elimination branch → 3.0.
         ("ct_elimination", 1, 0, 0, 50, {1}, 3.0),
-                                                                                      # ct_elimination_postplant: LIVE-PLAY EDGE — CT killed last T with bomb
-                                                                                      # planted but not defused. cs2_env.h:146-152 sets winner=1/round_over=1
-                                                                                      # when !t_alive, then process_bomb's defuse branch is skipped (round_over
-                                                                                      # guard), so bomb_just_defused stays 0. Must classify as elimination
-                                                                                      # (3.0), NOT defuse (5.0). _setup_round_end mirrors that live-play state.
         ("ct_elimination_postplant", 1, 1, 50, 100, {1}, 3.0),
-                                                                                      # Timeout (winner == -1): round timer expired, no plant — CT tactical win.
-                                                                                      # C code sets winner=-1 and timed_out=1; we reward CT survivors.
         ("ct_timeout", -1, 0, 0, 0, {1}, 4.0),
     ])
 def test_differential_win_magnitudes(scenario, winner, bomb_planted, bomb_ticks_left,
@@ -537,6 +518,19 @@ def test_differential_win_magnitudes(scenario, winner, bomb_planted, bomb_ticks_
       T win   (winner == 0): detonation if bomb_planted && ticks<=0, else elimination
       CT win  (winner == 1): defuse if bomb_just_defused, else elimination
       Timeout (winner == -1): timed_out flag set; CT gets ct_timeout reward
+
+    Scenarios covered:
+      t_detonation — bomb_planted, ticks<=0 → exploded (5.0).
+      t_elimination — no plant, T killed all CT (3.0).
+      ct_elimination (preplant) — !bomb_planted, T dead before plant.
+        bomb_just_defused=0 → elimination branch → 3.0.
+      ct_elimination_postplant — LIVE-PLAY EDGE. CT killed last T with bomb
+        planted but not defused. cs2_env.h:146-152 sets winner=1/round_over=1
+        when !t_alive, then process_bomb's defuse branch is skipped
+        (round_over guard), so bomb_just_defused stays 0. Must classify as
+        elimination (3.0), NOT defuse (5.0).
+      ct_timeout — round timer expired, no plant → CT tactical win (4.0). C
+        code sets winner=-1 and timed_out=1; we reward CT survivors.
 
     ct_defuse is excluded from this table because it requires a structurally
     different setup (live T agents, round_over=0, process_bomb driving defuse
