@@ -1,0 +1,201 @@
+"""Minimal PuffeRL trainer harness for Batch-1 trainer-level tests (Task 6b).
+
+Downstream tasks in the Batch-1 rewards overhaul (utof/cs2rl#9 Task 6c,
+Tasks 7-11) need to call ``trainer.evaluate()`` / ``trainer.train()`` on a real
+PuffeRL instance to exercise rollout-time code paths (reward clamp removal,
+Welford normalization, event masks, etc.). Spinning up the full production
+``train()`` flow in a test is too heavy — it pulls in multiprocessing vec
+workers, wandb init, checkpoint dirs, dead-run detection, etc. This module
+builds the smallest PuffeRL trainer that still has the production attribute
+surface the tests need.
+
+What's stripped vs. production ``src.train.train()``:
+    - vec backend: always ``pufferlib.vector.Serial`` (no worker processes, no
+      shared-memory handshake, deterministic teardown).
+    - checkpoint_dir: a ``tempfile.mkdtemp()`` scratch dir, wiped by cleanup().
+    - wandb / metrics.jsonl / dead-run detection / save loop: omitted.
+    - return-norm & timing patches: skipped. Tests can apply them explicitly
+      if they need to exercise those patches.
+
+Design contract:
+    - Public API is a single ``_build_trainer_for_test(...)`` function that
+      returns ``(trainer, cleanup)``. Tuple rather than contextmanager because
+      (a) the smoke-test shape in the task spec uses try/finally, and
+      (b) downstream tests may need to leak the trainer between helper
+      functions — easier with an explicit cleanup callable.
+    - ``with_selfplay`` defaults to False (Task 6c needs True; Tasks 7-11
+      default False to keep the attribute surface small).
+
+If PufferLib ever renames ``PuffeRL`` or drops a constructor kwarg, this file
+is where the breakage will first surface — giving us a single ~line-diff review
+surface for API drift instead of chasing it across every Batch-1 test.
+"""
+
+from __future__ import annotations
+
+import multiprocessing as mp
+import shutil
+import tempfile
+import types
+
+
+def _build_trainer_for_test(
+    num_envs: int = 32,
+    with_selfplay: bool = False,
+    device: str = "cpu",
+    seed: int = 0,
+):
+    """Build a tiny in-process PuffeRL trainer for Batch-1 trainer-level tests.
+
+    Parameters
+    ----------
+    num_envs : int
+        Vectorised-env count. 32 is enough to populate the rollout buffer in
+        one evaluate() round on the Serial backend in under ~5s; bump only if
+        a test specifically needs more parallelism (cost is roughly linear).
+    with_selfplay : bool
+        If True, apply ``_patch_trainer_with_selfplay`` so ``trainer.evaluate``
+        is the self-play variant. The SelfPlayManager is constructed with an
+        EMPTY pool, so ``should_use_past()`` always returns False — the past-
+        policy branch is NOT exercised, but the patched evaluate() wrapper is.
+        Required by Task 6c (reward-clamp removal test).
+    device : str
+        Torch device. Default "cpu" keeps tests deterministic and CI-friendly.
+    seed : int
+        Passed into both the env factory and the PPO config. Fixed default so
+        back-to-back harness invocations produce identical rollouts.
+
+    Returns
+    -------
+    trainer : pufferlib.pufferl.PuffeRL
+        Fully-constructed trainer with all production attributes the Batch-1
+        downstream tests assert against (see tests/test_train_harness_smoke.py
+        for the pinned surface).
+    cleanup : Callable[[], None]
+        Idempotent teardown: closes the vecenv, wipes the scratch checkpoint
+        dir. Tests MUST call this in a ``finally:`` to avoid leaking fd's /
+        shared-memory / tmp dirs.
+
+    Pitfalls
+    --------
+    - Re-using the same mp.Value across two harness instances in the same
+      process is fine — ``shared_ts`` is a local to this call.
+    - ``args`` is a ``types.SimpleNamespace``, not an argparse Namespace — just
+      mirrors the attribute access that ``build_train_config`` does.
+    - Serial backend means ``trainer.vecenv`` has a synchronous ``send``/``recv``
+      cycle; tests can inject observations by monkey-patching those if needed.
+    """
+    # Imports are function-local so importing this module in a test that
+    # doesn't actually call the factory (e.g. a smoke import test) is free.
+    # PuffeRL is lazy-imported inside train.train() in production; do the same
+    # here so this module is importable even if pufferlib's optional torch deps
+    # are mid-install in an isolated test runner.
+    import pufferlib.vector
+    from pufferlib.pufferl import PuffeRL
+
+    from map import make_simple_map
+    from train import (
+        SelfPlayManager,
+        _patch_trainer_with_selfplay,
+        build_policy,
+        build_train_config,
+        compute_batch_dims,
+        make_puffer_env,
+    )
+
+    # ── Scratch dir for config.json + any checkpoints PuffeRL writes ────────
+    # PuffeRL's constructor doesn't actually write to data_dir during __init__,
+    # but build_train_config requires it as a string. Using mkdtemp keeps each
+    # harness instance isolated; cleanup removes it wholesale.
+    tmp_checkpoint_dir = tempfile.mkdtemp(prefix="cs2rl-harness-")
+
+    # ── Shared team-spirit value (production pattern) ───────────────────────
+    # Production uses mp.Value so multiprocess workers can read a scalar that
+    # the main trainer anneals each epoch. Serial backend doesn't actually
+    # need shared memory, but make_puffer_env expects this interface.
+    shared_ts = mp.Value("f", 0.3)
+
+    # Simple 5-room map — the production default for non-dust2 runs. Avoids
+    # depending on any pre-generated mapdata file on disk.
+    map_data = make_simple_map()
+
+    def env_factory(*_args, buf=None, seed=None, **_kwargs):
+        # Mirrors the closure in train.train() lines ~1367-1368. The seed
+        # forwarded by pufferlib.vector can be None for the first reset, so
+        # we fall back to 0 rather than let make_puffer_env choke.
+        return make_puffer_env(
+            team_spirit=shared_ts,
+            buf=buf,
+            seed=seed or 0,
+            map_data=map_data,
+        )
+
+    # ── Vec env (Serial: no worker processes) ───────────────────────────────
+    # Serial makes teardown synchronous and deterministic — critical for
+    # pytest where a lingering process would block the whole session.
+    vecenv = pufferlib.vector.make(
+        env_factory,
+        num_envs=num_envs,
+        backend=pufferlib.vector.Serial,
+    )
+
+    # ── Minimal argparse-shaped config object ───────────────────────────────
+    # build_train_config reads these five attributes. Everything else in the
+    # production parser (wandb, vec-backend, etc.) is irrelevant once we've
+    # already instantiated the vecenv.
+    args = types.SimpleNamespace(
+        device=device,
+        seed=seed,
+                                                       # Tiny horizon — ONE evaluate() round is all downstream tests need.
+                                                       # PuffeRL requires total_timesteps >= batch_size; keep generous.
+        timesteps=batch_size_for(num_envs) * 4,
+        checkpoint_dir=tmp_checkpoint_dir,
+    )
+
+    _agents_per_env, bptt_horizon, batch_size = compute_batch_dims(num_envs)
+    train_config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
+
+    policy = build_policy(vecenv, device)
+    trainer = PuffeRL(train_config, vecenv, policy)
+
+    # ── Optional self-play patch ────────────────────────────────────────────
+    # Empty pool → should_use_past() always False → past_policy branch stays
+    # dormant, but trainer.evaluate is still the patched _evaluate_with_selfplay
+    # function (which is what Task 6c's clamp-removal test needs).
+    if with_selfplay:
+        self_play_mgr = SelfPlayManager(
+            pool_size=15,
+            p_past=0.3,
+            save_every_epochs=25,
+            win_threshold=0.6,
+            phase_length=50,
+        )
+        _patch_trainer_with_selfplay(trainer, self_play_mgr)
+
+    def cleanup():
+        """Idempotent teardown. Safe to call twice."""
+        # vecenv.close() is safe to call multiple times on Serial. Wrap in
+        # try/except so a cleanup failure never masks a test assertion error.
+        try:
+            trainer.close()
+        except Exception:              # noqa: BLE001 — best-effort cleanup
+            pass
+        try:
+            vecenv.close()
+        except Exception:              # noqa: BLE001
+            pass
+        shutil.rmtree(tmp_checkpoint_dir, ignore_errors=True)
+
+    return trainer, cleanup
+
+
+def batch_size_for(num_envs: int) -> int:
+    """Return the PPO batch size for a given num_envs.
+
+    Thin wrapper over ``src.train.compute_batch_dims`` so callers (and this
+    module's ``args.timesteps`` default) don't have to unpack the 3-tuple.
+    Kept here rather than in ``src/train.py`` because it's test-only — the
+    production code already uses the 3-tuple form directly.
+    """
+    from train import compute_batch_dims
+    return compute_batch_dims(num_envs)[2]
