@@ -748,6 +748,16 @@ def _patch_trainer_with_return_norm(trainer):
     trainer._batch1_max_entropy = float(max_entropy)
     trainer._batch1_log_alpha_reset_done = False
     trainer._batch1_current_target_entropy = 0.7 * float(max_entropy)
+    # Pre-init effective_alpha + grad_norm metrics (utof/cs2rl#16). The
+    # post-loop reads in _train_with_return_norm refresh these, but if the
+    # target_kl early-break trips on mb=0 OR no accumulation boundary fires,
+    # the local names are never bound — leaving the trainer attrs
+    # AttributeError on first read. Seeding them with sane defaults here
+    # turns those edge cases into "stale-from-previous-call" instead of a
+    # crash, and the post-loop refresh overwrites whenever the loop runs
+    # all the way through.
+    trainer._batch1_effective_alpha = float(trainer.config["ent_coef"])
+    trainer._batch1_grad_norm = 0.0
 
     # ──────────────────────────────────────────────────────────────────────
 
@@ -1058,7 +1068,13 @@ def _patch_trainer_with_return_norm(trainer):
         # at the optimizer-step site if accumulation never fires.
         # Tracked: utof/cs2rl issue (early-break unbound state).
         trainer._batch1_log_alpha = float(log_alpha.item())
-        trainer._batch1_effective_alpha = float(effective_alpha.detach().item())
+        # effective_alpha may be unbound this call if target_kl early-broke
+        # on mb=0 — leave the pre-initialised trainer attr (set in the patch
+        # block above) intact in that case rather than crashing.
+        try:
+            trainer._batch1_effective_alpha = float(effective_alpha.detach().item())
+        except (NameError, UnboundLocalError):
+            pass
         # Welford std exposure: guard with getattr+fallback because
         # _patch_trainer_with_selfplay (Task 6c, where these get attached)
         # may not have been applied — preserves the no-selfplay code path.
