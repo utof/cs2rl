@@ -294,18 +294,19 @@ def _capture_multinomial_calls():
 
 
 def test_prio_probs_event_oversample():
-    """Task 8: with a SMALL fraction of segments marked as events (one slot)
-    and OVERSAMPLE_FACTOR=4 applied to prio_probs, the sampled minibatch must
-    hit event segments meaningfully more often than the raw event-segment
-    fraction would predict. With 1/segments == ~0.3% events and factor=4 the
-    analytic expectation is ~1.2% — the un-boosted baseline is ~0.3%. We
-    assert the sampled rate >= 4x the raw rate, which fails fast if the
-    boost branch is missing.
+    """Task 8: with ~50% of segments marked as events and OVERSAMPLE_FACTOR=4
+    applied to prio_probs, the sampled minibatch must hit event segments well
+    above the raw event-segment fraction.
 
-    The plan's 25% target applies to the documented default mass-event
-    scenario (~50% event segments → ~80% sampled). The single-event variant
-    here is a more sensitive structural probe: it amplifies the visibility of
-    the boost while staying robust to the abs-advantage prior."""
+    Analytic expectation with equal prior weight and a 4x boost on 50% of
+    segments: 4*0.5 / (4*0.5 + 1*0.5) = 80% sampled event rate.
+
+    Two assertions:
+      - `hits >= 0.25` pins the plan's §Task 8 25% lower bound (a soft floor
+        that tolerates prior-advantage variation and short mini-epochs).
+      - `hits >= raw_fraction + 0.20` is the real regression guard — without
+        the boost branch, the sampled rate would track the raw ~50% rate,
+        so a +20pp lift can only come from the boost actually running."""
     import torch
 
     from train import _patch_trainer_with_return_norm

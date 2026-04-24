@@ -756,6 +756,13 @@ def _patch_trainer_with_return_norm(trainer):
         anneal_beta = b0 + (1 - b0) * a * self.epoch / self.total_epochs
         self.ratio[:] = 1
 
+        # Task 8: raw event-segment fraction (mask mean) — computed once per
+        # train() call because _batch1_event_mask doesn't change inside the
+        # minibatch loop. Reported to the log layer as event_oversample_fraction.
+        _t8_event_mask = getattr(self, "_batch1_event_mask", None)
+        self._batch1_event_oversample_fraction = (float(_t8_event_mask.float().mean())
+                                                  if _t8_event_mask is not None else 0.0)
+
         for mb in range(self.total_minibatches):
             profile("train_misc", epoch, nest=True)
             self.amp_context.__enter__()
@@ -787,11 +794,12 @@ def _patch_trainer_with_return_norm(trainer):
             #   draws biased samples without any further changes — and the
             #   importance-sampling correction below uses the BOOSTED
             #   prio_probs[idx], so the gradient stays unbiased.
-            # WHY: bomb-plant events are ~5% of segments early in training;
-            #   uniform prio sampling under-replays them. Oversampling
-            #   accelerates value-function fit on the rare-but-decisive
-            #   transitions. Plan §Task 8 target: event-mask hit-rate among
-            #   sampled segments >= 25%.
+            # WHY: bomb-plant events are sparse in early training (the exact
+            #   fraction is itself a Task 9 metric, reported via
+            #   _batch1_event_oversample_fraction). Uniform prio sampling
+            #   under-replays them; oversampling accelerates value-function
+            #   fit on the rare-but-decisive transitions. Plan §Task 8
+            #   target: event-mask hit-rate among sampled segments >= 25%.
             # PITFALLS:
             #   * mask absent / all-False → skip the boost so pre-Batch-1
             #     training paths and the warm-up pass before any plant
@@ -806,13 +814,10 @@ def _patch_trainer_with_return_norm(trainer):
             #     NOT the post-boost sampled fraction — that's what the
             #     wandb/log layer reports as `event_oversample_fraction`.
             OVERSAMPLE_FACTOR = 4.0
-            event_mask = getattr(self, "_batch1_event_mask", None)
-            if event_mask is not None and event_mask.any():
+            if _t8_event_mask is not None and _t8_event_mask.any():
                 boosted = prio_probs.clone()
-                boosted[event_mask] *= OVERSAMPLE_FACTOR
+                boosted[_t8_event_mask] *= OVERSAMPLE_FACTOR
                 prio_probs = boosted / boosted.sum()
-            self._batch1_event_oversample_fraction = (float(event_mask.float().mean())
-                                                      if event_mask is not None else 0.0)
             # ──────────────────────────────────────────────────────────────
 
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
