@@ -123,11 +123,18 @@ def _build_trainer_for_test(
         # Mirrors the closure in train.train() lines ~1367-1368. The seed
         # forwarded by pufferlib.vector can be None for the first reset, so
         # we fall back to 0 rather than let make_puffer_env choke.
+        #
+        # Task 6c: include_step_stats_in_info=True is REQUIRED so the
+        # harness-built trainer sees per-tick step_stats in info, which the
+        # self-play patch's channel-split code path consumes. With the flag
+        # off, Task 6c's "at least one Welford update" assertion would never
+        # fire because the fallback `r_new[i] = r[i]` branch would always run.
         return make_puffer_env(
             team_spirit=shared_ts,
             buf=buf,
             seed=seed or 0,
             map_data=map_data,
+            include_step_stats_in_info=True,
         )
 
     # ── Vec env (Serial: no worker processes) ───────────────────────────────
@@ -143,11 +150,11 @@ def _build_trainer_for_test(
     # build_train_config reads these five attributes. Everything else in the
     # production parser (wandb, vec-backend, etc.) is irrelevant once we've
     # already instantiated the vecenv.
+    # Tiny horizon — ONE evaluate() round is all downstream tests need.
+    # PuffeRL requires total_timesteps >= batch_size; keep generous.
     args = types.SimpleNamespace(
         device=device,
         seed=seed,
-                                                       # Tiny horizon — ONE evaluate() round is all downstream tests need.
-                                                       # PuffeRL requires total_timesteps >= batch_size; keep generous.
         timesteps=batch_size_for(num_envs) * 4,
         checkpoint_dir=tmp_checkpoint_dir,
     )

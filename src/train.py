@@ -163,13 +163,27 @@ def make_puffer_env(team_spirit=None,
                     buf=None,
                     seed=0,
                     episode_stats=True,
-                    map_data=None):
-    """Create the native C PufferEnv used by smoke/train/eval."""
+                    map_data=None,
+                    include_step_stats_in_info=False):
+    """Create the native C PufferEnv used by smoke/train/eval.
+
+    ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
+    emits ``info = [{"step_stats": StepStatsView}]`` on every tick so trainer
+    patches (Task 6c onward) can read per-channel raw reward fields. Defaults
+    to False so production code paths that don't consume step_stats (e.g. eval
+    scripts, viz) stay zero-cost.
+    """
     from c_env.cs2_env import make_env as make_c_env
 
     if record_fn is not None:
         raise ValueError("record_fn is only supported by the Python recording env")
-    return make_c_env(seed=seed, team_spirit=team_spirit, buf=buf, map_data=map_data)
+    return make_c_env(
+        seed=seed,
+        team_spirit=team_spirit,
+        buf=buf,
+        map_data=map_data,
+        include_step_stats_in_info=include_step_stats_in_info,
+    )
 
 
 def load_policy_from_checkpoint(checkpoint_path, device):
@@ -1167,10 +1181,34 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
     import pufferlib.pytorch
     import torch
 
+    # Task 6c (utof/cs2rl#9): Batch 1 reward-architecture helpers.
+    # Imported lazily here (not at module scope) to keep train.py import
+    # cost flat for callers that never hit the self-play path.
+    from train_helpers_batch1 import WelfordStd, split_into_channels, symlog
+
     # Past-policy LSTM state — same dict structure as trainer.lstm_h
     # key → (agents_per_batch, hidden_size)
     past_lstm_h = {k: torch.zeros_like(v) for k, v in trainer.lstm_h.items()}
     past_lstm_c = {k: torch.zeros_like(v) for k, v in trainer.lstm_h.items()}
+
+    # Task 6c: per-channel online-std estimators + segment-level event mask
+    # buffers. Attached to the trainer (not closure-local) so downstream
+    # tasks (Task 7 aggregation, Task 9 return-norm reset) can read them.
+    # prior_std=1.0 + min_count=1000 gives a conservative warmup: channels
+    # with few non-zero samples (rare-event, e.g. win/defuse) default to
+    # std=1 until we have >=1000 observations — prevents a spuriously small
+    # std from blowing up the normalized reward during early training.
+    trainer._batch1_welford_combat = WelfordStd(prior_std=1.0, min_count=1000)
+    trainer._batch1_welford_objective = WelfordStd(prior_std=1.0, min_count=1000)
+    trainer._batch1_welford_positional = WelfordStd(prior_std=1.0, min_count=1000)
+    # Segment-level event mask (populated by Task 7; init here so Task 6c's
+    # tests don't fail on missing attr and Task 7 can start by just writing).
+    # total_agents (not num_envs) is the per-segment row count in PuffeRL 3.0.
+    _dev = trainer.config["device"]
+    trainer._batch1_event_mask = torch.zeros(trainer.segments, dtype=torch.bool, device=_dev)
+    trainer._batch1_current_segment_has_event = torch.zeros(trainer.total_agents,
+                                                            dtype=torch.bool,
+                                                            device=_dev)
 
     def _evaluate_with_selfplay(self):
         profile = self.profile
@@ -1223,7 +1261,60 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-                r = torch.clamp(r, -1, 1)
+
+                # ── Task 6c: per-channel reward norm + symlog (replaces the
+                # old hard-clip of r to [-1, 1]). Pipeline:
+                #   step_stats (Task 6a info payload)
+                #     → split_into_channels (Task 4)
+                #     → WelfordStd.update + normalize per channel (Task 5)
+                #     → sum channels → symlog (Task 4) → r written to buffer
+                #
+                # Info shape: PufferLib's Serial/Multiprocessing backend
+                # collects info with list-extend semantics (pufferlib/vector.py
+                # ~L149-153). Cs2Env returns `[{"step_stats": view}]` per tick
+                # so `len(info)` is the number of envs in this batch, while
+                # r.shape[0] == len(info) * agents_per_env (10 for Cs2Env).
+                # All 10 agents in an env share the same step_stats because
+                # step_stats aggregates team-level reward fields; we update
+                # Welford ONCE per env (not per agent — that would over-count
+                # by 10x) and apply the same symlog'd channel sum to every
+                # agent row in that env.
+                #
+                # Fallback: if info[e] lacks step_stats (flag off OR an older
+                # info entry that predates Task 6a), pass raw r through for
+                # that env's rows unchanged — the minimal-disruption path if
+                # the flag gets toggled or an upstream change sneaks through.
+                agents_per_env_local = self.vecenv.driver_env.num_agents
+                r_new = torch.empty_like(r)
+                for e in range(len(info)):
+                    row_start = e * agents_per_env_local
+                    row_end = row_start + agents_per_env_local
+                    ss = info[e].get("step_stats", None) if isinstance(info[e], dict) else None
+                    if ss is None:
+                        # No per-tick step_stats: leave this env's rows as-is.
+                        r_new[row_start:row_end] = r[row_start:row_end]
+                        continue
+                    channels = split_into_channels(ss)
+                    # Welford.update takes scalar floats (one observation per env/tick).
+                    self._batch1_welford_combat.update(channels["combat"])
+                    self._batch1_welford_objective.update(channels["objective"])
+                    self._batch1_welford_positional.update(channels["positional"])
+                    # Normalize per-channel (divide by running std), sum, compress.
+                    # Build the scalar sum on CPU (cheap — 3 floats) then broadcast
+                    # to the 10-agent slice; avoids per-agent torch.tensor churn.
+                    combat_t = torch.tensor(channels["combat"], device=_dev, dtype=r.dtype)
+                    objective_t = torch.tensor(channels["objective"], device=_dev, dtype=r.dtype)
+                    positional_t = torch.tensor(channels["positional"], device=_dev, dtype=r.dtype)
+                    r_sum = (self._batch1_welford_combat.normalize(combat_t) +
+                             self._batch1_welford_objective.normalize(objective_t) +
+                             self._batch1_welford_positional.normalize(positional_t))
+                    r_new[row_start:row_end] = symlog(r_sum)
+                # If info was shorter than the batch (e.g. some envs didn't
+                # emit info this tick), copy through any remaining raw rows.
+                used = len(info) * agents_per_env_local
+                if used < r.shape[0]:
+                    r_new[used:] = r[used:]
+                r = r_new
 
                 # ── SELF-PLAY: override opponent-team actions ───────────────
                 if use_past:
