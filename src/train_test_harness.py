@@ -121,18 +121,18 @@ def _build_trainer_for_test(
 
     def env_factory(*_args, buf=None, seed=None, **_kwargs):
         # Mirrors the closure in train.train() lines ~1367-1368. The seed
-        # forwarded by pufferlib.vector can be None for the first reset, so
-        # we fall back to 0 rather than let make_puffer_env choke.
+        # forwarded by pufferlib.vector can be None for the first reset; use
+        # explicit `is None` check so a legitimate seed=0 is preserved rather
+        # than silently falsy-remapped.
         #
-        # Task 6c: include_step_stats_in_info=True is REQUIRED so the
-        # harness-built trainer sees per-tick step_stats in info, which the
-        # self-play patch's channel-split code path consumes. With the flag
-        # off, Task 6c's "at least one Welford update" assertion would never
-        # fire because the fallback `r_new[i] = r[i]` branch would always run.
+        # include_step_stats_in_info: always True so the harness-built trainer
+        # has a uniform attribute/info surface across selfplay and no-selfplay
+        # modes (Task 6c consumes it; Tasks 7-11 ignore it). Cost is a single
+        # pre-built singleton dict per env; no per-tick allocation.
         return make_puffer_env(
             team_spirit=shared_ts,
             buf=buf,
-            seed=seed or 0,
+            seed=0 if seed is None else seed,
             map_data=map_data,
             include_step_stats_in_info=True,
         )
@@ -147,19 +147,21 @@ def _build_trainer_for_test(
     )
 
     # ── Minimal argparse-shaped config object ───────────────────────────────
-    # build_train_config reads these five attributes. Everything else in the
+    # build_train_config reads these four attributes. Everything else in the
     # production parser (wandb, vec-backend, etc.) is irrelevant once we've
     # already instantiated the vecenv.
     # Tiny horizon — ONE evaluate() round is all downstream tests need.
-    # PuffeRL requires total_timesteps >= batch_size; keep generous.
+    # PuffeRL requires total_timesteps >= batch_size; pad by NUM_ROLLOUT_ROUNDS
+    # so a few back-to-back evaluate() calls in a single test stay within the
+    # configured timestep budget.
+    NUM_ROLLOUT_ROUNDS = 4
+    _agents_per_env, bptt_horizon, batch_size = compute_batch_dims(num_envs)
     args = types.SimpleNamespace(
         device=device,
         seed=seed,
-        timesteps=batch_size_for(num_envs) * 4,
+        timesteps=batch_size * NUM_ROLLOUT_ROUNDS,
         checkpoint_dir=tmp_checkpoint_dir,
     )
-
-    _agents_per_env, bptt_horizon, batch_size = compute_batch_dims(num_envs)
     train_config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
 
     policy = build_policy(vecenv, device)
@@ -180,13 +182,18 @@ def _build_trainer_for_test(
         _patch_trainer_with_selfplay(trainer, self_play_mgr)
 
     def cleanup():
-        """Idempotent teardown. Safe to call twice."""
-        # vecenv.close() is safe to call multiple times on Serial. Wrap in
-        # try/except so a cleanup failure never masks a test assertion error.
+        """Idempotent teardown. Safe to call twice.
+
+        Both .close() calls are wrapped in try/except so a cleanup failure
+        never masks a test assertion error. If PufferLib drops trainer.close()
+        in a future release, this silently no-ops — the smoke test pins
+        ``close`` in the attribute surface so the rename will be caught there.
+        """
         try:
             trainer.close()
         except Exception:              # noqa: BLE001 — best-effort cleanup
             pass
+                                       # vecenv.close() is safe to call multiple times on Serial.
         try:
             vecenv.close()
         except Exception:              # noqa: BLE001
@@ -194,15 +201,3 @@ def _build_trainer_for_test(
         shutil.rmtree(tmp_checkpoint_dir, ignore_errors=True)
 
     return trainer, cleanup
-
-
-def batch_size_for(num_envs: int) -> int:
-    """Return the PPO batch size for a given num_envs.
-
-    Thin wrapper over ``src.train.compute_batch_dims`` so callers (and this
-    module's ``args.timesteps`` default) don't have to unpack the 3-tuple.
-    Kept here rather than in ``src/train.py`` because it's test-only — the
-    production code already uses the 3-tuple form directly.
-    """
-    from train import compute_batch_dims
-    return compute_batch_dims(num_envs)[2]

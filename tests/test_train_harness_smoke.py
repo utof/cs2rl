@@ -45,6 +45,9 @@ def test_build_trainer_for_test_smoke():
                 "profile",
                 "amp_context",
                 "policy",
+                                       # close is required by harness cleanup(); pinned so a PufferLib
+                                       # rename silently no-ops the cleanup is caught here instead.
+                "close",
         ):
             assert hasattr(trainer, attr), f"trainer missing attribute: {attr}"
 
