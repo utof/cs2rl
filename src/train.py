@@ -778,6 +778,43 @@ def _patch_trainer_with_return_norm(trainer):
             adv = advantages.abs().sum(axis=1)
             prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
             prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
+
+            # ── Batch 1 Task 8: event-biased prio_probs oversampling ──────
+            # WHAT: when the segment-level event mask is populated and at
+            #   least one segment contains a bomb-plant event, multiply the
+            #   prio_probs of those segments by OVERSAMPLE_FACTOR before
+            #   renormalising. The downstream torch.multinomial call then
+            #   draws biased samples without any further changes — and the
+            #   importance-sampling correction below uses the BOOSTED
+            #   prio_probs[idx], so the gradient stays unbiased.
+            # WHY: bomb-plant events are ~5% of segments early in training;
+            #   uniform prio sampling under-replays them. Oversampling
+            #   accelerates value-function fit on the rare-but-decisive
+            #   transitions. Plan §Task 8 target: event-mask hit-rate among
+            #   sampled segments >= 25%.
+            # PITFALLS:
+            #   * mask absent / all-False → skip the boost so pre-Batch-1
+            #     training paths and the warm-up pass before any plant
+            #     happens still work (no division by zero, no NaN).
+            #   * Boost the prob, not the weight — boosting `prio_weights`
+            #     and re-running the (w+1e-6)/(sum+1e-6) renorm would alter
+            #     the abs-advantage prior shape; multiplying prio_probs and
+            #     dividing by sum keeps the prior intact on non-event rows.
+            #   * Cloning before the in-place mul protects callers that
+            #     might still hold a reference to the original prio_probs.
+            #   * The exposed metric is the RAW event fraction (mask mean),
+            #     NOT the post-boost sampled fraction — that's what the
+            #     wandb/log layer reports as `event_oversample_fraction`.
+            OVERSAMPLE_FACTOR = 4.0
+            event_mask = getattr(self, "_batch1_event_mask", None)
+            if event_mask is not None and event_mask.any():
+                boosted = prio_probs.clone()
+                boosted[event_mask] *= OVERSAMPLE_FACTOR
+                prio_probs = boosted / boosted.sum()
+            self._batch1_event_oversample_fraction = (float(event_mask.float().mean())
+                                                      if event_mask is not None else 0.0)
+            # ──────────────────────────────────────────────────────────────
+
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
             mb_prio = (self.segments * prio_probs[idx, None])**-anneal_beta
             mb_obs = self.observations[idx]

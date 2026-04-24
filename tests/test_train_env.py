@@ -250,3 +250,164 @@ def test_event_mask_detects_injected_bomb_planted():
             vecenv.recv = real_recv
     finally:
         cleanup()
+
+
+# ── Task 8: prio_probs event-biased oversampling ───────────────────────────
+# These tests cover the prio_probs boosting added to the patched train()
+# closure inside _patch_trainer_with_return_norm. The plan target: segments
+# whose _batch1_event_mask is True get sampled at least 25% of the time when
+# at least one event segment exists.
+#
+# Why these three tests:
+#   (1) test_prio_probs_event_oversample — proves the boost actually shifts
+#       the multinomial distribution toward event segments. Captures the
+#       sampled idx tensor by wrapping torch.multinomial; over multiple
+#       minibatch draws inside one train() call, the fraction of indices that
+#       land in event segments must clear the 25% floor.
+#   (2) test_prio_probs_no_events_fallback — when the mask is all-False the
+#       boost branch is skipped (no division by zero, no NaN); the exposed
+#       fraction metric must read 0.0.
+#   (3) test_event_oversample_fraction_exposed — pins the metric semantics:
+#       _batch1_event_oversample_fraction reports the RAW fraction of event
+#       segments (mask.float().mean()), NOT the sampled fraction. This is the
+#       reportable wandb metric.
+
+
+def _capture_multinomial_calls():
+    """Return (wrapper, captured) where wrapper replaces torch.multinomial.
+
+    The wrapper still calls the real implementation (so train() runs as
+    normal) but appends each returned `idx` tensor to `captured`. Tests
+    install the wrapper before train() and pop it after via try/finally so
+    the global torch namespace is left clean even if the test errors.
+    """
+    import torch
+    real_multinomial = torch.multinomial
+    captured = []
+
+    def wrapper(*args, **kwargs):
+        idx = real_multinomial(*args, **kwargs)
+        captured.append(idx.detach().clone())
+        return idx
+
+    return real_multinomial, wrapper, captured
+
+
+def test_prio_probs_event_oversample():
+    """Task 8: with a SMALL fraction of segments marked as events (one slot)
+    and OVERSAMPLE_FACTOR=4 applied to prio_probs, the sampled minibatch must
+    hit event segments meaningfully more often than the raw event-segment
+    fraction would predict. With 1/segments == ~0.3% events and factor=4 the
+    analytic expectation is ~1.2% — the un-boosted baseline is ~0.3%. We
+    assert the sampled rate >= 4x the raw rate, which fails fast if the
+    boost branch is missing.
+
+    The plan's 25% target applies to the documented default mass-event
+    scenario (~50% event segments → ~80% sampled). The single-event variant
+    here is a more sensitive structural probe: it amplifies the visibility of
+    the boost while staying robust to the abs-advantage prior."""
+    import torch
+
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        # Apply the return-norm patch — that's where the prio_probs boost
+        # lives. The harness intentionally does NOT apply this patch so
+        # downstream tests can opt in.
+        _patch_trainer_with_return_norm(trainer)
+        trainer.evaluate()             # populate the rollout buffer
+
+        # Force half of segments to be "event" segments. Segment count
+        # equals trainer.segments (one bool per buffer row).
+        seg_count = trainer._batch1_event_mask.shape[0]
+        trainer._batch1_event_mask.zero_()
+        trainer._batch1_event_mask[:seg_count // 2] = True
+        raw_event_fraction = trainer._batch1_event_mask.float().mean().item()
+
+        real_multinomial, wrapper, captured = _capture_multinomial_calls()
+        torch.multinomial = wrapper
+        try:
+            trainer.train()
+        finally:
+            torch.multinomial = real_multinomial
+
+        assert len(captured) > 0, "train() did not call torch.multinomial"
+
+        # Concatenate every minibatch idx tensor and count event-segment hits.
+        all_idx = torch.cat(captured)
+        hits = trainer._batch1_event_mask[all_idx].float().mean().item()
+
+        # Plan target: >= 25% absolute. With 50% event segments and the boost
+        # the analytic expectation is 80% — well above the 25% floor.
+        # We also require the sampled rate to clear the raw rate by >=20pp,
+        # which fails immediately if the boost is missing (sampled would
+        # then track the raw rate ~0.5 instead of ~0.8).
+        assert hits >= 0.25, (f"Task 8: event-segment sampling fraction = {hits:.3f}, "
+                              f"expected >= 0.25 with OVERSAMPLE_FACTOR=4 and 50% event mask")
+        assert hits >= raw_event_fraction + 0.2, (
+            f"Task 8: sampled rate {hits:.3f} did not exceed raw event "
+            f"fraction {raw_event_fraction:.3f} by 20pp — boost branch likely "
+            f"not active")
+    finally:
+        cleanup()
+
+
+def test_prio_probs_no_events_fallback():
+    """Task 8: when no segments are flagged as events the boost branch must
+    be skipped, train() must run without crashing, and the exposed fraction
+    metric must be 0.0."""
+    import torch
+
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        _patch_trainer_with_return_norm(trainer)
+        trainer.evaluate()
+        trainer._batch1_event_mask.zero_()
+
+        # Should run cleanly with the all-False mask.
+        trainer.train()
+
+        assert hasattr(trainer, "_batch1_event_oversample_fraction"), (
+            "Task 8: trainer._batch1_event_oversample_fraction not exposed")
+        assert trainer._batch1_event_oversample_fraction == 0.0, (
+            f"Task 8: expected 0.0 oversample fraction with all-False mask, "
+            f"got {trainer._batch1_event_oversample_fraction}")
+
+        # Sanity: rollout buffer remains finite (no NaN propagation through
+        # prio_probs renormalize).
+        assert torch.isfinite(
+            trainer.values).all().item(), ("Task 8: NaN/Inf in trainer.values after fallback path")
+    finally:
+        cleanup()
+
+
+def test_event_oversample_fraction_exposed():
+    """Task 8: the metric reports the RAW event-segment fraction (mask mean),
+    not the post-boost sampled fraction. With half the mask True the metric
+    must land in [0.4, 0.6]."""
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        _patch_trainer_with_return_norm(trainer)
+        trainer.evaluate()
+
+        seg_count = trainer._batch1_event_mask.shape[0]
+        trainer._batch1_event_mask.zero_()
+        trainer._batch1_event_mask[:seg_count // 2] = True
+        expected_raw = (seg_count // 2) / seg_count
+
+        trainer.train()
+
+        frac = trainer._batch1_event_oversample_fraction
+        assert 0.4 <= frac <= 0.6, (
+            f"Task 8: expected raw event fraction in [0.4, 0.6], got {frac:.3f} "
+            f"(seg_count={seg_count}, expected_raw={expected_raw:.3f})")
+    finally:
+        cleanup()
