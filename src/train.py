@@ -701,6 +701,27 @@ def _patch_trainer_with_return_norm(trainer):
     _ret_var = torch.ones(1, device=device)
     _ret_count = torch.zeros(1, device=device)
 
+    # ── Batch 1 Task 9a: force-reset return-norm stats + expose on trainer ──
+    # WHAT: zero _ret_mean/_ret_count and set _ret_var=1 in-place at patch
+    #   apply time, then attach the tensors to the trainer instance.
+    # WHY: Task 6c symlog-compresses rewards before they enter the rollout
+    #   buffer, so mb_returns = advantages + values lives in symlog space.
+    #   The return-norm running stats must therefore start fresh — carrying
+    #   stale raw-scale stats from a pre-Batch-1 checkpoint would contaminate
+    #   the symlog-space computation throughout warmup.
+    # PITFALL: use in-place .zero_()/.fill_() rather than reassigning the
+    #   names. The trainer attribute below is meant to be the same tensor
+    #   reference the closure mutates, so `_update_return_stats` writes are
+    #   visible via trainer._ret_var (and conversely tests reading the attr
+    #   see the live value, not a stale snapshot).
+    _ret_mean.zero_()
+    _ret_var.fill_(1.0)
+    _ret_count.zero_()
+    trainer._ret_mean = _ret_mean
+    trainer._ret_var = _ret_var
+    trainer._ret_count = _ret_count
+    # ──────────────────────────────────────────────────────────────────────
+
     # ── ADAPTIVE ENTROPY (Lagrangian / SAC-style alpha) ────────────────────
     # max_entropy derived from MultiDiscrete(ACTION_HEAD_SIZES).
     max_entropy = sum(np.log(n) for n in ACTION_HEAD_SIZES)

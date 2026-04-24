@@ -547,3 +547,52 @@ def test_batch1_metrics_exposed():
             assert math.isfinite(v), f"Task 9C: trainer.{name}={v} not finite"
     finally:
         cleanup()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Task 9a — return-norm stats reset + symlog-scale verification
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_return_norm_stats_reset_on_batch_start():
+    """Task 9a: applying the return-norm patch must put _ret_mean/_ret_var/
+    _ret_count into a neutral state and expose them on the trainer.
+
+    Reading them BEFORE any train() call pins the patch-time invariant —
+    this is what guarantees a fresh start in symlog space when Batch 1 is
+    enabled on a previously-trained checkpoint."""
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        _patch_trainer_with_return_norm(trainer)
+        assert float(trainer._ret_mean.item()) == 0.0
+        assert float(trainer._ret_var.item()) == 1.0
+        assert int(trainer._ret_count.item()) == 0
+    finally:
+        cleanup()
+
+
+def test_ret_var_reflects_symlog_scale():
+    """Task 9a: after one rollout/train round, _ret_var must reflect the
+    symlog-compressed scale of returns, not the raw scale.
+
+    Differential win rewards reach ±5 raw; symlog compresses those to about
+    ±1.79. With per-channel Welford normalisation on top, the typical
+    return std lands well under 10. The 10.0 threshold is a soft sanity
+    bound: anything much higher would indicate the symlog/normalise
+    pipeline isn't actually feeding the value head."""
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        _patch_trainer_with_return_norm(trainer)
+        trainer.evaluate()
+        trainer.train()
+        std = trainer._ret_var.item()**0.5
+        assert std < 10.0, (f"_ret_var std={std:.4f} too high — returns appear to be on raw "
+                            f"scale rather than symlog-compressed. Pipeline broken.")
+    finally:
+        cleanup()
