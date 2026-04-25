@@ -163,13 +163,27 @@ def make_puffer_env(team_spirit=None,
                     buf=None,
                     seed=0,
                     episode_stats=True,
-                    map_data=None):
-    """Create the native C PufferEnv used by smoke/train/eval."""
+                    map_data=None,
+                    include_step_stats_in_info=False):
+    """Create the native C PufferEnv used by smoke/train/eval.
+
+    ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
+    emits ``info = [{"step_stats": StepStatsView}]`` on every tick so trainer
+    patches (Task 6c onward) can read per-channel raw reward fields. Defaults
+    to False so production code paths that don't consume step_stats (e.g. eval
+    scripts, viz) stay zero-cost.
+    """
     from c_env.cs2_env import make_env as make_c_env
 
     if record_fn is not None:
         raise ValueError("record_fn is only supported by the Python recording env")
-    return make_c_env(seed=seed, team_spirit=team_spirit, buf=buf, map_data=map_data)
+    return make_c_env(
+        seed=seed,
+        team_spirit=team_spirit,
+        buf=buf,
+        map_data=map_data,
+        include_step_stats_in_info=include_step_stats_in_info,
+    )
 
 
 def load_policy_from_checkpoint(checkpoint_path, device):
@@ -687,15 +701,63 @@ def _patch_trainer_with_return_norm(trainer):
     _ret_var = torch.ones(1, device=device)
     _ret_count = torch.zeros(1, device=device)
 
+    # ── Batch 1 Task 9a: force-reset return-norm stats + expose on trainer ──
+    # WHAT: zero _ret_mean/_ret_count and set _ret_var=1 in-place at patch
+    #   apply time, then attach the tensors to the trainer instance.
+    # WHY: Task 6c symlog-compresses rewards before they enter the rollout
+    #   buffer, so mb_returns = advantages + values lives in symlog space.
+    #   The return-norm running stats must therefore start fresh — carrying
+    #   stale raw-scale stats from a pre-Batch-1 checkpoint would contaminate
+    #   the symlog-space computation throughout warmup.
+    # PITFALL: use in-place .zero_()/.fill_() rather than reassigning the
+    #   names. The trainer attribute below is meant to be the same tensor
+    #   reference the closure mutates, so `_update_return_stats` writes are
+    #   visible via trainer._ret_var (and conversely tests reading the attr
+    #   see the live value, not a stale snapshot).
+    _ret_mean.zero_()
+    _ret_var.fill_(1.0)
+    _ret_count.zero_()
+    trainer._ret_mean = _ret_mean
+    trainer._ret_var = _ret_var
+    trainer._ret_count = _ret_count
+    # ──────────────────────────────────────────────────────────────────────
+
     # ── ADAPTIVE ENTROPY (Lagrangian / SAC-style alpha) ────────────────────
     # max_entropy derived from MultiDiscrete(ACTION_HEAD_SIZES).
     max_entropy = sum(np.log(n) for n in ACTION_HEAD_SIZES)
-    target_entropy = 0.5 * max_entropy                 # ≈ 2.14
-    entropy_floor = 0.3 * max_entropy                  # collapse threshold
+    # Task 9A: target_entropy is no longer a static scalar — it's recomputed
+    # each train() call from a linear ramp 0.7→0.5*max_entropy across
+    # [0, 10_000_000] global steps (see target_entropy_schedule). The live
+    # value lives in the closure-local _t9_target_entropy in
+    # _train_with_return_norm and on trainer._batch1_current_target_entropy.
+    entropy_floor = 0.3 * max_entropy  # collapse threshold
     import math
 
     log_alpha = torch.tensor([math.log(0.1)], requires_grad=True, device=device)
     alpha_optimizer = torch.optim.Adam([log_alpha], lr=1e-4)
+
+    # Task 9A/9B: trainer-level state for target_entropy schedule + log_alpha
+    # reset. Attached to the trainer (not closure-local) so:
+    #   - tests can inspect/pin _batch1_max_entropy and current_target_entropy
+    #   - the wandb log layer can read _batch1_current_target_entropy without
+    #     reaching into the closure of _train_with_return_norm.
+    # _batch1_log_alpha_reset_done is the idempotency flag for Task 9B —
+    # the first train() call after this patch is applied resets log_alpha to
+    # log(ent_coef); every later train() call leaves log_alpha alone so the
+    # SAC dual-gradient loop can do its job.
+    trainer._batch1_max_entropy = float(max_entropy)
+    trainer._batch1_log_alpha_reset_done = False
+    trainer._batch1_current_target_entropy = 0.7 * float(max_entropy)
+    # Pre-init effective_alpha + grad_norm metrics (utof/cs2rl#16). The
+    # post-loop reads in _train_with_return_norm refresh these, but if the
+    # target_kl early-break trips on mb=0 OR no accumulation boundary fires,
+    # the local names are never bound — leaving the trainer attrs
+    # AttributeError on first read. Seeding them with sane defaults here
+    # turns those edge cases into "stale-from-previous-call" instead of a
+    # crash, and the post-loop refresh overwrites whenever the loop runs
+    # all the way through.
+    trainer._batch1_effective_alpha = float(trainer.config["ent_coef"])
+    trainer._batch1_grad_norm = 0.0
 
     # ──────────────────────────────────────────────────────────────────────
 
@@ -742,6 +804,40 @@ def _patch_trainer_with_return_norm(trainer):
         anneal_beta = b0 + (1 - b0) * a * self.epoch / self.total_epochs
         self.ratio[:] = 1
 
+        # Task 9A: recompute target_entropy from the linear ramp once per
+        # train() call. WHY here (not inside the minibatch loop): the schedule
+        # is keyed on global_step which is fixed for the duration of a single
+        # train() call, so recomputing per-minibatch would burn cycles for no
+        # signal. We mirror the value onto trainer._batch1_current_target_entropy
+        # so the wandb log layer can read it without touching this closure.
+        # PITFALL: do NOT capture max_entropy from the outer closure here —
+        # use trainer._batch1_max_entropy. Closure capture would silently break
+        # if the patch were re-applied on the same trainer instance.
+        from train_helpers_batch1 import target_entropy_schedule
+        _t9_target_entropy = target_entropy_schedule(self.global_step,
+                                                     trainer._batch1_max_entropy,
+                                                     warmup_end=10_000_000)
+        trainer._batch1_current_target_entropy = float(_t9_target_entropy)
+
+        # Task 9B: one-shot log_alpha reset on the first train() call after
+        # this patch. WHY: the entropy schedule + log_alpha are coupled — the
+        # outer training loop can leave log_alpha at a stale value from a
+        # previous run / re-init, and we need a deterministic starting point
+        # of log(ent_coef) so the SAC dual-gradient loop converges from a
+        # known floor. The flag is on the trainer (not the closure) so a
+        # checkpoint-restored trainer that gets re-patched still resets once.
+        if not trainer._batch1_log_alpha_reset_done:
+            with torch.no_grad():
+                log_alpha.fill_(math.log(config["ent_coef"]))
+            trainer._batch1_log_alpha_reset_done = True
+
+        # Task 8: raw event-segment fraction (mask mean) — computed once per
+        # train() call because _batch1_event_mask doesn't change inside the
+        # minibatch loop. Reported to the log layer as event_oversample_fraction.
+        _t8_event_mask = getattr(self, "_batch1_event_mask", None)
+        self._batch1_event_oversample_fraction = (float(_t8_event_mask.float().mean())
+                                                  if _t8_event_mask is not None else 0.0)
+
         for mb in range(self.total_minibatches):
             profile("train_misc", epoch, nest=True)
             self.amp_context.__enter__()
@@ -764,6 +860,41 @@ def _patch_trainer_with_return_norm(trainer):
             adv = advantages.abs().sum(axis=1)
             prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
             prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
+
+            # ── Batch 1 Task 8: event-biased prio_probs oversampling ──────
+            # WHAT: when the segment-level event mask is populated and at
+            #   least one segment contains a bomb-plant event, multiply the
+            #   prio_probs of those segments by OVERSAMPLE_FACTOR before
+            #   renormalising. The downstream torch.multinomial call then
+            #   draws biased samples without any further changes — and the
+            #   importance-sampling correction below uses the BOOSTED
+            #   prio_probs[idx], so the gradient stays unbiased.
+            # WHY: bomb-plant events are sparse in early training (the exact
+            #   fraction is itself a Task 9 metric, reported via
+            #   _batch1_event_oversample_fraction). Uniform prio sampling
+            #   under-replays them; oversampling accelerates value-function
+            #   fit on the rare-but-decisive transitions. Plan §Task 8
+            #   target: event-mask hit-rate among sampled segments >= 25%.
+            # PITFALLS:
+            #   * mask absent / all-False → skip the boost so pre-Batch-1
+            #     training paths and the warm-up pass before any plant
+            #     happens still work (no division by zero, no NaN).
+            #   * Boost the prob, not the weight — boosting `prio_weights`
+            #     and re-running the (w+1e-6)/(sum+1e-6) renorm would alter
+            #     the abs-advantage prior shape; multiplying prio_probs and
+            #     dividing by sum keeps the prior intact on non-event rows.
+            #   * Cloning before the in-place mul protects callers that
+            #     might still hold a reference to the original prio_probs.
+            #   * The exposed metric is the RAW event fraction (mask mean),
+            #     NOT the post-boost sampled fraction — that's what the
+            #     wandb/log layer reports as `event_oversample_fraction`.
+            OVERSAMPLE_FACTOR = 4.0
+            if _t8_event_mask is not None and _t8_event_mask.any():
+                boosted = prio_probs.clone()
+                boosted[_t8_event_mask] *= OVERSAMPLE_FACTOR
+                prio_probs = boosted / boosted.sum()
+            # ──────────────────────────────────────────────────────────────
+
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
             mb_prio = (self.segments * prio_probs[idx, None])**-anneal_beta
             mb_obs = self.observations[idx]
@@ -847,7 +978,11 @@ def _patch_trainer_with_return_norm(trainer):
 
             # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
             alpha = log_alpha.exp()
-            alpha_loss = (log_alpha * (current_entropy - target_entropy).detach()).mean()
+            # Task 9A: use the scheduled target_entropy (recomputed at top of
+            # this train() call) instead of the static fallback. _t9_target_entropy
+            # is a Python float; .detach() on a tensor minus a float is fine —
+            # autograd treats the float as a constant.
+            alpha_loss = (log_alpha * (current_entropy - _t9_target_entropy).detach()).mean()
             alpha_optimizer.zero_grad()
             alpha_loss.backward()
             alpha_optimizer.step()
@@ -892,7 +1027,15 @@ def _patch_trainer_with_return_norm(trainer):
             profile("learn", epoch)
             loss.backward()
             if (mb + 1) % self.accumulate_minibatches == 0:
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config["max_grad_norm"])
+                # Task 9C: capture pre-clip grad norm. clip_grad_norm_ returns
+                # the total norm computed BEFORE clipping (PyTorch contract,
+                # see torch.nn.utils.clip_grad_norm_ docs). Storing it on the
+                # trainer makes it available to the log layer; the .item()
+                # call forces a host sync which is fine here because the
+                # caller already syncs via .item() on losses below.
+                _t9_grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(),
+                                                               config["max_grad_norm"])
+                trainer._batch1_grad_norm = float(_t9_grad_norm)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
@@ -909,6 +1052,38 @@ def _patch_trainer_with_return_norm(trainer):
         losses["ret_mean"] = _ret_mean.item()
         losses["ret_std"] = (_ret_var + 1e-8).sqrt().item()
         losses["log_alpha"] = log_alpha.item()
+
+        # Task 9C: expose per-train()-call metrics on the trainer for the
+        # wandb log layer. Captured here (not inside the minibatch loop)
+        # because the log layer reports one value per train() call, not
+        # per-minibatch — and effective_alpha / log_alpha are last-write-
+        # wins after the inner loop anyway.
+        # PITFALL: effective_alpha is bound inside the minibatch loop;
+        # Python keeps the last bound value visible at this scope so
+        # reading it here works in the happy path. The real risk is the
+        # `target_kl` early-break path inside the loop: if minibatch 0
+        # exceeds the KL threshold and breaks before the alpha block
+        # binds effective_alpha, this read would NameError on the very
+        # first train() call. Same applies to _batch1_grad_norm captured
+        # at the optimizer-step site if accumulation never fires.
+        # Tracked: utof/cs2rl issue (early-break unbound state).
+        trainer._batch1_log_alpha = float(log_alpha.item())
+        # effective_alpha may be unbound this call if target_kl early-broke
+        # on mb=0 — leave the pre-initialised trainer attr (set in the patch
+        # block above) intact in that case rather than crashing.
+        try:
+            trainer._batch1_effective_alpha = float(effective_alpha.detach().item())
+        except (NameError, UnboundLocalError):
+            pass
+        # Welford std exposure: guard with getattr+fallback because
+        # _patch_trainer_with_selfplay (Task 6c, where these get attached)
+        # may not have been applied — preserves the no-selfplay code path.
+        _w_combat = getattr(trainer, "_batch1_welford_combat", None)
+        trainer._batch1_std_combat = (float(_w_combat.std()) if _w_combat is not None else 1.0)
+        _w_obj = getattr(trainer, "_batch1_welford_objective", None)
+        trainer._batch1_std_objective = (float(_w_obj.std()) if _w_obj is not None else 1.0)
+        _w_pos = getattr(trainer, "_batch1_welford_positional", None)
+        trainer._batch1_std_positional = (float(_w_pos.std()) if _w_pos is not None else 1.0)
 
         profile.end()
         logs = None
@@ -1167,10 +1342,43 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
     import pufferlib.pytorch
     import torch
 
+    # Task 6c (utof/cs2rl#9): Batch 1 reward-architecture helpers.
+    # Imported lazily here (not at module scope) to keep train.py import
+    # cost flat for callers that never hit the self-play path.
+    from train_helpers_batch1 import WelfordStd, split_into_channels, symlog
+
     # Past-policy LSTM state — same dict structure as trainer.lstm_h
     # key → (agents_per_batch, hidden_size)
     past_lstm_h = {k: torch.zeros_like(v) for k, v in trainer.lstm_h.items()}
     past_lstm_c = {k: torch.zeros_like(v) for k, v in trainer.lstm_h.items()}
+
+    # Task 6c: per-channel online-std estimators + segment-level event mask
+    # buffers. Attached to the trainer (not closure-local) so downstream
+    # tasks (Task 7 aggregation, Task 9 return-norm reset) can read them.
+    # prior_std=1.0 + min_count=1000 gives a conservative warmup: channels
+    # with few non-zero samples (rare-event, e.g. win/defuse) default to
+    # std=1 until we have >=1000 observations — prevents a spuriously small
+    # std from blowing up the normalized reward during early training.
+    trainer._batch1_welford_combat = WelfordStd(prior_std=1.0, min_count=1000)
+    trainer._batch1_welford_objective = WelfordStd(prior_std=1.0, min_count=1000)
+    trainer._batch1_welford_positional = WelfordStd(prior_std=1.0, min_count=1000)
+    # Segment-level event mask (populated by Task 7; init here so Task 6c's
+    # tests don't fail on missing attr and Task 7 can start by just writing).
+    # Dimension split:
+    #   _batch1_event_mask           — one bool PER SEGMENT (buffer row),
+    #                                   consumed when prio_probs sampling picks
+    #                                   which completed segments to replay.
+    #   _batch1_current_segment_has_event — one bool PER AGENT ROW (= total_agents),
+    #                                   live accumulator during rollout; OR'd
+    #                                   into the segment row when a segment closes.
+    # They're different shapes because one tracks "which rows in the finished
+    # buffer contain an event" and the other tracks "does the currently-rolling
+    # segment on this agent row contain an event yet".
+    _dev = trainer.config["device"]
+    trainer._batch1_event_mask = torch.zeros(trainer.segments, dtype=torch.bool, device=_dev)
+    trainer._batch1_current_segment_has_event = torch.zeros(trainer.total_agents,
+                                                            dtype=torch.bool,
+                                                            device=_dev)
 
     def _evaluate_with_selfplay(self):
         profile = self.profile
@@ -1223,7 +1431,77 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-                r = torch.clamp(r, -1, 1)
+
+                # ── Task 6c: per-channel reward norm + symlog (replaces the
+                # old hard-clip of r to [-1, 1]). Pipeline:
+                #   step_stats (Task 6a info payload)
+                #     → split_into_channels (Task 4)
+                #     → WelfordStd.update + normalize per channel (Task 5)
+                #     → sum channels → symlog (Task 4) → r written to buffer
+                #
+                # Info shape: PufferLib's Serial/Multiprocessing backend
+                # collects info with list-extend semantics (pufferlib/vector.py
+                # ~L149-153). Cs2Env returns `[{"step_stats": view}]` per tick
+                # so `len(info)` is the number of envs in this batch, while
+                # r.shape[0] == len(info) * agents_per_env (10 for Cs2Env).
+                # All 10 agents in an env share the same step_stats because
+                # step_stats aggregates team-level reward fields; we update
+                # Welford ONCE per env (not per agent — that would over-count
+                # by 10x) and apply the same symlog'd channel sum to every
+                # agent row in that env.
+                #
+                # Fallback: if info[e] lacks step_stats (flag off OR an older
+                # info entry that predates Task 6a), pass raw r through for
+                # that env's rows unchanged — the minimal-disruption path if
+                # the flag gets toggled or an upstream change sneaks through.
+                agents_per_env_local = self.vecenv.driver_env.num_agents
+                r_new = torch.empty_like(r)
+                for e in range(len(info)):
+                    row_start = e * agents_per_env_local
+                    row_end = row_start + agents_per_env_local
+                    ss = info[e].get("step_stats", None) if isinstance(info[e], dict) else None
+                    if ss is None:
+                        # No per-tick step_stats: leave this env's rows as-is.
+                        r_new[row_start:row_end] = r[row_start:row_end]
+                        continue
+                    channels = split_into_channels(ss)
+                    # Welford.update takes scalar floats (one observation per env/tick).
+                    self._batch1_welford_combat.update(channels["combat"])
+                    self._batch1_welford_objective.update(channels["objective"])
+                    self._batch1_welford_positional.update(channels["positional"])
+                    # Task 7: OR the per-tick bomb_planted flag into the live
+                    # event accumulator for every agent row in this env. The
+                    # C side sets ss->bomb_planted only on the transition tick
+                    # (cs2_bomb.h:60 — guarded by `if g->bomb_plant_ticks >=
+                    # sd->bomb_plant_time`) and StepStats is cleared every step
+                    # via clear_stats(ss) at the top of cs2_env.h:75. So
+                    # step_stats['bomb_planted'] is already a per-tick delta
+                    # (1 only on the plant tick) — NO edge-trigger needed.
+                    # All 10 agent rows in an env share the same event state:
+                    # if the bomb plants this tick, every row's current segment
+                    # now contains an event. Flushed to _batch1_event_mask at
+                    # the segment boundary below (see ~30 lines down).
+                    # bool(int(...)) is deliberate: stubs or numpy scalars may
+                    # not truthy-coerce cleanly; int() normalises to a Python
+                    # int first so bool() is guaranteed. Do not strip the cast.
+                    if bool(int(ss.get("bomb_planted", 0))):
+                        self._batch1_current_segment_has_event[row_start:row_end] = True
+                    # Normalize per-channel (divide by running std), sum, compress.
+                    # Build the scalar sum on CPU (cheap — 3 floats) then broadcast
+                    # to the 10-agent slice; avoids per-agent torch.tensor churn.
+                    combat_t = torch.tensor(channels["combat"], device=_dev, dtype=r.dtype)
+                    objective_t = torch.tensor(channels["objective"], device=_dev, dtype=r.dtype)
+                    positional_t = torch.tensor(channels["positional"], device=_dev, dtype=r.dtype)
+                    r_sum = (self._batch1_welford_combat.normalize(combat_t) +
+                             self._batch1_welford_objective.normalize(objective_t) +
+                             self._batch1_welford_positional.normalize(positional_t))
+                    r_new[row_start:row_end] = symlog(r_sum)
+                # If info was shorter than the batch (e.g. some envs didn't
+                # emit info this tick), copy through any remaining raw rows.
+                used = len(info) * agents_per_env_local
+                if used < r.shape[0]:
+                    r_new[used:] = r[used:]
+                r = r_new
 
                 # ── SELF-PLAY: override opponent-team actions ───────────────
                 if use_past:
@@ -1277,6 +1555,20 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 self.ep_lengths[env_id] += 1
                 if seq_pos + 1 >= cfg["bptt_horizon"]:
                     num_full = env_id.stop - env_id.start
+                    # Task 7: flush the live event accumulator → segment mask
+                    # BEFORE overwriting ep_indices. Each agent row's current
+                    # segment index lives in self.ep_indices[env_id]; once we
+                    # reassign ep_indices to (free_idx + arange(num_full)) a
+                    # few lines down, the old segment index is lost. Clone
+                    # first, write to _batch1_event_mask at those OLD slots,
+                    # then reset the live accumulator so the next segment
+                    # starts clean. Pitfall: writing AFTER the re-index would
+                    # clobber freshly-allocated future segments (off-by-one
+                    # bug that would silently mark the wrong rollout rows).
+                    old_seg_indices = self.ep_indices[env_id].clone().long()
+                    self._batch1_event_mask[old_seg_indices] = (
+                        self._batch1_current_segment_has_event[env_id])
+                    self._batch1_current_segment_has_event[env_id] = False
                     self.ep_indices[env_id] = (self.free_idx +
                                                torch.arange(num_full, device=dev).int())
                     self.ep_lengths[env_id] = 0

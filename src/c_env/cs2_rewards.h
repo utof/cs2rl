@@ -90,9 +90,65 @@ static void compute_rewards(Dust2Env* env,
     StepStats*  es = &env->episode_stats;
 
     if (g->round_over) {
+        /* Batch 1 (RL overhaul): differential win rewards by outcome mechanism.
+         *
+         * Classification (mutually exclusive, evaluated in order):
+         *   T win   (winner == 0):
+         *     - detonation: bomb_planted && bomb_ticks_left <= 0 (bomb timer ran to zero)
+         *     - elimination: otherwise (killed all CT, with or without planting attempt)
+         *   CT win  (winner == 1):
+         *     - defuse: bomb_just_defused set this tick (cs2_bomb.h defuse branch)
+         *     - elimination: otherwise (killed all T, with bomb planted but not defused,
+         *       or before any plant)
+         *   Timeout (winner == -1, timed_out flag set):
+         *     - CT gets the timeout magnitude as a reward for surviving without a plant.
+         *     - T agents receive -timeout magnitude as a penalty.
+         *     - Note: the C env uses winner=-1 for this case, not winner=1.
+         *
+         * We classify CT-defuse via the bomb_just_defused argument (set by
+         * cs2_bomb.h only when the defuse branch actually completes). This is
+         * the spec-compliant path: the live-play sequence where CT kills the
+         * last T post-plant sets winner=1 in cs2_env.h before process_bomb
+         * has a chance to fire, so bomb_just_defused stays 0 and we correctly
+         * classify as elimination — NOT defuse. Tests that want to exercise
+         * defuse MUST drive process_bomb naturally (see test_natural_defuse
+         * in tests/test_reward.py).
+         *
+         * Sets StepStats.win_by_detonation / win_by_defuse for Python-side
+         * channel routing: objective channel for detonation/defuse, combat
+         * channel for elimination/timeout.
+         */
+        int t_won     = (g->winner == 0);
+        int ct_won    = (g->winner == 1);
+        int timed_out = (g->winner == -1);
+        int detonated = t_won && g->bomb_planted && (g->bomb_ticks_left <= 0);
+        int defused   = ct_won && bomb_just_defused;
+
+        ss->win_by_detonation = detonated ? 1 : 0;
+        ss->win_by_defuse     = defused ? 1 : 0;
+        es->win_by_detonation = ss->win_by_detonation;
+        es->win_by_defuse     = ss->win_by_defuse;
+
+        float t_mag, ct_mag;
+        if (t_won) {
+            t_mag  = detonated ? sd->reward_win_t_detonation : sd->reward_win_t_elimination;
+            ct_mag = -t_mag; /* losers receive equal-magnitude penalty */
+        } else if (ct_won) {
+            ct_mag = defused ? sd->reward_win_ct_defuse : sd->reward_win_ct_elimination;
+            t_mag  = -ct_mag;
+        } else if (timed_out) {
+            /* Timeout: no team "won" but CTs achieved their objective (no plant).
+             * We give CTs a positive reward and Ts the symmetric penalty. */
+            ct_mag = sd->reward_win_ct_timeout;
+            t_mag  = -ct_mag;
+        } else {
+            t_mag  = 0.0f; /* defensive: ongoing round, should not be reached */
+            ct_mag = 0.0f;
+        }
+
         for (int i = 0; i < N_AGENTS; i++) {
             if (g->agents[i].alive) {
-                float w = (g->winner == g->agents[i].team) ? sd->reward_win : -sd->reward_win;
+                float w          = (g->agents[i].team == 0) ? t_mag : ct_mag;
                 env->rewards[i] += w;
                 ss->reward_win  += w;
                 es->reward_win  += w;
