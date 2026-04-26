@@ -619,8 +619,11 @@ def test_round_designated_carrier_assigned():
 
 
 def test_round_designated_carrier_stable_through_drop():
-    """Force the carrier to die, watch a teammate auto-pick up; assert
-    round_designated_carrier_id is unchanged."""
+    """Force the carrier to die and verify the round-fixed field survives
+    the resulting drop, regardless of whether auto-pickup fires. Also
+    sanity-checks that the production drop path actually engaged (would
+    catch a regression in cs2_env.h:155-167 silently skipping the drop).
+    """
     env = train.make_puffer_env(seed=7)
     try:
         env.reset(seed=7)
@@ -634,12 +637,24 @@ def test_round_designated_carrier_stable_through_drop():
             assert g.round_designated_carrier_id == rid_at_start, (
                 f"round_designated_carrier_id changed mid-round "
                 f"({rid_at_start} → {g.round_designated_carrier_id})")
+        # Sanity: the carrier-died branch in cs2_env.h:155-167 must have engaged.
+        # Either bomb is now dropped (no pickup yet) OR carrier_id was reassigned
+        # via auto-pickup (cs2_bomb.h:93-114). If neither, the drop path is broken.
+        assert g.bomb_is_dropped == 1 or g.bomb_carrier_id != rid_at_start, (
+            f"after carrier death, expected drop or pickup-reassignment, "
+            f"but bomb_is_dropped={g.bomb_is_dropped} and "
+            f"bomb_carrier_id={g.bomb_carrier_id} (still original carrier)")
     finally:
         env.close()
 
 
 def test_round_designated_carrier_property_50_seeds():
-    """Property test: 50 random seeds, field is invariant from reset to round-over."""
+    """Property test: 50 random seeds, the round-fixed field is invariant
+    from reset to round-over OR to 200 ticks. Every 5th seed kills the
+    carrier mid-round to exercise the drop path; the field must still hold.
+    Cheap; catches accidental writes from any code path (combat, bomb,
+    movement, etc.).
+    """
     actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
     for seed in range(50):
         env = train.make_puffer_env(seed=seed)
@@ -647,12 +662,17 @@ def test_round_designated_carrier_property_50_seeds():
             env.reset(seed=seed)
             g = env._c_env.game
             rid = g.round_designated_carrier_id
-            for _ in range(200):
+            kill_seed = (seed % 5 == 0)                                      # 10 / 50 seeds
+            for tick in range(200):
                 if g.round_over:
                     break
+                if kill_seed and tick == 5:
+                                                                             # Drive the drop-on-death path (cs2_env.h:155-167) on this iteration.
+                    g.agents[rid].hp = 0
+                    g.agents[rid].alive = 0
                 env.step(actions)
-            assert g.round_designated_carrier_id == rid, (
-                f"seed={seed}: round_designated_carrier_id drifted "
-                f"({rid} → {g.round_designated_carrier_id})")
+                assert g.round_designated_carrier_id == rid, (
+                    f"seed={seed} tick={tick}: round_designated_carrier_id "
+                    f"drifted ({rid} → {g.round_designated_carrier_id})")
         finally:
             env.close()
