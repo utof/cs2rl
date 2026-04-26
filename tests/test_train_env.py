@@ -596,3 +596,63 @@ def test_ret_var_reflects_symlog_scale():
                             f"scale rather than symlog-compressed. Pipeline broken.")
     finally:
         cleanup()
+
+
+# ── Batch 2 (utof/cs2rl Batch 2): designated bomb carrier — round-fixed ──
+def test_round_designated_carrier_assigned():
+    """At env_reset, all three carrier signals must align."""
+    env = train.make_puffer_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        rid = g.round_designated_carrier_id
+        assert 0 <= rid < 5, f"round_designated_carrier_id out of range: {rid}"
+        assert g.bomb_carrier_id == rid, (f"bomb_carrier_id ({g.bomb_carrier_id}) != "
+                                          f"round_designated_carrier_id ({rid}) at reset")
+        assert g.agents[rid].has_bomb == 1, (
+            f"designated carrier (idx {rid}) does not have_bomb=1 at reset")
+        for i in range(5):
+            if i != rid:
+                assert g.agents[i].has_bomb == 0, (f"non-carrier T idx {i} has_bomb=1 at reset")
+    finally:
+        env.close()
+
+
+def test_round_designated_carrier_stable_through_drop():
+    """Force the carrier to die, watch a teammate auto-pick up; assert
+    round_designated_carrier_id is unchanged."""
+    env = train.make_puffer_env(seed=7)
+    try:
+        env.reset(seed=7)
+        g = env._c_env.game
+        rid_at_start = g.round_designated_carrier_id
+        g.agents[rid_at_start].hp = 0
+        g.agents[rid_at_start].alive = 0
+        actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        for _ in range(20):
+            env.step(actions)
+            assert g.round_designated_carrier_id == rid_at_start, (
+                f"round_designated_carrier_id changed mid-round "
+                f"({rid_at_start} → {g.round_designated_carrier_id})")
+    finally:
+        env.close()
+
+
+def test_round_designated_carrier_property_50_seeds():
+    """Property test: 50 random seeds, field is invariant from reset to round-over."""
+    actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+    for seed in range(50):
+        env = train.make_puffer_env(seed=seed)
+        try:
+            env.reset(seed=seed)
+            g = env._c_env.game
+            rid = g.round_designated_carrier_id
+            for _ in range(200):
+                if g.round_over:
+                    break
+                env.step(actions)
+            assert g.round_designated_carrier_id == rid, (
+                f"seed={seed}: round_designated_carrier_id drifted "
+                f"({rid} → {g.round_designated_carrier_id})")
+        finally:
+            env.close()

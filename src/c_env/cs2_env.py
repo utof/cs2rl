@@ -180,6 +180,9 @@ class GameStateC(ctypes.Structure):
         ("bomb_plant_ticks", ctypes.c_int32),
         ("bomb_being_defused_by", ctypes.c_int32),
         ("bomb_defuse_ticks", ctypes.c_int32),
+                                                                       # Batch 2: round-fixed designated carrier — mirrors C cs2_types.h GameState.
+                                                                       # See C header for the why / pitfalls; insertion point matters for alignment.
+        ("round_designated_carrier_id", ctypes.c_int32),
         ("bombsite_entered", ctypes.c_int8 * 5),
         ("bomb_is_dropped", ctypes.c_int8),
         ("_pad_gs", ctypes.c_int8 * 2),
@@ -277,14 +280,20 @@ class Dust2EnvC(ctypes.Structure):
 # 20 bytes of added mask slots + alignment.
 # Batch 1 (RL overhaul): StepStats +4 bytes (win_by_detonation, win_by_defuse,
 # _pad_ss_wins[2]). Dust2EnvC +8 bytes (2× StepStats).
+# Batch 2 task 1: GameState +4 from round_designated_carrier_id (int32).
+# Dust2EnvC grows by +8 (not +4): the extra 4 bytes from `game` push the
+# trailing `client` void* pointer past an 8-byte alignment boundary, so the
+# C compiler inserts a 4-byte pad before `client`, giving a net +8 for
+# Dust2EnvC. T2 will further bump Dust2EnvC by +40 when OBS_DIM 104 → 105
+# grows the `observations` array.
 assert ctypes.sizeof(AgentStateC) == 152, (
     f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 152)")
-assert ctypes.sizeof(GameStateC) == 1584, (
-    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1584)")
+assert ctypes.sizeof(GameStateC) == 1588, (
+    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1588)")
 assert ctypes.sizeof(StepStatsC) == 248, (
     f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 248)")
-assert ctypes.sizeof(Dust2EnvC) == 6704, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6704)")
+assert ctypes.sizeof(Dust2EnvC) == 6712, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6712)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
