@@ -12,7 +12,7 @@
 /* ── Constants ─────────────────────────────────────────────────────────── */
 #define TEAM_SIZE             5
 #define N_AGENTS              10
-#define OBS_DIM               104
+#define OBS_DIM               105
 #define ACTION_DIM            8
 #define ACTION_MASK_DIM       38
 #define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */

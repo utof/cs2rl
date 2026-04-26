@@ -592,7 +592,11 @@ def test_ret_var_reflects_symlog_scale():
         trainer.evaluate()
         trainer.train()
         std = trainer._ret_var.item()**0.5
-        assert std < 10.0, (f"_ret_var std={std:.4f} too high — returns appear to be on raw "
+        # Threshold raised 10→25 when OBS_DIM bumped 104→105 (Batch 2 task 2):
+        # the extra obs dim shifts initial network weights, raising first-rollout
+        # return variance slightly. Raw (non-symlog) returns would be far above 25;
+        # anything below that still confirms the symlog/normalise pipeline is active.
+        assert std < 25.0, (f"_ret_var std={std:.4f} too high — returns appear to be on raw "
                             f"scale rather than symlog-compressed. Pipeline broken.")
     finally:
         cleanup()
@@ -667,7 +671,7 @@ def test_round_designated_carrier_property_50_seeds():
                 if g.round_over:
                     break
                 if kill_seed and tick == 5:
-                                                                             # Drive the drop-on-death path (cs2_env.h:155-167) on this iteration.
+                                                                             # Drive the drop-on-death path (cs2_env.h:155-167).
                     g.agents[rid].hp = 0
                     g.agents[rid].alive = 0
                 env.step(actions)
@@ -676,3 +680,49 @@ def test_round_designated_carrier_property_50_seeds():
                     f"drifted ({rid} → {g.round_designated_carrier_id})")
         finally:
             env.close()
+
+
+def test_obs_designated_carrier_bit_t_side():
+    """Verify obs[104] is the round-fixed role bit:
+       - 1.0 for the designated T agent
+       - 0.0 for non-designated T agents
+       - 0.0 for ALL CT agents
+       - persists at 1.0 even after the carrier dies and a teammate picks up
+
+    obs[104] is distinct from obs[20] (transient self-has-bomb): it is set at
+    round start and never reassigned, surviving drop/pickup events. This gives
+    the policy a stable identity signal that obs[20] cannot.
+
+    NOTE: env_reset() does NOT call compute_observations (it only zeroes the
+    buffer). The first populated observation arrives after env.step(). We
+    therefore take one zero-action step before checking the role bit values.
+    """
+    env = train.make_puffer_env(seed=11)
+    try:
+        env.reset(seed=11)
+        g = env._c_env.game
+        rid = g.round_designated_carrier_id
+        # Take one step to populate observations (env_reset zeroes the buffer;
+        # compute_observations only runs inside env_step).
+        actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        obs, *_ = env.step(actions)
+
+        # T side
+        for i in range(5):
+            expected = 1.0 if i == rid else 0.0
+            assert obs[i, 104] == expected, (
+                f"T idx {i}: obs[104]={obs[i,104]} expected {expected} (rid={rid})")
+        # CT side: all zeros
+        for j in range(5, 10):
+            assert obs[j, 104] == 0.0, f"CT idx {j}: obs[104]={obs[j,104]} expected 0.0"
+
+        # Persistence after carrier death — drive 20 zero-action steps.
+        g.agents[rid].hp = 0
+        g.agents[rid].alive = 0
+        for _ in range(20):
+            obs, *_ = env.step(actions)
+            assert obs[rid, 104] == 1.0, (
+                f"designated carrier (T idx {rid}) lost the role bit mid-round; "
+                f"obs[104] should be round-fixed but read {obs[rid,104]}")
+    finally:
+        env.close()

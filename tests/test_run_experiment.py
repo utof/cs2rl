@@ -21,7 +21,7 @@ def _init_fake_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" /
-     "train.py").write_text("OBS_DIM = 104\nACTION_HEAD_SIZES = (9, 16, 2, 2, 3, 2, 2, 2)\n")
+     "train.py").write_text("OBS_DIM = 105\nACTION_HEAD_SIZES = (9, 16, 2, 2, 3, 2, 2, 2)\n")
     (tmp_path / "src" / "c_env").mkdir()
     (tmp_path / "src" / "c_env" / "cs2_rewards.h").write_text(
         "#define INACTION_PENALTY -0.0005f\n"
@@ -114,7 +114,7 @@ def _mock_train_py(repo: Path) -> None:
     fake = """#!/usr/bin/env python
 # env_fingerprint in run_experiment greps the live train.py for these two
 # identifiers — keep them present even though this fake doesn't use them.
-OBS_DIM = 104
+OBS_DIM = 105
 ACTION_HEAD_SIZES = (9, 16, 2, 2, 3, 2, 2, 2)
 import argparse, json, sys, time
 from pathlib import Path

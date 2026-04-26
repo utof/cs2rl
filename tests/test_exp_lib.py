@@ -78,7 +78,7 @@ def test_env_fingerprint_captures_obs_dim(tmp_path):
     ACTION_HEAD_SIZES = (9, 16, 2, 2, 3, 2, 2, 2) — 8 ints. Tests mirror this.
     """
     fake_train = tmp_path / "train.py"
-    fake_train.write_text("OBS_DIM = 104\nACTION_HEAD_SIZES = (9, 16, 2, 2, 3, 2, 2, 2)\n")
+    fake_train.write_text("OBS_DIM = 105\nACTION_HEAD_SIZES = (9, 16, 2, 2, 3, 2, 2, 2)\n")
     fake_rewards_h = tmp_path / "cs2_rewards.h"
     fake_rewards_h.write_text("#define INACTION_PENALTY -0.0005f\n"
                               "static const float plant_progress_reward = 0.05f;\n"
@@ -90,7 +90,7 @@ def test_env_fingerprint_captures_obs_dim(tmp_path):
         rewards_h_path=fake_rewards_h,
         env_c_path=fake_env_c,
     )
-    assert fp["obs_dim"] == 104
+    assert fp["obs_dim"] == 105
     assert fp["action_head_sizes"] == [9, 16, 2, 2, 3, 2, 2, 2]
     assert "INACTION_PENALTY" in fp["reward_terms"]
     assert "plant_progress_reward" in fp["reward_terms"]

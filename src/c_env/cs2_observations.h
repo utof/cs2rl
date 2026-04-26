@@ -175,6 +175,13 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
         obs[102] = t_alive / (float)TEAM_SIZE;
         obs[103] = ct_alive / (float)TEAM_SIZE;
 
+        /* Batch 2: round-fixed designated-carrier role bit (T-side semantic).
+         * 1.0 only when this agent is the round's designated bomb carrier
+         * (set in env_reset, never reassigned). Distinct from obs[20]
+         * (transient self-has-bomb) — gives the policy a stable identity
+         * signal that survives drop/pickup. CT agents always read 0.0. */
+        obs[104] = (a->team == 0 && i == g->round_designated_carrier_id) ? 1.0f : 0.0f;
+
         /* Clip all obs to (-5, 5) */
         for (int k = 0; k < OBS_DIM; k++) {
             if (obs[k] > 5.0f)
