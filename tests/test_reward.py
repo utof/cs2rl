@@ -9,15 +9,6 @@ from nav import ACTION_DIM
 from train import ACTION_HEAD_SIZES
 
 
-# Batch 3: _facing_to_aim is no longer used — aim moved off the discrete
-# enum. Tests now set agent.facing directly and rely on env_step's human/
-# RL branch to read it (or via the continuous_actions Δyaw buffer for
-# RL-driven aim changes). Helper retained as a no-op stub in case other
-# tests in this file or downstream import it.
-def _facing_to_aim(angle):
-    return 0
-
-
 def test_pbrs_rewards_are_finite():
     """PBRS must not produce NaN or inf over a full episode."""
     env = make_env()

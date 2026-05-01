@@ -779,8 +779,7 @@ def make_env(
         reward_win_ct_defuse=5.0,
         reward_win_ct_timeout=4.0,
         reward_win_ct_elimination=3.0,
-        include_step_stats_in_info:
-    bool = False,                                                      # Task 6a: forward to Cs2Env (utof/cs2rl#7)  # noqa: E501
+        include_step_stats_in_info: bool = False,                      # Task 6a (utof/cs2rl#7)
 ):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
