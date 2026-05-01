@@ -2,7 +2,7 @@
  *
  * Exposes: binding.init(...) -> capsule
  *          binding.reset(capsule)
- *          binding.step(capsule, actions_array)
+ *          binding.step(capsule, actions_array, continuous_actions_array)
  *          binding.close(capsule)
  *          binding.get_buffers(capsule) -> (obs_ptr, rew_ptr, term_ptr, trunc_ptr)
  */
@@ -271,17 +271,24 @@ static PyObject* py_reset(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-/* ── binding.step(capsule, actions_array) -> None ── */
+/* ── binding.step(capsule, actions_array, continuous_actions_array) -> None ── */
+/* Batch 3: continuous_actions is a numpy float32 array shape
+ * (N_AGENTS, AIM_DIM). Caller is responsible for dtype + contiguity
+ * (Cs2Env.step in cs2_env.py converts/coerces before invoking). The two
+ * action buffers are kept SEPARATE — no bit-cast — so the int32 discrete
+ * heads and float32 Δyaw don't share alignment hazards. */
 static PyObject* py_step(PyObject* self, PyObject* args) {
-    PyObject *cap, *actions_o;
-    if (!PyArg_ParseTuple(args, "OO", &cap, &actions_o))
+    PyObject *cap, *actions_o, *cont_o;
+    if (!PyArg_ParseTuple(args, "OOO", &cap, &actions_o, &cont_o))
         return NULL;
     Dust2Env* env = (Dust2Env*)PyCapsule_GetPointer(cap, NULL);
     if (!env) {
         PyErr_SetString(PyExc_ValueError, "invalid capsule");
         return NULL;
     }
-    env_step(env, (const int32_t*)PyArray_DATA((PyArrayObject*)actions_o));
+    env_step(env,
+             (const int32_t*)PyArray_DATA((PyArrayObject*)actions_o),
+             (const float*)PyArray_DATA((PyArrayObject*)cont_o));
     Py_RETURN_NONE;
 }
 

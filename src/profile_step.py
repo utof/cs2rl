@@ -32,12 +32,16 @@ from typing import Any
 
 import numpy as np
 
+from _action_spec import AIM_DIM
 from c_env.cs2_env import make_env as make_c_env
 from nav import ACTION_DIM, N_AGENTS, OBS_DIM
 from paths import LOGS_DIR
 
 REPORT_DIR = LOGS_DIR / "profiles"
 NOOP_ACTION_C = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
+# Batch 3: zero Δyaw buffer for the binding-direct profile stepper.
+# binding.step now requires a third arg (float32 (N_AGENTS, AIM_DIM)).
+NOOP_CONT_C = np.zeros((N_AGENTS, AIM_DIM), dtype=np.float32)
 
 
 @dataclass
@@ -92,15 +96,13 @@ def _extract_profile_rows(pr: cProfile.Profile, sort_by: str, top_n: int) -> lis
     items = []
     for func, (cc, nc, tt, ct, _callers) in stats.stats.items():
         filename, line, name = func
-        items.append(
-            {
-                "function": f"{Path(filename).name}:{line}:{name}",
-                "primitive_calls": int(cc),
-                "total_calls": int(nc),
-                "self_seconds": float(tt),
-                "cumulative_seconds": float(ct),
-            }
-        )
+        items.append({
+            "function": f"{Path(filename).name}:{line}:{name}",
+            "primitive_calls": int(cc),
+            "total_calls": int(nc),
+            "self_seconds": float(tt),
+            "cumulative_seconds": float(ct),
+        })
     key = "cumulative_seconds" if sort_by == "cumulative" else "self_seconds"
     items.sort(key=lambda row: row[key], reverse=True)
     return items[:top_n]
@@ -134,14 +136,14 @@ def _make_cs2_env_manual_reset_stepper(seed: int):
 
 
 def _make_binding_direct_stepper(seed: int):
-    import binding  # available after cs2_env import adds src/c_env/ to sys.path
+    import binding                     # available after cs2_env import adds src/c_env/ to sys.path
 
     env = make_c_env(seed=seed, auto_reset=False)
     env.reset(seed=seed)
     capsule = env._capsule
 
     def step():
-        binding.step(capsule, NOOP_ACTION_C)
+        binding.step(capsule, NOOP_ACTION_C, NOOP_CONT_C)
         if env._c_env.game.round_over:
             binding.reset(capsule)
 
@@ -167,18 +169,13 @@ def _collect_low_hanging_fruit(benchmarks: dict[str, BenchResult]) -> list[str]:
     if wrapper < raw * 0.8:
         notes.append(
             "Cs2Env wrapper overhead is significant relative to binding_direct; inspect "
-            "action marshaling, buffer syncing, and terminal/reset handling in cs2_env.py."
-        )
+            "action marshaling, buffer syncing, and terminal/reset handling in cs2_env.py.")
     if shared < wrapper * 0.9:
-        notes.append(
-            "Shared-buffer mode is materially slower than the internal-buffer path; "
-            "external output copies are a likely low-hanging fruit."
-        )
+        notes.append("Shared-buffer mode is materially slower than the internal-buffer path; "
+                     "external output copies are a likely low-hanging fruit.")
     if manual < wrapper * 0.9:
-        notes.append(
-            "Benchmark harness overhead is distorting SPS; avoid terms.any() + manual "
-            "reset when profiling the native auto-reset env."
-        )
+        notes.append("Benchmark harness overhead is distorting SPS; avoid terms.any() + manual "
+                     "reset when profiling the native auto-reset env.")
     return notes
 
 
@@ -201,17 +198,15 @@ def _print_summary(
 ):
     print("\n=== BENCHMARKS ===")
     for key in (
-        "cs2_env",
-        "cs2_env_shared_buf",
-        "cs2_env_manual_reset",
-        "binding_direct",
+            "cs2_env",
+            "cs2_env_shared_buf",
+            "cs2_env_manual_reset",
+            "binding_direct",
     ):
         result = benchmarks[key]
-        print(
-            f"{result.name:24} {result.sps:10.0f} SPS  "
-            f"{result.us_per_step:8.2f} us/step  "
-            f"{result.seconds:7.3f}s total"
-        )
+        print(f"{result.name:24} {result.sps:10.0f} SPS  "
+              f"{result.us_per_step:8.2f} us/step  "
+              f"{result.seconds:7.3f}s total")
 
     raw = benchmarks["binding_direct"].sps
     wrapper = benchmarks["cs2_env"].sps
@@ -230,16 +225,12 @@ def _print_summary(
             return
         print(f"\n=== {title} TOP CUMULATIVE ===")
         for row in block["cumulative"][:10]:
-            print(
-                f"- {row['function']}  cum={row['cumulative_seconds']:.4f}s  "
-                f"self={row['self_seconds']:.4f}s  calls={row['total_calls']}"
-            )
+            print(f"- {row['function']}  cum={row['cumulative_seconds']:.4f}s  "
+                  f"self={row['self_seconds']:.4f}s  calls={row['total_calls']}")
         print(f"\n=== {title} TOP SELF TIME ===")
         for row in block["self_time"][:10]:
-            print(
-                f"- {row['function']}  self={row['self_seconds']:.4f}s  "
-                f"cum={row['cumulative_seconds']:.4f}s  calls={row['total_calls']}"
-            )
+            print(f"- {row['function']}  self={row['self_seconds']:.4f}s  "
+                  f"cum={row['cumulative_seconds']:.4f}s  calls={row['total_calls']}")
 
     print_profile_block("CS2_ENV", wrapper_profile)
 
@@ -261,25 +252,29 @@ def main():
     args = parser.parse_args()
 
     benchmarks = {
-        "cs2_env": _run_benchmark(
+        "cs2_env":
+        _run_benchmark(
             "cs2_env",
             lambda: _make_cs2_env_stepper(args.seed, args.action_mode, external_buf=False),
             args.steps,
             args.warmup,
         ),
-        "cs2_env_shared_buf": _run_benchmark(
+        "cs2_env_shared_buf":
+        _run_benchmark(
             "cs2_env_shared_buf",
             lambda: _make_cs2_env_stepper(args.seed, args.action_mode, external_buf=True),
             args.steps,
             args.warmup,
         ),
-        "cs2_env_manual_reset": _run_benchmark(
+        "cs2_env_manual_reset":
+        _run_benchmark(
             "cs2_env_manual_reset",
             lambda: _make_cs2_env_manual_reset_stepper(args.seed),
             args.steps,
             args.warmup,
         ),
-        "binding_direct": _run_benchmark(
+        "binding_direct":
+        _run_benchmark(
             "binding_direct",
             lambda: _make_binding_direct_stepper(args.seed),
             args.steps,
@@ -305,7 +300,10 @@ def main():
             "profile_steps": args.profile_steps,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         },
-        "benchmarks": {name: asdict(result) for name, result in benchmarks.items()},
+        "benchmarks": {
+            name: asdict(result)
+            for name, result in benchmarks.items()
+        },
         "profiles": {
             "cs2_env": wrapper_profile,
         },

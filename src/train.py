@@ -1005,7 +1005,12 @@ def _patch_trainer_with_return_norm(trainer):
             # ── PER-HEAD ENTROPY ──────────────────────────────────────────
             with torch.no_grad():
                 _dists = [torch.distributions.Categorical(logits=lgt) for lgt in logits]
-                _head_names = ["move", "aim", "shoot", "reload", "weapon", "use", "crouch", "jump"]
+                # Batch 3: head names sourced from _action_spec.ACTION_HEAD_NAMES
+                # (auto-gen from cs2_types.h). Pre-Batch-3 hardcoded "aim" here;
+                # now removed since aim is a continuous head emitted on a separate
+                # path. zip(strict=True) catches any future drift between
+                # _action_spec and the policy logits list.
+                _head_names = list(ACTION_HEAD_NAMES)
                 for _hi, (_hn, _hd) in enumerate(zip(_head_names, _dists, strict=True)):
                     losses[f"entropy/{_hn}"] += _hd.entropy().mean().item() / self.total_minibatches
             losses["entropy/total"] += current_entropy.item() / self.total_minibatches

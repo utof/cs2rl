@@ -9,11 +9,13 @@ from nav import ACTION_DIM
 from train import ACTION_HEAD_SIZES
 
 
+# Batch 3: _facing_to_aim is no longer used — aim moved off the discrete
+# enum. Tests now set agent.facing directly and rely on env_step's human/
+# RL branch to read it (or via the continuous_actions Δyaw buffer for
+# RL-driven aim changes). Helper retained as a no-op stub in case other
+# tests in this file or downstream import it.
 def _facing_to_aim(angle):
-    normalized = angle % (2 * math.pi)
-    if normalized < 0:
-        normalized += 2 * math.pi
-    return int(normalized * 16 / (2 * math.pi)) % 16
+    return 0
 
 
 def test_pbrs_rewards_are_finite():
@@ -74,11 +76,12 @@ def test_pbrs_shaping_positive_on_kill():
     ct.area_idx = id2idx[area_ct]
     ct.x, ct.y, ct.z = float(ct_c[0]), float(ct_c[1]), 0.0
 
-    t_facing = math.atan2(ct.y - t.y, ct.x - t.x)
+    # Batch 3: set facing directly (continuous-aim path); SHOOT is now head 1.
+    t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
 
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 1] = _facing_to_aim(t_facing)           # aim at CT (head index 1)
-    actions[0, 2] = 1                                  # t0 shoots (shoot is head index 2)
+    # Batch 3: SHOOT moved from head 2 → 1 after HEAD_AIM removal.
+    actions[0, 1] = 1                  # t0 shoots (shoot is head 1)
     _, rewards, _, _, _ = env.step(actions)
 
     assert rewards[0] > 0, f"Killing CT gives non-positive reward: {rewards[0]:.4f}"
@@ -210,8 +213,8 @@ def test_bomb_entry_bonus():
 
     # Step with use=1 — the C env checks use action to trigger entry bonus
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    # use action (head 5) triggers bombsite_entered check
-    actions[0, 5] = 1
+    # Batch 3: USE is now head index 4 (was 5; HEAD_AIM removed shifted enum down).
+    actions[0, 4] = 1
     _, rewards, _, _, _ = env.step(actions)
 
     # Reward for agent 0 must include the +0.3 bombsite entry bonus
@@ -254,9 +257,9 @@ def test_plant_progress_reward():
     env._c_env.game.bomb_being_planted_by = bomber_idx
     env._c_env.game.bomb_plant_ticks = 1               # already started (not tick 0)
 
-    # use=1 to continue planting (head index 5)
+    # use=1 to continue planting (Batch 3: USE is now head index 4)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[bomber_idx, 5] = 1
+    actions[bomber_idx, 4] = 1
     _, rewards, _, _, _ = env.step(actions)
 
     # The per-tick plant progress reward is +0.05
@@ -345,10 +348,10 @@ def test_kill_reward_weight_is_configurable():
     ct.y = float(ctc[1])
     ct.z = 0.0
 
-    t_facing = math.atan2(ct.y - t.y, ct.x - t.x)
+    # Batch 3: set facing directly; SHOOT is now head 1.
+    t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 1] = _facing_to_aim(t_facing)
-    actions[0, 2] = 1
+    actions[0, 1] = 1                  # SHOOT (post-Batch-3 index)
     _, rewards, _, _, _ = env.step(actions)
 
     # With all weights zeroed except reward_kill=0.9, killer reward must be ≈0.9
@@ -541,7 +544,7 @@ def test_differential_win_magnitudes(scenario, winner, bomb_planted, bomb_ticks_
     env.reset()
 
     _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_left, alive_teams)
-    actions = np.zeros((10, 8), dtype=np.int64)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
 
     _, _, _, _, _ = env.step(actions)
 
@@ -627,9 +630,10 @@ def test_natural_defuse():
     g.bomb_being_defused_by = 5
     g.bomb_defuse_ticks = defuse_time - 1
 
-    # HEAD_USE (index 5) = 1 keeps the CT defusing this tick.
+    # HEAD_USE = 1 keeps the CT defusing this tick.
+    # Batch 3: USE moved from head 5 to head 4 after HEAD_AIM removal.
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[5, 5] = 1
+    actions[5, 4] = 1
 
     env.step(actions)
 
@@ -681,7 +685,7 @@ def test_detonation_beats_elimination():
                          bomb_ticks_left=bomb_ticks_left,
                          round_ticks_left=50,
                          alive_teams={0})
-        actions = np.zeros((10, 8), dtype=np.int64)
+        actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
         env.step(actions)
         val = float(env._c_env.step_stats.reward_win)
         env.close()
@@ -743,7 +747,7 @@ def test_step_stats_in_info_flag_default_off():
     import numpy as np
     env = make_env()                   # default flag off
     env.reset()
-    actions = np.zeros((10, 8), dtype=np.int64)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, _, _, _, info = env.step(actions)
     assert info == [], f"flag-off should preserve empty info, got {info!r}"
     env.close()
@@ -759,7 +763,7 @@ def test_step_stats_in_info_flag_on_populates_view():
     import numpy as np
     env = make_env(include_step_stats_in_info=True)
     env.reset()
-    actions = np.zeros((10, 8), dtype=np.int64)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, _, _, _, info = env.step(actions)
     assert len(info) == 1, f"flag-on expects one info dict per step, got {len(info)}"
     assert "step_stats" in info[0]
@@ -774,7 +778,7 @@ def test_step_stats_in_info_flag_on_populates_view():
               "win_by_defuse"):
         val = ss[f]                    # raises AttributeError via __getitem__ if field is missing
         assert isinstance(val, (int, float)), f"expected numeric for {f}, got {type(val).__name__}"
-                                       # ndim==0 so split_into_channels's ndim==1 squeeze does not trigger.
+                                       # ndim==0 so split_into_channels's ndim==1 squeeze does not trigger.  # noqa: E501
     assert ss.ndim == 0
                                        # get() works with default.
     assert ss.get("nonexistent_field", "sentinel") == "sentinel"
@@ -798,7 +802,7 @@ def test_step_stats_in_info_flag_on_merges_with_terminal_summary():
     g.agents[5].team = 1
     g.winner = 1
     g.round_over = 1
-    actions = np.zeros((10, 8), dtype=np.int64)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, _, _, _, info = env.step(actions)
     assert len(info) == 1
     summary = info[0]

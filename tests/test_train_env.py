@@ -674,7 +674,7 @@ def test_round_designated_carrier_property_50_seeds():
                 if g.round_over:
                     break
                 if kill_seed and tick == 5:
-                                                                             # Drive the drop-on-death path (cs2_env.h:155-167).
+                                                                             # Drive the drop-on-death path (cs2_env.h:155-167).  # noqa: E501
                     g.agents[rid].hp = 0
                     g.agents[rid].alive = 0
                 env.step(actions)
@@ -855,5 +855,147 @@ def test_obs_dim_constant_consistency():
         assert env.single_observation_space.shape == (nav.OBS_DIM, ), (
             f"env.single_observation_space.shape={env.single_observation_space.shape} "
             f"!= ({nav.OBS_DIM},)")
+    finally:
+        env.close()
+
+
+# ── Batch 3 (utof/cs2rl Batch 3): continuous-aim H-PPO ──
+
+
+def test_action_spec_aim_is_gaussian_1d():
+    """`_action_spec.py` exports the discrete/continuous split:
+       - DISCRETE_HEAD_SPEC has 7 categorical entries, sum(sizes) = 22
+       - CONTINUOUS_HEAD_SPEC has 1 gaussian entry, dim 1
+       - AIM_DIM == 1
+       - Backwards-compat ACTION_DIM is 7, ACTION_MASK_DIM is 22.
+    Catches the regen-not-run footgun (modifying cs2_types.h without
+    re-running scripts/sync_action_spec.py)."""
+    import _action_spec as spec
+    assert spec.AIM_DIM == 1, f"AIM_DIM={spec.AIM_DIM}, expected 1 for Batch 3"
+    assert spec.ACTION_DIM == 7, f"ACTION_DIM={spec.ACTION_DIM}, expected 7 (HEAD_AIM removed)"
+    assert spec.ACTION_MASK_DIM == 22, f"ACTION_MASK_DIM={spec.ACTION_MASK_DIM}, expected 22"
+    assert len(spec.DISCRETE_HEAD_SPEC) == 7, (
+        f"DISCRETE_HEAD_SPEC has {len(spec.DISCRETE_HEAD_SPEC)} entries, expected 7")
+    assert all(t == "categorical" for _, t, _ in spec.DISCRETE_HEAD_SPEC), (
+        f"DISCRETE_HEAD_SPEC has non-categorical entries: {spec.DISCRETE_HEAD_SPEC}")
+    assert spec.CONTINUOUS_HEAD_SPEC == (("aim", "gaussian", 1), ), (
+        f"CONTINUOUS_HEAD_SPEC={spec.CONTINUOUS_HEAD_SPEC}, expected gaussian/dim=1")
+
+
+def test_continuous_aim_action_consumed():
+    """Env step with continuous_actions[i,0]=0.1 advances facing by exactly 0.1 rad.
+
+    Batch 3: validates that the float buffer plumbed through binding.step
+    actually drives env_step's wrap_pi(facing + clamped) branch. Uses the
+    designated bomb carrier (RL agent, not human_controlled) to ensure the
+    continuous branch fires.
+    """
+    import _action_spec as spec
+    env = train.make_puffer_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        i = g.round_designated_carrier_id
+        f0 = g.agents[i].facing
+        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
+        cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+        cont[i, 0] = 0.1
+        env._c_env                     # noqa: B018  (touch to ensure overlay is live)
+        env.step(actions, cont)
+        assert g.agents[i].alive == 1
+        delta = g.agents[i].facing - f0
+        if delta > np.pi:
+            delta -= 2 * np.pi
+        if delta < -np.pi:
+            delta += 2 * np.pi
+        assert abs(delta -
+                   0.1) < 1e-5, (f"facing advanced by {delta} rad, expected ~0.1 (clamped+wrapped)")
+    finally:
+        env.close()
+
+
+def test_continuous_aim_clamped_at_max_turn():
+    """Δyaw=10.0 is clamped to max_turn_speed=π/4 ≈ 0.7854 rad.
+
+    Batch 3: verifies the fminf/fmaxf clamp inside env_step. Without it
+    the policy could turn arbitrarily fast and break collision/visibility
+    invariants.
+    """
+    import _action_spec as spec
+    env = train.make_puffer_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        sd = env._c_env.sd.contents
+        i = g.round_designated_carrier_id
+        f0 = g.agents[i].facing
+        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
+        cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+        cont[i, 0] = 10.0
+        env.step(actions, cont)
+        delta = g.agents[i].facing - f0
+        if delta > np.pi:
+            delta -= 2 * np.pi
+        if delta < -np.pi:
+            delta += 2 * np.pi
+        assert abs(delta - sd.max_turn_speed) < 1e-5, (
+            f"clamp failed: delta={delta}, expected {sd.max_turn_speed}")
+    finally:
+        env.close()
+
+
+def test_continuous_aim_facing_wraps_around_pi():
+    """Starting facing=π−0.1, Δyaw=+0.2 wraps to ~−π+0.1.
+
+    Batch 3: verifies wrap_pi keeps facing bounded to [-π, +π]. Without
+    wrap_pi, facing would drift to π+0.1 and break downstream consumers
+    that assume the bounded representation (renderer, observation
+    normalisation, etc.).
+    """
+    import _action_spec as spec
+    env = train.make_puffer_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        i = g.round_designated_carrier_id
+        g.agents[i].facing = np.pi - 0.1
+        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
+        cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+        cont[i, 0] = 0.2
+        env.step(actions, cont)
+        expected = -np.pi + 0.1
+        assert abs(g.agents[i].facing - expected) < 1e-5, (
+            f"wrap failed: facing={g.agents[i].facing}, expected {expected}")
+    finally:
+        env.close()
+
+
+def test_step_stats_aim_delta_tracking():
+    """100-tick rollout with Δyaw=0.05; assert sum/sq_sum/count tracking.
+
+    Batch 3: validates that StepStats's Welford triple is populated so
+    Python-side Δyaw mean/var can be recovered for telemetry without
+    storing the full rollout. Resets the fields before the loop because
+    other tests in the same env instance may have populated them.
+    """
+    import _action_spec as spec
+    env = train.make_puffer_env(seed=42)
+    try:
+        env.reset(seed=42)
+        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
+        cont = np.full((10, spec.AIM_DIM), 0.05, dtype=np.float32)
+        ss = env._c_env.episode_stats
+        ss.aim_delta_sum = 0.0
+        ss.aim_delta_sq_sum = 0.0
+        ss.aim_delta_count = 0
+        g = env._c_env.game
+        for _ in range(100):
+            if g.round_over:
+                break
+            env.step(actions, cont)
+        assert ss.aim_delta_count > 0, "no aim_delta updates recorded"
+        assert ss.aim_delta_sum > 0, f"sum should be positive, got {ss.aim_delta_sum}"
+        mean = ss.aim_delta_sum / ss.aim_delta_count
+        assert abs(mean - 0.05) < 1e-5, f"mean Δyaw={mean}, expected 0.05"
     finally:
         env.close()

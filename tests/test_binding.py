@@ -42,10 +42,18 @@ def test_reset_returns_none(make_map):
 
 
 def test_step_returns_none(make_map):
+    """Batch 3: binding.step is now 3-arg — capsule, int32 discrete actions,
+    float32 continuous_actions. The shape (10,) here is wrong for both, but
+    the C side reads N_AGENTS*ACTION_DIM ints/N_AGENTS*AIM_DIM floats. The
+    raw int32(10,) buffer happens to be ≥10*7*4 bytes only if reinterpreted —
+    use the proper 2D shape now to be safe.
+    """
+    from _action_spec import ACTION_DIM, AIM_DIM
     _, env = _make_env(map_data=make_map)
     binding.reset(env._capsule)
-    actions = np.zeros(10, dtype=np.int32)
-    assert binding.step(env._capsule, actions) is None
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int32)
+    cont = np.zeros((10, AIM_DIM), dtype=np.float32)
+    assert binding.step(env._capsule, actions, cont) is None
 
 
 def test_close_idempotent(make_map):
@@ -70,20 +78,72 @@ def test_stepstats_has_win_type_flags(make_map):
 
 
 def test_human_controlled_uses_aim_rad_not_bin(make_map):
-    """When human_controlled=1, facing must equal aim_rad, not the 16-bin quantized value."""
+    """When human_controlled=1, facing must equal aim_rad, ignoring the
+    continuous_actions Δyaw buffer.
+
+    Batch 3: pre-Batch-3 this test verified the 16-bin override; now it
+    verifies that the human branch in env_step (`if (a->human_controlled)`)
+    short-circuits BEFORE reading continuous_actions. We pass a non-zero
+    Δyaw to confirm it is ignored — only aim_rad sets facing for human
+    agents.
+    """
+    from _action_spec import ACTION_DIM, AIM_DIM
     _, env = _make_env(map_data=make_map)
     binding.reset(env._capsule)
 
     agent = env._c_env.game.agents[0]
     agent.human_controlled = 1
-    aim = 1.23456                      # arbitrary radians, not on a 16-bin boundary
+    aim = 1.23456                      # arbitrary radians
     agent.aim_rad = aim
 
-    # actions[1] = bin 7 (a different angle) — must be overridden
-    actions = np.zeros((10, 7), dtype=np.int32)
-    actions[0, 1] = 7
-    binding.step(env._capsule, actions.flatten())
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int32)
+    # Non-zero continuous Δyaw — the human branch must IGNORE this.
+    cont = np.zeros((10, AIM_DIM), dtype=np.float32)
+    cont[0, 0] = 0.5
+    binding.step(env._capsule, actions, cont)
 
-    # Read back facing
     facing = env._c_env.game.agents[0].facing
     assert abs(facing - aim) < 1e-5, f"Expected facing≈{aim:.5f}, got {facing:.5f}"
+
+
+# ── Batch 3: continuous-aim plumbing ──
+
+
+def test_binding_step_accepts_continuous_array(make_map):
+    """binding.step now takes 3 args (capsule, int32 actions, float32 cont).
+
+    Batch 3: validates the new signature. Wrong shape on continuous_actions
+    raises a Python ValueError (caught Python-side in Cs2Env._prepare_continuous_actions
+    before the C call). Correct shape is accepted.
+    """
+    import pytest
+
+    from _action_spec import ACTION_DIM, AIM_DIM
+    _, env = _make_env(map_data=make_map)
+    env.reset(seed=0)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int32)
+    cont = np.zeros((10, AIM_DIM), dtype=np.float32)
+    env.step(actions, cont)            # should not raise
+    with pytest.raises(ValueError):
+        env.step(actions, np.zeros((10, 2), dtype=np.float32))
+
+
+def test_binding_default_continuous_actions_zero(make_map):
+    """If continuous_actions arg omitted, zero buffer supplied — facing unchanged.
+
+    Batch 3: defensive default keeps legacy callers (smoke-test loops, the
+    train.py main path before the policy is wired in T4-T5) working without
+    explicit continuous-action arrays. We use the designated bomb carrier
+    (an RL agent, not human_controlled) so the continuous branch in env_step
+    fires.
+    """
+    from _action_spec import ACTION_DIM
+    _, env = _make_env(map_data=make_map)
+    env.reset(seed=0)
+    g = env._c_env.game
+    i = g.round_designated_carrier_id
+    f0 = g.agents[i].facing
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int32)
+    env.step(actions)                                  # no continuous_actions
+    assert g.agents[i].facing == f0, (
+        f"facing changed without continuous_actions: f0={f0}, after={g.agents[i].facing}")

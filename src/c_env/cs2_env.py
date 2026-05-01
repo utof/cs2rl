@@ -10,7 +10,7 @@ import numpy as np
 import pufferlib
 
 import nav
-from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM
+from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from map import make_cs2_map
 from nav import N_AGENTS, OBS_DIM, ROUND_TIME
 
@@ -180,8 +180,8 @@ class GameStateC(ctypes.Structure):
         ("bomb_plant_ticks", ctypes.c_int32),
         ("bomb_being_defused_by", ctypes.c_int32),
         ("bomb_defuse_ticks", ctypes.c_int32),
-                                                                       # Batch 2: round-fixed designated carrier — mirrors C GameState.
-                                                                       # See cs2_types.h for why/pitfalls; insertion order matters for alignment.
+                                                                       # Batch 2: round-fixed designated carrier — mirrors C GameState.  # noqa: E501
+                                                                       # See cs2_types.h for why/pitfalls; insertion order matters for alignment.  # noqa: E501
         ("round_designated_carrier_id", ctypes.c_int32),
         ("bombsite_entered", ctypes.c_int8 * 5),
         ("bomb_is_dropped", ctypes.c_int8),
@@ -208,7 +208,14 @@ class StepStatsC(ctypes.Structure):
         ("action_shoot", ctypes.c_int32 * 2),
         ("action_use", ctypes.c_int32 * 2),
         ("action_last", ctypes.c_int32 * 2),
-        ("action_aim", ctypes.c_int32 * 16),
+                                                       # Batch 3: continuous-aim Δyaw stats (mirror C StepStats fields).
+                                                       # Replaces the 16-bin action_aim histogram (64B) with a Welford-style
+                                                       # triple (sum + sq_sum + count = 12B). No explicit _pad_aim_delta —
+                                                       # the three int32-aligned fields slot in cleanly between action_last
+                                                       # and action_reload. See cs2_types.h StepStats comment.
+        ("aim_delta_sum", ctypes.c_float),
+        ("aim_delta_sq_sum", ctypes.c_float),
+        ("aim_delta_count", ctypes.c_int32),
         ("action_reload", ctypes.c_int32 * 2),
         ("action_weapon", ctypes.c_int32 * 3),
         ("action_crouch", ctypes.c_int32 * 2),
@@ -287,14 +294,18 @@ class Dust2EnvC(ctypes.Structure):
 # Dust2EnvC.
 # Batch 2 task 2: OBS_DIM 104 → 105 — Dust2EnvC `observations` array
 # (c_float * (10 * 105)) is +40 bytes vs task 1.
+# Batch 3: StepStats −52 bytes (action_aim[16]=64B → aim_delta_*=12B).
+# Dust2EnvC −264 bytes nominal: 2× StepStats (−104) + masks shrink
+# (10×38→10×22 = −160). Verify empirically on first build — alignment
+# surprises are routine; values updated below to match observed sizeof.
 assert ctypes.sizeof(AgentStateC) == 152, (
     f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 152)")
 assert ctypes.sizeof(GameStateC) == 1588, (
     f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1588)")
-assert ctypes.sizeof(StepStatsC) == 248, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 248)")
-assert ctypes.sizeof(Dust2EnvC) == 6752, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6752)")
+assert ctypes.sizeof(StepStatsC) == 196, (
+    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 196)")
+assert ctypes.sizeof(Dust2EnvC) == 6488, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6488)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -344,7 +355,7 @@ class Cs2Env(pufferlib.PufferEnv):
             reward_win_ct_defuse=5.0,
             reward_win_ct_timeout=4.0,
             reward_win_ct_elimination=3.0,
-            include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)
+            include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)  # noqa: E501
     ):
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
@@ -513,6 +524,12 @@ class Cs2Env(pufferlib.PufferEnv):
 
         self._actions_shape = (N_AGENTS, ACTION_DIM)
         self._actions_scratch = np.zeros(self._actions_shape, dtype=np.int32)
+        # Batch 3: continuous-aim Δyaw scratch buffer (N_AGENTS, AIM_DIM=1) float32.
+        # Reused per-step when the caller passes None (default zero) or a
+        # non-contiguous / wrong-dtype array. Owning the scratch here means we
+        # never allocate on the hot path; copy-into is the worst case.
+        self._cont_actions_shape = (N_AGENTS, AIM_DIM)
+        self._cont_actions_scratch = np.zeros(self._cont_actions_shape, dtype=np.float32)
         self._terminal_rewards = np.empty(N_AGENTS, dtype=np.float32)
         self._terminal_terminals = np.empty(N_AGENTS, dtype=bool)
         self._terminal_truncations = np.empty(N_AGENTS, dtype=bool)
@@ -541,10 +558,23 @@ class Cs2Env(pufferlib.PufferEnv):
         self._sync_outputs()
         return self.observations, self._empty_infos
 
-    def step(self, actions):
+    def step(self, actions, continuous_actions=None):
+        """Step the env one tick.
+
+        Batch 3: actions is (N_AGENTS, ACTION_DIM=7) int32 — discrete heads.
+        continuous_actions is (N_AGENTS, AIM_DIM=1) float32 — Δyaw rad. If
+        None (legacy callers, tests, render path), a zero buffer is supplied
+        so RL agents do not turn. Wrong shape raises ValueError before the
+        C call to prevent OOB reads.
+
+        Pitfall: shape strictness is critical — the C side does no bounds
+        check on continuous_actions[i*AIM_DIM+0]; a (10,2) buffer would
+        silently read garbage from a misaligned slot.
+        """
         self._sync_team_spirit()
         actions_arr = self._prepare_actions(actions)
-        binding.step(self._capsule, actions_arr)
+        cont_arr = self._prepare_continuous_actions(continuous_actions)
+        binding.step(self._capsule, actions_arr, cont_arr)
         self._sync_outputs()
         infos = self._empty_infos
         rewards = self.rewards
@@ -623,6 +653,32 @@ class Cs2Env(pufferlib.PufferEnv):
         np.copyto(self._actions_scratch, actions_arr, casting="no")
         return self._actions_scratch
 
+    def _prepare_continuous_actions(self, cont):
+        """Coerce caller-supplied Δyaw buffer to (N_AGENTS, AIM_DIM) float32 contiguous.
+
+        Batch 3: shape mismatch ALWAYS raises (silent reshape would conceal a
+        bug given AIM_DIM=1 — e.g. a (10,) accidentally passed as (1,10) would
+        slip through). dtype mismatch is forgiven via cast. None → cached
+        zero scratch (RL training path before the policy is wired uses this).
+        """
+        if cont is None:
+            # Reuse the pre-zeroed scratch — zeroing every step would be wasteful.
+            # Tests that mutate this scratch via env.step(...) MUST pass an
+            # explicit buffer; the scratch is treated as read-only zeroes here.
+            return self._cont_actions_scratch
+        if not isinstance(cont, np.ndarray):
+            cont = np.asarray(cont, dtype=np.float32)
+        if cont.shape != self._cont_actions_shape:
+            raise ValueError(f"continuous_actions shape {cont.shape} != "
+                             f"{self._cont_actions_shape} (expected (N_AGENTS, AIM_DIM))")
+        if cont.dtype == np.float32 and cont.flags.c_contiguous:
+            return cont
+        # Fall through: cast/copy into scratch. casting="unsafe" allows
+        # float64 → float32 (RL policies sometimes emit float32 already, but
+        # numpy generic dtypes from `np.zeros((10,1))` default to float64).
+        np.copyto(self._cont_actions_scratch, cont.astype(np.float32, copy=False), casting="unsafe")
+        return self._cont_actions_scratch
+
     def _sync_outputs(self):
         if not self._uses_external_buffers:
             return
@@ -651,8 +707,14 @@ class Cs2Env(pufferlib.PufferEnv):
             summary[f"action_shoot_{idx}"] = int(stats.action_shoot[idx])
             summary[f"action_use_{idx}"] = int(stats.action_use[idx])
             summary[f"action_last_{idx}"] = int(stats.action_last[idx])
-        for idx in range(16):
-            summary[f"action_aim_{idx}"] = int(stats.action_aim[idx])
+        # Batch 3: continuous-aim stats — emit Welford triple instead of
+        # 16-bin histogram. Consumers that previously summed action_aim_*
+        # to derive total turns should now use aim_delta_count; mean/var
+        # via standard formulas. mean = sum / count;
+        # var = sq_sum / count - mean².
+        summary["aim_delta_sum"] = float(stats.aim_delta_sum)
+        summary["aim_delta_sq_sum"] = float(stats.aim_delta_sq_sum)
+        summary["aim_delta_count"] = int(stats.aim_delta_count)
         for idx in range(2):
             summary[f"action_reload_{idx}"] = int(stats.action_reload[idx])
         for idx in range(3):
@@ -717,7 +779,8 @@ def make_env(
         reward_win_ct_defuse=5.0,
         reward_win_ct_timeout=4.0,
         reward_win_ct_elimination=3.0,
-        include_step_stats_in_info: bool = False,                      # Task 6a: forward to Cs2Env (utof/cs2rl#7)
+        include_step_stats_in_info:
+    bool = False,                                                      # Task 6a: forward to Cs2Env (utof/cs2rl#7)  # noqa: E501
 ):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
