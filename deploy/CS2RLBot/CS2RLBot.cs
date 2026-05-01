@@ -399,6 +399,9 @@ public class CS2RLBotPlugin : BasePlugin
         }
         _slog.Information("[CS2RLBot] RoundEnd — LSTM reset for {Count} bot(s)", _policies.Count);
         _obsBuilder?.ClearReloadCache(); // prevent stale reload tracking across round boundary
+        // Batch 2: reset designated-carrier latches so each new round can re-latch.
+        // Mirrors the round-fixed sim semantics: obs[104] is set once per round, then frozen.
+        _obsBuilder?.ClearCarrierLatches();
         return HookResult.Continue;
     }
 
