@@ -834,3 +834,26 @@ def test_post_pickup_plant_mask_unmasked():
                             f"bomb_planted={g.bomb_planted}, round_over={g.round_over}")
     finally:
         env.close()
+
+
+# ── Batch 2 task 4: OBS_DIM constant-consistency ─────────────────────────────
+def test_obs_dim_constant_consistency():
+    """Three OBS_DIM declarations must agree:
+       - src/nav.py
+       - src/train.py
+       - env.single_observation_space.shape[0]
+    A drift here means the C ↔ Python boundary is misconfigured. The
+    earlier ctypes sizeof asserts (cs2_env.py:280-291) catch struct-size
+    drift; this test is the higher-level constant-agreement check.
+    """
+    import nav
+    import train as t
+    assert nav.OBS_DIM == t.OBS_DIM, (f"nav.OBS_DIM ({nav.OBS_DIM}) != train.OBS_DIM ({t.OBS_DIM})")
+    assert nav.OBS_DIM == 105, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 105 for Batch 2"
+    env = t.make_puffer_env(seed=0)
+    try:
+        assert env.single_observation_space.shape == (nav.OBS_DIM, ), (
+            f"env.single_observation_space.shape={env.single_observation_space.shape} "
+            f"!= ({nav.OBS_DIM},)")
+    finally:
+        env.close()
