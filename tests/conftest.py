@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -20,19 +21,29 @@ def pytest_configure(config):
         "performance: performance-sensitive tests excluded from default pytest runs",
     )
 
+    # Some tests (e.g. test_run_experiment.py::test_full_run_*) spawn the real
+    # scripts/run_experiment.py subprocess, which enforces a >=5 GB free-disk
+    # precondition on the repo root it's pointed at. The default pytest
+    # tmp_path lives under /tmp on the system root partition, which on small
+    # devices is regularly tight. Redirect basetemp to $HOME/.pytest_tmp
+    # unless the user passed --basetemp explicitly. $HOME is the user's
+    # primary partition and is the obvious place with persistent free space.
+    if not config.option.basetemp:
+        home_tmp = Path(os.path.expanduser("~/.pytest_tmp"))
+        home_tmp.mkdir(parents=True, exist_ok=True)
+        config.option.basetemp = str(home_tmp)
+
 
 def pytest_collection_modifyitems(config, items):
     explicit_targets = {Path(str(arg)).as_posix() for arg in config.invocation_params.args}
     run_performance = any(
         target.endswith("tests/smoke_test.py") or target.endswith("smoke_test.py")
-        for target in explicit_targets
-    )
+        for target in explicit_targets)
     if run_performance:
         return
 
     skip_performance = pytest.mark.skip(
-        reason="performance test; run explicitly with `uv run pytest tests/smoke_test.py -q -s`"
-    )
+        reason="performance test; run explicitly with `uv run pytest tests/smoke_test.py -q -s`")
     for item in items:
         if "performance" in item.keywords:
             item.add_marker(skip_performance)
