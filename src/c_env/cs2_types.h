@@ -10,31 +10,39 @@
 #endif
 
 /* ── Constants ─────────────────────────────────────────────────────────── */
-#define TEAM_SIZE             5
-#define N_AGENTS              10
-#define OBS_DIM               105
-#define ACTION_DIM            8
-#define ACTION_MASK_DIM       38
+#define TEAM_SIZE 5
+#define N_AGENTS  10
+#define OBS_DIM   105
+#define ACTION_DIM                                                                                 \
+    7  /* Batch 3: HEAD_AIM removed; aim is now a continuous head, see AIM_DIM below */
+#define ACTION_MASK_DIM                                                                            \
+    22 /* Batch 3: sum(ACTION_HEAD_SIZES) = 9+2+2+3+2+2+2 = 22 (was 38 with the 16-bin aim) */
+#define AIM_DIM                                                                                       \
+    1 /* Batch 3: 1D Gaussian (Δyaw only). Sim is 2D yaw-only — pitch deferred to Batch 3.5 (#24). \
+       */
 #define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */
 #define CROUCH_COOLDOWN_TICKS 7 /* ~0.4s at 16 Hz */
 #define INVALID_AREA_IDX      (-1)
 
 /* ── Action head spec (single source of truth for names, sizes, order) ── */
+/* Batch 3: HEAD_AIM removed entirely from the discrete head enum.
+ * Continuous aim lives in a separate float buffer (see binding.c env_step
+ * second arg) and is NOT one of these heads. Renumbered offsets propagate
+ * through cs2_env.h (mask emit), cs2_movement.h, cs2_combat.h, cs2_bomb.h,
+ * and cs2_input.h. */
 enum ActionHead {
     HEAD_MOVE   = 0,
-    HEAD_AIM    = 1,
-    HEAD_SHOOT  = 2,
-    HEAD_RELOAD = 3,
-    HEAD_WEAPON = 4,
-    HEAD_USE    = 5,
-    HEAD_CROUCH = 6,
-    HEAD_JUMP   = 7,
+    HEAD_SHOOT  = 1,
+    HEAD_RELOAD = 2,
+    HEAD_WEAPON = 3,
+    HEAD_USE    = 4,
+    HEAD_CROUCH = 5,
+    HEAD_JUMP   = 6,
 };
 
-static const int   ACTION_HEAD_SIZES[] = {9, 16, 2, 2, 3, 2, 2, 2};
+static const int   ACTION_HEAD_SIZES[] = {9, 2, 2, 3, 2, 2, 2};
 static const char* ACTION_HEAD_NAMES[] = {
     "move",
-    "aim",
     "shoot",
     "reload",
     "weapon",
@@ -233,7 +241,16 @@ typedef struct {
     int32_t action_shoot[2];
     int32_t action_use[2];
     int32_t action_last[2];
-    int32_t action_aim[16];
+    /* Batch 3: continuous-aim Δyaw stats (replaces 16-bin action_aim histogram).
+     * Sum + sum-of-squares + count enables Welford-style mean/var recovery
+     * Python-side without storing the full rollout. mean = sum / count;
+     * var = (sq_sum / count) - mean².
+     * No explicit pad — three int32-aligned fields (4+4+4=12B) follow
+     * the int32-aligned `action_last[2]` cleanly. `_pad_ss_wins[2]` at
+     * end of struct still pads to 4-byte boundary as before. */
+    float   aim_delta_sum;
+    float   aim_delta_sq_sum;
+    int32_t aim_delta_count;
     int32_t action_reload[2];
     int32_t action_weapon[3];
     int32_t action_crouch[2];
@@ -273,6 +290,19 @@ typedef struct {
     /* Phase 6: renderer client — NULL during training, set by make_client() */
     struct Client* client;
 } Dust2Env;
+
+/* ── Angle utilities ────────────────────────────────────────────────────── */
+/* Batch 3: wrap a radian value into [-π, +π].
+ * Used by env_step to keep `a->facing` bounded after applying Δyaw.
+ * Loop form (vs `fmodf`) is fine — typical input is `a->facing + clamped`
+ * where clamped ≤ π/4, so worst case is one iteration. */
+static inline float wrap_pi(float x) {
+    while (x > (float)M_PI)
+        x -= 2.0f * (float)M_PI;
+    while (x < -(float)M_PI)
+        x += 2.0f * (float)M_PI;
+    return x;
+}
 
 /* ── RNG utility (available to all headers) ─────────────────────────────── */
 static inline uint32_t xorshift32(uint32_t* state) {
