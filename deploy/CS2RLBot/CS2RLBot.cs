@@ -105,7 +105,7 @@ public class CS2RLBotPlugin : BasePlugin
         if (string.IsNullOrEmpty(_obsVersion))
         {
             Logger.LogWarning("[CS2RLBot] policy_lstm.json missing obs_version — run export_policy.py again");
-            _obsVersion = "v1-104dim"; // assume current version if not present
+            _obsVersion = "v1-105dim"; // assume current version (105-dim obs with carrier bit at obs[104]) if not present
         }
 
         // 4. Resolve model path
@@ -386,6 +386,10 @@ public class CS2RLBotPlugin : BasePlugin
             mem.Reset();
         _bombState = default;
         _obsBuilder?.ClearReloadCache(); // _reloadStartTimes keys are entity indices; stale across rounds
+        // Defensive mirror of OnRoundEnd: if OnRoundEnd is skipped (warmup, plugin reload,
+        // server crash recovery, freezetime abort), latches would otherwise drift across rounds.
+        // ObservationBuilder.cs:296 docstring explicitly anticipates RoundStart usage.
+        _obsBuilder?.ClearCarrierLatches();
         return HookResult.Continue;
     }
 
