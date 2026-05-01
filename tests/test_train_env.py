@@ -999,3 +999,73 @@ def test_step_stats_aim_delta_tracking():
         assert abs(mean - 0.05) < 1e-5, f"mean Δyaw={mean}, expected 0.05"
     finally:
         env.close()
+
+
+# ── Batch 3 Task 4: Hybrid policy forward shape + log_std clamp tests ──────
+# These exercise build_policy()'s new Gaussian aim head: the 4-tuple return
+# from forward(), the µ shape (B, AIM_DIM) bounded by max_turn_speed via
+# tanh*scale, and the [LOG_STD_MIN, LOG_STD_MAX] clamp that prevents σ
+# collapse / explosion. Trainer-side wiring (PPO ratio over both factors)
+# arrives in Task 5; these tests stay green regardless of trainer state.
+def test_policy_forward_emits_mu_and_logstd():
+    """build_policy returns a hybrid policy whose forward emits (logits[7],
+    mu_aim, log_std, value). mu_aim shape (B, 1), log_std broadcasts to
+    same. AIM_DIM bump to 2 (Batch 3.5) is a single-line change here."""
+    import torch
+
+    import _action_spec as spec
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        x = torch.zeros((1, train.OBS_DIM))
+        logits, mu_aim, log_std, value = policy.forward(x, state={})
+        assert len(logits) == spec.ACTION_DIM == 7, (
+            f"got {len(logits)} discrete heads, expected 7")
+        assert mu_aim.shape == (1, spec.AIM_DIM), (
+            f"mu_aim.shape={mu_aim.shape}, expected (1, {spec.AIM_DIM})")
+        assert log_std.shape == mu_aim.shape, (
+            f"log_std.shape={log_std.shape} should broadcast to mu shape")
+        # μ is already tanh*max_turn_speed scaled, so |μ| ≤ max_turn_speed.
+        sd = env._c_env.sd.contents
+        assert mu_aim.abs().max().item() <= sd.max_turn_speed + 1e-6, (
+            f"|mu_aim| exceeds max_turn_speed: {mu_aim.abs().max().item()}")
+        # value head still emits a single scalar per agent.
+        assert value.shape == (1, 1), f"value.shape={value.shape}, expected (1, 1)"
+    finally:
+        env.close()
+
+
+def test_logstd_clamp_lower():
+    """Push aim_log_std → -∞ via direct write; forward()'s output must
+    be ≥ LOG_STD_MIN after the clamp. Defends σ collapse — without the
+    clamp the Normal entropy would diverge to −∞ and pin the SAC-α loop."""
+    import torch
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        with torch.no_grad():
+            policy.aim_log_std.fill_(-100.0)                           # exp(-100) ≈ 0
+        x = torch.zeros((1, train.OBS_DIM))
+        _, _, log_std, _ = policy.forward(x, state={})
+        assert log_std.min().item() >= train.LOG_STD_MIN - 1e-6, (
+            f"log_std={log_std.min().item()} below LOG_STD_MIN={train.LOG_STD_MIN}")
+    finally:
+        env.close()
+
+
+def test_logstd_clamp_upper():
+    """Push aim_log_std → +∞; forward() output must be ≤ LOG_STD_MAX.
+    Defends σ explosion — uncapped σ would dominate the policy and
+    negate any μ signal the network learns."""
+    import torch
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        with torch.no_grad():
+            policy.aim_log_std.fill_(100.0)
+        x = torch.zeros((1, train.OBS_DIM))
+        _, _, log_std, _ = policy.forward(x, state={})
+        assert log_std.max().item() <= train.LOG_STD_MAX + 1e-6, (
+            f"log_std={log_std.max().item()} above LOG_STD_MAX={train.LOG_STD_MAX}")
+    finally:
+        env.close()

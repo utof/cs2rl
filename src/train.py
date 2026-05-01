@@ -16,6 +16,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
 import json
+import math
 import multiprocessing as mp
 import random
 import sys
@@ -26,10 +27,27 @@ from pathlib import Path
 
 import numpy as np
 
-from _action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES          # from cs2_types.h
+from _action_spec import (
+    ACTION_HEAD_NAMES,
+    ACTION_HEAD_SIZES,
+    AIM_DIM,
+)                                      # from cs2_types.h
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
 OBS_DIM = 105
+
+# Batch 3 (continuous aim H-PPO): state-independent log_std parameter
+# for the Gaussian aim head. σ_init = 0.1 rad ≈ 5.7° matches mega-spec
+# §9 lock and the H-PPO literature default. σ_min = 0.01 rad ≈ 0.6° —
+# floors entropy without flooding the policy with noise; tanh+max_turn_speed
+# clamp dominates the per-tick range regardless of σ. σ_max = 0.5 rad ≈ 28.6°
+# — symmetric bound prevents explosion that would mask μ.
+# Module-level so tests can `import train; train.LOG_STD_MIN` without poking
+# at the inner Dust2Policy class. Used in build_policy() forward paths and
+# in the max_entropy calc that drives the SAC-α dual loop.
+LOG_STD_INIT = math.log(0.1)
+LOG_STD_MIN = math.log(0.01)
+LOG_STD_MAX = math.log(0.5)
 
 
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
@@ -537,25 +555,112 @@ def build_policy(vecenv, device, obs_dim_override=None):
             ])
             self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
 
+            # Batch 3: continuous Gaussian aim head.
+            # mu_aim → (B, AIM_DIM); tanh-squashed and scaled by max_turn_speed
+            #   in forward(). State-DEPENDENT (per-step linear projection) so
+            #   the policy can react to the current obs (visible enemies, yaw
+            #   delta to target, etc.) when picking the mean Δyaw.
+            # aim_log_std → (AIM_DIM,) — state-INDEPENDENT learnable parameter
+            #   per Fan et al. IJCAI 2019 H-PPO baseline. Clamped in forward()
+            #   to [LOG_STD_MIN, LOG_STD_MAX] so neither σ collapse (entropy
+            #   loss → −∞) nor explosion (σ floods policy) is reachable.
+            # Pitfall: keep `std=0.01` on aim_mu init so the pre-tanh mean
+            #   starts ~zero — otherwise the policy starts saturated and
+            #   learning the Gaussian head is much slower.
+            self.aim_mu = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
+            self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+
+            # max_turn_speed mirrors C sd->max_turn_speed (StaticData, π/4
+            # default). Pulled from the vecenv's static-data block so the
+            # policy stays bound to the env's actual cap even if it changes
+            # at make_puffer_env time. Stored as a buffer (no grad, not a
+            # learnable param, follows .to(device)). The vecenv may itself
+            # be the driver_env when called from tests using make_puffer_env
+            # directly — handle both shapes.
+            sd = (vecenv.driver_env._c_env.sd.contents
+                  if hasattr(vecenv, 'driver_env') else vecenv._c_env.sd.contents)
+            self.register_buffer(
+                'max_turn_speed',
+                torch.tensor(sd.max_turn_speed, dtype=torch.float32),
+            )
+
         def get_value(self, x, lstm_state=None, done=None):
             hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
             return self.value_head(hidden_out), lstm_state
 
-        def get_action_and_value(self, x, lstm_state=None, done=None, action=None):
+        def get_action_and_value(self,
+                                 x,
+                                 lstm_state=None,
+                                 done=None,
+                                 action=None,
+                                 continuous_action=None):
+            """Hybrid sampler combining 7 categorical heads + 1 Gaussian aim head.
+
+            Args:
+                x: (B, OBS_DIM) observation batch.
+                lstm_state: optional (h, c) tuple for the LSTM rollout.
+                done: optional (B,) done-mask used to reset LSTM state.
+                action: (B, ACTION_DIM=7) int64 — discrete actions; if None,
+                    sample from the categorical heads.
+                continuous_action: (B, AIM_DIM=1) float32 — Δyaw in radians
+                    already in [-max_turn_speed, +max_turn_speed]; if None,
+                    sample from the Normal head.
+
+            Returns:
+                (action, continuous_action, log_prob, entropy, value, lstm_state)
+                log_prob and entropy aggregate across all 8 factors (7
+                categorical + 1 Normal) — discrete factors are independent so
+                their log-probs sum, and the Gaussian factor adds to the
+                total. PPO loss assembly + the matching trainer side
+                (rollout buffer for continuous_action, ratio computation)
+                lands in task 5 via _patch_trainer_with_hybrid_aim.
+            """
             hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
             logits = [head(hidden_out) for head in self.action_heads]
 
-            # MultiCategorical distribution
-            dists = [torch.distributions.Categorical(logits=head_logits) for head_logits in logits]
+            # Discrete sample / log-prob / entropy.
+            dists = [torch.distributions.Categorical(logits=h) for h in logits]
             if action is None:
                 action = torch.stack([d.sample() for d in dists], dim=-1)
+            log_prob_d = sum(d.log_prob(action[..., i]) for i, d in enumerate(dists))
+            entropy_d = sum(d.entropy() for d in dists)
 
-            log_prob = sum(d.log_prob(action[..., i]) for i, d in enumerate(dists))
-            entropy = sum(d.entropy() for d in dists)
+            # Continuous (Normal) sample / log-prob / entropy. tanh+scale
+            # bounds μ ∈ [-max_turn_speed, +max_turn_speed]; σ is clamped so
+            # the Normal can't collapse or explode mid-training.
+            mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
+            log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX)
+            sigma = torch.exp(log_std).expand_as(mu_aim)
+            aim_dist = torch.distributions.Normal(mu_aim, sigma)
+            if continuous_action is None:
+                # rsample preserves the reparameterised path through μ in case
+                # the trainer ever uses pathwise gradients (PPO doesn't, but
+                # cheap to keep this future-proof).
+                continuous_action = aim_dist.rsample()
+                # Re-clamp post-sample: σ exploration can land outside the
+                # tanh band, and the C env asserts |Δyaw| ≤ max_turn_speed.
+                # Defence-in-depth — never let the env see out-of-range Δyaw.
+                continuous_action = torch.clamp(
+                    continuous_action,
+                    -self.max_turn_speed,
+                    self.max_turn_speed,
+                )
+            log_prob_c = aim_dist.log_prob(continuous_action).sum(-1)
+            # Closed-form Gaussian entropy: 0.5·log(2πe·σ²), summed across
+            # AIM_DIM. .entropy() returns per-dim, so .sum(-1) is correct
+            # for AIM_DIM=1 today and stays correct if AIM_DIM bumps to ≥2.
+            entropy_c = aim_dist.entropy().sum(-1)
+
+            log_prob = log_prob_d + log_prob_c
+            entropy = entropy_d + entropy_c
             value = self.value_head(hidden_out)
-            return action, log_prob, entropy, value, lstm_state
+            return action, continuous_action, log_prob, entropy, value, lstm_state
 
         def forward_eval(self, x, state):
+            # Batch 3: returns 4-tuple (logits, mu_aim, log_std, value) so
+            # downstream samplers (eval loop / record / past-policy mixing)
+            # can construct the full hybrid action. Existing 2-tuple
+            # consumers break here — task 5 updates them.
             done = state.get("done")
             if done is None:
                 done = x.new_zeros(x.shape[0])
@@ -570,9 +675,18 @@ def build_policy(vecenv, device, obs_dim_override=None):
 
             logits = [head(hidden_out) for head in self.action_heads]
             value = self.value_head(hidden_out)
-            return logits, value
+            # μ is bounded by tanh*max_turn_speed; log_std broadcasts to μ
+            # shape so callers can build Normal(mu, exp(log_std)) directly
+            # without an extra .expand call.
+            mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
+            log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
+            return logits, mu_aim, log_std, value
 
         def forward(self, x, state):
+            # Batch 3: same 4-tuple contract as forward_eval. forward() is
+            # the path PufferLib's vectorised rollout uses (no LSTM state
+            # carry) — it stays in lockstep with forward_eval to keep the
+            # ONNX export single-pathway in task 6.
             if x.ndim == 3:
                 x_flat = x.reshape(-1, x.shape[-1])
             else:
@@ -581,8 +695,9 @@ def build_policy(vecenv, device, obs_dim_override=None):
             hidden_out, _ = self._forward_core(x_flat, None, None)
             logits = [head(hidden_out) for head in self.action_heads]
             value = self.value_head(hidden_out)
-
-            return logits, value
+            mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
+            log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
+            return logits, mu_aim, log_std, value
 
         def _forward_core(self, x, lstm_state, done):
             h = self.encoder(x.float())
@@ -723,8 +838,16 @@ def _patch_trainer_with_return_norm(trainer):
     # ──────────────────────────────────────────────────────────────────────
 
     # ── ADAPTIVE ENTROPY (Lagrangian / SAC-style alpha) ────────────────────
-    # max_entropy derived from MultiDiscrete(ACTION_HEAD_SIZES).
-    max_entropy = sum(np.log(n) for n in ACTION_HEAD_SIZES)
+    # Batch 3: max_entropy = sum of discrete max entropies + closed-form
+    # Gaussian entropy at σ = exp(LOG_STD_MAX). Used for entropy-coefficient
+    # annealing schedules (target_entropy ramp in Task 9A) and the SAC-α
+    # dual loop's bookkeeping. Discrete heads contribute log(N_i) each;
+    # the Gaussian contributes 0.5·log(2πe·σ²) per AIM_DIM — using σ_max
+    # is the conservative ceiling, since the policy's actual σ is clamped
+    # ≤ exp(LOG_STD_MAX) in every forward call.
+    max_entropy_discrete = sum(np.log(n) for n in ACTION_HEAD_SIZES)
+    max_entropy_continuous = AIM_DIM * 0.5 * np.log(2 * np.pi * np.e * np.exp(LOG_STD_MAX)**2)
+    max_entropy = max_entropy_discrete + max_entropy_continuous
     # Task 9A: target_entropy is no longer a static scalar — it's recomputed
     # each train() call from a linear ramp 0.7→0.5*max_entropy across
     # [0, 10_000_000] global steps (see target_entropy_schedule). The live
