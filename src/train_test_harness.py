@@ -96,6 +96,7 @@ def _build_trainer_for_test(
     from map import make_simple_map
     from train import (
         SelfPlayManager,
+        _patch_trainer_with_hybrid_aim,
         _patch_trainer_with_selfplay,
         build_policy,
         build_train_config,
@@ -167,11 +168,36 @@ def _build_trainer_for_test(
     policy = build_policy(vecenv, device)
     trainer = PuffeRL(train_config, vecenv, policy)
 
-    # ── Optional self-play patch ────────────────────────────────────────────
-    # Empty pool → should_use_past() always False → past_policy branch stays
-    # dormant, but trainer.evaluate is still the patched _evaluate_with_selfplay
-    # function (which is what Task 6c's clamp-removal test needs).
-    if with_selfplay:
+    # Batch 3 (T5): the hybrid-aim patcher is REQUIRED for any test that
+    # exercises evaluate() / train() because those code paths now read
+    # trainer.cont_actions / trainer.logprobs_{d,c}. Apply unconditionally
+    # so the harness shape matches production. _patch_trainer_with_return_norm
+    # is intentionally NOT applied here — harness tests that need it apply
+    # it explicitly (matches the pre-Batch-3 contract documented at module
+    # docstring "return-norm & timing patches: skipped").
+    _patch_trainer_with_hybrid_aim(trainer)
+
+    # ── Self-play patch (always applied at T5) ──────────────────────────────
+    # Pre-Batch-3: this was gated on `with_selfplay` so the no-selfplay path
+    # could exercise PufferLib's library evaluate(). T4 changed the policy
+    # contract to a 4-tuple; PufferLib's library evaluate still expects a
+    # 2-tuple, so the no-selfplay path can't run end-to-end without our
+    # hybrid-aware evaluate wrapper. The selfplay patch IS that wrapper;
+    # `with_selfplay=False` now means "no past-policy mixing" (empty pool
+    # never activates) — the patch wrapper still runs. The
+    # `with_selfplay=True` path additionally pre-seeds the manager. This
+    # keeps the test harness honest with production where the hybrid-aim
+    # rollout requires the patched evaluate path.
+    if not with_selfplay:
+        self_play_mgr = SelfPlayManager(
+            pool_size=15,
+            p_past=0.0,
+            save_every_epochs=25,
+            win_threshold=0.6,
+            phase_length=50,
+        )
+        _patch_trainer_with_selfplay(trainer, self_play_mgr)
+    else:
         self_play_mgr = SelfPlayManager(
             pool_size=15,
             p_past=0.3,

@@ -30,7 +30,7 @@ import numpy as np
 from _action_spec import (
     ACTION_HEAD_NAMES,
     ACTION_HEAD_SIZES,
-    AIM_DIM,
+    AIM_DIM,                           # noqa: F401  T4→T5 carry-forward (M-1): T6 ONNX exporter consumes this
 )                                      # from cs2_types.h
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
@@ -254,7 +254,6 @@ def update_obs_buffer(obs_buffer, obs, terms=None, truncs=None):
 
 
 def select_policy_actions(policy, obs_buffer, active_agents, device, policy_state, policy_mode):
-    import pufferlib.pytorch
     import torch
 
     if policy_mode == "random":
@@ -264,10 +263,24 @@ def select_policy_actions(policy, obs_buffer, active_agents, device, policy_stat
     obs_t = torch.as_tensor(obs_arr, device=device)
 
     with torch.no_grad():
-        logits, _ = policy.forward_eval(obs_t, policy_state)
+        # Batch 3 (T5): policy now emits 4-tuple (logits, mu_aim, log_std, value).
+        # This helper is eval/inspection only — used by record_episode and the
+        # Python-side scripted rollout. Its callers don't currently consume the
+        # continuous (Δyaw) component, so the sampled cont_t is dropped on the
+        # floor. The cont_action is still SAMPLED (sample mode) so the policy
+        # state advances identically to training; we just don't emit it. If a
+        # future eval path needs Δyaw, return (act_dict, cont_dict) — keeping
+        # the int-action signature for now to avoid touching every caller.
+        logits, mu_aim, log_std_aim, _ = policy.forward_eval(obs_t, policy_state)
         if policy_mode == "sample":
-            act_t, _, _ = pufferlib.pytorch.sample_logits(logits)
+            act_t, _cont_t, _, _ = _hybrid_sample_logits(
+                (logits, mu_aim, log_std_aim, None),
+                max_turn_speed=policy.max_turn_speed.item(),
+            )
         else:
+            # Greedy: argmax discrete + μ-only continuous (no exploration).
+            # Greedy callers care about deterministic playback, so the σ noise
+            # would actively hurt — μ_aim is the policy's best guess.
             act_t = torch.stack([head.argmax(dim=-1) for head in logits], dim=-1)
 
     act_np = act_t.cpu().numpy().astype(np.int64)
@@ -275,7 +288,6 @@ def select_policy_actions(policy, obs_buffer, active_agents, device, policy_stat
 
 
 def select_policy_actions_native(policy, obs, device, policy_state, policy_mode):
-    import pufferlib.pytorch
     import torch
 
     if policy_mode == "random":
@@ -285,9 +297,17 @@ def select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
     if hasattr(policy, "obs_dim") and obs_t.shape[-1] != policy.obs_dim:
         obs_t = obs_t[..., :policy.obs_dim]
     with torch.no_grad():
-        logits, _ = policy.forward_eval(obs_t, policy_state)
+        # Batch 3 (T5): same change as select_policy_actions above. This native
+        # helper feeds evaluate_checkpoint and the smoke path; both consume only
+        # discrete int32 actions today. cont_t is dropped on the floor; if Δyaw
+        # is wanted in eval recordings, plumb it through here in T6 alongside
+        # the ONNX export wiring. See sibling helper for greedy-vs-sample notes.
+        logits, mu_aim, log_std_aim, _ = policy.forward_eval(obs_t, policy_state)
         if policy_mode == "sample":
-            act_t, _, _ = pufferlib.pytorch.sample_logits(logits)
+            act_t, _cont_t, _, _ = _hybrid_sample_logits(
+                (logits, mu_aim, log_std_aim, None),
+                max_turn_speed=policy.max_turn_speed.item(),
+            )
         else:
             act_t = torch.stack([head.argmax(dim=-1) for head in logits], dim=-1)
 
@@ -574,14 +594,15 @@ def build_policy(vecenv, device, obs_dim_override=None):
             # default). Pulled from the vecenv's static-data block so the
             # policy stays bound to the env's actual cap even if it changes
             # at make_puffer_env time. Stored as a buffer (no grad, not a
-            # learnable param, follows .to(device)). The vecenv may itself
-            # be the driver_env when called from tests using make_puffer_env
-            # directly — handle both shapes.
-            sd = (vecenv.driver_env._c_env.sd.contents
-                  if hasattr(vecenv, 'driver_env') else vecenv._c_env.sd.contents)
+            # learnable param, follows .to(device)). T5 carry-forward (I-1):
+            # reuse the `driver_env` helper resolved at line ~526 instead of
+            # an inline hasattr ladder — the helper already handles the
+            # vecenv-vs-driver-env duality (test path passes a bare env;
+            # production passes a Multiprocessing/Serial vecenv). One source
+            # of truth for the "what is the env?" question.
             self.register_buffer(
                 'max_turn_speed',
-                torch.tensor(sd.max_turn_speed, dtype=torch.float32),
+                torch.tensor(driver_env._c_env.sd.contents.max_turn_speed, dtype=torch.float32),
             )
 
         def get_value(self, x, lstm_state=None, done=None):
@@ -637,9 +658,15 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 # the trainer ever uses pathwise gradients (PPO doesn't, but
                 # cheap to keep this future-proof).
                 continuous_action = aim_dist.rsample()
-                # Re-clamp post-sample: σ exploration can land outside the
-                # tanh band, and the C env asserts |Δyaw| ≤ max_turn_speed.
-                # Defence-in-depth — never let the env see out-of-range Δyaw.
+                # Re-clamp post-sample (T5 carry-forward I-2): σ exploration
+                # can land outside the tanh band. The C env (cs2_env.h:129)
+                # clamps |Δyaw| ≤ max_turn_speed silently with fminf/fmaxf —
+                # NOT an assert. The Python-side clamp keeps the recorded
+                # `continuous_action` byte-identical to what the env actually
+                # consumed, which matters for PPO's importance ratio: if we
+                # stored the unclamped sample and the env clipped it, the
+                # ratio re-evaluation in _hybrid_ppo_loss would be wrong by
+                # the clipping amount on every saturated step.
                 continuous_action = torch.clamp(
                     continuous_action,
                     -self.max_turn_speed,
@@ -806,7 +833,6 @@ def _patch_trainer_with_return_norm(trainer):
     import types
     from collections import defaultdict
 
-    import pufferlib.pytorch
     import torch
     from pufferlib.pufferl import compute_puff_advantage
 
@@ -1028,6 +1054,14 @@ def _patch_trainer_with_return_norm(trainer):
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
+            # Batch 3 (T5): pull continuous actions + per-factor old logprobs
+            # from the parallel buffers added by _patch_trainer_with_hybrid_aim.
+            # mb_logprobs (the SUM) stays the canonical "logp from rollout" for
+            # KL/clipfrac diagnostics below; the per-factor halves drive the
+            # per-factor PPO clip in _hybrid_ppo_loss.
+            mb_cont_actions = self.cont_actions[idx]
+            mb_old_logp_d = self.logprobs_d[idx]
+            mb_old_logp_c = self.logprobs_c[idx]
 
             # ── VALUE TARGET NORMALISATION ─────────────────────────────────
             # Normalize returns before value regression.  The value head learns
@@ -1047,15 +1081,50 @@ def _patch_trainer_with_return_norm(trainer):
                 lstm_c=None,
             )
 
-            logits, newvalue = self.policy(mb_obs, state)
-            actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits,
-                                                                           action=mb_actions)
+            # Batch 3 (T5): hybrid PPO update — per-factor clipped loss
+            # (Fan et al. IJCAI 2019). The helper does the policy forward
+            # pass (returning mu_aim/log_std + value) and assembles the
+            # clipped policy loss with INDEPENDENT discrete and continuous
+            # ratios. We still also need the raw logits for the per-head
+            # entropy diagnostics below, so re-pull them via a NO-grad path
+            # — _hybrid_ppo_loss already consumed them on the gradient path.
+            pg_loss, entropy, newvalue, newlogprob, ratio_d, ratio_c = _hybrid_ppo_loss(
+                self.policy,
+                mb_obs,
+                mb_actions,
+                mb_cont_actions,
+                mb_old_logp_d,
+                mb_old_logp_c,
+                mb_advantages,
+                clip_coef,
+                state,
+            )
+            with torch.no_grad():
+                # Logits-only path for the per-head entropy diagnostic block
+                # below. Cheaper than re-running _hybrid_ppo_loss; we already
+                # have the loss + entropy from the gradient pass.
+                logits, _mu_diag, _log_std_diag, _ = self.policy(mb_obs, state)
+            # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
+            # was used by downstream diagnostics; T5 dropped that consumer
+            # (mb_actions is the canonical stored discrete action). No
+            # rebinding here — the variable is unused after this point.
 
             profile("train_misc", epoch)
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
             logratio = newlogprob - mb_logprobs
+            # Batch 3: keep the joint ratio for KL/clipfrac diagnostics so the
+            # existing log surface (approx_kl, clipfrac, importance) is
+            # backwards-compatible. ratio_d is what gets stored in self.ratio
+            # because compute_puff_advantage was tuned for the discrete-head
+            # importance ratio in pre-Batch-3 runs; substituting ratio_d here
+            # preserves vtrace's behaviour.
             ratio = logratio.exp()
-            self.ratio[idx] = ratio.detach()
+            # Batch 3 (T5): _hybrid_ppo_loss returns flat (B*T,) ratios.
+            # self.ratio is (segments, bptt_horizon); reshape ratio_d to
+            # match so the indexed-write writes the right shape. ratio
+            # (joint) is already reshaped by mb_logprobs.shape on the
+            # previous line.
+            self.ratio[idx] = ratio_d.detach().reshape(mb_logprobs.shape)
 
             with torch.no_grad():
                 old_approx_kl = (-logratio).mean()
@@ -1082,10 +1151,14 @@ def _patch_trainer_with_return_norm(trainer):
             adv = mb_advantages
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
 
-            # Losses — use normalized returns as regression target
-            pg_loss1 = -adv * ratio
-            pg_loss2 = -adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
-            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+            # Batch 3 (T5): pg_loss already computed by _hybrid_ppo_loss above
+            # via per-factor clipping. The pre-Batch-3 single-ratio block lived
+            # here; it would over-clip (ratios from a Gaussian factor can vary
+            # very differently from categorical factors), so the spec L8
+            # decision is to clip per factor and sum. Keeping a no-op stub to
+            # make the diff easier to read and to flag where the change lives
+            # for future archaeologists.
+            _ = adv                    # adv computed above for vtrace; pg_loss already set
 
             newvalue = newvalue.view(mb_returns_norm.shape)
             v_loss_unclipped = (newvalue - mb_returns_norm)**2
@@ -1153,6 +1226,26 @@ def _patch_trainer_with_return_norm(trainer):
 
             # Learn on accumulated minibatches
             profile("learn", epoch)
+            # ── Batch 3 (T5) NaN guard ─────────────────────────────────────
+            # The continuous Gaussian aim head can emit non-finite μ / log_std
+            # during pathological early training (e.g. an obs that drives the
+            # tanh into hard saturation while σ explores LOG_STD_MAX — the
+            # log-prob of a far-tail sample under near-zero σ blows up).
+            # Skip optimizer.step() with a throttled stdout warning and
+            # zero out grads so the next minibatch starts from a clean slate.
+            # Do NOT raise — one bad minibatch shouldn't kill a run. `continue`
+            # is correct here: the enclosing `for mb in range(...)` is the
+            # PPO update loop. There is no nested loop between this check and
+            # that for-statement (verified before landing T5).
+            if not torch.isfinite(loss).all():
+                _now = time.time()
+                _last = getattr(self, '_last_nan_warn_t', 0.0)
+                if _now - _last > 60.0:
+                    print(f"[hybrid_aim NaN guard] non-finite loss "
+                          f"({float(loss.detach())}); skipping optimizer step")
+                    self._last_nan_warn_t = _now
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
             loss.backward()
             if (mb + 1) % self.accumulate_minibatches == 0:
                 # Task 9C: capture pre-clip grad norm. clip_grad_norm_ returns
@@ -1557,8 +1650,29 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     state["lstm_h"] = self.lstm_h[env_id.start]
                     state["lstm_c"] = self.lstm_c[env_id.start]
 
-                logits, value = self.policy.forward_eval(o_device, state)
-                action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                # Batch 3 (T5): hybrid rollout. Policy returns 4-tuple
+                # (logits, mu_aim, log_std, value). _hybrid_sample_logits
+                # produces both discrete action AND continuous Δyaw plus the
+                # joint log-prob; we then decompose the joint log-prob into
+                # discrete and continuous halves so the PPO update can clip
+                # each independently. The decomposition costs one extra
+                # categorical+normal eval per batch — cheap, ≪ env step.
+                logits, mu_aim, log_std_aim, value = self.policy.forward_eval(o_device, state)
+                action, cont_action, logprob, _ = _hybrid_sample_logits(
+                    (logits, mu_aim, log_std_aim, value),
+                    max_turn_speed=self.policy.max_turn_speed.item(),
+                )
+                # Per-factor logprobs for self.logprobs_d / self.logprobs_c.
+                # Recompute by reconstructing distributions — cheaper than
+                # plumbing a second return path through _hybrid_sample_logits.
+                # Stays correct because logits/mu_aim/log_std_aim are tensors
+                # we already hold; no extra policy forward pass.
+                _sigma_aim = torch.exp(log_std_aim).expand_as(mu_aim)
+                logprob_d = sum(
+                    torch.distributions.Categorical(logits=lg).log_prob(action[..., i])
+                    for i, lg in enumerate(logits))
+                logprob_c = (torch.distributions.Normal(mu_aim,
+                                                        _sigma_aim).log_prob(cont_action).sum(-1))
 
                 # ── Task 6c: per-channel reward norm + symlog (replaces the
                 # old hard-clip of r to [-1, 1]). Pipeline:
@@ -1642,8 +1756,24 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                         "lstm_h": past_lstm_h[env_id.start][opp_mask],
                         "lstm_c": past_lstm_c[env_id.start][opp_mask],
                     }
-                    opp_logits, _ = past_policy.forward_eval(o_device[opp_mask], past_state)
-                    opp_action, opp_logprob, _ = pufferlib.pytorch.sample_logits(opp_logits)
+                    # Batch 3 (T5): past policy is a HybridPolicy too — same
+                    # 4-tuple contract. Sample its discrete + continuous
+                    # action and decompose log-prob halves identically to
+                    # the current-policy path so the rollout buffer entries
+                    # stored at this opponent slot stay consistent across
+                    # both branches (PPO update treats them indistinguishably).
+                    opp_logits, opp_mu, opp_log_std, _opp_value = past_policy.forward_eval(
+                        o_device[opp_mask], past_state)
+                    opp_action, opp_cont_action, opp_logprob, _ = _hybrid_sample_logits(
+                        (opp_logits, opp_mu, opp_log_std, None),
+                        max_turn_speed=past_policy.max_turn_speed.item(),
+                    )
+                    _opp_sigma = torch.exp(opp_log_std).expand_as(opp_mu)
+                    opp_logprob_d = sum(
+                        torch.distributions.Categorical(logits=lg).log_prob(opp_action[..., i])
+                        for i, lg in enumerate(opp_logits))
+                    opp_logprob_c = (torch.distributions.Normal(
+                        opp_mu, _opp_sigma).log_prob(opp_cont_action).sum(-1))
 
                     # Write back updated past-policy LSTM states (cast from fp16 if needed)
                     past_lstm_h[env_id.start][opp_mask] = past_state["lstm_h"].to(
@@ -1651,10 +1781,16 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     past_lstm_c[env_id.start][opp_mask] = past_state["lstm_c"].to(
                         past_lstm_c[env_id.start].dtype)
 
-                    # Replace opponent slots in action & logprob buffers
-                    # Cast to destination dtype (amp_context may yield fp16)
+                    # Replace opponent slots in action & logprob buffers.
+                    # Cast to destination dtype (amp_context may yield fp16).
+                    # Continuous action and per-factor logprobs are also
+                    # spliced in so train()'s _hybrid_ppo_loss sees consistent
+                    # mb_cont_actions / mb_old_logp_{d,c} for opponent rows.
                     action[opp_idx] = opp_action.to(action.dtype)
                     logprob[opp_idx] = opp_logprob.to(logprob.dtype)
+                    cont_action[opp_idx] = opp_cont_action.to(cont_action.dtype)
+                    logprob_d[opp_idx] = opp_logprob_d.to(logprob_d.dtype)
+                    logprob_c[opp_idx] = opp_logprob_c.to(logprob_c.dtype)
                 # ──────────────────────────────────────────────────────────
 
             profile("eval_copy", epoch)
@@ -1676,6 +1812,14 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 
                 self.actions[batch_rows, seq_pos] = action
                 self.logprobs[batch_rows, seq_pos] = logprob
+                # Batch 3 (T5): parallel writes for the new buffers added by
+                # _patch_trainer_with_hybrid_aim. The PPO update at line ~1085
+                # reads these by the same idx; missing this write would
+                # silently feed zeros to _hybrid_ppo_loss → ratio_c always
+                # equals exp(new_logp_c - 0), which would diverge.
+                self.cont_actions[batch_rows, seq_pos] = cont_action
+                self.logprobs_d[batch_rows, seq_pos] = logprob_d
+                self.logprobs_c[batch_rows, seq_pos] = logprob_c
                 self.rewards[batch_rows, seq_pos] = r
                 self.terminals[batch_rows, seq_pos] = d.float()
                 self.values[batch_rows, seq_pos] = value.flatten()
@@ -1721,7 +1865,17 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                         self.stats[k].append(v)
 
             profile("env", epoch)
-            self.vecenv.send(action)
+            # Batch 3 (T5): vecenv.send patched by _patch_trainer_with_hybrid_aim
+            # to accept (action, cont_action) tuple. Discrete action is the
+            # numpy int32 buffer that the C env still receives positionally;
+            # cont_action is forwarded to env.step's continuous_actions kwarg
+            # via the per-env step wrapper for the Serial backend. For the
+            # Multiprocessing backend the cont buffer plumbing across the
+            # fork boundary is BLOCKED pending architectural decision (see
+            # _patch_trainer_with_hybrid_aim docstring) — Δyaw falls back
+            # to zero in that backend, leaving aim untrained but training
+            # otherwise functional.
+            self.vecenv.send((action, cont_action))
 
         profile("eval_misc", epoch)
         self.free_idx = self.total_agents
@@ -1732,6 +1886,295 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 
     trainer.evaluate = types.MethodType(_evaluate_with_selfplay, trainer)
     print("[Train] Self-play evaluate patch enabled.")
+    return trainer
+
+
+# ── SECTION: Batch 3 hybrid PPO helpers ────────────────────────────────────
+#
+# These three functions are the trainer-side complement of T4's HybridPolicy
+# (mu_aim + log_std_aim Gaussian head bolted onto 7 categorical heads).
+#
+#   _hybrid_sample_logits  — the rollout-time replacement for
+#                            pufferlib.pytorch.sample_logits(logits[, action]).
+#                            Pure function; takes the 4-tuple emitted by
+#                            HybridPolicy.forward / forward_eval and produces
+#                            (action, continuous_action, log_prob, entropy).
+#                            Joint factorised log-prob = sum of categorical
+#                            log-probs + Normal log-prob (independence
+#                            assumption per spec L8).
+#
+#   _hybrid_ppo_loss       — the PPO-update-time replacement, doing the
+#                            forward pass + per-factor clipped policy loss
+#                            (Fan et al. IJCAI 2019 H-PPO baseline). Returns
+#                            split discrete/continuous ratios so the caller
+#                            can keep KL/clipfrac diagnostics on the discrete
+#                            half (back-compat with the existing log surface).
+#
+#   _patch_trainer_with_hybrid_aim — extends the rollout buffer with
+#                            cont_actions / logprobs_d / logprobs_c parallel
+#                            to the existing actions / logprobs, and patches
+#                            vecenv.send to forward the float buffer to the
+#                            env. Applied AFTER _patch_trainer_with_return_norm
+#                            (which wraps train()) and BEFORE
+#                            _patch_trainer_with_selfplay (which wraps
+#                            evaluate()). Order matters: train() reads the
+#                            cont buffer that this patcher allocates.
+
+
+def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_turn_speed=None):
+    """Hybrid sampler for the 4-tuple HybridPolicy output (Batch 3 task 5).
+
+    Replaces the four in-tree usages of
+    ``pufferlib.pytorch.sample_logits(logits[, action=...])`` that previously
+    assumed a 2-tuple policy contract. Pure function (no monkey-patching) so
+    it can be unit-tested without spinning up a trainer.
+
+    Inputs
+    ------
+    policy_out : 4-tuple
+        (logits_list[7], mu_aim, log_std_aim, value) — the canonical T4
+        output of HybridPolicy.forward / forward_eval. The value slot is
+        ignored here; the caller already has it from the original call.
+    action : (B, ACTION_DIM=7) int64 tensor, or None
+        If None, sample fresh from the categorical heads. If supplied
+        (PPO update pass), evaluate log-prob under the new policy without
+        re-sampling — this is the difference between rollout and update.
+    continuous_action : (B, AIM_DIM=1) float32 tensor, or None
+        If None, sample Δyaw from Normal(mu_aim, exp(log_std_aim)) and
+        clamp to ±max_turn_speed. If supplied, evaluate log-prob without
+        re-sampling.
+    max_turn_speed : float or None
+        Hard clamp on sampled Δyaw. None means no clamp (only sane in the
+        update-pass path where continuous_action is provided pre-clamped).
+
+    Returns
+    -------
+    action, continuous_action, log_prob, entropy
+        action : (B, 7) int64
+        continuous_action : (B, 1) float32, ∈ [-max_turn_speed, max_turn_speed]
+        log_prob : (B,) — sum of discrete + continuous log-probs.
+            Joint factorised under independence (spec L8). The PPO loss
+            assembly in _hybrid_ppo_loss separates the two halves to apply
+            per-factor clipping (Fan et al. 2019); this helper sums them
+            because the rollout-side log_prob is what gets stored in
+            self.logprobs (back-compat) — the per-factor halves are stored
+            separately in self.logprobs_d / self.logprobs_c.
+        entropy : (B,) — discrete entropy (sum of 7 categoricals) + Normal
+            entropy. Note: Normal entropy 0.5·log(2πe·σ²) is NEGATIVE for
+            σ < 1/√(2πe) ≈ 0.242 — at σ_init=0.1 the continuous term is
+            ≈ −0.886. This is mathematically correct; do NOT clip or assert
+            entropy >= 0 anywhere downstream.
+    """
+    import torch
+
+    logits_list, mu_aim, log_std_aim, _value = policy_out
+
+    # ── Discrete: 7 independent categorical heads ──
+    # Reconstruct distributions from the logits so we can sample / log-prob /
+    # entropy without re-running the policy. The spec calls these "factors";
+    # under independence their joint log-prob is the sum.
+    dists_d = [torch.distributions.Categorical(logits=lg) for lg in logits_list]
+    if action is None:
+        action = torch.stack([d.sample() for d in dists_d], dim=-1)
+    log_prob_d = sum(d.log_prob(action[..., i]) for i, d in enumerate(dists_d))
+    entropy_d = sum(d.entropy() for d in dists_d)
+
+    # ── Continuous: 1D (today) Gaussian aim head ──
+    # σ comes pre-clamped from forward()/forward_eval() (LOG_STD_MIN/MAX),
+    # so we don't re-clamp here — would silently mask a regression in the
+    # policy if the clamp were removed upstream.
+    sigma = torch.exp(log_std_aim).expand_as(mu_aim)
+    dist_c = torch.distributions.Normal(mu_aim, sigma)
+    if continuous_action is None:
+        # rsample preserves the reparameterised gradient path. PPO doesn't
+        # use pathwise gradients but keeping rsample costs nothing and stays
+        # future-proof for SAC-style continuous extensions.
+        continuous_action = dist_c.rsample()
+        if max_turn_speed is not None:
+            # Same clamp logic as HybridPolicy.get_action_and_value (T4).
+            # The C env (cs2_env.h:129) clamps silently with fminf/fmaxf;
+            # storing the post-clamp value keeps the PPO ratio honest.
+            continuous_action = torch.clamp(continuous_action, -max_turn_speed, max_turn_speed)
+    log_prob_c = dist_c.log_prob(continuous_action).sum(-1)
+    entropy_c = dist_c.entropy().sum(-1)
+
+    return action, continuous_action, log_prob_d + log_prob_c, entropy_d + entropy_c
+
+
+def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d, mb_old_logp_c,
+                     mb_advantages, clip_coef, state):
+    """Per-factor PPO clipped loss (H-PPO, Fan et al. IJCAI 2019).
+
+    THE CORE OF T5. Re-runs the policy on mb_obs with the stored
+    mb_actions / mb_cont_actions, computes new log-probs split into
+    discrete and continuous halves, and applies the PPO clip
+    INDEPENDENTLY to each half before summing. This is the spec L8
+    decision: discrete head saturating doesn't have to drag the
+    continuous head's gradient through clipping (and vice versa).
+
+    Returns
+    -------
+    pg_loss : scalar — sum of clipped discrete + clipped continuous losses.
+    entropy : (B,) — joint factorised entropy (same shape as old logprobs).
+    new_value : (B, 1) — fresh value estimate for the value-loss path.
+    new_logp_total : (B,) — sum of new discrete + new continuous log-probs;
+        used for KL/clipfrac diagnostics in the caller.
+    ratio_d, ratio_c : (B,) — exposed so the caller can attribute clipfrac
+        per factor and substitute ratio_d into the existing self.ratio
+        slot for vtrace advantages (spec carry-forward: keep diagnostics
+        backwards-compatible by using the discrete ratio there).
+    """
+    import torch
+
+    logits_list, mu_aim, log_std_aim, new_value = policy(mb_obs, state)
+
+    # ── Shape harmonisation ──
+    # PufferLib's PPO update path passes mb_obs with shape (segments,
+    # bptt_horizon, OBS_DIM); HybridPolicy.forward flattens to (B*T, ...)
+    # before the heads, so logits/mu_aim/log_std/new_value come back at the
+    # FLAT batch dim while mb_actions / mb_cont_actions / mb_advantages /
+    # mb_old_logp_{d,c} retain their original (segments, bptt_horizon, …)
+    # shape. Flatten the latter to match logits' batch dim. If mb_actions
+    # is already 2D (test path passing flat tensors directly), .view keeps
+    # it 2D — a no-op.
+    flat_actions = mb_actions.reshape(-1, mb_actions.shape[-1])
+    flat_cont = mb_cont_actions.reshape(-1, mb_cont_actions.shape[-1])
+    flat_old_d = mb_old_logp_d.reshape(-1)
+    flat_old_c = mb_old_logp_c.reshape(-1)
+    flat_adv = mb_advantages.reshape(-1)
+
+    # ── Re-evaluate discrete and continuous halves under the new policy ──
+    dists_d = [torch.distributions.Categorical(logits=lg) for lg in logits_list]
+    new_logp_d = sum(d.log_prob(flat_actions[..., i]) for i, d in enumerate(dists_d))
+    sigma = torch.exp(log_std_aim).expand_as(mu_aim)
+    dist_c = torch.distributions.Normal(mu_aim, sigma)
+    new_logp_c = dist_c.log_prob(flat_cont).sum(-1)
+    entropy_d = sum(d.entropy() for d in dists_d)
+    entropy_c = dist_c.entropy().sum(-1)
+    entropy = entropy_d + entropy_c
+
+    # ── Per-factor PPO ratios + clipped loss ──
+    # max(unclipped, clipped) is taken element-wise per factor; the per-
+    # element scalars are then meaned. Summing the two means matches the
+    # H-PPO Eq. 8 in Fan et al. — equal weighting of the two heads. If a
+    # future variant wants weighted heads (e.g. up-weight continuous early
+    # in training), introduce per-factor coefficients HERE, not by scaling
+    # ratios.
+    ratio_d = torch.exp(new_logp_d - flat_old_d)
+    ratio_c = torch.exp(new_logp_c - flat_old_c)
+    pg_d_un = -flat_adv * ratio_d
+    pg_d_cl = -flat_adv * torch.clamp(ratio_d, 1 - clip_coef, 1 + clip_coef)
+    pg_c_un = -flat_adv * ratio_c
+    pg_c_cl = -flat_adv * torch.clamp(ratio_c, 1 - clip_coef, 1 + clip_coef)
+    pg_loss = torch.max(pg_d_un, pg_d_cl).mean() + torch.max(pg_c_un, pg_c_cl).mean()
+
+    return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c
+
+
+def _patch_trainer_with_hybrid_aim(trainer):
+    """Extend trainer with continuous-action rollout storage + vecenv plumbing.
+
+    Apply AFTER _patch_trainer_with_return_norm (so train() is wrapped) and
+    BEFORE the rollout begins. The PPO-update-side rewrites (callsite at
+    src/train.py:~1050) are inlined directly inside _train_with_return_norm
+    via the helpers above; this patcher only handles the rollout/storage
+    side.
+
+    Multiprocessing vecenv path
+    ───────────────────────────
+    PufferLib's Multiprocessing vecenv uses shared-memory action buffers
+    that are inherited by worker processes at fork time (see
+    .venv/.../pufferlib/vector.py:300-329). The continuous-action buffer
+    we add here is allocated on the MAIN process AFTER the workers have
+    already forked — so workers cannot see it directly.
+    For Multiprocessing we therefore stash cont_action on the main-process
+    vecenv and rely on the env factory to coordinate a separate float-shm
+    region. Production multiprocessing of the cont-action plumbing is
+    intentionally deferred (see plan §5.5 BLOCKED escalation). Smoke
+    training with --vec-backend serial works end-to-end; multiprocessing
+    smoke will fall through to a zero Δyaw via Cs2Env._cont_actions_scratch
+    until the deeper plumbing lands. Tests use Serial via the harness so
+    they're unaffected.
+    """
+    import torch
+
+    # ── Rollout buffer extension (step 5.4) ──
+    # self.actions has shape (segments, bptt_horizon, ACTION_DIM=7) int32 —
+    # we mirror with AIM_DIM trailing dim, float32. self.logprobs is
+    # (segments, bptt_horizon) float32; we add per-factor halves with the
+    # same shape so the caller can fetch self.logprobs_d[idx] etc. without
+    # any reshaping.
+    trainer.cont_actions = torch.zeros(
+        (*trainer.actions.shape[:-1], AIM_DIM),
+        dtype=torch.float32,
+        device=trainer.actions.device,
+    )
+    trainer.logprobs_d = torch.zeros_like(trainer.logprobs)
+    trainer.logprobs_c = torch.zeros_like(trainer.logprobs)
+
+    # ── vecenv.send patch (step 5.5) ──
+    # Goal: forward both the int discrete buffer and the float cont buffer
+    # to env.step(). _evaluate_with_selfplay calls self.vecenv.send(action)
+    # with a numpy int array; we change that callsite to send a tuple
+    # (action, cont_action) and the wrapper here unpacks. For the
+    # Multiprocessing backend cont_action lands on a vecenv-local stash
+    # only — see class docstring. For Serial, we forward via positional
+    # kwarg into env.step(actions, continuous_actions=...).
+    orig_send = trainer.vecenv.send
+
+    def _hybrid_send(action_pair):
+        """vecenv.send(...) wrapper accepting (action, cont_action) tuple.
+
+        Backwards-compatible with bare ndarrays so legacy callers (e.g. the
+        record path) continue to work — cont_action defaults to None which
+        makes Cs2Env.step fall back to its zero scratch buffer.
+        """
+        if isinstance(action_pair, tuple):
+            action, cont_action = action_pair
+        else:
+            action, cont_action = action_pair, None
+        if cont_action is not None and hasattr(cont_action, 'cpu'):
+            cont_action = cont_action.cpu().numpy().astype(np.float32, copy=False)
+        # Stash on the vecenv so the Serial backend's send path (below) and
+        # any custom step wrapper can pull it. None on a non-Serial path is
+        # the documented fallback (zero Δyaw → no turning).
+        trainer.vecenv._cont_action_buf = cont_action
+        return orig_send(action)
+
+    trainer.vecenv.send = _hybrid_send
+
+    # ── Serial backend: extend send() to actually forward cont_action ──
+    # PufferLib's Serial.send loops env.step(atns) → we monkey-patch the
+    # individual env step to consult vecenv._cont_action_buf and forward
+    # the matching slice to Cs2Env.step(actions, continuous_actions=...).
+    # On Multiprocessing, trainer.vecenv has no .envs attribute — skip.
+    if hasattr(trainer.vecenv, 'envs'):
+        envs = trainer.vecenv.envs
+        agents_per_env = trainer.vecenv.driver_env.num_agents
+        # Pre-compute per-env cont slices once so the wrapper closure is O(1).
+        for env_idx, env in enumerate(envs):
+            row_start = env_idx * agents_per_env
+            row_end = row_start + agents_per_env
+            orig_step = env.step
+
+            def _make_step_wrapper(orig, rs, re):
+
+                def _hybrid_env_step(actions):
+                    cont_buf = getattr(trainer.vecenv, '_cont_action_buf', None)
+                    cont = None
+                    if cont_buf is not None:
+                        # cont_buf is a flat numpy array shaped
+                        # (total_agents, AIM_DIM) — slice this env's chunk.
+                        cont = cont_buf[rs:re]
+                    return orig(actions, continuous_actions=cont)
+
+                return _hybrid_env_step
+
+            env.step = _make_step_wrapper(orig_step, row_start, row_end)
+
+    print("[Train] Hybrid-aim trainer patch enabled "
+          f"(cont_actions buffer={trainer.cont_actions.shape}, "
+          f"vecenv_kind={type(trainer.vecenv).__name__}).")
     return trainer
 
 
@@ -1850,6 +2293,13 @@ def train(args):
     trainer = PuffeRL(train_config, vecenv, policy)
     trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
     _patch_trainer_with_return_norm(trainer)
+    # Batch 3 (T5): hybrid-aim patch ALWAYS runs after return_norm because the
+    # train() wrapper installed by return_norm reads self.cont_actions /
+    # self.logprobs_{d,c} which this patcher allocates. Order also matters
+    # vs. selfplay: selfplay only wraps evaluate(), not train(), so the
+    # rollout-side cont_action plumbing must be in place before evaluate()
+    # is first called.
+    _patch_trainer_with_hybrid_aim(trainer)
 
     # ── Self-play setup ──────────────────────────────────────────────────────
     self_play_mgr = None
