@@ -776,7 +776,14 @@ def test_post_pickup_plant_mask_unmasked():
         # was within 32 units), teleport the next-T teammate onto the drop
         # location so the pickup loop fires on the following step.
         if g.bomb_is_dropped:
-            candidate = (rid + 1) % 5
+            # Pick the first ALIVE non-carrier T. Hardcoding (rid + 1) % 5 is
+            # brittle: that agent could itself have died on the same tick (e.g.
+            # multi-kill seeds). Iterating + alive-check removes the seed
+            # dependency.
+            candidate = next((i for i in range(5) if i != rid and g.agents[i].alive), None)
+            assert candidate is not None, (
+                "no alive T teammate available to receive the dropped bomb; "
+                "all 5 T-agents died on the same tick (test-setup edge case)")
             g.agents[candidate].x = g.bomb_x
             g.agents[candidate].y = g.bomb_y
             env.step(actions)
