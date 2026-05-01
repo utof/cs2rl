@@ -729,3 +729,101 @@ def test_obs_designated_carrier_bit_t_side():
                 f"obs[104] should be round-fixed but read {obs[rid,104]}")
     finally:
         env.close()
+
+
+def test_post_pickup_plant_mask_unmasked():
+    """After carrier dies and a teammate auto-picks up the bomb, the new
+    holder's HEAD_USE plant action must be unmasked when standing at a
+    bombsite. Closes mega-spec §Risks gap and verifies the dynamic
+    has_bomb gate (not the round-fixed role bit) drives the plant mask.
+
+    Sequencing rationale: the drop-on-death logic at cs2_env.h:154-167
+    runs inside env_step. process_bomb (which contains the auto-pickup
+    loop, cs2_bomb.h:93-114) is called in the SAME env_step immediately
+    after the drop. Because T-agents share a tight spawn cluster, another
+    T is almost always within the 32-unit pickup radius, so drop + pickup
+    typically complete atomically in one step. The test therefore:
+
+      Step 1 — kill the carrier and step; confirm the bomb is no longer
+               with the original carrier (either still dropped OR already
+               picked up by a nearby teammate).
+      Step 2 — if bomb is still dropped (rare), teleport a teammate onto
+               it and step so the pickup loop fires; either way, identify
+               the new_holder as whoever now has has_bomb==1.
+      Step 3 — scan bombsite areas; teleport the new_holder to each and
+               step until HEAD_USE+1 is unmasked.
+    """
+    env = train.make_puffer_env(seed=21)
+    try:
+        env.reset(seed=21)
+        g = env._c_env.game
+        rid = g.round_designated_carrier_id
+        actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+
+        # Step 1: kill the carrier; env_step performs drop-on-death and (if a
+        # teammate is within 32 units) the auto-pickup atomically in the same
+        # call — bomb_is_dropped may go 0→1→0 internally in one tick.
+        g.agents[rid].hp = 0
+        g.agents[rid].alive = 0
+        env.step(actions)
+
+        # After step 1 the original carrier must not still hold the bomb.
+        assert g.agents[rid].has_bomb == 0, (
+            f"original carrier (idx {rid}) still has_bomb after death+step; "
+            f"drop-on-death at cs2_env.h:157-169 may be broken")
+
+        # Step 2 (conditional): if the bomb is still in the air (no teammate
+        # was within 32 units), teleport the next-T teammate onto the drop
+        # location so the pickup loop fires on the following step.
+        if g.bomb_is_dropped:
+            candidate = (rid + 1) % 5
+            g.agents[candidate].x = g.bomb_x
+            g.agents[candidate].y = g.bomb_y
+            env.step(actions)
+
+        # Identify the new bomb holder (whoever now has has_bomb==1 among
+        # alive T-agents).
+        new_holder = None
+        for i in range(5):
+            if g.agents[i].has_bomb == 1 and g.agents[i].alive:
+                new_holder = i
+                break
+        assert new_holder is not None, (
+            "No alive T-agent holds the bomb after drop+pickup sequence; "
+            "auto-pickup loop at cs2_bomb.h:93-114 may be broken or all "
+            "T-agents died during the sequence")
+        assert new_holder != rid, (f"bomb ended up back with the original carrier (idx {rid}); "
+                                   "expected a teammate to receive it after drop+pickup")
+
+        # Step 3: find a bombsite area and teleport new_holder there; verify
+        # HEAD_USE+1 (plant action) is unmasked by the dynamic has_bomb gate.
+        # We scan all sd.N area indices (not capped) to locate bombsite areas,
+        # then step only once we land on one. Bombsite indices on Dust2 start
+        # around idx 1320 so a small cap like 200 would miss them entirely.
+        # We limit the number of env.step calls (not area scans) to 20 so the
+        # test terminates even if every bombsite area somehow fails to unmask.
+        sd = env._c_env.sd.contents
+        # Offset into the flat mask row for HEAD_USE action slot 1 (plant).
+        # ACTION_HEAD_SIZES[:5] = (move, aim, shoot, reload, weapon).
+        use_mask_offset = sum(train.ACTION_HEAD_SIZES[:5])
+        masks_open = False
+        steps_taken = 0
+        for ai in range(sd.N):
+            if not sd.bombsite_by_idx[ai]:
+                continue
+            g.agents[new_holder].area_idx = ai
+            env.step(actions)
+            steps_taken += 1
+            if env._masks_view[new_holder, use_mask_offset + 1] == 1:
+                masks_open = True
+                break
+            if steps_taken >= 20:
+                break
+        assert masks_open, (f"tried {steps_taken} bombsite areas (scanned all {sd.N} indices); "
+                            f"post-pickup carrier (idx {new_holder}) on a bombsite did NOT have "
+                            f"HEAD_USE+1 unmasked. Dynamic has_bomb gate at cs2_env.h:253-263 "
+                            f"may be broken. new_holder.has_bomb={g.agents[new_holder].has_bomb}, "
+                            f"new_holder.alive={g.agents[new_holder].alive}, "
+                            f"bomb_planted={g.bomb_planted}, round_over={g.round_over}")
+    finally:
+        env.close()
