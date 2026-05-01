@@ -29,7 +29,7 @@ import numpy as np
 from _action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES          # from cs2_types.h
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
-OBS_DIM = 104
+OBS_DIM = 105
 
 
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:

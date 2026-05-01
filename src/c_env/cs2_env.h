@@ -49,6 +49,9 @@ static void env_reset(Dust2Env* env) {
     spawn_team(g, sd, &env->rng, 1, sd->ct_spawns, sd->n_ct_spawns, bomb_carrier);
 
     g->bomb_carrier_id = bomb_carrier;
+    /* Batch 2: round-fixed copy. NEVER reassigned mid-round (see cs2_types.h
+     * field comment). compute_observations reads this for obs[104] (T2). */
+    g->round_designated_carrier_id = bomb_carrier;
 }
 
 static void env_step(Dust2Env* env, const int32_t* actions) {

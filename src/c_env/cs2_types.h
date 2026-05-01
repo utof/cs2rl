@@ -12,7 +12,7 @@
 /* ── Constants ─────────────────────────────────────────────────────────── */
 #define TEAM_SIZE             5
 #define N_AGENTS              10
-#define OBS_DIM               104
+#define OBS_DIM               105
 #define ACTION_DIM            8
 #define ACTION_MASK_DIM       38
 #define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */
@@ -200,9 +200,18 @@ typedef struct {
     int32_t    bomb_plant_ticks;
     int32_t    bomb_being_defused_by; /* agent index or -1 */
     int32_t    bomb_defuse_ticks;
-    int8_t     bombsite_entered[5];   /* per-T-agent flag: 1 if entered bombsite this round */
-    int8_t     bomb_is_dropped;       /* 1 when bomb on ground */
-    int8_t     _pad_gs[2];            /* pad to 4-byte boundary */
+    /* Batch 2: round-fixed designated bomb carrier (T-side index 0..4).
+     * Distinct from bomb_carrier_id, which is the *dynamic* possession
+     * tracker (reassigned on drop+auto-pickup in cs2_bomb.h:111). This
+     * field is set ONLY in env_reset and is the round's stable identity
+     * signal. Consumed by compute_observations to emit obs[104] (the role
+     * bit, in T2). Pitfall: must stay in the int32_t block before
+     * bombsite_entered to keep ctypes alignment in sync — see GameStateC
+     * mirror in cs2_env.py. */
+    int32_t round_designated_carrier_id;
+    int8_t  bombsite_entered[5]; /* per-T-agent flag: 1 if entered bombsite this round */
+    int8_t  bomb_is_dropped;     /* 1 when bomb on ground */
+    int8_t  _pad_gs[2];          /* pad to 4-byte boundary */
 } GameState;
 
 /* ── Per-step stats exported for Python-side episode aggregation ─────────── */

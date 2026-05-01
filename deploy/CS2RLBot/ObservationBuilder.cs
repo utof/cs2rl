@@ -1,5 +1,5 @@
 // deploy/CS2RLBot/ObservationBuilder.cs
-// Builds the 104-dim observation vector used by the RL policy, matching
+// Builds the 105-dim observation vector used by the RL policy, matching
 // cs2_observations.h exactly. See that file for the ground-truth formula
 // and dimension layout.
 using System.Text.Json;
@@ -60,7 +60,7 @@ internal struct BombState
 
 internal sealed class ObservationBuilder
 {
-    private const string SupportedVersion = "v1-104dim";
+    private const string SupportedVersion = "v1-105dim";
     private const int    TeamSize         = 5;
     private const int    Terrorist        = 2; // CS2 TeamNum for T-side
     private const int    CounterTerrorist = 3; // CS2 TeamNum for CT-side
@@ -76,6 +76,21 @@ internal sealed class ObservationBuilder
     // its .Raw is not publicly exposed in v1.0.364. Use CBaseEntity.Index instead.
     private readonly Dictionary<uint, float> _reloadStartTimes = new();
 
+    // Batch 2: round-fixed designated-carrier latch (obs[104]).
+    // Keyed by bot.Slot (int) because ObservationBuilder is a singleton shared across
+    // all bots — NOT per-bot instance state.
+    //
+    // Semantics (mirroring sim emission at src/c_env/cs2_observations.h:178-185):
+    //   - Set ONCE per round: the first tick a bot is observed to own the bomb
+    //     (HasC4 == true), that bot's Slot is latched as designated carrier.
+    //   - NEVER updated mid-round on drop+pickup — the role bit is intentionally
+    //     stable so the policy learns a consistent role assignment.
+    //   - Reset on every round-end via ClearCarrierLatches() (called from OnRoundEnd
+    //     in CS2RLBot.cs, mirroring how ClearReloadCache() is called there).
+    // Value: the bot.Slot that is the designated carrier for THIS round, or -1 if
+    // no latch has been set yet this round.
+    private readonly Dictionary<int, int> _designatedCarrierByBot = new();
+
     public ObservationBuilder(int obsDim, string obsVersion, MapConstants map)
     {
         if (obsVersion != SupportedVersion)
@@ -88,7 +103,7 @@ internal sealed class ObservationBuilder
     }
 
     /// <summary>
-    /// Build the 104-dim obs vector for one bot.
+    /// Build the 105-dim obs vector for one bot.
     /// Returns the internal buffer — caller must consume it before the next Build call (shared buffer).
     /// All FillX helpers write into _buf; ClipAll runs last to enforce [-5, 5].
     /// </summary>
@@ -275,6 +290,13 @@ internal sealed class ObservationBuilder
     /// stale entries if weapon entity indices are reused across rounds.
     /// </summary>
     public void ClearReloadCache() => _reloadStartTimes.Clear();
+
+    /// <summary>
+    /// Clear the designated-carrier latches for all bots. Must be called on every
+    /// RoundEnd (and RoundStart if used) so each round can re-latch independently.
+    /// Mirrors ClearReloadCache() — both are called from OnRoundEnd in CS2RLBot.cs.
+    /// </summary>
+    public void ClearCarrierLatches() => _designatedCarrierByBot.Clear();
 
     /// <summary>
     /// Fire cooldown normalized to [0,1] using slot-based cycle_ticks from WEAPON_DEFS.
@@ -523,6 +545,37 @@ internal sealed class ObservationBuilder
         int ctAlive = allPlayers.Count(p => p.IsValid && p.TeamNum == CounterTerrorist && p.PawnIsAlive);
         _buf[102] = tAlive  / (float)TeamSize;
         _buf[103] = ctAlive / (float)TeamSize;
+
+        // obs[104]: round-fixed designated-carrier role bit (Batch 2, cs2_observations.h:178-185).
+        //
+        // Latch semantics:
+        //   - First tick this bot is observed owning the bomb (HasC4 == true after
+        //     round-start), its Slot is recorded as the designated carrier for this round.
+        //   - The bit is held for the rest of the round even if the bot later drops
+        //     the bomb — NEVER re-latched mid-round (drop+pickup must not shift the bit).
+        //   - The latch dictionary is cleared on RoundEnd via ClearCarrierLatches()
+        //     (called from CS2RLBot.cs OnRoundEnd, same site as ClearReloadCache()).
+        //
+        // Design rationale: policy was trained with round-fixed carrier semantics in the
+        // sim (obs[104] is set once and frozen). Changing it mid-round would produce obs
+        // the policy has never seen during training → distribution shift / silent corruption.
+        //
+        // Pitfall: ObservationBuilder is a singleton, so state is per-bot.Slot, not
+        // per-instance. Using _designatedCarrierByBot[bot.Slot] instead of a plain int field.
+        int botSlot = bot.Slot;
+        _designatedCarrierByBot.TryGetValue(botSlot, out int latchedSlot); // 0 if missing; see below
+        // TryGetValue returns 0 (default int) for a missing key, which would alias slot 0.
+        // Use -1 sentinel: store as latchedSlot is valid only when key EXISTS.
+        bool hasLatch = _designatedCarrierByBot.ContainsKey(botSlot);
+        if (!hasLatch && HasC4(selfPawn))
+        {
+            // First observation this round where this bot owns the bomb → latch it.
+            _designatedCarrierByBot[botSlot] = botSlot;
+            latchedSlot = botSlot;
+            hasLatch = true;
+        }
+        // 1.0 if this bot is the designated carrier (latched this round), else 0.0.
+        _buf[104] = (hasLatch && latchedSlot == botSlot) ? 1.0f : 0.0f;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
