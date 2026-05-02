@@ -15,6 +15,13 @@ def make_map():
     return make_simple_map()
 
 
+# Alias fixture used by test_map.py verticality tests (spec §3.10).
+# Returns the same session-scoped instance as make_map.
+@pytest.fixture(scope="session")
+def simple_map(make_map):
+    return make_map
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
