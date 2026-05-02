@@ -75,6 +75,13 @@ internal sealed class ObservationBuilder
     private const int    Terrorist        = 2; // CS2 TeamNum for T-side
     private const int    CounterTerrorist = 3; // CS2 TeamNum for CT-side
 
+    // Z-axis normalization scale for self z and z-delta obs slots (world-space CS units).
+    // Matches the literal `128.0f` divisor in src/c_env/cs2_observations.h:38, :78, :135.
+    // Picked to keep typical map z-spans (catwalk ≈128u above bombsite ≈64u above floor 0)
+    // within roughly [-1, 1] for the network ingest. NOT a clip — values outside the range
+    // (e.g. mid-jump apex) pass through, then get bounded by the global ClipAll() to ±5.
+    private const float  ZNormScale       = 128f;
+
     private readonly int          _obsDim;
     private readonly MapConstants _map;
     // Reused across Build calls to avoid per-tick heap allocation (important at 64 Hz).
@@ -149,17 +156,20 @@ internal sealed class ObservationBuilder
         _buf[2] = bot.PawnHasHelmet ? 1f : 0f;
 
         // Absolute position — formula: x * inv_x_range - x_offset  (cs2_observations.h:33-34)
+        // VERTICALITY (T6): self z lives inside the same null-guard as x/y. On null AbsOrigin
+        // (rare — pawn freed mid-tick), all three slots silently retain their previous values
+        // from the buffer (Array.Clear runs once at the top of Build, then FillSelf fills 0..22;
+        // a null skip leaves whatever was last written or 0). Sim parity: cs2_observations.h:38
+        // reads `a->z / 128.0f` unconditionally, but agent.alive=false would zero the obs there
+        // too — so the rare null case is effectively zero in both worlds. Pitfall: do NOT use
+        // `centroids_z[area_idx]` for z — engine truth is the source for xy, use it for z too
+        // (consistency + dust2 sidecar centroids_z is zero-filled per spec §3.9).
         if (pawn.AbsOrigin != null)
         {
             _buf[3] = pawn.AbsOrigin.X * _map.InvXRange - _map.XOffset;
             _buf[4] = pawn.AbsOrigin.Y * _map.InvYRange - _map.YOffset;
+            _buf[5] = pawn.AbsOrigin.Z / ZNormScale;
         }
-        // VERTICALITY (T6): self z normalized by 128 — matches sim cs2_observations.h:38
-        // (`obs[5] = a->z / 128.0f`). Null-safe: if AbsOrigin is null (rare — pawn freed
-        // mid-tick), fall back to 0 just like the X/Y branch above silently leaves them at
-        // their previous value. Pitfall: do NOT use `centroids_z[area_idx]` — engine truth
-        // is the source for xy, so use it for z too (consistency + dust2 sidecar is zeroed).
-        _buf[5] = (pawn.AbsOrigin?.Z ?? 0f) / 128f;
 
         // Velocity / 250 — confirmed: AbsVelocity (not pawn.Velocity = CNetworkVelocityVector)
         _buf[6] = pawn.AbsVelocity.X / 250f;
@@ -382,10 +392,11 @@ internal sealed class ObservationBuilder
 
             _buf[baseIdx + 0] = ObsMath.NormRel(dx, _map.MapDiag);
             _buf[baseIdx + 1] = ObsMath.NormRel(dy, _map.MapDiag);
-            // VERTICALITY (T6): teammate z-delta normalized by 128 — matches sim cs2_observations.h:78
+            // VERTICALITY (T6): teammate z-delta normalized by ZNormScale (=128, named const
+            // shared with self-z and enemy-z) — matches sim cs2_observations.h:78
             // (`obs[base + 2] = (tm->z - a->z) / 128.0f`). Reached only inside the alive-teammate
             // branch (the early-`continue` above ensures tmPawn.AbsOrigin is non-null here).
-            _buf[baseIdx + 2] = (tmPawn.AbsOrigin.Z - selfZ) / 128f;
+            _buf[baseIdx + 2] = (tmPawn.AbsOrigin.Z - selfZ) / ZNormScale;
             _buf[baseIdx + 3] = tmPawn.Health / 100f;
             _buf[baseIdx + 4] = 1f; // alive
             _buf[baseIdx + 5] = MathF.Sin(angle);
@@ -477,13 +488,14 @@ internal sealed class ObservationBuilder
 
                     _buf[baseIdx + 0] = ObsMath.NormRel(dx, _map.MapDiag);
                     _buf[baseIdx + 1] = ObsMath.NormRel(dy, _map.MapDiag);
-                    // VERTICALITY (T6): enemy z-delta normalized by 128 — matches sim
+                    // VERTICALITY (T6): enemy z-delta normalized by ZNormScale (=128, named
+                    // const shared with self-z and teammate-z) — matches sim
                     // cs2_observations.h:135 (`obs[base + 2] = (en->z - a->z) / 128.0f`).
                     // Strictly INSIDE the `if (canSee && enemyPawn?.AbsOrigin != null)` block:
                     // when can_see=0 the slot stays 0 from the buffer clear (sim parity).
                     // Pitfall: do NOT mirror this into the stale-lastPos branch below — sim
                     // does not write z-delta there either.
-                    _buf[baseIdx + 2] = (enemyPawn.AbsOrigin.Z - selfZ) / 128f;
+                    _buf[baseIdx + 2] = (enemyPawn.AbsOrigin.Z - selfZ) / ZNormScale;
                     _buf[baseIdx + 5] = MathF.Sin(ang);
                     _buf[baseIdx + 6] = MathF.Cos(ang);
                     _buf[baseIdx + 7] = ObsMath.NormRel(dist, _map.MapDiag);
