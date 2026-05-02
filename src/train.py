@@ -1865,16 +1865,17 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                         self.stats[k].append(v)
 
             profile("env", epoch)
-            # Batch 3 (T5): vecenv.send patched by _patch_trainer_with_hybrid_aim
-            # to accept (action, cont_action) tuple. Discrete action is the
-            # numpy int32 buffer that the C env still receives positionally;
-            # cont_action is forwarded to env.step's continuous_actions kwarg
-            # via the per-env step wrapper for the Serial backend. For the
-            # Multiprocessing backend the cont buffer plumbing across the
-            # fork boundary is BLOCKED pending architectural decision (see
-            # _patch_trainer_with_hybrid_aim docstring) — Δyaw falls back
-            # to zero in that backend, leaving aim untrained but training
-            # otherwise functional.
+            # Batch 3 (T5/T5b): vecenv.send patched by
+            # _patch_trainer_with_hybrid_aim to accept (action, cont_action)
+            # tuple. Discrete action is the numpy int32 buffer that the C
+            # env still receives positionally. For the Serial backend
+            # cont_action is forwarded to env.step's continuous_actions
+            # kwarg via the per-env step wrapper. For the Multiprocessing
+            # backend cont_action is mirrored into a multiprocessing.RawArray
+            # shm view by _hybrid_send before orig_send runs, so workers
+            # see the same Δyaw on their next Cs2Env.step via the per-env
+            # numpy view installed by _attach_cont_action_view (see the
+            # _patch_trainer_with_hybrid_aim docstring for the shm pattern).
             self.vecenv.send((action, cont_action))
 
         profile("eval_misc", epoch)
