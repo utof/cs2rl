@@ -27,6 +27,14 @@ count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size)
  * rejects the move. Must match MAX_STEP_HEIGHT = 18.0 in src/map.py (L9 prune). */
 #define SV_MAX_STEP_HEIGHT_CS 18.0f
 
+/* Tolerance (world units) for the is_airborne re-evaluation: an agent is treated as
+ * airborne when (z > terrain_z + SV_AIRBORNE_EPS_CS) OR (vz != 0). Without this ε,
+ * float noise on z (e.g., from a ground-snap that didn't land exactly on terrain_z
+ * due to FP rounding) would flicker is_airborne every tick. Spec §7 risks: raise to
+ * 2.0 if standing-still flicker is observed during real training. Tuning this is a
+ * one-line change — guard is a named constant precisely so future ops finds it. */
+#define SV_AIRBORNE_EPS_CS 1.0f
+
 /* Sim tick duration (seconds). The env runs at 16 Hz. Keeping this local
  * avoids a cross-header coupling for a single constant used only here. */
 #define DT_SIM_MOVE (1.0f / 16.0f)
@@ -56,6 +64,9 @@ static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, flo
      * shaping stays consistent with movement enforcement.
      * Down-steps (dz < 0) are always allowed — the ground-snap + airborne paths handle them.
      * Ramp targets are always allowed — they are the explicit walk-up affordance.
+     * Note: only is_ramp[target_idx] matters; the SOURCE area's ramp flag is irrelevant.
+     * Walking off a ramp onto a cliff is still blocked by Δz; walking from a non-ramp onto
+     * a ramp is allowed (canonical "ascend the ramp" case).
      * Airborne agents bypass this guard — they are off-ground; the landing rule (L5) resolves
      * where they touch down. The axis-split sliding block in process_movement calls this
      * helper for each retry, so the guard is inherited for free by all diagonal/axis cases. */
@@ -342,16 +353,20 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
             /* No cooldown — bhop-style re-jump permitted on landing tick. */
         }
 
-        /* L5 is_airborne ε-guard: an agent above terrain by more than ε=1.0u (or
-         * with non-zero vz) is airborne. The ε prevents float-noise flicker when
+        /* L5 is_airborne ε-guard: an agent above terrain by more than SV_AIRBORNE_EPS_CS
+         * (or with non-zero vz) is airborne. The ε prevents float-noise flicker when
          * standing still on an elevated platform (z == terrain_z exactly but tiny
          * integration error). Walking off a platform onto a lower-z area triggers
          * this on the next tick — gravity then pulls them down via the airborne path.
          * MUST come AFTER the landing block: otherwise we'd flip is_airborne back to 1
-         * immediately after landing because tz is still mid-tick and vz has a remnant. */
+         * immediately after landing because tz is still mid-tick and vz has a remnant.
+         * Pitfall: the `vz != 0.0f` exact-float compare is safe because vz is only ever
+         * set to literal 0.0f (in the landing block above) when the grounded path is
+         * entered. Modify with care: any future grounded-path mutation of vz (e.g., a
+         * "stick to ground" damping) could silently flip agents to airborne via FP noise. */
         {
             float terrain_z_now = sd->centroids_z[a->area_idx];
-            if (a->z > terrain_z_now + 1.0f || a->vz != 0.0f) {
+            if (a->z > terrain_z_now + SV_AIRBORNE_EPS_CS || a->vz != 0.0f) {
                 a->is_airborne = 1;
             }
         }

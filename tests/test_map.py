@@ -300,7 +300,7 @@ def test_cliff_guard_blocks_walkup():
         env.step(actions, cont)
         assert g.agents[0].y <= y0, (f"facing=-π/2 + bin 1 should drive decreasing y; "
                                      f"y0={y0} but y={g.agents[0].y}. Check facing/bin convention.")
-                                                                                         # The cliff guard must have kept the agent in area 6 even as it approaches
+                                                                                         # The cliff guard must keep the agent in area 6 even as it approaches
                                                                                          # and presses against the y=192 boundary.
         for _ in range(19):
             env.step(actions, cont)
@@ -351,6 +351,11 @@ def test_cliff_guard_diagonal_slides():
         assert g.agents[0].x < x0, (
             f"axis-split slide failed: x did not decrease ({x0:.1f} → {g.agents[0].x:.1f}). "
             f"Either cliff guard is blocking both axes or bin/facing convention is wrong.")
+                                                                                              # The y-component (north toward catwalk) MUST have been rejected by the
+                                                                                              # cliff guard — agent's y should be approximately unchanged (within float
+                                                                                              # epsilon of 195.0). Proves the slide is genuinely axis-split (only x moved).
+        assert g.agents[0].y >= 195.0 - 0.5, (
+            f"y drifted during slide ({g.agents[0].y:.2f}); guard should reject y")
         assert g.agents[0].area_idx == 6, (
             f"agent escaped to area_idx={g.agents[0].area_idx} during diagonal slide")
         assert g.agents[0].z == 64.0, (f"z drifted during diagonal slide: {g.agents[0].z}")
