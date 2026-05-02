@@ -51,9 +51,17 @@ class StaticDataC(ctypes.Structure):
         ("raster_grid", ctypes.POINTER(ctypes.c_int32)),
         ("adjacency", ctypes.POINTER(ctypes.c_int8)),
         ("centroid_xy", ctypes.POINTER(ctypes.c_float)),
+                                                                       # T2 (verticality): per-area terrain elevation and ramp flag.
+                                                                       # Field order MUST stay in sync with:
+                                                                       #   - StaticData struct in cs2_types.h  (C canonical source)
+                                                                       #   - PyArg_ParseTuple format string in binding.c py_init()
+                                                                       # Mismatch here silently corrupts all pointer fields that follow.
+        ("centroids_z", ctypes.POINTER(ctypes.c_float)),               # float32[N] — terrain z per area
         ("area_ids", ctypes.POINTER(ctypes.c_int32)),
         ("bombsite_mask", ctypes.POINTER(ctypes.c_int8)),
         ("bombsite_by_idx", ctypes.POINTER(ctypes.c_int8)),
+                                                                       # is_ramp: MapData bool is converted to int8 in Cs2Env.__init__ before passing
+        ("is_ramp", ctypes.POINTER(ctypes.c_int8)),                    # int8[N] — 1=ramp/stairs
         ("bombsite_dist", ctypes.POINTER(ctypes.c_float)),
         ("grid_w", ctypes.c_int),
         ("grid_h", ctypes.c_int),
@@ -388,9 +396,20 @@ class Cs2Env(pufferlib.PufferEnv):
         raster_grid = _arr(md.grid, np.int32)
         adjacency = _arr(md.adjacency, np.int8)
         centroid_xy = _arr(md.centroids, np.float32)
+        # T2 (verticality): centroids_z must be float32 (C side reads as float*).
+        # Guaranteed by MapData contract (dtype=float32) but _arr enforces it anyway.
+        centroids_z = _arr(md.centroids_z, np.float32)
         area_ids = _arr(md.area_ids, np.int32)
         bombsite_mask = _arr(md.bombsite_mask, np.int8)
         bombsite_by_idx = _arr(md.bombsite_by_idx, np.int8)
+        # T2 (verticality): is_ramp is bool in MapData but C reads int8*.
+        # Convert explicitly — numpy bool layout is platform-dependent.
+        # Pitfall: do NOT pass md.is_ramp directly — bool dtype may not
+        # be 1-byte on all platforms; int8 is guaranteed portable.
+        # np.ascontiguousarray guards against stride surprises post-astype.
+        is_ramp_int8 = np.ascontiguousarray(md.is_ramp.astype(np.int8))
+        assert is_ramp_int8.dtype == np.int8, "is_ramp conversion to int8 failed"
+        assert is_ramp_int8.itemsize == 1, "is_ramp int8 itemsize sanity check failed"
         bombsite_dist = _arr(md.bombsite_dist, np.float32)
 
         inv_x = 2.0 / (md.x_max - md.x_min)
@@ -405,15 +424,21 @@ class Cs2Env(pufferlib.PufferEnv):
         delta_y = np.array([float(nav._DELTA_VECTORS[k][1]) for k in range(9)], dtype=np.float32)
         dir_facing = np.array([float(nav._DIR_FACING[k]) for k in range(9)], dtype=np.float32)
 
-        # Keep refs alive — prevents GC of backing numpy arrays
+        # Keep refs alive — prevents GC of backing numpy arrays.
+        # T2 (verticality): centroids_z and is_ramp_int8 added here so the C pointers
+        # sd->centroids_z and sd->is_ramp remain valid for the env's lifetime.
+        # is_ramp_int8 is a NEW array (result of .astype); it would be collected
+        # immediately if not held here — the C pointer would then dangle.
         self._refs = [
             vis_matrix,
             raster_grid,
             adjacency,
             centroid_xy,
+            centroids_z,
             area_ids,
             bombsite_mask,
             bombsite_by_idx,
+            is_ramp_int8,
             bombsite_dist,
             t_spawns,
             ct_spawns,
@@ -422,75 +447,81 @@ class Cs2Env(pufferlib.PufferEnv):
             dir_facing,
         ]
 
-        # Call binding.init() — positional order matches C format string
+        # Call binding.init() — positional order matches C format string.
+        # T2 (verticality): centroids_z inserted at pos 4 (after centroid_xy);
+        # is_ramp_int8 inserted at pos 8 (after bombsite_by_idx).
+        # CRITICAL: positions must stay in sync with StaticDataC._fields_ in this file
+        # and StaticData in cs2_types.h — mismatch silently corrupts pointer assignments.
         self._capsule = binding.init(
             vis_matrix,
             raster_grid,
             adjacency,
             centroid_xy,                                               # 0-3
+            centroids_z,                                               # 4: T2 terrain z per area
             area_ids,
             bombsite_mask,
             bombsite_by_idx,
-            bombsite_dist,                                             # 4-7
+            is_ramp_int8,                                              # 8: T2 ramp (int8)
+            bombsite_dist,                                             # 9
             int(md.N),
             int(md.grid.shape[1]),
-            int(md.grid.shape[0]),                                     # 8-10: N, grid_w, grid_h
-            int(md.area_ids.max()),                                    # 11: max_area_id
+            int(md.grid.shape[0]),                                     # 10-12: N, grid_w, grid_h
+            int(md.area_ids.max()),                                    # 13: max_area_id
             float(md.grid_x_min),
-            float(md.grid_y_min),                                      # 12-13
-            float(1.0 / md.grid_cell_size),                            # 14: grid_inv_cell
+            float(md.grid_y_min),                                      # 14-15
+            float(1.0 / md.grid_cell_size),                            # 16: grid_inv_cell
             float(inv_x),
             float(inv_y),
             float(x_off),
-            float(y_off),                                              # 15-18
-            float(md.bombsite_dist_scale),                             # 19
-            int(nav.LASER_DAMAGE),                                     # 20
+            float(y_off),                                              # 17-20
+            float(md.bombsite_dist_scale),                             # 21
+            int(nav.LASER_DAMAGE),                                     # 22
             float(nav.LASER_RANGE),
-            float(nav.LASER_RANGE * nav.LASER_RANGE),                  # 21-22
+            float(nav.LASER_RANGE * nav.LASER_RANGE),                  # 23-24
             int(nav.SHOOT_COOLDOWN),
-            int(nav.BOMB_PLANT_TIME),                                  # 23-24
+            int(nav.BOMB_PLANT_TIME),                                  # 25-26
             int(nav.BOMB_DEFUSE_TIME),
-            int(nav.BOMB_DEFUSE_KIT),                                  # 25-26
+            int(nav.BOMB_DEFUSE_KIT),                                  # 27-28
             int(nav.BOMB_TIMER),
-            int(nav.ROUND_TIME),                                       # 27-28
-            float(nav.FOOTSTEP_RADIUS * nav.FOOTSTEP_RADIUS),          # 29
-            float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),            # 30
+            int(nav.ROUND_TIME),                                       # 29-30
+            float(nav.FOOTSTEP_RADIUS * nav.FOOTSTEP_RADIUS),          # 31
+            float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),            # 32
             int(nav.ENEMY_MEMORY_TICKS),
-            int(nav.STALE_MEMORY_TICK),                                # 31-32
-            float(pbrs_gamma),                                         # 33: pbrs_gamma
+            int(nav.STALE_MEMORY_TICK),                                # 33-34
+            float(pbrs_gamma),                                         # 35: pbrs_gamma
             delta_x,
             delta_y,
             dir_facing,
-            t_spawns,                                                  # 34-37
-            int(len(md.t_spawn_areas)),                                # 38: n_t_spawns
-            ct_spawns,                                                 # 39
-            int(len(md.ct_spawn_areas)),                               # 40: n_ct_spawns
-            float(nav.MAX_TURN_SPEED_RAD),                             # 41
-            int(seed) & 0xFFFFFFFF,                                    # 42: seed (uint32)
-            float(init_team_spirit),                                   # 43
-            float(reward_win),                                         # 44
-            float(reward_win_t_detonation),                            # 45: Batch 1 per-mechanism
-            float(reward_win_t_elimination),                           # 46
-            float(reward_win_ct_defuse),                               # 47
-            float(reward_win_ct_timeout),                              # 48
-            float(reward_win_ct_elimination),                          # 49
-            float(reward_kill),                                        # 50
-            float(reward_death),                                       # 51
-            float(reward_bombsite_entry),                              # 52
-            float(reward_plant_bonus),                                 # 53
-            float(reward_plant_base),                                  # 54
-            float(reward_plant_progress_scale),                        # 55
-            float(reward_plant_interrupted),                           # 56
-            float(reward_defuse),                                      # 57
-            float(reward_shot_penalty),                                # 58
-            float(reward_ct_survival),                                 # 59
-            float(reward_inaction),                                    # 60
-            float(pbrs_alive_weight),                                  # 61
-            float(pbrs_hp_weight),                                     # 62
-            float(pbrs_site_weight),                                   # 63
-            float(pbrs_bomb_progress_weight),                          # 64
-            float(pbrs_nav_weight_t),                                  # 65
-            float(pbrs_nav_weight_ct),                                 # 66
+            t_spawns,                                                  # 36-39
+            int(len(md.t_spawn_areas)),                                # 40: n_t_spawns
+            ct_spawns,                                                 # 41
+            int(len(md.ct_spawn_areas)),                               # 42: n_ct_spawns
+            float(nav.MAX_TURN_SPEED_RAD),                             # 43
+            int(seed) & 0xFFFFFFFF,                                    # 44: seed (uint32)
+            float(init_team_spirit),                                   # 45
+            float(reward_win),                                         # 46
+            float(reward_win_t_detonation),                            # 47: Batch 1 per-mechanism
+            float(reward_win_t_elimination),                           # 48
+            float(reward_win_ct_defuse),                               # 49
+            float(reward_win_ct_timeout),                              # 50
+            float(reward_win_ct_elimination),                          # 51
+            float(reward_kill),                                        # 52
+            float(reward_death),                                       # 53
+            float(reward_bombsite_entry),                              # 54
+            float(reward_plant_bonus),                                 # 55
+            float(reward_plant_base),                                  # 56
+            float(reward_plant_progress_scale),                        # 57
+            float(reward_plant_interrupted),                           # 58
+            float(reward_defuse),                                      # 59
+            float(reward_shot_penalty),                                # 60
+            float(reward_ct_survival),                                 # 61
+            float(reward_inaction),                                    # 62
+            float(pbrs_alive_weight),                                  # 63
+            float(pbrs_hp_weight),                                     # 64
+            float(pbrs_site_weight),                                   # 65
+            float(pbrs_bomb_progress_weight),                          # 66
+            float(pbrs_nav_weight_t),                                  # 67
+            float(pbrs_nav_weight_ct),                                 # 68
         )
 
         # ctypes overlay of the C-allocated Dust2Env (tests + snapshot only)

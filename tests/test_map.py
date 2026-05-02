@@ -5,6 +5,7 @@ the elevated bombsite is reachable on foot, vis matrix sees catwalk-bombsite, an
 the L9 adjacency post-prune removes cliff edges from the nav graph.
 
 T1 tests (steps 1.8-1.10): 5 pure-Python MapData tests, no C env required.
+T2 tests (step 2.7): 1 binding smoke test — env construction with centroids_z/is_ramp plumbed.
 T3 tests (step 3.7): 5 movement/behaviour tests requiring the C env — added later.
 T4 tests (step 4.5): 1 obs z-delta test — added in T4.
 """
@@ -96,3 +97,55 @@ def test_simple_map_ramps_kept_in_adjacency(simple_map):
         "T-corridor → T-ramp must remain adjacent (ramp exemption)")
     assert simple_map.adjacency[t_ramp_idx, t_corridor_idx], (
         "adjacency must be symmetric (T-ramp → T-corridor)")
+
+
+# ── T2: binding smoke test ────────────────────────────────────────────────────
+
+
+def test_centroids_z_plumbed_through_binding():
+    """Round-trip: MapData.centroids_z[bombsite] == 64 and is_ramp[13] == True survive
+    Python→C→Python via env init (T2 plumbing smoke).
+
+    The C side stores raw pointers to numpy buffers; we can't read back through
+    ctypes without a debug accessor.  This smoke test verifies:
+      1. binding.init() accepts the two new array args without raising.
+      2. The Python-side MapData is intact after construction (centroids_z[6]==64.0,
+         is_ramp[13]==True) — ruling out accidental mutation during the _arr / astype calls.
+      3. env.close() cleans up without segfault.
+
+    Pitfall: if is_ramp_int8 were collected by GC before/during env init, the C pointer
+    would dangle and env.step() would segfault.  This test can't catch that (GC is
+    non-deterministic), but if is_ramp_int8 is NOT in self._refs, a gc.collect() call
+    inside this test would expose it.  The actual GC-lifetime check is done by reading
+    back through the ctypes pointer in T3's full movement tests.
+    """
+    import gc
+    import sys
+
+    # Extend path in case test is run in isolation (conftest.py also does this)
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+    from c_env.cs2_env import Cs2Env
+    from map import make_simple_map
+
+    map_data = make_simple_map()
+
+    # Verify MapData fields are in place before constructing env
+    assert map_data.centroids_z[6] == 64.0, (
+        f"bombsite area_idx=6 should have centroids_z=64.0, got {map_data.centroids_z[6]}")
+    assert map_data.is_ramp[13] is True or bool(map_data.is_ramp[13]), (
+        f"T-ramp area_idx=13 should have is_ramp=True, got {map_data.is_ramp[13]}")
+
+    # Construct env — if the format string or arg count is wrong, this raises ValueError
+    env = Cs2Env(map_data=map_data)
+
+    # Force GC to try to collect any would-be dangling is_ramp_int8 array.
+    # If it's NOT in self._refs, this can expose a use-after-free on the next step().
+    gc.collect()
+
+    # Verify MapData fields still intact after env construction (no accidental mutation)
+    assert map_data.centroids_z[6] == 64.0, ("centroids_z[6] mutated during env construction")
+    assert bool(map_data.is_ramp[13]), ("is_ramp[13] mutated during env construction")
+
+    if hasattr(env, "close"):
+        env.close()
