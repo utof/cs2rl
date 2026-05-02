@@ -692,9 +692,14 @@ class Cs2Env(pufferlib.PufferEnv):
             return
         per_env = N_AGENTS * AIM_DIM
         # ctypes float = 4 bytes; np.frombuffer with offset/count addresses
-        # the slice without copying. Holding _cont_action_shm_ref pins the
-        # backing storage — frombuffer alone does not increment a refcount
-        # the way RawArray's internal allocator expects in all paths.
+        # the slice without copying. np.frombuffer DOES set the resulting
+        # array's .base to raw_shm (so the buffer is technically reachable),
+        # but env_factory's local reference to raw_shm goes out of scope
+        # right after this method returns. Keeping _cont_action_shm_ref as
+        # an explicit anchor on self protects against future code that might
+        # replace _cont_action_view (e.g. with a reshape or a slice) and
+        # accidentally flatten the .base chain — at which point the OS could
+        # reclaim the mapping and the next read would be UB.
         flat = np.frombuffer(raw_shm, dtype=np.float32, count=per_env, offset=env_idx * per_env * 4)
         self._cont_action_view = flat.reshape(self._cont_actions_shape)
         self._cont_action_shm_ref = raw_shm

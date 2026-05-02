@@ -2174,8 +2174,14 @@ def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None):
                 view.fill(0.0)
             else:
                 # cont_action shape may be (total_agents, AIM_DIM) or
-                # already flat; we trust the rollout side to produce a
-                # buffer matching `view.shape` and let numpy broadcast/error.
+                # already flat. We assert total element count matches
+                # view.shape before reshape — this catches a future
+                # rollout-side shape change loudly instead of silently
+                # broadcasting (project style: strict shape validation,
+                # see _prepare_continuous_actions).
+                assert cont_action.size == view.size, (
+                    f"cont_action.size={cont_action.size} but "
+                    f"view.size={view.size} (view.shape={view.shape})")
                 view[:] = cont_action.reshape(view.shape)
         return orig_send(action)
 

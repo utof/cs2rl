@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "c_env"))
@@ -116,8 +117,6 @@ def test_binding_step_accepts_continuous_array(make_map):
     raises a Python ValueError (caught Python-side in Cs2Env._prepare_continuous_actions
     before the C call). Correct shape is accepted.
     """
-    import pytest
-
     from _action_spec import ACTION_DIM, AIM_DIM
     _, env = _make_env(map_data=make_map)
     env.reset(seed=0)
@@ -256,6 +255,7 @@ def test_continuous_aim_nan_guard():
 # writes into the same RawArray; the data is visible immediately.
 
 
+@pytest.mark.timeout(60)
 def test_continuous_aim_mp_backend_receives_buffer():
     """MP vecenv: writing Δyaw via trainer-side shm view is visible to workers.
 
