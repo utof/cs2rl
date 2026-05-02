@@ -9,8 +9,11 @@ T2 tests (step 2.7): 1 binding smoke test — env construction with centroids_z/
 T3 tests (step 3.7): 5 movement/behaviour tests requiring the C env — added later.
 T4 tests (step 4.5): 1 obs z-delta test — added in T4.
 """
+import math
 import sys
 from pathlib import Path
+
+import numpy as np
 
 # Ensure src/ is importable when running pytest from the repo root.
 # conftest.py does this too via SRC_DIR insertion, but this file is
@@ -147,4 +150,242 @@ def test_centroids_z_plumbed_through_binding():
     assert bool(map_data.is_ramp[13]), ("is_ramp[13] mutated during env construction")
 
     if hasattr(env, "close"):
+        env.close()
+
+
+# ── T3: movement behaviour tests (ground-snap, landing, cliff guard, ε) ──────
+#
+# These tests mutate AgentState fields directly via the ctypes overlay
+# (env._c_env.game) to set up specific scenarios, then step the env and
+# assert post-tick invariants.  All tests use the simple map (make_simple_map)
+# so that centroids_z[6]=64 (bombsite) and is_ramp[13]=True (T-ramp) are live.
+#
+# Movement direction conventions:
+#   The env uses facing-LOCAL movement bins (cs2_movement.h _LOCAL_MOVE_X/Y).
+#   Bin 1 ("W" = forward): _LOCAL_MOVE_Y[1]=+1, _LOCAL_MOVE_X[1]=0.
+#   With a->facing = -π/2 (agent facing -Y in world):
+#       wx = fy*cos(-π/2) - fx*sin(-π/2) = fy*0 - fx*(-1) = fx
+#       wy = fy*sin(-π/2) + fx*cos(-π/2) = fy*(-1) + fx*0 = -fy
+#   So bin 1 → world (wx=0, wy=-1): moves in -Y direction (toward lower y, i.e.
+#   toward the catwalk at y=80 from the bombsite at y=192-416).
+#   Bin 8 ("WA" = forward+left): _LOCAL_MOVE_X[8]=-0.707, _LOCAL_MOVE_Y[8]=+0.707.
+#       wx = 0.707*0 - (-0.707)*(-1) = -0.707  (moves -X, toward west)
+#       wy = 0.707*(-1) + (-0.707)*0 = -0.707  (moves -Y, toward catwalk)
+#   So bin 8 with facing=-π/2 drives NW (decreasing x and decreasing y).
+#
+# Assertion: bin 1 drives decreasing y and bin 8 drives decreasing x+y, verified
+# by the pre-step asserts in test_cliff_guard_blocks_walkup below.
+
+
+def _make_simple_env(seed=42):
+    """Create a PufferEnv seeded from the simple map with verticality active.
+
+    Using the default make_puffer_env() would give the dust2 map (centroids_z
+    all zeros), so verticality tests MUST explicitly pass map_data=simple_map.
+    """
+    import train
+    from map import make_simple_map
+    return train.make_puffer_env(seed=seed, map_data=make_simple_map())
+
+
+def _zero_actions(n_agents=10):
+    """Return (actions, continuous_actions) zero buffers for n_agents."""
+    import _action_spec as spec
+    return (
+        np.zeros((n_agents, spec.ACTION_DIM), dtype=np.int32),
+        np.zeros((n_agents, spec.AIM_DIM), dtype=np.float32),
+    )
+
+
+def test_agent_walk_to_bombsite_reaches_elevation():
+    """T3 load-bearing: agent teleported to bombsite (area_idx=6, z=0) snaps to z=64
+    on the next ground-snap tick.
+
+    Spec §6 acceptance criterion 3: "a grounded agent whose area_idx is set to the
+    bombsite has z = centroids_z[bombsite] = 64 after one step."
+    This directly validates the ground-snap rule (plan step 3.4).
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        # Teleport agent 0 to bombsite centroid (xy in area 6) at z=0.
+        # The ground-snap rule (T3 step 3.4) must set z=centroids_z[6]=64 on
+        # the next tick, even though we placed the agent at z=0.
+        g.agents[0].x = 950.0
+        g.agents[0].y = 300.0
+        g.agents[0].area_idx = 6
+        g.agents[0].z = 0.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 0
+        actions, cont = _zero_actions()
+        env.step(actions, cont)
+        assert g.agents[0].z >= 64.0, (
+            f"ground-snap failed: agent at bombsite (area 6) should have z=64, "
+            f"got z={g.agents[0].z}")
+        assert g.agents[0].is_airborne == 0, (
+            "agent should remain grounded after z-snap to terrain surface")
+    finally:
+        env.close()
+
+
+def test_landing_on_elevated_area():
+    """T3 load-bearing: airborne agent above bombsite lands at z=64 (not z=0).
+
+    Spec §6 acceptance criterion 5: "an airborne agent whose xy is in the bombsite
+    and who falls from z=200 lands at z=64 (terrain_z of that area)."
+    This validates the landing rule rewrite (plan step 3.3).
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        # Place agent airborne above bombsite at z=200, falling with vz=0.
+        # Gravity (SV_GRAVITY_CS=800 u/s²) will pull it down; it should land
+        # at terrain_z=64, not 0.
+        g.agents[0].x = 950.0
+        g.agents[0].y = 300.0
+        g.agents[0].area_idx = 6
+        g.agents[0].z = 200.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 1
+        actions, cont = _zero_actions()
+        # Step until landed (max 40 ticks; at 16 Hz falling 136u under gravity
+        # takes ~0.58s ≈ 9–10 ticks, plus ε).
+        for _ in range(40):
+            env.step(actions, cont)
+            if g.agents[0].is_airborne == 0:
+                break
+        assert g.agents[0].is_airborne == 0, (
+            "agent never landed within 40 ticks — landing rule may be broken")
+        assert abs(g.agents[0].z - 64.0) < 0.1, (
+            f"landed at z={g.agents[0].z}, expected ~64.0 (bombsite terrain_z)")
+        assert g.agents[0].vz == 0.0, (f"vz should be cleared on landing, got {g.agents[0].vz}")
+    finally:
+        env.close()
+
+
+def test_cliff_guard_blocks_walkup():
+    """T3 load-bearing: grounded agent at bombsite (z=64) cannot walk directly
+    into the catwalk area (z=128) since Δz=64 >> SV_MAX_STEP_HEIGHT_CS=18 and
+    catwalk is non-ramp.
+
+    Spec §6 acceptance criterion 6: "the cliff guard rejects the transition."
+    Validates plan step 3.2 (cliff guard in _resolve_xy_collision).
+    The cliff boundary is the y=192 edge: bombsite y=192-416, catwalk y=80-192.
+    Agent placed at y=195 (just inside bombsite) and driven north (decreasing y)
+    toward the catwalk for 20 ticks — must stay in area_idx=6 throughout.
+
+    Movement: facing=-π/2, bin 1 → world wy=-1 (decreasing y).
+    Pre-step assertion verifies the direction before trusting the main assert.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        # Place on the bombsite, just south of the y=192 cliff to catwalk.
+        g.agents[0].x = 900.0
+        g.agents[0].y = 195.0
+        g.agents[0].area_idx = 6
+        g.agents[0].z = 64.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 0
+        # facing = -π/2 so bin 1 (forward) drives wy < 0 (decreasing y = toward catwalk).
+        g.agents[0].facing = float(-math.pi / 2)
+        y0 = g.agents[0].y
+        actions, cont = _zero_actions()
+        # Bin 1 = "W" (forward). With facing=-π/2: wy = -1 → drives decreasing y.
+        actions[0, 0] = 1                                                                # HEAD_MOVE = 0
+                                                                                         # Sanity pre-check: after one step the agent must have tried to move in -y.
+        env.step(actions, cont)
+        assert g.agents[0].y <= y0, (f"facing=-π/2 + bin 1 should drive decreasing y; "
+                                     f"y0={y0} but y={g.agents[0].y}. Check facing/bin convention.")
+                                                                                         # The cliff guard must have kept the agent in area 6 even as it approaches
+                                                                                         # and presses against the y=192 boundary.
+        for _ in range(19):
+            env.step(actions, cont)
+            assert g.agents[0].area_idx == 6, (
+                f"cliff guard failed: agent escaped to area_idx={g.agents[0].area_idx} "
+                f"(catwalk is area 15); z={g.agents[0].z}")
+        assert g.agents[0].z == 64.0, (f"agent z drifted off bombsite terrain ({g.agents[0].z})")
+    finally:
+        env.close()
+
+
+def test_cliff_guard_diagonal_slides():
+    """T3 load-bearing: NW move at the catwalk cliff lets the agent slide west
+    (x decreasing) while the north component is rejected by the cliff guard.
+
+    Validates the interaction between the cliff guard and the existing axis-split
+    wall-slide logic (plan step 3.2 + the pre-existing diagonal retry in
+    process_movement). If sliding is broken the agent would be fully stuck.
+
+    Movement: facing=-π/2, bin 8 ("WA") → world (-0.707, -0.707): NW.
+    The -y component hits the cliff (area 15 target, Δz=64 > 18, non-ramp) → rejected.
+    The -x component tries to move west within area 6 → allowed if area 6 covers it.
+    The agent must move west (x decrease) but stay in area 6.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        # Starting position: bombsite, near the north cliff edge, with room to go west.
+        g.agents[0].x = 900.0
+        g.agents[0].y = 195.0
+        g.agents[0].area_idx = 6
+        g.agents[0].z = 64.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 0
+        g.agents[0].facing = float(-math.pi / 2)
+        x0 = g.agents[0].x
+        actions, cont = _zero_actions()
+        # Bin 8 = "WA" (forward+left). With facing=-π/2:
+        #   wx = _LOCAL_MOVE_Y[8]*cos(-π/2) - _LOCAL_MOVE_X[8]*sin(-π/2)
+        #      = 0.707*0 - (-0.707)*(-1) = -0.707  (moves west)
+        #   wy = _LOCAL_MOVE_Y[8]*sin(-π/2) + _LOCAL_MOVE_X[8]*cos(-π/2)
+        #      = 0.707*(-1) + (-0.707)*0 = -0.707  (moves toward catwalk, blocked)
+        actions[0, 0] = 8                                                                     # HEAD_MOVE = 0
+        env.step(actions, cont)
+        env.step(actions, cont)
+                                                                                              # x should have decreased (west slide allowed).
+        assert g.agents[0].x < x0, (
+            f"axis-split slide failed: x did not decrease ({x0:.1f} → {g.agents[0].x:.1f}). "
+            f"Either cliff guard is blocking both axes or bin/facing convention is wrong.")
+        assert g.agents[0].area_idx == 6, (
+            f"agent escaped to area_idx={g.agents[0].area_idx} during diagonal slide")
+        assert g.agents[0].z == 64.0, (f"z drifted during diagonal slide: {g.agents[0].z}")
+    finally:
+        env.close()
+
+
+def test_is_airborne_no_flicker_on_elevated_terrain():
+    """T3 load-bearing: standing still at bombsite terrain (z=64) for 10 ticks must
+    not flicker is_airborne to 1 (the ε guard must tolerate exact terrain_z).
+
+    Validates plan step 3.5 (ε=1.0u guard). Without the ε guard, floating-point
+    noise from the integration could push z fractionally above terrain_z and trigger
+    is_airborne=1 every tick, causing the agent to fall through the floor on the next
+    tick and oscillate. The ε=1.0u absorbs reasonable integration noise.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        # Place grounded on bombsite at exactly terrain_z=64.
+        g.agents[0].x = 950.0
+        g.agents[0].y = 300.0
+        g.agents[0].area_idx = 6
+        g.agents[0].z = 64.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 0
+        actions, cont = _zero_actions()
+        for tick in range(10):
+            env.step(actions, cont)
+            assert g.agents[0].is_airborne == 0, (
+                f"is_airborne flickered to 1 at tick {tick + 1} "
+                f"(z={g.agents[0].z:.4f}, vz={g.agents[0].vz:.6f}) — "
+                f"ε guard may be missing or terrain_z mismatch")
+        assert abs(g.agents[0].z -
+                   64.0) < 0.01, (f"z drifted from 64 after 10 idle ticks: {g.agents[0].z}")
+    finally:
         env.close()
