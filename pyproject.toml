@@ -48,6 +48,11 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# E501 (line-too-long) disabled: YAPF's `spaces_before_comment` aligner pushes
+# trailing comments past column 100 when the preceding code is long, producing
+# fights between the formatter and the linter. YAPF's column_limit=100 still
+# keeps lines reasonable for actual code; we just stop policing trailing comments.
+ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
