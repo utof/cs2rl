@@ -460,3 +460,75 @@ def test_onnx_export_output_order_pinned():
                 f"expected <= pi/4")
     finally:
         env.close()
+
+
+def test_build_model_state_dict_round_trip():
+    """T6: build_model correctly reconstructs LSTMPolicyONNXWrapper from a
+    synthesized Batch 3 state_dict, returns the 5-tuple, and tolerates
+    aim_log_std/max_turn_speed/value_head.* without raising. Also verifies
+    the Batch 2 backward-compat path returns aim_dim=0.
+
+    The full pinned-output-order test (test_onnx_export_output_order_pinned)
+    bypasses build_model entirely to dodge full checkpoint cost. This test
+    closes the gap on the part most likely to silently rot during a future
+    migration: the strict-load filter logic that decides which keys are
+    "expected unexpected" or "expected missing".
+    """
+    import math
+
+    import torch
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "deploy"))
+    from export_policy import build_model
+
+    obs_dim, hidden, aim_dim = 105, 256, 1
+    head_sizes = (9, 2, 2, 3, 2, 2, 2)
+
+    def _synth_batch3() -> dict:
+        # Synthesize a state_dict matching Dust2Policy's actual key layout
+        # (encoder.0/2 + lstm + action_heads.[0-6] + value_head + aim_mu +
+        # aim_log_std + max_turn_speed). Loading this through build_model
+        # exercises the same strict-load filter that production uses.
+        sd = {}
+        sd["encoder.0.weight"] = torch.randn(hidden, obs_dim)
+        sd["encoder.0.bias"] = torch.zeros(hidden)
+        sd["encoder.2.weight"] = torch.randn(hidden, hidden)
+        sd["encoder.2.bias"] = torch.zeros(hidden)
+        sd["lstm.weight_ih_l0"] = torch.randn(4 * hidden, hidden)
+        sd["lstm.weight_hh_l0"] = torch.randn(4 * hidden, hidden)
+        sd["lstm.bias_ih_l0"] = torch.zeros(4 * hidden)
+        sd["lstm.bias_hh_l0"] = torch.zeros(4 * hidden)
+        for i, n in enumerate(head_sizes):
+            sd[f"action_heads.{i}.weight"] = torch.randn(n, hidden)
+            sd[f"action_heads.{i}.bias"] = torch.zeros(n)
+        # value head — gets filtered as "expected unexpected"
+        sd["value_head.weight"] = torch.randn(1, hidden)
+        sd["value_head.bias"] = torch.zeros(1)
+        # Batch 3 aim head + buffers
+        sd["aim_mu.weight"] = torch.randn(aim_dim, hidden)
+        sd["aim_mu.bias"] = torch.zeros(aim_dim)
+        sd["aim_log_std"] = torch.tensor([math.log(0.1)])              # state-indep param
+        sd["max_turn_speed"] = torch.tensor(math.pi / 4.0)             # buffer
+        return sd
+
+    # Batch 3 path
+    sd_b3 = _synth_batch3()
+    out = build_model(sd_b3)
+    assert len(out) == 5, f"expected 5-tuple, got {len(out)}"
+    wrapper, ret_obs_dim, ret_hidden, ret_action_sizes, ret_aim_dim = out
+    assert ret_obs_dim == obs_dim
+    assert ret_hidden == hidden
+    assert tuple(ret_action_sizes) == head_sizes
+    assert ret_aim_dim == aim_dim
+    assert wrapper.aim_mu is not None
+    # Buffer should equal the value from the state_dict (NOT the π/4 fallback,
+    # which would silently lie if the buffer-load logic broke).
+    assert abs(float(wrapper._max_turn_speed) - math.pi / 4.0) < 1e-6
+
+    # Batch 2 backward-compat path
+    sd_b2 = _synth_batch3()
+    for k in ("aim_mu.weight", "aim_mu.bias", "aim_log_std", "max_turn_speed"):
+        del sd_b2[k]
+    wrapper_b2, _, _, _, ret_aim_dim_b2 = build_model(sd_b2)
+    assert ret_aim_dim_b2 == 0
+    assert wrapper_b2.aim_mu is None

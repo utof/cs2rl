@@ -42,8 +42,8 @@ class LSTMPolicyONNXWrapper(nn.Module):
         lstm: nn.LSTM,
         action_heads: nn.ModuleList,
                                                        # Batch 3: aim_mu is the optional Linear head reconstructed from
-                                                       # `aim_mu.*` keys; max_turn_speed mirrors sd->max_turn_speed and is
-                                                       # baked in as a buffer (constant in the exported graph).
+                                                       # `aim_mu.*` keys; max_turn_speed mirrors sd->max_turn_speed and
+                                                       # is baked in as a buffer (constant in the exported graph).
         aim_mu: nn.Linear | None = None,
         max_turn_speed: float | None = None,
     ):
@@ -80,9 +80,10 @@ class LSTMPolicyONNXWrapper(nn.Module):
             # mu_aim: deterministic μ-only output, range [-max_turn_speed, +max_turn_speed].
             # Sigma (aim_log_std) is intentionally NOT exported per spec L6 — sampling
             # noise is added Python-side during training, deploy is greedy μ.
-            mu_aim = torch.tanh(self.aim_mu(h_out)) * self._max_turn_speed # [B, AIM_DIM]
-            return logits + (mu_aim, h_new, c_new)                         # 10-tuple at AIM_DIM=1
-                                                                           # Backward-compat path (Batch 2 checkpoints).
+            # mu_aim shape [B, AIM_DIM]; 10-tuple total at AIM_DIM=1.
+            mu_aim = torch.tanh(self.aim_mu(h_out)) * self._max_turn_speed
+            return logits + (mu_aim, h_new, c_new)
+        # Backward-compat path (Batch 2 checkpoints): 9-tuple, no mu_aim slot.
         return logits + (h_new, c_new)
 
 
@@ -126,11 +127,27 @@ def build_model(state_dict: dict) -> tuple:
         aim_mu = nn.Linear(hidden_dim, aim_dim)
         # max_turn_speed is stored as a buffer in the policy; if the checkpoint
         # has it, use that; otherwise default to π/4 (matches StaticData lock).
+        # We WARN on the fallback because a Batch 3 checkpoint that lacks the
+        # buffer is malformed — the buffer should always be saved by the
+        # training loop. Silent fallback could mask a real bug (e.g. a future
+        # training change that drops the buffer without updating this loader).
+        # Batch 2 checkpoints never reach this branch (they lack aim_mu.weight)
+        # so the warning only fires on actual Batch 3 misconfigs.
         if "max_turn_speed" in state_dict:
             max_turn_speed = float(state_dict["max_turn_speed"].item())
         else:
             import math
+            import warnings
             max_turn_speed = math.pi / 4.0
+            warnings.warn(
+                "Batch 3 checkpoint (has aim_mu.weight) is missing the "
+                "`max_turn_speed` buffer. Falling back to π/4. If the policy "
+                "was trained with a different max_turn_speed, the exported "
+                "ONNX will scale mu_aim incorrectly. Re-train or set the "
+                "buffer manually before export.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     # else: leave aim_mu=None — Batch 2 checkpoint, fall back to old graph.
 
     # Detect multi-layer LSTM checkpoints early with a clear error
