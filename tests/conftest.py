@@ -15,6 +15,20 @@ def make_map():
     return make_simple_map()
 
 
+# Alias fixture used by test_map.py verticality tests (spec §3.10).
+# Returns the same session-scoped instance as make_map.
+@pytest.fixture(scope="session")
+def simple_map(make_map):
+    """Shared simple-map fixture (session-scoped, READ-ONLY).
+
+    Mutating arrays on this fixture (adjacency, vis_matrix, centroids_z, is_ramp,
+    ...) corrupts shared state across the entire test session because of session
+    scope. If your test needs to mutate map data, build a fresh one with
+    make_simple_map() inside the test instead of using this fixture.
+    """
+    return make_map
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

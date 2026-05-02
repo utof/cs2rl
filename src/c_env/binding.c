@@ -33,8 +33,16 @@ static void capsule_destructor(PyObject* cap) {
 
 /* ── binding.init(...) -> PyCapsule ── */
 static PyObject* py_init(PyObject* self, PyObject* args) {
-    PyObject *   vis_matrix_o, *raster_grid_o, *adjacency_o, *centroid_xy_o;
-    PyObject *   area_ids_o, *bombsite_mask_o, *bombsite_by_idx_o, *bombsite_dist_o;
+    PyObject *vis_matrix_o, *raster_grid_o, *adjacency_o, *centroid_xy_o;
+    /* T2 (verticality): centroids_z immediately after centroid_xy; is_ramp immediately
+     * after bombsite_by_idx.  Field order here MUST match:
+     *   - StaticData struct in cs2_types.h   (C canonical source)
+     *   - StaticDataC._fields_ in cs2_env.py (ctypes mirror)
+     * Mismatch silently hands area_ids data to is_ramp ptr (etc.). */
+    PyObject*    centroids_z_o;
+    PyObject *   area_ids_o, *bombsite_mask_o, *bombsite_by_idx_o;
+    PyObject*    is_ramp_o;
+    PyObject*    bombsite_dist_o;
     int          N, grid_w, grid_h, max_area_id;
     float        grid_x_min, grid_y_min, grid_inv_cell;
     float        inv_x_range, inv_y_range, x_offset, y_offset, bombsite_dist_scale;
@@ -66,32 +74,37 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
     float reward_win_t_detonation, reward_win_t_elimination;
     float reward_win_ct_defuse, reward_win_ct_timeout, reward_win_ct_elimination;
 
-    /* 67-arg format string — positions match StaticDataC._fields_ order from cs2_env.py.
-     * Total: 8O + 4i + 8f + i + 2f + 6i + 2f + 2i + f + 4O + i + O + i + f + I + f
-     *      + f(reward_win) + 5f(Batch1) + 17f(Phase5-rest) = 67 args. */
+    /* 69-arg format string — positions match StaticDataC._fields_ order from cs2_env.py.
+     * T2 (verticality): added centroids_z_o after centroid_xy_o (pos 4) and is_ramp_o
+     * after bombsite_by_idx_o (pos 8), for 10 O args total instead of 8.
+     * Total: 10O + 4i + 8f + i + 2f + 6i + 2f + 2i + f + 4O + i + O + i + f + I + f
+     *      + f(reward_win) + 5f(Batch1) + 17f(Phase5-rest) = 69 args.
+     * CRITICAL: positions must stay in sync with StaticDataC._fields_ in cs2_env.py
+     * and StaticData in cs2_types.h — mismatch silently corrupts pointer assignments. */
     static const char FMT[] =
-        "OOOOOOOO"           /* 0-7:  vis_matrix, raster_grid, adjacency, centroid_xy,
-                                       area_ids, bombsite_mask, bombsite_by_idx, bombsite_dist */
-        "iiii"               /* 8-11: N, grid_w, grid_h, max_area_id */
-        "ffffffff"           /* 12-19: grid_x_min, grid_y_min, grid_inv_cell,
+        "OOOOOO"             /* 0-5:  vis_matrix, raster_grid, adjacency, centroid_xy,
+                                       centroids_z, area_ids */
+        "OOOO"               /* 6-9:  bombsite_mask, bombsite_by_idx, is_ramp, bombsite_dist */
+        "iiii"               /* 10-13: N, grid_w, grid_h, max_area_id */
+        "ffffffff"           /* 14-21: grid_x_min, grid_y_min, grid_inv_cell,
                                         inv_x_range, inv_y_range, x_offset, y_offset, bombsite_dist_scale */
-        "i"                  /* 20: laser_damage */
-        "ff"                 /* 21-22: laser_range, laser_range_sq */
-        "iiiiii"             /* 23-28: shoot_cooldown, bomb_plant_time, bomb_defuse_time,
+        "i"                  /* 22: laser_damage */
+        "ff"                 /* 23-24: laser_range, laser_range_sq */
+        "iiiiii"             /* 25-30: shoot_cooldown, bomb_plant_time, bomb_defuse_time,
                                         bomb_defuse_kit, bomb_timer, round_time */
-        "ff"                 /* 29-30: footstep_radius_sq, gunshot_radius_sq */
-        "ii"                 /* 31-32: enemy_memory_ticks, stale_memory_tick */
-        "f"                  /* 33: pbrs_gamma */
-        "OOOO"               /* 34-37: delta_x, delta_y, dir_facing, t_spawns (all arrays) */
-        "i"                  /* 38: n_t_spawns */
-        "O"                  /* 39: ct_spawns (array) */
-        "i"                  /* 40: n_ct_spawns */
-        "f"                  /* 41: max_turn_speed */
-        "I"                  /* 42: seed (unsigned int) */
-        "f"                  /* 43: team_spirit */
-        "f"                  /* 44: reward_win (legacy symmetric) */
-        "fffff"              /* 45-49: Batch 1 per-mechanism win magnitudes */
-        "fffffffffffffffff"; /* 50-66: 17 remaining Phase-5 reward weights
+        "ff"                 /* 31-32: footstep_radius_sq, gunshot_radius_sq */
+        "ii"                 /* 33-34: enemy_memory_ticks, stale_memory_tick */
+        "f"                  /* 35: pbrs_gamma */
+        "OOOO"               /* 36-39: delta_x, delta_y, dir_facing, t_spawns (all arrays) */
+        "i"                  /* 40: n_t_spawns */
+        "O"                  /* 41: ct_spawns (array) */
+        "i"                  /* 42: n_ct_spawns */
+        "f"                  /* 43: max_turn_speed */
+        "I"                  /* 44: seed (unsigned int) */
+        "f"                  /* 45: team_spirit */
+        "f"                  /* 46: reward_win (legacy symmetric) */
+        "fffff"              /* 47-51: Batch 1 per-mechanism win magnitudes */
+        "fffffffffffffffff"; /* 52-68: 17 remaining Phase-5 reward weights
                                         (reward_kill through pbrs_nav_weight_ct) */
 
     if (!PyArg_ParseTuple(args,
@@ -100,9 +113,11 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
                           &raster_grid_o,
                           &adjacency_o,
                           &centroid_xy_o,
+                          &centroids_z_o, /* T2: terrain z per area (float32[N]) */
                           &area_ids_o,
                           &bombsite_mask_o,
                           &bombsite_by_idx_o,
+                          &is_ramp_o, /* T2: ramp flag per area (int8[N]) */
                           &bombsite_dist_o,
                           &N,
                           &grid_w,
@@ -169,15 +184,22 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
     if (!benv)
         return PyErr_NoMemory();
 
-    StaticData* sd      = &benv->sd;
-    sd->N               = N;
-    sd->vis_matrix      = (int8_t*)PyArray_DATA((PyArrayObject*)vis_matrix_o);
-    sd->raster_grid     = (int32_t*)PyArray_DATA((PyArrayObject*)raster_grid_o);
-    sd->adjacency       = (int8_t*)PyArray_DATA((PyArrayObject*)adjacency_o);
-    sd->centroid_xy     = (float*)PyArray_DATA((PyArrayObject*)centroid_xy_o);
+    StaticData* sd  = &benv->sd;
+    sd->N           = N;
+    sd->vis_matrix  = (int8_t*)PyArray_DATA((PyArrayObject*)vis_matrix_o);
+    sd->raster_grid = (int32_t*)PyArray_DATA((PyArrayObject*)raster_grid_o);
+    sd->adjacency   = (int8_t*)PyArray_DATA((PyArrayObject*)adjacency_o);
+    sd->centroid_xy = (float*)PyArray_DATA((PyArrayObject*)centroid_xy_o);
+    /* T2 (verticality): store terrain-z and ramp-flag pointers.
+     * Python side passes centroids_z as float32 and is_ramp as int8 (bool converted
+     * via .astype(np.int8) before passing — see cs2_env.py _refs).  The numpy arrays
+     * are kept alive by self._refs on the Cs2Env instance; these raw pointers are valid
+     * for the env's lifetime as long as the Python-side Cs2Env stays alive. */
+    sd->centroids_z     = (float*)PyArray_DATA((PyArrayObject*)centroids_z_o);
     sd->area_ids        = (int32_t*)PyArray_DATA((PyArrayObject*)area_ids_o);
     sd->bombsite_mask   = (int8_t*)PyArray_DATA((PyArrayObject*)bombsite_mask_o);
     sd->bombsite_by_idx = (int8_t*)PyArray_DATA((PyArrayObject*)bombsite_by_idx_o);
+    sd->is_ramp         = (int8_t*)PyArray_DATA((PyArrayObject*)is_ramp_o);
     sd->bombsite_dist   = (float*)PyArray_DATA((PyArrayObject*)bombsite_dist_o);
 
     sd->grid_w              = grid_w;

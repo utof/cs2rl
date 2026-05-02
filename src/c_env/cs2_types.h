@@ -17,7 +17,7 @@
     7  /* Batch 3: HEAD_AIM removed; aim is now a continuous head, see AIM_DIM below */
 #define ACTION_MASK_DIM                                                                            \
     22 /* Batch 3: sum(ACTION_HEAD_SIZES) = 9+2+2+3+2+2+2 = 22 (was 38 with the 16-bin aim) */
-#define AIM_DIM                                                                                       \
+#define AIM_DIM                                                                                      \
     1 /* Batch 3: 1D Gaussian (Δyaw only). Sim is 2D yaw-only — pitch deferred to Batch 3.5 (#24). \
        */
 #define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */
@@ -78,14 +78,24 @@ typedef struct {
 
 /* ── Static data (owned by Python numpy arrays, pointer shared across instances) ── */
 typedef struct {
-    int      N;               /* nav area count                                   */
-    int8_t*  vis_matrix;      /* [N*N]           area visibility, row-major        */
-    int32_t* raster_grid;     /* [grid_h*grid_w]  pos->area_idx, -1=off mesh       */
-    int8_t*  adjacency;       /* [N*N]           nav graph connectivity            */
-    float*   centroid_xy;     /* [N*2]           idx-indexed: centroid_xy[i*2+0]=x */
+    int      N;           /* nav area count                                   */
+    int8_t*  vis_matrix;  /* [N*N]           area visibility, row-major        */
+    int32_t* raster_grid; /* [grid_h*grid_w]  pos->area_idx, -1=off mesh       */
+    int8_t*  adjacency;   /* [N*N]           nav graph connectivity            */
+    float*   centroid_xy; /* [N*2]           idx-indexed: centroid_xy[i*2+0]=x */
+    /* T2 (verticality): per-area terrain elevation and ramp flag.
+     * centroids_z[i] = z of area i's ground surface (0.0 = flat).
+     * is_ramp[i]     = 1 if area i is a ramp/stairs — exempts the area from the
+     *                  cliff guard in cs2_movement.h _resolve_xy_collision.
+     * Field order MUST stay in sync with:
+     *   - StaticDataC._fields_ in cs2_env.py  (ctypes mirror)
+     *   - PyArg_ParseTuple format string in binding.c py_init()
+     * Mismatch silently corrupts all pointer fields that follow. */
+    float*   centroids_z;     /* [N]             idx-indexed: terrain z per area   */
     int32_t* area_ids;        /* [N]             idx -> raw area_id                */
     int8_t*  bombsite_mask;   /* [max_area_id+1]  area_id-indexed (for _potential) */
     int8_t*  bombsite_by_idx; /* [N]              idx-indexed (for step hot path)  */
+    int8_t*  is_ramp;         /* [N]              idx-indexed: 1=ramp/stairs       */
     float*   bombsite_dist;   /* [max_area_id+1]  area_id-indexed shortest dist    */
     int      grid_w, grid_h, max_area_id;
     float    grid_x_min, grid_y_min, grid_inv_cell;

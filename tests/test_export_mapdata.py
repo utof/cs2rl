@@ -34,10 +34,11 @@ def test_export_mapdata_dust2():
 
     # --- Identity fields ---
     # Batch 3: bumped 104dim → 105dim (carrier-bit added at obs[104]).
+    # Batch 5 (map-verticality T5): bumped v1→v2 to signal centroids_z presence.
     # Must stay in sync with deploy/export_mapdata.py:OBS_VERSION,
     # deploy/export_policy.py sidecar `obs_version`, and the C# plugin
     # ObservationBuilder.SupportedVersion.
-    assert data["obs_version"] == "v1-105dim", (f"obs_version mismatch: {data['obs_version']!r}")
+    assert data["obs_version"] == "v2-105dim", (f"obs_version mismatch: {data['obs_version']!r}")
     assert data["map"] == "de_dust2", f"map field mismatch: {data['map']!r}"
 
     inv_x = data["inv_x_range"]
@@ -79,3 +80,56 @@ def test_export_mapdata_dust2():
     # Half-diagonal of dust2's bounding rectangle should be ~3 000–5 000 world units.
     assert 500 < map_diag < 10000, (
         f"map_diag={map_diag:.1f} is outside [500, 10000] — suspicious nav bounds")
+
+
+def test_export_mapdata_includes_centroids_z():
+    """Verify that the v2 sidecar contains a correctly-shaped centroids_z list.
+
+    Batch 5 (map-verticality T5) added centroids_z to the sidecar so the C#
+    plugin (T6) can look up per-area terrain elevation at deploy time.
+
+    Checks:
+      1. "centroids_z" key is present in the returned dict.
+      2. Length matches the reported nav-area count N.
+      3. All entries are numeric (int or float) — the C# plugin expects JSON
+         number arrays; non-numeric values would silently corrupt elevation lookups.
+      4. For de_dust2 all values are 0.0 — make_cs2_map zero-fills centroids_z
+         because dust2 full verticality is deferred (spec §2 L1 / out-of-scope).
+         This confirms plumbing is wired, not that real elevations are present.
+
+    NOTE: is_ramp is intentionally absent from the sidecar; movement enforcement
+    is handled by the CS2 server, not the deploy plugin.
+    """
+    sys.path.insert(0, str(Path(__file__).parent.parent / "deploy"))
+    from export_mapdata import export_mapdata
+
+    data = export_mapdata("de_dust2")
+
+    # --- centroids_z key must be present ---
+    assert "centroids_z" in data, "sidecar dict is missing 'centroids_z' key"
+
+    centroids_z = data["centroids_z"]
+
+    # --- N must be present and match centroids_z length ---
+    assert "N" in data, "sidecar dict is missing 'N' key"
+    assert len(centroids_z) == data["N"], (
+        f"centroids_z length {len(centroids_z)} != N={data['N']}")
+
+    # --- Must be non-empty (dust2 has hundreds of nav areas) ---
+    assert len(centroids_z) > 0, "centroids_z is empty — nav mesh not loaded?"
+
+    # --- All entries must be numeric ---
+    # Pitfall: if the astype(float).tolist() conversion ever produces strings or
+    # None values (e.g., on a future custom map with bad data), the C# plugin would
+    # silently read 0.0 and agents would clip through geometry.
+    for i, z in enumerate(centroids_z):
+        assert isinstance(z,
+                          (int, float)), (f"centroids_z[{i}]={z!r} is not numeric; expected float")
+
+    # --- de_dust2 stub: all zeros until full verticality data is added ---
+    # make_cs2_map zero-fills centroids_z (spec §2 L1 / out-of-scope deferred).
+    # If this assertion ever fails it means real elevation data was added and
+    # the test should be updated to check actual values instead.
+    assert all(z == 0.0
+               for z in centroids_z), ("Expected all-zero centroids_z for de_dust2 (stub); "
+                                       "if real verticality data was added, update this assertion")

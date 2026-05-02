@@ -42,7 +42,7 @@ def _arr_int8(arr, name):
 
 # Area bounds: [N * 4] = [x0, y0, x1, y1] per area (from SIMPLE_ROOMS)
 area_bounds = np.zeros((md.N, 4), dtype=np.float32)
-for idx, x0, y0, x1, y1 in SIMPLE_ROOMS:
+for idx, x0, y0, x1, y1, *_ in SIMPLE_ROOMS:           # *_ absorbs z, is_ramp (7-tuple schema)
     area_bounds[idx] = [x0, y0, x1, y1]
 
 # Spawn area_ids → area_idx (area_id == area_idx for simple map)

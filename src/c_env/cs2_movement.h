@@ -23,6 +23,17 @@ count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size)
 #define SV_AIR_MAX_WISHSPD  30.0f       /* wishspeed clamp for air addspeed — bhop key   */
 #define SV_GRAVITY_CS       800.0f      /* units/s² downward                             */
 #define SV_JUMP_IMPULSE_CS  301.993377f /* sqrt(2 * g * 57u) — 57u target jump height */
+/* Source sv_stepsize default — maximum grounded up-step height before cliff guard
+ * rejects the move. Must match MAX_STEP_HEIGHT = 18.0 in src/map.py (L9 prune). */
+#define SV_MAX_STEP_HEIGHT_CS 18.0f
+
+/* Tolerance (world units) for the is_airborne re-evaluation: an agent is treated as
+ * airborne when (z > terrain_z + SV_AIRBORNE_EPS_CS) OR (vz != 0). Without this ε,
+ * float noise on z (e.g., from a ground-snap that didn't land exactly on terrain_z
+ * due to FP rounding) would flicker is_airborne every tick. Spec §7 risks: raise to
+ * 2.0 if standing-still flicker is observed during real training. Tuning this is a
+ * one-line change — guard is a named constant precisely so future ops finds it. */
+#define SV_AIRBORNE_EPS_CS 1.0f
 
 /* Sim tick duration (seconds). The env runs at 16 Hz. Keeping this local
  * avoids a cross-header coupling for a single constant used only here. */
@@ -48,6 +59,23 @@ static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, flo
         return -1;
     if (target_idx != a->area_idx && !sd->adjacency[a->area_idx * sd->N + target_idx])
         return -1;
+    /* L11 cliff guard: block grounded up-steps where Δz > SV_MAX_STEP_HEIGHT_CS into a
+     * non-ramp target. Mirrors the Python adjacency post-prune (map.py L9) so nav-distance
+     * shaping stays consistent with movement enforcement.
+     * Down-steps (dz < 0) are always allowed — the ground-snap + airborne paths handle them.
+     * Ramp targets are always allowed — they are the explicit walk-up affordance.
+     * Note: only is_ramp[target_idx] matters; the SOURCE area's ramp flag is irrelevant.
+     * Walking off a ramp onto a cliff is still blocked by Δz; walking from a non-ramp onto
+     * a ramp is allowed (canonical "ascend the ramp" case).
+     * Airborne agents bypass this guard — they are off-ground; the landing rule (L5) resolves
+     * where they touch down. The axis-split sliding block in process_movement calls this
+     * helper for each retry, so the guard is inherited for free by all diagonal/axis cases. */
+    if (!a->is_airborne) {
+        float dz = sd->centroids_z[target_idx] - sd->centroids_z[a->area_idx];
+        if (dz > SV_MAX_STEP_HEIGHT_CS && !sd->is_ramp[target_idx]) {
+            return -1; /* cliff: reject — agent slides or stops via axis-split in caller */
+        }
+    }
     return target_idx;
 }
 
@@ -289,18 +317,58 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
         if (a->is_airborne)
             vel_z -= 0.5f * SV_GRAVITY_CS * DT_SIM_MOVE;
 
-        /* Landing: the world is currently flat at z=0. When the airborne
-         * agent's integrated z dips to or below the floor with non-positive
-         * vz, snap to ground and clear airborne state. */
         a->z  = tz;
         a->vx = vel_x;
         a->vy = vel_y;
         a->vz = vel_z;
-        if (a->is_airborne && a->z <= 0.0f && a->vz <= 0.0f) {
-            a->z           = 0.0f;
+
+        /* L5 ground-snap: when grounded, snap a->z to the current area's terrain z.
+         * This handles two cases:
+         *   1. Agent walked onto a new area with a different terrain z — the xy
+         *      collision resolution updated area_idx; we now pin z to that area's
+         *      surface so the agent steps up/down seamlessly.
+         *   2. Grounded agent that didn't change area — this is a no-op (a->z already
+         *      equals terrain_z from the previous tick's snap, and tz = a->z since
+         *      vel_z = 0 when grounded).
+         * MUST come AFTER _resolve_xy_collision axis-split: area_idx is updated there,
+         * so reading centroids_z[a->area_idx] before the area transition would use the
+         * OLD area's z and break ramp ascent.
+         * MUST come AFTER a->z = tz above: tz is computed from the old a->z (before
+         * the xy move), so the ground-snap overrides it with the target area's terrain z.
+         * The landing block below gates on a->is_airborne, so grounded agents skip it. */
+        if (!a->is_airborne) {
+            a->z = sd->centroids_z[a->area_idx];
+        }
+
+        /* L5 landing rule: terrain z is per-area, not hardcoded 0. Agent has touched
+         * the area's surface when their integrated z dips at or below the area's
+         * terrain z with non-positive vz. Snap to terrain and clear airborne state.
+         * Pitfall: a->area_idx is already updated by _resolve_xy_collision above, so
+         * centroids_z[a->area_idx] is the LANDING area's z — correct. */
+        float terrain_z = sd->centroids_z[a->area_idx];
+        if (a->is_airborne && a->z <= terrain_z && a->vz <= 0.0f) {
+            a->z           = terrain_z;
             a->vz          = 0.0f;
             a->is_airborne = 0;
             /* No cooldown — bhop-style re-jump permitted on landing tick. */
+        }
+
+        /* L5 is_airborne ε-guard: an agent above terrain by more than SV_AIRBORNE_EPS_CS
+         * (or with non-zero vz) is airborne. The ε prevents float-noise flicker when
+         * standing still on an elevated platform (z == terrain_z exactly but tiny
+         * integration error). Walking off a platform onto a lower-z area triggers
+         * this on the next tick — gravity then pulls them down via the airborne path.
+         * MUST come AFTER the landing block: otherwise we'd flip is_airborne back to 1
+         * immediately after landing because tz is still mid-tick and vz has a remnant.
+         * Pitfall: the `vz != 0.0f` exact-float compare is safe because vz is only ever
+         * set to literal 0.0f (in the landing block above) when the grounded path is
+         * entered. Modify with care: any future grounded-path mutation of vz (e.g., a
+         * "stick to ground" damping) could silently flip agents to airborne via FP noise. */
+        {
+            float terrain_z_now = sd->centroids_z[a->area_idx];
+            if (a->z > terrain_z_now + SV_AIRBORNE_EPS_CS || a->vz != 0.0f) {
+                a->is_airborne = 1;
+            }
         }
 
         /* Footstep audibility: moving at ≥16 u/s on the ground, not crouching.

@@ -1,6 +1,12 @@
 #!/usr/bin/env python
 """Export map normalization constants from the CS2RL sim to a JSON sidecar.
 
+⚠ DEPLOY SUSPENDED 2026-05-03 ⚠ — active development paused after Batch 3.5
+(sim-only training take-priority). Last-known-good OBS_VERSION=v2-105dim.
+Do NOT bump OBS_VERSION or extend the sidecar schema as sim obs evolves; sim
+should grow its own internal versioning independent of deploy. Tests stay
+green to prevent silent bit-rot. See gh #(filed) for resume criteria.
+
 Usage (run from repo root):
     python deploy/export_mapdata.py --map de_dust2
 
@@ -38,7 +44,10 @@ from map import make_cs2_map
 # This version tag must stay in sync with:
 #   - deploy/export_policy.py  (obs_version field)
 #   - C# plugin  ObservationBuilder.cs  (OBS_VERSION constant)
-OBS_VERSION = "v1-105dim"
+# Batch 5 (map-verticality T5): bumped v1→v2 to signal centroids_z is now
+# present in the sidecar.  The C# plugin T6 will reject v1 exports that lack
+# this field (spec §2 L4 / OBS_VERSION discovery row).
+OBS_VERSION = "v2-105dim"
 
 
 def export_mapdata(map_name: str) -> dict:
@@ -52,6 +61,10 @@ def export_mapdata(map_name: str) -> dict:
         x_offset     — (x_max + x_min) / (x_max - x_min); subtract after multiplying
         y_offset     — (y_max + y_min) / (y_max - y_min); subtract after multiplying
         map_diag     — sqrt((1/inv_x)^2 + (1/inv_y)^2); used to normalize distances
+        centroids_z  — list[float] of length N; per-area terrain elevation in world Z
+                        units (0.0 for flat areas; populated by map-verticality work).
+                        NOTE: is_ramp is NOT exported — movement enforcement is done by
+                        the CS2 server, not the deploy plugin.
 
     These are derived from the centroids of the loaded nav mesh — the same
     source make_cs2_map() uses in cs2_env.py:312-315. Any change to the nav mesh
@@ -99,14 +112,24 @@ def export_mapdata(map_name: str) -> dict:
     print(f"[export_mapdata] x_off={x_off:.6f} y_off={y_off:.6f}")
     print(f"[export_mapdata] map_diag={map_diag:.2f}")
 
+    # centroids_z: per-area terrain elevation (float32[N] → list[float]).
+    # is_ramp is intentionally NOT exported — the CS2 server enforces movement
+    # constraints at deploy time; the plugin has no use for the ramp flag.
+    # Key must be "centroids_z" (snake_case) — T6 C# plugin looks for this exact key.
+    centroids_z = md.centroids_z.astype(float).tolist()
+
+    # N: number of nav areas.  Included so consumers can sanity-check that
+    # centroids_z has the expected length without having to reload the nav mesh.
     return {
         "map": map_name,
         "obs_version": OBS_VERSION,
+        "N": md.N,
         "inv_x_range": float(inv_x),
         "inv_y_range": float(inv_y),
         "x_offset": float(x_off),
         "y_offset": float(y_off),
         "map_diag": float(map_diag),
+        "centroids_z": centroids_z,
     }
 
 

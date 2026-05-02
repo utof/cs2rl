@@ -31,26 +31,39 @@ from nav import (
 class MapData:
     # Core geometry (area_idx-indexed, 0..N-1)
     N: int
-    area_ids: np.ndarray  # int32[N] — for simple maps, just np.arange(N)
-    centroids: np.ndarray  # float32[N, 2] — XY
-    vis_matrix: np.ndarray  # bool[N, N]
-    adjacency: np.ndarray  # bool[N, N]
+    area_ids: np.ndarray               # int32[N] — for simple maps, just np.arange(N)
+    centroids: np.ndarray              # float32[N, 2] — XY
+    vis_matrix: np.ndarray             # bool[N, N]
+    adjacency: np.ndarray              # bool[N, N]
+
+    # Verticality — per-area terrain elevation and ramp flag (spec L1, L8).
+    # centroids_z: terrain z-height for each area (0.0 for flat/ground areas).
+    #   - Ramps store their TOP elevation (e.g., a ramp from z=0 to z=64 has
+    #     centroids_z=64.0). Walking onto a ramp snaps the agent z up instantly
+    #     ("step-wise verticality" per spec L1). Smooth interpolation is v1b.
+    #   - make_cs2_map zero-fills this; dust2 verticality is a separate future task.
+    # is_ramp: True means the C-env cliff guard exempts this area from the
+    #   Δz > SV_MAX_STEP_HEIGHT check, allowing grounded agents to step up into it.
+    #   Pitfall: is_ramp=True on BOTH endpoint areas would let agents climb non-ramp
+    #   cliffs — only mark the ramp/stairs area, not the destination platform.
+    centroids_z: np.ndarray            # float32[N] — per-area terrain elevation (z), 0.0 for flat
+    is_ramp: np.ndarray                # bool[N]   — area is a ramp/stairs (cliff-guard exemption)
 
     # Raster grid
-    grid: np.ndarray  # int32[H, W] — cell → area_idx (-1 = off-mesh)
+    grid: np.ndarray                   # int32[H, W] — cell → area_idx (-1 = off-mesh)
     grid_x_min: float
     grid_y_min: float
-    grid_cell_size: float  # grid_inv_cell = 1.0 / grid_cell_size
+    grid_cell_size: float              # grid_inv_cell = 1.0 / grid_cell_size
 
     # Bombsite data (area_id-indexed; for simple maps area_id == area_idx)
-    bombsite_mask: np.ndarray  # bool[max_area_id+1]
-    bombsite_by_idx: np.ndarray  # int8[N]
-    bombsite_dist: np.ndarray  # float32[max_area_id+1]
+    bombsite_mask: np.ndarray          # bool[max_area_id+1]
+    bombsite_by_idx: np.ndarray        # int8[N]
+    bombsite_dist: np.ndarray          # float32[max_area_id+1]
     bombsite_dist_scale: float
 
     # Spawns as area_ids (not indices)
-    t_spawn_areas: list  # len 1–15
-    ct_spawn_areas: list  # len 1–5
+    t_spawn_areas: list                # len 1–15
+    ct_spawn_areas: list               # len 1–5
 
     # Map bounds (used to compute normalization constants in wrapper.py)
     x_min: float
@@ -128,12 +141,20 @@ def make_cs2_map(nav_path: str, cache_path: str) -> MapData:
         dtype=np.int8,
     )
 
+    # Verticality deferred for real dust2 (spec §3 out-of-scope: "Real CS2 dust2
+    # verticality" is a separate large-scope task tied to nav-mesh-Z parsing from awpy).
+    # Zero-fill keeps the MapData contract uniform and lets the C env init succeed.
+    centroids_z_cs2 = np.zeros(nav_graph.N, dtype=np.float32)
+    is_ramp_cs2 = np.zeros(nav_graph.N, dtype=bool)
+
     map_data = MapData(
         N=nav_graph.N,
         area_ids=np.array(nav_graph.area_ids, dtype=np.int32),
         centroids=nav_graph._centroid_matrix.astype(np.float32),
         vis_matrix=nav_graph.vis_matrix,
         adjacency=area_adjacency,
+        centroids_z=centroids_z_cs2,
+        is_ramp=is_ramp_cs2,
         grid=nav_graph._pos_grid,
         grid_x_min=float(nav_graph._grid_x_min),
         grid_y_min=float(nav_graph._grid_y_min),
@@ -154,40 +175,66 @@ def make_cs2_map(nav_path: str, cache_path: str) -> MapData:
     _CS2_MAP_CACHE[key] = map_data
 
     print(f"[MapData] Map bounds: X=[{x_min:.0f},{x_max:.0f}] Y=[{y_min:.0f},{y_max:.0f}]")
-    print(
-        f"[MapData] T-spawn: {len(t_spawn_areas)} areas  "
-        f"CT-spawn: {len(ct_spawn_areas)} areas  "
-        f"A-site: {len(a_site_areas)} areas  "
-        f"B-site: {len(b_site_areas)} areas"
-    )
+    print(f"[MapData] T-spawn: {len(t_spawn_areas)} areas  "
+          f"CT-spawn: {len(ct_spawn_areas)} areas  "
+          f"A-site: {len(a_site_areas)} areas  "
+          f"B-site: {len(b_site_areas)} areas")
     return map_data
 
 
 # ── Simple map definition ────────────────────────────────────────────────────
-# Each room: (area_idx, x0, y0, x1, y1)  — coordinates are world-space floats.
+# Schema (spec L8): (area_idx, x0, y0, x1, y1, z, is_ramp) — world-space floats.
+# z      — terrain elevation; ramps store their TOP elevation (spec L1).
+# is_ramp — True exempts the area from the C-env cliff-guard (agents may step up
+#            into it even if Δz > SV_MAX_STEP_HEIGHT_CS).
+#
+# Geometry per spec §4 Option A:
+#   y_min=80 (new northern strip houses catwalk+stairs), y_max=1184 (unchanged).
+#   Bombsite elevated to z=64. Dual ramps (T and CT side). Catwalk at z=128 (y=80-192).
+#   Stairs (is_ramp=True) connect CT-corridor to catwalk.
+#   T-corridor and CT-corridor x-extents shrunk to make room for ramps.
+#
+# BACKWARD-COMPAT NOTE: The 5-tuple schema is not preserved — this is an atomic
+# schema bump; all callers that iterate over SIMPLE_ROOMS must use 7-tuple unpacking
+# (or `for idx, x0, y0, x1, y1, *_ in rooms` for forward-compat ignoring z/is_ramp).
 SIMPLE_ROOMS = [
-    # T-spawn cluster (areas 0–4) — placed ABOVE the approach corridor (y > 384)
-    (0, 0, 416, 256, 672),  # T-spawn-A
-    (1, 256, 416, 512, 672),  # T-spawn-B
-    (2, 0, 672, 256, 928),  # T-spawn-C
-    (3, 256, 672, 512, 928),  # T-spawn-D
-    (4, 0, 928, 512, 1184),  # T-spawn-E
-    # T-side approach corridor — extends south to y=512 to overlap T-spawn-B
-    (5, 400, 192, 800, 512),  # T-corridor
-    # Bombsite — narrow horizontal band
-    (6, 800, 192, 1100, 416),  # Bombsite
-    # CT-side approach corridor — extends east to x=1600 and south to y=512 to overlap CT-spawn-A
-    (7, 1100, 192, 1600, 512),  # CT-corridor
-    # CT-spawn cluster (areas 8–12) — placed ABOVE the approach corridor (y > 416)
-    (8, 1500, 416, 1756, 672),  # CT-spawn-A
-    (9, 1756, 416, 2012, 672),  # CT-spawn-B
-    (10, 1500, 672, 1756, 928),  # CT-spawn-C
-    (11, 1756, 672, 2012, 928),  # CT-spawn-D
-    (12, 1500, 928, 2012, 1184),  # CT-spawn-E
+                                                       # T-spawn cluster (areas 0-4) — flat, z=0
+    (0, 0, 416, 256, 672, 0.0, False),                 # T-spawn-A
+    (1, 256, 416, 512, 672, 0.0, False),               # T-spawn-B
+    (2, 0, 672, 256, 928, 0.0, False),                 # T-spawn-C
+    (3, 256, 672, 512, 928, 0.0, False),               # T-spawn-D
+    (4, 0, 928, 512, 1184, 0.0, False),                # T-spawn-E
+                                                       # T-corridor — shrunk on east end (was x=400-800; now 400-750 to make room for T-ramp)
+    (5, 400, 192, 750, 512, 0.0, False),               # T-corridor
+                                                       # Bombsite — ELEVATED to z=64; shrunk on x edges (was 800-1100; now 820-1100)
+    (6, 820, 192, 1100, 416, 64.0, False),             # Bombsite (elevated)
+                                                       # CT-corridor — shrunk on west end (was 1100-1600; now 1170-1600)
+    (7, 1170, 192, 1600, 512, 0.0, False),             # CT-corridor
+                                                       # CT-spawn cluster (areas 8-12) — flat, z=0
+    (8, 1500, 416, 1756, 672, 0.0, False),
+    (9, 1756, 416, 2012, 672, 0.0, False),
+    (10, 1500, 672, 1756, 928, 0.0, False),
+    (11, 1756, 672, 2012, 928, 0.0, False),
+    (12, 1500, 928, 2012, 1184, 0.0, False),
+                                                       # T-ramp — ramp from T-corridor (z=0) up to bombsite (z=64); top elevation per spec L1
+    (13, 750, 192, 820, 416, 64.0, True),              # T-ramp
+                                                       # CT-ramp — ramp from CT-corridor (z=0) up to bombsite (z=64); top elevation
+    (14, 1100, 192, 1170, 416, 64.0, True),            # CT-ramp
+                                                       # Catwalk — z=128, NEW northern strip (y=80..192) overlooking bombsite from above
+    (15, 820, 80, 1170, 192, 128.0, False),            # Catwalk
+                                                       # Stairs — z=128, ramp connecting CT-corridor (z=0) up to catwalk (z=128);
+                                                       #   is_ramp=True so cliff guard lets agents walk up from CT-corridor to catwalk
+    (16, 1170, 80, 1300, 192, 128.0, True),            # Stairs
 ]
 SIMPLE_T_SPAWNS = [0, 1, 2, 3, 4]
 SIMPLE_CT_SPAWNS = [8, 9, 10, 11, 12]
 SIMPLE_BOMBSITES = [6]
+
+# Maximum grounded up-step (Source `sv_stepsize` default = 18u). MUST stay numerically
+# in lock-step with `SV_MAX_STEP_HEIGHT_CS` in src/c_env/cs2_movement.h (added in T3).
+# Drift between the two breaks the env: the cliff guard would refuse a movement that
+# nav-shaping treats as a shortcut, or vice versa.
+MAX_STEP_HEIGHT = 18.0
 
 
 def make_simple_map(
@@ -201,32 +248,42 @@ def make_simple_map(
 
     Parameters
     ----------
-    rooms      : list of (area_idx, x0, y0, x1, y1)
+    rooms      : list of (area_idx, x0, y0, x1, y1, z, is_ramp) — 7-tuple schema (spec L8).
+                 z is terrain elevation (float); is_ramp is bool (cliff-guard exemption).
     t_spawns   : list of area_idx values that are T-spawn areas
     ct_spawns  : list of area_idx values that are CT-spawn areas
     bombsites  : list of area_idx values that are bombsite areas
     cell_size  : world units per raster cell
+
+    Note: the 5-tuple schema (area_idx, x0, y0, x1, y1) used before Batch 5 is NOT
+    backward-compatible — callers passing custom rooms must use the 7-tuple form.
     """
     N = len(rooms)
-    area_ids = np.arange(N, dtype=np.int32)  # area_id == area_idx for simple maps
+    area_ids = np.arange(N, dtype=np.int32)            # area_id == area_idx for simple maps
 
-    # 1. Derive map bounds from rooms — rooms are (idx, x0, y0, x1, y1)
+    # 1. Derive map bounds from rooms — rooms are (idx, x0, y0, x1, y1, z, is_ramp).
+    # Use positional index to avoid requiring full 7-tuple if z/is_ramp are absent.
     x_min = float(min(r[1] for r in rooms))
     y_min = float(min(r[2] for r in rooms))
     x_max = float(max(r[3] for r in rooms))
     y_max = float(max(r[4] for r in rooms))
 
-    # 2. Centroids (rect centres)
+    # 2. Centroids (rect centres) and verticality arrays.
+    # z, is_ramp unpacked from tuple positions 5 and 6.
     centroids = np.zeros((N, 2), dtype=np.float32)
-    for idx, x0, y0, x1, y1 in rooms:
+    centroids_z = np.zeros(N, dtype=np.float32)
+    is_ramp = np.zeros(N, dtype=bool)
+    for idx, x0, y0, x1, y1, z, ramp in rooms:
         centroids[idx, 0] = (x0 + x1) * 0.5
         centroids[idx, 1] = (y0 + y1) * 0.5
+        centroids_z[idx] = z
+        is_ramp[idx] = ramp
 
     # 3. Raster grid: world coord → area_idx (-1 = off-mesh)
     grid_w = int(np.ceil((x_max - x_min) / cell_size))
     grid_h = int(np.ceil((y_max - y_min) / cell_size))
     grid = np.full((grid_h, grid_w), -1, dtype=np.int32)
-    for idx, x0, y0, x1, y1 in rooms:
+    for idx, x0, y0, x1, y1, *_ in rooms:              # *_ ignores z, is_ramp
         col0 = int((x0 - x_min) / cell_size)
         col1 = int(np.ceil((x1 - x_min) / cell_size))
         row0 = int((y0 - y_min) / cell_size)
@@ -250,6 +307,23 @@ def make_simple_map(
                     if b >= 0 and b != a:
                         adjacency[a, b] = True
                         adjacency[b, a] = True
+
+    # 4b. L9 adjacency post-prune (spec §2 L9): remove edges where BOTH endpoints
+    # are non-ramp AND |Δz| > MAX_STEP_HEIGHT. This mirrors the C-env cliff guard
+    # (cs2_movement.h SV_MAX_STEP_HEIGHT_CS) so that nav-distance shaping does not
+    # assign shortcut bonuses for movement edges that the C env will physically refuse.
+    # Pitfall: only prune non-ramp↔non-ramp cliff edges — ramp targets are always
+    # allowed (is_ramp=True is the explicit walk-up affordance, spec L11).
+    # MAX_STEP_HEIGHT (module constant) MUST numerically match SV_MAX_STEP_HEIGHT_CS in
+    # cs2_movement.h. See module-level constant for full rationale.
+    for i in range(N):
+        for j in range(N):
+            if i == j or not adjacency[i, j]:
+                continue
+            if is_ramp[i] or is_ramp[j]:
+                continue               # ramp endpoints exempt from cliff pruning
+            if abs(centroids_z[i] - centroids_z[j]) > MAX_STEP_HEIGHT:
+                adjacency[i, j] = False
 
     # 5. Visibility: Bresenham LOS centroid-to-centroid; blocked by cells == -1
     def _bresenham_visible(c0, c1) -> bool:
@@ -290,7 +364,7 @@ def make_simple_map(
 
     # 6. Bombsite data
     bombsite_set = set(bombsites)
-    bombsite_mask = np.zeros(N, dtype=bool)  # area_id == area_idx
+    bombsite_mask = np.zeros(N, dtype=bool)            # area_id == area_idx
     bombsite_mask[np.array(list(bombsite_set), dtype=np.int32)] = True
     bombsite_by_idx = bombsite_mask.astype(np.int8)
 
@@ -306,7 +380,7 @@ def make_simple_map(
                 dist_hops[nxt] = dist_hops[cur] + 1.0
                 queue.append(nxt)
 
-    bombsite_dist = dist_hops  # float32[N] (area_id == area_idx)
+    bombsite_dist = dist_hops          # float32[N] (area_id == area_idx)
     finite = bombsite_dist[np.isfinite(bombsite_dist)]
     bombsite_dist_scale = 0.0
     if finite.size:
@@ -319,6 +393,8 @@ def make_simple_map(
         centroids=centroids,
         vis_matrix=vis_matrix,
         adjacency=adjacency,
+        centroids_z=centroids_z,
+        is_ramp=is_ramp,
         grid=grid,
         grid_x_min=x_min,
         grid_y_min=y_min,
