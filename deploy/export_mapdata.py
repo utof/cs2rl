@@ -1,6 +1,12 @@
 #!/usr/bin/env python
 """Export map normalization constants from the CS2RL sim to a JSON sidecar.
 
+⚠ DEPLOY SUSPENDED 2026-05-03 ⚠ — active development paused after Batch 3.5
+(sim-only training take-priority). Last-known-good OBS_VERSION=v2-105dim.
+Do NOT bump OBS_VERSION or extend the sidecar schema as sim obs evolves; sim
+should grow its own internal versioning independent of deploy. Tests stay
+green to prevent silent bit-rot. See gh #(filed) for resume criteria.
+
 Usage (run from repo root):
     python deploy/export_mapdata.py --map de_dust2
 

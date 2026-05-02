@@ -1,6 +1,12 @@
 #!/usr/bin/env python
 """Export a trained PufferLib LSTM policy checkpoint to ONNX format.
 
+⚠ DEPLOY SUSPENDED 2026-05-03 ⚠ — active development paused after Batch 3.5
+(sim-only training take-priority). Last-known-good OBS_VERSION=v2-105dim.
+Do NOT bump the obs_version literal or extend the export surface as sim
+obs/action heads evolve. ONNX I/O may not match a future sim refactor;
+expect this module to need a from-scratch revisit on resume. See gh #(filed).
+
 Usage:
     python deploy/export_policy.py --checkpoint <path_to_.pt> [--output <path_to_.onnx>]
 """

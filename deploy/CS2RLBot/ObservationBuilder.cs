@@ -1,4 +1,14 @@
 // deploy/CS2RLBot/ObservationBuilder.cs
+//
+// ── DEPLOY SUSPENDED 2026-05-03 ────────────────────────────────────────────
+// Active development paused after Batch 3.5 (sim-only training take-priority).
+// POC verified on a real CS2 server pre-suspend; resuming pending sim/RL
+// showing promising emergent behaviour. Last-known-good schema: v2-105dim.
+// Do NOT bump SupportedVersion or add features here as the sim's obs schema
+// evolves — sim should grow its own internal versioning independent of
+// deploy. See gh #(filed) for resume criteria + scope notes.
+// ───────────────────────────────────────────────────────────────────────────
+//
 // Builds the 105-dim observation vector used by the RL policy, matching
 // cs2_observations.h exactly. See that file for the ground-truth formula
 // and dimension layout.

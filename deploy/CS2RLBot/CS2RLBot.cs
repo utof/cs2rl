@@ -1,3 +1,11 @@
+// ── DEPLOY SUSPENDED 2026-05-03 ────────────────────────────────────────────
+// Active development paused after Batch 3.5 (sim-only training take-priority).
+// POC verified on a real CS2 server pre-suspend; resuming pending sim/RL
+// showing promising emergent behaviour. Last-known-good schema: v2-105dim.
+// Do NOT plumb new sim obs/action surface through here as the sim evolves —
+// inevitable CSS API drift + ONNX I/O changes mean a from-scratch pass is
+// likely on resume. Leave as reference, not living code. See gh #(filed).
+// ───────────────────────────────────────────────────────────────────────────
 using System.Text.Json;
 using CounterStrikeSharp.API;
 using RayTraceAPI;  // FUNPLAY-pro-CS2/Ray-Trace v1.0.7 — exposes CRayTraceInterface for LOS traces.
