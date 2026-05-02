@@ -77,8 +77,9 @@ def test_simple_map_cliff_adjacency_pruned(simple_map):
     catwalk_idx = 15
     bombsite_idx = 6
     assert not simple_map.adjacency[catwalk_idx, bombsite_idx], (
-        "catwalk↔bombsite cliff edge must be pruned by L9; "
-        "if this fails, check the post-prune loop in make_simple_map")
+        "catwalk-bombsite cliff edge must be pruned by L9 to keep nav-shaping consistent")
+    assert not simple_map.adjacency[bombsite_idx,
+                                    catwalk_idx], ("adjacency must be symmetric after pruning")
 
 
 def test_simple_map_ramps_kept_in_adjacency(simple_map):
@@ -92,5 +93,6 @@ def test_simple_map_ramps_kept_in_adjacency(simple_map):
     t_corridor_idx = 5
     t_ramp_idx = 13
     assert simple_map.adjacency[t_corridor_idx, t_ramp_idx], (
-        "T-corridor → T-ramp must remain adjacent after L9 pruning (ramp exemption); "
-        "check is_ramp[13] == True in SIMPLE_ROOMS")
+        "T-corridor → T-ramp must remain adjacent (ramp exemption)")
+    assert simple_map.adjacency[t_ramp_idx, t_corridor_idx], (
+        "adjacency must be symmetric (T-ramp → T-corridor)")

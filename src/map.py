@@ -46,8 +46,8 @@ class MapData:
     #   Δz > SV_MAX_STEP_HEIGHT check, allowing grounded agents to step up into it.
     #   Pitfall: is_ramp=True on BOTH endpoint areas would let agents climb non-ramp
     #   cliffs — only mark the ramp/stairs area, not the destination platform.
-    centroids_z: np.ndarray            # float32[N] — per-area terrain elevation (z), 0.0 for flat areas
-    is_ramp: np.ndarray                # bool[N]   — area is a ramp/stairs (cliff-guard exemption in C-env)
+    centroids_z: np.ndarray            # float32[N] — per-area terrain elevation (z), 0.0 for flat
+    is_ramp: np.ndarray                # bool[N]   — area is a ramp/stairs (cliff-guard exemption)
 
     # Raster grid
     grid: np.ndarray                   # int32[H, W] — cell → area_idx (-1 = off-mesh)
@@ -230,6 +230,12 @@ SIMPLE_T_SPAWNS = [0, 1, 2, 3, 4]
 SIMPLE_CT_SPAWNS = [8, 9, 10, 11, 12]
 SIMPLE_BOMBSITES = [6]
 
+# Maximum grounded up-step (Source `sv_stepsize` default = 18u). MUST stay numerically
+# in lock-step with `SV_MAX_STEP_HEIGHT_CS` in src/c_env/cs2_movement.h (added in T3).
+# Drift between the two breaks the env: the cliff guard would refuse a movement that
+# nav-shaping treats as a shortcut, or vice versa.
+MAX_STEP_HEIGHT = 18.0
+
 
 def make_simple_map(
     rooms=SIMPLE_ROOMS,
@@ -308,8 +314,8 @@ def make_simple_map(
     # assign shortcut bonuses for movement edges that the C env will physically refuse.
     # Pitfall: only prune non-ramp↔non-ramp cliff edges — ramp targets are always
     # allowed (is_ramp=True is the explicit walk-up affordance, spec L11).
-    # MAX_STEP_HEIGHT MUST numerically match SV_MAX_STEP_HEIGHT_CS in cs2_movement.h.
-    MAX_STEP_HEIGHT = 18.0             # CS Source sv_stepsize default; mirror of C constant
+    # MAX_STEP_HEIGHT (module constant) MUST numerically match SV_MAX_STEP_HEIGHT_CS in
+    # cs2_movement.h. See module-level constant for full rationale.
     for i in range(N):
         for j in range(N):
             if i == j or not adjacency[i, j]:
