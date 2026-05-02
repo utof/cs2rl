@@ -293,13 +293,15 @@ def main():
     # Batch 3: bumped obs_version to v1-105dim to match the new role-bit
     # observation; aim_dim records whether this export carries the aim head
     # (0 = legacy Batch 2 graph, 1 = single-axis aim, 2+ = future Batch 3.5).
+    # Batch 5 (map-verticality T5): bumped v1→v2 to signal centroids_z is now
+    # present in the mapdata sidecar (spec §2 L4 / OBS_VERSION discovery row).
     sidecar = {
         "checkpoint": str(checkpoint_path),
         "obs_dim": obs_dim,
         "hidden_dim": hidden_dim,
         "action_sizes": action_sizes,
         "aim_dim": aim_dim,
-        "obs_version": "v1-105dim",
+        "obs_version": "v2-105dim",
     }
     sidecar_path.write_text(json.dumps(sidecar, indent=2))
     print(f"Sidecar JSON written: {sidecar_path}")
