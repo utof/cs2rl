@@ -45,27 +45,23 @@ class VizGameState:
 
 
 class StaticDataC(ctypes.Structure):
+    # fmt: off  -- YAPF aligns standalone comments to trailing-comment column; suppress here
     _fields_ = [
         ("N", ctypes.c_int),
         ("vis_matrix", ctypes.POINTER(ctypes.c_int8)),
         ("raster_grid", ctypes.POINTER(ctypes.c_int32)),
         ("adjacency", ctypes.POINTER(ctypes.c_int8)),
         ("centroid_xy", ctypes.POINTER(ctypes.c_float)),
-                                                                       # fmt: off  -- protect comment indent from YAPF alignment heuristic
-                                                                       # T2 (verticality): per-area terrain elevation and ramp flag.
-                                                                       # Field order MUST stay in sync with:
-                                                                       #   - StaticData struct in cs2_types.h  (C canonical source)
-                                                                       #   - PyArg_ParseTuple format string in binding.c py_init()
-                                                                       # Mismatch here silently corrupts all pointer fields that follow.
-                                                                       # fmt: on
-        ("centroids_z", ctypes.POINTER(ctypes.c_float)
-         ),                                                            # float32[N] — terrain z per area  # noqa: E501
+        # T2 (verticality): per-area terrain elevation and ramp flag.
+        # Field order MUST stay in sync with:
+        #   - StaticData struct in cs2_types.h  (C canonical source)
+        #   - PyArg_ParseTuple format string in binding.c py_init()
+        # Mismatch here silently corrupts all pointer fields that follow.
+        ("centroids_z", ctypes.POINTER(ctypes.c_float)),               # float32[N] — terrain z per area  # noqa: E501
         ("area_ids", ctypes.POINTER(ctypes.c_int32)),
         ("bombsite_mask", ctypes.POINTER(ctypes.c_int8)),
         ("bombsite_by_idx", ctypes.POINTER(ctypes.c_int8)),
-                                                                       # fmt: off  -- protect comment indent from YAPF alignment heuristic
-                                                                       # is_ramp: MapData bool is converted to int8 in Cs2Env.__init__ before passing
-                                                                       # fmt: on
+        # is_ramp: MapData bool is converted to int8 in Cs2Env.__init__ before passing
         ("is_ramp", ctypes.POINTER(ctypes.c_int8)),                    # int8[N] — 1=ramp/stairs
         ("bombsite_dist", ctypes.POINTER(ctypes.c_float)),
         ("grid_w", ctypes.c_int),
@@ -101,14 +97,10 @@ class StaticDataC(ctypes.Structure):
         ("ct_spawns", ctypes.c_int32 * 5),
         ("n_ct_spawns", ctypes.c_int),
         ("max_turn_speed", ctypes.c_float),
-                                                                       # fmt: off  -- protect comment indent from YAPF alignment heuristic
-                                                                       # legacy symmetric — superseded by per-mechanism fields (Batch 1)
-                                                                       # fmt: on
+        # legacy symmetric — superseded by per-mechanism fields (Batch 1)
         ("reward_win", ctypes.c_float),
-                                                                       # fmt: off  -- protect comment indent from YAPF alignment heuristic
-                                                                       # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).
-                                                                       # Must stay in same order as StaticData in cs2_types.h.
-                                                                       # fmt: on
+        # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).
+        # Must stay in same order as StaticData in cs2_types.h.
         ("reward_win_t_detonation", ctypes.c_float),                   # default 5.0
         ("reward_win_t_elimination", ctypes.c_float),                  # default 3.0
         ("reward_win_ct_defuse", ctypes.c_float),                      # default 5.0
@@ -132,6 +124,7 @@ class StaticDataC(ctypes.Structure):
         ("pbrs_nav_weight_t", ctypes.c_float),
         ("pbrs_nav_weight_ct", ctypes.c_float),
     ]
+    # fmt: on
 
 
 class AgentStateC(ctypes.Structure):
