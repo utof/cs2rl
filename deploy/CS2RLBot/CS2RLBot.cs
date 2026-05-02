@@ -117,6 +117,19 @@ public class CS2RLBotPlugin : BasePlugin
         _aimDim = doc.RootElement.TryGetProperty("aim_dim", out var aimProp)
             ? aimProp.GetInt32()
             : 0;
+        // Cross-check the sidecar's aim_dim against the plugin's compiled AimDim.
+        // A future Batch-3.5 export (aim_dim=2 for Δyaw + Δpitch) shipped against
+        // a plugin compiled with AimDim=1 would otherwise hit an opaque ORT
+        // shape mismatch at construction. Surface a clear deploy-time error.
+        if (_aimDim != 0 && _aimDim != PolicyInference.AimDim)
+        {
+            Logger.LogError(
+                "[CS2RLBot] sidecar aim_dim={Sidecar} but plugin compiled with " +
+                "PolicyInference.AimDim={Compile}. Rebuild plugin or re-export " +
+                "policy with matching dim.",
+                _aimDim, PolicyInference.AimDim);
+            return;
+        }
 
         // Read obs_version from sidecar — required for version handshake with mapdata JSON
         _obsVersion = doc.RootElement.TryGetProperty("obs_version", out var vProp)

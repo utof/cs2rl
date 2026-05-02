@@ -83,8 +83,12 @@ public sealed class PolicyInference : IDisposable
     // AimDim = 1 matches AIM_DIM in src/_action_spec.py — μ is a scalar Δyaw
     // (in radians, tanh-squashed and scaled to [-π/4, +π/4]).
     private readonly float[]  _muAim;
-    private readonly OrtValue _muAimOrt = null!;
     public  const    int      AimDim = 1;
+    // Note: the OrtValue wrapping _muAim is created in the ctor and stashed in
+    // _outputOrts[NumHeads]; disposal happens via the _outputOrts iteration in
+    // Dispose(). We deliberately do NOT keep a separate field — that would
+    // duplicate the disposal path and invite double-dispose if a future change
+    // adds a field-level cleanup.
 
     // Pinned OrtValue wrappers (created once at ctor, always non-null after successful construction)
     private readonly OrtValue _obsOrt = null!;
@@ -209,9 +213,8 @@ public sealed class PolicyInference : IDisposable
         _doneOrt  = doneOrt;
         _lstmHOrt = lstmHOrt;
         _lstmCOrt = lstmCOrt;
-        // muAimOrt may be null when HasAimHead=false; keep the field as a pinned
-        // handle so Dispose can clean it up (null-tolerant via ?.Dispose()).
-        _muAimOrt = muAimOrt!;
+        // muAimOrt (when non-null) is already stored in outputOrts[NumHeads];
+        // the local goes out of scope but the array reference keeps it alive.
         _outputOrts  = outputOrts;
         _inputValues = new[] { _obsOrt, _doneOrt, _lstmHOrt, _lstmCOrt };
 
