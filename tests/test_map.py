@@ -133,8 +133,7 @@ def test_centroids_z_plumbed_through_binding():
     # Verify MapData fields are in place before constructing env
     assert map_data.centroids_z[6] == 64.0, (
         f"bombsite area_idx=6 should have centroids_z=64.0, got {map_data.centroids_z[6]}")
-    assert map_data.is_ramp[13] is True or bool(map_data.is_ramp[13]), (
-        f"T-ramp area_idx=13 should have is_ramp=True, got {map_data.is_ramp[13]}")
+    assert bool(map_data.is_ramp[13]), "is_ramp[13] should be True (T-ramp area)"
 
     # Construct env — if the format string or arg count is wrong, this raises ValueError
     env = Cs2Env(map_data=map_data)

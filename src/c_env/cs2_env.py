@@ -56,7 +56,8 @@ class StaticDataC(ctypes.Structure):
                                                                        #   - StaticData struct in cs2_types.h  (C canonical source)
                                                                        #   - PyArg_ParseTuple format string in binding.c py_init()
                                                                        # Mismatch here silently corrupts all pointer fields that follow.
-        ("centroids_z", ctypes.POINTER(ctypes.c_float)),               # float32[N] — terrain z per area
+        ("centroids_z", ctypes.POINTER(ctypes.c_float)
+         ),                                                            # float32[N] — terrain z per area  # noqa: E501
         ("area_ids", ctypes.POINTER(ctypes.c_int32)),
         ("bombsite_mask", ctypes.POINTER(ctypes.c_int8)),
         ("bombsite_by_idx", ctypes.POINTER(ctypes.c_int8)),
@@ -96,10 +97,10 @@ class StaticDataC(ctypes.Structure):
         ("ct_spawns", ctypes.c_int32 * 5),
         ("n_ct_spawns", ctypes.c_int),
         ("max_turn_speed", ctypes.c_float),
-                                                                       # legacy symmetric — superseded by per-mechanism fields (Batch 1)  # noqa: E501
+                                                                       # legacy symmetric — superseded by per-mechanism fields (Batch 1)
         ("reward_win", ctypes.c_float),
-                                                                       # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).  # noqa: E501
-                                                                       # Must stay in same order as StaticData in cs2_types.h.  # noqa: E501
+                                                                       # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).
+                                                                       # Must stay in same order as StaticData in cs2_types.h.
         ("reward_win_t_detonation", ctypes.c_float),                   # default 5.0
         ("reward_win_t_elimination", ctypes.c_float),                  # default 3.0
         ("reward_win_ct_defuse", ctypes.c_float),                      # default 5.0
@@ -397,8 +398,12 @@ class Cs2Env(pufferlib.PufferEnv):
         adjacency = _arr(md.adjacency, np.int8)
         centroid_xy = _arr(md.centroids, np.float32)
         # T2 (verticality): centroids_z must be float32 (C side reads as float*).
-        # Guaranteed by MapData contract (dtype=float32) but _arr enforces it anyway.
+        # _arr coerces dtype via astype, but if MapData ever passes the wrong dtype
+        # we want a loud error here, not silent coercion poisoning the C pointer.
         centroids_z = _arr(md.centroids_z, np.float32)
+        if centroids_z.dtype != np.float32:
+            raise TypeError(f"centroids_z float32 conversion failed: dtype={centroids_z.dtype}; "
+                            "this would dangle the C-side sd->centroids_z pointer")
         area_ids = _arr(md.area_ids, np.int32)
         bombsite_mask = _arr(md.bombsite_mask, np.int8)
         bombsite_by_idx = _arr(md.bombsite_by_idx, np.int8)
@@ -408,8 +413,10 @@ class Cs2Env(pufferlib.PufferEnv):
         # be 1-byte on all platforms; int8 is guaranteed portable.
         # np.ascontiguousarray guards against stride surprises post-astype.
         is_ramp_int8 = np.ascontiguousarray(md.is_ramp.astype(np.int8))
-        assert is_ramp_int8.dtype == np.int8, "is_ramp conversion to int8 failed"
-        assert is_ramp_int8.itemsize == 1, "is_ramp int8 itemsize sanity check failed"
+        if is_ramp_int8.dtype != np.int8 or is_ramp_int8.itemsize != 1:
+            raise ValueError(f"is_ramp int8 conversion failed: dtype={is_ramp_int8.dtype}, "
+                             f"itemsize={is_ramp_int8.itemsize}; "
+                             "this would dangle the C-side sd->is_ramp pointer")
         bombsite_dist = _arr(md.bombsite_dist, np.float32)
 
         inv_x = 2.0 / (md.x_max - md.x_min)
