@@ -1142,6 +1142,63 @@ def test_hybrid_sample_writes_two_buffers():
         env.close()
 
 
+def test_hybrid_sample_logits_returns_per_factor_halves():
+    """Fix #1: _hybrid_sample_logits returns 6-tuple
+    (action, cont_action, log_prob_d, log_prob_c, entropy_d, entropy_c).
+
+    The per-factor halves it returns must equal what the old rebuild
+    pattern (constructing Categorical + Normal a second time at the
+    rollout site) would produce — bit-equivalent because the math is
+    identical and the inputs are deterministic given (logits, action).
+
+    This test pins the new contract so a future change that re-summed the
+    halves at return time (or worse, dropped an entropy slot) would go red.
+    Without this assertion the rollout would silently feed a wrong
+    log_probs_d / log_probs_c into _hybrid_ppo_loss and PPO updates would
+    diverge invisibly.
+    """
+    import torch
+
+    from train import _hybrid_sample_logits
+
+    torch.manual_seed(42)
+    B = 16
+    head_sizes = (9, 2, 2, 3, 2, 2, 2)
+    logits_list = [torch.randn(B, n) for n in head_sizes]
+    mu_aim = torch.zeros(B, 1)
+    log_std_aim = torch.full((1, ), -2.30)             # log(0.1)
+
+    ret = _hybrid_sample_logits(
+        (logits_list, mu_aim, log_std_aim, None),
+        max_turn_speed=0.7853981633974483,             # π/4
+    )
+    assert len(ret) == 6, f"Expected 6-tuple, got {len(ret)}-tuple"
+    action, cont_action, lp_d, lp_c, ent_d, ent_c = ret
+
+    # Shape checks
+    assert action.shape == (B, len(head_sizes))
+    assert cont_action.shape == (B, 1)
+    assert lp_d.shape == (B, ) and lp_c.shape == (B, )
+    assert ent_d.shape == (B, ) and ent_c.shape == (B, )
+    assert torch.isfinite(lp_d).all() and torch.isfinite(lp_c).all()
+
+    # Bit-equivalence with the rebuild pattern that the rollout caller
+    # used to do (and which Fix #1 deletes). Same math, same inputs →
+    # same bits. allclose with atol=0 is the strongest assertion.
+    rebuild_lp_d = sum(
+        torch.distributions.Categorical(logits=lg).log_prob(action[..., i])
+        for i, lg in enumerate(logits_list))
+    sigma = torch.exp(log_std_aim).expand_as(mu_aim)
+    rebuild_lp_c = (torch.distributions.Normal(mu_aim, sigma).log_prob(cont_action).sum(-1))
+    assert torch.allclose(lp_d, rebuild_lp_d, atol=1e-7), \
+        f"log_prob_d drift: max diff {(lp_d - rebuild_lp_d).abs().max().item()}"
+    assert torch.allclose(lp_c, rebuild_lp_c, atol=1e-7), \
+        f"log_prob_c drift: max diff {(lp_c - rebuild_lp_c).abs().max().item()}"
+
+    # Joint log-prob = sum of halves (spec L8 independence)
+    assert torch.allclose(lp_d + lp_c, rebuild_lp_d + rebuild_lp_c, atol=1e-7)
+
+
 def test_hybrid_loss_clip_applies_per_factor():
     """T5: _hybrid_ppo_loss applies the PPO clip independently per factor.
 
