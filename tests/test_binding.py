@@ -364,3 +364,99 @@ def test_continuous_aim_mp_backend_receives_buffer():
                     f"{[(i['aim_delta_count'], i['aim_delta_sum']) for i in terminal_infos]}")
     finally:
         vecenv.close()
+
+
+def test_onnx_export_output_order_pinned():
+    """Pin the deploy ONNX output order for the Batch 3 contract.
+
+    Constructs an `LSTMPolicyONNXWrapper` directly (avoiding the cost of a
+    full checkpoint round-trip) with the aim head wired in, exports it to
+    ONNX, loads the result with onnxruntime, and asserts the output names
+    are exactly:
+
+        logits_0, logits_1, ..., logits_6, mu_aim, lstm_h_out, lstm_c_out
+
+    The mu_aim slot must be float32 (B, 1) in [-max_turn_speed,
+    +max_turn_speed]. If this test ever fails, the C# decode in
+    deploy/CS2RLBot/PolicyInference.cs is about to silently misread the
+    aim output — reorder the wrapper or the C# side together, never one
+    in isolation. Imports are local so the test file's top-level cost is
+    unchanged.
+    """
+    import math
+    import sys as _sys
+    import tempfile
+    from pathlib import Path as _Path
+
+    import torch
+    from torch import nn
+
+    # Both deploy/ (for export_policy) and src/ (for train) need to be on the
+    # path. The conftest already inserts src/, but deploy/ is repo-root-relative.
+    _repo_root = _Path(__file__).parent.parent
+    _sys.path.insert(0, str(_repo_root))
+    _sys.path.insert(0, str(_repo_root / "src"))
+
+    import onnxruntime as ort
+
+    import train
+    from deploy.export_policy import LSTMPolicyONNXWrapper
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        obs_dim, hidden = train.OBS_DIM, 256
+        # Mirror the architecture build_model would produce. ACTION_HEAD_SIZES
+        # is the head order MOVE/SHOOT/RELOAD/WEAPON/USE/CROUCH/JUMP per
+        # _action_spec.py — keep this list synced if those sizes ever change.
+        encoder = nn.Sequential(nn.Linear(obs_dim, hidden), nn.ReLU(), nn.Linear(hidden, hidden),
+                                nn.ReLU())
+        lstm = nn.LSTM(hidden, hidden, num_layers=1, batch_first=False)
+        action_heads = nn.ModuleList([nn.Linear(hidden, n) for n in [9, 2, 2, 3, 2, 2, 2]])
+        aim_mu = nn.Linear(hidden, 1)
+        wrapper = LSTMPolicyONNXWrapper(encoder,
+                                        lstm,
+                                        action_heads,
+                                        aim_mu=aim_mu,
+                                        max_turn_speed=math.pi / 4.0).eval()
+
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
+            obs_t = torch.zeros(1, obs_dim)
+            done_t = torch.zeros(1)
+            lstm_h_t = torch.zeros(1, 1, hidden)
+            lstm_c_t = torch.zeros(1, 1, hidden)
+            torch.onnx.export(
+                wrapper,
+                (obs_t, done_t, lstm_h_t, lstm_c_t),
+                f.name,
+                input_names=["obs", "done", "lstm_h", "lstm_c"],
+                output_names=([f"logits_{i}"
+                               for i in range(7)] + ["mu_aim", "lstm_h_out", "lstm_c_out"]),
+                opset_version=17,
+                                                                                             # dynamo=False matches deploy/export_policy.py:main(); the
+                                                                                             # dynamo-based exporter pulls in onnxscript which isn't part
+                                                                                             # of this project's lockfile.
+                dynamo=False,
+            )
+            sess = ort.InferenceSession(f.name, providers=["CPUExecutionProvider"])
+            out_names = [o.name for o in sess.get_outputs()]
+            expected = ([f"logits_{i}" for i in range(7)] + ["mu_aim", "lstm_h_out", "lstm_c_out"])
+            assert out_names == expected, f"output order drift: {out_names}"
+
+            outs = sess.run(
+                out_names,
+                {
+                    "obs": np.zeros((1, obs_dim), dtype=np.float32),
+                    "done": np.zeros(1, dtype=np.float32),
+                    "lstm_h": np.zeros((1, 1, hidden), dtype=np.float32),
+                    "lstm_c": np.zeros((1, 1, hidden), dtype=np.float32),
+                },
+            )
+            mu = outs[7]
+            assert mu.shape == (1, 1), f"mu shape: {mu.shape}"
+            assert mu.dtype == np.float32, f"mu dtype: {mu.dtype}"
+            # tanh*max_turn_speed bound: a hair of slack absorbs fp32 wobble.
+            assert np.abs(mu).max() <= math.pi / 4.0 + 1e-5, (
+                f"mu_aim out of range: max |mu|={np.abs(mu).max()}, "
+                f"expected <= pi/4")
+    finally:
+        env.close()
