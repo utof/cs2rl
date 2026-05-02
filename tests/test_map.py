@@ -394,3 +394,55 @@ def test_is_airborne_no_flicker_on_elevated_terrain():
                    64.0) < 0.01, (f"z drifted from 64 after 10 idle ticks: {g.agents[0].z}")
     finally:
         env.close()
+
+
+# ── T4: obs z-delta slot population ──────────────────────────────────────────
+
+
+def test_obs_z_delta_populated_for_elevated_teammate():
+    """T4 load-bearing: obs[25] reflects (teammate.z - self.z)/128 = 0.5 when
+    self is at z=0 and teammate 1 is at z=64.
+
+    Slot derivation (plan §4.5): teammate slots start at obs[23]; per
+    cs2_observations.h line 65, base = 23 + tm_count * 7.  Teammate iteration
+    skips self (j == i), so for agent 0 viewing agent 1, tm_count=0 → base=23
+    → z_delta at obs[base+2] = obs[25].
+
+    Enemy z-delta (obs[53] for slot2=0 at base=51+0*8+2=53) is exercised by
+    the existing visibility tests in test_train_env.py; we don't re-test it
+    here to keep this test focused.
+
+    Pitfall: obs population only happens in compute_observations() which runs
+    during env.step(), NOT during env.reset().  The test must call env.step()
+    after placing agents, then read env.observations[0].
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        # Self at T-spawn (z=0), teammate at bombsite (z=64).
+        # Both on team T (agents 0-4 are T-side in the simple map layout).
+        g.agents[0].x = 100.0
+        g.agents[0].y = 500.0
+        g.agents[0].z = 0.0
+        g.agents[0].area_idx = 0                                                        # T-spawn-A
+        g.agents[0].is_airborne = 0
+        g.agents[1].x = 950.0
+        g.agents[1].y = 300.0
+        g.agents[1].z = 64.0
+        g.agents[1].area_idx = 6                                                        # bombsite (elevated)
+        g.agents[1].is_airborne = 0
+        actions, cont = _zero_actions()
+        env.step(actions, cont)
+                                                                                        # env.observations is a flat buffer (N_AGENTS * OBS_DIM floats).
+                                                                                        # env.observations[0] gives the OBS_DIM-length slice for agent 0.
+        obs = env.observations[0]
+                                                                                        # Teammate slot: tm_count=0, base=23, z_delta at obs[base+2]=obs[25].
+        z_delta = obs[25]
+        expected = (64.0 - 0.0) / 128.0                                                 # = 0.5
+        assert abs(z_delta - expected) < 1e-5, (
+            f"teammate z-delta slot obs[25] = {z_delta:.6f}, expected {expected:.6f}. "
+            f"Check that T4 filled obs[base+2] = (tm->z - a->z)/128.0f, "
+            f"and that agent 1 is alive (alive={g.agents[1].alive}).")
+    finally:
+        env.close()

@@ -29,7 +29,12 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
         obs[3]                = a->x * sd->inv_x_range - sd->x_offset;
         obs[4]                = a->y * sd->inv_y_range - sd->y_offset;
         /* Self Z: jump apex is ~57 u, so normalise by 128 (WALL_HEIGHT-ish)
-         * to keep values within ~[-1,1] for the foreseeable range. */
+         * to keep values within ~[-1,1] for the foreseeable range.
+         * Range note (Batch 5 verticality): with terrain z up to 128 (catwalk)
+         * plus jump apex ≈57u, obs[5] can reach ≈1.45. Network ingests the
+         * unclamped float same as velocity slots; no scaling change needed.
+         * Teammate/enemy z-delta slots (were 0.0f placeholders) are now
+         * (other->z - self->z)/128 — positive = other is above self. */
         obs[5] = a->z / 128.0f;
         obs[6] = (map_diag > 0.0f) ? a->vx / 250.0f : 0.0f;
         obs[7] = (map_diag > 0.0f) ? a->vy / 250.0f : 0.0f;
@@ -67,7 +72,10 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
                 float dx = tm->x - a->x, dy = tm->y - a->y;
                 obs[base + 0] = (map_diag > 0.0f) ? dx / map_diag : 0.0f;
                 obs[base + 1] = (map_diag > 0.0f) ? dy / map_diag : 0.0f;
-                obs[base + 2] = 0.0f; /* z placeholder */
+                /* Relative z-delta: positive = teammate above us.  Same /128
+                 * scale as self obs[5].  Range: catwalk(128) - spawn(0) = +1.0;
+                 * spawn - catwalk = -1.0.  Was constant-0 placeholder pre-T4. */
+                obs[base + 2] = (tm->z - a->z) / 128.0f;
                 obs[base + 3] = tm->hp / 100.0f;
                 obs[base + 4] = 1.0f;
                 float angle   = atan2f(dy, dx);
@@ -116,7 +124,10 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
                 float dist    = sqrtf(dx * dx + dy * dy);
                 obs[base + 0] = (map_diag > 0.0f) ? dx / map_diag : 0.0f;
                 obs[base + 1] = (map_diag > 0.0f) ? dy / map_diag : 0.0f;
-                obs[base + 2] = 0.0f; /* z placeholder */
+                /* Relative z-delta: positive = enemy above us.  Same /128
+                 * scale as self obs[5] and teammate slot.  Range mirrors
+                 * teammate block.  Was constant-0 placeholder pre-T4. */
+                obs[base + 2] = (en->z - a->z) / 128.0f;
                 float angle   = atan2f(dy, dx);
                 obs[base + 5] = sinf(angle);
                 obs[base + 6] = cosf(angle);
