@@ -26,11 +26,14 @@ public class CS2RLBotPlugin : BasePlugin
     private readonly Dictionary<CCSPlayerController, PolicyInference> _policies    = new();
     private readonly Dictionary<CCSPlayerController, ActionExecutor>  _executors   = new();
     private readonly Dictionary<CCSPlayerController, int[]>           _cachedActions = new();
-    // Batch 3: continuous Δyaw (radians) cached from the most recent inference
-    // tick. Re-applied every server tick by ActionExecutor.Execute so the bot
-    // turns smoothly between inference frames (the sim already clamped it to
-    // [-π/4, +π/4]; ActionExecutor clamps again as a defensive measure).
-    private readonly Dictionary<CCSPlayerController, float>           _cachedDeltaYaw = new();
+    // Batch 3 fix: Δyaw is NO LONGER cached across server ticks. Training
+    // applies Δyaw once per env step (= once per inference call) — re-applying
+    // the cached value on the 3 non-inference ticks between inferences would
+    // 4× over-rotate (e.g. 45° Δyaw → 180° per inference cycle). The
+    // continuous-aim value flows through a local variable in OnTick directly
+    // into ActionExecutor.Execute, which gates the Teleport call on
+    // isInferenceTick=true. On the 3 non-inference ticks between, yaw stays
+    // wherever the last inference Teleport set it.
 
     // ── Observation pipeline ──────────────────────────────────────────────────
     private readonly Dictionary<CCSPlayerController, EnemyMemory> _enemyMemories = new();
@@ -209,7 +212,6 @@ public class CS2RLBotPlugin : BasePlugin
         _policies.Clear();
         _executors.Clear();
         _cachedActions.Clear();
-        _cachedDeltaYaw.Clear();
         _enemyMemories.Clear();
         Logger.LogInformation("[CS2RLBot] Plugin unloaded — all PolicyInference instances disposed");
         _slog.Information("[CS2RLBot] Plugin unloaded");
@@ -269,7 +271,6 @@ public class CS2RLBotPlugin : BasePlugin
                 // HEAD_AIM was index 1 in the old 8-element layout and is now a
                 // separate continuous mu_aim output, not in this int[] cache.
                 _cachedActions[bot] = new int[7];
-                _cachedDeltaYaw[bot] = 0f;
                 _enemyMemories[bot] = new EnemyMemory();
                 Logger.LogInformation("[CS2RLBot] Bot registered: {Name} team={Team}",
                     bot.PlayerName, bot.TeamNum);
@@ -285,6 +286,13 @@ public class CS2RLBotPlugin : BasePlugin
                     shouldEndWarmup = true;
                 }
             }
+
+            // Δyaw flows directly from this inference into Execute(...) below,
+            // ONLY on inference ticks. On non-inference ticks we pass 0f — the
+            // executor won't use it (its yaw block is gated on isInferenceTick),
+            // but 0f makes the data-flow explicit and removes any risk of stale
+            // values being silently re-applied if the gate were ever loosened.
+            float deltaYawRad = 0f;
 
             if (isInferenceTick)
             {
@@ -363,19 +371,20 @@ public class CS2RLBotPlugin : BasePlugin
                 for (int i = 0; i < limit; i++)
                     cached[i] = ActionExecutor.Argmax(logits[i]);
 
-                // Cache the continuous Δyaw (radians) for re-application by the
-                // executor on non-inference ticks. 0f when no aim head present.
-                _cachedDeltaYaw[bot] = muAim.Length > 0 ? muAim[0] : 0f;
+                // Pass the fresh Δyaw through to Execute below. Not cached:
+                // applied exactly once this inference cycle, then discarded.
+                // 0f when no aim head present.
+                deltaYawRad = muAim.Length > 0 ? muAim[0] : 0f;
 
                 _slog.Debug("[CS2RLBot] Inference tick={Tick} bot={Bot} actions=[{Actions}] dYaw={DYaw:F4}",
-                    _tickCounter, bot.PlayerName, string.Join(",", cached), _cachedDeltaYaw[bot]);
+                    _tickCounter, bot.PlayerName, string.Join(",", cached), deltaYawRad);
 
                 if (LogObsConVar.Value == 1)
                     _slog.Debug("[CS2RLBot] ObsDump tick={Tick} obs=[{Obs}]",
                         _tickCounter, string.Join(",", obs));
             }
 
-            _executors[bot].Execute(bot, pawn, _cachedActions[bot], _cachedDeltaYaw[bot], isInferenceTick);
+            _executors[bot].Execute(bot, pawn, _cachedActions[bot], deltaYawRad, isInferenceTick);
         }
 
         if (shouldEndWarmup)
@@ -470,7 +479,6 @@ public class CS2RLBotPlugin : BasePlugin
             _policies.Remove(player);
             _executors.Remove(player);
             _cachedActions.Remove(player);
-            _cachedDeltaYaw.Remove(player);
             _enemyMemories.Remove(player);
             Logger.LogInformation("[CS2RLBot] Bot disconnected — disposed {Name}", player.PlayerName);
         }

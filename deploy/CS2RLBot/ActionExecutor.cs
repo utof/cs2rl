@@ -56,8 +56,9 @@ public sealed class ActionExecutor
     /// <param name="deltaYawRad">Continuous Δyaw output from the policy, in radians,
     ///   tanh-squashed and scaled to [-π/4, +π/4]. Applied as: new_yaw = wrap(current_yaw + Δyaw).
     ///   Pitch is preserved from pawn.EyeAngles.X (NOT zeroed — would visibly snap the bot's view).</param>
-    /// <param name="isInferenceTick">True every 4th server tick (16 Hz). Controls weapon_switch gate.
-    ///   Aim is updated EVERY tick now (no lerp), so this only gates weapon_switch.</param>
+    /// <param name="isInferenceTick">True every 4th server tick (16 Hz). Gates Δyaw application
+    ///   and weapon_switch. Δyaw MUST only be applied once per inference cycle to match
+    ///   training semantics (see comment block below).</param>
     public void Execute(
         CCSPlayerController bot,
         CCSPlayerPawn       pawn,
@@ -76,20 +77,31 @@ public sealed class ActionExecutor
         btns = (btns & ~clear) | set;
 
         // ── Aim (continuous Δyaw, Batch 3) ───────────────────────────────────
-        // Defensive clamp: ONNX should emit only tanh-squashed values, but
-        // belt-and-braces against numeric drift / quantisation.
-        const float MAX_TURN_RAD = (float)(Math.PI / 4.0);
-        deltaYawRad = Math.Clamp(deltaYawRad, -MAX_TURN_RAD, MAX_TURN_RAD);
-        float deltaYawDeg = deltaYawRad * 180f / MathF.PI;
-        QAngle current    = pawn.EyeAngles;                       // X=pitch, Y=yaw (Source convention)
-        float newYaw      = current.Y + deltaYawDeg;
-        newYaw            = newYaw - 360f * MathF.Floor((newYaw + 180f) / 360f); // wrap to [-180, +180]
-        pawn.Teleport(null, new QAngle(current.X, newYaw, 0f), null);
-        //                              ^^^^^^^^^ pitch preserved — NOT 0.
-        // (current.X stays from the previous frame; sim is 2D yaw-only and
-        // doesn't drive pitch, so it tracks whatever the human/admin/bot AI
-        // set it to. Batch 3.5 #24 adds Δpitch as a second continuous head
-        // and this becomes `current.X + deltaPitchDeg` instead.)
+        // Apply Δyaw ONLY on inference ticks (every 4th server tick at 16 Hz)
+        // to match training semantics: the policy is trained with one Δyaw per
+        // env step (= one inference call), and the C env consumes Δyaw exactly
+        // once per step (see src/c_env/cs2_env.h aim consumption block:
+        //   a->facing = wrap_pi(a->facing + clamped);  // fires once per step).
+        // Re-applying the cached Δyaw on every server tick would 4× over-rotate
+        // (e.g. 45° Δyaw → 180° per inference cycle). On non-inference ticks
+        // the bot's yaw stays at whatever the previous inference Teleport set.
+        if (isInferenceTick)
+        {
+            // Defensive clamp: ONNX should emit only tanh-squashed values, but
+            // belt-and-braces against numeric drift / quantisation.
+            const float MAX_TURN_RAD = (float)(Math.PI / 4.0);
+            deltaYawRad = Math.Clamp(deltaYawRad, -MAX_TURN_RAD, MAX_TURN_RAD);
+            float deltaYawDeg = deltaYawRad * 180f / MathF.PI;
+            QAngle current    = pawn.EyeAngles;                       // X=pitch, Y=yaw (Source convention)
+            float newYaw      = current.Y + deltaYawDeg;
+            newYaw            = newYaw - 360f * MathF.Floor((newYaw + 180f) / 360f); // wrap to [-180, +180]
+            pawn.Teleport(null, new QAngle(current.X, newYaw, 0f), null);
+            //                              ^^^^^^^^^ pitch preserved — NOT 0.
+            // (current.X stays from the previous frame; sim is 2D yaw-only and
+            // doesn't drive pitch, so it tracks whatever the human/admin/bot AI
+            // set it to. Batch 3.5 #24 adds Δpitch as a second continuous head
+            // and this becomes `current.X + deltaPitchDeg` instead.)
+        }
 
         // ── Head 1: shoot (2) — was Head 2 in the 8-element layout ───────────
         if (actions[1] == 1) btns |=  (ulong)PlayerButtons.Attack;
