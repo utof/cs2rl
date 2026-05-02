@@ -239,3 +239,128 @@ def test_continuous_aim_nan_guard():
             f"guard warning not printed: {captured.getvalue()!r}"
     finally:
         env.close()
+
+
+# ── Batch 3 Task 5b: Multiprocessing cont-action plumbing regression ───────
+#
+# Catches the exact silent-zero failure mode that T5 shipped with: under the
+# Multiprocessing vecenv backend the per-step Δyaw written by the trainer
+# was invisible to worker processes (Python attr stash on the parent vecenv,
+# not in shared memory). Workers fell through to the all-zero scratch and
+# the C env applied Δyaw=0 every tick — gradient signal for the Gaussian
+# aim head was decoupled from environment behaviour without any test failing.
+#
+# Fix verified here: T5b allocates a multiprocessing.RawArray BEFORE workers
+# fork, threads it into env_kwargs, and Cs2Env._attach_cont_action_view
+# carves a per-env numpy slice that workers see. Trainer (parent process)
+# writes into the same RawArray; the data is visible immediately.
+
+
+def test_continuous_aim_mp_backend_receives_buffer():
+    """MP vecenv: writing Δyaw via trainer-side shm view is visible to workers.
+
+    Spawns a small Multiprocessing vecenv (num_workers=2, num_envs=2),
+    allocates the cont-action RawArray and attaches per-env views, drives a
+    full round (≥ROUND_TIME ticks) with a non-zero Δyaw, and asserts that
+    each env's terminal info reports a non-zero aim_delta_count and a mean
+    Δyaw close to the value we wrote. Pre-fix this test would observe
+    aim_delta_sum/count consistent with Δyaw=0 (clamped tail values from
+    the env's own Welford accumulator over a zero buffer).
+
+    Test is intentionally inline (no train.train() machinery) so a failure
+    isolates to the backend plumbing, not the surrounding PPO trainer.
+    """
+    from multiprocessing import RawArray
+
+    import pufferlib.vector
+
+    from _action_spec import ACTION_DIM, AIM_DIM
+    from c_env.cs2_env import make_env
+
+    # ROUND_TIME=640 ticks; pad MAX_TICKS in case the first ticks are spent
+    # in a setup state where round_over fires immediately and resets the
+    # Welford counters before our writes can accumulate.
+    NUM_ENVS = 2
+    AGENTS_PER_ENV = 10                # 5 T + 5 CT
+    DELTA = 0.05                       # Δyaw value to inject
+    MAX_TICKS = 1500
+
+    cont_shm = RawArray("f", NUM_ENVS * AGENTS_PER_ENV * AIM_DIM)
+    # Trainer-side view onto the SAME bytes — what the parent process
+    # writes into propagates to workers via the OS shared mapping.
+    view_main = np.frombuffer(cont_shm, dtype=np.float32).reshape(NUM_ENVS * AGENTS_PER_ENV,
+                                                                  AIM_DIM)
+
+    def env_factory(*_args, buf=None, seed=None, _cont_shm=None, _cont_idx=None, **_kwargs):
+        env = make_env(seed=seed if seed is not None else 0,
+                       buf=buf,
+                       include_step_stats_in_info=False)
+        if _cont_shm is not None and _cont_idx is not None:
+            env._attach_cont_action_view(_cont_shm, _cont_idx)
+        return env
+
+    per_env_kwargs = [{
+        "_cont_shm": cont_shm,
+        "_cont_idx": i,
+    } for i in range(NUM_ENVS)]
+
+    # NOTE: pufferlib.vector.make has a quirk — if env_creator is a single
+    # callable, it broadcasts BOTH env_args and env_kwargs, overwriting our
+    # per-env list. Workaround: pass env_creators as a list of N copies of
+    # the same factory so the per-env env_kwargs survive (vector.py:672-684).
+    vecenv = pufferlib.vector.make(
+        [env_factory] * NUM_ENVS,
+        env_args=[[] for _ in range(NUM_ENVS)],
+        env_kwargs=per_env_kwargs,
+        num_envs=NUM_ENVS,
+        backend=pufferlib.vector.Multiprocessing,
+        num_workers=2,
+        batch_size=NUM_ENVS,
+        zero_copy=True,
+    )
+
+    try:
+        # Inject the constant Δyaw into shm BEFORE the first send — workers
+        # consume it on the very first step.
+        view_main.fill(DELTA)
+
+        vecenv.async_reset(seed=0)
+        vecenv.recv()                  # discard initial obs
+
+        # Discrete actions: zeros (NUM_ENVS * AGENTS_PER_ENV, ACTION_DIM)
+        # — vecenv.send takes the joint action across envs.
+        actions = np.zeros((NUM_ENVS * AGENTS_PER_ENV, ACTION_DIM), dtype=np.int32)
+
+        terminal_infos = []            # accumulate aim_delta_* per round
+        for _ in range(MAX_TICKS):
+            vecenv.send(actions)
+            _o, _r, _d, _t, infos, _ids, _m = vecenv.recv()
+            for info in infos:
+                if isinstance(info, dict) and "aim_delta_count" in info:
+                    terminal_infos.append(info)
+            if len(terminal_infos) >= NUM_ENVS:
+                break
+
+        assert terminal_infos, (
+            "no terminal infos collected after "
+            f"{MAX_TICKS} ticks — round never ended; cannot verify aim plumbing")
+
+        # T5b regression check: at least one terminal info must show a
+        # non-zero aim_delta_count AND a mean close to DELTA. Pre-fix,
+        # mean would be 0 (or noise) because workers stepped with the
+        # zero scratch buffer.
+        ok = False
+        for info in terminal_infos:
+            count = info["aim_delta_count"]
+            if count <= 0:
+                continue
+            mean = info["aim_delta_sum"] / count
+            if abs(mean - DELTA) < 0.01:
+                ok = True
+                break
+
+        assert ok, ("T5b regression: no env reported aim_delta_mean ≈ "
+                    f"{DELTA}. Got per-env stats: "
+                    f"{[(i['aim_delta_count'], i['aim_delta_sum']) for i in terminal_infos]}")
+    finally:
+        vecenv.close()

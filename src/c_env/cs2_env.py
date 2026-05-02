@@ -208,11 +208,11 @@ class StepStatsC(ctypes.Structure):
         ("action_shoot", ctypes.c_int32 * 2),
         ("action_use", ctypes.c_int32 * 2),
         ("action_last", ctypes.c_int32 * 2),
-                                                       # Batch 3: continuous-aim Δyaw stats (mirror C StepStats fields).
-                                                       # Replaces the 16-bin action_aim histogram (64B) with a Welford-style
-                                                       # triple (sum + sq_sum + count = 12B). No explicit _pad_aim_delta —
-                                                       # the three int32-aligned fields slot in cleanly between action_last
-                                                       # and action_reload. See cs2_types.h StepStats comment.
+                                                       # Batch 3: continuous-aim Δyaw stats (mirror C StepStats fields).  # noqa: E501
+                                                       # Replaces the 16-bin action_aim histogram (64B) with a Welford-style  # noqa: E501
+                                                       # triple (sum + sq_sum + count = 12B). No explicit _pad_aim_delta —  # noqa: E501
+                                                       # the three int32-aligned fields slot in cleanly between action_last  # noqa: E501
+                                                       # and action_reload. See cs2_types.h StepStats comment.  # noqa: E501
         ("aim_delta_sum", ctypes.c_float),
         ("aim_delta_sq_sum", ctypes.c_float),
         ("aim_delta_count", ctypes.c_int32),
@@ -530,6 +530,20 @@ class Cs2Env(pufferlib.PufferEnv):
         # never allocate on the hot path; copy-into is the worst case.
         self._cont_actions_shape = (N_AGENTS, AIM_DIM)
         self._cont_actions_scratch = np.zeros(self._cont_actions_shape, dtype=np.float32)
+        # Batch 3 (T5b): Optional shared-memory view onto a parent-process
+        # cont-action buffer. Set by _attach_cont_action_view() when the env
+        # is constructed by the Multiprocessing vecenv path; the worker reads
+        # whatever the trainer wrote into the shared RawArray BEFORE step.
+        # When set, _prepare_continuous_actions(None) returns this view
+        # instead of the (always-zero) scratch — so MP workers actually see
+        # the policy's Δyaw sample. Serial backend continues to bypass this
+        # via the per-env step wrapper and a Python attr stash on the
+        # vecenv (see _patch_trainer_with_hybrid_aim in src/train.py).
+        self._cont_action_view = None
+        # Hold the parent-process RawArray to keep it from being GC'd if the
+        # caller passes it transiently (it is also kept alive on the trainer
+        # side, but defensive double-anchoring is cheap).
+        self._cont_action_shm_ref = None
         self._terminal_rewards = np.empty(N_AGENTS, dtype=np.float32)
         self._terminal_terminals = np.empty(N_AGENTS, dtype=bool)
         self._terminal_truncations = np.empty(N_AGENTS, dtype=bool)
@@ -653,15 +667,56 @@ class Cs2Env(pufferlib.PufferEnv):
         np.copyto(self._actions_scratch, actions_arr, casting="no")
         return self._actions_scratch
 
+    def _attach_cont_action_view(self, raw_shm, env_idx):
+        """Attach a numpy view onto a parent-process RawArray slice (Batch 3 T5b).
+
+        Called by the env factory when the Multiprocessing vecenv path is
+        live. The trainer allocates a single ``multiprocessing.RawArray('f',
+        num_envs * N_AGENTS * AIM_DIM)`` BEFORE forking workers; each worker
+        receives the same raw buffer (forked file mapping, no pipe transfer)
+        and we carve out this env's per-agent slice as a numpy view.
+
+        After attach, ``_prepare_continuous_actions(None)`` returns this view
+        instead of the all-zero scratch — so the trainer can write Δyaw into
+        the shm slice on the main process and the worker's ``Cs2Env.step``
+        will see it on the very next tick.
+
+        Pitfall: ``raw_shm`` MUST have at least
+        ``(env_idx + 1) * N_AGENTS * AIM_DIM`` float32 slots. We do NOT
+        revalidate the global length here (we don't know num_envs); a too-
+        small allocation will manifest as np.frombuffer raising or as
+        out-of-range data. The caller (env factory in src/train.py) owns
+        the sizing.
+        """
+        if raw_shm is None:
+            return
+        per_env = N_AGENTS * AIM_DIM
+        # ctypes float = 4 bytes; np.frombuffer with offset/count addresses
+        # the slice without copying. Holding _cont_action_shm_ref pins the
+        # backing storage — frombuffer alone does not increment a refcount
+        # the way RawArray's internal allocator expects in all paths.
+        flat = np.frombuffer(raw_shm, dtype=np.float32, count=per_env, offset=env_idx * per_env * 4)
+        self._cont_action_view = flat.reshape(self._cont_actions_shape)
+        self._cont_action_shm_ref = raw_shm
+
     def _prepare_continuous_actions(self, cont):
         """Coerce caller-supplied Δyaw buffer to (N_AGENTS, AIM_DIM) float32 contiguous.
 
         Batch 3: shape mismatch ALWAYS raises (silent reshape would conceal a
         bug given AIM_DIM=1 — e.g. a (10,) accidentally passed as (1,10) would
         slip through). dtype mismatch is forgiven via cast. None → cached
-        zero scratch (RL training path before the policy is wired uses this).
+        zero scratch (RL training path before the policy is wired uses this),
+        OR if ``_attach_cont_action_view`` has installed a shared-memory
+        view (Batch 3 T5b — Multiprocessing vecenv path), that view is
+        returned instead so workers actually consume the trainer's Δyaw.
         """
         if cont is None:
+            if self._cont_action_view is not None:
+                # MP vecenv path: trainer wrote into the parent-process shm;
+                # the view is the workers' window onto the same physical
+                # bytes. Returning the view directly means the C binding
+                # reads the live data on this tick.
+                return self._cont_action_view
             # Reuse the pre-zeroed scratch — zeroing every step would be wasteful.
             # Tests that mutate this scratch via env.step(...) MUST pass an
             # explicit buffer; the scratch is treated as read-only zeroes here.

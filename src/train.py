@@ -2071,7 +2071,7 @@ def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d,
     return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c
 
 
-def _patch_trainer_with_hybrid_aim(trainer):
+def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None):
     """Extend trainer with continuous-action rollout storage + vecenv plumbing.
 
     Apply AFTER _patch_trainer_with_return_norm (so train() is wrapped) and
@@ -2080,23 +2080,35 @@ def _patch_trainer_with_hybrid_aim(trainer):
     via the helpers above; this patcher only handles the rollout/storage
     side.
 
-    Multiprocessing vecenv path
-    ───────────────────────────
-    PufferLib's Multiprocessing vecenv uses shared-memory action buffers
-    that are inherited by worker processes at fork time (see
-    .venv/.../pufferlib/vector.py:300-329). The continuous-action buffer
-    we add here is allocated on the MAIN process AFTER the workers have
-    already forked — so workers cannot see it directly.
-    For Multiprocessing we therefore stash cont_action on the main-process
-    vecenv and rely on the env factory to coordinate a separate float-shm
-    region. Production multiprocessing of the cont-action plumbing is
-    intentionally deferred (see plan §5.5 BLOCKED escalation). Smoke
-    training with --vec-backend serial works end-to-end; multiprocessing
-    smoke will fall through to a zero Δyaw via Cs2Env._cont_actions_scratch
-    until the deeper plumbing lands. Tests use Serial via the harness so
-    they're unaffected.
+    Multiprocessing vecenv path (Batch 3 T5b)
+    ─────────────────────────────────────────
+    PufferLib's Multiprocessing vecenv uses ``multiprocessing.RawArray`` for
+    its shm dict and forks workers AFTER allocation (see
+    ``.venv/.../pufferlib/vector.py:300-346``). Workers inherit the OS
+    shared mapping, so main process and workers see the same physical bytes
+    via different numpy views.
+
+    To carry continuous (Δyaw) actions across the fork boundary we mirror
+    that pattern — train() allocates its own RawArray BEFORE
+    pufferlib.vector.make and threads it through env_kwargs to each env's
+    ``Cs2Env._attach_cont_action_view``. The trainer-side numpy view over
+    the SAME RawArray is passed in here as ``cont_action_view_main``;
+    inside the patched ``_hybrid_send`` we write the policy's Δyaw sample
+    into it ``BEFORE`` calling ``orig_send(action)``. Workers' next
+    ``Cs2Env.step`` reads the data via their attached view, returning the
+    correct value from ``_prepare_continuous_actions(None)``.
+
+    Backwards compat: if ``cont_action_view_main`` is None (legacy callers
+    such as the test harness that builds a trainer without the shm path),
+    only the in-process Serial wrapper at the bottom of this function is
+    used. The Serial path uses a ``trainer.vecenv._cont_action_buf`` Python
+    attr stash + a per-env step wrapper, untouched from T5.
     """
     import torch
+    # Stash on the trainer so _hybrid_send (defined below) can close over
+    # it via attribute access. Storing on trainer (not closure-captured
+    # local) keeps it visible to instrumentation/inspection.
+    trainer._cont_action_view_main = cont_action_view_main
 
     # ── Rollout buffer extension (step 5.4) ──
     # self.actions has shape (segments, bptt_horizon, ACTION_DIM=7) int32 —
@@ -2128,6 +2140,16 @@ def _patch_trainer_with_hybrid_aim(trainer):
         Backwards-compatible with bare ndarrays so legacy callers (e.g. the
         record path) continue to work — cont_action defaults to None which
         makes Cs2Env.step fall back to its zero scratch buffer.
+
+        T5b dual-path:
+        - Serial backend: stash on `vecenv._cont_action_buf`; the per-env
+          step wrapper installed below reads it and forwards to
+          `Cs2Env.step(continuous_actions=...)`.
+        - Multiprocessing backend: also write the same buffer into the
+          shared-memory view (`trainer._cont_action_view_main`). Workers
+          read via `Cs2Env._cont_action_view` on the very next step.
+        Doing BOTH covers the test harness (which uses Serial wrapped in
+        the patcher) AND production training (Serial or MP).
         """
         if isinstance(action_pair, tuple):
             action, cont_action = action_pair
@@ -2139,6 +2161,21 @@ def _patch_trainer_with_hybrid_aim(trainer):
         # any custom step wrapper can pull it. None on a non-Serial path is
         # the documented fallback (zero Δyaw → no turning).
         trainer.vecenv._cont_action_buf = cont_action
+        # T5b: mirror the cont buffer into the shared-memory window so MP
+        # workers' attached views see the latest sample. We DELIBERATELY
+        # write all-zeros when cont_action is None so a stale prior write
+        # doesn't bleed into the next tick. The view shape is
+        # (num_envs * N_AGENTS, AIM_DIM) — same flatten as the per-env
+        # cont_action that comes from _hybrid_sample_logits.
+        view = trainer._cont_action_view_main
+        if view is not None:
+            if cont_action is None:
+                view.fill(0.0)
+            else:
+                # cont_action shape may be (total_agents, AIM_DIM) or
+                # already flat; we trust the rollout side to produce a
+                # buffer matching `view.shape` and let numpy broadcast/error.
+                view[:] = cont_action.reshape(view.shape)
         return orig_send(action)
 
     trainer.vecenv.send = _hybrid_send
@@ -2227,8 +2264,46 @@ def train(args):
 
     _map_data = args.map_data
 
-    def env_factory(*_args, buf=None, seed=None, **kwargs):
-        return make_puffer_env(team_spirit=shared_ts, buf=buf, seed=seed or 0, map_data=_map_data)
+    # ── Batch 3 (T5b): cont-action shared memory across the fork boundary ──
+    # PufferLib's Multiprocessing backend forks workers AFTER allocating its
+    # own shm dict, so any Python attribute set on the main vecenv after
+    # fork is invisible to workers. Mirror the pattern with our own
+    # RawArray('f', num_envs * N_AGENTS * AIM_DIM) allocated BEFORE
+    # pufferlib.vector.make runs. The trainer-side patch
+    # (_patch_trainer_with_hybrid_aim) writes the policy's Δyaw sample into
+    # `_cont_action_view_main` every send(); each worker's Cs2Env receives a
+    # numpy view onto the same physical bytes via _attach_cont_action_view
+    # (called inside env_factory below). For the Serial backend the view is
+    # also attached, but the per-env step wrapper installed by the patcher
+    # takes precedence — see that function for the dual-path docstring.
+    from multiprocessing import RawArray
+
+    # 10 (5 T + 5 CT) — N_AGENTS not exported via _action_spec; use AGENT_IDS.
+    _agents_per_env = len(AGENT_IDS)
+    _per_env_floats = _agents_per_env * AIM_DIM
+    _cont_action_shm = RawArray("f", args.num_envs * _per_env_floats)
+    _cont_action_view_main = np.frombuffer(_cont_action_shm, dtype=np.float32).reshape(
+        args.num_envs * _agents_per_env, AIM_DIM)
+
+    def env_factory(*_args, buf=None, seed=None, _cont_shm=None, _cont_idx=None, **kwargs):
+        env = make_puffer_env(team_spirit=shared_ts, buf=buf, seed=seed or 0, map_data=_map_data)
+        # Attach the shared-memory view so the env (whether running in the
+        # main process under Serial, or a forked worker under
+        # Multiprocessing) can pull cont_actions written by the trainer.
+        # _cont_idx may be None when env_factory is called outside the
+        # train() codepath (eg. legacy callers); attach is a no-op then.
+        if _cont_shm is not None and _cont_idx is not None:
+            env._attach_cont_action_view(_cont_shm, _cont_idx)
+        return env
+
+    # Per-env kwargs list — pufferlib.vector.make accepts a list of dicts
+    # (one per env). Both args propagate verbatim through fork because
+    # they're stored on env_kwargs[i] BEFORE Process.start() (see
+    # .venv/lib/.../pufferlib/vector.py:333-346).
+    _per_env_kwargs = [{
+        "_cont_shm": _cont_action_shm,
+        "_cont_idx": i,
+    } for i in range(args.num_envs)]
 
     backend_name = args.vec_backend.lower()
     if backend_name == "multiprocessing":
@@ -2252,8 +2327,15 @@ def train(args):
 
     print(f"[Train] Creating {args.num_envs} vectorised envs "
           f"(backend={backend_name}, workers={num_workers})...")
+    # pufferlib.vector.make quirk: if env_creator is a single callable AND
+    # env_kwargs is a per-env list, the broadcast logic at vector.py:672-684
+    # overwrites the per-env list. Pass env_creators as an explicit list of
+    # N copies of the same factory to make per-env kwargs survive. The
+    # env_args list is required to match length.
     vecenv = pufferlib.vector.make(
-        env_factory,
+        [env_factory] * args.num_envs,
+        env_args=[[] for _ in range(args.num_envs)],
+        env_kwargs=_per_env_kwargs,
         num_envs=args.num_envs,
         backend=backend,
         **vec_kwargs,
@@ -2299,7 +2381,12 @@ def train(args):
     # vs. selfplay: selfplay only wraps evaluate(), not train(), so the
     # rollout-side cont_action plumbing must be in place before evaluate()
     # is first called.
-    _patch_trainer_with_hybrid_aim(trainer)
+    # Pin the shm + view on the trainer so neither is GC'd mid-run. Without
+    # holding _cont_action_shm here, Python could free the RawArray once
+    # this function returns (Python doesn't know workers/numpy views are
+    # using it via the OS-level mapping).
+    trainer._cont_action_shm = _cont_action_shm
+    _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=_cont_action_view_main)
 
     # ── Self-play setup ──────────────────────────────────────────────────────
     self_play_mgr = None
