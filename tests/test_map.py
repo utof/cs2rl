@@ -295,13 +295,12 @@ def test_cliff_guard_blocks_walkup():
         y0 = g.agents[0].y
         actions, cont = _zero_actions()
         # Bin 1 = "W" (forward). With facing=-π/2: wy = -1 → drives decreasing y.
-        actions[0, 0] = 1                                                                # HEAD_MOVE = 0
-                                                                                         # Sanity pre-check: after one step the agent must have tried to move in -y.
+        # HEAD_MOVE = 0; sanity pre-check below confirms the agent moved in -y.
+        actions[0, 0] = 1
         env.step(actions, cont)
         assert g.agents[0].y <= y0, (f"facing=-π/2 + bin 1 should drive decreasing y; "
                                      f"y0={y0} but y={g.agents[0].y}. Check facing/bin convention.")
-                                                                                         # The cliff guard must keep the agent in area 6 even as it approaches
-                                                                                         # and presses against the y=192 boundary.
+        # Cliff guard must keep agent in area 6 as it approaches y=192 boundary.
         for _ in range(19):
             env.step(actions, cont)
             assert g.agents[0].area_idx == 6, (
@@ -344,16 +343,16 @@ def test_cliff_guard_diagonal_slides():
         #      = 0.707*0 - (-0.707)*(-1) = -0.707  (moves west)
         #   wy = _LOCAL_MOVE_Y[8]*sin(-π/2) + _LOCAL_MOVE_X[8]*cos(-π/2)
         #      = 0.707*(-1) + (-0.707)*0 = -0.707  (moves toward catwalk, blocked)
-        actions[0, 0] = 8                                                                     # HEAD_MOVE = 0
+        # HEAD_MOVE = 0; x should decrease (west slide allowed) post-step.
+        actions[0, 0] = 8
         env.step(actions, cont)
         env.step(actions, cont)
-                                                                                              # x should have decreased (west slide allowed).
         assert g.agents[0].x < x0, (
             f"axis-split slide failed: x did not decrease ({x0:.1f} → {g.agents[0].x:.1f}). "
             f"Either cliff guard is blocking both axes or bin/facing convention is wrong.")
-                                                                                              # The y-component (north toward catwalk) MUST have been rejected by the
-                                                                                              # cliff guard — agent's y should be approximately unchanged (within float
-                                                                                              # epsilon of 195.0). Proves the slide is genuinely axis-split (only x moved).
+        # y-component (north → catwalk) must be rejected by cliff guard;
+        # y stays approximately at the start (within float epsilon of 195.0).
+        # Proves axis-split is genuine (only x moved, not "magically nudged south").
         assert g.agents[0].y >= 195.0 - 0.5, (
             f"y drifted during slide ({g.agents[0].y:.2f}); guard should reject y")
         assert g.agents[0].area_idx == 6, (
@@ -408,9 +407,8 @@ def test_obs_z_delta_populated_for_elevated_teammate():
     skips self (j == i), so for agent 0 viewing agent 1, tm_count=0 → base=23
     → z_delta at obs[base+2] = obs[25].
 
-    Enemy z-delta (obs[53] for slot2=0 at base=51+0*8+2=53) is exercised by
-    the existing visibility tests in test_train_env.py; we don't re-test it
-    here to keep this test focused.
+    Includes a sign-flip sub-case (self at z=64, teammate at z=0 → obs[25] = -0.5)
+    to catch a subtle direction bug that wouldn't surface with just the positive case.
 
     Pitfall: obs population only happens in compute_observations() which runs
     during env.step(), NOT during env.reset().  The test must call env.step()
@@ -434,15 +432,37 @@ def test_obs_z_delta_populated_for_elevated_teammate():
         g.agents[1].is_airborne = 0
         actions, cont = _zero_actions()
         env.step(actions, cont)
-                                                                                        # env.observations is a flat buffer (N_AGENTS * OBS_DIM floats).
-                                                                                        # env.observations[0] gives the OBS_DIM-length slice for agent 0.
+                                                                                        # Verify ground-snap didn't mutate the teammate's z (T3 invariant).
+        assert g.agents[1].z == 64.0, f"teammate z drifted ({g.agents[1].z})"
+        assert g.agents[1].is_airborne == 0
+                                                                                        # env.observations is a flat buffer; [0] gives the OBS_DIM slice for agent 0.
         obs = env.observations[0]
                                                                                         # Teammate slot: tm_count=0, base=23, z_delta at obs[base+2]=obs[25].
         z_delta = obs[25]
         expected = (64.0 - 0.0) / 128.0                                                 # = 0.5
         assert abs(z_delta - expected) < 1e-5, (
             f"teammate z-delta slot obs[25] = {z_delta:.6f}, expected {expected:.6f}. "
-            f"Check that T4 filled obs[base+2] = (tm->z - a->z)/128.0f, "
-            f"and that agent 1 is alive (alive={g.agents[1].alive}).")
+            f"Check (tm->z - a->z)/128.0f; agent 1 alive={g.agents[1].alive}.")
+
+        # Sign-flip sub-case: swap z values; expect obs[25] = -0.5.
+        g.agents[0].z = 64.0
+        g.agents[0].area_idx = 6
+        g.agents[1].z = 0.0
+        g.agents[1].area_idx = 0
+        env.step(actions, cont)
+        obs = env.observations[0]
+        expected_neg = (0.0 - 64.0) / 128.0                                                       # = -0.5
+        assert abs(obs[25] - expected_neg) < 1e-5, (
+            f"sign-flip: teammate z-delta obs[25] = {obs[25]:.6f}, expected {expected_neg:.6f}. "
+            f"Direction bug? Formula must be (tm->z - a->z), NOT (a->z - tm->z).")
     finally:
         env.close()
+
+
+# Note: enemy z-delta slot at obs[base+2] (where base=51 for the closest enemy slot2=0)
+# is intentionally NOT covered here. The slot uses a distance-sorted indirection
+# (`order[]` array in cs2_observations.h:100-110) that needs setup-coordination across
+# multiple agents to test reliably. The formula matches the teammate write site verbatim,
+# and visibility-gating is documented at the write site (cs2_observations.h:122-134).
+# A live deploy-side test in T6 (or a dedicated test_obs_enemy_z_delta after T4 lands)
+# is the better venue. Tracking gap as a follow-up.

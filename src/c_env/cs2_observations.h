@@ -126,7 +126,12 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
                 obs[base + 1] = (map_diag > 0.0f) ? dy / map_diag : 0.0f;
                 /* Relative z-delta: positive = enemy above us.  Same /128
                  * scale as self obs[5] and teammate slot.  Range mirrors
-                 * teammate block.  Was constant-0 placeholder pre-T4. */
+                 * teammate block.  Was constant-0 placeholder pre-T4.
+                 * NB: visibility-gated — when !can_see (invisible / memory-only),
+                 * obs[base+2] stays 0 from memset.  Asymmetry vs teammate slot
+                 * (which writes z-delta whenever tm->alive).  Policies must
+                 * disambiguate "0 = invisible enemy" from "0 = same height" via
+                 * obs[base+3] (can_see flag at base+3). */
                 obs[base + 2] = (en->z - a->z) / 128.0f;
                 float angle   = atan2f(dy, dx);
                 obs[base + 5] = sinf(angle);
@@ -167,7 +172,10 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
             obs[96]  = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
             obs[97]  = (map_diag > 0.0f) ? by / map_diag : 0.0f;
         }
-        obs[98]  = 0.0f; /* z placeholder */
+        /* Bomb z deferred — out of scope for T4 (spec L4 covers teammate/enemy
+         * z-delta only).  Bomb z would require obs version contract for plug-in.
+         * See gh #(filed) for the bomb-z-aware obs follow-up. */
+        obs[98]  = 0.0f; /* bomb z placeholder (intentionally constant pre-followup) */
         obs[99]  = g->bomb_planted ? g->bomb_ticks_left / (float)sd->bomb_timer : 0.0f;
         obs[100] = (g->bomb_being_planted_by >= 0 && sd->bomb_plant_time > 0)
                        ? g->bomb_plant_ticks / (float)sd->bomb_plant_time
