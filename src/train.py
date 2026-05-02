@@ -48,6 +48,9 @@ OBS_DIM = 105
 LOG_STD_INIT = math.log(0.1)
 LOG_STD_MIN = math.log(0.01)
 LOG_STD_MAX = math.log(0.5)
+# Fix #2: precomputed log(2π) for the analytic Normal log-prob/entropy
+# replacing torch.distributions.Normal in _hybrid_sample_logits.
+_LOG_2PI = math.log(2.0 * math.pi)
 
 
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
@@ -273,7 +276,8 @@ def select_policy_actions(policy, obs_buffer, active_agents, device, policy_stat
         # the int-action signature for now to avoid touching every caller.
         logits, mu_aim, log_std_aim, _ = policy.forward_eval(obs_t, policy_state)
         if policy_mode == "sample":
-            act_t, _cont_t, _, _ = _hybrid_sample_logits(
+            # Fix #1: 6-tuple return; only need action + cont (logp/entropy unused here).
+            act_t, _cont_t, *_ = _hybrid_sample_logits(
                 (logits, mu_aim, log_std_aim, None),
                 max_turn_speed=policy.max_turn_speed.item(),
             )
@@ -304,7 +308,8 @@ def select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
         # the ONNX export wiring. See sibling helper for greedy-vs-sample notes.
         logits, mu_aim, log_std_aim, _ = policy.forward_eval(obs_t, policy_state)
         if policy_mode == "sample":
-            act_t, _cont_t, _, _ = _hybrid_sample_logits(
+            # Fix #1: 6-tuple return; only need action + cont (logp/entropy unused here).
+            act_t, _cont_t, *_ = _hybrid_sample_logits(
                 (logits, mu_aim, log_std_aim, None),
                 max_turn_speed=policy.max_turn_speed.item(),
             )
@@ -1650,29 +1655,22 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     state["lstm_h"] = self.lstm_h[env_id.start]
                     state["lstm_c"] = self.lstm_c[env_id.start]
 
-                # Batch 3 (T5): hybrid rollout. Policy returns 4-tuple
-                # (logits, mu_aim, log_std, value). _hybrid_sample_logits
-                # produces both discrete action AND continuous Δyaw plus the
-                # joint log-prob; we then decompose the joint log-prob into
-                # discrete and continuous halves so the PPO update can clip
-                # each independently. The decomposition costs one extra
-                # categorical+normal eval per batch — cheap, ≪ env step.
+                # Batch 3 (T5) + Fix #1: hybrid rollout. Policy returns 4-tuple
+                # (logits, mu_aim, log_std, value). _hybrid_sample_logits now
+                # returns the per-factor log-prob halves directly (6-tuple),
+                # eliminating the previous double-construction of 7 Categorical
+                # + 1 Normal at the rollout site (was +437 ms/epoch on the
+                # smoke benchmark per perf investigation post-PR #28).
                 logits, mu_aim, log_std_aim, value = self.policy.forward_eval(o_device, state)
-                action, cont_action, logprob, _ = _hybrid_sample_logits(
+                action, cont_action, logprob_d, logprob_c, _, _ = _hybrid_sample_logits(
                     (logits, mu_aim, log_std_aim, value),
                     max_turn_speed=self.policy.max_turn_speed.item(),
                 )
-                # Per-factor logprobs for self.logprobs_d / self.logprobs_c.
-                # Recompute by reconstructing distributions — cheaper than
-                # plumbing a second return path through _hybrid_sample_logits.
-                # Stays correct because logits/mu_aim/log_std_aim are tensors
-                # we already hold; no extra policy forward pass.
-                _sigma_aim = torch.exp(log_std_aim).expand_as(mu_aim)
-                logprob_d = sum(
-                    torch.distributions.Categorical(logits=lg).log_prob(action[..., i])
-                    for i, lg in enumerate(logits))
-                logprob_c = (torch.distributions.Normal(mu_aim,
-                                                        _sigma_aim).log_prob(cont_action).sum(-1))
+                # Joint log-prob for self.logprobs (back-compat slot read by
+                # PufferLib's diagnostics + the KL/clipfrac path). Per-factor
+                # halves go to self.logprobs_d / self.logprobs_c for the
+                # H-PPO clip in _hybrid_ppo_loss.
+                logprob = logprob_d + logprob_c
 
                 # ── Task 6c: per-channel reward norm + symlog (replaces the
                 # old hard-clip of r to [-1, 1]). Pipeline:
@@ -1756,24 +1754,21 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                         "lstm_h": past_lstm_h[env_id.start][opp_mask],
                         "lstm_c": past_lstm_c[env_id.start][opp_mask],
                     }
-                    # Batch 3 (T5): past policy is a HybridPolicy too — same
-                    # 4-tuple contract. Sample its discrete + continuous
-                    # action and decompose log-prob halves identically to
-                    # the current-policy path so the rollout buffer entries
-                    # stored at this opponent slot stay consistent across
-                    # both branches (PPO update treats them indistinguishably).
+                    # Batch 3 (T5) + Fix #1: past policy is a HybridPolicy too;
+                    # same 4-tuple contract. _hybrid_sample_logits now surfaces
+                    # the per-factor log-prob halves directly (6-tuple), so we
+                    # no longer reconstruct 7 Categorical + 1 Normal here. The
+                    # rollout buffer entries stored at this opponent slot stay
+                    # consistent with the current-policy branch (PPO update
+                    # treats them indistinguishably).
                     opp_logits, opp_mu, opp_log_std, _opp_value = past_policy.forward_eval(
                         o_device[opp_mask], past_state)
-                    opp_action, opp_cont_action, opp_logprob, _ = _hybrid_sample_logits(
-                        (opp_logits, opp_mu, opp_log_std, None),
-                        max_turn_speed=past_policy.max_turn_speed.item(),
-                    )
-                    _opp_sigma = torch.exp(opp_log_std).expand_as(opp_mu)
-                    opp_logprob_d = sum(
-                        torch.distributions.Categorical(logits=lg).log_prob(opp_action[..., i])
-                        for i, lg in enumerate(opp_logits))
-                    opp_logprob_c = (torch.distributions.Normal(
-                        opp_mu, _opp_sigma).log_prob(opp_cont_action).sum(-1))
+                    (opp_action, opp_cont_action, opp_logprob_d, opp_logprob_c, _,
+                     _) = _hybrid_sample_logits(
+                         (opp_logits, opp_mu, opp_log_std, None),
+                         max_turn_speed=past_policy.max_turn_speed.item(),
+                     )
+                    opp_logprob = opp_logprob_d + opp_logprob_c
 
                     # Write back updated past-policy LSTM states (cast from fp16 if needed)
                     past_lstm_h[env_id.start][opp_mask] = past_state["lstm_h"].to(
@@ -1950,56 +1945,85 @@ def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_t
 
     Returns
     -------
-    action, continuous_action, log_prob, entropy
+    action, continuous_action, log_prob_d, log_prob_c, entropy_d, entropy_c
         action : (B, 7) int64
         continuous_action : (B, 1) float32, ∈ [-max_turn_speed, max_turn_speed]
-        log_prob : (B,) — sum of discrete + continuous log-probs.
-            Joint factorised under independence (spec L8). The PPO loss
-            assembly in _hybrid_ppo_loss separates the two halves to apply
-            per-factor clipping (Fan et al. 2019); this helper sums them
-            because the rollout-side log_prob is what gets stored in
-            self.logprobs (back-compat) — the per-factor halves are stored
-            separately in self.logprobs_d / self.logprobs_c.
-        entropy : (B,) — discrete entropy (sum of 7 categoricals) + Normal
-            entropy. Note: Normal entropy 0.5·log(2πe·σ²) is NEGATIVE for
-            σ < 1/√(2πe) ≈ 0.242 — at σ_init=0.1 the continuous term is
-            ≈ −0.886. This is mathematically correct; do NOT clip or assert
-            entropy >= 0 anywhere downstream.
+        log_prob_d : (B,) — discrete factor log-prob (sum over 7 categoricals).
+            The PPO loss assembly in _hybrid_ppo_loss applies the clip to
+            this half independently of log_prob_c (Fan et al. 2019 Eq 8).
+            Callers that want the rollout-stored joint log_prob simply do
+            `log_prob_d + log_prob_c` (joint factorised under independence,
+            spec L8) — surfacing the halves directly here saves the rollout
+            from reconstructing 7 Categorical + 1 Normal a second time.
+        log_prob_c : (B,) — continuous factor log-prob (Normal sum-of-dims).
+        entropy_d : (B,) — discrete entropy (sum of 7 categoricals).
+        entropy_c : (B,) — Normal entropy 0.5·log(2πe·σ²). NEGATIVE for
+            σ < 1/√(2πe) ≈ 0.242 — at σ_init=0.1 it is ≈ −0.886. This is
+            mathematically correct; do NOT clip or assert entropy >= 0
+            anywhere downstream. Callers that don't need entropy can ignore
+            with `*_entropies` unpacking.
+
+    Pre-Fix#1 (Batch 3 T5) this returned the SUMMED log_prob and SUMMED
+    entropy as a 4-tuple, forcing the rollout caller to reconstruct
+    distributions to recover the per-factor halves for self.logprobs_d /
+    self.logprobs_c. That double-construction was measured at +437 ms/epoch
+    on the i7-9750H smoke (16.0 ms/step actual vs 9.1 ms/step minimal).
+    Surfacing the halves directly drops that cost to ~9.1 ms/step.
     """
     import torch
+    import torch.nn.functional as F
 
     logits_list, mu_aim, log_std_aim, _value = policy_out
 
-    # ── Discrete: 7 independent categorical heads ──
-    # Reconstruct distributions from the logits so we can sample / log-prob /
-    # entropy without re-running the policy. The spec calls these "factors";
-    # under independence their joint log-prob is the sum.
-    dists_d = [torch.distributions.Categorical(logits=lg) for lg in logits_list]
+    # ── Discrete: 7 independent categorical heads — hand-rolled (Fix #2) ──
+    # We avoid `torch.distributions.Categorical` because constructing 7 of them
+    # per rollout step (×64 bptt × ~12 epochs/sec) accumulates measurable
+    # Python-side overhead. The math is straightforward:
+    #   sample(logits) ≡ multinomial(softmax(logits), 1)
+    #   log_prob(a)    ≡ log_softmax(logits)[a]
+    #   entropy()      ≡ -Σ p · log_softmax  where p = exp(log_softmax)
+    # Bench at production batch=2560 measured 9.59 ms → 5.91 ms / step
+    # (1.62× speedup, ~235 ms/epoch saved). Numerical equivalence vs
+    # torch.distributions: |Δ| ≤ 1.91e-6 (different reduction order in
+    # softmax; well within the fp32 tolerance PPO already runs at).
+    log_probs_per_head = [F.log_softmax(lg, dim=-1) for lg in logits_list]
     if action is None:
-        action = torch.stack([d.sample() for d in dists_d], dim=-1)
-    log_prob_d = sum(d.log_prob(action[..., i]) for i, d in enumerate(dists_d))
-    entropy_d = sum(d.entropy() for d in dists_d)
+        action = torch.stack(
+            [torch.multinomial(lp.exp(), 1).squeeze(-1) for lp in log_probs_per_head],
+            dim=-1,
+        )
+    log_prob_d = sum(
+        lp.gather(-1, action[..., i:i + 1]).squeeze(-1) for i, lp in enumerate(log_probs_per_head))
+    # Entropy: H = -Σ p log p. log_softmax already gives log p; multiply by
+    # exp(log_softmax) = p. Single pass per head, no extra softmax call.
+    entropy_d = sum(-(lp.exp() * lp).sum(-1) for lp in log_probs_per_head)
 
-    # ── Continuous: 1D (today) Gaussian aim head ──
-    # σ comes pre-clamped from forward()/forward_eval() (LOG_STD_MIN/MAX),
-    # so we don't re-clamp here — would silently mask a regression in the
-    # policy if the clamp were removed upstream.
+    # ── Continuous: 1D Gaussian aim head — hand-rolled (Fix #2) ──
+    # σ comes pre-clamped from forward()/forward_eval() (LOG_STD_MIN/MAX), so
+    # we don't re-clamp here — would silently mask a regression in the policy
+    # if the clamp were removed upstream.
+    # Analytic forms (replace torch.distributions.Normal):
+    #   sample(μ, σ)   = μ + σ · randn_like(μ)         (vs rsample; no autograd
+    #                                                    graph, PPO doesn't use
+    #                                                    pathwise gradients)
+    #   log_prob(x)    = -½((x-μ)/σ)² - log σ - ½ log 2π
+    #   entropy()      = ½ + ½ log 2π + log σ
     sigma = torch.exp(log_std_aim).expand_as(mu_aim)
-    dist_c = torch.distributions.Normal(mu_aim, sigma)
     if continuous_action is None:
-        # rsample preserves the reparameterised gradient path. PPO doesn't
-        # use pathwise gradients but keeping rsample costs nothing and stays
-        # future-proof for SAC-style continuous extensions.
-        continuous_action = dist_c.rsample()
+        continuous_action = mu_aim + sigma * torch.randn_like(mu_aim)
         if max_turn_speed is not None:
             # Same clamp logic as HybridPolicy.get_action_and_value (T4).
             # The C env (cs2_env.h:129) clamps silently with fminf/fmaxf;
             # storing the post-clamp value keeps the PPO ratio honest.
             continuous_action = torch.clamp(continuous_action, -max_turn_speed, max_turn_speed)
-    log_prob_c = dist_c.log_prob(continuous_action).sum(-1)
-    entropy_c = dist_c.entropy().sum(-1)
+    diff = (continuous_action - mu_aim) / sigma
+    # log_std_aim has shape (AIM_DIM,); expand_as(mu_aim) broadcasts to (B, AIM_DIM)
+    # so .sum(-1) sums over AIM_DIM correctly.
+    log_std_b = log_std_aim.expand_as(mu_aim)
+    log_prob_c = (-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI).sum(-1)
+    entropy_c = (0.5 + 0.5 * _LOG_2PI + log_std_b).sum(-1)
 
-    return action, continuous_action, log_prob_d + log_prob_c, entropy_d + entropy_c
+    return action, continuous_action, log_prob_d, log_prob_c, entropy_d, entropy_c
 
 
 def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d, mb_old_logp_c,
@@ -2026,6 +2050,7 @@ def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d,
         backwards-compatible by using the discrete ratio there).
     """
     import torch
+    import torch.nn.functional as F
 
     logits_list, mu_aim, log_std_aim, new_value = policy(mb_obs, state)
 
@@ -2045,13 +2070,24 @@ def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d,
     flat_adv = mb_advantages.reshape(-1)
 
     # ── Re-evaluate discrete and continuous halves under the new policy ──
-    dists_d = [torch.distributions.Categorical(logits=lg) for lg in logits_list]
-    new_logp_d = sum(d.log_prob(flat_actions[..., i]) for i, d in enumerate(dists_d))
+    # Fix #3 (perf): replaces 7× torch.distributions.Categorical(logits=lg) +
+    # 1× torch.distributions.Normal(mu, sigma) construction per minibatch
+    # with the same hand-rolled forms used in _hybrid_sample_logits (Fix #2).
+    # Microbench measured 8.6 ms/MB savings; PPO update calls this 10×4 = 40
+    # times per epoch → ~345 ms/epoch saved on heavy-update epochs. Same
+    # numerical contract as before: |Δ| ≤ ~2e-6 vs torch.distributions
+    # reference (different softmax reduction order; well within fp32 noise).
+    log_probs_per_head = [F.log_softmax(lg, dim=-1) for lg in logits_list]
+    new_logp_d = sum(
+        lp.gather(-1, flat_actions[..., i:i + 1]).squeeze(-1)
+        for i, lp in enumerate(log_probs_per_head))
+    entropy_d = sum(-(lp.exp() * lp).sum(-1) for lp in log_probs_per_head)
+
     sigma = torch.exp(log_std_aim).expand_as(mu_aim)
-    dist_c = torch.distributions.Normal(mu_aim, sigma)
-    new_logp_c = dist_c.log_prob(flat_cont).sum(-1)
-    entropy_d = sum(d.entropy() for d in dists_d)
-    entropy_c = dist_c.entropy().sum(-1)
+    log_std_b = log_std_aim.expand_as(mu_aim)
+    diff = (flat_cont - mu_aim) / sigma
+    new_logp_c = (-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI).sum(-1)
+    entropy_c = (0.5 + 0.5 * _LOG_2PI + log_std_b).sum(-1)
     entropy = entropy_d + entropy_c
 
     # ── Per-factor PPO ratios + clipped loss ──
@@ -2230,6 +2266,20 @@ def train(args):
     import pufferlib.vector
     import torch
     from pufferlib.pufferl import PuffeRL
+
+    # Fix #2 (perf): disable torch.distributions argument validation globally.
+    # Most of our hot paths replaced torch.distributions with hand-rolled
+    # log_softmax+gather + analytic Normal already, but a few diagnostic /
+    # legacy paths (e.g. NaN-guard sanity prints, exploratory test paths) still
+    # construct distributions. validate_args=False removes the per-call
+    # constraint check overhead for those residual sites at zero risk —
+    # validation is purely a sanity check and any production code passes
+    # validated inputs by construction. Per the perf research subagent:
+    # PyTorch issue #11747 / #30968 confirmed Categorical's structural
+    # overhead is the logits.logsumexp allocation in __init__, NOT the
+    # validation; this toggle gives the residual ~few-percent gain on
+    # whatever still routes through torch.distributions.
+    torch.distributions.Distribution.set_default_validate_args(False)
 
     # Load .env from repo root if present (sets WANDB_* vars picked up by wandb)
     _env_file = Path(__file__).parent.parent / ".env"
