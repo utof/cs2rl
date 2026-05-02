@@ -171,7 +171,9 @@ def test_scripted_bomber_can_reach_site_and_plant():
 
     for _ in range(BOMB_PLANT_TIME):
         actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-        actions[bomber_idx, 5] = 1     # use action (head 5) plants the bomb
+        # Batch 3: head order changed — USE is now index 4 (was 5).
+        # Order is now: move=0, shoot=1, reload=2, weapon=3, use=4, crouch=5, jump=6.
+        actions[bomber_idx, 4] = 1     # use action plants the bomb
         env.step(actions)
         if env._c_env.game.bomb_planted:
             break
@@ -230,19 +232,16 @@ def test_controlled_visible_agents_can_kill():
     ct_agent.y = float(ct_centroid[1])
     ct_agent.z = 0.0
 
-    # Compute aim bucket corresponding to desired facing angle
-    def _facing_to_aim(angle):
-        normalized = angle % (2 * math.pi)
-        if normalized < 0:
-            normalized += 2 * math.pi
-        return int(normalized * 16 / (2 * math.pi)) % 16
-
+    # Batch 3: aim is now a continuous head — facing is set directly on the
+    # agent (above) and the discrete actions buffer no longer carries an
+    # aim bin. SHOOT moved from index 2 to index 1 in the new enum
+    # (move=0, shoot=1, reload=2, weapon=3, use=4, crouch=5, jump=6).
     t_facing = math.atan2(ct_agent.y - t_agent.y, ct_agent.x - t_agent.x)
     t_agent.facing = t_facing
 
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 1] = _facing_to_aim(t_facing)           # aim at CT (head index 1)
-    actions[0, 2] = 1                                  # t0 shoots (shoot is head index 2)
+    # Batch 3: SHOOT moved from head 2 → 1 after HEAD_AIM removal.
+    actions[0, 1] = 1                  # t0 shoots (shoot is head 1)
     _, rewards, _, _, _ = env.step(actions)
 
     assert not bool(env._c_env.game.agents[5].alive)

@@ -64,7 +64,11 @@ void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
     act[HEAD_MOVE] =
         _wasd_to_local_bin(IsKeyDown(KEY_W), IsKeyDown(KEY_A), IsKeyDown(KEY_S), IsKeyDown(KEY_D));
 
-    act[HEAD_AIM]    = 0; /* aim bin unused — continuous aim via agent->aim_rad */
+    /* Batch 3: HEAD_AIM removed from action enum; human aim is set
+     * directly via agent->aim_rad (line 55 above) and consumed by
+     * cs2_env.h env_step's `if (a->human_controlled)` branch. The
+     * continuous_actions float buffer is irrelevant for human agents —
+     * the env_step path takes the human branch before reading it. */
     act[HEAD_SHOOT]  = IsMouseButtonDown(MOUSE_BUTTON_LEFT) ? 1 : 0;
     act[HEAD_RELOAD] = IsKeyDown(KEY_R) ? 1 : 0;
     act[HEAD_WEAPON] = IsKeyDown(KEY_ONE) ? 1 : IsKeyDown(KEY_TWO) ? 2 : 0;

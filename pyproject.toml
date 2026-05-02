@@ -33,6 +33,7 @@ dev = [
     # means a fresh `uv sync` sets up the full hook toolchain in one step
     # (no apt / brew / separate tool installs needed).
     "clang-format>=20.1.0",
+    "pytest-timeout>=2.4.0",
 ]
 
 [tool.uv]

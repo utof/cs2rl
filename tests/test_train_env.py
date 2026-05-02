@@ -429,21 +429,43 @@ def test_event_oversample_fraction_exposed():
 
 def test_target_entropy_schedule_applied():
     """Task 9A: trainer._batch1_current_target_entropy must follow the
-    linear ramp 0.7→0.5 * max_entropy across [0, 10M] global steps."""
+    linear ramp 0.7→0.5 * max_entropy across [0, 10M] global steps.
+
+    Batch 3 (T5): the max_entropy expectation now includes the closed-form
+    Gaussian aim head entropy at σ_max = exp(LOG_STD_MAX). Pre-Batch-3 this
+    pin was sum(log(n) for n in ACTION_HEAD_SIZES) ≈ 6.7616; the Gaussian
+    term at AIM_DIM=1 / σ_max=0.5 adds 0.5·log(2πe·σ_max²) ≈ 0.7258, giving
+    ≈ 7.4874. The continuous term can be NEGATIVE for σ < 1/√(2πe) — but
+    here we evaluate at σ_max where it is positive, so target_entropy stays
+    > 0 across the whole ramp. Do NOT add an entropy >= 0 assertion to this
+    test (or anywhere else); negative continuous entropy is expected at
+    LOG_STD_INIT=0.1 and not a bug.
+    """
     import math
 
-    from train import ACTION_HEAD_SIZES, _patch_trainer_with_return_norm
+    from train import (
+        ACTION_HEAD_SIZES,
+        AIM_DIM,
+        LOG_STD_MAX,
+        _patch_trainer_with_return_norm,
+    )
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         _patch_trainer_with_return_norm(trainer)
 
-        expected_max = sum(math.log(n) for n in ACTION_HEAD_SIZES)
+        expected_max_discrete = sum(math.log(n) for n in ACTION_HEAD_SIZES)
+        # Closed-form Normal entropy at σ = exp(LOG_STD_MAX), summed across
+        # AIM_DIM. Mirrors the calc inside _patch_trainer_with_return_norm
+        # so this pin tracks the production formula exactly.
+        sigma_max = math.exp(LOG_STD_MAX)
+        expected_max_continuous = AIM_DIM * 0.5 * math.log(2 * math.pi * math.e * sigma_max**2)
+        expected_max = expected_max_discrete + expected_max_continuous
         # Pin the run-constant first; if this drifts the schedule break too.
         assert abs(trainer._batch1_max_entropy - expected_max) < 1e-9, (
             f"Task 9A: _batch1_max_entropy={trainer._batch1_max_entropy} != "
-            f"sum(log(n) for n in ACTION_HEAD_SIZES)={expected_max}")
+            f"discrete+continuous max={expected_max}")
 
         # evaluate() advances global_step by ~one rollout (batch_size); we
         # need a populated rollout buffer for train() to be valid, so call
@@ -674,7 +696,7 @@ def test_round_designated_carrier_property_50_seeds():
                 if g.round_over:
                     break
                 if kill_seed and tick == 5:
-                                                                             # Drive the drop-on-death path (cs2_env.h:155-167).
+                                                                             # Drive the drop-on-death path (cs2_env.h:155-167).  # noqa: E501
                     g.agents[rid].hp = 0
                     g.agents[rid].alive = 0
                 env.step(actions)
@@ -855,5 +877,325 @@ def test_obs_dim_constant_consistency():
         assert env.single_observation_space.shape == (nav.OBS_DIM, ), (
             f"env.single_observation_space.shape={env.single_observation_space.shape} "
             f"!= ({nav.OBS_DIM},)")
+    finally:
+        env.close()
+
+
+# ── Batch 3 (utof/cs2rl Batch 3): continuous-aim H-PPO ──
+
+
+def test_action_spec_aim_is_gaussian_1d():
+    """`_action_spec.py` exports the discrete/continuous split:
+       - DISCRETE_HEAD_SPEC has 7 categorical entries, sum(sizes) = 22
+       - CONTINUOUS_HEAD_SPEC has 1 gaussian entry, dim 1
+       - AIM_DIM == 1
+       - Backwards-compat ACTION_DIM is 7, ACTION_MASK_DIM is 22.
+    Catches the regen-not-run footgun (modifying cs2_types.h without
+    re-running scripts/sync_action_spec.py)."""
+    import _action_spec as spec
+    assert spec.AIM_DIM == 1, f"AIM_DIM={spec.AIM_DIM}, expected 1 for Batch 3"
+    assert spec.ACTION_DIM == 7, f"ACTION_DIM={spec.ACTION_DIM}, expected 7 (HEAD_AIM removed)"
+    assert spec.ACTION_MASK_DIM == 22, f"ACTION_MASK_DIM={spec.ACTION_MASK_DIM}, expected 22"
+    assert len(spec.DISCRETE_HEAD_SPEC) == 7, (
+        f"DISCRETE_HEAD_SPEC has {len(spec.DISCRETE_HEAD_SPEC)} entries, expected 7")
+    assert all(t == "categorical" for _, t, _ in spec.DISCRETE_HEAD_SPEC), (
+        f"DISCRETE_HEAD_SPEC has non-categorical entries: {spec.DISCRETE_HEAD_SPEC}")
+    assert spec.CONTINUOUS_HEAD_SPEC == (("aim", "gaussian", 1), ), (
+        f"CONTINUOUS_HEAD_SPEC={spec.CONTINUOUS_HEAD_SPEC}, expected gaussian/dim=1")
+
+
+def test_continuous_aim_action_consumed():
+    """Env step with continuous_actions[i,0]=0.1 advances facing by exactly 0.1 rad.
+
+    Batch 3: validates that the float buffer plumbed through binding.step
+    actually drives env_step's wrap_pi(facing + clamped) branch. Uses the
+    designated bomb carrier (RL agent, not human_controlled) to ensure the
+    continuous branch fires.
+    """
+    import _action_spec as spec
+    env = train.make_puffer_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        i = g.round_designated_carrier_id
+        f0 = g.agents[i].facing
+        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
+        cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+        cont[i, 0] = 0.1
+        env._c_env                     # noqa: B018  (touch to ensure overlay is live)
+        env.step(actions, cont)
+        assert g.agents[i].alive == 1
+        delta = g.agents[i].facing - f0
+        if delta > np.pi:
+            delta -= 2 * np.pi
+        if delta < -np.pi:
+            delta += 2 * np.pi
+        assert abs(delta -
+                   0.1) < 1e-5, (f"facing advanced by {delta} rad, expected ~0.1 (clamped+wrapped)")
+    finally:
+        env.close()
+
+
+def test_continuous_aim_clamped_at_max_turn():
+    """Δyaw=10.0 is clamped to max_turn_speed=π/4 ≈ 0.7854 rad.
+
+    Batch 3: verifies the fminf/fmaxf clamp inside env_step. Without it
+    the policy could turn arbitrarily fast and break collision/visibility
+    invariants.
+    """
+    import _action_spec as spec
+    env = train.make_puffer_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        sd = env._c_env.sd.contents
+        i = g.round_designated_carrier_id
+        f0 = g.agents[i].facing
+        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
+        cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+        cont[i, 0] = 10.0
+        env.step(actions, cont)
+        delta = g.agents[i].facing - f0
+        if delta > np.pi:
+            delta -= 2 * np.pi
+        if delta < -np.pi:
+            delta += 2 * np.pi
+        assert abs(delta - sd.max_turn_speed) < 1e-5, (
+            f"clamp failed: delta={delta}, expected {sd.max_turn_speed}")
+    finally:
+        env.close()
+
+
+def test_continuous_aim_facing_wraps_around_pi():
+    """Starting facing=π−0.1, Δyaw=+0.2 wraps to ~−π+0.1.
+
+    Batch 3: verifies wrap_pi keeps facing bounded to [-π, +π]. Without
+    wrap_pi, facing would drift to π+0.1 and break downstream consumers
+    that assume the bounded representation (renderer, observation
+    normalisation, etc.).
+    """
+    import _action_spec as spec
+    env = train.make_puffer_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        i = g.round_designated_carrier_id
+        g.agents[i].facing = np.pi - 0.1
+        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
+        cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+        cont[i, 0] = 0.2
+        env.step(actions, cont)
+        expected = -np.pi + 0.1
+        assert abs(g.agents[i].facing - expected) < 1e-5, (
+            f"wrap failed: facing={g.agents[i].facing}, expected {expected}")
+    finally:
+        env.close()
+
+
+def test_step_stats_aim_delta_tracking():
+    """100-tick rollout with Δyaw=0.05; assert sum/sq_sum/count tracking.
+
+    Batch 3: validates that StepStats's Welford triple is populated so
+    Python-side Δyaw mean/var can be recovered for telemetry without
+    storing the full rollout. Resets the fields before the loop because
+    other tests in the same env instance may have populated them.
+    """
+    import _action_spec as spec
+    env = train.make_puffer_env(seed=42)
+    try:
+        env.reset(seed=42)
+        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
+        cont = np.full((10, spec.AIM_DIM), 0.05, dtype=np.float32)
+        ss = env._c_env.episode_stats
+        ss.aim_delta_sum = 0.0
+        ss.aim_delta_sq_sum = 0.0
+        ss.aim_delta_count = 0
+        g = env._c_env.game
+        for _ in range(100):
+            if g.round_over:
+                break
+            env.step(actions, cont)
+        assert ss.aim_delta_count > 0, "no aim_delta updates recorded"
+        assert ss.aim_delta_sum > 0, f"sum should be positive, got {ss.aim_delta_sum}"
+        mean = ss.aim_delta_sum / ss.aim_delta_count
+        assert abs(mean - 0.05) < 1e-5, f"mean Δyaw={mean}, expected 0.05"
+    finally:
+        env.close()
+
+
+# ── Batch 3 Task 4: Hybrid policy forward shape + log_std clamp tests ──────
+# These exercise build_policy()'s new Gaussian aim head: the 4-tuple return
+# from forward(), the µ shape (B, AIM_DIM) bounded by max_turn_speed via
+# tanh*scale, and the [LOG_STD_MIN, LOG_STD_MAX] clamp that prevents σ
+# collapse / explosion. Trainer-side wiring (PPO ratio over both factors)
+# arrives in Task 5; these tests stay green regardless of trainer state.
+def test_policy_forward_emits_mu_and_logstd():
+    """build_policy returns a hybrid policy whose forward emits (logits[7],
+    mu_aim, log_std, value). mu_aim shape (B, 1), log_std broadcasts to
+    same. AIM_DIM bump to 2 (Batch 3.5) is a single-line change here."""
+    import torch
+
+    import _action_spec as spec
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        x = torch.zeros((1, train.OBS_DIM))
+        logits, mu_aim, log_std, value = policy.forward(x, state={})
+        assert len(logits) == spec.ACTION_DIM == 7, (
+            f"got {len(logits)} discrete heads, expected 7")
+        assert mu_aim.shape == (1, spec.AIM_DIM), (
+            f"mu_aim.shape={mu_aim.shape}, expected (1, {spec.AIM_DIM})")
+        assert log_std.shape == mu_aim.shape, (
+            f"log_std.shape={log_std.shape} should broadcast to mu shape")
+        # μ is already tanh*max_turn_speed scaled, so |μ| ≤ max_turn_speed.
+        sd = env._c_env.sd.contents
+        assert mu_aim.abs().max().item() <= sd.max_turn_speed + 1e-6, (
+            f"|mu_aim| exceeds max_turn_speed: {mu_aim.abs().max().item()}")
+        # value head still emits a single scalar per agent.
+        assert value.shape == (1, 1), f"value.shape={value.shape}, expected (1, 1)"
+    finally:
+        env.close()
+
+
+def test_logstd_clamp_lower():
+    """Push aim_log_std → -∞ via direct write; forward()'s output must
+    be ≥ LOG_STD_MIN after the clamp. Defends σ collapse — without the
+    clamp the Normal entropy would diverge to −∞ and pin the SAC-α loop."""
+    import torch
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        with torch.no_grad():
+            policy.aim_log_std.fill_(-100.0)                           # exp(-100) ≈ 0
+        x = torch.zeros((1, train.OBS_DIM))
+        _, _, log_std, _ = policy.forward(x, state={})
+        assert log_std.min().item() >= train.LOG_STD_MIN - 1e-6, (
+            f"log_std={log_std.min().item()} below LOG_STD_MIN={train.LOG_STD_MIN}")
+    finally:
+        env.close()
+
+
+def test_logstd_clamp_upper():
+    """Push aim_log_std → +∞; forward() output must be ≤ LOG_STD_MAX.
+    Defends σ explosion — uncapped σ would dominate the policy and
+    negate any μ signal the network learns."""
+    import torch
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        with torch.no_grad():
+            policy.aim_log_std.fill_(100.0)
+        x = torch.zeros((1, train.OBS_DIM))
+        _, _, log_std, _ = policy.forward(x, state={})
+        assert log_std.max().item() <= train.LOG_STD_MAX + 1e-6, (
+            f"log_std={log_std.max().item()} above LOG_STD_MAX={train.LOG_STD_MAX}")
+    finally:
+        env.close()
+
+
+# ── Batch 3 Task 5: hybrid-aim trainer integration tests ─────────────────────
+#
+# These two tests exercise the trainer-side wiring that T5 added on top of
+# T4's HybridPolicy:
+#   - test_hybrid_sample_writes_two_buffers: a single get_action_and_value()
+#       call must yield BOTH a finite int discrete action (7 heads) AND a
+#       finite float Δyaw bounded by max_turn_speed. If either buffer is
+#       silently zero/garbage the rollout would write a corrupt PPO target
+#       and the training run would diverge invisibly.
+#   - test_hybrid_loss_clip_applies_per_factor: feeds _hybrid_ppo_loss
+#       inputs that produce an out-of-clip discrete ratio AND an in-clip
+#       continuous ratio, asserting the per-factor clip (Fan et al. 2019)
+#       triggers on one head and not the other. This is the "L8 spec lock"
+#       — if a future refactor goes back to a single shared ratio this
+#       test goes red.
+#
+# Both tests use the bare make_puffer_env path (no PufferLib trainer) so
+# they are fast and don't depend on the test harness.
+
+
+def test_hybrid_sample_writes_two_buffers():
+    """T5: hybrid sampler must emit finite int discrete action AND finite
+    float Δyaw within ±max_turn_speed."""
+    import torch
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        x = torch.zeros((1, train.OBS_DIM))
+        action, cont_action, lp, ent, val, _ = policy.get_action_and_value(x)
+        assert action.shape == (1, 7), f"action.shape={action.shape}"
+        assert action.dtype in (torch.int64, torch.long), \
+            f"action.dtype={action.dtype}"
+        assert torch.isfinite(action.float()).all()
+        assert cont_action.shape == (1, 1), \
+            f"cont_action.shape={cont_action.shape}"
+        assert cont_action.dtype == torch.float32
+        assert torch.isfinite(cont_action).all()
+        sd = env._c_env.sd.contents
+        assert cont_action.abs().max().item() <= sd.max_turn_speed + 1e-5, (
+            f"|cont_action|={cont_action.abs().max().item()} > max_turn_speed")
+        assert lp.shape == (1, ) and ent.shape == (1, ), \
+            f"lp.shape={lp.shape}, ent.shape={ent.shape}"
+        assert torch.isfinite(lp).all() and torch.isfinite(ent).all()
+        assert val.shape == (1, 1), f"val.shape={val.shape}"
+    finally:
+        env.close()
+
+
+def test_hybrid_loss_clip_applies_per_factor():
+    """T5: _hybrid_ppo_loss applies the PPO clip independently per factor.
+
+    Constructs a minibatch where:
+      - mb_old_logp_d is set so ratio_d = exp(1) ≈ 2.72 — outside clip band
+      - mb_old_logp_c is set so ratio_c ≈ exp(0.05) ≈ 1.05 — inside band
+    With clip_coef=0.2 the discrete factor MUST be clamped to [0.8, 1.2]
+    in the loss while the continuous factor stays unclamped. The asserts
+    inspect the returned ratios directly to verify the input setup, then
+    check that pg_loss is finite (i.e. the loss path didn't NaN out).
+    """
+    import torch
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        B = 4
+        mb_obs = torch.zeros((B, train.OBS_DIM))
+        mb_actions = torch.zeros((B, 7), dtype=torch.int64)
+        mb_cont_actions = torch.zeros((B, 1), dtype=torch.float32)
+        mb_advantages = torch.ones(B)
+
+        # Seed old log-probs so we know what ratio_d / ratio_c will be.
+        # First evaluate the new policy on the inputs to get the canonical
+        # new_logp values; then offset by the desired ratio sign-flip.
+        with torch.no_grad():
+            logits_list, mu_aim, log_std_aim, _ = policy(mb_obs, state={})
+            dists_d = [torch.distributions.Categorical(logits=lg) for lg in logits_list]
+            new_logp_d_seed = sum(d.log_prob(mb_actions[..., i]) for i, d in enumerate(dists_d))
+            sigma = torch.exp(log_std_aim).expand_as(mu_aim)
+            dist_c = torch.distributions.Normal(mu_aim, sigma)
+            new_logp_c_seed = dist_c.log_prob(mb_cont_actions).sum(-1)
+
+        # ratio = exp(new_logp - old_logp): subtract delta from new_logp to set ratio.
+        mb_old_logp_d = new_logp_d_seed - 1.0          # ratio_d = e^1 ≈ 2.72 → outside clip
+        mb_old_logp_c = new_logp_c_seed - 0.05         # ratio_c ≈ 1.05 → inside clip
+
+        from train import _hybrid_ppo_loss
+        pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c = _hybrid_ppo_loss(
+            policy,
+            mb_obs,
+            mb_actions,
+            mb_cont_actions,
+            mb_old_logp_d,
+            mb_old_logp_c,
+            mb_advantages,
+            clip_coef=0.2,
+            state={},
+        )
+        assert (ratio_d > 1.2).all(), \
+            f"ratio_d={ratio_d} should exceed 1.2 (outside clip)"
+        assert ((ratio_c > 0.8) & (ratio_c < 1.2)).all(), \
+            f"ratio_c={ratio_c} should be in (0.8, 1.2) (inside clip)"
+        assert torch.isfinite(pg_loss).all()
+        assert torch.isfinite(entropy).all()
     finally:
         env.close()

@@ -61,6 +61,11 @@ public sealed class PolicyInference : IDisposable
     public readonly int HiddenDim;
     public readonly int NumHeads;
 
+    // Batch 3: True when the exported ONNX has a continuous-aim head (mu_aim).
+    // Driven by `aim_dim > 0` in the sidecar JSON. When false, we fall back to
+    // the Batch-2 layout (NumHeads + 2 outputs: logits + LSTM h_out + c_out).
+    public readonly bool HasAimHead;
+
     // Pre-allocated input buffers (reused every inference call — zero alloc)
     private readonly float[] _obs;
     private readonly float[] _done   = new float[1];
@@ -71,6 +76,19 @@ public sealed class PolicyInference : IDisposable
 
     // Pre-allocated logit output buffers
     private readonly float[][] _actionLogits;
+
+    // Batch 3: continuous-aim head (1D Gaussian Δyaw, μ-only at deploy).
+    // Allocated only when HasAimHead = true; empty array sentinel otherwise so
+    // callers can safely test `muAim.Length > 0` without null checks.
+    // AimDim = 1 matches AIM_DIM in src/_action_spec.py — μ is a scalar Δyaw
+    // (in radians, tanh-squashed and scaled to [-π/4, +π/4]).
+    private readonly float[]  _muAim;
+    public  const    int      AimDim = 1;
+    // Note: the OrtValue wrapping _muAim is created in the ctor and stashed in
+    // _outputOrts[NumHeads]; disposal happens via the _outputOrts iteration in
+    // Dispose(). We deliberately do NOT keep a separate field — that would
+    // duplicate the disposal path and invite double-dispose if a future change
+    // adds a field-level cleanup.
 
     // Pinned OrtValue wrappers (created once at ctor, always non-null after successful construction)
     private readonly OrtValue _obsOrt = null!;
@@ -85,9 +103,13 @@ public sealed class PolicyInference : IDisposable
     private LatencyTracker _latencyTracker = new();
 
     // ── Constructor ───────────────────────────────────────────────────────────
-    public PolicyInference(string modelPath, int[] actionSizes, ILogger log)
+    // hasAimHead: pass true when the ONNX export emits a continuous-aim head
+    // (Batch 3+ checkpoints with aim_dim>0 in the sidecar JSON). Pass false to
+    // load Batch-2 checkpoints with the legacy NumHeads+2 output layout.
+    public PolicyInference(string modelPath, int[] actionSizes, ILogger log, bool hasAimHead = true)
     {
         _log = log;
+        HasAimHead = hasAimHead;
 
         var opts = new SessionOptions
         {
@@ -112,10 +134,14 @@ public sealed class PolicyInference : IDisposable
         // Output names straight from the session (NOT from JSON sidecar — it doesn't have them)
         _outputNames = _session.OutputMetadata.Keys.ToArray();
 
-        // I1 — validate that the last two output slots are the LSTM hidden states
-        if (_outputNames.Length != NumHeads + 2)
+        // Batch 3: hybrid policy outputs are logits[N] + mu_aim + lstm_h_out + lstm_c_out
+        // = NumHeads + 3. Backward-compat with Batch 2 checkpoints (NumHeads + 2)
+        // is allowed when aim_dim=0 in the sidecar (caller passes hasAimHead=false).
+        int expectedOutputs = HasAimHead ? NumHeads + 3 : NumHeads + 2;
+        if (_outputNames.Length != expectedOutputs)
             throw new InvalidOperationException(
-                $"[CS2RLBot] Expected {NumHeads + 2} output slots (NumHeads={NumHeads} + 2 LSTM states) " +
+                $"[CS2RLBot] Expected {expectedOutputs} output slots " +
+                $"(NumHeads={NumHeads} + {(HasAimHead ? 1 : 0)} aim + 2 LSTM states) " +
                 $"but session has {_outputNames.Length}. Actual outputs: [{string.Join(", ", _outputNames)}]");
         for (int _vi = _outputNames.Length - 2; _vi < _outputNames.Length; _vi++)
         {
@@ -139,11 +165,20 @@ public sealed class PolicyInference : IDisposable
         for (int i = 0; i < NumHeads; i++)
             _actionLogits[i] = new float[actionSizes[i]];
 
+        // Batch 3: allocate mu_aim only when the policy actually emits it.
+        // Empty-array sentinel keeps RunInference's tuple shape stable for callers.
+        _muAim = HasAimHead ? new float[AimDim] : Array.Empty<float>();
+
         // Pin input/output OrtValues (shapes must match export-time dynamic_axes)
         // Use local nullable variables so that partial construction never calls Dispose on
         // an uninitialized handle; assign to readonly fields only after all succeed (C1)
-        OrtValue? obsOrt = null, doneOrt = null, lstmHOrt = null, lstmCOrt = null;
-        var outputOrts = new OrtValue[NumHeads + 2];
+        OrtValue? obsOrt = null, doneOrt = null, lstmHOrt = null, lstmCOrt = null, muAimOrt = null;
+        // Batch 3: outputOrts layout when HasAimHead=true:
+        //   [0..NumHeads-1] = logits, [NumHeads] = mu_aim,
+        //   [NumHeads+1] = lstm_h_out, [NumHeads+2] = lstm_c_out.
+        // When HasAimHead=false, the mu_aim slot is omitted (Batch-2 layout).
+        int totalOutputs = HasAimHead ? NumHeads + 3 : NumHeads + 2;
+        var outputOrts = new OrtValue[totalOutputs];
         try
         {
             obsOrt   = OrtValue.CreateTensorValueFromMemory(_obs,   new long[] { 1, ObsDim });
@@ -155,12 +190,19 @@ public sealed class PolicyInference : IDisposable
             for (int i = 0; i < NumHeads; i++)
                 outputOrts[i] = OrtValue.CreateTensorValueFromMemory(
                     _actionLogits[i], new long[] { 1, actionSizes[i] });
-            outputOrts[NumHeads]     = OrtValue.CreateTensorValueFromMemory(_lstmHOut, new long[] { 1, 1, HiddenDim });
-            outputOrts[NumHeads + 1] = OrtValue.CreateTensorValueFromMemory(_lstmCOut, new long[] { 1, 1, HiddenDim });
+            int idx = NumHeads;
+            if (HasAimHead)
+            {
+                muAimOrt = OrtValue.CreateTensorValueFromMemory(_muAim, new long[] { 1, AimDim });
+                outputOrts[idx++] = muAimOrt;
+            }
+            outputOrts[idx++] = OrtValue.CreateTensorValueFromMemory(_lstmHOut, new long[] { 1, 1, HiddenDim });
+            outputOrts[idx++] = OrtValue.CreateTensorValueFromMemory(_lstmCOut, new long[] { 1, 1, HiddenDim });
         }
         catch
         {
             obsOrt?.Dispose(); doneOrt?.Dispose(); lstmHOrt?.Dispose(); lstmCOrt?.Dispose();
+            muAimOrt?.Dispose();
             foreach (var o in outputOrts) o?.Dispose();
             _runOptions?.Dispose();
             _session?.Dispose();
@@ -171,6 +213,8 @@ public sealed class PolicyInference : IDisposable
         _doneOrt  = doneOrt;
         _lstmHOrt = lstmHOrt;
         _lstmCOrt = lstmCOrt;
+        // muAimOrt (when non-null) is already stored in outputOrts[NumHeads];
+        // the local goes out of scope but the array reference keeps it alive.
         _outputOrts  = outputOrts;
         _inputValues = new[] { _obsOrt, _doneOrt, _lstmHOrt, _lstmCOrt };
 
@@ -184,10 +228,13 @@ public sealed class PolicyInference : IDisposable
 
     // ── Inference ─────────────────────────────────────────────────────────────
     /// <summary>
-    /// Runs one inference step. Returns logit arrays (one per action head).
-    /// Caller must NOT hold onto the returned arrays across inference calls — they are reused.
+    /// Runs one inference step. Returns logit arrays (one per discrete head) plus
+    /// the continuous mu_aim buffer (Batch 3+). When HasAimHead=false, MuAim is an
+    /// empty array (callers can branch on `MuAim.Length > 0`).
+    /// Caller must NOT hold onto the returned arrays across inference calls — they
+    /// are reused on the next RunInference call.
     /// </summary>
-    public float[][] RunInference(ReadOnlySpan<float> obs, bool isDone)
+    public (float[][] Logits, float[] MuAim) RunInference(ReadOnlySpan<float> obs, bool isDone)
     {
         obs.CopyTo(_obs.AsSpan());
         _done[0] = isDone ? 1f : 0f;
@@ -205,7 +252,7 @@ public sealed class PolicyInference : IDisposable
         Buffer.BlockCopy(_lstmHOut, 0, _lstmH, 0, HiddenDim * sizeof(float));
         Buffer.BlockCopy(_lstmCOut, 0, _lstmC, 0, HiddenDim * sizeof(float));
 
-        return _actionLogits;
+        return (_actionLogits, _muAim);
     }
 
     // ── LSTM state ────────────────────────────────────────────────────────────

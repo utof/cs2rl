@@ -38,7 +38,7 @@ from map import make_cs2_map
 # This version tag must stay in sync with:
 #   - deploy/export_policy.py  (obs_version field)
 #   - C# plugin  ObservationBuilder.cs  (OBS_VERSION constant)
-OBS_VERSION = "v1-104dim"
+OBS_VERSION = "v1-105dim"
 
 
 def export_mapdata(map_name: str) -> dict:
@@ -85,15 +85,16 @@ def export_mapdata(map_name: str) -> dict:
     y_off = (md.y_max + md.y_min) / (md.y_max - md.y_min)
 
     # half-widths of the map in world units; used to compute diagonal
-    xr = 1.0 / inv_x  # = (x_max - x_min) / 2.0
-    yr = 1.0 / inv_y  # = (y_max - y_min) / 2.0
+    xr = 1.0 / inv_x                   # = (x_max - x_min) / 2.0
+    yr = 1.0 / inv_y                   # = (y_max - y_min) / 2.0
 
     # map_diag: Euclidean half-diagonal in world units, used to normalize
     # distances (e.g. entity-to-entity range) into a [0, 1]-ish range.
     # Formula: cs2_observations.h:15-17
     map_diag = math.sqrt(xr * xr + yr * yr)
 
-    print(f"[export_mapdata] Map bounds: X=[{md.x_min:.1f},{md.x_max:.1f}] Y=[{md.y_min:.1f},{md.y_max:.1f}]")
+    print(f"[export_mapdata] Map bounds: X=[{md.x_min:.1f},{md.x_max:.1f}] "
+          f"Y=[{md.y_min:.1f},{md.y_max:.1f}]")
     print(f"[export_mapdata] inv_x={inv_x:.6f} inv_y={inv_y:.6f}")
     print(f"[export_mapdata] x_off={x_off:.6f} y_off={y_off:.6f}")
     print(f"[export_mapdata] map_diag={map_diag:.2f}")
@@ -112,8 +113,7 @@ def export_mapdata(map_name: str) -> dict:
 def main():
     """CLI entry point — parse --map, compute constants, write JSON sidecar."""
     parser = argparse.ArgumentParser(
-        description="Export map normalization constants for the CS2RL plugin."
-    )
+        description="Export map normalization constants for the CS2RL plugin.")
     parser.add_argument(
         "--map",
         default="de_dust2",

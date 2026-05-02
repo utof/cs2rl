@@ -54,7 +54,13 @@ static void env_reset(Dust2Env* env) {
     g->round_designated_carrier_id = bomb_carrier;
 }
 
-static void env_step(Dust2Env* env, const int32_t* actions) {
+/* Batch 3: env_step now consumes TWO action buffers — separate, non-bit-cast.
+ * `actions`             : (N_AGENTS, ACTION_DIM=7) int32 — discrete heads (move/shoot/etc).
+ * `continuous_actions`  : (N_AGENTS, AIM_DIM=1)    float  — Δyaw radians per agent.
+ * The discrete enum no longer contains HEAD_AIM; aim is applied via the float
+ * buffer in the per-agent block below (clamped to ±sd->max_turn_speed, then
+ * wrap_pi'd into [-π, +π]). Owners: binding.c py_step plumbs both. */
+static void env_step(Dust2Env* env, const int32_t* actions, const float* continuous_actions) {
     StaticData* sd = env->sd;
     GameState*  g  = &env->game;
     StepStats*  ss = &env->step_stats;
@@ -103,19 +109,32 @@ static void env_step(Dust2Env* env, const int32_t* actions) {
         if (!a->alive)
             continue;
 
-        int aim_act    = actions[i * ACTION_DIM + HEAD_AIM];
         int shoot_act  = actions[i * ACTION_DIM + HEAD_SHOOT];
         int reload_act = actions[i * ACTION_DIM + HEAD_RELOAD];
         int wswitch    = actions[i * ACTION_DIM + HEAD_WEAPON];
         /* use and crouch handled in cs2_bomb.h and cs2_movement.h */
 
-        /* Aim: continuous for human, 16-bin for RL agents */
+        /* Batch 3: continuous-aim Δyaw consumption.
+         * Human-controlled agents still set facing directly via aim_rad
+         * (mouse delta wired in by deploy/UI). RL agents: read Δyaw from
+         * the continuous buffer, clamp to ±max_turn_speed (π/4 rad/tick
+         * from sd), apply, then wrap into [-π, +π]. Stats (sum/sq_sum/
+         * count) accumulate the CLAMPED value — this matches what the env
+         * actually executed, so Welford recovery reflects effective policy
+         * action, not raw network output. */
         if (a->human_controlled) {
             a->facing = a->aim_rad;
-        } else if (aim_act >= 0 && aim_act < 16) {
-            a->facing = (aim_act / 16.0f) * 2.0f * (float)M_PI;
+        } else {
+            float delta_yaw    = continuous_actions[i * AIM_DIM + 0];
+            float clamped      = fminf(fmaxf(delta_yaw, -sd->max_turn_speed), sd->max_turn_speed);
+            a->facing          = wrap_pi(a->facing + clamped);
+            ss->aim_delta_sum += clamped;
+            ss->aim_delta_sq_sum += clamped * clamped;
+            ss->aim_delta_count  += 1;
+            es->aim_delta_sum    += clamped;
+            es->aim_delta_sq_sum += clamped * clamped;
+            es->aim_delta_count  += 1;
         }
-        count_action(ss->action_aim, es->action_aim, aim_act, 16);
         count_action(ss->action_shoot, es->action_shoot, shoot_act, 2);
 
         /* Reload */
