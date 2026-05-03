@@ -271,6 +271,12 @@ typedef struct {
     float   aim_delta_sum;
     float   aim_delta_sq_sum;
     int32_t aim_delta_count;
+    /* Batch 3.5: pitch Welford triple (mirrors yaw fields above). Same int32-aligned
+     * layout: 4+4+4=12B. Pitch_log_std non-collapse is the spec's load-bearing
+     * acceptance signal — diagnostics need their own surface. */
+    float   aim_delta_pitch_sum;
+    float   aim_delta_pitch_sq_sum;
+    int32_t aim_delta_pitch_count;
     int32_t action_reload[2];
     int32_t action_weapon[3];
     int32_t action_crouch[2];

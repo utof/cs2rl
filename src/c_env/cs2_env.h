@@ -134,6 +134,23 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
             es->aim_delta_sum    += clamped;
             es->aim_delta_sq_sum += clamped * clamped;
             es->aim_delta_count  += 1;
+            /* Batch 3.5 (#24): continuous-aim Δpitch consumption — same shape as yaw.
+             * Per-tick angular velocity cap (sd->max_turn_speed); pitch additionally
+             * clamped to ±π/2 (bounded interval, no wrap). Welford accumulates the
+             * CLAMPED value to match the executed value (yaw convention).
+             * Pitfall: do NOT use wrap_pi here — pitch is a bounded interval, not
+             * a circular topology. ±π/2 is "looking straight up/down"; wrapping
+             * past it would invert the world geometrically. */
+            float delta_pitch = continuous_actions[i * AIM_DIM + 1];
+            float clamped_pitch =
+                fminf(fmaxf(delta_pitch, -sd->max_turn_speed), sd->max_turn_speed);
+            a->pitch = fminf(fmaxf(a->pitch + clamped_pitch, -(float)M_PI / 2), (float)M_PI / 2);
+            ss->aim_delta_pitch_sum    += clamped_pitch;
+            ss->aim_delta_pitch_sq_sum += clamped_pitch * clamped_pitch;
+            ss->aim_delta_pitch_count  += 1;
+            es->aim_delta_pitch_sum    += clamped_pitch;
+            es->aim_delta_pitch_sq_sum += clamped_pitch * clamped_pitch;
+            es->aim_delta_pitch_count  += 1;
         }
         count_action(ss->action_shoot, es->action_shoot, shoot_act, 2);
 

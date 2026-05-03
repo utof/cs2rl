@@ -228,6 +228,10 @@ class StepStatsC(ctypes.Structure):
         ("aim_delta_sum", ctypes.c_float),
         ("aim_delta_sq_sum", ctypes.c_float),
         ("aim_delta_count", ctypes.c_int32),
+                                                       # Batch 3.5: pitch Welford triple (mirror cs2_types.h StepStats fields).
+        ("aim_delta_pitch_sum", ctypes.c_float),
+        ("aim_delta_pitch_sq_sum", ctypes.c_float),
+        ("aim_delta_pitch_count", ctypes.c_int32),
         ("action_reload", ctypes.c_int32 * 2),
         ("action_weapon", ctypes.c_int32 * 3),
         ("action_crouch", ctypes.c_int32 * 2),
@@ -316,10 +320,10 @@ assert ctypes.sizeof(AgentStateC) == 156, (
     f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 156)")
 assert ctypes.sizeof(GameStateC) == 1628, (
     f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1628)")
-assert ctypes.sizeof(StepStatsC) == 196, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 196)")
-assert ctypes.sizeof(Dust2EnvC) == 6608, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6608)")
+assert ctypes.sizeof(StepStatsC) == 208, (
+    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 208)")
+assert ctypes.sizeof(Dust2EnvC) == 6632, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6632)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
