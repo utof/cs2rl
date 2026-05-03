@@ -34,7 +34,7 @@ from _action_spec import (
 )                                      # from cs2_types.h
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
-OBS_DIM = 105
+OBS_DIM = 107                          # Batch 3.5 (#24): mirrors nav.OBS_DIM; tests cross-check the two via tests/test_train_env.py:873.
 
 # Batch 3 (continuous aim H-PPO): state-independent log_std parameter
 # for the Gaussian aim head. σ_init = 0.1 rad ≈ 5.7° matches mega-spec

@@ -454,7 +454,7 @@ MAX_TURN_SPEED_RAD = math.pi / 4
 
 N_AGENTS = 10
 TEAM_SIZE = 5
-OBS_DIM = 105
+OBS_DIM = 107                          # Batch 3.5 (#24): pitch sin/cos appended at obs[11..12]; all downstream slots +2.
 
 INVALID_AREA_ID = -1
 STALE_MEMORY_TICK = -9999

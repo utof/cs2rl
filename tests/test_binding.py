@@ -116,6 +116,7 @@ def test_binding_step_accepts_continuous_array(make_map):
     Batch 3: validates the new signature. Wrong shape on continuous_actions
     raises a Python ValueError (caught Python-side in Cs2Env._prepare_continuous_actions
     before the C call). Correct shape is accepted.
+    Batch 3.5: wrong-shape probe uses AIM_DIM+1 so it stays wrong even as AIM_DIM grows.
     """
     from _action_spec import ACTION_DIM, AIM_DIM
     _, env = _make_env(map_data=make_map)
@@ -124,7 +125,8 @@ def test_binding_step_accepts_continuous_array(make_map):
     cont = np.zeros((10, AIM_DIM), dtype=np.float32)
     env.step(actions, cont)            # should not raise
     with pytest.raises(ValueError):
-        env.step(actions, np.zeros((10, 2), dtype=np.float32))
+                                       # AIM_DIM+1 columns is always wrong regardless of the current AIM_DIM value
+        env.step(actions, np.zeros((10, AIM_DIM + 1), dtype=np.float32))
 
 
 def test_binding_default_continuous_actions_zero(make_map):
@@ -183,10 +185,14 @@ def test_continuous_aim_nan_guard():
         # Force the aim head to emit NaN so the loss path goes non-finite.
         # We don't need to run a full PPO update — replicating the guard's
         # control flow inline is enough to verify it does the right thing.
+        # Batch 3.5: output AIM_DIM columns so expand_as(mu_aim) in forward
+        # doesn't raise a size mismatch when AIM_DIM > 1.
+        _aim_dim = train.AIM_DIM
+
         class _NaNLayer(torch.nn.Module):
 
             def forward(self, x):
-                return torch.full((x.shape[0], 1), float('nan'))
+                return torch.full((x.shape[0], _aim_dim), float('nan'))
 
         policy.aim_mu = _NaNLayer()
         old_params = [p.detach().clone() for p in policy.parameters()]

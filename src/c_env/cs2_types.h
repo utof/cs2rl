@@ -12,14 +12,22 @@
 /* ── Constants ─────────────────────────────────────────────────────────── */
 #define TEAM_SIZE 5
 #define N_AGENTS  10
-#define OBS_DIM   105
+/* Batch 3.5 (#24): self block now carries pitch sin/cos at obs[11..12]; all
+ * downstream obs slots shifted +2. SIM_OBS_VERSION below tracks sim's internal
+ * obs schema, distinct from deploy's frozen v2-105dim (gh #34 suspension). */
+#define OBS_DIM 107
 #define ACTION_DIM                                                                                 \
     7  /* Batch 3: HEAD_AIM removed; aim is now a continuous head, see AIM_DIM below */
 #define ACTION_MASK_DIM                                                                            \
     22 /* Batch 3: sum(ACTION_HEAD_SIZES) = 9+2+2+3+2+2+2 = 22 (was 38 with the 16-bin aim) */
-#define AIM_DIM                                                                                      \
-    1 /* Batch 3: 1D Gaussian (Δyaw only). Sim is 2D yaw-only — pitch deferred to Batch 3.5 (#24). \
-       */
+/* Batch 3.5: 2D Gaussian (Δyaw + Δpitch). Order in continuous_actions buffer:
+ * [i*AIM_DIM+0] = Δyaw, [i*AIM_DIM+1] = Δpitch. Both clamped to ±max_turn_speed
+ * per tick; pitch additionally clamped to ±π/2 absolute (bounded interval). */
+#define AIM_DIM 2
+/* Sim-side obs schema version (NOT used at runtime — pure documentation;
+ * future sim refactors bump this when obs schema changes. Deploy export
+ * literals stay frozen at v2-105dim per gh #34.) */
+#define SIM_OBS_VERSION       "sim-v1-107dim"
 #define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */
 #define CROUCH_COOLDOWN_TICKS 7 /* ~0.4s at 16 Hz */
 #define INVALID_AREA_IDX      (-1)
@@ -200,6 +208,8 @@ typedef struct {
     int8_t  is_airborne; /* 1 when z > 0 or vz != 0 — skips ground friction           */
     int8_t  _pad4[3];    /* pad to int32 boundary                                     */
     int32_t jump_cd;     /* ticks until another jump press is honoured (0 = bhop OK)  */
+    /* Batch 3.5 additions (pitch / 3D combat) — appended, never reorder. */
+    float pitch; /* radians, 0 = horizontal; clamped ±π/2 in cs2_env.h    */
 } AgentState;
 
 /* ── Game state ── */

@@ -22,6 +22,6 @@ DISCRETE_HEAD_SPEC = (
     ('crouch', 'categorical', 2),
     ('jump', 'categorical', 2),
 )
-CONTINUOUS_HEAD_SPEC = (('aim', 'gaussian', 1), )
+CONTINUOUS_HEAD_SPEC = (('aim', 'gaussian', 2), )
 CONTINUOUS_HEAD_NAMES = ('aim', )
-AIM_DIM = 1
+AIM_DIM = 2

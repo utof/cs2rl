@@ -169,6 +169,8 @@ class AgentStateC(ctypes.Structure):
         ("is_airborne", ctypes.c_int8),
         ("_pad4", ctypes.c_int8 * 3),
         ("jump_cd", ctypes.c_int32),
+                                                       # Batch 3.5: pitch — appended, mirror cs2_types.h AgentState.
+        ("pitch", ctypes.c_float),
     ]
 
 
@@ -308,14 +310,16 @@ class Dust2EnvC(ctypes.Structure):
 # Dust2EnvC −264 bytes nominal: 2× StepStats (−104) + masks shrink
 # (10×38→10×22 = −160). Verify empirically on first build — alignment
 # surprises are routine; values updated below to match observed sizeof.
-assert ctypes.sizeof(AgentStateC) == 152, (
-    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 152)")
-assert ctypes.sizeof(GameStateC) == 1588, (
-    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1588)")
+# Batch 3.5: AgentStateC +4 (float pitch), GameStateC +40 (×10 agents),
+# Dust2EnvC +40 (GameState) +80 (observations: 10×(107−105)×4).
+assert ctypes.sizeof(AgentStateC) == 156, (
+    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 156)")
+assert ctypes.sizeof(GameStateC) == 1628, (
+    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1628)")
 assert ctypes.sizeof(StepStatsC) == 196, (
     f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 196)")
-assert ctypes.sizeof(Dust2EnvC) == 6488, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6488)")
+assert ctypes.sizeof(Dust2EnvC) == 6608, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6608)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
