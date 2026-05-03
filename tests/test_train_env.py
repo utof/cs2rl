@@ -708,15 +708,15 @@ def test_round_designated_carrier_property_50_seeds():
 
 
 def test_obs_designated_carrier_bit_t_side():
-    """Verify obs[104] is the round-fixed role bit:
+    """Verify obs[106] is the round-fixed role bit:
        - 1.0 for the designated T agent
        - 0.0 for non-designated T agents
        - 0.0 for ALL CT agents
        - persists at 1.0 even after the carrier dies and a teammate picks up
 
-    obs[104] is distinct from obs[20] (transient self-has-bomb): it is set at
+    obs[106] is distinct from obs[22] (transient self-has-bomb): it is set at
     round start and never reassigned, surviving drop/pickup events. This gives
-    the policy a stable identity signal that obs[20] cannot.
+    the policy a stable identity signal that obs[22] cannot.
 
     NOTE: env_reset() does NOT call compute_observations (it only zeroes the
     buffer). The first populated observation arrives after env.step(). We
@@ -735,20 +735,20 @@ def test_obs_designated_carrier_bit_t_side():
         # T side
         for i in range(5):
             expected = 1.0 if i == rid else 0.0
-            assert obs[i, 104] == expected, (
-                f"T idx {i}: obs[104]={obs[i,104]} expected {expected} (rid={rid})")
+            assert obs[i, 106] == expected, (
+                f"T idx {i}: obs[106]={obs[i,106]} expected {expected} (rid={rid})")
         # CT side: all zeros
         for j in range(5, 10):
-            assert obs[j, 104] == 0.0, f"CT idx {j}: obs[104]={obs[j,104]} expected 0.0"
+            assert obs[j, 106] == 0.0, f"CT idx {j}: obs[106]={obs[j,106]} expected 0.0"
 
         # Persistence after carrier death — drive 20 zero-action steps.
         g.agents[rid].hp = 0
         g.agents[rid].alive = 0
         for _ in range(20):
             obs, *_ = env.step(actions)
-            assert obs[rid, 104] == 1.0, (
+            assert obs[rid, 106] == 1.0, (
                 f"designated carrier (T idx {rid}) lost the role bit mid-round; "
-                f"obs[104] should be round-fixed but read {obs[rid,104]}")
+                f"obs[106] should be round-fixed but read {obs[rid,106]}")
     finally:
         env.close()
 

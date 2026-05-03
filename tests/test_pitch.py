@@ -177,3 +177,51 @@ def test_binding_rejects_wrong_aim_dim_shape():
     finally:
         if hasattr(env, "close"):
             env.close()
+
+
+# ── T4 tests ──────────────────────────────────────────────────────────────
+
+
+def test_obs_pitch_sin_cos_populated():
+    """T4: obs[11], obs[12] = sin/cos(pitch) when pitch is non-zero.
+
+    Why this exists: T1 added the pitch field, T2 wired the consumption, T4 makes
+    pitch policy-observable. This test forces a known pitch value, steps the env
+    once, and verifies the obs slots match math.sin/cos(pitch). Pitfall: the obs
+    insertion shifts EVERY downstream obs[N] by +2 — if downstream tests fail
+    after T4, audit them per Step 4.6."""
+    import math
+
+    from c_env.cs2_env import Cs2Env
+    from map import make_simple_map
+    env = Cs2Env(map_data=make_simple_map())
+    try:
+        env.reset(seed=42)
+        env._c_env.game.agents[0].pitch = 0.5          # ~28.6°
+        actions, cont = _zero_actions()
+        env.step(actions, cont)
+        obs = env.observations[0]
+        assert obs[11] == pytest.approx(math.sin(0.5), abs=1e-5)
+        assert obs[12] == pytest.approx(math.cos(0.5), abs=1e-5)
+    finally:
+        if hasattr(env, "close"):
+            env.close()
+
+
+def test_obs_dim_is_107_in_runtime():
+    """T4: the actual emitted obs vector length is 107 (not just the constant).
+
+    Cross-checks the C-side OBS_DIM bump (T1) against the actual stride of the
+    observations buffer. If cs2_observations.h misses an obs[N] write (or writes
+    past 107), this catches it at runtime."""
+    from c_env.cs2_env import Cs2Env
+    from map import make_simple_map
+    env = Cs2Env(map_data=make_simple_map())
+    try:
+        env.reset(seed=42)
+        actions, cont = _zero_actions()
+        env.step(actions, cont)
+        assert env.observations.shape[1] == 107
+    finally:
+        if hasattr(env, "close"):
+            env.close()

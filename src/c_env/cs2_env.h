@@ -50,7 +50,7 @@ static void env_reset(Dust2Env* env) {
 
     g->bomb_carrier_id = bomb_carrier;
     /* Batch 2: round-fixed copy. NEVER reassigned mid-round (see cs2_types.h
-     * field comment). compute_observations reads this for obs[104] (T2). */
+     * field comment). compute_observations reads this for obs[106] (T4 shift). */
     g->round_designated_carrier_id = bomb_carrier;
 }
 

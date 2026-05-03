@@ -232,10 +232,10 @@ typedef struct {
      * Distinct from bomb_carrier_id, which is the *dynamic* possession
      * tracker (reassigned on drop+auto-pickup in cs2_bomb.h:111). This
      * field is set ONLY in env_reset and is the round's stable identity
-     * signal. Consumed by compute_observations to emit obs[104] (the role
-     * bit, in T2). Pitfall: must stay in the int32_t block before
-     * bombsite_entered to keep ctypes alignment in sync — see GameStateC
-     * mirror in cs2_env.py. */
+     * signal. Consumed by compute_observations to emit obs[106] (the role
+     * bit; index shifted from 104 in T4 pitch insertion). Pitfall: must stay in the int32_t block
+     * before bombsite_entered to keep ctypes alignment in sync — see GameStateC mirror in
+     * cs2_env.py. */
     int32_t round_designated_carrier_id;
     int8_t  bombsite_entered[5]; /* per-T-agent flag: 1 if entered bombsite this round */
     int8_t  bomb_is_dropped;     /* 1 when bomb on ground */
