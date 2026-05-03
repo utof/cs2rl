@@ -6,20 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Verticality batch (Batch-3.5 prereq) added two new StaticData pointer fields:
- *   - centroids_z[N]: per-area terrain z elevation
- *   - is_ramp[N]    : 1 if area is a ramp/stairs (exempts cliff guard)
- * The baked dust2 nav_data.h predates verticality and does NOT define
- * NAV_CENTROIDS_Z or NAV_IS_RAMP. Until nav_data.h is re-baked with z info,
- * provide zero-filled fallbacks so the demo runs as flat dust2 (no z-deltas;
- * cliff guard at cs2_movement.h:74 sees dz=0 and never triggers).
- *
- * Pitfall: NAV_N must be the COMPILE-TIME upper bound matching the StaticData.N
- * field. Sized statically; lifetime is process-lifetime which matches sd->. */
-static const float  DEMO_CENTROIDS_Z_FLAT[NAV_N] = {0}; /* all areas at z=0 */
-static const int8_t DEMO_IS_RAMP_NONE[NAV_N]     = {0}; /* no ramps on flat dust2 */
-
-/* Populate StaticData from baked nav_data.h constants */
+/* Populate StaticData from baked nav_data.h constants. Verticality fields
+ * (centroids_z, is_ramp) are baked alongside the rest by scripts/bake_nav.py
+ * — re-run that whenever map.py or SIMPLE_ROOMS changes. */
 static void load_nav_data(StaticData* sd) {
     memset(sd, 0, sizeof(StaticData));
     sd->N                   = NAV_N;
@@ -27,11 +16,11 @@ static void load_nav_data(StaticData* sd) {
     sd->raster_grid         = (int32_t*)NAV_RASTER_GRID;
     sd->adjacency           = (int8_t*)NAV_ADJACENCY;
     sd->centroid_xy         = (float*)NAV_CENTROID_XY;
-    sd->centroids_z         = (float*)DEMO_CENTROIDS_Z_FLAT; /* verticality fallback */
+    sd->centroids_z         = (float*)NAV_CENTROIDS_Z; /* verticality batch */
     sd->area_ids            = (int32_t*)NAV_AREA_IDS;
     sd->bombsite_mask       = (int8_t*)NAV_BOMBSITE_MASK;
     sd->bombsite_by_idx     = (int8_t*)NAV_BOMBSITE_BY_IDX;
-    sd->is_ramp             = (int8_t*)DEMO_IS_RAMP_NONE; /* verticality fallback */
+    sd->is_ramp             = (int8_t*)NAV_IS_RAMP; /* verticality batch */
     sd->bombsite_dist       = (float*)NAV_BOMBSITE_DIST;
     sd->grid_w              = NAV_GRID_W;
     sd->grid_h              = NAV_GRID_H;
