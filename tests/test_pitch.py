@@ -273,8 +273,10 @@ def test_3d_hit_at_correct_pitch_elevated_target():
     Map geometry (make_simple_map): area 5 (x=575, y=352, z=0) and area 6
     (x=960, y=304, z=64) are mutually visible. Using area centroids ensures
     vis_matrix[5][6] = True so the combat visibility gate passes.
-    eye_z = 0 + 64 = 64; target torso_z = 64 + 32 = 96; Δz = 32;
-    dist_2d ≈ 388 → required pitch = atan2(32, dist_2d) ≈ 0.082 rad ≈ 4.7°.
+    v1b geometry (gh #36 fix A): eye_z = 0 + 48 = 48; torso_z = 64 + 48 = 112;
+    Δz = 64; dist_2d ≈ 388 → required pitch = atan2(64, 388) ≈ 0.164 rad ≈ 9.4°.
+    (Pre-v1b had eye=64/torso=32 giving Δz=32 → 0.082 rad, but that broke
+    flat-ground combat — see EYE_HEIGHT comment in cs2_combat.h.)
     Why this exists: validates that the 3D hit-test gates ON correct pitch alignment
     when there's a vertical offset. Without 3D geometry, this would either always
     hit (2D logic ignoring z) or always miss (broken implementation).
@@ -292,8 +294,8 @@ def test_3d_hit_at_correct_pitch_elevated_target():
         sx, sy, sz = 575.0, 352.0, 0.0                 # area 5 centroid
         tx, ty, tz = 960.0, 304.0, 64.0                # area 6 centroid
         rx, ry = tx - sx, ty - sy
-        eye_z = sz + 64.0                              # EYE_HEIGHT_STAND
-        torso_z = tz + 32.0                            # TORSO_OFFSET_STAND
+        eye_z = sz + 48.0                              # EYE_HEIGHT_STAND (v1b: gh #36 fix A — center-to-center)
+        torso_z = tz + 48.0                            # TORSO_OFFSET_STAND (v1b: equal to EYE_HEIGHT_STAND)
         rz = torso_z - eye_z
         dist_2d = math.sqrt(rx * rx + ry * ry)
         pitch = math.atan2(rz, dist_2d)                # ~0.082 rad: correct 3D pitch
@@ -364,8 +366,8 @@ def test_3d_hit_pitch_down_from_catwalk():
 
     Map geometry: area 15 (x=995, y=136, z=128 — catwalk) is visible to area 5
     (x=575, y=352, z=0 — ground): vis[15][5]=True.
-    shooter eye_z = 128 + 64 = 192; target torso_z = 0 + 32 = 32; Δz = -160.
-    dist_2d ≈ 470 → pitch = atan2(-160, dist_2d) ≈ -0.327 rad ≈ -18.7°.
+    v1b geometry (gh #36 fix A): eye_z = 128 + 48 = 176; torso_z = 0 + 48 = 48;
+    Δz = -128. dist_2d ≈ 470 → pitch = atan2(-128, 470) ≈ -0.266 rad ≈ -15.2°.
     Why this exists: validates the SYMMETRIC down-pitch case (the up-pitch case
     proved positive Δz works; this proves negative). Catches a sign-flip bug
     in the 3D direction vector."""
@@ -381,8 +383,8 @@ def test_3d_hit_pitch_down_from_catwalk():
         sx, sy, sz = 995.0, 136.0, 128.0               # area 15 centroid
         tx, ty, tz = 575.0, 352.0, 0.0                 # area 5 centroid
         rx, ry = tx - sx, ty - sy
-        eye_z = sz + 64.0                              # EYE_HEIGHT_STAND
-        torso_z = tz + 32.0                            # TORSO_OFFSET_STAND
+        eye_z = sz + 48.0                              # EYE_HEIGHT_STAND (v1b: gh #36 fix A — center-to-center)
+        torso_z = tz + 48.0                            # TORSO_OFFSET_STAND (v1b: equal to EYE_HEIGHT_STAND)
         rz = torso_z - eye_z                           # -160
         dist_2d = math.sqrt(rx * rx + ry * ry)
         pitch = math.atan2(rz, dist_2d)                # ~-0.327 rad: downward pitch
@@ -430,8 +432,8 @@ def test_3d_perp_perfectly_aligned_no_nan():
         sx, sy, sz = 575.0, 352.0, 0.0
         tx, ty, tz = 960.0, 304.0, 64.0
         rx, ry = tx - sx, ty - sy
-        eye_z = sz + 64.0
-        torso_z = tz + 32.0
+        eye_z = sz + 48.0                              # EYE_HEIGHT_STAND (v1b: gh #36 fix A)
+        torso_z = tz + 48.0                            # TORSO_OFFSET_STAND (v1b: equal to EYE_HEIGHT_STAND)
         rz = torso_z - eye_z
         dist_2d = math.sqrt(rx * rx + ry * ry)
         pitch = math.atan2(rz, dist_2d)                # perfect 3D alignment → perp = 0

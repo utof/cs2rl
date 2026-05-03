@@ -45,19 +45,39 @@ static void process_combat(Dust2Env*      env,
 
     /* Batch 3.5 (#24): eye-height + torso-offset for the 3D hit-test.
      * Shooter eye = a->z + EYE_HEIGHT_*; target torso = en->z + TORSO_OFFSET_*.
-     * Numbers picked from CS view-angle convention proportionally scaled to our
-     * world units (catwalk z=128, bombsite z=64). Tunable in one place; the
-     * existing per-shot stochastic hitbox roll (head/chest/stomach/leg multipliers)
-     * is unchanged — these constants only affect the 3D-perp gate of "did the shot
-     * connect to the target's vertical centerline."
+     *
+     * v1a (T5 initial): EYE=64/32 (top-of-model), TORSO=32/16 (mid-body), per
+     * CS view-angle convention. CAUSED COLD-START FAILURE in T7 30M smoke run
+     * (gh #36): with eye_z=64 and torso_z=32, flat-ground (same-z) shots give
+     * rz=-32 → perp_3d=32 > HIT_HALF_WIDTH=16 → MISS at pitch=0. A random-init
+     * policy can't bootstrap because every flat-ground shot misses regardless
+     * of yaw alignment, so there's never a kill signal to learn pitch from.
+     * Verticality smoke (Batch 3, no pitch) achieved Plant=0.024 by epoch 180
+     * on simple_map; pitch3d v1a achieved 0 across the full 30M run.
+     *
+     * v1b (this commit, fix A from gh #36 diagnosis): EYE = TORSO at the same
+     * stance — both refer to the agent's vertical CENTER (~48u standing,
+     * ~24u crouching, midway between feet and top-of-model). This restores
+     * the spec L4 promise that "pitch=0, rz=0 reduces to original 2D logic"
+     * for same-stance same-z combat: rz = (a->z + 48) − (a->z + 48) = 0.
+     * Asymmetric-stance shots (stand-vs-crouch) get rz = ±24, which is just
+     * over HIT_HALF_WIDTH=16 → policy must learn a small pitch correction.
+     * Verticality engagements (catwalk z=128 vs bombsite z=64) unchanged in
+     * spirit: rz = 64 dominates the eye/torso term either way.
+     *
+     * Tunable in one place; the existing per-shot stochastic hitbox roll
+     * (head/chest/stomach/leg multipliers) is unchanged — these constants
+     * only affect the 3D-perp gate of "did the shot connect to the target's
+     * vertical centerline."
+     *
      * Pitfall: real CS player models are taller (~72u) than wide (~32u); the
-     * spherical HIT_HALF_WIDTH=16 sphere under-counts vertical silhouette at long
-     * range. If hit-rate criterion 3 fails (T7), v1b candidate is ellipsoidal
-     * (perp_h/16)² + (perp_v/36)² < 1 — single-place change. */
-    static const float EYE_HEIGHT_STAND    = 64.0f;
-    static const float EYE_HEIGHT_CROUCH   = 32.0f;
-    static const float TORSO_OFFSET_STAND  = 32.0f;
-    static const float TORSO_OFFSET_CROUCH = 16.0f;
+     * spherical HIT_HALF_WIDTH=16 sphere under-counts vertical silhouette at
+     * long range. If a future v1b smoke STILL fails hit-rate, the canonical
+     * fix is the spec Risk 4 ellipsoidal hitbox (perp_h/16)² + (perp_v/36)² < 1. */
+    static const float EYE_HEIGHT_STAND    = 48.0f;
+    static const float EYE_HEIGHT_CROUCH   = 24.0f;
+    static const float TORSO_OFFSET_STAND  = 48.0f;
+    static const float TORSO_OFFSET_CROUCH = 24.0f;
 
     for (int i = 0; i < N_AGENTS; i++) {
         AgentState* a = &g->agents[i];

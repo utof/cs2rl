@@ -238,15 +238,16 @@ def test_controlled_visible_agents_can_kill():
     # (move=0, shoot=1, reload=2, weapon=3, use=4, crouch=5, jump=6).
     t_facing = math.atan2(ct_agent.y - t_agent.y, ct_agent.x - t_agent.x)
     t_agent.facing = t_facing
-    # Batch 3.5: 3D combat hit-test requires correct pitch in addition to yaw.
-    # eye_z = t_agent.z + EYE_HEIGHT_STAND (64); torso_z = ct_agent.z + TORSO_OFFSET_STAND (32).
-    # Both agents at z=0 → rz = 32 - 64 = -32; set pitch so the aim ray hits
-    # the target torso exactly (perp=0). Without this, pitch=0 (horizontal) would
-    # miss because the torso is 32u below eye height — expected 3D behavior change.
+    # Batch 3.5 v1b (gh #36 fix A): 3D combat hit-test uses center-to-center
+    # geometry (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND = 48). For same-z agents
+    # this gives rz=0 → pitch=0 hits flat-ground shots as 2D would. The
+    # `t_agent.pitch = atan2(rz_3d, dist_2d_3d)` call below evaluates to 0 for
+    # this same-z setup but is kept for documentation: future asymmetric-z
+    # tests can copy this pattern and get the correct correction automatically.
     rx_3d = ct_agent.x - t_agent.x
     ry_3d = ct_agent.y - t_agent.y
-    eye_z_t = t_agent.z + 64.0         # EYE_HEIGHT_STAND
-    torso_z_ct = ct_agent.z + 32.0     # TORSO_OFFSET_STAND
+    eye_z_t = t_agent.z + 48.0         # EYE_HEIGHT_STAND (v1b)
+    torso_z_ct = ct_agent.z + 48.0     # TORSO_OFFSET_STAND (v1b)
     rz_3d = torso_z_ct - eye_z_t
     dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
     t_agent.pitch = math.atan2(rz_3d, dist_2d_3d)

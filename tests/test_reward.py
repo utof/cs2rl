@@ -69,12 +69,13 @@ def test_pbrs_shaping_positive_on_kill():
 
     # Batch 3: set facing directly (continuous-aim path); SHOOT is now head 1.
     t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
-    # Batch 3.5: 3D combat requires correct pitch to hit. Both agents at z=0:
-    # eye_z = 0 + 64 = 64; torso_z = 0 + 32 = 32 → rz = -32. pitch=0 would
-    # make the horizontal ray miss the torso (32u below eye). Set exact pitch.
+    # Batch 3.5 v1b (gh #36 fix A): 3D combat uses center-to-center geometry
+    # (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND = 48). Same-z agents → rz=0 →
+    # pitch=0 hits like 2D would. Kept pitch computation for documentation:
+    # asymmetric-z setups inherit the correct correction automatically.
     rx_3d = ct.x - t.x
     ry_3d = ct.y - t.y
-    rz_3d = (ct.z + 32.0) - (t.z + 64.0)               # torso_z - eye_z
+    rz_3d = (ct.z + 48.0) - (t.z + 48.0)               # torso_z - eye_z (v1b: equal)
     dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
     t.pitch = math.atan2(rz_3d, dist_2d_3d)
 
@@ -349,12 +350,13 @@ def test_kill_reward_weight_is_configurable():
 
     # Batch 3: set facing directly; SHOOT is now head 1.
     t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
-    # Batch 3.5: 3D combat requires correct pitch to hit. Both agents at z=0:
-    # eye_z = 0 + 64 = 64; torso_z = 0 + 32 = 32 → rz = -32. pitch=0 would
-    # make the horizontal ray miss the torso (32u below eye). Set exact pitch.
+    # Batch 3.5 v1b (gh #36 fix A): 3D combat uses center-to-center geometry
+    # (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND = 48). Same-z agents → rz=0 →
+    # pitch=0 hits like 2D would. Kept pitch computation for documentation:
+    # asymmetric-z setups inherit the correct correction automatically.
     rx_3d = ct.x - t.x
     ry_3d = ct.y - t.y
-    rz_3d = (ct.z + 32.0) - (t.z + 64.0)               # torso_z - eye_z
+    rz_3d = (ct.z + 48.0) - (t.z + 48.0)               # torso_z - eye_z (v1b: equal)
     dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
     t.pitch = math.atan2(rz_3d, dist_2d_3d)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
