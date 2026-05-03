@@ -6,6 +6,10 @@
 #include "raylib.h"
 #include "rlgl.h" /* rlSetClipPlanes — raylib's default far is 1000u, we need more */
 #include "cs2_types.h"
+/* line_of_sight_2d for the --fog flag in draw_agents. cs2_combat.h is also
+ * pulled in transitively through cs2_env.h in the demo TU, but include it
+ * directly so the fog feature doesn't depend on header order. */
+#include "cs2_combat.h"
 
 #define PLAYER_EYE_HEIGHT 64.0f  /* eye height above agent.z in world units */
 #define WALL_HEIGHT       128.0f /* wall extrusion height                   */
@@ -41,6 +45,12 @@ typedef struct {
      * silently dropped. Each per-frame poll sets the latch; the sim-tick
      * sampler consumes it. */
     int jump_pending;
+    /* Fog-of-war debug toggle: when set, draw_agents skips rendering any
+     * agent the human's own agent can't see via line_of_sight_2d (the same
+     * raycast the C env uses for combat / obs / memory). Lets a human
+     * "play as the bot" — see only what the trained policy sees in obs.
+     * Set via --fog CLI flag in cs2_demo.c. */
+    int fog_enabled;
 } Client;
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -430,9 +440,29 @@ static void draw_walls(Dust2Env* env) {
 
 /* ── draw_agents ─────────────────────────────────────────────────────────── */
 static void draw_agents(Dust2Env* env, Client* cl, float alpha) {
+    /* Fog-of-war debug: only draw agents the human's own agent has line of
+     * sight to. Uses the SAME line_of_sight_2d the C env uses for combat /
+     * obs / memory, so what the human sees ≡ what a deployed bot sees in
+     * its obs vector. Spectate mode (human_agent_idx<0) renders everyone
+     * — there's no "viewer" to filter from. */
+    AgentState* viewer = (cl->fog_enabled && cl->human_agent_idx >= 0)
+                             ? &env->game.agents[cl->human_agent_idx]
+                             : NULL;
+
     for (int i = 0; i < N_AGENTS; i++) {
         if (i == cl->human_agent_idx)
             continue; /* don't draw own body in first-person */
+
+        if (viewer != NULL) {
+            AgentState* target = &env->game.agents[i];
+            /* Use the agent's CURRENT (sim) position for the LoS test, not the
+             * interpolated render position — the LoS test mirrors the per-tick
+             * gate the C env applies at sim-tick rate. Interpolating between
+             * prev/curr could flicker the visibility at room boundaries. */
+            if (viewer->area_idx < 0 || target->area_idx < 0 ||
+                !line_of_sight_2d(env->sd, viewer->x, viewer->y, target->x, target->y))
+                continue; /* fogged: skip rendering */
+        }
 
         float x     = _lerp(cl->prev[i].x, cl->curr[i].x, alpha);
         float y     = _lerp(cl->prev[i].y, cl->curr[i].y, alpha);

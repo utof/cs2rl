@@ -82,9 +82,26 @@ static void load_nav_data(StaticData* sd) {
 }
 
 int main(int argc, char** argv) {
-    int human_idx = 0;
-    if (argc > 1 && strcmp(argv[1], "--spectate") == 0)
-        human_idx = -1;
+    int human_idx   = 0;
+    int fog_enabled = 0;
+    /* Argv parsing — order-independent so --spectate --fog and --fog --spectate
+     * both work. Unknown args are silently ignored (keeps backward compat with
+     * existing scripts that pass --record, --eval, etc. to the trainer demo).
+     *
+     *   --spectate : detach camera from any agent (free-fly, render all).
+     *   --fog      : human-agent fog-of-war — only draw enemies your agent's
+     *                line_of_sight_2d says are visible. Forces you to play
+     *                with the SAME perception the bot gets in its obs vector.
+     *                Useful for debugging "why didn't the bot react to that?"
+     *                — if you also can't see them with --fog, the bot's obs
+     *                doesn't contain that enemy either. Ignored in spectate
+     *                mode (no "viewer" agent to filter from). */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--spectate") == 0)
+            human_idx = -1;
+        else if (strcmp(argv[i], "--fog") == 0)
+            fog_enabled = 1;
+    }
 
     StaticData sd;
     load_nav_data(&sd);
@@ -104,7 +121,8 @@ int main(int argc, char** argv) {
     float continuous_actions[N_AGENTS * AIM_DIM];
     memset(continuous_actions, 0, sizeof(continuous_actions));
 
-    Client* cl = make_client(&env, human_idx, (const float*)NAV_AREA_BOUNDS);
+    Client* cl      = make_client(&env, human_idx, (const float*)NAV_AREA_BOUNDS);
+    cl->fog_enabled = fog_enabled;
 
     double next_step = GetTime();
     while (!WindowShouldClose()) {
