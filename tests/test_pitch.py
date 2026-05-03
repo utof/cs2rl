@@ -149,3 +149,31 @@ def test_welford_pitch_accumulates():
     finally:
         if hasattr(env, "close"):
             env.close()
+
+
+# ── T3 tests ──────────────────────────────────────────────────────────────
+
+
+def test_binding_rejects_wrong_aim_dim_shape():
+    """T3: stale-shape continuous_actions raises ValueError.
+
+    Defense-in-depth: the Python wrapper at cs2_env.py::_prepare_continuous_actions:779
+    already validates and raises FIRST with a different message ('continuous_actions
+    shape (10, 1) != (10, 2)'). The binding.c shape check is a second layer for
+    callers that bypass the Python wrapper (direct binding consumers, regression
+    tests, future C-only entry points). This test passes if EITHER layer fires —
+    Python wrapper OR binding.c's defensive check (Opus C4 review note)."""
+    import _action_spec as spec
+    from c_env.cs2_env import Cs2Env
+    from map import make_simple_map
+    env = Cs2Env(map_data=make_simple_map())
+    try:
+        env.reset(seed=42)
+        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
+        # Stale caller: AIM_DIM=1 shape (instead of 2) — must raise.
+        bad_cont = np.zeros((10, 1), dtype=np.float32)
+        with pytest.raises(ValueError, match=r"AIM_DIM|continuous_actions"):
+            env.step(actions, bad_cont)
+    finally:
+        if hasattr(env, "close"):
+            env.close()

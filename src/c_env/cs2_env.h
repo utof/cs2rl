@@ -54,12 +54,15 @@ static void env_reset(Dust2Env* env) {
     g->round_designated_carrier_id = bomb_carrier;
 }
 
-/* Batch 3: env_step now consumes TWO action buffers — separate, non-bit-cast.
+/* Batch 3 / Batch 3.5: env_step now consumes TWO action buffers — separate, non-bit-cast.
  * `actions`             : (N_AGENTS, ACTION_DIM=7) int32 — discrete heads (move/shoot/etc).
- * `continuous_actions`  : (N_AGENTS, AIM_DIM=1)    float  — Δyaw radians per agent.
+ * `continuous_actions`  : (N_AGENTS, AIM_DIM=2)    float  — [Δyaw, Δpitch] radians per agent.
  * The discrete enum no longer contains HEAD_AIM; aim is applied via the float
- * buffer in the per-agent block below (clamped to ±sd->max_turn_speed, then
- * wrap_pi'd into [-π, +π]). Owners: binding.c py_step plumbs both. */
+ * buffer in the per-agent block below (Δyaw clamped to ±sd->max_turn_speed then
+ * wrap_pi'd into [-π,+π]; Δpitch clamped to ±sd->max_turn_speed then a->pitch
+ * accumulator clamped to ±π/2 — bounded interval, NOT wrapped, see the no-wrap_pi
+ * pitfall comment near the consumption block). Owners: binding.c py_step plumbs
+ * both AND validates the cont buffer shape (Batch 3.5 #24). */
 static void env_step(Dust2Env* env, const int32_t* actions, const float* continuous_actions) {
     StaticData* sd = env->sd;
     GameState*  g  = &env->game;
