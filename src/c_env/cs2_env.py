@@ -822,6 +822,14 @@ class Cs2Env(pufferlib.PufferEnv):
         summary["aim_delta_sum"] = float(stats.aim_delta_sum)
         summary["aim_delta_sq_sum"] = float(stats.aim_delta_sq_sum)
         summary["aim_delta_count"] = int(stats.aim_delta_count)
+        # Batch 3.5 (#24): pitch Welford triple (mirrors yaw fields above).
+        # Consumers compute mean/var/std the same way: mean = sum / count;
+        # var = sq_sum / count - mean²; std = sqrt(max(0, var)).
+        # Pitch_log_std non-collapse is the spec's load-bearing acceptance
+        # signal — diagnostics need their own surface.
+        summary["aim_delta_pitch_sum"] = float(stats.aim_delta_pitch_sum)
+        summary["aim_delta_pitch_sq_sum"] = float(stats.aim_delta_pitch_sq_sum)
+        summary["aim_delta_pitch_count"] = int(stats.aim_delta_pitch_count)
         for idx in range(2):
             summary[f"action_reload_{idx}"] = int(stats.action_reload[idx])
         for idx in range(3):

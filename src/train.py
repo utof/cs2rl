@@ -220,6 +220,23 @@ def load_policy_from_checkpoint(checkpoint_path, device):
     # Infer obs_dim from checkpoint to handle checkpoints trained with different obs sizes
     ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
     policy_env = make_puffer_env()
+
+    # Batch 3.5 (#24, Opus I3): defensive obs_dim consistency check.
+    # The function rebuilds the policy with the *checkpoint's* obs_dim
+    # (obs_dim_override=ckpt_obs_dim). For any cross-version checkpoint
+    # (e.g., Batch-3 105-dim loaded against Batch-3.5 107-dim env), the
+    # policy will silently mis-interpret obs slots after the insertion
+    # point. Fail loud at load time instead.
+    # Pitfall: compare DISK shape to LIVE shape (ckpt_obs_dim vs
+    # env_obs_dim), not derived-to-derived (policy.obs_dim is set to
+    # obs_dim_override and would be self-referentially equal).
+    env_obs_dim = policy_env.single_observation_space.shape[0]
+    if ckpt_obs_dim != env_obs_dim:
+        policy_env.close()
+        raise ValueError(
+            f"checkpoint obs_dim={ckpt_obs_dim} ≠ env obs_dim={env_obs_dim}; "
+            f"checkpoint is from a different obs schema. Retrain or use a matching env.")
+
     try:
         policy = build_policy(policy_env, device, obs_dim_override=ckpt_obs_dim)
     finally:
@@ -362,10 +379,15 @@ def format_train_status(epoch, ts_val, logs):
     kills_ct = logs.get("environment/kills_ct", 0.0)
     round_len = logs.get("environment/round_length", 0.0)
     move_1 = logs.get("environment/action_move_1", 0.0)
+    # Batch 3.5: per-axis aim log_std (clamped). Defaults to 0.0 if missing.
+    # T7 acceptance gate 2 greps for aim_log_std_pitch= — keep this substring.
+    aim_log_std_yaw = logs.get("policy/aim_log_std_yaw", 0.0)
+    aim_log_std_pitch = logs.get("policy/aim_log_std_pitch", 0.0)
     return (f"Epoch {epoch} | SPS: {sps:.0f} | Timeout: {timeout:.3f} | "
             f"TWin: {t_win:.3f} | CTWin: {ct_win:.3f} | Plant: {plant:.3f} | "
             f"Kills(T/CT): {kills_t:.2f}/{kills_ct:.2f} | RoundLen: {round_len:.1f} | "
-            f"Move1: {move_1:.1f} | TS: {ts_val:.3f}")
+            f"Move1: {move_1:.1f} | TS: {ts_val:.3f} | "
+            f"aim_log_std_yaw={aim_log_std_yaw:.4f} aim_log_std_pitch={aim_log_std_pitch:.4f}")
 
 
 # ── SECTION: Record Episode ────────────────────────────────────────────────
@@ -2507,6 +2529,18 @@ def train(args):
                 # opponent_team flag: 1.0 = CT opponent, 0.0 = T opponent.
                 logs["self_play/opponent_team"] = float(self_play_mgr.opponent_team == "ct")
                 # ────────────────────────────────────────────────────────────
+
+            # Batch 3.5 (#24): per-axis aim log_std metrics. Read CLAMPED values
+            # (the values the policy actually used at this iteration), not the raw
+            # nn.Parameter. LOG_STD_MIN/MAX are module-globals at lines 49-50.
+            # Load-bearing for T7 acceptance gate 2: aim_log_std_pitch > -3.5
+            # at 30M steps. Format string in format_train_status must keep the
+            # 'aim_log_std_pitch=' substring greppable.
+            with torch.no_grad():
+                clamped_log_std = torch.clamp(policy.aim_log_std, LOG_STD_MIN,
+                                              LOG_STD_MAX).cpu().numpy()
+            logs["policy/aim_log_std_yaw"] = float(clamped_log_std[0])
+            logs["policy/aim_log_std_pitch"] = float(clamped_log_std[1])
 
             # ── Persist metrics ──────────────────────────────────────────────
             log_entry = {
