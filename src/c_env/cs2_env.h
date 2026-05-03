@@ -137,22 +137,43 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
             es->aim_delta_sum    += clamped;
             es->aim_delta_sq_sum += clamped * clamped;
             es->aim_delta_count  += 1;
-            /* Batch 3.5 (#24): continuous-aim Δpitch consumption — same shape as yaw.
-             * Per-tick angular velocity cap (sd->max_turn_speed); pitch additionally
-             * clamped to ±π/2 (bounded interval, no wrap). Welford accumulates the
-             * CLAMPED value to match the executed value (yaw convention).
-             * Pitfall: do NOT use wrap_pi here — pitch is a bounded interval, not
-             * a circular topology. ±π/2 is "looking straight up/down"; wrapping
-             * past it would invert the world geometrically. */
-            float delta_pitch = continuous_actions[i * AIM_DIM + 1];
-            float clamped_pitch =
-                fminf(fmaxf(delta_pitch, -sd->max_turn_speed), sd->max_turn_speed);
-            a->pitch = fminf(fmaxf(a->pitch + clamped_pitch, -(float)M_PI / 2), (float)M_PI / 2);
-            ss->aim_delta_pitch_sum    += clamped_pitch;
-            ss->aim_delta_pitch_sq_sum += clamped_pitch * clamped_pitch;
+            /* Batch 3.5 v1c (gh #36 fix B-3): ABSOLUTE pitch (no accumulator).
+             *
+             * v1a/v1b had Δpitch (delta + accumulator + bounded clamp), mirroring
+             * yaw's wrap-pi rotation. Failed cold-start training (T7 v1a, v1b):
+             * random-init policies produce a small but non-zero MEAN Δpitch
+             * (typically ±0.05 rad/tick from random aim_mu weights × obs).
+             * Yaw tolerates this — wrap_pi keeps it ergodic. Pitch's bounded
+             * ±π/2 clamp turns drift into hard saturation lock within ~16 ticks
+             * (1 sec). Saturated pitch (looking straight up/down) → all shots
+             * miss → no kill signal → no gradient → policy never recovers.
+             * Chicken-and-egg, structurally unfixable under Δpitch semantics.
+             *
+             * Solution: pitch is now state-dependent ABSOLUTE (the policy picks
+             * "where to look" each tick, not "how fast to turn"). No drift, no
+             * saturation pathology. Policy output range (±max_turn_speed = ±π/4
+             * after tanh*max_turn_speed) is preserved, which limits effective
+             * pitch to ±π/4 (~45°). For our world geometry that covers all
+             * realistic engagement angles (catwalk z=128 vs floor z=0 at 200u
+             * → atan2(-128, 200) ≈ -32°, well within ±45°).
+             *
+             * Welford fields keep their NAMES (aim_delta_pitch_*) for ctypes
+             * compatibility but now record the APPLIED ABSOLUTE pitch. mean =
+             * "where the policy is on average looking", σ = "spread of look
+             * directions". aim_log_std_pitch (T6 metric) is the primary
+             * non-collapse signal; this Welford pair is a secondary surface
+             * showing engagement-angle distribution.
+             *
+             * Pitfall: tests that pre-set agent.pitch via ctypes WRITE then
+             * call env.step() will see pitch overwritten by the cont buffer.
+             * Set the desired pitch via continuous_actions[i*AIM_DIM+1] instead. */
+            float pitch_target = continuous_actions[i * AIM_DIM + 1];
+            a->pitch           = fminf(fmaxf(pitch_target, -(float)M_PI / 2), (float)M_PI / 2);
+            ss->aim_delta_pitch_sum    += a->pitch;
+            ss->aim_delta_pitch_sq_sum += a->pitch * a->pitch;
             ss->aim_delta_pitch_count  += 1;
-            es->aim_delta_pitch_sum    += clamped_pitch;
-            es->aim_delta_pitch_sq_sum += clamped_pitch * clamped_pitch;
+            es->aim_delta_pitch_sum    += a->pitch;
+            es->aim_delta_pitch_sq_sum += a->pitch * a->pitch;
             es->aim_delta_pitch_count  += 1;
         }
         count_action(ss->action_shoot, es->action_shoot, shoot_act, 2);

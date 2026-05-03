@@ -20,9 +20,14 @@
     7  /* Batch 3: HEAD_AIM removed; aim is now a continuous head, see AIM_DIM below */
 #define ACTION_MASK_DIM                                                                            \
     22 /* Batch 3: sum(ACTION_HEAD_SIZES) = 9+2+2+3+2+2+2 = 22 (was 38 with the 16-bin aim) */
-/* Batch 3.5: 2D Gaussian (Δyaw + Δpitch). Order in continuous_actions buffer:
- * [i*AIM_DIM+0] = Δyaw, [i*AIM_DIM+1] = Δpitch. Both clamped to ±max_turn_speed
- * per tick; pitch additionally clamped to ±π/2 absolute (bounded interval). */
+/* Batch 3.5: 2D Gaussian (Δyaw + absolute pitch). Order in continuous_actions buffer:
+ * [i*AIM_DIM+0] = Δyaw  — accumulated via wrap_pi(facing + clamped Δyaw).
+ * [i*AIM_DIM+1] = pitch — ABSOLUTE (v1c, gh #36): a->pitch = clamp(value, ±π/2)
+ *                         each tick. NOT a delta — the policy picks where to
+ *                         look directly. Avoids the saturation pathology where
+ *                         random-init μ drift locked pitch at ±π/2 within ~16
+ *                         ticks. Effective range is ±max_turn_speed (~±π/4 = ±45°)
+ *                         since policy output is bounded by tanh*max_turn_speed. */
 #define AIM_DIM 2
 /* Sim-side obs schema version (NOT used at runtime — pure documentation;
  * future sim refactors bump this when obs schema changes. Deploy export
@@ -209,7 +214,7 @@ typedef struct {
     int8_t  _pad4[3];    /* pad to int32 boundary                                     */
     int32_t jump_cd;     /* ticks until another jump press is honoured (0 = bhop OK)  */
     /* Batch 3.5 additions (pitch / 3D combat) — appended, never reorder. */
-    float pitch; /* radians, 0 = horizontal; clamped ±π/2 in cs2_env.h    */
+    float pitch; /* radians, 0 = horizontal; ABSOLUTE per env_step (v1c, gh #36) */
 } AgentState;
 
 /* ── Game state ── */

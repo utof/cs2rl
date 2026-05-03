@@ -66,10 +66,17 @@ def _zero_actions():
 
 
 def test_pitch_consumed_from_continuous_actions():
-    """T2: continuous_actions[:, 1] becomes Δpitch; pitch field updates.
+    """T2 (v1c, gh #36 fix B-3): continuous_actions[:, 1] becomes ABSOLUTE pitch.
+
+    v1a/v1b read this slot as a Δpitch (delta accumulator). v1c reads it as the
+    absolute target — `a->pitch = clamp(value, ±π/2)` each tick. This test still
+    passes under both semantics because we set 0.05 from a zero start and read
+    0.05 back, but the meaning differs: under v1c, writing 0.05 puts pitch
+    AT 0.05; under v1b it added 0.05 to whatever was there. The other T2 tests
+    (clamp/Welford) cover the semantic difference.
 
     Why this exists: T1 added the pitch field but no consumer. T2 wires up the
-    env_step Δpitch read. This test catches a missed consumer (would-be silent
+    env_step pitch read. This test catches a missed consumer (would-be silent
     bug: pitch stays at 0.0 even when continuous_actions[1] is non-zero)."""
     from c_env.cs2_env import Cs2Env
     from map import make_simple_map
@@ -87,12 +94,13 @@ def test_pitch_consumed_from_continuous_actions():
 
 
 def test_pitch_clamps_at_pi_over_2_up():
-    """T2: pitch clamps at +π/2 (bounded interval; no wrap).
+    """T2 (v1c): pitch clamps at +π/2 (bounded interval; no wrap).
 
     Pitfall: pitch is NOT a circular topology like yaw. Wrapping past π/2
     would invert the world. The implementation uses fminf/fmaxf with explicit
-    bounds, NOT wrap_pi. This test verifies that 100 ticks of massive Δpitch
-    saturate at +π/2 instead of wrapping or overflowing."""
+    bounds, NOT wrap_pi. v1c: writing absolute=100.0 saturates instantly to
+    +π/2 (single fminf hit). The 100-tick loop is preserved from v1b for
+    parity but the saturation now happens on tick 1, not progressively."""
     import math
 
     from c_env.cs2_env import Cs2Env
@@ -113,11 +121,18 @@ def test_pitch_clamps_at_pi_over_2_up():
 
 
 def test_welford_pitch_accumulates():
-    """T2: aim_delta_pitch_count tracks per-tick consumption (alive agents only).
+    """T2 (v1c): aim_delta_pitch_count tracks per-tick consumption (alive agents only).
 
     Spec acceptance criterion 2 is load-bearing on aim_log_std_pitch not collapsing.
     The Welford pitch triple (sum/sq_sum/count) is the diagnostic that surfaces
     pitch consumption to train-loop logs.
+
+    v1c semantic shift: the Welford fields keep the name `aim_delta_pitch_*`
+    (ctypes mirror compatibility) but now record the APPLIED ABSOLUTE pitch,
+    not the delta. mean = avg look-direction, σ = engagement-angle spread.
+    For this test the numerical assertion is unchanged because writing a
+    constant 0.1 absolute every tick produces the same per-tick contribution
+    (0.1) as writing a delta of 0.1 once (also 0.1) under v1b.
 
     step_stats is cleared at the top of every env_step call (clear_stats(ss) at
     cs2_env.h:84); it reflects only the LAST step (10 agents × 1 tick = 10).
@@ -183,13 +198,18 @@ def test_binding_rejects_wrong_aim_dim_shape():
 
 
 def test_obs_pitch_sin_cos_populated():
-    """T4: obs[11], obs[12] = sin/cos(pitch) when pitch is non-zero.
+    """T4 (v1c): obs[11], obs[12] = sin/cos(pitch) when pitch is non-zero.
 
     Why this exists: T1 added the pitch field, T2 wired the consumption, T4 makes
     pitch policy-observable. This test forces a known pitch value, steps the env
     once, and verifies the obs slots match math.sin/cos(pitch). Pitfall: the obs
     insertion shifts EVERY downstream obs[N] by +2 — if downstream tests fail
-    after T4, audit them per Step 4.6."""
+    after T4, audit them per Step 4.6.
+
+    v1c (gh #36 fix B-3): pitch is now ABSOLUTE — env_step does
+    `a->pitch = clamp(continuous_actions[i*AIM_DIM+1], ±π/2)` BEFORE
+    compute_observations, so pre-setting `agent.pitch` via ctypes WRITE is
+    overwritten on every step. Set the desired pitch via cont[0, 1] instead."""
     import math
 
     from c_env.cs2_env import Cs2Env
@@ -197,8 +217,8 @@ def test_obs_pitch_sin_cos_populated():
     env = Cs2Env(map_data=make_simple_map())
     try:
         env.reset(seed=42)
-        env._c_env.game.agents[0].pitch = 0.5          # ~28.6°
         actions, cont = _zero_actions()
+        cont[0, 1] = 0.5               # ~28.6° absolute pitch (v1c semantics)
         env.step(actions, cont)
         obs = env.observations[0]
         assert obs[11] == pytest.approx(math.sin(0.5), abs=1e-5)
@@ -230,10 +250,9 @@ def test_obs_dim_is_107_in_runtime():
 # ── T5 tests ──────────────────────────────────────────────────────────────
 
 
-def _setup_3d_hit_scenario(env, sx, sy, sz, shooter_area_idx, tx, ty, tz, target_area_idx,
-                           shooter_pitch):
+def _setup_3d_hit_scenario(env, sx, sy, sz, shooter_area_idx, tx, ty, tz, target_area_idx):
     """Helper: place agent[0] (T) and agent[5] (CT) at given positions with
-    correct yaw + given pitch, ready to shoot.
+    correct yaw, ready to shoot.
 
     Args:
         env: Cs2Env instance (already reset).
@@ -245,16 +264,21 @@ def _setup_3d_hit_scenario(env, sx, sy, sz, shooter_area_idx, tx, ty, tz, target
             will use the OLD area_idx from the spawn position. Always keep in sync.
         tx, ty, tz: target position in world units.
         target_area_idx: nav area_idx for target position (same sync requirement).
-        shooter_pitch: aim pitch in radians.
+
     Resets fire_cd / reload_ticks / switch_ticks / is_crouching / is_airborne
     on both agents so a single shot can fire immediately. Sets target HP=100.
+
+    PITCH NOTE (v1c, gh #36 fix B-3): pitch is ABSOLUTE per env_step. This helper
+    no longer accepts `shooter_pitch` because writing `g.agents[0].pitch = X`
+    here would be overwritten by `a->pitch = clamp(cont[i*AIM_DIM+1], ±π/2)` on
+    the very next env.step. Callers must set pitch via the continuous_actions
+    buffer they pass to env.step (e.g., `cont[0, 1] = pitch`).
     """
     import math
     g = env._c_env.game
     g.agents[0].x, g.agents[0].y, g.agents[0].z = sx, sy, sz
     g.agents[0].area_idx = shooter_area_idx            # must match position for vis check
     g.agents[0].facing = math.atan2(ty - sy, tx - sx)
-    g.agents[0].pitch = shooter_pitch
     g.agents[0].is_crouching = 0
     g.agents[0].is_airborne = 0
     g.agents[0].fire_cd = 0
@@ -307,12 +331,12 @@ def test_3d_hit_at_correct_pitch_elevated_target():
                                tx=tx,
                                ty=ty,
                                tz=tz,
-                               target_area_idx=6,
-                               shooter_pitch=pitch)
+                               target_area_idx=6)
         hp_before = env._c_env.game.agents[5].hp
         actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
         actions[0, 1] = 1                              # HEAD_SHOOT
         cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+        cont[0, 1] = pitch                             # v1c: pitch is absolute, set via cont
         env.step(actions, cont)
         hp_after = env._c_env.game.agents[5].hp
         assert hp_after < hp_before, f"shot didn't connect; hp {hp_before}→{hp_after}"
@@ -347,12 +371,12 @@ def test_3d_miss_at_zero_pitch_elevated_target():
                                tx=tx,
                                ty=ty,
                                tz=tz,
-                               target_area_idx=6,
-                               shooter_pitch=0.0)      # WRONG pitch — horizontal
+                               target_area_idx=6)
         hp_before = env._c_env.game.agents[5].hp
         actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
         actions[0, 1] = 1
         cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+        # cont[0, 1] left at 0.0 — WRONG pitch (horizontal); v1c absolute semantics
         env.step(actions, cont)
         hp_after = env._c_env.game.agents[5].hp
         assert hp_after == hp_before, (f"shot connected at wrong pitch; hp {hp_before}→{hp_after}")
@@ -396,12 +420,12 @@ def test_3d_hit_pitch_down_from_catwalk():
                                tx=tx,
                                ty=ty,
                                tz=tz,
-                               target_area_idx=5,
-                               shooter_pitch=pitch)
+                               target_area_idx=5)
         hp_before = env._c_env.game.agents[5].hp
         actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
         actions[0, 1] = 1
         cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+        cont[0, 1] = pitch                             # v1c: pitch is absolute, set via cont
         env.step(actions, cont)
         hp_after = env._c_env.game.agents[5].hp
         assert hp_after < hp_before, (f"down-pitch shot didn't connect; hp {hp_before}→{hp_after}")
@@ -445,11 +469,11 @@ def test_3d_perp_perfectly_aligned_no_nan():
                                tx=tx,
                                ty=ty,
                                tz=tz,
-                               target_area_idx=6,
-                               shooter_pitch=pitch)
+                               target_area_idx=6)
         actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
         actions[0, 1] = 1
         cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+        cont[0, 1] = pitch                             # v1c: pitch is absolute, set via cont
         env.step(actions, cont)
                                                        # Validate no NaN propagated to obs vector.
         assert not np.any(np.isnan(env.observations)), "NaN in observations"
@@ -464,8 +488,9 @@ def test_pitch_clamps_at_pi_over_2_down():
     The original test_pitch_clamps_at_pi_over_2_up (T2) covers +π/2 saturation.
     Symmetric coverage is needed — if the implementation accidentally used
     `-(float)M_PI/2` in BOTH bounds (typo), the upward test would still pass
-    while the downward bound would silently be wrong. This test fires Δpitch=-100
-    for 100 ticks and asserts saturation at -π/2 (looking straight down)."""
+    while the downward bound would silently be wrong. v1c: writing absolute=-100
+    saturates instantly to -π/2 (single fmaxf hit). The 100-tick loop is preserved
+    from v1b for parity but saturation now happens on tick 1, not progressively."""
     import math
 
     from c_env.cs2_env import Cs2Env
