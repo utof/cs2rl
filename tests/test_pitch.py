@@ -385,16 +385,28 @@ def test_3d_miss_at_zero_pitch_elevated_target():
             env.close()
 
 
-def test_3d_hit_pitch_down_from_catwalk():
-    """T5: shooter on catwalk z=128 shooting DOWN at z=0 target — correct negative pitch.
+def test_3d_hit_pitch_down_from_ramp():
+    """T5: down-pitch shot from elevated ramp (z=64) at floor target (z=0).
 
-    Map geometry: area 15 (x=995, y=136, z=128 — catwalk) is visible to area 5
-    (x=575, y=352, z=0 — ground): vis[15][5]=True.
-    v1b geometry (gh #36 fix A): eye_z = 128 + 48 = 176; torso_z = 0 + 48 = 48;
-    Δz = -128. dist_2d ≈ 470 → pitch = atan2(-128, 470) ≈ -0.266 rad ≈ -15.2°.
-    Why this exists: validates the SYMMETRIC down-pitch case (the up-pitch case
-    proved positive Δz works; this proves negative). Catches a sign-flip bug
-    in the 3D direction vector."""
+    Why this exists: validates the SYMMETRIC down-pitch case (the up-pitch
+    test proved positive Δz works; this proves negative Δz). Catches a
+    sign-flip bug in the 3D direction vector.
+
+    Geometry: T-ramp (area 13, z=64) → T-corridor (area 5, z=0). adj[13][5]=1
+    so the position-raycast in build_vis_matrix passes (single adjacent
+    transition). Eye = 64+48 = 112; torso = 0+48 = 48; rz = -64.
+
+    History: this used to be "catwalk z=128 → T-corridor z=0", but the new
+    position-raycast `vis_matrix` (gh #36 follow-up) correctly blocks that
+    line. Why: catwalk and bombsite are 2D-adjacent at y=192 with non-zero
+    cliff dz=64 → adj[15][6]=0 → wall between them at z=0..WALL_H=150 (per
+    viz.py). The geometric line from catwalk eye z=176 down to T-corridor
+    target z=48 crosses that wall at z≈143 < 150, so the wall blocks it.
+    With our current full-height-wall model in simple_map, catwalk-to-floor
+    shots are physically impossible. Real CS has lower parapets (low cover
+    you shoot OVER); modeling that needs either per-edge wall heights or a
+    3D over-wall exemption — deferred. T-ramp→T-corridor exercises the
+    SAME down-pitch math without hitting the wall-height limitation."""
     import math
 
     import _action_spec as spec
@@ -403,20 +415,20 @@ def test_3d_hit_pitch_down_from_catwalk():
     env = Cs2Env(map_data=make_simple_map())
     try:
         env.reset(seed=42)
-        # Area 15 (catwalk z=128) → area 5 (ground z=0): vis[15][5]=True
-        sx, sy, sz = 995.0, 136.0, 128.0               # area 15 centroid
-        tx, ty, tz = 575.0, 352.0, 0.0                 # area 5 centroid
+        # T-ramp (z=64) → T-corridor (z=0); adj[13][5]=1 (ramp connection)
+        sx, sy, sz = 785.0, 304.0, 64.0                # area 13 centroid (T-ramp)
+        tx, ty, tz = 575.0, 352.0, 0.0                 # area 5 centroid (T-corridor)
         rx, ry = tx - sx, ty - sy
-        eye_z = sz + 48.0                              # EYE_HEIGHT_STAND (v1b: gh #36 fix A — center-to-center)
-        torso_z = tz + 48.0                            # TORSO_OFFSET_STAND (v1b: equal to EYE_HEIGHT_STAND)
-        rz = torso_z - eye_z                           # -160
+        eye_z = sz + 48.0                              # EYE_HEIGHT_STAND
+        torso_z = tz + 48.0                            # TORSO_OFFSET_STAND
+        rz = torso_z - eye_z                           # -64
         dist_2d = math.sqrt(rx * rx + ry * ry)
-        pitch = math.atan2(rz, dist_2d)                # ~-0.327 rad: downward pitch
+        pitch = math.atan2(rz, dist_2d)                # ~-0.29 rad: downward pitch
         _setup_3d_hit_scenario(env,
                                sx=sx,
                                sy=sy,
                                sz=sz,
-                               shooter_area_idx=15,
+                               shooter_area_idx=13,
                                tx=tx,
                                ty=ty,
                                tz=tz,

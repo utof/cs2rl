@@ -188,18 +188,24 @@ def test_controlled_visible_agents_can_kill():
     nav_graph = env.nav_graph
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
 
+    # Pair selection uses runtime LoS (see test_reward.py comment for the
+    # vis_matrix / line_of_sight_2d divergence introduced by gh #36).
     pair = None
     area_ids = nav_graph.area_ids
     for i, area_i in enumerate(area_ids[:400]):
         for area_j in area_ids[i + 1:i + 200]:
-            if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
-                continue
-            dx = nav_graph.centroids[area_j][0] - nav_graph.centroids[area_i][0]
-            dy = nav_graph.centroids[area_j][1] - nav_graph.centroids[area_i][1]
+            ci = nav_graph.centroids[area_i]
+            cj = nav_graph.centroids[area_j]
+            dx = cj[0] - ci[0]
+            dy = cj[1] - ci[1]
             dist = float((dx * dx + dy * dy)**0.5)
-            if 50 < dist < LASER_RANGE * 0.5:
-                pair = (area_i, area_j)
-                break
+            if not (50 < dist < LASER_RANGE * 0.5):
+                continue
+            if not env.map_data.line_of_sight_2d(float(ci[0]), float(ci[1]), float(cj[0]),
+                                                 float(cj[1])):
+                continue
+            pair = (area_i, area_j)
+            break
         if pair is not None:
             break
 

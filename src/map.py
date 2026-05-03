@@ -75,6 +75,75 @@ class MapData:
     # None for simple maps.
     nav_graph: object = field(default=None, repr=False)
 
+    def line_of_sight_2d(self, x1: float, y1: float, x2: float, y2: float) -> bool:
+        """Pure-Python mirror of cs2_combat.h::line_of_sight_2d.
+
+        Walks raster grid cells from (x1,y1) to (x2,y2) via Amanatides-Woo
+        DDA. Returns True iff every cell along the line has raster_grid >= 0
+        AND every area transition along the path has adjacency[prev,curr]=1.
+
+        Used by tests + diagnostic tooling. Runtime combat / obs / memory go
+        through the C function; this Python copy must stay in numerical
+        lock-step with the C version. If you change the C algorithm, update
+        this too — there's no shared source of truth (the only way to share
+        across language boundaries would be to expose the C function via the
+        binding, which adds maintenance for marginal benefit since the cost
+        is dominated by the per-cell lookup not the function-call overhead).
+
+        Why tests need this: the centroid-baked self.vis_matrix gives a
+        coarse "are these areas roughly visible to each other" signal that
+        doesn't necessarily match what the C raycast says about specific
+        positions inside those areas. Tests that need "agent at position A
+        can shoot agent at position B" must check this function, not
+        vis_matrix, after the build_vis_matrix C-side change in cs2_combat.h.
+
+        Termination: explicit step cap (|Δgx| + |Δgy|) avoids the float
+        bookkeeping bug where t_max overshoot makes a near-axis-aligned
+        line never reach exact (gx_end, gy_end) equality.
+        """
+        cell = self.grid_cell_size
+        H, W = self.grid.shape
+        fx0 = (x1 - self.grid_x_min) / cell
+        fy0 = (y1 - self.grid_y_min) / cell
+        fx1 = (x2 - self.grid_x_min) / cell
+        fy1 = (y2 - self.grid_y_min) / cell
+        gx, gy = int(fx0), int(fy0)
+        gxe, gye = int(fx1), int(fy1)
+        if not (0 <= gx < W and 0 <= gy < H and 0 <= gxe < W and 0 <= gye < H):
+            return False
+        prev = int(self.grid[gy, gx])
+        if prev < 0:
+            return False
+        if gx == gxe and gy == gye:
+            return True
+        dx, dy = fx1 - fx0, fy1 - fy0
+        sx = 1 if dx > 0 else (-1 if dx < 0 else 0)
+        sy = 1 if dy > 0 else (-1 if dy < 0 else 0)
+        tdx = abs(1.0 / dx) if sx else 1e30
+        tdy = abs(1.0 / dy) if sy else 1e30
+        tmx = ((gx + 1) - fx0) * tdx if sx > 0 else ((fx0 - gx) * tdx if sx < 0 else 1e30)
+        tmy = ((gy + 1) - fy0) * tdy if sy > 0 else ((fy0 - gy) * tdy if sy < 0 else 1e30)
+        max_steps = abs(gxe - gx) + abs(gye - gy)
+        for _ in range(max_steps):
+            if gx == gxe and gy == gye:
+                break
+            if tmx < tmy:
+                tmx += tdx
+                gx += sx
+            else:
+                tmy += tdy
+                gy += sy
+            if not (0 <= gx < W and 0 <= gy < H):
+                return False
+            cur = int(self.grid[gy, gx])
+            if cur < 0:
+                return False
+            if cur != prev:
+                if not self.adjacency[prev, cur]:
+                    return False
+                prev = cur
+        return True
+
 
 _CS2_MAP_CACHE: dict = {}
 

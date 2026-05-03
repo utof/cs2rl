@@ -1,13 +1,169 @@
 #pragma once
+#include <math.h>
 #include "cs2_types.h"
 #include "cs2_weapons.h"
 
+/* line_of_sight_2d — Amanatides-Woo grid raycast between two world (x,y).
+ *
+ * Returns 1 (clear) iff every grid cell along the line is in a valid area
+ * AND every area transition along the path satisfies adjacency. Returns 0
+ * otherwise.
+ *
+ * Why two checks (NOT just `raster_grid >= 0`):
+ *   - raster_grid == -1 means "no room" (dead space outside any room
+ *     rectangle). viz.py draws walls at room perimeters, so dead space
+ *     between rooms IS a wall. The raycast must reject lines crossing it.
+ *   - Adjacency catches walls between rooms that SHARE an edge but aren't
+ *     connected — e.g. bombsite (z=64, area 6) and catwalk (z=128, area 15)
+ *     share y=192 but the wall between them is full-height. Without the
+ *     adjacency check, a line crossing 6→15 would falsely report "clear"
+ *     because both cells have raster_grid >= 0.
+ *
+ * Replaces the prior centroid-based area→area `vis_matrix` lookup, which
+ * gave false negatives like `vis[bombsite][T-spawn-C] = 0` when the
+ * straight centroid-to-centroid line happened to exit the playable area
+ * even though edge-of-room → edge-of-room lines stay inside valid rooms
+ * the whole way. Demo bug: "step off bombsite, hits land". gh #36 follow-up.
+ *
+ * Cost: O(max(Δgx, Δgy)) cells per call. ~100-200 cells for typical
+ * engagement distances on simple_map; cheap in C. 90 calls/tick × 256
+ * envs × 16Hz fits easily inside a sub-1% slice of the step budget. No
+ * pre-computed table required (pre-bake would be ~9 MB for simple_map,
+ * grow O(cells²) for dust2 — not worth it given runtime cost).
+ *
+ * 2D-only by design: simple_map walls are full-height (z=0..150 per
+ * viz.py WALL_H), so 2D LoS suffices for walls. Verticality (catwalk,
+ * bombsite) is handled by adjacency: cross-z transitions like
+ * bombsite↔catwalk are non-adjacent → blocked at the cell boundary.
+ * If we ever model partial-height cover (low boxes, smokes), we'll need
+ * a 3D voxel raycast — separate change.
+ *
+ * Pitfall: source/target positions must be inside valid cells. Agents
+ * are pinned to their area_idx by process_movement; if you pass a
+ * position from a non-agent caller (dropped weapon, projectile mid-air),
+ * make sure it's in a valid cell or this returns blocked at step 0.
+ */
+static int line_of_sight_2d(StaticData* sd, float x1, float y1, float x2, float y2) {
+    int   N        = sd->N;
+    int   W        = sd->grid_w;
+    int   H        = sd->grid_h;
+    float inv_cell = sd->grid_inv_cell;
+    float gx_min   = sd->grid_x_min;
+    float gy_min   = sd->grid_y_min;
+
+    /* World → grid coords (float). */
+    float fx0 = (x1 - gx_min) * inv_cell;
+    float fy0 = (y1 - gy_min) * inv_cell;
+    float fx1 = (x2 - gx_min) * inv_cell;
+    float fy1 = (y2 - gy_min) * inv_cell;
+
+    int gx     = (int)fx0;
+    int gy     = (int)fy0;
+    int gx_end = (int)fx1;
+    int gy_end = (int)fy1;
+
+    /* Off-grid endpoints → treat as blocked (shouldn't happen for live
+     * agents but defensive against pathological inputs). */
+    if (gx < 0 || gx >= W || gy < 0 || gy >= H)
+        return 0;
+    if (gx_end < 0 || gx_end >= W || gy_end < 0 || gy_end >= H)
+        return 0;
+
+    /* Source cell must itself be valid; without this we'd skip its check
+     * (the loop only inspects cells AFTER stepping). */
+    int prev_area = sd->raster_grid[gy * W + gx];
+    if (prev_area < 0)
+        return 0;
+    if (gx == gx_end && gy == gy_end)
+        return 1; /* same cell — trivially clear */
+
+    /* Amanatides-Woo setup: t at which the ray crosses the next x/y cell
+     * boundary, in units of [0,1] over the segment. Whichever t is smaller
+     * tells us whether the next cell crossed is east-west (gx step) or
+     * north-south (gy step). */
+    float dx     = fx1 - fx0;
+    float dy     = fy1 - fy0;
+    int   step_x = (dx > 0.0f) ? 1 : (dx < 0.0f ? -1 : 0);
+    int   step_y = (dy > 0.0f) ? 1 : (dy < 0.0f ? -1 : 0);
+    /* Δt to advance one cell in each axis. INFINITY when step==0 keeps the
+     * `if (t_max_x < t_max_y)` branch from picking that axis. */
+    float t_delta_x = (step_x != 0) ? fabsf(1.0f / dx) : 1e30f;
+    float t_delta_y = (step_y != 0) ? fabsf(1.0f / dy) : 1e30f;
+    /* Distance (in t) to the FIRST cell boundary in each axis. */
+    float t_max_x = (step_x > 0) ? ((float)(gx + 1) - fx0) * t_delta_x
+                                 : (step_x < 0 ? (fx0 - (float)gx) * t_delta_x : 1e30f);
+    float t_max_y = (step_y > 0) ? ((float)(gy + 1) - fy0) * t_delta_y
+                                 : (step_y < 0 ? (fy0 - (float)gy) * t_delta_y : 1e30f);
+
+    /* Walk cells until we reach the target cell or hit a blocker.
+     *
+     * Termination via explicit step cap, NOT `gx == gx_end && gy == gy_end`.
+     * Why: floating-point t_max bookkeeping can make a step take gx (or gy)
+     * one cell PAST gx_end (gy_end) when the line is nearly axis-aligned —
+     * a strict-equality termination then never fires and the loop walks off
+     * across the entire grid (and into dead space, falsely reporting blocked).
+     * abs(Δgx) + abs(Δgy) is the exact upper bound on steps in Amanatides-Woo
+     * since each iteration advances exactly ONE of (gx, gy) by 1; +1 for the
+     * already-checked source cell. */
+    int max_steps =
+        (gx_end > gx ? gx_end - gx : gx - gx_end) + (gy_end > gy ? gy_end - gy : gy - gy_end);
+    for (int step = 0; step < max_steps; step++) {
+        if (gx == gx_end && gy == gy_end)
+            break; /* hit target cell exactly */
+        if (t_max_x < t_max_y) {
+            t_max_x += t_delta_x;
+            gx      += step_x;
+        } else {
+            t_max_y += t_delta_y;
+            gy      += step_y;
+        }
+        if (gx < 0 || gx >= W || gy < 0 || gy >= H)
+            return 0; /* line walked off the grid */
+        int curr_area = sd->raster_grid[gy * W + gx];
+        if (curr_area < 0)
+            return 0; /* dead space — wall by viz.py convention */
+        if (curr_area != prev_area) {
+            /* Crossed a room boundary. Connected? */
+            if (!sd->adjacency[prev_area * N + curr_area])
+                return 0; /* wall between two valid but disjoint rooms */
+            prev_area = curr_area;
+        }
+    }
+    return 1;
+}
+
+/* build_vis_matrix — per-tick agent-pair visibility (combat + obs + memory).
+ *
+ * Was: O(1) lookup into the pre-baked area→area sd->vis_matrix using each
+ * agent's area_idx. Coarse and produced false negatives whenever the
+ * centroid-to-centroid baking line exited the playable area even though
+ * actual agent positions had clear LoS (the bombsite→spawn demo bug).
+ *
+ * Now: per-pair position raycast via line_of_sight_2d. Aligns combat,
+ * fog-of-war observations, and enemy-memory with what the human sees in
+ * raylib (and what awpy/CS gamestate would feed a deployed bot). Same
+ * lookup interface for downstream consumers (vis10[i][j]).
+ *
+ * vis10[i][i] = 1 by convention (self-LoS); harmless — combat skips i==j
+ * via team partitioning, obs skips via "enemy" indexing, memory likewise.
+ *
+ * area_idx < 0 short-circuits to 0 (off-mesh agent — shouldn't happen for
+ * live agents but defensive against dead/unspawned slots).
+ */
 static void build_vis_matrix(GameState* g, StaticData* sd, int8_t vis10[N_AGENTS][N_AGENTS]) {
     for (int i = 0; i < N_AGENTS; i++) {
+        AgentState* ai = &g->agents[i];
         for (int j = 0; j < N_AGENTS; j++) {
-            int ai      = g->agents[i].area_idx;
-            int aj      = g->agents[j].area_idx;
-            vis10[i][j] = (ai >= 0 && aj >= 0) ? sd->vis_matrix[ai * sd->N + aj] : 0;
+            if (i == j) {
+                vis10[i][j] = 1;
+                continue;
+            }
+            AgentState* aj = &g->agents[j];
+            if (ai->area_idx < 0 || aj->area_idx < 0) {
+                vis10[i][j] = 0;
+                continue;
+            }
+            vis10[i][j] = (int8_t)line_of_sight_2d(sd, ai->x, ai->y, aj->x, aj->y);
         }
     }
 }

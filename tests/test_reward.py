@@ -30,18 +30,28 @@ def test_pbrs_shaping_positive_on_kill():
     env.reset()
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
 
-    # Find two visible areas within shooting range
+    # Find two visible areas within shooting range.
+    # Selection criterion (gh #36 follow-up): runtime position-LoS, NOT the
+    # centroid-baked vis_matrix. The C build_vis_matrix in cs2_combat.h now
+    # walks raster cells with adjacency checks, which can disagree with the
+    # static vis_matrix (centroid-only raycast at bake time). Use the Python
+    # mirror MapData.line_of_sight_2d to filter pair candidates so we pick a
+    # pair the live env actually treats as combatable.
     nav = env.nav_graph
     pair = None
     for i, area_i in enumerate(nav.area_ids[:400]):
         for area_j in nav.area_ids[i + 1:i + 200]:
-            if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
+            ci = nav.centroids[area_i]
+            cj = nav.centroids[area_j]
+            dx = cj[0] - ci[0]
+            dy = cj[1] - ci[1]
+            if not (50 < float((dx * dx + dy * dy)**0.5) < 1500):
                 continue
-            dx = nav.centroids[area_j][0] - nav.centroids[area_i][0]
-            dy = nav.centroids[area_j][1] - nav.centroids[area_i][1]
-            if 50 < float((dx * dx + dy * dy)**0.5) < 1500:
-                pair = (area_i, area_j)
-                break
+            if not env.map_data.line_of_sight_2d(float(ci[0]), float(ci[1]), float(cj[0]),
+                                                 float(cj[1])):
+                continue
+            pair = (area_i, area_j)
+            break
         if pair is not None:
             break
     assert pair is not None, "no visible test pair found"
@@ -309,16 +319,21 @@ def test_kill_reward_weight_is_configurable():
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
     nav = env.nav_graph
 
+    # Pair selection uses runtime LoS (see test_pbrs_shaping_positive_on_kill comment).
     pair = None
     for i, area_i in enumerate(nav.area_ids[:400]):
         for area_j in nav.area_ids[i + 1:i + 200]:
-            if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
+            ci = nav.centroids[area_i]
+            cj = nav.centroids[area_j]
+            dx = cj[0] - ci[0]
+            dy = cj[1] - ci[1]
+            if not (50 < float((dx * dx + dy * dy)**0.5) < 1500):
                 continue
-            dx = nav.centroids[area_j][0] - nav.centroids[area_i][0]
-            dy = nav.centroids[area_j][1] - nav.centroids[area_i][1]
-            if 50 < float((dx * dx + dy * dy)**0.5) < 1500:
-                pair = (area_i, area_j)
-                break
+            if not env.map_data.line_of_sight_2d(float(ci[0]), float(ci[1]), float(cj[0]),
+                                                 float(cj[1])):
+                continue
+            pair = (area_i, area_j)
+            break
         if pair is not None:
             break
     assert pair is not None
