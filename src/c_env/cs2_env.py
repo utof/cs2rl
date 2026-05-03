@@ -28,6 +28,7 @@ class VizAgentState:
     team: int
     pos: np.ndarray
     facing: float
+    pitch: float                       # Batch 3.5: aim pitch (radians, 0=horizontal, ±π/2 bounds).
     hp: int
     alive: bool
     has_bomb: bool
@@ -685,6 +686,7 @@ class Cs2Env(pufferlib.PufferEnv):
                     team=int(agent.team),
                     pos=np.array([agent.x, agent.y, agent.z], dtype=np.float32),
                     facing=float(agent.facing),
+                    pitch=float(agent.pitch),                                    # Batch 3.5: 3D aim direction.
                     hp=int(agent.hp),
                     alive=bool(agent.alive),
                     has_bomb=bool(agent.has_bomb),
