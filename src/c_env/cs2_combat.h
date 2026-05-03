@@ -38,8 +38,26 @@ static void process_combat(Dust2Env*      env,
      * Bots still have a 16-bin discrete aim head (22.5° per bin), which
      * means at typical combat range their angular resolution is far wider
      * than this hit window and they will whiff most shots until either the
-     * aim head is widened or policies are retrained. Expected. */
+     * aim head is widened or policies are retrained. Expected.
+     * Batch 3.5: now used as 3D spherical radius — same value, but applied
+     * to 3D cross-product perp distance instead of 2D. */
     static const float HIT_HALF_WIDTH = 16.0f;
+
+    /* Batch 3.5 (#24): eye-height + torso-offset for the 3D hit-test.
+     * Shooter eye = a->z + EYE_HEIGHT_*; target torso = en->z + TORSO_OFFSET_*.
+     * Numbers picked from CS view-angle convention proportionally scaled to our
+     * world units (catwalk z=128, bombsite z=64). Tunable in one place; the
+     * existing per-shot stochastic hitbox roll (head/chest/stomach/leg multipliers)
+     * is unchanged — these constants only affect the 3D-perp gate of "did the shot
+     * connect to the target's vertical centerline."
+     * Pitfall: real CS player models are taller (~72u) than wide (~32u); the
+     * spherical HIT_HALF_WIDTH=16 sphere under-counts vertical silhouette at long
+     * range. If hit-rate criterion 3 fails (T7), v1b candidate is ellipsoidal
+     * (perp_h/16)² + (perp_v/36)² < 1 — single-place change. */
+    static const float EYE_HEIGHT_STAND    = 64.0f;
+    static const float EYE_HEIGHT_CROUCH   = 32.0f;
+    static const float TORSO_OFFSET_STAND  = 32.0f;
+    static const float TORSO_OFFSET_CROUCH = 16.0f;
 
     for (int i = 0; i < N_AGENTS; i++) {
         AgentState* a = &g->agents[i];
@@ -62,8 +80,21 @@ static void process_combat(Dust2Env*      env,
         if (def->mag_size > 0)
             a->ammo_clip[a->weapon_slot]--; /* consume one round */
 
-        float       dx         = cosf(a->facing);
-        float       dy         = sinf(a->facing);
+        /* Batch 3.5 (#24): 3D aim direction. Pitch tilts the (cos·yaw, sin·yaw)
+         * 2D direction to a 3D unit vector. d = (cos·p·cos·y, cos·p·sin·y, sin·p).
+         * |d| = 1 by construction. */
+        float cos_p = cosf(a->pitch);
+        float sin_p = sinf(a->pitch);
+        float dx    = cos_p * cosf(a->facing);
+        float dy    = cos_p * sinf(a->facing);
+        float dz    = sin_p;
+
+        /* Shooter eye z (3D combat ray origin) — incorporates stand/crouch.
+         * Without this, a crouched defender on an elevated catwalk and a
+         * standing attacker at the bottom of the bombsite would have wrong
+         * relative angles (off by ±32u). */
+        float eye_z = a->z + (a->is_crouching ? EYE_HEIGHT_CROUCH : EYE_HEIGHT_STAND);
+
         int         en_start   = (a->team == 0) ? TEAM_SIZE : 0;
         float       best_dist  = sd->laser_range; /* reuse laser_range as max combat range */
         AgentState* best_enemy = NULL;
@@ -73,23 +104,46 @@ static void process_combat(Dust2Env*      env,
             if (!en->alive || !vis10[i][ej])
                 continue;
 
-            float rx      = en->x - a->x;
-            float ry      = en->y - a->y;
-            float dist_sq = rx * rx + ry * ry;
+            float rx = en->x - a->x;
+            float ry = en->y - a->y;
+            /* Target torso z — mid-body for laser-style single-hitbox combat.
+             * The existing per-shot stochastic head/chest/stomach/leg roll
+             * (lines below) determines WHERE on the body the shot lands;
+             * the 3D-perp gate here only decides IF a shot connects. */
+            float torso_z = en->z + (en->is_crouching ? TORSO_OFFSET_CROUCH : TORSO_OFFSET_STAND);
+            float rz      = torso_z - eye_z;
+            float dist_sq = rx * rx + ry * ry + rz * rz;
+            /* NB (Opus I4): best_dist is now 3D distance. Since 3D ≥ 2D, the
+             * same sd->laser_range budget is STRICTER, not more permissive —
+             * long-range engagements with mild Δz that the 2D version accepted
+             * may now be filtered out. If T7's hit-rate criterion 3 dips, a
+             * v1b tweak is bumping sd->laser_range to compensate.
+             * Pitfall: the `dist_sq == 0.0f` skip below now requires FULL 3D
+             * coincidence — two agents at the same (x, y) but different z
+             * (e.g., directly above/below) used to be skipped under the 2D
+             * formula and now proceed to the perp/forward checks. This is
+             * arguably a 2D bug fix; flagged here so future readers know. */
             if (dist_sq > best_dist * best_dist || dist_sq == 0.0f)
                 continue;
 
             float dist    = sqrtf(dist_sq);
-            float forward = rx * dx + ry * dy; /* signed projection onto aim */
+            float forward = rx * dx + ry * dy + rz * dz; /* 3D signed projection */
             if (forward <= 0.0f)
-                continue;                      /* enemy behind shooter */
+                continue;                                /* enemy behind shooter */
 
-            /* Strict aim: perpendicular distance from aim ray to enemy
-             * centre must be within the enemy's horizontal silhouette.
-             * |rx*dy - ry*dx| is the 2D cross-product magnitude; since
-             * (dx, dy) is unit length, it equals the perpendicular offset
-             * in world units. */
-            float perp = fabsf(rx * dy - ry * dx);
+            /* Cross-product magnitude form for perpendicular distance.
+             * Numerically stable: avoids the catastrophic cancellation of the
+             * sqrt(|r|² - forward²) form when forward ≈ |r| (perfectly aligned
+             * shot). Per spec L4 + Opus review I1.
+             * Since |d| = 1, |r × d| = perpendicular distance from r to the
+             * aim ray in world units. The 2D version (|rx*dy - ry*dx|) is the
+             * pitch=0, rz=0 reduction (cz term only) — verifiable by setting
+             * sin_p=0, cos_p=1: cx = ry*0 - 0*dy = 0; cy = 0*dx - rx*0 = 0;
+             * cz = rx*dy - ry*dx. */
+            float cx   = ry * dz - rz * dy;
+            float cy   = rz * dx - rx * dz;
+            float cz   = rx * dy - ry * dx;
+            float perp = sqrtf(cx * cx + cy * cy + cz * cz);
             if (perp > HIT_HALF_WIDTH)
                 continue;
 

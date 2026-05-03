@@ -238,6 +238,18 @@ def test_controlled_visible_agents_can_kill():
     # (move=0, shoot=1, reload=2, weapon=3, use=4, crouch=5, jump=6).
     t_facing = math.atan2(ct_agent.y - t_agent.y, ct_agent.x - t_agent.x)
     t_agent.facing = t_facing
+    # Batch 3.5: 3D combat hit-test requires correct pitch in addition to yaw.
+    # eye_z = t_agent.z + EYE_HEIGHT_STAND (64); torso_z = ct_agent.z + TORSO_OFFSET_STAND (32).
+    # Both agents at z=0 → rz = 32 - 64 = -32; set pitch so the aim ray hits
+    # the target torso exactly (perp=0). Without this, pitch=0 (horizontal) would
+    # miss because the torso is 32u below eye height — expected 3D behavior change.
+    rx_3d = ct_agent.x - t_agent.x
+    ry_3d = ct_agent.y - t_agent.y
+    eye_z_t = t_agent.z + 64.0         # EYE_HEIGHT_STAND
+    torso_z_ct = ct_agent.z + 32.0     # TORSO_OFFSET_STAND
+    rz_3d = torso_z_ct - eye_z_t
+    dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
+    t_agent.pitch = math.atan2(rz_3d, dist_2d_3d)
 
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     # Batch 3: SHOOT moved from head 2 → 1 after HEAD_AIM removal.
