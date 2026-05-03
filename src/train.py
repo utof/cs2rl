@@ -309,6 +309,24 @@ def select_policy_actions(policy, obs_buffer, active_agents, device, policy_stat
 
 
 def select_policy_actions_native(policy, obs, device, policy_state, policy_mode):
+    """Run policy in eval mode; return BOTH discrete and continuous actions.
+
+    Returns
+    -------
+    (actions, cont) : (np.int32 (N, ACTION_DIM), np.float32 (N, AIM_DIM))
+        actions : per-head argmax (greedy) or per-head sample (sample mode).
+        cont    : continuous aim head output. Greedy uses μ directly (already
+                  bounded by tanh*max_turn_speed); sample draws from
+                  Normal(μ, exp(log_std)) clamped to ±max_turn_speed (matches
+                  the rollout sampler's behaviour exactly).
+
+    Why both: env.step now requires (actions, continuous_actions). Earlier
+    (Batch 3) this helper returned discrete-only and the cont buffer was
+    dropped silently — recording/eval paths effectively passed cont=zeros
+    every tick, freezing aim at spawn (the "agents look forward in rerun"
+    bug). Returning both lets callers feed the env exactly the actions the
+    policy produced.
+    """
     import torch
 
     if policy_mode == "random":
@@ -318,22 +336,21 @@ def select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
     if hasattr(policy, "obs_dim") and obs_t.shape[-1] != policy.obs_dim:
         obs_t = obs_t[..., :policy.obs_dim]
     with torch.no_grad():
-        # Batch 3 (T5): same change as select_policy_actions above. This native
-        # helper feeds evaluate_checkpoint and the smoke path; both consume only
-        # discrete int32 actions today. cont_t is dropped on the floor; if Δyaw
-        # is wanted in eval recordings, plumb it through here in T6 alongside
-        # the ONNX export wiring. See sibling helper for greedy-vs-sample notes.
         logits, mu_aim, log_std_aim, _ = policy.forward_eval(obs_t, policy_state)
         if policy_mode == "sample":
-            # Fix #1: 6-tuple return; only need action + cont (logp/entropy unused here).
-            act_t, _cont_t, *_ = _hybrid_sample_logits(
+            # 6-tuple return; we keep action + cont (logp/entropy unused here).
+            act_t, cont_t, *_ = _hybrid_sample_logits(
                 (logits, mu_aim, log_std_aim, None),
                 max_turn_speed=policy.max_turn_speed.item(),
             )
         else:
+            # Greedy: per-head argmax for discrete, μ directly for continuous.
+            # μ is already tanh-squashed × max_turn_speed in HybridPolicy.forward
+            # (~line 679), so it's already bounded — no extra clamp needed.
             act_t = torch.stack([head.argmax(dim=-1) for head in logits], dim=-1)
+            cont_t = mu_aim
 
-    return act_t.cpu().numpy().astype(np.int32)
+    return (act_t.cpu().numpy().astype(np.int32), cont_t.cpu().numpy().astype(np.float32))
 
 
 def resolve_policy_mode(checkpoint_path, policy_mode):
@@ -441,10 +458,21 @@ def record_episode(
     while not done and step_count < env.round_time * 2:
         if policy_mode == "random":
             actions = np.asarray(env.action_space.sample(), dtype=np.int32)
+            # Random policy doesn't have a continuous head; pass zeros. This
+            # leaves agents with pitch=0 / Δyaw=0 every tick, which is fine
+            # for "random eval baseline" but obviously no aim variation.
+            cont = np.zeros((actions.shape[0], 2), dtype=np.float32)
         else:
-            actions = select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
+            # Returns (actions, cont) — the policy's actual continuous-aim
+            # output. Without this, recordings/eval used cont=zeros and the
+            # rerun replay showed agents stuck at spawn facing (the "look
+            # forward" bug). AIM_DIM=2 is hardcoded against cs2_types.h;
+            # if AIM_DIM ever changes the binding-side shape check will
+            # raise before we ever silently miscount.
+            actions, cont = select_policy_actions_native(policy, obs, device, policy_state,
+                                                         policy_mode)
 
-        obs, rewards, terms, truncs, infos = env.step(actions)
+        obs, rewards, terms, truncs, infos = env.step(actions, cont)
         step_count += 1
         log_tick(env.snapshot_state(), step_count, rewards_array_to_dict(rewards))
         done = bool(np.all(terms))
@@ -486,16 +514,20 @@ def evaluate_checkpoint(checkpoint_path=None,
         while not done and step_count < ROUND_TIME * 2:
             if policy_mode == "random":
                 actions = np.asarray(env.action_space.sample(), dtype=np.int32)
+                # See record_episode comment: random has no continuous head;
+                # pass zeros. Eval metrics under random policy reflect "no aim
+                # input" which is the prior behaviour anyway.
+                cont = np.zeros((actions.shape[0], 2), dtype=np.float32)
             else:
-                actions = select_policy_actions_native(policy, obs, device, policy_state,
-                                                       policy_mode)
+                actions, cont = select_policy_actions_native(policy, obs, device, policy_state,
+                                                             policy_mode)
 
             for action in actions:
                 for head_idx, action_value in enumerate(action):
                     action_hist[head_idx][int(action_value)] += 1
                 joint_hist[tuple(int(v) for v in action)] += 1
 
-            obs, rewards, terms, truncs, infos = env.step(actions)
+            obs, rewards, terms, truncs, infos = env.step(actions, cont)
             step_count += 1
 
             step_info = extract_env_info(infos)
