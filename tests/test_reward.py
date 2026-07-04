@@ -30,18 +30,28 @@ def test_pbrs_shaping_positive_on_kill():
     env.reset()
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
 
-    # Find two visible areas within shooting range
+    # Find two visible areas within shooting range.
+    # Selection criterion (gh #36 follow-up): runtime position-LoS, NOT the
+    # centroid-baked vis_matrix. The C build_vis_matrix in cs2_combat.h now
+    # walks raster cells with adjacency checks, which can disagree with the
+    # static vis_matrix (centroid-only raycast at bake time). Use the Python
+    # mirror MapData.line_of_sight_2d to filter pair candidates so we pick a
+    # pair the live env actually treats as combatable.
     nav = env.nav_graph
     pair = None
     for i, area_i in enumerate(nav.area_ids[:400]):
         for area_j in nav.area_ids[i + 1:i + 200]:
-            if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
+            ci = nav.centroids[area_i]
+            cj = nav.centroids[area_j]
+            dx = cj[0] - ci[0]
+            dy = cj[1] - ci[1]
+            if not (50 < float((dx * dx + dy * dy)**0.5) < 1500):
                 continue
-            dx = nav.centroids[area_j][0] - nav.centroids[area_i][0]
-            dy = nav.centroids[area_j][1] - nav.centroids[area_i][1]
-            if 50 < float((dx * dx + dy * dy)**0.5) < 1500:
-                pair = (area_i, area_j)
-                break
+            if not env.map_data.line_of_sight_2d(float(ci[0]), float(ci[1]), float(cj[0]),
+                                                 float(cj[1])):
+                continue
+            pair = (area_i, area_j)
+            break
         if pair is not None:
             break
     assert pair is not None, "no visible test pair found"
@@ -69,6 +79,15 @@ def test_pbrs_shaping_positive_on_kill():
 
     # Batch 3: set facing directly (continuous-aim path); SHOOT is now head 1.
     t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
+    # Batch 3.5 v1b (gh #36 fix A): 3D combat uses center-to-center geometry
+    # (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND = 48). Same-z agents → rz=0 →
+    # pitch=0 hits like 2D would. Kept pitch computation for documentation:
+    # asymmetric-z setups inherit the correct correction automatically.
+    rx_3d = ct.x - t.x
+    ry_3d = ct.y - t.y
+    rz_3d = (ct.z + 48.0) - (t.z + 48.0)               # torso_z - eye_z (v1b: equal)
+    dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
+    t.pitch = math.atan2(rz_3d, dist_2d_3d)
 
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     # Batch 3: SHOOT moved from head 2 → 1 after HEAD_AIM removal.
@@ -300,16 +319,21 @@ def test_kill_reward_weight_is_configurable():
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
     nav = env.nav_graph
 
+    # Pair selection uses runtime LoS (see test_pbrs_shaping_positive_on_kill comment).
     pair = None
     for i, area_i in enumerate(nav.area_ids[:400]):
         for area_j in nav.area_ids[i + 1:i + 200]:
-            if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
+            ci = nav.centroids[area_i]
+            cj = nav.centroids[area_j]
+            dx = cj[0] - ci[0]
+            dy = cj[1] - ci[1]
+            if not (50 < float((dx * dx + dy * dy)**0.5) < 1500):
                 continue
-            dx = nav.centroids[area_j][0] - nav.centroids[area_i][0]
-            dy = nav.centroids[area_j][1] - nav.centroids[area_i][1]
-            if 50 < float((dx * dx + dy * dy)**0.5) < 1500:
-                pair = (area_i, area_j)
-                break
+            if not env.map_data.line_of_sight_2d(float(ci[0]), float(ci[1]), float(cj[0]),
+                                                 float(cj[1])):
+                continue
+            pair = (area_i, area_j)
+            break
         if pair is not None:
             break
     assert pair is not None
@@ -341,8 +365,17 @@ def test_kill_reward_weight_is_configurable():
 
     # Batch 3: set facing directly; SHOOT is now head 1.
     t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
+    # Batch 3.5 v1b (gh #36 fix A): 3D combat uses center-to-center geometry
+    # (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND = 48). Same-z agents → rz=0 →
+    # pitch=0 hits like 2D would. Kept pitch computation for documentation:
+    # asymmetric-z setups inherit the correct correction automatically.
+    rx_3d = ct.x - t.x
+    ry_3d = ct.y - t.y
+    rz_3d = (ct.z + 48.0) - (t.z + 48.0)               # torso_z - eye_z (v1b: equal)
+    dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
+    t.pitch = math.atan2(rz_3d, dist_2d_3d)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 1] = 1                  # SHOOT (post-Batch-3 index)
+    actions[0, 1] = 1                                  # SHOOT (post-Batch-3 index)
     _, rewards, _, _, _ = env.step(actions)
 
     # With all weights zeroed except reward_kill=0.9, killer reward must be ≈0.9

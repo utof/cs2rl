@@ -6,7 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Populate StaticData from baked nav_data.h constants */
+/* Populate StaticData from baked nav_data.h constants. Verticality fields
+ * (centroids_z, is_ramp) are baked alongside the rest by scripts/bake_nav.py
+ * — re-run that whenever map.py or SIMPLE_ROOMS changes. */
 static void load_nav_data(StaticData* sd) {
     memset(sd, 0, sizeof(StaticData));
     sd->N                   = NAV_N;
@@ -14,9 +16,11 @@ static void load_nav_data(StaticData* sd) {
     sd->raster_grid         = (int32_t*)NAV_RASTER_GRID;
     sd->adjacency           = (int8_t*)NAV_ADJACENCY;
     sd->centroid_xy         = (float*)NAV_CENTROID_XY;
+    sd->centroids_z         = (float*)NAV_CENTROIDS_Z; /* verticality batch */
     sd->area_ids            = (int32_t*)NAV_AREA_IDS;
     sd->bombsite_mask       = (int8_t*)NAV_BOMBSITE_MASK;
     sd->bombsite_by_idx     = (int8_t*)NAV_BOMBSITE_BY_IDX;
+    sd->is_ramp             = (int8_t*)NAV_IS_RAMP; /* verticality batch */
     sd->bombsite_dist       = (float*)NAV_BOMBSITE_DIST;
     sd->grid_w              = NAV_GRID_W;
     sd->grid_h              = NAV_GRID_H;
@@ -78,9 +82,26 @@ static void load_nav_data(StaticData* sd) {
 }
 
 int main(int argc, char** argv) {
-    int human_idx = 0;
-    if (argc > 1 && strcmp(argv[1], "--spectate") == 0)
-        human_idx = -1;
+    int human_idx   = 0;
+    int fog_enabled = 0;
+    /* Argv parsing — order-independent so --spectate --fog and --fog --spectate
+     * both work. Unknown args are silently ignored (keeps backward compat with
+     * existing scripts that pass --record, --eval, etc. to the trainer demo).
+     *
+     *   --spectate : detach camera from any agent (free-fly, render all).
+     *   --fog      : human-agent fog-of-war — only draw enemies your agent's
+     *                line_of_sight_2d says are visible. Forces you to play
+     *                with the SAME perception the bot gets in its obs vector.
+     *                Useful for debugging "why didn't the bot react to that?"
+     *                — if you also can't see them with --fog, the bot's obs
+     *                doesn't contain that enemy either. Ignored in spectate
+     *                mode (no "viewer" agent to filter from). */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--spectate") == 0)
+            human_idx = -1;
+        else if (strcmp(argv[i], "--fog") == 0)
+            fog_enabled = 1;
+    }
 
     StaticData sd;
     load_nav_data(&sd);
@@ -93,8 +114,15 @@ int main(int argc, char** argv) {
 
     int32_t actions[N_AGENTS * ACTION_DIM];
     memset(actions, 0, sizeof(actions));
+    /* Batch 3 (continuous-aim H-PPO): env_step gained a second action buffer
+     * for the Gaussian aim head — (N_AGENTS, AIM_DIM) float32. Demo doesn't
+     * need policy-driven aim (the human player has aim_rad set via mouse
+     * delta in human_input(); RL agents in this demo path get zeros). */
+    float continuous_actions[N_AGENTS * AIM_DIM];
+    memset(continuous_actions, 0, sizeof(continuous_actions));
 
-    Client* cl = make_client(&env, human_idx, (const float*)NAV_AREA_BOUNDS);
+    Client* cl      = make_client(&env, human_idx, (const float*)NAV_AREA_BOUNDS);
+    cl->fog_enabled = fog_enabled;
 
     double next_step = GetTime();
     while (!WindowShouldClose()) {
@@ -103,7 +131,7 @@ int main(int argc, char** argv) {
             snapshot_prev(cl, &env);
             if (human_idx >= 0)
                 human_input(cl, &env, actions);
-            env_step(&env, actions);
+            env_step(&env, actions, continuous_actions);
             snapshot_curr(cl, &env);
             cl->last_step_time  = now;
             next_step          += 1.0 / 16.0;

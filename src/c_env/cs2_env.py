@@ -28,6 +28,7 @@ class VizAgentState:
     team: int
     pos: np.ndarray
     facing: float
+    pitch: float                       # Batch 3.5: aim pitch (radians, 0=horizontal, ±π/2 bounds).
     hp: int
     alive: bool
     has_bomb: bool
@@ -169,6 +170,8 @@ class AgentStateC(ctypes.Structure):
         ("is_airborne", ctypes.c_int8),
         ("_pad4", ctypes.c_int8 * 3),
         ("jump_cd", ctypes.c_int32),
+                                                       # Batch 3.5: pitch — appended, mirror cs2_types.h AgentState.
+        ("pitch", ctypes.c_float),
     ]
 
 
@@ -226,6 +229,10 @@ class StepStatsC(ctypes.Structure):
         ("aim_delta_sum", ctypes.c_float),
         ("aim_delta_sq_sum", ctypes.c_float),
         ("aim_delta_count", ctypes.c_int32),
+                                                       # Batch 3.5: pitch Welford triple (mirror cs2_types.h StepStats fields).
+        ("aim_delta_pitch_sum", ctypes.c_float),
+        ("aim_delta_pitch_sq_sum", ctypes.c_float),
+        ("aim_delta_pitch_count", ctypes.c_int32),
         ("action_reload", ctypes.c_int32 * 2),
         ("action_weapon", ctypes.c_int32 * 3),
         ("action_crouch", ctypes.c_int32 * 2),
@@ -308,14 +315,16 @@ class Dust2EnvC(ctypes.Structure):
 # Dust2EnvC −264 bytes nominal: 2× StepStats (−104) + masks shrink
 # (10×38→10×22 = −160). Verify empirically on first build — alignment
 # surprises are routine; values updated below to match observed sizeof.
-assert ctypes.sizeof(AgentStateC) == 152, (
-    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 152)")
-assert ctypes.sizeof(GameStateC) == 1588, (
-    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1588)")
-assert ctypes.sizeof(StepStatsC) == 196, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 196)")
-assert ctypes.sizeof(Dust2EnvC) == 6488, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6488)")
+# Batch 3.5: AgentStateC +4 (float pitch), GameStateC +40 (×10 agents),
+# Dust2EnvC +40 (GameState) +80 (observations: 10×(107−105)×4).
+assert ctypes.sizeof(AgentStateC) == 156, (
+    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 156)")
+assert ctypes.sizeof(GameStateC) == 1628, (
+    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1628)")
+assert ctypes.sizeof(StepStatsC) == 208, (
+    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 208)")
+assert ctypes.sizeof(Dust2EnvC) == 6632, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6632)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -677,6 +686,7 @@ class Cs2Env(pufferlib.PufferEnv):
                     team=int(agent.team),
                     pos=np.array([agent.x, agent.y, agent.z], dtype=np.float32),
                     facing=float(agent.facing),
+                    pitch=float(agent.pitch),                                    # Batch 3.5: 3D aim direction.
                     hp=int(agent.hp),
                     alive=bool(agent.alive),
                     has_bomb=bool(agent.has_bomb),
@@ -814,6 +824,14 @@ class Cs2Env(pufferlib.PufferEnv):
         summary["aim_delta_sum"] = float(stats.aim_delta_sum)
         summary["aim_delta_sq_sum"] = float(stats.aim_delta_sq_sum)
         summary["aim_delta_count"] = int(stats.aim_delta_count)
+        # Batch 3.5 (#24): pitch Welford triple (mirrors yaw fields above).
+        # Consumers compute mean/var/std the same way: mean = sum / count;
+        # var = sq_sum / count - mean²; std = sqrt(max(0, var)).
+        # Pitch_log_std non-collapse is the spec's load-bearing acceptance
+        # signal — diagnostics need their own surface.
+        summary["aim_delta_pitch_sum"] = float(stats.aim_delta_pitch_sum)
+        summary["aim_delta_pitch_sq_sum"] = float(stats.aim_delta_pitch_sq_sum)
+        summary["aim_delta_pitch_count"] = int(stats.aim_delta_pitch_count)
         for idx in range(2):
             summary[f"action_reload_{idx}"] = int(stats.action_reload[idx])
         for idx in range(3):

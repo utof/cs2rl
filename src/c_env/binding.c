@@ -298,7 +298,10 @@ static PyObject* py_reset(PyObject* self, PyObject* args) {
  * (N_AGENTS, AIM_DIM). Caller is responsible for dtype + contiguity
  * (Cs2Env.step in cs2_env.py converts/coerces before invoking). The two
  * action buffers are kept SEPARATE — no bit-cast — so the int32 discrete
- * heads and float32 Δyaw don't share alignment hazards. */
+ * heads and float32 [Δyaw, Δpitch] don't share alignment hazards.
+ *
+ * Batch 3.5 (#24): cont buffer shape is validated here before PyArray_DATA
+ * dereference — see validation block below. */
 static PyObject* py_step(PyObject* self, PyObject* args) {
     PyObject *cap, *actions_o, *cont_o;
     if (!PyArg_ParseTuple(args, "OOO", &cap, &actions_o, &cont_o))
@@ -308,9 +311,30 @@ static PyObject* py_step(PyObject* self, PyObject* args) {
         PyErr_SetString(PyExc_ValueError, "invalid capsule");
         return NULL;
     }
+    /* Batch 3.5 (#24): defensively validate continuous_actions shape.
+     * Without this, a stale caller passing (N_AGENTS, 1) after the AIM_DIM 1→2
+     * bump silently reads OOB at [i*AIM_DIM+1]. PyErr_Format gives a clear deploy-
+     * time error instead of a NaN-flooded training run or a segfault.
+     * Defense-in-depth: cs2_env.py::_prepare_continuous_actions:779 already raises
+     * ValueError on shape mismatch; this check catches callers that bypass the
+     * Python wrapper (direct binding consumers, regression tests with raw shapes,
+     * future C-only consumers). */
+    PyArrayObject* cont_arr = (PyArrayObject*)cont_o;
+    if (PyArray_NDIM(cont_arr) != 2 || PyArray_DIM(cont_arr, 0) != N_AGENTS ||
+        PyArray_DIM(cont_arr, 1) != AIM_DIM || PyArray_TYPE(cont_arr) != NPY_FLOAT32) {
+        PyErr_Format(PyExc_ValueError,
+                     "continuous_actions must be (N_AGENTS=%d, AIM_DIM=%d) float32; "
+                     "got shape (%ld, %ld) dtype=%d",
+                     N_AGENTS,
+                     AIM_DIM,
+                     (long)PyArray_DIM(cont_arr, 0),
+                     (long)PyArray_DIM(cont_arr, 1),
+                     PyArray_TYPE(cont_arr));
+        return NULL;
+    }
     env_step(env,
              (const int32_t*)PyArray_DATA((PyArrayObject*)actions_o),
-             (const float*)PyArray_DATA((PyArrayObject*)cont_o));
+             (const float*)PyArray_DATA(cont_arr));
     Py_RETURN_NONE;
 }
 

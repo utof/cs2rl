@@ -42,7 +42,8 @@ static int _wasd_to_local_bin(int w, int a, int s, int d) {
 
 /* human_input — called once per sim tick (16 Hz).
  * Camera yaw/pitch are already updated by update_camera() in c_render().
- * This function writes the current yaw to aim_rad and encodes WASD into actions.
+ * This function writes the current yaw to aim_rad, pitch to agent->pitch, and
+ * encodes WASD into actions.
  */
 void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
     int idx = cl->human_agent_idx;
@@ -51,8 +52,14 @@ void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
 
     AgentState* agent = &env->game.agents[idx];
 
-    /* Continuous aim — write exact radians, set bypass flag */
+    /* Continuous aim — write exact radians, set bypass flag.
+     * Batch 3.5 (gh #36 follow-up): pitch is now plumbed straight from the
+     * camera so the human can shoot ground enemies from the catwalk and
+     * vice-versa. cl->pitch is already clamped to ±1.5533 rad (≈±89°) by
+     * update_camera (cs2_render.h:371-374), well within the agent's ±π/2
+     * bounded clamp in env_step. */
     agent->aim_rad          = cl->yaw;
+    agent->pitch            = cl->pitch;
     agent->human_controlled = 1;
 
     int32_t* act = actions + idx * ACTION_DIM;

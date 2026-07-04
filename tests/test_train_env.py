@@ -708,15 +708,15 @@ def test_round_designated_carrier_property_50_seeds():
 
 
 def test_obs_designated_carrier_bit_t_side():
-    """Verify obs[104] is the round-fixed role bit:
+    """Verify obs[106] is the round-fixed role bit:
        - 1.0 for the designated T agent
        - 0.0 for non-designated T agents
        - 0.0 for ALL CT agents
        - persists at 1.0 even after the carrier dies and a teammate picks up
 
-    obs[104] is distinct from obs[20] (transient self-has-bomb): it is set at
+    obs[106] is distinct from obs[22] (transient self-has-bomb): it is set at
     round start and never reassigned, surviving drop/pickup events. This gives
-    the policy a stable identity signal that obs[20] cannot.
+    the policy a stable identity signal that obs[22] cannot.
 
     NOTE: env_reset() does NOT call compute_observations (it only zeroes the
     buffer). The first populated observation arrives after env.step(). We
@@ -735,20 +735,20 @@ def test_obs_designated_carrier_bit_t_side():
         # T side
         for i in range(5):
             expected = 1.0 if i == rid else 0.0
-            assert obs[i, 104] == expected, (
-                f"T idx {i}: obs[104]={obs[i,104]} expected {expected} (rid={rid})")
+            assert obs[i, 106] == expected, (
+                f"T idx {i}: obs[106]={obs[i,106]} expected {expected} (rid={rid})")
         # CT side: all zeros
         for j in range(5, 10):
-            assert obs[j, 104] == 0.0, f"CT idx {j}: obs[104]={obs[j,104]} expected 0.0"
+            assert obs[j, 106] == 0.0, f"CT idx {j}: obs[106]={obs[j,106]} expected 0.0"
 
         # Persistence after carrier death — drive 20 zero-action steps.
         g.agents[rid].hp = 0
         g.agents[rid].alive = 0
         for _ in range(20):
             obs, *_ = env.step(actions)
-            assert obs[rid, 104] == 1.0, (
+            assert obs[rid, 106] == 1.0, (
                 f"designated carrier (T idx {rid}) lost the role bit mid-round; "
-                f"obs[104] should be round-fixed but read {obs[rid,104]}")
+                f"obs[106] should be round-fixed but read {obs[rid,106]}")
     finally:
         env.close()
 
@@ -871,7 +871,7 @@ def test_obs_dim_constant_consistency():
     import nav
     import train as t
     assert nav.OBS_DIM == t.OBS_DIM, (f"nav.OBS_DIM ({nav.OBS_DIM}) != train.OBS_DIM ({t.OBS_DIM})")
-    assert nav.OBS_DIM == 105, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 105 for Batch 2"
+    assert nav.OBS_DIM == 107, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 107 for Batch 3.5"
     env = t.make_puffer_env(seed=0)
     try:
         assert env.single_observation_space.shape == (nav.OBS_DIM, ), (
@@ -884,24 +884,24 @@ def test_obs_dim_constant_consistency():
 # ── Batch 3 (utof/cs2rl Batch 3): continuous-aim H-PPO ──
 
 
-def test_action_spec_aim_is_gaussian_1d():
+def test_action_spec_aim_is_gaussian_2d():
     """`_action_spec.py` exports the discrete/continuous split:
        - DISCRETE_HEAD_SPEC has 7 categorical entries, sum(sizes) = 22
-       - CONTINUOUS_HEAD_SPEC has 1 gaussian entry, dim 1
-       - AIM_DIM == 1
+       - CONTINUOUS_HEAD_SPEC has 1 gaussian entry, dim 2 (Δyaw + Δpitch, Batch 3.5)
+       - AIM_DIM == 2
        - Backwards-compat ACTION_DIM is 7, ACTION_MASK_DIM is 22.
     Catches the regen-not-run footgun (modifying cs2_types.h without
     re-running scripts/sync_action_spec.py)."""
     import _action_spec as spec
-    assert spec.AIM_DIM == 1, f"AIM_DIM={spec.AIM_DIM}, expected 1 for Batch 3"
+    assert spec.AIM_DIM == 2, f"AIM_DIM={spec.AIM_DIM}, expected 2 for Batch 3.5"
     assert spec.ACTION_DIM == 7, f"ACTION_DIM={spec.ACTION_DIM}, expected 7 (HEAD_AIM removed)"
     assert spec.ACTION_MASK_DIM == 22, f"ACTION_MASK_DIM={spec.ACTION_MASK_DIM}, expected 22"
     assert len(spec.DISCRETE_HEAD_SPEC) == 7, (
         f"DISCRETE_HEAD_SPEC has {len(spec.DISCRETE_HEAD_SPEC)} entries, expected 7")
     assert all(t == "categorical" for _, t, _ in spec.DISCRETE_HEAD_SPEC), (
         f"DISCRETE_HEAD_SPEC has non-categorical entries: {spec.DISCRETE_HEAD_SPEC}")
-    assert spec.CONTINUOUS_HEAD_SPEC == (("aim", "gaussian", 1), ), (
-        f"CONTINUOUS_HEAD_SPEC={spec.CONTINUOUS_HEAD_SPEC}, expected gaussian/dim=1")
+    assert spec.CONTINUOUS_HEAD_SPEC == (("aim", "gaussian", 2), ), (
+        f"CONTINUOUS_HEAD_SPEC={spec.CONTINUOUS_HEAD_SPEC}, expected gaussian/dim=2")
 
 
 def test_continuous_aim_action_consumed():
@@ -1115,9 +1115,10 @@ def test_logstd_clamp_upper():
 
 def test_hybrid_sample_writes_two_buffers():
     """T5: hybrid sampler must emit finite int discrete action AND finite
-    float Δyaw within ±max_turn_speed."""
+    float Δaim within ±max_turn_speed. Batch 3.5: AIM_DIM=2 (Δyaw + Δpitch)."""
     import torch
 
+    from _action_spec import AIM_DIM
     env = train.make_puffer_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
@@ -1127,7 +1128,7 @@ def test_hybrid_sample_writes_two_buffers():
         assert action.dtype in (torch.int64, torch.long), \
             f"action.dtype={action.dtype}"
         assert torch.isfinite(action.float()).all()
-        assert cont_action.shape == (1, 1), \
+        assert cont_action.shape == (1, AIM_DIM), \
             f"cont_action.shape={cont_action.shape}"
         assert cont_action.dtype == torch.float32
         assert torch.isfinite(cont_action).all()

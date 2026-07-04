@@ -399,15 +399,15 @@ def test_is_airborne_no_flicker_on_elevated_terrain():
 
 
 def test_obs_z_delta_populated_for_elevated_teammate():
-    """T4 load-bearing: obs[25] reflects (teammate.z - self.z)/128 = 0.5 when
+    """T4 load-bearing: obs[27] reflects (teammate.z - self.z)/128 = 0.5 when
     self is at z=0 and teammate 1 is at z=64.
 
-    Slot derivation (plan §4.5): teammate slots start at obs[23]; per
-    cs2_observations.h line 65, base = 23 + tm_count * 7.  Teammate iteration
-    skips self (j == i), so for agent 0 viewing agent 1, tm_count=0 → base=23
-    → z_delta at obs[base+2] = obs[25].
+    Slot derivation (plan §4.5): teammate slots start at obs[25]; per
+    cs2_observations.h line 65, base = 25 + tm_count * 7.  Teammate iteration
+    skips self (j == i), so for agent 0 viewing agent 1, tm_count=0 → base=25
+    → z_delta at obs[base+2] = obs[27].
 
-    Includes a sign-flip sub-case (self at z=64, teammate at z=0 → obs[25] = -0.5)
+    Includes a sign-flip sub-case (self at z=64, teammate at z=0 → obs[27] = -0.5)
     to catch a subtle direction bug that wouldn't surface with just the positive case.
 
     Pitfall: obs population only happens in compute_observations() which runs
@@ -437,14 +437,14 @@ def test_obs_z_delta_populated_for_elevated_teammate():
         assert g.agents[1].is_airborne == 0
                                                                                         # env.observations is a flat buffer; [0] gives the OBS_DIM slice for agent 0.
         obs = env.observations[0]
-                                                                                        # Teammate slot: tm_count=0, base=23, z_delta at obs[base+2]=obs[25].
-        z_delta = obs[25]
+                                                                                        # Teammate slot: tm_count=0, base=25, z_delta at obs[base+2]=obs[27].
+        z_delta = obs[27]
         expected = (64.0 - 0.0) / 128.0                                                 # = 0.5
         assert abs(z_delta - expected) < 1e-5, (
-            f"teammate z-delta slot obs[25] = {z_delta:.6f}, expected {expected:.6f}. "
+            f"teammate z-delta slot obs[27] = {z_delta:.6f}, expected {expected:.6f}. "
             f"Check (tm->z - a->z)/128.0f; agent 1 alive={g.agents[1].alive}.")
 
-        # Sign-flip sub-case: swap z values; expect obs[25] = -0.5.
+        # Sign-flip sub-case: swap z values; expect obs[27] = -0.5.
         g.agents[0].z = 64.0
         g.agents[0].area_idx = 6
         g.agents[1].z = 0.0
@@ -452,8 +452,8 @@ def test_obs_z_delta_populated_for_elevated_teammate():
         env.step(actions, cont)
         obs = env.observations[0]
         expected_neg = (0.0 - 64.0) / 128.0                                                       # = -0.5
-        assert abs(obs[25] - expected_neg) < 1e-5, (
-            f"sign-flip: teammate z-delta obs[25] = {obs[25]:.6f}, expected {expected_neg:.6f}. "
+        assert abs(obs[27] - expected_neg) < 1e-5, (
+            f"sign-flip: teammate z-delta obs[27] = {obs[27]:.6f}, expected {expected_neg:.6f}. "
             f"Direction bug? Formula must be (tm->z - a->z), NOT (a->z - tm->z).")
     finally:
         env.close()

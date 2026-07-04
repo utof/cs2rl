@@ -12,14 +12,27 @@
 /* ── Constants ─────────────────────────────────────────────────────────── */
 #define TEAM_SIZE 5
 #define N_AGENTS  10
-#define OBS_DIM   105
+/* Batch 3.5 (#24): self block now carries pitch sin/cos at obs[11..12]; all
+ * downstream obs slots shifted +2. SIM_OBS_VERSION below tracks sim's internal
+ * obs schema, distinct from deploy's frozen v2-105dim (gh #34 suspension). */
+#define OBS_DIM 107
 #define ACTION_DIM                                                                                 \
     7  /* Batch 3: HEAD_AIM removed; aim is now a continuous head, see AIM_DIM below */
 #define ACTION_MASK_DIM                                                                            \
     22 /* Batch 3: sum(ACTION_HEAD_SIZES) = 9+2+2+3+2+2+2 = 22 (was 38 with the 16-bin aim) */
-#define AIM_DIM                                                                                      \
-    1 /* Batch 3: 1D Gaussian (Δyaw only). Sim is 2D yaw-only — pitch deferred to Batch 3.5 (#24). \
-       */
+/* Batch 3.5: 2D Gaussian (Δyaw + absolute pitch). Order in continuous_actions buffer:
+ * [i*AIM_DIM+0] = Δyaw  — accumulated via wrap_pi(facing + clamped Δyaw).
+ * [i*AIM_DIM+1] = pitch — ABSOLUTE (v1c, gh #36): a->pitch = clamp(value, ±π/2)
+ *                         each tick. NOT a delta — the policy picks where to
+ *                         look directly. Avoids the saturation pathology where
+ *                         random-init μ drift locked pitch at ±π/2 within ~16
+ *                         ticks. Effective range is ±max_turn_speed (~±π/4 = ±45°)
+ *                         since policy output is bounded by tanh*max_turn_speed. */
+#define AIM_DIM 2
+/* Sim-side obs schema version (NOT used at runtime — pure documentation;
+ * future sim refactors bump this when obs schema changes. Deploy export
+ * literals stay frozen at v2-105dim per gh #34.) */
+#define SIM_OBS_VERSION       "sim-v1-107dim"
 #define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */
 #define CROUCH_COOLDOWN_TICKS 7 /* ~0.4s at 16 Hz */
 #define INVALID_AREA_IDX      (-1)
@@ -200,6 +213,8 @@ typedef struct {
     int8_t  is_airborne; /* 1 when z > 0 or vz != 0 — skips ground friction           */
     int8_t  _pad4[3];    /* pad to int32 boundary                                     */
     int32_t jump_cd;     /* ticks until another jump press is honoured (0 = bhop OK)  */
+    /* Batch 3.5 additions (pitch / 3D combat) — appended, never reorder. */
+    float pitch; /* radians, 0 = horizontal; ABSOLUTE per env_step (v1c, gh #36) */
 } AgentState;
 
 /* ── Game state ── */
@@ -222,10 +237,10 @@ typedef struct {
      * Distinct from bomb_carrier_id, which is the *dynamic* possession
      * tracker (reassigned on drop+auto-pickup in cs2_bomb.h:111). This
      * field is set ONLY in env_reset and is the round's stable identity
-     * signal. Consumed by compute_observations to emit obs[104] (the role
-     * bit, in T2). Pitfall: must stay in the int32_t block before
-     * bombsite_entered to keep ctypes alignment in sync — see GameStateC
-     * mirror in cs2_env.py. */
+     * signal. Consumed by compute_observations to emit obs[106] (the role
+     * bit; index shifted from 104 in T4 pitch insertion). Pitfall: must stay in the int32_t block
+     * before bombsite_entered to keep ctypes alignment in sync — see GameStateC mirror in
+     * cs2_env.py. */
     int32_t round_designated_carrier_id;
     int8_t  bombsite_entered[5]; /* per-T-agent flag: 1 if entered bombsite this round */
     int8_t  bomb_is_dropped;     /* 1 when bomb on ground */
@@ -261,6 +276,12 @@ typedef struct {
     float   aim_delta_sum;
     float   aim_delta_sq_sum;
     int32_t aim_delta_count;
+    /* Batch 3.5: pitch Welford triple (mirrors yaw fields above). Same int32-aligned
+     * layout: 4+4+4=12B. Pitch_log_std non-collapse is the spec's load-bearing
+     * acceptance signal — diagnostics need their own surface. */
+    float   aim_delta_pitch_sum;
+    float   aim_delta_pitch_sq_sum;
+    int32_t aim_delta_pitch_count;
     int32_t action_reload[2];
     int32_t action_weapon[3];
     int32_t action_crouch[2];
