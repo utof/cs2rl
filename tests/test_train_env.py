@@ -708,13 +708,14 @@ def test_round_designated_carrier_property_50_seeds():
 
 
 def test_obs_designated_carrier_bit_t_side():
-    """Verify obs[106] is the round-fixed role bit:
+    """Verify obs[109] (OBS_GLOBAL_BASE+13; was 106 before the Batch 6
+    bombsite-bearing slots) is the round-fixed role bit:
        - 1.0 for the designated T agent
        - 0.0 for non-designated T agents
        - 0.0 for ALL CT agents
        - persists at 1.0 even after the carrier dies and a teammate picks up
 
-    obs[106] is distinct from obs[22] (transient self-has-bomb): it is set at
+    obs[109] is distinct from obs[22] (transient self-has-bomb): it is set at
     round start and never reassigned, surviving drop/pickup events. This gives
     the policy a stable identity signal that obs[22] cannot.
 
@@ -735,20 +736,20 @@ def test_obs_designated_carrier_bit_t_side():
         # T side
         for i in range(5):
             expected = 1.0 if i == rid else 0.0
-            assert obs[i, 106] == expected, (
-                f"T idx {i}: obs[106]={obs[i,106]} expected {expected} (rid={rid})")
+            assert obs[i, 109] == expected, (
+                f"T idx {i}: obs[109]={obs[i,109]} expected {expected} (rid={rid})")
         # CT side: all zeros
         for j in range(5, 10):
-            assert obs[j, 106] == 0.0, f"CT idx {j}: obs[106]={obs[j,106]} expected 0.0"
+            assert obs[j, 109] == 0.0, f"CT idx {j}: obs[109]={obs[j,109]} expected 0.0"
 
         # Persistence after carrier death — drive 20 zero-action steps.
         g.agents[rid].hp = 0
         g.agents[rid].alive = 0
         for _ in range(20):
             obs, *_ = env.step(actions)
-            assert obs[rid, 106] == 1.0, (
+            assert obs[rid, 109] == 1.0, (
                 f"designated carrier (T idx {rid}) lost the role bit mid-round; "
-                f"obs[106] should be round-fixed but read {obs[rid,106]}")
+                f"obs[109] should be round-fixed but read {obs[rid,109]}")
     finally:
         env.close()
 
@@ -871,7 +872,7 @@ def test_obs_dim_constant_consistency():
     import nav
     import train as t
     assert nav.OBS_DIM == t.OBS_DIM, (f"nav.OBS_DIM ({nav.OBS_DIM}) != train.OBS_DIM ({t.OBS_DIM})")
-    assert nav.OBS_DIM == 107, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 107 for Batch 3.5"
+    assert nav.OBS_DIM == 110, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 110 for Batch 6 Task 2.5"
     env = t.make_puffer_env(seed=0)
     try:
         assert env.single_observation_space.shape == (nav.OBS_DIM, ), (
@@ -885,16 +886,16 @@ def test_obs_blocks_tile_obs_dim():
     """OBS_BLOCKS (generated from cs2_types.h OBS_* macros) must tile [0, OBS_DIM)
     with no gaps/overlaps, in order. This is the Python mirror of the env_init
     tiling assert in cs2_env.h. Demo-zeroing / masking code slices obs via this
-    table (obs[start:stop]) instead of hardcoding 25/53/93 — a drift here would
+    table (obs[start:stop]) instead of hardcoding 28/56/96 — a drift here would
     silently zero the wrong obs slice, so pin the boundaries explicitly.
     Catches the regen-not-run footgun (edit cs2_types.h, forget the generator)."""
     import _obs_spec as spec
 
     # Named boundaries are the ones the upcoming demo code depends on.
-    assert spec.OBS_BLOCKS["self"] == (0, 25)
-    assert spec.OBS_BLOCKS["teammate"] == (25, 53)
-    assert spec.OBS_BLOCKS["enemy"] == (53, 93)
-    assert spec.OBS_BLOCKS["global"] == (93, 107)
+    assert spec.OBS_BLOCKS["self"] == (0, 28)
+    assert spec.OBS_BLOCKS["teammate"] == (28, 56)
+    assert spec.OBS_BLOCKS["enemy"] == (56, 96)
+    assert spec.OBS_BLOCKS["global"] == (96, 110)
 
     # Structural invariant: contiguous, ordered, covers exactly [0, OBS_DIM).
     prev_stop = 0

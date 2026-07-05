@@ -22,10 +22,10 @@ def test_aim_dim_bumped_to_2():
     assert AIM_DIM == 2
 
 
-def test_obs_dim_bumped_to_107():
-    """T1: nav.OBS_DIM tracks the C-side OBS_DIM."""
+def test_obs_dim_bumped_to_110():
+    """T1 (re-pinned Batch 6 Task 2.5): nav.OBS_DIM tracks the C-side OBS_DIM."""
     import nav
-    assert nav.OBS_DIM == 107
+    assert nav.OBS_DIM == 110
 
 
 def test_pitch_initialized_to_zero():
@@ -228,12 +228,13 @@ def test_obs_pitch_sin_cos_populated():
             env.close()
 
 
-def test_obs_dim_is_107_in_runtime():
-    """T4: the actual emitted obs vector length is 107 (not just the constant).
+def test_obs_dim_is_110_in_runtime():
+    """T4 (re-pinned Batch 6 Task 2.5): the actual emitted obs vector length is
+    110 (not just the constant).
 
     Cross-checks the C-side OBS_DIM bump (T1) against the actual stride of the
     observations buffer. If cs2_observations.h misses an obs[N] write (or writes
-    past 107), this catches it at runtime."""
+    past 110), this catches it at runtime."""
     from c_env.cs2_env import Cs2Env
     from map import make_simple_map
     env = Cs2Env(map_data=make_simple_map())
@@ -241,7 +242,7 @@ def test_obs_dim_is_107_in_runtime():
         env.reset(seed=42)
         actions, cont = _zero_actions()
         env.step(actions, cont)
-        assert env.observations.shape[1] == 107
+        assert env.observations.shape[1] == 110
     finally:
         if hasattr(env, "close"):
             env.close()

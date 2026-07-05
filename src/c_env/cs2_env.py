@@ -317,14 +317,16 @@ class Dust2EnvC(ctypes.Structure):
 # surprises are routine; values updated below to match observed sizeof.
 # Batch 3.5: AgentStateC +4 (float pitch), GameStateC +40 (×10 agents),
 # Dust2EnvC +40 (GameState) +80 (observations: 10×(107−105)×4).
+# Batch 6 Task 2.5: OBS_DIM 107 → 110 (bombsite bearing/distance in self
+# block) — Dust2EnvC observations +120 (10×3×4); agent/game/stats unchanged.
 assert ctypes.sizeof(AgentStateC) == 156, (
     f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 156)")
 assert ctypes.sizeof(GameStateC) == 1628, (
     f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1628)")
 assert ctypes.sizeof(StepStatsC) == 208, (
     f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 208)")
-assert ctypes.sizeof(Dust2EnvC) == 6632, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6632)")
+assert ctypes.sizeof(Dust2EnvC) == 6752, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6752)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer

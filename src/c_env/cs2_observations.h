@@ -14,13 +14,41 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
         map_diag = sqrtf(xr * xr + yr * yr);
     }
 
+    /* Batch 6 Task 2.5 (spec R9/D4): per-agent nearest bombsite-area centroid,
+     * found in ONE pass over the nav areas (outside the agent loop) instead of
+     * a per-agent scan. No fixed-size site list: dust2 flags 530 bombsite
+     * areas (285 A + 245 B), so any "sites are few" cap assumption breaks.
+     * Cost: N flag checks + n_sites×N_AGENTS distance updates per tick.
+     * best_site == -1 ⇔ the map has no bombsite (slots then stay 0). */
+    int   best_site[N_AGENTS];
+    float best_site_d2[N_AGENTS];
+    for (int i = 0; i < N_AGENTS; i++) {
+        best_site[i]    = -1;
+        best_site_d2[i] = 1e30f;
+    }
+    for (int k = 0; k < sd->N; k++) {
+        if (!sd->bombsite_by_idx[k])
+            continue;
+        float cx = sd->centroid_xy[k * 2];
+        float cy = sd->centroid_xy[k * 2 + 1];
+        for (int i = 0; i < N_AGENTS; i++) {
+            AgentState* ai = &g->agents[i];
+            float       dx = cx - ai->x, dy = cy - ai->y;
+            float       d2 = dx * dx + dy * dy;
+            if (d2 < best_site_d2[i]) {
+                best_site_d2[i] = d2;
+                best_site[i]    = k;
+            }
+        }
+    }
+
     for (int i = 0; i < N_AGENTS; i++) {
         float*      obs = &env->observations[i * OBS_DIM];
         AgentState* a   = &g->agents[i];
 
         memset(obs, 0, OBS_DIM * sizeof(float));
 
-        /* ── Self state (0-24) ── */
+        /* ── Self state (0-27; +25..+27 are the Batch 6 goal-direction slots) ── */
         int              slot = a->weapon_slot;
         const WeaponDef* def  = &WEAPON_DEFS[slot];
         obs[0]                = a->hp / 100.0f;
@@ -67,7 +95,36 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
         obs[23] = (float)a->alive;
         obs[24] = (float)(a->team == 0);
 
-        /* ── Teammates (25-52): 4 × 7 ── */
+        /* ── Goal direction (Batch 6 Task 2.5, spec R9/D4): slots +25..+27 ──
+         * [sin(rel_bearing), cos(rel_bearing), xy_dist/map_diag] to the
+         * Euclidean-NEAREST bombsite area centroid, where
+         *   rel_bearing = wrap_pi(atan2(site_y - y, site_x - x) - facing).
+         * Why: without a goal-direction slot a BC clone must memorize
+         * absolute-position → direction over the whole map (spec R9); with it,
+         * "turn until sin≈0 with cos>0, then walk" generalizes off the
+         * demonstrated routes. sin/cos pair (not a normalized angle) matches
+         * every other angle encoding in this file and stays continuous when
+         * the site is directly behind. Sign: rel_bearing > 0 ⇔ site is
+         * counter-clockwise of facing ⇔ positive Δyaw turns toward it.
+         * Written for ALL agents (CTs know the map too), dead or alive, same
+         * as the rest of the self block.
+         * Pitfalls: straight-line XY bearing may point through a wall (the
+         * policy/expert still routes via nav); at the exact centroid
+         * atan2f(0,0)=0 makes bearing meaningless — but dist≈0 there, which is
+         * the "arrived" signal; distance uses the same map_diag half-diagonal
+         * normalizer as the teammate/enemy dx/dy/dist slots. */
+        if (best_site[i] >= 0) {
+            float bx  = sd->centroid_xy[best_site[i] * 2] - a->x;
+            float by  = sd->centroid_xy[best_site[i] * 2 + 1] - a->y;
+            float rel = wrap_pi(atan2f(by, bx) - a->facing);
+
+            obs[OBS_SELF_BASE + 25] = sinf(rel);
+            obs[OBS_SELF_BASE + 26] = cosf(rel);
+            obs[OBS_SELF_BASE + 27] = (map_diag > 0.0f) ? sqrtf(best_site_d2[i]) / map_diag : 0.0f;
+        }
+        /* No bombsite on the map: slots stay 0 from memset. */
+
+        /* ── Teammates (OBS_TEAMMATE_BASE ..): 4 × 7 ── */
         int tm_start = (a->team == 0) ? 0 : TEAM_SIZE;
         int tm_count = 0;
         for (int j = tm_start; j < tm_start + TEAM_SIZE && tm_count < 4; j++) {
@@ -93,7 +150,7 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
             tm_count++;
         }
 
-        /* ── Enemies (53-92): 5 × 8 ── */
+        /* ── Enemies (OBS_ENEMY_BASE ..): 5 × 8 ── */
         int en_start = (a->team == 0) ? TEAM_SIZE : 0;
         /* Sort by distance — simple insertion sort over 5 elements */
         int   order[TEAM_SIZE];
