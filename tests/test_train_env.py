@@ -1365,6 +1365,77 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
         env.close()
 
 
+def test_hybrid_ppo_loss_normalizes_advantages():
+    """Finding 1 (2026-07-06 adversarial review): _hybrid_ppo_loss must
+    normalize advantages (stock-PufferLib style: (adv - mean) / (std + 1e-8),
+    scaled by the prio-IS weight) INSIDE the loss. The fork previously fed
+    raw advantages to the pg term and orphaned the normalization block at
+    the call site — the runtime probe showed pg_loss linear in adv
+    (pg_loss(10·A) = 10·pg_loss(A)), i.e. no normalization anywhere on the
+    gradient path. With sparse rewards this left the policy gradient ≈ 0
+    and let the entropy objective drag the policy to uniform (the 30M
+    degenerate run). Normalizing inside the loss makes the property
+    directly assertable: pg_loss must be invariant to advantage scale.
+
+    Also pins the prio-IS contract: mb_prio=None and mb_prio=1 are
+    equivalent; a non-uniform mb_prio must actually reweight the loss
+    (previously it was computed and discarded).
+    """
+    import torch
+
+    import train
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        torch.manual_seed(7)
+        B = 32
+        mb_obs = torch.randn((B, train.OBS_DIM)) * 0.5
+        mb_actions = torch.randint(0, 2, (B, 7), dtype=torch.int64)
+        mb_cont_actions = (torch.rand(B, 1) - 0.5) * 0.4
+        mb_advantages = torch.randn(B)
+        mb_old_logp_d = torch.zeros(B)
+        mb_old_logp_c = torch.zeros(B)
+
+        from train import _hybrid_ppo_loss
+
+        def loss_of(adv, prio=None):
+            pg_loss, *_ = _hybrid_ppo_loss(
+                policy,
+                mb_obs,
+                mb_actions,
+                mb_cont_actions,
+                mb_old_logp_d,
+                mb_old_logp_c,
+                adv,
+                clip_coef=0.2,
+                state={},
+                mb_prio=prio,
+            )
+            return pg_loss
+
+        base = loss_of(mb_advantages)
+
+        # Scale invariance — the R1 probe property that failed pre-fix
+        # (raw path gave exactly 100× here).
+        scaled = loss_of(mb_advantages * 100.0)
+        assert torch.allclose(base, scaled, rtol=1e-4), \
+            f"pg_loss not scale-invariant: {base.item():.6f} vs {scaled.item():.6f}"
+
+        # Idempotence: feeding already-stock-normalized advantages must give
+        # the same loss (normalizing a normalized tensor is a no-op).
+        pre_norm = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+        assert torch.allclose(base, loss_of(pre_norm), rtol=1e-4)
+
+        # prio-IS: uniform prio ≡ no prio; non-uniform prio must change the loss.
+        assert torch.allclose(base, loss_of(mb_advantages, prio=torch.ones(B)), rtol=1e-6)
+        skew = torch.linspace(0.2, 2.0, B)
+        assert not torch.allclose(base, loss_of(mb_advantages, prio=skew), rtol=1e-3), \
+            "non-uniform mb_prio had no effect on pg_loss — prio-IS weight still discarded"
+    finally:
+        env.close()
+
+
 # ── LSTM-BPTT correctness (rollout ↔ training consistency) ──────────────────
 #
 # Background: `use_rnn: True` means PufferLib's rollout threads LSTM state

@@ -1193,8 +1193,9 @@ def _patch_trainer_with_return_norm(trainer):
             #   prio_probs of those segments by OVERSAMPLE_FACTOR before
             #   renormalising. The downstream torch.multinomial call then
             #   draws biased samples without any further changes — and the
-            #   importance-sampling correction below uses the BOOSTED
-            #   prio_probs[idx], so the gradient stays unbiased.
+            #   importance-sampling correction (mb_prio, consumed inside
+            #   _hybrid_ppo_loss) uses the BOOSTED prio_probs[idx], so the
+            #   gradient stays unbiased.
             # WHY: bomb-plant events are sparse in early training (the exact
             #   fraction is itself a Task 9 metric, reported via
             #   _batch1_event_oversample_fraction). Uniform prio sampling
@@ -1226,7 +1227,8 @@ def _patch_trainer_with_return_norm(trainer):
             mb_obs = self.observations[idx]
             mb_actions = self.actions[idx]
             mb_logprobs = self.logprobs[idx]
-            mb_rewards = self.rewards[idx]
+            # (mb_rewards pull removed with the dead per-minibatch
+            # compute_puff_advantage recompute — see finding-1 note below)
             mb_terminals = self.terminals[idx]
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
@@ -1281,6 +1283,7 @@ def _patch_trainer_with_return_norm(trainer):
                 mb_advantages,
                 clip_coef,
                 state,
+                mb_prio=mb_prio,
             )
             with torch.no_grad():
                 # Logits-only path for the per-head entropy diagnostic block
@@ -1319,29 +1322,14 @@ def _patch_trainer_with_return_norm(trainer):
             if target_kl is not None and approx_kl.item() > target_kl:
                 break
 
-            adv = advantages[idx]
-            adv = compute_puff_advantage(
-                mb_values,
-                mb_rewards,
-                mb_terminals,
-                ratio,
-                adv,
-                config["gamma"],
-                config["gae_lambda"],
-                config["vtrace_rho_clip"],
-                config["vtrace_c_clip"],
-            )
-            adv = mb_advantages
-            adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
-
             # Batch 3 (T5): pg_loss already computed by _hybrid_ppo_loss above
-            # via per-factor clipping. The pre-Batch-3 single-ratio block lived
-            # here; it would over-clip (ratios from a Gaussian factor can vary
-            # very differently from categorical factors), so the spec L8
-            # decision is to clip per factor and sum. Keeping a no-op stub to
-            # make the diff easier to read and to flag where the change lives
-            # for future archaeologists.
-            _ = adv                    # adv computed above for vtrace; pg_loss already set
+            # via per-factor clipping (the pre-Batch-3 single-ratio block
+            # would over-clip — spec L8 decision). Advantage normalization +
+            # the mb_prio importance weight now live INSIDE _hybrid_ppo_loss
+            # (finding 1, 2026-07-06 adversarial review); the orphaned
+            # normalization stub and the discarded per-minibatch
+            # compute_puff_advantage recompute that used to sit here were
+            # dead compute and have been removed.
 
             newvalue = newvalue.view(mb_returns_norm.shape)
             v_loss_unclipped = (newvalue - mb_returns_norm)**2
@@ -2204,8 +2192,16 @@ def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_t
     return action, continuous_action, log_prob_d, log_prob_c, entropy_d, entropy_c
 
 
-def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d, mb_old_logp_c,
-                     mb_advantages, clip_coef, state):
+def _hybrid_ppo_loss(policy,
+                     mb_obs,
+                     mb_actions,
+                     mb_cont_actions,
+                     mb_old_logp_d,
+                     mb_old_logp_c,
+                     mb_advantages,
+                     clip_coef,
+                     state,
+                     mb_prio=None):
     """Per-factor PPO clipped loss (H-PPO, Fan et al. IJCAI 2019).
 
     THE CORE OF T5. Re-runs the policy on mb_obs with the stored
@@ -2254,6 +2250,30 @@ def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d,
     flat_old_d = mb_old_logp_d.reshape(-1)
     flat_old_c = mb_old_logp_c.reshape(-1)
     flat_adv = mb_advantages.reshape(-1)
+
+    # ── Advantage normalization + prio-IS weight (finding 1, 2026-07-06
+    # adversarial review) ──
+    # Stock PufferLib normalizes per-minibatch and applies the prioritized-
+    # replay importance weight BEFORE the pg term:
+    #     adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
+    # The T5 refactor moved the pg term into this function but fed it RAW
+    # advantages, orphaning the normalization at the call site. Consequence
+    # (verified at 98e3f32): with sparse rewards the pg gradient scale was
+    # ~0, so the entropy objective faced no counter-pressure and the 30M
+    # run drifted to an exactly-uniform discrete policy. Normalizing HERE
+    # (not at the call site) makes the contract self-contained and lets the
+    # test assert scale-invariance of pg_loss directly.
+    # PITFALLS:
+    #   * Normalize the RAW adv first, then multiply by mb_prio — reversing
+    #     the order changes the statistics (matches stock).
+    #   * mb_prio arrives as (segments, 1) from the trainer (broadcast over
+    #     bptt_horizon) or (B,) from tests; expand_as handles both. None ⇒
+    #     uniform replay (weight 1), e.g. BC/eval callers.
+    #   * A constant-adv minibatch has std 0 ⇒ normalized adv is exactly 0
+    #     (0/1e-8); pg_loss 0, no NaN.
+    flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+    if mb_prio is not None:
+        flat_adv = mb_prio.expand_as(mb_advantages).reshape(-1) * flat_adv
 
     # ── Re-evaluate discrete and continuous halves under the new policy ──
     # Fix #3 (perf): replaces 7× torch.distributions.Categorical(logits=lg) +
