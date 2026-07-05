@@ -425,8 +425,10 @@ def test_reward_components_logged_in_terminal_info():
 # All other reward weights (kill, death, pbrs, survival, shot, inaction) are
 # zeroed so step_stats.reward_win reflects only the win-magnitude path.
 #
-# We sum step_stats.reward_win over alive winners to get per-agent magnitude,
-# then assert it matches the expected differential value.
+# We assert per-agent rewards directly (env._c_env.rewards): the terminal
+# win/loss magnitude applies to EVERY team member, dead or alive (finding 3,
+# docs/2026-07-06-adversarial-review-verification.md — death must not shield
+# an agent from the round outcome).
 #
 # Direct-stimulus is preferred here because:
 # 1. compute_rewards is not exposed via ctypes as a standalone callable.
@@ -572,12 +574,60 @@ def test_differential_win_magnitudes(scenario, winner, bomb_planted, bomb_ticks_
 
     _, _, _, _, _ = env.step(actions)
 
-    ss = env._c_env.step_stats
-    # reward_win accumulates ±mag for every alive agent on winning/losing side.
-    # With one alive winner and no losers alive, reward_win == +expected_mag.
-    actual = float(ss.reward_win)
-    assert abs(actual - expected_mag) < 0.01, (
-        f"Scenario '{scenario}': expected reward_win≈{expected_mag}, got {actual:.4f}")
+    # Per-agent terminal rewards: the win/loss magnitude applies to EVERY
+    # team member, dead or alive (finding 3 fix). _setup_round_end leaves at
+    # most one agent alive per team, so agents 1-4 / 6-9 are always dead —
+    # asserting all ten rows covers the dead-agent path in every scenario.
+    if winner == 0:
+        t_mag, ct_mag = expected_mag, -expected_mag
+    else:                                                                                            # CT win (1) or timeout (-1): CT positive
+        t_mag, ct_mag = -expected_mag, expected_mag
+    for i in range(10):
+        expected_i = t_mag if i < 5 else ct_mag
+        actual_i = float(env._c_env.rewards[i])
+        assert abs(actual_i - expected_i) < 0.01, (
+            f"Scenario '{scenario}': agent {i} "
+            f"({'T' if i < 5 else 'CT'}, {'alive' if env._c_env.game.agents[i].alive else 'dead'}) "
+            f"expected {expected_i}, got {actual_i:.4f}")
+
+    # reward_win accumulator is the truthful cross-team sum of emitted
+    # terminal rewards — symmetric magnitudes over equal teams net to 0.
+    assert abs(float(env._c_env.step_stats.reward_win)) < 0.01
+    env.close()
+
+
+def test_loss_penalty_applies_to_fully_dead_team():
+    """Finding 3 (2026-07-06 adversarial review): a fully-eliminated team must
+    still receive the round-loss penalty. Pre-fix, the win/loss block was
+    gated on `agents[i].alive`, so a T team wiped by CT received 0 instead of
+    -3 each — dying made the loss penalty unreachable and death nearly free
+    (the C1 correction: no test covered the all-dead-team case; every
+    round-end test kept >=1 agent alive per team). This is that missing test.
+    """
+    import numpy as np
+
+    env = _make_zeroed_env()
+    env.reset()
+
+    # CT elimination win with ALL FIVE T dead (alive_teams={1} leaves only
+    # agent 5 alive; agents 0-4 are the fully-dead losing team).
+    _setup_round_end(env,
+                     winner=1,
+                     bomb_planted=0,
+                     bomb_ticks_left=0,
+                     round_ticks_left=50,
+                     alive_teams={1})
+    env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+
+    for i in range(5):
+        r = float(env._c_env.rewards[i])
+        assert abs(r - (-3.0)) < 0.01, (
+            f"dead T agent {i} must receive the -3.0 loss penalty, got {r:.4f}")
+    # Winning team: alive and dead members alike get the +3.0 win reward
+    # (a CT that traded itself to wipe the Ts still contributed to the win).
+    for i in range(5, 10):
+        r = float(env._c_env.rewards[i])
+        assert abs(r - 3.0) < 0.01, (f"CT agent {i} must receive the +3.0 win reward, got {r:.4f}")
     env.close()
 
 
@@ -711,7 +761,10 @@ def test_detonation_beats_elimination():
                          alive_teams={0})
         actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
         env.step(actions)
-        val = float(env._c_env.step_stats.reward_win)
+        # Per-agent reward of the winning T (agent 0). step_stats.reward_win
+        # is unusable here: since the finding-3 fix it sums BOTH teams'
+        # symmetric terminal rewards and nets to 0 every round.
+        val = float(env._c_env.rewards[0])
         env.close()
         return val
 

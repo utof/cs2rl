@@ -146,13 +146,23 @@ static void compute_rewards(Dust2Env* env,
             ct_mag = 0.0f;
         }
 
+        /* Terminal win/loss applies to EVERY team member, dead or alive
+         * (finding 3, docs/2026-07-06-adversarial-review-verification.md).
+         * The block used to be gated on agents[i].alive, which made death an
+         * escape hatch: a wiped losing team received 0 instead of -mag each
+         * (death cost only reward_death = 0.1), and a winner who traded
+         * itself for the round got nothing. Credit for the round outcome
+         * belongs to the whole team.
+         * PITFALL: ss/es->reward_win is now the truthful cross-team sum of
+         * emitted terminal rewards — with symmetric magnitudes and equal
+         * team sizes it nets to ~0 every round. Use winner_t / winner_ct /
+         * timed_out (and per-agent rewards) for outcome metrics, not this
+         * accumulator. */
         for (int i = 0; i < N_AGENTS; i++) {
-            if (g->agents[i].alive) {
-                float w          = (g->agents[i].team == 0) ? t_mag : ct_mag;
-                env->rewards[i] += w;
-                ss->reward_win  += w;
-                es->reward_win  += w;
-            }
+            float w          = (g->agents[i].team == 0) ? t_mag : ct_mag;
+            env->rewards[i] += w;
+            ss->reward_win  += w;
+            es->reward_win  += w;
         }
     }
 
