@@ -1362,3 +1362,177 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
         assert torch.isfinite(new_value).all()
     finally:
         env.close()
+
+
+# ── LSTM-BPTT correctness (rollout ↔ training consistency) ──────────────────
+#
+# Background: `use_rnn: True` means PufferLib's rollout threads LSTM state
+# tick-by-tick through forward_eval (state carried across the 64-tick
+# bptt_horizon segment, zeroed at each evaluate() start, reset on done).
+# The PPO update re-evaluates the SAME 64-tick segments via forward() on
+# (segments, bptt_horizon, OBS_DIM) batches. If forward() processes each
+# tick statelessly (LSTM seq-len 1, zero state — the pre-fix behaviour),
+# the recomputed log-probs/values systematically diverge from what the
+# rollout stored: importance ratios ≠ 1 before any gradient step, and the
+# LSTM's recurrent weights never receive through-time gradients (the LSTM
+# degenerates to an expensive MLP layer). These tests pin the fixed
+# contract: forward() must run true BPTT over the time dimension and match
+# the stepwise forward_eval rollout exactly (fp32 tolerance).
+
+
+def test_policy_forward_bptt_matches_stepwise_rollout():
+    """forward() on a (B, T, OBS) segment must reproduce, tick for tick, what
+    forward_eval() produces when threading LSTM state stepwise over the same
+    sequence (zero initial state, no dones). This is THE consistency property
+    PPO needs: rollout stores logprobs/values from forward_eval; the update
+    recomputes them via forward(). Pre-fix, forward() was stateless per tick
+    and this diverges from t=1 onwards."""
+    import torch
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        policy.eval()
+        torch.manual_seed(0)
+        B, T = 3, 6
+        x_seq = torch.randn(B, T, train.OBS_DIM)
+
+        # Stepwise rollout path: forward_eval threads lstm_h/lstm_c via state.
+        state = {"done": torch.zeros(B)}
+        step_logits, step_mu, step_value = [], [], []
+        with torch.no_grad():
+            for t in range(T):
+                logits, mu, _log_std, value = policy.forward_eval(x_seq[:, t, :], state)
+                step_logits.append(torch.cat(logits, dim=-1))
+                step_mu.append(mu)
+                step_value.append(value)
+
+        # Training path: one forward() call over the whole segment.
+        with torch.no_grad():
+            logits_b, mu_b, _log_std_b, value_b = policy.forward(x_seq, state={})
+        flat_logits = torch.cat(logits_b, dim=-1)      # (B*T, sum(heads))
+
+        for t in range(T):
+            for b in range(B):
+                flat_idx = b * T + t                                                          # row-major (B, T) flatten
+                assert torch.allclose(flat_logits[flat_idx], step_logits[t][b], atol=1e-5), (
+                    f"logits diverge at b={b} t={t}: "
+                    f"max diff {(flat_logits[flat_idx] - step_logits[t][b]).abs().max():.2e}")
+                assert torch.allclose(mu_b[flat_idx], step_mu[t][b],
+                                      atol=1e-5), (f"mu_aim diverges at b={b} t={t}")
+                assert torch.allclose(value_b[flat_idx], step_value[t][b],
+                                      atol=1e-5), (f"value diverges at b={b} t={t}")
+    finally:
+        env.close()
+
+
+def test_policy_forward_bptt_carries_memory():
+    """Two sequences with identical final-tick obs but different histories
+    must produce different final-tick outputs — i.e. forward() actually
+    propagates LSTM state across ticks. Pre-fix (stateless per-tick LSTM)
+    the final-tick outputs are bitwise identical and this test fails."""
+    import torch
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        policy.eval()
+        torch.manual_seed(1)
+        T = 5
+        last_obs = torch.randn(1, train.OBS_DIM)
+        hist_a = torch.zeros(1, T - 1, train.OBS_DIM)
+        hist_b = torch.randn(1, T - 1, train.OBS_DIM)
+        seq_a = torch.cat([hist_a, last_obs.unsqueeze(1)], dim=1)      # (1, T, OBS)
+        seq_b = torch.cat([hist_b, last_obs.unsqueeze(1)], dim=1)
+
+        with torch.no_grad():
+            _, _, _, value_a = policy.forward(seq_a, state={})
+            _, _, _, value_b = policy.forward(seq_b, state={})
+        # Final tick = flat row T-1 (row-major (B=1, T) flatten).
+        diff = (value_a[T - 1] - value_b[T - 1]).abs().max().item()
+        assert diff > 1e-6, (
+            f"final-tick value identical ({diff:.2e}) despite different histories — "
+            f"forward() is not carrying LSTM state across ticks (no BPTT)")
+    finally:
+        env.close()
+
+
+def test_policy_forward_bptt_resets_on_terminal():
+    """state['terminals'] (B, T) must reset the LSTM state at done ticks,
+    mirroring the rollout's (1-done)*state masking in _forward_core. A done
+    at tick k for row 0 means ticks k..T-1 of row 0 must equal a fresh
+    zero-state forward() over just that suffix; rows without dones must be
+    unaffected by the masking path."""
+    import torch
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        policy.eval()
+        torch.manual_seed(2)
+        B, T, k = 2, 6, 3
+        x_seq = torch.randn(B, T, train.OBS_DIM)
+        terminals = torch.zeros(B, T)
+        terminals[0, k] = 1.0          # row 0 episode ends before tick k
+
+        with torch.no_grad():
+            _, _, _, value_masked = policy.forward(x_seq, state={"terminals": terminals})
+            # Reference A: row 0's suffix from a fresh zero state.
+            _, _, _, value_suffix = policy.forward(x_seq[0:1, k:, :], state={})
+            # Reference B: the full batch with no terminals at all.
+            _, _, _, value_plain = policy.forward(x_seq, state={})
+
+        for t in range(k, T):
+            assert torch.allclose(
+                value_masked[0 * T + t], value_suffix[t - k],
+                atol=1e-5), (f"row 0 tick {t}: masked output != fresh-suffix output — "
+                             f"terminal reset not applied in BPTT")
+        for t in range(T):
+            assert torch.allclose(
+                value_masked[1 * T + t], value_plain[1 * T + t],
+                atol=1e-5), (f"row 1 tick {t}: no-done row was perturbed by the masking path")
+    finally:
+        env.close()
+
+
+def test_train_path_logprobs_match_rollout():
+    """End-to-end: after one real evaluate() rollout, re-evaluating the FULL
+    buffer through _hybrid_ppo_loss (the exact training-path forward, with
+    state carrying mb_terminals) must reproduce the rollout-stored logprobs
+    and values. This is the importance-ratio==1-at-epoch-start invariant;
+    pre-fix the stateless training forward breaks it by construction."""
+    import torch
+
+    from train import _hybrid_ppo_loss
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=False)
+    try:
+        trainer.evaluate()
+        state = dict(
+            action=trainer.actions,
+            lstm_h=None,
+            lstm_c=None,
+            terminals=trainer.terminals,
+        )
+        with torch.no_grad():
+            _pg, _ent, newvalue, newlogprob, _rd, _rc = _hybrid_ppo_loss(
+                trainer.policy,
+                trainer.observations,
+                trainer.actions,
+                trainer.cont_actions,
+                trainer.logprobs_d,
+                trainer.logprobs_c,
+                torch.zeros_like(trainer.logprobs),
+                0.15,
+                state,
+            )
+        newlogprob = newlogprob.reshape(trainer.logprobs.shape)
+        newvalue = newvalue.reshape(trainer.values.shape)
+        lp_diff = (newlogprob - trainer.logprobs).abs().max().item()
+        v_diff = (newvalue - trainer.values).abs().max().item()
+        assert lp_diff < 1e-3, (f"training-path logprobs diverge from rollout by {lp_diff:.4f} — "
+                                f"PPO ratios != 1 at epoch start (rollout/training LSTM mismatch)")
+        assert v_diff < 1e-3, (f"training-path values diverge from rollout by {v_diff:.4f}")
+    finally:
+        cleanup()

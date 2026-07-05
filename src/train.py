@@ -687,9 +687,9 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 done: optional (B,) done-mask used to reset LSTM state.
                 action: (B, ACTION_DIM=7) int64 — discrete actions; if None,
                     sample from the categorical heads.
-                continuous_action: (B, AIM_DIM=1) float32 — Δyaw in radians
-                    already in [-max_turn_speed, +max_turn_speed]; if None,
-                    sample from the Normal head.
+                continuous_action: (B, AIM_DIM=2) float32 — (Δyaw, Δpitch) in
+                    radians, already in [-max_turn_speed, +max_turn_speed];
+                    if None, sample from the Normal head.
 
             Returns:
                 (action, continuous_action, log_prob, entropy, value, lstm_state)
@@ -774,21 +774,122 @@ def build_policy(vecenv, device, obs_dim_override=None):
             return logits, mu_aim, log_std, value
 
         def forward(self, x, state):
-            # Batch 3: same 4-tuple contract as forward_eval. forward() is
-            # the path PufferLib's vectorised rollout uses (no LSTM state
-            # carry) — it stays in lockstep with forward_eval to keep the
-            # ONNX export single-pathway in task 6.
+            # Training-path forward: time-batched BPTT (LSTM-BPTT fix).
+            #
+            # WHAT: same 4-tuple contract as forward_eval, but a 3D input
+            #   (B=segments, T=bptt_horizon, OBS_DIM) is now unrolled through
+            #   the LSTM along T — mirroring upstream PufferLib 3.0's
+            #   models.LSTMWrapper.forward (encode flat → reshape seq-first →
+            #   one nn.LSTM call → heads on the flat output). Pre-fix this
+            #   flattened to (B*T, OBS) and ran the LSTM stateless per tick
+            #   (seq-len 1, zero state), so the recurrent weights never saw
+            #   through-time gradients and the PPO update recomputed
+            #   logprobs/values under a DIFFERENT function than the rollout
+            #   (forward_eval carries state tick-to-tick) — importance
+            #   ratios ≠ 1 before the first gradient step.
+            #
+            # WHY zero initial state is CORRECT here (not an approximation):
+            #   evaluate() zeroes trainer.lstm_h/c at its start, and with
+            #   compute_batch_dims' segments == total_agents each agent row
+            #   fills exactly ONE bptt_horizon segment per evaluate() call —
+            #   so every stored segment really did start from zero state.
+            #   PITFALL: if batch dims ever change so a row fills >1 segment
+            #   per evaluate(), zero-init becomes wrong for the later
+            #   segments and initial states must be stored at rollout time.
+            #
+            # state keys consumed (all optional; dict is NOT mutated):
+            #   lstm_h / lstm_c — initial state override, (B, H) or (1, B, H).
+            #     The trainer passes None → zero init (see above).
+            #   terminals — (B, T) done flags from the rollout buffer;
+            #     replicates forward_eval's (1-done)*state reset mid-segment
+            #     (see _lstm_bptt). Omit for the ONNX / single-tick path.
+            #
+            # ONNX (task 6): a 2D (B, OBS_DIM) input takes T=1 through the
+            # same code — one seq-len-1 LSTM call from zero state, identical
+            # math to the pre-fix path — so the export stays single-pathway.
             if x.ndim == 3:
-                x_flat = x.reshape(-1, x.shape[-1])
+                B, TT = x.shape[0], x.shape[1]
             else:
-                x_flat = x
+                B, TT = x.shape[0], 1
 
-            hidden_out, _ = self._forward_core(x_flat, None, None)
+            h = self.encoder(x.reshape(B * TT, x.shape[-1]).float())
+            h = h.reshape(B, TT, self.hidden_size).transpose(0, 1)     # (T, B, H) seq-first
+
+            lstm_h = state.get("lstm_h") if isinstance(state, dict) else None
+            lstm_c = state.get("lstm_c") if isinstance(state, dict) else None
+            if lstm_h is not None and lstm_c is not None:
+                hc = (lstm_h.reshape(1, B,
+                                     self.hidden_size), lstm_c.reshape(1, B, self.hidden_size))
+            else:
+                hc = (h.new_zeros(1, B, self.hidden_size), h.new_zeros(1, B, self.hidden_size))
+
+            terminals = state.get("terminals") if isinstance(state, dict) else None
+            h = self._lstm_bptt(h, hc, terminals)
+            # transpose back to (B, T, H) then flatten row-major so flat row
+            # b*T + t lines up with mb_actions.reshape(-1, ...) in
+            # _hybrid_ppo_loss — segment-major, time-minor. Changing this
+            # ordering silently misaligns every logprob/advantage pairing.
+            hidden_out = h.transpose(0, 1).reshape(B * TT, self.hidden_size)
+
             logits = [head(hidden_out) for head in self.action_heads]
             value = self.value_head(hidden_out)
             mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
             log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
             return logits, mu_aim, log_std, value
+
+        def _lstm_bptt(self, h_seq, hc, terminals):
+            """Run the LSTM over a full (T, B, H) segment with done-masking.
+
+            WHAT: one nn.LSTM call when the segment contains no episode
+            boundaries (the common case — native PufferLib BPTT); otherwise
+            the sequence is split at every tick where ANY row has a done and
+            h/c are zero-masked per-row at those ticks before continuing.
+
+            WHY: the rollout (forward_eval → _forward_core) multiplies the
+            carried state by (1 - done) BEFORE processing each tick, so a
+            new episode starts memory-free. Training must replicate that
+            reset or the recomputed logprobs at post-done ticks come from a
+            different function than the rollout stored (biased PPO ratios)
+            and gradients leak across episode boundaries. Upstream
+            LSTMWrapper skips this (it never resets on done, rollout OR
+            train, so it is self-consistent); we reset in rollout, hence we
+            must also reset here.
+
+            PITFALLS:
+              * terminals[:, t] == 1 means "the obs at tick t is the FIRST
+                obs of a new episode" (PufferLib autoreset delivers the done
+                flag alongside the reset obs) — mask BEFORE consuming tick t,
+                not after. Off-by-one here shifts every episode boundary.
+              * The chunked split is exact, not an approximation: an LSTM
+                over [t0, t1) then [t1, t2) with state carried equals one
+                call over [t0, t2). Splits only cost extra kernel launches;
+                a no-done minibatch stays a single cuDNN/oneDNN call.
+              * .tolist() forces one device→host sync per minibatch —
+                acceptable (the train loop already syncs via .item()s).
+            """
+            if terminals is None:
+                out, _ = self.lstm(h_seq, hc)
+                return out
+            TT, B, _H = h_seq.shape
+            term = terminals.reshape(B, TT) > 0.5
+            reset_ticks = torch.nonzero(term.any(dim=0)).flatten().tolist()
+            if not reset_ticks:
+                out, _ = self.lstm(h_seq, hc)
+                return out
+            outs = []
+            h0, c0 = hc
+            t0 = 0
+            for t in reset_ticks:
+                if t > t0:
+                    out, (h0, c0) = self.lstm(h_seq[t0:t], (h0, c0))
+                    outs.append(out)
+                keep = (~term[:, t]).float().view(1, B, 1)
+                h0 = h0 * keep
+                c0 = c0 * keep
+                t0 = t
+            out, _ = self.lstm(h_seq[t0:], (h0, c0))
+            outs.append(out)
+            return torch.cat(outs, dim=0)
 
         def _forward_core(self, x, lstm_state, done):
             h = self.encoder(x.float())
@@ -1139,10 +1240,16 @@ def _patch_trainer_with_return_norm(trainer):
             if not config["use_rnn"]:
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
 
+            # LSTM-BPTT fix: lstm_h/lstm_c None → zero initial state, which
+            # is exact (each stored segment began at evaluate()'s zeroed
+            # state — see Dust2Policy.forward doc). terminals drives the
+            # mid-segment done-reset inside _lstm_bptt so the training
+            # forward replicates the rollout's (1-done)*state masking.
             state = dict(
                 action=mb_actions,
                 lstm_h=None,
                 lstm_c=None,
+                terminals=mb_terminals,
             )
 
             # Batch 3 (T5): hybrid PPO update — per-factor clipped loss
@@ -1994,9 +2101,9 @@ def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_t
         If None, sample fresh from the categorical heads. If supplied
         (PPO update pass), evaluate log-prob under the new policy without
         re-sampling — this is the difference between rollout and update.
-    continuous_action : (B, AIM_DIM=1) float32 tensor, or None
-        If None, sample Δyaw from Normal(mu_aim, exp(log_std_aim)) and
-        clamp to ±max_turn_speed. If supplied, evaluate log-prob without
+    continuous_action : (B, AIM_DIM=2) float32 tensor, or None
+        If None, sample (Δyaw, Δpitch) from Normal(mu_aim, exp(log_std_aim))
+        and clamp to ±max_turn_speed. If supplied, evaluate log-prob without
         re-sampling.
     max_turn_speed : float or None
         Hard clamp on sampled Δyaw. None means no clamp (only sane in the
@@ -2006,7 +2113,7 @@ def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_t
     -------
     action, continuous_action, log_prob_d, log_prob_c, entropy_d, entropy_c
         action : (B, 7) int64
-        continuous_action : (B, 1) float32, ∈ [-max_turn_speed, max_turn_speed]
+        continuous_action : (B, AIM_DIM=2) float32, ∈ [-max_turn_speed, max_turn_speed]
         log_prob_d : (B,) — discrete factor log-prob (sum over 7 categoricals).
             The PPO loss assembly in _hybrid_ppo_loss applies the clip to
             this half independently of log_prob_c (Fan et al. 2019 Eq 8).
@@ -2107,6 +2214,14 @@ def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d,
         per factor and substitute ratio_d into the existing self.ratio
         slot for vtrace advantages (spec carry-forward: keep diagnostics
         backwards-compatible by using the discrete ratio there).
+
+    LSTM-BPTT fix: `state` must carry `terminals` (the minibatch's
+    (segments, bptt_horizon) done flags) so the policy forward runs
+    done-masked BPTT over the time dimension — without it the recomputed
+    logprobs at post-done ticks silently diverge from the rollout-stored
+    ones (state["lstm_h"]/["lstm_c"]=None means zero init, which is exact;
+    see Dust2Policy.forward). Test-path callers passing flat 2D tensors may
+    omit terminals: T=1 has no through-time state to reset.
     """
     import torch
     import torch.nn.functional as F
