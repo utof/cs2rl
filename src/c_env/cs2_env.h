@@ -18,6 +18,12 @@ static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_sp
             sum += ACTION_HEAD_SIZES[h];
         assert(sum == ACTION_MASK_DIM && "ACTION_MASK_DIM != sum(ACTION_HEAD_SIZES)");
     }
+    /* Verify the obs blocks (cs2_types.h OBS_* macros) tile OBS_DIM exactly.
+     * Catches a block *_SIZE / *_STRIDE / OBS_DIM drift at startup — same
+     * fail-fast contract as the ACTION check above. Since block bases derive
+     * from the preceding block width, this reduces to: last block end == dim. */
+    assert(OBS_GLOBAL_BASE + OBS_GLOBAL_SIZE == OBS_DIM &&
+           "obs block sizes do not tile OBS_DIM (see cs2_types.h OBS_* macros)");
     memset(env, 0, sizeof(Dust2Env));
     env->sd          = sd;
     env->rng         = seed ? seed : 1;

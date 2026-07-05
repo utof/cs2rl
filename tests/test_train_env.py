@@ -881,6 +881,36 @@ def test_obs_dim_constant_consistency():
         env.close()
 
 
+def test_obs_blocks_tile_obs_dim():
+    """OBS_BLOCKS (generated from cs2_types.h OBS_* macros) must tile [0, OBS_DIM)
+    with no gaps/overlaps, in order. This is the Python mirror of the env_init
+    tiling assert in cs2_env.h. Demo-zeroing / masking code slices obs via this
+    table (obs[start:stop]) instead of hardcoding 25/53/93 — a drift here would
+    silently zero the wrong obs slice, so pin the boundaries explicitly.
+    Catches the regen-not-run footgun (edit cs2_types.h, forget the generator)."""
+    import _obs_spec as spec
+
+    # Named boundaries are the ones the upcoming demo code depends on.
+    assert spec.OBS_BLOCKS["self"] == (0, 25)
+    assert spec.OBS_BLOCKS["teammate"] == (25, 53)
+    assert spec.OBS_BLOCKS["enemy"] == (53, 93)
+    assert spec.OBS_BLOCKS["global"] == (93, 107)
+
+    # Structural invariant: contiguous, ordered, covers exactly [0, OBS_DIM).
+    prev_stop = 0
+    for name, (start, stop) in spec.OBS_BLOCKS.items():
+        assert start == prev_stop, f"block {name!r} starts at {start}, expected {prev_stop} (gap/overlap)"
+        assert stop > start, f"block {name!r} is empty/inverted: {(start, stop)}"
+        prev_stop = stop
+    assert prev_stop == spec.OBS_DIM, (f"blocks end at {prev_stop} but OBS_DIM={spec.OBS_DIM}")
+
+    # Per-entity sub-structure matches the block widths (count × stride).
+    tm_start, tm_stop = spec.OBS_BLOCKS["teammate"]
+    assert tm_stop - tm_start == spec.OBS_TEAMMATE_COUNT * spec.OBS_TEAMMATE_STRIDE
+    en_start, en_stop = spec.OBS_BLOCKS["enemy"]
+    assert en_stop - en_start == spec.OBS_ENEMY_COUNT * spec.OBS_ENEMY_STRIDE
+
+
 # ── Batch 3 (utof/cs2rl Batch 3): continuous-aim H-PPO ──
 
 

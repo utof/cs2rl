@@ -15,7 +15,33 @@
 /* Batch 3.5 (#24): self block now carries pitch sin/cos at obs[11..12]; all
  * downstream obs slots shifted +2. SIM_OBS_VERSION below tracks sim's internal
  * obs schema, distinct from deploy's frozen v2-105dim (gh #34 suspension). */
-#define OBS_DIM 107
+/* ── Observation block layout (SINGLE SOURCE OF TRUTH) ───────────────────────
+ * The per-agent obs vector is four contiguous blocks:
+ *   self     [0  .. 25)  OBS_SELF_SIZE                       scalar self-state
+ *   teammate [25 .. 53)  OBS_TEAMMATE_COUNT × _STRIDE (4×7)  nearest teammates
+ *   enemy    [53 .. 93)  OBS_ENEMY_COUNT    × _STRIDE (5×8)  dist-sorted enemies
+ *   global   [93 .. 107) OBS_GLOBAL_SIZE                     round/bomb scalars
+ * Each block base is DERIVED from the preceding block's width, so the block
+ * boundaries (25/53/93) live in exactly ONE place. Consumers:
+ *   - cs2_observations.h writes every slot through these bases (never bare ints);
+ *   - env_init() in cs2_env.h asserts the blocks tile OBS_DIM exactly;
+ *   - scripts/sync_action_spec.py parses the *_SIZE/*_STRIDE/*_COUNT literals
+ *     into src/_obs_spec.py so Python masking / demo-zeroing code imports
+ *     OBS_BLOCKS instead of hardcoding 25/53/93.
+ * Pitfall: adding a feature => bump the OWNING block's *_SIZE (or *_STRIDE) AND
+ * the OBS_DIM literal below. If they drift, the env_init tiling assert fires at
+ * startup and the generator raises at codegen time. */
+#define OBS_SELF_BASE       0
+#define OBS_SELF_SIZE       25
+#define OBS_TEAMMATE_BASE   (OBS_SELF_BASE + OBS_SELF_SIZE)
+#define OBS_TEAMMATE_STRIDE 7
+#define OBS_TEAMMATE_COUNT  4
+#define OBS_ENEMY_BASE      (OBS_TEAMMATE_BASE + OBS_TEAMMATE_STRIDE * OBS_TEAMMATE_COUNT)
+#define OBS_ENEMY_STRIDE    8
+#define OBS_ENEMY_COUNT     5
+#define OBS_GLOBAL_BASE     (OBS_ENEMY_BASE + OBS_ENEMY_STRIDE * OBS_ENEMY_COUNT)
+#define OBS_GLOBAL_SIZE     14
+#define OBS_DIM             107
 #define ACTION_DIM                                                                                 \
     7  /* Batch 3: HEAD_AIM removed; aim is now a continuous head, see AIM_DIM below */
 #define ACTION_MASK_DIM                                                                            \

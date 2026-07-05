@@ -74,7 +74,7 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
             if (j == i)
                 continue;
             AgentState* tm   = &g->agents[j];
-            int         base = 25 + tm_count * 7;
+            int         base = OBS_TEAMMATE_BASE + tm_count * OBS_TEAMMATE_STRIDE;
             if (tm->alive) {
                 float dx = tm->x - a->x, dy = tm->y - a->y;
                 obs[base + 0] = (map_diag > 0.0f) ? dx / map_diag : 0.0f;
@@ -119,7 +119,7 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
         for (int slot2 = 0; slot2 < TEAM_SIZE; slot2++) {
             int         ej      = order[slot2];
             AgentState* en      = &g->agents[ej];
-            int         base    = 53 + slot2 * 8;
+            int         base    = OBS_ENEMY_BASE + slot2 * OBS_ENEMY_STRIDE;
             int         mem_s   = ej - en_start;
             int         can_see = en->alive ? vis10[i][ej] : 0;
 
@@ -153,41 +153,47 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
             }
         }
 
-        /* ── Global / bomb (93-106) ── */
-        obs[93] = g->round_ticks_left / (float)sd->round_time;
-        /* bomb status one-hot (94-97) */
+        /* ── Global / bomb block: obs[OBS_GLOBAL_BASE + 0 .. +13] ──
+         * Written base-relative (not bare 93..106) so the whole block shifts
+         * automatically if an upstream block (self/teammate/enemy) is resized.
+         * Slot map: +0 round-time · +1..4 bomb one-hot · +5,6 bomb xy ·
+         * +7 bomb-z placeholder · +8 bomb timer · +9 plant · +10 defuse ·
+         * +11 t_alive · +12 ct_alive · +13 designated-carrier bit. */
+        int gb      = OBS_GLOBAL_BASE;
+        obs[gb + 0] = g->round_ticks_left / (float)sd->round_time;
+        /* bomb status one-hot (+1..+4) */
         int carrier = g->bomb_carrier_id;
         if (!g->bomb_planted && !g->bomb_is_dropped) {
             if (carrier == i)
-                obs[94] = 1.0f; /* carried by self */
+                obs[gb + 1] = 1.0f; /* carried by self */
             else if (carrier >= 0 && a->team == 0)
-                obs[95] = 1.0f; /* carried by teammate */
+                obs[gb + 2] = 1.0f; /* carried by teammate */
         } else if (g->bomb_is_dropped) {
-            obs[96] = 1.0f;
+            obs[gb + 3] = 1.0f;
         } else if (g->bomb_planted) {
-            obs[97] = 1.0f;
+            obs[gb + 4] = 1.0f;
         }
-        /* bomb position (98-100) */
+        /* bomb position (+5,+6) */
         if (g->bomb_planted || g->bomb_is_dropped) {
             float bx = g->bomb_x - a->x, by = g->bomb_y - a->y;
-            obs[98] = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
-            obs[99] = (map_diag > 0.0f) ? by / map_diag : 0.0f;
+            obs[gb + 5] = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
+            obs[gb + 6] = (map_diag > 0.0f) ? by / map_diag : 0.0f;
         } else if (carrier >= 0 && a->team == 0 && carrier != i) {
             /* Teammate carrying: show their position */
-            float bx = g->agents[carrier].x - a->x;
-            float by = g->agents[carrier].y - a->y;
-            obs[98]  = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
-            obs[99]  = (map_diag > 0.0f) ? by / map_diag : 0.0f;
+            float bx    = g->agents[carrier].x - a->x;
+            float by    = g->agents[carrier].y - a->y;
+            obs[gb + 5] = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
+            obs[gb + 6] = (map_diag > 0.0f) ? by / map_diag : 0.0f;
         }
         /* Bomb z deferred — out of scope for T4 (spec L4 covers teammate/enemy
          * z-delta only).  Bomb z would require obs version contract for plug-in.
          * See gh #(filed) for the bomb-z-aware obs follow-up. */
-        obs[100] = 0.0f; /* bomb z placeholder (intentionally constant pre-followup) */
-        obs[101] = g->bomb_planted ? g->bomb_ticks_left / (float)sd->bomb_timer : 0.0f;
-        obs[102] = (g->bomb_being_planted_by >= 0 && sd->bomb_plant_time > 0)
-                       ? g->bomb_plant_ticks / (float)sd->bomb_plant_time
-                       : 0.0f;
-        /* obs[103]: defuse progress — extract to avoid GCC statement-expression */
+        obs[gb + 7] = 0.0f; /* bomb z placeholder (intentionally constant pre-followup) */
+        obs[gb + 8] = g->bomb_planted ? g->bomb_ticks_left / (float)sd->bomb_timer : 0.0f;
+        obs[gb + 9] = (g->bomb_being_planted_by >= 0 && sd->bomb_plant_time > 0)
+                          ? g->bomb_plant_ticks / (float)sd->bomb_plant_time
+                          : 0.0f;
+        /* +10: defuse progress — extract to avoid GCC statement-expression */
         {
             float defuse_prog = 0.0f;
             if (g->bomb_being_defused_by >= 0) {
@@ -196,17 +202,17 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
                 if (dtime > 0)
                     defuse_prog = g->bomb_defuse_ticks / (float)dtime;
             }
-            obs[103] = defuse_prog;
+            obs[gb + 10] = defuse_prog;
         }
-        obs[104] = t_alive / (float)TEAM_SIZE;
-        obs[105] = ct_alive / (float)TEAM_SIZE;
+        obs[gb + 11] = t_alive / (float)TEAM_SIZE;
+        obs[gb + 12] = ct_alive / (float)TEAM_SIZE;
 
         /* Batch 2: round-fixed designated-carrier role bit (T-side semantic).
          * 1.0 only when this agent is the round's designated bomb carrier
          * (set in env_reset, never reassigned). Distinct from obs[22]
          * (transient self-has-bomb) — gives the policy a stable identity
          * signal that survives drop/pickup. CT agents always read 0.0. */
-        obs[106] = (a->team == 0 && i == g->round_designated_carrier_id) ? 1.0f : 0.0f;
+        obs[gb + 13] = (a->team == 0 && i == g->round_designated_carrier_id) ? 1.0f : 0.0f;
 
         /* Clip all obs to (-5, 5) */
         for (int k = 0; k < OBS_DIM; k++) {

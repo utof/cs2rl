@@ -34,7 +34,12 @@ from _action_spec import (
 )                                      # from cs2_types.h
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
-OBS_DIM = 107                          # Batch 3.5 (#24): mirrors nav.OBS_DIM; tests cross-check the two via tests/test_train_env.py:873.
+# MUST stay a bare integer literal: scripts/exp_lib.py fingerprints the env by
+# regex-grepping `OBS_DIM = <int>` out of this file's source text (env_fingerprint),
+# so it cannot be an `import`. Mirrors nav.OBS_DIM / _obs_spec.OBS_DIM (generated
+# from cs2_types.h); the three are cross-checked by tests/test_train_env.py:873.
+# On an OBS_DIM bump, update cs2_types.h + rerun the generator, then bump this literal.
+OBS_DIM = 107
 
 # Batch 3 (continuous aim H-PPO): state-independent log_std parameter
 # for the Gaussian aim head. σ_init = 0.1 rad ≈ 5.7° matches mega-spec
