@@ -119,7 +119,41 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "prio_beta0": 1.0,
         "vtrace_rho_clip": 1.0,
         "vtrace_c_clip": 1.0,
+                                                       # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
+                                                       # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
+                                                       # warmup_steps, held constant after; consumed by the SAC-style α
+                                                       # controller via _scheduled_target_entropy. Previous hardcoded values
+                                                       # (0.7→0.5) kept the target so high the controller steered the policy
+                                                       # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
+                                                       # ≈ 2.87 nats still allows broad exploration but permits commitment.
+                                                       # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
+                                                       # _patch_trainer_with_return_norm clamps α ≥ 0.5 when H < 0.3·max;
+                                                       # a base target below the floor would make the two mechanisms fight.
+        "entropy_target_warmup_frac": 0.5,
+        "entropy_target_base_frac": 0.35,
+        "entropy_target_warmup_steps": 10_000_000,
     }
+
+
+def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> float:
+    """Config-driven entropy target for the SAC-style α controller.
+
+    Single source for both the patch-time seed and the per-train()-call
+    recompute in _patch_trainer_with_return_norm — keeping them identical
+    means a checkpoint-resumed trainer seeds at its true scheduled value
+    instead of a hardcoded warmup constant. `config` is anything with
+    .get() (PuffeRL config or a plain dict); missing keys fall back to the
+    build_train_config defaults so harness/older-checkpoint configs keep
+    working.
+    """
+    from train_helpers_batch1 import target_entropy_schedule
+    return target_entropy_schedule(
+        global_step,
+        max_entropy,
+        warmup_end=config.get("entropy_target_warmup_steps", 10_000_000),
+        warmup_high_frac=config.get("entropy_target_warmup_frac", 0.5),
+        base_frac=config.get("entropy_target_base_frac", 0.35),
+    )
 
 
 def resolve_run_name(name: str) -> str:
@@ -1073,7 +1107,11 @@ def _patch_trainer_with_return_norm(trainer):
     # SAC dual-gradient loop can do its job.
     trainer._batch1_max_entropy = float(max_entropy)
     trainer._batch1_log_alpha_reset_done = False
-    trainer._batch1_current_target_entropy = 0.7 * float(max_entropy)
+    # Seed from the schedule at the CURRENT global_step (not a hardcoded
+    # warmup constant) so checkpoint-resumed trainers start consistent;
+    # the per-train()-call recompute below overwrites it every call anyway.
+    trainer._batch1_current_target_entropy = _scheduled_target_entropy(
+        trainer.config, trainer.global_step, float(max_entropy))
     # Pre-init effective_alpha + grad_norm metrics (utof/cs2rl#16). The
     # post-loop reads in _train_with_return_norm refresh these, but if the
     # target_kl early-break trips on mb=0 OR no accumulation boundary fires,
@@ -1136,13 +1174,13 @@ def _patch_trainer_with_return_norm(trainer):
         # train() call, so recomputing per-minibatch would burn cycles for no
         # signal. We mirror the value onto trainer._batch1_current_target_entropy
         # so the wandb log layer can read it without touching this closure.
+        # Fracs/warmup_steps come from config via _scheduled_target_entropy
+        # (finding 4 residual — previously hardcoded 0.7→0.5).
         # PITFALL: do NOT capture max_entropy from the outer closure here —
         # use trainer._batch1_max_entropy. Closure capture would silently break
         # if the patch were re-applied on the same trainer instance.
-        from train_helpers_batch1 import target_entropy_schedule
-        _t9_target_entropy = target_entropy_schedule(self.global_step,
-                                                     trainer._batch1_max_entropy,
-                                                     warmup_end=10_000_000)
+        _t9_target_entropy = _scheduled_target_entropy(config, self.global_step,
+                                                       trainer._batch1_max_entropy)
         trainer._batch1_current_target_entropy = float(_t9_target_entropy)
 
         # Task 9B: one-shot log_alpha reset on the first train() call after

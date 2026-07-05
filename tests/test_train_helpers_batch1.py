@@ -40,9 +40,13 @@ def test_target_entropy_schedule_monotone():
     vals = [target_entropy_schedule(s, max_ent, warmup_end=10_000_000) for s in steps]
     # Non-increasing from start to base
     assert all(vals[i] >= vals[i + 1] for i in range(len(vals) - 1))
-    # Start at 0.7 * max_ent, end at 0.5 * max_ent
-    assert abs(vals[0] - 0.7 * max_ent) < 1e-6
-    assert abs(vals[-1] - 0.5 * max_ent) < 1e-6
+    # Default fracs lowered 0.7→0.5 / 0.5→0.35 (finding 4 residual,
+    # docs/2026-07-06-adversarial-review-verification.md): the old targets
+    # kept the policy near-uniform forever. These defaults mirror
+    # build_train_config's entropy_target_{warmup,base}_frac — production
+    # threads the config values explicitly via train._scheduled_target_entropy.
+    assert abs(vals[0] - 0.5 * max_ent) < 1e-6
+    assert abs(vals[-1] - 0.35 * max_ent) < 1e-6
 
 
 def test_target_entropy_schedule_never_exceeds_max():

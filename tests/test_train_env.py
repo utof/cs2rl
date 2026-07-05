@@ -429,7 +429,11 @@ def test_event_oversample_fraction_exposed():
 
 def test_target_entropy_schedule_applied():
     """Task 9A: trainer._batch1_current_target_entropy must follow the
-    linear ramp 0.7→0.5 * max_entropy across [0, 10M] global steps.
+    linear ramp warmup_frac→base_frac * max_entropy across [0, warmup_steps]
+    global steps. Fracs are config-driven since the finding-4-residual fix
+    (defaults 0.5→0.35; see test_entropy_target_config_threading) — this
+    test reads them from trainer.config and additionally proves a custom
+    config value is honored by the live train() recompute.
 
     Batch 3 (T5): the max_entropy expectation now includes the closed-form
     Gaussian aim head entropy at σ_max = exp(LOG_STD_MAX). Pre-Batch-3 this
@@ -474,28 +478,40 @@ def test_target_entropy_schedule_applied():
         # would mask the schedule check.
         trainer.evaluate()
 
-        # Step 0: target = 0.7 * max
+        warmup_frac = trainer.config["entropy_target_warmup_frac"]
+        base_frac = trainer.config["entropy_target_base_frac"]
+
+        # Step 0: target = warmup_frac * max
         trainer.global_step = 0
         trainer.train()
-        assert abs(trainer._batch1_current_target_entropy - 0.7 * expected_max) < 1e-5, (
-            f"Task 9A: at step 0 expected 0.7*max={0.7 * expected_max:.4f}, "
+        assert abs(trainer._batch1_current_target_entropy - warmup_frac * expected_max) < 1e-5, (
+            f"Task 9A: at step 0 expected {warmup_frac}*max={warmup_frac * expected_max:.4f}, "
             f"got {trainer._batch1_current_target_entropy:.4f}")
 
-        # Step 20M (past warmup_end=10M): target = 0.5 * max (constant after).
+        # Step 20M (past warmup_end=10M): target = base_frac * max (constant after).
         trainer.global_step = 20_000_000
         trainer.train()
-        assert abs(trainer._batch1_current_target_entropy - 0.5 * expected_max) < 1e-5, (
-            f"Task 9A: at step 20M expected 0.5*max={0.5 * expected_max:.4f}, "
+        assert abs(trainer._batch1_current_target_entropy - base_frac * expected_max) < 1e-5, (
+            f"Task 9A: at step 20M expected {base_frac}*max={base_frac * expected_max:.4f}, "
             f"got {trainer._batch1_current_target_entropy:.4f}")
 
         # Across the full ramp the value must stay <= max_entropy at every
-        # checked step. Upper-bound 0.7*max means it can never exceed max.
+        # checked step. Upper-bound warmup_frac*max means it can never exceed max.
         for step in (0, 1_000_000, 5_000_000, 10_000_000, 20_000_000):
             trainer.global_step = step
             trainer.train()
             assert trainer._batch1_current_target_entropy <= expected_max + 1e-9, (
                 f"Task 9A: target_entropy={trainer._batch1_current_target_entropy} "
                 f"exceeded max_entropy={expected_max} at step={step}")
+
+        # Config threading end-to-end: a custom frac set on the live config
+        # must be picked up by the next train() call's schedule recompute.
+        trainer.config["entropy_target_warmup_frac"] = 0.42
+        trainer.global_step = 0
+        trainer.train()
+        assert abs(trainer._batch1_current_target_entropy - 0.42 * expected_max) < 1e-5, (
+            f"custom entropy_target_warmup_frac not honored: expected "
+            f"{0.42 * expected_max:.4f}, got {trainer._batch1_current_target_entropy:.4f}")
     finally:
         cleanup()
 
@@ -1363,6 +1379,52 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
         assert torch.isfinite(new_value).all()
     finally:
         env.close()
+
+
+def test_entropy_target_config_threading():
+    """Finding 4 residual (2026-07-06 adversarial review): the entropy-target
+    schedule fracs were hardcoded (0.7→0.5·max held after 10M steps) — high
+    enough that even with a live pg gradient the α controller steers the
+    policy toward near-uniform forever. They are now config keys with lower
+    defaults (0.5→0.35·max), threaded through _scheduled_target_entropy so
+    both the patch-time seed and the per-train()-call recompute read the
+    same source. Pins: key names + defaults in build_train_config, custom
+    values honored, missing keys fall back, and the base target stays ABOVE
+    the hard entropy floor (0.3·max) so the floor branch (clamp α ≥ 0.5)
+    can never fight the controller.
+    """
+    from types import SimpleNamespace
+
+    import pytest
+
+    import train
+
+    args = SimpleNamespace(seed=0, timesteps=1_000, checkpoint_dir="/tmp/unused", device="cpu")
+    cfg = train.build_train_config(args, batch_size=1024, bptt_horizon=64)
+    assert cfg["entropy_target_warmup_frac"] == 0.5
+    assert cfg["entropy_target_base_frac"] == 0.35
+    assert cfg["entropy_target_warmup_steps"] == 10_000_000
+    # Floor consistency: base frac must stay above the 0.3·max hard floor.
+    assert cfg["entropy_target_base_frac"] > 0.3
+
+    max_ent = 8.0
+    assert train._scheduled_target_entropy(cfg, 0, max_ent) == pytest.approx(0.5 * max_ent)
+    assert train._scheduled_target_entropy(cfg, 10_000_000, max_ent) == \
+        pytest.approx(0.35 * max_ent)
+    assert train._scheduled_target_entropy(cfg, 30_000_000, max_ent) == \
+        pytest.approx(0.35 * max_ent)
+
+    custom = {
+        "entropy_target_warmup_frac": 0.42,
+        "entropy_target_base_frac": 0.21,
+        "entropy_target_warmup_steps": 100,
+    }
+    assert train._scheduled_target_entropy(custom, 0, 10.0) == pytest.approx(4.2)
+    assert train._scheduled_target_entropy(custom, 50, 10.0) == pytest.approx(3.15)
+    assert train._scheduled_target_entropy(custom, 100, 10.0) == pytest.approx(2.1)
+
+    # Missing keys → same defaults as build_train_config (config .get fallback).
+    assert train._scheduled_target_entropy({}, 0, max_ent) == pytest.approx(0.5 * max_ent)
 
 
 def test_hybrid_ppo_loss_normalizes_advantages():
