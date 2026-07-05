@@ -17,7 +17,11 @@ dependencies = [
     "onnx>=1.21.0",
     "onnxruntime>=1.24.4",
     "pettingzoo>=1.24.0",
-    "pufferlib>=3.0.0",
+                                                       # EXACT pin (gh #85): upstream 4.0 deletes pufferlib.vector/pytorch which
+                                                       # our monkey-patches import; a loose specifier would let a future relock
+                                                       # resolve to 4.0 and break loudly at a random moment. Upgrade is a
+                                                       # deliberate migration (see #85 playbook), not a version bump.
+    "pufferlib==3.0.0",
     "pynvml>=13.0.1",
     "rerun-sdk>=0.21.0",
     "shapely>=2.0.4",

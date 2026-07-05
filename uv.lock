@@ -319,7 +319,7 @@ requires-dist = [
     { name = "onnx", specifier = ">=1.21.0" },
     { name = "onnxruntime", specifier = ">=1.24.4" },
     { name = "pettingzoo", specifier = ">=1.24.0" },
-    { name = "pufferlib", specifier = ">=3.0.0" },
+    { name = "pufferlib", specifier = "==3.0.0" },
     { name = "pynvml", specifier = ">=13.0.1" },
     { name = "rerun-sdk", specifier = ">=0.21.0" },
     { name = "shapely", specifier = ">=2.0.4" },

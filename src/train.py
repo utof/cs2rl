@@ -994,6 +994,18 @@ def _patch_trainer_with_return_norm(trainer):
     needed (unlike PopArt) because we don't use the raw value for anything
     outside the loss.
     """
+    # gh #85: BPTT zero-init exactness (Dust2Policy.forward/_lstm_bptt) is only
+    # EXACT when each agent row fills exactly one buffer segment per evaluate(),
+    # i.e. segments == total_agents. Upstream PuffeRL only enforces
+    # total_agents <= segments (pufferl.py:83-86); our equality holds by
+    # construction in compute_batch_dims but nothing asserted it — one
+    # batch_size/bptt_horizon config edit away from silently-biased importance
+    # ratios. Fail loudly at patch time instead.
+    assert trainer.segments == trainer.total_agents, (
+        f"segments ({trainer.segments}) != total_agents ({trainer.total_agents}): "
+        "BPTT zero-init exactness broken — revisit batch_size/bptt_horizon "
+        "(compute_batch_dims) or the _lstm_bptt initial-state design. See gh #85.")
+
     import time
     import types
     from collections import defaultdict
