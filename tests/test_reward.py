@@ -277,6 +277,78 @@ def test_plant_progress_reward():
         f"Plant progress reward missing: agent {bomber_idx} reward = {rewards[bomber_idx]:.4f}")
 
 
+def test_planter_death_releases_plant_lock():
+    """Finding 7 (2026-07-06 adversarial review): a planter dying mid-plant
+    must release the plant lock so another T can plant that round.
+
+    Pre-fix, process_bomb had defuser-style death invalidation ONLY for the
+    defuser: when the planter died, `bomb_being_planted_by` stayed frozen on
+    the dead index, and the `== -1` / `== i` guards then rejected every other
+    carrier — planting was bricked for the rest of the round (live-verified:
+    a fresh carrier held USE 34 ticks with plant_time=19 and nothing
+    happened). Progress also resets to 0: the new planter starts a fresh
+    plant rather than inheriting ticks it didn't earn.
+    """
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+    g = env._c_env.game
+    sd = env._c_env.sd.contents
+    map_data = env.map_data
+    nav_graph = env.nav_graph
+
+    site_idx = None
+    site_centroid = None
+    for idx, is_site in enumerate(map_data.bombsite_by_idx):
+        if is_site:
+            site_idx = idx
+            site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
+            break
+    assert site_idx is not None, "No bombsite found in map"
+
+    def _put_at_site(i, has_bomb):
+        a = g.agents[i]
+        a.alive = 1
+        a.hp = 100
+        a.has_bomb = has_bomb
+        a.area_idx = site_idx
+        a.x, a.y, a.z = float(site_centroid[0]), float(site_centroid[1]), 0.0
+        g.bombsite_entered[i] = 1      # suppress entry bonus; not under test
+
+    # Agent 0 mid-plant at the site (5 of plant_time ticks done).
+    for i in range(10):
+        g.agents[i].has_bomb = 0
+    _put_at_site(0, has_bomb=1)
+    g.bomb_carrier_id = 0
+    g.bomb_being_planted_by = 0
+    g.bomb_plant_ticks = 5
+
+    # Kill the planter; one step must release the lock and reset progress.
+    g.agents[0].alive = 0
+    g.agents[0].hp = 0
+    env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+    assert int(
+        g.bomb_being_planted_by) == -1, (f"dead planter must release the plant lock, still held by "
+                                         f"{int(g.bomb_being_planted_by)}")
+    assert int(g.bomb_plant_ticks) == 0, (
+        f"plant progress must reset on planter death, got {int(g.bomb_plant_ticks)}")
+
+    # Hand the bomb to a living T at the site; a full fresh plant must succeed.
+    _put_at_site(1, has_bomb=1)
+    g.bomb_carrier_id = 1
+    g.bomb_is_dropped = 0
+    plant_time = int(sd.bomb_plant_time)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[1, 4] = 1                                                                # HEAD_USE held (Batch 3: USE is head 4)
+    for _ in range(plant_time + 2):
+        env.step(actions)
+        if int(g.bomb_planted):
+            break
+    assert int(g.bomb_planted) == 1, (
+        f"second carrier held USE {plant_time + 2} ticks (plant_time={plant_time}) "
+        f"but bomb never planted — plant lock still bricked")
+    env.close()
+
+
 # ── Phase 5 reward-externalization tests ──────────────────────────────────────
 
 
