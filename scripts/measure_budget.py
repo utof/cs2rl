@@ -42,15 +42,17 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
-sys.path.insert(0, str(REPO / "tests"))
 
-import numpy as np                                                     # noqa: E402
-from test_env_feasibility import _bfs_area_path, _bombsite_areas       # noqa: E402
+import numpy as np                     # noqa: E402
 
 from _action_spec import AIM_DIM                                                       # noqa: E402
 from c_env.cs2_env import make_env                                                     # noqa: E402
 from map import make_simple_map                                                        # noqa: E402
 from nav import ACTION_DIM, BOMB_PLANT_TIME, MAX_TURN_SPEED_RAD, ROUND_TIME, TEAM_SIZE # noqa: E402
+
+# Batch 6 Task 2: helpers extracted from tests/test_env_feasibility.py into
+# src/scripted_expert.py; they now take MapData directly (no NavGraph/shim).
+from scripted_expert import area_centroid, bfs_area_path, bombsite_areas # noqa: E402
 
 N_AGENTS = 10
 HEAD_USE = 4                           # discrete head order: move=0 shoot=1 reload=2 weapon=3 use=4 crouch=5 jump=6
@@ -59,24 +61,6 @@ JITTER_SEQ = [0.0, math.pi / 8, -math.pi / 8, math.pi / 4, -math.pi / 4, math.pi
 
 def _wrap_pi(x: float) -> float:
     return (x + math.pi) % (2 * math.pi) - math.pi
-
-
-class _NavShim:
-    """Duck-typed stand-in for NavGraph over a simple-map MapData.
-
-    GOTCHA (matters for Task 2's extraction): make_simple_map() returns
-    MapData(nav_graph=None) — env.nav_graph is None on the simple map, so the
-    test helpers' nav_graph.{_id_to_idx, area_ids, centroids} accesses crash.
-    On simple maps area_id == area_idx, so identity mappings over MapData
-    arrays reproduce the exact interface _bfs_area_path and the driver need.
-    The extracted ScriptedBomber must therefore take MapData (or this shim),
-    NOT env.nav_graph.
-    """
-
-    def __init__(self, md):
-        self.area_ids = md.area_ids
-        self._id_to_idx = {int(a): i for i, a in enumerate(md.area_ids)}
-        self.centroids = {int(a): md.centroids[i] for i, a in enumerate(md.area_ids)}
 
 
 def run_episode(map_data, seed: int, bomber_idx: int, variant: str):
@@ -100,10 +84,9 @@ def run_episode(map_data, seed: int, bomber_idx: int, variant: str):
     bomber.weapon_slot_target = 2
     bomber.switch_ticks = 0
 
-    bombsites = _bombsite_areas(env)
-    nav_shim = _NavShim(env.map_data)                  # env.nav_graph is None on simple maps
+    bombsites = bombsite_areas(env.map_data)
     start_area = int(env.map_data.area_ids[bomber.area_idx])
-    path = _bfs_area_path(nav_shim, env.map_data.adjacency, start_area, bombsites)
+    path = bfs_area_path(env.map_data, start_area, bombsites)
     if not path:
         env.close()
         return dict(seed=seed,
@@ -151,7 +134,7 @@ def run_episode(map_data, seed: int, bomber_idx: int, variant: str):
                 stuck += 1
             else:
                 stuck, last_pos = 0, pos
-            cx, cy = nav_shim.centroids[target_area]
+            cx, cy = area_centroid(env.map_data, target_area)
             base = math.atan2(float(cy) - float(bomber.y), float(cx) - float(bomber.x))
             step_move(base + JITTER_SEQ[min(stuck // 3, len(JITTER_SEQ) - 1)])
         if not hop_ok:
