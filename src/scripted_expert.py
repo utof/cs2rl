@@ -179,13 +179,22 @@ def setup_bomb_carrier(env, bomber_idx: int):
 
     Knife rationale: weapon_slot=2 has the highest wishspeed (250 u/s), so
     the bomber reaches max speed in ~3 accel ticks and spends the least
-    budget per area hop; switch_ticks=0 skips the draw animation."""
+    budget per area hop; switch_ticks=0 skips the draw animation.
+
+    round_designated_carrier_id (Batch 6 Task 3): env_reset picks a random
+    designated carrier among agents 0-4, which feeds the role bit at
+    obs[OBS_GLOBAL_BASE+13]. If we only hand `bomber_idx` the bomb, the
+    recorded demos would show role-bit=0 on the walking carrier (or =1 on
+    some idle teammate) — a silent train/BC distribution mismatch, since at
+    RL time the designated carrier IS the one walking to plant. Pin it to
+    the scripted bomber so demo obs match the RL-time semantics."""
     g = env._c_env.game
     for i in range(N_AGENTS):
         g.agents[i].has_bomb = 0
     bomber = g.agents[bomber_idx]
     bomber.has_bomb = 1
     g.bomb_carrier_id = bomber_idx
+    g.round_designated_carrier_id = bomber_idx
     bomber.weapon_slot = 2
     bomber.weapon_slot_target = 2
     bomber.switch_ticks = 0
