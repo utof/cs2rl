@@ -2853,23 +2853,34 @@ def train(args):
                                    mask_view_main=_mask_view_main)
 
     # ── Self-play setup ──────────────────────────────────────────────────────
-    self_play_mgr = None
-    if getattr(args, "self_play", True):
-        self_play_mgr = SelfPlayManager(
-            pool_size=15,
-            p_past=0.3,
-            save_every_epochs=25,                      # ~2M steps per save at batch_size=81920
-            win_threshold=0.6,
-            phase_length=50,                           # switch opponent team every ~4M steps
-        )
-        if resume_path and resume_path.exists():
-            import shutil as _shutil
+    # F11 (2026-07-06 adversarial review): the selfplay evaluate() wrapper is
+    # the ONLY rollout path that understands the hybrid 4-tuple policy
+    # contract — stock PuffeRL.evaluate crashes on the forward_eval tuple
+    # unpack at its first call, so --no-self-play was broken in production.
+    # The patch is now applied UNCONDITIONALLY (mirroring train_test_harness,
+    # which adopted this shape at T5); --no-self-play means "no past-policy
+    # mixing": p_past=0.0 with an empty, never-seeded pool ⇒ should_use_past()
+    # is always False, and the pool save / team-switch bookkeeping in the
+    # main loop is skipped via self_play_enabled below.
+    self_play_enabled = bool(getattr(args, "self_play", True))
+    self_play_mgr = SelfPlayManager(
+        pool_size=15,
+        p_past=0.3 if self_play_enabled else 0.0,
+        save_every_epochs=25,                          # ~2M steps per save at batch_size=81920
+        win_threshold=0.6,
+        phase_length=50,                               # switch opponent team every ~4M steps
+    )
+    if self_play_enabled and resume_path and resume_path.exists():
+        import shutil as _shutil
 
-            seed_path = Path(args.checkpoint_dir) / "sp_seed.pt"
-            _shutil.copy2(resume_path, seed_path)
-            self_play_mgr._add_to_pool(seed_path)
-            print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
-        _patch_trainer_with_selfplay(trainer, self_play_mgr)
+        seed_path = Path(args.checkpoint_dir) / "sp_seed.pt"
+        _shutil.copy2(resume_path, seed_path)
+        self_play_mgr._add_to_pool(seed_path)
+        print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
+    _patch_trainer_with_selfplay(trainer, self_play_mgr)
+    if not self_play_enabled:
+        print("[Train] Self-play mixing disabled (--no-self-play): "
+              "both teams use the current policy every epoch.")
     # timing is the outermost wrapper so it sees all evaluate() calls regardless of selfplay
     _patch_trainer_with_timing(trainer)
     # ────────────────────────────────────────────────────────────────────────
@@ -2917,7 +2928,10 @@ def train(args):
                 logs.update(health_metrics)
 
             # ── Self-play bookkeeping ────────────────────────────────────────
-            if self_play_mgr is not None:
+            # F11: gated on the FLAG, not the manager (the manager now always
+            # exists for the evaluate patch) — no pool saves / team switches
+            # under --no-self-play.
+            if self_play_enabled:
                 self_play_mgr.maybe_switch_teams(trainer.epoch)
                 win_rate_t = logs.get("environment/winner_t", 0.0)
                 win_rate_ct = logs.get("environment/winner_ct", 0.0)
