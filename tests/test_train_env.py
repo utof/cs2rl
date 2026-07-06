@@ -1293,7 +1293,7 @@ def test_hybrid_loss_clip_applies_per_factor():
         mb_old_logp_c = new_logp_c_seed - 0.05         # ratio_c ≈ 1.05 → inside clip
 
         from train import _hybrid_ppo_loss
-        pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c = _hybrid_ppo_loss(
+        pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c, _lg = _hybrid_ppo_loss(
             policy,
             mb_obs,
             mb_actions,
@@ -1340,7 +1340,7 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
         mb_old_logp_c = torch.zeros(B)
 
         from train import _hybrid_ppo_loss
-        pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c = (_hybrid_ppo_loss(
+        pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c, _lg = (_hybrid_ppo_loss(
             policy,
             mb_obs,
             mb_actions,
@@ -1698,7 +1698,7 @@ def test_train_path_logprobs_match_rollout():
             terminals=trainer.terminals,
         )
         with torch.no_grad():
-            _pg, _ent, newvalue, newlogprob, _rd, _rc = _hybrid_ppo_loss(
+            _pg, _ent, newvalue, newlogprob, _rd, _rc, _lg = _hybrid_ppo_loss(
                 trainer.policy,
                 trainer.observations,
                 trainer.actions,
@@ -1828,9 +1828,9 @@ def test_sampler_and_loss_mask_consistency():
         max_turn_speed=0.7853981633974483,
         mask=mask,
     )
-    pg_loss, entropy, _v, _lp_tot, ratio_d, ratio_c = _hybrid_ppo_loss(
+    pg_loss, entropy, _v, _lp_tot, ratio_d, ratio_c, _lg = _hybrid_ppo_loss(
         _StubPolicy(),
-        torch.zeros(B, 4),                                                                 # obs unused by the stub
+        torch.zeros(B, 4),                                                                      # obs unused by the stub
         action,
         cont,
         lp_d,
@@ -1845,10 +1845,20 @@ def test_sampler_and_loss_mask_consistency():
                                        f"max dev {(ratio_d - 1).abs().max().item():.2e}")
     assert torch.allclose(ratio_c, torch.ones(B), atol=1e-5)
     assert torch.isfinite(pg_loss).all() and torch.isfinite(entropy).all()
+                                                                                                # F16: the loss returns the logits it computed (7th element) so the
+                                                                                                # trainer skips the redundant diagnostic forward. With mb_masks given
+                                                                                                # they must be the MASKED logits — masked bins pushed to huge negatives.
+    from train import _MASK_HEAD_SLICES as _slices
+    for h, (lo, hi) in enumerate(_slices):
+        head_mask = mask[:, lo:hi]
+        if (~head_mask).any():
+            assert (_lg[h][~head_mask]
+                    < -1e30).all(), (f"head {h}: returned logits not masked — F16 diagnostics "
+                                     f"would report the unmasked distribution")
 
     # Control: DROP the mask on the loss side → ratios must deviate wherever
     # a mask bit was 0 (proves the consistency requirement is load-bearing).
-    _pg2, _e2, _v2, _lpt2, ratio_d_unmasked, _rc2 = _hybrid_ppo_loss(
+    _pg2, _e2, _v2, _lpt2, ratio_d_unmasked, _rc2, _lg2 = _hybrid_ppo_loss(
         _StubPolicy(),
         torch.zeros(B, 4),
         action,

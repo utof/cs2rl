@@ -1360,10 +1360,13 @@ def _patch_trainer_with_return_norm(trainer):
             # (Fan et al. IJCAI 2019). The helper does the policy forward
             # pass (returning mu_aim/log_std + value) and assembles the
             # clipped policy loss with INDEPENDENT discrete and continuous
-            # ratios. We still also need the raw logits for the per-head
-            # entropy diagnostics below, so re-pull them via a NO-grad path
-            # — _hybrid_ppo_loss already consumed them on the gradient path.
-            pg_loss, entropy, newvalue, newlogprob, ratio_d, ratio_c = _hybrid_ppo_loss(
+            # ratios. F16 (2026-07-06 adversarial review): it now also
+            # returns the logits it computed, killing the redundant no-grad
+            # diagnostic forward that used to run here per minibatch
+            # (halves update-forward cost). Post-F8 the returned logits are
+            # MASKED, so the per-head entropy diagnostics below report the
+            # true sampled distribution.
+            (pg_loss, entropy, newvalue, newlogprob, ratio_d, ratio_c, logits) = _hybrid_ppo_loss(
                 self.policy,
                 mb_obs,
                 mb_actions,
@@ -1376,15 +1379,12 @@ def _patch_trainer_with_return_norm(trainer):
                 mb_prio=mb_prio,
                 mb_masks=mb_masks,
             )
-            with torch.no_grad():
-                # Logits-only path for the per-head entropy diagnostic block
-                # below. Cheaper than re-running _hybrid_ppo_loss; we already
-                # have the loss + entropy from the gradient pass.
-                logits, _mu_diag, _log_std_diag, _ = self.policy(mb_obs, state)
             # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
             # was used by downstream diagnostics; T5 dropped that consumer
             # (mb_actions is the canonical stored discrete action). No
             # rebinding here — the variable is unused after this point.
+            # (F16: the former no-grad diagnostic re-forward that lived here
+            # is gone — `logits` now comes straight from _hybrid_ppo_loss.)
 
             profile("train_misc", epoch)
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
@@ -2350,6 +2350,13 @@ def _hybrid_ppo_loss(policy,
         per factor and substitute ratio_d into the existing self.ratio
         slot for vtrace advantages (spec carry-forward: keep diagnostics
         backwards-compatible by using the discrete ratio there).
+    logits_list : list of 7 (B, head_size) tensors — the per-head logits
+        this loss was computed from (F16: post-mask when mb_masks is given,
+        so per-head entropy diagnostics reflect the TRUE sampled
+        distribution). Returned so the caller doesn't need a second full
+        forward pass for diagnostics — that redundant no-grad forward used
+        to double the update-forward cost. Autograd-attached; consume under
+        torch.no_grad() and don't hold past backward() if memory matters.
 
     LSTM-BPTT fix: `state` must carry `terminals` (the minibatch's
     (segments, bptt_horizon) done flags) so the policy forward runs
@@ -2452,7 +2459,7 @@ def _hybrid_ppo_loss(policy,
     pg_c_cl = -flat_adv * torch.clamp(ratio_c, 1 - clip_coef, 1 + clip_coef)
     pg_loss = torch.max(pg_d_un, pg_d_cl).mean() + torch.max(pg_c_un, pg_c_cl).mean()
 
-    return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c
+    return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list
 
 
 def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_view_main=None):
