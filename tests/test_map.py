@@ -160,20 +160,24 @@ def test_centroids_z_plumbed_through_binding():
 # assert post-tick invariants.  All tests use the simple map (make_simple_map)
 # so that centroids_z[6]=64 (bombsite) and is_ramp[13]=True (T-ramp) are live.
 #
-# Movement direction conventions:
-#   The env uses facing-LOCAL movement bins (cs2_movement.h _LOCAL_MOVE_X/Y).
+# Movement direction conventions (post-F9 right-handed basis, 2026-07-06):
+#   The env uses facing-LOCAL movement bins (cs2_movement.h _LOCAL_MOVE_X/Y),
+#   rotated into world via world = fy*forward + fx*right with
+#   forward = (cos f, sin f) and right = (sin f, -cos f) (CW perpendicular;
+#   yaw is CCW in the x-east/y-north frame).
 #   Bin 1 ("W" = forward): _LOCAL_MOVE_Y[1]=+1, _LOCAL_MOVE_X[1]=0.
 #   With a->facing = -π/2 (agent facing -Y in world):
-#       wx = fy*cos(-π/2) - fx*sin(-π/2) = fy*0 - fx*(-1) = fx
-#       wy = fy*sin(-π/2) + fx*cos(-π/2) = fy*(-1) + fx*0 = -fy
+#       wx = fy*cos(-π/2) + fx*sin(-π/2) = -fx
+#       wy = fy*sin(-π/2) - fx*cos(-π/2) = -fy
 #   So bin 1 → world (wx=0, wy=-1): moves in -Y direction (toward lower y, i.e.
 #   toward the catwalk at y=80 from the bombsite at y=192-416).
-#   Bin 8 ("WA" = forward+left): _LOCAL_MOVE_X[8]=-0.707, _LOCAL_MOVE_Y[8]=+0.707.
-#       wx = 0.707*0 - (-0.707)*(-1) = -0.707  (moves -X, toward west)
-#       wy = 0.707*(-1) + (-0.707)*0 = -0.707  (moves -Y, toward catwalk)
-#   So bin 8 with facing=-π/2 drives NW (decreasing x and decreasing y).
+#   Bin 2 ("WD" = forward+right): _LOCAL_MOVE_X[2]=+0.707, _LOCAL_MOVE_Y[2]=+0.707.
+#       wx = -0.707  (moves -X, toward west — facing south, right IS west)
+#       wy = -0.707  (moves -Y, toward catwalk)
+#   So bin 2 with facing=-π/2 drives SW in screen terms (decreasing x and y).
+#   (Pre-F9 the strafe axis was mirrored and bin 8 "WA" produced this vector.)
 #
-# Assertion: bin 1 drives decreasing y and bin 8 drives decreasing x+y, verified
+# Assertion: bin 1 drives decreasing y and bin 2 drives decreasing x+y, verified
 # by the pre-step asserts in test_cliff_guard_blocks_walkup below.
 
 
@@ -319,7 +323,8 @@ def test_cliff_guard_diagonal_slides():
     wall-slide logic (plan step 3.2 + the pre-existing diagonal retry in
     process_movement). If sliding is broken the agent would be fully stuck.
 
-    Movement: facing=-π/2, bin 8 ("WA") → world (-0.707, -0.707): NW.
+    Movement: facing=-π/2, bin 2 ("WD") → world (-0.707, -0.707) — post-F9
+    right-handed basis: facing south, geometric right IS west.
     The -y component hits the cliff (area 15 target, Δz=64 > 18, non-ramp) → rejected.
     The -x component tries to move west within area 6 → allowed if area 6 covers it.
     The agent must move west (x decrease) but stay in area 6.
@@ -338,13 +343,13 @@ def test_cliff_guard_diagonal_slides():
         g.agents[0].facing = float(-math.pi / 2)
         x0 = g.agents[0].x
         actions, cont = _zero_actions()
-        # Bin 8 = "WA" (forward+left). With facing=-π/2:
-        #   wx = _LOCAL_MOVE_Y[8]*cos(-π/2) - _LOCAL_MOVE_X[8]*sin(-π/2)
-        #      = 0.707*0 - (-0.707)*(-1) = -0.707  (moves west)
-        #   wy = _LOCAL_MOVE_Y[8]*sin(-π/2) + _LOCAL_MOVE_X[8]*cos(-π/2)
-        #      = 0.707*(-1) + (-0.707)*0 = -0.707  (moves toward catwalk, blocked)
+        # Bin 2 = "WD" (forward+right), post-F9 basis. With facing=-π/2:
+        #   wx = fy*cos(-π/2) + fx*sin(-π/2) = 0 + 0.707*(-1) = -0.707  (west)
+        #   wy = fy*sin(-π/2) - fx*cos(-π/2) = -0.707 - 0     = -0.707  (toward
+        #        catwalk, blocked by the cliff guard)
+        # (Pre-F9 the mirrored basis produced this vector from bin 8 "WA".)
         # HEAD_MOVE = 0; x should decrease (west slide allowed) post-step.
-        actions[0, 0] = 8
+        actions[0, 0] = 2
         env.step(actions, cont)
         env.step(actions, cont)
         assert g.agents[0].x < x0, (
