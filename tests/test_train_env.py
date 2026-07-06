@@ -1912,3 +1912,33 @@ def test_env_publishes_masks_after_reset_and_step():
                    for o in offs), (f"dead agent per-head no-ops not set: {dead.tolist()}")
     finally:
         env.close()
+
+
+# ── F13 (2026-07-06 adversarial review): USE counter wired ───────────────────
+def test_action_use_counter_wired():
+    """action_use was declared + exported since Batch 2 but had NO writer in C
+    (USE is processed in process_bomb, which never called count_action) — the
+    W&B metric was permanently 0 and misleading when diagnosing plant
+    behaviour. Now counted like every other head: intent of alive agents.
+    (action_last was removed outright: no head, no writer, dead legacy.)"""
+    env = train.make_puffer_env(seed=0)
+    try:
+        env.reset()
+        use_head = list(train.ACTION_HEAD_NAMES).index("use")
+        acts = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        acts[:, use_head] = 1
+        for _ in range(5):
+            env.step(acts)
+        ss = env._c_env.step_stats
+        es = env._c_env.episode_stats
+        alive = sum(1 for i in range(10) if env._c_env.game.agents[i].alive)
+        assert list(ss.action_use) == [
+            0, alive
+        ], (f"per-tick USE counter wrong: {list(ss.action_use)} (alive={alive})")
+        assert list(es.action_use) == [0, 5 * alive
+                                       ], (f"episode USE counter wrong: {list(es.action_use)}")
+        info = env._build_terminal_info()
+        assert "action_use_1" in info and "action_last_0" not in info, (
+            "terminal info should export action_use_* and no longer export action_last_*")
+    finally:
+        env.close()

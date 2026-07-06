@@ -220,11 +220,11 @@ class StepStatsC(ctypes.Structure):
         ("action_move", ctypes.c_int32 * 9),
         ("action_shoot", ctypes.c_int32 * 2),
         ("action_use", ctypes.c_int32 * 2),
-        ("action_last", ctypes.c_int32 * 2),
+                                                       # action_last removed (F13) — dead legacy counter, see cs2_types.h.  # noqa: E501
                                                        # Batch 3: continuous-aim Δyaw stats (mirror C StepStats fields).  # noqa: E501
                                                        # Replaces the 16-bin action_aim histogram (64B) with a Welford-style  # noqa: E501
                                                        # triple (sum + sq_sum + count = 12B). No explicit _pad_aim_delta —  # noqa: E501
-                                                       # the three int32-aligned fields slot in cleanly between action_last  # noqa: E501
+                                                       # the three int32-aligned fields slot in cleanly between action_use  # noqa: E501
                                                        # and action_reload. See cs2_types.h StepStats comment.  # noqa: E501
         ("aim_delta_sum", ctypes.c_float),
         ("aim_delta_sq_sum", ctypes.c_float),
@@ -323,10 +323,12 @@ assert ctypes.sizeof(AgentStateC) == 156, (
     f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 156)")
 assert ctypes.sizeof(GameStateC) == 1628, (
     f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1628)")
-assert ctypes.sizeof(StepStatsC) == 208, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 208)")
-assert ctypes.sizeof(Dust2EnvC) == 6752, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6752)")
+# F13: 208→200 / 6752→6736 after removing the dead action_last[2] counter
+# (Dust2Env embeds TWO StepStats — step + episode — hence the −16).
+assert ctypes.sizeof(StepStatsC) == 200, (
+    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 200)")
+assert ctypes.sizeof(Dust2EnvC) == 6736, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6736)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -863,7 +865,8 @@ class Cs2Env(pufferlib.PufferEnv):
         for idx in range(2):
             summary[f"action_shoot_{idx}"] = int(stats.action_shoot[idx])
             summary[f"action_use_{idx}"] = int(stats.action_use[idx])
-            summary[f"action_last_{idx}"] = int(stats.action_last[idx])
+            # action_last_* removed (F13): the counter had no writer and no
+            # corresponding action head — it exported permanent zeros.
         # Batch 3: continuous-aim stats — emit Welford triple instead of
         # 16-bin histogram. Consumers that previously summed action_aim_*
         # to derive total turns should now use aim_delta_count; mean/var

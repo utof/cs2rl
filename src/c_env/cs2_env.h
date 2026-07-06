@@ -199,7 +199,14 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
         int shoot_act  = actions[i * ACTION_DIM + HEAD_SHOOT];
         int reload_act = actions[i * ACTION_DIM + HEAD_RELOAD];
         int wswitch    = actions[i * ACTION_DIM + HEAD_WEAPON];
-        /* use and crouch handled in cs2_bomb.h and cs2_movement.h */
+        int use_act    = actions[i * ACTION_DIM + HEAD_USE];
+        /* use and crouch SEMANTICS handled in cs2_bomb.h and cs2_movement.h.
+         * F13 (2026-07-06 adversarial review): the USE counter is wired HERE
+         * because process_bomb never counted it — action_use was declared,
+         * exported to W&B, and always 0 (misleading when diagnosing plant
+         * behaviour). Like every other head counter this counts the INTENT
+         * (raw action value from alive agents), not the effect. */
+        count_action(ss->action_use, es->action_use, use_act, 2);
 
         /* Batch 3: continuous-aim Δyaw consumption.
          * Human-controlled agents still set facing directly via aim_rad

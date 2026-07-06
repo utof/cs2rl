@@ -295,13 +295,17 @@ typedef struct {
     int32_t action_move[9];
     int32_t action_shoot[2];
     int32_t action_use[2];
-    int32_t action_last[2];
+    /* action_last[2] removed (F13, 2026-07-06 adversarial review): it had no
+     * corresponding action head (legacy of a pre-Batch-3 "switch to last
+     * weapon" concept), no writer, and exported permanently-zero metrics.
+     * Mirror struct in cs2_env.py StepStatsC + its sizeof assert were
+     * updated in the same change — touch both or the ctypes overlay shifts. */
     /* Batch 3: continuous-aim Δyaw stats (replaces 16-bin action_aim histogram).
      * Sum + sum-of-squares + count enables Welford-style mean/var recovery
      * Python-side without storing the full rollout. mean = sum / count;
      * var = (sq_sum / count) - mean².
      * No explicit pad — three int32-aligned fields (4+4+4=12B) follow
-     * the int32-aligned `action_last[2]` cleanly. `_pad_ss_wins[2]` at
+     * the int32-aligned `action_use[2]` cleanly. `_pad_ss_wins[2]` at
      * end of struct still pads to 4-byte boundary as before. */
     float   aim_delta_sum;
     float   aim_delta_sq_sum;
