@@ -2691,6 +2691,13 @@ def train(args):
     metrics_path = Path(args.checkpoint_dir) / "metrics.jsonl"
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     _metrics_file = metrics_path.open("a")
+    # N2 (2026-07-06 adversarial review): the file is opened in APPEND mode,
+    # so back-to-back runs concatenate silently — 15 runs shared one file with
+    # no separator and every analysis had to re-segment by agent_steps resets.
+    # Stamp every row with a per-process run id (label + launch timestamp;
+    # the label alone is NOT unique because re-runs into the same checkpoint
+    # dir share it). Old rows lack the key — segment those the legacy way.
+    run_id = f"{run_label}-{time.strftime('%Y%m%d-%H%M%S')}"
 
     # Shared team spirit value — all envs read it at episode start
     shared_ts = mp.Value("f", 0.3)
@@ -2940,6 +2947,7 @@ def train(args):
 
             # ── Persist metrics ──────────────────────────────────────────────
             log_entry = {
+                "run_id": run_id,                                           # N2: string key — segment runs by this, not by agent_steps resets
                 "step": trainer.global_step,
                 "epoch": trainer.epoch,
                 "team_spirit": ts_val,
