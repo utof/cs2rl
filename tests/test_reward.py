@@ -973,3 +973,55 @@ def test_step_stats_in_info_flag_on_merges_with_terminal_summary():
     # step_stats also present.
     assert "step_stats" in summary
     env.close()
+
+
+# ── F15 (2026-07-06 adversarial review): timeout counts as a CT win ──────────
+def test_timeout_counted_as_ct_win_in_stats():
+    """Rewards have always treated timeout as a CT win (reward_win_ct_timeout
+    positive for CT, symmetric penalty for T), but winner_ct stayed 0 —
+    dashboards undercounted CT wins by exactly the timeout rate and the
+    self-play save/team-switch logic read the skewed rate. winner_ct now
+    includes timeouts; the raw mechanism stays recoverable (winner == -1,
+    timed_out == 1), so defuse/elimination-only wins = winner_ct - timed_out."""
+    import numpy as np
+    env = _make_zeroed_env()
+    env.reset()
+    try:
+        # Drive a NATURAL timeout: both teams alive (so the elimination check
+        # can't preempt), one tick left on the round clock, round_over unset.
+        # process_bomb's timeout branch then sets winner=-1/timed_out=1 itself
+        # (the synthetic _setup_round_end path pre-sets round_over, which
+        # skips that branch and never raises timed_out).
+        _setup_round_end(env,
+                         winner=-1,
+                         bomb_planted=0,
+                         bomb_ticks_left=0,
+                         round_ticks_left=1,
+                         alive_teams={0, 1})
+        env._c_env.game.round_over = 0
+        env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+        ss = env._c_env.step_stats
+        assert ss.winner == -1, "raw winner must stay -1 on timeout (mechanism signal)"
+        assert ss.timed_out == 1
+        assert ss.winner_ct == 1, "timeout must count as a CT win in winner_ct (F15)"
+        assert ss.winner_t == 0
+        es = env._c_env.episode_stats
+        assert es.winner_ct == 1 and es.timed_out == 1
+
+        # Control: a T elimination win must NOT set winner_ct.
+        env2 = _make_zeroed_env()
+        env2.reset()
+        try:
+            _setup_round_end(env2,
+                             winner=0,
+                             bomb_planted=0,
+                             bomb_ticks_left=0,
+                             round_ticks_left=100,
+                             alive_teams={0})
+            env2.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+            assert env2._c_env.step_stats.winner_ct == 0
+            assert env2._c_env.step_stats.winner_t == 1
+        finally:
+            env2.close()
+    finally:
+        env.close()

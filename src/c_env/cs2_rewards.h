@@ -267,16 +267,26 @@ static void compute_rewards(Dust2Env* env,
     }
 
     if (g->round_over) {
+        /* F15 (2026-07-06 adversarial review): timeout COUNTS as a CT win in
+         * winner_ct. Rewards already treated it that way (CTs get
+         * reward_win_ct_timeout, Ts the symmetric penalty), but the stat used
+         * to stay 0 — dashboards undercounted CT wins by exactly the timeout
+         * rate, and self-play save/team-switch logic read the skewed rate.
+         * The raw mechanism is still fully recoverable: `winner` stays -1 on
+         * timeout and `timed_out` is its own flag, so
+         * elimination/defuse-only CT wins = winner_ct - timed_out. */
+        int ct_win_effective = (g->winner == 1) || (g->winner == -1);
+
         ss->winner       = g->winner;
         ss->winner_t     = (g->winner == 0);
-        ss->winner_ct    = (g->winner == 1);
+        ss->winner_ct    = ct_win_effective;
         ss->alive_t_end  = t_alive;
         ss->alive_ct_end = ct_alive;
         ss->round_length = g->tick;
 
         es->winner       = g->winner;
         es->winner_t     = (g->winner == 0);
-        es->winner_ct    = (g->winner == 1);
+        es->winner_ct    = ct_win_effective;
         es->alive_t_end  = t_alive;
         es->alive_ct_end = ct_alive;
         es->round_length = g->tick;
