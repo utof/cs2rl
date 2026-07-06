@@ -1988,3 +1988,64 @@ def test_strafe_labels_match_geometry():
                 f"(A/D strafe basis regressed — see F9)")
     finally:
         env.close()
+
+
+# ── F10 (2026-07-06 adversarial review): enemy-slot sort must not leak ───────
+def test_enemy_slot_sort_does_not_leak_invisible_rank():
+    """Enemy obs slots are distance-sorted, but the sort key must only use
+    information the policy legitimately has: true distance when visible,
+    last-known memory position when not, sentinel-far otherwise. Pre-F10 the
+    key was the TRUE distance for all 5 enemies unconditionally, so an unseen
+    enemy walking closer visibly reordered the slots (rank leak).
+
+    Invisibility here is forced via area_idx = -1 — build_vis_matrix
+    short-circuits off-mesh agents to can_see=0 regardless of position."""
+    from _obs_spec import OBS_BLOCKS, OBS_ENEMY_STRIDE
+    from c_env.cs2_env import make_env
+
+    env = make_env(seed=0, auto_reset=False)
+    try:
+        g = env._c_env.game
+        obs_view = env._obs_view
+        enemy_base = OBS_BLOCKS["enemy"][0]
+        observer = g.agents[0]         # T slot 0; enemies are 5-9
+
+        def slot_flags():
+            """(can_see, alive) per enemy obs slot of agent 0."""
+            return [(int(obs_view[0, enemy_base + s * OBS_ENEMY_STRIDE + 3]),
+                     int(obs_view[0, enemy_base + s * OBS_ENEMY_STRIDE + 4])) for s in range(5)]
+
+        env.reset()
+        # Wipe observer's enemy memory so the sentinel branch is exercised.
+        for m in range(5):
+            observer.enemy_mem_idx[m] = -1             # INVALID_AREA_IDX
+                                                       # Enemy 5: alive, ON-mesh, right next to the observer (trivial LoS).
+        vis_enemy = g.agents[5]
+        vis_enemy.alive, vis_enemy.hp = 1, 100
+        vis_enemy.x, vis_enemy.y = observer.x + 40.0, observer.y
+        vis_enemy.area_idx = observer.area_idx
+                                                       # Enemies 6-9: alive but OFF-mesh (area_idx=-1 → can_see forced 0).
+                                                       # Enemy 6 sits CLOSER than the visible one — pre-F10 it stole slot 0.
+        for j in range(6, 10):
+            g.agents[j].alive, g.agents[j].hp = 1, 100
+            g.agents[j].area_idx = -1
+            g.agents[j].x, g.agents[j].y = observer.x + 500.0, observer.y
+        g.agents[6].x = observer.x + 5.0
+
+        acts = np.zeros((10, 7), dtype=np.int64)
+        env.step(acts)
+        flags = slot_flags()
+        assert flags[0] == (1, 1), (
+            f"slot 0 must hold the VISIBLE enemy (can_see=1); got slots {flags} — "
+            f"a closer invisible enemy outranked it (F10 leak)")
+        assert all(cs == 0 for cs, _ in flags[1:]), f"only one enemy is visible: {flags}"
+
+        # Unseen movement must not reorder: drag the invisible enemy through
+        # the observer and re-step several times — slot 0 stays the visible one.
+        for new_dx in (2.0, 1.0, 0.5):
+            g.agents[6].x = observer.x + new_dx
+            env.step(acts)
+            assert slot_flags()[0] == (1, 1), (
+                f"invisible enemy at dx={new_dx} reordered the slots — rank leak")
+    finally:
+        env.close()

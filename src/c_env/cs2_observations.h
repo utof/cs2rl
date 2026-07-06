@@ -152,14 +152,36 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
 
         /* ── Enemies (OBS_ENEMY_BASE ..): 5 × 8 ── */
         int en_start = (a->team == 0) ? TEAM_SIZE : 0;
-        /* Sort by distance — simple insertion sort over 5 elements */
+        /* Sort by KNOWN distance — insertion sort over 5 elements.
+         * F10 (2026-07-06 adversarial review): the key used to be the TRUE
+         * distance for all 5 enemies unconditionally, so slot order (and
+         * per-slot flag churn) leaked the rank of enemies the agent could
+         * not see — an unseen enemy walking closer would reorder the slots.
+         * The key now uses only information the policy legitimately has:
+         *   visible enemy          → true squared distance,
+         *   invisible w/ memory    → squared distance to LAST-KNOWN centroid
+         *                            (the same position the obs slot emits),
+         *   invisible, no memory   → 1e30f sentinel (sorted last; insertion
+         *   (incl. dead: can_see=0)  sort is stable ⇒ ties keep index order).
+         * Dead enemies always have can_see=0 (see the slot loop below), so
+         * they rank by stale memory or the sentinel — never by their true
+         * corpse position. */
         int   order[TEAM_SIZE];
         float dists[TEAM_SIZE];
         for (int s = 0; s < TEAM_SIZE; s++) {
-            order[s]       = en_start + s;
-            AgentState* en = &g->agents[order[s]];
-            float       dx = en->x - a->x, dy = en->y - a->y;
-            dists[s] = dx * dx + dy * dy;
+            order[s]        = en_start + s;
+            AgentState* en  = &g->agents[order[s]];
+            int         ecs = en->alive ? vis10[i][order[s]] : 0;
+            if (ecs) {
+                float dx = en->x - a->x, dy = en->y - a->y;
+                dists[s] = dx * dx + dy * dy;
+            } else if (a->enemy_mem_idx[s] != INVALID_AREA_IDX) {
+                float mx = sd->centroid_xy[a->enemy_mem_idx[s] * 2] - a->x;
+                float my = sd->centroid_xy[a->enemy_mem_idx[s] * 2 + 1] - a->y;
+                dists[s] = mx * mx + my * my;
+            } else {
+                dists[s] = 1e30f;
+            }
         }
         for (int s = 1; s < TEAM_SIZE; s++) {
             int   ko = order[s];
