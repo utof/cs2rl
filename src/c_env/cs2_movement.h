@@ -187,8 +187,17 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
             float fy     = _LOCAL_MOVE_Y[move_dir];
             float ca     = cosf(facing);
             float sa     = sinf(facing);
-            wx           = fy * ca - fx * sa;
-            wy           = fy * sa + fx * ca;
+            /* world = fy * forward + fx * right, with forward = (ca, sa) and
+             * right = (sa, -ca) — the CLOCKWISE perpendicular, since yaw is
+             * CCW in this x-east/y-north frame. F9 (2026-07-06 adversarial
+             * review): the old form (wx = fy*ca - fx*sa; wy = fy*sa + fx*ca)
+             * rotated fx onto the CCW/left perpendicular, so D (bin 3,
+             * labelled right) moved world-LEFT and A world-RIGHT. Harmless
+             * under relabeling-invariant self-play, but wrong for scripted
+             * experts / BC demos / deploy key export. Pinned by
+             * test_strafe_labels_match_geometry. */
+            wx = fy * ca + fx * sa;
+            wy = fy * sa - fx * ca;
         }
 
         float vel_x     = a->vx;

@@ -1942,3 +1942,49 @@ def test_action_use_counter_wired():
             "terminal info should export action_use_* and no longer export action_last_*")
     finally:
         env.close()
+
+
+# ── F9 (2026-07-06 adversarial review): strafe labels match geometry ─────────
+def test_strafe_labels_match_geometry():
+    """With facing = 0 (+X) in this x-east/y-north, CCW-yaw frame:
+    W (bin 1) must move +X, D (bin 3, 'right') must move -Y (clockwise
+    perpendicular = geometric right), A (bin 7, 'left') +Y, S (bin 5) -X.
+    The pre-F9 basis rotated the strafe axis CCW, so A/D were mirrored vs
+    their labels — invisible to self-play (relabeling-invariant) but wrong
+    for scripted experts, BC demos, and deploy key export."""
+    import math
+
+    from c_env.cs2_env import make_env
+
+    env = make_env(seed=0, auto_reset=False)
+    try:
+        g = env._c_env.game
+        sd = env._c_env.sd.contents
+        # An open bombsite-area centroid (R4 recipe) — flat, no walls nearby.
+        id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
+        open_area = next(aid for aid in env.map_data.area_ids
+                         if sd.bombsite_by_idx[id2idx[int(aid)]])
+        cx, cy = env.map_data.centroids[open_area][:2]
+
+        expected = {1: 0.0, 3: -90.0, 5: 180.0, 7: 90.0}                                      # bin → world angle (deg)
+        for move_bin, want_deg in expected.items():
+            env.reset()
+            a = g.agents[0]
+            a.alive, a.hp = 1, 100
+            a.x, a.y, a.z = float(cx), float(cy), 0.0
+            a.area_idx = id2idx[int(open_area)]
+            a.facing = 0.0
+            a.aim_rad = 0.0
+            a.vx = a.vy = a.vz = 0.0
+            acts = np.zeros((10, 7), dtype=np.int64)
+            acts[0, 0] = move_bin
+            env.step(acts)
+            speed = math.hypot(a.vx, a.vy)
+            assert speed > 1.0, f"bin {move_bin}: agent did not move (v={a.vx},{a.vy})"
+            got_deg = math.degrees(math.atan2(a.vy, a.vx))
+            diff = (got_deg - want_deg + 180.0) % 360.0 - 180.0
+            assert abs(diff) < 1.0, (
+                f"bin {move_bin}: velocity angle {got_deg:.1f}° != expected {want_deg:.1f}° "
+                f"(A/D strafe basis regressed — see F9)")
+    finally:
+        env.close()
