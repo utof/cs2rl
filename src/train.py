@@ -224,7 +224,8 @@ def make_puffer_env(team_spirit=None,
                     seed=0,
                     episode_stats=True,
                     map_data=None,
-                    include_step_stats_in_info=False):
+                    include_step_stats_in_info=False,
+                    pbrs_gamma=None):
     """Create the native C PufferEnv used by smoke/train/eval.
 
     ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
@@ -232,17 +233,27 @@ def make_puffer_env(team_spirit=None,
     patches (Task 6c onward) can read per-channel raw reward fields. Defaults
     to False so production code paths that don't consume step_stats (e.g. eval
     scripts, viz) stay zero-cost.
+
+    ``pbrs_gamma`` (finding 2 / N3, 2026-07-06 review): PBRS shaping discount.
+    None (default) uses the env-side default, which is pinned to the training
+    gamma (0.999) and drift-guarded by test_pbrs_gamma_matches_training_gamma.
+    Pass explicitly only for experiments that also change the training gamma —
+    the two MUST move together or PBRS loses policy-invariance.
     """
     from c_env.cs2_env import make_env as make_c_env
 
     if record_fn is not None:
         raise ValueError("record_fn is only supported by the Python recording env")
+    kwargs = {}
+    if pbrs_gamma is not None:
+        kwargs["pbrs_gamma"] = pbrs_gamma
     return make_c_env(
         seed=seed,
         team_spirit=team_spirit,
         buf=buf,
         map_data=map_data,
         include_step_stats_in_info=include_step_stats_in_info,
+        **kwargs,
     )
 
 
@@ -620,13 +631,10 @@ def evaluate_checkpoint(checkpoint_path=None,
         print(f"[Eval] top_actions: {', '.join(parts)}")
 
 
-# ── SECTION: Training config ───────────────────────────────────────────────
-
-TRAINING_CONFIG = dict(
-    gamma=0.99,                        # used by PBRS shaping in sim.py and test_reward.py
-)
-
 # ── SECTION: PufferLib env factory ─────────────────────────────────────────
+# (dead TRAINING_CONFIG dict removed here — zero readers repo-wide, referenced
+# a nonexistent sim.py, and its gamma=0.99 contradicted build_train_config;
+# finding 21f of docs/2026-07-06-adversarial-review-verification.md)
 
 
 def make_env(team_spirit=None, map_data=None):

@@ -146,23 +146,36 @@ def test_team_spirit_one_equalizes_alive_team():
 
 
 def test_idle_penalty():
-    """Idle action (move=0) for a live agent should incur -0.0005 penalty."""
-    env = make_env(seed=0, auto_reset=False)
+    """Idle action (move=0) for a live agent should incur -0.0005 penalty.
+
+    PBRS weights and the CT survival micro-reward are zeroed so the idle
+    penalty is the ONLY per-tick term and can be asserted exactly. The old
+    version asserted total reward ≤ -0.0004 under default shaping, which
+    silently depended on the PBRS stationary residual (γ_pbrs − 1)·φ being
+    large; the finding-2 fix (γ_pbrs 0.99 → 0.999) shrank that residual 10×
+    and exposed the coupling.
+    """
+    env = make_env(
+        seed=0,
+        auto_reset=False,
+        reward_ct_survival=0.0,
+        pbrs_alive_weight=0.0,
+        pbrs_hp_weight=0.0,
+        pbrs_site_weight=0.0,
+        pbrs_bomb_progress_weight=0.0,
+        pbrs_nav_weight_t=0.0,
+        pbrs_nav_weight_ct=0.0,
+    )
     env.reset()
 
     # All agents idle (move action = 0)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, rewards, _, _, _ = env.step(actions)
 
-    # Every alive agent should have received the -0.0005 idle penalty.
-    # The reward may also contain PBRS terms, so we only check the sign / range.
     for i in range(10):
         if env._c_env.game.agents[i].alive:
-            assert rewards[i] <= 0, f"Agent {i} idled but got non-negative reward: {rewards[i]:.6f}"
-            # The idle penalty alone is -0.0005; PBRS shaping should be small.
-            # Verify the penalty is at most -0.0005 (PBRS can add to it).
-            assert rewards[i] <= -0.0004, (
-                f"Agent {i} idle penalty smaller than expected: {rewards[i]:.6f}")
+            assert abs(rewards[i] - (-0.0005)) < 1e-6, (
+                f"Agent {i} idled: expected exactly -0.0005, got {rewards[i]:.6f}")
     env.close()
 
 

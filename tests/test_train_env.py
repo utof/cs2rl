@@ -1381,6 +1381,46 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
         env.close()
 
 
+def test_pbrs_gamma_matches_training_gamma():
+    """Finding 2 (2026-07-06 adversarial review): PBRS shaping used
+    γ_pbrs = 0.99 while training used γ = 0.999. With F(s,s') =
+    γ_pbrs·φ(s') − φ(s), any γ_pbrs ≠ γ breaks the Ng et al. policy-
+    invariance guarantee — the residual (γ_pbrs − γ)·φ ≈ −0.009·φ per tick
+    penalized dwelling in high-φ states. This drift guard pins the LIVE
+    env value (read from C static data through the production factory)
+    against build_train_config's gamma: if either side changes without the
+    other, this fails and points here.
+    """
+    from types import SimpleNamespace
+
+    import pytest
+
+    import train
+
+    args = SimpleNamespace(seed=0, timesteps=1_000, checkpoint_dir="/tmp/unused", device="cpu")
+    cfg = train.build_train_config(args, batch_size=1024, bptt_horizon=64)
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        live_pbrs_gamma = float(env._c_env.sd.contents.pbrs_gamma)
+    finally:
+        env.close()
+    assert live_pbrs_gamma == pytest.approx(
+        cfg["gamma"]), (f"pbrs_gamma={live_pbrs_gamma} != training gamma={cfg['gamma']}; "
+                        f"PBRS is only policy-invariant when they match — update the "
+                        f"cs2_env defaults (Cs2Env.__init__ AND make_env) or thread "
+                        f"pbrs_gamma explicitly")
+
+    # N3 fix: make_puffer_env must expose pbrs_gamma for per-experiment
+    # overrides (previously the training γ could not be threaded through
+    # without a signature change).
+    env = train.make_puffer_env(seed=0, pbrs_gamma=0.5)
+    try:
+        assert float(env._c_env.sd.contents.pbrs_gamma) == pytest.approx(0.5)
+    finally:
+        env.close()
+
+
 def test_entropy_target_config_threading():
     """Finding 4 residual (2026-07-06 adversarial review): the entropy-target
     schedule fracs were hardcoded (0.7→0.5·max held after 10M steps) — high

@@ -367,7 +367,11 @@ class Cs2Env(pufferlib.PufferEnv):
             pbrs_bomb_progress_weight=0.3,
             pbrs_nav_weight_t=0.04,
             pbrs_nav_weight_ct=0.15,
-            pbrs_gamma=0.99,
+                                                                                # MUST equal the training discount (build_train_config "gamma") —  # noqa: E501
+                                                                                # PBRS F(s,s') = γ_pbrs·φ(s') − φ(s) is policy-invariant only when  # noqa: E501
+                                                                                # γ_pbrs == γ (finding 2, 2026-07-06 review; was 0.99 vs 0.999).  # noqa: E501
+                                                                                # Drift-guarded by test_pbrs_gamma_matches_training_gamma.  # noqa: E501
+            pbrs_gamma=0.999,
                                                                                 # Batch 1 (RL overhaul): per-outcome win magnitudes.  # noqa: E501
                                                                                 # These supersede the symmetric reward_win at round end.  # noqa: E501
                                                                                 # Defaults chosen to make detonation/defuse > timeout > elimination.  # noqa: E501
@@ -891,9 +895,9 @@ def make_env(
         pbrs_bomb_progress_weight=0.3,
         pbrs_nav_weight_t=0.04,
         pbrs_nav_weight_ct=0.15,
-        pbrs_gamma=0.99,
+        pbrs_gamma=0.999,                                              # must equal training gamma — see Cs2Env.__init__ note
                                                                        # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).  # noqa: E501
-        reward_win_t_detonation=5.0,
+    reward_win_t_detonation=5.0,
         reward_win_t_elimination=3.0,
         reward_win_ct_defuse=5.0,
         reward_win_ct_timeout=4.0,
