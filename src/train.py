@@ -1645,8 +1645,13 @@ def compute_game_metrics(logs):
 class DeadRunDetector:
     """Checks training metrics every check_interval steps for degenerate runs.
 
-    Raises RuntimeError on NaN/Inf; accumulates soft warnings and prints
-    a DEAD RUN banner when five or more accumulate.
+    Raises RuntimeError on NaN/Inf; accumulates soft warnings and prints a
+    DEAD RUN banner when five or more accumulate, returning True. F14
+    (2026-07-06 adversarial review): the train() loop now ACTS on that True —
+    autopsy checkpoint + SystemExit(3) — unless --no-dead-run-abort is set.
+    Callers embedding this class elsewhere must handle the return themselves;
+    a discarded return silently reduces it to a log line (the failure mode
+    that let the 30M degenerate run burn ~150 post-verdict epochs).
     """
 
     def __init__(self, check_interval=10_000):
@@ -2879,7 +2884,25 @@ def train(args):
         if isinstance(logs, dict):
             game_metrics = compute_game_metrics(logs)
             logs.update(game_metrics)
-            dead_run_detector.check(trainer.global_step, logs)
+            # F14 (2026-07-06 adversarial review): the detector's return was
+            # previously discarded — the 30M degenerate run printed its banner
+            # and kept burning compute for another ~150 epochs. Now: save an
+            # autopsy checkpoint and abort with a NONZERO exit code so shell
+            # wrappers / experiment runners see the failure. Opt out with
+            # --no-dead-run-abort (e.g. when deliberately probing degenerate
+            # regimes). NaN/Inf still raises inside check() as before.
+            if (dead_run_detector.check(trainer.global_step, logs)
+                    and getattr(args, "dead_run_abort", True)):
+                autopsy_path = Path(args.checkpoint_dir) / "dust2_policy_dead.pt"
+                autopsy_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(policy.state_dict(), autopsy_path)
+                _metrics_file.flush()
+                print(f"[Train] DEAD RUN — aborting at step {trainer.global_step:,}. "
+                      f"Autopsy checkpoint: {autopsy_path}")
+                if wandb_run is not None:
+                    wandb_run.finish(exit_code=3)
+                trainer.close()
+                raise SystemExit(3)
 
             # Network health monitoring every 5 epochs (too expensive every epoch)
             if trainer.epoch % 5 == 0:
@@ -3025,6 +3048,15 @@ if __name__ == "__main__":
         action="store_false",
         dest="self_play",
         help="Disable self-play (both teams always use current policy)",
+    )
+    parser.add_argument(
+        "--no-dead-run-abort",
+        action="store_false",
+        dest="dead_run_abort",
+        help=("F14: by default a DEAD RUN verdict (5+ accumulated degeneracy alerts) "
+              "saves an autopsy checkpoint and exits with code 3. Pass this to only "
+              "print the banner and keep training (e.g. when deliberately studying "
+              "degenerate regimes)."),
     )
     args = parser.parse_args()
 

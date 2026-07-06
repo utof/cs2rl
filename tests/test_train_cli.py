@@ -28,6 +28,7 @@ def test_train_help_shows_current_cli():
             "--vec-backend",
             "--record-policy",
             "--eval-policy",
+            "--no-dead-run-abort",     # F14: dead-run abort opt-out must stay exposed
     ):
         assert flag in result.stdout, f"{flag} missing from --help output"
 
