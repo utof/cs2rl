@@ -120,7 +120,22 @@ def _build_trainer_for_test(
     # depending on any pre-generated mapdata file on disk.
     map_data = make_simple_map()
 
-    def env_factory(*_args, buf=None, seed=None, **_kwargs):
+    # ── F8: action-mask shm, same env→trainer pattern as production ─────────
+    # Serial backend runs envs in-process, but the RawArray pattern is kept
+    # identical to train.train() so harness-built trainers exercise the REAL
+    # masked rollout path (sampler + rollout buffer + PPO-loss mask).
+    from multiprocessing import RawArray
+
+    import numpy as np
+
+    from _action_spec import ACTION_MASK_DIM
+
+    _agents_per_env = 10
+    mask_shm = RawArray("b", num_envs * _agents_per_env * ACTION_MASK_DIM)
+    mask_view_main = np.frombuffer(mask_shm, dtype=np.int8).reshape(num_envs * _agents_per_env,
+                                                                    ACTION_MASK_DIM)
+
+    def env_factory(*_args, buf=None, seed=None, _mask_idx=None, **_kwargs):
         # Mirrors the closure in train.train() lines ~1367-1368. The seed
         # forwarded by pufferlib.vector can be None for the first reset; use
         # explicit `is None` check so a legitimate seed=0 is preserved rather
@@ -130,19 +145,29 @@ def _build_trainer_for_test(
         # has a uniform attribute/info surface across selfplay and no-selfplay
         # modes (Task 6c consumes it; Tasks 7-11 ignore it). Cost is a single
         # pre-built singleton dict per env; no per-tick allocation.
-        return make_puffer_env(
+        env = make_puffer_env(
             team_spirit=shared_ts,
             buf=buf,
             seed=0 if seed is None else seed,
             map_data=map_data,
             include_step_stats_in_info=True,
         )
+        if _mask_idx is not None:
+            env._attach_mask_view(mask_shm, _mask_idx)
+        return env
 
     # ── Vec env (Serial: no worker processes) ───────────────────────────────
     # Serial makes teardown synchronous and deterministic — critical for
     # pytest where a lingering process would block the whole session.
+    # Factory-list form (not single callable) for the same reason as
+    # production: per-env kwargs survive only when env_creators is a list
+    # (pufferlib vector.py broadcast quirk).
     vecenv = pufferlib.vector.make(
-        env_factory,
+        [env_factory] * num_envs,
+        env_args=[[] for _ in range(num_envs)],
+        env_kwargs=[{
+            "_mask_idx": i
+        } for i in range(num_envs)],
         num_envs=num_envs,
         backend=pufferlib.vector.Serial,
     )
@@ -175,7 +200,10 @@ def _build_trainer_for_test(
     # is intentionally NOT applied here — harness tests that need it apply
     # it explicitly (matches the pre-Batch-3 contract documented at module
     # docstring "return-norm & timing patches: skipped").
-    _patch_trainer_with_hybrid_aim(trainer)
+    # F8: mask_view_main plumbed so harness rollouts run MASKED, same as
+    # production. Pin the RawArray on the trainer against GC (prod pattern).
+    trainer._action_mask_shm = mask_shm
+    _patch_trainer_with_hybrid_aim(trainer, mask_view_main=mask_view_main)
 
     # ── Self-play patch (always applied at T5) ──────────────────────────────
     # Pre-Batch-3: this was gated on `with_selfplay` so the no-selfplay path

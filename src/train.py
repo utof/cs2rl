@@ -30,6 +30,7 @@ import numpy as np
 from _action_spec import (
     ACTION_HEAD_NAMES,
     ACTION_HEAD_SIZES,
+    ACTION_MASK_DIM,                   # F8: trainer-side mask buffer width (= sum of head sizes)
     AIM_DIM,                           # noqa: F401  T4→T5 carry-forward (M-1): T6 ONNX exporter consumes this
 )                                      # from cs2_types.h
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
@@ -56,6 +57,44 @@ LOG_STD_MAX = math.log(0.5)
 # Fix #2: precomputed log(2π) for the analytic Normal log-prob/entropy
 # replacing torch.distributions.Normal in _hybrid_sample_logits.
 _LOG_2PI = math.log(2.0 * math.pi)
+
+# F8 (2026-07-06 adversarial review): per-head [start, end) column ranges of
+# the flat (ACTION_MASK_DIM,) action-mask row, derived from ACTION_HEAD_SIZES
+# exactly like the C side derives moff[] in compute_masks (cs2_env.h). Layout
+# at time of writing: move 0-8, shoot 9-10, reload 11-12, weapon 13-15,
+# use 16-17, crouch 18-19, jump 20-21.
+_MASK_HEAD_SLICES = []
+_off = 0
+for _sz in ACTION_HEAD_SIZES:
+    _MASK_HEAD_SLICES.append((_off, _off + _sz))
+    _off += _sz
+del _off, _sz
+
+
+def _apply_action_masks(logits_list, mask):
+    """Mask invalid action bins out of the per-head logits (F8).
+
+    mask : (B, ACTION_MASK_DIM) bool/int8 tensor, 1 = valid — the C-computed
+    masks from cs2_env.h compute_masks, sliced per head via _MASK_HEAD_SLICES.
+    Invalid bins are filled with finfo.min/2, NOT -inf: after log_softmax the
+    masked log-prob stays FINITE (≈ dtype-min/2, since any real logit is
+    negligible against it), so entropy terms are exactly p·logp = 0·finite = 0
+    instead of 0·(-inf) = NaN. exp(min/2 - lse) underflows to exactly 0, so
+    multinomial can never draw a masked bin. The C side guarantees ≥1 valid
+    bin per head per agent (dead agents get per-head no-ops), so the masked
+    softmax is always well-defined — do NOT relax that invariant in C without
+    revisiting this function.
+
+    Returns a NEW list; input logits are not mutated (callers may hold them).
+    """
+    import torch
+
+    masked = []
+    for (lo, hi), lg in zip(_MASK_HEAD_SLICES, logits_list, strict=True):
+        head_valid = mask[..., lo:hi] != 0
+        fill = torch.finfo(lg.dtype).min / 2
+        masked.append(lg.masked_fill(~head_valid, fill))
+    return masked
 
 
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
@@ -1287,6 +1326,11 @@ def _patch_trainer_with_return_norm(trainer):
             mb_cont_actions = self.cont_actions[idx]
             mb_old_logp_d = self.logprobs_d[idx]
             mb_old_logp_c = self.logprobs_c[idx]
+            # F8: rollout-stored action masks (all-ones = unmasked fallback).
+            # getattr for trainers built before _patch_trainer_with_hybrid_aim
+            # ran (shouldn't happen in prod; keeps direct-call tests working).
+            _masks_buf = getattr(self, "action_masks", None)
+            mb_masks = _masks_buf[idx] if _masks_buf is not None else None
 
             # ── VALUE TARGET NORMALISATION ─────────────────────────────────
             # Normalize returns before value regression.  The value head learns
@@ -1330,6 +1374,7 @@ def _patch_trainer_with_return_norm(trainer):
                 clip_coef,
                 state,
                 mb_prio=mb_prio,
+                mb_masks=mb_masks,
             )
             with torch.no_grad():
                 # Logits-only path for the per-head entropy diagnostic block
@@ -1860,6 +1905,17 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
             r = torch.as_tensor(r).to(dev)
             d = torch.as_tensor(d).to(dev)
 
+            # F8: pull the C-computed action masks for exactly this batch of
+            # agent rows. env_id indexes agent rows, matching the shm layout
+            # (num_envs*N_AGENTS, ACTION_MASK_DIM). `!= 0` both converts to
+            # bool AND copies — the shm bytes get overwritten by the next
+            # worker step, so we must not keep a view. None ⇒ unmasked
+            # (legacy trainer built without the mask shm).
+            mask_view = getattr(self, "_action_mask_view_main", None)
+            action_mask = None
+            if mask_view is not None:
+                action_mask = torch.as_tensor(mask_view[env_id]).to(dev) != 0
+
             profile("eval_forward", epoch)
             with torch.no_grad(), self.amp_context:
                 state = dict(reward=r, done=d, env_id=env_id, mask=mask)
@@ -1877,6 +1933,7 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 action, cont_action, logprob_d, logprob_c, _, _ = _hybrid_sample_logits(
                     (logits, mu_aim, log_std_aim, value),
                     max_turn_speed=self.policy.max_turn_speed.item(),
+                    mask=action_mask,
                 )
                 # Joint log-prob for self.logprobs (back-compat slot read by
                 # PufferLib's diagnostics + the KL/clipfrac path). Per-factor
@@ -1979,6 +2036,7 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                      _) = _hybrid_sample_logits(
                          (opp_logits, opp_mu, opp_log_std, None),
                          max_turn_speed=past_policy.max_turn_speed.item(),
+                         mask=action_mask[opp_mask] if action_mask is not None else None,
                      )
                     opp_logprob = opp_logprob_d + opp_logprob_c
 
@@ -2027,6 +2085,12 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 self.cont_actions[batch_rows, seq_pos] = cont_action
                 self.logprobs_d[batch_rows, seq_pos] = logprob_d
                 self.logprobs_c[batch_rows, seq_pos] = logprob_c
+                # F8: persist the masks the sampler just used so the PPO
+                # update (mb_masks in _hybrid_ppo_loss) recomputes logprobs
+                # over the identical masked distribution. Skipped when
+                # unmasked — the buffer's all-ones default is the no-op mask.
+                if action_mask is not None:
+                    self.action_masks[batch_rows, seq_pos] = action_mask
                 self.rewards[batch_rows, seq_pos] = r
                 self.terminals[batch_rows, seq_pos] = d.float()
                 self.values[batch_rows, seq_pos] = value.flatten()
@@ -2129,7 +2193,11 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 #                            cont buffer that this patcher allocates.
 
 
-def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_turn_speed=None):
+def _hybrid_sample_logits(policy_out,
+                          action=None,
+                          continuous_action=None,
+                          max_turn_speed=None,
+                          mask=None):
     """Hybrid sampler for the 4-tuple HybridPolicy output (Batch 3 task 5).
 
     Replaces the four in-tree usages of
@@ -2154,6 +2222,13 @@ def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_t
     max_turn_speed : float or None
         Hard clamp on sampled Δyaw. None means no clamp (only sane in the
         update-pass path where continuous_action is provided pre-clamped).
+    mask : (B, ACTION_MASK_DIM) bool/int8 tensor, or None (F8)
+        C-computed action masks (1 = valid; see cs2_env.h compute_masks).
+        When given, invalid bins are excluded from sampling AND from the
+        log-prob/entropy — the distribution IS the masked distribution, so
+        the stored logprobs stay consistent with _hybrid_ppo_loss as long as
+        the update pass receives the SAME mask (mb_masks). None = unmasked
+        (legacy eval/record callers that have no mask plumbing).
 
     Returns
     -------
@@ -2186,6 +2261,12 @@ def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_t
     import torch.nn.functional as F
 
     logits_list, mu_aim, log_std_aim, _value = policy_out
+
+    # F8: mask BEFORE log_softmax so sampling, log-prob and entropy all see
+    # the same (masked) distribution. Dead agents collapse to deterministic
+    # per-head no-ops (entropy 0) instead of burning exploration samples.
+    if mask is not None:
+        logits_list = _apply_action_masks(logits_list, mask)
 
     # ── Discrete: 7 independent categorical heads — hand-rolled (Fix #2) ──
     # We avoid `torch.distributions.Categorical` because constructing 7 of them
@@ -2247,7 +2328,8 @@ def _hybrid_ppo_loss(policy,
                      mb_advantages,
                      clip_coef,
                      state,
-                     mb_prio=None):
+                     mb_prio=None,
+                     mb_masks=None):
     """Per-factor PPO clipped loss (H-PPO, Fan et al. IJCAI 2019).
 
     THE CORE OF T5. Re-runs the policy on mb_obs with the stored
@@ -2276,6 +2358,13 @@ def _hybrid_ppo_loss(policy,
     ones (state["lstm_h"]/["lstm_c"]=None means zero init, which is exact;
     see Dust2Policy.forward). Test-path callers passing flat 2D tensors may
     omit terminals: T=1 has no through-time state to reset.
+
+    mb_masks (F8): the rollout-stored action masks for this minibatch,
+    (segments, bptt_horizon, ACTION_MASK_DIM) bool (or flat (B, MASK_DIM) on
+    the test path). MUST be the same masks the rollout sampler used —
+    masking here but not there (or vice versa) silently skews the PPO
+    ratios for any agent-step where a mask bit was 0. None = unmasked
+    (pre-F8 callers / BC paths).
     """
     import torch
     import torch.nn.functional as F
@@ -2329,6 +2418,12 @@ def _hybrid_ppo_loss(policy,
     # times per epoch → ~345 ms/epoch saved on heavy-update epochs. Same
     # numerical contract as before: |Δ| ≤ ~2e-6 vs torch.distributions
     # reference (different softmax reduction order; well within fp32 noise).
+    # F8: apply the rollout's action masks to the fresh logits so new_logp /
+    # entropy are computed over the SAME masked distribution the sampler drew
+    # from — otherwise ratios drift wherever a mask bit was 0.
+    if mb_masks is not None:
+        flat_masks = mb_masks.reshape(-1, mb_masks.shape[-1])
+        logits_list = _apply_action_masks(logits_list, flat_masks)
     log_probs_per_head = [F.log_softmax(lg, dim=-1) for lg in logits_list]
     new_logp_d = sum(
         lp.gather(-1, flat_actions[..., i:i + 1]).squeeze(-1)
@@ -2360,7 +2455,7 @@ def _hybrid_ppo_loss(policy,
     return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c
 
 
-def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None):
+def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_view_main=None):
     """Extend trainer with continuous-action rollout storage + vecenv plumbing.
 
     Apply AFTER _patch_trainer_with_return_norm (so train() is wrapped) and
@@ -2398,6 +2493,13 @@ def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None):
     # it via attribute access. Storing on trainer (not closure-captured
     # local) keeps it visible to instrumentation/inspection.
     trainer._cont_action_view_main = cont_action_view_main
+    # F8: main-process numpy view over the mask shm (env→trainer direction;
+    # see Cs2Env._attach_mask_view). _evaluate_with_selfplay reads rows for
+    # the recv'd env_id slice right after recv() — the workers finished their
+    # step by then, so the bytes are the masks for the obs batch in hand.
+    # None ⇒ rollout runs unmasked (legacy callers without shm plumbing) and
+    # action_masks stays all-ones, which makes the update path a no-op mask.
+    trainer._action_mask_view_main = mask_view_main
 
     # ── Rollout buffer extension (step 5.4) ──
     # self.actions has shape (segments, bptt_horizon, ACTION_DIM=7) int32 —
@@ -2412,6 +2514,16 @@ def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None):
     )
     trainer.logprobs_d = torch.zeros_like(trainer.logprobs)
     trainer.logprobs_c = torch.zeros_like(trainer.logprobs)
+    # F8: per-step action masks, parallel to actions but ACTION_MASK_DIM wide.
+    # Initialised to ONES (= everything valid): rows never written (mask shm
+    # absent, or rollout rounds that don't fill every segment) degrade to the
+    # exact pre-F8 unmasked behaviour instead of masking everything to the
+    # no-op. bool keeps the buffer small (segments × 64 × 22 bytes).
+    trainer.action_masks = torch.ones(
+        (*trainer.actions.shape[:-1], ACTION_MASK_DIM),
+        dtype=torch.bool,
+        device=trainer.actions.device,
+    )
 
     # ── vecenv.send patch (step 5.5) ──
     # Goal: forward both the int discrete buffer and the float cont buffer
@@ -2594,24 +2706,45 @@ def train(args):
     _cont_action_view_main = np.frombuffer(_cont_action_shm, dtype=np.float32).reshape(
         args.num_envs * _agents_per_env, AIM_DIM)
 
-    def env_factory(*_args, buf=None, seed=None, _cont_shm=None, _cont_idx=None, **kwargs):
+    # ── F8: action-mask shared memory, the REVERSE direction (env→trainer) ──
+    # Same fork-inheritance pattern as the cont-action RawArray above, but the
+    # envs write (Cs2Env copies its C-computed masks into its slice at the end
+    # of every step/reset) and the trainer reads right after vecenv.recv().
+    # recv() is the synchronisation point: the worker finished its step before
+    # the batch is handed over, so the bytes always match the obs in hand.
+    _mask_shm = RawArray("b", args.num_envs * _agents_per_env * ACTION_MASK_DIM)
+    _mask_view_main = np.frombuffer(_mask_shm,
+                                    dtype=np.int8).reshape(args.num_envs * _agents_per_env,
+                                                           ACTION_MASK_DIM)
+
+    def env_factory(*_args,
+                    buf=None,
+                    seed=None,
+                    _cont_shm=None,
+                    _cont_idx=None,
+                    _mask_shm=None,
+                    **kwargs):
         env = make_puffer_env(team_spirit=shared_ts, buf=buf, seed=seed or 0, map_data=_map_data)
-        # Attach the shared-memory view so the env (whether running in the
+        # Attach the shared-memory views so the env (whether running in the
         # main process under Serial, or a forked worker under
-        # Multiprocessing) can pull cont_actions written by the trainer.
-        # _cont_idx may be None when env_factory is called outside the
-        # train() codepath (eg. legacy callers); attach is a no-op then.
+        # Multiprocessing) can pull cont_actions written by the trainer and
+        # publish action masks back to it (F8). _cont_idx may be None when
+        # env_factory is called outside the train() codepath (eg. legacy
+        # callers); both attaches are no-ops then.
         if _cont_shm is not None and _cont_idx is not None:
             env._attach_cont_action_view(_cont_shm, _cont_idx)
+        if _mask_shm is not None and _cont_idx is not None:
+            env._attach_mask_view(_mask_shm, _cont_idx)
         return env
 
     # Per-env kwargs list — pufferlib.vector.make accepts a list of dicts
-    # (one per env). Both args propagate verbatim through fork because
+    # (one per env). All args propagate verbatim through fork because
     # they're stored on env_kwargs[i] BEFORE Process.start() (see
     # .venv/lib/.../pufferlib/vector.py:333-346).
     _per_env_kwargs = [{
         "_cont_shm": _cont_action_shm,
         "_cont_idx": i,
+        "_mask_shm": _mask_shm,
     } for i in range(args.num_envs)]
 
     backend_name = args.vec_backend.lower()
@@ -2695,7 +2828,10 @@ def train(args):
     # this function returns (Python doesn't know workers/numpy views are
     # using it via the OS-level mapping).
     trainer._cont_action_shm = _cont_action_shm
-    _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=_cont_action_view_main)
+    trainer._action_mask_shm = _mask_shm                                         # F8: same GC-pinning rationale
+    _patch_trainer_with_hybrid_aim(trainer,
+                                   cont_action_view_main=_cont_action_view_main,
+                                   mask_view_main=_mask_view_main)
 
     # ── Self-play setup ──────────────────────────────────────────────────────
     self_play_mgr = None

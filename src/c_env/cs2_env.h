@@ -32,6 +32,78 @@ static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_sp
     clear_stats(&env->episode_stats);
 }
 
+/* compute_masks: refresh env->masks (N_AGENTS × ACTION_MASK_DIM int8, 1=valid)
+ * from the CURRENT game state. Called at the tail of env_step (masks describe
+ * the NEXT step's valid actions) and at the end of env_reset — without the
+ * reset call the buffer would hold stale terminal-round masks (or all-zeros
+ * on the very first reset), which matters now that the trainer actually
+ * consumes masks (F8, 2026-07-06 adversarial review).
+ *
+ * Invariant the Python sampler relies on: EVERY head of EVERY agent keeps at
+ * least one valid bin. For dead agents that is bin 0 (the no-op) of each head
+ * — NOT just flat index 0 — because _hybrid_sample_logits masked-softmaxes
+ * each head independently; an all-invalid head would be a NaN softmax.
+ * Alive agents satisfy the invariant structurally (only non-zero bins are
+ * ever gated below). */
+static void compute_masks(Dust2Env* env) {
+    StaticData* sd = env->sd;
+    GameState*  g  = &env->game;
+
+    /* Compute mask offsets from ACTION_HEAD_SIZES (derived, not hardcoded) */
+    int moff[ACTION_DIM];
+    moff[0] = 0;
+    for (int h = 1; h < ACTION_DIM; h++)
+        moff[h] = moff[h - 1] + ACTION_HEAD_SIZES[h - 1];
+
+    memset(env->masks, 1, sizeof(env->masks)); /* default: all valid */
+    for (int i = 0; i < N_AGENTS; i++) {
+        int8_t*     m = &env->masks[i * ACTION_MASK_DIM];
+        AgentState* a = &g->agents[i];
+        if (!a->alive) {
+            memset(m, 0, ACTION_MASK_DIM); /* dead: only per-head no-ops valid */
+            for (int h = 0; h < ACTION_DIM; h++)
+                m[moff[h]] = 1;
+            continue;
+        }
+        /* Jump mask: no jump while airborne, on cooldown, or crouching */
+        if (a->is_airborne || a->jump_cd > 0 || a->is_crouching)
+            m[moff[HEAD_JUMP] + 1] = 0;
+        int              slot = a->weapon_slot;
+        const WeaponDef* def  = &WEAPON_DEFS[slot];
+        /* Shoot mask: gate on cooldown, reload, switch, and ammo.
+         * Knife (mag_size < 0) is always shootable. */
+        int has_ammo = (def->mag_size < 0) || (a->ammo_clip[slot] > 0);
+        int can_shoot =
+            (a->fire_cd == 0 && a->reload_ticks == 0 && a->switch_ticks == 0 && has_ammo);
+        m[moff[HEAD_SHOOT] + 1] = (int8_t)can_shoot;
+        /* Reload mask */
+        int can_reload =
+            (def->mag_size > 0 && a->ammo_clip[slot] < def->mag_size && a->ammo_reserve[slot] > 0 &&
+             a->reload_ticks == 0 && a->switch_ticks == 0);
+        m[moff[HEAD_RELOAD] + 1] = (int8_t)can_reload;
+        /* Weapon switch mask: mask already-held weapon option */
+        if (slot == 0)
+            m[moff[HEAD_WEAPON] + 1] = 0;
+        if (slot == 1)
+            m[moff[HEAD_WEAPON] + 2] = 0;
+        if (a->switch_ticks > 0) {
+            m[moff[HEAD_WEAPON] + 1] = 0;
+            m[moff[HEAD_WEAPON] + 2] = 0;
+        }
+        /* Use mask: T needs bomb+bombsite; CT needs planted bomb nearby */
+        if (a->team == 0 && a->has_bomb && !g->bomb_planted) {
+            int at_site = (a->area_idx >= 0) ? sd->bombsite_by_idx[a->area_idx] : 0;
+            if (!at_site)
+                m[moff[HEAD_USE] + 1] = 0;
+        } else if (a->team == 1 && g->bomb_planted) {
+            if (a->area_idx != g->bomb_area_idx)
+                m[moff[HEAD_USE] + 1] = 0;
+        } else {
+            m[moff[HEAD_USE] + 1] = 0;
+        }
+    }
+}
+
 static void env_reset(Dust2Env* env) {
     StaticData* sd = env->sd;
     GameState*  g  = &env->game;
@@ -58,6 +130,12 @@ static void env_reset(Dust2Env* env) {
     /* Batch 2: round-fixed copy. NEVER reassigned mid-round (see cs2_types.h
      * field comment). compute_observations reads this for obs[106] (T4 shift). */
     g->round_designated_carrier_id = bomb_carrier;
+
+    /* F8: masks must describe the fresh spawn state, not the previous round's
+     * terminal state (or all-zeros on first reset). Observations stay zeroed
+     * at reset (pre-existing contract); masks can't, because the sampler
+     * would divide by an all-invalid head. */
+    compute_masks(env);
 }
 
 /* Batch 3 / Batch 3.5: env_step now consumes TWO action buffers — separate, non-bit-cast.
@@ -278,61 +356,8 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
                     bomb_just_defused,
                     bomb_defuser_id);
 
-    /* Compute mask offsets from ACTION_HEAD_SIZES (derived, not hardcoded) */
-    int moff[ACTION_DIM];
-    moff[0] = 0;
-    for (int h = 1; h < ACTION_DIM; h++)
-        moff[h] = moff[h - 1] + ACTION_HEAD_SIZES[h - 1];
-
-    /* Compute action masks for next step */
-    memset(env->masks, 1, sizeof(env->masks)); /* default: all valid */
-    for (int i = 0; i < N_AGENTS; i++) {
-        int8_t*     m = &env->masks[i * ACTION_MASK_DIM];
-        AgentState* a = &g->agents[i];
-        if (!a->alive) {
-            memset(m, 0, ACTION_MASK_DIM); /* dead: nothing valid */
-            m[0] = 1;                      /* stop is always valid */
-            continue;
-        }
-        /* Jump mask: no jump while airborne, on cooldown, or crouching */
-        if (a->is_airborne || a->jump_cd > 0 || a->is_crouching)
-            m[moff[HEAD_JUMP] + 1] = 0;
-        int              slot = a->weapon_slot;
-        const WeaponDef* def  = &WEAPON_DEFS[slot];
-        /* Shoot mask: gate on cooldown, reload, switch, and ammo.
-         * Knife (mag_size < 0) is always shootable. */
-        int has_ammo = (def->mag_size < 0) || (a->ammo_clip[slot] > 0);
-        int can_shoot =
-            (a->fire_cd == 0 && a->reload_ticks == 0 && a->switch_ticks == 0 && has_ammo);
-        m[moff[HEAD_SHOOT] + 1] = (int8_t)can_shoot;
-        /* Reload mask */
-        int can_reload =
-            (def->mag_size > 0 && a->ammo_clip[slot] < def->mag_size && a->ammo_reserve[slot] > 0 &&
-             a->reload_ticks == 0 && a->switch_ticks == 0);
-        m[moff[HEAD_RELOAD] + 1] = (int8_t)can_reload;
-        /* Weapon switch mask: mask already-held weapon option */
-        if (slot == 0)
-            m[moff[HEAD_WEAPON] + 1] = 0;
-        if (slot == 1)
-            m[moff[HEAD_WEAPON] + 2] = 0;
-        if (a->switch_ticks > 0) {
-            m[moff[HEAD_WEAPON] + 1] = 0;
-            m[moff[HEAD_WEAPON] + 2] = 0;
-        }
-        /* Use mask: T needs bomb+bombsite; CT needs planted bomb nearby */
-        if (a->team == 0 && a->has_bomb && !g->bomb_planted) {
-            int at_site = (a->area_idx >= 0) ? sd->bombsite_by_idx[a->area_idx] : 0;
-            if (!at_site)
-                m[moff[HEAD_USE] + 1] = 0;
-        } else if (a->team == 1 && g->bomb_planted) {
-            if (a->area_idx != g->bomb_area_idx)
-                m[moff[HEAD_USE] + 1] = 0;
-        } else {
-            m[moff[HEAD_USE] + 1] = 0;
-        }
-    }
+    compute_masks(env);
 }
-
 static void env_close(Dust2Env* env) {
     (void)env;
 }

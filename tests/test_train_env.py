@@ -850,8 +850,16 @@ def test_post_pickup_plant_mask_unmasked():
         # test terminates even if every bombsite area somehow fails to unmask.
         sd = env._c_env.sd.contents
         # Offset into the flat mask row for HEAD_USE action slot 1 (plant).
-        # ACTION_HEAD_SIZES[:5] = (move, aim, shoot, reload, weapon).
-        use_mask_offset = sum(train.ACTION_HEAD_SIZES[:5])
+        # ACTION_HEAD_SIZES = (move, shoot, reload, weapon, use, crouch, jump)
+        # → USE head starts at sum of the first FOUR sizes (9+2+2+3 = 16).
+        # N1 (2026-07-06 verification): this used to be [:5] = 18, which put
+        # the assertion on crouch-press (index 19) — always 1 for alive
+        # agents, so the test was vacuously green. Derive the offset from the
+        # head-name index instead of a hardcoded count so a future head
+        # reorder can't silently re-vacuous it.
+        use_head_idx = train.ACTION_HEAD_NAMES.index("use")
+        use_mask_offset = sum(train.ACTION_HEAD_SIZES[:use_head_idx])
+        assert use_mask_offset == 16, "USE head offset drifted; check ACTION_HEAD_SIZES order"
         masks_open = False
         steps_taken = 0
         for ai in range(sd.N):
@@ -1700,6 +1708,11 @@ def test_train_path_logprobs_match_rollout():
                 torch.zeros_like(trainer.logprobs),
                 0.15,
                 state,
+                                                                                                   # F8: the harness rollout samples MASKED; re-evaluating the
+                                                                                                   # buffer must use the same stored masks or the logprobs
+                                                                                                   # diverge by construction (that divergence is itself pinned
+                                                                                                   # by test_sampler_and_loss_mask_consistency's control case).
+                mb_masks=trainer.action_masks,
             )
         newlogprob = newlogprob.reshape(trainer.logprobs.shape)
         newvalue = newvalue.reshape(trainer.values.shape)
@@ -1710,3 +1723,182 @@ def test_train_path_logprobs_match_rollout():
         assert v_diff < 1e-3, (f"training-path values diverge from rollout by {v_diff:.4f}")
     finally:
         cleanup()
+
+
+# ── F8 (2026-07-06 adversarial review): action-mask consumption ──────────────
+# The C env computed per-agent action masks every tick since Batch 2, but no
+# trainer-path code ever consumed them. F8 threads them through:
+#   compute_masks (C, also at reset)  →  Cs2Env._attach_mask_view shm slice
+#   →  trainer._action_mask_view_main  →  _hybrid_sample_logits(mask=...)
+#   →  trainer.action_masks rollout buffer  →  _hybrid_ppo_loss(mb_masks=...)
+# The tests below pin each contract. The former USE-mask test above was
+# vacuous (N1: asserted the crouch slot); its offset is now derived + pinned.
+
+
+def test_hybrid_sample_logits_respects_masks():
+    """Masked bins must never be sampled, their probability mass must be 0 in
+    log_prob, and a fully-no-op'd (dead-agent-style) row must have discrete
+    entropy exactly 0. Reference distribution: torch Categorical on -inf
+    masked logits (the sampler uses finfo.min/2 instead of -inf to keep
+    entropy NaN-free — same distribution, different fill)."""
+    import torch
+
+    from train import _MASK_HEAD_SLICES, _hybrid_sample_logits
+
+    torch.manual_seed(7)
+    B = 64
+    head_sizes = train.ACTION_HEAD_SIZES
+    mask_dim = sum(head_sizes)
+    logits_list = [torch.randn(B, n) for n in head_sizes]
+    mu_aim = torch.zeros(B, 2)
+    log_std_aim = torch.full((2, ), -2.30)
+
+    # Row 0: dead-agent pattern — only bin 0 of each head valid.
+    # Other rows: random masks with bin 0 always valid (C invariant).
+    mask = (torch.rand(B, mask_dim) > 0.4)
+    for (lo, _hi) in _MASK_HEAD_SLICES:
+        mask[:, lo] = True
+    mask[0] = False
+    for (lo, _hi) in _MASK_HEAD_SLICES:
+        mask[0, lo] = True
+
+    for trial in range(20):
+        action, _cont, lp_d, _lp_c, ent_d, _ent_c = _hybrid_sample_logits(
+            (logits_list, mu_aim, log_std_aim, None),
+            max_turn_speed=0.7853981633974483,
+            mask=mask,
+        )
+        for h, (lo, _hi) in enumerate(_MASK_HEAD_SLICES):
+            picked_valid = mask[torch.arange(B), lo + action[:, h]]
+            assert picked_valid.all(), (f"trial {trial}: head {h} sampled a masked bin at rows "
+                                        f"{(~picked_valid).nonzero().flatten().tolist()}")
+        # Dead-style row: exactly one valid bin per head ⇒ H = 0, action = no-ops.
+        assert (action[0] == 0).all(), f"dead-style row sampled non-no-op: {action[0]}"
+        assert abs(ent_d[0].item()) < 1e-5, f"dead-style row entropy_d={ent_d[0].item()}"
+        assert torch.isfinite(lp_d).all() and torch.isfinite(ent_d).all()
+
+    # log_prob reference vs torch.distributions on -inf-masked logits.
+    fixed_action = action
+    _a, _c, lp_d_eval, _lpc, _ed, _ec = _hybrid_sample_logits(
+        (logits_list, mu_aim, log_std_aim, None),
+        action=fixed_action,
+        continuous_action=_cont,
+        mask=mask,
+    )
+    ref = 0.0
+    for h, (lo, hi) in enumerate(_MASK_HEAD_SLICES):
+        ref_logits = logits_list[h].masked_fill(~mask[:, lo:hi], float("-inf"))
+        ref = ref + torch.distributions.Categorical(logits=ref_logits).log_prob(fixed_action[:, h])
+    assert torch.allclose(lp_d_eval, ref,
+                          atol=1e-5), (f"masked log_prob_d drift vs reference: "
+                                       f"{(lp_d_eval - ref).abs().max().item():.2e}")
+
+
+def test_sampler_and_loss_mask_consistency():
+    """Rollout sampler and PPO-update loss must see the SAME masked
+    distribution: feeding the sampler's (action, logp) back into
+    _hybrid_ppo_loss with the same mb_masks must give ratio ≈ 1 exactly.
+    This is the invariant that breaks silently if masking is applied on one
+    side only (the failure mode the F8 docstrings warn about)."""
+    import torch
+
+    from train import _hybrid_ppo_loss, _hybrid_sample_logits
+
+    torch.manual_seed(11)
+    B = 32
+    head_sizes = train.ACTION_HEAD_SIZES
+    mask_dim = sum(head_sizes)
+    logits_list = [torch.randn(B, n) for n in head_sizes]
+    mu_aim = torch.randn(B, 2) * 0.1
+    log_std_aim = torch.full((2, ), -2.30)
+    value = torch.zeros(B, 1)
+
+    from train import _MASK_HEAD_SLICES
+    mask = (torch.rand(B, mask_dim) > 0.3)
+    for (lo, _hi) in _MASK_HEAD_SLICES:
+        mask[:, lo] = True
+
+    class _StubPolicy:
+
+        def __call__(self, mb_obs, state):
+            return logits_list, mu_aim, log_std_aim, value
+
+    action, cont, lp_d, lp_c, _, _ = _hybrid_sample_logits(
+        (logits_list, mu_aim, log_std_aim, value),
+        max_turn_speed=0.7853981633974483,
+        mask=mask,
+    )
+    pg_loss, entropy, _v, _lp_tot, ratio_d, ratio_c = _hybrid_ppo_loss(
+        _StubPolicy(),
+        torch.zeros(B, 4),                                                                 # obs unused by the stub
+        action,
+        cont,
+        lp_d,
+        lp_c,
+        torch.randn(B),
+        clip_coef=0.2,
+        state={},
+        mb_masks=mask,
+    )
+    assert torch.allclose(ratio_d, torch.ones(B),
+                          atol=1e-5), (f"ratio_d != 1 with identical mask on both sides: "
+                                       f"max dev {(ratio_d - 1).abs().max().item():.2e}")
+    assert torch.allclose(ratio_c, torch.ones(B), atol=1e-5)
+    assert torch.isfinite(pg_loss).all() and torch.isfinite(entropy).all()
+
+    # Control: DROP the mask on the loss side → ratios must deviate wherever
+    # a mask bit was 0 (proves the consistency requirement is load-bearing).
+    _pg2, _e2, _v2, _lpt2, ratio_d_unmasked, _rc2 = _hybrid_ppo_loss(
+        _StubPolicy(),
+        torch.zeros(B, 4),
+        action,
+        cont,
+        lp_d,
+        lp_c,
+        torch.randn(B),
+        clip_coef=0.2,
+        state={},
+        mb_masks=None,
+    )
+    assert not torch.allclose(ratio_d_unmasked, torch.ones(B), atol=1e-3), (
+        "unmasked loss over masked rollout produced ratio 1 — mask had no "
+        "distributional effect; test premises are broken")
+
+
+def test_env_publishes_masks_after_reset_and_step():
+    """Cs2Env._attach_mask_view + the step()/reset() copy-out: the shm slice
+    must mirror _masks_view after reset (fresh spawn masks — the pre-F8 code
+    had NO mask computation at reset at all) and after a step that kills an
+    agent (dead row = per-head no-ops, the C invariant the sampler needs)."""
+    from multiprocessing import RawArray
+
+    from _action_spec import ACTION_MASK_DIM
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        n_agents = 10
+        shm = RawArray("b", n_agents * ACTION_MASK_DIM)
+        env._attach_mask_view(shm, 0)
+        view = np.frombuffer(shm, dtype=np.int8).reshape(n_agents, ACTION_MASK_DIM)
+
+        env.reset()
+        assert (view == env._masks_view).all(), "shm != _masks_view after reset"
+        assert view.sum() > n_agents, (
+            "masks after reset look empty — env_reset no longer calls compute_masks?")
+        # All agents alive at spawn: move head fully valid.
+        assert view[:, :9].all(), "alive agents should have the full move head valid"
+
+        g = env._c_env.game
+        g.agents[0].hp = 0
+        g.agents[0].alive = 0
+        actions = np.zeros((n_agents, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        env.step(actions)
+        assert (view == env._masks_view).all(), "shm != _masks_view after step"
+        offs = np.cumsum((0, ) + tuple(train.ACTION_HEAD_SIZES))[:-1]
+        dead = view[0]
+        assert dead.sum() == len(train.ACTION_HEAD_SIZES), (
+            f"dead agent should have exactly one valid bin per head, got {dead.tolist()}")
+        assert all(dead[o] == 1
+                   for o in offs), (f"dead agent per-head no-ops not set: {dead.tolist()}")
+    finally:
+        env.close()

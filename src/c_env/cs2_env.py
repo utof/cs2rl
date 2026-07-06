@@ -598,6 +598,15 @@ class Cs2Env(pufferlib.PufferEnv):
         # caller passes it transiently (it is also kept alive on the trainer
         # side, but defensive double-anchoring is cheap).
         self._cont_action_shm_ref = None
+        # F8 (2026-07-06 adversarial review): outbound action-mask view.
+        # Reverse direction of the cont-action shm — the ENV writes, the
+        # TRAINER reads. When _attach_mask_view() installs a view onto a
+        # parent-process RawArray, step()/reset() copy the C-computed masks
+        # (self._masks_view) into it so the trainer can mask sampling for the
+        # obs it just received. None (default) = no copy, zero cost — legacy
+        # callers and tests that read env._masks_view directly are unaffected.
+        self._mask_out_view = None
+        self._mask_shm_ref = None
         self._terminal_rewards = np.empty(N_AGENTS, dtype=np.float32)
         self._terminal_terminals = np.empty(N_AGENTS, dtype=bool)
         self._terminal_truncations = np.empty(N_AGENTS, dtype=bool)
@@ -624,6 +633,10 @@ class Cs2Env(pufferlib.PufferEnv):
         self._sync_team_spirit()
         binding.reset(self._capsule)
         self._sync_outputs()
+        if self._mask_out_view is not None:
+            # F8: env_reset recomputes masks in C; publish them so the trainer
+            # masks the very first sample of the episode too.
+            np.copyto(self._mask_out_view, self._masks_view)
         return self.observations, self._empty_infos
 
     def step(self, actions, continuous_actions=None):
@@ -669,6 +682,12 @@ class Cs2Env(pufferlib.PufferEnv):
             # Task 6a: non-terminal tick — return the pre-built singleton info list
             # (no per-tick allocation; the StepStatsView proxies the live struct).
             infos = self._nonterminal_infos
+        if self._mask_out_view is not None:
+            # F8: publish the masks for the observation being returned. On the
+            # auto-reset branch binding.reset already recomputed masks for the
+            # fresh spawn state (env_reset calls compute_masks), so this copy
+            # is correct in both the mid-round and the round-rollover case.
+            np.copyto(self._mask_out_view, self._masks_view)
         return self.observations, rewards, terminals, truncations, infos
 
     def set_team_spirit(self, value: float):
@@ -758,6 +777,29 @@ class Cs2Env(pufferlib.PufferEnv):
         flat = np.frombuffer(raw_shm, dtype=np.float32, count=per_env, offset=env_idx * per_env * 4)
         self._cont_action_view = flat.reshape(self._cont_actions_shape)
         self._cont_action_shm_ref = raw_shm
+
+    def _attach_mask_view(self, raw_shm, env_idx):
+        """Attach the outbound action-mask shm slice (F8, env→trainer direction).
+
+        Mirror image of ``_attach_cont_action_view``: the trainer allocates one
+        ``multiprocessing.RawArray('b', num_envs * N_AGENTS * ACTION_MASK_DIM)``
+        BEFORE forking workers; each env carves out its (N_AGENTS,
+        ACTION_MASK_DIM) int8 slice and copies the C-side masks into it at the
+        end of every step()/reset(). The trainer's main-process view over the
+        same bytes is read right after vecenv.recv() — by which point the
+        worker has finished its step, so the masks always correspond to the
+        observation batch just received (recv is the synchronisation point).
+
+        Pitfall: sizing is the caller's job, exactly as for the cont-action
+        attach — ``raw_shm`` must hold at least (env_idx+1)*N_AGENTS*
+        ACTION_MASK_DIM bytes.
+        """
+        if raw_shm is None:
+            return
+        per_env = N_AGENTS * ACTION_MASK_DIM
+        flat = np.frombuffer(raw_shm, dtype=np.int8, count=per_env, offset=env_idx * per_env)
+        self._mask_out_view = flat.reshape(N_AGENTS, ACTION_MASK_DIM)
+        self._mask_shm_ref = raw_shm
 
     def _prepare_continuous_actions(self, cont):
         """Coerce caller-supplied Δyaw buffer to (N_AGENTS, AIM_DIM) float32 contiguous.
