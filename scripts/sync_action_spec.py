@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Extract action head spec from cs2_types.h and write src/_action_spec.py.
+"""Sync Python action + obs specs from cs2_types.h (the single source of truth).
 
-Batch 3: emits separate discrete + continuous spec lists. Backwards-compat
-aliases (ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_DIM, ACTION_MASK_DIM)
-stay; they refer to the discrete-only side. New: AIM_DIM,
+Emits TWO generated modules, both derived from the C header so a dimension
+change is a one-file (cs2_types.h) edit that propagates to Python:
+  - src/_action_spec.py : action head spec (discrete + continuous / AIM_DIM).
+  - src/_obs_spec.py     : OBS_DIM + OBS_BLOCKS (named per-block start:stop
+                           slices) so masking / demo-zeroing code never
+                           hardcodes 25 / 53 / 93.
+
+Batch 3: action side emits separate discrete + continuous spec lists.
+Backwards-compat aliases (ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_DIM,
+ACTION_MASK_DIM) stay; they refer to the discrete-only side. New: AIM_DIM,
 CONTINUOUS_HEAD_NAMES, DISCRETE_HEAD_SPEC, CONTINUOUS_HEAD_SPEC.
 
-Run after changing ACTION_HEAD_SIZES, ACTION_HEAD_NAMES, or AIM_DIM:
+Run after changing ACTION_HEAD_SIZES/ACTION_HEAD_NAMES/AIM_DIM, or any OBS_*
+macro (block sizes / OBS_DIM) in cs2_types.h:
     uv run python scripts/sync_action_spec.py
 """
 import re
@@ -14,6 +22,7 @@ from pathlib import Path
 
 HEADER = Path(__file__).resolve().parent.parent / "src" / "c_env" / "cs2_types.h"
 OUTPUT = Path(__file__).resolve().parent.parent / "src" / "_action_spec.py"
+OBS_OUTPUT = Path(__file__).resolve().parent.parent / "src" / "_obs_spec.py"
 
 text = HEADER.read_text()
 
@@ -81,3 +90,72 @@ print(f"[sync_action_spec] Wrote {OUTPUT}")
 print(f"  ACTION_DIM={action_dim}  ACTION_MASK_DIM={action_mask_dim}  AIM_DIM={aim_dim}")
 print(f"  NAMES={names}")
 print(f"  SIZES={sizes}")
+
+# ── Obs block layout → src/_obs_spec.py ──────────────────────────────────────
+# Parse the PRIMITIVE OBS_* literals from cs2_types.h and recompute the block
+# bases exactly as the C macros derive them (base = prev_base + prev_width).
+# We deliberately do NOT try to eval the C base expressions — we mirror the
+# arithmetic here so the Python table is a self-checking cross-witness: if the
+# recomputed last-block end != the parsed OBS_DIM literal, the two have drifted
+# and we raise (same contract as the env_init tiling assert in cs2_env.h).
+
+
+def _obs_int(macro: str) -> int:
+    """Read `#define <macro> <int-literal>` from cs2_types.h.
+
+    Only matches bare integer literals — the derived base macros
+    (OBS_TEAMMATE_BASE = (…)) are intentionally NOT parsed here; we recompute
+    those from the primitive sizes/strides/counts below.
+    """
+    m = re.search(rf"#define\s+{macro}\s+(-?\d+)\b", text)
+    if not m:
+        raise RuntimeError(f"Could not find primitive '#define {macro} <int>' in cs2_types.h")
+    return int(m.group(1))
+
+
+obs_dim = _obs_int("OBS_DIM")
+self_size = _obs_int("OBS_SELF_SIZE")
+tm_stride, tm_count = _obs_int("OBS_TEAMMATE_STRIDE"), _obs_int("OBS_TEAMMATE_COUNT")
+en_stride, en_count = _obs_int("OBS_ENEMY_STRIDE"), _obs_int("OBS_ENEMY_COUNT")
+global_size = _obs_int("OBS_GLOBAL_SIZE")
+
+# Recompute bases by tiling (mirrors the derived C macros).
+self_base = 0
+tm_base = self_base + self_size
+en_base = tm_base + tm_stride * tm_count
+global_base = en_base + en_stride * en_count
+global_end = global_base + global_size
+
+if global_end != obs_dim:
+    raise RuntimeError(f"Obs blocks do not tile OBS_DIM: blocks end at {global_end} but "
+                       f"OBS_DIM={obs_dim} in cs2_types.h. Fix a block *_SIZE/*_STRIDE or OBS_DIM.")
+
+# (start, stop) half-open slices — usable directly as obs[start:stop].
+obs_blocks = {
+    "self": (self_base, tm_base),
+    "teammate": (tm_base, en_base),
+    "enemy": (en_base, global_base),
+    "global": (global_base, global_end),
+}
+obs_block_lines = ",\n    ".join(f"{name!r}: {rng!r}" for name, rng in obs_blocks.items())
+
+OBS_OUTPUT.write_text(
+    f"# Auto-generated from cs2_types.h — do not edit manually.\n"
+    f"# Regenerate: uv run python scripts/sync_action_spec.py\n"
+    f"\n"
+    f"OBS_DIM = {obs_dim}\n"
+    f"\n"
+    f"# Per-agent observation block layout, mirrored from the OBS_* macros in\n"
+    f"# cs2_types.h. Each value is a (start, stop) half-open slice usable\n"
+    f"# directly as obs[start:stop]. Masking / demo-zeroing code MUST index via\n"
+    f"# this table (e.g. OBS_BLOCKS['enemy']) — never hardcode 25 / 53 / 93.\n"
+    f"OBS_BLOCKS = {{\n    {obs_block_lines},\n}}\n"
+    f"\n"
+    f"# Per-entity sub-structure of the teammate / enemy blocks (count × stride).\n"
+    f"# Lets demo code walk individual teammate/enemy sub-slots if needed.\n"
+    f"OBS_TEAMMATE_COUNT = {tm_count}\n"
+    f"OBS_TEAMMATE_STRIDE = {tm_stride}\n"
+    f"OBS_ENEMY_COUNT = {en_count}\n"
+    f"OBS_ENEMY_STRIDE = {en_stride}\n")
+print(f"[sync_action_spec] Wrote {OBS_OUTPUT}")
+print(f"  OBS_DIM={obs_dim}  OBS_BLOCKS={obs_blocks}")

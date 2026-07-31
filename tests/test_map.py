@@ -160,20 +160,24 @@ def test_centroids_z_plumbed_through_binding():
 # assert post-tick invariants.  All tests use the simple map (make_simple_map)
 # so that centroids_z[6]=64 (bombsite) and is_ramp[13]=True (T-ramp) are live.
 #
-# Movement direction conventions:
-#   The env uses facing-LOCAL movement bins (cs2_movement.h _LOCAL_MOVE_X/Y).
+# Movement direction conventions (post-F9 right-handed basis, 2026-07-06):
+#   The env uses facing-LOCAL movement bins (cs2_movement.h _LOCAL_MOVE_X/Y),
+#   rotated into world via world = fy*forward + fx*right with
+#   forward = (cos f, sin f) and right = (sin f, -cos f) (CW perpendicular;
+#   yaw is CCW in the x-east/y-north frame).
 #   Bin 1 ("W" = forward): _LOCAL_MOVE_Y[1]=+1, _LOCAL_MOVE_X[1]=0.
 #   With a->facing = -π/2 (agent facing -Y in world):
-#       wx = fy*cos(-π/2) - fx*sin(-π/2) = fy*0 - fx*(-1) = fx
-#       wy = fy*sin(-π/2) + fx*cos(-π/2) = fy*(-1) + fx*0 = -fy
+#       wx = fy*cos(-π/2) + fx*sin(-π/2) = -fx
+#       wy = fy*sin(-π/2) - fx*cos(-π/2) = -fy
 #   So bin 1 → world (wx=0, wy=-1): moves in -Y direction (toward lower y, i.e.
 #   toward the catwalk at y=80 from the bombsite at y=192-416).
-#   Bin 8 ("WA" = forward+left): _LOCAL_MOVE_X[8]=-0.707, _LOCAL_MOVE_Y[8]=+0.707.
-#       wx = 0.707*0 - (-0.707)*(-1) = -0.707  (moves -X, toward west)
-#       wy = 0.707*(-1) + (-0.707)*0 = -0.707  (moves -Y, toward catwalk)
-#   So bin 8 with facing=-π/2 drives NW (decreasing x and decreasing y).
+#   Bin 2 ("WD" = forward+right): _LOCAL_MOVE_X[2]=+0.707, _LOCAL_MOVE_Y[2]=+0.707.
+#       wx = -0.707  (moves -X, toward west — facing south, right IS west)
+#       wy = -0.707  (moves -Y, toward catwalk)
+#   So bin 2 with facing=-π/2 drives SW in screen terms (decreasing x and y).
+#   (Pre-F9 the strafe axis was mirrored and bin 8 "WA" produced this vector.)
 #
-# Assertion: bin 1 drives decreasing y and bin 8 drives decreasing x+y, verified
+# Assertion: bin 1 drives decreasing y and bin 2 drives decreasing x+y, verified
 # by the pre-step asserts in test_cliff_guard_blocks_walkup below.
 
 
@@ -319,7 +323,8 @@ def test_cliff_guard_diagonal_slides():
     wall-slide logic (plan step 3.2 + the pre-existing diagonal retry in
     process_movement). If sliding is broken the agent would be fully stuck.
 
-    Movement: facing=-π/2, bin 8 ("WA") → world (-0.707, -0.707): NW.
+    Movement: facing=-π/2, bin 2 ("WD") → world (-0.707, -0.707) — post-F9
+    right-handed basis: facing south, geometric right IS west.
     The -y component hits the cliff (area 15 target, Δz=64 > 18, non-ramp) → rejected.
     The -x component tries to move west within area 6 → allowed if area 6 covers it.
     The agent must move west (x decrease) but stay in area 6.
@@ -338,13 +343,13 @@ def test_cliff_guard_diagonal_slides():
         g.agents[0].facing = float(-math.pi / 2)
         x0 = g.agents[0].x
         actions, cont = _zero_actions()
-        # Bin 8 = "WA" (forward+left). With facing=-π/2:
-        #   wx = _LOCAL_MOVE_Y[8]*cos(-π/2) - _LOCAL_MOVE_X[8]*sin(-π/2)
-        #      = 0.707*0 - (-0.707)*(-1) = -0.707  (moves west)
-        #   wy = _LOCAL_MOVE_Y[8]*sin(-π/2) + _LOCAL_MOVE_X[8]*cos(-π/2)
-        #      = 0.707*(-1) + (-0.707)*0 = -0.707  (moves toward catwalk, blocked)
+        # Bin 2 = "WD" (forward+right), post-F9 basis. With facing=-π/2:
+        #   wx = fy*cos(-π/2) + fx*sin(-π/2) = 0 + 0.707*(-1) = -0.707  (west)
+        #   wy = fy*sin(-π/2) - fx*cos(-π/2) = -0.707 - 0     = -0.707  (toward
+        #        catwalk, blocked by the cliff guard)
+        # (Pre-F9 the mirrored basis produced this vector from bin 8 "WA".)
         # HEAD_MOVE = 0; x should decrease (west slide allowed) post-step.
-        actions[0, 0] = 8
+        actions[0, 0] = 2
         env.step(actions, cont)
         env.step(actions, cont)
         assert g.agents[0].x < x0, (
@@ -399,15 +404,16 @@ def test_is_airborne_no_flicker_on_elevated_terrain():
 
 
 def test_obs_z_delta_populated_for_elevated_teammate():
-    """T4 load-bearing: obs[27] reflects (teammate.z - self.z)/128 = 0.5 when
+    """T4 load-bearing: obs[30] reflects (teammate.z - self.z)/128 = 0.5 when
     self is at z=0 and teammate 1 is at z=64.
 
-    Slot derivation (plan §4.5): teammate slots start at obs[25]; per
-    cs2_observations.h line 65, base = 25 + tm_count * 7.  Teammate iteration
-    skips self (j == i), so for agent 0 viewing agent 1, tm_count=0 → base=25
-    → z_delta at obs[base+2] = obs[27].
+    Slot derivation (plan §4.5, re-pinned for Batch 6 Task 2.5): teammate slots
+    start at obs[28] (OBS_TEAMMATE_BASE; was 25 before the bombsite-bearing
+    slots grew the self block to 28), base = 28 + tm_count * 7.  Teammate
+    iteration skips self (j == i), so for agent 0 viewing agent 1, tm_count=0
+    → base=28 → z_delta at obs[base+2] = obs[30].
 
-    Includes a sign-flip sub-case (self at z=64, teammate at z=0 → obs[27] = -0.5)
+    Includes a sign-flip sub-case (self at z=64, teammate at z=0 → obs[30] = -0.5)
     to catch a subtle direction bug that wouldn't surface with just the positive case.
 
     Pitfall: obs population only happens in compute_observations() which runs
@@ -437,14 +443,14 @@ def test_obs_z_delta_populated_for_elevated_teammate():
         assert g.agents[1].is_airborne == 0
                                                                                         # env.observations is a flat buffer; [0] gives the OBS_DIM slice for agent 0.
         obs = env.observations[0]
-                                                                                        # Teammate slot: tm_count=0, base=25, z_delta at obs[base+2]=obs[27].
-        z_delta = obs[27]
+                                                                                        # Teammate slot: tm_count=0, base=28, z_delta at obs[base+2]=obs[30].
+        z_delta = obs[30]
         expected = (64.0 - 0.0) / 128.0                                                 # = 0.5
         assert abs(z_delta - expected) < 1e-5, (
-            f"teammate z-delta slot obs[27] = {z_delta:.6f}, expected {expected:.6f}. "
+            f"teammate z-delta slot obs[30] = {z_delta:.6f}, expected {expected:.6f}. "
             f"Check (tm->z - a->z)/128.0f; agent 1 alive={g.agents[1].alive}.")
 
-        # Sign-flip sub-case: swap z values; expect obs[27] = -0.5.
+        # Sign-flip sub-case: swap z values; expect obs[30] = -0.5.
         g.agents[0].z = 64.0
         g.agents[0].area_idx = 6
         g.agents[1].z = 0.0
@@ -452,8 +458,8 @@ def test_obs_z_delta_populated_for_elevated_teammate():
         env.step(actions, cont)
         obs = env.observations[0]
         expected_neg = (0.0 - 64.0) / 128.0                                                       # = -0.5
-        assert abs(obs[27] - expected_neg) < 1e-5, (
-            f"sign-flip: teammate z-delta obs[27] = {obs[27]:.6f}, expected {expected_neg:.6f}. "
+        assert abs(obs[30] - expected_neg) < 1e-5, (
+            f"sign-flip: teammate z-delta obs[30] = {obs[30]:.6f}, expected {expected_neg:.6f}. "
             f"Direction bug? Formula must be (tm->z - a->z), NOT (a->z - tm->z).")
     finally:
         env.close()

@@ -6,6 +6,7 @@ src/c_env/nav_data.h
 .worktrees/
 .env
 **/*.npy
+outputs
 outputs/checkpoints/
 outputs/recordings/
 outputs/logs/
@@ -26,7 +27,7 @@ deploy/CS2RLBot/obj/
 deploy/CS2RLBot_build/
 
 
-
+**/zig-pkg
 
 # C
 

@@ -1,120 +1,23 @@
 # tests/test_env_feasibility.py
 import math
-from collections import deque
 
 import numpy as np
 
 from c_env.cs2_env import make_env
 from nav import ACTION_DIM, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
 
-
-def _bombsite_areas(env):
-    return {
-        int(aid)
-        for i, aid in enumerate(env.map_data.area_ids) if env.map_data.bombsite_by_idx[i]
-    }
-
-
-def _bfs_area_path(nav_graph, adjacency, start_area: int, goal_areas) -> list[int]:
-    """Area-level BFS over the nav adjacency graph. Returns a list of area
-    ids [start, ..., goal] or [] if unreachable. Used only to pick *which*
-    areas the agent should traverse; the actual driving is done by
-    _drive_agent_through_area_path below."""
-    goal_areas = set(goal_areas)
-    id_to_idx = nav_graph._id_to_idx
-    q = deque([start_area])
-    prev = {start_area: None}
-    found = None
-
-    while q:
-        cur = q.popleft()
-        if cur in goal_areas:
-            found = cur
-            break
-        cur_idx = id_to_idx[cur]
-        for nbr_idx in np.flatnonzero(adjacency[cur_idx]):
-            nbr_area = nav_graph.area_ids[int(nbr_idx)]
-            if nbr_area == cur or nbr_area in prev:
-                continue
-            prev[nbr_area] = cur
-            q.append(nbr_area)
-
-    if found is None:
-        return []
-
-    path = []
-    cur = found
-    while cur is not None:
-        path.append(cur)
-        cur = prev[cur]
-    path.reverse()
-    return path
-
-
-def _drive_agent_through_area_path(env, agent_idx, area_path, max_ticks_per_hop=256) -> bool:
-    """Walk an agent from its current position through `area_path` by
-    repeatedly (face next-area centroid, action = move forward) each tick.
-
-    Why this shape: movement is now facing-local with Source-style accel +
-    friction, so world-compass step planning no longer maps 1:1 to actions.
-    We directly poke `a->facing` before each env.step instead of going
-    through the aim action head, which avoids the aim-applied-after-
-    movement single-tick lag. The agent rolls up to wishspeed over ~3
-    ticks and naturally curves toward each centroid.
-
-    Corner/wall unsticking: collision blocks velocity, so if the bot's
-    straight line to the next centroid clips a wall it will stall at the
-    wall. We detect a static position and jitter facing ±45°/±90° to find
-    a clear direction. This mirrors how a trained policy would learn to
-    wiggle around corners; it's good enough for test driving without
-    requiring a full sub-cell planner.
-
-    Returns True iff the agent ends its journey inside `area_path[-1]`."""
-    jitter_seq = [
-        0.0,
-        math.pi / 8,
-        -math.pi / 8,
-        math.pi / 4,
-        -math.pi / 4,
-        math.pi / 2,
-        -math.pi / 2,
-    ]
-    for target_area in area_path[1:]:
-        last_pos = None
-        stuck = 0
-        reached = False
-        for _ in range(max_ticks_per_hop):
-            ca = env._c_env.game.agents[agent_idx]
-            cur_area_id = int(env.map_data.area_ids[ca.area_idx])
-            if cur_area_id == target_area:
-                reached = True
-                break
-
-            pos = (round(float(ca.x), 1), round(float(ca.y), 1))
-            if pos == last_pos:
-                stuck += 1
-            else:
-                stuck = 0
-                last_pos = pos
-
-            cx, cy = env.nav_graph.centroids[target_area]
-            base = math.atan2(float(cy) - float(ca.y), float(cx) - float(ca.x))
-            ca.facing = base + jitter_seq[min(stuck // 3, len(jitter_seq) - 1)]
-
-            actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-            actions[agent_idx, 0] = 1  # facing-local "move forward"
-            env.step(actions)
-        if not reached:
-            return False
-    return True
+# Batch 6 Task 2: the pathing + driving helpers were extracted to
+# src/scripted_expert.py (spec D-3) so the BC demo generator shares one
+# canonical implementation with these tests. drive_agent_through_area_path
+# is the facing-poke TEST driver; the action-interface expert used for demo
+# recording is scripted_expert.ScriptedBomber.
+from scripted_expert import bfs_area_path, bombsite_areas, drive_agent_through_area_path
 
 
 def test_spawn_areas_are_distinct_and_site_reachable():
     env = make_env()
     env.reset()
-    nav_graph = env.nav_graph
-    adjacency = env.map_data.adjacency
-    bombsites = _bombsite_areas(env)
+    bombsites = bombsite_areas(env.map_data)
     t_spawn_areas = env.map_data.t_spawn_areas
     ct_spawn_areas = env.map_data.ct_spawn_areas
 
@@ -124,7 +27,7 @@ def test_spawn_areas_are_distinct_and_site_reachable():
     assert len(set(ct_spawn_areas)) == TEAM_SIZE
 
     for spawn_area in t_spawn_areas:
-        path = _bfs_area_path(nav_graph, adjacency, spawn_area, bombsites)
+        path = bfs_area_path(env.map_data, spawn_area, bombsites)
         assert path, f"T spawn area {spawn_area} cannot reach any bombsite"
 
     env.close()
@@ -136,7 +39,7 @@ def test_scripted_bomber_can_reach_site_and_plant():
     # we're still driving. We also lift the round timer below.
     env = make_env(auto_reset=False)
     env.reset()
-    bombsites = _bombsite_areas(env)
+    bombsites = bombsite_areas(env.map_data)
 
     # Lift the round timer for this test. The area-level BFS path on real
     # de_dust2 can be 30+ hops long, and the face-centroid + accel driver
@@ -159,11 +62,11 @@ def test_scripted_bomber_can_reach_site_and_plant():
 
     bomber = env._c_env.game.agents[bomber_idx]
     start_area_id = int(env.map_data.area_ids[bomber.area_idx])
-    area_path = _bfs_area_path(env.nav_graph, env.map_data.adjacency, start_area_id, bombsites)
+    area_path = bfs_area_path(env.map_data, start_area_id, bombsites)
     assert area_path, "No area-level path from bomber spawn to any bombsite"
     final_site_area = area_path[-1]
 
-    assert _drive_agent_through_area_path(
+    assert drive_agent_through_area_path(
         env, bomber_idx, area_path), (f"Bomber failed to walk area path {area_path}")
 
     assert int(env.map_data.area_ids[bomber.area_idx]) == final_site_area
@@ -272,9 +175,7 @@ def test_controlled_visible_agents_can_kill():
 def test_fixed_seed_agents_can_leave_spawn():
     env = make_env()
     env.reset()
-    nav_graph = env.nav_graph
-    adjacency = env.map_data.adjacency
-    bombsites = _bombsite_areas(env)
+    bombsites = bombsite_areas(env.map_data)
     t_spawn_areas = env.map_data.t_spawn_areas
 
     for agent_idx in range(10):
@@ -287,7 +188,7 @@ def test_fixed_seed_agents_can_leave_spawn():
         else:
             goals = set(t_spawn_areas)
 
-        path = _bfs_area_path(nav_graph, adjacency, area_id, goals)
+        path = bfs_area_path(env.map_data, area_id, goals)
         assert len(path) >= 2, f"No route out of spawn for agent {agent_idx}"
 
         # Drive only to the first area beyond spawn — this test just wants
@@ -295,7 +196,7 @@ def test_fixed_seed_agents_can_leave_spawn():
         # current movement model, not traverse the full route.
         solo_env = make_env()
         solo_env.reset()
-        _drive_agent_through_area_path(solo_env, agent_idx, path[:2], max_ticks_per_hop=64)
+        drive_agent_through_area_path(solo_env, agent_idx, path[:2], max_ticks_per_hop=64)
 
         moved = solo_env._c_env.game.agents[agent_idx]
         moved_area_id = int(solo_env.map_data.area_ids[moved.area_idx])

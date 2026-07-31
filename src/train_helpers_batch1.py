@@ -8,7 +8,7 @@ Functions:
     symlog(x):           sign-preserving log compression; bounds scale without hard cutoff
     symexp(x):           inverse of symlog
     target_entropy_schedule(step, max_entropy, warmup_end=10_000_000,
-                             warmup_high_frac=0.7, base_frac=0.5):
+                             warmup_high_frac=0.5, base_frac=0.35):
                          linear ramp from warmup_high_frac*max_entropy to base_frac*max_entropy
                          over warmup_end steps; held constant after.
     split_into_channels(step_stats_view):
@@ -46,11 +46,20 @@ def target_entropy_schedule(
     step: int,
     max_entropy: float,
     warmup_end: int = 10_000_000,
-    warmup_high_frac: float = 0.7,
-    base_frac: float = 0.5,
+    warmup_high_frac: float = 0.5,
+    base_frac: float = 0.35,
 ) -> float:
     """Linear ramp from `warmup_high_frac * max_entropy` at step 0 down to
-    `base_frac * max_entropy` at step `warmup_end`; held constant after."""
+    `base_frac * max_entropy` at step `warmup_end`; held constant after.
+
+    Defaults lowered 0.7→0.5 / 0.5→0.35 (finding 4 residual, 2026-07-06
+    adversarial review): the old targets were high enough to hold the
+    policy near-uniform indefinitely. These defaults are FALLBACK mirrors
+    of build_train_config's entropy_target_{warmup,base}_frac /
+    entropy_target_warmup_steps — production threads the config values
+    through train._scheduled_target_entropy, so tune there, not here.
+    Keep base_frac > 0.3: the trainer's hard entropy floor (clamp α ≥ 0.5
+    when H < 0.3·max) must stay strictly below the scheduled target."""
     # Single branch: clamp t to [0, 1] so the linear formula yields
     # base_frac * max_entropy at step >= warmup_end without a discontinuity.
     t = min(step / warmup_end, 1.0)

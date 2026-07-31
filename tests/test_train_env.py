@@ -429,7 +429,11 @@ def test_event_oversample_fraction_exposed():
 
 def test_target_entropy_schedule_applied():
     """Task 9A: trainer._batch1_current_target_entropy must follow the
-    linear ramp 0.7→0.5 * max_entropy across [0, 10M] global steps.
+    linear ramp warmup_frac→base_frac * max_entropy across [0, warmup_steps]
+    global steps. Fracs are config-driven since the finding-4-residual fix
+    (defaults 0.5→0.35; see test_entropy_target_config_threading) — this
+    test reads them from trainer.config and additionally proves a custom
+    config value is honored by the live train() recompute.
 
     Batch 3 (T5): the max_entropy expectation now includes the closed-form
     Gaussian aim head entropy at σ_max = exp(LOG_STD_MAX). Pre-Batch-3 this
@@ -474,28 +478,40 @@ def test_target_entropy_schedule_applied():
         # would mask the schedule check.
         trainer.evaluate()
 
-        # Step 0: target = 0.7 * max
+        warmup_frac = trainer.config["entropy_target_warmup_frac"]
+        base_frac = trainer.config["entropy_target_base_frac"]
+
+        # Step 0: target = warmup_frac * max
         trainer.global_step = 0
         trainer.train()
-        assert abs(trainer._batch1_current_target_entropy - 0.7 * expected_max) < 1e-5, (
-            f"Task 9A: at step 0 expected 0.7*max={0.7 * expected_max:.4f}, "
+        assert abs(trainer._batch1_current_target_entropy - warmup_frac * expected_max) < 1e-5, (
+            f"Task 9A: at step 0 expected {warmup_frac}*max={warmup_frac * expected_max:.4f}, "
             f"got {trainer._batch1_current_target_entropy:.4f}")
 
-        # Step 20M (past warmup_end=10M): target = 0.5 * max (constant after).
+        # Step 20M (past warmup_end=10M): target = base_frac * max (constant after).
         trainer.global_step = 20_000_000
         trainer.train()
-        assert abs(trainer._batch1_current_target_entropy - 0.5 * expected_max) < 1e-5, (
-            f"Task 9A: at step 20M expected 0.5*max={0.5 * expected_max:.4f}, "
+        assert abs(trainer._batch1_current_target_entropy - base_frac * expected_max) < 1e-5, (
+            f"Task 9A: at step 20M expected {base_frac}*max={base_frac * expected_max:.4f}, "
             f"got {trainer._batch1_current_target_entropy:.4f}")
 
         # Across the full ramp the value must stay <= max_entropy at every
-        # checked step. Upper-bound 0.7*max means it can never exceed max.
+        # checked step. Upper-bound warmup_frac*max means it can never exceed max.
         for step in (0, 1_000_000, 5_000_000, 10_000_000, 20_000_000):
             trainer.global_step = step
             trainer.train()
             assert trainer._batch1_current_target_entropy <= expected_max + 1e-9, (
                 f"Task 9A: target_entropy={trainer._batch1_current_target_entropy} "
                 f"exceeded max_entropy={expected_max} at step={step}")
+
+        # Config threading end-to-end: a custom frac set on the live config
+        # must be picked up by the next train() call's schedule recompute.
+        trainer.config["entropy_target_warmup_frac"] = 0.42
+        trainer.global_step = 0
+        trainer.train()
+        assert abs(trainer._batch1_current_target_entropy - 0.42 * expected_max) < 1e-5, (
+            f"custom entropy_target_warmup_frac not honored: expected "
+            f"{0.42 * expected_max:.4f}, got {trainer._batch1_current_target_entropy:.4f}")
     finally:
         cleanup()
 
@@ -708,13 +724,14 @@ def test_round_designated_carrier_property_50_seeds():
 
 
 def test_obs_designated_carrier_bit_t_side():
-    """Verify obs[106] is the round-fixed role bit:
+    """Verify obs[109] (OBS_GLOBAL_BASE+13; was 106 before the Batch 6
+    bombsite-bearing slots) is the round-fixed role bit:
        - 1.0 for the designated T agent
        - 0.0 for non-designated T agents
        - 0.0 for ALL CT agents
        - persists at 1.0 even after the carrier dies and a teammate picks up
 
-    obs[106] is distinct from obs[22] (transient self-has-bomb): it is set at
+    obs[109] is distinct from obs[22] (transient self-has-bomb): it is set at
     round start and never reassigned, surviving drop/pickup events. This gives
     the policy a stable identity signal that obs[22] cannot.
 
@@ -735,20 +752,20 @@ def test_obs_designated_carrier_bit_t_side():
         # T side
         for i in range(5):
             expected = 1.0 if i == rid else 0.0
-            assert obs[i, 106] == expected, (
-                f"T idx {i}: obs[106]={obs[i,106]} expected {expected} (rid={rid})")
+            assert obs[i, 109] == expected, (
+                f"T idx {i}: obs[109]={obs[i,109]} expected {expected} (rid={rid})")
         # CT side: all zeros
         for j in range(5, 10):
-            assert obs[j, 106] == 0.0, f"CT idx {j}: obs[106]={obs[j,106]} expected 0.0"
+            assert obs[j, 109] == 0.0, f"CT idx {j}: obs[109]={obs[j,109]} expected 0.0"
 
         # Persistence after carrier death — drive 20 zero-action steps.
         g.agents[rid].hp = 0
         g.agents[rid].alive = 0
         for _ in range(20):
             obs, *_ = env.step(actions)
-            assert obs[rid, 106] == 1.0, (
+            assert obs[rid, 109] == 1.0, (
                 f"designated carrier (T idx {rid}) lost the role bit mid-round; "
-                f"obs[106] should be round-fixed but read {obs[rid,106]}")
+                f"obs[109] should be round-fixed but read {obs[rid,109]}")
     finally:
         env.close()
 
@@ -833,8 +850,16 @@ def test_post_pickup_plant_mask_unmasked():
         # test terminates even if every bombsite area somehow fails to unmask.
         sd = env._c_env.sd.contents
         # Offset into the flat mask row for HEAD_USE action slot 1 (plant).
-        # ACTION_HEAD_SIZES[:5] = (move, aim, shoot, reload, weapon).
-        use_mask_offset = sum(train.ACTION_HEAD_SIZES[:5])
+        # ACTION_HEAD_SIZES = (move, shoot, reload, weapon, use, crouch, jump)
+        # → USE head starts at sum of the first FOUR sizes (9+2+2+3 = 16).
+        # N1 (2026-07-06 verification): this used to be [:5] = 18, which put
+        # the assertion on crouch-press (index 19) — always 1 for alive
+        # agents, so the test was vacuously green. Derive the offset from the
+        # head-name index instead of a hardcoded count so a future head
+        # reorder can't silently re-vacuous it.
+        use_head_idx = train.ACTION_HEAD_NAMES.index("use")
+        use_mask_offset = sum(train.ACTION_HEAD_SIZES[:use_head_idx])
+        assert use_mask_offset == 16, "USE head offset drifted; check ACTION_HEAD_SIZES order"
         masks_open = False
         steps_taken = 0
         for ai in range(sd.N):
@@ -871,7 +896,7 @@ def test_obs_dim_constant_consistency():
     import nav
     import train as t
     assert nav.OBS_DIM == t.OBS_DIM, (f"nav.OBS_DIM ({nav.OBS_DIM}) != train.OBS_DIM ({t.OBS_DIM})")
-    assert nav.OBS_DIM == 107, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 107 for Batch 3.5"
+    assert nav.OBS_DIM == 110, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 110 for Batch 6 Task 2.5"
     env = t.make_puffer_env(seed=0)
     try:
         assert env.single_observation_space.shape == (nav.OBS_DIM, ), (
@@ -879,6 +904,36 @@ def test_obs_dim_constant_consistency():
             f"!= ({nav.OBS_DIM},)")
     finally:
         env.close()
+
+
+def test_obs_blocks_tile_obs_dim():
+    """OBS_BLOCKS (generated from cs2_types.h OBS_* macros) must tile [0, OBS_DIM)
+    with no gaps/overlaps, in order. This is the Python mirror of the env_init
+    tiling assert in cs2_env.h. Demo-zeroing / masking code slices obs via this
+    table (obs[start:stop]) instead of hardcoding 28/56/96 — a drift here would
+    silently zero the wrong obs slice, so pin the boundaries explicitly.
+    Catches the regen-not-run footgun (edit cs2_types.h, forget the generator)."""
+    import _obs_spec as spec
+
+    # Named boundaries are the ones the upcoming demo code depends on.
+    assert spec.OBS_BLOCKS["self"] == (0, 28)
+    assert spec.OBS_BLOCKS["teammate"] == (28, 56)
+    assert spec.OBS_BLOCKS["enemy"] == (56, 96)
+    assert spec.OBS_BLOCKS["global"] == (96, 110)
+
+    # Structural invariant: contiguous, ordered, covers exactly [0, OBS_DIM).
+    prev_stop = 0
+    for name, (start, stop) in spec.OBS_BLOCKS.items():
+        assert start == prev_stop, f"block {name!r} starts at {start}, expected {prev_stop} (gap/overlap)"
+        assert stop > start, f"block {name!r} is empty/inverted: {(start, stop)}"
+        prev_stop = stop
+    assert prev_stop == spec.OBS_DIM, (f"blocks end at {prev_stop} but OBS_DIM={spec.OBS_DIM}")
+
+    # Per-entity sub-structure matches the block widths (count × stride).
+    tm_start, tm_stop = spec.OBS_BLOCKS["teammate"]
+    assert tm_stop - tm_start == spec.OBS_TEAMMATE_COUNT * spec.OBS_TEAMMATE_STRIDE
+    en_start, en_stop = spec.OBS_BLOCKS["enemy"]
+    assert en_stop - en_start == spec.OBS_ENEMY_COUNT * spec.OBS_ENEMY_STRIDE
 
 
 # ── Batch 3 (utof/cs2rl Batch 3): continuous-aim H-PPO ──
@@ -1238,7 +1293,7 @@ def test_hybrid_loss_clip_applies_per_factor():
         mb_old_logp_c = new_logp_c_seed - 0.05         # ratio_c ≈ 1.05 → inside clip
 
         from train import _hybrid_ppo_loss
-        pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c = _hybrid_ppo_loss(
+        pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c, _lg = _hybrid_ppo_loss(
             policy,
             mb_obs,
             mb_actions,
@@ -1285,7 +1340,7 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
         mb_old_logp_c = torch.zeros(B)
 
         from train import _hybrid_ppo_loss
-        pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c = (_hybrid_ppo_loss(
+        pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c, _lg = (_hybrid_ppo_loss(
             policy,
             mb_obs,
             mb_actions,
@@ -1330,5 +1385,667 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
         assert torch.isfinite(pg_loss).all()
         assert torch.isfinite(entropy).all()
         assert torch.isfinite(new_value).all()
+    finally:
+        env.close()
+
+
+def test_pbrs_gamma_matches_training_gamma():
+    """Finding 2 (2026-07-06 adversarial review): PBRS shaping used
+    γ_pbrs = 0.99 while training used γ = 0.999. With F(s,s') =
+    γ_pbrs·φ(s') − φ(s), any γ_pbrs ≠ γ breaks the Ng et al. policy-
+    invariance guarantee — the residual (γ_pbrs − γ)·φ ≈ −0.009·φ per tick
+    penalized dwelling in high-φ states. This drift guard pins the LIVE
+    env value (read from C static data through the production factory)
+    against build_train_config's gamma: if either side changes without the
+    other, this fails and points here.
+    """
+    from types import SimpleNamespace
+
+    import pytest
+
+    import train
+
+    args = SimpleNamespace(seed=0, timesteps=1_000, checkpoint_dir="/tmp/unused", device="cpu")
+    cfg = train.build_train_config(args, batch_size=1024, bptt_horizon=64)
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        live_pbrs_gamma = float(env._c_env.sd.contents.pbrs_gamma)
+    finally:
+        env.close()
+    assert live_pbrs_gamma == pytest.approx(
+        cfg["gamma"]), (f"pbrs_gamma={live_pbrs_gamma} != training gamma={cfg['gamma']}; "
+                        f"PBRS is only policy-invariant when they match — update the "
+                        f"cs2_env defaults (Cs2Env.__init__ AND make_env) or thread "
+                        f"pbrs_gamma explicitly")
+
+    # N3 fix: make_puffer_env must expose pbrs_gamma for per-experiment
+    # overrides (previously the training γ could not be threaded through
+    # without a signature change).
+    env = train.make_puffer_env(seed=0, pbrs_gamma=0.5)
+    try:
+        assert float(env._c_env.sd.contents.pbrs_gamma) == pytest.approx(0.5)
+    finally:
+        env.close()
+
+
+def test_entropy_target_config_threading():
+    """Finding 4 residual (2026-07-06 adversarial review): the entropy-target
+    schedule fracs were hardcoded (0.7→0.5·max held after 10M steps) — high
+    enough that even with a live pg gradient the α controller steers the
+    policy toward near-uniform forever. They are now config keys with lower
+    defaults (0.5→0.35·max), threaded through _scheduled_target_entropy so
+    both the patch-time seed and the per-train()-call recompute read the
+    same source. Pins: key names + defaults in build_train_config, custom
+    values honored, missing keys fall back, and the base target stays ABOVE
+    the hard entropy floor (0.3·max) so the floor branch (clamp α ≥ 0.5)
+    can never fight the controller.
+    """
+    from types import SimpleNamespace
+
+    import pytest
+
+    import train
+
+    args = SimpleNamespace(seed=0, timesteps=1_000, checkpoint_dir="/tmp/unused", device="cpu")
+    cfg = train.build_train_config(args, batch_size=1024, bptt_horizon=64)
+    assert cfg["entropy_target_warmup_frac"] == 0.5
+    assert cfg["entropy_target_base_frac"] == 0.35
+    assert cfg["entropy_target_warmup_steps"] == 10_000_000
+    # Floor consistency: base frac must stay above the 0.3·max hard floor.
+    assert cfg["entropy_target_base_frac"] > 0.3
+
+    max_ent = 8.0
+    assert train._scheduled_target_entropy(cfg, 0, max_ent) == pytest.approx(0.5 * max_ent)
+    assert train._scheduled_target_entropy(cfg, 10_000_000, max_ent) == \
+        pytest.approx(0.35 * max_ent)
+    assert train._scheduled_target_entropy(cfg, 30_000_000, max_ent) == \
+        pytest.approx(0.35 * max_ent)
+
+    custom = {
+        "entropy_target_warmup_frac": 0.42,
+        "entropy_target_base_frac": 0.21,
+        "entropy_target_warmup_steps": 100,
+    }
+    assert train._scheduled_target_entropy(custom, 0, 10.0) == pytest.approx(4.2)
+    assert train._scheduled_target_entropy(custom, 50, 10.0) == pytest.approx(3.15)
+    assert train._scheduled_target_entropy(custom, 100, 10.0) == pytest.approx(2.1)
+
+    # Missing keys → same defaults as build_train_config (config .get fallback).
+    assert train._scheduled_target_entropy({}, 0, max_ent) == pytest.approx(0.5 * max_ent)
+
+
+def test_hybrid_ppo_loss_normalizes_advantages():
+    """Finding 1 (2026-07-06 adversarial review): _hybrid_ppo_loss must
+    normalize advantages (stock-PufferLib style: (adv - mean) / (std + 1e-8),
+    scaled by the prio-IS weight) INSIDE the loss. The fork previously fed
+    raw advantages to the pg term and orphaned the normalization block at
+    the call site — the runtime probe showed pg_loss linear in adv
+    (pg_loss(10·A) = 10·pg_loss(A)), i.e. no normalization anywhere on the
+    gradient path. With sparse rewards this left the policy gradient ≈ 0
+    and let the entropy objective drag the policy to uniform (the 30M
+    degenerate run). Normalizing inside the loss makes the property
+    directly assertable: pg_loss must be invariant to advantage scale.
+
+    Also pins the prio-IS contract: mb_prio=None and mb_prio=1 are
+    equivalent; a non-uniform mb_prio must actually reweight the loss
+    (previously it was computed and discarded).
+    """
+    import torch
+
+    import train
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        torch.manual_seed(7)
+        B = 32
+        mb_obs = torch.randn((B, train.OBS_DIM)) * 0.5
+        mb_actions = torch.randint(0, 2, (B, 7), dtype=torch.int64)
+        mb_cont_actions = (torch.rand(B, 1) - 0.5) * 0.4
+        mb_advantages = torch.randn(B)
+        mb_old_logp_d = torch.zeros(B)
+        mb_old_logp_c = torch.zeros(B)
+
+        from train import _hybrid_ppo_loss
+
+        def loss_of(adv, prio=None):
+            pg_loss, *_ = _hybrid_ppo_loss(
+                policy,
+                mb_obs,
+                mb_actions,
+                mb_cont_actions,
+                mb_old_logp_d,
+                mb_old_logp_c,
+                adv,
+                clip_coef=0.2,
+                state={},
+                mb_prio=prio,
+            )
+            return pg_loss
+
+        base = loss_of(mb_advantages)
+
+        # Scale invariance — the R1 probe property that failed pre-fix
+        # (raw path gave exactly 100× here).
+        scaled = loss_of(mb_advantages * 100.0)
+        assert torch.allclose(base, scaled, rtol=1e-4), \
+            f"pg_loss not scale-invariant: {base.item():.6f} vs {scaled.item():.6f}"
+
+        # Idempotence: feeding already-stock-normalized advantages must give
+        # the same loss (normalizing a normalized tensor is a no-op).
+        pre_norm = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+        assert torch.allclose(base, loss_of(pre_norm), rtol=1e-4)
+
+        # prio-IS: uniform prio ≡ no prio; non-uniform prio must change the loss.
+        assert torch.allclose(base, loss_of(mb_advantages, prio=torch.ones(B)), rtol=1e-6)
+        skew = torch.linspace(0.2, 2.0, B)
+        assert not torch.allclose(base, loss_of(mb_advantages, prio=skew), rtol=1e-3), \
+            "non-uniform mb_prio had no effect on pg_loss — prio-IS weight still discarded"
+    finally:
+        env.close()
+
+
+# ── LSTM-BPTT correctness (rollout ↔ training consistency) ──────────────────
+#
+# Background: `use_rnn: True` means PufferLib's rollout threads LSTM state
+# tick-by-tick through forward_eval (state carried across the 64-tick
+# bptt_horizon segment, zeroed at each evaluate() start, reset on done).
+# The PPO update re-evaluates the SAME 64-tick segments via forward() on
+# (segments, bptt_horizon, OBS_DIM) batches. If forward() processes each
+# tick statelessly (LSTM seq-len 1, zero state — the pre-fix behaviour),
+# the recomputed log-probs/values systematically diverge from what the
+# rollout stored: importance ratios ≠ 1 before any gradient step, and the
+# LSTM's recurrent weights never receive through-time gradients (the LSTM
+# degenerates to an expensive MLP layer). These tests pin the fixed
+# contract: forward() must run true BPTT over the time dimension and match
+# the stepwise forward_eval rollout exactly (fp32 tolerance).
+
+
+def test_policy_forward_bptt_matches_stepwise_rollout():
+    """forward() on a (B, T, OBS) segment must reproduce, tick for tick, what
+    forward_eval() produces when threading LSTM state stepwise over the same
+    sequence (zero initial state, no dones). This is THE consistency property
+    PPO needs: rollout stores logprobs/values from forward_eval; the update
+    recomputes them via forward(). Pre-fix, forward() was stateless per tick
+    and this diverges from t=1 onwards."""
+    import torch
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        policy.eval()
+        torch.manual_seed(0)
+        B, T = 3, 6
+        x_seq = torch.randn(B, T, train.OBS_DIM)
+
+        # Stepwise rollout path: forward_eval threads lstm_h/lstm_c via state.
+        state = {"done": torch.zeros(B)}
+        step_logits, step_mu, step_value = [], [], []
+        with torch.no_grad():
+            for t in range(T):
+                logits, mu, _log_std, value = policy.forward_eval(x_seq[:, t, :], state)
+                step_logits.append(torch.cat(logits, dim=-1))
+                step_mu.append(mu)
+                step_value.append(value)
+
+        # Training path: one forward() call over the whole segment.
+        with torch.no_grad():
+            logits_b, mu_b, _log_std_b, value_b = policy.forward(x_seq, state={})
+        flat_logits = torch.cat(logits_b, dim=-1)      # (B*T, sum(heads))
+
+        for t in range(T):
+            for b in range(B):
+                flat_idx = b * T + t                                                          # row-major (B, T) flatten
+                assert torch.allclose(flat_logits[flat_idx], step_logits[t][b], atol=1e-5), (
+                    f"logits diverge at b={b} t={t}: "
+                    f"max diff {(flat_logits[flat_idx] - step_logits[t][b]).abs().max():.2e}")
+                assert torch.allclose(mu_b[flat_idx], step_mu[t][b],
+                                      atol=1e-5), (f"mu_aim diverges at b={b} t={t}")
+                assert torch.allclose(value_b[flat_idx], step_value[t][b],
+                                      atol=1e-5), (f"value diverges at b={b} t={t}")
+    finally:
+        env.close()
+
+
+def test_policy_forward_bptt_carries_memory():
+    """Two sequences with identical final-tick obs but different histories
+    must produce different final-tick outputs — i.e. forward() actually
+    propagates LSTM state across ticks. Pre-fix (stateless per-tick LSTM)
+    the final-tick outputs are bitwise identical and this test fails."""
+    import torch
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        policy.eval()
+        torch.manual_seed(1)
+        T = 5
+        last_obs = torch.randn(1, train.OBS_DIM)
+        hist_a = torch.zeros(1, T - 1, train.OBS_DIM)
+        hist_b = torch.randn(1, T - 1, train.OBS_DIM)
+        seq_a = torch.cat([hist_a, last_obs.unsqueeze(1)], dim=1)      # (1, T, OBS)
+        seq_b = torch.cat([hist_b, last_obs.unsqueeze(1)], dim=1)
+
+        with torch.no_grad():
+            _, _, _, value_a = policy.forward(seq_a, state={})
+            _, _, _, value_b = policy.forward(seq_b, state={})
+        # Final tick = flat row T-1 (row-major (B=1, T) flatten).
+        diff = (value_a[T - 1] - value_b[T - 1]).abs().max().item()
+        assert diff > 1e-6, (
+            f"final-tick value identical ({diff:.2e}) despite different histories — "
+            f"forward() is not carrying LSTM state across ticks (no BPTT)")
+    finally:
+        env.close()
+
+
+def test_policy_forward_bptt_resets_on_terminal():
+    """state['terminals'] (B, T) must reset the LSTM state at done ticks,
+    mirroring the rollout's (1-done)*state masking in _forward_core. A done
+    at tick k for row 0 means ticks k..T-1 of row 0 must equal a fresh
+    zero-state forward() over just that suffix; rows without dones must be
+    unaffected by the masking path."""
+    import torch
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device='cpu')
+        policy.eval()
+        torch.manual_seed(2)
+        B, T, k = 2, 6, 3
+        x_seq = torch.randn(B, T, train.OBS_DIM)
+        terminals = torch.zeros(B, T)
+        terminals[0, k] = 1.0          # row 0 episode ends before tick k
+
+        with torch.no_grad():
+            _, _, _, value_masked = policy.forward(x_seq, state={"terminals": terminals})
+            # Reference A: row 0's suffix from a fresh zero state.
+            _, _, _, value_suffix = policy.forward(x_seq[0:1, k:, :], state={})
+            # Reference B: the full batch with no terminals at all.
+            _, _, _, value_plain = policy.forward(x_seq, state={})
+
+        for t in range(k, T):
+            assert torch.allclose(
+                value_masked[0 * T + t], value_suffix[t - k],
+                atol=1e-5), (f"row 0 tick {t}: masked output != fresh-suffix output — "
+                             f"terminal reset not applied in BPTT")
+        for t in range(T):
+            assert torch.allclose(
+                value_masked[1 * T + t], value_plain[1 * T + t],
+                atol=1e-5), (f"row 1 tick {t}: no-done row was perturbed by the masking path")
+    finally:
+        env.close()
+
+
+def test_train_path_logprobs_match_rollout():
+    """End-to-end: after one real evaluate() rollout, re-evaluating the FULL
+    buffer through _hybrid_ppo_loss (the exact training-path forward, with
+    state carrying mb_terminals) must reproduce the rollout-stored logprobs
+    and values. This is the importance-ratio==1-at-epoch-start invariant;
+    pre-fix the stateless training forward breaks it by construction."""
+    import torch
+
+    from train import _hybrid_ppo_loss
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=False)
+    try:
+        trainer.evaluate()
+        state = dict(
+            action=trainer.actions,
+            lstm_h=None,
+            lstm_c=None,
+            terminals=trainer.terminals,
+        )
+        with torch.no_grad():
+            _pg, _ent, newvalue, newlogprob, _rd, _rc, _lg = _hybrid_ppo_loss(
+                trainer.policy,
+                trainer.observations,
+                trainer.actions,
+                trainer.cont_actions,
+                trainer.logprobs_d,
+                trainer.logprobs_c,
+                torch.zeros_like(trainer.logprobs),
+                0.15,
+                state,
+                                                                                                   # F8: the harness rollout samples MASKED; re-evaluating the
+                                                                                                   # buffer must use the same stored masks or the logprobs
+                                                                                                   # diverge by construction (that divergence is itself pinned
+                                                                                                   # by test_sampler_and_loss_mask_consistency's control case).
+                mb_masks=trainer.action_masks,
+            )
+        newlogprob = newlogprob.reshape(trainer.logprobs.shape)
+        newvalue = newvalue.reshape(trainer.values.shape)
+        lp_diff = (newlogprob - trainer.logprobs).abs().max().item()
+        v_diff = (newvalue - trainer.values).abs().max().item()
+        assert lp_diff < 1e-3, (f"training-path logprobs diverge from rollout by {lp_diff:.4f} — "
+                                f"PPO ratios != 1 at epoch start (rollout/training LSTM mismatch)")
+        assert v_diff < 1e-3, (f"training-path values diverge from rollout by {v_diff:.4f}")
+    finally:
+        cleanup()
+
+
+# ── F8 (2026-07-06 adversarial review): action-mask consumption ──────────────
+# The C env computed per-agent action masks every tick since Batch 2, but no
+# trainer-path code ever consumed them. F8 threads them through:
+#   compute_masks (C, also at reset)  →  Cs2Env._attach_mask_view shm slice
+#   →  trainer._action_mask_view_main  →  _hybrid_sample_logits(mask=...)
+#   →  trainer.action_masks rollout buffer  →  _hybrid_ppo_loss(mb_masks=...)
+# The tests below pin each contract. The former USE-mask test above was
+# vacuous (N1: asserted the crouch slot); its offset is now derived + pinned.
+
+
+def test_hybrid_sample_logits_respects_masks():
+    """Masked bins must never be sampled, their probability mass must be 0 in
+    log_prob, and a fully-no-op'd (dead-agent-style) row must have discrete
+    entropy exactly 0. Reference distribution: torch Categorical on -inf
+    masked logits (the sampler uses finfo.min/2 instead of -inf to keep
+    entropy NaN-free — same distribution, different fill)."""
+    import torch
+
+    from train import _MASK_HEAD_SLICES, _hybrid_sample_logits
+
+    torch.manual_seed(7)
+    B = 64
+    head_sizes = train.ACTION_HEAD_SIZES
+    mask_dim = sum(head_sizes)
+    logits_list = [torch.randn(B, n) for n in head_sizes]
+    mu_aim = torch.zeros(B, 2)
+    log_std_aim = torch.full((2, ), -2.30)
+
+    # Row 0: dead-agent pattern — only bin 0 of each head valid.
+    # Other rows: random masks with bin 0 always valid (C invariant).
+    mask = (torch.rand(B, mask_dim) > 0.4)
+    for (lo, _hi) in _MASK_HEAD_SLICES:
+        mask[:, lo] = True
+    mask[0] = False
+    for (lo, _hi) in _MASK_HEAD_SLICES:
+        mask[0, lo] = True
+
+    for trial in range(20):
+        action, _cont, lp_d, _lp_c, ent_d, _ent_c = _hybrid_sample_logits(
+            (logits_list, mu_aim, log_std_aim, None),
+            max_turn_speed=0.7853981633974483,
+            mask=mask,
+        )
+        for h, (lo, _hi) in enumerate(_MASK_HEAD_SLICES):
+            picked_valid = mask[torch.arange(B), lo + action[:, h]]
+            assert picked_valid.all(), (f"trial {trial}: head {h} sampled a masked bin at rows "
+                                        f"{(~picked_valid).nonzero().flatten().tolist()}")
+        # Dead-style row: exactly one valid bin per head ⇒ H = 0, action = no-ops.
+        assert (action[0] == 0).all(), f"dead-style row sampled non-no-op: {action[0]}"
+        assert abs(ent_d[0].item()) < 1e-5, f"dead-style row entropy_d={ent_d[0].item()}"
+        assert torch.isfinite(lp_d).all() and torch.isfinite(ent_d).all()
+
+    # log_prob reference vs torch.distributions on -inf-masked logits.
+    fixed_action = action
+    _a, _c, lp_d_eval, _lpc, _ed, _ec = _hybrid_sample_logits(
+        (logits_list, mu_aim, log_std_aim, None),
+        action=fixed_action,
+        continuous_action=_cont,
+        mask=mask,
+    )
+    ref = 0.0
+    for h, (lo, hi) in enumerate(_MASK_HEAD_SLICES):
+        ref_logits = logits_list[h].masked_fill(~mask[:, lo:hi], float("-inf"))
+        ref = ref + torch.distributions.Categorical(logits=ref_logits).log_prob(fixed_action[:, h])
+    assert torch.allclose(lp_d_eval, ref,
+                          atol=1e-5), (f"masked log_prob_d drift vs reference: "
+                                       f"{(lp_d_eval - ref).abs().max().item():.2e}")
+
+
+def test_sampler_and_loss_mask_consistency():
+    """Rollout sampler and PPO-update loss must see the SAME masked
+    distribution: feeding the sampler's (action, logp) back into
+    _hybrid_ppo_loss with the same mb_masks must give ratio ≈ 1 exactly.
+    This is the invariant that breaks silently if masking is applied on one
+    side only (the failure mode the F8 docstrings warn about)."""
+    import torch
+
+    from train import _hybrid_ppo_loss, _hybrid_sample_logits
+
+    torch.manual_seed(11)
+    B = 32
+    head_sizes = train.ACTION_HEAD_SIZES
+    mask_dim = sum(head_sizes)
+    logits_list = [torch.randn(B, n) for n in head_sizes]
+    mu_aim = torch.randn(B, 2) * 0.1
+    log_std_aim = torch.full((2, ), -2.30)
+    value = torch.zeros(B, 1)
+
+    from train import _MASK_HEAD_SLICES
+    mask = (torch.rand(B, mask_dim) > 0.3)
+    for (lo, _hi) in _MASK_HEAD_SLICES:
+        mask[:, lo] = True
+
+    class _StubPolicy:
+
+        def __call__(self, mb_obs, state):
+            return logits_list, mu_aim, log_std_aim, value
+
+    action, cont, lp_d, lp_c, _, _ = _hybrid_sample_logits(
+        (logits_list, mu_aim, log_std_aim, value),
+        max_turn_speed=0.7853981633974483,
+        mask=mask,
+    )
+    pg_loss, entropy, _v, _lp_tot, ratio_d, ratio_c, _lg = _hybrid_ppo_loss(
+        _StubPolicy(),
+        torch.zeros(B, 4),                                                                      # obs unused by the stub
+        action,
+        cont,
+        lp_d,
+        lp_c,
+        torch.randn(B),
+        clip_coef=0.2,
+        state={},
+        mb_masks=mask,
+    )
+    assert torch.allclose(ratio_d, torch.ones(B),
+                          atol=1e-5), (f"ratio_d != 1 with identical mask on both sides: "
+                                       f"max dev {(ratio_d - 1).abs().max().item():.2e}")
+    assert torch.allclose(ratio_c, torch.ones(B), atol=1e-5)
+    assert torch.isfinite(pg_loss).all() and torch.isfinite(entropy).all()
+                                                                                                # F16: the loss returns the logits it computed (7th element) so the
+                                                                                                # trainer skips the redundant diagnostic forward. With mb_masks given
+                                                                                                # they must be the MASKED logits — masked bins pushed to huge negatives.
+    from train import _MASK_HEAD_SLICES as _slices
+    for h, (lo, hi) in enumerate(_slices):
+        head_mask = mask[:, lo:hi]
+        if (~head_mask).any():
+            assert (_lg[h][~head_mask]
+                    < -1e30).all(), (f"head {h}: returned logits not masked — F16 diagnostics "
+                                     f"would report the unmasked distribution")
+
+    # Control: DROP the mask on the loss side → ratios must deviate wherever
+    # a mask bit was 0 (proves the consistency requirement is load-bearing).
+    _pg2, _e2, _v2, _lpt2, ratio_d_unmasked, _rc2, _lg2 = _hybrid_ppo_loss(
+        _StubPolicy(),
+        torch.zeros(B, 4),
+        action,
+        cont,
+        lp_d,
+        lp_c,
+        torch.randn(B),
+        clip_coef=0.2,
+        state={},
+        mb_masks=None,
+    )
+    assert not torch.allclose(ratio_d_unmasked, torch.ones(B), atol=1e-3), (
+        "unmasked loss over masked rollout produced ratio 1 — mask had no "
+        "distributional effect; test premises are broken")
+
+
+def test_env_publishes_masks_after_reset_and_step():
+    """Cs2Env._attach_mask_view + the step()/reset() copy-out: the shm slice
+    must mirror _masks_view after reset (fresh spawn masks — the pre-F8 code
+    had NO mask computation at reset at all) and after a step that kills an
+    agent (dead row = per-head no-ops, the C invariant the sampler needs)."""
+    from multiprocessing import RawArray
+
+    from _action_spec import ACTION_MASK_DIM
+
+    env = train.make_puffer_env(seed=0)
+    try:
+        n_agents = 10
+        shm = RawArray("b", n_agents * ACTION_MASK_DIM)
+        env._attach_mask_view(shm, 0)
+        view = np.frombuffer(shm, dtype=np.int8).reshape(n_agents, ACTION_MASK_DIM)
+
+        env.reset()
+        assert (view == env._masks_view).all(), "shm != _masks_view after reset"
+        assert view.sum() > n_agents, (
+            "masks after reset look empty — env_reset no longer calls compute_masks?")
+        # All agents alive at spawn: move head fully valid.
+        assert view[:, :9].all(), "alive agents should have the full move head valid"
+
+        g = env._c_env.game
+        g.agents[0].hp = 0
+        g.agents[0].alive = 0
+        actions = np.zeros((n_agents, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        env.step(actions)
+        assert (view == env._masks_view).all(), "shm != _masks_view after step"
+        offs = np.cumsum((0, ) + tuple(train.ACTION_HEAD_SIZES))[:-1]
+        dead = view[0]
+        assert dead.sum() == len(train.ACTION_HEAD_SIZES), (
+            f"dead agent should have exactly one valid bin per head, got {dead.tolist()}")
+        assert all(dead[o] == 1
+                   for o in offs), (f"dead agent per-head no-ops not set: {dead.tolist()}")
+    finally:
+        env.close()
+
+
+# ── F13 (2026-07-06 adversarial review): USE counter wired ───────────────────
+def test_action_use_counter_wired():
+    """action_use was declared + exported since Batch 2 but had NO writer in C
+    (USE is processed in process_bomb, which never called count_action) — the
+    W&B metric was permanently 0 and misleading when diagnosing plant
+    behaviour. Now counted like every other head: intent of alive agents.
+    (action_last was removed outright: no head, no writer, dead legacy.)"""
+    env = train.make_puffer_env(seed=0)
+    try:
+        env.reset()
+        use_head = list(train.ACTION_HEAD_NAMES).index("use")
+        acts = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        acts[:, use_head] = 1
+        for _ in range(5):
+            env.step(acts)
+        ss = env._c_env.step_stats
+        es = env._c_env.episode_stats
+        alive = sum(1 for i in range(10) if env._c_env.game.agents[i].alive)
+        assert list(ss.action_use) == [
+            0, alive
+        ], (f"per-tick USE counter wrong: {list(ss.action_use)} (alive={alive})")
+        assert list(es.action_use) == [0, 5 * alive
+                                       ], (f"episode USE counter wrong: {list(es.action_use)}")
+        info = env._build_terminal_info()
+        assert "action_use_1" in info and "action_last_0" not in info, (
+            "terminal info should export action_use_* and no longer export action_last_*")
+    finally:
+        env.close()
+
+
+# ── F9 (2026-07-06 adversarial review): strafe labels match geometry ─────────
+def test_strafe_labels_match_geometry():
+    """With facing = 0 (+X) in this x-east/y-north, CCW-yaw frame:
+    W (bin 1) must move +X, D (bin 3, 'right') must move -Y (clockwise
+    perpendicular = geometric right), A (bin 7, 'left') +Y, S (bin 5) -X.
+    The pre-F9 basis rotated the strafe axis CCW, so A/D were mirrored vs
+    their labels — invisible to self-play (relabeling-invariant) but wrong
+    for scripted experts, BC demos, and deploy key export."""
+    import math
+
+    from c_env.cs2_env import make_env
+
+    env = make_env(seed=0, auto_reset=False)
+    try:
+        g = env._c_env.game
+        sd = env._c_env.sd.contents
+        # An open bombsite-area centroid (R4 recipe) — flat, no walls nearby.
+        id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
+        open_area = next(aid for aid in env.map_data.area_ids
+                         if sd.bombsite_by_idx[id2idx[int(aid)]])
+        cx, cy = env.map_data.centroids[open_area][:2]
+
+        expected = {1: 0.0, 3: -90.0, 5: 180.0, 7: 90.0}                                      # bin → world angle (deg)
+        for move_bin, want_deg in expected.items():
+            env.reset()
+            a = g.agents[0]
+            a.alive, a.hp = 1, 100
+            a.x, a.y, a.z = float(cx), float(cy), 0.0
+            a.area_idx = id2idx[int(open_area)]
+            a.facing = 0.0
+            a.aim_rad = 0.0
+            a.vx = a.vy = a.vz = 0.0
+            acts = np.zeros((10, 7), dtype=np.int64)
+            acts[0, 0] = move_bin
+            env.step(acts)
+            speed = math.hypot(a.vx, a.vy)
+            assert speed > 1.0, f"bin {move_bin}: agent did not move (v={a.vx},{a.vy})"
+            got_deg = math.degrees(math.atan2(a.vy, a.vx))
+            diff = (got_deg - want_deg + 180.0) % 360.0 - 180.0
+            assert abs(diff) < 1.0, (
+                f"bin {move_bin}: velocity angle {got_deg:.1f}° != expected {want_deg:.1f}° "
+                f"(A/D strafe basis regressed — see F9)")
+    finally:
+        env.close()
+
+
+# ── F10 (2026-07-06 adversarial review): enemy-slot sort must not leak ───────
+def test_enemy_slot_sort_does_not_leak_invisible_rank():
+    """Enemy obs slots are distance-sorted, but the sort key must only use
+    information the policy legitimately has: true distance when visible,
+    last-known memory position when not, sentinel-far otherwise. Pre-F10 the
+    key was the TRUE distance for all 5 enemies unconditionally, so an unseen
+    enemy walking closer visibly reordered the slots (rank leak).
+
+    Invisibility here is forced via area_idx = -1 — build_vis_matrix
+    short-circuits off-mesh agents to can_see=0 regardless of position."""
+    from _obs_spec import OBS_BLOCKS, OBS_ENEMY_STRIDE
+    from c_env.cs2_env import make_env
+
+    env = make_env(seed=0, auto_reset=False)
+    try:
+        g = env._c_env.game
+        obs_view = env._obs_view
+        enemy_base = OBS_BLOCKS["enemy"][0]
+        observer = g.agents[0]         # T slot 0; enemies are 5-9
+
+        def slot_flags():
+            """(can_see, alive) per enemy obs slot of agent 0."""
+            return [(int(obs_view[0, enemy_base + s * OBS_ENEMY_STRIDE + 3]),
+                     int(obs_view[0, enemy_base + s * OBS_ENEMY_STRIDE + 4])) for s in range(5)]
+
+        env.reset()
+        # Wipe observer's enemy memory so the sentinel branch is exercised.
+        for m in range(5):
+            observer.enemy_mem_idx[m] = -1             # INVALID_AREA_IDX
+                                                       # Enemy 5: alive, ON-mesh, right next to the observer (trivial LoS).
+        vis_enemy = g.agents[5]
+        vis_enemy.alive, vis_enemy.hp = 1, 100
+        vis_enemy.x, vis_enemy.y = observer.x + 40.0, observer.y
+        vis_enemy.area_idx = observer.area_idx
+                                                       # Enemies 6-9: alive but OFF-mesh (area_idx=-1 → can_see forced 0).
+                                                       # Enemy 6 sits CLOSER than the visible one — pre-F10 it stole slot 0.
+        for j in range(6, 10):
+            g.agents[j].alive, g.agents[j].hp = 1, 100
+            g.agents[j].area_idx = -1
+            g.agents[j].x, g.agents[j].y = observer.x + 500.0, observer.y
+        g.agents[6].x = observer.x + 5.0
+
+        acts = np.zeros((10, 7), dtype=np.int64)
+        env.step(acts)
+        flags = slot_flags()
+        assert flags[0] == (1, 1), (
+            f"slot 0 must hold the VISIBLE enemy (can_see=1); got slots {flags} — "
+            f"a closer invisible enemy outranked it (F10 leak)")
+        assert all(cs == 0 for cs, _ in flags[1:]), f"only one enemy is visible: {flags}"
+
+        # Unseen movement must not reorder: drag the invisible enemy through
+        # the observer and re-step several times — slot 0 stays the visible one.
+        for new_dx in (2.0, 1.0, 0.5):
+            g.agents[6].x = observer.x + new_dx
+            env.step(acts)
+            assert slot_flags()[0] == (1, 1), (
+                f"invisible enemy at dx={new_dx} reordered the slots — rank leak")
     finally:
         env.close()

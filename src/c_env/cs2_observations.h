@@ -14,13 +14,41 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
         map_diag = sqrtf(xr * xr + yr * yr);
     }
 
+    /* Batch 6 Task 2.5 (spec R9/D4): per-agent nearest bombsite-area centroid,
+     * found in ONE pass over the nav areas (outside the agent loop) instead of
+     * a per-agent scan. No fixed-size site list: dust2 flags 530 bombsite
+     * areas (285 A + 245 B), so any "sites are few" cap assumption breaks.
+     * Cost: N flag checks + n_sites×N_AGENTS distance updates per tick.
+     * best_site == -1 ⇔ the map has no bombsite (slots then stay 0). */
+    int   best_site[N_AGENTS];
+    float best_site_d2[N_AGENTS];
+    for (int i = 0; i < N_AGENTS; i++) {
+        best_site[i]    = -1;
+        best_site_d2[i] = 1e30f;
+    }
+    for (int k = 0; k < sd->N; k++) {
+        if (!sd->bombsite_by_idx[k])
+            continue;
+        float cx = sd->centroid_xy[k * 2];
+        float cy = sd->centroid_xy[k * 2 + 1];
+        for (int i = 0; i < N_AGENTS; i++) {
+            AgentState* ai = &g->agents[i];
+            float       dx = cx - ai->x, dy = cy - ai->y;
+            float       d2 = dx * dx + dy * dy;
+            if (d2 < best_site_d2[i]) {
+                best_site_d2[i] = d2;
+                best_site[i]    = k;
+            }
+        }
+    }
+
     for (int i = 0; i < N_AGENTS; i++) {
         float*      obs = &env->observations[i * OBS_DIM];
         AgentState* a   = &g->agents[i];
 
         memset(obs, 0, OBS_DIM * sizeof(float));
 
-        /* ── Self state (0-24) ── */
+        /* ── Self state (0-27; +25..+27 are the Batch 6 goal-direction slots) ── */
         int              slot = a->weapon_slot;
         const WeaponDef* def  = &WEAPON_DEFS[slot];
         obs[0]                = a->hp / 100.0f;
@@ -67,14 +95,43 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
         obs[23] = (float)a->alive;
         obs[24] = (float)(a->team == 0);
 
-        /* ── Teammates (25-52): 4 × 7 ── */
+        /* ── Goal direction (Batch 6 Task 2.5, spec R9/D4): slots +25..+27 ──
+         * [sin(rel_bearing), cos(rel_bearing), xy_dist/map_diag] to the
+         * Euclidean-NEAREST bombsite area centroid, where
+         *   rel_bearing = wrap_pi(atan2(site_y - y, site_x - x) - facing).
+         * Why: without a goal-direction slot a BC clone must memorize
+         * absolute-position → direction over the whole map (spec R9); with it,
+         * "turn until sin≈0 with cos>0, then walk" generalizes off the
+         * demonstrated routes. sin/cos pair (not a normalized angle) matches
+         * every other angle encoding in this file and stays continuous when
+         * the site is directly behind. Sign: rel_bearing > 0 ⇔ site is
+         * counter-clockwise of facing ⇔ positive Δyaw turns toward it.
+         * Written for ALL agents (CTs know the map too), dead or alive, same
+         * as the rest of the self block.
+         * Pitfalls: straight-line XY bearing may point through a wall (the
+         * policy/expert still routes via nav); at the exact centroid
+         * atan2f(0,0)=0 makes bearing meaningless — but dist≈0 there, which is
+         * the "arrived" signal; distance uses the same map_diag half-diagonal
+         * normalizer as the teammate/enemy dx/dy/dist slots. */
+        if (best_site[i] >= 0) {
+            float bx  = sd->centroid_xy[best_site[i] * 2] - a->x;
+            float by  = sd->centroid_xy[best_site[i] * 2 + 1] - a->y;
+            float rel = wrap_pi(atan2f(by, bx) - a->facing);
+
+            obs[OBS_SELF_BASE + 25] = sinf(rel);
+            obs[OBS_SELF_BASE + 26] = cosf(rel);
+            obs[OBS_SELF_BASE + 27] = (map_diag > 0.0f) ? sqrtf(best_site_d2[i]) / map_diag : 0.0f;
+        }
+        /* No bombsite on the map: slots stay 0 from memset. */
+
+        /* ── Teammates (OBS_TEAMMATE_BASE ..): 4 × 7 ── */
         int tm_start = (a->team == 0) ? 0 : TEAM_SIZE;
         int tm_count = 0;
         for (int j = tm_start; j < tm_start + TEAM_SIZE && tm_count < 4; j++) {
             if (j == i)
                 continue;
             AgentState* tm   = &g->agents[j];
-            int         base = 25 + tm_count * 7;
+            int         base = OBS_TEAMMATE_BASE + tm_count * OBS_TEAMMATE_STRIDE;
             if (tm->alive) {
                 float dx = tm->x - a->x, dy = tm->y - a->y;
                 obs[base + 0] = (map_diag > 0.0f) ? dx / map_diag : 0.0f;
@@ -93,16 +150,38 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
             tm_count++;
         }
 
-        /* ── Enemies (53-92): 5 × 8 ── */
+        /* ── Enemies (OBS_ENEMY_BASE ..): 5 × 8 ── */
         int en_start = (a->team == 0) ? TEAM_SIZE : 0;
-        /* Sort by distance — simple insertion sort over 5 elements */
+        /* Sort by KNOWN distance — insertion sort over 5 elements.
+         * F10 (2026-07-06 adversarial review): the key used to be the TRUE
+         * distance for all 5 enemies unconditionally, so slot order (and
+         * per-slot flag churn) leaked the rank of enemies the agent could
+         * not see — an unseen enemy walking closer would reorder the slots.
+         * The key now uses only information the policy legitimately has:
+         *   visible enemy          → true squared distance,
+         *   invisible w/ memory    → squared distance to LAST-KNOWN centroid
+         *                            (the same position the obs slot emits),
+         *   invisible, no memory   → 1e30f sentinel (sorted last; insertion
+         *   (incl. dead: can_see=0)  sort is stable ⇒ ties keep index order).
+         * Dead enemies always have can_see=0 (see the slot loop below), so
+         * they rank by stale memory or the sentinel — never by their true
+         * corpse position. */
         int   order[TEAM_SIZE];
         float dists[TEAM_SIZE];
         for (int s = 0; s < TEAM_SIZE; s++) {
-            order[s]       = en_start + s;
-            AgentState* en = &g->agents[order[s]];
-            float       dx = en->x - a->x, dy = en->y - a->y;
-            dists[s] = dx * dx + dy * dy;
+            order[s]        = en_start + s;
+            AgentState* en  = &g->agents[order[s]];
+            int         ecs = en->alive ? vis10[i][order[s]] : 0;
+            if (ecs) {
+                float dx = en->x - a->x, dy = en->y - a->y;
+                dists[s] = dx * dx + dy * dy;
+            } else if (a->enemy_mem_idx[s] != INVALID_AREA_IDX) {
+                float mx = sd->centroid_xy[a->enemy_mem_idx[s] * 2] - a->x;
+                float my = sd->centroid_xy[a->enemy_mem_idx[s] * 2 + 1] - a->y;
+                dists[s] = mx * mx + my * my;
+            } else {
+                dists[s] = 1e30f;
+            }
         }
         for (int s = 1; s < TEAM_SIZE; s++) {
             int   ko = order[s];
@@ -119,7 +198,7 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
         for (int slot2 = 0; slot2 < TEAM_SIZE; slot2++) {
             int         ej      = order[slot2];
             AgentState* en      = &g->agents[ej];
-            int         base    = 53 + slot2 * 8;
+            int         base    = OBS_ENEMY_BASE + slot2 * OBS_ENEMY_STRIDE;
             int         mem_s   = ej - en_start;
             int         can_see = en->alive ? vis10[i][ej] : 0;
 
@@ -153,41 +232,47 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
             }
         }
 
-        /* ── Global / bomb (93-106) ── */
-        obs[93] = g->round_ticks_left / (float)sd->round_time;
-        /* bomb status one-hot (94-97) */
+        /* ── Global / bomb block: obs[OBS_GLOBAL_BASE + 0 .. +13] ──
+         * Written base-relative (not bare 93..106) so the whole block shifts
+         * automatically if an upstream block (self/teammate/enemy) is resized.
+         * Slot map: +0 round-time · +1..4 bomb one-hot · +5,6 bomb xy ·
+         * +7 bomb-z placeholder · +8 bomb timer · +9 plant · +10 defuse ·
+         * +11 t_alive · +12 ct_alive · +13 designated-carrier bit. */
+        int gb      = OBS_GLOBAL_BASE;
+        obs[gb + 0] = g->round_ticks_left / (float)sd->round_time;
+        /* bomb status one-hot (+1..+4) */
         int carrier = g->bomb_carrier_id;
         if (!g->bomb_planted && !g->bomb_is_dropped) {
             if (carrier == i)
-                obs[94] = 1.0f; /* carried by self */
+                obs[gb + 1] = 1.0f; /* carried by self */
             else if (carrier >= 0 && a->team == 0)
-                obs[95] = 1.0f; /* carried by teammate */
+                obs[gb + 2] = 1.0f; /* carried by teammate */
         } else if (g->bomb_is_dropped) {
-            obs[96] = 1.0f;
+            obs[gb + 3] = 1.0f;
         } else if (g->bomb_planted) {
-            obs[97] = 1.0f;
+            obs[gb + 4] = 1.0f;
         }
-        /* bomb position (98-100) */
+        /* bomb position (+5,+6) */
         if (g->bomb_planted || g->bomb_is_dropped) {
             float bx = g->bomb_x - a->x, by = g->bomb_y - a->y;
-            obs[98] = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
-            obs[99] = (map_diag > 0.0f) ? by / map_diag : 0.0f;
+            obs[gb + 5] = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
+            obs[gb + 6] = (map_diag > 0.0f) ? by / map_diag : 0.0f;
         } else if (carrier >= 0 && a->team == 0 && carrier != i) {
             /* Teammate carrying: show their position */
-            float bx = g->agents[carrier].x - a->x;
-            float by = g->agents[carrier].y - a->y;
-            obs[98]  = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
-            obs[99]  = (map_diag > 0.0f) ? by / map_diag : 0.0f;
+            float bx    = g->agents[carrier].x - a->x;
+            float by    = g->agents[carrier].y - a->y;
+            obs[gb + 5] = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
+            obs[gb + 6] = (map_diag > 0.0f) ? by / map_diag : 0.0f;
         }
         /* Bomb z deferred — out of scope for T4 (spec L4 covers teammate/enemy
          * z-delta only).  Bomb z would require obs version contract for plug-in.
          * See gh #(filed) for the bomb-z-aware obs follow-up. */
-        obs[100] = 0.0f; /* bomb z placeholder (intentionally constant pre-followup) */
-        obs[101] = g->bomb_planted ? g->bomb_ticks_left / (float)sd->bomb_timer : 0.0f;
-        obs[102] = (g->bomb_being_planted_by >= 0 && sd->bomb_plant_time > 0)
-                       ? g->bomb_plant_ticks / (float)sd->bomb_plant_time
-                       : 0.0f;
-        /* obs[103]: defuse progress — extract to avoid GCC statement-expression */
+        obs[gb + 7] = 0.0f; /* bomb z placeholder (intentionally constant pre-followup) */
+        obs[gb + 8] = g->bomb_planted ? g->bomb_ticks_left / (float)sd->bomb_timer : 0.0f;
+        obs[gb + 9] = (g->bomb_being_planted_by >= 0 && sd->bomb_plant_time > 0)
+                          ? g->bomb_plant_ticks / (float)sd->bomb_plant_time
+                          : 0.0f;
+        /* +10: defuse progress — extract to avoid GCC statement-expression */
         {
             float defuse_prog = 0.0f;
             if (g->bomb_being_defused_by >= 0) {
@@ -196,17 +281,17 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
                 if (dtime > 0)
                     defuse_prog = g->bomb_defuse_ticks / (float)dtime;
             }
-            obs[103] = defuse_prog;
+            obs[gb + 10] = defuse_prog;
         }
-        obs[104] = t_alive / (float)TEAM_SIZE;
-        obs[105] = ct_alive / (float)TEAM_SIZE;
+        obs[gb + 11] = t_alive / (float)TEAM_SIZE;
+        obs[gb + 12] = ct_alive / (float)TEAM_SIZE;
 
         /* Batch 2: round-fixed designated-carrier role bit (T-side semantic).
          * 1.0 only when this agent is the round's designated bomb carrier
          * (set in env_reset, never reassigned). Distinct from obs[22]
          * (transient self-has-bomb) — gives the policy a stable identity
          * signal that survives drop/pickup. CT agents always read 0.0. */
-        obs[106] = (a->team == 0 && i == g->round_designated_carrier_id) ? 1.0f : 0.0f;
+        obs[gb + 13] = (a->team == 0 && i == g->round_designated_carrier_id) ? 1.0f : 0.0f;
 
         /* Clip all obs to (-5, 5) */
         for (int k = 0; k < OBS_DIM; k++) {

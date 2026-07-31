@@ -220,11 +220,11 @@ class StepStatsC(ctypes.Structure):
         ("action_move", ctypes.c_int32 * 9),
         ("action_shoot", ctypes.c_int32 * 2),
         ("action_use", ctypes.c_int32 * 2),
-        ("action_last", ctypes.c_int32 * 2),
+                                                       # action_last removed (F13) — dead legacy counter, see cs2_types.h.  # noqa: E501
                                                        # Batch 3: continuous-aim Δyaw stats (mirror C StepStats fields).  # noqa: E501
                                                        # Replaces the 16-bin action_aim histogram (64B) with a Welford-style  # noqa: E501
                                                        # triple (sum + sq_sum + count = 12B). No explicit _pad_aim_delta —  # noqa: E501
-                                                       # the three int32-aligned fields slot in cleanly between action_last  # noqa: E501
+                                                       # the three int32-aligned fields slot in cleanly between action_use  # noqa: E501
                                                        # and action_reload. See cs2_types.h StepStats comment.  # noqa: E501
         ("aim_delta_sum", ctypes.c_float),
         ("aim_delta_sq_sum", ctypes.c_float),
@@ -317,14 +317,18 @@ class Dust2EnvC(ctypes.Structure):
 # surprises are routine; values updated below to match observed sizeof.
 # Batch 3.5: AgentStateC +4 (float pitch), GameStateC +40 (×10 agents),
 # Dust2EnvC +40 (GameState) +80 (observations: 10×(107−105)×4).
+# Batch 6 Task 2.5: OBS_DIM 107 → 110 (bombsite bearing/distance in self
+# block) — Dust2EnvC observations +120 (10×3×4); agent/game/stats unchanged.
 assert ctypes.sizeof(AgentStateC) == 156, (
     f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 156)")
 assert ctypes.sizeof(GameStateC) == 1628, (
     f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1628)")
-assert ctypes.sizeof(StepStatsC) == 208, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 208)")
-assert ctypes.sizeof(Dust2EnvC) == 6632, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6632)")
+# F13: 208→200 / 6752→6736 after removing the dead action_last[2] counter
+# (Dust2Env embeds TWO StepStats — step + episode — hence the −16).
+assert ctypes.sizeof(StepStatsC) == 200, (
+    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 200)")
+assert ctypes.sizeof(Dust2EnvC) == 6736, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6736)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -365,7 +369,11 @@ class Cs2Env(pufferlib.PufferEnv):
             pbrs_bomb_progress_weight=0.3,
             pbrs_nav_weight_t=0.04,
             pbrs_nav_weight_ct=0.15,
-            pbrs_gamma=0.99,
+                                                                                # MUST equal the training discount (build_train_config "gamma") —  # noqa: E501
+                                                                                # PBRS F(s,s') = γ_pbrs·φ(s') − φ(s) is policy-invariant only when  # noqa: E501
+                                                                                # γ_pbrs == γ (finding 2, 2026-07-06 review; was 0.99 vs 0.999).  # noqa: E501
+                                                                                # Drift-guarded by test_pbrs_gamma_matches_training_gamma.  # noqa: E501
+            pbrs_gamma=0.999,
                                                                                 # Batch 1 (RL overhaul): per-outcome win magnitudes.  # noqa: E501
                                                                                 # These supersede the symmetric reward_win at round end.  # noqa: E501
                                                                                 # Defaults chosen to make detonation/defuse > timeout > elimination.  # noqa: E501
@@ -592,6 +600,15 @@ class Cs2Env(pufferlib.PufferEnv):
         # caller passes it transiently (it is also kept alive on the trainer
         # side, but defensive double-anchoring is cheap).
         self._cont_action_shm_ref = None
+        # F8 (2026-07-06 adversarial review): outbound action-mask view.
+        # Reverse direction of the cont-action shm — the ENV writes, the
+        # TRAINER reads. When _attach_mask_view() installs a view onto a
+        # parent-process RawArray, step()/reset() copy the C-computed masks
+        # (self._masks_view) into it so the trainer can mask sampling for the
+        # obs it just received. None (default) = no copy, zero cost — legacy
+        # callers and tests that read env._masks_view directly are unaffected.
+        self._mask_out_view = None
+        self._mask_shm_ref = None
         self._terminal_rewards = np.empty(N_AGENTS, dtype=np.float32)
         self._terminal_terminals = np.empty(N_AGENTS, dtype=bool)
         self._terminal_truncations = np.empty(N_AGENTS, dtype=bool)
@@ -618,6 +635,10 @@ class Cs2Env(pufferlib.PufferEnv):
         self._sync_team_spirit()
         binding.reset(self._capsule)
         self._sync_outputs()
+        if self._mask_out_view is not None:
+            # F8: env_reset recomputes masks in C; publish them so the trainer
+            # masks the very first sample of the episode too.
+            np.copyto(self._mask_out_view, self._masks_view)
         return self.observations, self._empty_infos
 
     def step(self, actions, continuous_actions=None):
@@ -663,6 +684,12 @@ class Cs2Env(pufferlib.PufferEnv):
             # Task 6a: non-terminal tick — return the pre-built singleton info list
             # (no per-tick allocation; the StepStatsView proxies the live struct).
             infos = self._nonterminal_infos
+        if self._mask_out_view is not None:
+            # F8: publish the masks for the observation being returned. On the
+            # auto-reset branch binding.reset already recomputed masks for the
+            # fresh spawn state (env_reset calls compute_masks), so this copy
+            # is correct in both the mid-round and the round-rollover case.
+            np.copyto(self._mask_out_view, self._masks_view)
         return self.observations, rewards, terminals, truncations, infos
 
     def set_team_spirit(self, value: float):
@@ -753,6 +780,29 @@ class Cs2Env(pufferlib.PufferEnv):
         self._cont_action_view = flat.reshape(self._cont_actions_shape)
         self._cont_action_shm_ref = raw_shm
 
+    def _attach_mask_view(self, raw_shm, env_idx):
+        """Attach the outbound action-mask shm slice (F8, env→trainer direction).
+
+        Mirror image of ``_attach_cont_action_view``: the trainer allocates one
+        ``multiprocessing.RawArray('b', num_envs * N_AGENTS * ACTION_MASK_DIM)``
+        BEFORE forking workers; each env carves out its (N_AGENTS,
+        ACTION_MASK_DIM) int8 slice and copies the C-side masks into it at the
+        end of every step()/reset(). The trainer's main-process view over the
+        same bytes is read right after vecenv.recv() — by which point the
+        worker has finished its step, so the masks always correspond to the
+        observation batch just received (recv is the synchronisation point).
+
+        Pitfall: sizing is the caller's job, exactly as for the cont-action
+        attach — ``raw_shm`` must hold at least (env_idx+1)*N_AGENTS*
+        ACTION_MASK_DIM bytes.
+        """
+        if raw_shm is None:
+            return
+        per_env = N_AGENTS * ACTION_MASK_DIM
+        flat = np.frombuffer(raw_shm, dtype=np.int8, count=per_env, offset=env_idx * per_env)
+        self._mask_out_view = flat.reshape(N_AGENTS, ACTION_MASK_DIM)
+        self._mask_shm_ref = raw_shm
+
     def _prepare_continuous_actions(self, cont):
         """Coerce caller-supplied Δyaw buffer to (N_AGENTS, AIM_DIM) float32 contiguous.
 
@@ -815,7 +865,8 @@ class Cs2Env(pufferlib.PufferEnv):
         for idx in range(2):
             summary[f"action_shoot_{idx}"] = int(stats.action_shoot[idx])
             summary[f"action_use_{idx}"] = int(stats.action_use[idx])
-            summary[f"action_last_{idx}"] = int(stats.action_last[idx])
+            # action_last_* removed (F13): the counter had no writer and no
+            # corresponding action head — it exported permanent zeros.
         # Batch 3: continuous-aim stats — emit Welford triple instead of
         # 16-bin histogram. Consumers that previously summed action_aim_*
         # to derive total turns should now use aim_delta_count; mean/var
@@ -889,9 +940,9 @@ def make_env(
         pbrs_bomb_progress_weight=0.3,
         pbrs_nav_weight_t=0.04,
         pbrs_nav_weight_ct=0.15,
-        pbrs_gamma=0.99,
+        pbrs_gamma=0.999,                                              # must equal training gamma — see Cs2Env.__init__ note
                                                                        # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).  # noqa: E501
-        reward_win_t_detonation=5.0,
+    reward_win_t_detonation=5.0,
         reward_win_t_elimination=3.0,
         reward_win_ct_defuse=5.0,
         reward_win_ct_timeout=4.0,

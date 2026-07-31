@@ -24,6 +24,27 @@ static void process_bomb(Dust2Env*      env,
         }
     }
 
+    /* Planter invalidation on death (finding 7, 2026-07-06 adversarial
+     * review). Without this, a planter dying mid-plant left
+     * bomb_being_planted_by frozen on the dead index; the `== -1` / `== i`
+     * guards below then rejected every subsequent carrier and planting was
+     * bricked for the rest of the round. Mirrors the defuser block above,
+     * with two DELIBERATE differences: (a) only death/bomb-loss invalidates
+     * — USE release keeps the pause-not-reset semantics of the plant branch
+     * (the defuser resets on release; the planter does not); (b) progress
+     * resets to 0 so the next planter starts fresh instead of inheriting
+     * ticks it didn't earn (keeps per-tick plant-progress reward accounting
+     * coherent). !has_bomb is defensive: you cannot be planting a bomb you
+     * no longer hold (death->drop is the only current path here). No
+     * plant_interrupted penalty on death — dying is already penalized. */
+    if (!g->round_over && g->bomb_being_planted_by != -1) {
+        AgentState* pl = &g->agents[g->bomb_being_planted_by];
+        if (!pl->alive || !pl->has_bomb) {
+            g->bomb_being_planted_by = -1;
+            g->bomb_plant_ticks      = 0;
+        }
+    }
+
     if (!g->round_over) {
         for (int i = 0; i < N_AGENTS; i++) {
             AgentState* a = &g->agents[i];

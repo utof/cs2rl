@@ -30,11 +30,17 @@ import numpy as np
 from _action_spec import (
     ACTION_HEAD_NAMES,
     ACTION_HEAD_SIZES,
+    ACTION_MASK_DIM,                   # F8: trainer-side mask buffer width (= sum of head sizes)
     AIM_DIM,                           # noqa: F401  T4→T5 carry-forward (M-1): T6 ONNX exporter consumes this
 )                                      # from cs2_types.h
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 
-OBS_DIM = 107                          # Batch 3.5 (#24): mirrors nav.OBS_DIM; tests cross-check the two via tests/test_train_env.py:873.
+# MUST stay a bare integer literal: scripts/exp_lib.py fingerprints the env by
+# regex-grepping `OBS_DIM = <int>` out of this file's source text (env_fingerprint),
+# so it cannot be an `import`. Mirrors nav.OBS_DIM / _obs_spec.OBS_DIM (generated
+# from cs2_types.h); the three are cross-checked by tests/test_train_env.py:873.
+# On an OBS_DIM bump, update cs2_types.h + rerun the generator, then bump this literal.
+OBS_DIM = 110
 
 # Batch 3 (continuous aim H-PPO): state-independent log_std parameter
 # for the Gaussian aim head. σ_init = 0.1 rad ≈ 5.7° matches mega-spec
@@ -51,6 +57,44 @@ LOG_STD_MAX = math.log(0.5)
 # Fix #2: precomputed log(2π) for the analytic Normal log-prob/entropy
 # replacing torch.distributions.Normal in _hybrid_sample_logits.
 _LOG_2PI = math.log(2.0 * math.pi)
+
+# F8 (2026-07-06 adversarial review): per-head [start, end) column ranges of
+# the flat (ACTION_MASK_DIM,) action-mask row, derived from ACTION_HEAD_SIZES
+# exactly like the C side derives moff[] in compute_masks (cs2_env.h). Layout
+# at time of writing: move 0-8, shoot 9-10, reload 11-12, weapon 13-15,
+# use 16-17, crouch 18-19, jump 20-21.
+_MASK_HEAD_SLICES = []
+_off = 0
+for _sz in ACTION_HEAD_SIZES:
+    _MASK_HEAD_SLICES.append((_off, _off + _sz))
+    _off += _sz
+del _off, _sz
+
+
+def _apply_action_masks(logits_list, mask):
+    """Mask invalid action bins out of the per-head logits (F8).
+
+    mask : (B, ACTION_MASK_DIM) bool/int8 tensor, 1 = valid — the C-computed
+    masks from cs2_env.h compute_masks, sliced per head via _MASK_HEAD_SLICES.
+    Invalid bins are filled with finfo.min/2, NOT -inf: after log_softmax the
+    masked log-prob stays FINITE (≈ dtype-min/2, since any real logit is
+    negligible against it), so entropy terms are exactly p·logp = 0·finite = 0
+    instead of 0·(-inf) = NaN. exp(min/2 - lse) underflows to exactly 0, so
+    multinomial can never draw a masked bin. The C side guarantees ≥1 valid
+    bin per head per agent (dead agents get per-head no-ops), so the masked
+    softmax is always well-defined — do NOT relax that invariant in C without
+    revisiting this function.
+
+    Returns a NEW list; input logits are not mutated (callers may hold them).
+    """
+    import torch
+
+    masked = []
+    for (lo, hi), lg in zip(_MASK_HEAD_SLICES, logits_list, strict=True):
+        head_valid = mask[..., lo:hi] != 0
+        fill = torch.finfo(lg.dtype).min / 2
+        masked.append(lg.masked_fill(~head_valid, fill))
+    return masked
 
 
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
@@ -114,7 +158,41 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "prio_beta0": 1.0,
         "vtrace_rho_clip": 1.0,
         "vtrace_c_clip": 1.0,
+                                                       # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
+                                                       # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
+                                                       # warmup_steps, held constant after; consumed by the SAC-style α
+                                                       # controller via _scheduled_target_entropy. Previous hardcoded values
+                                                       # (0.7→0.5) kept the target so high the controller steered the policy
+                                                       # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
+                                                       # ≈ 2.87 nats still allows broad exploration but permits commitment.
+                                                       # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
+                                                       # _patch_trainer_with_return_norm clamps α ≥ 0.5 when H < 0.3·max;
+                                                       # a base target below the floor would make the two mechanisms fight.
+        "entropy_target_warmup_frac": 0.5,
+        "entropy_target_base_frac": 0.35,
+        "entropy_target_warmup_steps": 10_000_000,
     }
+
+
+def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> float:
+    """Config-driven entropy target for the SAC-style α controller.
+
+    Single source for both the patch-time seed and the per-train()-call
+    recompute in _patch_trainer_with_return_norm — keeping them identical
+    means a checkpoint-resumed trainer seeds at its true scheduled value
+    instead of a hardcoded warmup constant. `config` is anything with
+    .get() (PuffeRL config or a plain dict); missing keys fall back to the
+    build_train_config defaults so harness/older-checkpoint configs keep
+    working.
+    """
+    from train_helpers_batch1 import target_entropy_schedule
+    return target_entropy_schedule(
+        global_step,
+        max_entropy,
+        warmup_end=config.get("entropy_target_warmup_steps", 10_000_000),
+        warmup_high_frac=config.get("entropy_target_warmup_frac", 0.5),
+        base_frac=config.get("entropy_target_base_frac", 0.35),
+    )
 
 
 def resolve_run_name(name: str) -> str:
@@ -185,7 +263,8 @@ def make_puffer_env(team_spirit=None,
                     seed=0,
                     episode_stats=True,
                     map_data=None,
-                    include_step_stats_in_info=False):
+                    include_step_stats_in_info=False,
+                    pbrs_gamma=None):
     """Create the native C PufferEnv used by smoke/train/eval.
 
     ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
@@ -193,17 +272,27 @@ def make_puffer_env(team_spirit=None,
     patches (Task 6c onward) can read per-channel raw reward fields. Defaults
     to False so production code paths that don't consume step_stats (e.g. eval
     scripts, viz) stay zero-cost.
+
+    ``pbrs_gamma`` (finding 2 / N3, 2026-07-06 review): PBRS shaping discount.
+    None (default) uses the env-side default, which is pinned to the training
+    gamma (0.999) and drift-guarded by test_pbrs_gamma_matches_training_gamma.
+    Pass explicitly only for experiments that also change the training gamma —
+    the two MUST move together or PBRS loses policy-invariance.
     """
     from c_env.cs2_env import make_env as make_c_env
 
     if record_fn is not None:
         raise ValueError("record_fn is only supported by the Python recording env")
+    kwargs = {}
+    if pbrs_gamma is not None:
+        kwargs["pbrs_gamma"] = pbrs_gamma
     return make_c_env(
         seed=seed,
         team_spirit=team_spirit,
         buf=buf,
         map_data=map_data,
         include_step_stats_in_info=include_step_stats_in_info,
+        **kwargs,
     )
 
 
@@ -581,13 +670,10 @@ def evaluate_checkpoint(checkpoint_path=None,
         print(f"[Eval] top_actions: {', '.join(parts)}")
 
 
-# ── SECTION: Training config ───────────────────────────────────────────────
-
-TRAINING_CONFIG = dict(
-    gamma=0.99,                        # used by PBRS shaping in sim.py and test_reward.py
-)
-
 # ── SECTION: PufferLib env factory ─────────────────────────────────────────
+# (dead TRAINING_CONFIG dict removed here — zero readers repo-wide, referenced
+# a nonexistent sim.py, and its gamma=0.99 contradicted build_train_config;
+# finding 21f of docs/2026-07-06-adversarial-review-verification.md)
 
 
 def make_env(team_spirit=None, map_data=None):
@@ -682,9 +768,9 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 done: optional (B,) done-mask used to reset LSTM state.
                 action: (B, ACTION_DIM=7) int64 — discrete actions; if None,
                     sample from the categorical heads.
-                continuous_action: (B, AIM_DIM=1) float32 — Δyaw in radians
-                    already in [-max_turn_speed, +max_turn_speed]; if None,
-                    sample from the Normal head.
+                continuous_action: (B, AIM_DIM=2) float32 — (Δyaw, Δpitch) in
+                    radians, already in [-max_turn_speed, +max_turn_speed];
+                    if None, sample from the Normal head.
 
             Returns:
                 (action, continuous_action, log_prob, entropy, value, lstm_state)
@@ -769,21 +855,122 @@ def build_policy(vecenv, device, obs_dim_override=None):
             return logits, mu_aim, log_std, value
 
         def forward(self, x, state):
-            # Batch 3: same 4-tuple contract as forward_eval. forward() is
-            # the path PufferLib's vectorised rollout uses (no LSTM state
-            # carry) — it stays in lockstep with forward_eval to keep the
-            # ONNX export single-pathway in task 6.
+            # Training-path forward: time-batched BPTT (LSTM-BPTT fix).
+            #
+            # WHAT: same 4-tuple contract as forward_eval, but a 3D input
+            #   (B=segments, T=bptt_horizon, OBS_DIM) is now unrolled through
+            #   the LSTM along T — mirroring upstream PufferLib 3.0's
+            #   models.LSTMWrapper.forward (encode flat → reshape seq-first →
+            #   one nn.LSTM call → heads on the flat output). Pre-fix this
+            #   flattened to (B*T, OBS) and ran the LSTM stateless per tick
+            #   (seq-len 1, zero state), so the recurrent weights never saw
+            #   through-time gradients and the PPO update recomputed
+            #   logprobs/values under a DIFFERENT function than the rollout
+            #   (forward_eval carries state tick-to-tick) — importance
+            #   ratios ≠ 1 before the first gradient step.
+            #
+            # WHY zero initial state is CORRECT here (not an approximation):
+            #   evaluate() zeroes trainer.lstm_h/c at its start, and with
+            #   compute_batch_dims' segments == total_agents each agent row
+            #   fills exactly ONE bptt_horizon segment per evaluate() call —
+            #   so every stored segment really did start from zero state.
+            #   PITFALL: if batch dims ever change so a row fills >1 segment
+            #   per evaluate(), zero-init becomes wrong for the later
+            #   segments and initial states must be stored at rollout time.
+            #
+            # state keys consumed (all optional; dict is NOT mutated):
+            #   lstm_h / lstm_c — initial state override, (B, H) or (1, B, H).
+            #     The trainer passes None → zero init (see above).
+            #   terminals — (B, T) done flags from the rollout buffer;
+            #     replicates forward_eval's (1-done)*state reset mid-segment
+            #     (see _lstm_bptt). Omit for the ONNX / single-tick path.
+            #
+            # ONNX (task 6): a 2D (B, OBS_DIM) input takes T=1 through the
+            # same code — one seq-len-1 LSTM call from zero state, identical
+            # math to the pre-fix path — so the export stays single-pathway.
             if x.ndim == 3:
-                x_flat = x.reshape(-1, x.shape[-1])
+                B, TT = x.shape[0], x.shape[1]
             else:
-                x_flat = x
+                B, TT = x.shape[0], 1
 
-            hidden_out, _ = self._forward_core(x_flat, None, None)
+            h = self.encoder(x.reshape(B * TT, x.shape[-1]).float())
+            h = h.reshape(B, TT, self.hidden_size).transpose(0, 1)     # (T, B, H) seq-first
+
+            lstm_h = state.get("lstm_h") if isinstance(state, dict) else None
+            lstm_c = state.get("lstm_c") if isinstance(state, dict) else None
+            if lstm_h is not None and lstm_c is not None:
+                hc = (lstm_h.reshape(1, B,
+                                     self.hidden_size), lstm_c.reshape(1, B, self.hidden_size))
+            else:
+                hc = (h.new_zeros(1, B, self.hidden_size), h.new_zeros(1, B, self.hidden_size))
+
+            terminals = state.get("terminals") if isinstance(state, dict) else None
+            h = self._lstm_bptt(h, hc, terminals)
+            # transpose back to (B, T, H) then flatten row-major so flat row
+            # b*T + t lines up with mb_actions.reshape(-1, ...) in
+            # _hybrid_ppo_loss — segment-major, time-minor. Changing this
+            # ordering silently misaligns every logprob/advantage pairing.
+            hidden_out = h.transpose(0, 1).reshape(B * TT, self.hidden_size)
+
             logits = [head(hidden_out) for head in self.action_heads]
             value = self.value_head(hidden_out)
             mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
             log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
             return logits, mu_aim, log_std, value
+
+        def _lstm_bptt(self, h_seq, hc, terminals):
+            """Run the LSTM over a full (T, B, H) segment with done-masking.
+
+            WHAT: one nn.LSTM call when the segment contains no episode
+            boundaries (the common case — native PufferLib BPTT); otherwise
+            the sequence is split at every tick where ANY row has a done and
+            h/c are zero-masked per-row at those ticks before continuing.
+
+            WHY: the rollout (forward_eval → _forward_core) multiplies the
+            carried state by (1 - done) BEFORE processing each tick, so a
+            new episode starts memory-free. Training must replicate that
+            reset or the recomputed logprobs at post-done ticks come from a
+            different function than the rollout stored (biased PPO ratios)
+            and gradients leak across episode boundaries. Upstream
+            LSTMWrapper skips this (it never resets on done, rollout OR
+            train, so it is self-consistent); we reset in rollout, hence we
+            must also reset here.
+
+            PITFALLS:
+              * terminals[:, t] == 1 means "the obs at tick t is the FIRST
+                obs of a new episode" (PufferLib autoreset delivers the done
+                flag alongside the reset obs) — mask BEFORE consuming tick t,
+                not after. Off-by-one here shifts every episode boundary.
+              * The chunked split is exact, not an approximation: an LSTM
+                over [t0, t1) then [t1, t2) with state carried equals one
+                call over [t0, t2). Splits only cost extra kernel launches;
+                a no-done minibatch stays a single cuDNN/oneDNN call.
+              * .tolist() forces one device→host sync per minibatch —
+                acceptable (the train loop already syncs via .item()s).
+            """
+            if terminals is None:
+                out, _ = self.lstm(h_seq, hc)
+                return out
+            TT, B, _H = h_seq.shape
+            term = terminals.reshape(B, TT) > 0.5
+            reset_ticks = torch.nonzero(term.any(dim=0)).flatten().tolist()
+            if not reset_ticks:
+                out, _ = self.lstm(h_seq, hc)
+                return out
+            outs = []
+            h0, c0 = hc
+            t0 = 0
+            for t in reset_ticks:
+                if t > t0:
+                    out, (h0, c0) = self.lstm(h_seq[t0:t], (h0, c0))
+                    outs.append(out)
+                keep = (~term[:, t]).float().view(1, B, 1)
+                h0 = h0 * keep
+                c0 = c0 * keep
+                t0 = t
+            out, _ = self.lstm(h_seq[t0:], (h0, c0))
+            outs.append(out)
+            return torch.cat(outs, dim=0)
 
         def _forward_core(self, x, lstm_state, done):
             h = self.encoder(x.float())
@@ -888,6 +1075,18 @@ def _patch_trainer_with_return_norm(trainer):
     needed (unlike PopArt) because we don't use the raw value for anything
     outside the loss.
     """
+    # gh #85: BPTT zero-init exactness (Dust2Policy.forward/_lstm_bptt) is only
+    # EXACT when each agent row fills exactly one buffer segment per evaluate(),
+    # i.e. segments == total_agents. Upstream PuffeRL only enforces
+    # total_agents <= segments (pufferl.py:83-86); our equality holds by
+    # construction in compute_batch_dims but nothing asserted it — one
+    # batch_size/bptt_horizon config edit away from silently-biased importance
+    # ratios. Fail loudly at patch time instead.
+    assert trainer.segments == trainer.total_agents, (
+        f"segments ({trainer.segments}) != total_agents ({trainer.total_agents}): "
+        "BPTT zero-init exactness broken — revisit batch_size/bptt_horizon "
+        "(compute_batch_dims) or the _lstm_bptt initial-state design. See gh #85.")
+
     import time
     import types
     from collections import defaultdict
@@ -955,7 +1154,11 @@ def _patch_trainer_with_return_norm(trainer):
     # SAC dual-gradient loop can do its job.
     trainer._batch1_max_entropy = float(max_entropy)
     trainer._batch1_log_alpha_reset_done = False
-    trainer._batch1_current_target_entropy = 0.7 * float(max_entropy)
+    # Seed from the schedule at the CURRENT global_step (not a hardcoded
+    # warmup constant) so checkpoint-resumed trainers start consistent;
+    # the per-train()-call recompute below overwrites it every call anyway.
+    trainer._batch1_current_target_entropy = _scheduled_target_entropy(
+        trainer.config, trainer.global_step, float(max_entropy))
     # Pre-init effective_alpha + grad_norm metrics (utof/cs2rl#16). The
     # post-loop reads in _train_with_return_norm refresh these, but if the
     # target_kl early-break trips on mb=0 OR no accumulation boundary fires,
@@ -1018,13 +1221,13 @@ def _patch_trainer_with_return_norm(trainer):
         # train() call, so recomputing per-minibatch would burn cycles for no
         # signal. We mirror the value onto trainer._batch1_current_target_entropy
         # so the wandb log layer can read it without touching this closure.
+        # Fracs/warmup_steps come from config via _scheduled_target_entropy
+        # (finding 4 residual — previously hardcoded 0.7→0.5).
         # PITFALL: do NOT capture max_entropy from the outer closure here —
         # use trainer._batch1_max_entropy. Closure capture would silently break
         # if the patch were re-applied on the same trainer instance.
-        from train_helpers_batch1 import target_entropy_schedule
-        _t9_target_entropy = target_entropy_schedule(self.global_step,
-                                                     trainer._batch1_max_entropy,
-                                                     warmup_end=10_000_000)
+        _t9_target_entropy = _scheduled_target_entropy(config, self.global_step,
+                                                       trainer._batch1_max_entropy)
         trainer._batch1_current_target_entropy = float(_t9_target_entropy)
 
         # Task 9B: one-shot log_alpha reset on the first train() call after
@@ -1075,8 +1278,9 @@ def _patch_trainer_with_return_norm(trainer):
             #   prio_probs of those segments by OVERSAMPLE_FACTOR before
             #   renormalising. The downstream torch.multinomial call then
             #   draws biased samples without any further changes — and the
-            #   importance-sampling correction below uses the BOOSTED
-            #   prio_probs[idx], so the gradient stays unbiased.
+            #   importance-sampling correction (mb_prio, consumed inside
+            #   _hybrid_ppo_loss) uses the BOOSTED prio_probs[idx], so the
+            #   gradient stays unbiased.
             # WHY: bomb-plant events are sparse in early training (the exact
             #   fraction is itself a Task 9 metric, reported via
             #   _batch1_event_oversample_fraction). Uniform prio sampling
@@ -1108,7 +1312,8 @@ def _patch_trainer_with_return_norm(trainer):
             mb_obs = self.observations[idx]
             mb_actions = self.actions[idx]
             mb_logprobs = self.logprobs[idx]
-            mb_rewards = self.rewards[idx]
+            # (mb_rewards pull removed with the dead per-minibatch
+            # compute_puff_advantage recompute — see finding-1 note below)
             mb_terminals = self.terminals[idx]
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
@@ -1121,6 +1326,11 @@ def _patch_trainer_with_return_norm(trainer):
             mb_cont_actions = self.cont_actions[idx]
             mb_old_logp_d = self.logprobs_d[idx]
             mb_old_logp_c = self.logprobs_c[idx]
+            # F8: rollout-stored action masks (all-ones = unmasked fallback).
+            # getattr for trainers built before _patch_trainer_with_hybrid_aim
+            # ran (shouldn't happen in prod; keeps direct-call tests working).
+            _masks_buf = getattr(self, "action_masks", None)
+            mb_masks = _masks_buf[idx] if _masks_buf is not None else None
 
             # ── VALUE TARGET NORMALISATION ─────────────────────────────────
             # Normalize returns before value regression.  The value head learns
@@ -1134,20 +1344,29 @@ def _patch_trainer_with_return_norm(trainer):
             if not config["use_rnn"]:
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
 
+            # LSTM-BPTT fix: lstm_h/lstm_c None → zero initial state, which
+            # is exact (each stored segment began at evaluate()'s zeroed
+            # state — see Dust2Policy.forward doc). terminals drives the
+            # mid-segment done-reset inside _lstm_bptt so the training
+            # forward replicates the rollout's (1-done)*state masking.
             state = dict(
                 action=mb_actions,
                 lstm_h=None,
                 lstm_c=None,
+                terminals=mb_terminals,
             )
 
             # Batch 3 (T5): hybrid PPO update — per-factor clipped loss
             # (Fan et al. IJCAI 2019). The helper does the policy forward
             # pass (returning mu_aim/log_std + value) and assembles the
             # clipped policy loss with INDEPENDENT discrete and continuous
-            # ratios. We still also need the raw logits for the per-head
-            # entropy diagnostics below, so re-pull them via a NO-grad path
-            # — _hybrid_ppo_loss already consumed them on the gradient path.
-            pg_loss, entropy, newvalue, newlogprob, ratio_d, ratio_c = _hybrid_ppo_loss(
+            # ratios. F16 (2026-07-06 adversarial review): it now also
+            # returns the logits it computed, killing the redundant no-grad
+            # diagnostic forward that used to run here per minibatch
+            # (halves update-forward cost). Post-F8 the returned logits are
+            # MASKED, so the per-head entropy diagnostics below report the
+            # true sampled distribution.
+            (pg_loss, entropy, newvalue, newlogprob, ratio_d, ratio_c, logits) = _hybrid_ppo_loss(
                 self.policy,
                 mb_obs,
                 mb_actions,
@@ -1157,16 +1376,15 @@ def _patch_trainer_with_return_norm(trainer):
                 mb_advantages,
                 clip_coef,
                 state,
+                mb_prio=mb_prio,
+                mb_masks=mb_masks,
             )
-            with torch.no_grad():
-                # Logits-only path for the per-head entropy diagnostic block
-                # below. Cheaper than re-running _hybrid_ppo_loss; we already
-                # have the loss + entropy from the gradient pass.
-                logits, _mu_diag, _log_std_diag, _ = self.policy(mb_obs, state)
             # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
             # was used by downstream diagnostics; T5 dropped that consumer
             # (mb_actions is the canonical stored discrete action). No
             # rebinding here — the variable is unused after this point.
+            # (F16: the former no-grad diagnostic re-forward that lived here
+            # is gone — `logits` now comes straight from _hybrid_ppo_loss.)
 
             profile("train_misc", epoch)
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
@@ -1195,29 +1413,14 @@ def _patch_trainer_with_return_norm(trainer):
             if target_kl is not None and approx_kl.item() > target_kl:
                 break
 
-            adv = advantages[idx]
-            adv = compute_puff_advantage(
-                mb_values,
-                mb_rewards,
-                mb_terminals,
-                ratio,
-                adv,
-                config["gamma"],
-                config["gae_lambda"],
-                config["vtrace_rho_clip"],
-                config["vtrace_c_clip"],
-            )
-            adv = mb_advantages
-            adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
-
             # Batch 3 (T5): pg_loss already computed by _hybrid_ppo_loss above
-            # via per-factor clipping. The pre-Batch-3 single-ratio block lived
-            # here; it would over-clip (ratios from a Gaussian factor can vary
-            # very differently from categorical factors), so the spec L8
-            # decision is to clip per factor and sum. Keeping a no-op stub to
-            # make the diff easier to read and to flag where the change lives
-            # for future archaeologists.
-            _ = adv                    # adv computed above for vtrace; pg_loss already set
+            # via per-factor clipping (the pre-Batch-3 single-ratio block
+            # would over-clip — spec L8 decision). Advantage normalization +
+            # the mb_prio importance weight now live INSIDE _hybrid_ppo_loss
+            # (finding 1, 2026-07-06 adversarial review); the orphaned
+            # normalization stub and the discarded per-minibatch
+            # compute_puff_advantage recompute that used to sit here were
+            # dead compute and have been removed.
 
             newvalue = newvalue.view(mb_returns_norm.shape)
             v_loss_unclipped = (newvalue - mb_returns_norm)**2
@@ -1442,8 +1645,13 @@ def compute_game_metrics(logs):
 class DeadRunDetector:
     """Checks training metrics every check_interval steps for degenerate runs.
 
-    Raises RuntimeError on NaN/Inf; accumulates soft warnings and prints
-    a DEAD RUN banner when five or more accumulate.
+    Raises RuntimeError on NaN/Inf; accumulates soft warnings and prints a
+    DEAD RUN banner when five or more accumulate, returning True. F14
+    (2026-07-06 adversarial review): the train() loop now ACTS on that True —
+    autopsy checkpoint + SystemExit(3) — unless --no-dead-run-abort is set.
+    Callers embedding this class elsewhere must handle the return themselves;
+    a discarded return silently reduces it to a log line (the failure mode
+    that let the 30M degenerate run burn ~150 post-verdict epochs).
     """
 
     def __init__(self, check_interval=10_000):
@@ -1702,6 +1910,17 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
             r = torch.as_tensor(r).to(dev)
             d = torch.as_tensor(d).to(dev)
 
+            # F8: pull the C-computed action masks for exactly this batch of
+            # agent rows. env_id indexes agent rows, matching the shm layout
+            # (num_envs*N_AGENTS, ACTION_MASK_DIM). `!= 0` both converts to
+            # bool AND copies — the shm bytes get overwritten by the next
+            # worker step, so we must not keep a view. None ⇒ unmasked
+            # (legacy trainer built without the mask shm).
+            mask_view = getattr(self, "_action_mask_view_main", None)
+            action_mask = None
+            if mask_view is not None:
+                action_mask = torch.as_tensor(mask_view[env_id]).to(dev) != 0
+
             profile("eval_forward", epoch)
             with torch.no_grad(), self.amp_context:
                 state = dict(reward=r, done=d, env_id=env_id, mask=mask)
@@ -1719,6 +1938,7 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 action, cont_action, logprob_d, logprob_c, _, _ = _hybrid_sample_logits(
                     (logits, mu_aim, log_std_aim, value),
                     max_turn_speed=self.policy.max_turn_speed.item(),
+                    mask=action_mask,
                 )
                 # Joint log-prob for self.logprobs (back-compat slot read by
                 # PufferLib's diagnostics + the KL/clipfrac path). Per-factor
@@ -1821,6 +2041,7 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                      _) = _hybrid_sample_logits(
                          (opp_logits, opp_mu, opp_log_std, None),
                          max_turn_speed=past_policy.max_turn_speed.item(),
+                         mask=action_mask[opp_mask] if action_mask is not None else None,
                      )
                     opp_logprob = opp_logprob_d + opp_logprob_c
 
@@ -1869,6 +2090,12 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 self.cont_actions[batch_rows, seq_pos] = cont_action
                 self.logprobs_d[batch_rows, seq_pos] = logprob_d
                 self.logprobs_c[batch_rows, seq_pos] = logprob_c
+                # F8: persist the masks the sampler just used so the PPO
+                # update (mb_masks in _hybrid_ppo_loss) recomputes logprobs
+                # over the identical masked distribution. Skipped when
+                # unmasked — the buffer's all-ones default is the no-op mask.
+                if action_mask is not None:
+                    self.action_masks[batch_rows, seq_pos] = action_mask
                 self.rewards[batch_rows, seq_pos] = r
                 self.terminals[batch_rows, seq_pos] = d.float()
                 self.values[batch_rows, seq_pos] = value.flatten()
@@ -1971,7 +2198,11 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 #                            cont buffer that this patcher allocates.
 
 
-def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_turn_speed=None):
+def _hybrid_sample_logits(policy_out,
+                          action=None,
+                          continuous_action=None,
+                          max_turn_speed=None,
+                          mask=None):
     """Hybrid sampler for the 4-tuple HybridPolicy output (Batch 3 task 5).
 
     Replaces the four in-tree usages of
@@ -1989,19 +2220,26 @@ def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_t
         If None, sample fresh from the categorical heads. If supplied
         (PPO update pass), evaluate log-prob under the new policy without
         re-sampling — this is the difference between rollout and update.
-    continuous_action : (B, AIM_DIM=1) float32 tensor, or None
-        If None, sample Δyaw from Normal(mu_aim, exp(log_std_aim)) and
-        clamp to ±max_turn_speed. If supplied, evaluate log-prob without
+    continuous_action : (B, AIM_DIM=2) float32 tensor, or None
+        If None, sample (Δyaw, Δpitch) from Normal(mu_aim, exp(log_std_aim))
+        and clamp to ±max_turn_speed. If supplied, evaluate log-prob without
         re-sampling.
     max_turn_speed : float or None
         Hard clamp on sampled Δyaw. None means no clamp (only sane in the
         update-pass path where continuous_action is provided pre-clamped).
+    mask : (B, ACTION_MASK_DIM) bool/int8 tensor, or None (F8)
+        C-computed action masks (1 = valid; see cs2_env.h compute_masks).
+        When given, invalid bins are excluded from sampling AND from the
+        log-prob/entropy — the distribution IS the masked distribution, so
+        the stored logprobs stay consistent with _hybrid_ppo_loss as long as
+        the update pass receives the SAME mask (mb_masks). None = unmasked
+        (legacy eval/record callers that have no mask plumbing).
 
     Returns
     -------
     action, continuous_action, log_prob_d, log_prob_c, entropy_d, entropy_c
         action : (B, 7) int64
-        continuous_action : (B, 1) float32, ∈ [-max_turn_speed, max_turn_speed]
+        continuous_action : (B, AIM_DIM=2) float32, ∈ [-max_turn_speed, max_turn_speed]
         log_prob_d : (B,) — discrete factor log-prob (sum over 7 categoricals).
             The PPO loss assembly in _hybrid_ppo_loss applies the clip to
             this half independently of log_prob_c (Fan et al. 2019 Eq 8).
@@ -2028,6 +2266,12 @@ def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_t
     import torch.nn.functional as F
 
     logits_list, mu_aim, log_std_aim, _value = policy_out
+
+    # F8: mask BEFORE log_softmax so sampling, log-prob and entropy all see
+    # the same (masked) distribution. Dead agents collapse to deterministic
+    # per-head no-ops (entropy 0) instead of burning exploration samples.
+    if mask is not None:
+        logits_list = _apply_action_masks(logits_list, mask)
 
     # ── Discrete: 7 independent categorical heads — hand-rolled (Fix #2) ──
     # We avoid `torch.distributions.Categorical` because constructing 7 of them
@@ -2080,8 +2324,17 @@ def _hybrid_sample_logits(policy_out, action=None, continuous_action=None, max_t
     return action, continuous_action, log_prob_d, log_prob_c, entropy_d, entropy_c
 
 
-def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d, mb_old_logp_c,
-                     mb_advantages, clip_coef, state):
+def _hybrid_ppo_loss(policy,
+                     mb_obs,
+                     mb_actions,
+                     mb_cont_actions,
+                     mb_old_logp_d,
+                     mb_old_logp_c,
+                     mb_advantages,
+                     clip_coef,
+                     state,
+                     mb_prio=None,
+                     mb_masks=None):
     """Per-factor PPO clipped loss (H-PPO, Fan et al. IJCAI 2019).
 
     THE CORE OF T5. Re-runs the policy on mb_obs with the stored
@@ -2102,6 +2355,28 @@ def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d,
         per factor and substitute ratio_d into the existing self.ratio
         slot for vtrace advantages (spec carry-forward: keep diagnostics
         backwards-compatible by using the discrete ratio there).
+    logits_list : list of 7 (B, head_size) tensors — the per-head logits
+        this loss was computed from (F16: post-mask when mb_masks is given,
+        so per-head entropy diagnostics reflect the TRUE sampled
+        distribution). Returned so the caller doesn't need a second full
+        forward pass for diagnostics — that redundant no-grad forward used
+        to double the update-forward cost. Autograd-attached; consume under
+        torch.no_grad() and don't hold past backward() if memory matters.
+
+    LSTM-BPTT fix: `state` must carry `terminals` (the minibatch's
+    (segments, bptt_horizon) done flags) so the policy forward runs
+    done-masked BPTT over the time dimension — without it the recomputed
+    logprobs at post-done ticks silently diverge from the rollout-stored
+    ones (state["lstm_h"]/["lstm_c"]=None means zero init, which is exact;
+    see Dust2Policy.forward). Test-path callers passing flat 2D tensors may
+    omit terminals: T=1 has no through-time state to reset.
+
+    mb_masks (F8): the rollout-stored action masks for this minibatch,
+    (segments, bptt_horizon, ACTION_MASK_DIM) bool (or flat (B, MASK_DIM) on
+    the test path). MUST be the same masks the rollout sampler used —
+    masking here but not there (or vice versa) silently skews the PPO
+    ratios for any agent-step where a mask bit was 0. None = unmasked
+    (pre-F8 callers / BC paths).
     """
     import torch
     import torch.nn.functional as F
@@ -2123,6 +2398,30 @@ def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d,
     flat_old_c = mb_old_logp_c.reshape(-1)
     flat_adv = mb_advantages.reshape(-1)
 
+    # ── Advantage normalization + prio-IS weight (finding 1, 2026-07-06
+    # adversarial review) ──
+    # Stock PufferLib normalizes per-minibatch and applies the prioritized-
+    # replay importance weight BEFORE the pg term:
+    #     adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
+    # The T5 refactor moved the pg term into this function but fed it RAW
+    # advantages, orphaning the normalization at the call site. Consequence
+    # (verified at 98e3f32): with sparse rewards the pg gradient scale was
+    # ~0, so the entropy objective faced no counter-pressure and the 30M
+    # run drifted to an exactly-uniform discrete policy. Normalizing HERE
+    # (not at the call site) makes the contract self-contained and lets the
+    # test assert scale-invariance of pg_loss directly.
+    # PITFALLS:
+    #   * Normalize the RAW adv first, then multiply by mb_prio — reversing
+    #     the order changes the statistics (matches stock).
+    #   * mb_prio arrives as (segments, 1) from the trainer (broadcast over
+    #     bptt_horizon) or (B,) from tests; expand_as handles both. None ⇒
+    #     uniform replay (weight 1), e.g. BC/eval callers.
+    #   * A constant-adv minibatch has std 0 ⇒ normalized adv is exactly 0
+    #     (0/1e-8); pg_loss 0, no NaN.
+    flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+    if mb_prio is not None:
+        flat_adv = mb_prio.expand_as(mb_advantages).reshape(-1) * flat_adv
+
     # ── Re-evaluate discrete and continuous halves under the new policy ──
     # Fix #3 (perf): replaces 7× torch.distributions.Categorical(logits=lg) +
     # 1× torch.distributions.Normal(mu, sigma) construction per minibatch
@@ -2131,6 +2430,12 @@ def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d,
     # times per epoch → ~345 ms/epoch saved on heavy-update epochs. Same
     # numerical contract as before: |Δ| ≤ ~2e-6 vs torch.distributions
     # reference (different softmax reduction order; well within fp32 noise).
+    # F8: apply the rollout's action masks to the fresh logits so new_logp /
+    # entropy are computed over the SAME masked distribution the sampler drew
+    # from — otherwise ratios drift wherever a mask bit was 0.
+    if mb_masks is not None:
+        flat_masks = mb_masks.reshape(-1, mb_masks.shape[-1])
+        logits_list = _apply_action_masks(logits_list, flat_masks)
     log_probs_per_head = [F.log_softmax(lg, dim=-1) for lg in logits_list]
     new_logp_d = sum(
         lp.gather(-1, flat_actions[..., i:i + 1]).squeeze(-1)
@@ -2159,10 +2464,10 @@ def _hybrid_ppo_loss(policy, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d,
     pg_c_cl = -flat_adv * torch.clamp(ratio_c, 1 - clip_coef, 1 + clip_coef)
     pg_loss = torch.max(pg_d_un, pg_d_cl).mean() + torch.max(pg_c_un, pg_c_cl).mean()
 
-    return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c
+    return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list
 
 
-def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None):
+def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_view_main=None):
     """Extend trainer with continuous-action rollout storage + vecenv plumbing.
 
     Apply AFTER _patch_trainer_with_return_norm (so train() is wrapped) and
@@ -2200,6 +2505,13 @@ def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None):
     # it via attribute access. Storing on trainer (not closure-captured
     # local) keeps it visible to instrumentation/inspection.
     trainer._cont_action_view_main = cont_action_view_main
+    # F8: main-process numpy view over the mask shm (env→trainer direction;
+    # see Cs2Env._attach_mask_view). _evaluate_with_selfplay reads rows for
+    # the recv'd env_id slice right after recv() — the workers finished their
+    # step by then, so the bytes are the masks for the obs batch in hand.
+    # None ⇒ rollout runs unmasked (legacy callers without shm plumbing) and
+    # action_masks stays all-ones, which makes the update path a no-op mask.
+    trainer._action_mask_view_main = mask_view_main
 
     # ── Rollout buffer extension (step 5.4) ──
     # self.actions has shape (segments, bptt_horizon, ACTION_DIM=7) int32 —
@@ -2214,6 +2526,16 @@ def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None):
     )
     trainer.logprobs_d = torch.zeros_like(trainer.logprobs)
     trainer.logprobs_c = torch.zeros_like(trainer.logprobs)
+    # F8: per-step action masks, parallel to actions but ACTION_MASK_DIM wide.
+    # Initialised to ONES (= everything valid): rows never written (mask shm
+    # absent, or rollout rounds that don't fill every segment) degrade to the
+    # exact pre-F8 unmasked behaviour instead of masking everything to the
+    # no-op. bool keeps the buffer small (segments × 64 × 22 bytes).
+    trainer.action_masks = torch.ones(
+        (*trainer.actions.shape[:-1], ACTION_MASK_DIM),
+        dtype=torch.bool,
+        device=trainer.actions.device,
+    )
 
     # ── vecenv.send patch (step 5.5) ──
     # Goal: forward both the int discrete buffer and the float cont buffer
@@ -2369,6 +2691,13 @@ def train(args):
     metrics_path = Path(args.checkpoint_dir) / "metrics.jsonl"
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     _metrics_file = metrics_path.open("a")
+    # N2 (2026-07-06 adversarial review): the file is opened in APPEND mode,
+    # so back-to-back runs concatenate silently — 15 runs shared one file with
+    # no separator and every analysis had to re-segment by agent_steps resets.
+    # Stamp every row with a per-process run id (label + launch timestamp;
+    # the label alone is NOT unique because re-runs into the same checkpoint
+    # dir share it). Old rows lack the key — segment those the legacy way.
+    run_id = f"{run_label}-{time.strftime('%Y%m%d-%H%M%S')}"
 
     # Shared team spirit value — all envs read it at episode start
     shared_ts = mp.Value("f", 0.3)
@@ -2396,24 +2725,45 @@ def train(args):
     _cont_action_view_main = np.frombuffer(_cont_action_shm, dtype=np.float32).reshape(
         args.num_envs * _agents_per_env, AIM_DIM)
 
-    def env_factory(*_args, buf=None, seed=None, _cont_shm=None, _cont_idx=None, **kwargs):
+    # ── F8: action-mask shared memory, the REVERSE direction (env→trainer) ──
+    # Same fork-inheritance pattern as the cont-action RawArray above, but the
+    # envs write (Cs2Env copies its C-computed masks into its slice at the end
+    # of every step/reset) and the trainer reads right after vecenv.recv().
+    # recv() is the synchronisation point: the worker finished its step before
+    # the batch is handed over, so the bytes always match the obs in hand.
+    _mask_shm = RawArray("b", args.num_envs * _agents_per_env * ACTION_MASK_DIM)
+    _mask_view_main = np.frombuffer(_mask_shm,
+                                    dtype=np.int8).reshape(args.num_envs * _agents_per_env,
+                                                           ACTION_MASK_DIM)
+
+    def env_factory(*_args,
+                    buf=None,
+                    seed=None,
+                    _cont_shm=None,
+                    _cont_idx=None,
+                    _mask_shm=None,
+                    **kwargs):
         env = make_puffer_env(team_spirit=shared_ts, buf=buf, seed=seed or 0, map_data=_map_data)
-        # Attach the shared-memory view so the env (whether running in the
+        # Attach the shared-memory views so the env (whether running in the
         # main process under Serial, or a forked worker under
-        # Multiprocessing) can pull cont_actions written by the trainer.
-        # _cont_idx may be None when env_factory is called outside the
-        # train() codepath (eg. legacy callers); attach is a no-op then.
+        # Multiprocessing) can pull cont_actions written by the trainer and
+        # publish action masks back to it (F8). _cont_idx may be None when
+        # env_factory is called outside the train() codepath (eg. legacy
+        # callers); both attaches are no-ops then.
         if _cont_shm is not None and _cont_idx is not None:
             env._attach_cont_action_view(_cont_shm, _cont_idx)
+        if _mask_shm is not None and _cont_idx is not None:
+            env._attach_mask_view(_mask_shm, _cont_idx)
         return env
 
     # Per-env kwargs list — pufferlib.vector.make accepts a list of dicts
-    # (one per env). Both args propagate verbatim through fork because
+    # (one per env). All args propagate verbatim through fork because
     # they're stored on env_kwargs[i] BEFORE Process.start() (see
     # .venv/lib/.../pufferlib/vector.py:333-346).
     _per_env_kwargs = [{
         "_cont_shm": _cont_action_shm,
         "_cont_idx": i,
+        "_mask_shm": _mask_shm,
     } for i in range(args.num_envs)]
 
     backend_name = args.vec_backend.lower()
@@ -2497,26 +2847,40 @@ def train(args):
     # this function returns (Python doesn't know workers/numpy views are
     # using it via the OS-level mapping).
     trainer._cont_action_shm = _cont_action_shm
-    _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=_cont_action_view_main)
+    trainer._action_mask_shm = _mask_shm                                         # F8: same GC-pinning rationale
+    _patch_trainer_with_hybrid_aim(trainer,
+                                   cont_action_view_main=_cont_action_view_main,
+                                   mask_view_main=_mask_view_main)
 
     # ── Self-play setup ──────────────────────────────────────────────────────
-    self_play_mgr = None
-    if getattr(args, "self_play", True):
-        self_play_mgr = SelfPlayManager(
-            pool_size=15,
-            p_past=0.3,
-            save_every_epochs=25,                      # ~2M steps per save at batch_size=81920
-            win_threshold=0.6,
-            phase_length=50,                           # switch opponent team every ~4M steps
-        )
-        if resume_path and resume_path.exists():
-            import shutil as _shutil
+    # F11 (2026-07-06 adversarial review): the selfplay evaluate() wrapper is
+    # the ONLY rollout path that understands the hybrid 4-tuple policy
+    # contract — stock PuffeRL.evaluate crashes on the forward_eval tuple
+    # unpack at its first call, so --no-self-play was broken in production.
+    # The patch is now applied UNCONDITIONALLY (mirroring train_test_harness,
+    # which adopted this shape at T5); --no-self-play means "no past-policy
+    # mixing": p_past=0.0 with an empty, never-seeded pool ⇒ should_use_past()
+    # is always False, and the pool save / team-switch bookkeeping in the
+    # main loop is skipped via self_play_enabled below.
+    self_play_enabled = bool(getattr(args, "self_play", True))
+    self_play_mgr = SelfPlayManager(
+        pool_size=15,
+        p_past=0.3 if self_play_enabled else 0.0,
+        save_every_epochs=25,                          # ~2M steps per save at batch_size=81920
+        win_threshold=0.6,
+        phase_length=50,                               # switch opponent team every ~4M steps
+    )
+    if self_play_enabled and resume_path and resume_path.exists():
+        import shutil as _shutil
 
-            seed_path = Path(args.checkpoint_dir) / "sp_seed.pt"
-            _shutil.copy2(resume_path, seed_path)
-            self_play_mgr._add_to_pool(seed_path)
-            print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
-        _patch_trainer_with_selfplay(trainer, self_play_mgr)
+        seed_path = Path(args.checkpoint_dir) / "sp_seed.pt"
+        _shutil.copy2(resume_path, seed_path)
+        self_play_mgr._add_to_pool(seed_path)
+        print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
+    _patch_trainer_with_selfplay(trainer, self_play_mgr)
+    if not self_play_enabled:
+        print("[Train] Self-play mixing disabled (--no-self-play): "
+              "both teams use the current policy every epoch.")
     # timing is the outermost wrapper so it sees all evaluate() calls regardless of selfplay
     _patch_trainer_with_timing(trainer)
     # ────────────────────────────────────────────────────────────────────────
@@ -2538,7 +2902,25 @@ def train(args):
         if isinstance(logs, dict):
             game_metrics = compute_game_metrics(logs)
             logs.update(game_metrics)
-            dead_run_detector.check(trainer.global_step, logs)
+            # F14 (2026-07-06 adversarial review): the detector's return was
+            # previously discarded — the 30M degenerate run printed its banner
+            # and kept burning compute for another ~150 epochs. Now: save an
+            # autopsy checkpoint and abort with a NONZERO exit code so shell
+            # wrappers / experiment runners see the failure. Opt out with
+            # --no-dead-run-abort (e.g. when deliberately probing degenerate
+            # regimes). NaN/Inf still raises inside check() as before.
+            if (dead_run_detector.check(trainer.global_step, logs)
+                    and getattr(args, "dead_run_abort", True)):
+                autopsy_path = Path(args.checkpoint_dir) / "dust2_policy_dead.pt"
+                autopsy_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(policy.state_dict(), autopsy_path)
+                _metrics_file.flush()
+                print(f"[Train] DEAD RUN — aborting at step {trainer.global_step:,}. "
+                      f"Autopsy checkpoint: {autopsy_path}")
+                if wandb_run is not None:
+                    wandb_run.finish(exit_code=3)
+                trainer.close()
+                raise SystemExit(3)
 
             # Network health monitoring every 5 epochs (too expensive every epoch)
             if trainer.epoch % 5 == 0:
@@ -2546,7 +2928,10 @@ def train(args):
                 logs.update(health_metrics)
 
             # ── Self-play bookkeeping ────────────────────────────────────────
-            if self_play_mgr is not None:
+            # F11: gated on the FLAG, not the manager (the manager now always
+            # exists for the evaluate patch) — no pool saves / team switches
+            # under --no-self-play.
+            if self_play_enabled:
                 self_play_mgr.maybe_switch_teams(trainer.epoch)
                 win_rate_t = logs.get("environment/winner_t", 0.0)
                 win_rate_ct = logs.get("environment/winner_ct", 0.0)
@@ -2576,6 +2961,7 @@ def train(args):
 
             # ── Persist metrics ──────────────────────────────────────────────
             log_entry = {
+                "run_id": run_id,                                           # N2: string key — segment runs by this, not by agent_steps resets
                 "step": trainer.global_step,
                 "epoch": trainer.epoch,
                 "team_spirit": ts_val,
@@ -2684,6 +3070,15 @@ if __name__ == "__main__":
         action="store_false",
         dest="self_play",
         help="Disable self-play (both teams always use current policy)",
+    )
+    parser.add_argument(
+        "--no-dead-run-abort",
+        action="store_false",
+        dest="dead_run_abort",
+        help=("F14: by default a DEAD RUN verdict (5+ accumulated degeneracy alerts) "
+              "saves an autopsy checkpoint and exits with code 3. Pass this to only "
+              "print the banner and keep training (e.g. when deliberately studying "
+              "degenerate regimes)."),
     )
     args = parser.parse_args()
 

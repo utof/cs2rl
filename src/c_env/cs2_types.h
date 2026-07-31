@@ -15,7 +15,36 @@
 /* Batch 3.5 (#24): self block now carries pitch sin/cos at obs[11..12]; all
  * downstream obs slots shifted +2. SIM_OBS_VERSION below tracks sim's internal
  * obs schema, distinct from deploy's frozen v2-105dim (gh #34 suspension). */
-#define OBS_DIM 107
+/* ── Observation block layout (SINGLE SOURCE OF TRUTH) ───────────────────────
+ * The per-agent obs vector is four contiguous blocks:
+ *   self     [0  .. 28)  OBS_SELF_SIZE                       scalar self-state
+ *   teammate [28 .. 56)  OBS_TEAMMATE_COUNT × _STRIDE (4×7)  nearest teammates
+ *   enemy    [56 .. 96)  OBS_ENEMY_COUNT    × _STRIDE (5×8)  dist-sorted enemies
+ *   global   [96 .. 110) OBS_GLOBAL_SIZE                     round/bomb scalars
+ * Each block base is DERIVED from the preceding block's width, so the block
+ * boundaries (28/56/96) live in exactly ONE place. Consumers:
+ *   - cs2_observations.h writes every slot through these bases (never bare ints);
+ *   - env_init() in cs2_env.h asserts the blocks tile OBS_DIM exactly;
+ *   - scripts/sync_action_spec.py parses the *_SIZE/*_STRIDE/*_COUNT literals
+ *     into src/_obs_spec.py so Python masking / demo-zeroing code imports
+ *     OBS_BLOCKS instead of hardcoding block boundaries.
+ * Pitfall: adding a feature => bump the OWNING block's *_SIZE (or *_STRIDE) AND
+ * the OBS_DIM literal below. If they drift, the env_init tiling assert fires at
+ * startup and the generator raises at codegen time.
+ * Batch 6 Task 2.5 (spec R9/D4): self block 25 → 28 — appended goal-direction
+ * slots [sin(rel_bearing), cos(rel_bearing), dist/map_diag] to the nearest
+ * bombsite, written in cs2_observations.h. Downstream bases shifted +3. */
+#define OBS_SELF_BASE       0
+#define OBS_SELF_SIZE       28
+#define OBS_TEAMMATE_BASE   (OBS_SELF_BASE + OBS_SELF_SIZE)
+#define OBS_TEAMMATE_STRIDE 7
+#define OBS_TEAMMATE_COUNT  4
+#define OBS_ENEMY_BASE      (OBS_TEAMMATE_BASE + OBS_TEAMMATE_STRIDE * OBS_TEAMMATE_COUNT)
+#define OBS_ENEMY_STRIDE    8
+#define OBS_ENEMY_COUNT     5
+#define OBS_GLOBAL_BASE     (OBS_ENEMY_BASE + OBS_ENEMY_STRIDE * OBS_ENEMY_COUNT)
+#define OBS_GLOBAL_SIZE     14
+#define OBS_DIM             110
 #define ACTION_DIM                                                                                 \
     7  /* Batch 3: HEAD_AIM removed; aim is now a continuous head, see AIM_DIM below */
 #define ACTION_MASK_DIM                                                                            \
@@ -32,7 +61,7 @@
 /* Sim-side obs schema version (NOT used at runtime — pure documentation;
  * future sim refactors bump this when obs schema changes. Deploy export
  * literals stay frozen at v2-105dim per gh #34.) */
-#define SIM_OBS_VERSION       "sim-v1-107dim"
+#define SIM_OBS_VERSION       "sim-v2-110dim"
 #define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */
 #define CROUCH_COOLDOWN_TICKS 7 /* ~0.4s at 16 Hz */
 #define INVALID_AREA_IDX      (-1)
@@ -237,8 +266,9 @@ typedef struct {
      * Distinct from bomb_carrier_id, which is the *dynamic* possession
      * tracker (reassigned on drop+auto-pickup in cs2_bomb.h:111). This
      * field is set ONLY in env_reset and is the round's stable identity
-     * signal. Consumed by compute_observations to emit obs[106] (the role
-     * bit; index shifted from 104 in T4 pitch insertion). Pitfall: must stay in the int32_t block
+     * signal. Consumed by compute_observations to emit the role bit at
+     * obs[OBS_GLOBAL_BASE+13] (=109 since the Batch 6 bearing slots; was 106,
+     * and 104 before the T4 pitch insertion). Pitfall: must stay in the int32_t block
      * before bombsite_entered to keep ctypes alignment in sync — see GameStateC mirror in
      * cs2_env.py. */
     int32_t round_designated_carrier_id;
@@ -265,13 +295,17 @@ typedef struct {
     int32_t action_move[9];
     int32_t action_shoot[2];
     int32_t action_use[2];
-    int32_t action_last[2];
+    /* action_last[2] removed (F13, 2026-07-06 adversarial review): it had no
+     * corresponding action head (legacy of a pre-Batch-3 "switch to last
+     * weapon" concept), no writer, and exported permanently-zero metrics.
+     * Mirror struct in cs2_env.py StepStatsC + its sizeof assert were
+     * updated in the same change — touch both or the ctypes overlay shifts. */
     /* Batch 3: continuous-aim Δyaw stats (replaces 16-bin action_aim histogram).
      * Sum + sum-of-squares + count enables Welford-style mean/var recovery
      * Python-side without storing the full rollout. mean = sum / count;
      * var = (sq_sum / count) - mean².
      * No explicit pad — three int32-aligned fields (4+4+4=12B) follow
-     * the int32-aligned `action_last[2]` cleanly. `_pad_ss_wins[2]` at
+     * the int32-aligned `action_use[2]` cleanly. `_pad_ss_wins[2]` at
      * end of struct still pads to 4-byte boundary as before. */
     float   aim_delta_sum;
     float   aim_delta_sq_sum;

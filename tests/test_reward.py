@@ -146,23 +146,36 @@ def test_team_spirit_one_equalizes_alive_team():
 
 
 def test_idle_penalty():
-    """Idle action (move=0) for a live agent should incur -0.0005 penalty."""
-    env = make_env(seed=0, auto_reset=False)
+    """Idle action (move=0) for a live agent should incur -0.0005 penalty.
+
+    PBRS weights and the CT survival micro-reward are zeroed so the idle
+    penalty is the ONLY per-tick term and can be asserted exactly. The old
+    version asserted total reward ≤ -0.0004 under default shaping, which
+    silently depended on the PBRS stationary residual (γ_pbrs − 1)·φ being
+    large; the finding-2 fix (γ_pbrs 0.99 → 0.999) shrank that residual 10×
+    and exposed the coupling.
+    """
+    env = make_env(
+        seed=0,
+        auto_reset=False,
+        reward_ct_survival=0.0,
+        pbrs_alive_weight=0.0,
+        pbrs_hp_weight=0.0,
+        pbrs_site_weight=0.0,
+        pbrs_bomb_progress_weight=0.0,
+        pbrs_nav_weight_t=0.0,
+        pbrs_nav_weight_ct=0.0,
+    )
     env.reset()
 
     # All agents idle (move action = 0)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, rewards, _, _, _ = env.step(actions)
 
-    # Every alive agent should have received the -0.0005 idle penalty.
-    # The reward may also contain PBRS terms, so we only check the sign / range.
     for i in range(10):
         if env._c_env.game.agents[i].alive:
-            assert rewards[i] <= 0, f"Agent {i} idled but got non-negative reward: {rewards[i]:.6f}"
-            # The idle penalty alone is -0.0005; PBRS shaping should be small.
-            # Verify the penalty is at most -0.0005 (PBRS can add to it).
-            assert rewards[i] <= -0.0004, (
-                f"Agent {i} idle penalty smaller than expected: {rewards[i]:.6f}")
+            assert abs(rewards[i] - (-0.0005)) < 1e-6, (
+                f"Agent {i} idled: expected exactly -0.0005, got {rewards[i]:.6f}")
     env.close()
 
 
@@ -275,6 +288,78 @@ def test_plant_progress_reward():
     # The per-tick plant progress reward is +0.05
     assert rewards[bomber_idx] >= 0.04, (
         f"Plant progress reward missing: agent {bomber_idx} reward = {rewards[bomber_idx]:.4f}")
+
+
+def test_planter_death_releases_plant_lock():
+    """Finding 7 (2026-07-06 adversarial review): a planter dying mid-plant
+    must release the plant lock so another T can plant that round.
+
+    Pre-fix, process_bomb had defuser-style death invalidation ONLY for the
+    defuser: when the planter died, `bomb_being_planted_by` stayed frozen on
+    the dead index, and the `== -1` / `== i` guards then rejected every other
+    carrier — planting was bricked for the rest of the round (live-verified:
+    a fresh carrier held USE 34 ticks with plant_time=19 and nothing
+    happened). Progress also resets to 0: the new planter starts a fresh
+    plant rather than inheriting ticks it didn't earn.
+    """
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+    g = env._c_env.game
+    sd = env._c_env.sd.contents
+    map_data = env.map_data
+    nav_graph = env.nav_graph
+
+    site_idx = None
+    site_centroid = None
+    for idx, is_site in enumerate(map_data.bombsite_by_idx):
+        if is_site:
+            site_idx = idx
+            site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
+            break
+    assert site_idx is not None, "No bombsite found in map"
+
+    def _put_at_site(i, has_bomb):
+        a = g.agents[i]
+        a.alive = 1
+        a.hp = 100
+        a.has_bomb = has_bomb
+        a.area_idx = site_idx
+        a.x, a.y, a.z = float(site_centroid[0]), float(site_centroid[1]), 0.0
+        g.bombsite_entered[i] = 1      # suppress entry bonus; not under test
+
+    # Agent 0 mid-plant at the site (5 of plant_time ticks done).
+    for i in range(10):
+        g.agents[i].has_bomb = 0
+    _put_at_site(0, has_bomb=1)
+    g.bomb_carrier_id = 0
+    g.bomb_being_planted_by = 0
+    g.bomb_plant_ticks = 5
+
+    # Kill the planter; one step must release the lock and reset progress.
+    g.agents[0].alive = 0
+    g.agents[0].hp = 0
+    env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+    assert int(
+        g.bomb_being_planted_by) == -1, (f"dead planter must release the plant lock, still held by "
+                                         f"{int(g.bomb_being_planted_by)}")
+    assert int(g.bomb_plant_ticks) == 0, (
+        f"plant progress must reset on planter death, got {int(g.bomb_plant_ticks)}")
+
+    # Hand the bomb to a living T at the site; a full fresh plant must succeed.
+    _put_at_site(1, has_bomb=1)
+    g.bomb_carrier_id = 1
+    g.bomb_is_dropped = 0
+    plant_time = int(sd.bomb_plant_time)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[1, 4] = 1                                                                # HEAD_USE held (Batch 3: USE is head 4)
+    for _ in range(plant_time + 2):
+        env.step(actions)
+        if int(g.bomb_planted):
+            break
+    assert int(g.bomb_planted) == 1, (
+        f"second carrier held USE {plant_time + 2} ticks (plant_time={plant_time}) "
+        f"but bomb never planted — plant lock still bricked")
+    env.close()
 
 
 # ── Phase 5 reward-externalization tests ──────────────────────────────────────
@@ -425,8 +510,10 @@ def test_reward_components_logged_in_terminal_info():
 # All other reward weights (kill, death, pbrs, survival, shot, inaction) are
 # zeroed so step_stats.reward_win reflects only the win-magnitude path.
 #
-# We sum step_stats.reward_win over alive winners to get per-agent magnitude,
-# then assert it matches the expected differential value.
+# We assert per-agent rewards directly (env._c_env.rewards): the terminal
+# win/loss magnitude applies to EVERY team member, dead or alive (finding 3,
+# docs/2026-07-06-adversarial-review-verification.md — death must not shield
+# an agent from the round outcome).
 #
 # Direct-stimulus is preferred here because:
 # 1. compute_rewards is not exposed via ctypes as a standalone callable.
@@ -572,12 +659,60 @@ def test_differential_win_magnitudes(scenario, winner, bomb_planted, bomb_ticks_
 
     _, _, _, _, _ = env.step(actions)
 
-    ss = env._c_env.step_stats
-    # reward_win accumulates ±mag for every alive agent on winning/losing side.
-    # With one alive winner and no losers alive, reward_win == +expected_mag.
-    actual = float(ss.reward_win)
-    assert abs(actual - expected_mag) < 0.01, (
-        f"Scenario '{scenario}': expected reward_win≈{expected_mag}, got {actual:.4f}")
+    # Per-agent terminal rewards: the win/loss magnitude applies to EVERY
+    # team member, dead or alive (finding 3 fix). _setup_round_end leaves at
+    # most one agent alive per team, so agents 1-4 / 6-9 are always dead —
+    # asserting all ten rows covers the dead-agent path in every scenario.
+    if winner == 0:
+        t_mag, ct_mag = expected_mag, -expected_mag
+    else:                                                                                            # CT win (1) or timeout (-1): CT positive
+        t_mag, ct_mag = -expected_mag, expected_mag
+    for i in range(10):
+        expected_i = t_mag if i < 5 else ct_mag
+        actual_i = float(env._c_env.rewards[i])
+        assert abs(actual_i - expected_i) < 0.01, (
+            f"Scenario '{scenario}': agent {i} "
+            f"({'T' if i < 5 else 'CT'}, {'alive' if env._c_env.game.agents[i].alive else 'dead'}) "
+            f"expected {expected_i}, got {actual_i:.4f}")
+
+    # reward_win accumulator is the truthful cross-team sum of emitted
+    # terminal rewards — symmetric magnitudes over equal teams net to 0.
+    assert abs(float(env._c_env.step_stats.reward_win)) < 0.01
+    env.close()
+
+
+def test_loss_penalty_applies_to_fully_dead_team():
+    """Finding 3 (2026-07-06 adversarial review): a fully-eliminated team must
+    still receive the round-loss penalty. Pre-fix, the win/loss block was
+    gated on `agents[i].alive`, so a T team wiped by CT received 0 instead of
+    -3 each — dying made the loss penalty unreachable and death nearly free
+    (the C1 correction: no test covered the all-dead-team case; every
+    round-end test kept >=1 agent alive per team). This is that missing test.
+    """
+    import numpy as np
+
+    env = _make_zeroed_env()
+    env.reset()
+
+    # CT elimination win with ALL FIVE T dead (alive_teams={1} leaves only
+    # agent 5 alive; agents 0-4 are the fully-dead losing team).
+    _setup_round_end(env,
+                     winner=1,
+                     bomb_planted=0,
+                     bomb_ticks_left=0,
+                     round_ticks_left=50,
+                     alive_teams={1})
+    env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+
+    for i in range(5):
+        r = float(env._c_env.rewards[i])
+        assert abs(r - (-3.0)) < 0.01, (
+            f"dead T agent {i} must receive the -3.0 loss penalty, got {r:.4f}")
+    # Winning team: alive and dead members alike get the +3.0 win reward
+    # (a CT that traded itself to wipe the Ts still contributed to the win).
+    for i in range(5, 10):
+        r = float(env._c_env.rewards[i])
+        assert abs(r - 3.0) < 0.01, (f"CT agent {i} must receive the +3.0 win reward, got {r:.4f}")
     env.close()
 
 
@@ -711,7 +846,10 @@ def test_detonation_beats_elimination():
                          alive_teams={0})
         actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
         env.step(actions)
-        val = float(env._c_env.step_stats.reward_win)
+        # Per-agent reward of the winning T (agent 0). step_stats.reward_win
+        # is unusable here: since the finding-3 fix it sums BOTH teams'
+        # symmetric terminal rewards and nets to 0 every round.
+        val = float(env._c_env.rewards[0])
         env.close()
         return val
 
@@ -835,3 +973,55 @@ def test_step_stats_in_info_flag_on_merges_with_terminal_summary():
     # step_stats also present.
     assert "step_stats" in summary
     env.close()
+
+
+# ── F15 (2026-07-06 adversarial review): timeout counts as a CT win ──────────
+def test_timeout_counted_as_ct_win_in_stats():
+    """Rewards have always treated timeout as a CT win (reward_win_ct_timeout
+    positive for CT, symmetric penalty for T), but winner_ct stayed 0 —
+    dashboards undercounted CT wins by exactly the timeout rate and the
+    self-play save/team-switch logic read the skewed rate. winner_ct now
+    includes timeouts; the raw mechanism stays recoverable (winner == -1,
+    timed_out == 1), so defuse/elimination-only wins = winner_ct - timed_out."""
+    import numpy as np
+    env = _make_zeroed_env()
+    env.reset()
+    try:
+        # Drive a NATURAL timeout: both teams alive (so the elimination check
+        # can't preempt), one tick left on the round clock, round_over unset.
+        # process_bomb's timeout branch then sets winner=-1/timed_out=1 itself
+        # (the synthetic _setup_round_end path pre-sets round_over, which
+        # skips that branch and never raises timed_out).
+        _setup_round_end(env,
+                         winner=-1,
+                         bomb_planted=0,
+                         bomb_ticks_left=0,
+                         round_ticks_left=1,
+                         alive_teams={0, 1})
+        env._c_env.game.round_over = 0
+        env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+        ss = env._c_env.step_stats
+        assert ss.winner == -1, "raw winner must stay -1 on timeout (mechanism signal)"
+        assert ss.timed_out == 1
+        assert ss.winner_ct == 1, "timeout must count as a CT win in winner_ct (F15)"
+        assert ss.winner_t == 0
+        es = env._c_env.episode_stats
+        assert es.winner_ct == 1 and es.timed_out == 1
+
+        # Control: a T elimination win must NOT set winner_ct.
+        env2 = _make_zeroed_env()
+        env2.reset()
+        try:
+            _setup_round_end(env2,
+                             winner=0,
+                             bomb_planted=0,
+                             bomb_ticks_left=0,
+                             round_ticks_left=100,
+                             alive_teams={0})
+            env2.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+            assert env2._c_env.step_stats.winner_ct == 0
+            assert env2._c_env.step_stats.winner_t == 1
+        finally:
+            env2.close()
+    finally:
+        env.close()
