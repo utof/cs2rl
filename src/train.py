@@ -54,9 +54,54 @@ OBS_DIM = 110
 LOG_STD_INIT = math.log(0.1)
 LOG_STD_MIN = math.log(0.01)
 LOG_STD_MAX = math.log(0.5)
+# gh#91: σ to widen a BC-frozen aim head to at PPO resume. BC detaches
+# aim_log_std (spec D-6) so bc_warmstart.pt carries σ=0.1 while fitting
+# obs-dependent |μ| up to ~0.63 rad — one lr=3e-4 Adam step then moves μ a
+# full σ and continuous approx_kl (~1.4) blows past target_kl (0.03),
+# throttling every update to ~1 minibatch. σ=0.3 drops that per-step KL ~9×
+# while staying inside [σ_min, σ_max]. Applied by reinit_frozen_aim_log_std.
+AIM_LOG_STD_RESUME_INIT = math.log(0.3)
 # Fix #2: precomputed log(2π) for the analytic Normal log-prob/entropy
 # replacing torch.distributions.Normal in _hybrid_sample_logits.
 _LOG_2PI = math.log(2.0 * math.pi)
+
+
+def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6):
+    """gh#91: widen a BC-frozen aim head before PPO resumes from it.
+
+    WHAT: if ``state_dict`` carries an ``aim_log_std`` tensor still sitting
+    exactly at LOG_STD_INIT (every element, within ``atol``), overwrite it
+    in-place with AIM_LOG_STD_RESUME_INIT (σ 0.1 → 0.3) and return True.
+    Any other value — i.e. a checkpoint whose aim head actually trained —
+    is left untouched (returns False).
+
+    WHY: BC detaches aim_log_std (spec D-6), so bc_warmstart.pt pairs a
+    near-deterministic σ=0.1 with large obs-dependent aim means. Resuming
+    PPO from that puts one Adam step a full σ away → continuous approx_kl
+    ~1.4 ≫ target_kl 0.03 → the KL early-stop throttles updates to ~1
+    minibatch/epoch for ~85 epochs (root-caused 2026-08-01, run
+    checkpoints-20260801-022606; companion metrics bug gh#90).
+
+    PITFALLS:
+      * Detection is by VALUE, not filename — any un-trained aim_log_std is
+        the BC signature (an RL run moves it within its first updates). A
+        trained checkpoint landing back on exactly log(0.1) elementwise is
+        measure-zero.
+      * Mutates ``state_dict`` (pre-``load_state_dict``), matching dtype/
+        device of the stored tensor via full_like.
+      * Matches any key ENDING in "aim_log_std" so a future wrapper prefix
+        (e.g. "policy.aim_log_std") keeps working.
+    """
+    import torch as _torch
+
+    changed = False
+    for key, val in state_dict.items():
+        if key.endswith("aim_log_std") and _torch.allclose(
+                val, _torch.full_like(val, LOG_STD_INIT), atol=atol):
+            state_dict[key] = _torch.full_like(val, AIM_LOG_STD_RESUME_INIT)
+            changed = True
+    return changed
+
 
 # F8 (2026-07-06 adversarial review): per-head [start, end) column ranges of
 # the flat (ACTION_MASK_DIM,) action-mask row, derived from ACTION_HEAD_SIZES
@@ -1249,7 +1294,34 @@ def _patch_trainer_with_return_norm(trainer):
         self._batch1_event_oversample_fraction = (float(_t8_event_mask.float().mean())
                                                   if _t8_event_mask is not None else 0.0)
 
+        # ── gh#90: KL early-stop bookkeeping ───────────────────────────────
+        # WHAT: the target_kl early-stop is (a) gated to update-epoch
+        #   boundaries and (b) decoupled from the losses/* divisor.
+        # WHY (root-caused 2026-08-01, run checkpoints-20260801-022606):
+        #   the old inline `break` sat before the logging block while every
+        #   losses/* metric divided by the PLANNED self.total_minibatches —
+        #   a truncated update silently scaled all logged losses by k/N
+        #   ("importance=0.0167" was really ratio=1.0 with k=1). And because
+        #   this flattened loop collapses all update_epochs into one range,
+        #   one KL spike aborted passes over data never visited — harsher
+        #   than standard PPO, which finishes the current epoch first.
+        # HOW: losses accumulate RAW sums inside the loop and are divided by
+        #   the EXECUTED count (_mb_run) after it; a KL trip sets _kl_stop
+        #   and the loop exits at the next epoch boundary, so epoch 0 always
+        #   completes (⇒ _mb_run >= 1, and the effective_alpha / advantages
+        #   post-loop reads can no longer see an mb=0 abort).
+        # PITFALL: total_minibatches need not divide update_epochs evenly
+        #   (harness: 7 mbs / 3 epochs) — the boundary stride uses floor
+        #   division with a >=1 clamp, never a modulo of zero.
+        target_kl = config.get("target_kl", None)
+        _mbs_per_epoch = max(1,
+                             self.total_minibatches // max(1, int(config.get("update_epochs", 1))))
+        _kl_stop = False
+        _mb_run = 0
+
         for mb in range(self.total_minibatches):
+            if _kl_stop and mb % _mbs_per_epoch == 0:
+                break                  # epoch boundary: honor the KL trip
             profile("train_misc", epoch, nest=True)
             self.amp_context.__enter__()
 
@@ -1408,10 +1480,12 @@ def _patch_trainer_with_return_norm(trainer):
                 approx_kl = ((ratio - 1) - logratio).mean()
                 clipfrac = ((ratio - 1.0).abs() > config["clip_coef"]).float().mean()
 
-            # Early stopping: stop update if KL divergence exceeds target
-            target_kl = config.get("target_kl", None)
+            # Early stopping (gh#90): a KL trip finishes the CURRENT epoch
+            # (this minibatch included — matches standard PPO's post-epoch
+            # check) and stops at the next epoch boundary via the loop-top
+            # gate, instead of the old immediate mid-pass break.
             if target_kl is not None and approx_kl.item() > target_kl:
-                break
+                _kl_stop = True
 
             # Batch 3 (T5): pg_loss already computed by _hybrid_ppo_loss above
             # via per-factor clipping (the pre-Batch-3 single-ratio block
@@ -1470,21 +1544,26 @@ def _patch_trainer_with_return_norm(trainer):
                 # _action_spec and the policy logits list.
                 _head_names = list(ACTION_HEAD_NAMES)
                 for _hi, (_hn, _hd) in enumerate(zip(_head_names, _dists, strict=True)):
-                    losses[f"entropy/{_hn}"] += _hd.entropy().mean().item() / self.total_minibatches
-            losses["entropy/total"] += current_entropy.item() / self.total_minibatches
+                    losses[f"entropy/{_hn}"] += _hd.entropy().mean().item()
+            losses["entropy/total"] += current_entropy.item()
             # ──────────────────────────────────────────────────────────────
 
             # Logging
             profile("train_misc", epoch)
-            losses["policy_loss"] += pg_loss.item() / self.total_minibatches
-            losses["value_loss"] += v_loss.item() / self.total_minibatches
-            losses["entropy"] += current_entropy.item() / self.total_minibatches
-            losses["alpha"] += alpha.detach().item() / self.total_minibatches
-            losses["alpha_loss"] += alpha_loss.item() / self.total_minibatches
-            losses["old_approx_kl"] += old_approx_kl.item() / self.total_minibatches
-            losses["approx_kl"] += approx_kl.item() / self.total_minibatches
-            losses["clipfrac"] += clipfrac.item() / self.total_minibatches
-            losses["importance"] += ratio.mean().item() / self.total_minibatches
+            losses["policy_loss"] += pg_loss.item()
+            losses["value_loss"] += v_loss.item()
+            losses["entropy"] += current_entropy.item()
+            losses["alpha"] += alpha.detach().item()
+            losses["alpha_loss"] += alpha_loss.item()
+            losses["old_approx_kl"] += old_approx_kl.item()
+            losses["approx_kl"] += approx_kl.item()
+            losses["clipfrac"] += clipfrac.item()
+            losses["importance"] += ratio.mean().item()
+            # gh#90: count EXECUTED minibatches — the divisor for every
+            # accumulated losses/* above and the per-head entropy block.
+            # Incremented here (with the stats) so a future early-`continue`
+            # placed above the logging block can't desync count from sums.
+            _mb_run += 1
 
             # Learn on accumulated minibatches
             profile("learn", epoch)
@@ -1522,6 +1601,16 @@ def _patch_trainer_with_return_norm(trainer):
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
+        # gh#90: normalize the accumulated losses/* sums by the EXECUTED
+        # minibatch count. Must run BEFORE the scalar (non-accumulated) keys
+        # below (explained_variance, ret_mean, ...) are inserted — dividing
+        # those would corrupt them. minibatches_run itself is added after
+        # the division for the same reason. max(_mb_run, 1) is pure belt-and-
+        # braces: the epoch-boundary gate guarantees epoch 0 completes.
+        for _lk in list(losses):
+            losses[_lk] /= max(_mb_run, 1)
+        losses["minibatches_run"] = _mb_run
+
         # Reprioritize experience
         profile("train_misc", epoch)
         if config["anneal_lr"]:
@@ -1543,13 +1632,13 @@ def _patch_trainer_with_return_norm(trainer):
         # wins after the inner loop anyway.
         # PITFALL: effective_alpha is bound inside the minibatch loop;
         # Python keeps the last bound value visible at this scope so
-        # reading it here works in the happy path. The real risk is the
-        # `target_kl` early-break path inside the loop: if minibatch 0
-        # exceeds the KL threshold and breaks before the alpha block
-        # binds effective_alpha, this read would NameError on the very
-        # first train() call. Same applies to _batch1_grad_norm captured
-        # at the optimizer-step site if accumulation never fires.
-        # Tracked: utof/cs2rl issue (early-break unbound state).
+        # reading it here works in the happy path. Since gh#90 the
+        # target_kl early-stop can only exit at an epoch boundary (epoch 0
+        # always completes), so the old "break on mb=0 leaves
+        # effective_alpha unbound" NameError is structurally impossible —
+        # the try/except below stays as defense-in-depth only. The NaN
+        # guard's `continue` can still skip the optimizer-step site, so
+        # _batch1_grad_norm keeps its pre-seeded default in that edge.
         trainer._batch1_log_alpha = float(log_alpha.item())
         # effective_alpha may be unbound this call if target_kl early-broke
         # on mb=0 — leave the pre-initialised trainer attr (set in the patch
@@ -2829,6 +2918,12 @@ def train(args):
         if not resume_path.exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
         state_dict = _torch.load(resume_path, map_location=device, weights_only=True)
+        # gh#91: BC warm-start checkpoints carry aim_log_std frozen at
+        # LOG_STD_INIT — widen to AIM_LOG_STD_RESUME_INIT before loading or
+        # the KL early-stop throttles the whole run (see the helper's doc).
+        if reinit_frozen_aim_log_std(state_dict):
+            print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "
+                  f"re-initialized to log(0.3) ≈ {AIM_LOG_STD_RESUME_INIT:.3f} (gh#91)")
         policy.load_state_dict(state_dict)
         print(f"[Train] Resumed from checkpoint: {resume_path}")
     # ────────────────────────────────────────────────────────────────────────
