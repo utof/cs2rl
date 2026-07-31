@@ -123,12 +123,29 @@ def test_actions_are_valid_bc_labels(demo_dir):
         assert disc[-1, 0] == 0
 
 
+# Within-block offsets of the two carrier-identifying slots. These are the one
+# place this file uses numbers rather than imports, because _obs_spec.py is
+# generated with BLOCK boundaries only — it has no per-field table to import.
+# Sources: cs2_observations.h `obs[22] = (a->team == 0 && a->has_bomb)` and
+# `obs[gb + 13] = (... i == g->round_designated_carrier_id)`. They are written
+# relative to their block bases below and range-checked against OBS_BLOCKS, so
+# a block-boundary shift (25/53/93 → 28/56/96 happened in Task 2.5) moves them
+# automatically and a within-block layout change trips the range assert.
+SELF_HAS_BOMB_OFFSET = 22
+GLOBAL_DESIGNATED_CARRIER_OFFSET = 13
+
+
 def test_carrier_row_only_and_carrier_state_in_obs(demo_dir):
     """R3 sanity via obs content: the recorded row must be the CARRIER's —
-    obs[22] (self-has-bomb) and the role bit (global base+13) are 1.0 from
-    the very first tick (the priming step lands the setup pokes before
-    recording starts)."""
-    gb = OBS_BLOCKS["global"][0]
+    self-has-bomb and the designated-carrier role bit are 1.0 from the very
+    first tick (the priming step lands the setup pokes before recording
+    starts)."""
+    self_lo, self_hi = OBS_BLOCKS["self"]
+    gb, g_hi = OBS_BLOCKS["global"]
+    has_bomb = self_lo + SELF_HAS_BOMB_OFFSET
+    role_bit = gb + GLOBAL_DESIGNATED_CARRIER_OFFSET
+    assert self_lo <= has_bomb < self_hi, "self-has-bomb slot fell outside the self block"
+    assert gb <= role_bit < g_hi, "designated-carrier slot fell outside the global block"
     for d in _load_all(demo_dir):
-        assert np.all(d["obs"][:, 22] == 1.0), "self-has-bomb not set — wrong row recorded?"
-        assert np.all(d["obs"][:, gb + 13] == 1.0), "designated-carrier role bit not pinned"
+        assert np.all(d["obs"][:, has_bomb] == 1.0), "self-has-bomb not set — wrong row recorded?"
+        assert np.all(d["obs"][:, role_bit] == 1.0), "designated-carrier role bit not pinned"
