@@ -1354,12 +1354,17 @@ def _patch_trainer_with_return_norm(trainer):
         # wants (continuity comes from target==h_anchor at release, never
         # from moving log_alpha: Adam(lr=1e-4) travels ~1e-4/minibatch, so a
         # parked log_alpha is stranded — spec finding 1).
-        # PITFALL: keep grace+ramp >= entropy_target_warmup_steps. At ramp_end
-        # control returns to the Task 9A schedule; with defaults (5M+10M >= 10M
-        # warmup) it has already flattened at base_frac*max so the handoff is
-        # continuous, but e.g. grace=2M+ramp=3M lands ramp_end at 5M where the
-        # base schedule still reads ~0.425*max — an upward target jump of
-        # ~0.6 nats at the exact boundary the spec promises is clean.
+        # PITFALL: keep grace+ramp >= entropy_target_warmup_steps. OFF falls
+        # through to the Task 9A schedule (see the override condition below),
+        # and 9A ramps DOWNWARD — warmup_high_frac*max (0.5) at step 0 to
+        # base_frac*max (0.35) at entropy_target_warmup_steps — so during
+        # warmup it reads strictly ABOVE the base_frac*max the warm-start ramp
+        # lands on. With defaults (grace 5M + ramp 10M = 15M >= 10M warmup) 9A
+        # has already flattened at base_frac*max and the handoff is exactly
+        # continuous. But e.g. grace=2M+ramp=3M puts ramp_end at 5M, where 9A
+        # still reads 0.425*max: the target jumps UPWARD 0.35*max -> 0.425*max,
+        # i.e. 2.87 -> 3.49 nats (+0.62, at max_entropy=8.21), at the exact
+        # boundary the spec promises is clean.
         _ws_enabled = bool(config.get("warmstart_entropy", False))
         _ws_floor_active = True
         if _ws_enabled:
@@ -1385,12 +1390,25 @@ def _patch_trainer_with_return_norm(trainer):
                              trainer._batch1_max_entropy))
             trainer._batch1_warmstart_phase = _ws.phase
             _ws_floor_active = _ws.floor_active
-            if _ws.target is not None:
+            if _ws.phase != WS_OFF and _ws.target is not None:
                 # Override the Task 9A schedule during the ramp AND mirror it,
                 # or the wandb target trace plots the unmodified base schedule
-                # (spec finding 9).
+                # (spec finding 9). Effectively RAMP-only: GRACE carries
+                # target=None (no target is consumed while alpha is ceilinged).
+                # PITFALL: the WS_OFF guard is load-bearing — the helper returns
+                # target=base_target (NOT None) once OFF, so testing target
+                # alone would pin the target at base_frac*max for the rest of
+                # the run and silently flatten the tail of the 9A warmup ramp
+                # whenever grace+ramp < entropy_target_warmup_steps. Falling
+                # through here is what makes OFF byte-for-byte pre-feature
+                # behavior at ANY config, which is what the spec promises.
                 _t9_target_entropy = _ws.target
                 trainer._batch1_current_target_entropy = float(_ws.target)
+        else:
+            # Config can be toggled off in-process (tests do this; production
+            # builds the config once). Re-seed the phase so a stale GRACE can
+            # never keep the alpha optimizer frozen after the mode is disabled.
+            trainer._batch1_warmstart_phase = WS_OFF
 
         # Task 8: raw event-segment fraction (mask mean) — computed once per
         # train() call because _batch1_event_mask doesn't change inside the

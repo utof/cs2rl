@@ -16,6 +16,8 @@ which sits at ent_coef=0.1 during grace by design (Task 9B reset).
 """
 import math
 
+import pytest
+
 # "log_alpha did not move" tolerance. NOT 0/1e-9: log_alpha is a float32
 # tensor, so log_alpha.item() round-trips log(0.1) to ~3.2e-8 of the float64
 # math.log(0.1) the assertions compare against. 1e-7 absorbs that while
@@ -59,7 +61,12 @@ def test_grace_pins_effective_alpha_and_freezes_log_alpha():
         assert abs(losses["log_alpha"] - math.log(trainer.config["ent_coef"])) < _FROZEN_TOL
         losses2 = _run_train_once(trainer)
         assert abs(losses2["log_alpha"] - math.log(trainer.config["ent_coef"])) < _FROZEN_TOL
+        # Value pin, not mere presence: h_over_h0 is an ABSOLUTE ratio and
+        # must stay ~1 over two updates. If it ever migrates above the gh#90
+        # divisor loop it gets divided by the executed-minibatch count (7 on
+        # this harness), landing near 0.14 — well outside rel=0.5.
         assert "warmstart_h_over_h0" in losses2
+        assert losses2["warmstart_h_over_h0"] == pytest.approx(1.0, rel=0.5)
         # the anchor source must be maintained every update, unconditionally
         assert trainer._batch1_last_entropy_mean is not None
     finally:
@@ -79,6 +86,22 @@ def test_grace_zero_anchors_on_second_update_and_ramps():
         assert abs(trainer._batch1_warmstart_h_anchor - h_after_1) < 1e-9
         # ramp_steps is huge so the mirrored target sits ~at the anchor
         assert abs(trainer._batch1_current_target_entropy - h_after_1) < 1e-3
+        # COUPLING: the assertion above only proves the MIRROR (the wandb
+        # trace) was overridden. This one proves the CONSUMED target — the
+        # _t9_target_entropy that alpha_loss is actually computed from — was
+        # overridden too, which is the half that steers training.
+        # alpha_loss = mean(log_alpha * (H - target)). With the target anchored
+        # at the previous update's mean H, (H - target) ~ 0, so alpha_loss ~ 0
+        # (measured -0.020). Drop the consumed override while keeping the
+        # mirror and the target reverts to the Task 9A schedule, which this
+        # early in warmup reads ~0.4997*max = 4.10 nats against H ~ 1.55:
+        # alpha_loss jumps to +5.89 (measured). The bound sits at 1.151
+        # (|log 0.1| * 0.5): 5x below the broken value, 59x above the correct
+        # one — verified by breaking the override and watching this fail.
+        assert abs(losses2["alpha_loss"]) < abs(math.log(trainer.config["ent_coef"])) * 0.5, (
+            "consumed target was not overridden — alpha_loss "
+            f"{losses2['alpha_loss']} implies the Task 9A schedule is still "
+            "driving the controller during RAMP")
     finally:
         cleanup()
 
