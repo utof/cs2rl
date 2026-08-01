@@ -14,15 +14,23 @@ Functions:
     split_into_channels(step_stats_view):
                          route StepStats reward fields into combat/objective/positional channels
                          using win_by_detonation / win_by_defuse flags
+    warmstart_entropy_state(step, grace_steps, ramp_steps, h_anchor, base_target):
+                         two-phase warm-start entropy schedule: GRACE (alpha ceilinged,
+                         floor disabled) -> RAMP (target h_anchor -> base_target,
+                         floor still disabled) -> OFF (steady state, floor active).
 
 Classes:
     WelfordStd:          scalar online-std estimator with prior_std warmup fallback;
                          Task 6 instantiates three (one per reward channel).
+    WarmstartEntropyState: frozen dataclass result of warmstart_entropy_state
+                         (phase, target, floor_active).
 
 All free functions are stateless and deterministic. WelfordStd carries
 per-instance running statistics — each channel needs its own instance.
 """
 from __future__ import annotations
+
+import dataclasses
 
 import numpy as np
 import torch
@@ -65,6 +73,56 @@ def target_entropy_schedule(
     t = min(step / warmup_end, 1.0)
     frac = warmup_high_frac + (base_frac - warmup_high_frac) * t
     return frac * max_entropy
+
+
+# Warm-start entropy mode phases (spec docs/superpowers/specs/
+# 2026-08-01-warmstart-entropy-control-design.md). Ints (not Enum) so the
+# value can go straight into the losses/* dict as a plottable metric.
+WS_GRACE, WS_RAMP, WS_OFF = 0, 1, 2
+
+
+@dataclasses.dataclass(frozen=True)
+class WarmstartEntropyState:
+    """One evaluation of the warm-start entropy schedule.
+
+    target is None during GRACE (alpha is ceilinged so no target is consumed);
+    floor_active gates the trainer's hard alpha>=0.5 entropy-floor clamp —
+    False for the ENTIRE warm-start window (grace + ramp), True at/after
+    ramp_end. PITFALL (spec finding 2): do NOT derive floor_active from
+    "target < floor" — the ramp crosses the floor mid-window and re-arming
+    there is a ~500x effective-alpha discontinuity at an unplotted step.
+    """
+    phase: int
+    target: float | None
+    floor_active: bool
+
+
+def warmstart_entropy_state(step: int, *, grace_steps: int, ramp_steps: int, h_anchor: float | None,
+                            base_target: float) -> WarmstartEntropyState:
+    """Pure warm-start entropy schedule: GRACE -> RAMP -> OFF.
+
+    WHAT: while step < grace_steps (or no h_anchor captured yet), entropy
+    pressure is off (GRACE). Then the target ramps linearly from h_anchor
+    (the policy's measured mean entropy at grace end) to base_target over
+    ramp_steps (RAMP), after which behavior is identical to the normal
+    schedule (OFF).
+
+    WHY h_anchor=None => GRACE even past the boundary: the anchor is read
+    from the PREVIOUS update's mean entropy (trainer._batch1_last_entropy_mean),
+    which doesn't exist on the very first update of a grace_steps=0 run —
+    grace semantics until the caller can anchor keeps that case well-defined.
+
+    PITFALL: continuity at grace end comes from target==h_anchor (alpha's
+    Lagrangian gradient ~0), NOT from moving log_alpha — Adam(lr=1e-4) on a
+    scalar moves log-alpha at most ~1e-4/minibatch (~0.9 over a 30M run), so
+    a parked log_alpha can never climb back (spec §1 finding-1 bound).
+    """
+    if step < grace_steps or h_anchor is None:
+        return WarmstartEntropyState(WS_GRACE, None, False)
+    if ramp_steps <= 0 or step >= grace_steps + ramp_steps:
+        return WarmstartEntropyState(WS_OFF, base_target, True)
+    t = (step - grace_steps) / ramp_steps
+    return WarmstartEntropyState(WS_RAMP, h_anchor + (base_target - h_anchor) * t, False)
 
 
 # Channel assignment from spec §Channel assignment
