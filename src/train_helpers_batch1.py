@@ -105,10 +105,23 @@ def warmstart_entropy_state(step: int, *, grace_steps: int, ramp_steps: int, h_a
     pressure is off (GRACE). Then the target ramps linearly from h_anchor
     (the policy's measured mean entropy at grace end) to base_target over
     ramp_steps (RAMP), after which behavior is identical to the normal
-    schedule (OFF).
+    schedule (OFF). ramp_steps <= 0 (including negative values, treated the
+    same as 0) skips RAMP entirely: the state jumps straight to OFF at
+    step == grace_steps.
+
+    h_anchor LATCHING CONTRACT: the caller must capture h_anchor exactly
+    ONCE, at the grace->ramp transition, from that moment's previous-update
+    mean entropy — then pass that SAME frozen float on every subsequent call
+    for the rest of the ramp. This function does not latch anything itself;
+    it is pure and re-evaluates its inputs every call. Passing a live,
+    per-update entropy value instead of the frozen one degenerates the
+    linear ramp into a contraction of the *current* entropy toward
+    base_target (a different, unintended schedule) rather than a fixed
+    interpolation from the grace-end anchor.
 
     WHY h_anchor=None => GRACE even past the boundary: the anchor is read
-    from the PREVIOUS update's mean entropy (trainer._batch1_last_entropy_mean),
+    from the PREVIOUS update's mean entropy (trainer._batch1_last_entropy_mean
+    — added by the trainer wiring task, not yet present in this module),
     which doesn't exist on the very first update of a grace_steps=0 run —
     grace semantics until the caller can anchor keeps that case well-defined.
 
@@ -116,6 +129,31 @@ def warmstart_entropy_state(step: int, *, grace_steps: int, ramp_steps: int, h_a
     Lagrangian gradient ~0), NOT from moving log_alpha — Adam(lr=1e-4) on a
     scalar moves log-alpha at most ~1e-4/minibatch (~0.9 over a 30M run), so
     a parked log_alpha can never climb back (spec §1 finding-1 bound).
+
+    PITFALL: there is no "mode disabled" representation here. A caller with
+    the warm-start feature disabled must NOT call this function at all — a
+    permanently-None h_anchor makes every call return GRACE with
+    floor_active=False forever, silently disarming the trainer's entropy
+    floor for the whole run. The trainer wiring task gates all calls behind
+    the `warmstart_entropy` config flag; this module has no such flag.
+
+    Args:
+        step: trainer.global_step — agent steps, the same counter
+            target_entropy_schedule's `step` argument uses.
+        grace_steps: length of the GRACE window, in the same agent-step
+            unit as `step`.
+        ramp_steps: length of the RAMP window (after grace_steps), in the
+            same agent-step unit as `step`.
+        h_anchor: the frozen mean-entropy anchor captured at the grace->ramp
+            transition (see LATCHING CONTRACT above), or None before it has
+            been captured.
+        base_target: the steady-state (OFF-phase) entropy target, in the
+            same units as h_anchor.
+
+    Returns:
+        WarmstartEntropyState with phase in {WS_GRACE, WS_RAMP, WS_OFF},
+        target (None only during GRACE), and floor_active (True only once
+        OFF is reached).
     """
     if step < grace_steps or h_anchor is None:
         return WarmstartEntropyState(WS_GRACE, None, False)
