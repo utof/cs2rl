@@ -27,13 +27,29 @@ from pathlib import Path
 
 import numpy as np
 
+# _action_spec is generated from cs2_types.h. Notes on the names imported below:
+#   ACTION_MASK_DIM - F8: trainer-side mask buffer width (= sum of head sizes).
+#   AIM_DIM         - T4→T5 carry-forward (M-1): unused in this module, imported so the
+#                     T6 ONNX exporter can pull it from `train` (see __all__ below).
+# PITFALL (gh#97): no trailing comments anywhere in this import block. yapf snaps
+# trailing comments to its spaces_before_comment stops (40/56/72) while ruff's isort
+# wants exactly one space, so any comment in here makes the two formatters fight and
+# ruff reports I001 forever. Second gh#97 trap: a suppression directive must END its
+# line — trailing prose after its code list makes the directive malformed and inert
+# (and ruff then parses the prose as rule codes, warning on every invocation).
 from _action_spec import (
     ACTION_HEAD_NAMES,
     ACTION_HEAD_SIZES,
-    ACTION_MASK_DIM,                   # F8: trainer-side mask buffer width (= sum of head sizes)
-    AIM_DIM,                           # noqa: F401  T4→T5 carry-forward (M-1): T6 ONNX exporter consumes this
-)                                      # from cs2_types.h
+    ACTION_MASK_DIM,
+    AIM_DIM,
+)
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
+
+# Explicit re-export marker: naming AIM_DIM here is what tells ruff that the
+# otherwise-unused import is intentional. A trailing per-line F401 suppression cannot
+# be used instead, for the formatter reason above. Nothing does `from train import *`,
+# so narrowing star-imports to this one name has no effect on any caller.
+__all__ = ("AIM_DIM", )
 
 # MUST stay a bare integer literal: scripts/exp_lib.py fingerprints the env by
 # regex-grepping `OBS_DIM = <int>` out of this file's source text (env_fingerprint),
