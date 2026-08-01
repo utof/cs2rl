@@ -93,18 +93,27 @@ def _twin_episode_check(n_steps=900, seed=1234, team_spirit=0.0):
         sym.reset(seed=seed)
         for step_n in range(n_steps):
             actions = rng.integers(ACTION_HEAD_SIZES, size=(10, ACTION_DIM)).astype(np.int32)
-            _, r_plain, term_plain, _, info_plain = plain.step(actions)
-            _, r_sym, term_sym, _, info_sym = sym.step(actions.copy())
+            obs_plain, r_plain, term_plain, _, info_plain = plain.step(actions)
+            obs_sym, r_sym, term_sym, _, info_sym = sym.step(actions.copy())
             raw = np.array(r_plain, dtype=np.float32)
             got = np.array(r_sym, dtype=np.float32)
+            # Lockstep guard covers observations too, not just terminals: the
+            # transform must not perturb the sim, and obs is the widest
+            # per-tick surface that would show it if it did.
             assert np.array_equal(
                 term_plain, term_sym), (f"twins diverged at step {step_n} — seeds are not lockstep")
+            assert np.array_equal(
+                obs_plain,
+                obs_sym), (f"observations diverged at step {step_n} — symmetrization must "
+                           "not feed back into the sim")
             assert got == pytest.approx(_expected(raw), abs=1e-5), f"step {step_n}"
+            # Zero-sum is the whole point, so assert it on EVERY tick, not only
+            # the terminal ones.
+            assert got.sum() == pytest.approx(0.0, abs=1e-4), f"step {step_n} not zero-sum"
             if info_plain and np.abs(raw).max() >= 1.0:
                 # terminal tick: win/loss magnitudes (>=3.0 pre-mixing) dwarf
                 # the per-tick shaping terms, so this is the §6.4 terminal case
                 saw_terminal_with_win_bonus = True
-                assert got.sum() == pytest.approx(0.0, abs=1e-4)
     finally:
         plain.close()
         sym.close()
@@ -143,6 +152,66 @@ def test_c_side_reward_channels_are_pre_transform():
         plain.close()
         sym.close()
     pytest.fail("no round ended within 900 steps")
+
+
+def test_symmetrization_holds_on_the_external_buffer_vecenv_path():
+    """The path training actually runs on (review finding 1).
+
+    Every other test here builds a bare env with buf=None, where self.rewards
+    IS the zero-copy C view; under pufferlib.vector.make the env gets EXTERNAL
+    buffers and _sync_outputs np.copyto's the C rewards into a separate array.
+    Symmetrizing the wrong one of those two arrays would leave the whole suite
+    green while training silently learned on raw rewards, so this drives the
+    real factory -> vector.make stack and reads the rewards the trainer reads.
+    Serial (not Multiprocessing): same external-buffer code path, no worker
+    processes to make the assertion failures unreadable.
+    """
+    import multiprocessing as mp
+
+    import pufferlib.vector
+
+    import train
+
+    def _make(symmetrize):
+        factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3),
+                                          map_data=None,
+                                          reward_symmetrize=symmetrize)
+        return pufferlib.vector.make([factory],
+                                     env_args=[[]],
+                                     env_kwargs=[{}],
+                                     num_envs=1,
+                                     backend=pufferlib.vector.Serial,
+                                     batch_size=1,
+                                     zero_copy=True)
+
+    plain = _make(False)
+    sym = _make(True)
+    rng = np.random.default_rng(21)
+    try:
+        # Pin the premise: if this ever goes False the test has quietly
+        # regressed into re-testing the buf=None path the others cover.
+        assert plain.driver_env._uses_external_buffers, (
+            "vecenv did not hand the env external buffers — this test no "
+            "longer covers the training path it exists for")
+        plain.async_reset(seed=4242)
+        sym.async_reset(seed=4242)
+        plain.recv()
+        sym.recv()
+        for step_n in range(300):
+            actions = rng.integers(ACTION_HEAD_SIZES, size=(10, ACTION_DIM)).astype(np.int32)
+            plain.send(actions)
+            sym.send(actions.copy())
+            _o_p, r_plain, term_plain, _t_p, _i_p, _id_p, _m_p = plain.recv()
+            _o_s, r_sym, term_sym, _t_s, _i_s, _id_s, _m_s = sym.recv()
+            raw = np.asarray(r_plain, dtype=np.float32)
+            got = np.asarray(r_sym, dtype=np.float32)
+            assert np.array_equal(
+                term_plain, term_sym), (f"twins diverged at step {step_n} — seeds are not lockstep")
+            assert got == pytest.approx(_expected(raw), abs=1e-5), f"step {step_n}"
+            assert got.sum() == pytest.approx(0.0, abs=1e-4), f"step {step_n} not zero-sum"
+    finally:
+        plain.close()
+        sym.close()
 
 
 def test_make_puffer_env_threads_the_flag():
