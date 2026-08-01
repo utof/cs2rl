@@ -163,6 +163,22 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     dict as a fingerprint, so silent drift here invalidates experiment
     provenance.
     """
+    # ── Warm-start entropy mode (spec 2026-08-01) ──
+    # Two-phase override for BC-warm-started runs: GRACE (alpha ceilinged ~0,
+    # alpha-optimizer paused, hard entropy floor disabled) then RAMP (target
+    # re-anchored at measured H, rising to base_frac*max; floor still off,
+    # re-arms at ramp end). Explicit flag, NO auto-detection: config.json is
+    # dumped BEFORE the resume block loads the checkpoint, so an auto-set flag
+    # would be recorded False — provenance poison (spec finding 3). The getattr
+    # defaults keep harness/dump-config args objects (which may predate these
+    # flags) working. Read out here rather than inline in the dict below: yapf
+    # snaps that dict's comment column past the longest line in the block, so
+    # long inline getattr() calls would re-indent every comment in it.
+    ws_entropy = bool(getattr(args, "warmstart_entropy", False))
+    ws_grace = int(getattr(args, "warmstart_grace_steps", 5_000_000))
+    ws_ramp = int(getattr(args, "warmstart_ramp_steps", 10_000_000))
+    ws_alpha_ceil = float(getattr(args, "warmstart_alpha_ceiling", 0.0))
+
     return {
                                                        # Core PPO
         "env": "cs2-dust2",
@@ -216,6 +232,11 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "entropy_target_warmup_frac": 0.5,
         "entropy_target_base_frac": 0.35,
         "entropy_target_warmup_steps": 10_000_000,
+                                                       # ── Warm-start entropy mode: see the comment above ──
+        "warmstart_entropy": ws_entropy,
+        "warmstart_grace_steps": ws_grace,
+        "warmstart_ramp_steps": ws_ramp,
+        "warmstart_alpha_ceiling": ws_alpha_ceil,
     }
 
 
@@ -2928,6 +2949,11 @@ def train(args):
         print(f"[Train] Resumed from checkpoint: {resume_path}")
     # ────────────────────────────────────────────────────────────────────────
 
+    if train_config.get("warmstart_entropy") and not resume_path:
+        print("[Train] WARN: --warmstart-entropy without --resume — the grace window "
+              "will suppress entropy pressure on a from-scratch policy (legal, but "
+              "probably not what you want).")
+
     trainer = PuffeRL(train_config, vecenv, policy)
     trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
     _patch_trainer_with_return_norm(trainer)
@@ -3175,6 +3201,24 @@ if __name__ == "__main__":
               "print the banner and keep training (e.g. when deliberately studying "
               "degenerate regimes)."),
     )
+    parser.add_argument("--warmstart-entropy",
+                        action="store_true",
+                        dest="warmstart_entropy",
+                        help="Two-phase entropy override for BC-warm-started runs: grace window "
+                        "(alpha~0, floor off) then target ramp re-anchored at measured entropy. "
+                        "Pair with --resume; see spec 2026-08-01.")
+    parser.add_argument("--warmstart-grace-steps",
+                        type=int,
+                        default=5_000_000,
+                        dest="warmstart_grace_steps")
+    parser.add_argument("--warmstart-ramp-steps",
+                        type=int,
+                        default=10_000_000,
+                        dest="warmstart_ramp_steps")
+    parser.add_argument("--warmstart-alpha-ceiling",
+                        type=float,
+                        default=0.0,
+                        dest="warmstart_alpha_ceiling")
     args = parser.parse_args()
 
     if args.dump_config:

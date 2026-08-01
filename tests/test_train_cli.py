@@ -28,7 +28,11 @@ def test_train_help_shows_current_cli():
             "--vec-backend",
             "--record-policy",
             "--eval-policy",
-            "--no-dead-run-abort",     # F14: dead-run abort opt-out must stay exposed
+            "--no-dead-run-abort",                     # F14: dead-run abort opt-out must stay exposed
+            "--warmstart-entropy",
+            "--warmstart-grace-steps",
+            "--warmstart-ramp-steps",
+            "--warmstart-alpha-ceiling",
     ):
         assert flag in result.stdout, f"{flag} missing from --help output"
 
@@ -74,6 +78,40 @@ def test_dump_config_writes_json(tmp_path):
     for key in ("learning_rate", "gamma", "clip_coef", "batch_size"):
         assert key in config, f"missing key {key}"
     assert isinstance(config["batch_size"], int) and config["batch_size"] > 0
+
+
+def _dump_config(tmp_path, *extra_args):
+    """Run --dump-config through `uv run` (project venv) and return the parsed
+    config.json — the four warmstart keys must round-trip through the REAL
+    argparse surface, not a hand-built Namespace (which would only exercise
+    build_train_config's getattr fallbacks and hide a missing add_argument)."""
+    import json
+
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir(exist_ok=True)
+    r = subprocess.run([
+        "uv", "run", "python",
+        str(TRAIN_SCRIPT), "--dump-config", "--checkpoint-dir",
+        str(ckpt), *extra_args
+    ],
+                       capture_output=True,
+                       text=True,
+                       timeout=60,
+                       cwd=REPO_ROOT)
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    return json.loads((ckpt / "config.json").read_text())
+
+
+def test_warmstart_entropy_config_keys(tmp_path):
+    cfg = _dump_config(tmp_path)
+    assert cfg["warmstart_entropy"] is False
+    assert cfg["warmstart_grace_steps"] == 5_000_000
+    assert cfg["warmstart_ramp_steps"] == 10_000_000
+    assert cfg["warmstart_alpha_ceiling"] == 0.0
+
+    cfg = _dump_config(tmp_path, "--warmstart-entropy", "--warmstart-grace-steps", "1000")
+    assert cfg["warmstart_entropy"] is True
+    assert cfg["warmstart_grace_steps"] == 1000
 
 
 def test_train_smoke_returns_zero():
