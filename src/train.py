@@ -224,8 +224,20 @@ def reward_overrides_from_args(args) -> dict:
     PITFALL: the getattr fallbacks are load-bearing for harness/dump-config
     args objects that predate these flags; do not tighten them to attribute
     access.
+
+    PITFALL: argparse's type=float accepts "nan"/"inf", so the finiteness
+    check belongs here — the one funnel both call sites pass through. A NaN
+    weight otherwise surfaces hours into a run as a NaN loss with no clue
+    which knob produced it, so raise at startup and name the key.
     """
-    return {k: float(getattr(args, k, d)) for k, d in REWARD_WEIGHT_DEFAULTS.items()}
+    overrides = {}
+    for k, d in REWARD_WEIGHT_DEFAULTS.items():
+        v = float(getattr(args, k, d))
+        if not math.isfinite(v):
+            raise ValueError(f"reward weight {k}={v} is not finite; "
+                             "pass a real number (this would poison the loss silently)")
+        overrides[k] = v
+    return overrides
 
 
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
@@ -290,7 +302,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     reward_weights = reward_overrides_from_args(args)
     reward_symmetrize = bool(getattr(args, "reward_symmetrize", False))
 
-    return {
+    cfg = {
                                                        # Core PPO
         "env": "cs2-dust2",
         "device": args.device,
@@ -348,16 +360,24 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "warmstart_grace_steps": ws_grace,
         "warmstart_ramp_steps": ws_ramp,
         "warmstart_alpha_ceiling": ws_alpha_ceil,
-                                                       # ── Reward wiring: 23 make_env weights, verbatim key names ──
-                                                       # (grouped + annotated on REWARD_WEIGHT_DEFAULTS). Splatted so
-                                                       # the tuple stays the only derivation point; insertion order is
-                                                       # deterministic and config.json is dumped with sort_keys anyway.
-                                                       # None of the 23 names collides with a key above — the pin test
-                                                       # would surface a rename, and a collision would show up as a
-                                                       # missing key in test_reward_weight_config_keys_*.
         "reward_symmetrize": reward_symmetrize,
-        **reward_weights,
     }
+
+    # ── Reward wiring: 23 make_env weights, verbatim key names ──
+    # (grouped + annotated on REWARD_WEIGHT_DEFAULTS, the single source of
+    # truth). Merged via an explicit collision check rather than a trailing
+    # `**reward_weights` splat: a splat in last position would SILENTLY
+    # overwrite an existing config key if someone ever adds a make_env weight
+    # named like one of the keys above, and the resulting config would look
+    # perfectly well-formed. This assert is the only thing that actually
+    # catches that — the pin test compares against make_env's signature and
+    # would not notice a collision on this side. Key order does not matter:
+    # every config.json / fingerprint dump uses sort_keys=True.
+    assert not (cfg.keys() & reward_weights.keys()), (
+        "reward weight name collides with an existing config key: "
+        f"{sorted(cfg.keys() & reward_weights.keys())}")
+    cfg.update(reward_weights)
+    return cfg
 
 
 def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> float:
@@ -3522,6 +3542,7 @@ if __name__ == "__main__":
                             default=_rw_default,
                             dest=_rw_name,
                             help=f"Env reward weight {_rw_name} (default {_rw_default}).")
+    del _rw_name, _rw_default                                                    # module scope is `if __name__` here — don't leak loop vars
     parser.add_argument(
         "--reward-symmetrize",
         action="store_true",

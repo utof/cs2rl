@@ -90,7 +90,11 @@ def _dump_config(tmp_path, *extra_args):
     """Run --dump-config through `uv run` (project venv) and return the parsed
     config.json — the four warmstart keys must round-trip through the REAL
     argparse surface, not a hand-built Namespace (which would only exercise
-    build_train_config's getattr fallbacks and hide a missing add_argument)."""
+    build_train_config's getattr fallbacks and hide a missing add_argument).
+
+    120s (not 60s) for the same reason as gh#95 on run_train_command: this
+    subprocess competes with a live GPU training run on this box, and the
+    failure mode was contention, not runtime growth."""
     import json
 
     ckpt = tmp_path / "ckpt"
@@ -102,7 +106,7 @@ def _dump_config(tmp_path, *extra_args):
     ],
                        capture_output=True,
                        text=True,
-                       timeout=60,
+                       timeout=120,
                        cwd=REPO_ROOT)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     return json.loads((ckpt / "config.json").read_text())
