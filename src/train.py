@@ -158,6 +158,76 @@ def _apply_action_masks(logits_list, mask):
     return masked
 
 
+# ── Reward weights: the single wiring source of truth (spec 2026-08-01 §4.2) ──
+# Config key == make_env kwarg name == CLI flag (dashes) — NO prefix rewriting.
+# Six of the 23 do not start with `reward_` (the pbrs_* group), so any code
+# that discovers weights by scanning for a `reward_` prefix is wrong by
+# construction. This dict is the ONLY derivation point: build_train_config's
+# keys, the CLI flags, the env-factory override dict and the §6.1 pin test all
+# read it.
+#
+# WHY the defaults are duplicated here instead of read from the signature:
+# train.py imports c_env lazily (inside functions) so `--dump-config` costs no
+# map/binding import; a module-level inspect.signature(make_env) would undo
+# that. tests/test_reward_weight_wiring.py pins both sides against each other,
+# so the duplication cannot silently drift.
+#
+# PITFALL: do NOT "clean up" a value here or in make_env. These defaults ARE
+# the trained baseline; an unflagged run must stay byte-identical to the
+# pre-wiring env.
+#
+# Deliberately NOT threaded: pbrs_gamma (must equal training gamma — dedicated
+# guarded make_puffer_env parameter), team_spirit (config-threaded separately),
+# include_step_stats_in_info (issue #100, out of scope).
+REWARD_WEIGHT_DEFAULTS = {
+                                                       # ── non-potential (hackable — sweep with care) ──
+    "reward_win": 1.0,
+    "reward_kill": 0.3,
+    "reward_death": 0.1,
+    "reward_bombsite_entry": 0.3,
+    "reward_plant_bonus": 3.0,
+    "reward_plant_base": 0.2,
+    "reward_plant_progress_scale": 0.05,
+    "reward_plant_interrupted": 0.1,
+    "reward_defuse": 0.2,
+    "reward_shot_penalty": 0.005,
+    "reward_ct_survival": 0.001,                       # the CT stall drip — A1 arm sets this to 0.0
+    "reward_inaction": 0.0005,
+    "reward_win_t_detonation": 5.0,
+    "reward_win_t_elimination": 3.0,
+    "reward_win_ct_defuse": 5.0,
+    "reward_win_ct_timeout": 4.0,                      # NOTE: exceeds ct_elimination — A1b arm
+    "reward_win_ct_elimination": 3.0,
+                                                       # ── PBRS-potential (optimum-safe per Ng et al. 1999; tunes
+                                                       # equilibrium selection in MARL per Devlin & Kudenko 2011) ──
+    "pbrs_alive_weight": 0.3,
+    "pbrs_hp_weight": 0.002,
+    "pbrs_site_weight": 0.2,
+    "pbrs_bomb_progress_weight": 0.3,
+    "pbrs_nav_weight_t": 0.04,
+    "pbrs_nav_weight_ct": 0.15,
+}
+REWARD_WEIGHT_KEYS = tuple(REWARD_WEIGHT_DEFAULTS)
+
+
+def reward_overrides_from_args(args) -> dict:
+    """Build the env-side reward-weight override dict from parsed args.
+
+    WHAT: {kwarg_name: float} for all 23 weights, taking the CLI value when
+    present and the make_env default otherwise.
+
+    WHY a shared helper: build_train_config (provenance) and train()'s env
+    factory (behavior) MUST agree exactly. train_config is not available at
+    env-construction time — it is built after pufferlib.vector.make — so both
+    call sites derive from this one function instead.
+
+    PITFALL: the getattr fallbacks are load-bearing for harness/dump-config
+    args objects that predate these flags; do not tighten them to attribute
+    access.
+    """
+    return {k: float(getattr(args, k, d)) for k, d in REWARD_WEIGHT_DEFAULTS.items()}
+
+
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
     """Return (agents_per_env, bptt_horizon, batch_size) used by both training
     and --dump-config. Single source of truth so the fingerprint dict captured
@@ -211,6 +281,14 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     ws_grace = int(getattr(args, "warmstart_grace_steps", 5_000_000))
     ws_ramp = int(getattr(args, "warmstart_ramp_steps", 10_000_000))
     ws_alpha_ceil = float(getattr(args, "warmstart_alpha_ceiling", 0.0))
+
+    # ── Reward weights + symmetrization (spec 2026-08-01) ──
+    # Read out here (not inline in the dict) for the same reason as the
+    # warmstart block above: yapf snaps the returned dict's comment column to
+    # its longest line. Grouping/labelling of the weights lives on
+    # REWARD_WEIGHT_DEFAULTS, the single source of truth.
+    reward_weights = reward_overrides_from_args(args)
+    reward_symmetrize = bool(getattr(args, "reward_symmetrize", False))
 
     return {
                                                        # Core PPO
@@ -270,6 +348,15 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "warmstart_grace_steps": ws_grace,
         "warmstart_ramp_steps": ws_ramp,
         "warmstart_alpha_ceiling": ws_alpha_ceil,
+                                                       # ── Reward wiring: 23 make_env weights, verbatim key names ──
+                                                       # (grouped + annotated on REWARD_WEIGHT_DEFAULTS). Splatted so
+                                                       # the tuple stays the only derivation point; insertion order is
+                                                       # deterministic and config.json is dumped with sort_keys anyway.
+                                                       # None of the 23 names collides with a key above — the pin test
+                                                       # would surface a rename, and a collision would show up as a
+                                                       # missing key in test_reward_weight_config_keys_*.
+        "reward_symmetrize": reward_symmetrize,
+        **reward_weights,
     }
 
 
@@ -3423,6 +3510,25 @@ if __name__ == "__main__":
                         type=float,
                         default=0.0,
                         dest="warmstart_alpha_ceiling")
+    # ── Reward weights (spec 2026-08-01 §4.2) ──
+    # Generated from REWARD_WEIGHT_DEFAULTS so flag name, dest and default can
+    # never disagree with the config key — the dest-typo class of bug (commit
+    # 4d9dfa0) is impossible by construction here. Flag == kwarg name with
+    # dashes; default == the make_env default, so omitting a flag reproduces
+    # today's env exactly.
+    for _rw_name, _rw_default in REWARD_WEIGHT_DEFAULTS.items():
+        parser.add_argument(f"--{_rw_name.replace('_', '-')}",
+                            type=float,
+                            default=_rw_default,
+                            dest=_rw_name,
+                            help=f"Env reward weight {_rw_name} (default {_rw_default}).")
+    parser.add_argument(
+        "--reward-symmetrize",
+        action="store_true",
+        dest="reward_symmetrize",
+        help="Zero-sum the per-tick reward vector in Python after each step: "
+        "r_i' = 0.5*(r_i - mean over the opposing team). Removes every private "
+        "per-team subsidy from the shared policy's gradient (spec 2026-08-01 §4.3).")
     args = parser.parse_args()
 
     if args.dump_config:
