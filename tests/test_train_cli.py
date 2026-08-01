@@ -109,9 +109,17 @@ def test_warmstart_entropy_config_keys(tmp_path):
     assert cfg["warmstart_ramp_steps"] == 10_000_000
     assert cfg["warmstart_alpha_ceiling"] == 0.0
 
-    cfg = _dump_config(tmp_path, "--warmstart-entropy", "--warmstart-grace-steps", "1000")
+    # Override ALL four with non-default values. Overriding only some would let
+    # a misspelled dest= or a deleted add_argument pass silently: for the
+    # untouched flags argparse's default equals build_train_config's getattr
+    # fallback, so the dumped config looks correct either way. The 0.25 ceiling
+    # is also the only exercise of type=float through the real parser.
+    cfg = _dump_config(tmp_path, "--warmstart-entropy", "--warmstart-grace-steps", "1000",
+                       "--warmstart-ramp-steps", "2000", "--warmstart-alpha-ceiling", "0.25")
     assert cfg["warmstart_entropy"] is True
     assert cfg["warmstart_grace_steps"] == 1000
+    assert cfg["warmstart_ramp_steps"] == 2000
+    assert cfg["warmstart_alpha_ceiling"] == 0.25
 
 
 def test_train_smoke_returns_zero():

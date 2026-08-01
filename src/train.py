@@ -164,16 +164,33 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     provenance.
     """
     # ── Warm-start entropy mode (spec 2026-08-01) ──
-    # Two-phase override for BC-warm-started runs: GRACE (alpha ceilinged ~0,
-    # alpha-optimizer paused, hard entropy floor disabled) then RAMP (target
-    # re-anchored at measured H, rising to base_frac*max; floor still off,
-    # re-arms at ramp end). Explicit flag, NO auto-detection: config.json is
-    # dumped BEFORE the resume block loads the checkpoint, so an auto-set flag
-    # would be recorded False — provenance poison (spec finding 3). The getattr
-    # defaults keep harness/dump-config args objects (which may predate these
-    # flags) working. Read out here rather than inline in the dict below: yapf
-    # snaps that dict's comment column past the longest line in the block, so
-    # long inline getattr() calls would re-indent every comment in it.
+    # Two-phase override for BC-warm-started runs: GRACE (alpha clamped to the
+    # ceiling, alpha-optimizer paused, hard entropy floor disabled) then RAMP
+    # (target re-anchored at measured H, rising to base_frac*max; floor still
+    # off, re-arms at ramp end). At the default ceiling of 0.0 the GRACE window
+    # turns the entropy bonus fully OFF — pure PPO on reward, not merely a small
+    # bonus. Explicit flag, NO auto-detection: config.json is dumped BEFORE the
+    # resume block loads the checkpoint, so an auto-set flag would be recorded
+    # False — provenance poison (spec finding 3). The getattr defaults keep
+    # harness/dump-config args objects (which may predate these flags) working.
+    # Read out here rather than inline in the dict below: yapf snaps that dict's
+    # comment column past the longest line in the block, so long inline
+    # getattr() calls would re-indent every comment in it.
+    #
+    # CONTRACTS for the trainer wiring (do not re-derive these downstream):
+    # 1. Both *_steps are trainer.global_step units — agent steps, the same
+    #    counter entropy_target_warmup_steps and target_entropy_schedule use.
+    # 2. No CLI validation, deliberately. The pure schedule helper
+    #    warmstart_entropy_state treats ramp_steps <= 0 as "jump straight to OFF
+    #    at grace end" (tested: test_ramp_steps_zero_goes_straight_to_off), so 0
+    #    is a legal no-ramp request, NOT a divide-by-zero; negative values are
+    #    documented as equivalent to 0. A negative grace_steps simply means the
+    #    grace window ends immediately (the test is step < grace_steps).
+    # 3. The ceiling applies to the LINEAR effective alpha —
+    #    torch.clamp(alpha, max=ceiling) — never to log_alpha, since the 0.0
+    #    default would be log(0) = -inf. The hard entropy floor must be gated
+    #    off before/independently of the ceiling clamp, or the floor's
+    #    clamp(min=0.5) and this clamp(max=0.0) fight each other.
     ws_entropy = bool(getattr(args, "warmstart_entropy", False))
     ws_grace = int(getattr(args, "warmstart_grace_steps", 5_000_000))
     ws_ramp = int(getattr(args, "warmstart_ramp_steps", 10_000_000))
