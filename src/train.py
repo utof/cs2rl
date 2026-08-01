@@ -1177,6 +1177,12 @@ def _patch_trainer_with_return_norm(trainer):
     import torch
     from pufferlib.pufferl import compute_puff_advantage
 
+    # Warm-start entropy mode (spec 2026-08-01). Function-local like every
+    # other import here — train.py has no module-level train_helpers_batch1
+    # import. _train_with_return_norm is nested inside this function, so it
+    # picks these up as closure freevars. WS_RAMP is not needed here.
+    from train_helpers_batch1 import WS_GRACE, WS_OFF, warmstart_entropy_state
+
     # Running stats for return normalization (Welford-style, torch tensors)
     device = trainer.config["device"]
     _ret_mean = torch.zeros(1, device=device)
@@ -1253,6 +1259,21 @@ def _patch_trainer_with_return_norm(trainer):
     trainer._batch1_effective_alpha = float(trainer.config["ent_coef"])
     trainer._batch1_grad_norm = 0.0
 
+    # ── Warm-start entropy mode state (spec 2026-08-01) ────────────────────
+    # h_anchor: mean policy entropy captured at grace end (None until then);
+    # last_entropy_mean: previous update's post-divisor losses["entropy"] —
+    # the ONLY valid anchor source (there is no entropy EMA in this codebase,
+    # and trainer.losses is refreshed only inside the throttled log-flush
+    # block, so it can be several updates stale — spec finding 4).
+    # h0: first update's mean entropy, denominator of warmstart_h_over_h0
+    # (grace collapse watch — with the floor disabled AND alpha~0 the run
+    # has no anti-collapse guard, spec finding 6).
+    trainer._batch1_warmstart_h_anchor = None
+    trainer._batch1_warmstart_h0 = None
+    trainer._batch1_warmstart_phase = WS_OFF
+    trainer._batch1_last_entropy_mean = None
+    trainer._batch1_warmstart_warn_epoch = -10**9
+
     # ──────────────────────────────────────────────────────────────────────
 
     def _update_return_stats(returns_flat):
@@ -1324,6 +1345,52 @@ def _patch_trainer_with_return_norm(trainer):
             with torch.no_grad():
                 log_alpha.fill_(math.log(config["ent_coef"]))
             trainer._batch1_log_alpha_reset_done = True
+
+        # ── Warm-start entropy mode: resolve phase once per train() call ───
+        # (global_step only advances in evaluate(), so it is constant here —
+        # same reasoning as the Task 9A recompute above; all transitions land
+        # on update boundaries.) Ordering vs Task 9B: 9B runs FIRST and sets
+        # log_alpha to log(ent_coef) — exactly the operating point warm-start
+        # wants (continuity comes from target==h_anchor at release, never
+        # from moving log_alpha: Adam(lr=1e-4) travels ~1e-4/minibatch, so a
+        # parked log_alpha is stranded — spec finding 1).
+        # PITFALL: keep grace+ramp >= entropy_target_warmup_steps. At ramp_end
+        # control returns to the Task 9A schedule; with defaults (5M+10M >= 10M
+        # warmup) it has already flattened at base_frac*max so the handoff is
+        # continuous, but e.g. grace=2M+ramp=3M lands ramp_end at 5M where the
+        # base schedule still reads ~0.425*max — an upward target jump of
+        # ~0.6 nats at the exact boundary the spec promises is clean.
+        _ws_enabled = bool(config.get("warmstart_entropy", False))
+        _ws_floor_active = True
+        if _ws_enabled:
+            _ws_grace = int(config.get("warmstart_grace_steps", 5_000_000))
+            if (trainer._batch1_warmstart_h_anchor is None and self.global_step >= _ws_grace
+                    and trainer._batch1_last_entropy_mean is not None):
+                # one-shot anchor capture (idempotent: guarded on None).
+                # Finite-check (Task 1 review): a NaN/inf entropy mean latched
+                # here would poison target and alpha_loss for the whole ramp —
+                # skip the capture (stay GRACE) and shout instead.
+                if math.isfinite(trainer._batch1_last_entropy_mean):
+                    trainer._batch1_warmstart_h_anchor = float(trainer._batch1_last_entropy_mean)
+                else:
+                    print(f"[Train] WARN warm-start: non-finite entropy mean "
+                          f"{trainer._batch1_last_entropy_mean} at grace end — "
+                          f"anchor capture skipped, staying in GRACE.")
+            _ws = warmstart_entropy_state(
+                self.global_step,
+                grace_steps=_ws_grace,
+                ramp_steps=int(config.get("warmstart_ramp_steps", 10_000_000)),
+                h_anchor=trainer._batch1_warmstart_h_anchor,
+                base_target=(config.get("entropy_target_base_frac", 0.35) *
+                             trainer._batch1_max_entropy))
+            trainer._batch1_warmstart_phase = _ws.phase
+            _ws_floor_active = _ws.floor_active
+            if _ws.target is not None:
+                # Override the Task 9A schedule during the ramp AND mirror it,
+                # or the wandb target trace plots the unmodified base schedule
+                # (spec finding 9).
+                _t9_target_entropy = _ws.target
+                trainer._batch1_current_target_entropy = float(_ws.target)
 
         # Task 8: raw event-segment fraction (mask mean) — computed once per
         # train() call because _batch1_event_mask doesn't change inside the
@@ -1552,14 +1619,30 @@ def _patch_trainer_with_return_norm(trainer):
             # this train() call) instead of the static fallback. _t9_target_entropy
             # is a Python float; .detach() on a tensor minus a float is fine —
             # autograd treats the float as a constant.
+            # alpha_loss is computed UNCONDITIONALLY (the logging block below
+            # accumulates it every minibatch — spec finding 7); during the
+            # warm-start GRACE phase only the optimizer step is skipped, so
+            # log_alpha stays at its operating point (see phase-resolution
+            # comment above for why that matters).
             alpha_loss = (log_alpha * (current_entropy - _t9_target_entropy).detach()).mean()
-            alpha_optimizer.zero_grad()
-            alpha_loss.backward()
-            alpha_optimizer.step()
+            if trainer._batch1_warmstart_phase != WS_GRACE:
+                alpha_optimizer.zero_grad()
+                alpha_loss.backward()
+                alpha_optimizer.step()
 
-            # Entropy floor: prevent collapse
             effective_alpha = alpha.detach()
-            if current_entropy.item() < entropy_floor:
+            if trainer._batch1_warmstart_phase == WS_GRACE:
+                # grace: entropy pressure ceilinged (default 0.0 — pure
+                # PPO+reward; the knob exists for a nonzero-alpha rerun if
+                # the collapse watch fires)
+                effective_alpha = torch.clamp(effective_alpha,
+                                              max=float(config.get("warmstart_alpha_ceiling", 0.0)))
+            # Entropy floor: prevent collapse. Gated off for the ENTIRE
+            # warm-start window (grace+ramp): the BC policy lives below the
+            # floor by design, and re-arming mid-ramp would jump effective
+            # alpha ~1e-3 -> 0.5 in one minibatch (spec finding 2). It re-arms
+            # at ramp_end — a plotted boundary.
+            if _ws_floor_active and current_entropy.item() < entropy_floor:
                 effective_alpha = torch.clamp(effective_alpha, min=0.5)
 
             entropy_loss = -effective_alpha * current_entropy
@@ -1648,6 +1731,41 @@ def _patch_trainer_with_return_norm(trainer):
         for _lk in list(losses):
             losses[_lk] /= max(_mb_run, 1)
         losses["minibatches_run"] = _mb_run
+
+        # Warm-start metrics are ABSOLUTE values — inserted after the gh#90
+        # divisor loop above, alongside minibatches_run, or they'd be divided
+        # by the executed-minibatch count (the exact bug class gh#90 fixed).
+        if config.get("warmstart_entropy", False):
+            losses["warmstart_phase"] = trainer._batch1_warmstart_phase
+            # h0 is captured on the mode's first update, when entropy is
+            # healthy (BC policy ~1.8 nats) — the >1e-9 guard exists because
+            # total entropy (discrete + Gaussian differential) CAN go
+            # non-positive in the collapse regime, and a non-positive
+            # denominator would flip the watch's sign. If capture is ever
+            # skipped, say so once instead of silently disabling the watch.
+            if trainer._batch1_warmstart_h0 is None:
+                if losses["entropy"] > 1e-9:
+                    trainer._batch1_warmstart_h0 = float(losses["entropy"])
+                else:
+                    print(f"[Train] WARN warm-start: first-update entropy "
+                          f"{losses['entropy']:.3f} <= 0 — h_over_h0 collapse "
+                          f"watch cannot arm (will retry next update).")
+            if trainer._batch1_warmstart_h0:
+                losses["warmstart_h_over_h0"] = losses["entropy"] / trainer._batch1_warmstart_h0
+                # collapse watch (spec finding 6): grace disables BOTH
+                # anti-collapse guards (floor clamp + alpha), so shout —
+                # throttled to every 20 epochs — if H halves.
+                if (trainer._batch1_warmstart_phase == WS_GRACE
+                        and losses["warmstart_h_over_h0"] < 0.5
+                        and self.epoch - trainer._batch1_warmstart_warn_epoch >= 20):
+                    trainer._batch1_warmstart_warn_epoch = self.epoch
+                    print(f"[Train] WARN warm-start grace: entropy at "
+                          f"{losses['warmstart_h_over_h0']:.2f} of its start value "
+                          f"({losses['entropy']:.3f} nats) with alpha ceilinged and the "
+                          f"entropy floor disabled — collapse watch (spec finding 6).")
+        # Anchor source: maintained EVERY update, unconditionally (mode may be
+        # enabled on a later resume of this process in tests; cost is one float).
+        trainer._batch1_last_entropy_mean = float(losses["entropy"])
 
         # Reprioritize experience
         profile("train_misc", epoch)
