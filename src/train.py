@@ -472,7 +472,8 @@ def make_puffer_env(team_spirit=None,
                     map_data=None,
                     include_step_stats_in_info=False,
                     pbrs_gamma=None,
-                    reward_overrides=None):
+                    reward_overrides=None,
+                    reward_symmetrize=False):
     """Create the native C PufferEnv used by smoke/train/eval.
 
     ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
@@ -491,6 +492,13 @@ def make_puffer_env(team_spirit=None,
     over train.REWARD_WEIGHT_KEYS, forwarded verbatim to make_env. None
     (default) means every weight keeps its make_env default, so all existing
     callers (eval, record, smoke, tests) are unaffected.
+
+    ``reward_symmetrize`` (spec 2026-08-01 §4.3): when True the env applies the
+    zero-sum post-step transform r_i' = 0.5*(r_i - mean of the opposing five).
+    It is a dedicated parameter, NOT a reward_overrides key — it is a bool knob
+    rather than a weight, and the override validator above rejects it by name.
+    Defaults False so eval/record/smoke keep raw, comparable reward numbers;
+    only the training factory turns it on.
     """
     from c_env.cs2_env import make_env as make_c_env
 
@@ -538,6 +546,7 @@ def make_puffer_env(team_spirit=None,
         buf=buf,
         map_data=map_data,
         include_step_stats_in_info=include_step_stats_in_info,
+        reward_symmetrize=reward_symmetrize,
         **kwargs,
     )
 
@@ -926,7 +935,7 @@ def make_env(team_spirit=None, map_data=None):
     return make_puffer_env(team_spirit=team_spirit, map_data=map_data)
 
 
-def build_env_factory(*, shared_ts, map_data, reward_overrides=None):
+def build_env_factory(*, shared_ts, map_data, reward_overrides=None, reward_symmetrize=False):
     """Return the per-env factory callable handed to pufferlib.vector.make.
 
     WHAT: a closure over the shared team-spirit Value, the preloaded map data
@@ -945,11 +954,17 @@ def build_env_factory(*, shared_ts, map_data, reward_overrides=None):
     exercise this exact code path, and a closure defined inside train() is
     unreachable without launching a run.
 
-    PITFALL (review finding 1): reward_overrides reach ONLY the training env
-    factory — the --smoke/--record/--eval paths call make_puffer_env without
-    them, so `--smoke --reward-ct-survival 0.0` silently runs default weights.
-    Known limitation, stated here and in the final report; do not fix in this
-    branch.
+    reward_symmetrize (spec §4.3) rides along as closure state for the same
+    reason, but through its OWN parameter rather than the overrides dict: it is
+    a bool knob, not a weight, and make_puffer_env's validator rejects it as an
+    override key by name.
+
+    PITFALL (review finding 1): reward_overrides and reward_symmetrize reach
+    ONLY the training env factory — the --smoke/--record/--eval paths call
+    make_puffer_env without them, so `--smoke --reward-ct-survival 0.0`
+    silently runs default weights. For symmetrization that is deliberate:
+    eval/record must report raw, cross-run-comparable rewards. Known
+    limitation, stated here and in the final report; do not fix in this branch.
     PITFALL: `seed or 0` is intentional — pufferlib passes seed=None for some
     backends. Keep it.
     """
@@ -974,7 +989,8 @@ def build_env_factory(*, shared_ts, map_data, reward_overrides=None):
                               buf=buf,
                               seed=seed or 0,
                               map_data=map_data,
-                              reward_overrides=reward_overrides)
+                              reward_overrides=reward_overrides,
+                              reward_symmetrize=reward_symmetrize)
         # Attach the shared-memory views so the env (whether running in the
         # main process under Serial, or a forked worker under
         # Multiprocessing) can pull cont_actions written by the trainer and
@@ -1000,11 +1016,15 @@ def build_train_env_factory(args, *, shared_ts, map_data):
     against. test_train_uses_build_train_env_factory pins train() to it.
 
     Derives the overrides from the same helper build_train_config uses, so
-    config.json provenance and the envs' actual weights cannot disagree.
+    config.json provenance and the envs' actual weights cannot disagree. Same
+    for reward_symmetrize: read off args with the identical getattr default
+    build_train_config uses, so the logged "reward_symmetrize" key always
+    describes the envs that actually ran.
     """
     return build_env_factory(shared_ts=shared_ts,
                              map_data=map_data,
-                             reward_overrides=reward_overrides_from_args(args))
+                             reward_overrides=reward_overrides_from_args(args),
+                             reward_symmetrize=bool(getattr(args, "reward_symmetrize", False)))
 
 
 # ── SECTION: Policy ────────────────────────────────────────────────────────

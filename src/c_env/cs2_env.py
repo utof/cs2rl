@@ -12,7 +12,7 @@ import pufferlib
 import nav
 from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from map import make_cs2_map
-from nav import N_AGENTS, OBS_DIM, ROUND_TIME
+from nav import N_AGENTS, OBS_DIM, ROUND_TIME, TEAM_SIZE
 
 _DIR = Path(__file__).parent
 if str(_DIR) not in sys.path:
@@ -338,6 +338,52 @@ _PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
 # Module-level cache for map data
 _ENV_CACHE: dict = {}
 
+# ── Zero-sum reward symmetrization (spec 2026-08-01 §4.3) ─────────────────────
+
+
+def symmetrize_rewards(rewards):
+    """Rewrite a 10-agent reward vector to be exactly zero-sum, in place.
+
+    WHAT: for agent i on team A facing team B,
+        r_i' = 0.5 * ( r_i - mean_{j in B}(r_j) )
+    Agents 0..TEAM_SIZE-1 are T, TEAM_SIZE..N_AGENTS-1 are CT (same split the
+    C CT-survival loop uses, src/c_env/cs2_rewards.h:225).
+
+    WHY: the shared self-play policy is paid for private, non-zero-sum
+    per-team subsidies (the CT survival drip, the timeout-win bonus); that
+    gradient leaks through the shared trunk and shows up on the T side as
+    ever-later plants. Subtracting the opponent's mean restores the exactly
+    zero-sum structure under which shared-policy self-play is known to work.
+    mean (not sum) keeps per-agent scale comparable; the 0.5x keeps total
+    reward scale from ~doubling, which would interact with the return-norm
+    patch and the BC-warm-started critic. Subtracting the opponent's PBRS
+    term is itself potential-based (-phi_B(s)), so PBRS policy invariance
+    survives.
+
+    PITFALLS:
+    - The opposing-team mean divides by the FIXED TEAM_SIZE=5 regardless of how
+      many opponents are alive (spec-pinned). Late-round, with four dead CTs,
+      the survivor's stall drip is attenuated to 1/5 before subtraction — the
+      subsidy cancellation is WEAKEST exactly in the stall-heavy end-of-round
+      window the A2 experiment targets. Analysts reading A2 must know this
+      (review finding 7).
+      1. BOTH team means must be read before EITHER slice is written — writing
+         the T slice first makes the CT half depend on transformed values.
+      2. In place, and the caller's array is what matters: on the vecenv path
+         this array is the PufferLib shared reward buffer the trainer reads,
+         and the returned tuple is ignored by the Multiprocessing backend.
+      3. Safe to mutate the zero-copy C view: env_step memsets env->rewards at
+         the top of every tick (src/c_env/cs2_env.h:339), and the C episode /
+         step stat channels are separate accumulators — which is exactly why
+         those channels stay PRE-transform (spec §4.3 analysis caveat).
+    """
+    mean_t = rewards[:TEAM_SIZE].mean()
+    mean_ct = rewards[TEAM_SIZE:].mean()
+    rewards[:TEAM_SIZE] = 0.5 * (rewards[:TEAM_SIZE] - mean_ct)
+    rewards[TEAM_SIZE:] = 0.5 * (rewards[TEAM_SIZE:] - mean_t)
+    return rewards
+
+
 # ── Cs2Env ────────────────────────────────────────────────────────────────────
 
 
@@ -383,6 +429,7 @@ class Cs2Env(pufferlib.PufferEnv):
             reward_win_ct_timeout=4.0,
             reward_win_ct_elimination=3.0,
             include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)  # noqa: E501
+            reward_symmetrize: bool = False,                                    # spec 2026-08-01 §4.3  # noqa: E501
     ):
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
@@ -614,6 +661,10 @@ class Cs2Env(pufferlib.PufferEnv):
         self._terminal_truncations = np.empty(N_AGENTS, dtype=bool)
         self._empty_infos = []
         self._include_step_stats_in_info = bool(include_step_stats_in_info)
+        # Spec 2026-08-01 §4.3: Python-layer zero-sum transform, applied at the
+        # very end of step(). No StaticDataC field and no C rebuild — the
+        # binding cannot be rebuilt on this box (issue #101).
+        self._reward_symmetrize = bool(reward_symmetrize)
         # Task 6a: optional per-tick step_stats view in info (see utof/cs2rl#7).
         # Zero cost when flag is off; constructed once at init when flag is on.
         # _nonterminal_infos is a pre-built list[dict] reused every non-terminal
@@ -690,6 +741,14 @@ class Cs2Env(pufferlib.PufferEnv):
             # fresh spawn state (env_reset calls compute_masks), so this copy
             # is correct in both the mid-round and the round-rollover case.
             np.copyto(self._mask_out_view, self._masks_view)
+        if self._reward_symmetrize:
+            # Applied LAST so it covers all four buffer paths: external buffer
+            # (vecenv — `rewards` is self.rewards, already synced from C by
+            # _sync_outputs above and untouched by binding.reset), the
+            # non-external terminal snapshot (_terminal_rewards), and both
+            # non-terminal cases. Terminal ticks carry the win/loss magnitudes,
+            # so they MUST be symmetrized too (spec §4.3).
+            symmetrize_rewards(rewards)
         return self.observations, rewards, terminals, truncations, infos
 
     def set_team_spirit(self, value: float):
@@ -948,6 +1007,7 @@ def make_env(
         reward_win_ct_timeout=4.0,
         reward_win_ct_elimination=3.0,
         include_step_stats_in_info: bool = False,                      # Task 6a (utof/cs2rl#7)
+        reward_symmetrize: bool = False,                               # spec 2026-08-01 §4.3
 ):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
@@ -990,4 +1050,5 @@ def make_env(
         reward_win_ct_timeout=reward_win_ct_timeout,
         reward_win_ct_elimination=reward_win_ct_elimination,
         include_step_stats_in_info=include_step_stats_in_info,
+        reward_symmetrize=reward_symmetrize,
     )
