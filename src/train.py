@@ -1921,6 +1921,28 @@ def compute_game_metrics(logs):
 # ── SECTION: Dead Run Detector ─────────────────────────────────────────────
 
 
+def _kill_reward_is_active(vecenv):
+    """True if the env pays a nonzero per-kill reward (gh#93).
+
+    WHAT: reads StaticData.reward_kill out of the C env behind a vecenv, the
+    same `driver_env._c_env.sd` path build_policy uses for max_turn_speed.
+
+    WHY: DeadRunDetector's zero-kills rule is only meaningful when kills are
+    something the reward function actually asks for. With the weight at 0,
+    kills_per_episode==0 is the configuration, not a dead run.
+
+    PITFALLS: returns True (alert stays armed) for ANY env it cannot read —
+    unknown must not silently disable a safety check. Note this only covers the
+    weight-is-zero case; a nonzero weight whose behaviour has simply not emerged
+    yet is handled by the non-accumulating alert inside check().
+    """
+    try:
+        driver_env = getattr(vecenv, "driver_env", vecenv)
+        return float(driver_env._c_env.sd.contents.reward_kill) != 0.0
+    except Exception:
+        return True
+
+
 class DeadRunDetector:
     """Checks training metrics every check_interval steps for degenerate runs.
 
@@ -1933,8 +1955,16 @@ class DeadRunDetector:
     that let the 30M degenerate run burn ~150 post-verdict epochs).
     """
 
-    def __init__(self, check_interval=10_000):
+    def __init__(self, check_interval=10_000, kills_expected=True):
+        """kills_expected: False suppresses the zero-kills rule entirely (gh#93).
+
+        Pass False when the environment's kill reward is switched off, i.e. when
+        kills_per_episode==0 is the configured outcome rather than evidence of a
+        dead run. Callers get this from _kill_reward_is_active(vecenv); the
+        default stays True so an unknown/unreadable env keeps the alert.
+        """
         self.check_interval = check_interval
+        self.kills_expected = kills_expected
         self.alerts = []
 
     def check(self, step, metrics):
@@ -1960,9 +1990,21 @@ class DeadRunDetector:
             if timeout_rate > 0.95:
                 self.alerts.append(f"WARNING: Timeout rate {timeout_rate:.0%} at step {step}")
 
-        if step > 500_000:
+        # gh#93: the zero-kills rule used to append a FRESH alert on every check
+        # past 500k while kills stayed 0, so a single persistent condition
+        # manufactured the 5 alerts that trip the abort verdict on its own (the
+        # task5-rerun was killed at step 1.3M this way, and every 30M run to date
+        # has had kills_per_episode==0 throughout — combat has not emerged yet).
+        # Two guards now:
+        #   - kills_expected=False drops the rule outright (kill reward is off,
+        #     so zero kills is the configured outcome, not a symptom);
+        #   - otherwise at most ONE zero-kills alert is live at a time, so the
+        #     rule can contribute to a verdict but never reach it alone.
+        # The other rules keep accumulating on purpose: sustained entropy
+        # collapse / KL blowup genuinely are worse the longer they persist.
+        if self.kills_expected and step > 500_000:
             kills_per_ep = metrics.get("game/kills_per_episode", 1.0)
-            if kills_per_ep == 0:
+            if kills_per_ep == 0 and not any("Zero kills" in a for a in self.alerts):
                 self.alerts.append(f"WARNING: Zero kills by step {step}")
 
         if step > 100_000:
@@ -3178,7 +3220,11 @@ def train(args):
     save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
     last_save = time.time()
 
-    dead_run_detector = DeadRunDetector()
+    # gh#93: arm the zero-kills rule only when the env actually rewards kills.
+    _kills_expected = _kill_reward_is_active(trainer.vecenv)
+    if not _kills_expected:
+        print("[Train] Kill reward is 0 — dead-run zero-kills alert disabled (gh#93).")
+    dead_run_detector = DeadRunDetector(kills_expected=_kills_expected)
 
     print(f"[Train] Starting PufferLib PPO for {args.timesteps:,} env steps...")
     while trainer.epoch < trainer.total_epochs:
