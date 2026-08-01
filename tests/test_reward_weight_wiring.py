@@ -125,3 +125,56 @@ def test_reward_overrides_from_args_rejects_non_finite(bad):
 
     with pytest.raises(ValueError, match="reward_kill"):
         reward_overrides_from_args(Namespace(reward_kill=bad))
+
+
+def test_env_factory_injects_reward_overrides():
+    """Spec §6.3: overrides must arrive through the FACTORY path.
+
+    Deliberately does not call make_puffer_env directly — the discard trap
+    (env_factory swallows **kwargs) lives in the factory, so a direct
+    make_puffer_env test would pass while training ran the baseline.
+    Read back through the ctypes overlay: sd is a POINTER, .contents required.
+    """
+    import multiprocessing as mp
+
+    import train
+
+    overrides = dict(train.REWARD_WEIGHT_DEFAULTS)
+    overrides["reward_ct_survival"] = 0.0                              # A1 arm
+    overrides["reward_win_ct_timeout"] = 3.0                           # A1b arm
+    overrides["pbrs_nav_weight_t"] = 0.07                              # non-`reward_`-prefixed
+    factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3),
+                                      map_data=None,
+                                      reward_overrides=overrides)
+    env = factory(seed=0)
+    try:
+        sd = env._c_env.sd.contents
+        assert sd.reward_ct_survival == pytest.approx(0.0)
+        assert sd.reward_win_ct_timeout == pytest.approx(3.0)
+        assert sd.pbrs_nav_weight_t == pytest.approx(0.07)
+        assert sd.reward_kill == pytest.approx(0.3), "untouched weight must keep its default"
+    finally:
+        env.close()
+
+
+def test_env_factory_without_overrides_keeps_defaults():
+    """reward_overrides=None must reproduce today's env exactly."""
+    import multiprocessing as mp
+
+    import train
+
+    factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
+    env = factory(seed=0)
+    try:
+        sd = env._c_env.sd.contents
+        for name, default in train.REWARD_WEIGHT_DEFAULTS.items():
+            assert getattr(sd, name) == pytest.approx(default), name
+    finally:
+        env.close()
+
+
+def test_unknown_reward_override_key_is_rejected():
+    """Fail loud, not with a bare make_env TypeError deep in a forked worker."""
+    import train
+    with pytest.raises(ValueError, match="reward_ct_surival"):
+        train.make_puffer_env(reward_overrides={"reward_ct_surival": 0.0})
