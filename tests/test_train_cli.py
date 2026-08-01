@@ -6,7 +6,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = REPO_ROOT / "src" / "train.py"
 
 
-def run_train_command(*args, timeout=180):
+# gh#95: 600s (not 180s) because the --smoke subprocess competes with a live GPU
+# training run on this box — the flake was CPU/GPU contention, not runtime growth.
+def run_train_command(*args, timeout=600):
     return subprocess.run(
         [sys.executable, str(TRAIN_SCRIPT), *args],
         cwd=REPO_ROOT,
