@@ -246,3 +246,130 @@ class WelfordStd:
         """Return x / max(std, 1e-8). No mean subtraction (rewards are sign-meaningful)."""
         s = self.std()
         return x / max(s, 1e-8)
+
+
+def _scale_cuda(x: float, std: float) -> np.float32:
+    """x / max(std,1e-8) exactly as CUDA torch does it: multiply by the double
+    reciprocal rounded to float32 (torch lowers div-by-Scalar to mul)."""
+    return np.float32(x) * np.float32(1.0 / max(std, 1e-8))
+
+
+def _scale_cpu(x: float, std: float) -> np.float32:
+    """x / max(std,1e-8) exactly as CPU torch does it: true float32 division
+    against the float32-rounded divisor."""
+    return np.float32(x) / np.float32(max(std, 1e-8))
+
+
+def process_step_rewards(
+    info,
+    r: torch.Tensor,
+    agents_per_env: int,
+    welford_combat: WelfordStd,
+    welford_objective: WelfordStd,
+    welford_positional: WelfordStd,
+    scratch: np.ndarray,
+    current_segment_has_event: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Per-channel reward normalisation + symlog for one vecenv tick, batched.
+
+    WHAT
+      Consumes the per-env `info` list produced by Cs2Env (each entry either a
+      dict carrying a "step_stats" view, or something without it), advances the
+      three per-channel WelfordStd estimators once per env, and returns a new
+      reward tensor shaped like `r` (one row per *agent*) where every agent row
+      of env `e` holds symlog(sum of that env's normalised channels).
+
+    WHY (perf)
+      The previous inline version built three single-scalar CUDA tensors per env
+      per tick (torch.tensor(python_float, device=cuda) x3) plus ~10 more tiny
+      device ops. At 256 envs x 64 ticks that is ~213k launch-bound CUDA ops per
+      epoch inside the timed eval_forward region, with GPU utilisation at 33%.
+      Here the per-env arithmetic happens in numpy float32 on the host, and the
+      device sees ONE host-to-device copy, ONE repeat_interleave and ONE symlog
+      per tick.
+
+    PITFALLS — both of these silently change training values if broken:
+      1. The per-env Python loop MUST stay. WelfordStd state is global and
+         mutated per env, so env e's normalisation has to observe the state as
+         of *after* env e's own update(): it is the update/normalize
+         INTERLEAVING that matters, not merely the update order. Only tensor
+         construction was hoisted out; nothing was reordered.
+      2. The channel arithmetic is float32 end-to-end, and it has to reproduce
+         torch's `float32_tensor / python_float` lowering *per device* — those
+         two lowerings do not agree with each other to the last bit:
+           - CUDA: torch turns division by a Scalar into a multiply by its
+             reciprocal, with the reciprocal taken in double and then rounded to
+             float32 → np.float32(x) * np.float32(1.0 / s).
+           - CPU: a genuine float32 division against the float32-rounded
+             divisor → np.float32(x) / np.float32(s).
+         Measured over thousands of samples each lowering matches its device
+         exactly and the other one differs on ~20-25% of inputs by 1 ULP. Plain
+         Python-float (float64) math matches neither. The association order
+         (combat + objective) + positional is likewise preserved.
+         If a future torch release changes this lowering,
+         tests/test_reward_loop_equivalence.py fails on the affected device —
+         that is the intended tripwire, so fix the formula rather than the test.
+      3. symlog is applied once on device to the assembled vector — never on the
+         host scalars — so the log1p rounding matches the old path bit for bit.
+
+    Envs whose info entry has no "step_stats" (flag off, or an older info entry)
+    fall back to passing their raw `r` rows through UNCHANGED and are NOT
+    symlog'd. A short info list (len(info) * agents_per_env < r.shape[0]) leaves
+    the trailing raw rows untouched as well.
+
+    `scratch` is a caller-owned np.float32 buffer of length >= len(info); it is
+    reused across ticks to keep the loop allocation-free. Exact bit-for-bit
+    equivalence with the old per-scalar torch path is guaranteed for
+    r.dtype == torch.float32 (what the env actually produces); other float
+    dtypes are supported by a final cast but not ULP-audited.
+
+    `current_segment_has_event`, when given, is the live per-agent-row event
+    accumulator: rows of an env whose step_stats reports bomb_planted this tick
+    are set True (per-tick delta from the C side — no edge trigger needed).
+    """
+    n_env = len(info)
+    r_new = torch.empty_like(r)
+    buf = scratch[:n_env]
+    # raw_envs: indices of envs with no step_stats — their raw r rows pass through.
+    raw_envs = []
+    # Device-specific mirror of WelfordStd.normalize() — see PITFALL 2. Bound
+    # once per tick, not per env.
+    _scale = _scale_cuda if r.is_cuda else _scale_cpu
+
+    for e in range(n_env):
+        entry = info[e]
+        ss = entry.get("step_stats", None) if isinstance(entry, dict) else None
+        if ss is None:
+            raw_envs.append(e)
+            # Placeholder; this env's rows get overwritten with raw r below.
+            buf[e] = 0.0
+            continue
+        channels = split_into_channels(ss)
+        # Welford.update takes scalar floats (one observation per env/tick).
+        welford_combat.update(channels["combat"])
+        welford_objective.update(channels["objective"])
+        welford_positional.update(channels["positional"])
+        # bool(int(...)) is deliberate: stubs or numpy scalars may not
+        # truthy-coerce cleanly; int() normalises first. Do not strip the cast.
+        if current_segment_has_event is not None and bool(int(ss.get("bomb_planted", 0))):
+            current_segment_has_event[e * agents_per_env:(e + 1) * agents_per_env] = True
+        c = _scale(channels["combat"], welford_combat.std())
+        o = _scale(channels["objective"], welford_objective.std())
+        p = _scale(channels["positional"], welford_positional.std())
+        buf[e] = (c + o) + p
+
+    # min(): if info is somehow LONGER than the batch, the extra envs still get
+    # their Welford update (as in the old per-env-slice-assign path) but their
+    # rewards have nowhere to go — clamp instead of raising on shape mismatch.
+    used = min(n_env * agents_per_env, r.shape[0])
+    if used:
+        vec = torch.from_numpy(buf).to(r.device)
+        if vec.dtype != r.dtype:
+            vec = vec.to(r.dtype)
+        r_new[:used] = symlog(vec).repeat_interleave(agents_per_env)[:used]
+    for e in raw_envs:
+        row_start = e * agents_per_env
+        r_new[row_start:row_start + agents_per_env] = r[row_start:row_start + agents_per_env]
+    if used < r.shape[0]:
+        r_new[used:] = r[used:]
+    return r_new

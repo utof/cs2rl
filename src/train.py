@@ -2154,7 +2154,7 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
     # Task 6c (utof/cs2rl#9): Batch 1 reward-architecture helpers.
     # Imported lazily here (not at module scope) to keep train.py import
     # cost flat for callers that never hit the self-play path.
-    from train_helpers_batch1 import WelfordStd, split_into_channels, symlog
+    from train_helpers_batch1 import WelfordStd, process_step_rewards
 
     # Past-policy LSTM state — same dict structure as trainer.lstm_h
     # key → (agents_per_batch, hidden_size)
@@ -2188,6 +2188,10 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
     trainer._batch1_current_segment_has_event = torch.zeros(trainer.total_agents,
                                                             dtype=torch.bool,
                                                             device=_dev)
+    # Host scratch for the batched per-tick reward assembly (see
+    # process_step_rewards). Grown on demand to len(info); starts empty because
+    # the per-tick env count isn't known until the first recv().
+    trainer._batch1_reward_scratch = np.empty(0, dtype=np.float32)
 
     def _evaluate_with_selfplay(self):
         profile = self.profile
@@ -2289,54 +2293,39 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 # info entry that predates Task 6a), pass raw r through for
                 # that env's rows unchanged — the minimal-disruption path if
                 # the flag gets toggled or an upstream change sneaks through.
+                #
+                # Task 7: process_step_rewards also ORs the per-tick
+                # bomb_planted flag into _batch1_current_segment_has_event for
+                # every agent row in the env. The C side sets ss->bomb_planted
+                # only on the transition tick (cs2_bomb.h:60 — guarded by
+                # `if g->bomb_plant_ticks >= sd->bomb_plant_time`) and StepStats
+                # is cleared every step via clear_stats(ss) at the top of
+                # cs2_env.h:75, so the field is already a per-tick delta (1 only
+                # on the plant tick) — NO edge-trigger needed. All 10 agent rows
+                # in an env share the event state; it is flushed into
+                # _batch1_event_mask at the segment boundary below.
+                #
+                # PERF: the per-env loop lives in process_step_rewards() and
+                # builds the tick's rewards in a host float32 scratch buffer, so
+                # the device sees one H2D copy + one symlog per tick instead of
+                # three single-scalar torch.tensor() constructions per env
+                # (~213k launch-bound CUDA ops/epoch at 256 envs x 64 ticks,
+                # inside this timed eval_forward region). The helper's docstring
+                # carries the bit-exactness invariants — read it before touching
+                # the arithmetic.
                 agents_per_env_local = self.vecenv.driver_env.num_agents
-                r_new = torch.empty_like(r)
-                for e in range(len(info)):
-                    row_start = e * agents_per_env_local
-                    row_end = row_start + agents_per_env_local
-                    ss = info[e].get("step_stats", None) if isinstance(info[e], dict) else None
-                    if ss is None:
-                        # No per-tick step_stats: leave this env's rows as-is.
-                        r_new[row_start:row_end] = r[row_start:row_end]
-                        continue
-                    channels = split_into_channels(ss)
-                    # Welford.update takes scalar floats (one observation per env/tick).
-                    self._batch1_welford_combat.update(channels["combat"])
-                    self._batch1_welford_objective.update(channels["objective"])
-                    self._batch1_welford_positional.update(channels["positional"])
-                    # Task 7: OR the per-tick bomb_planted flag into the live
-                    # event accumulator for every agent row in this env. The
-                    # C side sets ss->bomb_planted only on the transition tick
-                    # (cs2_bomb.h:60 — guarded by `if g->bomb_plant_ticks >=
-                    # sd->bomb_plant_time`) and StepStats is cleared every step
-                    # via clear_stats(ss) at the top of cs2_env.h:75. So
-                    # step_stats['bomb_planted'] is already a per-tick delta
-                    # (1 only on the plant tick) — NO edge-trigger needed.
-                    # All 10 agent rows in an env share the same event state:
-                    # if the bomb plants this tick, every row's current segment
-                    # now contains an event. Flushed to _batch1_event_mask at
-                    # the segment boundary below (see ~30 lines down).
-                    # bool(int(...)) is deliberate: stubs or numpy scalars may
-                    # not truthy-coerce cleanly; int() normalises to a Python
-                    # int first so bool() is guaranteed. Do not strip the cast.
-                    if bool(int(ss.get("bomb_planted", 0))):
-                        self._batch1_current_segment_has_event[row_start:row_end] = True
-                    # Normalize per-channel (divide by running std), sum, compress.
-                    # Build the scalar sum on CPU (cheap — 3 floats) then broadcast
-                    # to the 10-agent slice; avoids per-agent torch.tensor churn.
-                    combat_t = torch.tensor(channels["combat"], device=_dev, dtype=r.dtype)
-                    objective_t = torch.tensor(channels["objective"], device=_dev, dtype=r.dtype)
-                    positional_t = torch.tensor(channels["positional"], device=_dev, dtype=r.dtype)
-                    r_sum = (self._batch1_welford_combat.normalize(combat_t) +
-                             self._batch1_welford_objective.normalize(objective_t) +
-                             self._batch1_welford_positional.normalize(positional_t))
-                    r_new[row_start:row_end] = symlog(r_sum)
-                # If info was shorter than the batch (e.g. some envs didn't
-                # emit info this tick), copy through any remaining raw rows.
-                used = len(info) * agents_per_env_local
-                if used < r.shape[0]:
-                    r_new[used:] = r[used:]
-                r = r_new
+                if self._batch1_reward_scratch.shape[0] < len(info):
+                    self._batch1_reward_scratch = np.empty(len(info), dtype=np.float32)
+                r = process_step_rewards(
+                    info,
+                    r,
+                    agents_per_env_local,
+                    self._batch1_welford_combat,
+                    self._batch1_welford_objective,
+                    self._batch1_welford_positional,
+                    self._batch1_reward_scratch,
+                    current_segment_has_event=self._batch1_current_segment_has_event,
+                )
 
                 # ── SELF-PLAY: override opponent-team actions ───────────────
                 if use_past:
