@@ -139,10 +139,14 @@ def test_env_factory_injects_reward_overrides():
 
     import train
 
-    overrides = dict(train.REWARD_WEIGHT_DEFAULTS)
-    overrides["reward_ct_survival"] = 0.0                              # A1 arm
-    overrides["reward_win_ct_timeout"] = 3.0                           # A1b arm
-    overrides["pbrs_nav_weight_t"] = 0.07                              # non-`reward_`-prefixed
+    # PARTIAL dict on purpose (review fix 5): a full REWARD_WEIGHT_DEFAULTS
+    # copy would set reward_kill to its default explicitly, so the "untouched"
+    # assertion below would pass even with the omitted-key fallback broken.
+    overrides = {
+        "reward_ct_survival": 0.0,                                     # A1 arm
+        "reward_win_ct_timeout": 3.0,                                  # A1b arm
+        "pbrs_nav_weight_t": 0.07,                                     # non-`reward_`-prefixed
+    }
     factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3),
                                       map_data=None,
                                       reward_overrides=overrides)
@@ -177,4 +181,77 @@ def test_unknown_reward_override_key_is_rejected():
     """Fail loud, not with a bare make_env TypeError deep in a forked worker."""
     import train
     with pytest.raises(ValueError, match="reward_ct_surival"):
+        train.make_puffer_env(reward_overrides={"reward_ct_surival": 0.0})
+
+
+def test_env_factory_rejects_unexpected_kwargs():
+    """Review fix 1: the catch-all **kwargs must be fatal, not silent.
+
+    pufferlib only passes buf/seed/env_kwargs[i], all named parameters, so a
+    stray kwarg means someone routed reward keys through _per_env_kwargs —
+    the discard trap. Crash instead of training the baseline.
+    """
+    import multiprocessing as mp
+
+    import train
+
+    factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
+    with pytest.raises(TypeError, match="reward_ct_survival"):
+        factory(seed=0, reward_ct_survival=0.0)
+
+
+def test_build_train_env_factory_carries_args_overrides():
+    """Review fix 2: the train() → factory seam, without launching a run.
+
+    Reads the returned closure's cells: if the wiring ever regresses to
+    reward_overrides=None (or to the defaults regardless of args), the
+    non-default weight below stops arriving and this fails.
+    """
+    import multiprocessing as mp
+
+    import train
+
+    args = Namespace(reward_ct_survival=0.0)
+    factory = train.build_train_env_factory(args, shared_ts=mp.Value("f", 0.3), map_data=None)
+    cells = dict(
+        zip(factory.__code__.co_freevars, (c.cell_contents for c in factory.__closure__),
+            strict=True))
+    assert cells["reward_overrides"] == pytest.approx(train.reward_overrides_from_args(args))
+    assert cells["reward_overrides"]["reward_ct_survival"] == 0.0
+
+
+def test_train_uses_build_train_env_factory():
+    """Pin train()'s call site itself — the one line no test can execute.
+
+    PITFALL: this is a source-text assertion, deliberately. Everything else in
+    train() needs a real run to reach, and the failure this guards (dropping
+    the overrides) is invisible at runtime: the arm just trains the baseline.
+    If you legitimately rename the helper, update this string.
+    """
+    import inspect
+
+    import train
+
+    src = inspect.getsource(train.train)
+    assert "build_train_env_factory(" in src, "train() no longer builds envs through the seam"
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "0.3", None])
+def test_make_puffer_env_validates_override_values(bad):
+    """Review fix 3: validate at the last boundary before the C env too.
+
+    Direct callers (train_test_harness, future sweep scripts) bypass
+    reward_overrides_from_args, so its finiteness check alone is not enough.
+    """
+    import train
+
+    with pytest.raises(ValueError, match="reward_kill"):
+        train.make_puffer_env(reward_overrides={"reward_kill": bad})
+
+
+def test_unknown_reward_override_error_suggests_the_flag():
+    """Review fix 4: a typo'd key should name the flag the user meant."""
+    import train
+
+    with pytest.raises(ValueError, match=r"--reward-ct-survival"):
         train.make_puffer_env(reward_overrides={"reward_ct_surival": 0.0})

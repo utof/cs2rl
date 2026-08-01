@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import multiprocessing as mp
+import numbers
 import random
 import sys
 import time
@@ -501,12 +502,36 @@ def make_puffer_env(team_spirit=None,
     if reward_overrides:
         # Validate here, not at make_env: an unknown key would otherwise
         # surface as a TypeError inside a forked vecenv worker, where the
-        # traceback is far from the mistake.
+        # traceback is far from the mistake. This is the LAST boundary before
+        # the C env, so it also re-checks value sanity — direct callers
+        # (train_test_harness, future sweep scripts) can hand us a dict that
+        # never passed through reward_overrides_from_args.
         unknown = set(reward_overrides) - set(REWARD_WEIGHT_KEYS)
         if unknown:
-            raise ValueError(f"unknown reward override keys: {sorted(unknown)} "
-                             f"(valid keys: {REWARD_WEIGHT_KEYS})")
-        kwargs.update(reward_overrides)
+            import difflib
+            hints = []
+            for key in sorted(unknown):
+                near = difflib.get_close_matches(key, REWARD_WEIGHT_KEYS, n=1)
+                if near:
+                    hints.append(f"{key!r} — did you mean --{near[0].replace('_', '-')}?")
+            raise ValueError(f"unknown reward override keys: {sorted(unknown)}. " +
+                             (" ".join(hints) + " " if hints else "") +
+                             f"Valid keys: {sorted(REWARD_WEIGHT_KEYS)}. Non-weight env knobs "
+                             "(pbrs_gamma, reward_symmetrize) are NOT overrides — they have "
+                             "dedicated make_puffer_env parameters.")
+        for key, val in reward_overrides.items():
+            # numbers.Real, not a bare float() call: float("0.3") succeeds, so
+            # a string weight from a YAML sweep file would sail through here
+            # and only misbehave at the ctypes boundary. bool is a Real in
+            # Python, hence the explicit exclusion.
+            if isinstance(val, bool) or not isinstance(val, numbers.Real):
+                raise ValueError(f"reward override {key}={val!r} is not a real number "
+                                 f"(got {type(val).__name__})")
+            fval = float(val)
+            if not math.isfinite(fval):
+                raise ValueError(f"reward weight {key}={fval} is not finite; "
+                                 "pass a real number (this would poison the loss silently)")
+            kwargs[key] = fval
     return make_c_env(
         seed=seed,
         team_spirit=team_spirit,
@@ -515,60 +540,6 @@ def make_puffer_env(team_spirit=None,
         include_step_stats_in_info=include_step_stats_in_info,
         **kwargs,
     )
-
-
-def build_env_factory(*, shared_ts, map_data, reward_overrides=None):
-    """Return the per-env factory callable handed to pufferlib.vector.make.
-
-    WHAT: a closure over the shared team-spirit Value, the preloaded map data
-    and the reward-weight overrides; it builds one Cs2Env and attaches the
-    cont-action / action-mask shared-memory views.
-
-    WHY the overrides are CLOSURE state and not per-env kwargs (spec §4.2):
-    the returned factory accepts **kwargs and DISCARDS them — only the
-    explicitly named parameters survive. Reward keys added to the
-    _per_env_kwargs list in train() would be silently dropped and every
-    experiment arm would train the default weights. Closure state crosses the
-    fork boundary the same way shared_ts and map_data already do (proven).
-
-    WHY module-level rather than nested in train(): the §6.3 test has to
-    exercise this exact code path, and a closure defined inside train() is
-    unreachable without launching a run.
-
-    PITFALL (review finding 1): reward_overrides reach ONLY the training env
-    factory — the --smoke/--record/--eval paths call make_puffer_env without
-    them, so `--smoke --reward-ct-survival 0.0` silently runs default weights.
-    Known limitation, stated here and in the final report; do not fix in this
-    branch.
-    PITFALL: `seed or 0` is intentional — pufferlib passes seed=None for some
-    backends. Keep it.
-    """
-
-    def env_factory(*_args,
-                    buf=None,
-                    seed=None,
-                    _cont_shm=None,
-                    _cont_idx=None,
-                    _mask_shm=None,
-                    **kwargs):
-        env = make_puffer_env(team_spirit=shared_ts,
-                              buf=buf,
-                              seed=seed or 0,
-                              map_data=map_data,
-                              reward_overrides=reward_overrides)
-        # Attach the shared-memory views so the env (whether running in the
-        # main process under Serial, or a forked worker under
-        # Multiprocessing) can pull cont_actions written by the trainer and
-        # publish action masks back to it (F8). _cont_idx may be None when
-        # env_factory is called outside the train() codepath (eg. legacy
-        # callers); both attaches are no-ops then.
-        if _cont_shm is not None and _cont_idx is not None:
-            env._attach_cont_action_view(_cont_shm, _cont_idx)
-        if _mask_shm is not None and _cont_idx is not None:
-            env._attach_mask_view(_mask_shm, _cont_idx)
-        return env
-
-    return env_factory
 
 
 def load_policy_from_checkpoint(checkpoint_path, device):
@@ -953,6 +924,87 @@ def evaluate_checkpoint(checkpoint_path=None,
 
 def make_env(team_spirit=None, map_data=None):
     return make_puffer_env(team_spirit=team_spirit, map_data=map_data)
+
+
+def build_env_factory(*, shared_ts, map_data, reward_overrides=None):
+    """Return the per-env factory callable handed to pufferlib.vector.make.
+
+    WHAT: a closure over the shared team-spirit Value, the preloaded map data
+    and the reward-weight overrides; it builds one Cs2Env and attaches the
+    cont-action / action-mask shared-memory views.
+
+    WHY the overrides are CLOSURE state and not per-env kwargs (spec §4.2):
+    the returned factory's parameters are all explicitly named, and anything
+    else is now a hard error (see below). Reward keys added to the
+    _per_env_kwargs list in train() used to be silently dropped, which would
+    have made every experiment arm train the default weights. Closure state
+    crosses the fork boundary the same way shared_ts and map_data already do
+    (proven).
+
+    WHY module-level rather than nested in train(): the §6.3 test has to
+    exercise this exact code path, and a closure defined inside train() is
+    unreachable without launching a run.
+
+    PITFALL (review finding 1): reward_overrides reach ONLY the training env
+    factory — the --smoke/--record/--eval paths call make_puffer_env without
+    them, so `--smoke --reward-ct-survival 0.0` silently runs default weights.
+    Known limitation, stated here and in the final report; do not fix in this
+    branch.
+    PITFALL: `seed or 0` is intentional — pufferlib passes seed=None for some
+    backends. Keep it.
+    """
+
+    def env_factory(*_args,
+                    buf=None,
+                    seed=None,
+                    _cont_shm=None,
+                    _cont_idx=None,
+                    _mask_shm=None,
+                    **kwargs):
+        # STRICT catch-all (review fix 1): pufferlib only ever passes buf,
+        # seed and the env_kwargs[i] dict, all of which are named parameters
+        # above — so nothing legitimate lands here. Swallowing strays instead
+        # would resurrect the discard trap: a reward key routed through
+        # _per_env_kwargs would vanish and the arm would train the baseline.
+        if kwargs:
+            raise TypeError(f"env_factory got unexpected kwargs {sorted(kwargs)}; "
+                            "per-env kwargs are discarded — pass via build_env_factory "
+                            "closure state")
+        env = make_puffer_env(team_spirit=shared_ts,
+                              buf=buf,
+                              seed=seed or 0,
+                              map_data=map_data,
+                              reward_overrides=reward_overrides)
+        # Attach the shared-memory views so the env (whether running in the
+        # main process under Serial, or a forked worker under
+        # Multiprocessing) can pull cont_actions written by the trainer and
+        # publish action masks back to it (F8). _cont_idx may be None when
+        # env_factory is called outside the train() codepath (eg. legacy
+        # callers); both attaches are no-ops then.
+        if _cont_shm is not None and _cont_idx is not None:
+            env._attach_cont_action_view(_cont_shm, _cont_idx)
+        if _mask_shm is not None and _cont_idx is not None:
+            env._attach_mask_view(_mask_shm, _cont_idx)
+        return env
+
+    return env_factory
+
+
+def build_train_env_factory(args, *, shared_ts, map_data):
+    """The training path's env factory: reward overrides derived from args.
+
+    WHY this exists as its own function (review fix 2): it is the seam between
+    the CLI and the envs. Inlined in train() it was untestable without
+    launching a run, so nothing caught a regression that dropped the overrides
+    — exactly the silent-baseline failure this whole change is guarding
+    against. test_train_uses_build_train_env_factory pins train() to it.
+
+    Derives the overrides from the same helper build_train_config uses, so
+    config.json provenance and the envs' actual weights cannot disagree.
+    """
+    return build_env_factory(shared_ts=shared_ts,
+                             map_data=map_data,
+                             reward_overrides=reward_overrides_from_args(args))
 
 
 # ── SECTION: Policy ────────────────────────────────────────────────────────
@@ -3222,16 +3274,11 @@ def train(args):
                                     dtype=np.int8).reshape(args.num_envs * _agents_per_env,
                                                            ACTION_MASK_DIM)
 
-    # Reward-weight overrides (spec 2026-08-01). Derived from args via the same
-    # helper build_train_config uses, so config.json provenance and the envs'
-    # actual weights cannot disagree. NOTE: train_config is built AFTER the
-    # vecenv exists (below), which is why this reads args directly rather than
-    # the config dict.
-    _reward_overrides = reward_overrides_from_args(args)
-
-    env_factory = build_env_factory(shared_ts=shared_ts,
-                                    map_data=_map_data,
-                                    reward_overrides=_reward_overrides)
+    # Reward-weight overrides (spec 2026-08-01) ride in as closure state, NOT
+    # per-env kwargs. NOTE: train_config is built AFTER the vecenv exists
+    # (below), which is why this reads args directly rather than the config
+    # dict. Keep this call — it is what the seam test pins.
+    env_factory = build_train_env_factory(args, shared_ts=shared_ts, map_data=_map_data)
 
     # Per-env kwargs list — pufferlib.vector.make accepts a list of dicts
     # (one per env). All args propagate verbatim through fork because
