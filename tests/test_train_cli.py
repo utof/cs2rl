@@ -35,6 +35,10 @@ def test_train_help_shows_current_cli():
             "--warmstart-grace-steps",
             "--warmstart-ramp-steps",
             "--warmstart-alpha-ceiling",
+            "--reward-ct-survival",                    # A1 arm (spec §5)
+            "--reward-win-ct-timeout",                 # A1b arm
+            "--pbrs-nav-weight-t",                     # non-`reward_`-prefixed weight
+            "--reward-symmetrize",                     # A2 arm
     ):
         assert flag in result.stdout, f"{flag} missing from --help output"
 
@@ -86,7 +90,11 @@ def _dump_config(tmp_path, *extra_args):
     """Run --dump-config through `uv run` (project venv) and return the parsed
     config.json — the four warmstart keys must round-trip through the REAL
     argparse surface, not a hand-built Namespace (which would only exercise
-    build_train_config's getattr fallbacks and hide a missing add_argument)."""
+    build_train_config's getattr fallbacks and hide a missing add_argument).
+
+    120s (not 60s) for the same reason as gh#95 on run_train_command: this
+    subprocess competes with a live GPU training run on this box, and the
+    failure mode was contention, not runtime growth."""
     import json
 
     ckpt = tmp_path / "ckpt"
@@ -98,7 +106,7 @@ def _dump_config(tmp_path, *extra_args):
     ],
                        capture_output=True,
                        text=True,
-                       timeout=60,
+                       timeout=120,
                        cwd=REPO_ROOT)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     return json.loads((ckpt / "config.json").read_text())
@@ -122,6 +130,43 @@ def test_warmstart_entropy_config_keys(tmp_path):
     assert cfg["warmstart_grace_steps"] == 1000
     assert cfg["warmstart_ramp_steps"] == 2000
     assert cfg["warmstart_alpha_ceiling"] == 0.25
+
+
+def test_reward_weight_config_keys_default_to_make_env_values(tmp_path):
+    """Every threaded weight lands in config.json at its make_env default.
+
+    Together with test_reward_weight_wiring.py (which pins those defaults
+    against the real signature) this is the "unflagged run is identical to
+    today" guarantee, verified through the REAL argparse surface: a typo'd
+    dest= or a missing add_argument would leave the key at the getattr
+    fallback and could not be caught by a hand-built Namespace.
+    """
+    from train import REWARD_WEIGHT_DEFAULTS
+
+    cfg = _dump_config(tmp_path)
+    for name, default in REWARD_WEIGHT_DEFAULTS.items():
+        assert name in cfg, f"{name} missing from config.json"
+        assert cfg[name] == default, f"{name}: {cfg[name]} != {default}"
+    assert cfg["reward_symmetrize"] is False
+
+
+def test_reward_weight_cli_overrides_round_trip(tmp_path):
+    """Representative overrides + the symmetrize flag survive CLI → config.json.
+
+    Uses the two weights the A/B actually moves (spec §5) plus one PBRS weight
+    (proving the six non-`reward_`-prefixed kwargs are wired too) and one
+    per-outcome win magnitude.
+    """
+    cfg = _dump_config(tmp_path, "--reward-ct-survival", "0.0", "--reward-win-ct-timeout", "3.0",
+                       "--pbrs-nav-weight-t", "0.07", "--reward-win-t-detonation", "6.5",
+                       "--reward-symmetrize")
+    assert cfg["reward_ct_survival"] == 0.0
+    assert cfg["reward_win_ct_timeout"] == 3.0
+    assert cfg["pbrs_nav_weight_t"] == 0.07
+    assert cfg["reward_win_t_detonation"] == 6.5
+    assert cfg["reward_symmetrize"] is True
+    # untouched neighbours keep their defaults (no accidental global override)
+    assert cfg["reward_kill"] == 0.3
 
 
 def test_train_smoke_returns_zero():

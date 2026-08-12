@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import multiprocessing as mp
+import numbers
 import random
 import sys
 import time
@@ -158,6 +159,129 @@ def _apply_action_masks(logits_list, mask):
     return masked
 
 
+# ── Reward weights: the single wiring source of truth (spec 2026-08-01 §4.2) ──
+# Config key == make_env kwarg name == CLI flag (dashes) — NO prefix rewriting.
+# Six of the 23 do not start with `reward_` (the pbrs_* group), so any code
+# that discovers weights by scanning for a `reward_` prefix is wrong by
+# construction. This dict is the ONLY derivation point: build_train_config's
+# keys, the CLI flags, the env-factory override dict and the §6.1 pin test all
+# read it.
+#
+# WHY the defaults are duplicated here instead of read from the signature:
+# train.py imports c_env lazily (inside functions) so `--dump-config` costs no
+# map/binding import; a module-level inspect.signature(make_env) would undo
+# that. tests/test_reward_weight_wiring.py pins both sides against each other,
+# so the duplication cannot silently drift.
+#
+# PITFALL: do NOT "clean up" a value here or in make_env. These defaults ARE
+# the trained baseline; an unflagged run must stay byte-identical to the
+# pre-wiring env.
+#
+# Deliberately NOT threaded: pbrs_gamma (must equal training gamma — dedicated
+# guarded make_puffer_env parameter), team_spirit (config-threaded separately),
+# include_step_stats_in_info (issue #100, out of scope).
+REWARD_WEIGHT_DEFAULTS = {
+                                                       # ── non-potential (hackable — sweep with care) ──
+    "reward_win": 1.0,
+    "reward_kill": 0.3,
+    "reward_death": 0.1,
+    "reward_bombsite_entry": 0.3,
+    "reward_plant_bonus": 3.0,
+    "reward_plant_base": 0.2,
+    "reward_plant_progress_scale": 0.05,
+    "reward_plant_interrupted": 0.1,
+    "reward_defuse": 0.2,
+    "reward_shot_penalty": 0.005,
+    "reward_ct_survival": 0.001,                       # the CT stall drip — A1 arm sets this to 0.0
+    "reward_inaction": 0.0005,
+    "reward_win_t_detonation": 5.0,
+    "reward_win_t_elimination": 3.0,
+    "reward_win_ct_defuse": 5.0,
+    "reward_win_ct_timeout": 4.0,                      # NOTE: exceeds ct_elimination — A1b arm
+    "reward_win_ct_elimination": 3.0,
+                                                       # ── PBRS-potential (optimum-safe per Ng et al. 1999; tunes
+                                                       # equilibrium selection in MARL per Devlin & Kudenko 2011) ──
+    "pbrs_alive_weight": 0.3,
+    "pbrs_hp_weight": 0.002,
+    "pbrs_site_weight": 0.2,
+    "pbrs_bomb_progress_weight": 0.3,
+    "pbrs_nav_weight_t": 0.04,
+    "pbrs_nav_weight_ct": 0.15,
+}
+REWARD_WEIGHT_KEYS = tuple(REWARD_WEIGHT_DEFAULTS)
+
+
+def reward_overrides_from_args(args) -> dict:
+    """Build the env-side reward-weight override dict from parsed args.
+
+    WHAT: {kwarg_name: float} for all 23 weights, taking the CLI value when
+    present and the make_env default otherwise.
+
+    WHY a shared helper: build_train_config (provenance) and train()'s env
+    factory (behavior) MUST agree exactly. train_config is not available at
+    env-construction time — it is built after pufferlib.vector.make — so both
+    call sites derive from this one function instead.
+
+    PITFALL: the getattr fallbacks are load-bearing for harness/dump-config
+    args objects that predate these flags; do not tighten them to attribute
+    access.
+
+    PITFALL: argparse's type=float accepts "nan"/"inf", so the finiteness
+    check belongs here — the one funnel both call sites pass through. A NaN
+    weight otherwise surfaces hours into a run as a NaN loss with no clue
+    which knob produced it, so raise at startup and name the key.
+    """
+    overrides = {}
+    for k, d in REWARD_WEIGHT_DEFAULTS.items():
+        v = float(getattr(args, k, d))
+        if not math.isfinite(v):
+            raise ValueError(f"reward weight {k}={v} is not finite; "
+                             "pass a real number (this would poison the loss silently)")
+        overrides[k] = v
+    return overrides
+
+
+def auto_vec_workers(num_envs: int, physical_cores: int) -> int:
+    """Largest worker count <= min(num_envs, physical_cores) that divides num_envs.
+
+    WHY: pufferlib.vector.make raises APIUsageError unless
+    num_envs % num_workers == 0. The old default min(num_envs, cores)
+    violated that on any box whose core count doesn't divide num_envs
+    (6-core VM, 12-core laptop...), crashing every launch until someone
+    hand-picked --vec-num-workers — a recurring failure, fixed 2026-08-13.
+
+    PITFALL: this is only the DEFAULT. An explicit --vec-num-workers is
+    passed through unvalidated on purpose — pufferlib's own error is the
+    right feedback for a deliberate bad choice.
+    """
+    cap = max(1, min(num_envs, physical_cores))
+    for k in range(cap, 0, -1):
+        if num_envs % k == 0:
+            return k
+    return 1
+
+
+def _atomic_save_state_dict(state_dict, path):
+    """torch.save via sibling .tmp + os.replace so a crash never corrupts ``path``.
+
+    WHY: the periodic save in train() overwrites ONE file (dust2_policy.pt)
+    every --save_every_sec. The training box's GPU is known to fall off the
+    PCI bus under thermal load (hard crash, 2026-08-13); a plain torch.save
+    interrupted mid-write would leave the ONLY recovery checkpoint torn.
+    os.replace() is an atomic rename on POSIX, so ``path`` always holds a
+    complete checkpoint — old or new, never partial.
+
+    PITFALL: torch is imported lazily — train.py's module level must stay
+    torch-free so --dump-config keeps its no-heavy-imports guarantee.
+    """
+    import torch
+
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(state_dict, tmp)
+    os.replace(tmp, path)
+
+
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
     """Return (agents_per_env, bptt_horizon, batch_size) used by both training
     and --dump-config. Single source of truth so the fingerprint dict captured
@@ -212,7 +336,15 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     ws_ramp = int(getattr(args, "warmstart_ramp_steps", 10_000_000))
     ws_alpha_ceil = float(getattr(args, "warmstart_alpha_ceiling", 0.0))
 
-    return {
+    # ── Reward weights + symmetrization (spec 2026-08-01) ──
+    # Read out here (not inline in the dict) for the same reason as the
+    # warmstart block above: yapf snaps the returned dict's comment column to
+    # its longest line. Grouping/labelling of the weights lives on
+    # REWARD_WEIGHT_DEFAULTS, the single source of truth.
+    reward_weights = reward_overrides_from_args(args)
+    reward_symmetrize = bool(getattr(args, "reward_symmetrize", False))
+
+    cfg = {
                                                        # Core PPO
         "env": "cs2-dust2",
         "device": args.device,
@@ -270,7 +402,24 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "warmstart_grace_steps": ws_grace,
         "warmstart_ramp_steps": ws_ramp,
         "warmstart_alpha_ceiling": ws_alpha_ceil,
+        "reward_symmetrize": reward_symmetrize,
     }
+
+    # ── Reward wiring: 23 make_env weights, verbatim key names ──
+    # (grouped + annotated on REWARD_WEIGHT_DEFAULTS, the single source of
+    # truth). Merged via an explicit collision check rather than a trailing
+    # `**reward_weights` splat: a splat in last position would SILENTLY
+    # overwrite an existing config key if someone ever adds a make_env weight
+    # named like one of the keys above, and the resulting config would look
+    # perfectly well-formed. This assert is the only thing that actually
+    # catches that — the pin test compares against make_env's signature and
+    # would not notice a collision on this side. Key order does not matter:
+    # every config.json / fingerprint dump uses sort_keys=True.
+    assert not (cfg.keys() & reward_weights.keys()), (
+        "reward weight name collides with an existing config key: "
+        f"{sorted(cfg.keys() & reward_weights.keys())}")
+    cfg.update(reward_weights)
+    return cfg
 
 
 def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> float:
@@ -363,7 +512,9 @@ def make_puffer_env(team_spirit=None,
                     episode_stats=True,
                     map_data=None,
                     include_step_stats_in_info=False,
-                    pbrs_gamma=None):
+                    pbrs_gamma=None,
+                    reward_overrides=None,
+                    reward_symmetrize=False):
     """Create the native C PufferEnv used by smoke/train/eval.
 
     ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
@@ -377,6 +528,18 @@ def make_puffer_env(team_spirit=None,
     gamma (0.999) and drift-guarded by test_pbrs_gamma_matches_training_gamma.
     Pass explicitly only for experiments that also change the training gamma —
     the two MUST move together or PBRS loses policy-invariance.
+
+    ``reward_overrides`` (spec 2026-08-01 §4.2): optional {kwarg: value} dict
+    over train.REWARD_WEIGHT_KEYS, forwarded verbatim to make_env. None
+    (default) means every weight keeps its make_env default, so all existing
+    callers (eval, record, smoke, tests) are unaffected.
+
+    ``reward_symmetrize`` (spec 2026-08-01 §4.3): when True the env applies the
+    zero-sum post-step transform r_i' = 0.5*(r_i - mean of the opposing five).
+    It is a dedicated parameter, NOT a reward_overrides key — it is a bool knob
+    rather than a weight, and the override validator above rejects it by name.
+    Defaults False so eval/record/smoke keep raw, comparable reward numbers;
+    only the training factory turns it on.
     """
     from c_env.cs2_env import make_env as make_c_env
 
@@ -385,12 +548,46 @@ def make_puffer_env(team_spirit=None,
     kwargs = {}
     if pbrs_gamma is not None:
         kwargs["pbrs_gamma"] = pbrs_gamma
+    if reward_overrides:
+        # Validate here, not at make_env: an unknown key would otherwise
+        # surface as a TypeError inside a forked vecenv worker, where the
+        # traceback is far from the mistake. This is the LAST boundary before
+        # the C env, so it also re-checks value sanity — direct callers
+        # (train_test_harness, future sweep scripts) can hand us a dict that
+        # never passed through reward_overrides_from_args.
+        unknown = set(reward_overrides) - set(REWARD_WEIGHT_KEYS)
+        if unknown:
+            import difflib
+            hints = []
+            for key in sorted(unknown):
+                near = difflib.get_close_matches(key, REWARD_WEIGHT_KEYS, n=1)
+                if near:
+                    hints.append(f"{key!r} — did you mean --{near[0].replace('_', '-')}?")
+            raise ValueError(f"unknown reward override keys: {sorted(unknown)}. " +
+                             (" ".join(hints) + " " if hints else "") +
+                             f"Valid keys: {sorted(REWARD_WEIGHT_KEYS)}. Non-weight env knobs "
+                             "(pbrs_gamma, reward_symmetrize) are NOT overrides — they have "
+                             "dedicated make_puffer_env parameters.")
+        for key, val in reward_overrides.items():
+            # numbers.Real, not a bare float() call: float("0.3") succeeds, so
+            # a string weight from a YAML sweep file would sail through here
+            # and only misbehave at the ctypes boundary. bool is a Real in
+            # Python, hence the explicit exclusion.
+            if isinstance(val, bool) or not isinstance(val, numbers.Real):
+                raise ValueError(f"reward override {key}={val!r} is not a real number "
+                                 f"(got {type(val).__name__})")
+            fval = float(val)
+            if not math.isfinite(fval):
+                raise ValueError(f"reward weight {key}={fval} is not finite; "
+                                 "pass a real number (this would poison the loss silently)")
+            kwargs[key] = fval
     return make_c_env(
         seed=seed,
         team_spirit=team_spirit,
         buf=buf,
         map_data=map_data,
         include_step_stats_in_info=include_step_stats_in_info,
+        reward_symmetrize=reward_symmetrize,
         **kwargs,
     )
 
@@ -777,6 +974,98 @@ def evaluate_checkpoint(checkpoint_path=None,
 
 def make_env(team_spirit=None, map_data=None):
     return make_puffer_env(team_spirit=team_spirit, map_data=map_data)
+
+
+def build_env_factory(*, shared_ts, map_data, reward_overrides=None, reward_symmetrize=False):
+    """Return the per-env factory callable handed to pufferlib.vector.make.
+
+    WHAT: a closure over the shared team-spirit Value, the preloaded map data
+    and the reward-weight overrides; it builds one Cs2Env and attaches the
+    cont-action / action-mask shared-memory views.
+
+    WHY the overrides are CLOSURE state and not per-env kwargs (spec §4.2):
+    the returned factory's parameters are all explicitly named, and anything
+    else is now a hard error (see below). Reward keys added to the
+    _per_env_kwargs list in train() used to be silently dropped, which would
+    have made every experiment arm train the default weights. Closure state
+    crosses the fork boundary the same way shared_ts and map_data already do
+    (proven).
+
+    WHY module-level rather than nested in train(): the §6.3 test has to
+    exercise this exact code path, and a closure defined inside train() is
+    unreachable without launching a run.
+
+    reward_symmetrize (spec §4.3) rides along as closure state for the same
+    reason, but through its OWN parameter rather than the overrides dict: it is
+    a bool knob, not a weight, and make_puffer_env's validator rejects it as an
+    override key by name.
+
+    PITFALL (review finding 1): reward_overrides and reward_symmetrize reach
+    ONLY the training env factory — the --smoke/--record/--eval paths call
+    make_puffer_env without them, so `--smoke --reward-ct-survival 0.0`
+    silently runs default weights. For symmetrization that is deliberate:
+    eval/record must report raw, cross-run-comparable rewards. Known
+    limitation, stated here and in the final report; do not fix in this branch.
+    PITFALL: `seed or 0` is intentional — pufferlib passes seed=None for some
+    backends. Keep it.
+    """
+
+    def env_factory(*_args,
+                    buf=None,
+                    seed=None,
+                    _cont_shm=None,
+                    _cont_idx=None,
+                    _mask_shm=None,
+                    **kwargs):
+        # STRICT catch-all (review fix 1): pufferlib only ever passes buf,
+        # seed and the env_kwargs[i] dict, all of which are named parameters
+        # above — so nothing legitimate lands here. Swallowing strays instead
+        # would resurrect the discard trap: a reward key routed through
+        # _per_env_kwargs would vanish and the arm would train the baseline.
+        if kwargs:
+            raise TypeError(f"env_factory got unexpected kwargs {sorted(kwargs)}; "
+                            "per-env kwargs are discarded — pass via build_env_factory "
+                            "closure state")
+        env = make_puffer_env(team_spirit=shared_ts,
+                              buf=buf,
+                              seed=seed or 0,
+                              map_data=map_data,
+                              reward_overrides=reward_overrides,
+                              reward_symmetrize=reward_symmetrize)
+        # Attach the shared-memory views so the env (whether running in the
+        # main process under Serial, or a forked worker under
+        # Multiprocessing) can pull cont_actions written by the trainer and
+        # publish action masks back to it (F8). _cont_idx may be None when
+        # env_factory is called outside the train() codepath (eg. legacy
+        # callers); both attaches are no-ops then.
+        if _cont_shm is not None and _cont_idx is not None:
+            env._attach_cont_action_view(_cont_shm, _cont_idx)
+        if _mask_shm is not None and _cont_idx is not None:
+            env._attach_mask_view(_mask_shm, _cont_idx)
+        return env
+
+    return env_factory
+
+
+def build_train_env_factory(args, *, shared_ts, map_data):
+    """The training path's env factory: reward overrides derived from args.
+
+    WHY this exists as its own function (review fix 2): it is the seam between
+    the CLI and the envs. Inlined in train() it was untestable without
+    launching a run, so nothing caught a regression that dropped the overrides
+    — exactly the silent-baseline failure this whole change is guarding
+    against. test_train_uses_build_train_env_factory pins train() to it.
+
+    Derives the overrides from the same helper build_train_config uses, so
+    config.json provenance and the envs' actual weights cannot disagree. Same
+    for reward_symmetrize: read off args with the identical getattr default
+    build_train_config uses, so the logged "reward_symmetrize" key always
+    describes the envs that actually ran.
+    """
+    return build_env_factory(shared_ts=shared_ts,
+                             map_data=map_data,
+                             reward_overrides=reward_overrides_from_args(args),
+                             reward_symmetrize=bool(getattr(args, "reward_symmetrize", False)))
 
 
 # ── SECTION: Policy ────────────────────────────────────────────────────────
@@ -3046,25 +3335,11 @@ def train(args):
                                     dtype=np.int8).reshape(args.num_envs * _agents_per_env,
                                                            ACTION_MASK_DIM)
 
-    def env_factory(*_args,
-                    buf=None,
-                    seed=None,
-                    _cont_shm=None,
-                    _cont_idx=None,
-                    _mask_shm=None,
-                    **kwargs):
-        env = make_puffer_env(team_spirit=shared_ts, buf=buf, seed=seed or 0, map_data=_map_data)
-        # Attach the shared-memory views so the env (whether running in the
-        # main process under Serial, or a forked worker under
-        # Multiprocessing) can pull cont_actions written by the trainer and
-        # publish action masks back to it (F8). _cont_idx may be None when
-        # env_factory is called outside the train() codepath (eg. legacy
-        # callers); both attaches are no-ops then.
-        if _cont_shm is not None and _cont_idx is not None:
-            env._attach_cont_action_view(_cont_shm, _cont_idx)
-        if _mask_shm is not None and _cont_idx is not None:
-            env._attach_mask_view(_mask_shm, _cont_idx)
-        return env
+    # Reward-weight overrides (spec 2026-08-01) ride in as closure state, NOT
+    # per-env kwargs. NOTE: train_config is built AFTER the vecenv exists
+    # (below), which is why this reads args directly rather than the config
+    # dict. Keep this call — it is what the seam test pins.
+    env_factory = build_train_env_factory(args, shared_ts=shared_ts, map_data=_map_data)
 
     # Per-env kwargs list — pufferlib.vector.make accepts a list of dicts
     # (one per env). All args propagate verbatim through fork because
@@ -3082,7 +3357,7 @@ def train(args):
 
         backend = pufferlib.vector.Multiprocessing
         physical_cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
-        num_workers = args.vec_num_workers or min(args.num_envs, physical_cores)
+        num_workers = args.vec_num_workers or auto_vec_workers(args.num_envs, physical_cores)
         vec_kwargs = {
             "num_workers": num_workers,
             "batch_size": args.num_envs,
@@ -3302,7 +3577,7 @@ def train(args):
 
         if time.time() - last_save > args.save_every_sec:
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(policy.state_dict(), save_path)
+            _atomic_save_state_dict(policy.state_dict(), save_path)
             last_save = time.time()
             print(f"Saved checkpoint to {save_path}")
 
@@ -3317,7 +3592,7 @@ def train(args):
 
     # Final checkpoint save
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(policy.state_dict(), save_path)
+    _atomic_save_state_dict(policy.state_dict(), save_path)
     print(f"[Train] Final checkpoint saved to {save_path}")
 
     _metrics_file.close()
@@ -3423,6 +3698,26 @@ if __name__ == "__main__":
                         type=float,
                         default=0.0,
                         dest="warmstart_alpha_ceiling")
+    # ── Reward weights (spec 2026-08-01 §4.2) ──
+    # Generated from REWARD_WEIGHT_DEFAULTS so flag name, dest and default can
+    # never disagree with the config key — the dest-typo class of bug (commit
+    # 4d9dfa0) is impossible by construction here. Flag == kwarg name with
+    # dashes; default == the make_env default, so omitting a flag reproduces
+    # today's env exactly.
+    for _rw_name, _rw_default in REWARD_WEIGHT_DEFAULTS.items():
+        parser.add_argument(f"--{_rw_name.replace('_', '-')}",
+                            type=float,
+                            default=_rw_default,
+                            dest=_rw_name,
+                            help=f"Env reward weight {_rw_name} (default {_rw_default}).")
+    del _rw_name, _rw_default                                                    # module scope is `if __name__` here — don't leak loop vars
+    parser.add_argument(
+        "--reward-symmetrize",
+        action="store_true",
+        dest="reward_symmetrize",
+        help="Zero-sum the per-tick reward vector in Python after each step: "
+        "r_i' = 0.5*(r_i - mean over the opposing team). Removes every private "
+        "per-team subsidy from the shared policy's gradient (spec 2026-08-01 §4.3).")
     args = parser.parse_args()
 
     if args.dump_config:
