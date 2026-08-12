@@ -2041,6 +2041,47 @@ def _patch_trainer_with_return_norm(trainer):
                     self._last_nan_warn_t = _now
                 self.optimizer.zero_grad(set_to_none=True)
                 continue
+
+            # ── TAG diagnostic hook (spec 2026-08-13 §4.2/§4.3) ────────────
+            # mb0 = pre-update on-policy regime. mbL = last EXECUTED
+            # minibatch: total_minibatches-1 normally, or the final mb of
+            # the epoch the KL gate tripped on (the loop-top gate exits at
+            # the next epoch boundary) — conditioning mbL on the gate NOT
+            # tripping would select against the late-update regime it
+            # exists to observe. Placed AFTER the NaN guard (never measure
+            # a batch the update skips) and BEFORE loss.backward() (.grad
+            # still untouched). Results stash on the TRAINER — see
+            # _inject_tag_metrics for the two routing constraints.
+            if config.get("tag_diagnostic", False) \
+                    and epoch % max(1, int(config.get("tag_every", 5))) == 0:
+                _tag_mb0 = (mb == 0)
+                _tag_mbL = (mb == self.total_minibatches - 1
+                            or (_kl_stop and (mb + 1) % _mbs_per_epoch == 0))
+                if _tag_mb0 or _tag_mbL:
+                    _tag = tag_grad_cossim(
+                        self.policy,
+                        mb_obs=mb_obs,
+                        mb_actions=mb_actions,
+                        mb_cont_actions=mb_cont_actions,
+                        mb_old_logp_d=mb_old_logp_d,
+                        mb_old_logp_c=mb_old_logp_c,
+                        mb_advantages=mb_advantages,
+                        clip_coef=clip_coef,
+                        state=state,
+                        mb_prio=mb_prio,
+                        mb_masks=mb_masks,
+                        mb_returns_norm=mb_returns_norm,
+                        idx=idx,
+                        mb_label="mb0" if _tag_mb0 else "mbL",
+                    )
+                    if getattr(trainer, "_tag_metrics", None) is None:
+                        trainer._tag_metrics = {}
+                    trainer._tag_metrics.update(_tag)
+                    if not _tag_mb0:
+                        trainer._tag_metrics["tag/mbL_index"] = float(mb)
+                    trainer._tag_metrics["tag/selfplay_active"] = float(
+                        getattr(self, "_selfplay_used_past", False))
+            # ──────────────────────────────────────────────────────────────
             loss.backward()
             if (mb + 1) % self.accumulate_minibatches == 0:
                 # Task 9C: capture pre-clip grad norm. clip_grad_norm_ returns
@@ -2512,6 +2553,12 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
         if use_past:
             past_policy = self_play_mgr.load_past_policy(dev, self.vecenv)
             use_past = past_policy is not None
+
+        # TAG (spec 2026-08-13 §4.2): expose whether THIS epoch's rollout
+        # used a past-policy opponent — on those epochs one team's rows are
+        # off-policy and cross-team cos-sim measures on-vs-off-policy
+        # asymmetry, not T/CT conflict; the analyzer drops them.
+        self._selfplay_used_past = bool(use_past)
 
         if use_past:
             for k in past_lstm_h:
@@ -3264,6 +3311,26 @@ def tag_grad_cossim(policy, *, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_
     return out
 
 
+def _inject_tag_metrics(trainer, logs):
+    """Move pending TAG metrics into this epoch's logs dict (spec §4.2).
+
+    CALL-ORDER CONSTRAINT: must run AFTER dead_run_detector.check(...) in
+    the outer loop — tag/* carries deliberate NaNs (zero-norm subsets,
+    documented in tag_grad_cossim) and check() raises RuntimeError on any
+    NaN in the metrics dict; injecting earlier aborts the run with exit
+    code 3 on the first degenerate subset. Also never route these through
+    the `losses` dict: its keys are divided by _mb_run (gh#90), prefixed
+    losses/, and lag environment/* by one epoch.
+
+    logs=None (throttled epoch) is a no-op: the top-of-loop reset then
+    DROPS the measurement — injecting it next epoch would mislabel its
+    step/epoch (spec §4.2 drop semantics).
+    """
+    pending = getattr(trainer, "_tag_metrics", None)
+    if pending and isinstance(logs, dict):
+        logs.update(pending)
+
+
 def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_view_main=None):
     """Extend trainer with continuous-action rollout storage + vecenv plumbing.
 
@@ -3690,6 +3757,7 @@ def train(args):
 
     print(f"[Train] Starting PufferLib PPO for {args.timesteps:,} env steps...")
     while trainer.epoch < trainer.total_epochs:
+        trainer._tag_metrics = None    # TAG: drop any un-injected measurement
         trainer.evaluate()
         logs = trainer.train()
 
@@ -3756,6 +3824,10 @@ def train(args):
                                               LOG_STD_MAX).cpu().numpy()
             logs["policy/aim_log_std_yaw"] = float(clamped_log_std[0])
             logs["policy/aim_log_std_pitch"] = float(clamped_log_std[1])
+
+            # TAG injection — MUST stay after dead_run_detector.check above
+            # (deliberate NaNs; see _inject_tag_metrics docstring).
+            _inject_tag_metrics(trainer, logs)
 
             # ── Persist metrics ──────────────────────────────────────────────
             log_entry = {
