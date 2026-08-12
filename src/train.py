@@ -2933,7 +2933,8 @@ def _hybrid_ppo_loss(policy,
                      clip_coef,
                      state,
                      mb_prio=None,
-                     mb_masks=None):
+                     mb_masks=None,
+                     return_pg_rows=False):
     """Per-factor PPO clipped loss (H-PPO, Fan et al. IJCAI 2019).
 
     THE CORE OF T5. Re-runs the policy on mb_obs with the stored
@@ -2976,6 +2977,18 @@ def _hybrid_ppo_loss(policy,
     masking here but not there (or vice versa) silently skews the PPO
     ratios for any agent-step where a mask bit was 0. None = unmasked
     (pre-F8 callers / BC paths).
+
+    return_pg_rows (TAG diagnostic, spec 2026-08-13 §4.3): when True the
+    return tuple gains an 8th element — the per-row pg loss vector
+    max(pg_d_un, pg_d_cl) + max(pg_c_un, pg_c_cl), flat (B*T,), graph-
+    attached, advantage-normalized + prio-weighted exactly like pg_loss
+    (whose value is the mean of the two factor vectors separately; the sum
+    vector's .mean() equals it up to fp reduction order). TAG forms subset
+    losses as weighted means over this vector so every subset gradient is a
+    true restriction of the real gradient from ONE forward pass. False (the
+    default, all production update paths) returns the existing 7-tuple
+    bitwise-identically — pinned by
+    test_return_pg_rows_default_is_bitwise_identical_7_tuple.
     """
     import torch
     import torch.nn.functional as F
@@ -3061,8 +3074,13 @@ def _hybrid_ppo_loss(policy,
     pg_d_cl = -flat_adv * torch.clamp(ratio_d, 1 - clip_coef, 1 + clip_coef)
     pg_c_un = -flat_adv * ratio_c
     pg_c_cl = -flat_adv * torch.clamp(ratio_c, 1 - clip_coef, 1 + clip_coef)
-    pg_loss = torch.max(pg_d_un, pg_d_cl).mean() + torch.max(pg_c_un, pg_c_cl).mean()
+    pg_d_rows = torch.max(pg_d_un, pg_d_cl)
+    pg_c_rows = torch.max(pg_c_un, pg_c_cl)
+    pg_loss = pg_d_rows.mean() + pg_c_rows.mean()
 
+    if return_pg_rows:
+        return (pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list,
+                pg_d_rows + pg_c_rows)
     return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list
 
 
