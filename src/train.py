@@ -344,6 +344,14 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     reward_weights = reward_overrides_from_args(args)
     reward_symmetrize = bool(getattr(args, "reward_symmetrize", False))
 
+    # ── TAG diagnostic (spec 2026-08-13 §4.1) ──
+    # getattr fallbacks keep harness/dump-config args objects that predate
+    # these flags working, same pattern as the warmstart block above.
+    # NOTE: these keys change exp_lib.behavior_hash for ALL future runs
+    # (hash covers sorted config.json) — recorded decision, spec §4.1.
+    tag_diagnostic = bool(getattr(args, "tag_diagnostic", False))
+    tag_every = int(getattr(args, "tag_every", 5))
+
     cfg = {
                                                        # Core PPO
         "env": "cs2-dust2",
@@ -403,6 +411,8 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "warmstart_ramp_steps": ws_ramp,
         "warmstart_alpha_ceiling": ws_alpha_ceil,
         "reward_symmetrize": reward_symmetrize,
+        "tag_diagnostic": tag_diagnostic,
+        "tag_every": tag_every,
     }
 
     # ── Reward wiring: 23 make_env weights, verbatim key names ──
@@ -3906,6 +3916,20 @@ if __name__ == "__main__":
         help="Zero-sum the per-tick reward vector in Python after each step: "
         "r_i' = 0.5*(r_i - mean over the opposing team). Removes every private "
         "per-team subsidy from the shared policy's gradient (spec 2026-08-01 §4.3).")
+
+    # ── TAG gradient-conflict diagnostic (spec 2026-08-13) ──
+    parser.add_argument("--tag-diagnostic",
+                        action="store_true",
+                        dest="tag_diagnostic",
+                        help="Measure T-vs-CT policy-gradient cosine similarity per parameter "
+                        "group during PPO updates (tag/* metrics). Zero behavioral effect on "
+                        "training — pinned bitwise by tests/test_tag_trainer.py.")
+    parser.add_argument("--tag-every",
+                        type=int,
+                        default=5,
+                        dest="tag_every",
+                        help="Measure on epochs where epoch %% tag_every == 0 (default 5; "
+                        "values < 1 clamp to 1 at the hook).")
     args = parser.parse_args()
 
     if args.dump_config:
