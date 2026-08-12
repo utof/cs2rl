@@ -241,6 +241,26 @@ def reward_overrides_from_args(args) -> dict:
     return overrides
 
 
+def auto_vec_workers(num_envs: int, physical_cores: int) -> int:
+    """Largest worker count <= min(num_envs, physical_cores) that divides num_envs.
+
+    WHY: pufferlib.vector.make raises APIUsageError unless
+    num_envs % num_workers == 0. The old default min(num_envs, cores)
+    violated that on any box whose core count doesn't divide num_envs
+    (6-core VM, 12-core laptop...), crashing every launch until someone
+    hand-picked --vec-num-workers — a recurring failure, fixed 2026-08-13.
+
+    PITFALL: this is only the DEFAULT. An explicit --vec-num-workers is
+    passed through unvalidated on purpose — pufferlib's own error is the
+    right feedback for a deliberate bad choice.
+    """
+    cap = max(1, min(num_envs, physical_cores))
+    for k in range(cap, 0, -1):
+        if num_envs % k == 0:
+            return k
+    return 1
+
+
 def _atomic_save_state_dict(state_dict, path):
     """torch.save via sibling .tmp + os.replace so a crash never corrupts ``path``.
 
@@ -3337,7 +3357,7 @@ def train(args):
 
         backend = pufferlib.vector.Multiprocessing
         physical_cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
-        num_workers = args.vec_num_workers or min(args.num_envs, physical_cores)
+        num_workers = args.vec_num_workers or auto_vec_workers(args.num_envs, physical_cores)
         vec_kwargs = {
             "num_workers": num_workers,
             "batch_size": args.num_envs,
