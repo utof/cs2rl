@@ -241,6 +241,27 @@ def reward_overrides_from_args(args) -> dict:
     return overrides
 
 
+def _atomic_save_state_dict(state_dict, path):
+    """torch.save via sibling .tmp + os.replace so a crash never corrupts ``path``.
+
+    WHY: the periodic save in train() overwrites ONE file (dust2_policy.pt)
+    every --save_every_sec. The training box's GPU is known to fall off the
+    PCI bus under thermal load (hard crash, 2026-08-13); a plain torch.save
+    interrupted mid-write would leave the ONLY recovery checkpoint torn.
+    os.replace() is an atomic rename on POSIX, so ``path`` always holds a
+    complete checkpoint — old or new, never partial.
+
+    PITFALL: torch is imported lazily — train.py's module level must stay
+    torch-free so --dump-config keeps its no-heavy-imports guarantee.
+    """
+    import torch
+
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(state_dict, tmp)
+    os.replace(tmp, path)
+
+
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
     """Return (agents_per_env, bptt_horizon, batch_size) used by both training
     and --dump-config. Single source of truth so the fingerprint dict captured
@@ -3536,7 +3557,7 @@ def train(args):
 
         if time.time() - last_save > args.save_every_sec:
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(policy.state_dict(), save_path)
+            _atomic_save_state_dict(policy.state_dict(), save_path)
             last_save = time.time()
             print(f"Saved checkpoint to {save_path}")
 
@@ -3551,7 +3572,7 @@ def train(args):
 
     # Final checkpoint save
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(policy.state_dict(), save_path)
+    _atomic_save_state_dict(policy.state_dict(), save_path)
     print(f"[Train] Final checkpoint saved to {save_path}")
 
     _metrics_file.close()
