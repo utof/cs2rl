@@ -107,3 +107,150 @@ def test_pg_rows_subset_mean_hits_analytic_target(env_policy):
     expected = -2.0 * adv_norm[:4].mean()
     assert torch.allclose(subset_loss, expected, atol=1e-6), \
         f"{subset_loss} != {expected}"
+
+
+def test_tag_param_groups_partition_the_policy(env_policy):
+    """Spec §4.2: trunk = encoder+lstm (620,544 of 626,971 params — 99%),
+    policy_heads = action_heads+aim_mu+aim_log_std (6,170), value_head
+    (257). The three groups must PARTITION named_parameters (requires_grad
+    only) — an unmapped param must raise, not silently vanish from every
+    group (a renamed module would otherwise drop out of the metric
+    unnoticed).
+    """
+    _, policy = env_policy
+    groups = train._tag_param_groups(policy)
+    assert set(groups) == {"trunk", "policy_heads", "value_head"}
+    n_grouped = sum(len(ps) for ps in groups.values())
+    n_policy = sum(1 for _, p in policy.named_parameters() if p.requires_grad)
+    assert n_grouped == n_policy
+    assert all(len(ps) > 0 for ps in groups.values())
+    numel = {g: sum(p.numel() for p in ps) for g, ps in groups.items()}
+    assert numel["trunk"] > 100 * numel["policy_heads"]                # 99% dominance
+
+
+def _tag_call(policy, kw, idx):
+    B = kw["mb_advantages"].shape[0]
+    return train.tag_grad_cossim(
+        policy,
+        idx=idx,
+        mb_returns_norm=torch.zeros(B),
+        mb_prio=None,
+        mb_masks=None,
+        mb_label="mb0",
+        **kw,
+    )
+
+
+def test_synthetic_sign_check(env_policy):
+    """Spec §5 test 2 — both directions, with EXACT cosine targets.
+
+    Opposed: every row is the same transition (row_map = all-zeros) with
+    adv +1 on T rows and -1 on CT rows. Each subset loss is then a scalar
+    multiple of the single row's pg term with opposite signs ⇒ cross and
+    cross_half exactly -1; within-team halves see identical rows ⇒ exactly
+    +1.
+
+    Aligned: each CT row is a bitwise COPY of its T counterpart (mirror
+    row_map, mirrored advantages), so loss_T ≡ loss_CT as functions of the
+    parameters ⇒ identical gradients ⇒ cross exactly +1.
+
+    NOTE the shared-normalization trap this construction dodges: two
+    team-constant advantage levels can never co-align (mean subtraction
+    puts them on opposite sides of zero), so the aligned case must mirror
+    ROWS, not just choose friendly constants. A sign or mask bug cannot
+    pass both branches.
+    """
+    _, policy = env_policy
+    B = 20                             # 2 envs × 10 slots
+    idx = torch.arange(B)              # (idx % 10) < 5 → rows 0-4, 10-14 are T
+    team_t = (idx % 10) < 5
+
+    adv = torch.where(team_t, torch.tensor(1.0), torch.tensor(-1.0))
+    kw = _flat_batch(policy, B, adv, row_map=torch.zeros(B, dtype=torch.long))
+    m = _tag_call(policy, kw, idx)
+    for g in ("trunk", "policy_heads"):
+        assert m[f"tag/cossim_cross/{g}/mb0"] < -0.99
+        assert m[f"tag/cossim_cross_half/{g}/mb0"] < -0.99
+        assert m[f"tag/cossim_within_t/{g}/mb0"] > 0.99
+        assert m[f"tag/cossim_within_ct/{g}/mb0"] > 0.99
+        assert m[f"tag/gnorm_t/{g}/mb0"] > 0
+        assert m[f"tag/gnorm_ct/{g}/mb0"] > 0
+
+    mirror = idx.clone()
+    mirror[~team_t] -= 5                               # CT slot j ← T slot j-5
+    torch.manual_seed(11)
+    adv_aligned = torch.randn(B)[mirror]               # advantages mirrored too
+    kw2 = _flat_batch(policy, B, adv_aligned, row_map=mirror)
+    m2 = _tag_call(policy, kw2, idx)
+    for g in ("trunk", "policy_heads"):
+        assert m2[f"tag/cossim_cross/{g}/mb0"] > 0.99
+
+
+def test_within_halves_split_by_env_parity(env_policy):
+    """Spec §4.2 (plan-review finding 2): halves are split by ENV parity
+    (idx // 10) % 2 — exchangeable, balanced — NOT by segment parity, which
+    would pin T_a to agent slots {0,2,4} forever. Construction: 2 envs;
+    env 0's T rows get adv +1, env 1's T rows get -1 (CT rows vary to keep
+    the batch non-degenerate). Under env parity, within_t compares env 0
+    vs env 1 ⇒ opposed ⇒ within_t < 0. Under slot parity both halves would
+    mix the envs and within_t would sit near 0/positive — the assertion
+    separates the two implementations.
+    """
+    _, policy = env_policy
+    B = 20
+    idx = torch.arange(B)
+    row_map = torch.cat([torch.arange(10), torch.arange(10)])                 # env1 copies env0's rows
+    adv = torch.zeros(B)
+    adv[0:5] = 1.0                                                            # env 0 T rows
+    adv[10:15] = -1.0                                                         # env 1 T rows (identical transitions)
+    adv[5:10] = 0.5                                                           # CT rows keep full-batch stats sane
+    adv[15:20] = 0.5
+    kw = _flat_batch(policy, B, adv, row_map=row_map)
+    m = _tag_call(policy, kw, idx)
+    assert m["tag/cossim_within_t/trunk/mb0"] < -0.9, (
+        "within_t should compare env 0 vs env 1 (opposed by construction) — "
+        "a slot-parity split mixes the envs and lands elsewhere")
+
+
+def test_zero_norm_subset_yields_nan_others_finite(env_policy):
+    """Spec §5 test 6: a subset whose normalized advantages are exactly zero
+    (CT rows pinned at the full-batch mean) produces a deliberate NaN in
+    every CT-involving cos-sim and gnorm_ct == 0, while the T-side keys stay
+    finite. Analysis drops NaNs; this pins that they ARE NaN rather than a
+    fake 0 or a crash.
+    """
+    import math
+    _, policy = env_policy
+    B = 20
+    idx = torch.arange(B)
+    team_t = (idx % 10) < 5
+    # T rows: ±1 alternating (mean 0); CT rows: exactly 0 == full-batch mean
+    adv = torch.zeros(B)
+    t_pos = team_t.nonzero().squeeze(1)
+    adv[t_pos] = torch.where(
+        torch.arange(len(t_pos)) % 2 == 0, torch.tensor(1.0), torch.tensor(-1.0))
+    m = _tag_call(policy, _flat_batch(policy, B, adv), idx)
+    for g in ("trunk", "policy_heads"):
+        assert math.isnan(m[f"tag/cossim_cross/{g}/mb0"])
+        assert math.isnan(m[f"tag/cossim_cross_half/{g}/mb0"])
+        assert math.isnan(m[f"tag/cossim_within_ct/{g}/mb0"])
+        assert m[f"tag/gnorm_ct/{g}/mb0"] == 0.0
+        assert math.isfinite(m[f"tag/cossim_within_t/{g}/mb0"])
+        assert m[f"tag/gnorm_t/{g}/mb0"] > 0
+
+
+def test_vf_control_present_and_no_value_head_pg_keys(env_policy):
+    """Spec §4.2 (plan-review finding 14): tag/cossim_vf/<mb> is the
+    known-anticorrelated control (vf-only subset losses over value_head
+    params) and must be finite on a generic batch. The pg loss never
+    touches value_head, so pg keys for that group must NOT exist at all —
+    dead NaN/0 keys in metrics.jsonl read as signal to nobody's benefit.
+    """
+    import math
+    _, policy = env_policy
+    B = 20
+    idx = torch.arange(B)
+    torch.manual_seed(3)
+    m = _tag_call(policy, _flat_batch(policy, B, torch.randn(B)), idx)
+    assert math.isfinite(m["tag/cossim_vf/mb0"])
+    assert not any("value_head" in k for k in m), ("pg metrics must not be emitted for value_head")

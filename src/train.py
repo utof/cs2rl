@@ -3084,6 +3084,176 @@ def _hybrid_ppo_loss(policy,
     return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list
 
 
+def _tag_param_groups(policy):
+    """Partition policy params into the TAG groups (spec 2026-08-13 §4.2).
+
+    trunk        — encoder.* + lstm.* (620,544 of 626,971 trainable params,
+                   99.0%, LSTM alone 526,336; this is why no 'total' group
+                   exists — it would replicate trunk while reading as
+                   independent signal).
+    policy_heads — action_heads.* + aim_mu.* + the aim_log_std parameter
+                   (6,170 params).
+    value_head   — value_head.* (257 params; used ONLY for the vf control —
+                   pg metrics skip it, the pg graph never touches it).
+
+    Uses named_parameters() filtered to requires_grad — NOT state_dict(),
+    which would sweep in non-trainable buffers (e.g. max_turn_speed).
+    PITFALL: an unmapped parameter RAISES. Silent fallthrough would let a
+    renamed module drop out of every group and the metric would quietly
+    measure a subset of the network.
+    """
+    groups = {"trunk": [], "policy_heads": [], "value_head": []}
+    for name, p in policy.named_parameters():
+        if not p.requires_grad:
+            continue
+        if name.startswith(("encoder.", "lstm.")):
+            groups["trunk"].append(p)
+        elif name.startswith(("action_heads.", "aim_mu.")) or name == "aim_log_std":
+            groups["policy_heads"].append(p)
+        elif name.startswith("value_head."):
+            groups["value_head"].append(p)
+        else:
+            raise AssertionError(
+                f"TAG: unmapped policy parameter {name!r} — update _tag_param_groups")
+    return groups
+
+
+def tag_grad_cossim(policy, *, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d, mb_old_logp_c,
+                    mb_advantages, clip_coef, state, mb_prio, mb_masks, mb_returns_norm, idx,
+                    mb_label):
+    """T-vs-CT gradient cosine-similarity measurement (spec 2026-08-13 §4.2).
+
+    WHAT: ONE extra forward via _hybrid_ppo_loss(return_pg_rows=True), then
+    six subset losses as weighted means over the per-row pg vector — T, CT,
+    and the env-parity halves T_a/T_b, CT_a/CT_b — each differentiated with
+    torch.autograd.grad against the SAME graph (retain_graph=True because
+    successive grad calls need it; the real update's graph is a separate,
+    untouched object). Advantage normalization is shared over the full
+    minibatch (it lives inside _hybrid_ppo_loss, before the per-row max),
+    so every subset gradient is a true restriction of the real gradient.
+    vf-only T/CT losses on the same forward's new_value feed the
+    known-anticorrelated tag/cossim_vf control over value_head params.
+
+    Cost per measured minibatch: 1 forward + 8 backwards (spec §4.3 budget:
+    ≤5% of epoch time at --tag-every 5; raise tag_every if exceeded, don't
+    optimize).
+
+    WHY cross_half exists: the criterion statistic is cos(g_Ta, g_CTa) —
+    size-matched to the within-team null (all arms at n/2 rows). The
+    full-size cos(g_T, g_CT) is reported as the lower-noise descriptive
+    number but has a LARGER expected same-distribution cosine than any n/2
+    statistic, which would bias within − cross toward "no conflict"
+    (plan-review finding 2).
+
+    WHY the entropy term is absent: the pg vector contains no entropy —
+    deliberate (spec §4.2): entropy is team-agnostic (pushes cos-sim toward
+    +1 mechanically) and its effective_alpha is warmstart-phase-dependent.
+
+    ROW IDENTITY: segment index ≡ global agent index (env-major, 10/env, T
+    at slots 0-4 — the trainer asserts segments == total_agents, gh#85), so
+    team T rows are (idx % 10) < 5 and env parity is (idx // 10) % 2, where
+    idx is the minibatch's multinomial segment gather.
+
+    PITFALLS:
+    * Never touches .grad, self.ratio, KL bookkeeping, or the Welford
+      return-norm state — mb_returns_norm arrives already normalized.
+      Training with the flag on is bitwise-identical (pinned by
+      tests/test_tag_trainer.py).
+    * Zero-norm subsets (subset advantage exactly 0 after shared
+      normalization) yield a DELIBERATE NaN cos-sim (0/0) and gnorm 0 —
+      analysis drops them; do not "fix" with an epsilon. These NaNs are
+      also why the outer-loop injection must stay after
+      dead_run_detector.check (see _inject_tag_metrics).
+    * pg metrics cover trunk + policy_heads only — the pg graph never
+      touches value_head, so those keys would be dead NaN/0 noise.
+    * The loss path evaluates stored actions and samples nothing, so there
+      is no RNG interaction.
+    """
+    import torch
+
+    groups = _tag_param_groups(policy)
+    pg_group_names = ("trunk", "policy_heads")
+    pg_params = [p for g in pg_group_names for p in groups[g]]
+    sizes = [len(groups[g]) for g in pg_group_names]
+    bounds = [sum(sizes[:i]) for i in range(len(sizes) + 1)]
+
+    team_t = (idx % 10) < 5
+    env_even = ((idx // 10) % 2) == 0                  # env-parity split (exchangeable)
+    subsets = {
+        "T": team_t,
+        "CT": ~team_t,
+        "T_a": team_t & env_even,
+        "T_b": team_t & ~env_even,
+        "CT_a": (~team_t) & env_even,
+        "CT_b": (~team_t) & ~env_even,
+    }
+
+    def _row_weights(mask):
+        # segment mask → flat per-row weights, matching pg_rows' layout
+        # ((segments, bptt).reshape(-1) segment-major; flat test path is 1:1)
+        w = mask.to(mb_advantages.dtype)
+        if mb_advantages.dim() > 1:
+            w = w.unsqueeze(1)
+        return w.expand_as(mb_advantages).reshape(-1)
+
+    def _flat(grads):
+        return torch.cat([g.reshape(-1) for g in grads])
+
+    def _cos(a, b):
+        # 0-norm ⇒ 0/0 ⇒ NaN, deliberately (see docstring)
+        return float((a @ b) / (a.norm() * b.norm()))
+
+    (_, _, newvalue, *_rest, pg_rows) = _hybrid_ppo_loss(policy,
+                                                         mb_obs,
+                                                         mb_actions,
+                                                         mb_cont_actions,
+                                                         mb_old_logp_d,
+                                                         mb_old_logp_c,
+                                                         mb_advantages,
+                                                         clip_coef,
+                                                         state,
+                                                         mb_prio=mb_prio,
+                                                         mb_masks=mb_masks,
+                                                         return_pg_rows=True)
+
+    pg_grads = {}                                                      # subset -> {group: flat grad}
+    vf_grads = {}                                                      # 'T'/'CT' -> flat value_head grad
+    for name, mask in subsets.items():
+        w = _row_weights(mask)
+        loss_s = (pg_rows * w).sum() / w.sum()
+        gs = torch.autograd.grad(loss_s,
+                                 pg_params,
+                                 retain_graph=True,
+                                 allow_unused=True,
+                                 materialize_grads=True)
+        pg_grads[name] = {
+            g: _flat(gs[bounds[i]:bounds[i + 1]]).detach()
+            for i, g in enumerate(pg_group_names)
+        }
+        if name in ("T", "CT"):
+                                                                       # vf-only control: unclipped value loss restricted to the subset
+            newv = newvalue.view(mb_returns_norm.shape)
+            w_full = w.reshape(mb_returns_norm.shape)
+            vf_s = 0.5 * (((newv - mb_returns_norm)**2) * w_full).sum() / w_full.sum()
+            vgs = torch.autograd.grad(vf_s,
+                                      groups["value_head"],
+                                      retain_graph=True,
+                                      allow_unused=True,
+                                      materialize_grads=True)
+            vf_grads[name] = _flat(vgs).detach()
+
+    out = {}
+    for g in pg_group_names:
+        out[f"tag/cossim_cross/{g}/{mb_label}"] = _cos(pg_grads["T"][g], pg_grads["CT"][g])
+        out[f"tag/cossim_cross_half/{g}/{mb_label}"] = _cos(pg_grads["T_a"][g], pg_grads["CT_a"][g])
+        out[f"tag/cossim_within_t/{g}/{mb_label}"] = _cos(pg_grads["T_a"][g], pg_grads["T_b"][g])
+        out[f"tag/cossim_within_ct/{g}/{mb_label}"] = _cos(pg_grads["CT_a"][g], pg_grads["CT_b"][g])
+        out[f"tag/gnorm_t/{g}/{mb_label}"] = float(pg_grads["T"][g].norm())
+        out[f"tag/gnorm_ct/{g}/{mb_label}"] = float(pg_grads["CT"][g].norm())
+    out[f"tag/cossim_vf/{mb_label}"] = _cos(vf_grads["T"], vf_grads["CT"])
+    return out
+
+
 def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_view_main=None):
     """Extend trainer with continuous-action rollout storage + vecenv plumbing.
 
