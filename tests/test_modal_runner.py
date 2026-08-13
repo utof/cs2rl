@@ -2447,6 +2447,7 @@ class FakeChild:
         self.stdout = io.BytesIO(stdout)
         self.stderr = io.BytesIO(stderr)
         self.signals: list[int] = []
+        self.wait_timeouts: list[float | None] = []
         self._done = threading.Event()
         if not hold:
             self._done.set()
@@ -2455,7 +2456,13 @@ class FakeChild:
         return self.returncode if self._done.is_set() else None
 
     def wait(self, timeout=None):
-        if not self._done.wait(timeout=timeout):
+        self.wait_timeouts.append(timeout)
+        # Grace waits must not burn wall-clock time in tests. A held child
+        # times out immediately; a released child returns at once.
+        effective = timeout
+        if timeout is not None and timeout >= mrl.TERM_GRACE_SECONDS:
+            effective = 0
+        if not self._done.wait(timeout=effective):
             raise subprocess.TimeoutExpired(["fake"], timeout)
         return self.returncode
 
@@ -2783,7 +2790,7 @@ def _signal_hooks(child, *, release_on=signal.SIGKILL):
 
     def fake_killpg(_pgid, sig):
         kills.append(sig)
-        if sig == release_on:
+        if release_on is not None and sig == release_on:
             child.release()
 
     def fake_sleep(seconds: float) -> None:
@@ -2900,7 +2907,7 @@ def test_child_receives_term_then_kill_after_grace(tmp_path):
         child.release()
         thread.join(timeout=2.0)
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
-    assert 15.0 in hooks["slept"]
+    assert mrl.TERM_GRACE_SECONDS in child.wait_timeouts
 
 
 def test_cleanup_closes_log_before_final_commit(tmp_path):
@@ -2986,6 +2993,191 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
     assert mrl.execute_training_attempt(**kwargs) == mrl.REDELIVERED
     assert (kwargs["run_root"] / mrl.STATUS_FILENAME).read_bytes() == before
     assert committed == commits_before
+
+
+def test_post_spawn_failure_kills_child_and_writes_terminal_status(tmp_path):
+    child = FakeChild(hold=True)
+    hooks = _signal_hooks(child)
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            sleep=hooks["sleep"],
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    (kwargs["run_root"] / mrl.TRAIN_LOG_NAME).mkdir()
+    with pytest.raises(OSError):
+        mrl.execute_training_attempt(**kwargs)
+    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    assert persisted["status"] in {"failed", "interrupted"}
+    assert persisted["attempt_id"] == "attempt-a"
+    assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
+    assert child.poll() is not None
+
+
+def test_term_grace_is_deadline_not_mandatory_sleep(tmp_path):
+    child = FakeChild(hold=True)
+    hooks = _signal_hooks(child, release_on=signal.SIGTERM)
+    started = time.monotonic()
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            sleep=hooks["sleep"],
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
+    try:
+        _handler, term_handler = _wait_until_handlers(hooks["installed"], hooks["originals"])
+        term_handler(signal.SIGTERM, None)
+        assert finished.wait(timeout=2.0)
+    finally:
+        child.release()
+        thread.join(timeout=2.0)
+    assert time.monotonic() - started < 5.0
+    assert hooks["kills"] == [signal.SIGTERM]
+    assert 15.0 not in hooks["slept"]
+    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    assert persisted["status"] == "interrupted"
+
+
+def _record_hash_after_terminal(monkeypatch, run_root: Path) -> list[str]:
+    hashed: list[str] = []
+
+    def wrapped_validate(path):
+        del path
+        status = json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"]
+        if status != "training":
+            hashed.append("validate")
+        raise mrl.ValidationError("test stub: skip torch")
+
+    def wrapped_hash(path):
+        del path
+        status = json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"]
+        if status != "training":
+            hashed.append("hash")
+        return "00" * 32
+
+    monkeypatch.setattr(mrl, "validate_local_checkpoint", wrapped_validate)
+    monkeypatch.setattr(mrl, "sha256_file", wrapped_hash)
+    return hashed
+
+
+def test_interrupt_uses_sidecar_digest_and_skips_torch_hash(tmp_path, monkeypatch):
+    child = FakeChild(hold=True)
+    hooks = _signal_hooks(child)
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            sleep=hooks["sleep"],
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    run_root = kwargs["run_root"]
+    ckpt_dir = run_root / "checkpoints"
+    ckpt_dir.mkdir()
+    sidecar_digest = "ab" * 32
+    (ckpt_dir / mrl.CHECKPOINT_SIDECAR_NAME).write_text(
+        json.dumps({
+            "sha256": sidecar_digest,
+            "size": 13,
+            "mtime_ns": 1,
+            "validated_at": "2026-08-13T00:00:00+00:00",
+        }) + "\n")
+    hashed = _record_hash_after_terminal(monkeypatch, run_root)
+    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
+    try:
+        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
+        int_handler(signal.SIGINT, None)
+        assert finished.wait(timeout=2.0)
+    finally:
+        child.release()
+        thread.join(timeout=2.0)
+    assert hashed == []
+    payload = json.loads((run_root / mrl.RESULT_FILENAME).read_text())
+    assert payload["status"] == "interrupted"
+    assert payload["checkpoint_sha256"] == sidecar_digest
+
+
+def test_interrupt_without_sidecar_leaves_checkpoint_hash_null(tmp_path, monkeypatch):
+    child = FakeChild(hold=True)
+    hooks = _signal_hooks(child)
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            sleep=hooks["sleep"],
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    run_root = kwargs["run_root"]
+    ckpt_dir = run_root / "checkpoints"
+    ckpt_dir.mkdir()
+    (ckpt_dir / "dust2_policy.pt").write_bytes(b"do-not-load-me")
+    hashed = _record_hash_after_terminal(monkeypatch, run_root)
+    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
+    try:
+        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
+        int_handler(signal.SIGINT, None)
+        assert finished.wait(timeout=2.0)
+    finally:
+        child.release()
+        thread.join(timeout=2.0)
+    assert hashed == []
+    payload = json.loads((run_root / mrl.RESULT_FILENAME).read_text())
+    assert payload["status"] == "interrupted"
+    assert payload["checkpoint_sha256"] is None
+
+
+def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
+    child = FakeChild(hold=True)
+    hooks = _signal_hooks(child, release_on=None)
+    watcher_stop: dict[str, threading.Event | None] = {"event": None}
+    at_terminal: list[tuple[str, bool]] = []
+    real_start = mrl._start_checkpoint_watcher
+    real_transition = mrl.transition_status
+
+    def wrapped_start(**kwargs):
+        stop, thread = real_start(**kwargs)
+        watcher_stop["event"] = stop
+        return stop, thread
+
+    def wrapped_transition(run_root, next_status, **kwargs):
+        if next_status in mrl.TERMINAL_STATUSES:
+            event = watcher_stop["event"]
+            at_terminal.append((next_status.value, event is not None and event.is_set()))
+        return real_transition(run_root, next_status, **kwargs)
+
+    monkeypatch.setattr(mrl, "_start_checkpoint_watcher", wrapped_start)
+    monkeypatch.setattr(mrl, "transition_status", wrapped_transition)
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            sleep=hooks["sleep"],
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
+    try:
+        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
+        int_handler(signal.SIGINT, None)
+        child.release()
+        assert finished.wait(timeout=2.0)
+    finally:
+        child.release()
+        thread.join(timeout=2.0)
+    assert at_terminal == [("interrupted", True)]
+    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    assert persisted["status"] == "interrupted"
 
 
 # ── Task 7 cycle D: exit mapping and completion evidence ───────────────────

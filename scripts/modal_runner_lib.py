@@ -1783,6 +1783,7 @@ REASON_TIMEOUT = "timeout"
 REASON_DEAD_RUN = "dead_run"
 REASON_INVALID_EVIDENCE = "invalid_evidence"
 REASON_NONZERO_EXIT = "nonzero_exit"
+REASON_ERROR = "error"
 
 
 @dataclass(frozen=True)
@@ -1938,6 +1939,11 @@ def _start_checkpoint_watcher(
 ) -> tuple[threading.Event, threading.Thread]:
     stop = threading.Event()
 
+    def guarded_commit() -> None:
+        if stop.is_set():
+            return
+        commit()
+
     def loop() -> None:
         last: tuple[int, int] | None = None
         while not stop.is_set():
@@ -1945,7 +1951,7 @@ def _start_checkpoint_watcher(
                 last = publish_stable_checkpoint(
                     run_root,
                     now=now,
-                    commit=commit,
+                    commit=guarded_commit,
                     sleep=sleep,
                     last_published=last,
                 )
@@ -2001,14 +2007,18 @@ def _metrics_summary(run_root: Path) -> tuple[int, int | None]:
 
 
 def _optional_checkpoint_sha256(run_root: Path) -> str | None:
-    ckpt = Path(run_root) / "checkpoints" / CHECKPOINT_NAME
-    if not ckpt.is_file():
+    """Sidecar digest only. Non-completed paths must not torch-load or rehash."""
+    sidecar = Path(run_root) / "checkpoints" / CHECKPOINT_SIDECAR_NAME
+    if not sidecar.is_file():
         return None
     try:
-        validate_local_checkpoint(ckpt)
-    except ValidationError:
+        payload = json.loads(sidecar.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    return sha256_file(ckpt)
+    digest = payload.get("sha256")
+    if not isinstance(digest, str) or not digest:
+        return None
+    return digest
 
 
 def _write_run_result(
@@ -2058,8 +2068,26 @@ def _signal_process_group(
         killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
         return
-    sleep(TERM_GRACE_SECONDS)
     poll = getattr(child, "poll", None)
+    if poll is not None and poll() is not None:
+        return
+    child_wait = getattr(child, "wait", None)
+    if child_wait is not None:
+        try:
+            child_wait(timeout=TERM_GRACE_SECONDS)
+        except (subprocess.TimeoutExpired, Exception, KeyboardInterrupt):
+            # Deadline elapsed, or wait itself was interrupted — fall through
+            # to poll/KILL. Cleanup must not resurrect KeyboardInterrupt.
+            pass
+    else:
+        deadline = time.monotonic() + TERM_GRACE_SECONDS
+        while True:
+            if poll is not None and poll() is not None:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sleep(min(POLL_INTERVAL_SECONDS, remaining))
     if poll is not None and poll() is not None:
         return
     try:
@@ -2115,6 +2143,7 @@ def _run_training_attempt(
     cleaned = False
     cleanup_lock = threading.Lock()
     heartbeat_stopped = False
+    watcher_stopped = False
     started_at = now()
     final_result: TrainingAttemptResult | None = None
     owned_log: object | None = None
@@ -2126,6 +2155,14 @@ def _run_training_attempt(
             return
         heartbeat_stopped = True
         _stop_heartbeat(heartbeat)
+
+    def stop_watcher_once() -> None:
+        nonlocal watcher_stopped
+        if watcher_stopped:
+            return
+        watcher_stopped = True
+        ckpt_stop.set()
+        ckpt_thread.join(timeout=5.0)
 
     def finalize(
         status: Status,
@@ -2144,6 +2181,7 @@ def _run_training_attempt(
         for thread in tee_threads:
             thread.join(timeout=5.0)
         stop_heartbeat_once()
+        stop_watcher_once()
         _close_log_sink(owned_log)
         _close_log_sink(log_sink)
         evidence: CompletionEvidence | None = None
@@ -2205,25 +2243,22 @@ def _run_training_attempt(
         tee_threads.extend(threads)
         for thread in threads:
             thread.start()
-        try:
-            timed_out = False
-            child_wait = getattr(child, "wait", None)
-            child_poll = getattr(child, "poll", None)
-            while True:
-                if child_poll is not None and child_poll() is not None:
-                    break
-                if timeout is not None and now() - started_at >= timeout:
-                    timed_out = True
-                    break
-                if child_wait is None:
-                    sleep(POLL_INTERVAL_SECONDS)
-                    continue
-                try:
-                    child_wait(timeout=POLL_INTERVAL_SECONDS)
-                except subprocess.TimeoutExpired:
-                    continue
-        except KeyboardInterrupt:
-            finalize(Status.INTERRUPTED, REASON_SIGNAL, None, kill_child=True)
+        timed_out = False
+        child_wait = getattr(child, "wait", None)
+        child_poll = getattr(child, "poll", None)
+        while True:
+            if child_poll is not None and child_poll() is not None:
+                break
+            if timeout is not None and now() - started_at >= timeout:
+                timed_out = True
+                break
+            if child_wait is None:
+                sleep(POLL_INTERVAL_SECONDS)
+                continue
+            try:
+                child_wait(timeout=POLL_INTERVAL_SECONDS)
+            except subprocess.TimeoutExpired:
+                continue
         if not cleaned:
             if timed_out:
                 finalize(Status.INTERRUPTED, REASON_TIMEOUT, None, kill_child=True)
@@ -2238,12 +2273,19 @@ def _run_training_attempt(
             reason=REASON_NONZERO_EXIT,
             exit_code=getattr(child, "returncode", None),
         )
+    except KeyboardInterrupt:
+        finalize(Status.INTERRUPTED, REASON_SIGNAL, None, kill_child=True)
+        if final_result is not None:
+            return final_result
+        raise
+    except Exception:
+        finalize(Status.FAILED, REASON_ERROR, None, kill_child=True)
+        raise
     finally:
         if prev_int is not None:
             signal_signal(signal.SIGINT, prev_int)
         if prev_term is not None:
             signal_signal(signal.SIGTERM, prev_term)
-        ckpt_stop.set()
-        ckpt_thread.join(timeout=5.0)
+        stop_watcher_once()
         stop_heartbeat_once()
         _close_log_sink(owned_log)
