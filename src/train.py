@@ -108,16 +108,171 @@ def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6):
         device of the stored tensor via full_like.
       * Matches any key ENDING in "aim_log_std" so a future wrapper prefix
         (e.g. "policy.aim_log_std") keeps working.
+      * Batch 7: the matcher covers aim_log_std, aim_log_std_t and
+        aim_log_std_ct. The legacy→split warm conversion must still call this
+        FIRST, on the legacy dict — see convert_legacy_state_dict_to_split.
     """
+    import re as _re
+
     import torch as _torch
 
     changed = False
     for key, val in state_dict.items():
-        if key.endswith("aim_log_std") and _torch.allclose(
+        # Batch 7 (spec §3.3): also match the split copies. The bare
+        # endswith("aim_log_std") this replaces is FALSE for "aim_log_std_t"
+        # and "aim_log_std_ct" — belt-and-braces so a future split-format
+        # warmstart is widened by VALUE too. It does NOT relieve the caller of
+        # the ordering rule: on a legacy→split resume this helper must run on
+        # the LEGACY dict, before convert_legacy_state_dict_to_split.
+        if _re.search(r"aim_log_std(_t|_ct)?$", key) and _torch.allclose(
                 val, _torch.full_like(val, LOG_STD_INIT), atol=atol):
             state_dict[key] = _torch.full_like(val, AIM_LOG_STD_RESUME_INIT)
             changed = True
     return changed
+
+
+def state_dict_is_split(state_dict):
+    """True if this checkpoint was written by a T/CT split policy (spec §3.3).
+
+    WHAT: presence of the `aim_log_std_t` parameter is the marker — it exists
+    in exactly one architecture and nowhere else in the key space.
+
+    WHY key inference rather than the config flag: config.json is rewritten
+    unconditionally on every launch (src/train.py:3668), so a flag-less
+    crash-resume would stamp `tct_split_heads: false` over a split run's
+    provenance. Deciding from the keys means resume, self-play snapshot
+    loading and the eval/record loader all do the right thing with no flag at
+    all — the flag governs only fresh construction and the legacy→split
+    conversion direction.
+
+    PITFALL: "aim_log_std_ct".endswith("aim_log_std_t") is False, so this does
+    not accidentally fire on a CT-only key set; it is nonetheless deliberate
+    that the marker is the T copy, since both are always written together.
+    """
+    return any(k.endswith("aim_log_std_t") for k in state_dict)
+
+
+def convert_legacy_state_dict_to_split(state_dict):
+    """Warm split: duplicate a legacy checkpoint's heads into both team copies.
+
+    WHAT: returns a NEW dict where `action_heads.*` → `action_heads_t.*` +
+    `action_heads_ct.*`, `aim_mu.*` → `aim_mu_t.*` + `aim_mu_ct.*`,
+    `aim_log_std` → `aim_log_std_t` + `aim_log_std_ct`. Everything else
+    (encoder, lstm, value_head) passes through untouched — the trunk and the
+    critic stay shared.
+
+    WHY duplicate rather than re-initialize one side: the BC warmstart heads
+    encode "how to act at all". Starting CT from random heads would confound
+    the experiment with a relearning phase. Warm split means both teams start
+    IDENTICAL and the divergence itself is the treatment.
+
+    PITFALLS:
+      * ORDER (spec §3.3, the gh#91 trap): call reinit_frozen_aim_log_std on
+        the LEGACY dict BEFORE this function. The un-widened matcher used to
+        miss the `_t`/`_ct` keys entirely; running the re-init afterwards
+        would silently leave σ=0.1 and throttle every PPO update of the run
+        through the KL early-stop, with no error and no log line. The matcher
+        is now widened as belt-and-braces, but the ordering is still the
+        contract — pinned by
+        test_warm_split_duplicates_heads_and_reinits_sigma_in_both_copies.
+      * Keys are matched strictly (no wrapper prefix like "policy."). Every
+        checkpoint this project writes is bare-keyed; a prefixed dict would
+        pass through unconverted and then fail loudly at
+        load_state_dict_arch_checked rather than half-loading.
+      * Tensors are cloned so the two copies never alias — an in-place
+        optimizer step on one would otherwise move the other.
+    """
+    out = {}
+    for key, val in state_dict.items():
+        if key.startswith("action_heads."):
+            suffix = key[len("action_heads."):]
+            out[f"action_heads_t.{suffix}"] = val.clone()
+            out[f"action_heads_ct.{suffix}"] = val.clone()
+        elif key.startswith("aim_mu."):
+            suffix = key[len("aim_mu."):]
+            out[f"aim_mu_t.{suffix}"] = val.clone()
+            out[f"aim_mu_ct.{suffix}"] = val.clone()
+        elif key == "aim_log_std":
+            out["aim_log_std_t"] = val.clone()
+            out["aim_log_std_ct"] = val.clone()
+        else:
+            out[key] = val
+    return out
+
+
+def load_state_dict_arch_checked(policy, state_dict, *, source):
+    """load_state_dict with a loud architecture-mismatch error (spec §3.3).
+
+    WHAT: compares the checkpoint's architecture (key inference) against the
+    policy's (`policy.tct_split_heads`) and raises a message naming BOTH
+    before loading anything. Never a silent partial load.
+
+    WHY it exists even though every construction site infers: the sites that
+    RECEIVE a pre-built policy and then load into it (train main's resume,
+    load_policy_from_checkpoint, SelfPlayManager.load_past_policy) can be
+    handed a mismatched pair by a caller that bypassed inference. A bare
+    load_state_dict there raises a wall of missing/unexpected keys that names
+    neither architecture — the operator's first hypothesis becomes "corrupt
+    checkpoint", which is wrong and expensive.
+
+    PITFALL: this does NOT convert. Legacy→split conversion is a deliberate
+    act with a σ-re-init ordering constraint, so it stays at the one call site
+    that means it (the train-main warm split).
+    """
+    ckpt_split = state_dict_is_split(state_dict)
+    policy_split = bool(getattr(policy, "tct_split_heads", False))
+    if ckpt_split != policy_split:
+
+        def _name(flag):
+            return "SPLIT (per-team T/CT policy heads)" if flag else "LEGACY (shared policy heads)"
+
+        raise ValueError(
+            f"policy/checkpoint architecture mismatch loading {source}: the checkpoint is "
+            f"{_name(ckpt_split)} but the policy is {_name(policy_split)}. Rebuild the policy "
+            f"with build_policy(..., tct_split_heads={ckpt_split}) — loaders are supposed to "
+            f"infer this from the checkpoint keys (state_dict_is_split), see spec "
+            f"2026-08-13 §3.3.")
+    policy.load_state_dict(state_dict)
+
+
+def resolve_resume_split(resume_path, *, flag, map_location="cpu"):
+    """Decide split-ness BEFORE build_policy, from the resume checkpoint.
+
+    Returns ``(split_active, state_dict_or_None, resolved_Path_or_None)``.
+
+    WHY this shape (spec §3.3 ordering constraint): in train() the policy is
+    constructed at ~:3656, but train_config is not built until ~:3661 and the
+    resume checkpoint is not read until ~:3688 — at construction time neither
+    the flag's config key nor the checkpoint's keys are in scope. So the
+    checkpoint is sniffed once here, the decision is passed into build_policy,
+    and the already-loaded dict is handed back for reuse at the load site
+    (no double I/O on a 2.5 MB file, and no chance of the two reads
+    disagreeing).
+
+    Decision table:
+      no resume            → (bool(flag), None, None)
+      legacy checkpoint    → (bool(flag), sd, path)   flag widens to warm split
+      split checkpoint     → (True,       sd, path)   inference WINS
+
+    The flag can only WIDEN legacy→split; it can never narrow a split
+    checkpoint back to a legacy policy. That asymmetry is what makes a
+    flag-less crash-resume of a split run correct — the routine reality on
+    this box, not an edge case.
+
+    PITFALL: loads with map_location="cpu" regardless of the training device.
+    load_state_dict copies into the policy's own (possibly CUDA) tensors, so
+    this is safe and avoids allocating a second copy on the GPU during
+    startup.
+    """
+    import torch as _torch
+
+    if not resume_path:
+        return bool(flag), None, None
+    resume_path = Path(resume_path)
+    if not resume_path.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+    state_dict = _torch.load(resume_path, map_location=map_location, weights_only=True)
+    return bool(flag) or state_dict_is_split(state_dict), state_dict, resume_path
 
 
 # F8 (2026-07-06 adversarial review): per-head [start, end) column ranges of
@@ -3786,8 +3941,18 @@ def train(args):
         **vec_kwargs,
     )
 
-    print(f"[Train] Building policy on device={device}...")
-    policy = build_policy(vecenv, device)
+    # Batch 7 (spec §3.3): sniff the resume checkpoint BEFORE build_policy —
+    # the architecture decision has to exist at construction time, and neither
+    # train_config (built below) nor the checkpoint read (further below) is
+    # available yet. The sniffed dict is reused at the load site.
+    # getattr on the flag keeps harness/older args objects working.
+    resume_path = getattr(args, "resume", None)
+    tct_split_heads, _resume_state_dict, resume_path = resolve_resume_split(
+        resume_path, flag=bool(getattr(args, "tct_split_heads", False)))
+
+    print(f"[Train] Building policy on device={device} "
+          f"(tct_split_heads={tct_split_heads})...")
+    policy = build_policy(vecenv, device, tct_split_heads=tct_split_heads)
 
     agents_per_env, bptt_horizon, batch_size = compute_batch_dims(args.num_envs)
     # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
@@ -3805,21 +3970,23 @@ def train(args):
         print(f"[Train] WARN: failed to write config.json: {_e}")
 
     # ── Resume from checkpoint ───────────────────────────────────────────────
-    resume_path = getattr(args, "resume", None)
+    # resume_path / _resume_state_dict come from the pre-build_policy sniff
+    # above; nothing is re-read from disk here.
     if resume_path:
-        import torch as _torch
-
-        resume_path = Path(resume_path)
-        if not resume_path.exists():
-            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
-        state_dict = _torch.load(resume_path, map_location=device, weights_only=True)
+        state_dict = _resume_state_dict
         # gh#91: BC warm-start checkpoints carry aim_log_std frozen at
         # LOG_STD_INIT — widen to AIM_LOG_STD_RESUME_INIT before loading or
         # the KL early-stop throttles the whole run (see the helper's doc).
+        # Batch 7: this MUST run before the warm split below — the re-initer
+        # keys off the σ key name, and duplicating first would hide it.
         if reinit_frozen_aim_log_std(state_dict):
             print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "
                   f"re-initialized to log(0.3) ≈ {AIM_LOG_STD_RESUME_INIT:.3f} (gh#91)")
-        policy.load_state_dict(state_dict)
+        if tct_split_heads and not state_dict_is_split(state_dict):
+            state_dict = convert_legacy_state_dict_to_split(state_dict)
+            print("[Train] Warm split: duplicated the legacy policy heads into per-team "
+                  "T/CT copies (spec 2026-08-13 §3.3) — both teams start identical.")
+        load_state_dict_arch_checked(policy, state_dict, source=str(resume_path))
         print(f"[Train] Resumed from checkpoint: {resume_path}")
     # ────────────────────────────────────────────────────────────────────────
 

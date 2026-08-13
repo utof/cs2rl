@@ -231,3 +231,132 @@ def test_get_action_and_value_routes_by_team(env):
     _a, cont, _lp, _ent, _v, _st = p.get_action_and_value(_obs(3, 3))
     assert (cont[:3] > 0).all()
     assert (cont[3:] < 0).all()
+
+
+def _legacy_frozen_state_dict(env):
+    """A legacy state_dict with BC-frozen σ — the bc_warmstart.pt signature.
+
+    Synthetic rather than reading outputs/checkpoints/bc_warmstart.pt so the
+    test runs on any checkout; the real file is covered by the guarded test
+    below.
+    """
+    p = train.build_policy(env, device="cpu")
+    with torch.no_grad():
+        p.aim_log_std.fill_(train.LOG_STD_INIT)
+    return {k: v.clone() for k, v in p.state_dict().items()}
+
+
+def test_state_dict_is_split_discriminates_both_vintages(env):
+    """Spec §3.3: split-ness is read off the KEYS, at every load."""
+    legacy = train.build_policy(env, device="cpu").state_dict()
+    split = train.build_policy(env, device="cpu", tct_split_heads=True).state_dict()
+    assert train.state_dict_is_split(legacy) is False
+    assert train.state_dict_is_split(split) is True
+
+
+def test_warm_split_duplicates_heads_and_reinits_sigma_in_both_copies(env):
+    """Spec §5 test 3: the warm-split path applied in the spec's ORDER
+    (re-init σ on the legacy dict FIRST, then duplicate) leaves both copies
+    equal to the legacy tensors and σ == AIM_LOG_STD_RESUME_INIT in BOTH
+    aim_log_std_t and aim_log_std_ct.
+
+    This is the gh#91 trap: reinit_frozen_aim_log_std matches
+    endswith("aim_log_std"), which is FALSE for "aim_log_std_t" — running it
+    after duplication would leave σ=0.1 and throttle every update of a 30M
+    run with no error message.
+    """
+    legacy = _legacy_frozen_state_dict(env)
+    assert train.reinit_frozen_aim_log_std(legacy) is True
+    split_sd = train.convert_legacy_state_dict_to_split(legacy)
+
+    for copy in ("aim_log_std_t", "aim_log_std_ct"):
+        assert torch.allclose(split_sd[copy],
+                              torch.full_like(split_sd[copy], train.AIM_LOG_STD_RESUME_INIT)), copy
+    assert "aim_log_std" not in split_sd
+    for i in range(7):
+        for suffix in ("weight", "bias"):
+            src = legacy[f"action_heads.{i}.{suffix}"]
+            assert torch.equal(split_sd[f"action_heads_t.{i}.{suffix}"], src)
+            assert torch.equal(split_sd[f"action_heads_ct.{i}.{suffix}"], src)
+    assert torch.equal(split_sd["aim_mu_t.weight"], legacy["aim_mu.weight"])
+    assert torch.equal(split_sd["aim_mu_ct.weight"], legacy["aim_mu.weight"])
+    assert torch.equal(split_sd["encoder.0.weight"], legacy["encoder.0.weight"])
+    assert torch.equal(split_sd["value_head.weight"], legacy["value_head.weight"])
+
+    # and it actually loads
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p.load_state_dict(split_sd)
+
+
+def test_reinit_matcher_also_catches_split_sigma_keys(env):
+    """Spec §3.3 belt-and-braces: the widened matcher catches a future
+    split-format warmstart by VALUE too, so a split checkpoint whose σ is
+    still frozen at log(0.1) is widened on resume like a legacy one.
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    with torch.no_grad():
+        p.aim_log_std_t.fill_(train.LOG_STD_INIT)
+        p.aim_log_std_ct.fill_(train.LOG_STD_INIT)
+    sd = {k: v.clone() for k, v in p.state_dict().items()}
+    assert train.reinit_frozen_aim_log_std(sd) is True
+    for copy in ("aim_log_std_t", "aim_log_std_ct"):
+        assert torch.allclose(sd[copy], torch.full_like(sd[copy], train.AIM_LOG_STD_RESUME_INIT))
+
+
+def test_arch_mismatch_raises_naming_both_architectures(env):
+    """Spec §3.3: never a silent partial load. The error must name what the
+    checkpoint is AND what the policy is — a bare load_state_dict KeyError
+    tells the operator neither.
+    """
+    legacy_p = train.build_policy(env, device="cpu")
+    split_p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    split_sd = split_p.state_dict()
+    legacy_sd = legacy_p.state_dict()
+
+    with pytest.raises(ValueError, match=r"SPLIT.*LEGACY|LEGACY.*SPLIT"):
+        train.load_state_dict_arch_checked(legacy_p, split_sd, source="snap.pt")
+    with pytest.raises(ValueError, match=r"SPLIT.*LEGACY|LEGACY.*SPLIT"):
+        train.load_state_dict_arch_checked(split_p, legacy_sd, source="snap.pt")
+
+
+def test_split_checkpoint_round_trips_bitwise(env):
+    """Spec §5 test 3 (third clause): split → split is a plain load."""
+    a = train.build_policy(env, device="cpu", tct_split_heads=True)
+    b = train.build_policy(env, device="cpu", tct_split_heads=True)
+    train.load_state_dict_arch_checked(b, a.state_dict(), source="a")
+    for (n, pa), (_, pb) in zip(a.named_parameters(), b.named_parameters(), strict=True):
+        assert torch.equal(pa, pb), n
+
+
+def test_resolve_resume_split_infers_and_never_narrows(env, tmp_path):
+    """Spec §5 test 9 + §3.3's ordering constraint: the pre-build_policy sniff.
+
+    Four cases, and the one that matters most is row 3 — a SPLIT checkpoint
+    resumed WITHOUT the flag still builds a split policy. That is the
+    crash-resume path, and on this GPU box crash-resume is a first-class case,
+    not an edge (the operator relaunches without re-reading the flag list).
+    The flag can only WIDEN legacy→split; it can never narrow split→legacy.
+    """
+    legacy_pt = tmp_path / "legacy.pt"
+    split_pt = tmp_path / "split.pt"
+    torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
+    torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
+
+    split, sd, path = train.resolve_resume_split(None, flag=False)
+    assert (split, sd, path) == (False, None, None)
+    split, sd, _ = train.resolve_resume_split(None, flag=True)
+    assert split is True and sd is None
+
+    split, sd, path = train.resolve_resume_split(str(legacy_pt), flag=False)
+    assert split is False and sd is not None and path == legacy_pt
+    split, _sd, _ = train.resolve_resume_split(str(legacy_pt), flag=True)
+    assert split is True, "flag must widen a legacy checkpoint to a warm split"
+
+    split, sd, _ = train.resolve_resume_split(str(split_pt), flag=False)
+    assert split is True, "split checkpoint must be detected without the flag"
+    assert "aim_log_std_t" in sd, "the sniffed dict must be returned for reuse"
+    split, _sd, _ = train.resolve_resume_split(str(split_pt), flag=True)
+    assert split is True
+
+    with pytest.raises(FileNotFoundError, match="Resume checkpoint not found"):
+        train.resolve_resume_split(str(tmp_path / "nope.pt"), flag=False)
