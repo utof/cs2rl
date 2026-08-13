@@ -268,7 +268,12 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
     values and any diff would self-certify.
 
     Also returns per-phase medians of tag/cossim_vf under the '_vf' key —
-    the known-anticorrelated control (never a decision input).
+    the known-anticorrelated control (never a decision input) — and, under
+    '_n_raw', the number of rows carrying ANY tag measurement key BEFORE
+    the drop rules. _n_raw is what lets the report distinguish "the
+    instrument never ran" (0) from "it ran and every epoch was dropped"
+    (>0 with no surviving groups); those are different facts about a run
+    and printing the same line for both misleads.
     """
     rng = random.Random(seed)
 
@@ -280,7 +285,10 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
 
     acc = {}                                                                               # (group, mb, phase) -> [(cross_half, within)]
     vf_acc = {}                                                                            # (mb, phase) -> [vf]
+    n_raw = 0                                                                              # rows with any tag measurement, counted BEFORE drops
     for row in rows:
+        if any(_TAG_KEY.match(k) or _TAG_VF_KEY.match(k) for k in row):
+            n_raw += 1
         if row.get("tag/selfplay_active"):
             continue
         phase = _phase(row.get("step", 0.0))
@@ -332,19 +340,31 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
             "verdict": verdict,
         }
     out["_vf"] = {k: median(v) for k, v in vf_acc.items()}
+    out["_n_raw"] = n_raw
     return out
 
 
 def print_tag_report(summary):
-    """Human-readable TAG section. Prints nothing but a hint when the run
-    predates the instrument (no tag/* keys at all)."""
+    """Human-readable TAG section.
+
+    Two no-group cases are reported differently on purpose: a run that
+    predates the instrument (_n_raw == 0) versus one where the instrument
+    ran but every epoch hit a drop rule (_n_raw > 0) — the latter is a
+    finding about the run, not a missing flag. The vf control prints in
+    both cases: it is measured over value-head params, so a pg-side drop
+    (e.g. degenerate norm ratio) says nothing about it.
+    """
     print("\nTAG gradient-conflict readout (spec 2026-08-13 §4.5; criterion: "
           f"median(within - cross_half) >= {CONFLICT_MIN}, 95% CI excluding 0, "
           f"n >= {CONFLICT_MIN_N}):")
     groups = [g for g in ("trunk", "policy_heads") if g in summary]
     if not groups:
-        print("  (no tag/* measurements in this run — was --tag-diagnostic on?)")
-        return
+        n_raw = summary.get("_n_raw", 0)
+        if n_raw:
+            print(f"  (tag measurements present in {n_raw} epochs, but every epoch was "
+                  "dropped — selfplay contamination / NaN / norm-ratio band)")
+        else:
+            print("  (no tag/* measurements in this run — was --tag-diagnostic on?)")
     for group in groups:
         print(f"  {group}")
         for mb in ("mb0", "mbL"):

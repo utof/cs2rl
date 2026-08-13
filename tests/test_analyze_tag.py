@@ -5,13 +5,15 @@ conflict = median(within_i - cross_half_i) >= 0.1 with a 95% bootstrap CI
 excluding 0 AND n >= 5 surviving epochs; drops: selfplay_active epochs, NaN
 measurements, norm ratio outside [0.1, 10].
 """
+import io
 import math
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from analyze_tplant import tag_summary
+from analyze_tplant import print_tag_report, tag_summary
 
 
 def _row(step,
@@ -26,7 +28,10 @@ def _row(step,
     return {
         "step": step,
         "tag/selfplay_active": selfplay,
-        f"tag/cossim_cross/{group}/{mb}": cross_half if cross is None else cross,
+                                                                                         # decoy: the FULL-size cross key is never the criterion, so it
+                                                                                         # defaults to a value distinct from cross_half — a regex that
+                                                                                         # over-matched `cossim_cross` would move every result and fail.
+        f"tag/cossim_cross/{group}/{mb}": cross_half + 0.11 if cross is None else cross,
         f"tag/cossim_cross_half/{group}/{mb}": cross_half,
         f"tag/cossim_within_t/{group}/{mb}": within,
         f"tag/cossim_within_ct/{group}/{mb}": within,
@@ -52,24 +57,26 @@ def test_no_conflict_when_cross_equals_within():
 
 def test_conflict_is_median_of_paired_diffs_not_diff_of_medians():
     """Plan-review finding 5: point estimate and CI must be the SAME
-    estimator. Construction where they differ: diffs alternate 0.3/0.3/0.0…
-    with within/cross values whose independent medians differ from the
-    paired median. 21 epochs: 14 diffs of 0.3, 7 of 0.0 → median(diffs) =
-    0.3; but median(within)=0.5, median(cross)=0.35 → difference 0.15. The
-    paired value is correct.
+    estimator, so conflict must be the median of the PAIRED differences.
+
+    Discriminating construction (a fixture where both estimators agree
+    would let the wrong one pass): pairs (cross_half, within) =
+    (0.5, 0.5), (0.45, 0.45), (0.0, 0.3), (0.1, 0.4), (0.6, 0.9).
+    Paired diffs are [0, 0, 0.3, 0.3, 0.3] → median 0.3. But BOTH marginal
+    medians land on the zero-diff pairs — median(cross_half) = 0.45 and
+    median(within) = 0.45 — so a difference of independent medians returns
+    exactly 0.0. The paired value is the correct one.
+
+    No verdict/CI assertion here: with two zero diffs in five, ci_low can
+    touch 0, which says nothing about the estimator property under test.
     """
-    rows = []
-    for i in range(21):
-        if i % 3 == 2:
-            rows.append(_row(step=i * 1e5, cross_half=0.8, within=0.8))               # diff 0.0
-        else:
-            rows.append(_row(step=i * 1e5, cross_half=0.2 + 0.01 * i,
-                             within=0.5 + 0.01 * i))                                  # diff 0.3
+    pairs = [(0.5, 0.5), (0.45, 0.45), (0.0, 0.3), (0.1, 0.4), (0.6, 0.9)]
+    rows = [_row(step=i * 1e5, cross_half=c, within=w) for i, (c, w) in enumerate(pairs)]
     s = tag_summary(rows, dead_windows=[])
     r = s["trunk"]["mb0"]["healthy"]
     assert abs(r["conflict"] -
-               0.3) < 1e-9, ("conflict must be median(within_i - cross_half_i), not "
-                             "median(within) - median(cross_half)")
+               0.3) < 1e-9, ("conflict must be median(within_i - cross_half_i) (=0.3 here), "
+                             "not median(within) - median(cross_half) (=0.0 here)")
 
 
 def test_drop_rules_nan_norm_ratio_selfplay():
@@ -97,6 +104,54 @@ def test_min_n_guard_blocks_single_epoch_conflict():
     r = s["trunk"]["mb0"]["healthy"]
     assert r["n_epochs"] == 1
     assert r["verdict"] == "insufficient data (n=1)"
+
+
+def test_all_epochs_dropped_reports_dropped_not_absent():
+    """Review finding: "every epoch dropped" and "instrument never ran" are
+    different facts and must not print the same line. _n_raw counts rows
+    carrying tag measurements BEFORE any drop rule, so the report can tell
+    a fully-contaminated run from a pre-instrument one.
+    """
+    rows = [_row(step=i * 1e5, cross_half=0.1, within=0.6, selfplay=1.0) for i in range(8)]
+    s = tag_summary(rows, dead_windows=[])
+    assert s["_n_raw"] == 8
+    assert "trunk" not in s and "policy_heads" not in s
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        print_tag_report(s)
+    text = out.getvalue()
+    assert "was --tag-diagnostic on?" not in text, (
+        "an all-dropped run must not be reported as having no measurements")
+    assert "dropped" in text and "8" in text
+
+
+def test_no_tag_keys_at_all_reports_instrument_absent():
+    """The pre-instrument run (e.g. the 30M A/B checkpoints) still prints
+    the original hint — _n_raw == 0 is the distinguishing fact."""
+    s = tag_summary([{"step": 1e5, "game/bomb_plant_rate": 0.5}], dead_windows=[])
+    assert s["_n_raw"] == 0
+    out = io.StringIO()
+    with redirect_stdout(out):
+        print_tag_report(s)
+    assert "was --tag-diagnostic on?" in out.getvalue()
+
+
+def test_vf_control_prints_even_when_all_pg_epochs_drop():
+    """The vf control is measured over different params than the pg groups;
+    a pg-side drop (degenerate norm ratio) must not swallow it."""
+    rows = []
+    for i in range(6):
+        row = _row(step=i * 1e5, cross_half=0.1, within=0.6, gt=100.0, gct=0.5)
+        row["tag/cossim_vf/mb0"] = -0.8
+        rows.append(row)
+    s = tag_summary(rows, dead_windows=[])
+    assert "trunk" not in s
+    assert abs(s["_vf"][("mb0", "healthy")] - (-0.8)) < 1e-9
+    out = io.StringIO()
+    with redirect_stdout(out):
+        print_tag_report(s)
+    assert "vf control mb0/healthy" in out.getvalue()
 
 
 def test_dead_window_rows_split_into_dead_phase():
