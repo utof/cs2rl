@@ -3829,6 +3829,9 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
     assert locked_dep_installs
     assert all("--directory /tmp" in cmd for cmd in locked_dep_installs)
     locked_dep_command = " && ".join(locked_dep_installs)
+    assert "/tmp/cs2rl-reqs.txt" in locked_dep_command
+    assert "--no-deps" in locked_dep_command
+    assert "pufferlib" not in locked_dep_command
     assert "uv export" not in locked_dep_command
     assert "uv sync" not in locked_dep_command
     assert "uv export" not in commands
@@ -3837,6 +3840,12 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
     assert "--no-deps" in commands
     assert "--no-binary pufferlib" in commands
     assert PINNED_PUFFERLIB_SDIST in commands
+    hashed_sdist_installs = [
+        part.strip() for command in image.commands for part in command.split("&&")
+        if "uv pip install" in part and PINNED_PUFFERLIB_SDIST in part
+    ]
+    assert hashed_sdist_installs
+    assert all("pufferlib" in cmd for cmd in hashed_sdist_installs)
     assert "Python.h" in commands
     assert "release 12.8" in commands
     assert "pufferlib._C" in commands

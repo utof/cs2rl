@@ -58,7 +58,7 @@ dependency_image = (modal.Image.from_registry(
             "cd /opt/cs2rl && uv venv .venv --python /usr/local/bin/python3 && "
             "python3 /opt/cs2rl/modal_image_reqs.py /opt/cs2rl/uv.lock -o /tmp/cs2rl-reqs.txt && "
             "uv pip install --python /opt/cs2rl/.venv/bin/python --directory /tmp "
-            "-r /tmp/cs2rl-reqs.txt",
+            "--no-deps -r /tmp/cs2rl-reqs.txt",
             "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
             "inventory={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
             "pathlib.Path('/tmp/locked-inventory.json').write_text("
