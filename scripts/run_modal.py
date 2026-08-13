@@ -307,6 +307,51 @@ def _lookup_named(factory, name: str, *, missing: str):
         raise mrl.ValidationError(missing) from None
 
 
+def _thread_cap_records() -> list[str]:
+    return [f"{key}={value}" for key, value in sorted(mrl._THREAD_CAP_ENV.items())]
+
+
+def _seed_from_train_args(train_args: tuple[str, ...]) -> int:
+    """Return the live --seed, defaulting to train.py's default of 1."""
+    seed = 1
+    index = 0
+    tokens = list(train_args)
+    while index < len(tokens):
+        token = tokens[index]
+        value: str | None = None
+        if token == "--seed":
+            if index + 1 >= len(tokens):
+                raise mrl.ValidationError("--seed requires a value")
+            value = tokens[index + 1]
+            index += 2
+        elif token.startswith("--seed="):
+            value = token.split("=", 1)[1]
+            index += 1
+        else:
+            index += 1
+            continue
+        try:
+            seed = int(value)
+        except ValueError as err:
+            raise mrl.ValidationError(f"--seed must be an int, got {value!r}") from err
+    return seed
+
+
+def _effective_timesteps(request: mrl.RunRequest) -> int:
+    return (request.timesteps // request.batch_size) * request.batch_size
+
+
+def _require_pinned_image_digest(digest: str) -> str:
+    """Fail if the live CUDA child digest or the payload digest drifted."""
+    live = CUDA_IMAGE.rsplit("@", 1)[-1]
+    if live != IMAGE_DIGEST:
+        raise mrl.ValidationError(
+            f"live CUDA image digest {live} drifted from pinned {IMAGE_DIGEST}")
+    if digest != IMAGE_DIGEST:
+        raise mrl.ValidationError(f"image digest {digest} drifted from pinned {IMAGE_DIGEST}")
+    return IMAGE_DIGEST
+
+
 def _launch_payload(
     request: mrl.RunRequest,
     *,
@@ -317,9 +362,13 @@ def _launch_payload(
     source_client: PurePosixPath,
     resume_client: PurePosixPath | None,
     resume_digest: str | None,
+    resume_size: int | None,
     modal_version: str,
     wandb_enabled: bool,
+    created_at: str,
 ) -> dict[str, object]:
+    resume_mount = None if resume_client is None else str(mrl.mounted_path(resume_client))
+    run_root = mrl.mounted_path(mrl.RUNS_ROOT / request.run_id)
     payload: dict[str, object] = {
         "run_id": request.run_id,
         "attempt_id": attempt_id,
@@ -327,9 +376,10 @@ def _launch_payload(
         "tree": tree,
         "source_archive_sha256": source_archive_sha256,
         "source_mount_path": str(mrl.mounted_path(source_client)),
-        "resume_mount_path":
-        (None if resume_client is None else str(mrl.mounted_path(resume_client))),
+        "resume_mount_path": resume_mount,
         "resume_sha256": resume_digest,
+        "resume_size": resume_size,
+        "resume_source_path": resume_mount,
         "effective_map": request.effective_map,
         "gpu": request.gpu,
         "cpu_request": request.cpu_cores,
@@ -342,12 +392,69 @@ def _launch_payload(
         "save_every_seconds": request.save_every_seconds,
         "train_args": list(request.train_args),
         "timesteps": request.timesteps,
-        "image_digest": IMAGE_DIGEST,
+        "training_argv": request.training_argv(run_root, resume_mount),
+        "requested_timesteps": request.timesteps,
+        "effective_timesteps": _effective_timesteps(request),
+        "batch_size": request.batch_size,
+        "seed": _seed_from_train_args(request.train_args),
+        "created_at": created_at,
+        "runner_commit": git_sha,
+        "config_hash": "0" * 64,
+        "image_digest": _require_pinned_image_digest(IMAGE_DIGEST),
         "modal_version": modal_version,
+        "thread_caps": _thread_cap_records(),
     }
     if wandb_enabled:
         payload["wandb_enabled"] = True
     return payload
+
+
+def build_remote_manifest(payload: dict[str, object]) -> mrl.Manifest:
+    """Materialize the design §5 Manifest from the Function payload."""
+    digest = _require_pinned_image_digest(str(payload["image_digest"]))
+    requested = int(payload["requested_timesteps"])
+    batch_size = int(payload["batch_size"])
+    effective = int(payload["effective_timesteps"])
+    expected = (requested // batch_size) * batch_size
+    if effective != expected:
+        raise mrl.ValidationError(f"effective_timesteps {effective} != floor formula {expected}")
+    resume_sha = payload.get("resume_sha256")
+    resume_size = payload.get("resume_size")
+    resume_source = payload.get("resume_source_path")
+    config_hash = payload.get("config_hash")
+    return mrl.Manifest(
+        schema_version=mrl.SCHEMA_VERSION,
+        run_id=str(payload["run_id"]),
+        attempt_id=str(payload["attempt_id"]),
+        commit=str(payload["git_sha"]),
+        tree=str(payload["tree"]),
+        source_archive_sha256=str(payload["source_archive_sha256"]),
+        modal_version=str(payload["modal_version"]),
+        image_digest=digest,
+        effective_map=str(payload["effective_map"]),
+        gpu=str(payload["gpu"]),
+        cpu_request=int(payload["cpu_request"]),
+        cpu_soft_limit=int(payload["cpu_soft_limit"]),
+        memory_request_mib=int(payload["memory_request_mib"]),
+        memory_hard_limit_mib=int(payload["memory_hard_limit_mib"]),
+        vec_workers=int(payload["vec_workers"]),
+        timeout_minutes=int(payload["timeout_minutes"]),
+        training_argv=[str(token) for token in payload["training_argv"]],
+        requested_timesteps=requested,
+        effective_timesteps=effective,
+        batch_size=batch_size,
+        seed=int(payload["seed"]),
+        created_at=str(payload["created_at"]),
+        resume_sha256=None if resume_sha is None else str(resume_sha),
+        resume_size=None if resume_size is None else int(resume_size),
+        resume_source_path=None if resume_source is None else str(resume_source),
+        runner_commit=str(payload["runner_commit"]),
+        config_hash=str(config_hash) if config_hash else "0" * 64,
+    )
+
+
+def _remote_run_root(run_id: str) -> Path:
+    return mrl.mounted_path(mrl.RUNS_ROOT / run_id)
 
 
 def _request_from_payload(payload: dict[str, object]) -> mrl.RunRequest:
@@ -434,16 +541,19 @@ def launch_run(
         ensure_blob(volume, source_client, archive)
         resume_client: PurePosixPath | None = None
         resume_digest: str | None = None
+        resume_size: int | None = None
         if local_ckpt is not None:
             ensure_blob(volume, local_ckpt.client_path, Path(request.resume.local_checkpoint))
             resume_client = local_ckpt.client_path
             resume_digest = local_ckpt.sha256
+            resume_size = local_ckpt.size
         elif prior_bytes is not None and prior_digest is not None:
             staged = tmp_path / f"{prior_digest}.pt"
             staged.write_bytes(prior_bytes)
             resume_client = mrl.INPUTS_ROOT / "sha256" / f"{prior_digest}.pt"
             ensure_blob(volume, resume_client, staged)
             resume_digest = prior_digest
+            resume_size = len(prior_bytes)
 
         payload = _launch_payload(
             request,
@@ -454,8 +564,10 @@ def launch_run(
             source_client=source_client,
             resume_client=resume_client,
             resume_digest=resume_digest,
+            resume_size=resume_size,
             modal_version=str(modal_mod.__version__),
             wandb_enabled=secret is not None,
+            created_at=stamp.isoformat(),
         )
 
         options: dict[str, object] = {
@@ -485,10 +597,11 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
     registry = ModalDictRegistry(modal.Dict.from_name(mrl.REGISTRY_NAME, create_if_missing=False))
     request = _request_from_payload(payload)
     attempt_id = str(payload["attempt_id"])
-    run_root = mrl.mounted_path(mrl.RUNS_ROOT / request.run_id)
+    run_root = _remote_run_root(request.run_id)
     lock = threading.Lock()
     resume = payload.get("resume_mount_path")
     resume_sha = payload.get("resume_sha256")
+    manifest = build_remote_manifest(payload)
     prepared = mrl.prepare_remote_source(
         volume=volume,
         archive_path=Path(str(payload["source_mount_path"])),
@@ -502,6 +615,7 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
         remote_resume=None if resume is None else str(resume),
         expected_resume_sha256=None if resume_sha is None else str(resume_sha),
         wandb_api_key=os.environ.get("WANDB_API_KEY") if payload.get("wandb_enabled") else None,
+        manifest=manifest,
     )
     result = mrl.execute_training_attempt(
         registry=registry,
@@ -512,6 +626,7 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
         lock=lock,
         now=lambda: datetime.now(UTC),
         timeout=timedelta(minutes=request.timeout_minutes),
+        manifest=manifest,
     )
     if result == mrl.REDELIVERED:
         return {"status": mrl.REDELIVERED, "run_id": request.run_id}

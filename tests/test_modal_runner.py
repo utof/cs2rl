@@ -3320,6 +3320,7 @@ class FakeModal:
         self.volumes = {}
         self.dicts = {}
         self.known_secrets = set()
+        self.invoke_remote = False
         self.Image = FakeImage
         self.Image._fake = self
         self.App = self._app_type()
@@ -3524,6 +3525,8 @@ class FakeConfiguredFunction:
 
     def remote(self, *args, **kwargs):
         self._fake.configured_remote_calls.append((self.options, args, kwargs))
+        if self._fake.invoke_remote:
+            return self.base._fn(*args, **kwargs)
         return {"status": "ok"}
 
 
@@ -4123,6 +4126,183 @@ def test_prior_run_resume_sends_only_immutable_digest_path(fake_modal, tmp_path)
     assert "runs/parent-run" not in payload["resume_mount_path"]
     assert f"inputs/sha256/{digest}.pt" in fake_modal.volumes[mrl.VOLUME_NAME].files
     assert fake_modal.volumes[mrl.VOLUME_NAME].files[f"inputs/sha256/{digest}.pt"] == ckpt_bytes
+
+
+def _expected_thread_caps():
+    return [f"{key}={value}" for key, value in sorted(mrl._THREAD_CAP_ENV.items())]
+
+
+def test_launch_payload_includes_design_contract_fields(fake_modal, tmp_path):
+    import torch
+
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    ckpt = tmp_path / "warm.pt"
+    torch.save({"weight": torch.tensor([1.0])}, ckpt)
+    digest = mrl.sha256_file(ckpt)
+    request = module.resolve_launch_request(
+        **_valid_launch_sentinels(git_sha=sha, resume_local_checkpoint=str(ckpt)))
+    module.launch_run(request,
+                      repo=repo,
+                      app_obj=module.app,
+                      now=_aware(),
+                      stdout=_capture_stdout())
+    payload = fake_modal.configured_remote_calls[0][1][0]
+    run_root = mrl.mounted_path(mrl.RUNS_ROOT / request.run_id)
+    resume_mount = f"/artifacts/inputs/sha256/{digest}.pt"
+    requested = request.timesteps
+    batch_size = request.batch_size
+    effective = (requested // batch_size) * batch_size
+    assert payload["training_argv"] == request.training_argv(run_root, resume_mount)
+    assert payload["requested_timesteps"] == requested
+    assert payload["effective_timesteps"] == effective
+    assert payload["batch_size"] == batch_size
+    assert payload["seed"] == 2
+    assert payload["created_at"] == _aware().isoformat()
+    assert payload["resume_sha256"] == digest
+    assert payload["resume_size"] == ckpt.stat().st_size
+    assert payload["resume_source_path"] == resume_mount
+    assert payload["runner_commit"] == sha
+    assert payload["config_hash"] == "0" * 64
+    assert payload["modal_version"] == fake_modal.__version__
+    assert payload["image_digest"] == PINNED_CUDA_CHILD_DIGEST
+    assert payload["effective_map"] == "simple"
+    assert payload["gpu"] == "T4"
+    assert payload["cpu_request"] == payload["cpu_soft_limit"] == 8
+    assert payload["memory_request_mib"] == payload["memory_hard_limit_mib"] == 16384
+    assert payload["vec_workers"] == 8
+    assert payload["thread_caps"] == _expected_thread_caps()
+    assert all(
+        isinstance(value, (str, int, float, bool, list, type(None))) for value in payload.values())
+
+
+def test_build_remote_manifest_records_contract_and_rejects_digest_drift(fake_modal, tmp_path):
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    request = module.resolve_launch_request(**_valid_launch_sentinels(git_sha=sha))
+    module.launch_run(request,
+                      repo=repo,
+                      app_obj=module.app,
+                      now=_aware(),
+                      stdout=_capture_stdout())
+    payload = fake_modal.configured_remote_calls[0][1][0]
+    manifest = module.build_remote_manifest(payload)
+    assert manifest.modal_version == fake_modal.__version__
+    assert manifest.image_digest == PINNED_CUDA_CHILD_DIGEST
+    assert manifest.effective_map == "simple"
+    assert manifest.gpu == "T4"
+    assert manifest.cpu_request == manifest.cpu_soft_limit == 8
+    assert manifest.memory_request_mib == manifest.memory_hard_limit_mib == 16384
+    assert manifest.vec_workers == 8
+    assert manifest.training_argv == payload["training_argv"]
+    assert manifest.requested_timesteps == request.timesteps
+    assert manifest.effective_timesteps == (request.timesteps //
+                                            request.batch_size) * request.batch_size
+    assert manifest.batch_size == request.batch_size
+    assert manifest.seed == 2
+    assert manifest.created_at == _aware().isoformat()
+    assert manifest.resume_sha256 is None
+    assert manifest.resume_size is None
+    assert manifest.resume_source_path is None
+    assert manifest.runner_commit == sha
+    assert manifest.config_hash == "0" * 64
+    assert manifest.commit == sha
+    drifted = dict(payload)
+    drifted["image_digest"] = "sha256:" + "0" * 64
+    with pytest.raises(mrl.ValidationError, match="digest"):
+        module.build_remote_manifest(drifted)
+
+
+def test_train_remote_writes_manifest_and_rejects_completed_without_evidence(
+        fake_modal, tmp_path, monkeypatch):
+    module = _import_run_modal()
+    fake_modal.invoke_remote = True
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    request = module.resolve_launch_request(**_valid_launch_sentinels(git_sha=sha))
+
+    def fake_run_root(run_id: str) -> Path:
+        path = tmp_path / "runs" / run_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(module, "_remote_run_root", fake_run_root)
+    real_execute = mrl.execute_training_attempt
+    captured: dict[str, object] = {}
+
+    def fake_prepare(**kwargs):
+        manifest = kwargs["manifest"]
+        assert isinstance(manifest, mrl.Manifest)
+        captured["prepare_manifest"] = manifest
+        run_root = Path(kwargs["run_root"])
+        run_root.mkdir(parents=True, exist_ok=True)
+        lock = kwargs["lock"]
+        attempt_id = kwargs["attempt_id"]
+        mrl.transition_status(run_root,
+                              mrl.Status.PREPARING,
+                              now=_aware(),
+                              attempt_id=attempt_id,
+                              lock=lock)
+        mrl.atomic_write_json(run_root / mrl.MANIFEST_FILENAME, manifest.to_dict())
+        mrl.transition_status(run_root,
+                              mrl.Status.BUILDING,
+                              now=_aware(),
+                              attempt_id=attempt_id,
+                              lock=lock)
+        source_dir = tmp_path / "extracted"
+        source_dir.mkdir(exist_ok=True)
+        return mrl.PreparedSource(
+            source_dir=source_dir,
+            child_env={
+                "PATH": "/usr/bin",
+                "OMP_NUM_THREADS": "1"
+            },
+            train_command=["python", "-c", "pass"],
+            heartbeat=_noop_heartbeat(),
+            config_hash=manifest.config_hash,
+        )
+
+    def fake_execute(**kwargs):
+        captured["execute_manifest"] = kwargs["manifest"]
+        kwargs["process_factory"] = lambda *a, **k: FakeChild(returncode=0, stdout=b"done\n")
+        kwargs["sleep"] = lambda _seconds: None
+        kwargs["now"] = lambda: _aware()
+        return real_execute(**kwargs)
+
+    monkeypatch.setattr(mrl, "prepare_remote_source", fake_prepare)
+    monkeypatch.setattr(mrl, "execute_training_attempt", fake_execute)
+    result = module.launch_run(request,
+                               repo=repo,
+                               app_obj=module.app,
+                               now=_aware(),
+                               stdout=_capture_stdout())
+    run_root = tmp_path / "runs" / request.run_id
+    written = json.loads((run_root / mrl.MANIFEST_FILENAME).read_text())
+    assert written["image_digest"] == PINNED_CUDA_CHILD_DIGEST
+    assert written["modal_version"] == fake_modal.__version__
+    assert written["effective_map"] == "simple"
+    assert written["gpu"] == "T4"
+    assert written["cpu_request"] == written["cpu_soft_limit"] == 8
+    assert written["memory_request_mib"] == written["memory_hard_limit_mib"] == 16384
+    assert written["vec_workers"] == 8
+    assert written["training_argv"][0] == "--train"
+    assert written["requested_timesteps"] == request.timesteps
+    assert written["effective_timesteps"] == (request.timesteps //
+                                              request.batch_size) * request.batch_size
+    assert written["batch_size"] == request.batch_size
+    assert written["seed"] == 2
+    assert written["created_at"] == _aware().isoformat()
+    assert written["runner_commit"] == sha
+    assert written["resume_sha256"] is None
+    assert written["resume_size"] is None
+    assert written["resume_source_path"] is None
+    assert captured["prepare_manifest"] is captured["execute_manifest"]
+    assert result["status"] == mrl.Status.FAILED.value
+    assert result["reason"] == mrl.REASON_INVALID_EVIDENCE
+    assert json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"] == "failed"
+    assert json.loads((run_root / mrl.RESULT_FILENAME).read_text())["status"] == "failed"
 
 
 # ── Task 8 cycle E: client-only status / download ──────────────────────────
