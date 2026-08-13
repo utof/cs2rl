@@ -3563,7 +3563,15 @@ def _tag_param_groups(policy):
                    exists — it would replicate trunk while reading as
                    independent signal).
     policy_heads — action_heads.* + aim_mu.* + the aim_log_std parameter
-                   (6,170 params).
+                   (6,170 params). Batch 7: under --tct-split-heads BOTH team
+                   copies (action_heads_t/_ct, aim_mu_t/_ct, aim_log_std_t/_ct)
+                   map to this ONE group, doubling it to 12,340. The union is
+                   deliberate — it is what makes the T-vs-CT cross cos-sim
+                   exactly 0.0 (each team's gradient is zero on the other's
+                   copy), which the analyzer labels as a structural artifact
+                   rather than a conflict (spec §3.4). Splitting the group per
+                   team instead would produce a within-copy number that
+                   answers a different question than the trunk cells.
     value_head   — value_head.* (257 params; used ONLY for the vf control —
                    pg metrics skip it, the pg graph never touches it).
 
@@ -3579,7 +3587,9 @@ def _tag_param_groups(policy):
             continue
         if name.startswith(("encoder.", "lstm.")):
             groups["trunk"].append(p)
-        elif name.startswith(("action_heads.", "aim_mu.")) or name == "aim_log_std":
+        elif name.startswith(("action_heads.", "action_heads_t.", "action_heads_ct.",
+                              "aim_mu.", "aim_mu_t.", "aim_mu_ct.")) \
+                or name in ("aim_log_std", "aim_log_std_t", "aim_log_std_ct"):
             groups["policy_heads"].append(p)
         elif name.startswith("value_head."):
             groups["value_head"].append(p)

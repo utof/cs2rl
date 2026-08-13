@@ -158,3 +158,40 @@ def test_flag_on_does_not_perturb_training_bitwise():
                                p.detach()), (f"parameter {n} diverged with --tag-diagnostic on")
     finally:
         cleanup_b()
+
+
+def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
+    """Spec §5 test 4b: the team-identity INVARIANT re-pinned on the split
+    path.
+
+    Two independent identity sources must agree or the whole batch is
+    meaningless: TAG partitions by slot index ((idx % 10) < 5, src/train.py
+    ~:3237) while the split routes by the obs bit obs[24]. If they ever
+    disagree, TAG would silently measure the wrong partition of a correctly
+    routed network — and nothing would crash. The legacy-path version of this
+    pin is test_row_mask_matches_obs_team_bit above; this one proves the
+    invariant survives building the trainer with a split policy.
+    """
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+    torch.manual_seed(0)
+    trainer, cleanup = _build_trainer_for_test(num_envs=32,
+                                               with_selfplay=True,
+                                               seed=0,
+                                               tct_split_heads=True)
+    trainer.config["target_kl"] = None
+    _patch_trainer_with_return_norm(trainer)
+    try:
+        assert trainer.policy.tct_split_heads is True
+        trainer.evaluate()
+        seg = torch.arange(trainer.segments)
+        expected_t = ((seg % 10) < 5).float()
+        # Probe timestep 1, NOT 0: on the FIRST-ever evaluate() the t=0 slot
+        # still holds the zero-initialized pre-step obs (same artifact the
+        # legacy pin above documents and dodges the same way).
+        team_bits = trainer.observations[:, 1, 24].float().cpu()
+        assert torch.equal(team_bits, expected_t), (
+            "segment%10 team mask disagrees with obs[24] team bit on the split path — "
+            "TAG would measure a different partition than the router")
+    finally:
+        cleanup()

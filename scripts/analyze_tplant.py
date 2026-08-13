@@ -246,6 +246,14 @@ CONFLICT_MIN_N = 5                     # pre-registered minimum surviving epochs
 NORM_RATIO_BAND = (0.1, 10.0)          # gnorm_t/gnorm_ct outside this drops (spec §6)
 _BOOT_N = 2000
 
+SPLIT_ACTIVE_KEY = "split/active"
+# Batch 7 (spec 2026-08-13 §3.4): a THIRD verdict state, deliberately not the
+# drop path. Dropped cells mean "the instrument didn't produce a usable
+# measurement"; this cell means "the measurement is exactly 0 BY CONSTRUCTION".
+# Routing it through the drops would make _n_raw's "everything was dropped"
+# wording describe a run where nothing went wrong (re-review N9).
+STRUCTURAL_VERDICT = "structural (split run — cross≡0 by architecture)"
+
 
 def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
     """Per group × mb × phase conflict scores (spec 2026-08-13 §4.5).
@@ -274,6 +282,20 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
     instrument never ran" (0) from "it ran and every epoch was dropped"
     (>0 with no surviving groups); those are different facts about a run
     and printing the same line for both misleads.
+
+    Batch 7: rows carrying split/active == 1 route their policy_heads cells to
+    a dedicated structural verdict (STRUCTURAL_VERDICT). Under the T/CT heads
+    split each team's gradient is exactly zero on the other team's copy, so
+    the cross cos-sim is exactly 0.0 with both norms positive — it never hits
+    the NaN drop, and within − 0 would print a false CONFLICT every epoch. The
+    TRUNK cells keep normal verdicts and remain the decision metric; the
+    labeling signal is this per-epoch metrics key and NOT config.json, which
+    is rewritten on every launch and reads false after a flag-less resume.
+    Also returned under '_structural_backstop': True when every surviving
+    policy_heads cross_half is exactly 0.0 AND no split/active key was seen
+    anywhere — a warn-only heuristic for a split run whose labeling key is
+    missing. It never relabels; the analyzer must not infer a run's
+    architecture from a numeric coincidence.
     """
     rng = random.Random(seed)
 
@@ -286,9 +308,15 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
     acc = {}                                                                               # (group, mb, phase) -> [(cross_half, within)]
     vf_acc = {}                                                                            # (mb, phase) -> [vf]
     n_raw = 0                                                                              # rows with any tag measurement, counted BEFORE drops
+    struct_acc = {}                                                                        # (group, mb, phase) -> [(cross_half, within)] on split rows
+    saw_split_key = False                                                                  # any row carried split/active at all
+    heads_cross_all = []                                                                   # every surviving policy_heads cross_half (backstop input)
     for row in rows:
         if any(_TAG_KEY.match(k) or _TAG_VF_KEY.match(k) for k in row):
             n_raw += 1
+        row_split = bool(row.get(SPLIT_ACTIVE_KEY))
+        if SPLIT_ACTIVE_KEY in row:
+            saw_split_key = True
         if row.get("tag/selfplay_active"):
             continue
         phase = _phase(row.get("step", 0.0))
@@ -311,10 +339,19 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
             if not (NORM_RATIO_BAND[0] <= ratio <= NORM_RATIO_BAND[1]):
                 continue
             within = 0.5 * (vals["cossim_within_t"] + vals["cossim_within_ct"])
-            acc.setdefault((group, mb, phase), []).append((vals["cossim_cross_half"], within))
+            if group == "policy_heads":
+                heads_cross_all.append(vals["cossim_cross_half"])
+            target = struct_acc if (row_split and group == "policy_heads") else acc
+            target.setdefault((group, mb, phase), []).append((vals["cossim_cross_half"], within))
 
-    out = {}
-    for (group, mb, phase), pairs in acc.items():
+    def _cell(pairs, structural):
+        """Bootstrap + verdict for one (group, mb, phase) cell.
+
+        `structural` short-circuits the verdict only — n_epochs, the medians
+        and the CI are still computed and printed, because "cross is 0.000 and
+        within is 0.55" is informative context for a reader even when the
+        cell is excluded from the decision.
+        """
         diffs = [w - c for c, w in pairs]
         conflict = median(diffs)
         boots = []
@@ -324,13 +361,15 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
         boots.sort()
         ci_low = boots[int(0.025 * boot_n)]
         ci_high = boots[int(0.975 * boot_n) - 1]
-        if len(pairs) < CONFLICT_MIN_N:
+        if structural:
+            verdict = STRUCTURAL_VERDICT
+        elif len(pairs) < CONFLICT_MIN_N:
             verdict = f"insufficient data (n={len(pairs)})"
         elif conflict >= CONFLICT_MIN and ci_low > 0:
             verdict = "CONFLICT"
         else:
             verdict = "no conflict detected"
-        out.setdefault(group, {}).setdefault(mb, {})[phase] = {
+        return {
             "n_epochs": len(pairs),
             "median_cross_half": median([c for c, _ in pairs]),
             "median_within": median([w for _, w in pairs]),
@@ -339,8 +378,20 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
             "ci_high": ci_high,
             "verdict": verdict,
         }
+
+    out = {}
+    for (group, mb, phase), pairs in acc.items():
+        out.setdefault(group, {}).setdefault(mb, {})[phase] = _cell(pairs, structural=False)
+    # Structural cells are written after the normal ones. A single run is one
+    # architecture, so the two accumulators never contend for the same slot;
+    # tag_summary is called per run dir (see main), and concatenating rows from
+    # a split and a legacy run into one call is not a supported input.
+    for (group, mb, phase), pairs in struct_acc.items():
+        out.setdefault(group, {}).setdefault(mb, {})[phase] = _cell(pairs, structural=True)
     out["_vf"] = {k: median(v) for k, v in vf_acc.items()}
     out["_n_raw"] = n_raw
+    out["_structural_backstop"] = bool(heads_cross_all) and not saw_split_key and all(
+        c == 0.0 for c in heads_cross_all)
     return out
 
 
@@ -353,6 +404,10 @@ def print_tag_report(summary):
     finding about the run, not a missing flag. The vf control prints in
     both cases: it is measured over value-head params, so a pg-side drop
     (e.g. degenerate norm ratio) says nothing about it.
+
+    Batch 7 adds a third cell state (STRUCTURAL_VERDICT) printed on its own
+    line with the explanation above, plus a warn-only backstop for a split run
+    whose split/active key never made it into metrics.jsonl.
     """
     print("\nTAG gradient-conflict readout (spec 2026-08-13 §4.5; criterion: "
           f"median(within - cross_half) >= {CONFLICT_MIN}, 95% CI excluding 0, "
@@ -377,6 +432,22 @@ def print_tag_report(summary):
                       f"within {r['median_within']:+.3f}  "
                       f"conflict {r['conflict']:+.3f} "
                       f"[{r['ci_low']:+.3f}, {r['ci_high']:+.3f}]  → {r['verdict']}")
+    if any(
+            r.get("verdict") == STRUCTURAL_VERDICT for g in groups
+            for mbd in summary.get(g, {}).values() for r in mbd.values()):
+        print("    ^ structural cells are excluded from the decision: under the T/CT heads "
+              "split each team's gradient is exactly zero on the other team's copy, so the "
+              "cross cos-sim is 0 by construction (spec §3.4). In a split run the "
+              "trunk cells are the decision metric; within-team head numbers stay "
+              "meaningful (both halves live on the same copy). NOTE the gnorm_t/gnorm_ct "
+              "ratio-band drop rule now compares the T COPY's norm to the CT COPY's for "
+              "this group — it is an inter-copy asymmetry signal here, no longer the "
+              "degeneracy guard it is for the trunk.")
+    if summary.get("_structural_backstop"):
+        print("  WARNING: every measured policy_heads cross_half is exactly 0.0 and no "
+              "split/active key is present in the metrics. That is the signature of a "
+              "--tct-split-heads run whose labeling key is missing — the policy_heads "
+              "verdicts above are almost certainly structural artifacts, not conflict.")
     vf = summary.get("_vf") or {}
     for (mb, phase), v in sorted(vf.items()):
         print(f"  vf control {mb}/{phase}: {v:+.3f}  "
