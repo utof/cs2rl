@@ -52,7 +52,7 @@ dependency_image = (modal.Image.from_registry(
     _REPO_ROOT / "pyproject.toml"), "/opt/cs2rl/pyproject.toml", copy=True).add_local_file(
         str(_REPO_ROOT / "uv.lock"), "/opt/cs2rl/uv.lock", copy=True).run_commands(
             "cd /opt/cs2rl && uv sync --locked --no-dev --no-install-project "
-            "--no-install-package pufferlib",
+            "--no-install-package pufferlib --no-build-package pufferlib",
             "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
             "inventory={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
             "pathlib.Path('/tmp/locked-inventory.json').write_text("

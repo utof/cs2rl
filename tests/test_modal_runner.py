@@ -3717,6 +3717,7 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
     assert (str(ROOT / "uv.lock"), "/opt/cs2rl/uv.lock", True) in image.local_files
     commands = "\n".join(image.commands)
     assert "--no-install-package pufferlib" in commands
+    assert "--no-build-package pufferlib" in commands
     assert "--no-build-isolation" in commands
     assert "--no-deps" in commands
     assert "--no-binary pufferlib" in commands
