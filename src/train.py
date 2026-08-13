@@ -507,6 +507,15 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     tag_diagnostic = bool(getattr(args, "tag_diagnostic", False))
     tag_every = int(getattr(args, "tag_every", 5))
 
+    # ── Batch 7 heads split (spec 2026-08-13 §2) ──
+    # getattr fallback, same pattern as the TAG block above. This records the
+    # FLAG, not the resolved architecture: a flag-less crash-resume of a split
+    # run writes false here on purpose, which is precisely why the analyzer
+    # reads the per-epoch split/active metric rather than config.json
+    # (spec §3.4). Adding this key also shifts exp_lib.behavior_hash for all
+    # future runs — recorded decision, spec §6.
+    tct_split_heads = bool(getattr(args, "tct_split_heads", False))
+
     cfg = {
                                                        # Core PPO
         "env": "cs2-dust2",
@@ -568,6 +577,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "reward_symmetrize": reward_symmetrize,
         "tag_diagnostic": tag_diagnostic,
         "tag_every": tag_every,
+        "tct_split_heads": tct_split_heads,
     }
 
     # ── Reward wiring: 23 make_env weights, verbatim key names ──
@@ -4319,6 +4329,17 @@ if __name__ == "__main__":
                         dest="tag_every",
                         help="Measure on epochs where epoch %% tag_every == 0 (default 5; "
                         "values < 1 clamp to 1 at the hook).")
+
+    # ── Batch 7: T/CT policy-heads split (spec 2026-08-13) ──
+    parser.add_argument(
+        "--tct-split-heads",
+        action="store_true",
+        dest="tct_split_heads",
+        help="Give each team its own copy of the policy heads (action_heads, aim_mu, "
+        "aim_log_std), routed by the obs team bit; trunk and value head stay shared. "
+        "Only affects FRESH construction and the legacy->split warm conversion — every "
+        "loader infers split-ness from the checkpoint's keys, so a crash-resume without "
+        "this flag still rebuilds a split policy.")
     args = parser.parse_args()
 
     if args.dump_config:
