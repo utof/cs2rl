@@ -237,8 +237,8 @@ def _legacy_frozen_state_dict(env):
     """A legacy state_dict with BC-frozen σ — the bc_warmstart.pt signature.
 
     Synthetic rather than reading outputs/checkpoints/bc_warmstart.pt so the
-    test runs on any checkout; the real file is covered by the guarded test
-    below.
+    test runs on any checkout; the real file's σ-widening is asserted at
+    launch time via the startup stdout check (plan Task 9.2).
     """
     p = train.build_policy(env, device="cpu")
     with torch.no_grad():
