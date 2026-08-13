@@ -65,9 +65,27 @@ dependency_image = (modal.Image.from_registry(
             "json.dumps(inventory, sort_keys=True))\"",
             "uv pip install --python /opt/cs2rl/.venv/bin/python --no-deps "
             "setuptools==82.0.1 wheel==0.48.0 Cython==3.2.9 ziglang==0.14.1",
+            "python3 -c \""
+            "import hashlib, tarfile, urllib.request; "
+            "from pathlib import Path; "
+            f"spec={PUFFERLIB_SDIST!r}; "
+            "url, _, digest = spec.partition('#sha256='); "
+            "archive = Path('/tmp/pufferlib-3.0.0.tar.gz'); "
+            "urllib.request.urlretrieve(url, archive); "
+            "got = hashlib.sha256(archive.read_bytes()).hexdigest(); "
+            "assert got == digest, got; "
+            "tf = tarfile.open(archive); "
+            "tf.extractall('/tmp', filter='data'); "
+            "tf.close(); "
+            "p = Path('/tmp/pufferlib-3.0.0/setup.py'); "
+            "text = p.read_text(); "
+            "old = 'c_extensions = []'; "
+            "assert old in text; "
+            "p.write_text(text.replace(old, old + chr(10) + 'c_extension_paths = []', 1))"
+            "\" && "
             "uv pip install --python /opt/cs2rl/.venv/bin/python "
             "--no-build-isolation --no-deps --no-binary pufferlib "
-            f"'{PUFFERLIB_SDIST}'",
+            "/tmp/pufferlib-3.0.0",
             "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
             "base=json.loads(pathlib.Path('/tmp/locked-inventory.json').read_text()); "
             "now={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
