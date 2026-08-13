@@ -50,10 +50,13 @@ dependency_image = (modal.Image.from_registry(
     "1",
 }).add_local_file(str(
     _REPO_ROOT / "pyproject.toml"), "/opt/cs2rl/pyproject.toml", copy=True).add_local_file(
-        str(_REPO_ROOT / "uv.lock"), "/opt/cs2rl/uv.lock", copy=True).run_commands(
+        str(_REPO_ROOT / "uv.lock"), "/opt/cs2rl/uv.lock", copy=True).add_local_file(
+            str(_REPO_ROOT / "scripts" / "modal_image_reqs.py"),
+            "/opt/cs2rl/modal_image_reqs.py",
+            copy=True
+        ).run_commands(
             "cd /opt/cs2rl && uv venv .venv --python /usr/local/bin/python3 && "
-            "uv export --locked --no-dev --no-emit-project --no-emit-package pufferlib "
-            "--no-hashes -o /tmp/cs2rl-reqs.txt && "
+            "python3 /opt/cs2rl/modal_image_reqs.py /opt/cs2rl/uv.lock -o /tmp/cs2rl-reqs.txt && "
             "uv pip install --python /opt/cs2rl/.venv/bin/python --directory /tmp "
             "-r /tmp/cs2rl-reqs.txt",
             "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "

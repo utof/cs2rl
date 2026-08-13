@@ -3704,6 +3704,107 @@ def test_base_function_has_no_static_named_object_dependency(fake_modal):
     assert mrl.REGISTRY_NAME == "cs2rl-training-run-registry"
 
 
+def _run_modal_image_reqs(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "modal_image_reqs.py"), *args],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _requirement_names(text: str) -> list[str]:
+    pins = [line for line in text.splitlines() if line.strip()]
+    assert pins
+    assert all("==" in line for line in pins)
+    return [line.split("==", 1)[0] for line in pins]
+
+
+def test_modal_image_reqs_from_repo_lock_includes_torch_numpy_not_pufferlib_or_modal():
+    result = _run_modal_image_reqs(str(ROOT / "uv.lock"))
+    names = _requirement_names(result.stdout)
+    assert names == sorted(names)
+    assert "torch" in names
+    assert "numpy" in names
+    assert "pufferlib" not in names
+    assert "cs2rl" not in names
+    assert "modal" not in names
+
+
+def test_modal_image_reqs_writes_minus_o(tmp_path):
+    out = tmp_path / "cs2rl-reqs.txt"
+    result = _run_modal_image_reqs(str(ROOT / "uv.lock"), "-o", str(out))
+    assert result.stdout == ""
+    names = _requirement_names(out.read_text())
+    assert names == sorted(names)
+    assert "torch" in names
+    assert "numpy" in names
+    assert "pufferlib" not in names
+    assert "modal" not in names
+
+
+def test_modal_image_reqs_walks_runtime_graph_not_dev_or_modal_groups(tmp_path):
+    lock = tmp_path / "uv.lock"
+    lock.write_text("""\
+version = 1
+[[package]]
+name = "cs2rl"
+version = "0.1.0"
+dependencies = [
+    { name = "numpy" },
+    { name = "pufferlib" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+]
+modal = [
+    { name = "modal" },
+]
+
+[[package]]
+name = "numpy"
+version = "2.4.3"
+
+[[package]]
+name = "pufferlib"
+version = "3.0.0"
+dependencies = [
+    { name = "torch" },
+    { name = "shimmy", extra = ["gym-v21"] },
+]
+
+[[package]]
+name = "torch"
+version = "2.10.0"
+
+[[package]]
+name = "shimmy"
+version = "1.3.0"
+
+[package.optional-dependencies]
+gym-v21 = [
+    { name = "pyglet" },
+]
+
+[[package]]
+name = "pyglet"
+version = "2.1.0"
+
+[[package]]
+name = "modal"
+version = "1.5.4"
+
+[[package]]
+name = "ruff"
+version = "0.11.13"
+""")
+    result = _run_modal_image_reqs(str(lock))
+    assert result.stdout == "numpy==2.4.3\npyglet==2.1.0\nshimmy==1.3.0\ntorch==2.10.0\n"
+
+
 def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal):
     module = _import_run_modal()
     image = module.dependency_image
@@ -3715,19 +3816,23 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
     assert "ziglang==0.14.1" in image.pips
     assert (str(ROOT / "pyproject.toml"), "/opt/cs2rl/pyproject.toml", True) in image.local_files
     assert (str(ROOT / "uv.lock"), "/opt/cs2rl/uv.lock", True) in image.local_files
+    assert (str(ROOT / "scripts" / "modal_image_reqs.py"), "/opt/cs2rl/modal_image_reqs.py",
+            True) in image.local_files
     commands = "\n".join(image.commands)
-    assert "uv export" in commands
+    assert "modal_image_reqs.py" in commands
     assert "uv pip install" in commands
     assert "-r" in commands
-    assert "--no-emit-package pufferlib" in commands
     locked_dep_installs = [
-        part.strip()
-        for command in image.commands
-        for part in command.split("&&")
+        part.strip() for command in image.commands for part in command.split("&&")
         if "uv pip install" in part and "-r" in part
     ]
     assert locked_dep_installs
     assert all("--directory /tmp" in cmd for cmd in locked_dep_installs)
+    locked_dep_command = " && ".join(locked_dep_installs)
+    assert "uv export" not in locked_dep_command
+    assert "uv sync" not in locked_dep_command
+    assert "uv export" not in commands
+    assert "uv sync" not in commands
     assert "--no-build-isolation" in commands
     assert "--no-deps" in commands
     assert "--no-binary pufferlib" in commands
