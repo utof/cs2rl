@@ -169,6 +169,22 @@ def test_reward_weight_cli_overrides_round_trip(tmp_path):
     assert cfg["reward_kill"] == 0.3
 
 
+def test_tag_diagnostic_config_keys(tmp_path):
+    """TAG flags land in config.json (provenance) — spec 2026-08-13 §4.1.
+
+    Both keys overridden together: for untouched flags argparse's default
+    equals build_train_config's getattr fallback, so a typo'd dest= would
+    pass silently (same rationale as the warmstart key test above).
+    """
+    cfg = _dump_config(tmp_path)
+    assert cfg["tag_diagnostic"] is False
+    assert cfg["tag_every"] == 5
+
+    cfg = _dump_config(tmp_path, "--tag-diagnostic", "--tag-every", "2")
+    assert cfg["tag_diagnostic"] is True
+    assert cfg["tag_every"] == 2
+
+
 def test_train_smoke_returns_zero():
     result = run_train_command("--smoke")
     assert result.returncode == 0, (

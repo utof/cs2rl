@@ -344,6 +344,14 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     reward_weights = reward_overrides_from_args(args)
     reward_symmetrize = bool(getattr(args, "reward_symmetrize", False))
 
+    # ── TAG diagnostic (spec 2026-08-13 §4.1) ──
+    # getattr fallbacks keep harness/dump-config args objects that predate
+    # these flags working, same pattern as the warmstart block above.
+    # NOTE: these keys change exp_lib.behavior_hash for ALL future runs
+    # (hash covers sorted config.json) — recorded decision, spec §4.1.
+    tag_diagnostic = bool(getattr(args, "tag_diagnostic", False))
+    tag_every = int(getattr(args, "tag_every", 5))
+
     cfg = {
                                                        # Core PPO
         "env": "cs2-dust2",
@@ -403,6 +411,8 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "warmstart_ramp_steps": ws_ramp,
         "warmstart_alpha_ceiling": ws_alpha_ceil,
         "reward_symmetrize": reward_symmetrize,
+        "tag_diagnostic": tag_diagnostic,
+        "tag_every": tag_every,
     }
 
     # ── Reward wiring: 23 make_env weights, verbatim key names ──
@@ -2031,6 +2041,47 @@ def _patch_trainer_with_return_norm(trainer):
                     self._last_nan_warn_t = _now
                 self.optimizer.zero_grad(set_to_none=True)
                 continue
+
+            # ── TAG diagnostic hook (spec 2026-08-13 §4.2/§4.3) ────────────
+            # mb0 = pre-update on-policy regime. mbL = last EXECUTED
+            # minibatch: total_minibatches-1 normally, or the final mb of
+            # the epoch the KL gate tripped on (the loop-top gate exits at
+            # the next epoch boundary) — conditioning mbL on the gate NOT
+            # tripping would select against the late-update regime it
+            # exists to observe. Placed AFTER the NaN guard (never measure
+            # a batch the update skips) and BEFORE loss.backward() (.grad
+            # still untouched). Results stash on the TRAINER — see
+            # _inject_tag_metrics for the two routing constraints.
+            if config.get("tag_diagnostic", False) \
+                    and epoch % max(1, int(config.get("tag_every", 5))) == 0:
+                _tag_mb0 = (mb == 0)
+                _tag_mbL = (mb == self.total_minibatches - 1
+                            or (_kl_stop and (mb + 1) % _mbs_per_epoch == 0))
+                if _tag_mb0 or _tag_mbL:
+                    _tag = tag_grad_cossim(
+                        self.policy,
+                        mb_obs=mb_obs,
+                        mb_actions=mb_actions,
+                        mb_cont_actions=mb_cont_actions,
+                        mb_old_logp_d=mb_old_logp_d,
+                        mb_old_logp_c=mb_old_logp_c,
+                        mb_advantages=mb_advantages,
+                        clip_coef=clip_coef,
+                        state=state,
+                        mb_prio=mb_prio,
+                        mb_masks=mb_masks,
+                        mb_returns_norm=mb_returns_norm,
+                        idx=idx,
+                        mb_label="mb0" if _tag_mb0 else "mbL",
+                    )
+                    if getattr(trainer, "_tag_metrics", None) is None:
+                        trainer._tag_metrics = {}
+                    trainer._tag_metrics.update(_tag)
+                    if not _tag_mb0:
+                        trainer._tag_metrics["tag/mbL_index"] = float(mb)
+                    trainer._tag_metrics["tag/selfplay_active"] = float(
+                        getattr(self, "_selfplay_used_past", False))
+            # ──────────────────────────────────────────────────────────────
             loss.backward()
             if (mb + 1) % self.accumulate_minibatches == 0:
                 # Task 9C: capture pre-clip grad norm. clip_grad_norm_ returns
@@ -2503,6 +2554,12 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
             past_policy = self_play_mgr.load_past_policy(dev, self.vecenv)
             use_past = past_policy is not None
 
+        # TAG (spec 2026-08-13 §4.2): expose whether THIS epoch's rollout
+        # used a past-policy opponent — on those epochs one team's rows are
+        # off-policy and cross-team cos-sim measures on-vs-off-policy
+        # asymmetry, not T/CT conflict; the analyzer drops them.
+        self._selfplay_used_past = bool(use_past)
+
         if use_past:
             for k in past_lstm_h:
                 past_lstm_h[k].zero_()
@@ -2933,7 +2990,8 @@ def _hybrid_ppo_loss(policy,
                      clip_coef,
                      state,
                      mb_prio=None,
-                     mb_masks=None):
+                     mb_masks=None,
+                     return_pg_rows=False):
     """Per-factor PPO clipped loss (H-PPO, Fan et al. IJCAI 2019).
 
     THE CORE OF T5. Re-runs the policy on mb_obs with the stored
@@ -2976,6 +3034,18 @@ def _hybrid_ppo_loss(policy,
     masking here but not there (or vice versa) silently skews the PPO
     ratios for any agent-step where a mask bit was 0. None = unmasked
     (pre-F8 callers / BC paths).
+
+    return_pg_rows (TAG diagnostic, spec 2026-08-13 §4.3): when True the
+    return tuple gains an 8th element — the per-row pg loss vector
+    max(pg_d_un, pg_d_cl) + max(pg_c_un, pg_c_cl), flat (B*T,), graph-
+    attached, advantage-normalized + prio-weighted exactly like pg_loss
+    (whose value is the mean of the two factor vectors separately; the sum
+    vector's .mean() equals it up to fp reduction order). TAG forms subset
+    losses as weighted means over this vector so every subset gradient is a
+    true restriction of the real gradient from ONE forward pass. False (the
+    default, all production update paths) returns the existing 7-tuple
+    bitwise-identically — pinned by
+    test_return_pg_rows_default_is_bitwise_identical_7_tuple.
     """
     import torch
     import torch.nn.functional as F
@@ -3061,9 +3131,204 @@ def _hybrid_ppo_loss(policy,
     pg_d_cl = -flat_adv * torch.clamp(ratio_d, 1 - clip_coef, 1 + clip_coef)
     pg_c_un = -flat_adv * ratio_c
     pg_c_cl = -flat_adv * torch.clamp(ratio_c, 1 - clip_coef, 1 + clip_coef)
-    pg_loss = torch.max(pg_d_un, pg_d_cl).mean() + torch.max(pg_c_un, pg_c_cl).mean()
+    pg_d_rows = torch.max(pg_d_un, pg_d_cl)
+    pg_c_rows = torch.max(pg_c_un, pg_c_cl)
+    pg_loss = pg_d_rows.mean() + pg_c_rows.mean()
 
+    if return_pg_rows:
+        return (pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list,
+                pg_d_rows + pg_c_rows)
     return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list
+
+
+def _tag_param_groups(policy):
+    """Partition policy params into the TAG groups (spec 2026-08-13 §4.2).
+
+    trunk        — encoder.* + lstm.* (620,544 of 626,971 trainable params,
+                   99.0%, LSTM alone 526,336; this is why no 'total' group
+                   exists — it would replicate trunk while reading as
+                   independent signal).
+    policy_heads — action_heads.* + aim_mu.* + the aim_log_std parameter
+                   (6,170 params).
+    value_head   — value_head.* (257 params; used ONLY for the vf control —
+                   pg metrics skip it, the pg graph never touches it).
+
+    Uses named_parameters() filtered to requires_grad — NOT state_dict(),
+    which would sweep in non-trainable buffers (e.g. max_turn_speed).
+    PITFALL: an unmapped parameter RAISES. Silent fallthrough would let a
+    renamed module drop out of every group and the metric would quietly
+    measure a subset of the network.
+    """
+    groups = {"trunk": [], "policy_heads": [], "value_head": []}
+    for name, p in policy.named_parameters():
+        if not p.requires_grad:
+            continue
+        if name.startswith(("encoder.", "lstm.")):
+            groups["trunk"].append(p)
+        elif name.startswith(("action_heads.", "aim_mu.")) or name == "aim_log_std":
+            groups["policy_heads"].append(p)
+        elif name.startswith("value_head."):
+            groups["value_head"].append(p)
+        else:
+            raise AssertionError(
+                f"TAG: unmapped policy parameter {name!r} — update _tag_param_groups")
+    return groups
+
+
+def tag_grad_cossim(policy, *, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d, mb_old_logp_c,
+                    mb_advantages, clip_coef, state, mb_prio, mb_masks, mb_returns_norm, idx,
+                    mb_label):
+    """T-vs-CT gradient cosine-similarity measurement (spec 2026-08-13 §4.2).
+
+    WHAT: ONE extra forward via _hybrid_ppo_loss(return_pg_rows=True), then
+    six subset losses as weighted means over the per-row pg vector — T, CT,
+    and the env-parity halves T_a/T_b, CT_a/CT_b — each differentiated with
+    torch.autograd.grad against the SAME graph (retain_graph=True because
+    successive grad calls need it; the real update's graph is a separate,
+    untouched object). Advantage normalization is shared over the full
+    minibatch (it lives inside _hybrid_ppo_loss, before the per-row max),
+    so every subset gradient is a true restriction of the real gradient.
+    vf-only T/CT losses on the same forward's new_value feed the
+    known-anticorrelated tag/cossim_vf control over value_head params.
+
+    Cost per measured minibatch: 1 forward + 8 backwards (spec §4.3 budget:
+    ≤5% of epoch time at --tag-every 5; raise tag_every if exceeded, don't
+    optimize).
+
+    WHY cross_half exists: the criterion statistic is cos(g_Ta, g_CTa) —
+    size-matched to the within-team null (all arms at n/2 rows). The
+    full-size cos(g_T, g_CT) is reported as the lower-noise descriptive
+    number but has a LARGER expected same-distribution cosine than any n/2
+    statistic, which would bias within − cross toward "no conflict"
+    (plan-review finding 2).
+
+    WHY the entropy term is absent: the pg vector contains no entropy —
+    deliberate (spec §4.2): entropy is team-agnostic (pushes cos-sim toward
+    +1 mechanically) and its effective_alpha is warmstart-phase-dependent.
+
+    ROW IDENTITY: segment index ≡ global agent index (env-major, 10/env, T
+    at slots 0-4 — the trainer asserts segments == total_agents, gh#85), so
+    team T rows are (idx % 10) < 5 and env parity is (idx // 10) % 2, where
+    idx is the minibatch's multinomial segment gather.
+
+    PITFALLS:
+    * Never touches .grad, self.ratio, KL bookkeeping, or the Welford
+      return-norm state — mb_returns_norm arrives already normalized.
+      Training with the flag on is bitwise-identical (pinned by
+      tests/test_tag_trainer.py).
+    * Zero-norm subsets (subset advantage exactly 0 after shared
+      normalization) yield a DELIBERATE NaN cos-sim (0/0) and gnorm 0 —
+      analysis drops them; do not "fix" with an epsilon. These NaNs are
+      also why the outer-loop injection must stay after
+      dead_run_detector.check (see _inject_tag_metrics).
+    * pg metrics cover trunk + policy_heads only — the pg graph never
+      touches value_head, so those keys would be dead NaN/0 noise.
+    * The loss path evaluates stored actions and samples nothing, so there
+      is no RNG interaction.
+    """
+    import torch
+
+    groups = _tag_param_groups(policy)
+    pg_group_names = ("trunk", "policy_heads")
+    pg_params = [p for g in pg_group_names for p in groups[g]]
+    sizes = [len(groups[g]) for g in pg_group_names]
+    bounds = [sum(sizes[:i]) for i in range(len(sizes) + 1)]
+
+    team_t = (idx % 10) < 5
+    env_even = ((idx // 10) % 2) == 0                  # env-parity split (exchangeable)
+    subsets = {
+        "T": team_t,
+        "CT": ~team_t,
+        "T_a": team_t & env_even,
+        "T_b": team_t & ~env_even,
+        "CT_a": (~team_t) & env_even,
+        "CT_b": (~team_t) & ~env_even,
+    }
+
+    def _row_weights(mask):
+        # segment mask → flat per-row weights, matching pg_rows' layout
+        # ((segments, bptt).reshape(-1) segment-major; flat test path is 1:1)
+        w = mask.to(mb_advantages.dtype)
+        if mb_advantages.dim() > 1:
+            w = w.unsqueeze(1)
+        return w.expand_as(mb_advantages).reshape(-1)
+
+    def _flat(grads):
+        return torch.cat([g.reshape(-1) for g in grads])
+
+    def _cos(a, b):
+        # 0-norm ⇒ 0/0 ⇒ NaN, deliberately (see docstring)
+        return float((a @ b) / (a.norm() * b.norm()))
+
+    (_, _, newvalue, *_rest, pg_rows) = _hybrid_ppo_loss(policy,
+                                                         mb_obs,
+                                                         mb_actions,
+                                                         mb_cont_actions,
+                                                         mb_old_logp_d,
+                                                         mb_old_logp_c,
+                                                         mb_advantages,
+                                                         clip_coef,
+                                                         state,
+                                                         mb_prio=mb_prio,
+                                                         mb_masks=mb_masks,
+                                                         return_pg_rows=True)
+
+    pg_grads = {}                                                      # subset -> {group: flat grad}
+    vf_grads = {}                                                      # 'T'/'CT' -> flat value_head grad
+    for name, mask in subsets.items():
+        w = _row_weights(mask)
+        loss_s = (pg_rows * w).sum() / w.sum()
+        gs = torch.autograd.grad(loss_s,
+                                 pg_params,
+                                 retain_graph=True,
+                                 allow_unused=True,
+                                 materialize_grads=True)
+        pg_grads[name] = {
+            g: _flat(gs[bounds[i]:bounds[i + 1]]).detach()
+            for i, g in enumerate(pg_group_names)
+        }
+        if name in ("T", "CT"):
+                                                                       # vf-only control: unclipped value loss restricted to the subset
+            newv = newvalue.view(mb_returns_norm.shape)
+            w_full = w.reshape(mb_returns_norm.shape)
+            vf_s = 0.5 * (((newv - mb_returns_norm)**2) * w_full).sum() / w_full.sum()
+            vgs = torch.autograd.grad(vf_s,
+                                      groups["value_head"],
+                                      retain_graph=True,
+                                      allow_unused=True,
+                                      materialize_grads=True)
+            vf_grads[name] = _flat(vgs).detach()
+
+    out = {}
+    for g in pg_group_names:
+        out[f"tag/cossim_cross/{g}/{mb_label}"] = _cos(pg_grads["T"][g], pg_grads["CT"][g])
+        out[f"tag/cossim_cross_half/{g}/{mb_label}"] = _cos(pg_grads["T_a"][g], pg_grads["CT_a"][g])
+        out[f"tag/cossim_within_t/{g}/{mb_label}"] = _cos(pg_grads["T_a"][g], pg_grads["T_b"][g])
+        out[f"tag/cossim_within_ct/{g}/{mb_label}"] = _cos(pg_grads["CT_a"][g], pg_grads["CT_b"][g])
+        out[f"tag/gnorm_t/{g}/{mb_label}"] = float(pg_grads["T"][g].norm())
+        out[f"tag/gnorm_ct/{g}/{mb_label}"] = float(pg_grads["CT"][g].norm())
+    out[f"tag/cossim_vf/{mb_label}"] = _cos(vf_grads["T"], vf_grads["CT"])
+    return out
+
+
+def _inject_tag_metrics(trainer, logs):
+    """Move pending TAG metrics into this epoch's logs dict (spec §4.2).
+
+    CALL-ORDER CONSTRAINT: must run AFTER dead_run_detector.check(...) in
+    the outer loop — tag/* carries deliberate NaNs (zero-norm subsets,
+    documented in tag_grad_cossim) and check() raises RuntimeError on any
+    NaN in the metrics dict; injecting earlier aborts the run with exit
+    code 3 on the first degenerate subset. Also never route these through
+    the `losses` dict: its keys are divided by _mb_run (gh#90), prefixed
+    losses/, and lag environment/* by one epoch.
+
+    logs=None (throttled epoch) is a no-op: the top-of-loop reset then
+    DROPS the measurement — injecting it next epoch would mislabel its
+    step/epoch (spec §4.2 drop semantics).
+    """
+    pending = getattr(trainer, "_tag_metrics", None)
+    if pending and isinstance(logs, dict):
+        logs.update(pending)
 
 
 def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_view_main=None):
@@ -3492,6 +3757,7 @@ def train(args):
 
     print(f"[Train] Starting PufferLib PPO for {args.timesteps:,} env steps...")
     while trainer.epoch < trainer.total_epochs:
+        trainer._tag_metrics = None    # TAG: drop any un-injected measurement
         trainer.evaluate()
         logs = trainer.train()
 
@@ -3558,6 +3824,10 @@ def train(args):
                                               LOG_STD_MAX).cpu().numpy()
             logs["policy/aim_log_std_yaw"] = float(clamped_log_std[0])
             logs["policy/aim_log_std_pitch"] = float(clamped_log_std[1])
+
+            # TAG injection — MUST stay after dead_run_detector.check above
+            # (deliberate NaNs; see _inject_tag_metrics docstring).
+            _inject_tag_metrics(trainer, logs)
 
             # ── Persist metrics ──────────────────────────────────────────────
             log_entry = {
@@ -3718,6 +3988,20 @@ if __name__ == "__main__":
         help="Zero-sum the per-tick reward vector in Python after each step: "
         "r_i' = 0.5*(r_i - mean over the opposing team). Removes every private "
         "per-team subsidy from the shared policy's gradient (spec 2026-08-01 §4.3).")
+
+    # ── TAG gradient-conflict diagnostic (spec 2026-08-13) ──
+    parser.add_argument("--tag-diagnostic",
+                        action="store_true",
+                        dest="tag_diagnostic",
+                        help="Measure T-vs-CT policy-gradient cosine similarity per parameter "
+                        "group during PPO updates (tag/* metrics). Zero behavioral effect on "
+                        "training — pinned bitwise by tests/test_tag_trainer.py.")
+    parser.add_argument("--tag-every",
+                        type=int,
+                        default=5,
+                        dest="tag_every",
+                        help="Measure on epochs where epoch %% tag_every == 0 (default 5; "
+                        "values < 1 clamp to 1 at the hook).")
     args = parser.parse_args()
 
     if args.dump_config:
