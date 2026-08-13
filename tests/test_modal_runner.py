@@ -2784,6 +2784,57 @@ def test_torn_checkpoint_does_not_publish_sidecar(tmp_path):
         thread.join(timeout=2.0)
 
 
+def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
+    """Live PufferLib rewrites dust2_policy.pt every epoch (~0.5s).
+
+    The 1s settle window never elapses while the child is alive. After SIGINT
+    the file is stable and finalize must still publish the sidecar, or resume
+    cannot validate the parent.
+    """
+    child = FakeChild(hold=True)
+    hooks = _signal_hooks(child)
+    rewrites = {"n": 0}
+
+    def fake_sleep(seconds: float) -> None:
+        hooks["sleep"](seconds)
+        if seconds >= 1.0 and child.poll() is None:
+            rewrites["n"] += 1
+            _write_policy_checkpoint(kwargs["run_root"], float(rewrites["n"]))
+
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            sleep=fake_sleep,
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    ckpt = _write_policy_checkpoint(kwargs["run_root"], 0.0)
+    sidecar = kwargs["run_root"] / "checkpoints" / "dust2_policy.pt.meta.json"
+    thread, finished, boxed = _run_attempt_in_thread(kwargs)
+    try:
+        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
+        deadline = time.monotonic() + 2.0
+        while rewrites["n"] < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert rewrites["n"] >= 2
+        assert not sidecar.exists()
+        int_handler(signal.SIGINT, None)
+        assert finished.wait(timeout=2.0)
+    finally:
+        child.release()
+        thread.join(timeout=2.0)
+    assert json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"
+    deadline = time.monotonic() + 2.0
+    while not sidecar.is_file() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert sidecar.is_file()
+    meta = json.loads(sidecar.read_text())
+    assert meta["sha256"] == mrl.sha256_file(ckpt)
+    assert meta["size"] == ckpt.stat().st_size
+
+
 # ── Task 7 cycle C: SIGINT / KeyboardInterrupt / SIGTERM cleanup ───────────
 
 

@@ -2196,6 +2196,13 @@ def _run_training_attempt(
             thread.join(timeout=5.0)
         stop_heartbeat_once()
         stop_watcher_once()
+        # Live PufferLib rewrites dust2_policy.pt every epoch, faster than the
+        # 1s settle window, so the watcher never publishes. After the child is
+        # dead the file is stable; resume needs that sidecar.
+        try:
+            publish_stable_checkpoint(run_root, now=now, commit=commit, sleep=sleep)
+        except Exception:
+            pass
         _close_log_sink(owned_log)
         _close_log_sink(log_sink)
         evidence: CompletionEvidence | None = None
