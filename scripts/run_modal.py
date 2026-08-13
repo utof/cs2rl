@@ -237,14 +237,13 @@ class ModalVolumeIndex:
         self._staged.append((path, data))
 
     def commit(self) -> None:
+        # Client batch_upload already persists. Volume.commit() is mounted-only
+        # and raises RuntimeError from the laptop after launch_run/reserve_run.
         if self._staged:
             with self._volume.batch_upload(force=False) as batch:
                 for path, data in self._staged:
                     batch.put_file(io.BytesIO(data), _client_volume_path(path))
             self._staged.clear()
-        commit = getattr(self._volume, "commit", None)
-        if commit is not None:
-            commit()
 
 
 class ModalDictRegistry:

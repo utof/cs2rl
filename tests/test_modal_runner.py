@@ -3993,6 +3993,29 @@ def test_volume_adapter_uses_root_relative_client_paths(fake_modal):
     assert mrl.mounted_path(ckpt_client) == Path("/artifacts/inputs/sha256/abcd.pt")
 
 
+def test_volume_adapter_commit_does_not_call_client_volume_commit(fake_modal):
+    module = _import_run_modal()
+    volume = _named_volume(fake_modal)
+    commit_calls = {"count": 0}
+
+    def raising_commit():
+        commit_calls["count"] += 1
+        raise RuntimeError("commit() can only be called on a mounted volume inside a container")
+
+    volume.commit = raising_commit
+    artifacts = module.ModalVolumeIndex(volume)
+    reservation = mrl.RUNS_ROOT / "ok-id" / mrl.RESERVATION_FILENAME
+    artifacts.put_file(reservation, b'{"attempt_id":"a"}\n')
+    artifacts.commit()
+    assert artifacts.exists(reservation)
+    assert volume.files[reservation.as_posix()] == b'{"attempt_id":"a"}\n'
+    assert artifacts._staged == []
+    assert all(force is False for _path, force, _local in fake_modal.batch_upload_calls)
+    assert all(not remote.startswith("/artifacts")
+               for remote, _force, _local in fake_modal.batch_upload_calls)
+    assert commit_calls["count"] == 0
+
+
 def test_ensure_blob_uploads_missing_and_reuses_after_streamed_verify(fake_modal, tmp_path):
     module = _import_run_modal()
     volume = _named_volume(fake_modal)

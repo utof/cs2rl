@@ -1022,8 +1022,10 @@ class Registry(Protocol):
 class ArtifactIndex(Protocol):
     """Client Volume metadata and reservation writes. Paths are PurePosixPath.
 
-    exists is committed-object metadata (Volume.iterdir). put_file + commit
-    map to batch_upload then Volume.commit. Never pass /artifacts/... here.
+    exists is committed-object metadata (Volume.iterdir). put_file stages;
+    commit flushes via client batch_upload(force=False), which already persists.
+    Volume.commit() is the in-container mounted-volume API only. Never pass
+    /artifacts/... here.
     """
 
     def exists(self, path: PurePosixPath) -> bool:
@@ -1035,7 +1037,7 @@ class ArtifactIndex(Protocol):
         ...
 
     def commit(self) -> None:
-        """Persist staged uploads (Volume.commit)."""
+        """Persist staged uploads via client batch_upload(force=False)."""
         ...
 
 
