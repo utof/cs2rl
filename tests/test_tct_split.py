@@ -1,0 +1,522 @@
+"""Batch 7 T/CT policy-heads split — policy-level contracts.
+
+Spec: docs/superpowers/specs/2026-08-13-batch7-tct-heads-split-design.md
+(tests 1, 2, 3, 4a, 6, 7, 9, 10 land in this file; the trainer-level
+invariant re-pin is test 4b in tests/test_tag_trainer.py, the TAG param-group
+partition is test 5a in tests/test_tag_diagnostic.py, the analyzer labeling is
+test 5b in tests/test_analyze_tag.py, and the CLI round-trip is test 8 in
+tests/test_train_cli.py).
+
+Fixture pattern mirrors tests/test_tag_diagnostic.py: one real
+make_puffer_env, policies built off it on CPU. The env is module-scoped
+because make_puffer_env loads the nav graph / visibility matrix (~seconds)
+and every test here only needs its observation space + static data.
+"""
+
+import math
+
+import pytest
+import torch
+import torch.nn.functional as F
+
+import train
+from _action_spec import AIM_DIM
+
+
+@pytest.fixture(scope="module")
+def env():
+    e = train.make_puffer_env(seed=0)
+    try:
+        yield e
+    finally:
+        e.close()
+
+
+# The legacy parameter-name set, SPELLED OUT (spec §5 test 1). Hardcoded on
+# purpose: diffing the flag-off constructor against itself would be
+# tautological, so the pin is against this literal list. A construction change
+# — renamed module, extra layer, split leaking into the flag-off path — fails
+# here loudly instead of silently changing what every checkpoint contains.
+LEGACY_PARAM_NAMES = {
+    "encoder.0.weight",
+    "encoder.0.bias",
+    "encoder.2.weight",
+    "encoder.2.bias",
+    "lstm.weight_ih_l0",
+    "lstm.weight_hh_l0",
+    "lstm.bias_ih_l0",
+    "lstm.bias_hh_l0",
+    "action_heads.0.weight",
+    "action_heads.0.bias",
+    "action_heads.1.weight",
+    "action_heads.1.bias",
+    "action_heads.2.weight",
+    "action_heads.2.bias",
+    "action_heads.3.weight",
+    "action_heads.3.bias",
+    "action_heads.4.weight",
+    "action_heads.4.bias",
+    "action_heads.5.weight",
+    "action_heads.5.bias",
+    "action_heads.6.weight",
+    "action_heads.6.bias",
+    "value_head.weight",
+    "value_head.bias",
+    "aim_mu.weight",
+    "aim_mu.bias",
+    "aim_log_std",
+}
+
+
+def _obs(n_t, n_ct, seed=0):
+    """(n_t + n_ct, OBS_DIM) batch: first n_t rows are T (obs[24] == 1)."""
+    torch.manual_seed(seed)
+    x = torch.randn(n_t + n_ct, train.OBS_DIM) * 0.5
+    x[:n_t, 24] = 1.0
+    x[n_t:, 24] = 0.0
+    return x
+
+
+def test_flag_off_builds_exactly_the_legacy_modules(env):
+    """Spec §5 test 1 (structural half): the default constructor's parameter
+    name set is EXACTLY the legacy list, no _t/_ct module exists, and the
+    split marker is False. Behavioral coverage of the legacy path comes from
+    the whole existing suite, which exercises it heavily.
+    """
+    p = train.build_policy(env, device="cpu")
+    assert {n for n, _ in p.named_parameters()} == LEGACY_PARAM_NAMES
+    assert p.tct_split_heads is False
+    assert not any(
+        n.endswith(("_t", "_ct")) or "_t." in n or "_ct." in n for n, _ in p.named_parameters())
+    assert not hasattr(p, "aim_log_std_t")
+
+
+def test_flag_off_forward_equals_direct_legacy_head_application(env):
+    """Spec §5 test 1 (behavioral half): with the flag off, forward's outputs
+    equal the heads applied directly to the trunk output — proving the blend
+    path is not executed at all (a blend with a degenerate all-ones mask would
+    also match numerically, so this asserts against the SAME module objects
+    and is paired with the structural assertion above).
+    """
+    p = train.build_policy(env, device="cpu")
+    x = _obs(4, 4)
+    logits, mu, log_std, value = p(x, state={})
+    # Replicate forward's trunk with the IDENTICAL op sequence (reshape →
+    # seq-first → zero-state LSTM → flatten back) so the comparison is
+    # bitwise, not merely close — a re-derivation via _forward_core would
+    # differ in reduction order and force a tolerance that hides real bugs.
+    B, TT = x.shape[0], 1
+    h = p.encoder(x.reshape(B * TT, x.shape[-1]).float())
+    h = h.reshape(B, TT, p.hidden_size).transpose(0, 1)
+    hc = (h.new_zeros(1, B, p.hidden_size), h.new_zeros(1, B, p.hidden_size))
+    h, _ = p.lstm(h, hc)
+    h = h.transpose(0, 1).reshape(B * TT, p.hidden_size)
+    for i, lg in enumerate(logits):
+        assert torch.equal(lg, p.action_heads[i](h))
+    assert torch.equal(value, p.value_head(h))
+    assert torch.equal(mu, torch.tanh(p.aim_mu(h)) * p.max_turn_speed)
+
+
+def test_split_constructor_shapes_and_names(env):
+    """The split policy carries BOTH head copies and no shared copy — the
+    shared trunk + value head are untouched (spec §3.1).
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    names = {n for n, _ in p.named_parameters()}
+    assert p.tct_split_heads is True
+    for stem in ("action_heads_t.0.weight", "action_heads_ct.0.weight", "aim_mu_t.weight",
+                 "aim_mu_ct.weight", "aim_log_std_t", "aim_log_std_ct"):
+        assert stem in names, stem
+    assert "aim_log_std" not in names
+    assert not any(n.startswith(("action_heads.", "aim_mu.")) for n in names)
+    assert {"encoder.0.weight", "lstm.weight_ih_l0", "value_head.weight"} <= names
+    assert p.aim_log_std_t.shape == (AIM_DIM, )
+    assert "tct_split_heads" not in p.state_dict(), \
+        "the split marker must be a plain attribute, never a state_dict entry"
+
+
+def test_pure_team_batch_leaves_other_copy_gradient_exactly_zero(env):
+    """Spec §5 test 2: a batch of pure-T rows must leave EVERY CT-copy
+    parameter's gradient exactly zero (and vice versa); a mixed batch makes
+    both nonzero. This is the routing correctness proof — the blend weight is
+    0 on the other team's copy, so autograd contributes literally nothing.
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+
+    def _grads(x):
+        p.zero_grad(set_to_none=True)
+        logits, mu, _log_std, _v = p(x, state={})
+        (sum(lg.sum() for lg in logits) + mu.sum()).backward()
+        out = {}
+        for name, param in p.named_parameters():
+            out[name] = 0.0 if param.grad is None else param.grad.abs().sum().item()
+        return out
+
+    g_t = _grads(_obs(8, 0))
+    assert all(v == 0.0 for n, v in g_t.items() if "_ct" in n), \
+        "pure-T batch leaked gradient into a CT copy"
+    assert any(v > 0.0 for n, v in g_t.items() if "_t" in n)
+
+    g_ct = _grads(_obs(0, 8))
+    assert all(v == 0.0 for n, v in g_ct.items() if "_t" in n), \
+        "pure-CT batch leaked gradient into a T copy"
+    assert any(v > 0.0 for n, v in g_ct.items() if "_ct" in n)
+
+    g_mix = _grads(_obs(4, 4))
+    assert any(v > 0.0 for n, v in g_mix.items() if "_t" in n)
+    assert any(v > 0.0 for n, v in g_mix.items() if "_ct" in n)
+
+
+def test_obs_bit_selects_the_serving_copy_in_every_forward_path(env):
+    """Spec §5 test 4a: flipping obs[24] on a row flips which copy serves it,
+    in forward (2D and 3D) and forward_eval. Constructed by zeroing one copy's
+    aim_mu bias and setting the other's to a marker value, so the served
+    copy is readable straight off mu_aim's sign.
+
+    PITFALL under test (spec §3.2): on a 3D (B, T, obs) input the mask must be
+    x[..., 24].reshape(B*TT, 1). Writing x[:, 24] there selects TIMESTEP 24 —
+    the exact silent bug this test exists to catch, which is why the 3D case
+    uses T > 1 with a per-row (not per-timestep) team assignment.
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    with torch.no_grad():
+        for m in (p.aim_mu_t, p.aim_mu_ct):
+            m.weight.zero_()
+        p.aim_mu_t.bias.fill_(5.0)     # tanh(+5) ≈ +1 → mu > 0 means "T copy served"
+        p.aim_mu_ct.bias.fill_(-5.0)   # tanh(-5) ≈ -1 → mu < 0 means "CT copy served"
+
+    x2 = _obs(3, 3)
+    for path in (lambda z: p(z, state={}), lambda z: p.forward_eval(z, state={})):
+        _lg, mu, _ls, _v = path(x2)
+        assert (mu[:3] > 0).all(), "T rows must be served by the _t copy"
+        assert (mu[3:] < 0).all(), "CT rows must be served by the _ct copy"
+
+    # 3D training path: 4 segments × 6 timesteps; segments 0/1 are T, 2/3 CT.
+    x3 = torch.randn(4, 6, train.OBS_DIM) * 0.5
+    x3[:2, :, 24] = 1.0
+    x3[2:, :, 24] = 0.0
+    _lg, mu3, _ls, _v = p(x3, state={})
+    mu3 = mu3.reshape(4, 6, AIM_DIM)
+    assert (mu3[:2] > 0).all(), "3D path: T segments must hit the _t copy"
+    assert (mu3[2:] < 0).all(), "3D path: CT segments must hit the _ct copy"
+
+
+def test_log_std_is_clamped_per_copy_then_blended(env):
+    """Spec §3.2: clamp each copy, THEN blend. With one copy driven far above
+    LOG_STD_MAX the served value must be the CLAMP, not a blend of raw
+    parameters — same result for a 0/1 mask either way, but this pins the
+    order §3.6's per-team σ logs depend on.
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    with torch.no_grad():
+        p.aim_log_std_t.fill_(10.0)    # far above LOG_STD_MAX
+        p.aim_log_std_ct.fill_(train.LOG_STD_MIN)
+    _lg, _mu, log_std, _v = p(_obs(2, 2), state={})
+    assert torch.allclose(log_std[:2], torch.full_like(log_std[:2], train.LOG_STD_MAX))
+    assert torch.allclose(log_std[2:], torch.full_like(log_std[2:], train.LOG_STD_MIN))
+
+
+def test_get_action_and_value_routes_by_team(env):
+    """Spec §3.1: get_action_and_value is split for consistency even though no
+    production path calls it (its only in-tree caller is
+    tests/test_train_env.py:1181; train_bc.py uses forward_eval). Same marker
+    trick as the forward test, read off the returned value/continuous action.
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    with torch.no_grad():
+        for m in (p.aim_mu_t, p.aim_mu_ct):
+            m.weight.zero_()
+        p.aim_mu_t.bias.fill_(5.0)
+        p.aim_mu_ct.bias.fill_(-5.0)
+        p.aim_log_std_t.fill_(train.LOG_STD_MIN)       # σ ≈ 0.01: sample ≈ μ
+        p.aim_log_std_ct.fill_(train.LOG_STD_MIN)
+    torch.manual_seed(0)
+    _a, cont, _lp, _ent, _v, _st = p.get_action_and_value(_obs(3, 3))
+    assert (cont[:3] > 0).all()
+    assert (cont[3:] < 0).all()
+
+
+def _legacy_frozen_state_dict(env):
+    """A legacy state_dict with BC-frozen σ — the bc_warmstart.pt signature.
+
+    Synthetic rather than reading outputs/checkpoints/bc_warmstart.pt so the
+    test runs on any checkout; the real file's σ-widening is asserted at
+    launch time via the startup stdout check (plan Task 9.2).
+    """
+    p = train.build_policy(env, device="cpu")
+    with torch.no_grad():
+        p.aim_log_std.fill_(train.LOG_STD_INIT)
+    return {k: v.clone() for k, v in p.state_dict().items()}
+
+
+def test_state_dict_is_split_discriminates_both_vintages(env):
+    """Spec §3.3: split-ness is read off the KEYS, at every load."""
+    legacy = train.build_policy(env, device="cpu").state_dict()
+    split = train.build_policy(env, device="cpu", tct_split_heads=True).state_dict()
+    assert train.state_dict_is_split(legacy) is False
+    assert train.state_dict_is_split(split) is True
+
+
+def test_warm_split_duplicates_heads_and_reinits_sigma_in_both_copies(env):
+    """Spec §5 test 3: the warm-split path applied in the spec's ORDER
+    (re-init σ on the legacy dict FIRST, then duplicate) leaves both copies
+    equal to the legacy tensors and σ == AIM_LOG_STD_RESUME_INIT in BOTH
+    aim_log_std_t and aim_log_std_ct.
+
+    This is the gh#91 trap: reinit_frozen_aim_log_std matches
+    endswith("aim_log_std"), which is FALSE for "aim_log_std_t" — running it
+    after duplication would leave σ=0.1 and throttle every update of a 30M
+    run with no error message.
+    """
+    legacy = _legacy_frozen_state_dict(env)
+    assert train.reinit_frozen_aim_log_std(legacy) is True
+    split_sd = train.convert_legacy_state_dict_to_split(legacy)
+
+    for copy in ("aim_log_std_t", "aim_log_std_ct"):
+        assert torch.allclose(split_sd[copy],
+                              torch.full_like(split_sd[copy], train.AIM_LOG_STD_RESUME_INIT)), copy
+    assert "aim_log_std" not in split_sd
+    for i in range(7):
+        for suffix in ("weight", "bias"):
+            src = legacy[f"action_heads.{i}.{suffix}"]
+            assert torch.equal(split_sd[f"action_heads_t.{i}.{suffix}"], src)
+            assert torch.equal(split_sd[f"action_heads_ct.{i}.{suffix}"], src)
+    assert torch.equal(split_sd["aim_mu_t.weight"], legacy["aim_mu.weight"])
+    assert torch.equal(split_sd["aim_mu_ct.weight"], legacy["aim_mu.weight"])
+    assert torch.equal(split_sd["encoder.0.weight"], legacy["encoder.0.weight"])
+    assert torch.equal(split_sd["value_head.weight"], legacy["value_head.weight"])
+
+    # and it actually loads
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p.load_state_dict(split_sd)
+
+
+def test_reinit_matcher_also_catches_split_sigma_keys(env):
+    """Spec §3.3 belt-and-braces: the widened matcher catches a future
+    split-format warmstart by VALUE too, so a split checkpoint whose σ is
+    still frozen at log(0.1) is widened on resume like a legacy one.
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    with torch.no_grad():
+        p.aim_log_std_t.fill_(train.LOG_STD_INIT)
+        p.aim_log_std_ct.fill_(train.LOG_STD_INIT)
+    sd = {k: v.clone() for k, v in p.state_dict().items()}
+    assert train.reinit_frozen_aim_log_std(sd) is True
+    for copy in ("aim_log_std_t", "aim_log_std_ct"):
+        assert torch.allclose(sd[copy], torch.full_like(sd[copy], train.AIM_LOG_STD_RESUME_INIT))
+
+
+def test_arch_mismatch_raises_naming_both_architectures(env):
+    """Spec §3.3: never a silent partial load. The error must name what the
+    checkpoint is AND what the policy is — a bare load_state_dict KeyError
+    tells the operator neither.
+    """
+    legacy_p = train.build_policy(env, device="cpu")
+    split_p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    split_sd = split_p.state_dict()
+    legacy_sd = legacy_p.state_dict()
+
+    with pytest.raises(ValueError, match=r"SPLIT.*LEGACY|LEGACY.*SPLIT"):
+        train.load_state_dict_arch_checked(legacy_p, split_sd, source="snap.pt")
+    with pytest.raises(ValueError, match=r"SPLIT.*LEGACY|LEGACY.*SPLIT"):
+        train.load_state_dict_arch_checked(split_p, legacy_sd, source="snap.pt")
+
+
+def test_split_checkpoint_round_trips_bitwise(env):
+    """Spec §5 test 3 (third clause): split → split is a plain load."""
+    a = train.build_policy(env, device="cpu", tct_split_heads=True)
+    b = train.build_policy(env, device="cpu", tct_split_heads=True)
+    train.load_state_dict_arch_checked(b, a.state_dict(), source="a")
+    for (n, pa), (_, pb) in zip(a.named_parameters(), b.named_parameters(), strict=True):
+        assert torch.equal(pa, pb), n
+
+
+def test_resolve_resume_split_infers_and_never_narrows(env, tmp_path):
+    """Spec §5 test 9 + §3.3's ordering constraint: the pre-build_policy sniff.
+
+    Four cases, and the one that matters most is row 3 — a SPLIT checkpoint
+    resumed WITHOUT the flag still builds a split policy. That is the
+    crash-resume path, and on this GPU box crash-resume is a first-class case,
+    not an edge (the operator relaunches without re-reading the flag list).
+    The flag can only WIDEN legacy→split; it can never narrow split→legacy.
+    """
+    legacy_pt = tmp_path / "legacy.pt"
+    split_pt = tmp_path / "split.pt"
+    torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
+    torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
+
+    split, sd, path = train.resolve_resume_split(None, flag=False)
+    assert (split, sd, path) == (False, None, None)
+    split, sd, _ = train.resolve_resume_split(None, flag=True)
+    assert split is True and sd is None
+
+    split, sd, path = train.resolve_resume_split(str(legacy_pt), flag=False)
+    assert split is False and sd is not None and path == legacy_pt
+    split, _sd, _ = train.resolve_resume_split(str(legacy_pt), flag=True)
+    assert split is True, "flag must widen a legacy checkpoint to a warm split"
+
+    split, sd, _ = train.resolve_resume_split(str(split_pt), flag=False)
+    assert split is True, "split checkpoint must be detected without the flag"
+    assert "aim_log_std_t" in sd, "the sniffed dict must be returned for reuse"
+    split, _sd, _ = train.resolve_resume_split(str(split_pt), flag=True)
+    assert split is True
+
+    with pytest.raises(FileNotFoundError, match="Resume checkpoint not found"):
+        train.resolve_resume_split(str(tmp_path / "nope.pt"), flag=False)
+
+
+def test_self_play_loads_both_checkpoint_vintages(env, tmp_path):
+    """Spec §5 test 6: a legacy snapshot AND a split snapshot each load into
+    the past-policy slot without error.
+
+    Why this is load-bearing rather than tidy: self-play activates on ~30% of
+    epochs (p_past=0.3) and load_past_policy gets no config — under a
+    flag-only design a split run would crash hours in, on a random epoch. Key
+    inference makes both vintages work in both directions, so a split run can
+    also mix in pre-split snapshots from an earlier pool.
+    """
+    legacy_pt = tmp_path / "past_legacy.pt"
+    split_pt = tmp_path / "past_split.pt"
+    torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
+    torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
+
+    for path, expect_split in ((legacy_pt, False), (split_pt, True)):
+        # Constructor is all-default at HEAD, and _evaluate_with_selfplay calls
+        # `self_play_mgr.load_past_policy(dev, self.vecenv)` — mirrored here.
+        mgr = train.SelfPlayManager()
+        mgr.pool = [path]
+        past = mgr.load_past_policy("cpu", env)
+        assert past is not None, path
+        assert past.tct_split_heads is expect_split, path
+        assert not past.training, "past policies must be in eval mode"
+
+
+def test_load_policy_from_checkpoint_infers_split(env, tmp_path):
+    """Spec §3.3: the eval/record loader keeps working on split checkpoints —
+    it constructs from the keys, so no flag reaches it and none is needed.
+    """
+    split_pt = tmp_path / "eval_split.pt"
+    torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
+    p = train.load_policy_from_checkpoint(split_pt, "cpu")
+    assert p.tct_split_heads is True
+
+    # Legacy vintage through the same loader — this function has no other test
+    # coverage in the repo, so pin both directions here.
+    legacy_pt = tmp_path / "eval_legacy.pt"
+    torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
+    p = train.load_policy_from_checkpoint(legacy_pt, "cpu")
+    assert p.tct_split_heads is False
+
+
+def test_log_aim_log_std_legacy_keys_unchanged(env):
+    """Spec §5 test 10 (legacy half): on a legacy policy the emitted keys are
+    exactly today's two, with today's values.
+    """
+    p = train.build_policy(env, device="cpu")
+    with torch.no_grad():
+        p.aim_log_std.copy_(torch.tensor([-1.5, -2.0]))
+    logs = {}
+    train.log_aim_log_std(p, logs)
+    assert set(logs) == {"policy/aim_log_std_yaw", "policy/aim_log_std_pitch"}
+    assert logs["policy/aim_log_std_yaw"] == pytest.approx(-1.5)
+    assert logs["policy/aim_log_std_pitch"] == pytest.approx(-2.0)
+
+
+def test_log_aim_log_std_split_emits_mean_plus_per_team(env):
+    """Spec §5 test 10 + §3.6 (the remedy for review-1 BLOCKER 2): under the
+    split the legacy keys become the MEAN of the two CLAMPED copies — that
+    preserves the T7 acceptance gate and every dashboard consumer — and four
+    per-team keys carry the actually interesting signal (do the teams learn
+    different aim noise?).
+
+    The clamp is applied per copy BEFORE averaging, matching the forward path:
+    aim_log_std_t is set above LOG_STD_MAX here, so a mean-then-clamp
+    implementation lands on a different number and fails.
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    with torch.no_grad():
+        p.aim_log_std_t.copy_(torch.tensor([10.0, -2.0]))              # yaw above LOG_STD_MAX
+        p.aim_log_std_ct.copy_(torch.tensor([-3.0, -1.0]))
+    logs = {}
+    train.log_aim_log_std(p, logs)
+    assert logs["policy/aim_log_std_yaw_t"] == pytest.approx(train.LOG_STD_MAX)
+    assert logs["policy/aim_log_std_yaw_ct"] == pytest.approx(-3.0)
+    assert logs["policy/aim_log_std_pitch_t"] == pytest.approx(-2.0)
+    assert logs["policy/aim_log_std_pitch_ct"] == pytest.approx(-1.0)
+    assert logs["policy/aim_log_std_yaw"] == pytest.approx(0.5 * (train.LOG_STD_MAX + -3.0))
+    assert logs["policy/aim_log_std_pitch"] == pytest.approx(-1.5)
+
+
+def test_status_line_keeps_the_t7_gate_substring(env):
+    """Spec §5 test 10 (last clause): T7 acceptance gate 2 greps stdout for
+    'aim_log_std_pitch=' — a split run must still print it.
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    logs = {}
+    train.log_aim_log_std(p, logs)
+    # Verified at HEAD: format_train_status(epoch, ts_val, logs) — the exact
+    # signature the outer loop calls. The contract under test is only that the
+    # formatted line still contains the 'aim_log_std_pitch=' substring the T7
+    # gate greps.
+    line = train.format_train_status(7, 0.5, logs)
+    assert "aim_log_std_pitch=" in line
+
+
+def test_head_divergence_zero_at_warm_split_and_keys_present(env):
+    """Spec §5 test 7 (first clause): split/head_l2_rel/* keys exist and are
+    ~0 immediately after a warm split, because both copies are identical.
+    Legacy policies emit nothing (the metric is undefined without two copies).
+    """
+    legacy = _legacy_frozen_state_dict(env)
+    split_sd = train.convert_legacy_state_dict_to_split(legacy)
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p.load_state_dict(split_sd)
+    d = train.compute_head_divergence(p)
+    assert set(d) == {
+        "split/head_l2_rel/action_heads", "split/head_l2_rel/aim_mu",
+        "split/head_l2_rel/aim_log_std"
+    }
+    assert all(v == 0.0 for v in d.values()), d
+    assert train.compute_head_divergence(train.build_policy(env, device="cpu")) == {}
+
+
+def test_head_divergence_exceeds_the_decay_aware_null(env):
+    """Spec §5 test 7 + §4 Q3: divergence under team-asymmetric advantages
+    must exceed a same-steps, same-optimizer control with ZERO advantages.
+
+    Why a control at all: the optimizer carries weight_decay=1e-4 (the Adam
+    construction in train()) which moves even a zero-gradient copy, and head_l2_rel
+    is a RATIO — shrinking both copies inflates it with no learning at all. So
+    raw L2 has no achievable null and the honest comparison is
+    asymmetric-vs-zero advantage over the identical number of steps.
+
+    The two arms start from the same state, seeded with a small pre-existing
+    T/CT gap. A zero-gap start would make the null trivially 0.0 (decay acts
+    identically on identical copies) and the inequality vacuous; seeding the
+    gap is what makes the control actually control something.
+    """
+
+    def _arm(asymmetric):
+        torch.manual_seed(0)
+        p = train.build_policy(env, device="cpu", tct_split_heads=True)
+        with torch.no_grad():          # identical seeded gap in both arms
+            p.aim_mu_ct.bias.add_(0.05)
+            p.action_heads_ct[0].bias.add_(0.05)
+        opt = torch.optim.Adam(p.parameters(), lr=1e-3, weight_decay=1e-4)
+        x = _obs(8, 8, seed=1)
+        adv = (torch.cat([torch.ones(8), -torch.ones(8)]) if asymmetric else torch.zeros(16))
+        for _ in range(20):
+            logits, mu, _ls, _v = p(x, state={})
+            logp = sum(F.log_softmax(lg, dim=-1)[:, 0] for lg in logits) + mu.sum(-1)
+            opt.zero_grad(set_to_none=True)
+            (-(adv * logp).mean()).backward()
+            opt.step()
+        return train.compute_head_divergence(p)
+
+    treated = _arm(asymmetric=True)
+    null = _arm(asymmetric=False)
+    for key in ("split/head_l2_rel/action_heads", "split/head_l2_rel/aim_mu"):
+        assert treated[key] > null[key], (
+            f"{key}: asymmetric-advantage divergence {treated[key]:.6f} did not exceed "
+            f"the zero-advantage weight-decay floor {null[key]:.6f}")
+    assert math.isfinite(null["split/head_l2_rel/aim_log_std"])

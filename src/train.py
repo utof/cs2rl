@@ -108,16 +108,171 @@ def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6):
         device of the stored tensor via full_like.
       * Matches any key ENDING in "aim_log_std" so a future wrapper prefix
         (e.g. "policy.aim_log_std") keeps working.
+      * Batch 7: the matcher covers aim_log_std, aim_log_std_t and
+        aim_log_std_ct. The legacy→split warm conversion must still call this
+        FIRST, on the legacy dict — see convert_legacy_state_dict_to_split.
     """
+    import re as _re
+
     import torch as _torch
 
     changed = False
     for key, val in state_dict.items():
-        if key.endswith("aim_log_std") and _torch.allclose(
+        # Batch 7 (spec §3.3): also match the split copies. The bare
+        # endswith("aim_log_std") this replaces is FALSE for "aim_log_std_t"
+        # and "aim_log_std_ct" — belt-and-braces so a future split-format
+        # warmstart is widened by VALUE too. It does NOT relieve the caller of
+        # the ordering rule: on a legacy→split resume this helper must run on
+        # the LEGACY dict, before convert_legacy_state_dict_to_split.
+        if _re.search(r"aim_log_std(_t|_ct)?$", key) and _torch.allclose(
                 val, _torch.full_like(val, LOG_STD_INIT), atol=atol):
             state_dict[key] = _torch.full_like(val, AIM_LOG_STD_RESUME_INIT)
             changed = True
     return changed
+
+
+def state_dict_is_split(state_dict):
+    """True if this checkpoint was written by a T/CT split policy (spec §3.3).
+
+    WHAT: presence of the `aim_log_std_t` parameter is the marker — it exists
+    in exactly one architecture and nowhere else in the key space.
+
+    WHY key inference rather than the config flag: config.json is rewritten
+    unconditionally on every launch (src/train.py:3668), so a flag-less
+    crash-resume would stamp `tct_split_heads: false` over a split run's
+    provenance. Deciding from the keys means resume, self-play snapshot
+    loading and the eval/record loader all do the right thing with no flag at
+    all — the flag governs only fresh construction and the legacy→split
+    conversion direction.
+
+    PITFALL: "aim_log_std_ct".endswith("aim_log_std_t") is False, so this does
+    not accidentally fire on a CT-only key set; it is nonetheless deliberate
+    that the marker is the T copy, since both are always written together.
+    """
+    return any(k.endswith("aim_log_std_t") for k in state_dict)
+
+
+def convert_legacy_state_dict_to_split(state_dict):
+    """Warm split: duplicate a legacy checkpoint's heads into both team copies.
+
+    WHAT: returns a NEW dict where `action_heads.*` → `action_heads_t.*` +
+    `action_heads_ct.*`, `aim_mu.*` → `aim_mu_t.*` + `aim_mu_ct.*`,
+    `aim_log_std` → `aim_log_std_t` + `aim_log_std_ct`. Everything else
+    (encoder, lstm, value_head) passes through untouched — the trunk and the
+    critic stay shared.
+
+    WHY duplicate rather than re-initialize one side: the BC warmstart heads
+    encode "how to act at all". Starting CT from random heads would confound
+    the experiment with a relearning phase. Warm split means both teams start
+    IDENTICAL and the divergence itself is the treatment.
+
+    PITFALLS:
+      * ORDER (spec §3.3, the gh#91 trap): call reinit_frozen_aim_log_std on
+        the LEGACY dict BEFORE this function. The un-widened matcher used to
+        miss the `_t`/`_ct` keys entirely; running the re-init afterwards
+        would silently leave σ=0.1 and throttle every PPO update of the run
+        through the KL early-stop, with no error and no log line. The matcher
+        is now widened as belt-and-braces, but the ordering is still the
+        contract — pinned by
+        test_warm_split_duplicates_heads_and_reinits_sigma_in_both_copies.
+      * Keys are matched strictly (no wrapper prefix like "policy."). Every
+        checkpoint this project writes is bare-keyed; a prefixed dict would
+        pass through unconverted and then fail loudly at
+        load_state_dict_arch_checked rather than half-loading.
+      * Tensors are cloned so the two copies never alias — an in-place
+        optimizer step on one would otherwise move the other.
+    """
+    out = {}
+    for key, val in state_dict.items():
+        if key.startswith("action_heads."):
+            suffix = key[len("action_heads."):]
+            out[f"action_heads_t.{suffix}"] = val.clone()
+            out[f"action_heads_ct.{suffix}"] = val.clone()
+        elif key.startswith("aim_mu."):
+            suffix = key[len("aim_mu."):]
+            out[f"aim_mu_t.{suffix}"] = val.clone()
+            out[f"aim_mu_ct.{suffix}"] = val.clone()
+        elif key == "aim_log_std":
+            out["aim_log_std_t"] = val.clone()
+            out["aim_log_std_ct"] = val.clone()
+        else:
+            out[key] = val
+    return out
+
+
+def load_state_dict_arch_checked(policy, state_dict, *, source):
+    """load_state_dict with a loud architecture-mismatch error (spec §3.3).
+
+    WHAT: compares the checkpoint's architecture (key inference) against the
+    policy's (`policy.tct_split_heads`) and raises a message naming BOTH
+    before loading anything. Never a silent partial load.
+
+    WHY it exists even though every construction site infers: the sites that
+    RECEIVE a pre-built policy and then load into it (train main's resume,
+    load_policy_from_checkpoint, SelfPlayManager.load_past_policy) can be
+    handed a mismatched pair by a caller that bypassed inference. A bare
+    load_state_dict there raises a wall of missing/unexpected keys that names
+    neither architecture — the operator's first hypothesis becomes "corrupt
+    checkpoint", which is wrong and expensive.
+
+    PITFALL: this does NOT convert. Legacy→split conversion is a deliberate
+    act with a σ-re-init ordering constraint, so it stays at the one call site
+    that means it (the train-main warm split).
+    """
+    ckpt_split = state_dict_is_split(state_dict)
+    policy_split = bool(getattr(policy, "tct_split_heads", False))
+    if ckpt_split != policy_split:
+
+        def _name(flag):
+            return "SPLIT (per-team T/CT policy heads)" if flag else "LEGACY (shared policy heads)"
+
+        raise ValueError(
+            f"policy/checkpoint architecture mismatch loading {source}: the checkpoint is "
+            f"{_name(ckpt_split)} but the policy is {_name(policy_split)}. Rebuild the policy "
+            f"with build_policy(..., tct_split_heads={ckpt_split}) — loaders are supposed to "
+            f"infer this from the checkpoint keys (state_dict_is_split), see spec "
+            f"2026-08-13 §3.3.")
+    policy.load_state_dict(state_dict)
+
+
+def resolve_resume_split(resume_path, *, flag, map_location="cpu"):
+    """Decide split-ness BEFORE build_policy, from the resume checkpoint.
+
+    Returns ``(split_active, state_dict_or_None, resolved_Path_or_None)``.
+
+    WHY this shape (spec §3.3 ordering constraint): in train() the policy is
+    constructed at ~:3656, but train_config is not built until ~:3661 and the
+    resume checkpoint is not read until ~:3688 — at construction time neither
+    the flag's config key nor the checkpoint's keys are in scope. So the
+    checkpoint is sniffed once here, the decision is passed into build_policy,
+    and the already-loaded dict is handed back for reuse at the load site
+    (no double I/O on a 2.5 MB file, and no chance of the two reads
+    disagreeing).
+
+    Decision table:
+      no resume            → (bool(flag), None, None)
+      legacy checkpoint    → (bool(flag), sd, path)   flag widens to warm split
+      split checkpoint     → (True,       sd, path)   inference WINS
+
+    The flag can only WIDEN legacy→split; it can never narrow a split
+    checkpoint back to a legacy policy. That asymmetry is what makes a
+    flag-less crash-resume of a split run correct — the routine reality on
+    this box, not an edge case.
+
+    PITFALL: loads with map_location="cpu" regardless of the training device.
+    load_state_dict copies into the policy's own (possibly CUDA) tensors, so
+    this is safe and avoids allocating a second copy on the GPU during
+    startup.
+    """
+    import torch as _torch
+
+    if not resume_path:
+        return bool(flag), None, None
+    resume_path = Path(resume_path)
+    if not resume_path.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+    state_dict = _torch.load(resume_path, map_location=map_location, weights_only=True)
+    return bool(flag) or state_dict_is_split(state_dict), state_dict, resume_path
 
 
 # F8 (2026-07-06 adversarial review): per-head [start, end) column ranges of
@@ -352,6 +507,15 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     tag_diagnostic = bool(getattr(args, "tag_diagnostic", False))
     tag_every = int(getattr(args, "tag_every", 5))
 
+    # ── Batch 7 heads split (spec 2026-08-13 §2) ──
+    # getattr fallback, same pattern as the TAG block above. This records the
+    # FLAG, not the resolved architecture: a flag-less crash-resume of a split
+    # run writes false here on purpose, which is precisely why the analyzer
+    # reads the per-epoch split/active metric rather than config.json
+    # (spec §3.4). Adding this key also shifts exp_lib.behavior_hash for all
+    # future runs — recorded decision, spec §6.
+    tct_split_heads = bool(getattr(args, "tct_split_heads", False))
+
     cfg = {
                                                        # Core PPO
         "env": "cs2-dust2",
@@ -413,6 +577,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "reward_symmetrize": reward_symmetrize,
         "tag_diagnostic": tag_diagnostic,
         "tag_every": tag_every,
+        "tct_split_heads": tct_split_heads,
     }
 
     # ── Reward wiring: 23 make_env weights, verbatim key names ──
@@ -610,7 +775,10 @@ def load_policy_from_checkpoint(checkpoint_path, device):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     print(f"[Policy] Loading checkpoint -> {checkpoint_path}")
-    state_dict = torch.load(checkpoint_path, map_location=device)
+    # weights_only=True: every checkpoint this project writes is a bare tensor
+    # state_dict, and the other loaders (resume sniff, self-play pool) already
+    # load with it — a checkpoint that fails here is untrusted or corrupt.
+    state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
 
     # Infer obs_dim from checkpoint to handle checkpoints trained with different obs sizes
     ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
@@ -633,11 +801,16 @@ def load_policy_from_checkpoint(checkpoint_path, device):
             f"checkpoint is from a different obs schema. Retrain or use a matching env.")
 
     try:
-        policy = build_policy(policy_env, device, obs_dim_override=ckpt_obs_dim)
+        # Batch 7 (spec §3.3): architecture inferred from the checkpoint keys,
+        # exactly like obs_dim above — this loader gets no flag and needs none.
+        policy = build_policy(policy_env,
+                              device,
+                              obs_dim_override=ckpt_obs_dim,
+                              tct_split_heads=state_dict_is_split(state_dict))
     finally:
         policy_env.close()
 
-    policy.load_state_dict(state_dict)
+    load_state_dict_arch_checked(policy, state_dict, source=str(checkpoint_path))
     policy.eval()
     return policy
 
@@ -1081,7 +1254,22 @@ def build_train_env_factory(args, *, shared_ts, map_data):
 # ── SECTION: Policy ────────────────────────────────────────────────────────
 
 
-def build_policy(vecenv, device, obs_dim_override=None):
+def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
+    """Build the Dust2 recurrent policy.
+
+    tct_split_heads (Batch 7, spec 2026-08-13): when True the policy-head
+    group — the 7 discrete action_heads, the aim_mu projection and the
+    aim_log_std parameter — is duplicated per team (`_t` / `_ct` suffixes) and
+    each row is routed to its own team's copy by the obs team bit obs[24].
+    Trunk (encoder + LSTM) and value_head stay SHARED. Default False builds
+    the legacy modules and executes the legacy forward lines verbatim, pinned
+    by tests/test_tct_split.py::test_flag_off_builds_exactly_the_legacy_modules.
+
+    PITFALL: callers must not decide split-ness from config alone — every
+    loader infers it from the checkpoint's keys (state_dict_is_split), because
+    config.json is rewritten on each launch and a flag-less crash-resume would
+    otherwise rebuild the wrong architecture (spec §3.3).
+    """
     import pufferlib.pytorch
     import torch
     import torch.nn as nn
@@ -1111,13 +1299,17 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 elif "weight" in name:
                     nn.init.orthogonal_(p, gain=1.0)
 
-            # Separate heads for MultiDiscrete(ACTION_HEAD_SIZES)
-            self.action_heads = nn.ModuleList([
-                pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
-                for n in ACTION_HEAD_SIZES
-            ])
-            self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
+            # Batch 7 (spec 2026-08-13 §3.1): plain bool, NOT a buffer — it
+            # must never enter state_dict() or every existing checkpoint would
+            # gain a key. Loaders read it to detect a policy/checkpoint
+            # architecture mismatch (load_state_dict_arch_checked).
+            # `tct_split_heads` here is build_policy's parameter, captured by
+            # closure exactly like `obs_dim` and `hidden` above — the inner
+            # class takes no new constructor argument.
+            self.tct_split_heads = bool(tct_split_heads)
 
+            # Separate heads for MultiDiscrete(ACTION_HEAD_SIZES)
+            #
             # Batch 3: continuous Gaussian aim head.
             # mu_aim → (B, AIM_DIM); tanh-squashed and scaled by max_turn_speed
             #   in forward(). State-DEPENDENT (per-step linear projection) so
@@ -1130,8 +1322,48 @@ def build_policy(vecenv, device, obs_dim_override=None):
             # Pitfall: keep `std=0.01` on aim_mu init so the pre-tanh mean
             #   starts ~zero — otherwise the policy starts saturated and
             #   learning the Gaussian head is much slower.
-            self.aim_mu = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
-            self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+            #
+            # Batch 7 note on the deliberate duplication of these three
+            # expressions across the two branches: the construction ORDER
+            # (7 discrete heads → value_head → aim_mu → aim_log_std) is what
+            # determines how many draws each layer takes from the global torch
+            # RNG. Factoring the head group into a shared helper would move
+            # value_head's draw and change every layer's init relative to the
+            # legacy baseline at the same seed. Repetition here buys exact
+            # RNG-stream parity between the flag-off and flag-on `_t` copies,
+            # which is the whole point of spec §3.7.
+            if not self.tct_split_heads:
+                self.action_heads = nn.ModuleList([
+                    pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
+                    for n in ACTION_HEAD_SIZES
+                ])
+                self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
+                self.aim_mu = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
+                self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+            else:
+                self.action_heads_t = nn.ModuleList([
+                    pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
+                    for n in ACTION_HEAD_SIZES
+                ])
+                self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
+                self.aim_mu_t = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
+                self.aim_log_std_t = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+                # RNG hygiene (spec §3.7): the CT copy's construction is what
+                # draws from the default stream, so it is forked — post-hoc
+                # weight cloning would NOT restore stream parity. Without this
+                # the flag-on run's every subsequent sample shifts relative to
+                # the baseline at the same seed and "the split is the only
+                # changed variable" is strictly false. devices=[] forks the CPU
+                # generator only (construction is on CPU; .to(device) happens
+                # after) and skips CUDA device enumeration.
+                with torch.random.fork_rng(devices=[]):
+                    self.action_heads_ct = nn.ModuleList([
+                        pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
+                        for n in ACTION_HEAD_SIZES
+                    ])
+                    self.aim_mu_ct = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM),
+                                                                  std=0.01)
+                self.aim_log_std_ct = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
 
             # max_turn_speed mirrors C sd->max_turn_speed (StaticData, π/4
             # default). Pulled from the vecenv's static-data block so the
@@ -1147,6 +1379,24 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 'max_turn_speed',
                 torch.tensor(driver_env._c_env.sd.contents.max_turn_speed, dtype=torch.float32),
             )
+
+        @staticmethod
+        def _blend(mask, out_t, out_ct):
+            """Route a per-row output to its team's head copy (spec §3.2).
+
+            mask is 0/1 with 1.0 == T, broadcastable over out_t's trailing
+            dims. Branch-free (GPU-friendly) and autograd-exact: a T row's
+            blend weight on the CT copy is literally 0, so it contributes zero
+            gradient there — that is the routing correctness proof, pinned by
+            test_pure_team_batch_leaves_other_copy_gradient_exactly_zero.
+
+            PITFALL: the cast is load-bearing. A float32 mask multiplied into
+            fp16 head outputs would silently promote them under any future
+            autocast; casting to the output dtype keeps the arithmetic in the
+            head's own precision.
+            """
+            m = mask.to(out_t.dtype)
+            return m * out_t + (1.0 - m) * out_ct
 
         def get_value(self, x, lstm_state=None, done=None):
             hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
@@ -1180,7 +1430,16 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 lands in task 5 via _patch_trainer_with_hybrid_aim.
             """
             hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
-            logits = [head(hidden_out) for head in self.action_heads]
+            if self.tct_split_heads:
+                # 2D input (B, obs): the team bit is a column. (The 3D
+                # timestep trap lives in forward(), not here.)
+                mask = x[:, 24:25]
+                logits = [
+                    self._blend(mask, ht(hidden_out), hct(hidden_out))
+                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
+                ]
+            else:
+                logits = [head(hidden_out) for head in self.action_heads]
 
             # Discrete sample / log-prob / entropy.
             dists = [torch.distributions.Categorical(logits=h) for h in logits]
@@ -1192,8 +1451,20 @@ def build_policy(vecenv, device, obs_dim_override=None):
             # Continuous (Normal) sample / log-prob / entropy. tanh+scale
             # bounds μ ∈ [-max_turn_speed, +max_turn_speed]; σ is clamped so
             # the Normal can't collapse or explode mid-training.
-            mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-            log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX)
+            if self.tct_split_heads:
+                mu_aim = self._blend(mask,
+                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
+                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
+                # clamp EACH copy, then blend (spec §3.2) — identical result
+                # for a 0/1 mask, but it matches the legacy clamp-at-use
+                # semantics and keeps §3.6's per-team σ logs interpretable.
+                log_std = self._blend(
+                    mask,
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+            else:
+                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX)
             sigma = torch.exp(log_std).expand_as(mu_aim)
             aim_dist = torch.distributions.Normal(mu_aim, sigma)
             if continuous_action is None:
@@ -1243,13 +1514,27 @@ def build_policy(vecenv, device, obs_dim_override=None):
             if lstm_state is not None:
                 state["lstm_h"], state["lstm_c"] = lstm_state
 
-            logits = [head(hidden_out) for head in self.action_heads]
+            if self.tct_split_heads:
+                mask = x[:, 24:25]                                                                # 2D input (B, obs)
+                logits = [
+                    self._blend(mask, ht(hidden_out), hct(hidden_out))
+                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
+                ]
+                mu_aim = self._blend(mask,
+                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
+                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
+                log_std = self._blend(
+                    mask,
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+            else:
+                logits = [head(hidden_out) for head in self.action_heads]
+                                                                                                  # μ is bounded by tanh*max_turn_speed; log_std broadcasts to μ
+                                                                                                  # shape so callers can build Normal(mu, exp(log_std)) directly
+                                                                                                  # without an extra .expand call.
+                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
             value = self.value_head(hidden_out)
-            # μ is bounded by tanh*max_turn_speed; log_std broadcasts to μ
-            # shape so callers can build Normal(mu, exp(log_std)) directly
-            # without an extra .expand call.
-            mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-            log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
             return logits, mu_aim, log_std, value
 
         def forward(self, x, state):
@@ -1310,10 +1595,32 @@ def build_policy(vecenv, device, obs_dim_override=None):
             # ordering silently misaligns every logprob/advantage pairing.
             hidden_out = h.transpose(0, 1).reshape(B * TT, self.hidden_size)
 
-            logits = [head(hidden_out) for head in self.action_heads]
+            if self.tct_split_heads:
+                # PITFALL (spec §3.2 — the bug class this comment exists to
+                # prevent): build the mask from the 3D x with x[..., 24].
+                # Writing x[:, 24] on a (B, T, obs) input silently selects
+                # TIMESTEP 24 instead of the team column. The reshape to
+                # (B*TT, 1) is aligned with hidden_out's
+                # h.transpose(0,1).reshape(B*TT, H) — both segment-major,
+                # time-minor. Works unchanged for the 2D/ONNX path, where
+                # TT == 1 and x[..., 24] is already the team column.
+                mask = x[..., 24].reshape(B * TT, 1)
+                logits = [
+                    self._blend(mask, ht(hidden_out), hct(hidden_out))
+                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
+                ]
+                mu_aim = self._blend(mask,
+                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
+                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
+                log_std = self._blend(
+                    mask,
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+            else:
+                logits = [head(hidden_out) for head in self.action_heads]
+                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
             value = self.value_head(hidden_out)
-            mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-            log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
             return logits, mu_aim, log_std, value
 
         def _lstm_bptt(self, h_seq, hc, terminals):
@@ -1419,6 +1726,105 @@ def compute_network_health(model, device):
     # Would need trainer.policy or similar. Skipping for now.
 
     return metrics
+
+
+def log_aim_log_std(policy, logs):
+    """Emit policy/aim_log_std_* into `logs` under BOTH architectures (spec §3.6).
+
+    WHAT: legacy policy → today's two keys, unchanged. Split policy → the same
+    two keys carrying the MEAN of the two CLAMPED copies, plus four per-team
+    keys policy/aim_log_std_{yaw,pitch}_{t,ct}.
+
+    WHY the legacy keys survive as a mean rather than being replaced: the T7
+    acceptance gate greps the status line for `aim_log_std_pitch=` (see
+    format_train_status), and every dashboard/analysis consumer reads those
+    two names. Adding the per-team keys alongside is what exposes the actually
+    interesting Batch 7 signal — whether the teams learn different aim noise.
+
+    WHY this is a function and not three inline lines in the outer loop: the
+    pre-Batch-7 code read policy.aim_log_std unconditionally, which raises
+    AttributeError on a split policy before the run writes a single metrics
+    row. Extracting it makes that path directly testable (spec §5 test 10,
+    which re-review N3 flagged as untested).
+
+    PITFALL: CLAMP EACH COPY, THEN AVERAGE — never average then clamp. The
+    forward path clamps per copy (spec §3.2), so a mean-then-clamp here would
+    report a σ the policy never used whenever one copy sits outside the band.
+
+    Architecture is detected from the policy object (hasattr aim_log_std_t),
+    never from config — config.json is rewritten every launch and lies after a
+    flag-less resume (spec §3.4).
+    """
+    # train.py imports torch lazily inside functions (module import stays cheap
+    # for the CLI/help paths) — keep that convention here.
+    import torch
+
+    with torch.no_grad():
+        if hasattr(policy, "aim_log_std_t"):
+            ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
+            ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
+            logs["policy/aim_log_std_yaw_t"] = float(ls_t[0])
+            logs["policy/aim_log_std_pitch_t"] = float(ls_t[1])
+            logs["policy/aim_log_std_yaw_ct"] = float(ls_ct[0])
+            logs["policy/aim_log_std_pitch_ct"] = float(ls_ct[1])
+            clamped = 0.5 * (ls_t + ls_ct)
+        else:
+            clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
+    logs["policy/aim_log_std_yaw"] = float(clamped[0])
+    logs["policy/aim_log_std_pitch"] = float(clamped[1])
+
+
+def compute_head_divergence(policy):
+    """split/head_l2_rel/<module> — how far the two team head copies have moved apart.
+
+    Metric (spec §4 Q3):  ‖W_t − W_ct‖ / (0.5‖W_t‖ + 0.5‖W_ct‖)
+
+    WHY relative and not raw L2: the optimizer runs weight_decay=1e-4
+    (see the Adam construction in train()), so even a copy that receives zero
+    gradient keeps moving. Raw L2 therefore has no achievable null. Normalising
+    by the mean norm of the two copies makes "how different are the teams'
+    heads" scale-free; the honest null is still a decay-aware control (zero-
+    advantage steps), which is what tests/test_tct_split.py exercises, and the
+    run readout reports the TRAJECTORY, not a binary.
+
+    Returns {} for a legacy policy — the metric is undefined with one copy,
+    and emitting a fake 0.0 would read as "the teams agree" to anyone
+    plotting it.
+
+    PITFALL: modules are grouped, not per-tensor — all 7 discrete heads
+    contribute to one `action_heads` number. Per-head keys would be 9 series
+    per epoch of mostly-identical curves; if a per-head breakdown is ever
+    needed, add it as a separate function rather than widening this one.
+    """
+    import torch
+
+    if not hasattr(policy, "aim_log_std_t"):
+        return {}
+
+    def _flat(obj):
+        if isinstance(obj, torch.nn.Parameter):
+            return obj.detach().reshape(-1)
+        return torch.cat([p.detach().reshape(-1) for p in obj.parameters()])
+
+    out = {}
+    with torch.no_grad():
+        for name, mod_t, mod_ct in (
+            ("action_heads", policy.action_heads_t, policy.action_heads_ct),
+            ("aim_mu", policy.aim_mu_t, policy.aim_mu_ct),
+            ("aim_log_std", policy.aim_log_std_t, policy.aim_log_std_ct),
+        ):
+            w_t, w_ct = _flat(mod_t), _flat(mod_ct)
+            denom = 0.5 * float(w_t.norm()) + 0.5 * float(w_ct.norm())
+            if denom > 0.0:
+                # NaN in either copy propagates through the ratio — visible,
+                # never masked as "teams identical".
+                val = float((w_t - w_ct).norm()) / denom
+            else:
+                # denom == 0.0 → both copies all-zero → genuinely identical.
+                # denom NaN fails both comparisons → emit NaN, not a fake 0.0.
+                val = 0.0 if denom == 0.0 else float("nan")
+            out[f"split/head_l2_rel/{name}"] = val
+    return out
 
 
 # ── SECTION: Timing patch ─────────────────────────────────────────────────
@@ -2446,7 +2852,15 @@ class SelfPlayManager:
         return bool(self.pool) and random.random() < self.p_past
 
     def load_past_policy(self, device, vecenv):
-        """Load a random past checkpoint. Returns the policy module or None."""
+        """Load a random past checkpoint. Returns the policy module or None.
+
+        Batch 7 (spec §3.3): the state_dict is read BEFORE build_policy so the
+        architecture can be inferred from its keys. This method receives no
+        config and no flag — during a split run the pool fills with split
+        snapshots, and a flag-only design would raise here on ~30% of epochs
+        (p_past=0.3), hours into the run. Inference also lets a split run mix
+        in pre-split snapshots left over in an older pool.
+        """
         import torch
 
         if not self.pool:
@@ -2455,9 +2869,9 @@ class SelfPlayManager:
         if not path.exists():
             self.pool.remove(path)
             return None
-        policy = build_policy(vecenv, device)
         state_dict = torch.load(path, map_location=device, weights_only=True)
-        policy.load_state_dict(state_dict)
+        policy = build_policy(vecenv, device, tct_split_heads=state_dict_is_split(state_dict))
+        load_state_dict_arch_checked(policy, state_dict, source=str(path))
         policy.eval()
         return policy
 
@@ -3149,7 +3563,15 @@ def _tag_param_groups(policy):
                    exists — it would replicate trunk while reading as
                    independent signal).
     policy_heads — action_heads.* + aim_mu.* + the aim_log_std parameter
-                   (6,170 params).
+                   (6,170 params). Batch 7: under --tct-split-heads BOTH team
+                   copies (action_heads_t/_ct, aim_mu_t/_ct, aim_log_std_t/_ct)
+                   map to this ONE group, doubling it to 12,340. The union is
+                   deliberate — it is what makes the T-vs-CT cross cos-sim
+                   exactly 0.0 (each team's gradient is zero on the other's
+                   copy), which the analyzer labels as a structural artifact
+                   rather than a conflict (spec §3.4). Splitting the group per
+                   team instead would produce a within-copy number that
+                   answers a different question than the trunk cells.
     value_head   — value_head.* (257 params; used ONLY for the vf control —
                    pg metrics skip it, the pg graph never touches it).
 
@@ -3165,7 +3587,9 @@ def _tag_param_groups(policy):
             continue
         if name.startswith(("encoder.", "lstm.")):
             groups["trunk"].append(p)
-        elif name.startswith(("action_heads.", "aim_mu.")) or name == "aim_log_std":
+        elif name.startswith(("action_heads.", "action_heads_t.", "action_heads_ct.",
+                              "aim_mu.", "aim_mu_t.", "aim_mu_ct.")) \
+                or name in ("aim_log_std", "aim_log_std_t", "aim_log_std_ct"):
             groups["policy_heads"].append(p)
         elif name.startswith("value_head."):
             groups["value_head"].append(p)
@@ -3652,8 +4076,18 @@ def train(args):
         **vec_kwargs,
     )
 
-    print(f"[Train] Building policy on device={device}...")
-    policy = build_policy(vecenv, device)
+    # Batch 7 (spec §3.3): sniff the resume checkpoint BEFORE build_policy —
+    # the architecture decision has to exist at construction time, and neither
+    # train_config (built below) nor the checkpoint read (further below) is
+    # available yet. The sniffed dict is reused at the load site.
+    # getattr on the flag keeps harness/older args objects working.
+    resume_path = getattr(args, "resume", None)
+    tct_split_heads, _resume_state_dict, resume_path = resolve_resume_split(
+        resume_path, flag=bool(getattr(args, "tct_split_heads", False)))
+
+    print(f"[Train] Building policy on device={device} "
+          f"(tct_split_heads={tct_split_heads})...")
+    policy = build_policy(vecenv, device, tct_split_heads=tct_split_heads)
 
     agents_per_env, bptt_horizon, batch_size = compute_batch_dims(args.num_envs)
     # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
@@ -3671,21 +4105,23 @@ def train(args):
         print(f"[Train] WARN: failed to write config.json: {_e}")
 
     # ── Resume from checkpoint ───────────────────────────────────────────────
-    resume_path = getattr(args, "resume", None)
+    # resume_path / _resume_state_dict come from the pre-build_policy sniff
+    # above; nothing is re-read from disk here.
     if resume_path:
-        import torch as _torch
-
-        resume_path = Path(resume_path)
-        if not resume_path.exists():
-            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
-        state_dict = _torch.load(resume_path, map_location=device, weights_only=True)
+        state_dict = _resume_state_dict
         # gh#91: BC warm-start checkpoints carry aim_log_std frozen at
         # LOG_STD_INIT — widen to AIM_LOG_STD_RESUME_INIT before loading or
         # the KL early-stop throttles the whole run (see the helper's doc).
+        # Batch 7: this MUST run before the warm split below — the re-initer
+        # keys off the σ key name, and duplicating first would hide it.
         if reinit_frozen_aim_log_std(state_dict):
             print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "
                   f"re-initialized to log(0.3) ≈ {AIM_LOG_STD_RESUME_INIT:.3f} (gh#91)")
-        policy.load_state_dict(state_dict)
+        if tct_split_heads and not state_dict_is_split(state_dict):
+            state_dict = convert_legacy_state_dict_to_split(state_dict)
+            print("[Train] Warm split: duplicated the legacy policy heads into per-team "
+                  "T/CT copies (spec 2026-08-13 §3.3) — both teams start identical.")
+        load_state_dict_arch_checked(policy, state_dict, source=str(resume_path))
         print(f"[Train] Resumed from checkpoint: {resume_path}")
     # ────────────────────────────────────────────────────────────────────────
 
@@ -3815,15 +4251,35 @@ def train(args):
 
             # Batch 3.5 (#24): per-axis aim log_std metrics. Read CLAMPED values
             # (the values the policy actually used at this iteration), not the raw
-            # nn.Parameter. LOG_STD_MIN/MAX are module-globals at lines 49-50.
-            # Load-bearing for T7 acceptance gate 2: aim_log_std_pitch > -3.5
-            # at 30M steps. Format string in format_train_status must keep the
-            # 'aim_log_std_pitch=' substring greppable.
-            with torch.no_grad():
-                clamped_log_std = torch.clamp(policy.aim_log_std, LOG_STD_MIN,
-                                              LOG_STD_MAX).cpu().numpy()
-            logs["policy/aim_log_std_yaw"] = float(clamped_log_std[0])
-            logs["policy/aim_log_std_pitch"] = float(clamped_log_std[1])
+            # nn.Parameter. Load-bearing for T7 acceptance gate 2:
+            # aim_log_std_pitch > -3.5 at 30M steps, and format_train_status must
+            # keep the 'aim_log_std_pitch=' substring greppable.
+            # Batch 7: the reader branches on architecture inside the helper —
+            # a split policy has no `aim_log_std` attribute at all (spec §3.6).
+            log_aim_log_std(policy, logs)
+
+            # Batch 7 (spec §3.4): split/active is the analyzer's labeling
+            # signal for the structurally-zero policy_heads TAG cells. It is
+            # derived from the POLICY OBJECT, never from config.json — the
+            # config is rewritten unconditionally at every launch, so a
+            # flag-less crash-resume of a split run (which key inference
+            # deliberately supports) would stamp tct_split_heads:false and
+            # silently disarm the labeling. A metrics key travels with the rows
+            # the analyzer already reads and survives resume seams.
+            #
+            # PLACEMENT IS PART OF THE CONTRACT: this belongs HERE, in the
+            # unconditional outer-loop logging block, NOT inside the TAG hook
+            # and NOT behind `tag_diagnostic` / `epoch % tag_every`. Every
+            # logged epoch's row must carry it. Gating it on the TAG throttle
+            # would leave ~80% of rows unlabeled at the default --tag-every 5,
+            # and any future analyzer that inspects a non-measurement row (a
+            # dead-window scan, a σ trajectory, a divergence plot) would read
+            # the missing key as "legacy run" — the exact misidentification the
+            # key exists to prevent. It is also independent of the TAG flag
+            # entirely: a split run launched WITHOUT --tag-diagnostic still
+            # labels every row.
+            logs["split/active"] = float(hasattr(policy, "aim_log_std_t"))
+            logs.update(compute_head_divergence(policy))
 
             # TAG injection — MUST stay after dead_run_detector.check above
             # (deliberate NaNs; see _inject_tag_metrics docstring).
@@ -4002,6 +4458,17 @@ if __name__ == "__main__":
                         dest="tag_every",
                         help="Measure on epochs where epoch %% tag_every == 0 (default 5; "
                         "values < 1 clamp to 1 at the hook).")
+
+    # ── Batch 7: T/CT policy-heads split (spec 2026-08-13) ──
+    parser.add_argument(
+        "--tct-split-heads",
+        action="store_true",
+        dest="tct_split_heads",
+        help="Give each team its own copy of the policy heads (action_heads, aim_mu, "
+        "aim_log_std), routed by the obs team bit; trunk and value head stay shared. "
+        "Only affects FRESH construction and the legacy->split warm conversion — every "
+        "loader infers split-ness from the checkpoint's keys, so a crash-resume without "
+        "this flag still rebuilds a split policy.")
     args = parser.parse_args()
 
     if args.dump_config:

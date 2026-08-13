@@ -39,6 +39,7 @@ def test_train_help_shows_current_cli():
             "--reward-win-ct-timeout",                 # A1b arm
             "--pbrs-nav-weight-t",                     # non-`reward_`-prefixed weight
             "--reward-symmetrize",                     # A2 arm
+            "--tct-split-heads",                       # Batch 7 heads split (spec 2026-08-13)
     ):
         assert flag in result.stdout, f"{flag} missing from --help output"
 
@@ -183,6 +184,22 @@ def test_tag_diagnostic_config_keys(tmp_path):
     cfg = _dump_config(tmp_path, "--tag-diagnostic", "--tag-every", "2")
     assert cfg["tag_diagnostic"] is True
     assert cfg["tag_every"] == 2
+
+
+def test_tct_split_heads_config_key(tmp_path):
+    """Batch 7 flag lands in config.json (provenance) — spec 2026-08-13 §2.
+
+    NOTE what this key is and is not: it records the FLAG AS PASSED, not the
+    architecture the run actually built. A flag-less crash-resume of a split
+    run correctly writes false here while running a split policy — which is
+    exactly why the TAG analyzer keys off the per-epoch split/active metric
+    instead of this file (spec §3.4).
+    """
+    cfg = _dump_config(tmp_path)
+    assert cfg["tct_split_heads"] is False
+
+    cfg = _dump_config(tmp_path, "--tct-split-heads")
+    assert cfg["tct_split_heads"] is True
 
 
 def test_train_smoke_returns_zero():

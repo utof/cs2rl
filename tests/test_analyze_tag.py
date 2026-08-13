@@ -161,3 +161,88 @@ def test_dead_window_rows_split_into_dead_phase():
     assert s["trunk"]["mb0"]["healthy"]["n_epochs"] == 10
     assert s["trunk"]["mb0"]["dead"]["n_epochs"] == 10
     assert s["trunk"]["mb0"]["dead"]["conflict"] > 0.5
+
+
+def _split_row(step, cross_half, within, group, mb="mb0", split_active=1.0):
+    """A metrics row from a SPLIT run: same shape as _row plus split/active."""
+    row = _row(step=step, cross_half=cross_half, within=within, mb=mb, group=group)
+    row["split/active"] = split_active
+    return row
+
+
+def test_split_active_routes_heads_cells_to_the_structural_state():
+    """Spec §5 test 5b: under a split run the policy_heads cross cos-sim is
+    EXACTLY 0 by architecture (each team's gradient is zero on the other
+    team's copy), so within − 0 would print a false CONFLICT. Rows carrying
+    split/active == 1 must route their policy_heads cells to the dedicated
+    structural verdict — while trunk cells keep normal verdicts, because the
+    trunk is still shared and its conflict is the actual decision metric.
+    """
+    rows = []
+    for i in range(30):
+        rows.append(_split_row(i * 1e5, cross_half=0.0, within=0.55, group="policy_heads"))
+        rows.append(_split_row(i * 1e5, cross_half=0.15, within=0.60, group="trunk"))
+    # merge the per-group rows pairwise so each epoch is one row, as in a real run
+    merged = []
+    for a, b in zip(rows[::2], rows[1::2], strict=True):
+        m = dict(a)
+        m.update(b)
+        merged.append(m)
+
+    s = tag_summary(merged, dead_windows=[])
+    heads = s["policy_heads"]["mb0"]["healthy"]
+    assert heads["verdict"] == "structural (split run — cross≡0 by architecture)"
+    assert heads["n_epochs"] == 30
+    assert s["trunk"]["mb0"]["healthy"]["verdict"] == "CONFLICT"
+    # _n_raw accounting is about "did the instrument run", NOT about structural
+    # exclusion — a structurally-excluded cell is not a dropped one (re-review N9).
+    assert s["_n_raw"] == 30
+
+
+def test_rows_without_split_active_behave_exactly_as_before():
+    """Spec §5 test 5b (regression half): a pre-Batch-7 run has no
+    split/active key anywhere and must score identically to today.
+    """
+    rows = [
+        _row(step=i * 1e5, cross_half=0.15, within=0.60, group="policy_heads") for i in range(30)
+    ]
+    s = tag_summary(rows, dead_windows=[])
+    assert s["policy_heads"]["mb0"]["healthy"]["verdict"] == "CONFLICT"
+    assert s["_structural_backstop"] is False
+
+
+def test_all_zero_cross_backstop_warns_without_split_active():
+    """Spec §3.4 backstop (belt-and-braces, warn-only): if every measured
+    policy_heads cross_half is exactly 0.0 and no split/active key is present,
+    the run is almost certainly a split run whose metrics predate — or lost —
+    the labeling key. Warn rather than relabel: the analyzer must not
+    silently decide a run's architecture from a numeric coincidence.
+    """
+    rows = [
+        _row(step=i * 1e5, cross_half=0.0, within=0.55, group="policy_heads") for i in range(30)
+    ]
+    s = tag_summary(rows, dead_windows=[])
+    assert s["_structural_backstop"] is True
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_tag_report(s)
+    out = buf.getvalue()
+    assert "cross_half is exactly 0.0" in out
+    assert "--tct-split-heads" in out
+
+
+def test_structural_verdict_prints_on_its_own_line():
+    """Spec §5 test 5b: the structural state is REPORTED, on its own line, and
+    says why the cell is excluded from the decision — not hidden, and not
+    routed through the drop path whose _n_raw wording ("everything dropped")
+    would misdescribe it.
+    """
+    rows = [
+        _split_row(i * 1e5, cross_half=0.0, within=0.55, group="policy_heads") for i in range(30)
+    ]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_tag_report(tag_summary(rows, dead_windows=[]))
+    out = buf.getvalue()
+    assert "structural (split run — cross≡0 by architecture)" in out
+    assert "trunk cells are the decision metric" in out
