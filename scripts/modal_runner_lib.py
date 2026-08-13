@@ -2302,11 +2302,19 @@ def _run_training_attempt(
         )
     except KeyboardInterrupt:
         finalize(Status.INTERRUPTED, REASON_SIGNAL, None, kill_child=True)
+        try:
+            publish_stable_checkpoint(run_root, now=now, commit=commit, sleep=sleep)
+        except Exception:
+            pass
         if final_result is not None:
             return final_result
         raise
     except Exception:
         finalize(Status.FAILED, REASON_ERROR, None, kill_child=True)
+        try:
+            publish_stable_checkpoint(run_root, now=now, commit=commit, sleep=sleep)
+        except Exception:
+            pass
         raise
     finally:
         if prev_int is not None:
