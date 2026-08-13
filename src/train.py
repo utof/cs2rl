@@ -765,7 +765,10 @@ def load_policy_from_checkpoint(checkpoint_path, device):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     print(f"[Policy] Loading checkpoint -> {checkpoint_path}")
-    state_dict = torch.load(checkpoint_path, map_location=device)
+    # weights_only=True: every checkpoint this project writes is a bare tensor
+    # state_dict, and the other loaders (resume sniff, self-play pool) already
+    # load with it — a checkpoint that fails here is untrusted or corrupt.
+    state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
 
     # Infer obs_dim from checkpoint to handle checkpoints trained with different obs sizes
     ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]

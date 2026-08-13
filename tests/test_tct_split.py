@@ -396,3 +396,10 @@ def test_load_policy_from_checkpoint_infers_split(env, tmp_path):
     torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
     p = train.load_policy_from_checkpoint(split_pt, "cpu")
     assert p.tct_split_heads is True
+
+    # Legacy vintage through the same loader — this function has no other test
+    # coverage in the repo, so pin both directions here.
+    legacy_pt = tmp_path / "eval_legacy.pt"
+    torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
+    p = train.load_policy_from_checkpoint(legacy_pt, "cpu")
+    assert p.tct_split_heads is False
