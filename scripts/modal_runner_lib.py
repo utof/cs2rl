@@ -29,9 +29,10 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Protocol
@@ -1401,3 +1402,354 @@ def build_dump_config_argv(request: RunRequest, remote_resume: str | None) -> li
     """
     run_root = mounted_path(RUNS_ROOT / request.run_id)
     return _assemble_train_argv(request, run_root, remote_resume, dump_config=True)
+
+
+UV_BIN = "/usr/local/bin/uv"
+PREBUILT_PYTHON = "/opt/cs2rl/.venv/bin/python"
+TRAIN_SCRIPT = "src/train.py"
+
+# Child env is an allowlist, not a denylist: Modal/image leftovers (tokens,
+# extra WANDB_* creds, host thread caps) must not leak into uv/train.
+_PRESERVED_CHILD_ENV_KEYS = frozenset({
+    "PATH",
+    "PYTHONPATH",
+    "LD_LIBRARY_PATH",
+    "LIBRARY_PATH",
+    "CPATH",
+    "CPLUS_INCLUDE_PATH",
+    "CUDA_HOME",
+    "CUDA_PATH",
+    "NVIDIA_VISIBLE_DEVICES",
+    "NVIDIA_DRIVER_CAPABILITIES",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_NUMERIC",
+    "LC_TIME",
+    "LC_COLLATE",
+    "LC_MONETARY",
+    "LC_MESSAGES",
+    "LC_PAPER",
+    "LC_NAME",
+    "LC_ADDRESS",
+    "LC_TELEPHONE",
+    "LC_MEASUREMENT",
+    "LC_IDENTIFICATION",
+})
+_THREAD_CAP_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+
+
+def _is_preserved_child_env_key(key: str) -> bool:
+    return key in _PRESERVED_CHILD_ENV_KEYS or key.startswith("LC_")
+
+
+def build_child_env(
+    parent: Mapping[str, str],
+    *,
+    wandb_enabled: bool = False,
+    wandb_api_key: str | None = None,
+) -> dict[str, str]:
+    """Allowlisted runtime/build env plus forced single-thread BLAS caps.
+
+    WANDB_* never comes from the parent. When W&B is on, only WANDB_API_KEY
+    from the attached Secret is added — callers must not log or persist it.
+    """
+    env = {key: value for key, value in parent.items() if _is_preserved_child_env_key(key)}
+    env.update(_THREAD_CAP_ENV)
+    if wandb_enabled:
+        if not wandb_api_key:
+            raise ValidationError("WANDB_API_KEY is required when W&B is enabled")
+        env["WANDB_API_KEY"] = wandb_api_key
+    return env
+
+
+def build_install_command(source_dir: str | Path) -> list[str]:
+    """Install only the extracted project into the prebuilt image venv."""
+    return [
+        UV_BIN,
+        "pip",
+        "install",
+        "--python",
+        PREBUILT_PYTHON,
+        "--no-deps",
+        "--no-build-isolation",
+        os.fspath(source_dir),
+    ]
+
+
+def build_train_command(argv: Sequence[str]) -> list[str]:
+    """Prebuilt interpreter + live script + already-split argv. Never a shell."""
+    return [PREBUILT_PYTHON, TRAIN_SCRIPT, *argv]
+
+
+def build_dump_config_command(request: RunRequest, remote_resume: str | None) -> list[str]:
+    """Cheap --dump-config invocation with the same owned flags as training."""
+    return build_train_command(build_dump_config_argv(request, remote_resume))
+
+
+# Minimum CUDA tensors: 2-step x 1-agent, enough for compute_puff_advantage
+# to dispatch without training-sized allocations.
+CUDA_PROBE_SOURCE = """
+import torch
+import pufferlib.pufferl as pufferl
+assert torch.cuda.is_available(), "cuda is not available"
+assert pufferl.ADVANTAGE_CUDA, "ADVANTAGE_CUDA is false"
+values = torch.zeros((2, 1), device="cuda")
+rewards = torch.zeros((2, 1), device="cuda")
+terminals = torch.zeros((2, 1), device="cuda")
+ratio = torch.ones((2, 1), device="cuda")
+advantages = torch.zeros((2, 1), device="cuda")
+pufferl.compute_puff_advantage(
+    values, rewards, terminals, ratio, advantages, 0.99, 0.95, 1.0, 1.0)
+torch.cuda.synchronize()
+""".strip()
+
+
+def build_cuda_probe_command() -> list[str]:
+    """Prebuilt interpreter running the CUDA/PufferLib advantage probe string."""
+    return [PREBUILT_PYTHON, "-c", CUDA_PROBE_SOURCE]
+
+
+@dataclass
+class HeartbeatWorker:
+    """Independent STATUS.json refresher. stop_and_join before every terminal write."""
+
+    stop: threading.Event
+    thread: threading.Thread
+
+    def stop_and_join(self, timeout: float = 5.0) -> None:
+        self.stop.set()
+        self.thread.join(timeout=timeout)
+        if self.thread.is_alive():
+            raise RuntimeError("heartbeat worker did not stop")
+
+
+def start_heartbeat_worker(
+    *,
+    run_root: Path,
+    attempt_id: str,
+    lock: LockLike,
+    now: Callable[[], datetime],
+    commit: Callable[[], None] | None = None,
+    interval: timedelta = HEARTBEAT_INTERVAL,
+    wait: Callable[[threading.Event, float], bool] | None = None,
+) -> HeartbeatWorker:
+    """Write + commit immediately, then every `interval`, until stop_and_join.
+
+    `wait(event, seconds)` is injectable so tests can advance a fake clock
+    instead of sleeping a real minute. The default is Event.wait.
+    """
+    stop = threading.Event()
+    wait_fn = wait if wait is not None else (lambda event, seconds: event.wait(seconds))
+
+    def loop() -> None:
+        while not stop.is_set():
+            write_heartbeat(run_root, now=now(), attempt_id=attempt_id, lock=lock)
+            if commit is not None:
+                commit()
+            if wait_fn(stop, interval.total_seconds()):
+                break
+
+    thread = threading.Thread(target=loop, name="cs2rl-preflight-heartbeat", daemon=True)
+    thread.start()
+    return HeartbeatWorker(stop=stop, thread=thread)
+
+
+class ReloadingVolume(Protocol):
+    """In-container Volume handle. reload before reads; commit after STATUS writes."""
+
+    def reload(self) -> None:
+        ...
+
+    def commit(self) -> None:
+        ...
+
+
+@dataclass
+class PreparedSource:
+    """Extracted project ready for remaining preflight / training handoff."""
+
+    source_dir: Path
+    child_env: dict[str, str]
+    train_command: list[str]
+    heartbeat: object | None = None
+    config_hash: str | None = None
+    _staging: tempfile.TemporaryDirectory[str] | None = field(default=None,
+                                                              repr=False,
+                                                              compare=False)
+
+    def __repr__(self) -> str:
+        # child_env may hold WANDB_API_KEY; only key names are safe to show.
+        return (f"PreparedSource(source_dir={self.source_dir!r}, "
+                f"child_env_keys={sorted(self.child_env)!r}, "
+                f"train_command={self.train_command!r}, "
+                f"config_hash={self.config_hash!r})")
+
+
+def _verify_extracted_provenance(source_dir: Path, expected_commit: str,
+                                 expected_tree: str) -> None:
+    sidecar_path = source_dir / PROVENANCE_NAME
+    if not sidecar_path.is_file():
+        raise ValidationError(f"missing provenance sidecar: {sidecar_path}")
+    payload = json.loads(sidecar_path.read_text())
+    commit = str(payload.get("commit", ""))
+    tree = str(payload.get("tree", ""))
+    if commit != expected_commit or tree != expected_tree:
+        raise ValidationError(f"provenance sidecar mismatch: commit {commit} tree {tree} "
+                              f"!= expected {expected_commit} {expected_tree}")
+
+
+def _stop_heartbeat(heartbeat: object | None) -> None:
+    if heartbeat is None:
+        return
+    stop = getattr(heartbeat, "stop_and_join", None)
+    if stop is not None:
+        stop()
+
+
+def _validate_remote_resume(path: Path, expected_sha256: str | None) -> FileProvenance:
+    """Weights-only load the mounted checkpoint and pin its content hash."""
+    provenance = validate_local_checkpoint(path)
+    if expected_sha256 is not None and provenance.sha256 != expected_sha256:
+        raise ValidationError(f"resume sha256 {provenance.sha256} != expected {expected_sha256}")
+    return provenance
+
+
+def _hash_dumped_config(run_root: Path) -> str:
+    config_path = Path(run_root) / "checkpoints" / "config.json"
+    if not config_path.is_file():
+        raise ValidationError("dump-config did not write checkpoints/config.json")
+    config = json.loads(config_path.read_text())
+    normalized = normalize_config_for_transport(config)
+    return sha256_bytes(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode())
+
+
+def prepare_remote_source(
+    *,
+    volume: ReloadingVolume,
+    archive_path: Path,
+    expected_archive_sha256: str,
+    expected_commit: str,
+    expected_tree: str,
+    request: RunRequest,
+    run_root: Path,
+    attempt_id: str,
+    lock: LockLike,
+    run: Callable[..., subprocess.CompletedProcess[object]] = subprocess.run,
+    start_heartbeat: Callable[..., object] | None = None,
+    ephemeral_parent: Path | None = None,
+    parent_env: Mapping[str, str] | None = None,
+    wandb_api_key: str | None = None,
+    now: Callable[[], datetime] | None = None,
+    remote_resume: str | Path | None = None,
+    expected_resume_sha256: str | None = None,
+    manifest: Manifest | None = None,
+    on_ready: Callable[[PreparedSource], object] | None = None,
+) -> PreparedSource:
+    """Reload, verify, extract, install, dump, probe; hand off a live heartbeat.
+
+    Fallible project/C-extension work happens after the Volume run root can
+    accept STATUS/manifest writes so a failure can persist build_failed.
+    Static image-build errors stay in the CLI and never reach this function.
+    Success transfers heartbeat ownership to the caller; every exception
+    path stops/joins first, then writes the terminal state under the same lock.
+    """
+    now_fn = now if now is not None else (lambda: datetime.now(UTC))
+    run_root = Path(run_root)
+    heartbeat: object | None = None
+    staging: tempfile.TemporaryDirectory[str] | None = None
+    if start_heartbeat is None:
+        start_heartbeat = start_heartbeat_worker
+    try:
+        if _read_status(run_root) is None:
+            transition_status(run_root,
+                              Status.PREPARING,
+                              now=now_fn(),
+                              attempt_id=attempt_id,
+                              lock=lock)
+        heartbeat = start_heartbeat(
+            run_root=run_root,
+            attempt_id=attempt_id,
+            lock=lock,
+            now=now_fn,
+            commit=volume.commit,
+        )
+        volume.reload()
+        archive_path = Path(archive_path)
+        if not archive_path.is_file():
+            raise ValidationError(f"source archive missing after Volume.reload(): {archive_path}")
+        digest = sha256_file(archive_path)
+        if digest != expected_archive_sha256:
+            raise ValidationError(
+                f"source archive sha256 {digest} != expected {expected_archive_sha256}")
+        if ephemeral_parent is not None:
+            Path(ephemeral_parent).mkdir(parents=True, exist_ok=True)
+        staging = tempfile.TemporaryDirectory(prefix="cs2rl-src-", dir=ephemeral_parent)
+        source_dir = Path(staging.name)
+        safe_extract_git_archive(archive_path, source_dir)
+        _verify_extracted_provenance(source_dir, expected_commit, expected_tree)
+        if manifest is not None:
+            atomic_write_json(run_root / MANIFEST_FILENAME, manifest.to_dict())
+            volume.commit()
+        transition_status(run_root, Status.BUILDING, now=now_fn(), attempt_id=attempt_id, lock=lock)
+        child_env = build_child_env(
+            parent_env if parent_env is not None else os.environ,
+            wandb_enabled=request.wandb_secret_name is not None,
+            wandb_api_key=wandb_api_key,
+        )
+        cwd = os.fspath(source_dir)
+        run(build_install_command(source_dir), cwd=cwd, shell=False, env=child_env, check=True)
+        resume_str = os.fspath(remote_resume) if remote_resume is not None else None
+        if resume_str is not None:
+            _validate_remote_resume(Path(resume_str), expected_resume_sha256)
+        run(
+            build_dump_config_command(request, resume_str),
+            cwd=cwd,
+            shell=False,
+            env=child_env,
+            check=True,
+        )
+        config_hash = _hash_dumped_config(run_root)
+        if manifest is not None:
+            atomic_write_json(
+                run_root / MANIFEST_FILENAME,
+                replace(manifest, config_hash=config_hash).to_dict(),
+            )
+            volume.commit()
+        run(build_cuda_probe_command(), cwd=cwd, shell=False, env=child_env, check=True)
+        prepared = PreparedSource(
+            source_dir=source_dir,
+            child_env=child_env,
+            train_command=build_train_command(build_train_argv(request, resume_str)),
+            heartbeat=heartbeat,
+            config_hash=config_hash,
+            _staging=staging,
+        )
+        if on_ready is not None:
+            on_ready(prepared)
+        return prepared
+    except Exception:
+        _stop_heartbeat(heartbeat)
+        current = _read_status(run_root)
+        if current is not None and current.attempt_id == attempt_id:
+            try:
+                transition_status(run_root,
+                                  Status.BUILD_FAILED,
+                                  now=now_fn(),
+                                  attempt_id=attempt_id,
+                                  lock=lock)
+                volume.commit()
+            except Exception:
+                # Do not hide the original preflight error.
+                pass
+        if staging is not None:
+            staging.cleanup()
+        raise

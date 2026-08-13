@@ -25,13 +25,16 @@ Pitfalls this file is careful about:
 """
 import ast
 import json
+import os
 import subprocess
 import sys
 import tarfile
 import threading
+import time
 import tomllib
-from datetime import UTC
+from datetime import UTC, timedelta
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 
@@ -1655,3 +1658,626 @@ def test_different_attempt_cannot_reach_remote_wrapper():
     # Loser never received a Function delivery, so no attempt:<id> claim exists.
     assert registry.get("attempt:attempt-b") is None
     assert registry.get("attempt:attempt-a") is None
+
+
+# ── Task 6 cycle A: child environment + exact command builders ─────────────
+
+
+def test_child_env_preserves_runtime_keys_and_forces_thread_caps():
+    parent = {
+        "PATH": "/usr/bin",
+        "PYTHONPATH": "/opt/extra",
+        "LD_LIBRARY_PATH": "/usr/lib/cuda",
+        "LIBRARY_PATH": "/usr/lib",
+        "CPATH": "/usr/include",
+        "CPLUS_INCLUDE_PATH": "/usr/include/c++",
+        "CUDA_HOME": "/usr/local/cuda",
+        "CUDA_PATH": "/usr/local/cuda",
+        "NVIDIA_VISIBLE_DEVICES": "0",
+        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+        "HOME": "/home/modal",
+        "TMPDIR": "/tmp",
+        "LANG": "C.UTF-8",
+        "LANGUAGE": "en_US:en",
+        "LC_ALL": "C.UTF-8",
+        "LC_CTYPE": "C.UTF-8",
+        "LC_MESSAGES": "C",
+        "SECRET_TOKEN": "drop-me",
+        "WANDB_API_KEY": "parent-secret",
+        "WANDB_AUTH": "also-secret",
+        "OMP_NUM_THREADS": "16",
+        "MKL_NUM_THREADS": "8",
+        "OPENBLAS_NUM_THREADS": "32",
+        "NUMEXPR_NUM_THREADS": "4",
+    }
+    env = mrl.build_child_env(parent, wandb_enabled=False)
+    for key in (
+            "PATH",
+            "PYTHONPATH",
+            "LD_LIBRARY_PATH",
+            "LIBRARY_PATH",
+            "CPATH",
+            "CPLUS_INCLUDE_PATH",
+            "CUDA_HOME",
+            "CUDA_PATH",
+            "NVIDIA_VISIBLE_DEVICES",
+            "NVIDIA_DRIVER_CAPABILITIES",
+            "HOME",
+            "TMPDIR",
+            "LANG",
+            "LANGUAGE",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LC_MESSAGES",
+    ):
+        assert env[key] == parent[key]
+    assert env["OMP_NUM_THREADS"] == "1"
+    assert env["MKL_NUM_THREADS"] == "1"
+    assert env["OPENBLAS_NUM_THREADS"] == "1"
+    assert env["NUMEXPR_NUM_THREADS"] == "1"
+    assert "SECRET_TOKEN" not in env
+    assert not any(key.startswith("WANDB_") for key in env)
+
+
+def test_child_env_wandb_disabled_strips_every_wandb_credential():
+    env = mrl.build_child_env(
+        {
+            "PATH": "/bin",
+            "WANDB_API_KEY": "parent-secret",
+            "WANDB_API_KEY_FILE": "/secrets/wandb",
+            "WANDB_AUTH": "token",
+        },
+        wandb_enabled=False,
+    )
+    assert not any(key.startswith("WANDB_") for key in env)
+
+
+def test_child_env_wandb_enabled_passes_secret_without_serializing():
+    secret = "secret-from-modal"
+    env = mrl.build_child_env(
+        {
+            "PATH": "/bin",
+            "WANDB_API_KEY": "parent-should-not-win",
+            "WANDB_AUTH": "drop-this-too",
+        },
+        wandb_enabled=True,
+        wandb_api_key=secret,
+    )
+    assert env["WANDB_API_KEY"] == secret
+    # Parent WANDB_* credentials are not inherited; only the attached Secret.
+    assert "WANDB_AUTH" not in env
+    # The Secret must not appear in a JSON dump of the rest of the env.
+    redacted = json.dumps({key: value for key, value in env.items() if key != "WANDB_API_KEY"})
+    assert secret not in redacted
+    with pytest.raises(mrl.ValidationError):
+        mrl.build_child_env({"PATH": "/bin"}, wandb_enabled=True, wandb_api_key=None)
+
+
+def test_install_and_train_commands_are_exact():
+    source_dir = "/tmp/extracted-src"
+    assert mrl.build_install_command(source_dir) == [
+        "/usr/local/bin/uv",
+        "pip",
+        "install",
+        "--python",
+        "/opt/cs2rl/.venv/bin/python",
+        "--no-deps",
+        "--no-build-isolation",
+        source_dir,
+    ]
+    argv = ["--train", "--timesteps", "1"]
+    assert mrl.build_train_command(argv) == [
+        "/opt/cs2rl/.venv/bin/python",
+        "src/train.py",
+        *argv,
+    ]
+
+
+# ── Task 6 cycle B: reload / verify / extract / install ────────────────────
+
+
+class RecordingVolume:
+    """Materializes the uploaded archive only on reload, like Volume.reload()."""
+
+    def __init__(self, src_archive: Path, dest_archive: Path):
+        self.events: list[str] = []
+        self._src = src_archive
+        self._dest = dest_archive
+
+    def reload(self) -> None:
+        self.events.append("reload")
+        if not self._dest.exists():
+            self._dest.parent.mkdir(parents=True, exist_ok=True)
+            self._dest.write_bytes(self._src.read_bytes())
+
+    def commit(self) -> None:
+        self.events.append("commit")
+
+
+def _noop_heartbeat(**_kwargs):
+    return SimpleNamespace(stop_and_join=lambda: None)
+
+
+def _source_bundle(tmp_path: Path):
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    client_archive = tmp_path / "client.tar.gz"
+    provenance = mrl.create_source_bundle(repo, sha, client_archive)
+    mount_archive = tmp_path / "artifacts" / "sources" / f"{provenance.archive_sha256}.tar.gz"
+    return sha, tree, client_archive, mount_archive, provenance
+
+
+def _preflight_kwargs(tmp_path: Path, **overrides):
+    sha, tree, client_archive, mount_archive, provenance = _source_bundle(tmp_path)
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    kwargs = {
+        "volume": RecordingVolume(client_archive, mount_archive),
+        "archive_path": mount_archive,
+        "expected_archive_sha256": provenance.archive_sha256,
+        "expected_commit": sha,
+        "expected_tree": tree,
+        "request": mrl.build_run_request(**_valid_run_kwargs(run_id="ok-id")),
+        "run_root": run_root,
+        "attempt_id": "attempt-a",
+        "lock": threading.Lock(),
+        "ephemeral_parent": tmp_path / "ephemeral",
+        "parent_env": {
+            "PATH": "/usr/bin",
+            "HOME": "/home/modal",
+            "WANDB_API_KEY": "parent-secret"
+        },
+        "now": lambda: _aware(),
+        "start_heartbeat": _noop_heartbeat,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_prepare_reloads_verifies_extracts_then_installs(tmp_path):
+    recorded: list[tuple[list[str], dict]] = []
+    heartbeat_events: list[str] = []
+
+    def start_heartbeat(**kwargs):
+        heartbeat_events.append("start")
+        return SimpleNamespace(stop_and_join=lambda: heartbeat_events.append("stopped"))
+
+    def fake_run(cmd, **kwargs):
+        assert heartbeat_events == ["start"]
+        recorded.append((list(cmd), kwargs))
+        if "--dump-config" in list(cmd):
+            _write_dumped_config(run_root)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    kwargs = _preflight_kwargs(tmp_path, run=fake_run, start_heartbeat=start_heartbeat)
+    volume = kwargs["volume"]
+    run_root = kwargs["run_root"]
+    prepared = mrl.prepare_remote_source(**kwargs)
+    assert volume.events[0] == "reload"
+    assert recorded, "install command was never invoked"
+    install_cmd, install_kwargs = recorded[0]
+    assert install_cmd == mrl.build_install_command(prepared.source_dir)
+    assert install_kwargs["cwd"] == os.fspath(prepared.source_dir)
+    assert install_kwargs["shell"] is False
+    assert install_kwargs["env"]["PATH"] == "/usr/bin"
+    assert install_kwargs["env"]["OMP_NUM_THREADS"] == "1"
+    assert "WANDB_API_KEY" not in install_kwargs["env"]
+    assert (prepared.source_dir / "readme.txt").read_text() == "hello\n"
+    sidecar = json.loads((prepared.source_dir / mrl.PROVENANCE_NAME).read_text())
+    assert sidecar["commit"] == kwargs["expected_commit"]
+    assert sidecar["tree"] == kwargs["expected_tree"]
+    assert prepared.source_dir.is_relative_to(tmp_path / "ephemeral")
+    assert not mount_is_extract_root(prepared.source_dir, kwargs["archive_path"])
+
+
+def mount_is_extract_root(source_dir: Path, archive_path: Path) -> bool:
+    return source_dir == archive_path.parent or archive_path.parent in source_dir.parents
+
+
+def test_prepare_rejects_archive_hash_mismatch(tmp_path):
+    kwargs = _preflight_kwargs(tmp_path, expected_archive_sha256="0" * 64, run=lambda *a, **k: None)
+    with pytest.raises(mrl.ValidationError):
+        mrl.prepare_remote_source(**kwargs)
+    # Hash is checked after reload; the archive must not be trusted blindly.
+    assert kwargs["volume"].events[0] == "reload"
+
+
+def test_prepare_rejects_provenance_sidecar_mismatch(tmp_path):
+    kwargs = _preflight_kwargs(tmp_path, expected_commit="f" * 40, run=lambda *a, **k: None)
+    with pytest.raises(mrl.ValidationError):
+        mrl.prepare_remote_source(**kwargs)
+
+
+def test_prepare_reads_archive_only_after_volume_reload(tmp_path):
+    kwargs = _preflight_kwargs(tmp_path, run=lambda *a, **k: None)
+
+    class BlindVolume:
+        events: list[str] = []
+
+        def reload(self) -> None:
+            self.events.append("reload")
+
+        def commit(self) -> None:
+            self.events.append("commit")
+
+    kwargs["volume"] = BlindVolume()
+    with pytest.raises((mrl.ValidationError, FileNotFoundError, OSError)):
+        mrl.prepare_remote_source(**kwargs)
+    assert kwargs["volume"].events[0] == "reload"
+
+
+# ── Task 6 cycle C: resume validation + cheap config dump/hash ──────────────
+
+
+def _write_dumped_config(run_root: Path) -> dict[str, object]:
+    ckpt_dir = run_root / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    config = {"env": "cs2-dust2", "seed": 2, "data_dir": str(ckpt_dir), "timesteps": 30000000}
+    (ckpt_dir / "config.json").write_text(json.dumps(config))
+    return config
+
+
+def test_dump_config_command_is_exact():
+    request = mrl.build_run_request(**_valid_run_kwargs(run_id="ok-id"))
+    resume = "/artifacts/inputs/sha256/abc.pt"
+    assert mrl.build_dump_config_command(request, resume) == [
+        "/opt/cs2rl/.venv/bin/python",
+        "src/train.py",
+        *mrl.build_dump_config_argv(request, resume),
+    ]
+
+
+def test_prepare_validates_resume_then_dumps_and_hashes_config(tmp_path):
+    import torch
+
+    ckpt = tmp_path / "artifacts" / "inputs" / "sha256" / "warm.pt"
+    ckpt.parent.mkdir(parents=True)
+    torch.save({"weight": torch.tensor([1.0, 2.0])}, ckpt)
+    digest = mrl.sha256_file(ckpt)
+    recorded: list[tuple[list[str], dict]] = []
+    validated: list[Path] = []
+
+    def fake_run(cmd, **kwargs):
+        recorded.append((list(cmd), kwargs))
+        cmd_list = list(cmd)
+        if "--dump-config" in cmd_list:
+            # Resume must already have been accepted before the cheap dump.
+            assert validated == [ckpt]
+            _write_dumped_config(kwargs_run_root)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    orig_validate = mrl.validate_local_checkpoint
+
+    def tracking_validate(path):
+        validated.append(Path(path))
+        return orig_validate(path)
+
+    kwargs_run_root = tmp_path / "run"
+    manifest = _make_manifest(config_hash="0" * 64, run_id="ok-id")
+    kwargs = _preflight_kwargs(
+        tmp_path,
+        run=fake_run,
+        start_heartbeat=_noop_heartbeat,
+        remote_resume=str(ckpt),
+        expected_resume_sha256=digest,
+        manifest=manifest,
+    )
+    kwargs_run_root = kwargs["run_root"]
+    monkey_validate = tracking_validate
+    mrl.validate_local_checkpoint = monkey_validate
+    try:
+        prepared = mrl.prepare_remote_source(**kwargs)
+    finally:
+        mrl.validate_local_checkpoint = orig_validate
+    assert validated == [ckpt]
+    assert len(recorded) >= 2
+    dump_cmd, dump_kwargs = recorded[1]
+    request = kwargs["request"]
+    assert dump_cmd == mrl.build_dump_config_command(request, str(ckpt))
+    assert dump_kwargs["cwd"] == os.fspath(prepared.source_dir)
+    assert dump_kwargs["shell"] is False
+    assert dump_kwargs["env"]["OMP_NUM_THREADS"] == "1"
+    dumped = json.loads((kwargs["run_root"] / "checkpoints" / "config.json").read_text())
+    expected_hash = mrl.sha256_bytes(
+        json.dumps(mrl.normalize_config_for_transport(dumped),
+                   sort_keys=True,
+                   separators=(",", ":")).encode())
+    payload = json.loads((kwargs["run_root"] / mrl.MANIFEST_FILENAME).read_text())
+    assert payload["config_hash"] == expected_hash
+    assert prepared.config_hash == expected_hash
+    assert "data_dir" not in mrl.normalize_config_for_transport(dumped)
+
+
+def test_prepare_rejects_resume_hash_mismatch(tmp_path):
+    import torch
+
+    ckpt = tmp_path / "warm.pt"
+    torch.save({"weight": torch.tensor([1.0])}, ckpt)
+    kwargs = _preflight_kwargs(
+        tmp_path,
+        run=lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0),
+        start_heartbeat=_noop_heartbeat,
+        remote_resume=str(ckpt),
+        expected_resume_sha256="0" * 64,
+        manifest=_make_manifest(),
+    )
+    with pytest.raises(mrl.ValidationError):
+        mrl.prepare_remote_source(**kwargs)
+
+
+def test_prepare_rejects_non_checkpoint_resume(tmp_path):
+    ckpt = tmp_path / "warm.pt"
+    ckpt.write_text("not a checkpoint\n")
+    kwargs = _preflight_kwargs(
+        tmp_path,
+        run=lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0),
+        start_heartbeat=_noop_heartbeat,
+        remote_resume=str(ckpt),
+        expected_resume_sha256=mrl.sha256_file(ckpt),
+        manifest=_make_manifest(),
+    )
+    with pytest.raises(mrl.ValidationError):
+        mrl.prepare_remote_source(**kwargs)
+
+
+# ── Task 6 cycle D: CUDA/PufferLib probe + preflight heartbeat ─────────────
+
+
+def _write_probe_stubs(root: Path, *, advantage_cuda: bool, record_path: Path) -> None:
+    """Minimal torch/pufferlib so the probe string can run without a GPU."""
+    torch_dir = root / "torch"
+    torch_dir.mkdir(parents=True)
+    (torch_dir / "__init__.py").write_text(f"""
+class _Cuda:
+    def is_available(self):
+        return True
+    def synchronize(self):
+        open({str(record_path)!r}, "a").write("synchronize\\n")
+
+class Tensor:
+    def __init__(self, shape, device="cpu"):
+        self.shape = shape
+        self.device = device
+
+def zeros(shape, device="cpu"):
+    return Tensor(shape, device)
+
+def ones(shape, device="cpu"):
+    return Tensor(shape, device)
+
+cuda = _Cuda()
+""")
+    puffer_dir = root / "pufferlib"
+    puffer_dir.mkdir(parents=True)
+    (puffer_dir / "__init__.py").write_text("")
+    (puffer_dir / "pufferl.py").write_text(f"""
+ADVANTAGE_CUDA = {advantage_cuda!r}
+
+def compute_puff_advantage(values, rewards, terminals, ratio, advantages, *args):
+    with open({str(record_path)!r}, "a") as handle:
+        handle.write("compute_puff_advantage device=" + str(values.device) + "\\n")
+    return advantages
+""")
+
+
+def _run_cuda_probe(tmp_path: Path, *, advantage_cuda: bool):
+    stubs = tmp_path / "stubs"
+    record_path = tmp_path / "probe.log"
+    record_path.write_text("")
+    _write_probe_stubs(stubs, advantage_cuda=advantage_cuda, record_path=record_path)
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(stubs)}
+    result = subprocess.run(
+        [sys.executable, "-c", mrl.CUDA_PROBE_SOURCE],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, record_path
+
+
+def test_cuda_probe_command_is_exact_python_string():
+    command = mrl.build_cuda_probe_command()
+    assert command[0] == "/opt/cs2rl/.venv/bin/python"
+    assert command[1] == "-c"
+    source = command[2]
+    assert source == mrl.CUDA_PROBE_SOURCE
+    assert "torch.cuda.is_available()" in source
+    assert "pufferlib.pufferl" in source
+    assert "ADVANTAGE_CUDA" in source
+    assert "compute_puff_advantage" in source
+    assert "synchronize" in source
+
+
+def test_cuda_probe_fails_when_advantage_cuda_is_false(tmp_path):
+    result, _record_path = _run_cuda_probe(tmp_path, advantage_cuda=False)
+    assert result.returncode != 0
+    assert "ADVANTAGE_CUDA" in (result.stderr + result.stdout)
+
+
+def test_cuda_probe_success_invokes_kernel_and_synchronizes(tmp_path):
+    result, record_path = _run_cuda_probe(tmp_path, advantage_cuda=True)
+    assert result.returncode == 0, result.stderr
+    lines = record_path.read_text().splitlines()
+    assert "compute_puff_advantage device=cuda" in lines
+    assert "synchronize" in lines
+
+
+def test_prepare_records_install_dump_probe_then_launch(tmp_path):
+    recorded: list[list[str]] = []
+    launched: list[object] = []
+
+    def fake_run(cmd, **kwargs):
+        recorded.append(list(cmd))
+        if "--dump-config" in list(cmd):
+            _write_dumped_config(kwargs_run_root)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    def on_ready(prepared):
+        launched.append(prepared)
+        fake_run(
+            prepared.train_command,
+            cwd=os.fspath(prepared.source_dir),
+            shell=False,
+            env=prepared.child_env,
+        )
+
+    kwargs = _preflight_kwargs(
+        tmp_path,
+        run=fake_run,
+        start_heartbeat=_noop_heartbeat,
+        on_ready=on_ready,
+        manifest=_make_manifest(run_id="ok-id"),
+    )
+    kwargs_run_root = kwargs["run_root"]
+    prepared = mrl.prepare_remote_source(**kwargs)
+    assert launched and launched[0] is prepared
+    assert recorded[0] == mrl.build_install_command(prepared.source_dir)
+    assert recorded[1] == mrl.build_dump_config_command(kwargs["request"], None)
+    assert recorded[2] == mrl.build_cuda_probe_command()
+    assert recorded[3] == prepared.train_command
+    assert prepared.train_command == mrl.build_train_command(
+        mrl.build_train_argv(kwargs["request"], None))
+    assert prepared.heartbeat is not None
+
+
+def test_preflight_failure_stops_heartbeat_then_writes_build_failed(tmp_path):
+    order: list[str] = []
+    status_at_stop: list[str] = []
+
+    def start_heartbeat(**_kwargs):
+
+        def stop_and_join():
+            order.append("stop")
+            status_path = kwargs["run_root"] / mrl.STATUS_FILENAME
+            status_at_stop.append(json.loads(status_path.read_text())["status"])
+
+        return SimpleNamespace(stop_and_join=stop_and_join)
+
+    def fake_run(cmd, **_kwargs):
+        if list(cmd)[:3] == ["/usr/local/bin/uv", "pip", "install"]:
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    kwargs = _preflight_kwargs(tmp_path, run=fake_run, start_heartbeat=start_heartbeat)
+    with pytest.raises(subprocess.CalledProcessError):
+        mrl.prepare_remote_source(**kwargs)
+    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    assert order == ["stop"]
+    assert status_at_stop == ["building"]
+    assert persisted["status"] == "build_failed"
+    assert persisted["attempt_id"] == "attempt-a"
+
+
+def test_prepare_does_not_persist_wandb_secret(tmp_path):
+    secret = "secret-from-modal"
+    recorded_envs: list[dict[str, str]] = []
+
+    def fake_run(cmd, **kwargs):
+        recorded_envs.append(dict(kwargs["env"]))
+        if "--dump-config" in list(cmd):
+            _write_dumped_config(kwargs_run_root)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    request = mrl.build_run_request(**_valid_run_kwargs(
+        run_id="ok-id",
+        train_args="--timesteps 1 --wandb",
+        wandb_secret_name="wandb",
+    ))
+    kwargs = _preflight_kwargs(
+        tmp_path,
+        run=fake_run,
+        start_heartbeat=_noop_heartbeat,
+        request=request,
+        wandb_api_key=secret,
+        manifest=_make_manifest(run_id="ok-id"),
+    )
+    kwargs_run_root = kwargs["run_root"]
+    prepared = mrl.prepare_remote_source(**kwargs)
+    assert all(env["WANDB_API_KEY"] == secret for env in recorded_envs)
+    assert prepared.child_env["WANDB_API_KEY"] == secret
+    assert secret not in repr(prepared)
+    for path in kwargs["run_root"].rglob("*"):
+        if path.is_file():
+            assert secret not in path.read_text(errors="ignore")
+
+
+def test_heartbeat_commits_throughout_blocked_preflight(tmp_path):
+
+    class Clock:
+
+        def __init__(self):
+            self._now = _aware()
+            self._lock = threading.Lock()
+
+        def now(self):
+            with self._lock:
+                return self._now
+
+        def advance(self, seconds: float):
+            with self._lock:
+                self._now += timedelta(seconds=seconds)
+                return self._now
+
+    clock = Clock()
+    beat_times: list = []
+
+    def wait(event: threading.Event, seconds: float) -> bool:
+        clock.advance(seconds)
+        return event.wait(0.01)
+
+    def start_heartbeat(**kwargs):
+        return mrl.start_heartbeat_worker(
+            run_root=kwargs["run_root"],
+            attempt_id=kwargs["attempt_id"],
+            lock=kwargs["lock"],
+            now=clock.now,
+            commit=kwargs["commit"],
+            interval=timedelta(seconds=60),
+            wait=wait,
+        )
+
+    def fake_run(cmd, **kwargs):
+        cmd_list = list(cmd)
+        if cmd_list[:3] == ["/usr/local/bin/uv", "pip", "install"]:
+            started = clock.now()
+            deadline = time.monotonic() + 5.0
+            while clock.now() - started < timedelta(minutes=5, seconds=1):
+                if time.monotonic() > deadline:
+                    raise TimeoutError("fake clock did not advance during blocked install")
+                time.sleep(0.01)
+            return subprocess.CompletedProcess(cmd, 0)
+        if "--dump-config" in cmd_list:
+            _write_dumped_config(kwargs_run_root)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    kwargs = _preflight_kwargs(
+        tmp_path,
+        run=fake_run,
+        start_heartbeat=start_heartbeat,
+        now=clock.now,
+        manifest=_make_manifest(run_id="ok-id"),
+    )
+    kwargs_run_root = kwargs["run_root"]
+    volume = kwargs["volume"]
+    orig_commit = volume.commit
+
+    def recording_commit():
+        beat_times.append(clock.now())
+        orig_commit()
+
+    volume.commit = recording_commit
+    prepared = mrl.prepare_remote_source(**kwargs)
+    assert prepared.heartbeat is not None
+    assert prepared.heartbeat.thread.is_alive()
+    prepared.heartbeat.stop_and_join()
+    assert not prepared.heartbeat.thread.is_alive()
+    assert len(beat_times) >= 6
+    for earlier, later in zip(beat_times, beat_times[1:], strict=False):
+        assert later - earlier <= timedelta(seconds=60)
+    status = mrl.RunStatus.from_dict(
+        json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text()))
+    derived = mrl.derive_status(status, now=clock.now())
+    assert derived.stale is False
