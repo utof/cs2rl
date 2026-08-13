@@ -1815,8 +1815,15 @@ def compute_head_divergence(policy):
         ):
             w_t, w_ct = _flat(mod_t), _flat(mod_ct)
             denom = 0.5 * float(w_t.norm()) + 0.5 * float(w_ct.norm())
-            out[f"split/head_l2_rel/{name}"] = (float(
-                (w_t - w_ct).norm()) / denom if denom > 0.0 else 0.0)
+            if denom > 0.0:
+                # NaN in either copy propagates through the ratio — visible,
+                # never masked as "teams identical".
+                val = float((w_t - w_ct).norm()) / denom
+            else:
+                # denom == 0.0 → both copies all-zero → genuinely identical.
+                # denom NaN fails both comparisons → emit NaN, not a fake 0.0.
+                val = 0.0 if denom == 0.0 else float("nan")
+            out[f"split/head_l2_rel/{name}"] = val
     return out
 
 

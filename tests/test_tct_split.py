@@ -484,8 +484,8 @@ def test_head_divergence_exceeds_the_decay_aware_null(env):
     """Spec §5 test 7 + §4 Q3: divergence under team-asymmetric advantages
     must exceed a same-steps, same-optimizer control with ZERO advantages.
 
-    Why a control at all: the optimizer carries weight_decay=1e-4 (set at
-    src/train.py:3698) which moves even a zero-gradient copy, and head_l2_rel
+    Why a control at all: the optimizer carries weight_decay=1e-4 (the Adam
+    construction in train()) which moves even a zero-gradient copy, and head_l2_rel
     is a RATIO — shrinking both copies inflates it with no learning at all. So
     raw L2 has no achievable null and the honest comparison is
     asymmetric-vs-zero advantage over the identical number of steps.
