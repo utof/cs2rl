@@ -1552,9 +1552,13 @@ def start_heartbeat_worker(
 
     def loop() -> None:
         while not stop.is_set():
-            write_heartbeat(run_root, now=now(), attempt_id=attempt_id, lock=lock)
-            if commit is not None:
-                commit()
+            try:
+                write_heartbeat(run_root, now=now(), attempt_id=attempt_id, lock=lock)
+                if commit is not None:
+                    commit()
+            except Exception:
+                # One Volume.commit() blip must not kill the daemon.
+                pass
             if wait_fn(stop, interval.total_seconds()):
                 break
 
@@ -1564,7 +1568,7 @@ def start_heartbeat_worker(
 
 
 class ReloadingVolume(Protocol):
-    """In-container Volume handle. reload before reads; commit after STATUS writes."""
+    """In-container Volume handle. reload before STATUS writes; commit after them."""
 
     def reload(self) -> None:
         ...
@@ -1578,7 +1582,7 @@ class PreparedSource:
     """Extracted project ready for remaining preflight / training handoff."""
 
     source_dir: Path
-    child_env: dict[str, str]
+    child_env: dict[str, str] = field(repr=False)
     train_command: list[str]
     heartbeat: object | None = None
     config_hash: str | None = None
@@ -1656,11 +1660,13 @@ def prepare_remote_source(
 ) -> PreparedSource:
     """Reload, verify, extract, install, dump, probe; hand off a live heartbeat.
 
-    Fallible project/C-extension work happens after the Volume run root can
-    accept STATUS/manifest writes so a failure can persist build_failed.
-    Static image-build errors stay in the CLI and never reach this function.
-    Success transfers heartbeat ownership to the caller; every exception
-    path stops/joins first, then writes the terminal state under the same lock.
+    Reload first so Volume.reload() cannot drop an uncommitted STATUS write.
+    PREPARING is committed before the heartbeat starts. Fallible project and
+    C-extension work happens after that durable status exists so a failure
+    can persist build_failed. Static image-build errors stay in the CLI and
+    never reach this function. Success transfers heartbeat ownership to the
+    caller; every exception path stops/joins first, then writes the terminal
+    state under the same lock.
     """
     now_fn = now if now is not None else (lambda: datetime.now(UTC))
     run_root = Path(run_root)
@@ -1669,19 +1675,6 @@ def prepare_remote_source(
     if start_heartbeat is None:
         start_heartbeat = start_heartbeat_worker
     try:
-        if _read_status(run_root) is None:
-            transition_status(run_root,
-                              Status.PREPARING,
-                              now=now_fn(),
-                              attempt_id=attempt_id,
-                              lock=lock)
-        heartbeat = start_heartbeat(
-            run_root=run_root,
-            attempt_id=attempt_id,
-            lock=lock,
-            now=now_fn,
-            commit=volume.commit,
-        )
         volume.reload()
         archive_path = Path(archive_path)
         if not archive_path.is_file():
@@ -1690,6 +1683,20 @@ def prepare_remote_source(
         if digest != expected_archive_sha256:
             raise ValidationError(
                 f"source archive sha256 {digest} != expected {expected_archive_sha256}")
+        if _read_status(run_root) is None:
+            transition_status(run_root,
+                              Status.PREPARING,
+                              now=now_fn(),
+                              attempt_id=attempt_id,
+                              lock=lock)
+            volume.commit()
+        heartbeat = start_heartbeat(
+            run_root=run_root,
+            attempt_id=attempt_id,
+            lock=lock,
+            now=now_fn,
+            commit=volume.commit,
+        )
         if ephemeral_parent is not None:
             Path(ephemeral_parent).mkdir(parents=True, exist_ok=True)
         staging = tempfile.TemporaryDirectory(prefix="cs2rl-src-", dir=ephemeral_parent)
@@ -1737,7 +1744,11 @@ def prepare_remote_source(
             on_ready(prepared)
         return prepared
     except Exception:
-        _stop_heartbeat(heartbeat)
+        try:
+            _stop_heartbeat(heartbeat)
+        except Exception:
+            # Do not hide the original preflight error.
+            pass
         current = _read_status(run_root)
         if current is not None and current.attempt_id == attempt_id:
             try:

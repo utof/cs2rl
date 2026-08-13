@@ -1777,21 +1777,52 @@ def test_install_and_train_commands_are_exact():
 
 
 class RecordingVolume:
-    """Materializes the uploaded archive only on reload, like Volume.reload()."""
+    """Materializes the uploaded archive only on reload, like Volume.reload().
 
-    def __init__(self, src_archive: Path, dest_archive: Path):
+    commit() snapshots run_root. reload() restores that snapshot and drops
+    uncommitted STATUS.json — Volume.reload() replaces the mount.
+    """
+
+    def __init__(self, src_archive: Path, dest_archive: Path, run_root: Path | None = None):
         self.events: list[str] = []
         self._src = src_archive
         self._dest = dest_archive
+        self._run_root = Path(run_root) if run_root is not None else None
+        self._committed_run_root: dict[Path, bytes] = {}
 
     def reload(self) -> None:
         self.events.append("reload")
         if not self._dest.exists():
             self._dest.parent.mkdir(parents=True, exist_ok=True)
             self._dest.write_bytes(self._src.read_bytes())
+        self._restore_run_root()
 
     def commit(self) -> None:
         self.events.append("commit")
+        self._snapshot_run_root()
+
+    def _snapshot_run_root(self) -> None:
+        if self._run_root is None or not self._run_root.exists():
+            return
+        snapshot: dict[Path, bytes] = {}
+        for path in self._run_root.rglob("*"):
+            if path.is_file():
+                snapshot[path.relative_to(self._run_root)] = path.read_bytes()
+        self._committed_run_root = snapshot
+
+    def _restore_run_root(self) -> None:
+        if self._run_root is None:
+            return
+        if self._run_root.exists():
+            for path in self._run_root.rglob("*"):
+                if not path.is_file():
+                    continue
+                if path.relative_to(self._run_root) not in self._committed_run_root:
+                    path.unlink()
+        for rel, data in self._committed_run_root.items():
+            dest = self._run_root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
 
 
 def _noop_heartbeat(**_kwargs):
@@ -1813,7 +1844,7 @@ def _preflight_kwargs(tmp_path: Path, **overrides):
     run_root = tmp_path / "run"
     run_root.mkdir()
     kwargs = {
-        "volume": RecordingVolume(client_archive, mount_archive),
+        "volume": RecordingVolume(client_archive, mount_archive, run_root),
         "archive_path": mount_archive,
         "expected_archive_sha256": provenance.archive_sha256,
         "expected_commit": sha,
@@ -1833,6 +1864,65 @@ def _preflight_kwargs(tmp_path: Path, **overrides):
     }
     kwargs.update(overrides)
     return kwargs
+
+
+def test_recording_volume_reload_restores_committed_run_root(tmp_path):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    src = tmp_path / "src.tar.gz"
+    src.write_bytes(b"archive")
+    dest = tmp_path / "dest.tar.gz"
+    volume = RecordingVolume(src, dest, run_root)
+    (run_root / mrl.STATUS_FILENAME).write_text("uncommitted\n")
+    volume.reload()
+    assert dest.read_bytes() == b"archive"
+    assert not (run_root / mrl.STATUS_FILENAME).exists()
+    (run_root / mrl.STATUS_FILENAME).write_text("preparing\n")
+    (run_root / "keep.txt").write_text("committed\n")
+    volume.commit()
+    (run_root / mrl.STATUS_FILENAME).write_text("dirty\n")
+    (run_root / "extra.txt").write_text("uncommitted\n")
+    volume.reload()
+    assert (run_root / mrl.STATUS_FILENAME).read_text() == "preparing\n"
+    assert (run_root / "keep.txt").read_text() == "committed\n"
+    assert not (run_root / "extra.txt").exists()
+
+
+def test_prepare_reloads_before_status_write_and_commits_before_heartbeat(tmp_path):
+    order: list[object] = []
+
+    def fake_run(cmd, **kwargs):
+        if "--dump-config" in list(cmd):
+            _write_dumped_config(run_root)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    def start_heartbeat(**kwargs):
+        order.append("heartbeat")
+        status = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+        assert status["status"] == "preparing"
+        return SimpleNamespace(stop_and_join=lambda: None)
+
+    kwargs = _preflight_kwargs(tmp_path, run=fake_run, start_heartbeat=start_heartbeat)
+    volume = kwargs["volume"]
+    run_root = kwargs["run_root"]
+    orig_reload = volume.reload
+    orig_commit = volume.commit
+
+    def tracking_reload():
+        order.append(("reload", (run_root / mrl.STATUS_FILENAME).exists()))
+        orig_reload()
+
+    def tracking_commit():
+        order.append("commit")
+        orig_commit()
+
+    volume.reload = tracking_reload
+    volume.commit = tracking_commit
+    mrl.prepare_remote_source(**kwargs)
+    assert order[0] == ("reload", False)
+    assert order[1] == "commit"
+    assert order[2] == "heartbeat"
+    assert Path(mrl.STATUS_FILENAME) in volume._committed_run_root
 
 
 def test_prepare_reloads_verifies_extracts_then_installs(tmp_path):
@@ -1881,6 +1971,7 @@ def test_prepare_rejects_archive_hash_mismatch(tmp_path):
         mrl.prepare_remote_source(**kwargs)
     # Hash is checked after reload; the archive must not be trusted blindly.
     assert kwargs["volume"].events[0] == "reload"
+    assert not (kwargs["run_root"] / mrl.STATUS_FILENAME).exists()
 
 
 def test_prepare_rejects_provenance_sidecar_mismatch(tmp_path):
@@ -2171,6 +2262,30 @@ def test_preflight_failure_stops_heartbeat_then_writes_build_failed(tmp_path):
     assert persisted["attempt_id"] == "attempt-a"
 
 
+def test_preflight_failure_keeps_build_failed_when_heartbeat_stop_raises(tmp_path):
+
+    def start_heartbeat(**_kwargs):
+
+        def stop_and_join(timeout: float = 5.0):
+            raise RuntimeError("heartbeat worker did not stop")
+
+        return SimpleNamespace(stop_and_join=stop_and_join)
+
+    def fake_run(cmd, **_kwargs):
+        if list(cmd)[:3] == ["/usr/local/bin/uv", "pip", "install"]:
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    kwargs = _preflight_kwargs(tmp_path, run=fake_run, start_heartbeat=start_heartbeat)
+    with pytest.raises(subprocess.CalledProcessError):
+        mrl.prepare_remote_source(**kwargs)
+    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    assert persisted["status"] == "build_failed"
+    assert persisted["attempt_id"] == "attempt-a"
+    ephemeral = kwargs["ephemeral_parent"]
+    assert not ephemeral.exists() or not any(ephemeral.iterdir())
+
+
 def test_prepare_does_not_persist_wandb_secret(tmp_path):
     secret = "secret-from-modal"
     recorded_envs: list[dict[str, str]] = []
@@ -2281,3 +2396,38 @@ def test_heartbeat_commits_throughout_blocked_preflight(tmp_path):
         json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text()))
     derived = mrl.derive_status(status, now=clock.now())
     assert derived.stale is False
+
+
+def test_heartbeat_loop_survives_transient_commit_error(tmp_path):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    lock = threading.Lock()
+    mrl.transition_status(run_root, mrl.Status.PREPARING, now=_aware(), attempt_id="a1", lock=lock)
+    recovered = threading.Event()
+    commits = {"n": 0}
+
+    def flaky_commit():
+        commits["n"] += 1
+        if commits["n"] == 1:
+            raise RuntimeError("volume commit blip")
+        recovered.set()
+
+    def wait(event: threading.Event, _seconds: float) -> bool:
+        return event.wait(0.01)
+
+    worker = mrl.start_heartbeat_worker(
+        run_root=run_root,
+        attempt_id="a1",
+        lock=lock,
+        now=_aware,
+        commit=flaky_commit,
+        interval=timedelta(seconds=60),
+        wait=wait,
+    )
+    try:
+        assert recovered.wait(timeout=2.0)
+        assert worker.thread.is_alive()
+        assert commits["n"] >= 2
+    finally:
+        worker.stop_and_join()
+    assert not worker.thread.is_alive()
