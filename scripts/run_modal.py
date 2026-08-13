@@ -83,7 +83,7 @@ dependency_image = (modal.Image.from_registry(
             "assert old in text; "
             "p.write_text(text.replace(old, old + chr(10) + 'c_extension_paths = []', 1))"
             "\" && "
-            "uv pip install --python /opt/cs2rl/.venv/bin/python "
+            "CC=gcc CXX=g++ uv pip install --python /opt/cs2rl/.venv/bin/python "
             "--no-build-isolation --no-deps --no-binary pufferlib "
             "/tmp/pufferlib-3.0.0",
             "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "

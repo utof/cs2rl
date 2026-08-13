@@ -3848,6 +3848,7 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
     assert hashed_sdist_installs
     assert all("pufferlib" in cmd for cmd in hashed_sdist_installs)
     assert all("/tmp/pufferlib-3.0.0" in cmd for cmd in hashed_sdist_installs)
+    assert all("CXX=g++" in cmd for cmd in hashed_sdist_installs)
     assert "Python.h" in commands
     assert "release 12.8" in commands
     assert "pufferlib._C" in commands
