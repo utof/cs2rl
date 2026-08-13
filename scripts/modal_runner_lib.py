@@ -935,17 +935,16 @@ def transition_status(
     *,
     now: datetime,
     attempt_id: str,
-    lock: LockLike | None = None,
+    lock: LockLike,
 ) -> RunStatus | None:
     """Advance STATUS.json if this attempt owns the run.
 
     Returns None when a different attempt already owns canonical state — the
     redelivered container must not write, commit, or train. Same-terminal
-    writes by the original attempt are idempotent. Pass the same `lock` the
-    heartbeat uses so cleanup can stop/join, then transition, without a race.
+    writes by the original attempt are idempotent. `lock` is required and
+    must be the same lock the heartbeat uses so a beat cannot clobber a
+    terminal write.
     """
-    if lock is None:
-        return _transition_status_unlocked(run_root, next_status, now=now, attempt_id=attempt_id)
     with lock:
         return _transition_status_unlocked(run_root, next_status, now=now, attempt_id=attempt_id)
 

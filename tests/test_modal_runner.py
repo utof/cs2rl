@@ -28,6 +28,7 @@ import json
 import subprocess
 import sys
 import tarfile
+import threading
 import tomllib
 from datetime import UTC
 from pathlib import Path, PurePosixPath
@@ -1021,22 +1022,43 @@ def test_status_transitions_are_monotonic_and_attempt_owned(tmp_path):
 
     run_root = tmp_path / "run"
     run_root.mkdir()
+    lock = threading.Lock()
     now = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
-    first = mrl.transition_status(run_root, mrl.Status.PREPARING, now=now, attempt_id="attempt-a")
+    first = mrl.transition_status(run_root,
+                                  mrl.Status.PREPARING,
+                                  now=now,
+                                  attempt_id="attempt-a",
+                                  lock=lock)
     assert first.status is mrl.Status.PREPARING
     assert first.attempt_id == "attempt-a"
-    mrl.transition_status(run_root, mrl.Status.BUILDING, now=now, attempt_id="attempt-a")
-    mrl.transition_status(run_root, mrl.Status.TRAINING, now=now, attempt_id="attempt-a")
-    done = mrl.transition_status(run_root, mrl.Status.COMPLETED, now=now, attempt_id="attempt-a")
+    mrl.transition_status(run_root, mrl.Status.BUILDING, now=now, attempt_id="attempt-a", lock=lock)
+    mrl.transition_status(run_root, mrl.Status.TRAINING, now=now, attempt_id="attempt-a", lock=lock)
+    done = mrl.transition_status(run_root,
+                                 mrl.Status.COMPLETED,
+                                 now=now,
+                                 attempt_id="attempt-a",
+                                 lock=lock)
     assert done.status is mrl.Status.COMPLETED
     # Idempotent same-terminal write by the original delivery.
-    again = mrl.transition_status(run_root, mrl.Status.COMPLETED, now=now, attempt_id="attempt-a")
+    again = mrl.transition_status(run_root,
+                                  mrl.Status.COMPLETED,
+                                  now=now,
+                                  attempt_id="attempt-a",
+                                  lock=lock)
     assert again.status is mrl.Status.COMPLETED
     with pytest.raises(mrl.ValidationError):
-        mrl.transition_status(run_root, mrl.Status.TRAINING, now=now, attempt_id="attempt-a")
+        mrl.transition_status(run_root,
+                              mrl.Status.TRAINING,
+                              now=now,
+                              attempt_id="attempt-a",
+                              lock=lock)
     before = (run_root / "STATUS.json").read_bytes()
     # Redelivered delivery has no authority and must not touch the file.
-    denied = mrl.transition_status(run_root, mrl.Status.FAILED, now=now, attempt_id="attempt-b")
+    denied = mrl.transition_status(run_root,
+                                   mrl.Status.FAILED,
+                                   now=now,
+                                   attempt_id="attempt-b",
+                                   lock=lock)
     assert denied is None
     assert (run_root / "STATUS.json").read_bytes() == before
 
@@ -1093,19 +1115,29 @@ def _aware(hour=12, minute=0, second=0):
     return datetime(2026, 8, 13, hour, minute, second, tzinfo=UTC)
 
 
-def _advance_to_training(run_root, attempt_id="a1"):
-    mrl.transition_status(run_root, mrl.Status.PREPARING, now=_aware(), attempt_id=attempt_id)
-    mrl.transition_status(run_root, mrl.Status.BUILDING, now=_aware(), attempt_id=attempt_id)
-    return mrl.transition_status(run_root, mrl.Status.TRAINING, now=_aware(), attempt_id=attempt_id)
+def _advance_to_training(run_root, attempt_id="a1", *, lock):
+    mrl.transition_status(run_root,
+                          mrl.Status.PREPARING,
+                          now=_aware(),
+                          attempt_id=attempt_id,
+                          lock=lock)
+    mrl.transition_status(run_root,
+                          mrl.Status.BUILDING,
+                          now=_aware(),
+                          attempt_id=attempt_id,
+                          lock=lock)
+    return mrl.transition_status(run_root,
+                                 mrl.Status.TRAINING,
+                                 now=_aware(),
+                                 attempt_id=attempt_id,
+                                 lock=lock)
 
 
 def test_heartbeat_refreshes_updated_at_under_lock(tmp_path):
-    import threading
-
     run_root = tmp_path / "run"
     run_root.mkdir()
     lock = threading.Lock()
-    _advance_to_training(run_root)
+    _advance_to_training(run_root, lock=lock)
     # Fake clock: a beat at each 60s mark must refresh updated_at.
     last = None
     for minute in (1, 2):
@@ -1119,14 +1151,57 @@ def test_heartbeat_refreshes_updated_at_under_lock(tmp_path):
     assert last is not None
 
 
-def test_late_heartbeat_cannot_replace_terminal(tmp_path):
-    import threading
+def test_blocked_heartbeat_cannot_clobber_completed(tmp_path):
+    """Hold the lock, queue a beat, write completed, then release.
 
+    The queued heartbeat must observe the terminal write and leave
+    STATUS.json as completed. This is the interleaving an unlocked
+    transition_status would lose: beat reads training, terminal write
+    lands, beat writes training back.
+    """
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    lock = threading.Lock()
+    _advance_to_training(run_root, lock=lock)
+
+    lock.acquire()
+    started = threading.Event()
+    beat_status = []
+
+    def beat():
+        started.set()
+        beat_status.append(
+            mrl.write_heartbeat(run_root, now=_aware(minute=3), attempt_id="a1", lock=lock))
+
+    worker = threading.Thread(target=beat)
+    worker.start()
+    try:
+        assert started.wait(timeout=2.0)
+        # started.set() races the acquire; park long enough to be blocked.
+        threading.Event().wait(0.05)
+        assert worker.is_alive()
+
+        # Critical section is already held; do not re-enter the same Lock.
+        written = mrl._transition_status_unlocked(run_root,
+                                                  mrl.Status.COMPLETED,
+                                                  now=_aware(minute=2),
+                                                  attempt_id="a1")
+        assert written is not None
+        assert written.status is mrl.Status.COMPLETED
+    finally:
+        lock.release()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+    assert json.loads((run_root / "STATUS.json").read_text())["status"] == "completed"
+    assert beat_status and beat_status[0].status is mrl.Status.COMPLETED
+
+
+def test_late_heartbeat_cannot_replace_terminal(tmp_path):
     run_root = tmp_path / "run"
     run_root.mkdir()
     lock = threading.Lock()
     stop = threading.Event()
-    _advance_to_training(run_root)
+    _advance_to_training(run_root, lock=lock)
 
     def heartbeat_loop():
         while not stop.is_set():
@@ -1154,7 +1229,7 @@ def test_late_heartbeat_cannot_replace_terminal(tmp_path):
 def test_derive_status_stale_after_five_minutes_does_not_mutate(tmp_path):
     run_root = tmp_path / "run"
     run_root.mkdir()
-    written = _advance_to_training(run_root)
+    written = _advance_to_training(run_root, lock=threading.Lock())
     before = (run_root / "STATUS.json").read_bytes()
     derived = mrl.derive_status(written, now=_aware(hour=12, minute=5))
     assert derived.stale is True
