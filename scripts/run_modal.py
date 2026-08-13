@@ -54,7 +54,8 @@ dependency_image = (modal.Image.from_registry(
             "cd /opt/cs2rl && uv venv .venv --python /usr/local/bin/python3 && "
             "uv export --locked --no-dev --no-emit-project --no-emit-package pufferlib "
             "--no-hashes -o /tmp/cs2rl-reqs.txt && "
-            "uv pip install --python /opt/cs2rl/.venv/bin/python -r /tmp/cs2rl-reqs.txt",
+            "uv pip install --python /opt/cs2rl/.venv/bin/python --directory /tmp "
+            "-r /tmp/cs2rl-reqs.txt",
             "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
             "inventory={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
             "pathlib.Path('/tmp/locked-inventory.json').write_text("

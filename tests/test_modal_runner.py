@@ -3720,6 +3720,14 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
     assert "uv pip install" in commands
     assert "-r" in commands
     assert "--no-emit-package pufferlib" in commands
+    locked_dep_installs = [
+        part.strip()
+        for command in image.commands
+        for part in command.split("&&")
+        if "uv pip install" in part and "-r" in part
+    ]
+    assert locked_dep_installs
+    assert all("--directory /tmp" in cmd for cmd in locked_dep_installs)
     assert "--no-build-isolation" in commands
     assert "--no-deps" in commands
     assert "--no-binary pufferlib" in commands
