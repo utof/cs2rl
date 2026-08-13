@@ -32,7 +32,7 @@ import tempfile
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
@@ -983,6 +983,191 @@ def _transition_status_unlocked(
 HEARTBEAT_INTERVAL = timedelta(seconds=60)
 STALE_AFTER = timedelta(minutes=5)
 RESERVATION_FILENAME = "reservation.json"
+MANIFEST_FILENAME = "manifest.json"
+
+
+class Registry(Protocol):
+    """Atomic run/attempt claims. Maps to a Modal Dict.
+
+    put_if_absent is Dict.put(key, value, skip_if_exists=True). Do not
+    synthesize this from contains() plus put() — two launchers can both
+    observe a miss and both write.
+    """
+
+    def put_if_absent(self, key: str, value: Mapping[str, object]) -> bool:
+        """Insert key only if absent. True iff this caller created it."""
+        ...
+
+    def get(self, key: str) -> Mapping[str, object] | None:
+        """Return a copy of the stored claim, or None on a Dict miss."""
+        ...
+
+    def set_existing(self, key: str, value: Mapping[str, object]) -> None:
+        """Overwrite a claim only when stored attempt_id still matches.
+
+        Maps to a normal Dict.put after get. Not compare-and-swap; it
+        only refuses to clobber a different attempt's record.
+        """
+        ...
+
+
+class ArtifactIndex(Protocol):
+    """Client Volume metadata and reservation writes. Paths are PurePosixPath.
+
+    exists is committed-object metadata (Volume.iterdir). put_file + commit
+    map to batch_upload then Volume.commit. Never pass /artifacts/... here.
+    """
+
+    def exists(self, path: PurePosixPath) -> bool:
+        """True if a committed Volume object exists at the client path."""
+        ...
+
+    def put_file(self, path: PurePosixPath, data: bytes) -> None:
+        """Stage bytes at a client Volume path. Durable only after commit."""
+        ...
+
+    def commit(self) -> None:
+        """Persist staged uploads (Volume.commit)."""
+        ...
+
+
+def run_registry_key(run_id: str) -> str:
+    """Dict key for the provisional run lease."""
+    return f"run:{run_id}"
+
+
+def attempt_registry_key(attempt_id: str) -> str:
+    """Dict key for the remote same-input attempt claim."""
+    return f"attempt:{attempt_id}"
+
+
+def _reservation_path(run_id: str) -> PurePosixPath:
+    return RUNS_ROOT / run_id / RESERVATION_FILENAME
+
+
+def _manifest_path(run_id: str) -> PurePosixPath:
+    return RUNS_ROOT / run_id / MANIFEST_FILENAME
+
+
+def _volume_has_run(artifacts: ArtifactIndex, run_id: str) -> bool:
+    """True if a durable reservation or manifest already occupies this run."""
+    return artifacts.exists(_reservation_path(run_id)) or artifacts.exists(_manifest_path(run_id))
+
+
+FAILURE_UPLOAD = "upload_failed"
+ALLOWED_FAILURE_CODES = frozenset({FAILURE_UPLOAD})
+
+
+def record_run_failure(
+    registry: Registry,
+    run_id: str,
+    attempt_id: str,
+    failure_code: str,
+) -> None:
+    """Annotate the winning claim. Never delete it; never store exception text.
+
+    failure_code is allowlisted so a caught upload error cannot leak a path
+    or secret into the Dict. set_existing still refuses a mismatched attempt.
+    """
+    if failure_code not in ALLOWED_FAILURE_CODES:
+        raise ValidationError(f"unknown failure code: {failure_code!r}")
+    validate_run_id(run_id)
+    validate_run_id(attempt_id)
+    key = run_registry_key(run_id)
+    current = registry.get(key)
+    if current is None or current.get("attempt_id") != attempt_id:
+        raise ValidationError(f"run id is not claimed by this attempt: {run_id}")
+    updated = dict(current)
+    updated["lifecycle"] = "failed"
+    updated["failure_code"] = failure_code
+    registry.set_existing(key, updated)
+
+
+def finish_reservation(
+    registry: Registry,
+    artifacts: ArtifactIndex,
+    run_id: str,
+    attempt_id: str,
+    *,
+    upload: Callable[[], None],
+) -> None:
+    """Run the first post-reservation upload; keep the claim if it fails.
+
+    Reservation already committed. A later source/checkpoint failure must
+    not free the run ID. `artifacts` is unused here — uploads go through
+    the caller — but the signature keeps the same adapter pair as reserve_run.
+    """
+    del artifacts
+    try:
+        upload()
+    except Exception:
+        record_run_failure(registry, run_id, attempt_id, FAILURE_UPLOAD)
+        raise
+
+
+def reserve_run(
+    registry: Registry,
+    artifacts: ArtifactIndex,
+    run_id: str,
+    attempt_id: str,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Atomically claim run_id, then durably commit reservation.json.
+
+    The Dict put is only a seven-day mutex. The Volume reservation is the
+    durable boundary and must land before any source/checkpoint upload or
+    Function schedule. Reject when either a live Dict claim or a committed
+    reservation/manifest exists — an expired Dict cannot reuse a Volume
+    record. A lost put_if_absent is a hard reject — never overwrite
+    another attempt's claim.
+    """
+    validate_run_id(run_id)
+    validate_run_id(attempt_id)
+    if _volume_has_run(artifacts, run_id):
+        raise ValidationError(f"run id already reserved: {run_id}")
+    stamp = (now if now is not None else datetime.now(UTC)).isoformat()
+    claim: dict[str, object] = {"attempt_id": attempt_id, "created_at": stamp}
+    if not registry.put_if_absent(run_registry_key(run_id), claim):
+        raise ValidationError(f"run id already claimed: {run_id}")
+    payload = {"attempt_id": attempt_id, "created_at": stamp}
+    artifacts.put_file(
+        _reservation_path(run_id),
+        (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode(),
+    )
+    artifacts.commit()
+
+
+REDELIVERED = "redelivered"
+
+
+def claim_attempt(registry: Registry, attempt_id: str) -> bool:
+    """Atomically claim this same-input delivery. True iff first writer.
+
+    Maps to put_if_absent on attempt:<attempt_id>. Modal restarts a
+    preempted Function on the same input; the loser must not train.
+    """
+    validate_run_id(attempt_id)
+    return registry.put_if_absent(attempt_registry_key(attempt_id), {"attempt_id": attempt_id})
+
+
+def deliver_attempt(
+    registry: Registry,
+    artifacts: ArtifactIndex,
+    *,
+    attempt_id: str,
+    train: Callable[[], object],
+) -> object:
+    """Run train() only for the winning attempt claim.
+
+    A same-input loser returns 'redelivered' without calling train, writing
+    canonical state, or committing the Volume. artifacts is unused on the
+    loser path on purpose — the callback is the only writer.
+    """
+    del artifacts
+    if not claim_attempt(registry, attempt_id):
+        return REDELIVERED
+    return train()
 
 
 class LockLike(Protocol):

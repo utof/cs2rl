@@ -1380,3 +1380,278 @@ def test_list_run_artifacts_keeps_unknown_trainer_files(tmp_path):
     assert "checkpoints/notes.txt" in listed
     assert "checkpoints/extra/weird.bin" in listed
     assert "checkpoints/dust2_policy.pt" in listed
+
+
+# ── Task 5 cycle A: registry/artifact protocols + durable reservation ──────
+
+
+class FakeRegistry:
+    """In-memory Modal Dict: put_if_absent is the only atomic insert."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.data: dict[str, dict[str, object]] = {}
+        self.events: list[tuple[object, ...]] = []
+
+    def put_if_absent(self, key: str, value: dict[str, object]) -> bool:
+        with self._lock:
+            self.events.append(("put_if_absent", key))
+            if key in self.data:
+                return False
+            self.data[key] = dict(value)
+            return True
+
+    def get(self, key: str) -> dict[str, object] | None:
+        with self._lock:
+            stored = self.data.get(key)
+            return None if stored is None else dict(stored)
+
+    def set_existing(self, key: str, value: dict[str, object]) -> None:
+        with self._lock:
+            current = self.data.get(key)
+            if current is None or current.get("attempt_id") != value.get("attempt_id"):
+                raise mrl.ValidationError(
+                    f"registry claim is not owned by {value.get('attempt_id')!r}")
+            self.data[key] = dict(value)
+            self.events.append(("set_existing", key))
+
+    def expire(self, key: str) -> None:
+        """Simulate Modal's seven-day inactivity eviction."""
+        with self._lock:
+            self.data.pop(key, None)
+            self.events.append(("expire", key))
+
+
+class FakeArtifactIndex:
+    """In-memory Volume: client PurePosixPath keys, durable only after commit."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.committed: dict[PurePosixPath, bytes] = {}
+        self.staged: dict[PurePosixPath, bytes] = {}
+        self.events: list[tuple[object, ...]] = []
+
+    def exists(self, path: PurePosixPath) -> bool:
+        with self._lock:
+            return path in self.committed
+
+    def put_file(self, path: PurePosixPath, data: bytes) -> None:
+        if not isinstance(path, PurePosixPath) or path.is_absolute():
+            raise AssertionError(f"client Volume path must be relative PurePosixPath, got {path!r}")
+        with self._lock:
+            self.staged[path] = data
+            self.events.append(("put_file", path))
+
+    def commit(self) -> None:
+        with self._lock:
+            self.committed.update(self.staged)
+            self.staged.clear()
+            self.events.append(("commit", ))
+
+
+def test_reserve_run_commits_reservation_immediately_after_dict_claim():
+    """Winning claim must persist runs/<id>/reservation.json before any other upload."""
+    registry = FakeRegistry()
+    artifacts = FakeArtifactIndex()
+    now = _aware()
+    mrl.reserve_run(registry, artifacts, "ok-id", "attempt-a", now=now)
+
+    reservation_path = mrl.RUNS_ROOT / "ok-id" / mrl.RESERVATION_FILENAME
+    assert registry.events[0] == ("put_if_absent", "run:ok-id")
+    assert artifacts.events == [("put_file", reservation_path), ("commit", )]
+    claim = registry.get("run:ok-id")
+    assert claim is not None
+    assert claim["attempt_id"] == "attempt-a"
+    assert claim["created_at"] == now.isoformat()
+    payload = json.loads(artifacts.committed[reservation_path])
+    assert payload["attempt_id"] == "attempt-a"
+    assert payload["created_at"] == now.isoformat()
+    # Reservation is the only Volume write: no source, checkpoint, or Function.
+    assert all(event[0] in {"put_file", "commit"} for event in artifacts.events)
+    assert artifacts.events[0][1] == reservation_path
+
+
+# ── Task 5 cycle B: concurrent race + expired-Dict Volume fallback ─────────
+
+
+def test_concurrent_reserve_run_admits_exactly_one_attempt():
+    registry = FakeRegistry()
+    artifacts = FakeArtifactIndex()
+    results: list[tuple[str, str]] = []
+    barrier = threading.Barrier(2)
+
+    def worker(attempt_id: str) -> None:
+        barrier.wait()
+        try:
+            mrl.reserve_run(registry, artifacts, "ok-id", attempt_id, now=_aware())
+            results.append(("ok", attempt_id))
+        except mrl.ValidationError:
+            results.append(("reject", attempt_id))
+
+    threads = [
+        threading.Thread(target=worker, args=("attempt-a", )),
+        threading.Thread(target=worker, args=("attempt-b", )),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+    wins = [attempt for status, attempt in results if status == "ok"]
+    losses = [attempt for status, attempt in results if status == "reject"]
+    assert len(wins) == 1
+    assert len(losses) == 1
+    winner = wins[0]
+    assert registry.get("run:ok-id")["attempt_id"] == winner
+    reservation = json.loads(artifacts.committed[mrl.RUNS_ROOT / "ok-id" /
+                                                 mrl.RESERVATION_FILENAME])
+    assert reservation["attempt_id"] == winner
+
+
+def test_dict_miss_with_existing_volume_manifest_rejects_run():
+    registry = FakeRegistry()
+    artifacts = FakeArtifactIndex()
+    artifacts.committed[mrl.RUNS_ROOT / "ok-id" / mrl.MANIFEST_FILENAME] = b"{}\n"
+    with pytest.raises(mrl.ValidationError):
+        mrl.reserve_run(registry, artifacts, "ok-id", "attempt-b", now=_aware())
+    assert registry.get("run:ok-id") is None
+    assert artifacts.events == []
+
+
+def test_upload_failure_after_reservation_keeps_run_id_and_records_failure_code():
+    registry = FakeRegistry()
+    artifacts = FakeArtifactIndex()
+    mrl.reserve_run(registry, artifacts, "ok-id", "attempt-a", now=_aware())
+
+    def boom_upload() -> None:
+        raise OSError("could not upload /secrets/key to sources/dead.tar.gz")
+
+    with pytest.raises(OSError, match="could not upload"):
+        mrl.finish_reservation(registry, artifacts, "ok-id", "attempt-a", upload=boom_upload)
+    claim = registry.get("run:ok-id")
+    assert claim is not None
+    assert claim["attempt_id"] == "attempt-a"
+    assert claim["failure_code"] == "upload_failed"
+    assert "secret" not in json.dumps(claim)
+    assert "sources/dead.tar.gz" not in json.dumps(claim)
+    assert mrl.RUNS_ROOT / "ok-id" / mrl.RESERVATION_FILENAME in artifacts.committed
+    with pytest.raises(mrl.ValidationError):
+        mrl.reserve_run(registry, artifacts, "ok-id", "attempt-b", now=_aware())
+
+
+def test_expired_dict_still_rejects_when_volume_reservation_exists():
+    registry = FakeRegistry()
+    artifacts = FakeArtifactIndex()
+    mrl.reserve_run(registry, artifacts, "ok-id", "attempt-a", now=_aware())
+
+    def boom_upload() -> None:
+        raise OSError("source upload failed")
+
+    with pytest.raises(OSError):
+        mrl.finish_reservation(registry, artifacts, "ok-id", "attempt-a", upload=boom_upload)
+    # Seven inactive days evict the Dict lease; the Volume reservation remains.
+    registry.expire("run:ok-id")
+    assert registry.get("run:ok-id") is None
+    with pytest.raises(mrl.ValidationError):
+        mrl.reserve_run(registry, artifacts, "ok-id", "attempt-b", now=_aware())
+    assert registry.get("run:ok-id") is None
+
+
+# ── Task 5 cycle C: attempt redelivery / idempotent terminal behavior ──────
+
+
+def test_first_attempt_claim_owns_canonical_state_writes(tmp_path):
+    registry = FakeRegistry()
+    artifacts = FakeArtifactIndex()
+    mrl.reserve_run(registry, artifacts, "ok-id", "attempt-a", now=_aware())
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    lock = threading.Lock()
+
+    def train() -> str:
+        status = mrl.transition_status(
+            run_root,
+            mrl.Status.PREPARING,
+            now=_aware(),
+            attempt_id="attempt-a",
+            lock=lock,
+        )
+        assert status is not None
+        (run_root / "result.json").write_text("{}\n")
+        (run_root / "train.log").write_text("ok\n")
+        (run_root / "checkpoints").mkdir()
+        (run_root / "checkpoints" / "dust2_policy.pt").write_bytes(b"ckpt")
+        artifacts.put_file(mrl.RUNS_ROOT / "ok-id" / "result.json", b"{}\n")
+        artifacts.commit()
+        return "trained"
+
+    result = mrl.deliver_attempt(registry, artifacts, attempt_id="attempt-a", train=train)
+    assert result == "trained"
+    assert mrl.claim_attempt(registry, "attempt-a") is False
+    persisted = json.loads((run_root / "STATUS.json").read_text())
+    assert persisted["attempt_id"] == "attempt-a"
+    assert persisted["status"] == "preparing"
+    assert (run_root / "result.json").is_file()
+    assert (run_root / "train.log").is_file()
+    assert (run_root / "checkpoints" / "dust2_policy.pt").is_file()
+    claim = registry.get("attempt:attempt-a")
+    assert claim is not None
+    assert claim["attempt_id"] == "attempt-a"
+
+
+def test_same_input_redelivery_returns_without_train_or_writes(tmp_path):
+    registry = FakeRegistry()
+    artifacts = FakeArtifactIndex()
+    mrl.reserve_run(registry, artifacts, "ok-id", "attempt-a", now=_aware())
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    lock = threading.Lock()
+
+    def train() -> str:
+        mrl.transition_status(
+            run_root,
+            mrl.Status.PREPARING,
+            now=_aware(),
+            attempt_id="attempt-a",
+            lock=lock,
+        )
+        (run_root / "result.json").write_text('{"status":"completed"}\n')
+        (run_root / "train.log").write_text("first\n")
+        (run_root / "checkpoints").mkdir()
+        (run_root / "checkpoints" / "dust2_policy.pt").write_bytes(b"ckpt")
+        artifacts.put_file(mrl.RUNS_ROOT / "ok-id" / "result.json", b"{}\n")
+        artifacts.commit()
+        return "trained"
+
+    assert mrl.deliver_attempt(registry, artifacts, attempt_id="attempt-a",
+                               train=train) == "trained"
+    before_status = (run_root / "STATUS.json").read_bytes()
+    before_result = (run_root / "result.json").read_bytes()
+    before_log = (run_root / "train.log").read_bytes()
+    before_ckpt = (run_root / "checkpoints" / "dust2_policy.pt").read_bytes()
+    before_events = list(artifacts.events)
+    before_committed = dict(artifacts.committed)
+
+    def should_not_run() -> str:
+        raise AssertionError("training callback must not run on redelivery")
+
+    assert mrl.deliver_attempt(registry, artifacts, attempt_id="attempt-a",
+                               train=should_not_run) == "redelivered"
+    assert (run_root / "STATUS.json").read_bytes() == before_status
+    assert (run_root / "result.json").read_bytes() == before_result
+    assert (run_root / "train.log").read_bytes() == before_log
+    assert (run_root / "checkpoints" / "dust2_policy.pt").read_bytes() == before_ckpt
+    assert artifacts.events == before_events
+    assert artifacts.committed == before_committed
+
+
+def test_different_attempt_cannot_reach_remote_wrapper():
+    registry = FakeRegistry()
+    artifacts = FakeArtifactIndex()
+    mrl.reserve_run(registry, artifacts, "ok-id", "attempt-a", now=_aware())
+    with pytest.raises(mrl.ValidationError):
+        mrl.reserve_run(registry, artifacts, "ok-id", "attempt-b", now=_aware())
+    assert registry.get("run:ok-id")["attempt_id"] == "attempt-a"
+    # Loser never received a Function delivery, so no attempt:<id> claim exists.
+    assert registry.get("attempt:attempt-b") is None
+    assert registry.get("attempt:attempt-a") is None
