@@ -534,6 +534,15 @@ def test_timesteps_must_be_exactly_one_positive_int(raw):
         mrl.build_run_request(**_valid_run_kwargs(train_args=raw))
 
 
+def test_timesteps_below_one_full_batch_rejected_at_request_build():
+    batch_size = _live_batch_size()
+    with pytest.raises(mrl.ValidationError, match="full batch"):
+        mrl.build_run_request(**_valid_run_kwargs(train_args=f"--timesteps {batch_size - 1}"))
+    request = mrl.build_run_request(**_valid_run_kwargs(train_args=f"--timesteps {batch_size}"))
+    assert request.timesteps == batch_size
+    assert request.timesteps == request.batch_size
+
+
 def test_exact_allowed_flags_are_kept():
     raw = ("--timesteps 30000000 --seed 2 --warmstart-entropy --no-dead-run-abort "
            "--tag-diagnostic --tag-every 5 --tct-split-heads --reward-win 1.0")
@@ -646,7 +655,7 @@ def test_secret_without_wandb_rejected():
 
 def test_wandb_with_secret_is_accepted():
     request = mrl.build_run_request(
-        **_valid_run_kwargs(train_args="--timesteps 1 --wandb", wandb_secret_name="wandb"))
+        **_valid_run_kwargs(train_args="--timesteps 163840 --wandb", wandb_secret_name="wandb"))
     assert request.wandb_secret_name == "wandb"
     assert "--wandb" in request.train_args
 
@@ -2304,7 +2313,7 @@ def test_prepare_does_not_persist_wandb_secret(tmp_path):
 
     request = mrl.build_run_request(**_valid_run_kwargs(
         run_id="ok-id",
-        train_args="--timesteps 1 --wandb",
+        train_args="--timesteps 163840 --wandb",
         wandb_secret_name="wandb",
     ))
     kwargs = _preflight_kwargs(
@@ -3817,7 +3826,7 @@ def test_omitted_resource_sentinels_apply_defaults_and_smoke_values_pass(fake_mo
         memory_mib=8192,
         vec_workers=4,
         timeout_minutes=15,
-        train_args="--timesteps 1 --seed 2",
+        train_args="--timesteps 163840 --seed 2",
     ))
     assert smoke.cpu_request_limit == (4, 4)
     assert smoke.memory_request_limit == (8192, 8192)
@@ -4000,7 +4009,7 @@ def test_smoke_resource_tuples_and_cpu_memory_semantics(fake_modal, tmp_path):
         memory_mib=8192,
         vec_workers=4,
         timeout_minutes=15,
-        train_args="--timesteps 1 --seed 2",
+        train_args="--timesteps 163840 --seed 2",
     ))
     # CPU tuple is a soft throttling limit; memory tuple is a hard OOM limit.
     assert request.cpu_request_limit == (4, 4)
@@ -4019,7 +4028,7 @@ def test_wandb_secret_missing_fails_before_claim_without_leaking_name(fake_modal
     secret_name = "prod-wandb-key"
     request = module.resolve_launch_request(**_valid_launch_sentinels(
         git_sha=sha,
-        train_args="--timesteps 1 --seed 2 --wandb",
+        train_args="--timesteps 163840 --seed 2 --wandb",
         wandb_secret_name=secret_name,
     ))
     with pytest.raises(mrl.ValidationError) as excinfo:
@@ -4039,7 +4048,7 @@ def test_wandb_attaches_secret_and_records_enabled_flag_only(fake_modal, tmp_pat
     fake_modal.known_secrets.add(secret_name)
     request = module.resolve_launch_request(**_valid_launch_sentinels(
         git_sha=sha,
-        train_args="--timesteps 1 --seed 2 --wandb",
+        train_args="--timesteps 163840 --seed 2 --wandb",
         wandb_secret_name=secret_name,
     ))
     stdout = _capture_stdout()
@@ -4416,6 +4425,101 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
     assert result["reason"] is None
     assert json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"] == "completed"
     assert json.loads((run_root / mrl.RESULT_FILENAME).read_text())["status"] == "completed"
+
+
+def test_train_remote_redelivery_claims_before_prepare(fake_modal, tmp_path, monkeypatch):
+    module = _import_run_modal()
+    fake_modal.invoke_remote = True
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    request = module.resolve_launch_request(**_valid_launch_sentinels(git_sha=sha))
+    factory_calls: list[object] = []
+    prepare_calls: list[int] = []
+
+    def fake_run_root(run_id: str) -> Path:
+        path = tmp_path / "runs" / run_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(module, "_remote_run_root", fake_run_root)
+    real_execute = mrl.execute_training_attempt
+
+    def fake_prepare(**kwargs):
+        prepare_calls.append(1)
+        kwargs["volume"].commit()
+        manifest = kwargs["manifest"]
+        run_root = Path(kwargs["run_root"])
+        run_root.mkdir(parents=True, exist_ok=True)
+        lock = kwargs["lock"]
+        attempt_id = kwargs["attempt_id"]
+        now = _aware(minute=len(prepare_calls))
+        mrl.transition_status(run_root,
+                              mrl.Status.PREPARING,
+                              now=now,
+                              attempt_id=attempt_id,
+                              lock=lock)
+        mrl.atomic_write_json(run_root / mrl.MANIFEST_FILENAME, manifest.to_dict())
+        mrl.transition_status(run_root,
+                              mrl.Status.BUILDING,
+                              now=now,
+                              attempt_id=attempt_id,
+                              lock=lock)
+        source_dir = tmp_path / "extracted"
+        source_dir.mkdir(exist_ok=True)
+        return mrl.PreparedSource(
+            source_dir=source_dir,
+            child_env={
+                "PATH": "/usr/bin",
+                "OMP_NUM_THREADS": "1"
+            },
+            train_command=["python", "-c", "pass"],
+            heartbeat=_noop_heartbeat(),
+            config_hash=manifest.config_hash,
+        )
+
+    def fake_execute(**kwargs):
+
+        def factory(*args, **factory_kwargs):
+            factory_calls.append((args, factory_kwargs))
+            return FakeChild(returncode=0, stdout=b"done\n")
+
+        kwargs["process_factory"] = factory
+        kwargs["sleep"] = lambda _seconds: None
+        kwargs["now"] = lambda: _aware()
+        return real_execute(**kwargs)
+
+    monkeypatch.setattr(mrl, "prepare_remote_source", fake_prepare)
+    monkeypatch.setattr(mrl, "execute_training_attempt", fake_execute)
+    first = module.launch_run(request,
+                              repo=repo,
+                              app_obj=module.app,
+                              now=_aware(),
+                              stdout=_capture_stdout())
+    assert first["status"] != mrl.REDELIVERED
+    assert factory_calls
+    payload = fake_modal.configured_remote_calls[0][1][0]
+    run_root = tmp_path / "runs" / request.run_id
+    status_bytes = (run_root / mrl.STATUS_FILENAME).read_bytes()
+    manifest_bytes = (run_root / mrl.MANIFEST_FILENAME).read_bytes()
+    volume = fake_modal.volumes[mrl.VOLUME_NAME]
+    commits_after_first = volume.commit_count
+    factory_count = len(factory_calls)
+    prepare_count = len(prepare_calls)
+    second = module.train_remote.with_options(
+        gpu=request.gpu,
+        cpu=request.cpu_request_limit,
+        memory=request.memory_request_limit,
+        timeout=request.timeout_minutes * 60,
+        volumes={
+            "/artifacts": volume
+        },
+    ).remote(payload)
+    assert second == {"status": mrl.REDELIVERED, "run_id": request.run_id}
+    assert len(prepare_calls) == prepare_count
+    assert len(factory_calls) == factory_count
+    assert (run_root / mrl.STATUS_FILENAME).read_bytes() == status_bytes
+    assert (run_root / mrl.MANIFEST_FILENAME).read_bytes() == manifest_bytes
+    assert volume.commit_count == commits_after_first
 
 
 # ── Task 8 cycle E: client-only status / download ──────────────────────────

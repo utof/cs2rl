@@ -523,6 +523,8 @@ def build_run_request(
         raise ValidationError("resume-local-checkpoint and resume-run-id are mutually exclusive")
     if resume_run_id is not None:
         validate_run_id(resume_run_id)
+    if timesteps < batch_size:
+        raise ValidationError(f"--timesteps {timesteps} is below one full batch ({batch_size})")
     resume = ResumeRequest(
         local_checkpoint=Path(resume_local_checkpoint) if resume_local_checkpoint else None,
         prior_run_id=resume_run_id,
@@ -1855,18 +1857,18 @@ def execute_training_attempt(
     signal_signal: Callable[..., object] | None = None,
     manifest: Manifest | None = None,
     timeout: timedelta | None = None,
+    already_claimed: bool = False,
 ) -> object:
     """Claim this delivery, then run the training child at most once.
 
     A same-input loser returns `redelivered` without writing STATUS, committing,
     or invoking the process factory. The original delivery is the only canonical
     writer. SIGINT, KeyboardInterrupt, and SIGTERM share one cleanup path.
+    already_claimed skips the inner put_if_absent when the caller already won.
     """
-    return deliver_attempt(
-        registry,
-        _UnusedArtifacts(),
-        attempt_id=attempt_id,
-        train=lambda: _run_training_attempt(
+
+    def train() -> object:
+        return _run_training_attempt(
             attempt_id=attempt_id,
             run_root=Path(run_root),
             prepared=prepared,
@@ -1883,7 +1885,15 @@ def execute_training_attempt(
             signal_signal=signal.signal if signal_signal is None else signal_signal,
             manifest=manifest,
             timeout=timeout,
-        ),
+        )
+
+    if already_claimed:
+        return train()
+    return deliver_attempt(
+        registry,
+        _UnusedArtifacts(),
+        attempt_id=attempt_id,
+        train=train,
     )
 
 

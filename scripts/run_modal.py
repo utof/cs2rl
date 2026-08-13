@@ -675,8 +675,11 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
     """Remote training wrapper. Invoked only via with_options(...).remote."""
     volume = modal.Volume.from_name(mrl.VOLUME_NAME, create_if_missing=False)
     registry = ModalDictRegistry(modal.Dict.from_name(mrl.REGISTRY_NAME, create_if_missing=False))
-    request = _request_from_payload(payload)
     attempt_id = str(payload["attempt_id"])
+    run_id = str(payload["run_id"])
+    if not mrl.claim_attempt(registry, attempt_id):
+        return {"status": mrl.REDELIVERED, "run_id": run_id}
+    request = _request_from_payload(payload)
     run_root = _remote_run_root(request.run_id)
     lock = threading.Lock()
     resume = payload.get("resume_mount_path")
@@ -709,6 +712,7 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
         now=lambda: datetime.now(UTC),
         timeout=timedelta(minutes=request.timeout_minutes),
         manifest=manifest,
+        already_claimed=True,
     )
     if result == mrl.REDELIVERED:
         return {"status": mrl.REDELIVERED, "run_id": request.run_id}
