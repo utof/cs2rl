@@ -25,11 +25,14 @@ import json
 import os
 import re
 import shlex
+import signal
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
@@ -1764,3 +1767,483 @@ def prepare_remote_source(
         if staging is not None:
             staging.cleanup()
         raise
+
+
+TRAIN_LOG_NAME = "train.log"
+RESULT_FILENAME = "result.json"
+CHECKPOINT_NAME = "dust2_policy.pt"
+CHECKPOINT_SIDECAR_NAME = "dust2_policy.pt.meta.json"
+DEAD_CHECKPOINT_NAME = "dust2_policy_dead.pt"
+CHECKPOINT_SETTLE_SECONDS = 1.0
+TERM_GRACE_SECONDS = 15.0
+DEAD_RUN_EXIT_CODE = 3
+POLL_INTERVAL_SECONDS = 0.05
+REASON_SIGNAL = "signal"
+REASON_TIMEOUT = "timeout"
+REASON_DEAD_RUN = "dead_run"
+REASON_INVALID_EVIDENCE = "invalid_evidence"
+REASON_NONZERO_EXIT = "nonzero_exit"
+
+
+@dataclass(frozen=True)
+class TrainingAttemptResult:
+    """Winner-only outcome. Losers return REDELIVERED, not this type."""
+
+    status: Status
+    reason: str | None = None
+    exit_code: int | None = None
+
+
+class _UnusedArtifacts:
+    """deliver_attempt ignores artifacts on every path; refuse accidental writes."""
+
+    def exists(self, path: PurePosixPath) -> bool:
+        del path
+        return False
+
+    def put_file(self, path: PurePosixPath, data: bytes) -> None:
+        raise RuntimeError(f"losing delivery must not write {path}")
+
+    def commit(self) -> None:
+        raise RuntimeError("losing delivery must not commit")
+
+
+def _tee_stream(src: object, sinks: Sequence[object]) -> None:
+    """Copy one child stream to every sink. Never slice or cap the payload."""
+    if src is None:
+        return
+    read = getattr(src, "read", None)
+    if read is None:
+        return
+    while True:
+        chunk = read(65536)
+        if not chunk:
+            break
+        text = chunk.decode("utf-8", errors="replace") if isinstance(chunk,
+                                                                     (bytes, bytearray)) else chunk
+        for sink in sinks:
+            if sink is None:
+                continue
+            try:
+                sink.write(text)
+                flush = getattr(sink, "flush", None)
+                if flush is not None:
+                    flush()
+            except ValueError:
+                continue
+
+
+def execute_training_attempt(
+    *,
+    registry: Registry,
+    attempt_id: str,
+    run_root: Path,
+    prepared: PreparedSource,
+    commit: Callable[[], None],
+    lock: LockLike,
+    now: Callable[[], datetime],
+    process_factory: Callable[..., object] = subprocess.Popen,
+    sleep: Callable[[float], None] | None = None,
+    wait: Callable[[threading.Event, float], bool] | None = None,
+    log_sink: object | None = None,
+    start_heartbeat: Callable[..., object] | None = None,
+    killpg: Callable[[int, int], None] | None = None,
+    getpgid: Callable[[int], int] | None = None,
+    signal_signal: Callable[..., object] | None = None,
+    manifest: Manifest | None = None,
+    timeout: timedelta | None = None,
+) -> object:
+    """Claim this delivery, then run the training child at most once.
+
+    A same-input loser returns `redelivered` without writing STATUS, committing,
+    or invoking the process factory. The original delivery is the only canonical
+    writer. SIGINT, KeyboardInterrupt, and SIGTERM share one cleanup path.
+    """
+    return deliver_attempt(
+        registry,
+        _UnusedArtifacts(),
+        attempt_id=attempt_id,
+        train=lambda: _run_training_attempt(
+            attempt_id=attempt_id,
+            run_root=Path(run_root),
+            prepared=prepared,
+            commit=commit,
+            lock=lock,
+            now=now,
+            process_factory=process_factory,
+            sleep=time.sleep if sleep is None else sleep,
+            wait=wait,
+            log_sink=log_sink,
+            start_heartbeat=start_heartbeat,
+            killpg=os.killpg if killpg is None else killpg,
+            getpgid=os.getpgid if getpgid is None else getpgid,
+            signal_signal=signal.signal if signal_signal is None else signal_signal,
+            manifest=manifest,
+            timeout=timeout,
+        ),
+    )
+
+
+def _checkpoint_generation(stat_result: os.stat_result) -> tuple[int, int]:
+    return (stat_result.st_mtime_ns, stat_result.st_size)
+
+
+def publish_stable_checkpoint(
+    run_root: Path,
+    *,
+    now: Callable[[], datetime],
+    commit: Callable[[], None],
+    sleep: Callable[[float], None],
+    last_published: tuple[int, int] | None = None,
+) -> tuple[int, int] | None:
+    """Publish sidecar+commit only for a stable, weights-only-loadable generation.
+
+    A changing mtime/size across the settle window is skipped. A torn file is
+    load-rejected and must not produce a sidecar.
+    """
+    ckpt = Path(run_root) / "checkpoints" / CHECKPOINT_NAME
+    if not ckpt.is_file():
+        return last_published
+    first = _checkpoint_generation(ckpt.stat())
+    if first == last_published:
+        return last_published
+    sleep(CHECKPOINT_SETTLE_SECONDS)
+    if not ckpt.is_file():
+        return last_published
+    second_stat = ckpt.stat()
+    second = _checkpoint_generation(second_stat)
+    if second != first:
+        return last_published
+    try:
+        validate_local_checkpoint(ckpt)
+    except ValidationError:
+        return last_published
+    payload = {
+        "sha256": sha256_file(ckpt),
+        "size": second_stat.st_size,
+        "mtime_ns": second_stat.st_mtime_ns,
+        "validated_at": now().isoformat(),
+    }
+    atomic_write_json(ckpt.with_name(CHECKPOINT_SIDECAR_NAME), payload)
+    commit()
+    return second
+
+
+def _start_checkpoint_watcher(
+    *,
+    run_root: Path,
+    now: Callable[[], datetime],
+    commit: Callable[[], None],
+    sleep: Callable[[float], None],
+) -> tuple[threading.Event, threading.Thread]:
+    stop = threading.Event()
+
+    def loop() -> None:
+        last: tuple[int, int] | None = None
+        while not stop.is_set():
+            try:
+                last = publish_stable_checkpoint(
+                    run_root,
+                    now=now,
+                    commit=commit,
+                    sleep=sleep,
+                    last_published=last,
+                )
+            except Exception:
+                pass
+            # Real short poll: do not consume the injected heartbeat wait/clock.
+            if stop.wait(0.05):
+                break
+
+    thread = threading.Thread(target=loop, name="cs2rl-checkpoint-watch", daemon=True)
+    thread.start()
+    return stop, thread
+
+
+def _close_log_sink(log_sink: object | None) -> None:
+    if log_sink is None:
+        return
+    closer = getattr(log_sink, "close", None)
+    if closer is not None:
+        closer()
+
+
+def _is_dead_run(run_root: Path, returncode: int | None) -> bool:
+    if returncode == DEAD_RUN_EXIT_CODE:
+        return True
+    return (Path(run_root) / "checkpoints" / DEAD_CHECKPOINT_NAME).is_file()
+
+
+def _map_child_exit(
+    run_root: Path,
+    returncode: int | None,
+    manifest: Manifest | None,
+) -> tuple[Status, str | None]:
+    if returncode == 0:
+        if manifest is None:
+            return Status.FAILED, REASON_INVALID_EVIDENCE
+        try:
+            validate_completed_run(run_root, manifest)
+        except ValidationError:
+            return Status.FAILED, REASON_INVALID_EVIDENCE
+        return Status.COMPLETED, None
+    if _is_dead_run(run_root, returncode):
+        return Status.FAILED, REASON_DEAD_RUN
+    return Status.FAILED, REASON_NONZERO_EXIT
+
+
+def _metrics_summary(run_root: Path) -> tuple[int, int | None]:
+    try:
+        steps = _iter_metrics_steps(Path(run_root) / "checkpoints" / "metrics.jsonl")
+    except (ValidationError, OSError):
+        return 0, None
+    return len(steps), steps[-1]
+
+
+def _optional_checkpoint_sha256(run_root: Path) -> str | None:
+    ckpt = Path(run_root) / "checkpoints" / CHECKPOINT_NAME
+    if not ckpt.is_file():
+        return None
+    try:
+        validate_local_checkpoint(ckpt)
+    except ValidationError:
+        return None
+    return sha256_file(ckpt)
+
+
+def _write_run_result(
+    run_root: Path,
+    *,
+    status: Status,
+    exit_code: int | None,
+    started_at: str,
+    finished_at: str,
+    evidence: CompletionEvidence | None,
+) -> None:
+    if evidence is not None:
+        digest = evidence.checkpoint_sha256
+        last_step = evidence.last_step
+        row_count, _ = _metrics_summary(run_root)
+    else:
+        digest = _optional_checkpoint_sha256(run_root)
+        row_count, last_step = _metrics_summary(run_root)
+    result = RunResult(
+        schema_version=SCHEMA_VERSION,
+        status=status,
+        exit_code=-1 if exit_code is None else exit_code,
+        started_at=started_at,
+        finished_at=finished_at,
+        artifact_root=str(run_root),
+        checkpoint_sha256=digest,
+        metrics_row_count=row_count,
+        last_step=last_step,
+    )
+    atomic_write_json(Path(run_root) / RESULT_FILENAME, result.to_dict())
+
+
+def _signal_process_group(
+    child: object | None,
+    *,
+    killpg: Callable[[int, int], None],
+    getpgid: Callable[[int], int],
+    sleep: Callable[[float], None],
+) -> None:
+    if child is None:
+        return
+    pid = getattr(child, "pid", None)
+    if pid is None:
+        return
+    try:
+        pgid = getpgid(pid)
+        killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    sleep(TERM_GRACE_SECONDS)
+    poll = getattr(child, "poll", None)
+    if poll is not None and poll() is not None:
+        return
+    try:
+        killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
+def _run_training_attempt(
+    *,
+    attempt_id: str,
+    run_root: Path,
+    prepared: PreparedSource,
+    commit: Callable[[], None],
+    lock: LockLike,
+    now: Callable[[], datetime],
+    process_factory: Callable[..., object],
+    sleep: Callable[[float], None],
+    wait: Callable[[threading.Event, float], bool] | None,
+    log_sink: object | None,
+    start_heartbeat: Callable[..., object] | None,
+    killpg: Callable[[int, int], None],
+    getpgid: Callable[[int], int],
+    signal_signal: Callable[..., object],
+    manifest: Manifest | None,
+    timeout: timedelta | None,
+) -> object:
+    run_root.mkdir(parents=True, exist_ok=True)
+    transition_status(run_root, Status.TRAINING, now=now(), attempt_id=attempt_id, lock=lock)
+    commit()
+    wait_fn = wait if wait is not None else (lambda event, seconds: event.wait(seconds))
+    heartbeat = prepared.heartbeat
+    if heartbeat is None:
+        starter = start_heartbeat if start_heartbeat is not None else start_heartbeat_worker
+        heartbeat = starter(
+            run_root=run_root,
+            attempt_id=attempt_id,
+            lock=lock,
+            now=now,
+            commit=commit,
+            interval=HEARTBEAT_INTERVAL,
+            wait=wait_fn,
+        )
+    ckpt_stop, ckpt_thread = _start_checkpoint_watcher(
+        run_root=run_root,
+        now=now,
+        commit=commit,
+        sleep=sleep,
+    )
+    child: object | None = None
+    prev_int: object | None = None
+    prev_term: object | None = None
+    cleaned = False
+    cleanup_lock = threading.Lock()
+    heartbeat_stopped = False
+    started_at = now()
+    final_result: TrainingAttemptResult | None = None
+    owned_log: object | None = None
+    tee_threads: list[threading.Thread] = []
+
+    def stop_heartbeat_once() -> None:
+        nonlocal heartbeat_stopped
+        if heartbeat_stopped:
+            return
+        heartbeat_stopped = True
+        _stop_heartbeat(heartbeat)
+
+    def finalize(
+        status: Status,
+        reason: str | None,
+        exit_code: int | None,
+        *,
+        kill_child: bool,
+    ) -> None:
+        nonlocal cleaned, final_result
+        with cleanup_lock:
+            if cleaned:
+                return
+            cleaned = True
+        if kill_child:
+            _signal_process_group(child, killpg=killpg, getpgid=getpgid, sleep=sleep)
+        for thread in tee_threads:
+            thread.join(timeout=5.0)
+        stop_heartbeat_once()
+        _close_log_sink(owned_log)
+        _close_log_sink(log_sink)
+        evidence: CompletionEvidence | None = None
+        if status is Status.COMPLETED and manifest is not None:
+            try:
+                evidence = validate_completed_run(run_root, manifest)
+            except ValidationError:
+                status = Status.FAILED
+                reason = REASON_INVALID_EVIDENCE
+        try:
+            transition_status(run_root, status, now=now(), attempt_id=attempt_id, lock=lock)
+            _write_run_result(
+                run_root,
+                status=status,
+                exit_code=exit_code,
+                started_at=started_at.isoformat(),
+                finished_at=now().isoformat(),
+                evidence=evidence,
+            )
+            commit()
+        except Exception:
+            # A failed Volume commit must not become a cross-container rewrite.
+            pass
+        final_result = TrainingAttemptResult(status=status, reason=reason, exit_code=exit_code)
+
+    def on_signal(_signum: int, _frame: object) -> None:
+        finalize(Status.INTERRUPTED, REASON_SIGNAL, None, kill_child=True)
+
+    try:
+        child = process_factory(
+            prepared.train_command,
+            cwd=os.fspath(prepared.source_dir),
+            env=prepared.child_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            shell=False,
+        )
+        try:
+            prev_int = signal_signal(signal.SIGINT, on_signal)
+            prev_term = signal_signal(signal.SIGTERM, on_signal)
+        except ValueError:
+            # signal.signal is main-thread-only; tests may run the child loop
+            # on a worker thread and inject a fake installer instead.
+            prev_int = None
+            prev_term = None
+        owned_log = (run_root / TRAIN_LOG_NAME).open("a", encoding="utf-8")
+        shared_sinks: list[object] = [owned_log]
+        if log_sink is not None:
+            shared_sinks.append(log_sink)
+        threads = [
+            threading.Thread(target=_tee_stream,
+                             args=(getattr(child, "stdout", None), [*shared_sinks, sys.stdout]),
+                             daemon=True),
+            threading.Thread(target=_tee_stream,
+                             args=(getattr(child, "stderr", None), [*shared_sinks, sys.stderr]),
+                             daemon=True),
+        ]
+        tee_threads.extend(threads)
+        for thread in threads:
+            thread.start()
+        try:
+            timed_out = False
+            child_wait = getattr(child, "wait", None)
+            child_poll = getattr(child, "poll", None)
+            while True:
+                if child_poll is not None and child_poll() is not None:
+                    break
+                if timeout is not None and now() - started_at >= timeout:
+                    timed_out = True
+                    break
+                if child_wait is None:
+                    sleep(POLL_INTERVAL_SECONDS)
+                    continue
+                try:
+                    child_wait(timeout=POLL_INTERVAL_SECONDS)
+                except subprocess.TimeoutExpired:
+                    continue
+        except KeyboardInterrupt:
+            finalize(Status.INTERRUPTED, REASON_SIGNAL, None, kill_child=True)
+        if not cleaned:
+            if timed_out:
+                finalize(Status.INTERRUPTED, REASON_TIMEOUT, None, kill_child=True)
+            else:
+                exit_code = getattr(child, "returncode", None)
+                mapped, reason = _map_child_exit(run_root, exit_code, manifest)
+                finalize(mapped, reason, exit_code, kill_child=False)
+        if final_result is not None:
+            return final_result
+        return TrainingAttemptResult(
+            status=Status.FAILED,
+            reason=REASON_NONZERO_EXIT,
+            exit_code=getattr(child, "returncode", None),
+        )
+    finally:
+        if prev_int is not None:
+            signal_signal(signal.SIGINT, prev_int)
+        if prev_term is not None:
+            signal_signal(signal.SIGTERM, prev_term)
+        ckpt_stop.set()
+        ckpt_thread.join(timeout=5.0)
+        stop_heartbeat_once()
+        _close_log_sink(owned_log)
