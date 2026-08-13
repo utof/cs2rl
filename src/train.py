@@ -1081,7 +1081,22 @@ def build_train_env_factory(args, *, shared_ts, map_data):
 # ── SECTION: Policy ────────────────────────────────────────────────────────
 
 
-def build_policy(vecenv, device, obs_dim_override=None):
+def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
+    """Build the Dust2 recurrent policy.
+
+    tct_split_heads (Batch 7, spec 2026-08-13): when True the policy-head
+    group — the 7 discrete action_heads, the aim_mu projection and the
+    aim_log_std parameter — is duplicated per team (`_t` / `_ct` suffixes) and
+    each row is routed to its own team's copy by the obs team bit obs[24].
+    Trunk (encoder + LSTM) and value_head stay SHARED. Default False builds
+    the legacy modules and executes the legacy forward lines verbatim, pinned
+    by tests/test_tct_split.py::test_flag_off_builds_exactly_the_legacy_modules.
+
+    PITFALL: callers must not decide split-ness from config alone — every
+    loader infers it from the checkpoint's keys (state_dict_is_split), because
+    config.json is rewritten on each launch and a flag-less crash-resume would
+    otherwise rebuild the wrong architecture (spec §3.3).
+    """
     import pufferlib.pytorch
     import torch
     import torch.nn as nn
@@ -1111,13 +1126,17 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 elif "weight" in name:
                     nn.init.orthogonal_(p, gain=1.0)
 
-            # Separate heads for MultiDiscrete(ACTION_HEAD_SIZES)
-            self.action_heads = nn.ModuleList([
-                pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
-                for n in ACTION_HEAD_SIZES
-            ])
-            self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
+            # Batch 7 (spec 2026-08-13 §3.1): plain bool, NOT a buffer — it
+            # must never enter state_dict() or every existing checkpoint would
+            # gain a key. Loaders read it to detect a policy/checkpoint
+            # architecture mismatch (load_state_dict_arch_checked).
+            # `tct_split_heads` here is build_policy's parameter, captured by
+            # closure exactly like `obs_dim` and `hidden` above — the inner
+            # class takes no new constructor argument.
+            self.tct_split_heads = bool(tct_split_heads)
 
+            # Separate heads for MultiDiscrete(ACTION_HEAD_SIZES)
+            #
             # Batch 3: continuous Gaussian aim head.
             # mu_aim → (B, AIM_DIM); tanh-squashed and scaled by max_turn_speed
             #   in forward(). State-DEPENDENT (per-step linear projection) so
@@ -1130,8 +1149,48 @@ def build_policy(vecenv, device, obs_dim_override=None):
             # Pitfall: keep `std=0.01` on aim_mu init so the pre-tanh mean
             #   starts ~zero — otherwise the policy starts saturated and
             #   learning the Gaussian head is much slower.
-            self.aim_mu = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
-            self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+            #
+            # Batch 7 note on the deliberate duplication of these three
+            # expressions across the two branches: the construction ORDER
+            # (7 discrete heads → value_head → aim_mu → aim_log_std) is what
+            # determines how many draws each layer takes from the global torch
+            # RNG. Factoring the head group into a shared helper would move
+            # value_head's draw and change every layer's init relative to the
+            # legacy baseline at the same seed. Repetition here buys exact
+            # RNG-stream parity between the flag-off and flag-on `_t` copies,
+            # which is the whole point of spec §3.7.
+            if not self.tct_split_heads:
+                self.action_heads = nn.ModuleList([
+                    pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
+                    for n in ACTION_HEAD_SIZES
+                ])
+                self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
+                self.aim_mu = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
+                self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+            else:
+                self.action_heads_t = nn.ModuleList([
+                    pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
+                    for n in ACTION_HEAD_SIZES
+                ])
+                self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
+                self.aim_mu_t = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
+                self.aim_log_std_t = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+                # RNG hygiene (spec §3.7): the CT copy's construction is what
+                # draws from the default stream, so it is forked — post-hoc
+                # weight cloning would NOT restore stream parity. Without this
+                # the flag-on run's every subsequent sample shifts relative to
+                # the baseline at the same seed and "the split is the only
+                # changed variable" is strictly false. devices=[] forks the CPU
+                # generator only (construction is on CPU; .to(device) happens
+                # after) and skips CUDA device enumeration.
+                with torch.random.fork_rng(devices=[]):
+                    self.action_heads_ct = nn.ModuleList([
+                        pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
+                        for n in ACTION_HEAD_SIZES
+                    ])
+                    self.aim_mu_ct = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM),
+                                                                  std=0.01)
+                self.aim_log_std_ct = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
 
             # max_turn_speed mirrors C sd->max_turn_speed (StaticData, π/4
             # default). Pulled from the vecenv's static-data block so the
@@ -1147,6 +1206,24 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 'max_turn_speed',
                 torch.tensor(driver_env._c_env.sd.contents.max_turn_speed, dtype=torch.float32),
             )
+
+        @staticmethod
+        def _blend(mask, out_t, out_ct):
+            """Route a per-row output to its team's head copy (spec §3.2).
+
+            mask is 0/1 with 1.0 == T, broadcastable over out_t's trailing
+            dims. Branch-free (GPU-friendly) and autograd-exact: a T row's
+            blend weight on the CT copy is literally 0, so it contributes zero
+            gradient there — that is the routing correctness proof, pinned by
+            test_pure_team_batch_leaves_other_copy_gradient_exactly_zero.
+
+            PITFALL: the cast is load-bearing. A float32 mask multiplied into
+            fp16 head outputs would silently promote them under any future
+            autocast; casting to the output dtype keeps the arithmetic in the
+            head's own precision.
+            """
+            m = mask.to(out_t.dtype)
+            return m * out_t + (1.0 - m) * out_ct
 
         def get_value(self, x, lstm_state=None, done=None):
             hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
@@ -1180,7 +1257,16 @@ def build_policy(vecenv, device, obs_dim_override=None):
                 lands in task 5 via _patch_trainer_with_hybrid_aim.
             """
             hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
-            logits = [head(hidden_out) for head in self.action_heads]
+            if self.tct_split_heads:
+                # 2D input (B, obs): the team bit is a column. (The 3D
+                # timestep trap lives in forward(), not here.)
+                mask = x[:, 24:25]
+                logits = [
+                    self._blend(mask, ht(hidden_out), hct(hidden_out))
+                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
+                ]
+            else:
+                logits = [head(hidden_out) for head in self.action_heads]
 
             # Discrete sample / log-prob / entropy.
             dists = [torch.distributions.Categorical(logits=h) for h in logits]
@@ -1192,8 +1278,20 @@ def build_policy(vecenv, device, obs_dim_override=None):
             # Continuous (Normal) sample / log-prob / entropy. tanh+scale
             # bounds μ ∈ [-max_turn_speed, +max_turn_speed]; σ is clamped so
             # the Normal can't collapse or explode mid-training.
-            mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-            log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX)
+            if self.tct_split_heads:
+                mu_aim = self._blend(mask,
+                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
+                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
+                # clamp EACH copy, then blend (spec §3.2) — identical result
+                # for a 0/1 mask, but it matches the legacy clamp-at-use
+                # semantics and keeps §3.6's per-team σ logs interpretable.
+                log_std = self._blend(
+                    mask,
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+            else:
+                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX)
             sigma = torch.exp(log_std).expand_as(mu_aim)
             aim_dist = torch.distributions.Normal(mu_aim, sigma)
             if continuous_action is None:
@@ -1243,13 +1341,27 @@ def build_policy(vecenv, device, obs_dim_override=None):
             if lstm_state is not None:
                 state["lstm_h"], state["lstm_c"] = lstm_state
 
-            logits = [head(hidden_out) for head in self.action_heads]
+            if self.tct_split_heads:
+                mask = x[:, 24:25]                                                                # 2D input (B, obs)
+                logits = [
+                    self._blend(mask, ht(hidden_out), hct(hidden_out))
+                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
+                ]
+                mu_aim = self._blend(mask,
+                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
+                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
+                log_std = self._blend(
+                    mask,
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+            else:
+                logits = [head(hidden_out) for head in self.action_heads]
+                                                                                                  # μ is bounded by tanh*max_turn_speed; log_std broadcasts to μ
+                                                                                                  # shape so callers can build Normal(mu, exp(log_std)) directly
+                                                                                                  # without an extra .expand call.
+                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
             value = self.value_head(hidden_out)
-            # μ is bounded by tanh*max_turn_speed; log_std broadcasts to μ
-            # shape so callers can build Normal(mu, exp(log_std)) directly
-            # without an extra .expand call.
-            mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-            log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
             return logits, mu_aim, log_std, value
 
         def forward(self, x, state):
@@ -1310,10 +1422,32 @@ def build_policy(vecenv, device, obs_dim_override=None):
             # ordering silently misaligns every logprob/advantage pairing.
             hidden_out = h.transpose(0, 1).reshape(B * TT, self.hidden_size)
 
-            logits = [head(hidden_out) for head in self.action_heads]
+            if self.tct_split_heads:
+                # PITFALL (spec §3.2 — the bug class this comment exists to
+                # prevent): build the mask from the 3D x with x[..., 24].
+                # Writing x[:, 24] on a (B, T, obs) input silently selects
+                # TIMESTEP 24 instead of the team column. The reshape to
+                # (B*TT, 1) is aligned with hidden_out's
+                # h.transpose(0,1).reshape(B*TT, H) — both segment-major,
+                # time-minor. Works unchanged for the 2D/ONNX path, where
+                # TT == 1 and x[..., 24] is already the team column.
+                mask = x[..., 24].reshape(B * TT, 1)
+                logits = [
+                    self._blend(mask, ht(hidden_out), hct(hidden_out))
+                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
+                ]
+                mu_aim = self._blend(mask,
+                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
+                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
+                log_std = self._blend(
+                    mask,
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+            else:
+                logits = [head(hidden_out) for head in self.action_heads]
+                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
             value = self.value_head(hidden_out)
-            mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-            log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
             return logits, mu_aim, log_std, value
 
         def _lstm_bptt(self, h_seq, hc, terminals):
