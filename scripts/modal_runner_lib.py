@@ -870,6 +870,8 @@ class Manifest:
     resume_source_path: str | None
     runner_commit: str
     config_hash: str
+    thread_caps: list[str]
+    resumed_from_run_id: str | None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

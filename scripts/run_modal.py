@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
@@ -403,6 +404,7 @@ def _launch_payload(
         "image_digest": _require_pinned_image_digest(IMAGE_DIGEST),
         "modal_version": modal_version,
         "thread_caps": _thread_cap_records(),
+        "resumed_from_run_id": request.resume.prior_run_id,
     }
     if wandb_enabled:
         payload["wandb_enabled"] = True
@@ -422,6 +424,7 @@ def build_remote_manifest(payload: dict[str, object]) -> mrl.Manifest:
     resume_size = payload.get("resume_size")
     resume_source = payload.get("resume_source_path")
     config_hash = payload.get("config_hash")
+    resumed_from = payload.get("resumed_from_run_id")
     return mrl.Manifest(
         schema_version=mrl.SCHEMA_VERSION,
         run_id=str(payload["run_id"]),
@@ -450,6 +453,8 @@ def build_remote_manifest(payload: dict[str, object]) -> mrl.Manifest:
         resume_source_path=None if resume_source is None else str(resume_source),
         runner_commit=str(payload["runner_commit"]),
         config_hash=str(config_hash) if config_hash else "0" * 64,
+        thread_caps=[str(item) for item in payload["thread_caps"]],
+        resumed_from_run_id=None if resumed_from is None else str(resumed_from),
     )
 
 
@@ -617,6 +622,8 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
         wandb_api_key=os.environ.get("WANDB_API_KEY") if payload.get("wandb_enabled") else None,
         manifest=manifest,
     )
+    if prepared.config_hash is not None:
+        manifest = replace(manifest, config_hash=prepared.config_hash)
     result = mrl.execute_training_attempt(
         registry=registry,
         attempt_id=attempt_id,

@@ -1003,6 +1003,8 @@ def _make_manifest(**overrides) -> mrl.Manifest:
         "resume_source_path": None,
         "runner_commit": "a" * 40,
         "config_hash": "d" * 64,
+        "thread_caps": [f"{key}={value}" for key, value in sorted(mrl._THREAD_CAP_ENV.items())],
+        "resumed_from_run_id": None,
     }
     payload.update(overrides)
     return mrl.Manifest(**payload)
@@ -4123,6 +4125,8 @@ def test_prior_run_resume_sends_only_immutable_digest_path(fake_modal, tmp_path)
     payload = fake_modal.configured_remote_calls[0][1][0]
     assert payload["resume_mount_path"] == f"/artifacts/inputs/sha256/{digest}.pt"
     assert payload["resume_sha256"] == digest
+    assert payload["resumed_from_run_id"] == "parent-run"
+    assert module.build_remote_manifest(payload).resumed_from_run_id == "parent-run"
     assert "runs/parent-run" not in payload["resume_mount_path"]
     assert f"inputs/sha256/{digest}.pt" in fake_modal.volumes[mrl.VOLUME_NAME].files
     assert fake_modal.volumes[mrl.VOLUME_NAME].files[f"inputs/sha256/{digest}.pt"] == ckpt_bytes
@@ -4173,6 +4177,7 @@ def test_launch_payload_includes_design_contract_fields(fake_modal, tmp_path):
     assert payload["memory_request_mib"] == payload["memory_hard_limit_mib"] == 16384
     assert payload["vec_workers"] == 8
     assert payload["thread_caps"] == _expected_thread_caps()
+    assert payload["resumed_from_run_id"] is None
     assert all(
         isinstance(value, (str, int, float, bool, list, type(None))) for value in payload.values())
 
@@ -4208,6 +4213,8 @@ def test_build_remote_manifest_records_contract_and_rejects_digest_drift(fake_mo
     assert manifest.resume_source_path is None
     assert manifest.runner_commit == sha
     assert manifest.config_hash == "0" * 64
+    assert manifest.thread_caps == _expected_thread_caps()
+    assert manifest.resumed_from_run_id is None
     assert manifest.commit == sha
     drifted = dict(payload)
     drifted["image_digest"] = "sha256:" + "0" * 64
@@ -4298,11 +4305,98 @@ def test_train_remote_writes_manifest_and_rejects_completed_without_evidence(
     assert written["resume_sha256"] is None
     assert written["resume_size"] is None
     assert written["resume_source_path"] is None
-    assert captured["prepare_manifest"] is captured["execute_manifest"]
+    assert written["thread_caps"] == _expected_thread_caps()
+    assert written["resumed_from_run_id"] is None
+    assert captured["execute_manifest"].config_hash == captured["prepare_manifest"].config_hash
+    assert captured["execute_manifest"].thread_caps == _expected_thread_caps()
     assert result["status"] == mrl.Status.FAILED.value
     assert result["reason"] == mrl.REASON_INVALID_EVIDENCE
     assert json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"] == "failed"
     assert json.loads((run_root / mrl.RESULT_FILENAME).read_text())["status"] == "failed"
+
+
+def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_path, monkeypatch):
+    import torch
+
+    module = _import_run_modal()
+    fake_modal.invoke_remote = True
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    request = module.resolve_launch_request(**_valid_launch_sentinels(git_sha=sha))
+    mount = tmp_path / "artifacts"
+    mount.mkdir()
+    monkeypatch.setattr(mrl, "VOLUME_MOUNT", mount)
+    captured: dict[str, object] = {}
+    real_prepare = mrl.prepare_remote_source
+    real_execute = mrl.execute_training_attempt
+
+    def materialize(self):
+        for key, data in self.files.items():
+            dest = mrl.VOLUME_MOUNT.joinpath(*PurePosixPath(key).parts)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+
+    monkeypatch.setattr(FakeVolume, "reload", materialize)
+
+    def fake_run(cmd, **kwargs):
+        if "--dump-config" in list(cmd):
+            _write_dumped_config(Path(captured["run_root"]))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    def prepare_with_real_hash_rewrite(**kwargs):
+        captured["prepare_in_manifest"] = kwargs["manifest"]
+        captured["run_root"] = Path(kwargs["run_root"])
+        kwargs["run"] = fake_run
+        kwargs["start_heartbeat"] = _noop_heartbeat
+        prepared = real_prepare(**kwargs)
+        captured["prepared"] = prepared
+        return prepared
+
+    def execute_with_valid_evidence(**kwargs):
+        captured["execute_manifest"] = kwargs["manifest"]
+        run_root = Path(kwargs["run_root"])
+
+        def factory(*_args, **_kwargs):
+            ckpt_dir = run_root / "checkpoints"
+            torch.save({"weight": torch.tensor([1.0])}, ckpt_dir / "dust2_policy.pt")
+            effective = (request.timesteps // request.batch_size) * request.batch_size
+            _write_metrics(ckpt_dir / "metrics.jsonl", [request.batch_size, effective])
+            return FakeChild(returncode=0, stdout=b"done\n")
+
+        kwargs["process_factory"] = factory
+        kwargs["sleep"] = lambda _seconds: None
+        kwargs["now"] = lambda: _aware()
+        return real_execute(**kwargs)
+
+    monkeypatch.setattr(mrl, "prepare_remote_source", prepare_with_real_hash_rewrite)
+    monkeypatch.setattr(mrl, "execute_training_attempt", execute_with_valid_evidence)
+    result = module.launch_run(request,
+                               repo=repo,
+                               app_obj=module.app,
+                               now=_aware(),
+                               stdout=_capture_stdout())
+    run_root = Path(captured["run_root"])
+    dumped = json.loads((run_root / "checkpoints" / "config.json").read_text())
+    expected_hash = mrl.sha256_bytes(
+        json.dumps(mrl.normalize_config_for_transport(dumped),
+                   sort_keys=True,
+                   separators=(",", ":")).encode())
+    on_disk = json.loads((run_root / mrl.MANIFEST_FILENAME).read_text())
+    prepared = captured["prepared"]
+    execute_manifest = captured["execute_manifest"]
+    assert captured["prepare_in_manifest"].config_hash == "0" * 64
+    assert prepared.config_hash == expected_hash
+    assert on_disk["config_hash"] == expected_hash
+    assert execute_manifest.config_hash == expected_hash
+    assert execute_manifest.config_hash != "0" * 64
+    assert execute_manifest.thread_caps == _expected_thread_caps()
+    assert execute_manifest.resumed_from_run_id is None
+    assert on_disk["thread_caps"] == _expected_thread_caps()
+    assert on_disk["resumed_from_run_id"] is None
+    assert result["status"] == mrl.Status.COMPLETED.value
+    assert result["reason"] is None
+    assert json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"] == "completed"
+    assert json.loads((run_root / mrl.RESULT_FILENAME).read_text())["status"] == "completed"
 
 
 # ── Task 8 cycle E: client-only status / download ──────────────────────────
