@@ -1728,6 +1728,98 @@ def compute_network_health(model, device):
     return metrics
 
 
+def log_aim_log_std(policy, logs):
+    """Emit policy/aim_log_std_* into `logs` under BOTH architectures (spec §3.6).
+
+    WHAT: legacy policy → today's two keys, unchanged. Split policy → the same
+    two keys carrying the MEAN of the two CLAMPED copies, plus four per-team
+    keys policy/aim_log_std_{yaw,pitch}_{t,ct}.
+
+    WHY the legacy keys survive as a mean rather than being replaced: the T7
+    acceptance gate greps the status line for `aim_log_std_pitch=` (see
+    format_train_status), and every dashboard/analysis consumer reads those
+    two names. Adding the per-team keys alongside is what exposes the actually
+    interesting Batch 7 signal — whether the teams learn different aim noise.
+
+    WHY this is a function and not three inline lines in the outer loop: the
+    pre-Batch-7 code read policy.aim_log_std unconditionally, which raises
+    AttributeError on a split policy before the run writes a single metrics
+    row. Extracting it makes that path directly testable (spec §5 test 10,
+    which re-review N3 flagged as untested).
+
+    PITFALL: CLAMP EACH COPY, THEN AVERAGE — never average then clamp. The
+    forward path clamps per copy (spec §3.2), so a mean-then-clamp here would
+    report a σ the policy never used whenever one copy sits outside the band.
+
+    Architecture is detected from the policy object (hasattr aim_log_std_t),
+    never from config — config.json is rewritten every launch and lies after a
+    flag-less resume (spec §3.4).
+    """
+    # train.py imports torch lazily inside functions (module import stays cheap
+    # for the CLI/help paths) — keep that convention here.
+    import torch
+
+    with torch.no_grad():
+        if hasattr(policy, "aim_log_std_t"):
+            ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
+            ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
+            logs["policy/aim_log_std_yaw_t"] = float(ls_t[0])
+            logs["policy/aim_log_std_pitch_t"] = float(ls_t[1])
+            logs["policy/aim_log_std_yaw_ct"] = float(ls_ct[0])
+            logs["policy/aim_log_std_pitch_ct"] = float(ls_ct[1])
+            clamped = 0.5 * (ls_t + ls_ct)
+        else:
+            clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
+    logs["policy/aim_log_std_yaw"] = float(clamped[0])
+    logs["policy/aim_log_std_pitch"] = float(clamped[1])
+
+
+def compute_head_divergence(policy):
+    """split/head_l2_rel/<module> — how far the two team head copies have moved apart.
+
+    Metric (spec §4 Q3):  ‖W_t − W_ct‖ / (0.5‖W_t‖ + 0.5‖W_ct‖)
+
+    WHY relative and not raw L2: the optimizer runs weight_decay=1e-4
+    (see the Adam construction in train()), so even a copy that receives zero
+    gradient keeps moving. Raw L2 therefore has no achievable null. Normalising
+    by the mean norm of the two copies makes "how different are the teams'
+    heads" scale-free; the honest null is still a decay-aware control (zero-
+    advantage steps), which is what tests/test_tct_split.py exercises, and the
+    run readout reports the TRAJECTORY, not a binary.
+
+    Returns {} for a legacy policy — the metric is undefined with one copy,
+    and emitting a fake 0.0 would read as "the teams agree" to anyone
+    plotting it.
+
+    PITFALL: modules are grouped, not per-tensor — all 7 discrete heads
+    contribute to one `action_heads` number. Per-head keys would be 9 series
+    per epoch of mostly-identical curves; if a per-head breakdown is ever
+    needed, add it as a separate function rather than widening this one.
+    """
+    import torch
+
+    if not hasattr(policy, "aim_log_std_t"):
+        return {}
+
+    def _flat(obj):
+        if isinstance(obj, torch.nn.Parameter):
+            return obj.detach().reshape(-1)
+        return torch.cat([p.detach().reshape(-1) for p in obj.parameters()])
+
+    out = {}
+    with torch.no_grad():
+        for name, mod_t, mod_ct in (
+            ("action_heads", policy.action_heads_t, policy.action_heads_ct),
+            ("aim_mu", policy.aim_mu_t, policy.aim_mu_ct),
+            ("aim_log_std", policy.aim_log_std_t, policy.aim_log_std_ct),
+        ):
+            w_t, w_ct = _flat(mod_t), _flat(mod_ct)
+            denom = 0.5 * float(w_t.norm()) + 0.5 * float(w_ct.norm())
+            out[f"split/head_l2_rel/{name}"] = (float(
+                (w_t - w_ct).norm()) / denom if denom > 0.0 else 0.0)
+    return out
+
+
 # ── SECTION: Timing patch ─────────────────────────────────────────────────
 
 
@@ -4142,15 +4234,35 @@ def train(args):
 
             # Batch 3.5 (#24): per-axis aim log_std metrics. Read CLAMPED values
             # (the values the policy actually used at this iteration), not the raw
-            # nn.Parameter. LOG_STD_MIN/MAX are module-globals at lines 49-50.
-            # Load-bearing for T7 acceptance gate 2: aim_log_std_pitch > -3.5
-            # at 30M steps. Format string in format_train_status must keep the
-            # 'aim_log_std_pitch=' substring greppable.
-            with torch.no_grad():
-                clamped_log_std = torch.clamp(policy.aim_log_std, LOG_STD_MIN,
-                                              LOG_STD_MAX).cpu().numpy()
-            logs["policy/aim_log_std_yaw"] = float(clamped_log_std[0])
-            logs["policy/aim_log_std_pitch"] = float(clamped_log_std[1])
+            # nn.Parameter. Load-bearing for T7 acceptance gate 2:
+            # aim_log_std_pitch > -3.5 at 30M steps, and format_train_status must
+            # keep the 'aim_log_std_pitch=' substring greppable.
+            # Batch 7: the reader branches on architecture inside the helper —
+            # a split policy has no `aim_log_std` attribute at all (spec §3.6).
+            log_aim_log_std(policy, logs)
+
+            # Batch 7 (spec §3.4): split/active is the analyzer's labeling
+            # signal for the structurally-zero policy_heads TAG cells. It is
+            # derived from the POLICY OBJECT, never from config.json — the
+            # config is rewritten unconditionally at every launch, so a
+            # flag-less crash-resume of a split run (which key inference
+            # deliberately supports) would stamp tct_split_heads:false and
+            # silently disarm the labeling. A metrics key travels with the rows
+            # the analyzer already reads and survives resume seams.
+            #
+            # PLACEMENT IS PART OF THE CONTRACT: this belongs HERE, in the
+            # unconditional outer-loop logging block, NOT inside the TAG hook
+            # and NOT behind `tag_diagnostic` / `epoch % tag_every`. Every
+            # logged epoch's row must carry it. Gating it on the TAG throttle
+            # would leave ~80% of rows unlabeled at the default --tag-every 5,
+            # and any future analyzer that inspects a non-measurement row (a
+            # dead-window scan, a σ trajectory, a divergence plot) would read
+            # the missing key as "legacy run" — the exact misidentification the
+            # key exists to prevent. It is also independent of the TAG flag
+            # entirely: a split run launched WITHOUT --tag-diagnostic still
+            # labels every row.
+            logs["split/active"] = float(hasattr(policy, "aim_log_std_t"))
+            logs.update(compute_head_divergence(policy))
 
             # TAG injection — MUST stay after dead_run_detector.check above
             # (deliberate NaNs; see _inject_tag_metrics docstring).

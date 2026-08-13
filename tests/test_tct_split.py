@@ -13,8 +13,11 @@ because make_puffer_env loads the nav graph / visibility matrix (~seconds)
 and every test here only needs its observation space + static data.
 """
 
+import math
+
 import pytest
 import torch
+import torch.nn.functional as F
 
 import train
 from _action_spec import AIM_DIM
@@ -403,3 +406,117 @@ def test_load_policy_from_checkpoint_infers_split(env, tmp_path):
     torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
     p = train.load_policy_from_checkpoint(legacy_pt, "cpu")
     assert p.tct_split_heads is False
+
+
+def test_log_aim_log_std_legacy_keys_unchanged(env):
+    """Spec §5 test 10 (legacy half): on a legacy policy the emitted keys are
+    exactly today's two, with today's values.
+    """
+    p = train.build_policy(env, device="cpu")
+    with torch.no_grad():
+        p.aim_log_std.copy_(torch.tensor([-1.5, -2.0]))
+    logs = {}
+    train.log_aim_log_std(p, logs)
+    assert set(logs) == {"policy/aim_log_std_yaw", "policy/aim_log_std_pitch"}
+    assert logs["policy/aim_log_std_yaw"] == pytest.approx(-1.5)
+    assert logs["policy/aim_log_std_pitch"] == pytest.approx(-2.0)
+
+
+def test_log_aim_log_std_split_emits_mean_plus_per_team(env):
+    """Spec §5 test 10 + §3.6 (the remedy for review-1 BLOCKER 2): under the
+    split the legacy keys become the MEAN of the two CLAMPED copies — that
+    preserves the T7 acceptance gate and every dashboard consumer — and four
+    per-team keys carry the actually interesting signal (do the teams learn
+    different aim noise?).
+
+    The clamp is applied per copy BEFORE averaging, matching the forward path:
+    aim_log_std_t is set above LOG_STD_MAX here, so a mean-then-clamp
+    implementation lands on a different number and fails.
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    with torch.no_grad():
+        p.aim_log_std_t.copy_(torch.tensor([10.0, -2.0]))              # yaw above LOG_STD_MAX
+        p.aim_log_std_ct.copy_(torch.tensor([-3.0, -1.0]))
+    logs = {}
+    train.log_aim_log_std(p, logs)
+    assert logs["policy/aim_log_std_yaw_t"] == pytest.approx(train.LOG_STD_MAX)
+    assert logs["policy/aim_log_std_yaw_ct"] == pytest.approx(-3.0)
+    assert logs["policy/aim_log_std_pitch_t"] == pytest.approx(-2.0)
+    assert logs["policy/aim_log_std_pitch_ct"] == pytest.approx(-1.0)
+    assert logs["policy/aim_log_std_yaw"] == pytest.approx(0.5 * (train.LOG_STD_MAX + -3.0))
+    assert logs["policy/aim_log_std_pitch"] == pytest.approx(-1.5)
+
+
+def test_status_line_keeps_the_t7_gate_substring(env):
+    """Spec §5 test 10 (last clause): T7 acceptance gate 2 greps stdout for
+    'aim_log_std_pitch=' — a split run must still print it.
+    """
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    logs = {}
+    train.log_aim_log_std(p, logs)
+    # Verified at HEAD: format_train_status(epoch, ts_val, logs) — the exact
+    # signature the outer loop calls. The contract under test is only that the
+    # formatted line still contains the 'aim_log_std_pitch=' substring the T7
+    # gate greps.
+    line = train.format_train_status(7, 0.5, logs)
+    assert "aim_log_std_pitch=" in line
+
+
+def test_head_divergence_zero_at_warm_split_and_keys_present(env):
+    """Spec §5 test 7 (first clause): split/head_l2_rel/* keys exist and are
+    ~0 immediately after a warm split, because both copies are identical.
+    Legacy policies emit nothing (the metric is undefined without two copies).
+    """
+    legacy = _legacy_frozen_state_dict(env)
+    split_sd = train.convert_legacy_state_dict_to_split(legacy)
+    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p.load_state_dict(split_sd)
+    d = train.compute_head_divergence(p)
+    assert set(d) == {
+        "split/head_l2_rel/action_heads", "split/head_l2_rel/aim_mu",
+        "split/head_l2_rel/aim_log_std"
+    }
+    assert all(v == 0.0 for v in d.values()), d
+    assert train.compute_head_divergence(train.build_policy(env, device="cpu")) == {}
+
+
+def test_head_divergence_exceeds_the_decay_aware_null(env):
+    """Spec §5 test 7 + §4 Q3: divergence under team-asymmetric advantages
+    must exceed a same-steps, same-optimizer control with ZERO advantages.
+
+    Why a control at all: the optimizer carries weight_decay=1e-4 (set at
+    src/train.py:3698) which moves even a zero-gradient copy, and head_l2_rel
+    is a RATIO — shrinking both copies inflates it with no learning at all. So
+    raw L2 has no achievable null and the honest comparison is
+    asymmetric-vs-zero advantage over the identical number of steps.
+
+    The two arms start from the same state, seeded with a small pre-existing
+    T/CT gap. A zero-gap start would make the null trivially 0.0 (decay acts
+    identically on identical copies) and the inequality vacuous; seeding the
+    gap is what makes the control actually control something.
+    """
+
+    def _arm(asymmetric):
+        torch.manual_seed(0)
+        p = train.build_policy(env, device="cpu", tct_split_heads=True)
+        with torch.no_grad():          # identical seeded gap in both arms
+            p.aim_mu_ct.bias.add_(0.05)
+            p.action_heads_ct[0].bias.add_(0.05)
+        opt = torch.optim.Adam(p.parameters(), lr=1e-3, weight_decay=1e-4)
+        x = _obs(8, 8, seed=1)
+        adv = (torch.cat([torch.ones(8), -torch.ones(8)]) if asymmetric else torch.zeros(16))
+        for _ in range(20):
+            logits, mu, _ls, _v = p(x, state={})
+            logp = sum(F.log_softmax(lg, dim=-1)[:, 0] for lg in logits) + mu.sum(-1)
+            opt.zero_grad(set_to_none=True)
+            (-(adv * logp).mean()).backward()
+            opt.step()
+        return train.compute_head_divergence(p)
+
+    treated = _arm(asymmetric=True)
+    null = _arm(asymmetric=False)
+    for key in ("split/head_l2_rel/action_heads", "split/head_l2_rel/aim_mu"):
+        assert treated[key] > null[key], (
+            f"{key}: asymmetric-advantage divergence {treated[key]:.6f} did not exceed "
+            f"the zero-advantage weight-decay floor {null[key]:.6f}")
+    assert math.isfinite(null["split/head_l2_rel/aim_log_std"])
