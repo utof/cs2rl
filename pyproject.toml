@@ -39,6 +39,16 @@ dev = [
     "clang-format>=20.1.0",
     "pytest-timeout>=2.4.0",
 ]
+# NON-DEFAULT group (RL-overhaul task 14, tracker #82): the Modal SDK is needed
+# only for the optional cloud training runner (scripts/run_modal.py). A plain
+# `uv sync` must not pull it — the local/scientific stack stays byte-identical
+# either way — so it lives outside `dev` and is only installed via
+# `uv sync --group modal`. The floor pins the SDK contract the runner relies on
+# (Function.with_options cpu/memory tuples, Dict.put skip_if_exists,
+# objects.create allow_existing); the <2 ceiling avoids tracking a future major.
+modal = [
+    "modal>=1.4.3,<2",
+]
 
 [tool.uv]
 # Keep numpy>=2 available for the current awpy stack in this repo.
