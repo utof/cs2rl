@@ -47,6 +47,16 @@ SOURCES_ROOT = PurePosixPath("sources")
 INPUTS_ROOT = PurePosixPath("inputs")
 RUNS_ROOT = PurePosixPath("runs")
 
+# The image venv that holds torch/numpy/PufferLib and runs train.py. It is NOT
+# the interpreter this module runs under on the container: a Modal function runs
+# on the image's standalone python (/usr/local/bin/python from add_python=), which
+# has only uv + the modal client. Defined here, above validate_local_checkpoint,
+# because that validator shells out to it when in-process torch is unavailable.
+PREBUILT_PYTHON = "/opt/cs2rl/.venv/bin/python"
+# Cap on the out-of-process weights-only load. Generous for a ~2.5 MB policy;
+# a hung interpreter must not stall the interrupt path's terminal write.
+PREBUILT_LOAD_TIMEOUT_SECONDS = 120.0
+
 ALLOWED_MAPS = frozenset({"simple", "dust2"})
 ALLOWED_GPUS = frozenset({"T4", "L4", "A10"})
 ALLOWED_NUM_ENVS = frozenset({16, 32, 64, 128, 256})
@@ -768,23 +778,77 @@ class FileProvenance:
     mount_path: Path
 
 
+def _import_torch() -> object:
+    """Import torch, or raise ImportError. A seam, not a convenience wrapper.
+
+    Tests monkeypatch this to reproduce the container runner's torch-less
+    interpreter; without the seam the whole prebuilt fallback below is
+    unreachable from a laptop, which is exactly how it stayed broken.
+    """
+    import torch
+    return torch
+
+
+# argv[1] is the checkpoint path. Kept out of the -c source so no filename can
+# ever be interpolated into executed code.
+_PREBUILT_LOAD_SOURCE = (
+    "import sys, torch; torch.load(sys.argv[1], map_location='cpu', weights_only=True)")
+
+
+def _assert_weights_only_loadable(path: Path) -> None:
+    """Prove `path` is a weights-only-loadable torch checkpoint.
+
+    In-process when torch is importable (laptop, tests, training child). On the
+    Modal container the runner interpreter has NO torch — every dependency lives
+    in the PREBUILT_PYTHON venv — so the load is delegated to that interpreter.
+    Verified in a live container: runner_torch=MISSING, prebuilt subprocess=ok.
+
+    PITFALL: never soften a failure here into "skip". A checkpoint that cannot
+    be proven loadable must raise, so the caller records a reason instead of
+    silently publishing nothing (gh: the three-T4-run sidecar hunt).
+    """
+    try:
+        torch = _import_torch()
+    except ImportError:
+        pass
+    else:
+        try:
+            torch.load(path, map_location="cpu", weights_only=True)
+        except Exception as err:
+            raise ValidationError(f"checkpoint is not weights-only loadable: {path}") from err
+        return
+    if not Path(PREBUILT_PYTHON).is_file():
+        raise ValidationError(f"cannot validate {path}: torch is not importable and the prebuilt "
+                              f"interpreter {PREBUILT_PYTHON} does not exist")
+    try:
+        completed = subprocess.run(
+            [PREBUILT_PYTHON, "-c", _PREBUILT_LOAD_SOURCE,
+             os.fspath(path)],
+            capture_output=True,
+            text=True,
+            timeout=PREBUILT_LOAD_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as err:
+        raise ValidationError(f"cannot validate {path}: {PREBUILT_PYTHON} did not finish within "
+                              f"{PREBUILT_LOAD_TIMEOUT_SECONDS}s") from err
+    except OSError as err:
+        raise ValidationError(f"cannot validate {path}: {PREBUILT_PYTHON} failed to run: "
+                              f"{err}") from err
+    if completed.returncode != 0:
+        raise ValidationError(f"checkpoint is not weights-only loadable: {path}: "
+                              f"{completed.stderr.strip()[-400:]}")
+
+
 def validate_local_checkpoint(path: Path) -> FileProvenance:
     """Weights-only load, hash, and map a local checkpoint to the Volume path.
 
-    Torch is imported here only. A module-level import would pull CUDA/pynvml
-    into every status/download invocation and into the import-boundary tests.
+    Torch is never imported at module scope: that would pull CUDA/pynvml into
+    every status/download invocation and into the import-boundary tests.
     """
     path = Path(path)
     if not path.is_file():
         raise ValidationError(f"checkpoint is not a readable file: {path}")
-    try:
-        import torch
-    except ImportError as err:
-        raise ValidationError("torch is required to validate checkpoints") from err
-    try:
-        torch.load(path, map_location="cpu", weights_only=True)
-    except Exception as err:
-        raise ValidationError(f"checkpoint is not weights-only loadable: {path}") from err
+    _assert_weights_only_loadable(path)
     digest = sha256_file(path)
     client_path = INPUTS_ROOT / "sha256" / f"{digest}.pt"
     return FileProvenance(
@@ -1414,7 +1478,8 @@ def build_dump_config_argv(request: RunRequest, remote_resume: str | None) -> li
 
 
 UV_BIN = "/usr/local/bin/uv"
-PREBUILT_PYTHON = "/opt/cs2rl/.venv/bin/python"
+# PREBUILT_PYTHON is defined with the path constants at the top of this module —
+# validate_local_checkpoint needs it and is defined long before this point.
 TRAIN_SCRIPT = "src/train.py"
 
 # Child env is an allowlist, not a denylist: Modal/image leftovers (tokens,
@@ -1779,6 +1844,7 @@ TRAIN_LOG_NAME = "train.log"
 RESULT_FILENAME = "result.json"
 CHECKPOINT_NAME = "dust2_policy.pt"
 CHECKPOINT_SIDECAR_NAME = "dust2_policy.pt.meta.json"
+CHECKPOINT_PUBLISH_REASON_NAME = "dust2_policy.pt.publish_reason.json"
 DEAD_CHECKPOINT_NAME = "dust2_policy_dead.pt"
 CHECKPOINT_SETTLE_SECONDS = 1.0
 TERM_GRACE_SECONDS = 15.0
@@ -1903,6 +1969,19 @@ def _checkpoint_generation(stat_result: os.stat_result) -> tuple[int, int]:
     return (stat_result.st_mtime_ns, stat_result.st_size)
 
 
+@dataclass(frozen=True)
+class PublishOutcome:
+    """Result of one publish attempt. `reason is None` iff a sidecar was written.
+
+    The reason exists because every call site wraps this in `except Exception:
+    pass`. Returning WHY a generation was skipped is the only way a skip is
+    visible from outside the container.
+    """
+
+    generation: tuple[int, int] | None
+    reason: str | None = None
+
+
 def publish_stable_checkpoint(
     run_root: Path,
     *,
@@ -1910,29 +1989,34 @@ def publish_stable_checkpoint(
     commit: Callable[[], None],
     sleep: Callable[[float], None],
     last_published: tuple[int, int] | None = None,
-) -> tuple[int, int] | None:
+) -> PublishOutcome:
     """Publish sidecar+commit only for a stable, weights-only-loadable generation.
 
     A changing mtime/size across the settle window is skipped. A torn file is
-    load-rejected and must not produce a sidecar.
+    load-rejected and must not produce a sidecar. Every skip carries a reason;
+    "already published" is reported as a skip with no reason, since the sidecar
+    for that generation does exist.
     """
     ckpt = Path(run_root) / "checkpoints" / CHECKPOINT_NAME
     if not ckpt.is_file():
-        return last_published
+        return PublishOutcome(last_published, f"no checkpoint at {ckpt}")
     first = _checkpoint_generation(ckpt.stat())
     if first == last_published:
-        return last_published
+        return PublishOutcome(last_published)
     sleep(CHECKPOINT_SETTLE_SECONDS)
     if not ckpt.is_file():
-        return last_published
+        return PublishOutcome(last_published, f"checkpoint vanished during settle: {ckpt}")
     second_stat = ckpt.stat()
     second = _checkpoint_generation(second_stat)
     if second != first:
-        return last_published
+        return PublishOutcome(
+            last_published,
+            f"checkpoint still changing across the {CHECKPOINT_SETTLE_SECONDS}s settle "
+            f"window: {first} -> {second}")
     try:
         validate_local_checkpoint(ckpt)
-    except ValidationError:
-        return last_published
+    except ValidationError as err:
+        return PublishOutcome(last_published, str(err))
     payload = {
         "sha256": sha256_file(ckpt),
         "size": second_stat.st_size,
@@ -1941,7 +2025,7 @@ def publish_stable_checkpoint(
     }
     atomic_write_json(ckpt.with_name(CHECKPOINT_SIDECAR_NAME), payload)
     commit()
-    return second
+    return PublishOutcome(second)
 
 
 def _start_checkpoint_watcher(
@@ -1968,8 +2052,11 @@ def _start_checkpoint_watcher(
                     commit=guarded_commit,
                     sleep=sleep,
                     last_published=last,
-                )
+                ).generation
             except Exception:
+                # Reasons are deliberately dropped here: this loop runs every
+                # 50ms while training, so it must never write or log per skip.
+                # finalize records the one reason that matters (the last one).
                 pass
             # Real short poll: do not consume the injected heartbeat wait/clock.
             if stop.wait(0.05):
@@ -1978,6 +2065,57 @@ def _start_checkpoint_watcher(
     thread = threading.Thread(target=loop, name="cs2rl-checkpoint-watch", daemon=True)
     thread.start()
     return stop, thread
+
+
+def _record_publish_reason(
+    run_root: Path,
+    reason: str | None,
+    *,
+    now: Callable[[], datetime],
+) -> bool:
+    """Keep the on-Volume note consistent with the last publish attempt.
+
+    The file's presence means "this run produced no usable checkpoint, here is
+    why"; a later success removes it. Returns whether the note changed on disk,
+    so a caller that runs after the terminal commit knows to commit again.
+    Never raises: losing the run's terminal write to a note would be worse.
+    """
+    path = Path(run_root) / "checkpoints" / CHECKPOINT_PUBLISH_REASON_NAME
+    try:
+        if reason is None:
+            existed = path.is_file()
+            path.unlink(missing_ok=True)
+            return existed
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, {"reason": reason, "at": now().isoformat()})
+        print(f"checkpoint sidecar not published: {reason}", file=sys.stderr, flush=True)
+        return True
+    except Exception:
+        return False
+
+
+def _publish_and_note(
+    run_root: Path,
+    *,
+    now: Callable[[], datetime],
+    commit: Callable[[], None],
+    sleep: Callable[[float], None],
+    commit_note: bool,
+) -> None:
+    """One publish attempt that can never raise and never skips silently.
+
+    commit_note=False for the call inside finalize, whose terminal commit
+    persists the note anyway; True for the retries that run after it.
+    """
+    try:
+        reason = publish_stable_checkpoint(run_root, now=now, commit=commit, sleep=sleep).reason
+    except Exception as err:           # noqa: BLE001 - a broken publish must not lose the run
+        reason = f"publish raised {type(err).__name__}: {err}"
+    if _record_publish_reason(run_root, reason, now=now) and commit_note:
+        try:
+            commit()
+        except Exception:
+            pass
 
 
 def _close_log_sink(log_sink: object | None) -> None:
@@ -2196,13 +2334,12 @@ def _run_training_attempt(
             thread.join(timeout=5.0)
         stop_heartbeat_once()
         stop_watcher_once()
-        # Live PufferLib rewrites dust2_policy.pt every epoch, faster than the
-        # 1s settle window, so the watcher never publishes. After the child is
-        # dead the file is stable; resume needs that sidecar.
-        try:
-            publish_stable_checkpoint(run_root, now=now, commit=commit, sleep=sleep)
-        except Exception:
-            pass
+        # Last chance to produce the sidecar resume needs. The watcher rarely
+        # manages it: live PufferLib rewrites dust2_policy.pt every epoch, faster
+        # than the 1s settle window. Once the child is dead the file is stable.
+        # Any skip is recorded next to the checkpoint and committed below with
+        # the terminal status — a silent skip cost three T4 runs to diagnose.
+        _publish_and_note(run_root, now=now, commit=commit, sleep=sleep, commit_note=False)
         _close_log_sink(owned_log)
         _close_log_sink(log_sink)
         evidence: CompletionEvidence | None = None
@@ -2289,10 +2426,7 @@ def _run_training_attempt(
                 finalize(mapped, reason, exit_code, kill_child=False)
         # Signal-handler finalize cannot reliably torch.load/sleep. Retry on
         # the main thread now that the child wait loop has returned.
-        try:
-            publish_stable_checkpoint(run_root, now=now, commit=commit, sleep=sleep)
-        except Exception:
-            pass
+        _publish_and_note(run_root, now=now, commit=commit, sleep=sleep, commit_note=True)
         if final_result is not None:
             return final_result
         return TrainingAttemptResult(
@@ -2302,19 +2436,13 @@ def _run_training_attempt(
         )
     except KeyboardInterrupt:
         finalize(Status.INTERRUPTED, REASON_SIGNAL, None, kill_child=True)
-        try:
-            publish_stable_checkpoint(run_root, now=now, commit=commit, sleep=sleep)
-        except Exception:
-            pass
+        _publish_and_note(run_root, now=now, commit=commit, sleep=sleep, commit_note=True)
         if final_result is not None:
             return final_result
         raise
     except Exception:
         finalize(Status.FAILED, REASON_ERROR, None, kill_child=True)
-        try:
-            publish_stable_checkpoint(run_root, now=now, commit=commit, sleep=sleep)
-        except Exception:
-            pass
+        _publish_and_note(run_root, now=now, commit=commit, sleep=sleep, commit_note=True)
         raise
     finally:
         if prev_int is not None:

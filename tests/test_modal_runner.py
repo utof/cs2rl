@@ -2825,7 +2825,8 @@ def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
     finally:
         child.release()
         thread.join(timeout=2.0)
-    assert json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"
+    assert json.loads(
+        (kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"
     deadline = time.monotonic() + 2.0
     while not sidecar.is_file() and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -2833,6 +2834,137 @@ def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
     meta = json.loads(sidecar.read_text())
     assert meta["sha256"] == mrl.sha256_file(ckpt)
     assert meta["size"] == ckpt.stat().st_size
+
+
+# ── Runner-interpreter checkpoint validation ───────────────────────────────
+#
+# The Modal runner process and the training child are DIFFERENT interpreters.
+# The runner is the image's standalone /usr/local/bin/python (only uv + modal);
+# torch lives exclusively in the PREBUILT_PYTHON venv that runs train.py.
+# Verified in a live container on 2026-08-14:
+#   runner_executable=/usr/local/bin/python  runner_torch=MISSING
+# Every test above runs on a laptop where `import torch` succeeds, so none of
+# them can see this. These do: they force the torch-less runner condition.
+
+
+def _no_torch(monkeypatch, *, prebuilt: str) -> None:
+    """Simulate the container runner: no in-process torch, prebuilt venv at `prebuilt`."""
+
+    def raise_import_error():
+        raise ImportError("No module named 'torch'")
+
+    monkeypatch.setattr(mrl, "_import_torch", raise_import_error)
+    monkeypatch.setattr(mrl, "PREBUILT_PYTHON", prebuilt)
+
+
+def _publish(run_root: Path):
+    commits: list[int] = []
+    outcome = mrl.publish_stable_checkpoint(
+        run_root,
+        now=_aware,
+        commit=lambda: commits.append(1),
+        sleep=lambda _seconds: None,
+        last_published=None,
+    )
+    return outcome, commits
+
+
+def test_publish_validates_via_prebuilt_interpreter_when_runner_lacks_torch(tmp_path, monkeypatch):
+    """A valid checkpoint must still publish when the runner cannot import torch."""
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    ckpt = _write_policy_checkpoint(run_root, 1.0)
+    _no_torch(monkeypatch, prebuilt=sys.executable)
+
+    outcome, commits = _publish(run_root)
+
+    sidecar = ckpt.with_name("dust2_policy.pt.meta.json")
+    assert sidecar.is_file()
+    assert outcome.reason is None
+    assert outcome.generation == (ckpt.stat().st_mtime_ns, ckpt.stat().st_size)
+    assert len(commits) == 1
+    assert json.loads(sidecar.read_text())["sha256"] == mrl.sha256_file(ckpt)
+
+
+def test_prebuilt_validation_still_rejects_a_torn_checkpoint(tmp_path, monkeypatch):
+    """The fallback must not become a rubber stamp: garbage still fails to load."""
+    run_root = tmp_path / "run"
+    (run_root / "checkpoints").mkdir(parents=True)
+    (run_root / "checkpoints" / "dust2_policy.pt").write_bytes(b"torn-not-a-checkpoint")
+    _no_torch(monkeypatch, prebuilt=sys.executable)
+
+    outcome, commits = _publish(run_root)
+
+    assert not (run_root / "checkpoints" / "dust2_policy.pt.meta.json").exists()
+    assert outcome.generation is None
+    assert "not weights-only loadable" in outcome.reason
+    assert commits == []
+
+
+def test_publish_reason_names_the_missing_interpreter(tmp_path, monkeypatch):
+    """No torch and no prebuilt venv: skipping is fine, skipping SILENTLY is not."""
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    _write_policy_checkpoint(run_root, 1.0)
+    _no_torch(monkeypatch, prebuilt=str(tmp_path / "nonexistent" / "python"))
+
+    outcome, commits = _publish(run_root)
+
+    assert not (run_root / "checkpoints" / "dust2_policy.pt.meta.json").exists()
+    assert "nonexistent" in outcome.reason
+    assert commits == []
+
+
+def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path, monkeypatch):
+    """finalize must leave evidence on the Volume, before its commit, of WHY there
+    is no sidecar. Three T4 runs were burned on a silently swallowed skip."""
+    _no_torch(monkeypatch, prebuilt=str(tmp_path / "nonexistent" / "python"))
+    child = FakeChild(hold=True)
+    hooks = _signal_hooks(child)
+    commits: list[bool] = []
+
+    def commit() -> None:
+        commits.append(
+            (kwargs["run_root"] / "checkpoints" / mrl.CHECKPOINT_PUBLISH_REASON_NAME).is_file())
+
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            commit=commit,
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    _write_policy_checkpoint(kwargs["run_root"], 1.0)
+    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
+    try:
+        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
+        int_handler(signal.SIGINT, None)
+        assert finished.wait(timeout=2.0)
+    finally:
+        child.release()
+        thread.join(timeout=2.0)
+
+    reason_path = kwargs["run_root"] / "checkpoints" / mrl.CHECKPOINT_PUBLISH_REASON_NAME
+    assert reason_path.is_file()
+    payload = json.loads(reason_path.read_text())
+    assert "nonexistent" in payload["reason"]
+    assert payload["at"]
+    # Written BEFORE a commit, or it never reaches the Volume.
+    assert any(commits)
+
+
+def test_completed_run_validates_without_runner_torch(tmp_path, monkeypatch):
+    """validate_completed_run torch-loads too: without the fallback every clean
+    exit is misfiled as failed/invalid_evidence and no run can ever complete."""
+    run_root, manifest, effective, ckpt = _minimal_completed_tree(tmp_path)
+    _no_torch(monkeypatch, prebuilt=sys.executable)
+
+    evidence = mrl.validate_completed_run(run_root, manifest)
+
+    assert evidence.last_step == effective
+    assert evidence.checkpoint_sha256 == mrl.sha256_file(ckpt)
 
 
 # ── Task 7 cycle C: SIGINT / KeyboardInterrupt / SIGTERM cleanup ───────────
