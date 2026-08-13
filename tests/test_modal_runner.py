@@ -23,6 +23,7 @@ Pitfalls this file is careful about:
     hermetic: it must not depend on the editable install's .pth, which any
     `uv sync --no-install-project` removes from the venv.
 """
+import ast
 import subprocess
 import sys
 import tarfile
@@ -70,6 +71,18 @@ import src.train
 import scripts.exp_lib
 import scripts.run_experiment
 assert 'modal' not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
+
+
+def test_modal_runner_lib_does_not_import_modal_or_torch():
+    # Fresh subprocess: the parent may already have torch (Task 3 checkpoint
+    # tests) or modal (later runner tests) in sys.modules.
+    code = """
+import sys
+import scripts.modal_runner_lib
+assert 'modal' not in sys.modules
+assert 'torch' not in sys.modules
 """
     subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
 
@@ -347,6 +360,20 @@ def test_parse_train_args_preserves_punctuation_as_data():
     assert mrl.validate_train_args(argv) == 30_000_000
 
 
+def test_parse_train_args_unclosed_quote_is_validation_error():
+    with pytest.raises(mrl.ValidationError):
+        mrl.parse_train_args('--timesteps 1 --wandb-entity "unclosed')
+    with pytest.raises(mrl.ValidationError):
+        mrl.build_run_request(**_valid_run_kwargs(train_args="--timesteps 1 --name 'oops"))
+
+
+def test_omitted_train_args_fail_closed():
+    kwargs = _valid_run_kwargs()
+    del kwargs["train_args"]
+    with pytest.raises(mrl.ValidationError):
+        mrl.build_run_request(**kwargs)
+
+
 def test_live_option_mirror_contains_exact_long_names_only():
     assert "--timesteps" in mrl.LIVE_TRAIN_OPTIONS
     assert "--num_envs" in mrl.LIVE_TRAIN_OPTIONS
@@ -355,6 +382,37 @@ def test_live_option_mirror_contains_exact_long_names_only():
     assert "--checkpoint_dir" in mrl.LIVE_TRAIN_OPTIONS
     assert "--devi" not in mrl.LIVE_TRAIN_OPTIONS
     assert "--num-envs" not in mrl.LIVE_TRAIN_OPTIONS  # runner spelling, not live
+
+
+def _live_train_long_options_from_source() -> set[str]:
+    """Static train.py long options + hyphenated REWARD_WEIGHT_DEFAULTS keys.
+
+    Reads source (no `import src.train`) so collection cannot pull CUDA.
+    Generated `add_argument(f"--{_rw_name...}")` is a JoinedStr and is
+    recovered from the defaults dict instead.
+    """
+    tree = ast.parse((ROOT / "src" / "train.py").read_text())
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "REWARD_WEIGHT_DEFAULTS":
+                    assert isinstance(node.value, ast.Dict)
+                    for key in node.value.keys:
+                        assert isinstance(key, ast.Constant) and isinstance(key.value, str)
+                        names.add(f"--{key.value.replace('_', '-')}")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr != "add_argument":
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    if arg.value.startswith("--"):
+                        names.add(arg.value)
+    return names
+
+
+def test_live_train_option_mirror_matches_train_py():
+    assert _live_train_long_options_from_source() == set(mrl.LIVE_TRAIN_OPTION_ARITY)
 
 
 @pytest.mark.parametrize(
@@ -383,6 +441,7 @@ _FORBIDDEN_FLAGS = [
     "--save_every_sec",
     "--vec-backend",
     "--vec-num-workers",
+    "--vec-overwork",
     "--dump-config",
     "--smoke",
     "--record",
@@ -404,6 +463,7 @@ def test_forbidden_flags_rejected_in_both_forms(flag, form):
         "--record",
         "--eval",
         "--dust2",
+        "--vec-overwork",
     }
     if flag in valueless:
         token = flag
@@ -579,6 +639,64 @@ def test_wandb_with_secret_is_accepted():
         **_valid_run_kwargs(train_args="--timesteps 1 --wandb", wandb_secret_name="wandb"))
     assert request.wandb_secret_name == "wandb"
     assert "--wandb" in request.train_args
+
+
+def test_run_request_constructor_enforces_allowlists():
+    with pytest.raises(mrl.ValidationError):
+        mrl.RunRequest(run_id="ok-id", git_sha="a" * 40, effective_map="simple")
+    with pytest.raises(mrl.ValidationError):
+        mrl.RunRequest(
+            run_id="ok-id",
+            git_sha="a" * 40,
+            effective_map="cs2-dust2",
+            train_args=("--timesteps", "1"),
+            timesteps=1,
+        )
+    with pytest.raises(mrl.ValidationError):
+        mrl.RunRequest(
+            run_id="ok-id",
+            git_sha="a" * 40,
+            effective_map="simple",
+            gpu="H100",
+            train_args=("--timesteps", "1"),
+            timesteps=1,
+        )
+    with pytest.raises(mrl.ValidationError):
+        mrl.RunRequest(
+            run_id="ok-id",
+            git_sha="a" * 40,
+            effective_map="simple",
+            train_args=("--timesteps", "1", "--device", "cuda"),
+            timesteps=1,
+        )
+    with pytest.raises(mrl.ValidationError):
+        mrl.RunRequest(
+            run_id="ok-id",
+            git_sha="a" * 40,
+            effective_map="simple",
+            train_args=("--timesteps", "1", "--wandb"),
+            timesteps=1,
+        )
+
+
+def test_resume_request_constructor_enforces_mutual_exclusion():
+    with pytest.raises(mrl.ValidationError):
+        mrl.ResumeRequest(
+            local_checkpoint=Path("outputs/checkpoints/bc_warmstart.pt"),
+            prior_run_id="parent-run",
+        )
+
+
+def test_valid_direct_run_request_still_constructs():
+    request = mrl.RunRequest(
+        run_id="ok-id",
+        git_sha="a" * 40,
+        effective_map="simple",
+        train_args=("--timesteps", "1"),
+        timesteps=1,
+    )
+    assert request.timesteps == 1
+    assert request.effective_map == "simple"
 
 
 # ── Task 3 cycle A: clean HEAD / Git object validation ─────────────────────
