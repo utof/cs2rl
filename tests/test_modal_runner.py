@@ -24,6 +24,7 @@ Pitfalls this file is careful about:
     `uv sync --no-install-project` removes from the venv.
 """
 import ast
+import importlib
 import io
 import json
 import os
@@ -3285,3 +3286,979 @@ def test_dead_run_and_timeout_have_distinct_reasons(tmp_path):
     assert json.loads(
         (kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
+
+
+# ── Task 8 cycle A: launch-App import / image / object declarations ────────
+
+PINNED_CUDA_CHILD_DIGEST = (
+    "sha256:6617a625f4090c76c545a0e7d63f2e441718ef9af7f4efe7dd1242a29e289fd7")
+PINNED_CUDA_IMAGE = ("nvidia/cuda:12.8.1-devel-ubuntu22.04@" + PINNED_CUDA_CHILD_DIGEST)
+PINNED_PUFFERLIB_SDIST = (
+    "https://files.pythonhosted.org/packages/7c/e1/5292f9b69c6263707b40ba04a87e6b9bcc177281d31092f77afd90c412f1/"
+    "pufferlib-3.0.0.tar.gz#sha256=7df3a3e3f5f894d78d2a1f5374097890aec01473183e748abefe4f3faa10eaa9"
+)
+
+
+class FakeModal:
+    """In-process stand-in for the Modal SDK. Importing the app must not call it."""
+
+    def __init__(self):
+        self.__version__ = "1.4.3"
+        self.apps = []
+        self.images = []
+        self.volume_creates = []
+        self.dict_creates = []
+        self.volume_lookups = []
+        self.dict_lookups = []
+        self.secret_lookups = []
+        self.base_remote_calls = []
+        self.configured_remote_calls = []
+        self.with_options_calls = []
+        self.batch_upload_calls = []
+        self.read_file_calls = []
+        self.iterdir_calls = []
+        self.volumes = {}
+        self.dicts = {}
+        self.known_secrets = set()
+        self.Image = FakeImage
+        self.Image._fake = self
+        self.App = self._app_type()
+        self.Volume = self._volume_type()
+        self.Dict = self._dict_type()
+        self.Secret = self._secret_type()
+
+    def as_module(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            Image=self.Image,
+            App=self.App,
+            Volume=self.Volume,
+            Dict=self.Dict,
+            Secret=self.Secret,
+            __version__=self.__version__,
+        )
+
+    def _app_type(self):
+        fake = self
+
+        class App:
+
+            def __init__(self, name: str, include_source=None, **kwargs):
+                del kwargs
+                self.name = name
+                self.include_source = include_source
+                self.app_id = "ap-ephemeral-test"
+                self.functions: dict[str, object] = {}
+                self.entrypoints: dict[str, object] = {}
+                fake.apps.append(self)
+
+            def function(self, **kwargs):
+
+                def decorator(fn):
+                    bound = FakeFunction(fake, fn, kwargs)
+                    self.functions[fn.__name__] = bound
+                    return bound
+
+                return decorator
+
+            def local_entrypoint(self, *args, **kwargs):
+                del args, kwargs
+
+                def decorator(fn):
+                    self.entrypoints[fn.__name__] = fn
+                    return fn
+
+                return decorator
+
+        return App
+
+    def _volume_type(self):
+        fake = self
+
+        class Volume:
+
+            class objects:
+
+                @staticmethod
+                def create(name: str, allow_existing: bool = False, **kwargs):
+                    del kwargs
+                    fake.volume_creates.append((name, allow_existing))
+                    if name in fake.volumes and not allow_existing:
+                        raise FileExistsError(name)
+                    fake.volumes.setdefault(name, FakeVolume(fake, name))
+
+            @staticmethod
+            def from_name(name: str, create_if_missing: bool = False):
+                fake.volume_lookups.append((name, create_if_missing))
+                if name not in fake.volumes:
+                    if create_if_missing:
+                        fake.volumes[name] = FakeVolume(fake, name)
+                    else:
+                        raise FakeNotFoundError(f"Volume {name!r} not found")
+                return fake.volumes[name]
+
+        return Volume
+
+    def _dict_type(self):
+        fake = self
+
+        class Dict:
+
+            class objects:
+
+                @staticmethod
+                def create(name: str, allow_existing: bool = False, **kwargs):
+                    del kwargs
+                    fake.dict_creates.append((name, allow_existing))
+                    if name in fake.dicts and not allow_existing:
+                        raise FileExistsError(name)
+                    fake.dicts.setdefault(name, FakeDict(fake, name))
+
+            @staticmethod
+            def from_name(name: str, create_if_missing: bool = False):
+                fake.dict_lookups.append((name, create_if_missing))
+                if name not in fake.dicts:
+                    if create_if_missing:
+                        fake.dicts[name] = FakeDict(fake, name)
+                    else:
+                        raise FakeNotFoundError(f"Dict {name!r} not found")
+                return fake.dicts[name]
+
+        return Dict
+
+    def _secret_type(self):
+        fake = self
+
+        class Secret:
+
+            def __init__(self, name: str):
+                self.name = name
+
+            def __repr__(self) -> str:
+                return "Secret(<redacted>)"
+
+            @staticmethod
+            def from_name(name: str, **kwargs):
+                del kwargs
+                fake.secret_lookups.append(name)
+                if name not in fake.known_secrets:
+                    raise FakeNotFoundError("requested W&B Secret is missing")
+                return Secret(name)
+
+        return Secret
+
+
+class FakeNotFoundError(Exception):
+    """Stand-in for a missing named Modal object."""
+
+
+class FakeImage:
+    _fake: FakeModal | None = None
+
+    def __init__(self):
+        self.registry_tag: str | None = None
+        self.add_python: str | None = None
+        self.apt: list[str] = []
+        self.pips: list[str] = []
+        self.env_vars: dict[str, str] = {}
+        self.local_files: list[tuple[str, str, bool]] = []
+        self.commands: list[str] = []
+
+    @classmethod
+    def from_registry(cls, tag: str, add_python: str | None = None, **kwargs):
+        del kwargs
+        image = cls()
+        image.registry_tag = tag
+        image.add_python = add_python
+        if cls._fake is not None:
+            cls._fake.images.append(image)
+        return image
+
+    def apt_install(self, *packages: str):
+        self.apt.extend(packages)
+        return self
+
+    def pip_install(self, *packages: str):
+        self.pips.extend(packages)
+        return self
+
+    def env(self, mapping: dict[str, str]):
+        self.env_vars.update(mapping)
+        return self
+
+    def add_local_file(self, src: str, dst: str, copy: bool = False):
+        self.local_files.append((src, dst, copy))
+        return self
+
+    def run_commands(self, *commands: str):
+        self.commands.extend(commands)
+        return self
+
+
+class FakeFunction:
+    """Decorated Function: base .remote is forbidden; with_options is the only path."""
+
+    def __init__(self, fake: FakeModal, fn, kwargs: dict[str, object]):
+        self._fake = fake
+        self._fn = fn
+        self.kwargs = kwargs
+        self.__name__ = fn.__name__
+
+    def __call__(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+    def remote(self, *args, **kwargs):
+        self._fake.base_remote_calls.append((args, kwargs))
+        raise AssertionError("base Function must never be called")
+
+    def with_options(self, **kwargs):
+        self._fake.with_options_calls.append(dict(kwargs))
+        return FakeConfiguredFunction(self._fake, self, kwargs)
+
+
+class FakeConfiguredFunction:
+
+    def __init__(self, fake: FakeModal, base: FakeFunction, options: dict[str, object]):
+        self._fake = fake
+        self.base = base
+        self.options = options
+
+    def remote(self, *args, **kwargs):
+        self._fake.configured_remote_calls.append((self.options, args, kwargs))
+        return {"status": "ok"}
+
+
+class FakeVolume:
+
+    def __init__(self, fake: FakeModal, name: str):
+        self._fake = fake
+        self.name = name
+        self.files: dict[str, bytes] = {}
+        self.pending_creates: dict[str, bytes] = {}
+        self.replace_after_read: dict[str, bytes] = {}
+        self.commit_count = 0
+        self.reject_next_upload = False
+
+    def _client_path(self, path) -> str:
+        text = str(path)
+        if text.startswith("/artifacts"):
+            raise AssertionError(f"/artifacts leaked to Volume client API: {text}")
+        return text
+
+    def batch_upload(self, force: bool = False):
+        return FakeBatchUpload(self, force)
+
+    def read_file(self, path):
+        key = self._client_path(path)
+        self._fake.read_file_calls.append(key)
+        if key not in self.files:
+            raise FileNotFoundError(key)
+        data = self.files[key]
+        if key in self.replace_after_read:
+            self.files[key] = self.replace_after_read.pop(key)
+        yield data
+
+    def iterdir(self, path, *, recursive: bool = True):
+        key = self._client_path(path)
+        self._fake.iterdir_calls.append((key, recursive))
+        prefix = key.rstrip("/")
+        for stored in sorted(self.files):
+            if prefix == "" or stored == prefix or stored.startswith(prefix + "/"):
+                yield SimpleNamespace(path=stored, type="file")
+
+    def commit(self):
+        self.commit_count += 1
+
+    def reload(self):
+        return None
+
+
+class FakeBatchUpload:
+
+    def __init__(self, volume: FakeVolume, force: bool):
+        self.volume = volume
+        self.force = force
+        self.puts: list[tuple[str, str]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def put_file(self, local_path, remote_path):
+        key = self.volume._client_path(remote_path)
+        self.volume._fake.batch_upload_calls.append((key, self.force, str(local_path)))
+        if self.force:
+            raise AssertionError("force=True is never used")
+        if key in self.volume.pending_creates:
+            self.volume.files[key] = self.volume.pending_creates.pop(key)
+            raise FileExistsError(key)
+        if self.volume.reject_next_upload:
+            self.volume.reject_next_upload = False
+            raise FileExistsError(key)
+        if key in self.volume.files:
+            raise FileExistsError(key)
+        data = Path(local_path).read_bytes() if not hasattr(local_path,
+                                                            "read") else local_path.read()
+        self.volume.files[key] = data
+        self.puts.append((str(local_path), key))
+
+
+class FakeDict:
+
+    def __init__(self, fake: FakeModal, name: str):
+        self._fake = fake
+        self.name = name
+        self.data: dict[str, object] = {}
+
+    def put(self, key: str, value, *, skip_if_exists: bool = False) -> bool:
+        if skip_if_exists and key in self.data:
+            return False
+        self.data[key] = value
+        return True
+
+    def get(self, key: str):
+        if key not in self.data:
+            raise KeyError(key)
+        return self.data[key]
+
+
+@pytest.fixture
+def fake_modal():
+    fake = FakeModal()
+    previous = sys.modules.get("modal")
+    sys.modules["modal"] = fake.as_module()
+    for name in ("scripts.run_modal", "scripts.modal_artifacts"):
+        sys.modules.pop(name, None)
+    try:
+        yield fake
+    finally:
+        for name in ("scripts.run_modal", "scripts.modal_artifacts"):
+            sys.modules.pop(name, None)
+        if previous is None:
+            sys.modules.pop("modal", None)
+        else:
+            sys.modules["modal"] = previous
+
+
+def _import_run_modal():
+    return importlib.import_module("scripts.run_modal")
+
+
+def test_importing_app_creates_no_function_call_or_gpu_work(fake_modal):
+    module = _import_run_modal()
+    assert fake_modal.base_remote_calls == []
+    assert fake_modal.configured_remote_calls == []
+    assert fake_modal.with_options_calls == []
+    assert fake_modal.volume_creates == []
+    assert fake_modal.dict_creates == []
+    assert fake_modal.volume_lookups == []
+    assert fake_modal.dict_lookups == []
+    assert fake_modal.secret_lookups == []
+    assert module.app.name == "cs2rl-training"
+    assert "gpu" not in module.train_remote.kwargs or module.train_remote.kwargs["gpu"] is None
+
+
+def test_base_function_has_no_static_named_object_dependency(fake_modal):
+    module = _import_run_modal()
+    kwargs = module.train_remote.kwargs
+    assert kwargs.get("volumes") in (None, {})
+    assert "volumes" not in kwargs or not kwargs["volumes"]
+    assert kwargs.get("secrets") in (None, [])
+    assert kwargs.get("retries") == 0
+    assert kwargs.get("single_use_containers") is True
+    assert module.app.include_source is False
+    assert kwargs.get("include_source") is False
+    assert module.app.name == "cs2rl-training"
+    assert "main" in module.app.entrypoints
+    assert mrl.VOLUME_NAME == "cs2rl-training-artifacts"
+    assert mrl.REGISTRY_NAME == "cs2rl-training-run-registry"
+
+
+def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal):
+    module = _import_run_modal()
+    image = module.dependency_image
+    assert image.registry_tag == PINNED_CUDA_IMAGE
+    assert image.add_python == "3.12"
+    assert image.env_vars["TORCH_CUDA_ARCH_LIST"] == "7.5;8.6;8.9"
+    assert image.env_vars["NO_OCEAN"] == "1"
+    assert "uv==0.11.1" in image.pips
+    assert "ziglang==0.14.1" in image.pips
+    assert ("pyproject.toml", "/opt/cs2rl/pyproject.toml", True) in image.local_files
+    assert ("uv.lock", "/opt/cs2rl/uv.lock", True) in image.local_files
+    commands = "\n".join(image.commands)
+    assert "--no-install-package pufferlib" in commands
+    assert "--no-build-isolation" in commands
+    assert "--no-deps" in commands
+    assert "--no-binary pufferlib" in commands
+    assert PINNED_PUFFERLIB_SDIST in commands
+    assert "Python.h" in commands
+    assert "release 12.8" in commands
+    assert "pufferlib._C" in commands
+    assert "compute_puff_advantage" in commands
+    assert "all('sm_'+arch in elf for arch in ('75','86','89'))" in commands
+    runner = module.runner_image
+    assert ("scripts/modal_runner_lib.py", "/opt/app/scripts/modal_runner_lib.py",
+            True) in runner.local_files
+    assert ("scripts/run_modal.py", "/opt/app/scripts/run_modal.py", True) in runner.local_files
+    assert runner.env_vars["PYTHONPATH"] == "/opt/app"
+
+
+# ── Task 8 cycle B: run-only parser / omitted sentinels ────────────────────
+
+
+def _launch_sentinels(**overrides):
+    """Every launch option starts as None; callers supply only explicit values."""
+    kwargs = {
+        "action": None,
+        "run_id": None,
+        "git_sha": None,
+        "map": None,
+        "gpu": None,
+        "cpu_cores": None,
+        "memory_mib": None,
+        "num_envs": None,
+        "vec_workers": None,
+        "timeout_minutes": None,
+        "save_every_seconds": None,
+        "train_args": None,
+        "resume_local_checkpoint": None,
+        "resume_run_id": None,
+        "wandb_secret_name": None,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _valid_launch_sentinels(**overrides):
+    kwargs = _launch_sentinels(
+        action="run",
+        run_id="140826-b7r-seed2-shared",
+        git_sha="a" * 40,
+        map="simple",
+        train_args="--timesteps 30000000 --seed 2",
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_status_and_download_are_not_app_actions(fake_modal):
+    module = _import_run_modal()
+    assert list(module.app.entrypoints) == ["main"]
+    for action in ("status", "download"):
+        with pytest.raises(mrl.ValidationError):
+            module.resolve_launch_request(**_valid_launch_sentinels(action=action))
+    with pytest.raises(mrl.ValidationError):
+        module.resolve_launch_request(**_valid_launch_sentinels(action=None))
+    with pytest.raises(mrl.ValidationError):
+        module.resolve_launch_request(**_valid_launch_sentinels(action="train"))
+
+
+def test_omitted_gpu_defaults_to_t4_invalid_explicit_gpu_rejected(fake_modal):
+    module = _import_run_modal()
+    request = module.resolve_launch_request(**_valid_launch_sentinels(gpu=None))
+    assert request.gpu == mrl.DEFAULT_GPU == "T4"
+    for gpu in ("T4", "L4", "A10"):
+        assert module.resolve_launch_request(**_valid_launch_sentinels(gpu=gpu)).gpu == gpu
+    for gpu in ("A10G", "A100", "H100", "any", "T4,L4", "t4", "T4:2", "T4;L4"):
+        with pytest.raises(mrl.ValidationError):
+            module.resolve_launch_request(**_valid_launch_sentinels(gpu=gpu))
+
+
+def test_map_has_no_default_and_must_be_allowlisted(fake_modal):
+    module = _import_run_modal()
+    with pytest.raises(mrl.ValidationError):
+        module.resolve_launch_request(**_valid_launch_sentinels(map=None))
+    for effective_map in ("simple", "dust2"):
+        request = module.resolve_launch_request(**_valid_launch_sentinels(map=effective_map))
+        assert request.effective_map == effective_map
+    for effective_map in ("", "cs2-dust2", "DUST2", "dust"):
+        with pytest.raises(mrl.ValidationError):
+            module.resolve_launch_request(**_valid_launch_sentinels(map=effective_map))
+
+
+def test_omitted_resource_sentinels_apply_defaults_and_smoke_values_pass(fake_modal):
+    module = _import_run_modal()
+    request = module.resolve_launch_request(**_valid_launch_sentinels())
+    assert request.cpu_cores == 8
+    assert request.memory_mib == 16384
+    assert request.cpu_request_limit == (8, 8)
+    assert request.memory_request_limit == (16384, 16384)
+    assert request.num_envs == 256
+    assert request.vec_workers == 8
+    assert request.timeout_minutes == 120
+    assert request.save_every_seconds == 300
+    smoke = module.resolve_launch_request(**_valid_launch_sentinels(
+        cpu_cores=4,
+        memory_mib=8192,
+        vec_workers=4,
+        timeout_minutes=15,
+        train_args="--timesteps 1 --seed 2",
+    ))
+    assert smoke.cpu_request_limit == (4, 4)
+    assert smoke.memory_request_limit == (8192, 8192)
+    assert smoke.vec_workers == 4
+    assert smoke.timeout_minutes == 15
+
+
+# ── Task 8 cycle C: Volume namespace + reservation/blob adapters ───────────
+
+
+def _named_volume(fake_modal, name=mrl.VOLUME_NAME):
+    fake_modal.Volume.objects.create(name, allow_existing=True)
+    return fake_modal.Volume.from_name(name, create_if_missing=False)
+
+
+def _named_dict(fake_modal, name=mrl.REGISTRY_NAME):
+    fake_modal.Dict.objects.create(name, allow_existing=True)
+    return fake_modal.Dict.from_name(name, create_if_missing=False)
+
+
+def test_volume_adapter_uses_root_relative_client_paths(fake_modal):
+    module = _import_run_modal()
+    volume = _named_volume(fake_modal)
+    artifacts = module.ModalVolumeIndex(volume)
+    reservation = mrl.RUNS_ROOT / "ok-id" / mrl.RESERVATION_FILENAME
+    artifacts.put_file(reservation, b'{"attempt_id":"a"}\n')
+    artifacts.commit()
+    assert artifacts.exists(reservation)
+    assert reservation.as_posix() in volume.files
+    assert all(not path.startswith("/artifacts") for path in volume.files)
+    assert all(not remote.startswith("/artifacts")
+               for remote, _force, _local in fake_modal.batch_upload_calls)
+    source_client = mrl.SOURCES_ROOT / "deadbeef.tar.gz"
+    assert mrl.mounted_path(source_client) == Path("/artifacts/sources/deadbeef.tar.gz")
+    ckpt_client = mrl.INPUTS_ROOT / "sha256" / "abcd.pt"
+    assert mrl.mounted_path(ckpt_client) == Path("/artifacts/inputs/sha256/abcd.pt")
+
+
+def test_ensure_blob_uploads_missing_and_reuses_after_streamed_verify(fake_modal, tmp_path):
+    module = _import_run_modal()
+    volume = _named_volume(fake_modal)
+    blob = tmp_path / "src.tar.gz"
+    blob.write_bytes(b"source-bytes")
+    digest = mrl.sha256_file(blob)
+    client_path = mrl.SOURCES_ROOT / f"{digest}.tar.gz"
+    module.ensure_blob(volume, client_path, blob)
+    assert fake_modal.batch_upload_calls == [(client_path.as_posix(), False, str(blob))]
+    assert volume.files[client_path.as_posix()] == b"source-bytes"
+    assert mrl.mounted_path(client_path) == Path("/artifacts/sources") / f"{digest}.tar.gz"
+
+    fake_modal.batch_upload_calls.clear()
+    module.ensure_blob(volume, client_path, blob)
+    assert fake_modal.batch_upload_calls == []
+    assert fake_modal.read_file_calls[-1] == client_path.as_posix()
+
+
+def test_ensure_blob_handles_concurrent_create_and_rejects_mismatch(fake_modal, tmp_path):
+    module = _import_run_modal()
+    volume = _named_volume(fake_modal)
+    blob = tmp_path / "warm.pt"
+    blob.write_bytes(b"ckpt-bytes")
+    digest = mrl.sha256_file(blob)
+    client_path = mrl.INPUTS_ROOT / "sha256" / f"{digest}.pt"
+    volume.pending_creates[client_path.as_posix()] = b"ckpt-bytes"
+    module.ensure_blob(volume, client_path, blob)
+    assert mrl.mounted_path(client_path) == Path("/artifacts/inputs/sha256") / f"{digest}.pt"
+    volume.files[client_path.as_posix()] = b"other-bytes"
+    with pytest.raises(mrl.ValidationError):
+        module.ensure_blob(volume, client_path, blob)
+    assert all(force is False for _path, force, _local in fake_modal.batch_upload_calls)
+
+
+def test_reserve_run_through_modal_adapters_stays_in_client_namespace(fake_modal):
+    module = _import_run_modal()
+    volume = _named_volume(fake_modal)
+    registry = module.ModalDictRegistry(_named_dict(fake_modal))
+    artifacts = module.ModalVolumeIndex(volume)
+    mrl.reserve_run(registry, artifacts, "ok-id", "attempt-a", now=_aware())
+    reservation = mrl.RUNS_ROOT / "ok-id" / mrl.RESERVATION_FILENAME
+    assert reservation.as_posix() in volume.files
+    assert all(not path.startswith("/artifacts") for path in volume.files)
+    assert registry.get(mrl.run_registry_key("ok-id"))["attempt_id"] == "attempt-a"
+    assert fake_modal.volume_creates == [(mrl.VOLUME_NAME, True)]
+    assert fake_modal.dict_creates == [(mrl.REGISTRY_NAME, True)]
+    assert fake_modal.volume_lookups == [(mrl.VOLUME_NAME, False)]
+    assert fake_modal.dict_lookups == [(mrl.REGISTRY_NAME, False)]
+
+
+# ── Task 8 cycle D: configured run invocation and W&B gating ───────────────
+
+
+def _capture_stdout():
+    return io.StringIO()
+
+
+def _write_parent_artifacts(volume, parent_id, *, status, updated_at, ckpt_bytes, sidecar):
+    status_path = (mrl.RUNS_ROOT / parent_id / mrl.STATUS_FILENAME).as_posix()
+    ckpt_path = (mrl.RUNS_ROOT / parent_id / "checkpoints" / mrl.CHECKPOINT_NAME).as_posix()
+    sidecar_path = (mrl.RUNS_ROOT / parent_id / "checkpoints" /
+                    mrl.CHECKPOINT_SIDECAR_NAME).as_posix()
+    volume.files[status_path] = json.dumps({
+        "schema_version": 1,
+        "status": status,
+        "attempt_id": "parent-attempt",
+        "updated_at": updated_at,
+    }).encode()
+    volume.files[ckpt_path] = ckpt_bytes
+    if sidecar is not None:
+        volume.files[sidecar_path] = json.dumps(sidecar).encode()
+    return ckpt_path, sidecar_path
+
+
+def test_invalid_inputs_validate_before_claim_or_gpu(fake_modal, tmp_path):
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    junk = tmp_path / "nope.pt"
+    junk.write_text("not-a-checkpoint")
+    request = module.resolve_launch_request(
+        **_valid_launch_sentinels(git_sha=sha, resume_local_checkpoint=str(junk)))
+    with pytest.raises(mrl.ValidationError):
+        module.launch_run(request, repo=repo, app_obj=module.app)
+    assert fake_modal.volume_creates == []
+    assert fake_modal.dict_creates == []
+    assert fake_modal.configured_remote_calls == []
+    assert fake_modal.base_remote_calls == []
+
+
+def test_configured_run_uses_with_options_defaults_and_prints_ids(fake_modal, tmp_path):
+    import torch
+
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    ckpt = tmp_path / "warm.pt"
+    torch.save({"weight": torch.tensor([1.0])}, ckpt)
+    digest = mrl.sha256_file(ckpt)
+    request = module.resolve_launch_request(
+        **_valid_launch_sentinels(git_sha=sha, resume_local_checkpoint=str(ckpt)))
+    stdout = _capture_stdout()
+    result = module.launch_run(request, repo=repo, app_obj=module.app, stdout=stdout)
+    assert result["status"] == "ok"
+    assert fake_modal.base_remote_calls == []
+    assert len(fake_modal.with_options_calls) == 1
+    options = fake_modal.with_options_calls[0]
+    assert options["gpu"] == "T4"
+    assert options["cpu"] == (8, 8)
+    assert options["memory"] == (16384, 16384)
+    assert options["timeout"] == 120 * 60
+    assert list(options["volumes"]) == ["/artifacts"]
+    assert "secrets" not in options
+    _opts, args, kwargs = fake_modal.configured_remote_calls[0]
+    payload = args[0] if args else kwargs["payload"]
+    assert payload["run_id"] == request.run_id
+    assert payload["resume_mount_path"] == f"/artifacts/inputs/sha256/{digest}.pt"
+    assert payload["resume_sha256"] == digest
+    assert "wandb_enabled" not in payload
+    assert "wandb_secret_name" not in payload
+    dumped = json.dumps(payload)
+    assert "wandb" not in dumped
+    assert all(
+        isinstance(value, (str, int, float, bool, list, type(None))) for value in payload.values())
+    printed = stdout.getvalue()
+    assert module.app.app_id in printed
+    assert request.run_id in printed
+    source_name = next(path for path in fake_modal.volumes[mrl.VOLUME_NAME].files
+                       if path.startswith("sources/"))
+    assert source_name.endswith(".tar.gz")
+    assert not source_name.startswith("/artifacts")
+    assert f"inputs/sha256/{digest}.pt" in fake_modal.volumes[mrl.VOLUME_NAME].files
+
+
+def test_smoke_resource_tuples_and_cpu_memory_semantics(fake_modal, tmp_path):
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    request = module.resolve_launch_request(**_valid_launch_sentinels(
+        git_sha=sha,
+        cpu_cores=4,
+        memory_mib=8192,
+        vec_workers=4,
+        timeout_minutes=15,
+        train_args="--timesteps 1 --seed 2",
+    ))
+    # CPU tuple is a soft throttling limit; memory tuple is a hard OOM limit.
+    assert request.cpu_request_limit == (4, 4)
+    assert request.memory_request_limit == (8192, 8192)
+    module.launch_run(request, repo=repo, app_obj=module.app, stdout=_capture_stdout())
+    options = fake_modal.with_options_calls[0]
+    assert options["cpu"] == (4, 4)
+    assert options["memory"] == (8192, 8192)
+    assert options["timeout"] == 15 * 60
+
+
+def test_wandb_secret_missing_fails_before_claim_without_leaking_name(fake_modal, tmp_path):
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    secret_name = "prod-wandb-key"
+    request = module.resolve_launch_request(**_valid_launch_sentinels(
+        git_sha=sha,
+        train_args="--timesteps 1 --seed 2 --wandb",
+        wandb_secret_name=secret_name,
+    ))
+    with pytest.raises(mrl.ValidationError) as excinfo:
+        module.launch_run(request, repo=repo, app_obj=module.app)
+    assert secret_name not in str(excinfo.value)
+    assert fake_modal.volume_creates == []
+    assert fake_modal.dict_creates == []
+    assert fake_modal.configured_remote_calls == []
+    assert fake_modal.secret_lookups == [secret_name]
+
+
+def test_wandb_attaches_secret_and_records_enabled_flag_only(fake_modal, tmp_path):
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    secret_name = "prod-wandb-key"
+    fake_modal.known_secrets.add(secret_name)
+    request = module.resolve_launch_request(**_valid_launch_sentinels(
+        git_sha=sha,
+        train_args="--timesteps 1 --seed 2 --wandb",
+        wandb_secret_name=secret_name,
+    ))
+    stdout = _capture_stdout()
+    module.launch_run(request, repo=repo, app_obj=module.app, stdout=stdout)
+    options = fake_modal.with_options_calls[0]
+    assert "secrets" in options
+    assert len(options["secrets"]) == 1
+    payload = fake_modal.configured_remote_calls[0][1][0]
+    assert payload["wandb_enabled"] is True
+    assert "wandb_secret_name" not in payload
+    assert secret_name not in json.dumps(payload)
+    assert secret_name not in stdout.getvalue()
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["active", "missing", "stale", "mismatch", "replaced"],
+)
+def test_prior_run_resume_fails_closed_without_consuming_new_id(fake_modal, tmp_path, case):
+    import torch
+
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    ckpt = tmp_path / "parent.pt"
+    torch.save({"weight": torch.tensor([3.0])}, ckpt)
+    ckpt_bytes = ckpt.read_bytes()
+    digest = mrl.sha256_file(ckpt)
+    volume = _named_volume(fake_modal)
+    sidecar = {
+        "sha256": digest,
+        "size": len(ckpt_bytes),
+        "mtime_ns": 1,
+        "validated_at": _aware().isoformat(),
+    }
+    status = "completed" if case != "active" else "training"
+    _ckpt_path, sidecar_path = _write_parent_artifacts(
+        volume,
+        "parent-run",
+        status=status,
+        updated_at=_aware().isoformat(),
+        ckpt_bytes=ckpt_bytes,
+        sidecar=None if case == "missing" else sidecar,
+    )
+    if case == "stale":
+        volume.files[sidecar_path] = json.dumps({
+            **sidecar,
+            "size": len(ckpt_bytes) + 1,
+            "mtime_ns": 99,
+        }).encode()
+    elif case == "mismatch":
+        volume.files[sidecar_path] = json.dumps({**sidecar, "sha256": "0" * 64}).encode()
+    elif case == "replaced":
+        volume.replace_after_read = {
+            sidecar_path: json.dumps({
+                **sidecar, "sha256": "1" * 64
+            }).encode()
+        }
+    request = module.resolve_launch_request(
+        **_valid_launch_sentinels(git_sha=sha, run_id="child-run", resume_run_id="parent-run"))
+    creates_before = list(fake_modal.volume_creates)
+    dicts_before = list(fake_modal.dict_creates)
+    with pytest.raises(mrl.ValidationError):
+        module.launch_run(request, repo=repo, app_obj=module.app, now=_aware())
+    assert fake_modal.volume_creates == creates_before
+    assert fake_modal.dict_creates == dicts_before
+    assert fake_modal.configured_remote_calls == []
+    assert fake_modal.dicts.get(mrl.REGISTRY_NAME) is None
+
+
+def test_prior_run_resume_sends_only_immutable_digest_path(fake_modal, tmp_path):
+    import torch
+
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    ckpt = tmp_path / "parent.pt"
+    torch.save({"weight": torch.tensor([4.0])}, ckpt)
+    ckpt_bytes = ckpt.read_bytes()
+    digest = mrl.sha256_file(ckpt)
+    volume = _named_volume(fake_modal)
+    _write_parent_artifacts(
+        volume,
+        "parent-run",
+        status="completed",
+        updated_at=_aware().isoformat(),
+        ckpt_bytes=ckpt_bytes,
+        sidecar={
+            "sha256": digest,
+            "size": len(ckpt_bytes),
+            "mtime_ns": 1,
+            "validated_at": _aware().isoformat(),
+        },
+    )
+    request = module.resolve_launch_request(
+        **_valid_launch_sentinels(git_sha=sha, run_id="child-run", resume_run_id="parent-run"))
+    module.launch_run(request,
+                      repo=repo,
+                      app_obj=module.app,
+                      now=_aware(),
+                      stdout=_capture_stdout())
+    payload = fake_modal.configured_remote_calls[0][1][0]
+    assert payload["resume_mount_path"] == f"/artifacts/inputs/sha256/{digest}.pt"
+    assert payload["resume_sha256"] == digest
+    assert "runs/parent-run" not in payload["resume_mount_path"]
+    assert f"inputs/sha256/{digest}.pt" in fake_modal.volumes[mrl.VOLUME_NAME].files
+    assert fake_modal.volumes[mrl.VOLUME_NAME].files[f"inputs/sha256/{digest}.pt"] == ckpt_bytes
+
+
+# ── Task 8 cycle E: client-only status / download ──────────────────────────
+
+
+def _import_artifacts():
+    return importlib.import_module("scripts.modal_artifacts")
+
+
+def test_artifact_client_never_imports_app_or_creates_objects(fake_modal):
+    module = _import_artifacts()
+    assert "scripts.run_modal" not in sys.modules
+    assert fake_modal.images == []
+    assert fake_modal.apps == []
+    with pytest.raises(mrl.ValidationError):
+        module.collect_status("ok-id")
+    assert fake_modal.volume_creates == []
+    assert fake_modal.dict_creates == []
+    assert fake_modal.volume_lookups == [(mrl.VOLUME_NAME, False)]
+    assert fake_modal.configured_remote_calls == []
+    assert fake_modal.base_remote_calls == []
+
+
+def test_status_rejects_launch_only_options_via_client(fake_modal):
+    module = _import_artifacts()
+    with pytest.raises(mrl.ValidationError):
+        module.main(["status", "--run-id", "ok-id", "--gpu", "T4"])
+    assert fake_modal.volume_lookups == []
+    assert fake_modal.volume_creates == []
+
+
+@pytest.mark.parametrize("case", ["missing", "stale", "mismatch", "replaced", "ok"])
+def test_status_checkpoint_loadable_protocol(fake_modal, tmp_path, case):
+    import torch
+
+    module = _import_artifacts()
+    ckpt = tmp_path / "dust2_policy.pt"
+    torch.save({"weight": torch.tensor([5.0])}, ckpt)
+    ckpt_bytes = ckpt.read_bytes()
+    digest = mrl.sha256_file(ckpt)
+    volume = _named_volume(fake_modal)
+    sidecar = {
+        "sha256": digest,
+        "size": len(ckpt_bytes),
+        "mtime_ns": 1,
+        "validated_at": _aware().isoformat(),
+    }
+    _ckpt_path, sidecar_path = _write_parent_artifacts(
+        volume,
+        "ok-id",
+        status="completed",
+        updated_at=_aware().isoformat(),
+        ckpt_bytes=ckpt_bytes,
+        sidecar=None if case == "missing" else sidecar,
+    )
+    if case == "stale":
+        volume.files[sidecar_path] = json.dumps({**sidecar, "size": len(ckpt_bytes) + 8}).encode()
+    elif case == "mismatch":
+        volume.files[sidecar_path] = json.dumps({**sidecar, "sha256": "0" * 64}).encode()
+    elif case == "replaced":
+        volume.replace_after_read = {
+            sidecar_path: json.dumps({
+                **sidecar, "sha256": "1" * 64
+            }).encode()
+        }
+    report = module.collect_status("ok-id", now=_aware())
+    assert report["run_id"] == "ok-id"
+    assert report["status"] == "completed"
+    assert report["checkpoint_loadable"] is (case == "ok")
+
+
+def test_status_does_not_interrupt_on_mere_file_presence(fake_modal, tmp_path):
+    import torch
+
+    module = _import_artifacts()
+    ckpt = tmp_path / "dust2_policy.pt"
+    torch.save({"weight": torch.tensor([6.0])}, ckpt)
+    volume = _named_volume(fake_modal)
+    _write_parent_artifacts(
+        volume,
+        "ok-id",
+        status="training",
+        updated_at=_aware().isoformat(),
+        ckpt_bytes=ckpt.read_bytes(),
+        sidecar=None,
+    )
+    dead = (mrl.RUNS_ROOT / "ok-id" / "checkpoints" / mrl.DEAD_CHECKPOINT_NAME).as_posix()
+    volume.files[dead] = b"autopsy"
+    report = module.collect_status("ok-id", now=_aware())
+    assert report["status"] == "training"
+    assert report["stale"] is False
+    assert report["checkpoint_loadable"] is False
+
+
+def test_download_stages_renames_and_refuses_overwrite(fake_modal, tmp_path):
+    module = _import_artifacts()
+    volume = _named_volume(fake_modal)
+    volume.files["runs/ok-id/STATUS.json"] = b'{"status":"completed"}\n'
+    volume.files["runs/ok-id/checkpoints/config.json"] = b"{}\n"
+    dest_root = tmp_path / "outputs" / "modal"
+    dest = module.download_run("ok-id", dest_root=dest_root)
+    assert dest == dest_root / "ok-id"
+    assert (dest / "STATUS.json").read_bytes() == b'{"status":"completed"}\n'
+    assert (dest / "checkpoints" / "config.json").read_bytes() == b"{}\n"
+    assert list(dest_root.glob(".ok-id.tmp-*")) == []
+    assert fake_modal.iterdir_calls == [("runs/ok-id", True)]
+    assert all(not path.startswith("/artifacts") for path, _rec in fake_modal.iterdir_calls)
+    assert all(not path.startswith("/artifacts") for path in fake_modal.read_file_calls)
+    with pytest.raises(mrl.ValidationError):
+        module.download_run("ok-id", dest_root=dest_root)
+    escaped = dest_root / "escaped"
+    volume.files["runs/ok-id/../../secret"] = b"nope"
+    # Existing dest still blocks; use a new id for the escape case.
+    volume.files["runs/evil/../../secret"] = b"nope"
+    volume.files["runs/evil/STATUS.json"] = b"{}\n"
+    with pytest.raises(mrl.ValidationError):
+        module.download_run("evil", dest_root=dest_root)
+    assert not escaped.exists()
+    assert not (dest_root / "evil").exists()
+    assert not (dest_root / "secret").exists()
+
+
+def test_detached_run_can_be_downloaded_later_by_id(fake_modal, tmp_path):
+    module = _import_artifacts()
+    assert "scripts.run_modal" not in sys.modules
+    volume = _named_volume(fake_modal)
+    volume.files["runs/detached-1/result.json"] = b'{"status":"completed"}\n'
+    dest = module.download_run("detached-1", dest_root=tmp_path / "outputs" / "modal")
+    assert (dest / "result.json").read_text() == '{"status":"completed"}\n'
+    assert fake_modal.apps == []
+    assert fake_modal.images == []
+    assert fake_modal.configured_remote_calls == []
+
+
+def test_detach_is_a_modal_run_cli_flag_not_an_app_option(fake_modal):
+    # Modal 1.4.3 places --detach on `modal run` before FUNC_REF:
+    # `modal run --detach scripts/run_modal.py --action run ...`
+    module = _import_run_modal()
+    assert "detach" not in module.main.__code__.co_varnames
