@@ -24,10 +24,12 @@ Pitfalls this file is careful about:
     `uv sync --no-install-project` removes from the venv.
 """
 import ast
+import json
 import subprocess
 import sys
 import tarfile
 import tomllib
+from datetime import UTC
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -953,3 +955,353 @@ def test_validate_local_checkpoint_rejects_non_checkpoint(tmp_path):
     missing = tmp_path / "missing.pt"
     with pytest.raises(mrl.ValidationError):
         mrl.validate_local_checkpoint(missing)
+
+
+# ── Task 4 cycle A: atomic JSON + status transition table ──────────────────
+
+
+def _live_batch_size(num_envs: int = 256) -> int:
+    """Live compute_batch_dims: num_envs * 10 agents * 64 BPTT horizon."""
+    return num_envs * mrl.AGENTS_PER_ENV * mrl.BPTT_HORIZON
+
+
+def _make_manifest(**overrides) -> mrl.Manifest:
+    requested = 30_000_000
+    batch_size = _live_batch_size()
+    payload = {
+        "schema_version": 1,
+        "run_id": "ok-id",
+        "attempt_id": "attempt-a",
+        "commit": "a" * 40,
+        "tree": "b" * 40,
+        "source_archive_sha256": "c" * 64,
+        "modal_version": "1.4.3",
+        "image_digest": "sha256:6617a625f4090c76c545a0e7d63f2e441718ef9af7f4efe7dd1242a29e289fd7",
+        "effective_map": "simple",
+        "gpu": "T4",
+        "cpu_request": 8,
+        "cpu_soft_limit": 8,
+        "memory_request_mib": 16384,
+        "memory_hard_limit_mib": 16384,
+        "vec_workers": 8,
+        "timeout_minutes": 120,
+        "training_argv": ["--train", "--timesteps", "30000000"],
+        "requested_timesteps": requested,
+        "effective_timesteps": (requested // batch_size) * batch_size,
+        "batch_size": batch_size,
+        "seed": 2,
+        "created_at": "2026-08-13T00:00:00+00:00",
+        "resume_sha256": None,
+        "resume_size": None,
+        "resume_source_path": None,
+        "runner_commit": "a" * 40,
+        "config_hash": "d" * 64,
+    }
+    payload.update(overrides)
+    return mrl.Manifest(**payload)
+
+
+def test_atomic_write_json_replaces_and_cleans_temp_on_failure(tmp_path):
+    path = tmp_path / "STATUS.json"
+    mrl.atomic_write_json(path, {"ok": True})
+    assert json.loads(path.read_text()) == {"ok": True}
+
+    def boom(src, dst):
+        raise OSError("injected replace failure")
+
+    with pytest.raises(OSError, match="injected"):
+        mrl.atomic_write_json(path, {"ok": False}, replace=boom)
+    assert json.loads(path.read_text()) == {"ok": True}
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "STATUS.json"]
+    assert leftovers == []
+
+
+def test_status_transitions_are_monotonic_and_attempt_owned(tmp_path):
+    from datetime import datetime
+
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    now = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
+    first = mrl.transition_status(run_root, mrl.Status.PREPARING, now=now, attempt_id="attempt-a")
+    assert first.status is mrl.Status.PREPARING
+    assert first.attempt_id == "attempt-a"
+    mrl.transition_status(run_root, mrl.Status.BUILDING, now=now, attempt_id="attempt-a")
+    mrl.transition_status(run_root, mrl.Status.TRAINING, now=now, attempt_id="attempt-a")
+    done = mrl.transition_status(run_root, mrl.Status.COMPLETED, now=now, attempt_id="attempt-a")
+    assert done.status is mrl.Status.COMPLETED
+    # Idempotent same-terminal write by the original delivery.
+    again = mrl.transition_status(run_root, mrl.Status.COMPLETED, now=now, attempt_id="attempt-a")
+    assert again.status is mrl.Status.COMPLETED
+    with pytest.raises(mrl.ValidationError):
+        mrl.transition_status(run_root, mrl.Status.TRAINING, now=now, attempt_id="attempt-a")
+    before = (run_root / "STATUS.json").read_bytes()
+    # Redelivered delivery has no authority and must not touch the file.
+    denied = mrl.transition_status(run_root, mrl.Status.FAILED, now=now, attempt_id="attempt-b")
+    assert denied is None
+    assert (run_root / "STATUS.json").read_bytes() == before
+
+
+def test_manifest_records_authoritative_simple_map_not_legacy_env():
+    manifest = _make_manifest()
+    payload = manifest.to_dict()
+    assert payload["schema_version"] == 1
+    assert payload["attempt_id"] == "attempt-a"
+    assert payload["source_archive_sha256"] == "c" * 64
+    assert payload["resume_sha256"] is None
+    assert payload["resume_size"] is None
+    assert payload["resume_source_path"] is None
+    assert payload["modal_version"] == "1.4.3"
+    assert payload["image_digest"].startswith("sha256:")
+    assert payload["gpu"] == "T4"
+    assert payload["vec_workers"] == 8
+    assert payload["effective_map"] == "simple"
+    assert payload["cpu_request"] == payload["cpu_soft_limit"] == 8
+    assert payload["memory_request_mib"] == payload["memory_hard_limit_mib"] == 16384
+    # Live config.json currently lies; the manifest must not copy that field.
+    live_config = {"env": "cs2-dust2", "seed": 2, "data_dir": "/artifacts/runs/ok-id/checkpoints"}
+    assert live_config["env"] == "cs2-dust2"
+    assert "env" not in payload
+    assert payload["effective_map"] == "simple"
+
+
+def test_run_result_schema_is_explicit():
+    result = mrl.RunResult(
+        schema_version=1,
+        status=mrl.Status.COMPLETED,
+        exit_code=0,
+        started_at="2026-08-13T12:00:00+00:00",
+        finished_at="2026-08-13T12:01:00+00:00",
+        artifact_root="/artifacts/runs/ok-id",
+        checkpoint_sha256="a" * 64,
+        metrics_row_count=2,
+        last_step=29_982_720,
+    )
+    payload = result.to_dict()
+    assert payload["schema_version"] == 1
+    assert payload["status"] == "completed"
+    assert payload["exit_code"] == 0
+    assert payload["checkpoint_sha256"] == "a" * 64
+    assert payload["last_step"] == 29_982_720
+
+
+# ── Task 4 cycle B: heartbeat + derived stale ──────────────────────────────
+
+
+def _aware(hour=12, minute=0, second=0):
+    from datetime import datetime
+
+    return datetime(2026, 8, 13, hour, minute, second, tzinfo=UTC)
+
+
+def _advance_to_training(run_root, attempt_id="a1"):
+    mrl.transition_status(run_root, mrl.Status.PREPARING, now=_aware(), attempt_id=attempt_id)
+    mrl.transition_status(run_root, mrl.Status.BUILDING, now=_aware(), attempt_id=attempt_id)
+    return mrl.transition_status(run_root, mrl.Status.TRAINING, now=_aware(), attempt_id=attempt_id)
+
+
+def test_heartbeat_refreshes_updated_at_under_lock(tmp_path):
+    import threading
+
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    lock = threading.Lock()
+    _advance_to_training(run_root)
+    # Fake clock: a beat at each 60s mark must refresh updated_at.
+    last = None
+    for minute in (1, 2):
+        now = _aware(minute=minute)
+        last = mrl.write_heartbeat(run_root, now=now, attempt_id="a1", lock=lock)
+        assert last is not None
+        assert last.status is mrl.Status.TRAINING
+        assert last.updated_at == now.isoformat()
+        persisted = json.loads((run_root / "STATUS.json").read_text())
+        assert persisted["updated_at"] == now.isoformat()
+    assert last is not None
+
+
+def test_late_heartbeat_cannot_replace_terminal(tmp_path):
+    import threading
+
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    lock = threading.Lock()
+    stop = threading.Event()
+    _advance_to_training(run_root)
+
+    def heartbeat_loop():
+        while not stop.is_set():
+            mrl.write_heartbeat(run_root, now=_aware(minute=1), attempt_id="a1", lock=lock)
+            stop.wait(0.01)
+
+    worker = threading.Thread(target=heartbeat_loop)
+    worker.start()
+    # Terminal cleanup stops/joins the heartbeat, then transitions while
+    # holding the shared lock. A delayed beat after join must no-op.
+    stop.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+    mrl.transition_status(run_root,
+                          mrl.Status.COMPLETED,
+                          now=_aware(minute=2),
+                          attempt_id="a1",
+                          lock=lock)
+    beat = mrl.write_heartbeat(run_root, now=_aware(minute=3), attempt_id="a1", lock=lock)
+    assert beat is not None
+    assert beat.status is mrl.Status.COMPLETED
+    assert json.loads((run_root / "STATUS.json").read_text())["status"] == "completed"
+
+
+def test_derive_status_stale_after_five_minutes_does_not_mutate(tmp_path):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    written = _advance_to_training(run_root)
+    before = (run_root / "STATUS.json").read_bytes()
+    derived = mrl.derive_status(written, now=_aware(hour=12, minute=5))
+    assert derived.stale is True
+    assert derived.status is mrl.Status.INTERRUPTED
+    assert (run_root / "STATUS.json").read_bytes() == before
+    fresh = mrl.derive_status(written, now=_aware(minute=4, second=59))
+    assert fresh.stale is False
+    assert fresh.status is mrl.Status.TRAINING
+
+
+def test_reservation_without_status_is_preparing_then_interrupted(tmp_path):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    reserved_at = _aware()
+    (run_root / "reservation.json").write_text(
+        json.dumps({
+            "attempt_id": "a1",
+            "created_at": reserved_at.isoformat()
+        }))
+    early = mrl.derive_run_view(run_root, now=_aware(minute=4))
+    assert early.status is mrl.Status.PREPARING
+    assert early.reason == "no-heartbeat"
+    assert early.stale is False
+    late = mrl.derive_run_view(run_root, now=_aware(minute=5))
+    assert late.status is mrl.Status.INTERRUPTED
+    assert late.reason == "no-heartbeat"
+    assert late.stale is True
+    assert not (run_root / "STATUS.json").exists()
+
+
+# ── Task 4 cycle C: completion evidence + transport config + download ───────
+
+
+def _write_metrics(path: Path, steps: list[int]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for epoch, step in enumerate(steps, start=1):
+        # Representative live row: pin the live key `step` (src/train.py).
+        rows.append(
+            json.dumps({
+                "run_id": "ok-id",
+                "step": step,
+                "epoch": epoch,
+                "sps": 1.0
+            }) + "\n")
+    path.write_text("".join(rows))
+
+
+def _minimal_completed_tree(tmp_path: Path, *, steps: list[int] | None = None):
+    import torch
+
+    run_root = tmp_path / "run"
+    ckpt_dir = run_root / "checkpoints"
+    ckpt_dir.mkdir(parents=True)
+    ckpt = ckpt_dir / "dust2_policy.pt"
+    torch.save({"weight": torch.tensor([1.0])}, ckpt)
+    batch_size = _live_batch_size(256)
+    requested = 30_000_000
+    effective = (requested // batch_size) * batch_size
+    if steps is None:
+        steps = [batch_size, effective]
+    _write_metrics(ckpt_dir / "metrics.jsonl", steps)
+    config = {
+        "env": "cs2-dust2",
+        "seed": 2,
+        "data_dir": str(ckpt_dir),
+        "timesteps": requested,
+    }
+    normalized = mrl.normalize_config_for_transport(config)
+    config_hash = mrl.sha256_bytes(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode())
+    (ckpt_dir / "config.json").write_text(json.dumps(config))
+    manifest = _make_manifest(
+        attempt_id="a1",
+        requested_timesteps=requested,
+        effective_timesteps=effective,
+        batch_size=batch_size,
+        created_at=_aware().isoformat(),
+        config_hash=config_hash,
+        training_argv=["--train"],
+    )
+    return run_root, manifest, effective, ckpt
+
+
+def test_normalize_config_strips_only_checkpoint_data_dir():
+    raw = {"env": "cs2-dust2", "data_dir": "/artifacts/runs/x/checkpoints", "seed": 2}
+    normalized = mrl.normalize_config_for_transport(raw)
+    assert "data_dir" not in normalized
+    assert normalized == {"env": "cs2-dust2", "seed": 2}
+    assert mrl.normalize_config_for_transport(normalized) == normalized
+
+
+def test_validate_completed_run_accepts_representative_metrics(tmp_path):
+    train_src = (ROOT / "src" / "train.py").read_text()
+    fn = ast.parse(train_src)
+    for node in ast.walk(fn):
+        if isinstance(node, ast.FunctionDef) and node.name == "compute_batch_dims":
+            body = ast.get_source_segment(train_src, node)
+            assert body is not None
+            assert "agents_per_env = 10" in body
+            assert "bptt_horizon = 64" in body
+            assert "num_envs * agents_per_env * bptt_horizon" in body
+            break
+    else:
+        raise AssertionError("live compute_batch_dims not found")
+    assert mrl.AGENTS_PER_ENV == 10
+    assert mrl.BPTT_HORIZON == 64
+    run_root, manifest, effective, ckpt = _minimal_completed_tree(tmp_path)
+    evidence = mrl.validate_completed_run(run_root, manifest)
+    assert evidence.last_step == effective
+    assert evidence.checkpoint_sha256 == mrl.sha256_file(ckpt)
+    assert evidence.config_hash == manifest.config_hash
+    assert manifest.batch_size == _live_batch_size(256)
+    assert manifest.effective_timesteps == (30_000_000 // manifest.batch_size) * manifest.batch_size
+    assert manifest.effective_timesteps >= manifest.batch_size
+    assert json.loads((run_root / "checkpoints" / "config.json").read_text())["env"] == "cs2-dust2"
+    assert manifest.effective_map == "simple"
+
+
+@pytest.mark.parametrize(
+    "defect", ["bad_ckpt", "empty", "malformed", "nonmonotonic", "wrong_hash", "short_step"])
+def test_validate_completed_run_rejects_bad_evidence(tmp_path, defect):
+    run_root, manifest, effective, ckpt = _minimal_completed_tree(tmp_path)
+    if defect == "bad_ckpt":
+        ckpt.write_text("nope")
+    elif defect == "empty":
+        (run_root / "checkpoints" / "metrics.jsonl").write_text("")
+    elif defect == "malformed":
+        (run_root / "checkpoints" / "metrics.jsonl").write_text("{nope\n")
+    elif defect == "nonmonotonic":
+        _write_metrics(run_root / "checkpoints" / "metrics.jsonl", [100, 50])
+    elif defect == "wrong_hash":
+        manifest = mrl.Manifest(**{**manifest.to_dict(), "config_hash": "e" * 64})
+    elif defect == "short_step":
+        _write_metrics(run_root / "checkpoints" / "metrics.jsonl", [effective - 1])
+    with pytest.raises(mrl.ValidationError):
+        mrl.validate_completed_run(run_root, manifest)
+
+
+def test_list_run_artifacts_keeps_unknown_trainer_files(tmp_path):
+    run_root, manifest, _, _ = _minimal_completed_tree(tmp_path)
+    extra = run_root / "checkpoints" / "notes.txt"
+    extra.write_text("keep me\n")
+    nested = run_root / "checkpoints" / "extra" / "weird.bin"
+    nested.parent.mkdir()
+    nested.write_bytes(b"\x00\x01")
+    listed = {path.relative_to(run_root).as_posix() for path in mrl.list_run_artifacts(run_root)}
+    assert "checkpoints/notes.txt" in listed
+    assert "checkpoints/extra/weird.bin" in listed
+    assert "checkpoints/dust2_policy.pt" in listed

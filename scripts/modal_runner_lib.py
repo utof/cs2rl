@@ -22,15 +22,19 @@ import enum
 import gzip
 import hashlib
 import json
+import os
 import re
 import shlex
 import stat
 import subprocess
 import tarfile
 import tempfile
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+import uuid
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
+from typing import Protocol
 
 VOLUME_NAME = "cs2rl-training-artifacts"
 REGISTRY_NAME = "cs2rl-training-run-registry"
@@ -783,6 +787,383 @@ def validate_local_checkpoint(path: Path) -> FileProvenance:
         client_path=client_path,
         mount_path=mounted_path(client_path),
     )
+
+
+STATUS_FILENAME = "STATUS.json"
+SCHEMA_VERSION = 1
+
+# Linear lifecycle. Terminals have no outbound edges except the same-terminal
+# idempotent write handled in transition_status.
+_ALLOWED_TRANSITIONS: dict[Status, frozenset[Status]] = {
+    Status.PREPARING:
+    frozenset({Status.BUILDING, Status.BUILD_FAILED, Status.INTERRUPTED, Status.FAILED}),
+    Status.BUILDING:
+    frozenset({Status.TRAINING, Status.BUILD_FAILED, Status.INTERRUPTED, Status.FAILED}),
+    Status.TRAINING:
+    frozenset({Status.COMPLETED, Status.FAILED, Status.INTERRUPTED}),
+}
+
+
+@dataclass(frozen=True)
+class RunStatus:
+    """Persisted STATUS.json. attempt_id is the sole writer identity."""
+
+    schema_version: int
+    status: Status
+    attempt_id: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status.value,
+            "attempt_id": self.attempt_id,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> RunStatus:
+        return cls(
+            schema_version=int(payload["schema_version"]),
+            status=Status(str(payload["status"])),
+            attempt_id=str(payload["attempt_id"]),
+            updated_at=str(payload["updated_at"]),
+        )
+
+
+@dataclass(frozen=True)
+class Manifest:
+    """Minimum manifest.json contract from design §5.
+
+    effective_map is authoritative. Do not store live config's `env` field —
+    that currently says cs2-dust2 even for the simple map.
+    """
+
+    schema_version: int
+    run_id: str
+    attempt_id: str
+    commit: str
+    tree: str
+    source_archive_sha256: str
+    modal_version: str
+    image_digest: str
+    effective_map: str
+    gpu: str
+    cpu_request: int
+    cpu_soft_limit: int
+    memory_request_mib: int
+    memory_hard_limit_mib: int
+    vec_workers: int
+    timeout_minutes: int
+    training_argv: list[str]
+    requested_timesteps: int
+    effective_timesteps: int
+    batch_size: int
+    seed: int
+    created_at: str
+    resume_sha256: str | None
+    resume_size: int | None
+    resume_source_path: str | None
+    runner_commit: str
+    config_hash: str
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """Terminal result.json (design §7). Never written by a losing delivery."""
+
+    schema_version: int
+    status: Status
+    exit_code: int
+    started_at: str
+    finished_at: str
+    artifact_root: str
+    checkpoint_sha256: str | None
+    metrics_row_count: int
+    last_step: int | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status.value,
+            "exit_code": self.exit_code,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "artifact_root": self.artifact_root,
+            "checkpoint_sha256": self.checkpoint_sha256,
+            "metrics_row_count": self.metrics_row_count,
+            "last_step": self.last_step,
+        }
+
+
+def atomic_write_json(
+    path: Path,
+    payload: Mapping[str, object],
+    *,
+    replace: Callable[[str, str], None] = os.replace,
+) -> None:
+    """Write JSON via a sibling temp file, then atomically replace.
+
+    The temp is always unlinked on failure so a crashed replace cannot leave a
+    `.STATUS.json.tmp-*` that a later reader might mistake for canonical state.
+    `replace` is injectable so tests can prove that cleanup path.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
+    try:
+        tmp.write_text(json.dumps(dict(payload), sort_keys=True, indent=2) + "\n")
+        replace(str(tmp), str(path))
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _read_status(run_root: Path) -> RunStatus | None:
+    path = run_root / STATUS_FILENAME
+    if not path.is_file():
+        return None
+    return RunStatus.from_dict(json.loads(path.read_text()))
+
+
+def transition_status(
+    run_root: Path,
+    next_status: Status,
+    *,
+    now: datetime,
+    attempt_id: str,
+    lock: LockLike | None = None,
+) -> RunStatus | None:
+    """Advance STATUS.json if this attempt owns the run.
+
+    Returns None when a different attempt already owns canonical state — the
+    redelivered container must not write, commit, or train. Same-terminal
+    writes by the original attempt are idempotent. Pass the same `lock` the
+    heartbeat uses so cleanup can stop/join, then transition, without a race.
+    """
+    if lock is None:
+        return _transition_status_unlocked(run_root, next_status, now=now, attempt_id=attempt_id)
+    with lock:
+        return _transition_status_unlocked(run_root, next_status, now=now, attempt_id=attempt_id)
+
+
+def _transition_status_unlocked(
+    run_root: Path,
+    next_status: Status,
+    *,
+    now: datetime,
+    attempt_id: str,
+) -> RunStatus | None:
+    run_root = Path(run_root)
+    current = _read_status(run_root)
+    if current is not None and current.attempt_id != attempt_id:
+        return None
+    if current is None:
+        if next_status is not Status.PREPARING:
+            raise ValidationError(f"first status must be preparing, got {next_status.value}")
+    elif current.status is next_status:
+        if next_status in TERMINAL_STATUSES:
+            return current
+        raise ValidationError(f"nonterminal status {next_status.value} is already current")
+    elif next_status not in _ALLOWED_TRANSITIONS.get(current.status, frozenset()):
+        raise ValidationError(
+            f"illegal status transition {current.status.value} -> {next_status.value}")
+    status = RunStatus(
+        schema_version=SCHEMA_VERSION,
+        status=next_status,
+        attempt_id=attempt_id,
+        updated_at=now.isoformat(),
+    )
+    atomic_write_json(run_root / STATUS_FILENAME, status.to_dict())
+    return status
+
+
+HEARTBEAT_INTERVAL = timedelta(seconds=60)
+STALE_AFTER = timedelta(minutes=5)
+RESERVATION_FILENAME = "reservation.json"
+
+
+class LockLike(Protocol):
+
+    def __enter__(self) -> object:
+        ...
+
+    def __exit__(self, *exc: object) -> None:
+        ...
+
+
+@dataclass(frozen=True)
+class DerivedStatus:
+    """Client-side view. Never written back to STATUS.json."""
+
+    status: Status
+    stale: bool
+    reason: str | None = None
+
+
+def write_heartbeat(
+    run_root: Path,
+    *,
+    now: datetime,
+    attempt_id: str,
+    lock: LockLike,
+) -> RunStatus | None:
+    """Refresh updated_at if this attempt still owns a nonterminal run.
+
+    The shared lock is the same one terminal cleanup holds. Taking it after
+    a terminal write means we observe COMPLETED/FAILED/... and return it
+    unchanged — a late beat cannot resurrect `training`.
+    """
+    with lock:
+        current = _read_status(Path(run_root))
+        if current is None or current.attempt_id != attempt_id:
+            return None
+        if current.status in TERMINAL_STATUSES:
+            return current
+        status = RunStatus(
+            schema_version=current.schema_version,
+            status=current.status,
+            attempt_id=current.attempt_id,
+            updated_at=now.isoformat(),
+        )
+        atomic_write_json(Path(run_root) / STATUS_FILENAME, status.to_dict())
+        return status
+
+
+def _parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def derive_status(status: RunStatus, *, now: datetime) -> DerivedStatus:
+    """Map a persisted status to the client view. Does not write."""
+    if status.status in TERMINAL_STATUSES:
+        return DerivedStatus(status=status.status, stale=False)
+    age = now - _parse_iso(status.updated_at)
+    if age >= STALE_AFTER:
+        return DerivedStatus(status=Status.INTERRUPTED, stale=True, reason="stale")
+    return DerivedStatus(status=status.status, stale=False)
+
+
+def derive_run_view(run_root: Path, *, now: datetime) -> DerivedStatus:
+    """Derive status from STATUS.json or, if missing, reservation.json.
+
+    A crash after the durable reservation but before the first STATUS write
+    looks like preparing/no-heartbeat for five minutes, then interrupted.
+    """
+    run_root = Path(run_root)
+    current = _read_status(run_root)
+    if current is not None:
+        return derive_status(current, now=now)
+    reservation_path = run_root / RESERVATION_FILENAME
+    if not reservation_path.is_file():
+        raise ValidationError(f"no STATUS.json or reservation.json under {run_root}")
+    payload = json.loads(reservation_path.read_text())
+    created = _parse_iso(str(payload["created_at"]))
+    if now - created >= STALE_AFTER:
+        return DerivedStatus(status=Status.INTERRUPTED, stale=True, reason="no-heartbeat")
+    return DerivedStatus(status=Status.PREPARING, stale=False, reason="no-heartbeat")
+
+
+def sha256_bytes(data: bytes) -> str:
+    """SHA-256 of an in-memory payload (normalized config JSON)."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def normalize_config_for_transport(config: Mapping[str, object]) -> dict[str, object]:
+    """Drop only the run-local checkpoint data_dir; everything else must match.
+
+    data_dir is the one path the trainer rewrites to the mounted run directory.
+    Any other drift is a real config mismatch and must fail completion.
+    """
+    return {key: value for key, value in config.items() if key != "data_dir"}
+
+
+@dataclass(frozen=True)
+class CompletionEvidence:
+    last_step: int
+    checkpoint_sha256: str
+    config_hash: str
+
+
+def _iter_metrics_steps(metrics_path: Path) -> list[int]:
+    """Parse every nonblank JSONL row; pin the live `step` key."""
+    if not metrics_path.is_file() or metrics_path.stat().st_size == 0:
+        raise ValidationError(f"metrics file missing or empty: {metrics_path}")
+    steps: list[int] = []
+    with metrics_path.open() as handle:
+        for line_no, raw in enumerate(handle, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as err:
+                raise ValidationError(f"malformed metrics line {line_no}") from err
+            if "step" not in row:
+                raise ValidationError(f"metrics line {line_no} missing live key 'step'")
+            try:
+                step = int(row["step"])
+            except (TypeError, ValueError) as err:
+                raise ValidationError(f"metrics line {line_no} has non-integer step") from err
+            if step < 0:
+                raise ValidationError(f"metrics line {line_no} has negative step {step}")
+            if steps and step < steps[-1]:
+                raise ValidationError(
+                    f"metrics step not monotonic at line {line_no}: {steps[-1]} -> {step}")
+            steps.append(step)
+    if not steps:
+        raise ValidationError(f"metrics file has no rows: {metrics_path}")
+    return steps
+
+
+def validate_completed_run(run_root: Path, manifest: Manifest) -> CompletionEvidence:
+    """Accept a terminal run only with loadable ckpt, matching config, and enough steps.
+
+    last `step` is compared to effective_timesteps = floor(requested/batch)*batch,
+    never to the raw request. A torn file's earlier maximum is ignored — we use
+    the last row only after proving the whole file is monotonic.
+    """
+    run_root = Path(run_root)
+    ckpt_dir = run_root / "checkpoints"
+    ckpt = ckpt_dir / "dust2_policy.pt"
+    validate_local_checkpoint(ckpt)
+    config_path = ckpt_dir / "config.json"
+    if not config_path.is_file():
+        raise ValidationError("missing checkpoints/config.json")
+    config = json.loads(config_path.read_text())
+    normalized = normalize_config_for_transport(config)
+    config_hash = sha256_bytes(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode())
+    if config_hash != manifest.config_hash:
+        raise ValidationError("config hash does not match manifest")
+    if manifest.effective_timesteps < manifest.batch_size:
+        raise ValidationError("effective_timesteps is less than one full batch")
+    expected = (manifest.requested_timesteps // manifest.batch_size) * manifest.batch_size
+    if manifest.effective_timesteps != expected:
+        raise ValidationError(
+            f"effective_timesteps {manifest.effective_timesteps} != floor formula {expected}")
+    steps = _iter_metrics_steps(ckpt_dir / "metrics.jsonl")
+    last_step = steps[-1]
+    if last_step < manifest.effective_timesteps:
+        raise ValidationError(
+            f"last metrics step {last_step} < effective_timesteps {manifest.effective_timesteps}")
+    return CompletionEvidence(
+        last_step=last_step,
+        checkpoint_sha256=sha256_file(ckpt),
+        config_hash=config_hash,
+    )
+
+
+def list_run_artifacts(run_root: Path) -> list[Path]:
+    """Every file under the run, including unknown trainer outputs.
+
+    Download must not whitelist the minimum schema and drop extras.
+    """
+    run_root = Path(run_root)
+    return sorted(path for path in run_root.rglob("*") if path.is_file())
 
 
 def _assemble_train_argv(
