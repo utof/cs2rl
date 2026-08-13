@@ -36,6 +36,7 @@ import threading
 import time
 import tomllib
 from datetime import UTC, timedelta
+from enum import IntEnum
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -3337,6 +3338,8 @@ class FakeModal:
             Volume=self.Volume,
             Dict=self.Dict,
             Secret=self.Secret,
+            exception=SimpleNamespace(NotFoundError=FakeNotFoundError),
+            NotFoundError=FakeNotFoundError,
             __version__=self.__version__,
         )
 
@@ -3542,6 +3545,9 @@ class FakeVolume:
         self.replace_after_read: dict[str, bytes] = {}
         self.commit_count = 0
         self.reject_next_upload = False
+        self.iterdir_entries: list[object] | None = None
+        self.missing_prefix_exc: type[BaseException] | None = None
+        self.fail_prefix: str | None = None
 
     def _client_path(self, path) -> str:
         text = str(path)
@@ -3565,10 +3571,17 @@ class FakeVolume:
     def iterdir(self, path, *, recursive: bool = True):
         key = self._client_path(path)
         self._fake.iterdir_calls.append((key, recursive))
+        if self.iterdir_entries is not None:
+            yield from self.iterdir_entries
+            return
         prefix = key.rstrip("/")
+        matched = False
         for stored in sorted(self.files):
             if prefix == "" or stored == prefix or stored.startswith(prefix + "/"):
+                matched = True
                 yield SimpleNamespace(path=stored, type="file")
+        if not matched and self.missing_prefix_exc is not None:
+            raise self.missing_prefix_exc(key)
 
     def commit(self):
         self.commit_count += 1
@@ -3601,6 +3614,8 @@ class FakeBatchUpload:
         if self.volume.reject_next_upload:
             self.volume.reject_next_upload = False
             raise FileExistsError(key)
+        if self.volume.fail_prefix is not None and key.startswith(self.volume.fail_prefix):
+            raise OSError(f"could not upload {key}")
         if key in self.volume.files:
             raise FileExistsError(key)
         data = Path(local_path).read_bytes() if not hasattr(local_path,
@@ -3689,8 +3704,8 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
     assert image.env_vars["NO_OCEAN"] == "1"
     assert "uv==0.11.1" in image.pips
     assert "ziglang==0.14.1" in image.pips
-    assert ("pyproject.toml", "/opt/cs2rl/pyproject.toml", True) in image.local_files
-    assert ("uv.lock", "/opt/cs2rl/uv.lock", True) in image.local_files
+    assert (str(ROOT / "pyproject.toml"), "/opt/cs2rl/pyproject.toml", True) in image.local_files
+    assert (str(ROOT / "uv.lock"), "/opt/cs2rl/uv.lock", True) in image.local_files
     commands = "\n".join(image.commands)
     assert "--no-install-package pufferlib" in commands
     assert "--no-build-isolation" in commands
@@ -3703,10 +3718,14 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
     assert "compute_puff_advantage" in commands
     assert "all('sm_'+arch in elf for arch in ('75','86','89'))" in commands
     runner = module.runner_image
-    assert ("scripts/modal_runner_lib.py", "/opt/app/scripts/modal_runner_lib.py",
+    assert (str(ROOT / "scripts" / "modal_runner_lib.py"), "/opt/app/scripts/modal_runner_lib.py",
             True) in runner.local_files
-    assert ("scripts/run_modal.py", "/opt/app/scripts/run_modal.py", True) in runner.local_files
+    assert (str(ROOT / "scripts" / "run_modal.py"), "/opt/app/scripts/run_modal.py",
+            True) in runner.local_files
     assert runner.env_vars["PYTHONPATH"] == "/opt/app"
+    for src, _dst, _copy in (*image.local_files, *runner.local_files):
+        assert Path(src).is_absolute()
+        assert Path(src).is_relative_to(ROOT)
 
 
 # ── Task 8 cycle B: run-only parser / omitted sentinels ────────────────────
@@ -4536,3 +4555,124 @@ def test_detach_is_a_modal_run_cli_flag_not_an_app_option(fake_modal):
     # `modal run --detach scripts/run_modal.py --action run ...`
     module = _import_run_modal()
     assert "detach" not in module.main.__code__.co_varnames
+
+
+# ── Task 8 quality-review: FileEntry types, empty prefixes, reservation ────
+
+
+class FileEntryType(IntEnum):
+    """Stand-in for modal.types.FileEntryType. str() is fileentrytype.directory."""
+
+    FILE = 1
+    DIRECTORY = 2
+    SYMLINK = 3
+
+
+def test_download_skips_fileentry_directories_and_refuses_symlinks(fake_modal, tmp_path):
+    module = _import_artifacts()
+    volume = _named_volume(fake_modal)
+    volume.files["runs/ok-id/STATUS.json"] = b'{"status":"completed"}\n'
+    volume.files["runs/ok-id/checkpoints/config.json"] = b"{}\n"
+    volume.iterdir_entries = [
+        SimpleNamespace(path="runs/ok-id/checkpoints", type=FileEntryType.DIRECTORY),
+        SimpleNamespace(path="runs/ok-id/STATUS.json", type=FileEntryType.FILE),
+        SimpleNamespace(path="runs/ok-id/checkpoints/config.json", type=FileEntryType.FILE),
+    ]
+    dest_root = tmp_path / "outputs" / "modal"
+    dest = module.download_run("ok-id", dest_root=dest_root)
+    assert (dest / "STATUS.json").read_bytes() == b'{"status":"completed"}\n'
+    assert (dest / "checkpoints" / "config.json").read_bytes() == b"{}\n"
+    assert not (dest / "checkpoints").is_file()
+
+    volume.files["runs/link-id/STATUS.json"] = b"{}\n"
+    volume.iterdir_entries = [
+        SimpleNamespace(path="runs/link-id/outside", type=FileEntryType.SYMLINK),
+        SimpleNamespace(path="runs/link-id/STATUS.json", type=FileEntryType.FILE),
+    ]
+    with pytest.raises(mrl.ValidationError, match="symlink"):
+        module.download_run("link-id", dest_root=dest_root)
+    assert not (dest_root / "link-id").exists()
+
+
+def test_iterdir_paths_treats_missing_prefix_not_found_as_empty(fake_modal):
+    module = _import_run_modal()
+    volume = _named_volume(fake_modal)
+    volume.missing_prefix_exc = FakeNotFoundError
+    assert module._iterdir_paths(volume, "sources") == []
+    assert module._iterdir_paths(volume, "runs") == []
+    assert not module._volume_has_client_path(volume, "sources/deadbeef.tar.gz")
+
+
+def test_first_launch_lists_empty_volume_prefixes(fake_modal, tmp_path):
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    volume = _named_volume(fake_modal)
+    volume.missing_prefix_exc = FakeNotFoundError
+    _named_dict(fake_modal)
+    request = module.resolve_launch_request(**_valid_launch_sentinels(git_sha=sha))
+    module.launch_run(request, repo=repo, app_obj=module.app, stdout=_capture_stdout())
+    assert fake_modal.configured_remote_calls
+    source_name = next(path for path in volume.files if path.startswith("sources/"))
+    assert source_name.endswith(".tar.gz")
+
+
+def test_launch_upload_failure_records_failure_code_without_freeing_id(fake_modal, tmp_path):
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    volume = _named_volume(fake_modal)
+    volume.fail_prefix = "sources/"
+    _named_dict(fake_modal)
+    request = module.resolve_launch_request(**_valid_launch_sentinels(git_sha=sha))
+    with pytest.raises(OSError, match="could not upload"):
+        module.launch_run(request, repo=repo, app_obj=module.app, stdout=_capture_stdout())
+    claim = fake_modal.dicts[mrl.REGISTRY_NAME].get(mrl.run_registry_key(request.run_id))
+    assert claim["failure_code"] == mrl.FAILURE_UPLOAD
+    assert claim["attempt_id"]
+    assert "secret" not in json.dumps(claim)
+    assert (mrl.RUNS_ROOT / request.run_id / mrl.RESERVATION_FILENAME).as_posix() in volume.files
+    assert fake_modal.configured_remote_calls == []
+    with pytest.raises(mrl.ValidationError):
+        module.launch_run(request, repo=repo, app_obj=module.app, stdout=_capture_stdout())
+
+
+def test_lookup_helpers_chain_unexpected_errors(fake_modal):
+    launch = _import_run_modal()
+    artifacts = _import_artifacts()
+
+    class BoomFactory:
+
+        @staticmethod
+        def from_name(name, create_if_missing=False):
+            del name, create_if_missing
+            raise RuntimeError("modal backend exploded")
+
+    with pytest.raises(RuntimeError, match="modal backend exploded") as launch_info:
+        launch._lookup_named(BoomFactory, mrl.VOLUME_NAME, missing="artifact volume is missing")
+    assert launch_info.value.__cause__ is None
+
+    class BoomModal:
+
+        class Volume:
+
+            @staticmethod
+            def from_name(name, create_if_missing=False):
+                del name, create_if_missing
+                raise RuntimeError("volume backend exploded")
+
+    with pytest.raises(RuntimeError, match="volume backend exploded") as artifact_info:
+        artifacts._lookup_volume(BoomModal)
+    assert artifact_info.value.__cause__ is None
+
+
+def test_corrupt_volume_json_is_validation_error(fake_modal):
+    module = _import_artifacts()
+    volume = _named_volume(fake_modal)
+    volume.files["runs/ok-id/STATUS.json"] = b"{not-json"
+    with pytest.raises(mrl.ValidationError):
+        module.collect_status("ok-id", now=_aware())
+    del volume.files["runs/ok-id/STATUS.json"]
+    volume.files["runs/ok-id/reservation.json"] = b'{"created_at":"not-a-timestamp"}'
+    with pytest.raises(mrl.ValidationError):
+        module.collect_status("ok-id", now=_aware())

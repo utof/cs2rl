@@ -31,6 +31,7 @@ import modal
 
 import scripts.modal_runner_lib as mrl
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 CUDA_IMAGE = ("nvidia/cuda:12.8.1-devel-ubuntu22.04@"
               "sha256:6617a625f4090c76c545a0e7d63f2e441718ef9af7f4efe7dd1242a29e289fd7")
 IMAGE_DIGEST = "sha256:6617a625f4090c76c545a0e7d63f2e441718ef9af7f4efe7dd1242a29e289fd7"
@@ -47,45 +48,46 @@ dependency_image = (modal.Image.from_registry(
     "7.5;8.6;8.9",
     "NO_OCEAN":
     "1",
-}).add_local_file("pyproject.toml", "/opt/cs2rl/pyproject.toml", copy=True).add_local_file(
-    "uv.lock", "/opt/cs2rl/uv.lock", copy=True).run_commands(
-        "cd /opt/cs2rl && uv sync --locked --no-dev --no-install-project "
-        "--no-install-package pufferlib",
-        "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
-        "inventory={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
-        "pathlib.Path('/tmp/locked-inventory.json').write_text("
-        "json.dumps(inventory, sort_keys=True))\"",
-        "uv pip install --python /opt/cs2rl/.venv/bin/python --no-deps "
-        "setuptools==82.0.1 wheel==0.48.0 Cython==3.2.9 ziglang==0.14.1",
-        "uv pip install --python /opt/cs2rl/.venv/bin/python "
-        "--no-build-isolation --no-deps --no-binary pufferlib "
-        f"'{PUFFERLIB_SDIST}'",
-        "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
-        "base=json.loads(pathlib.Path('/tmp/locked-inventory.json').read_text()); "
-        "now={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
-        "allowed={'setuptools','wheel','cython','ziglang','pufferlib'}; "
-        "assert {k:v for k,v in now.items() if k not in allowed} == "
-        "{k:v for k,v in base.items() if k not in allowed}; "
-        "assert set(now) <= set(base) | allowed; "
-        "expected={'torch':'2.10.0','numpy':'2.4.3','pufferlib':'3.0.0',"
-        "'setuptools':'82.0.1','wheel':'0.48.0','Cython':'3.2.9',"
-        "'ziglang':'0.14.1'}; actual={k:m.version(k) for k in expected}; "
-        "assert actual == expected, actual\"",
-        "/opt/cs2rl/.venv/bin/python -c \"import importlib.util, pathlib, subprocess, "
-        "sysconfig, torch; "
-        "import pufferlib._C; so=importlib.util.find_spec('pufferlib._C').origin; "
-        "header=pathlib.Path(sysconfig.get_paths()['include'])/'Python.h'; "
-        "assert header.is_file(), header; "
-        "nvcc=subprocess.check_output(['nvcc','--version'], text=True); "
-        "assert 'release 12.8' in nvcc, nvcc; "
-        "assert hasattr(torch.ops.pufferlib,'compute_puff_advantage'); "
-        "elf=subprocess.check_output(['cuobjdump','--list-elf',so], text=True); "
-        "assert all('sm_'+arch in elf for arch in ('75','86','89')), elf\"",
-    ))
-runner_image = (dependency_image.add_local_file("scripts/modal_runner_lib.py",
+}).add_local_file(str(
+    _REPO_ROOT / "pyproject.toml"), "/opt/cs2rl/pyproject.toml", copy=True).add_local_file(
+        str(_REPO_ROOT / "uv.lock"), "/opt/cs2rl/uv.lock", copy=True).run_commands(
+            "cd /opt/cs2rl && uv sync --locked --no-dev --no-install-project "
+            "--no-install-package pufferlib",
+            "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
+            "inventory={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
+            "pathlib.Path('/tmp/locked-inventory.json').write_text("
+            "json.dumps(inventory, sort_keys=True))\"",
+            "uv pip install --python /opt/cs2rl/.venv/bin/python --no-deps "
+            "setuptools==82.0.1 wheel==0.48.0 Cython==3.2.9 ziglang==0.14.1",
+            "uv pip install --python /opt/cs2rl/.venv/bin/python "
+            "--no-build-isolation --no-deps --no-binary pufferlib "
+            f"'{PUFFERLIB_SDIST}'",
+            "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
+            "base=json.loads(pathlib.Path('/tmp/locked-inventory.json').read_text()); "
+            "now={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
+            "allowed={'setuptools','wheel','cython','ziglang','pufferlib'}; "
+            "assert {k:v for k,v in now.items() if k not in allowed} == "
+            "{k:v for k,v in base.items() if k not in allowed}; "
+            "assert set(now) <= set(base) | allowed; "
+            "expected={'torch':'2.10.0','numpy':'2.4.3','pufferlib':'3.0.0',"
+            "'setuptools':'82.0.1','wheel':'0.48.0','Cython':'3.2.9',"
+            "'ziglang':'0.14.1'}; actual={k:m.version(k) for k in expected}; "
+            "assert actual == expected, actual\"",
+            "/opt/cs2rl/.venv/bin/python -c \"import importlib.util, pathlib, subprocess, "
+            "sysconfig, torch; "
+            "import pufferlib._C; so=importlib.util.find_spec('pufferlib._C').origin; "
+            "header=pathlib.Path(sysconfig.get_paths()['include'])/'Python.h'; "
+            "assert header.is_file(), header; "
+            "nvcc=subprocess.check_output(['nvcc','--version'], text=True); "
+            "assert 'release 12.8' in nvcc, nvcc; "
+            "assert hasattr(torch.ops.pufferlib,'compute_puff_advantage'); "
+            "elf=subprocess.check_output(['cuobjdump','--list-elf',so], text=True); "
+            "assert all('sm_'+arch in elf for arch in ('75','86','89')), elf\"",
+        ))
+runner_image = (dependency_image.add_local_file(str(_REPO_ROOT / "scripts" / "modal_runner_lib.py"),
                                                 "/opt/app/scripts/modal_runner_lib.py",
                                                 copy=True).add_local_file(
-                                                    "scripts/run_modal.py",
+                                                    str(_REPO_ROOT / "scripts" / "run_modal.py"),
                                                     "/opt/app/scripts/run_modal.py",
                                                     copy=True).env({"PYTHONPATH": "/opt/app"}))
 
@@ -152,11 +154,27 @@ def _client_volume_path(path: PurePosixPath) -> str:
     return text
 
 
+def _missing_iterdir_errors() -> tuple[type[BaseException], ...]:
+    # Empty Volume prefixes raise NotFoundError on first launch.
+    types: list[type[BaseException]] = [FileNotFoundError, OSError, KeyError]
+    not_found = getattr(getattr(modal, "exception", None), "NotFoundError", None)
+    if isinstance(not_found, type) and issubclass(not_found, BaseException):
+        types.append(not_found)
+    extra = getattr(modal, "NotFoundError", None)
+    if isinstance(extra, type) and issubclass(extra, BaseException):
+        types.append(extra)
+    return tuple(dict.fromkeys(types))
+
+
 def _iterdir_paths(volume: object, path: str) -> list[str]:
     try:
         return [str(entry.path) for entry in volume.iterdir(path, recursive=False)]
-    except (FileNotFoundError, OSError, KeyError):
+    except _missing_iterdir_errors():
         return []
+    except Exception as err:
+        if type(err).__name__ in {"NotFoundError", "FakeNotFoundError"}:
+            return []
+        raise
 
 
 def _volume_has_client_path(volume: object, remote: str) -> bool:
@@ -254,17 +272,38 @@ def ensure_blob(volume: object, client_path: PurePosixPath, local_path: Path) ->
         _require_blob_match(existing, expected_size, expected_digest)
 
 
+def _load_volume_json(raw: bytes) -> object:
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as err:
+        raise mrl.ValidationError("corrupt volume json") from err
+
+
+def _parse_iso8601(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError) as err:
+        raise mrl.ValidationError("corrupt volume timestamp") from err
+
+
 def _derive_parent_view(volume: object, parent_id: str, now: datetime) -> mrl.DerivedStatus:
     status_remote = _client_volume_path(mrl.RUNS_ROOT / parent_id / mrl.STATUS_FILENAME)
     reservation_remote = _client_volume_path(mrl.RUNS_ROOT / parent_id / mrl.RESERVATION_FILENAME)
     status_bytes = _read_volume_file(volume, status_remote)
     if status_bytes is not None:
-        return mrl.derive_status(mrl.RunStatus.from_dict(json.loads(status_bytes)), now=now)
+        try:
+            payload = _load_volume_json(status_bytes)
+            return mrl.derive_status(mrl.RunStatus.from_dict(payload), now=now)
+        except (TypeError, ValueError, KeyError) as err:
+            raise mrl.ValidationError("corrupt volume status json") from err
     reservation_bytes = _read_volume_file(volume, reservation_remote)
     if reservation_bytes is None:
         raise mrl.ValidationError("parent run was not found")
-    payload = json.loads(reservation_bytes)
-    created = datetime.fromisoformat(str(payload["created_at"]))
+    try:
+        payload = _load_volume_json(reservation_bytes)
+        created = _parse_iso8601(str(payload["created_at"]))
+    except (TypeError, ValueError, KeyError) as err:
+        raise mrl.ValidationError("corrupt volume reservation json") from err
     if now - created >= mrl.STALE_AFTER:
         return mrl.DerivedStatus(status=mrl.Status.INTERRUPTED, stale=True, reason="no-heartbeat")
     return mrl.DerivedStatus(status=mrl.Status.PREPARING, stale=False, reason="no-heartbeat")
@@ -281,7 +320,12 @@ def _validate_prior_checkpoint(volume: object, parent_id: str, now: datetime) ->
     sidecar_a_bytes = _read_volume_file(volume, sidecar_remote)
     if sidecar_a_bytes is None:
         raise mrl.ValidationError("parent checkpoint sidecar missing")
-    sidecar_a = json.loads(sidecar_a_bytes)
+    try:
+        sidecar_a = _load_volume_json(sidecar_a_bytes)
+    except mrl.ValidationError as err:
+        raise mrl.ValidationError("parent checkpoint sidecar is corrupt") from err
+    if not isinstance(sidecar_a, dict):
+        raise mrl.ValidationError("parent checkpoint sidecar is corrupt")
     ckpt_bytes = _read_volume_file(volume, ckpt_remote)
     if ckpt_bytes is None:
         raise mrl.ValidationError("parent checkpoint missing")
@@ -296,16 +340,39 @@ def _validate_prior_checkpoint(volume: object, parent_id: str, now: datetime) ->
     except Exception as err:
         raise mrl.ValidationError("parent checkpoint is not weights-only loadable") from err
     sidecar_b_bytes = _read_volume_file(volume, sidecar_remote)
-    if sidecar_b_bytes is None or json.loads(sidecar_b_bytes) != sidecar_a:
+    try:
+        sidecar_b = None if sidecar_b_bytes is None else _load_volume_json(sidecar_b_bytes)
+    except mrl.ValidationError as err:
+        raise mrl.ValidationError("parent checkpoint was replaced during validation") from err
+    if sidecar_b_bytes is None or sidecar_b != sidecar_a:
         raise mrl.ValidationError("parent checkpoint was replaced during validation")
     return ckpt_bytes, digest
+
+
+def _not_found_types() -> tuple[type[BaseException], ...]:
+    types: list[type[BaseException]] = [FileNotFoundError, KeyError]
+    not_found = getattr(getattr(modal, "exception", None), "NotFoundError", None)
+    if isinstance(not_found, type) and issubclass(not_found, BaseException):
+        types.append(not_found)
+    extra = getattr(modal, "NotFoundError", None)
+    if isinstance(extra, type) and issubclass(extra, BaseException):
+        types.append(extra)
+    return tuple(dict.fromkeys(types))
+
+
+def _is_not_found_error(err: BaseException) -> bool:
+    if isinstance(err, _not_found_types()):
+        return True
+    return type(err).__name__ in {"NotFoundError", "FakeNotFoundError"}
 
 
 def _lookup_named(factory, name: str, *, missing: str):
     try:
         return factory.from_name(name, create_if_missing=False)
-    except Exception:
-        raise mrl.ValidationError(missing) from None
+    except Exception as err:
+        if _is_not_found_error(err):
+            raise mrl.ValidationError(missing) from err
+        raise
 
 
 def _thread_cap_records() -> list[str]:
@@ -510,8 +577,10 @@ def launch_run(
     if request.wandb_secret_name is not None:
         try:
             secret = modal_mod.Secret.from_name(request.wandb_secret_name)
-        except Exception:
-            raise mrl.ValidationError("requested W&B Secret is missing") from None
+        except Exception as err:
+            if _is_not_found_error(err):
+                raise mrl.ValidationError("requested W&B Secret is missing") from err
+            raise
 
     prior_bytes: bytes | None = None
     prior_digest: str | None = None
@@ -530,64 +599,70 @@ def launch_run(
     registry_dict = _lookup_named(modal_mod.Dict,
                                   mrl.REGISTRY_NAME,
                                   missing="run registry is missing")
-    mrl.reserve_run(
-        ModalDictRegistry(registry_dict),
-        ModalVolumeIndex(volume),
-        request.run_id,
-        nonce,
-        now=stamp,
+    registry = ModalDictRegistry(registry_dict)
+    artifacts = ModalVolumeIndex(volume)
+    mrl.reserve_run(registry, artifacts, request.run_id, nonce, now=stamp)
+
+    uploaded: dict[str, object] = {}
+
+    def upload() -> None:
+        with tempfile.TemporaryDirectory(prefix="cs2rl-launch-") as tmp:
+            tmp_path = Path(tmp)
+            archive = tmp_path / "source.tar.gz"
+            provenance = mrl.create_source_bundle(repo, canonical, archive)
+            source_client = mrl.SOURCES_ROOT / f"{provenance.archive_sha256}.tar.gz"
+            ensure_blob(volume, source_client, archive)
+            resume_client: PurePosixPath | None = None
+            resume_digest: str | None = None
+            resume_size: int | None = None
+            if local_ckpt is not None:
+                ensure_blob(volume, local_ckpt.client_path, Path(request.resume.local_checkpoint))
+                resume_client = local_ckpt.client_path
+                resume_digest = local_ckpt.sha256
+                resume_size = local_ckpt.size
+            elif prior_bytes is not None and prior_digest is not None:
+                staged = tmp_path / f"{prior_digest}.pt"
+                staged.write_bytes(prior_bytes)
+                resume_client = mrl.INPUTS_ROOT / "sha256" / f"{prior_digest}.pt"
+                ensure_blob(volume, resume_client, staged)
+                resume_digest = prior_digest
+                resume_size = len(prior_bytes)
+            uploaded["provenance"] = provenance
+            uploaded["source_client"] = source_client
+            uploaded["resume_client"] = resume_client
+            uploaded["resume_digest"] = resume_digest
+            uploaded["resume_size"] = resume_size
+
+    mrl.finish_reservation(registry, artifacts, request.run_id, nonce, upload=upload)
+    provenance = uploaded["provenance"]
+    payload = _launch_payload(
+        request,
+        attempt_id=nonce,
+        git_sha=canonical,
+        tree=provenance.tree,
+        source_archive_sha256=provenance.archive_sha256,
+        source_client=uploaded["source_client"],
+        resume_client=uploaded["resume_client"],
+        resume_digest=uploaded["resume_digest"],
+        resume_size=uploaded["resume_size"],
+        modal_version=str(modal_mod.__version__),
+        wandb_enabled=secret is not None,
+        created_at=stamp.isoformat(),
     )
 
-    with tempfile.TemporaryDirectory(prefix="cs2rl-launch-") as tmp:
-        tmp_path = Path(tmp)
-        archive = tmp_path / "source.tar.gz"
-        provenance = mrl.create_source_bundle(repo, canonical, archive)
-        source_client = mrl.SOURCES_ROOT / f"{provenance.archive_sha256}.tar.gz"
-        ensure_blob(volume, source_client, archive)
-        resume_client: PurePosixPath | None = None
-        resume_digest: str | None = None
-        resume_size: int | None = None
-        if local_ckpt is not None:
-            ensure_blob(volume, local_ckpt.client_path, Path(request.resume.local_checkpoint))
-            resume_client = local_ckpt.client_path
-            resume_digest = local_ckpt.sha256
-            resume_size = local_ckpt.size
-        elif prior_bytes is not None and prior_digest is not None:
-            staged = tmp_path / f"{prior_digest}.pt"
-            staged.write_bytes(prior_bytes)
-            resume_client = mrl.INPUTS_ROOT / "sha256" / f"{prior_digest}.pt"
-            ensure_blob(volume, resume_client, staged)
-            resume_digest = prior_digest
-            resume_size = len(prior_bytes)
-
-        payload = _launch_payload(
-            request,
-            attempt_id=nonce,
-            git_sha=canonical,
-            tree=provenance.tree,
-            source_archive_sha256=provenance.archive_sha256,
-            source_client=source_client,
-            resume_client=resume_client,
-            resume_digest=resume_digest,
-            resume_size=resume_size,
-            modal_version=str(modal_mod.__version__),
-            wandb_enabled=secret is not None,
-            created_at=stamp.isoformat(),
-        )
-
-        options: dict[str, object] = {
-            "gpu": request.gpu,
-            "cpu": request.cpu_request_limit,
-            "memory": request.memory_request_limit,
-            "timeout": request.timeout_minutes * 60,
-            "volumes": {
-                "/artifacts": volume
-            },
-        }
-        if secret is not None:
-            options["secrets"] = [secret]
-        print(f"app_id={getattr(app_handle, 'app_id', None)} run_id={request.run_id}", file=sink)
-        return train.with_options(**options).remote(payload)
+    options: dict[str, object] = {
+        "gpu": request.gpu,
+        "cpu": request.cpu_request_limit,
+        "memory": request.memory_request_limit,
+        "timeout": request.timeout_minutes * 60,
+        "volumes": {
+            "/artifacts": volume
+        },
+    }
+    if secret is not None:
+        options["secrets"] = [secret]
+    print(f"app_id={getattr(app_handle, 'app_id', None)} run_id={request.run_id}", file=sink)
+    return train.with_options(**options).remote(payload)
 
 
 @app.function(
