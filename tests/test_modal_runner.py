@@ -3840,12 +3840,13 @@ def fake_modal():
     fake = FakeModal()
     previous = sys.modules.get("modal")
     sys.modules["modal"] = fake.as_module()
-    for name in ("scripts.run_modal", "scripts.modal_artifacts"):
+    for name in ("scripts.run_modal", "scripts.modal_artifacts", "scripts.modal_backfill_sidecar"):
         sys.modules.pop(name, None)
     try:
         yield fake
     finally:
-        for name in ("scripts.run_modal", "scripts.modal_artifacts"):
+        for name in ("scripts.run_modal", "scripts.modal_artifacts",
+                     "scripts.modal_backfill_sidecar"):
             sys.modules.pop(name, None)
         if previous is None:
             sys.modules.pop("modal", None)
@@ -5117,3 +5118,108 @@ def test_corrupt_volume_json_is_validation_error(fake_modal):
     volume.files["runs/ok-id/reservation.json"] = b'{"created_at":"not-a-timestamp"}'
     with pytest.raises(mrl.ValidationError):
         module.collect_status("ok-id", now=_aware())
+
+
+# ── Client-side sidecar backfill ───────────────────────────────────────────
+#
+# Runs interrupted before ae7dd7b have a good dust2_policy.pt and no sidecar,
+# so --resume-run-id refuses them forever: the container that could publish is
+# gone. The same hole reopens whenever a container dies without running
+# finalize at all (hard preemption, OOM kill, node loss). Backfill closes it
+# from the laptop, which has torch, without spending a GPU minute.
+
+
+def _import_backfill():
+    return importlib.import_module("scripts.modal_backfill_sidecar")
+
+
+def _volume_with_orphan_checkpoint(fake_modal,
+                                   tmp_path,
+                                   *,
+                                   status="interrupted",
+                                   sidecar=None,
+                                   ckpt_bytes=None):
+    import torch
+
+    if ckpt_bytes is None:
+        ckpt = tmp_path / "dust2_policy.pt"
+        torch.save({"weight": torch.tensor([7.0])}, ckpt)
+        ckpt_bytes = ckpt.read_bytes()
+    volume = _named_volume(fake_modal)
+    _write_parent_artifacts(
+        volume,
+        "orphan-id",
+        status=status,
+        updated_at=_aware().isoformat(),
+        ckpt_bytes=ckpt_bytes,
+        sidecar=sidecar,
+    )
+    return volume, ckpt_bytes
+
+
+def test_backfill_publishes_sidecar_that_satisfies_the_status_client(fake_modal, tmp_path):
+    module = _import_backfill()
+    artifacts = _import_artifacts()
+    volume, ckpt_bytes = _volume_with_orphan_checkpoint(fake_modal, tmp_path)
+    assert artifacts.collect_status("orphan-id", now=_aware())["checkpoint_loadable"] is False
+
+    report = module.backfill_sidecar("orphan-id", now=_aware())
+
+    assert report["sha256"] == mrl.sha256_bytes(ckpt_bytes)
+    assert report["size"] == len(ckpt_bytes)
+    assert artifacts.collect_status("orphan-id", now=_aware())["checkpoint_loadable"] is True
+    written = json.loads(volume.files[(mrl.RUNS_ROOT / "orphan-id" / "checkpoints" /
+                                       mrl.CHECKPOINT_SIDECAR_NAME).as_posix()])
+    # Provenance must be explicit: a client cannot observe the container's mtime.
+    assert written["backfilled"] is True
+    assert written["mtime_ns"] is None
+
+
+def test_backfill_refuses_a_run_that_is_still_active(fake_modal, tmp_path):
+    module = _import_backfill()
+    volume, _ = _volume_with_orphan_checkpoint(fake_modal, tmp_path, status="training")
+
+    with pytest.raises(mrl.ValidationError, match="still active"):
+        module.backfill_sidecar("orphan-id", now=_aware())
+
+    assert fake_modal.batch_upload_calls == []
+    assert (mrl.RUNS_ROOT / "orphan-id" / "checkpoints" /
+            mrl.CHECKPOINT_SIDECAR_NAME).as_posix() not in volume.files
+
+
+def test_backfill_refuses_to_overwrite_an_existing_sidecar(fake_modal, tmp_path):
+    module = _import_backfill()
+    existing = {"sha256": "0" * 64, "size": 1, "mtime_ns": 1, "validated_at": _aware().isoformat()}
+    _volume_with_orphan_checkpoint(fake_modal, tmp_path, sidecar=existing)
+
+    with pytest.raises(mrl.ValidationError, match="already"):
+        module.backfill_sidecar("orphan-id", now=_aware())
+
+    assert fake_modal.batch_upload_calls == []
+
+
+def test_backfill_refuses_a_checkpoint_that_is_not_weights_only_loadable(fake_modal, tmp_path):
+    module = _import_backfill()
+    volume, _ = _volume_with_orphan_checkpoint(fake_modal, tmp_path, ckpt_bytes=b"torn-bytes")
+
+    with pytest.raises(mrl.ValidationError, match="weights-only"):
+        module.backfill_sidecar("orphan-id", now=_aware())
+
+    assert fake_modal.batch_upload_calls == []
+    assert (mrl.RUNS_ROOT / "orphan-id" / "checkpoints" /
+            mrl.CHECKPOINT_SIDECAR_NAME).as_posix() not in volume.files
+
+
+def test_backfill_never_imports_the_launch_app(fake_modal, tmp_path):
+    module = _import_backfill()
+    _volume_with_orphan_checkpoint(fake_modal, tmp_path)
+    module.backfill_sidecar("orphan-id", now=_aware())
+    assert "scripts.run_modal" not in sys.modules
+    assert fake_modal.images == []
+    assert fake_modal.apps == []
+    # The fixture creates the volume; the module must only ever look it up, and
+    # never with create_if_missing=True.
+    assert fake_modal.volume_lookups
+    assert all(lookup == (mrl.VOLUME_NAME, False) for lookup in fake_modal.volume_lookups)
+    assert fake_modal.dict_creates == []
+    assert fake_modal.dict_lookups == []
