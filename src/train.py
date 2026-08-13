@@ -788,11 +788,16 @@ def load_policy_from_checkpoint(checkpoint_path, device):
             f"checkpoint is from a different obs schema. Retrain or use a matching env.")
 
     try:
-        policy = build_policy(policy_env, device, obs_dim_override=ckpt_obs_dim)
+        # Batch 7 (spec §3.3): architecture inferred from the checkpoint keys,
+        # exactly like obs_dim above — this loader gets no flag and needs none.
+        policy = build_policy(policy_env,
+                              device,
+                              obs_dim_override=ckpt_obs_dim,
+                              tct_split_heads=state_dict_is_split(state_dict))
     finally:
         policy_env.close()
 
-    policy.load_state_dict(state_dict)
+    load_state_dict_arch_checked(policy, state_dict, source=str(checkpoint_path))
     policy.eval()
     return policy
 
@@ -2735,7 +2740,15 @@ class SelfPlayManager:
         return bool(self.pool) and random.random() < self.p_past
 
     def load_past_policy(self, device, vecenv):
-        """Load a random past checkpoint. Returns the policy module or None."""
+        """Load a random past checkpoint. Returns the policy module or None.
+
+        Batch 7 (spec §3.3): the state_dict is read BEFORE build_policy so the
+        architecture can be inferred from its keys. This method receives no
+        config and no flag — during a split run the pool fills with split
+        snapshots, and a flag-only design would raise here on ~30% of epochs
+        (p_past=0.3), hours into the run. Inference also lets a split run mix
+        in pre-split snapshots left over in an older pool.
+        """
         import torch
 
         if not self.pool:
@@ -2744,9 +2757,9 @@ class SelfPlayManager:
         if not path.exists():
             self.pool.remove(path)
             return None
-        policy = build_policy(vecenv, device)
         state_dict = torch.load(path, map_location=device, weights_only=True)
-        policy.load_state_dict(state_dict)
+        policy = build_policy(vecenv, device, tct_split_heads=state_dict_is_split(state_dict))
+        load_state_dict_arch_checked(policy, state_dict, source=str(path))
         policy.eval()
         return policy
 

@@ -360,3 +360,39 @@ def test_resolve_resume_split_infers_and_never_narrows(env, tmp_path):
 
     with pytest.raises(FileNotFoundError, match="Resume checkpoint not found"):
         train.resolve_resume_split(str(tmp_path / "nope.pt"), flag=False)
+
+
+def test_self_play_loads_both_checkpoint_vintages(env, tmp_path):
+    """Spec §5 test 6: a legacy snapshot AND a split snapshot each load into
+    the past-policy slot without error.
+
+    Why this is load-bearing rather than tidy: self-play activates on ~30% of
+    epochs (p_past=0.3) and load_past_policy gets no config — under a
+    flag-only design a split run would crash hours in, on a random epoch. Key
+    inference makes both vintages work in both directions, so a split run can
+    also mix in pre-split snapshots from an earlier pool.
+    """
+    legacy_pt = tmp_path / "past_legacy.pt"
+    split_pt = tmp_path / "past_split.pt"
+    torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
+    torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
+
+    for path, expect_split in ((legacy_pt, False), (split_pt, True)):
+        # Constructor is all-default at HEAD, and _evaluate_with_selfplay calls
+        # `self_play_mgr.load_past_policy(dev, self.vecenv)` — mirrored here.
+        mgr = train.SelfPlayManager()
+        mgr.pool = [path]
+        past = mgr.load_past_policy("cpu", env)
+        assert past is not None, path
+        assert past.tct_split_heads is expect_split, path
+        assert not past.training, "past policies must be in eval mode"
+
+
+def test_load_policy_from_checkpoint_infers_split(env, tmp_path):
+    """Spec §3.3: the eval/record loader keeps working on split checkpoints —
+    it constructs from the keys, so no flag reaches it and none is needed.
+    """
+    split_pt = tmp_path / "eval_split.pt"
+    torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
+    p = train.load_policy_from_checkpoint(split_pt, "cpu")
+    assert p.tct_split_heads is True

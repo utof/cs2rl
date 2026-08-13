@@ -480,6 +480,12 @@ def build_bc_policy(device="cpu", seed: int = 0):
     train_bc: layer_init draws from the global RNG at construction time, so
     seeding afterwards left two `build_bc_policy(seed=0)` calls with different
     weights and made `--seed` a lie (review finding 8).
+
+    Batch 7 (spec 2026-08-13 §3.3): BC always builds the LEGACY architecture
+    (tct_split_heads defaults False). Its product, bc_warmstart.pt, is the
+    input to the legacy→split warm conversion, so a split BC policy would have
+    no consumer — and the RL side infers architecture from checkpoint keys, so
+    a legacy BC checkpoint resumes into either architecture correctly.
     """
     import torch
 
