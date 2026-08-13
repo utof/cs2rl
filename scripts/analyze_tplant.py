@@ -382,10 +382,12 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
     out = {}
     for (group, mb, phase), pairs in acc.items():
         out.setdefault(group, {}).setdefault(mb, {})[phase] = _cell(pairs, structural=False)
-    # Structural cells are written after the normal ones. A single run is one
-    # architecture, so the two accumulators never contend for the same slot;
-    # tag_summary is called per run dir (see main), and concatenating rows from
-    # a split and a legacy run into one call is not a supported input.
+    # Structural cells are written after the normal ones, so on a contended
+    # slot the structural label WINS — deliberate: contention only happens when
+    # some of a split run's rows lost the split/active key (e.g. a resume under
+    # pre-Batch-7 code), and the architecture fact is still true for those
+    # rows. tag_summary is called per run dir (see main); concatenating rows
+    # from a split and a legacy run into one call is not a supported input.
     for (group, mb, phase), pairs in struct_acc.items():
         out.setdefault(group, {}).setdefault(mb, {})[phase] = _cell(pairs, structural=True)
     out["_vf"] = {k: median(v) for k, v in vf_acc.items()}
