@@ -3859,7 +3859,10 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
             True) in runner.local_files
     assert (str(ROOT / "scripts" / "run_modal.py"), "/opt/app/scripts/run_modal.py",
             True) in runner.local_files
-    assert runner.env_vars["PYTHONPATH"] == "/opt/app"
+    # include_source=False: Modal imports module_name "run_modal", while
+    # run_modal.py does "import scripts.modal_runner_lib". Both path entries
+    # are required; /opt/app alone raises ModuleNotFoundError: run_modal.
+    assert runner.env_vars["PYTHONPATH"] == "/opt/app:/opt/app/scripts"
     for src, _dst, _copy in (*image.local_files, *runner.local_files):
         assert Path(src).is_absolute()
         assert Path(src).is_relative_to(ROOT)

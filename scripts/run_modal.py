@@ -113,7 +113,12 @@ runner_image = (dependency_image.add_local_file(str(_REPO_ROOT / "scripts" / "mo
                                                 copy=True).add_local_file(
                                                     str(_REPO_ROOT / "scripts" / "run_modal.py"),
                                                     "/opt/app/scripts/run_modal.py",
-                                                    copy=True).env({"PYTHONPATH": "/opt/app"}))
+                                                    copy=True).env({
+                                                        # Modal imports "run_modal"; this file
+                                                        # imports scripts.modal_runner_lib.
+                                                        "PYTHONPATH":
+                                                        "/opt/app:/opt/app/scripts"
+                                                    }))
 
 app = modal.App("cs2rl-training", include_source=False)
 
