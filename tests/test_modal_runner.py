@@ -25,6 +25,7 @@ Pitfalls this file is careful about:
 """
 import subprocess
 import sys
+import tarfile
 import tomllib
 from pathlib import Path, PurePosixPath
 
@@ -578,3 +579,259 @@ def test_wandb_with_secret_is_accepted():
         **_valid_run_kwargs(train_args="--timesteps 1 --wandb", wandb_secret_name="wandb"))
     assert request.wandb_secret_name == "wandb"
     assert "--wandb" in request.train_args
+
+
+# ── Task 3 cycle A: clean HEAD / Git object validation ─────────────────────
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _init_source_repo(tmp_path: Path) -> Path:
+    """Tiny real git repo so HEAD/diff checks exercise the actual git CLI."""
+    repo = tmp_path / "src-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@test")
+    _git(repo, "config", "user.name", "t")
+    (repo / "readme.txt").write_text("hello\n")
+    _git(repo, "add", "readme.txt")
+    _git(repo, "commit", "-qm", "init")
+    return repo
+
+
+def test_validate_clean_head_accepts_matching_clean_commit(tmp_path):
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    assert mrl.validate_clean_head(repo, sha) == sha
+    assert mrl.validate_clean_head(repo, sha.upper()) == sha
+
+
+@pytest.mark.parametrize(
+    "bad_sha",
+    [
+        "not-a-sha",
+        "abc",
+        "g" * 40,
+        "a" * 39,
+        "a" * 41,
+    ],
+)
+def test_validate_clean_head_rejects_non_hex_sha(tmp_path, bad_sha):
+    repo = _init_source_repo(tmp_path)
+    with pytest.raises(mrl.ValidationError):
+        mrl.validate_clean_head(repo, bad_sha)
+
+
+def test_validate_clean_head_rejects_unknown_object(tmp_path):
+    repo = _init_source_repo(tmp_path)
+    with pytest.raises(mrl.ValidationError):
+        mrl.validate_clean_head(repo, "b" * 40)
+
+
+def test_validate_clean_head_rejects_sha_that_is_not_head(tmp_path):
+    repo = _init_source_repo(tmp_path)
+    (repo / "readme.txt").write_text("second\n")
+    _git(repo, "add", "readme.txt")
+    _git(repo, "commit", "-qm", "second")
+    parent = _git(repo, "rev-parse", "HEAD^")
+    with pytest.raises(mrl.ValidationError):
+        mrl.validate_clean_head(repo, parent)
+
+
+def test_validate_clean_head_rejects_unstaged_tracked_change(tmp_path):
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "readme.txt").write_text("dirty\n")
+    with pytest.raises(mrl.ValidationError):
+        mrl.validate_clean_head(repo, sha)
+
+
+def test_validate_clean_head_rejects_staged_tracked_change(tmp_path):
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "readme.txt").write_text("staged\n")
+    _git(repo, "add", "readme.txt")
+    with pytest.raises(mrl.ValidationError):
+        mrl.validate_clean_head(repo, sha)
+
+
+# ── Task 3 cycle B: safe archive extraction ────────────────────────────────
+
+
+def _write_tar(path: Path, info: tarfile.TarInfo, data: bytes = b"") -> None:
+    import io
+
+    with tarfile.open(path, "w") as tar:
+        payload = io.BytesIO(data) if info.type == tarfile.REGTYPE else None
+        if payload is not None:
+            info.size = len(data)
+        tar.addfile(info, payload)
+
+
+def test_safe_extract_accepts_git_archive(tmp_path):
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    archive = tmp_path / "src.tar"
+    _git(repo, "archive", "--format=tar", f"--output={archive}", sha)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    mrl.safe_extract_git_archive(archive, dest)
+    assert (dest / "readme.txt").read_text() == "hello\n"
+
+
+def test_safe_extract_rejects_unsafe_members(tmp_path):
+    dest = tmp_path / "out"
+    dest.mkdir()
+    cases: list[tarfile.TarInfo] = []
+    link = tarfile.TarInfo("link")
+    link.type = tarfile.SYMTYPE
+    link.linkname = "readme.txt"
+    cases.append(link)
+    hard = tarfile.TarInfo("hard")
+    hard.type = tarfile.LNKTYPE
+    hard.linkname = "readme.txt"
+    cases.append(hard)
+    fifo = tarfile.TarInfo("fifo")
+    fifo.type = tarfile.FIFOTYPE
+    cases.append(fifo)
+    abs_path = tarfile.TarInfo("/etc/passwd")
+    abs_path.type = tarfile.REGTYPE
+    cases.append(abs_path)
+    traversal = tarfile.TarInfo("foo/../../etc/passwd")
+    traversal.type = tarfile.REGTYPE
+    cases.append(traversal)
+    for index, info in enumerate(cases):
+        archive = tmp_path / f"bad-{index}.tar"
+        _write_tar(archive, info, data=b"x")
+        with pytest.raises(mrl.ValidationError):
+            mrl.safe_extract_git_archive(archive, dest)
+
+
+# ── Task 3 cycle C: deterministic archive + provenance sidecar ──────────────
+
+
+def _source_repo_with_noise(tmp_path: Path) -> Path:
+    repo = _init_source_repo(tmp_path)
+    script = repo / "tool.sh"
+    script.write_text("#!/bin/sh\necho hi\n")
+    script.chmod(0o755)
+    _git(repo, "add", "tool.sh")
+    _git(repo, "update-index", "--chmod=+x", "tool.sh")
+    _git(repo, "commit", "-qm", "add executable")
+    (repo / ".env").write_text("SECRET=1\n")
+    (repo / "noise.txt").write_text("untracked\n")
+    (repo / "outputs").mkdir()
+    (repo / "outputs" / "run.log").write_text("nope\n")
+    (repo / ".venv").mkdir()
+    (repo / ".venv" / "pyvenv.cfg").write_text("x\n")
+    docs_git = repo / "docs" / ".git"
+    docs_git.mkdir(parents=True)
+    (docs_git / "HEAD").write_text("ref: refs/heads/main\n")
+    return repo
+
+
+def _open_bundle_tar(bundle: Path) -> tarfile.TarFile:
+    import gzip
+
+    return tarfile.open(fileobj=gzip.open(bundle, "rb"), mode="r:")
+
+
+def test_source_bundle_excludes_untracked_and_is_deterministic(tmp_path):
+    repo = _source_repo_with_noise(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    first = tmp_path / "a.tar.gz"
+    second = tmp_path / "b.tar.gz"
+    prov_a = mrl.create_source_bundle(repo, sha, first)
+    prov_b = mrl.create_source_bundle(repo, sha, second)
+    assert first.read_bytes() == second.read_bytes()
+    assert prov_a.archive_sha256 == prov_b.archive_sha256 == mrl.sha256_file(first)
+    assert prov_a.commit == sha
+    assert prov_a.tree == tree
+    with _open_bundle_tar(first) as tar:
+        names = set(tar.getnames())
+    assert "readme.txt" in names
+    assert "tool.sh" in names
+    assert ".cs2rl-provenance.json" in names
+    assert ".env" not in names
+    assert "noise.txt" not in names
+    assert "outputs/run.log" not in names
+    assert ".venv/pyvenv.cfg" not in names
+    assert "docs/.git/HEAD" not in names
+
+
+def test_source_bundle_hash_changes_for_new_commit(tmp_path):
+    repo = _source_repo_with_noise(tmp_path)
+    sha1 = _git(repo, "rev-parse", "HEAD")
+    first = tmp_path / "old.tar.gz"
+    mrl.create_source_bundle(repo, sha1, first)
+    (repo / "readme.txt").write_text("changed\n")
+    _git(repo, "add", "readme.txt")
+    _git(repo, "commit", "-qm", "change")
+    sha2 = _git(repo, "rev-parse", "HEAD")
+    second = tmp_path / "new.tar.gz"
+    mrl.create_source_bundle(repo, sha2, second)
+    assert mrl.sha256_file(first) != mrl.sha256_file(second)
+
+
+def test_source_bundle_normalizes_modes_and_gzip_header(tmp_path):
+    repo = _source_repo_with_noise(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    bundle = tmp_path / "src.tar.gz"
+    mrl.create_source_bundle(repo, sha, bundle)
+    header = bundle.read_bytes()[:10]
+    flags = header[3]
+    mtime = int.from_bytes(header[4:8], "little")
+    assert flags & 0x08 == 0
+    assert mtime == 0
+    with _open_bundle_tar(bundle) as tar:
+        for member in tar.getmembers():
+            mode = member.mode & 0o777
+            if member.isdir():
+                assert mode == 0o755
+            elif member.name.endswith("tool.sh"):
+                assert mode == 0o755
+            else:
+                assert mode == 0o644
+        sidecar = tar.extractfile(".cs2rl-provenance.json")
+        assert sidecar is not None
+        import json
+
+        payload = json.loads(sidecar.read().decode())
+    assert payload["commit"] == sha
+    assert payload["tree"] == _git(repo, "rev-parse", f"{sha}^{{tree}}")
+
+
+# ── Task 3 cycle D: local checkpoint hash + weights-only load ───────────────
+
+
+def test_validate_local_checkpoint_hashes_and_maps_paths(tmp_path):
+    import torch
+
+    ckpt = tmp_path / "warm.pt"
+    torch.save({"weight": torch.tensor([1.0, 2.0])}, ckpt)
+    provenance = mrl.validate_local_checkpoint(ckpt)
+    digest = mrl.sha256_file(ckpt)
+    assert provenance.sha256 == digest
+    assert provenance.size == ckpt.stat().st_size
+    assert provenance.client_path == mrl.INPUTS_ROOT / "sha256" / f"{digest}.pt"
+    assert provenance.mount_path == Path("/artifacts/inputs/sha256") / f"{digest}.pt"
+
+
+def test_validate_local_checkpoint_rejects_non_checkpoint(tmp_path):
+    junk = tmp_path / "nope.txt"
+    junk.write_text("not a checkpoint\n")
+    with pytest.raises(mrl.ValidationError):
+        mrl.validate_local_checkpoint(junk)
+    missing = tmp_path / "missing.pt"
+    with pytest.raises(mrl.ValidationError):
+        mrl.validate_local_checkpoint(missing)
