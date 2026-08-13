@@ -2287,6 +2287,12 @@ def _run_training_attempt(
                 exit_code = getattr(child, "returncode", None)
                 mapped, reason = _map_child_exit(run_root, exit_code, manifest)
                 finalize(mapped, reason, exit_code, kill_child=False)
+        # Signal-handler finalize cannot reliably torch.load/sleep. Retry on
+        # the main thread now that the child wait loop has returned.
+        try:
+            publish_stable_checkpoint(run_root, now=now, commit=commit, sleep=sleep)
+        except Exception:
+            pass
         if final_result is not None:
             return final_result
         return TrainingAttemptResult(
