@@ -2334,12 +2334,14 @@ def _run_training_attempt(
             thread.join(timeout=5.0)
         stop_heartbeat_once()
         stop_watcher_once()
-        # Last chance to produce the sidecar resume needs. The watcher rarely
-        # manages it: live PufferLib rewrites dust2_policy.pt every epoch, faster
-        # than the 1s settle window. Once the child is dead the file is stable.
-        # Any skip is recorded next to the checkpoint and committed below with
-        # the terminal status — a silent skip cost three T4 runs to diagnose.
-        _publish_and_note(run_root, now=now, commit=commit, sleep=sleep, commit_note=False)
+        # Completed/failed still publish here so the sidecar shares the terminal
+        # commit. Interrupted must not: the 120s prebuilt load would sit in the
+        # SIGTERM handler before STATUS, and Modal's preemption/timeout kill
+        # windows are ~30s / a handful of seconds. The post-finalize retry
+        # publishes after STATUS is durable (live T4: sidecar validated_at was
+        # ~7s after result.json finished_at).
+        if status is not Status.INTERRUPTED:
+            _publish_and_note(run_root, now=now, commit=commit, sleep=sleep, commit_note=False)
         _close_log_sink(owned_log)
         _close_log_sink(log_sink)
         evidence: CompletionEvidence | None = None

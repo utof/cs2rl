@@ -2955,6 +2955,100 @@ def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path,
     assert any(commits)
 
 
+def test_interrupt_commits_status_even_if_prebuilt_load_hangs(tmp_path, monkeypatch):
+    """SIGINT finalize must persist STATUS before any hung PREBUILT_PYTHON load.
+
+    Modal preemption grace is ~30s and Function-timeout slack is seconds. A
+    120s weights-only load inside finalize can lose both sidecar and STATUS.
+    The watcher thread is exempt so its 50ms poll cannot stall this test.
+    """
+    release = threading.Event()
+
+    def hanging_load(_path):
+        if threading.current_thread().name == "cs2rl-checkpoint-watch":
+            raise mrl.ValidationError("watcher must not hang the interrupt path")
+        if not release.wait(timeout=10.0):
+            raise mrl.ValidationError("test timed out waiting to release the hung load")
+
+    monkeypatch.setattr(mrl, "_assert_weights_only_loadable", hanging_load)
+    child = FakeChild(hold=True)
+    hooks = _signal_hooks(child)
+    commits: list[str | None] = []
+
+    def commit() -> None:
+        status_path = kwargs["run_root"] / mrl.STATUS_FILENAME
+        if not status_path.is_file():
+            commits.append(None)
+            return
+        commits.append(json.loads(status_path.read_text())["status"])
+
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            commit=commit,
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    _write_policy_checkpoint(kwargs["run_root"], 1.0)
+    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
+    try:
+        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
+        handler_thread = threading.Thread(target=int_handler,
+                                          args=(signal.SIGINT, None),
+                                          daemon=True)
+        handler_thread.start()
+        deadline = time.monotonic() + 2.0
+        interrupted = False
+        while time.monotonic() < deadline:
+            status_path = kwargs["run_root"] / mrl.STATUS_FILENAME
+            if (status_path.is_file()
+                    and json.loads(status_path.read_text())["status"] == "interrupted"):
+                interrupted = True
+                break
+            time.sleep(0.01)
+        assert interrupted, "STATUS must become interrupted while the prebuilt load is still hung"
+        assert "interrupted" in commits
+    finally:
+        release.set()
+        child.release()
+        assert finished.wait(timeout=2.0)
+        thread.join(timeout=2.0)
+
+
+def test_checkpoint_watcher_threads_generation_into_last_published(tmp_path, monkeypatch):
+    """A watcher-only typo on PublishOutcome.generation is swallowed every 50ms.
+
+    Direct publish tests cannot see that: they assert .generation on the
+    function return, not on the value the thread feeds back as last_published.
+    """
+    seen: list[tuple[int, int] | None] = []
+    generation = (111, 222)
+
+    def fake_publish(*_args, last_published=None, **_kwargs):
+        seen.append(last_published)
+        return mrl.PublishOutcome(generation)
+
+    monkeypatch.setattr(mrl, "publish_stable_checkpoint", fake_publish)
+    stop, watcher = mrl._start_checkpoint_watcher(
+        run_root=tmp_path,
+        now=_aware,
+        commit=lambda: None,
+        sleep=lambda _seconds: None,
+    )
+    try:
+        deadline = time.monotonic() + 2.0
+        while len(seen) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(seen) >= 2
+        assert seen[0] is None
+        assert seen[1] == generation
+    finally:
+        stop.set()
+        watcher.join(timeout=2.0)
+
+
 def test_completed_run_validates_without_runner_torch(tmp_path, monkeypatch):
     """validate_completed_run torch-loads too: without the fallback every clean
     exit is misfiled as failed/invalid_evidence and no run can ever complete."""
