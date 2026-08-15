@@ -195,3 +195,44 @@ def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
             "TAG would measure a different partition than the router")
     finally:
         cleanup()
+
+
+def test_row_mask_matches_obs_team_bit_on_a_both_flags_trainer():
+    """Spec §5 test 4 (trunk half): re-pin obs[24] == ((idx % 10) < 5)
+    on a both-flags trainer.
+
+    WHAT: tct_split_heads=True, tct_split_trunk=True; after one evaluate()
+    the segment-index team mask still equals the C-env team bit. Probe
+    timestep 1, not 0 (same t=0 zero-obs artifact as the heads-only pin).
+
+    WHY: trunk routing also keys on obs[24]. If PufferLib segment order
+    or the env slot layout drifted only under a split trunk, TAG would
+    measure the wrong partition of a correctly routed network. The
+    heads-only pin is test_row_mask_matches_obs_team_bit_on_a_split_trainer.
+
+    PITFALL: do not probe t=0 on the first evaluate() — that slot is
+    still the zero-initialized pre-step obs.
+    """
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+    torch.manual_seed(0)
+    trainer, cleanup = _build_trainer_for_test(num_envs=32,
+                                               with_selfplay=True,
+                                               seed=0,
+                                               tct_split_heads=True,
+                                               tct_split_trunk=True)
+    trainer.config["target_kl"] = None
+    _patch_trainer_with_return_norm(trainer)
+    try:
+        assert trainer.policy.tct_split_heads is True
+        assert trainer.policy.tct_split_trunk is True
+        trainer.evaluate()
+        seg = torch.arange(trainer.segments)
+        expected_t = ((seg % 10) < 5).float()
+        team_bits = trainer.observations[:, 1, 24].float().cpu()
+        assert torch.equal(
+            team_bits, expected_t), ("segment%10 team mask disagrees with obs[24] team bit on the "
+                                     "both-flags path — TAG would measure a different partition "
+                                     "than the trunk router")
+    finally:
+        cleanup()
