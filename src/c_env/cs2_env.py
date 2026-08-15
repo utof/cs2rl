@@ -252,6 +252,7 @@ class StepStatsC(ctypes.Structure):
         ("win_by_detonation", ctypes.c_int8),          # 1 when bomb detonated (T wins)
         ("win_by_defuse", ctypes.c_int8),              # 1 when bomb was defused (CT wins)
         ("_pad_ss_wins", ctypes.c_int8 * 2),           # pad to 4-byte boundary
+        ("plant_tick", ctypes.c_int32),                # g->tick at plant; 0 = never planted
     ]
 
 
@@ -325,10 +326,13 @@ assert ctypes.sizeof(GameStateC) == 1628, (
     f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1628)")
 # F13: 208→200 / 6752→6736 after removing the dead action_last[2] counter
 # (Dust2Env embeds TWO StepStats — step + episode — hence the −16).
-assert ctypes.sizeof(StepStatsC) == 200, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 200)")
-assert ctypes.sizeof(Dust2EnvC) == 6736, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6736)")
+# Instrumentation 2026-08-15: 200→204 / 6736→6744 after appending
+# plant_tick (int32) to StepStats. Dust2Env embeds TWO StepStats
+# (step + episode), so the env grows by +8.
+assert ctypes.sizeof(StepStatsC) == 204, (
+    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 204)")
+assert ctypes.sizeof(Dust2EnvC) == 6744, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6744)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -973,6 +977,11 @@ class Cs2Env(pufferlib.PufferEnv):
             "alive_t_end": int(stats.alive_t_end),
             "alive_ct_end": int(stats.alive_ct_end),
             "round_length": int(stats.round_length),
+                                                                       # plant_tick is the observe-only C field (0 = never planted).
+                                                                       # Exported here so terminal info can read the sentinel without
+                                                                       # flipping include_step_stats_in_info. Win-flag keys stay for
+                                                                       # the later terminal-export task.
+            "plant_tick": int(stats.plant_tick),
         })
         summary.update({
             "reward_win": float(stats.reward_win),

@@ -337,6 +337,12 @@ typedef struct {
     int8_t win_by_detonation; /* 1 when round ended because bomb detonated (T wins) */
     int8_t win_by_defuse;     /* 1 when round ended because bomb was defused (CT wins) */
     int8_t _pad_ss_wins[2];   /* pad to 4-byte boundary for ctypes alignment */
+    /* Observe-only plant timestamp (instrumentation 2026-08-15).
+     * Written in cs2_bomb.h at plant completion from g->tick (same clock as
+     * round_length). 0 = never planted. clear_stats memsets the whole
+     * struct, so env_reset starts this at 0. Do not reorder earlier fields
+     * — ctypes overlay + sizeof asserts must stay in lockstep. */
+    int32_t plant_tick; /* g->tick at plant completion; 0 = never planted */
 } StepStats;
 
 /* ── Full environment (one per parallel instance) ── */
