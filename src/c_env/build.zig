@@ -98,7 +98,10 @@ pub fn build(b: *std.Build) void {
     });
     demo.root_module.addCSourceFile(.{
         .file  = b.path("cs2_demo.c"),
-        .flags = &.{ "-std=c99", "-O2", "-Wall", "-g" },
+        // -Wno-comment: cs2_types.h has `*_SIZE/*_STRIDE` inside a block
+        // comment (pre-existing). Zig's clang treats that -Wall warning as
+        // a hard error; do not touch the binding-shared header here.
+        .flags = &.{ "-std=c99", "-O2", "-Wall", "-Wno-comment", "-g" },
     });
     // cs2_demo.c includes cs2_types.h from the same directory
     demo.root_module.addIncludePath(b.path("."));
@@ -110,6 +113,16 @@ pub fn build(b: *std.Build) void {
 
     const install_demo = b.addInstallArtifact(demo, .{});
     cs2_demo_step.dependOn(&install_demo.step);
+
+    // Voices live in demo_assets/ — src/c_env/resources is a pufferlib
+    // symlink (and gitignored). Copy next to zig-out/bin/cs2_demo so the
+    // runtime walk (GetApplicationDirectory() + "resources/") finds them.
+    const install_voices = b.addInstallDirectory(.{
+        .source_dir     = b.path("demo_assets"),
+        .install_dir    = .bin,
+        .install_subdir = "resources",
+    });
+    cs2_demo_step.dependOn(&install_voices.step);
 
     // ── demo_events_test: raylib-free detect-helper unit tests ─────────────
     // Invoked explicitly: `zig build demo_events_test`

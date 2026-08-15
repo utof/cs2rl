@@ -1,6 +1,7 @@
 /* cs2_render.h — Raylib 3D FPS renderer for cs2rl. Phase 6. */
 #pragma once
 #include <stdlib.h>
+#include <stdio.h>
 #include <math.h>
 #include <string.h>
 #include "raylib.h"
@@ -17,6 +18,19 @@
 #define MOUSE_SENSITIVITY 0.002f /* rad/px — tuned with raw per-frame pixel deltas */
 #define WINDOW_W          1280
 #define WINDOW_H          720
+
+/* Demo-juice audio (P0). Voices live in src/c_env/demo_assets/ because
+ * src/c_env/resources is a pufferlib symlink in the parent tree (and is
+ * gitignored). build.zig copies the four WAVs to zig-out/bin/resources/. */
+#define DEMO_VOICE_SHOT  0
+#define DEMO_VOICE_FOOT  1
+#define DEMO_VOICE_PLANT 2
+#define DEMO_VOICE_BEEP  3
+#define DEMO_VOICE_N     4
+/* Rotating LoadSoundAlias pool: overlapping shots/feet would cut off if we
+ * PlaySound the same Sound twice. Unloaded in c_close, not per PlaySound. */
+#define DEMO_ALIAS_N     24
+#define DEMO_KILL_FEED_N 4
 
 /* ── AgentSnapshot — interpolation state per agent ─────────────────────── */
 typedef struct {
@@ -51,6 +65,25 @@ typedef struct {
      * "play as the bot" — see only what the trained policy sees in obs.
      * Set via --fog CLI flag in cs2_demo.c. */
     int fog_enabled;
+    /* Snapshot-diff audio. AgentSnapshot cannot drive this (no
+     * fired_this_tick / is_airborne / bomb_ticks_left). */
+    int    audio_ok;                  /* 1 iff InitAudioDevice + IsAudioDeviceReady */
+    float  master_volume;             /* default 1.0; [ / ] nudge via SetMasterVolume */
+    double last_footstep_t[N_AGENTS]; /* GetTime() of last *played* foot */
+    Sound  snd[DEMO_VOICE_N];
+    int    snd_ok[DEMO_VOICE_N];
+    Sound  alias_pool[DEMO_ALIAS_N];
+    int    alias_used[DEMO_ALIAS_N];
+    int    alias_cursor;
+    /* Applied once on a local shot in the 16 Hz block. Decay + look-dir
+     * add live in Task 3; do not write these into yaw/pitch/aim_rad. */
+    float punch_pitch;
+    float punch_yaw;
+    /* Alive 1→0 edges recorded on the sim tick. Draw/fade is Task 3. */
+    int    kill_feed_n;
+    int    kill_feed_idx[DEMO_KILL_FEED_N];
+    int    kill_feed_team[DEMO_KILL_FEED_N];
+    double kill_feed_t[DEMO_KILL_FEED_N];
 } Client;
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -258,6 +291,144 @@ void snapshot_curr(Client* client, Dust2Env* env) {
     _copy_agents_to_snapshot(env, client->curr);
 }
 
+/* ── Demo juice audio helpers ─────────────────────────────────────────────
+ *
+ * Resource walk (no extras-c, no ChangeDirectory):
+ *   GetApplicationDirectory() + resources/     (sibling of the binary)
+ *   GetApplicationDirectory() + ../resources
+ *   same two slots with demo_assets/           (source dir name)
+ * GetApplicationDirectory() keeps a trailing slash; we still tolerate a
+ * missing one so "bin"+"resources" cannot glue. Missing WAV: log once,
+ * skip that voice. InitAudioDevice is void — failure is IsAudioDeviceReady.
+ */
+
+static const char* DEMO_VOICE_FILES[DEMO_VOICE_N] = {
+    "gunshot.wav",
+    "footstep.wav",
+    "plant.wav",
+    "beep.wav",
+};
+
+/* Join appdir + folder + file into out. folder may be "resources" or
+ * "../resources". appdir usually ends in '/'. */
+static void
+_demo_join_res(char* out, size_t n, const char* appdir, const char* folder, const char* file) {
+    size_t la    = strlen(appdir);
+    int    slash = (la > 0 && appdir[la - 1] != '/' && appdir[la - 1] != '\\');
+    if (slash)
+        snprintf(out, n, "%s/%s/%s", appdir, folder, file);
+    else
+        snprintf(out, n, "%s%s/%s", appdir, folder, file);
+}
+
+/* Resolve one voice path. Returns 1 and writes out[] on the first hit. */
+static int _demo_find_voice(char* out, size_t n, const char* file) {
+    const char* appdir    = GetApplicationDirectory();
+    const char* folders[] = {"resources", "../resources", "demo_assets", "../demo_assets"};
+    int         i;
+    for (i = 0; i < 4; i++) {
+        _demo_join_res(out, n, appdir, folders[i], file);
+        if (FileExists(out))
+            return 1;
+    }
+    return 0;
+}
+
+/* Load the four voices. Each miss is logged once here (init-time only). */
+static void _demo_load_voices(Client* cl) {
+    char path[1024];
+    int  i;
+    for (i = 0; i < DEMO_VOICE_N; i++) {
+        cl->snd_ok[i] = 0;
+        if (!_demo_find_voice(path, sizeof(path), DEMO_VOICE_FILES[i])) {
+            TraceLog(LOG_WARNING,
+                     "cs2_demo: missing voice %s (searched resources/ + demo_assets/)",
+                     DEMO_VOICE_FILES[i]);
+            continue;
+        }
+        cl->snd[i] = LoadSound(path);
+        if (!IsSoundValid(cl->snd[i])) {
+            TraceLog(LOG_WARNING, "cs2_demo: failed to load %s from %s", DEMO_VOICE_FILES[i], path);
+            continue;
+        }
+        cl->snd_ok[i] = 1;
+    }
+}
+
+/* Official raylib audio_sound_positioning pan/attenuate (not Steam Audio).
+ * Listener is cl->camera. Event is sim (x,y,z) → raylib (x, z, y).
+ * max_dist is scaled to this map (~2000 u); the official sample uses 1.0
+ * because its scene is a 10-unit grid. */
+static void _demo_set_spatial(Client* cl, Sound snd, float sx, float sy, float sz, float max_dist) {
+    float px   = sx;
+    float py   = sz + PLAYER_EYE_HEIGHT;
+    float pz   = sy;
+    float dx   = px - cl->camera.position.x;
+    float dy   = py - cl->camera.position.y;
+    float dz   = pz - cl->camera.position.z;
+    float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    float att  = 1.0f / (1.0f + dist / max_dist);
+    if (att < 0.0f)
+        att = 0.0f;
+    if (att > 1.0f)
+        att = 1.0f;
+
+    float inv = (dist > 1e-4f) ? (1.0f / dist) : 0.0f;
+    float ndx = dx * inv, ndy = dy * inv, ndz = dz * inv;
+
+    float fx = cl->camera.target.x - cl->camera.position.x;
+    float fy = cl->camera.target.y - cl->camera.position.y;
+    float fz = cl->camera.target.z - cl->camera.position.z;
+    float fl = sqrtf(fx * fx + fy * fy + fz * fz);
+    if (fl > 1e-4f) {
+        fx /= fl;
+        fy /= fl;
+        fz /= fl;
+    }
+
+    /* right = cross(up, forward). Camera up is (0,1,0) in this demo. */
+    float ux = cl->camera.up.x, uy = cl->camera.up.y, uz = cl->camera.up.z;
+    float rx = uy * fz - uz * fy;
+    float ry = uz * fx - ux * fz;
+    float rz = ux * fy - uy * fx;
+    float rl = sqrtf(rx * rx + ry * ry + rz * rz);
+    if (rl > 1e-4f) {
+        rx /= rl;
+        ry /= rl;
+        rz /= rl;
+    }
+
+    float fdot = fx * ndx + fy * ndy + fz * ndz;
+    if (fdot < 0.0f)
+        att *= (1.0f + fdot * 0.5f);
+
+    float pan = 0.5f + 0.5f * (ndx * rx + ndy * ry + ndz * rz);
+    if (pan < 0.0f)
+        pan = 0.0f;
+    if (pan > 1.0f)
+        pan = 1.0f;
+
+    SetSoundVolume(snd, att);
+    SetSoundPan(snd, pan);
+}
+
+/* Play one voice at a sim-space point via the next alias slot. */
+static void _demo_play_at(Client* cl, int voice, float x, float y, float z, float max_dist) {
+    int i;
+    if (!cl->audio_ok || voice < 0 || voice >= DEMO_VOICE_N || !cl->snd_ok[voice])
+        return;
+    i = cl->alias_cursor;
+    if (cl->alias_used[i])
+        UnloadSoundAlias(cl->alias_pool[i]);
+    cl->alias_pool[i] = LoadSoundAlias(cl->snd[voice]);
+    cl->alias_used[i] = 1;
+    cl->alias_cursor  = (i + 1) % DEMO_ALIAS_N;
+    if (!IsSoundValid(cl->alias_pool[i]))
+        return;
+    _demo_set_spatial(cl, cl->alias_pool[i], x, y, z, max_dist);
+    PlaySound(cl->alias_pool[i]);
+}
+
 /* ── make_client / c_close ───────────────────────────────────────────────
  *
  * area_bounds: float[N*4] = [x0, y0, x1, y1] per area — from nav_data.h
@@ -301,12 +472,52 @@ Client* make_client(Dust2Env* env, int human_agent_idx, const float* area_bounds
     memcpy(cl->prev, cl->curr, sizeof(cl->curr));
 
     cl->last_step_time = GetTime();
-    env->client        = (struct Client*)cl;
+    cl->master_volume  = 1.0f;
+    /* First foot must not be dropped: calloc leaves 0, and GetTime() is
+     * near 0 right after InitWindow, so 0 would eat the first ~333 ms. */
+    {
+        int i;
+        for (i = 0; i < N_AGENTS; i++)
+            cl->last_footstep_t[i] = -1.0e9;
+    }
+
+    /* InitAudioDevice is void. Failure is the ready check — same skip
+     * path as a missing WAV (log once, no voices). */
+    InitAudioDevice();
+    cl->audio_ok = IsAudioDeviceReady() ? 1 : 0;
+    if (!cl->audio_ok) {
+        TraceLog(LOG_WARNING, "cs2_demo: audio device not ready; skipping voices");
+    } else {
+        SetMasterVolume(cl->master_volume);
+        _demo_load_voices(cl);
+    }
+
+    env->client = (struct Client*)cl;
     return cl;
 }
 
 void c_close(Dust2Env* env) {
     if (env->client) {
+        Client* cl = (Client*)env->client;
+        int     i;
+        /* Aliases first (they share sample data), then source Sounds.
+         * CloseAudioDevice BEFORE CloseWindow — raylib tears audio down
+         * against the still-alive context. */
+        for (i = 0; i < DEMO_ALIAS_N; i++) {
+            if (cl->alias_used[i]) {
+                UnloadSoundAlias(cl->alias_pool[i]);
+                cl->alias_used[i] = 0;
+            }
+        }
+        if (cl->audio_ok) {
+            for (i = 0; i < DEMO_VOICE_N; i++) {
+                if (cl->snd_ok[i]) {
+                    UnloadSound(cl->snd[i]);
+                    cl->snd_ok[i] = 0;
+                }
+            }
+        }
+        CloseAudioDevice();
         if (env->sd && env->sd->wall_list.walls) {
             free(env->sd->wall_list.walls);
             env->sd->wall_list.walls = NULL;
@@ -576,6 +787,22 @@ void c_render(Client* cl, Dust2Env* env) {
     float  alpha = (float)((now - cl->last_step_time) * 16.0);
     if (alpha > 1.0f)
         alpha = 1.0f;
+
+    /* Volume nudge is per render frame so a tap between 16 Hz ticks is
+     * not dropped. IsKeyPressed, not IsKeyDown — spec says nudge. */
+    if (IsKeyPressed(KEY_LEFT_BRACKET)) {
+        cl->master_volume -= 0.1f;
+        if (cl->master_volume < 0.0f)
+            cl->master_volume = 0.0f;
+        if (cl->audio_ok)
+            SetMasterVolume(cl->master_volume);
+    } else if (IsKeyPressed(KEY_RIGHT_BRACKET)) {
+        cl->master_volume += 0.1f;
+        if (cl->master_volume > 1.0f)
+            cl->master_volume = 1.0f;
+        if (cl->audio_ok)
+            SetMasterVolume(cl->master_volume);
+    }
 
     update_camera(cl, env, alpha);
 
