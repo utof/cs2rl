@@ -553,6 +553,24 @@ def test_exact_allowed_flags_are_kept():
     assert "--tag-every" in request.train_args
 
 
+def test_tct_split_trunk_is_allowed():
+    """--tct-split-trunk is a live store_true on the 7R scientific argv.
+
+    Mirrors test_exact_allowed_flags_are_kept: the flag must survive
+    build_run_request together with the rest of the 7R scientific set
+    (seed / warmstart-entropy / TAG / heads / a reward weight). An
+    unknown-flag spelling still fails — that pin is
+    test_unknown_spelling_rejected_before_ownership.
+    """
+    raw = ("--timesteps 30000000 --seed 2 --warmstart-entropy --no-dead-run-abort "
+           "--tag-diagnostic --tag-every 5 --tct-split-heads --tct-split-trunk "
+           "--reward-win 1.0")
+    request = mrl.build_run_request(**_valid_run_kwargs(train_args=raw))
+    assert request.timesteps == 30_000_000
+    assert "--tct-split-trunk" in request.train_args
+    assert "--tct-split-heads" in request.train_args
+
+
 # ── Task 2 cycle C: runner-owned argv injection ────────────────────────────
 
 

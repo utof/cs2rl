@@ -596,6 +596,10 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # (spec §3.4). Adding this key also shifts exp_lib.behavior_hash for all
     # future runs — recorded decision, spec §6.
     tct_split_heads = bool(getattr(args, "tct_split_heads", False))
+    # Trunk twin (spec 2026-08-15): same FLAG-not-architecture contract as
+    # heads. A flag-less crash-resume of a trunk-split run writes false
+    # here on purpose; the analyzer reads split/trunk_active instead.
+    tct_split_trunk = bool(getattr(args, "tct_split_trunk", False))
 
     cfg = {
                                                        # Core PPO
@@ -659,6 +663,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "tag_diagnostic": tag_diagnostic,
         "tag_every": tag_every,
         "tct_split_heads": tct_split_heads,
+        "tct_split_trunk": tct_split_trunk,
     }
 
     # ── Reward wiring: 23 make_env weights, verbatim key names ──
@@ -2035,6 +2040,55 @@ def compute_head_divergence(policy):
                 # denom NaN fails both comparisons → emit NaN, not a fake 0.0.
                 val = 0.0 if denom == 0.0 else float("nan")
             out[f"split/head_l2_rel/{name}"] = val
+    return out
+
+
+def compute_trunk_divergence(policy):
+    """split/trunk_l2_rel/<module> — how far the two team trunk copies have moved apart.
+
+    WHAT: relative L2 between the T and CT copies of encoder and lstm.
+    Metric is the same formula as compute_head_divergence (spec §4 Q3):
+        ‖W_t − W_ct‖ / (0.5‖W_t‖ + 0.5‖W_ct‖)
+    Keys: split/trunk_l2_rel/encoder, split/trunk_l2_rel/lstm.
+
+    WHY relative and not raw L2: the optimizer runs weight_decay=1e-4, so
+    even a copy that receives zero gradient keeps moving. Raw L2 has no
+    achievable null. The ratio is scale-free; the honest null is still a
+    decay-aware control. Gate is hasattr(policy, "encoder_t") — the live
+    architecture, never config.json — matching split/trunk_active.
+
+    Returns {} when there is no encoder_t. The metric is undefined with
+    one copy, and emitting a fake 0.0 would read as "the teams agree".
+
+    PITFALL: modules are grouped, not per-tensor — every Linear in the
+    Sequential encoder and every LSTM weight (ih/hh/bias) contribute to
+    one number. A per-layer series is a separate function if ever needed.
+    T=1 + zero LSTM state leaves weight_hh unmoved; that does not make
+    the encoder ratio 0 after a team-asymmetric step.
+    """
+    import torch
+
+    if not hasattr(policy, "encoder_t"):
+        return {}
+
+    def _flat(obj):
+        if isinstance(obj, torch.nn.Parameter):
+            return obj.detach().reshape(-1)
+        return torch.cat([p.detach().reshape(-1) for p in obj.parameters()])
+
+    out = {}
+    with torch.no_grad():
+        for name, mod_t, mod_ct in (
+            ("encoder", policy.encoder_t, policy.encoder_ct),
+            ("lstm", policy.lstm_t, policy.lstm_ct),
+        ):
+            w_t, w_ct = _flat(mod_t), _flat(mod_ct)
+            denom = 0.5 * float(w_t.norm()) + 0.5 * float(w_ct.norm())
+            if denom > 0.0:
+                val = float((w_t - w_ct).norm()) / denom
+            else:
+                val = 0.0 if denom == 0.0 else float("nan")
+            out[f"split/trunk_l2_rel/{name}"] = val
     return out
 
 
@@ -4521,6 +4575,7 @@ def train(args):
             # gate on --tag-every / --tag-diagnostic.
             logs["split/trunk_active"] = float(hasattr(policy, "encoder_t"))
             logs.update(compute_head_divergence(policy))
+            logs.update(compute_trunk_divergence(policy))
 
             # TAG injection — MUST stay after dead_run_detector.check above
             # (deliberate NaNs; see _inject_tag_metrics docstring).
@@ -4710,6 +4765,16 @@ if __name__ == "__main__":
         "Only affects FRESH construction and the legacy->split warm conversion — every "
         "loader infers split-ness from the checkpoint's keys, so a crash-resume without "
         "this flag still rebuilds a split policy.")
+    parser.add_argument(
+        "--tct-split-trunk",
+        action="store_true",
+        dest="tct_split_trunk",
+        help="Give each team its own copy of the actor trunk (encoder, LSTM), routed "
+        "by the obs team bit; policy heads stay as --tct-split-heads decides and the "
+        "value head stays shared. Only affects FRESH construction and the "
+        "legacy->split warm conversion — every loader infers split-ness from the "
+        "checkpoint's keys, so a crash-resume without this flag still rebuilds a "
+        "split-trunk policy.")
     args = parser.parse_args()
 
     if args.dump_config:

@@ -128,6 +128,7 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--tag-diagnostic": 0,
     "--tag-every": 1,
     "--tct-split-heads": 0,
+    "--tct-split-trunk": 0,
                                                        # Reward weights: dest is underscore, CLI is hyphen. Mirror the generator
                                                        # in src/train.py (`--{_rw_name.replace('_', '-')}`) so a new weight is a
                                                        # one-line add here, not a silent "unknown option" after a train.py bump.
