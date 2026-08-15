@@ -257,6 +257,23 @@ def test_state_dict_is_split_discriminates_both_vintages(env):
     assert train.state_dict_is_split(split) is True
 
 
+def test_state_dict_is_trunk_split_and_convert():
+    sd = {
+        "encoder.0.weight": torch.ones(2, 2),
+        "lstm.weight_ih_l0": torch.ones(3, 3),
+        "aim_log_std": torch.zeros(2),
+        "value_head.weight": torch.ones(1, 2),
+    }
+    assert train.state_dict_is_split(sd) is False
+    assert train.state_dict_is_trunk_split(sd) is False
+    out = train.convert_shared_trunk_to_split(sd)
+    assert "encoder_t.0.weight" in out and "encoder_ct.0.weight" in out
+    assert "encoder.0.weight" not in out
+    assert "lstm_t.weight_ih_l0" in out and "lstm_ct.weight_ih_l0" in out
+    assert "aim_log_std" in out        # heads untouched
+    assert train.state_dict_is_trunk_split(out) is True
+
+
 def test_warm_split_duplicates_heads_and_reinits_sigma_in_both_copies(env):
     """Spec §5 test 3: the warm-split path applied in the spec's ORDER
     (re-init σ on the legacy dict FIRST, then duplicate) leaves both copies
@@ -338,31 +355,44 @@ def test_resolve_resume_split_infers_and_never_narrows(env, tmp_path):
     resumed WITHOUT the flag still builds a split policy. That is the
     crash-resume path, and on this GPU box crash-resume is a first-class case,
     not an edge (the operator relaunches without re-reading the flag list).
-    The flag can only WIDEN legacy→split; it can never narrow split→legacy.
+    Each flag can only WIDEN its axis; it can never narrow split→legacy.
+    These fixtures have no encoder_t.0.weight, so the trunk bit stays False
+    when trunk_flag is omitted/False.
     """
     legacy_pt = tmp_path / "legacy.pt"
     split_pt = tmp_path / "split.pt"
     torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
     torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
 
-    split, sd, path = train.resolve_resume_split(None, flag=False)
-    assert (split, sd, path) == (False, None, None)
-    split, sd, _ = train.resolve_resume_split(None, flag=True)
-    assert split is True and sd is None
+    heads, trunk, sd, path = train.resolve_resume_split(None, heads_flag=False, trunk_flag=False)
+    assert (heads, trunk, sd, path) == (False, False, None, None)
+    heads, trunk, sd, _ = train.resolve_resume_split(None, heads_flag=True, trunk_flag=False)
+    assert heads is True and trunk is False and sd is None
 
-    split, sd, path = train.resolve_resume_split(str(legacy_pt), flag=False)
-    assert split is False and sd is not None and path == legacy_pt
-    split, _sd, _ = train.resolve_resume_split(str(legacy_pt), flag=True)
-    assert split is True, "flag must widen a legacy checkpoint to a warm split"
+    heads, trunk, sd, path = train.resolve_resume_split(str(legacy_pt),
+                                                        heads_flag=False,
+                                                        trunk_flag=False)
+    assert heads is False and trunk is False and sd is not None and path == legacy_pt
+    heads, trunk, _sd, _ = train.resolve_resume_split(str(legacy_pt),
+                                                      heads_flag=True,
+                                                      trunk_flag=False)
+    assert heads is True, "flag must widen a legacy checkpoint to a warm split"
+    assert trunk is False
 
-    split, sd, _ = train.resolve_resume_split(str(split_pt), flag=False)
-    assert split is True, "split checkpoint must be detected without the flag"
+    heads, trunk, sd, _ = train.resolve_resume_split(str(split_pt),
+                                                     heads_flag=False,
+                                                     trunk_flag=False)
+    assert heads is True, "split checkpoint must be detected without the flag"
+    assert trunk is False, "heads-split fixtures have no encoder_t.0.weight"
     assert "aim_log_std_t" in sd, "the sniffed dict must be returned for reuse"
-    split, _sd, _ = train.resolve_resume_split(str(split_pt), flag=True)
-    assert split is True
+    heads, trunk, _sd, _ = train.resolve_resume_split(str(split_pt),
+                                                      heads_flag=True,
+                                                      trunk_flag=False)
+    assert heads is True
+    assert trunk is False
 
     with pytest.raises(FileNotFoundError, match="Resume checkpoint not found"):
-        train.resolve_resume_split(str(tmp_path / "nope.pt"), flag=False)
+        train.resolve_resume_split(str(tmp_path / "nope.pt"), heads_flag=False, trunk_flag=False)
 
 
 def test_self_play_loads_both_checkpoint_vintages(env, tmp_path):
