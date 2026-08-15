@@ -67,9 +67,16 @@ void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
     /* Movement — WASD → facing-local 8-bin. Actual world direction is
      * computed in process_movement() from this bin + agent->aim_rad, which
      * keeps movement continuously aligned with the mouse. env->sd is no
-     * longer consulted here (bin layout is fixed, not nav-derived). */
+     * longer consulted here (bin layout is fixed, not nav-derived).
+     *
+     * A/D are swapped at this call only. F9 pinned bin 3 = geometric
+     * right (clockwise perp: −Y at yaw=0). Raylib look-at with
+     * up=(0,1,0) and forward=(cos yaw, sin yaw) on XZ has screen-right
+     * = the *counter-clockwise* perp (+Y at yaw=0 = bin 7). Feeding D
+     * into the left slot (and A into the right) makes D walk toward
+     * the right edge of the window. Bot HEAD_MOVE bins stay F9. */
     act[HEAD_MOVE] =
-        _wasd_to_local_bin(IsKeyDown(KEY_W), IsKeyDown(KEY_A), IsKeyDown(KEY_S), IsKeyDown(KEY_D));
+        _wasd_to_local_bin(IsKeyDown(KEY_W), IsKeyDown(KEY_D), IsKeyDown(KEY_S), IsKeyDown(KEY_A));
 
     /* Batch 3: HEAD_AIM removed from action enum; human aim is set
      * directly via agent->aim_rad (line 55 above) and consumed by
