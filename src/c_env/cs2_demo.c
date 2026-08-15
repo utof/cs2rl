@@ -3,6 +3,7 @@
 #include "nav_data.h"
 #include "cs2_render.h"
 #include "cs2_input.h"
+#include "cs2_demo_events.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -81,6 +82,99 @@ static void load_nav_data(StaticData* sd) {
     sd->pbrs_gamma                  = 0.99f;
 }
 
+/* Copy env.game into a DemoWorldTick. Pose snapshots (AgentSnapshot) cannot
+ * drive audio: they lack fired_this_tick / is_airborne / bomb_ticks_left.
+ * Bomb xyz is NOT on DemoWorldTick — plant/beep spatial reads env.game
+ * after the step (spec §3.1). */
+static void copy_game_to_world(const Dust2Env* env, DemoWorldTick* w) {
+    const GameState* g = &env->game;
+    int              i;
+    w->bomb_planted    = g->bomb_planted;
+    w->bomb_ticks_left = g->bomb_ticks_left;
+    for (i = 0; i < N_AGENTS; i++) {
+        const AgentState* a          = &g->agents[i];
+        w->agents[i].x               = a->x;
+        w->agents[i].y               = a->y;
+        w->agents[i].z               = a->z;
+        w->agents[i].alive           = a->alive;
+        w->agents[i].team            = a->team;
+        w->agents[i].is_airborne     = a->is_airborne;
+        w->agents[i].fired_this_tick = a->fired_this_tick;
+    }
+}
+
+/* Official-example spatial play of remaining detect bits. 3 Hz foot drop
+ * must already have cleared extra bits — this function does not rate-limit. */
+static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* curr, DemoEvents ev) {
+    int i;
+    for (i = 0; i < N_AGENTS; i++) {
+        if (ev.shot_mask & (1u << i))
+            _demo_play_at(cl,
+                          DEMO_VOICE_SHOT,
+                          curr->agents[i].x,
+                          curr->agents[i].y,
+                          curr->agents[i].z,
+                          800.0f);
+        if (ev.foot_mask & (1u << i))
+            _demo_play_at(cl,
+                          DEMO_VOICE_FOOT,
+                          curr->agents[i].x,
+                          curr->agents[i].y,
+                          curr->agents[i].z,
+                          400.0f);
+    }
+    /* DemoWorldTick has no bomb xyz; wrapper reads the post-step game. */
+    if (ev.plant)
+        _demo_play_at(
+            cl, DEMO_VOICE_PLANT, env->game.bomb_x, env->game.bomb_y, env->game.bomb_z, 800.0f);
+    if (ev.beep)
+        _demo_play_at(
+            cl, DEMO_VOICE_BEEP, env->game.bomb_x, env->game.bomb_y, env->game.bomb_z, 1200.0f);
+}
+
+/* View-kick on the local shot only (human agent, else spectate-0).
+ * Applied once per sim tick, not per render frame. Do not write yaw /
+ * pitch / aim_rad — human_input copies those into the sim. Render
+ * decays punch and adds it to camera look only. */
+static void demo_apply_local_punch(Client* cl, const Dust2Env* env, unsigned shot_mask) {
+    int      local = (cl->human_agent_idx >= 0) ? cl->human_agent_idx : 0;
+    unsigned u;
+    float    n;
+    if ((shot_mask & (1u << local)) == 0)
+        return;
+    cl->punch_pitch += 0.045f; /* mid-range of spec ~0.03–0.06 rad */
+    /* Deterministic tiny yaw noise from the sim tick; no GetRandomValue. */
+    u              = (unsigned)env->game.tick * 1664525u + 1013904223u;
+    n              = ((float)((u >> 16) & 0xffff) / 32767.5f) - 1.0f;
+    cl->punch_yaw += n * 0.008f;
+}
+
+/* Record alive 1→0 edges for the kill feed. Last 4, timestamped now.
+ * draw_hud fades each row out over 3 s. */
+static void
+demo_record_kill_feed(Client* cl, const DemoWorldTick* prev, const DemoWorldTick* curr) {
+    int    i;
+    double t = GetTime();
+    for (i = 0; i < N_AGENTS; i++) {
+        if (!(prev->agents[i].alive && !curr->agents[i].alive))
+            continue;
+        if (cl->kill_feed_n < DEMO_KILL_FEED_N) {
+            int k                 = cl->kill_feed_n++;
+            cl->kill_feed_idx[k]  = i;
+            cl->kill_feed_team[k] = curr->agents[i].team;
+            cl->kill_feed_t[k]    = t;
+        } else {
+            memmove(cl->kill_feed_idx, cl->kill_feed_idx + 1, (DEMO_KILL_FEED_N - 1) * sizeof(int));
+            memmove(
+                cl->kill_feed_team, cl->kill_feed_team + 1, (DEMO_KILL_FEED_N - 1) * sizeof(int));
+            memmove(cl->kill_feed_t, cl->kill_feed_t + 1, (DEMO_KILL_FEED_N - 1) * sizeof(double));
+            cl->kill_feed_idx[DEMO_KILL_FEED_N - 1]  = i;
+            cl->kill_feed_team[DEMO_KILL_FEED_N - 1] = curr->agents[i].team;
+            cl->kill_feed_t[DEMO_KILL_FEED_N - 1]    = t;
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     int human_idx   = 0;
     int fog_enabled = 0;
@@ -124,15 +218,42 @@ int main(int argc, char** argv) {
     Client* cl      = make_client(&env, human_idx, (const float*)NAV_AREA_BOUNDS);
     cl->fog_enabled = fog_enabled;
 
+    /* Both world ticks start as a copy of the post-reset game. A
+     * prev!=curr spawn pair would look like a teleport and footstep
+     * every agent (spec §3.1). Same for env_reset below. */
+    DemoWorldTick prev_world, curr_world;
+    copy_game_to_world(&env, &curr_world);
+    prev_world = curr_world;
+
     double next_step = GetTime();
     while (!WindowShouldClose()) {
         double now = GetTime();
         if (now >= next_step) {
+            DemoEvents ev;
+            int        i;
             snapshot_prev(cl, &env);
+            prev_world = curr_world; /* same shift as pose snapshots */
             if (human_idx >= 0)
                 human_input(cl, &env, actions);
             env_step(&env, actions, continuous_actions);
             snapshot_curr(cl, &env);
+            copy_game_to_world(&env, &curr_world);
+            ev = demo_detect_events(&prev_world, &curr_world);
+            /* 3 Hz drop BEFORE PlaySound. Helper emits every hypot>1 walk. */
+            {
+                double tnow = GetTime();
+                for (i = 0; i < N_AGENTS; i++) {
+                    if ((ev.foot_mask & (1u << i)) == 0)
+                        continue;
+                    if (tnow - cl->last_footstep_t[i] < (1.0 / 3.0))
+                        ev.foot_mask &= ~(1u << i);
+                    else
+                        cl->last_footstep_t[i] = tnow;
+                }
+            }
+            demo_play_events(cl, &env, &curr_world, ev);
+            demo_apply_local_punch(cl, &env, ev.shot_mask);
+            demo_record_kill_feed(cl, &prev_world, &curr_world);
             cl->last_step_time  = now;
             next_step          += 1.0 / 16.0;
         }
@@ -141,6 +262,8 @@ int main(int argc, char** argv) {
             env_reset(&env);
             _copy_agents_to_snapshot(&env, cl->curr);
             memcpy(cl->prev, cl->curr, sizeof(cl->curr));
+            copy_game_to_world(&env, &curr_world);
+            prev_world = curr_world;
         }
     }
 
