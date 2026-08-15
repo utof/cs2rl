@@ -300,3 +300,46 @@ def test_trunk_active_key_replaces_footer_even_if_trunk_cells_dropped():
         print_tag_report(s)
     assert "trunk cells are the decision metric" not in buf.getvalue()
     assert "no actor TAG cell is a decision metric" in buf.getvalue()
+
+
+def test_trunk_cross_zero_backstop_warns_without_trunk_active():
+    """Spec §5.5b / §3.4 trunk backstop: warn-only, no relabel.
+
+    WHAT: every surviving trunk cross_half is exactly 0.0 and no
+    split/trunk_active key is present (absent, not 0.0). The report
+    warns that the labeling key is missing; trunk cells keep a normal
+    CONFLICT verdict.
+
+    WHY: a trunk-split run whose metrics lost the key would otherwise
+    print a false CONFLICT on the last remaining decision cell with no
+    hint that the architecture is the cause. Relabeling from a numeric
+    coincidence is forbidden (same contract as the heads backstop).
+
+    PITFALL: these rows are heads-legacy (no split/active). The Batch 7
+    "trunk cells are the decision metric" footer must stay off — it
+    keys on a heads structural cell, not on a numeric trunk zero.
+    """
+    rows = []
+    for i in range(30):
+        r = _row(step=i * 1e5, cross_half=0.0, within=0.55, group="trunk")
+        r.update(_row(step=i * 1e5, cross_half=0.15, within=0.60, group="policy_heads"))
+        rows.append(r)
+    assert "split/trunk_active" not in rows[0]
+    assert "split/active" not in rows[0]
+    s = tag_summary(rows, dead_windows=[])
+    assert s["_trunk_structural_backstop"] is True
+    assert s["_saw_trunk_active"] is False
+    assert s["_structural_backstop"] is False
+    assert s["trunk"]["mb0"]["healthy"]["verdict"] == "CONFLICT"
+    assert s["trunk"]["mb0"]["healthy"]["verdict"] != TRUNK_STRUCTURAL
+    assert s["policy_heads"]["mb0"]["healthy"]["verdict"] == "CONFLICT"
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_tag_report(s)
+    out = buf.getvalue()
+    assert "every measured trunk cross_half is exactly 0.0" in out
+    assert "split/trunk_active" in out
+    assert "--tct-split-trunk" in out
+    assert TRUNK_STRUCTURAL not in out
+    assert "no actor TAG cell is a decision metric" not in out
+    assert "trunk cells are the decision metric" not in out
