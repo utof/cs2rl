@@ -1,8 +1,9 @@
 // build.zig — Zig build script for the cs2rl C environment.
 //
 // Targets:
-//   (default)   binding   — CPython extension module (.so / .pyd)
-//   cs2_demo              — standalone Raylib demo (requires X11 dev libs on Linux)
+//   (default)   binding            — CPython extension module (.so / .pyd)
+//   cs2_demo                       — standalone Raylib demo (requires X11 dev libs on Linux)
+//   demo_events_test (optional)    — headless detect-helper tests; no Raylib, not in binding
 //
 // Include paths are passed by setup.py as -D flags because Zig has no
 // equivalent of CMake's find_package(Python NumPy). This keeps discovery
@@ -109,4 +110,31 @@ pub fn build(b: *std.Build) void {
 
     const install_demo = b.addInstallArtifact(demo, .{});
     cs2_demo_step.dependOn(&install_demo.step);
+
+    // ── demo_events_test: raylib-free detect-helper unit tests ─────────────
+    // Invoked explicitly: `zig build demo_events_test`
+    // Compiles demo_events_test.c + cs2_demo_events.h only. Must NOT link
+    // Raylib or join the default binding install — training stays display-free.
+    // linkSystemLibrary("m") is required for hypotf on this Linux toolchain.
+    const demo_events_test = b.addExecutable(.{
+        .name = "demo_events_test",
+        .root_module = b.createModule(.{
+            .target   = target,
+            .optimize = optimize,
+        }),
+    });
+    demo_events_test.root_module.addCSourceFile(.{
+        .file  = b.path("demo_events_test.c"),
+        .flags = &.{ "-std=c99", "-Wall", "-g" },
+    });
+    demo_events_test.root_module.addIncludePath(b.path("."));
+    demo_events_test.linkLibC();
+    demo_events_test.linkSystemLibrary("m");
+
+    const run_demo_events_test = b.addRunArtifact(demo_events_test);
+    const demo_events_test_step = b.step(
+        "demo_events_test",
+        "Run headless demo event-detect tests (no Raylib)",
+    );
+    demo_events_test_step.dependOn(&run_demo_events_test.step);
 }
