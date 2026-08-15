@@ -13,6 +13,8 @@ PITFALLS:
     content-addressed archive, not Modal automount.
   * Never call the undecorated Function. GPU/CPU/memory/Volume/Secret belong
     only on the configured variant.
+  * Launch via with_options(...).spawn(), never .remote(). SYNC remote inputs
+    are cancelled when the local client dies, even under `modal run --detach`.
 """
 from __future__ import annotations
 
@@ -108,17 +110,18 @@ dependency_image = (modal.Image.from_registry(
             "elf=subprocess.check_output(['cuobjdump','--list-elf',so], text=True); "
             "assert all('sm_'+arch in elf for arch in ('75','86','89')), elf\"",
         ))
-runner_image = (dependency_image.add_local_file(str(_REPO_ROOT / "scripts" / "modal_runner_lib.py"),
-                                                "/opt/app/scripts/modal_runner_lib.py",
-                                                copy=True).add_local_file(
-                                                    str(_REPO_ROOT / "scripts" / "run_modal.py"),
-                                                    "/opt/app/scripts/run_modal.py",
-                                                    copy=True).env({
-                                                        # Modal imports "run_modal"; this file
-                                                        # imports scripts.modal_runner_lib.
-                                                        "PYTHONPATH":
-                                                        "/opt/app:/opt/app/scripts"
-                                                    }))
+runner_image = (
+    dependency_image.add_local_file(str(_REPO_ROOT / "scripts" / "modal_runner_lib.py"),
+                                    "/opt/app/scripts/modal_runner_lib.py",
+                                    copy=True).add_local_file(str(_REPO_ROOT / "scripts" /
+                                                                  "run_modal.py"),
+                                                              "/opt/app/scripts/run_modal.py",
+                                                              copy=True).env({
+                                                                                               # Modal imports "run_modal"; this file
+                                                                                               # imports scripts.modal_runner_lib.
+                                                                  "PYTHONPATH":
+                                                                  "/opt/app:/opt/app/scripts"
+                                                              }))
 
 app = modal.App("cs2rl-training", include_source=False)
 
@@ -690,7 +693,21 @@ def launch_run(
     if secret is not None:
         options["secrets"] = [secret]
     print(f"app_id={getattr(app_handle, 'app_id', None)} run_id={request.run_id}", file=sink)
-    return train.with_options(**options).remote(payload)
+    # ASYNC spawn, not SYNC remote. .remote() is FUNCTION_CALL_INVOCATION_TYPE_SYNC:
+    # the Modal client cancels that input on SIGTERM/shutdown even under
+    # `modal run --detach` (live: 150826-trunk-seed2-split, 21.3M/29.98M,
+    # "Successfully canceled input"). --detach only keeps the App; Modal's
+    # own Function CLI uses spawn when --detach is set. spawn() returns a
+    # FunctionCall handle and does not wait, so the local entrypoint can exit
+    # without owning the GPU input.
+    handle = train.with_options(**options).spawn(payload)
+    function_call_id = getattr(handle, "object_id", None)
+    print(f"function_call_id={function_call_id}", file=sink)
+    return {
+        "status": "spawned",
+        "run_id": request.run_id,
+        "function_call_id": function_call_id,
+    }
 
 
 @app.function(
@@ -700,7 +717,7 @@ def launch_run(
     include_source=False,
 )
 def train_remote(payload: dict[str, object]) -> dict[str, object]:
-    """Remote training wrapper. Invoked only via with_options(...).remote."""
+    """Remote training wrapper. Invoked only via with_options(...).spawn."""
     volume = modal.Volume.from_name(mrl.VOLUME_NAME, create_if_missing=False)
     registry = ModalDictRegistry(modal.Dict.from_name(mrl.REGISTRY_NAME, create_if_missing=False))
     attempt_id = str(payload["attempt_id"])
