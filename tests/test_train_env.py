@@ -40,6 +40,67 @@ def test_make_env_alias_steps_without_nan():
         env.close()
 
 
+def test_compute_game_metrics_surfaces_new_keys_without_backfilling_plant_tick():
+    from train import compute_game_metrics
+    old = {
+        "environment/winner_t": 0.4,
+        "environment/winner_ct": 0.6,
+        "environment/timed_out": 0.2,
+        "environment/kills_t": 1.0,
+        "environment/kills_ct": 2.0,
+        "environment/bomb_planted": 0.3,
+        "environment/bomb_defused": 0.1,
+        "environment/round_length": 500.0,
+        "environment/reward_win": 0.0,
+        "environment/reward_kills": 0.5,
+        "environment/reward_deaths": -0.2,
+        "environment/reward_bomb": 1.1,
+        "environment/reward_pbrs": 0.3,
+        "environment/reward_shots": -0.01,
+        "environment/reward_survival": 0.2,
+        "environment/reward_inaction": -0.05,
+    }
+    out = compute_game_metrics(old)
+    assert out["game/win_rate_t"] == 0.4
+    assert out["game/kills_per_episode"] == 3.0
+    assert out["game/kills_t"] == 1.0
+    assert out["game/kills_ct"] == 2.0
+    assert out["game/defuse_rate"] == 0.1
+    assert out["game/reward/win"] == 0.0
+    assert out["game/reward/kills"] == 0.5
+    assert out["game/reward/deaths"] == -0.2
+    assert out["game/reward/bomb"] == 1.1
+    assert out["game/reward/pbrs"] == 0.3
+    assert out["game/reward/shots"] == -0.01
+    assert out["game/reward/survival"] == 0.2
+    assert out["game/reward/inaction"] == -0.05
+    assert "game/plant_tick" not in out
+    assert "game/win_by_detonation" not in out
+    assert "game/win_by_defuse" not in out
+
+    new = dict(old)
+    new["environment/plant_tick"] = 40.0
+    new["environment/win_by_detonation"] = 0.2
+    new["environment/win_by_defuse"] = 0.1
+    out2 = compute_game_metrics(new)
+    assert out2["game/plant_tick"] == 40.0
+    assert out2["game/win_by_detonation"] == 0.2
+    assert out2["game/win_by_defuse"] == 0.1
+
+
+def test_make_puffer_env_default_keeps_step_stats_off():
+    import inspect
+
+    import train
+    sig = inspect.signature(train.make_puffer_env)
+    assert sig.parameters["include_step_stats_in_info"].default is False
+    env = train.make_puffer_env(seed=0)
+    try:
+        assert env._include_step_stats_in_info is False
+    finally:
+        env.close()
+
+
 # ── Task 6c: reward-clamp removal + per-channel Welford + symlog ───────────
 # These tests depend on:
 #   - Task 4 (symlog, split_into_channels in src/train_helpers_batch1.py)

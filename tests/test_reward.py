@@ -362,6 +362,93 @@ def test_planter_death_releases_plant_lock():
     env.close()
 
 
+def test_plant_completion_writes_plant_tick():
+    """process_bomb must stamp episode_stats.plant_tick = g->tick at plant.
+
+    Why: later analysis needs a direct plant timestamp (0 = never planted).
+    Pitfall: do not copy the test_plant_progress_reward setup — that test
+    pre-sets bomb_plant_ticks=1 and takes one progress step only, so it
+    never completes a plant. Site placement mirrors _put_at_site above.
+    g->tick is incremented at the top of env_step, so plant_tick >= 1.
+    """
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+    g = env._c_env.game
+    sd = env._c_env.sd.contents
+    map_data = env.map_data
+    nav_graph = env.nav_graph
+    site_idx = None
+    site_centroid = None
+    for idx, is_site in enumerate(map_data.bombsite_by_idx):
+        if is_site:
+            site_idx = idx
+            site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
+            break
+    assert site_idx is not None
+    for i in range(10):
+        g.agents[i].has_bomb = 0
+    a = g.agents[0]
+    a.alive = 1
+    a.hp = 100
+    a.has_bomb = 1
+    a.area_idx = site_idx
+    a.x, a.y, a.z = float(site_centroid[0]), float(site_centroid[1]), 0.0
+    g.bombsite_entered[0] = 1
+    g.bomb_carrier_id = 0
+    g.bomb_is_dropped = 0
+    plant_time = int(sd.bomb_plant_time)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[0, 4] = 1
+    planted = False
+    for _ in range(plant_time + 2):
+        env.step(actions)
+        if int(g.bomb_planted) == 1:
+            planted = True
+            break
+    assert planted, "USE hold did not complete a plant"
+    tick = int(g.tick)
+    assert int(env._c_env.episode_stats.plant_tick) == tick
+    assert int(env._c_env.episode_stats.plant_tick) > 0
+    env.close()
+
+
+def test_no_plant_leaves_plant_tick_zero():
+    """An unplanted timeout round must leave plant_tick at the 0 sentinel.
+
+    Why: 0 is the never-planted sentinel (clear_stats memsets StepStats).
+    Pitfall: idle actions (USE=0) so process_bomb cannot complete a plant.
+    info['plant_tick'] is the terminal-info view of episode_stats.plant_tick;
+    the C field is the Task 1 contract, the info key is how Python reads it.
+    """
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    done = False
+    for _ in range(int(env._c_env.sd.contents.round_time) + 2):
+        _, _, terminals, _, info = env.step(actions)
+        if bool(terminals[0]) or (info and info[0].get("timed_out")):
+            done = True
+            break
+    assert done, "unplanted round never terminated"
+    info = info[0] if info else env._build_terminal_info()
+    assert int(info["plant_tick"]) == 0
+    assert int(env._c_env.episode_stats.plant_tick) == 0
+    env.close()
+
+
+def test_terminal_info_exports_plant_tick_and_win_flags():
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+    info = env._build_terminal_info()
+    assert "plant_tick" in info
+    assert "win_by_detonation" in info
+    assert "win_by_defuse" in info
+    assert int(info["plant_tick"]) == 0
+    assert int(info["win_by_detonation"]) == 0
+    assert int(info["win_by_defuse"]) == 0
+    env.close()
+
+
 # ── Phase 5 reward-externalization tests ──────────────────────────────────────
 
 

@@ -78,6 +78,25 @@ def test_stepstats_has_win_type_flags(make_map):
     assert int(ss.win_by_defuse) == 0
 
 
+def test_stepstats_has_plant_tick(make_map):
+    """StepStatsC must expose plant_tick (g->tick at plant; 0 = never planted).
+
+    Why: observe-only plant-latency field is appended after _pad_ss_wins, so
+    sizeof grows 200→204 / 6736→6744. clear_stats memsets the struct, so
+    reset must leave 0. Pitfall: do not read this via a numpy recarray —
+    binding.c has no StepStats dtype; ctypes is the Python-side mirror.
+    """
+    import ctypes
+
+    from c_env.cs2_env import Dust2EnvC, StepStatsC
+    _, env = _make_env(map_data=make_map)
+    assert hasattr(env._c_env.episode_stats, "plant_tick")
+    env.reset()
+    assert int(env._c_env.episode_stats.plant_tick) == 0
+    assert ctypes.sizeof(StepStatsC) == 204
+    assert ctypes.sizeof(Dust2EnvC) == 6744
+
+
 def test_human_controlled_uses_aim_rad_not_bin(make_map):
     """When human_controlled=1, facing must equal aim_rad, ignoring the
     continuous_actions Δyaw buffer.

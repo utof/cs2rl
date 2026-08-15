@@ -80,6 +80,15 @@ static void process_bomb(Dust2Env*      env,
                             *bomb_planter_id         = i;
                             ss->bomb_planted         = 1;
                             es->bomb_planted++;
+                            /* Stamp plant completion tick. ss is cleared every
+                             * env_step so it always gets this tick. es is
+                             * episode-lifetime: first-write-wins is belt-and-
+                             * braces (bomb_planted already blocks a second
+                             * plant). g->tick was incremented at the top of
+                             * env_step, so this is never 0. */
+                            ss->plant_tick = g->tick;
+                            if (es->plant_tick == 0)
+                                es->plant_tick = g->tick;
                         }
                     }
                 } else if (g->bomb_being_planted_by == i) {
