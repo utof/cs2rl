@@ -2,17 +2,11 @@
 import math
 
 import numpy as np
+import pytest
 
 from c_env.cs2_env import make_env
 from nav import ACTION_DIM
 from train import ACTION_HEAD_SIZES
-
-
-def _facing_to_aim(angle):
-    normalized = angle % (2 * math.pi)
-    if normalized < 0:
-        normalized += 2 * math.pi
-    return int(normalized * 16 / (2 * math.pi)) % 16
 
 
 def test_pbrs_rewards_are_finite():
@@ -36,18 +30,28 @@ def test_pbrs_shaping_positive_on_kill():
     env.reset()
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
 
-    # Find two visible areas within shooting range
+    # Find two visible areas within shooting range.
+    # Selection criterion (gh #36 follow-up): runtime position-LoS, NOT the
+    # centroid-baked vis_matrix. The C build_vis_matrix in cs2_combat.h now
+    # walks raster cells with adjacency checks, which can disagree with the
+    # static vis_matrix (centroid-only raycast at bake time). Use the Python
+    # mirror MapData.line_of_sight_2d to filter pair candidates so we pick a
+    # pair the live env actually treats as combatable.
     nav = env.nav_graph
     pair = None
     for i, area_i in enumerate(nav.area_ids[:400]):
         for area_j in nav.area_ids[i + 1:i + 200]:
-            if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
+            ci = nav.centroids[area_i]
+            cj = nav.centroids[area_j]
+            dx = cj[0] - ci[0]
+            dy = cj[1] - ci[1]
+            if not (50 < float((dx * dx + dy * dy)**0.5) < 1500):
                 continue
-            dx = nav.centroids[area_j][0] - nav.centroids[area_i][0]
-            dy = nav.centroids[area_j][1] - nav.centroids[area_i][1]
-            if 50 < float((dx * dx + dy * dy)**0.5) < 1500:
-                pair = (area_i, area_j)
-                break
+            if not env.map_data.line_of_sight_2d(float(ci[0]), float(ci[1]), float(cj[0]),
+                                                 float(cj[1])):
+                continue
+            pair = (area_i, area_j)
+            break
         if pair is not None:
             break
     assert pair is not None, "no visible test pair found"
@@ -73,11 +77,21 @@ def test_pbrs_shaping_positive_on_kill():
     ct.area_idx = id2idx[area_ct]
     ct.x, ct.y, ct.z = float(ct_c[0]), float(ct_c[1]), 0.0
 
-    t_facing = math.atan2(ct.y - t.y, ct.x - t.x)
+    # Batch 3: set facing directly (continuous-aim path); SHOOT is now head 1.
+    t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
+    # Batch 3.5 v1b (gh #36 fix A): 3D combat uses center-to-center geometry
+    # (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND = 48). Same-z agents → rz=0 →
+    # pitch=0 hits like 2D would. Kept pitch computation for documentation:
+    # asymmetric-z setups inherit the correct correction automatically.
+    rx_3d = ct.x - t.x
+    ry_3d = ct.y - t.y
+    rz_3d = (ct.z + 48.0) - (t.z + 48.0)               # torso_z - eye_z (v1b: equal)
+    dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
+    t.pitch = math.atan2(rz_3d, dist_2d_3d)
 
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 1] = _facing_to_aim(t_facing)           # aim at CT (head index 1)
-    actions[0, 2] = 1                                  # t0 shoots (shoot is head index 2)
+    # Batch 3: SHOOT moved from head 2 → 1 after HEAD_AIM removal.
+    actions[0, 1] = 1                  # t0 shoots (shoot is head 1)
     _, rewards, _, _, _ = env.step(actions)
 
     assert rewards[0] > 0, f"Killing CT gives non-positive reward: {rewards[0]:.4f}"
@@ -132,23 +146,36 @@ def test_team_spirit_one_equalizes_alive_team():
 
 
 def test_idle_penalty():
-    """Idle action (move=0) for a live agent should incur -0.0005 penalty."""
-    env = make_env(seed=0, auto_reset=False)
+    """Idle action (move=0) for a live agent should incur -0.0005 penalty.
+
+    PBRS weights and the CT survival micro-reward are zeroed so the idle
+    penalty is the ONLY per-tick term and can be asserted exactly. The old
+    version asserted total reward ≤ -0.0004 under default shaping, which
+    silently depended on the PBRS stationary residual (γ_pbrs − 1)·φ being
+    large; the finding-2 fix (γ_pbrs 0.99 → 0.999) shrank that residual 10×
+    and exposed the coupling.
+    """
+    env = make_env(
+        seed=0,
+        auto_reset=False,
+        reward_ct_survival=0.0,
+        pbrs_alive_weight=0.0,
+        pbrs_hp_weight=0.0,
+        pbrs_site_weight=0.0,
+        pbrs_bomb_progress_weight=0.0,
+        pbrs_nav_weight_t=0.0,
+        pbrs_nav_weight_ct=0.0,
+    )
     env.reset()
 
     # All agents idle (move action = 0)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, rewards, _, _, _ = env.step(actions)
 
-    # Every alive agent should have received the -0.0005 idle penalty.
-    # The reward may also contain PBRS terms, so we only check the sign / range.
     for i in range(10):
         if env._c_env.game.agents[i].alive:
-            assert rewards[i] <= 0, f"Agent {i} idled but got non-negative reward: {rewards[i]:.6f}"
-            # The idle penalty alone is -0.0005; PBRS shaping should be small.
-            # Verify the penalty is at most -0.0005 (PBRS can add to it).
-            assert rewards[i] <= -0.0004, (
-                f"Agent {i} idle penalty smaller than expected: {rewards[i]:.6f}")
+            assert abs(rewards[i] - (-0.0005)) < 1e-6, (
+                f"Agent {i} idled: expected exactly -0.0005, got {rewards[i]:.6f}")
     env.close()
 
 
@@ -209,8 +236,8 @@ def test_bomb_entry_bonus():
 
     # Step with use=1 — the C env checks use action to trigger entry bonus
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    # use action (head 5) triggers bombsite_entered check
-    actions[0, 5] = 1
+    # Batch 3: USE is now head index 4 (was 5; HEAD_AIM removed shifted enum down).
+    actions[0, 4] = 1
     _, rewards, _, _, _ = env.step(actions)
 
     # Reward for agent 0 must include the +0.3 bombsite entry bonus
@@ -253,9 +280,9 @@ def test_plant_progress_reward():
     env._c_env.game.bomb_being_planted_by = bomber_idx
     env._c_env.game.bomb_plant_ticks = 1               # already started (not tick 0)
 
-    # use=1 to continue planting (head index 5)
+    # use=1 to continue planting (Batch 3: USE is now head index 4)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[bomber_idx, 5] = 1
+    actions[bomber_idx, 4] = 1
     _, rewards, _, _, _ = env.step(actions)
 
     # The per-tick plant progress reward is +0.05
@@ -263,12 +290,90 @@ def test_plant_progress_reward():
         f"Plant progress reward missing: agent {bomber_idx} reward = {rewards[bomber_idx]:.4f}")
 
 
+def test_planter_death_releases_plant_lock():
+    """Finding 7 (2026-07-06 adversarial review): a planter dying mid-plant
+    must release the plant lock so another T can plant that round.
+
+    Pre-fix, process_bomb had defuser-style death invalidation ONLY for the
+    defuser: when the planter died, `bomb_being_planted_by` stayed frozen on
+    the dead index, and the `== -1` / `== i` guards then rejected every other
+    carrier — planting was bricked for the rest of the round (live-verified:
+    a fresh carrier held USE 34 ticks with plant_time=19 and nothing
+    happened). Progress also resets to 0: the new planter starts a fresh
+    plant rather than inheriting ticks it didn't earn.
+    """
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+    g = env._c_env.game
+    sd = env._c_env.sd.contents
+    map_data = env.map_data
+    nav_graph = env.nav_graph
+
+    site_idx = None
+    site_centroid = None
+    for idx, is_site in enumerate(map_data.bombsite_by_idx):
+        if is_site:
+            site_idx = idx
+            site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
+            break
+    assert site_idx is not None, "No bombsite found in map"
+
+    def _put_at_site(i, has_bomb):
+        a = g.agents[i]
+        a.alive = 1
+        a.hp = 100
+        a.has_bomb = has_bomb
+        a.area_idx = site_idx
+        a.x, a.y, a.z = float(site_centroid[0]), float(site_centroid[1]), 0.0
+        g.bombsite_entered[i] = 1      # suppress entry bonus; not under test
+
+    # Agent 0 mid-plant at the site (5 of plant_time ticks done).
+    for i in range(10):
+        g.agents[i].has_bomb = 0
+    _put_at_site(0, has_bomb=1)
+    g.bomb_carrier_id = 0
+    g.bomb_being_planted_by = 0
+    g.bomb_plant_ticks = 5
+
+    # Kill the planter; one step must release the lock and reset progress.
+    g.agents[0].alive = 0
+    g.agents[0].hp = 0
+    env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+    assert int(
+        g.bomb_being_planted_by) == -1, (f"dead planter must release the plant lock, still held by "
+                                         f"{int(g.bomb_being_planted_by)}")
+    assert int(g.bomb_plant_ticks) == 0, (
+        f"plant progress must reset on planter death, got {int(g.bomb_plant_ticks)}")
+
+    # Hand the bomb to a living T at the site; a full fresh plant must succeed.
+    _put_at_site(1, has_bomb=1)
+    g.bomb_carrier_id = 1
+    g.bomb_is_dropped = 0
+    plant_time = int(sd.bomb_plant_time)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[1, 4] = 1                                                                # HEAD_USE held (Batch 3: USE is head 4)
+    for _ in range(plant_time + 2):
+        env.step(actions)
+        if int(g.bomb_planted):
+            break
+    assert int(g.bomb_planted) == 1, (
+        f"second carrier held USE {plant_time + 2} ticks (plant_time={plant_time}) "
+        f"but bomb never planted — plant lock still bricked")
+    env.close()
+
+
 # ── Phase 5 reward-externalization tests ──────────────────────────────────────
 
 
 def test_kill_reward_weight_is_configurable():
     """make_env(reward_kill=X) scales the kill reward; zero-out all other weights
-    so the kill reward is the only non-zero contribution."""
+    so the kill reward is the only non-zero contribution.
+
+    Batch 1 (RL overhaul): must also zero the per-mechanism win-reward fields,
+    otherwise killing the last enemy triggers a T-elimination reward on top of
+    the kill reward and corrupts the assertion. These fields did not exist before
+    Task 3 so they were not in the original zero-out list.
+    """
     env = make_env(
         reward_kill=0.9,
         reward_death=0.0,
@@ -288,22 +393,32 @@ def test_kill_reward_weight_is_configurable():
         pbrs_bomb_progress_weight=0.0,
         pbrs_nav_weight_t=0.0,
         pbrs_nav_weight_ct=0.0,
+        reward_win_t_detonation=0.0,
+        reward_win_t_elimination=0.0,
+        reward_win_ct_defuse=0.0,
+        reward_win_ct_timeout=0.0,
+        reward_win_ct_elimination=0.0,
         auto_reset=False,
     )
     env.reset()
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
     nav = env.nav_graph
 
+    # Pair selection uses runtime LoS (see test_pbrs_shaping_positive_on_kill comment).
     pair = None
     for i, area_i in enumerate(nav.area_ids[:400]):
         for area_j in nav.area_ids[i + 1:i + 200]:
-            if not env.map_data.vis_matrix[id2idx[area_i], id2idx[area_j]]:
+            ci = nav.centroids[area_i]
+            cj = nav.centroids[area_j]
+            dx = cj[0] - ci[0]
+            dy = cj[1] - ci[1]
+            if not (50 < float((dx * dx + dy * dy)**0.5) < 1500):
                 continue
-            dx = nav.centroids[area_j][0] - nav.centroids[area_i][0]
-            dy = nav.centroids[area_j][1] - nav.centroids[area_i][1]
-            if 50 < float((dx * dx + dy * dy)**0.5) < 1500:
-                pair = (area_i, area_j)
-                break
+            if not env.map_data.line_of_sight_2d(float(ci[0]), float(ci[1]), float(cj[0]),
+                                                 float(cj[1])):
+                continue
+            pair = (area_i, area_j)
+            break
         if pair is not None:
             break
     assert pair is not None
@@ -333,10 +448,19 @@ def test_kill_reward_weight_is_configurable():
     ct.y = float(ctc[1])
     ct.z = 0.0
 
-    t_facing = math.atan2(ct.y - t.y, ct.x - t.x)
+    # Batch 3: set facing directly; SHOOT is now head 1.
+    t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
+    # Batch 3.5 v1b (gh #36 fix A): 3D combat uses center-to-center geometry
+    # (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND = 48). Same-z agents → rz=0 →
+    # pitch=0 hits like 2D would. Kept pitch computation for documentation:
+    # asymmetric-z setups inherit the correct correction automatically.
+    rx_3d = ct.x - t.x
+    ry_3d = ct.y - t.y
+    rz_3d = (ct.z + 48.0) - (t.z + 48.0)               # torso_z - eye_z (v1b: equal)
+    dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
+    t.pitch = math.atan2(rz_3d, dist_2d_3d)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 1] = _facing_to_aim(t_facing)
-    actions[0, 2] = 1
+    actions[0, 1] = 1                                  # SHOOT (post-Batch-3 index)
     _, rewards, _, _, _ = env.step(actions)
 
     # With all weights zeroed except reward_kill=0.9, killer reward must be ≈0.9
@@ -376,3 +500,528 @@ def test_reward_components_logged_in_terminal_info():
     missing = EXPECTED_KEYS - set(info.keys())
     assert not missing, f"Missing reward component keys in terminal info: {missing}"
     env.close()
+
+
+# ── Batch 1 Task 3: differential win-reward magnitude tests ──────────────────
+#
+# Strategy: direct-stimulus white-box approach.
+# We set game state (winner, bomb_planted, bomb_ticks_left, round_over, alive
+# agents) directly via ctypes, then call env.step() with all-zero actions.
+# All other reward weights (kill, death, pbrs, survival, shot, inaction) are
+# zeroed so step_stats.reward_win reflects only the win-magnitude path.
+#
+# We assert per-agent rewards directly (env._c_env.rewards): the terminal
+# win/loss magnitude applies to EVERY team member, dead or alive (finding 3,
+# docs/2026-07-06-adversarial-review-verification.md — death must not shield
+# an agent from the round outcome).
+#
+# Direct-stimulus is preferred here because:
+# 1. compute_rewards is not exposed via ctypes as a standalone callable.
+# 2. Driving a full round to a specific outcome (detonation/defuse/etc.) would
+#    require scripting agent actions and is brittle.
+# 3. The white-box approach gives a clean FAIL before the C change and a crisp
+#    PASS after — matching the TDD contract.
+#
+# Isolation: setting round_over=1 and winner=0/1 before step() causes
+# compute_rewards to fire the round-over block exactly once per step call.
+
+
+def _make_zeroed_env():
+    """Return a make_env with all shaping weights zeroed; only win-reward matters.
+
+    Pitfall: reward_win (the old symmetric weight) must also be zero so the
+    existing code path does not pollute the result before Task 3 replaces it.
+    The new per-mechanism fields default to the desired magnitudes.
+    """
+    return make_env(
+        seed=0,
+        auto_reset=False,
+        reward_win=0.0,                                # silence old symmetric path (pre-Task-3)
+        reward_kill=0.0,
+        reward_death=0.0,
+        reward_bombsite_entry=0.0,
+        reward_plant_bonus=0.0,
+        reward_plant_base=0.0,
+        reward_plant_progress_scale=0.0,
+        reward_plant_interrupted=0.0,
+        reward_defuse=0.0,
+        reward_shot_penalty=0.0,
+        reward_ct_survival=0.0,
+        reward_inaction=0.0,
+        pbrs_alive_weight=0.0,
+        pbrs_hp_weight=0.0,
+        pbrs_site_weight=0.0,
+        pbrs_bomb_progress_weight=0.0,
+        pbrs_nav_weight_t=0.0,
+        pbrs_nav_weight_ct=0.0,
+                                                       # New per-mechanism defaults (Task 3):
+        reward_win_t_detonation=5.0,
+        reward_win_t_elimination=3.0,
+        reward_win_ct_defuse=5.0,
+        reward_win_ct_timeout=4.0,
+        reward_win_ct_elimination=3.0,
+    )
+
+
+def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_left, alive_teams):
+    """Configure game state for a deterministic round-end scenario.
+
+    Sets one agent alive per team (agent 0 = T, agent 5 = CT) and marks the
+    round over with the specified winner/bomb conditions. All other agents dead.
+
+    Use this helper for scenarios where round_over is already set before step()
+    (detonation, elimination, timeout, and post-plant elimination edge-cases).
+    For ct_defuse, see the standalone `test_natural_defuse` — pre-setting
+    round_over blocks the defuse branch in process_bomb (cs2_bomb.h:27), so
+    bomb_just_defused would never fire and the spec-compliant classifier in
+    compute_rewards (which requires bomb_just_defused=1 for defuse) would
+    misclassify as elimination.
+
+    Args:
+        winner:          0=T wins, 1=CT wins, -1=timeout
+        bomb_planted:    1 if bomb is planted
+        bomb_ticks_left: remaining bomb timer (<=0 means detonated)
+        round_ticks_left: remaining round timer
+        alive_teams:     set of teams that have survivors ({0}, {1}, or {0,1})
+    """
+    g = env._c_env.game
+    # Kill all agents first
+    for i in range(10):
+        g.agents[i].alive = 0
+        g.agents[i].hp = 0
+    # Revive one agent per alive team
+    if 0 in alive_teams:
+        g.agents[0].alive = 1
+        g.agents[0].hp = 100
+        g.agents[0].team = 0
+    if 1 in alive_teams:
+        g.agents[5].alive = 1
+        g.agents[5].hp = 100
+        g.agents[5].team = 1
+    # Set round-end state
+    g.winner = winner
+    g.bomb_planted = bomb_planted
+    g.bomb_ticks_left = bomb_ticks_left
+    g.round_ticks_left = round_ticks_left
+    g.round_over = 1
+
+
+@pytest.mark.parametrize(
+    "scenario,winner,bomb_planted,bomb_ticks_left,round_ticks_left,"
+    "alive_teams,expected_mag", [
+        ("t_detonation", 0, 1, -1, 100, {0}, 5.0),
+        ("t_elimination", 0, 0, 0, 50, {0}, 3.0),
+        ("ct_elimination", 1, 0, 0, 50, {1}, 3.0),
+        ("ct_elimination_postplant", 1, 1, 50, 100, {1}, 3.0),
+        ("ct_timeout", -1, 0, 0, 0, {1}, 4.0),
+    ])
+def test_differential_win_magnitudes(scenario, winner, bomb_planted, bomb_ticks_left,
+                                     round_ticks_left, alive_teams, expected_mag):
+    """Each round-end outcome must yield exactly its specified win magnitude.
+
+    Direct-stimulus: we set game state via ctypes, call step(), and read
+    step_stats.reward_win. With all other weights zeroed, the only contribution
+    to reward_win is the per-mechanism win-reward block in compute_rewards.
+
+    All five scenarios pre-set round_over=1 via _setup_round_end; step() then
+    runs compute_rewards exactly once on the terminal state. This faithfully
+    represents live-play states where round_over is decided upstream
+    (detonation, elimination, timeout, post-plant elimination).
+
+    Classification logic (mirrors compute_rewards round-over block):
+      T win   (winner == 0): detonation if bomb_planted && ticks<=0, else elimination
+      CT win  (winner == 1): defuse if bomb_just_defused, else elimination
+      Timeout (winner == -1): timed_out flag set; CT gets ct_timeout reward
+
+    Scenarios covered:
+      t_detonation — bomb_planted, ticks<=0 → exploded (5.0).
+      t_elimination — no plant, T killed all CT (3.0).
+      ct_elimination (preplant) — !bomb_planted, T dead before plant.
+        bomb_just_defused=0 → elimination branch → 3.0.
+      ct_elimination_postplant — LIVE-PLAY EDGE. CT killed last T with bomb
+        planted but not defused. cs2_env.h:146-152 sets winner=1/round_over=1
+        when !t_alive, then process_bomb's defuse branch is skipped
+        (round_over guard), so bomb_just_defused stays 0. Must classify as
+        elimination (3.0), NOT defuse (5.0).
+      ct_timeout — round timer expired, no plant → CT tactical win (4.0). C
+        code sets winner=-1 and timed_out=1; we reward CT survivors.
+
+    ct_defuse is excluded from this table because it requires a structurally
+    different setup (live T agents, round_over=0, process_bomb driving defuse
+    naturally). See test_natural_defuse for that case.
+    """
+    import numpy as np
+    env = _make_zeroed_env()
+    env.reset()
+
+    _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_left, alive_teams)
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+
+    _, _, _, _, _ = env.step(actions)
+
+    # Per-agent terminal rewards: the win/loss magnitude applies to EVERY
+    # team member, dead or alive (finding 3 fix). _setup_round_end leaves at
+    # most one agent alive per team, so agents 1-4 / 6-9 are always dead —
+    # asserting all ten rows covers the dead-agent path in every scenario.
+    if winner == 0:
+        t_mag, ct_mag = expected_mag, -expected_mag
+    else:                                                                                            # CT win (1) or timeout (-1): CT positive
+        t_mag, ct_mag = -expected_mag, expected_mag
+    for i in range(10):
+        expected_i = t_mag if i < 5 else ct_mag
+        actual_i = float(env._c_env.rewards[i])
+        assert abs(actual_i - expected_i) < 0.01, (
+            f"Scenario '{scenario}': agent {i} "
+            f"({'T' if i < 5 else 'CT'}, {'alive' if env._c_env.game.agents[i].alive else 'dead'}) "
+            f"expected {expected_i}, got {actual_i:.4f}")
+
+    # reward_win accumulator is the truthful cross-team sum of emitted
+    # terminal rewards — symmetric magnitudes over equal teams net to 0.
+    assert abs(float(env._c_env.step_stats.reward_win)) < 0.01
+    env.close()
+
+
+def test_loss_penalty_applies_to_fully_dead_team():
+    """Finding 3 (2026-07-06 adversarial review): a fully-eliminated team must
+    still receive the round-loss penalty. Pre-fix, the win/loss block was
+    gated on `agents[i].alive`, so a T team wiped by CT received 0 instead of
+    -3 each — dying made the loss penalty unreachable and death nearly free
+    (the C1 correction: no test covered the all-dead-team case; every
+    round-end test kept >=1 agent alive per team). This is that missing test.
+    """
+    import numpy as np
+
+    env = _make_zeroed_env()
+    env.reset()
+
+    # CT elimination win with ALL FIVE T dead (alive_teams={1} leaves only
+    # agent 5 alive; agents 0-4 are the fully-dead losing team).
+    _setup_round_end(env,
+                     winner=1,
+                     bomb_planted=0,
+                     bomb_ticks_left=0,
+                     round_ticks_left=50,
+                     alive_teams={1})
+    env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+
+    for i in range(5):
+        r = float(env._c_env.rewards[i])
+        assert abs(r - (-3.0)) < 0.01, (
+            f"dead T agent {i} must receive the -3.0 loss penalty, got {r:.4f}")
+    # Winning team: alive and dead members alike get the +3.0 win reward
+    # (a CT that traded itself to wipe the Ts still contributed to the win).
+    for i in range(5, 10):
+        r = float(env._c_env.rewards[i])
+        assert abs(r - 3.0) < 0.01, (f"CT agent {i} must receive the +3.0 win reward, got {r:.4f}")
+    env.close()
+
+
+def test_natural_defuse():
+    """CT-defuse outcome, driven end-to-end through process_bomb.
+
+    Unlike the parametrized magnitude tests (which pre-set round_over=1 and
+    exercise ONLY the classification branch of compute_rewards), this test
+    drives the full bomb-defuse code path:
+
+      process_combat (no kills) → elimination check (t_alive > 0, skipped)
+      → process_bomb defuse branch fires → bomb_just_defused=1, round_over=1,
+      winner=1 → compute_rewards sees ct_won && bomb_just_defused → defuse.
+
+    Why a dedicated test (not a parametrize row):
+      - ct_defuse is the only scenario where round_over is NOT pre-set; the
+        test must arrange alive T agents so cs2_env.h:146's elimination check
+        is skipped, then step once to let process_bomb complete the defuse.
+        That requires structurally different setup from the other cases.
+      - We assert multiple invariants (flag values, per-agent rewards for
+        winner and loser) that wouldn't fit cleanly in a parametrize row.
+
+    Pitfall avoided:
+      An earlier attempt killed all T agents in the defuse setup. That made
+      t_alive=0, triggering cs2_env.h:146's unconditional elimination path
+      (round_over=1, winner=1) BEFORE process_bomb could fire. The defuse
+      branch then got skipped (cs2_bomb.h:27 guard), bomb_just_defused stayed
+      0, and the scenario mis-classified as elimination (3.0). We keep at
+      least one T agent alive, placed at a non-bomb area so process_combat
+      does nothing (actions are zeroed → no shoot), to let process_bomb reach
+      the defuse gate.
+    """
+    import numpy as np
+
+    env = _make_zeroed_env()
+    env.reset()
+
+    g = env._c_env.game
+    sd = env._c_env.sd.contents
+
+    # Kill every agent first to zero the slate.
+    for i in range(10):
+        g.agents[i].alive = 0
+        g.agents[i].hp = 0
+
+    # Alive CT defuser at the bomb area (agent 5).
+    ct = g.agents[5]
+    ct.alive = 1
+    ct.hp = 100
+    ct.team = 1
+    ct.has_kit = 0                     # use no-kit defuse_time
+    ct.area_idx = 0                    # arbitrary valid area
+
+    # Alive T at a different area so process_combat doesn't kill them
+    # (zeroed actions → no shoot → no combat resolution). Having a T alive
+    # is REQUIRED to avoid the elimination check in cs2_env.h:146 firing
+    # before process_bomb runs.
+    t = g.agents[0]
+    t.alive = 1
+    t.hp = 100
+    t.team = 0
+    t.area_idx = 1                     # anywhere != ct.area_idx
+
+    # Bomb state: planted, live, co-located with the CT defuser, round open.
+    g.bomb_planted = 1
+    g.bomb_area_idx = ct.area_idx
+    g.bomb_ticks_left = 50             # plenty of bomb-timer headroom
+    g.round_ticks_left = 100           # round timer well above zero
+    g.round_over = 0                   # CRITICAL: leave the round open
+    g.winner = -1                      # ongoing
+
+    # Short-circuit the defuse timer so ONE step completes the defuse.
+    defuse_time = int(sd.bomb_defuse_time)
+    g.bomb_being_defused_by = 5
+    g.bomb_defuse_ticks = defuse_time - 1
+
+    # HEAD_USE = 1 keeps the CT defusing this tick.
+    # Batch 3: USE moved from head 5 to head 4 after HEAD_AIM removal.
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    actions[5, 4] = 1
+
+    env.step(actions)
+
+    # Pin the load-bearing precondition: the decoy T must survive this step
+    # so process_combat's t_alive count stays positive and cs2_env.h:146's
+    # elimination guard does NOT fire before process_bomb. If a future
+    # process_combat change (passive chip damage, AoE, long-range hit) kills
+    # this T mid-step, the defuse branch gets skipped silently and the
+    # downstream reward assertions flip to the elimination magnitudes —
+    # this assertion points the failure at the real cause instead.
+    assert int(
+        g.agents[0].alive) == 1, ("decoy T agent must survive the step for natural defuse to fire; "
+                                  "if this trips, process_combat has grown side effects that break "
+                                  "test_natural_defuse's setup assumption")
+
+    ss = env._c_env.step_stats
+
+    # Classification flags: defuse fired, detonation did not.
+    assert int(ss.win_by_defuse) == 1, "win_by_defuse must be 1 after natural defuse"
+    assert int(ss.win_by_detonation) == 0, "win_by_detonation must be 0 after defuse"
+
+    # Per-agent rewards: CT gets +ct_defuse magnitude, T gets the penalty.
+    # _make_zeroed_env sets reward_win_ct_defuse=5.0.
+    ct_reward = float(env._c_env.rewards[5])
+    t_reward = float(env._c_env.rewards[0])
+    assert abs(ct_reward - 5.0) < 0.01, (f"CT defuser reward expected +5.0, got {ct_reward:.4f}")
+    assert abs(t_reward - (-5.0)) < 0.01, (f"T loser penalty expected -5.0, got {t_reward:.4f}")
+
+    # reward_win accumulator nets to zero (equal +mag and -mag with one of
+    # each team alive) — documents the accounting, doesn't gate correctness.
+    assert abs(float(ss.reward_win) - 0.0) < 0.01
+
+    env.close()
+
+
+def test_detonation_beats_elimination():
+    """T win-by-detonation (5.0) must exceed T win-by-elimination (3.0).
+
+    High-level smoke test; parametrized test above covers exact values.
+    """
+    import numpy as np
+
+    def _run(bomb_planted, bomb_ticks_left):
+        env = _make_zeroed_env()
+        env.reset()
+        _setup_round_end(env,
+                         winner=0,
+                         bomb_planted=bomb_planted,
+                         bomb_ticks_left=bomb_ticks_left,
+                         round_ticks_left=50,
+                         alive_teams={0})
+        actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+        env.step(actions)
+        # Per-agent reward of the winning T (agent 0). step_stats.reward_win
+        # is unusable here: since the finding-3 fix it sums BOTH teams'
+        # symmetric terminal rewards and nets to 0 every round.
+        val = float(env._c_env.rewards[0])
+        env.close()
+        return val
+
+    r_deton = _run(bomb_planted=1, bomb_ticks_left=-1)                 # detonation
+    r_elim = _run(bomb_planted=0, bomb_ticks_left=0)                   # elimination
+
+    assert r_deton > r_elim, (
+        f"Detonation reward ({r_deton}) should exceed elimination reward ({r_elim})")
+    assert abs(r_deton - 5.0) < 0.01, f"Detonation expected 5.0, got {r_deton:.4f}"
+    assert abs(r_elim - 3.0) < 0.01, f"Elimination expected 3.0, got {r_elim:.4f}"
+
+
+# ── Batch 1 Task 2: win-type flag lifecycle tests ─────────────────────────────
+
+
+def test_win_flags_cleared_on_round_reset():
+    """White-box: stuffing win_by_detonation/win_by_defuse to 1, then calling
+    env.reset(), must yield 0 for both fields.
+
+    Rationale for white-box approach (vs. driving to a real round end):
+    Task 3 (not yet implemented) is what sets these flags organically during
+    play. Testing against a live round-end would give a trivial pass (flags
+    never get set, so they stay 0) rather than a true FAIL→PASS cycle. By
+    force-setting the fields and asserting they are cleared, we get a
+    deterministic FAIL here (if the reset path were broken) and a PASS once
+    we confirm the existing memset in clear_stats() covers the new fields.
+
+    Implementation note: step_stats is a single StepStatsC struct on
+    Dust2EnvC (not per-team array). clear_stats() calls
+    memset(stats, 0, sizeof(StepStats)), which already zeroes every field
+    including the Batch-1-added win_by_detonation / win_by_defuse. No C
+    change is needed — this test confirms the existing bulk-zero is sufficient.
+    """
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+    ss = env._c_env.step_stats         # ctypes StepStatsC — single struct, not array-of-two
+
+    # Force-set both win-type flags to non-zero to simulate a previous round
+    # that ended by detonation or defuse.
+    ss.win_by_detonation = 1
+    ss.win_by_defuse = 1
+
+    # Round reset path: env.reset() calls clear_stats(&env->step_stats) which
+    # does memset(..., 0, sizeof(StepStats)) — must zero the new fields.
+    env.reset()
+
+    assert int(ss.win_by_detonation) == 0, (
+        f"win_by_detonation not cleared on round reset: {ss.win_by_detonation}")
+    assert int(
+        ss.win_by_defuse) == 0, (f"win_by_defuse not cleared on round reset: {ss.win_by_defuse}")
+    env.close()
+
+
+def test_step_stats_in_info_flag_default_off():
+    """With include_step_stats_in_info=False (default), non-terminal step() ticks
+    must return info == [] (byte-identical to pre-Task-6a behavior)."""
+    import numpy as np
+    env = make_env()                   # default flag off
+    env.reset()
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    _, _, _, _, info = env.step(actions)
+    assert info == [], f"flag-off should preserve empty info, got {info!r}"
+    env.close()
+
+
+def test_step_stats_in_info_flag_on_populates_view():
+    """With the flag on, every step() returns info[0]['step_stats'] exposing the
+    fields consumed by split_into_channels (reward_*, win_by_detonation/defuse).
+
+    Uses make_env to construct the env; no trainer involved — this is a pure
+    env-level unit test per Task 6a scope (no trainer harness yet; utof/cs2rl#8).
+    """
+    import numpy as np
+    env = make_env(include_step_stats_in_info=True)
+    env.reset()
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    _, _, _, _, info = env.step(actions)
+    assert len(info) == 1, f"flag-on expects one info dict per step, got {len(info)}"
+    assert "step_stats" in info[0]
+    ss = info[0]["step_stats"]
+    # Field surface required by split_into_channels (see train_helpers_batch1.py).
+    # After one step() the PBRS delta may be non-zero, so we assert readability + type
+    # rather than a specific value. Do NOT use `hasattr(ss, "_ss")` here: it is always
+    # True (StepStatsView.__slots__ guarantees _ss exists post-init), so an `or`-chained
+    # assertion would short-circuit and never touch the field list.
+    for f in ("reward_win", "reward_kills", "reward_deaths", "reward_bomb", "reward_pbrs",
+              "reward_shots", "reward_survival", "reward_inaction", "win_by_detonation",
+              "win_by_defuse"):
+        val = ss[f]                    # raises AttributeError via __getitem__ if field is missing
+        assert isinstance(val, (int, float)), f"expected numeric for {f}, got {type(val).__name__}"
+                                       # ndim==0 so split_into_channels's ndim==1 squeeze does not trigger.  # noqa: E501
+    assert ss.ndim == 0
+                                       # get() works with default.
+    assert ss.get("nonexistent_field", "sentinel") == "sentinel"
+    env.close()
+
+
+def test_step_stats_in_info_flag_on_merges_with_terminal_summary():
+    """On round_over ticks, info[0] must contain BOTH the terminal summary
+    (winner_t/winner_ct/bomb_planted/...) AND step_stats — not one or the other."""
+    import numpy as np
+    env = make_env(include_step_stats_in_info=True)
+    env.reset()
+    # Force round_over via direct state manipulation (same pattern as
+    # _setup_round_end in test_reward.py). Minimal: kill all agents of one team.
+    g = env._c_env.game
+    for i in range(10):
+        g.agents[i].alive = 0
+        g.agents[i].hp = 0
+    g.agents[5].alive = 1
+    g.agents[5].hp = 100
+    g.agents[5].team = 1
+    g.winner = 1
+    g.round_over = 1
+    actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    _, _, _, _, info = env.step(actions)
+    assert len(info) == 1
+    summary = info[0]
+    # Terminal summary fields (from _build_terminal_info) still present.
+    assert "winner_ct" in summary or "winner_t" in summary
+    # step_stats also present.
+    assert "step_stats" in summary
+    env.close()
+
+
+# ── F15 (2026-07-06 adversarial review): timeout counts as a CT win ──────────
+def test_timeout_counted_as_ct_win_in_stats():
+    """Rewards have always treated timeout as a CT win (reward_win_ct_timeout
+    positive for CT, symmetric penalty for T), but winner_ct stayed 0 —
+    dashboards undercounted CT wins by exactly the timeout rate and the
+    self-play save/team-switch logic read the skewed rate. winner_ct now
+    includes timeouts; the raw mechanism stays recoverable (winner == -1,
+    timed_out == 1), so defuse/elimination-only wins = winner_ct - timed_out."""
+    import numpy as np
+    env = _make_zeroed_env()
+    env.reset()
+    try:
+        # Drive a NATURAL timeout: both teams alive (so the elimination check
+        # can't preempt), one tick left on the round clock, round_over unset.
+        # process_bomb's timeout branch then sets winner=-1/timed_out=1 itself
+        # (the synthetic _setup_round_end path pre-sets round_over, which
+        # skips that branch and never raises timed_out).
+        _setup_round_end(env,
+                         winner=-1,
+                         bomb_planted=0,
+                         bomb_ticks_left=0,
+                         round_ticks_left=1,
+                         alive_teams={0, 1})
+        env._c_env.game.round_over = 0
+        env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+        ss = env._c_env.step_stats
+        assert ss.winner == -1, "raw winner must stay -1 on timeout (mechanism signal)"
+        assert ss.timed_out == 1
+        assert ss.winner_ct == 1, "timeout must count as a CT win in winner_ct (F15)"
+        assert ss.winner_t == 0
+        es = env._c_env.episode_stats
+        assert es.winner_ct == 1 and es.timed_out == 1
+
+        # Control: a T elimination win must NOT set winner_ct.
+        env2 = _make_zeroed_env()
+        env2.reset()
+        try:
+            _setup_round_end(env2,
+                             winner=0,
+                             bomb_planted=0,
+                             bomb_ticks_left=0,
+                             round_ticks_left=100,
+                             alive_teams={0})
+            env2.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
+            assert env2._c_env.step_stats.winner_ct == 0
+            assert env2._c_env.step_stats.winner_t == 1
+        finally:
+            env2.close()
+    finally:
+        env.close()

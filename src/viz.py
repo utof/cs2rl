@@ -22,8 +22,7 @@ def init_recording(save_path: str = None):
                 rrb.TimeSeriesView(name="HP", origin="/hp"),
             ),
             column_shares=[0.7, 0.3],
-        )
-    )
+        ))
     rr.send_blueprint(blueprint)
 
 
@@ -129,7 +128,7 @@ def log_simple_map(map_data):
     """
     from map import SIMPLE_ROOMS
 
-    rooms = SIMPLE_ROOMS  # list of (idx, x0, y0, x1, y1)
+    rooms = SIMPLE_ROOMS               # list of (idx, x0, y0, x1, y1)
 
     t_spawns = set(map_data.t_spawn_areas)
     ct_spawns = set(map_data.ct_spawn_areas)
@@ -140,8 +139,16 @@ def log_simple_map(map_data):
     colors = []
     base = 0
 
-    for idx, x0, y0, x1, y1 in rooms:
-        z = 0.0
+    for room in rooms:
+        # Verticality batch added z + is_ramp to SIMPLE_ROOMS tuples (now 7-element).
+        # Old tuple was (idx, x0, y0, x1, y1); new is (idx, x0, y0, x1, y1, z, is_ramp).
+        # Unpack flexibly so old/new shapes both work.
+        if len(room) == 5:
+            idx, x0, y0, x1, y1 = room
+            z = 0.0
+            is_ramp = False
+        else:
+            idx, x0, y0, x1, y1, z, is_ramp = room
         quad = [
             [x0, y0, z],
             [x1, y0, z],
@@ -151,14 +158,18 @@ def log_simple_map(map_data):
         vertices.extend(quad)
         triangles.append([base, base + 1, base + 2])
         triangles.append([base, base + 2, base + 3])
+        # Color priority: spawn > bombsite > ramp > floor. Ramp is distinct
+        # cyan so the user can spot which areas are sloped (verticality batch).
         if idx in t_spawns:
-            c = [180, 80, 80]  # red tint — T-side
+            c = [180, 80, 80]          # red tint — T-side
         elif idx in ct_spawns:
-            c = [80, 80, 180]  # blue tint — CT-side
+            c = [80, 80, 180]          # blue tint — CT-side
         elif idx in bombsites:
-            c = [200, 140, 40]  # orange — bombsite
+            c = [200, 140, 40]         # orange — bombsite
+        elif is_ramp:
+            c = [80, 200, 200]         # cyan — ramp/stairs (verticality)
         else:
-            c = [100, 110, 100]  # grey — corridor/mid
+            c = [100, 110, 100]        # grey — corridor/mid
         colors.extend([c, c, c, c])
         base += 4
 
@@ -178,12 +189,18 @@ def log_simple_map(map_data):
     # faces at connections are fine — they still look like a 3D maze from any
     # non-top-down angle.
     WALL_H = 150.0
-    WALL_COLOR = [220, 210, 180]  # warm off-white
+    WALL_COLOR = [220, 210, 180]       # warm off-white
 
     w_verts = []
     w_tris = []
     w_base = 0
-    for _, x0, y0, x1, y1 in rooms:
+    for room in rooms:
+        # Verticality batch added z + is_ramp; tuple is now 7-element. Extract
+        # only the bbox here (walls don't currently care about z extrusion).
+        if len(room) == 5:
+            _, x0, y0, x1, y1 = room
+        else:
+            _, x0, y0, x1, y1, *_ = room
         # 4 edges of the rectangle: bottom, right, top, left
         edges = [
             ((x0, y0), (x1, y0)),
@@ -245,17 +262,25 @@ def log_tick(game_state, tick: int, rewards: dict):
                     labels=[f"{'[B]' if agent.has_bomb else ''}{agent.hp}hp"],
                 ),
             )
-            dx = np.cos(agent.facing) * 120
-            dy = np.sin(agent.facing) * 120
-            # facing == aim direction: shooting uses cosf/sinf(facing) as the ray
-            aim_color = [min(c + 80, 255) for c in color]  # brighter than body
+            # Batch 3.5: aim direction is 3D (yaw + pitch). Direction vector
+            # d = (cos(p)cos(y), cos(p)sin(y), sin(p)) matches the 3D combat
+            # hit-test in cs2_combat.h::process_combat. pitch=0 → horizontal
+            # (z-component = 0); pitch=±π/2 → straight up/down. Length 120u
+            # makes the arrow visible at agent scale (HIT_HALF_WIDTH=16).
+            pitch = getattr(agent, "pitch", 0.0)                                        # backward-compat: pre-Batch-3.5 viz
+            cos_p = np.cos(pitch)
+            sin_p = np.sin(pitch)
+            dx = cos_p * np.cos(agent.facing) * 120
+            dy = cos_p * np.sin(agent.facing) * 120
+            dz = sin_p * 120
+            aim_color = [min(c + 80, 255) for c in color]                               # brighter than body
             rr.log(
                 f"{entity}/aim",
                 rr.LineStrips3D(
-                    [[agent.pos.tolist(), (agent.pos + [dx, dy, 0]).tolist()]],
+                    [[agent.pos.tolist(), (agent.pos + [dx, dy, dz]).tolist()]],
                     colors=[aim_color],
                     radii=[4.0],
-                    labels=["aim"],
+                    labels=[f"aim p={np.degrees(pitch):+.1f}°"],
                 ),
             )
         else:

@@ -1,3 +1,11 @@
+// ── DEPLOY SUSPENDED 2026-05-03 ────────────────────────────────────────────
+// Active development paused after Batch 3.5 (sim-only training take-priority).
+// POC verified on a real CS2 server pre-suspend; resuming pending sim/RL
+// showing promising emergent behaviour. Last-known-good schema: v2-105dim.
+// Do NOT plumb new sim obs/action surface through here as the sim evolves —
+// inevitable CSS API drift + ONNX I/O changes mean a from-scratch pass is
+// likely on resume. Leave as reference, not living code. See gh #(filed).
+// ───────────────────────────────────────────────────────────────────────────
 using System.Text.Json;
 using CounterStrikeSharp.API;
 using RayTraceAPI;  // FUNPLAY-pro-CS2/Ray-Trace v1.0.7 — exposes CRayTraceInterface for LOS traces.
@@ -26,6 +34,14 @@ public class CS2RLBotPlugin : BasePlugin
     private readonly Dictionary<CCSPlayerController, PolicyInference> _policies    = new();
     private readonly Dictionary<CCSPlayerController, ActionExecutor>  _executors   = new();
     private readonly Dictionary<CCSPlayerController, int[]>           _cachedActions = new();
+    // Batch 3 fix: Δyaw is NO LONGER cached across server ticks. Training
+    // applies Δyaw once per env step (= once per inference call) — re-applying
+    // the cached value on the 3 non-inference ticks between inferences would
+    // 4× over-rotate (e.g. 45° Δyaw → 180° per inference cycle). The
+    // continuous-aim value flows through a local variable in OnTick directly
+    // into ActionExecutor.Execute, which gates the Teleport call on
+    // isInferenceTick=true. On the 3 non-inference ticks between, yaw stays
+    // wherever the last inference Teleport set it.
 
     // ── Observation pipeline ──────────────────────────────────────────────────
     private readonly Dictionary<CCSPlayerController, EnemyMemory> _enemyMemories = new();
@@ -45,6 +61,11 @@ public class CS2RLBotPlugin : BasePlugin
     private string   _modelPath    = string.Empty;
     private int[]    _actionSizes  = Array.Empty<int>();
     private int      _obsDim;
+    // Batch 3: continuous-aim head dimensionality. 0 = no aim head (Batch-2
+    // checkpoint, legacy NumHeads+2 ONNX layout). >0 = continuous Δyaw head
+    // (currently always 1 — single-scalar Δyaw). Drives PolicyInference's
+    // hasAimHead constructor flag.
+    private int      _aimDim;
 
     // ── Structured logger (Serilog) ───────────────────────────────────────────
     private Serilog.ILogger _slog = Serilog.Log.Logger;
@@ -98,6 +119,26 @@ public class CS2RLBotPlugin : BasePlugin
                          .Select(e => e.GetInt32())
                          .ToArray();
 
+        // Batch 3: aim_dim is a top-level int field in the sidecar (added by T6
+        // export_policy.py). Missing/0 means a Batch-2 checkpoint (no aim head),
+        // and we fall back to the legacy NumHeads+2 output layout.
+        _aimDim = doc.RootElement.TryGetProperty("aim_dim", out var aimProp)
+            ? aimProp.GetInt32()
+            : 0;
+        // Cross-check the sidecar's aim_dim against the plugin's compiled AimDim.
+        // A future Batch-3.5 export (aim_dim=2 for Δyaw + Δpitch) shipped against
+        // a plugin compiled with AimDim=1 would otherwise hit an opaque ORT
+        // shape mismatch at construction. Surface a clear deploy-time error.
+        if (_aimDim != 0 && _aimDim != PolicyInference.AimDim)
+        {
+            Logger.LogError(
+                "[CS2RLBot] sidecar aim_dim={Sidecar} but plugin compiled with " +
+                "PolicyInference.AimDim={Compile}. Rebuild plugin or re-export " +
+                "policy with matching dim.",
+                _aimDim, PolicyInference.AimDim);
+            return;
+        }
+
         // Read obs_version from sidecar — required for version handshake with mapdata JSON
         _obsVersion = doc.RootElement.TryGetProperty("obs_version", out var vProp)
             ? vProp.GetString() ?? string.Empty
@@ -105,7 +146,7 @@ public class CS2RLBotPlugin : BasePlugin
         if (string.IsNullOrEmpty(_obsVersion))
         {
             Logger.LogWarning("[CS2RLBot] policy_lstm.json missing obs_version — run export_policy.py again");
-            _obsVersion = "v1-104dim"; // assume current version if not present
+            _obsVersion = "v1-105dim"; // assume current version (105-dim obs with carrier bit at obs[104]) if not present
         }
 
         // 4. Resolve model path
@@ -117,11 +158,11 @@ public class CS2RLBotPlugin : BasePlugin
         }
 
         Logger.LogInformation(
-            "[CS2RLBot] Loaded config — obs_dim={ObsDim} action_sizes=[{Sizes}] model={Model}",
-            _obsDim, string.Join(",", _actionSizes), _modelPath);
+            "[CS2RLBot] Loaded config — obs_dim={ObsDim} action_sizes=[{Sizes}] aim_dim={AimDim} model={Model}",
+            _obsDim, string.Join(",", _actionSizes), _aimDim, _modelPath);
         _slog.Information(
-            "[CS2RLBot] Loaded config — obs_dim={ObsDim} action_sizes=[{Sizes}] model={Model}",
-            _obsDim, string.Join(",", _actionSizes), _modelPath);
+            "[CS2RLBot] Loaded config — obs_dim={ObsDim} action_sizes=[{Sizes}] aim_dim={AimDim} model={Model}",
+            _obsDim, string.Join(",", _actionSizes), _aimDim, _modelPath);
 
         // Load map normalization constants (generated by deploy/export_mapdata.py)
         // Path: two levels up from ModuleDirectory (plugins/CS2RLBot/) → addons/counterstrikesharp/ → mapdata/
@@ -243,9 +284,14 @@ public class CS2RLBotPlugin : BasePlugin
             // Lazy-initialise dicts on first encounter
             if (!_policies.ContainsKey(bot))
             {
-                _policies[bot]      = new PolicyInference(_modelPath, _actionSizes, Logger);
+                // Batch 3: hasAimHead is driven by sidecar `aim_dim > 0`. Older
+                // checkpoints (aim_dim=0 or field absent) get the legacy layout.
+                _policies[bot]      = new PolicyInference(_modelPath, _actionSizes, Logger, hasAimHead: _aimDim > 0);
                 _executors[bot]     = new ActionExecutor();
-                _cachedActions[bot] = new int[8]; // 8 slots (move/aim/shoot/use/weapon/reload/crouch/jump); extras default to 0
+                // Batch 3: ACTION_DIM 8→7 (move/shoot/reload/weapon/use/crouch/jump);
+                // HEAD_AIM was index 1 in the old 8-element layout and is now a
+                // separate continuous mu_aim output, not in this int[] cache.
+                _cachedActions[bot] = new int[7];
                 _enemyMemories[bot] = new EnemyMemory();
                 Logger.LogInformation("[CS2RLBot] Bot registered: {Name} team={Team}",
                     bot.PlayerName, bot.TeamNum);
@@ -261,6 +307,13 @@ public class CS2RLBotPlugin : BasePlugin
                     shouldEndWarmup = true;
                 }
             }
+
+            // Δyaw flows directly from this inference into Execute(...) below,
+            // ONLY on inference ticks. On non-inference ticks we pass 0f — the
+            // executor won't use it (its yaw block is gated on isInferenceTick),
+            // but 0f makes the data-flow explicit and removes any risk of stale
+            // values being silently re-applied if the gate were ever loosened.
+            float deltaYawRad = 0f;
 
             if (isInferenceTick)
             {
@@ -330,22 +383,29 @@ public class CS2RLBotPlugin : BasePlugin
                     obs = new float[_obsDim]; // fallback: obsBuilder failed to init (mapdata missing or version mismatch)
                 }
 
-                float[][] logits = _policies[bot].RunInference(obs, isDone: false);
+                // Batch 3: RunInference now returns (logits, muAim). muAim is
+                // an empty array when the loaded checkpoint has no aim head.
+                var (logits, muAim) = _policies[bot].RunInference(obs, isDone: false);
 
                 int[] cached = _cachedActions[bot];
                 int limit = Math.Min(logits.Length, cached.Length);
                 for (int i = 0; i < limit; i++)
                     cached[i] = ActionExecutor.Argmax(logits[i]);
 
-                _slog.Debug("[CS2RLBot] Inference tick={Tick} bot={Bot} actions=[{Actions}]",
-                    _tickCounter, bot.PlayerName, string.Join(",", cached));
+                // Pass the fresh Δyaw through to Execute below. Not cached:
+                // applied exactly once this inference cycle, then discarded.
+                // 0f when no aim head present.
+                deltaYawRad = muAim.Length > 0 ? muAim[0] : 0f;
+
+                _slog.Debug("[CS2RLBot] Inference tick={Tick} bot={Bot} actions=[{Actions}] dYaw={DYaw:F4}",
+                    _tickCounter, bot.PlayerName, string.Join(",", cached), deltaYawRad);
 
                 if (LogObsConVar.Value == 1)
                     _slog.Debug("[CS2RLBot] ObsDump tick={Tick} obs=[{Obs}]",
                         _tickCounter, string.Join(",", obs));
             }
 
-            _executors[bot].Execute(bot, pawn, _cachedActions[bot], isInferenceTick);
+            _executors[bot].Execute(bot, pawn, _cachedActions[bot], deltaYawRad, isInferenceTick);
         }
 
         if (shouldEndWarmup)
@@ -386,6 +446,10 @@ public class CS2RLBotPlugin : BasePlugin
             mem.Reset();
         _bombState = default;
         _obsBuilder?.ClearReloadCache(); // _reloadStartTimes keys are entity indices; stale across rounds
+        // Defensive mirror of OnRoundEnd: if OnRoundEnd is skipped (warmup, plugin reload,
+        // server crash recovery, freezetime abort), latches would otherwise drift across rounds.
+        // ObservationBuilder.cs:296 docstring explicitly anticipates RoundStart usage.
+        _obsBuilder?.ClearCarrierLatches();
         return HookResult.Continue;
     }
 
@@ -399,6 +463,9 @@ public class CS2RLBotPlugin : BasePlugin
         }
         _slog.Information("[CS2RLBot] RoundEnd — LSTM reset for {Count} bot(s)", _policies.Count);
         _obsBuilder?.ClearReloadCache(); // prevent stale reload tracking across round boundary
+        // Batch 2: reset designated-carrier latches so each new round can re-latch.
+        // Mirrors the round-fixed sim semantics: obs[104] is set once per round, then frozen.
+        _obsBuilder?.ClearCarrierLatches();
         return HookResult.Continue;
     }
 

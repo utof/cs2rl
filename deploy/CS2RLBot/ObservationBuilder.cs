@@ -1,5 +1,15 @@
 // deploy/CS2RLBot/ObservationBuilder.cs
-// Builds the 104-dim observation vector used by the RL policy, matching
+//
+// ── DEPLOY SUSPENDED 2026-05-03 ────────────────────────────────────────────
+// Active development paused after Batch 3.5 (sim-only training take-priority).
+// POC verified on a real CS2 server pre-suspend; resuming pending sim/RL
+// showing promising emergent behaviour. Last-known-good schema: v2-105dim.
+// Do NOT bump SupportedVersion or add features here as the sim's obs schema
+// evolves — sim should grow its own internal versioning independent of
+// deploy. See gh #(filed) for resume criteria + scope notes.
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Builds the 105-dim observation vector used by the RL policy, matching
 // cs2_observations.h exactly. See that file for the ground-truth formula
 // and dimension layout.
 using System.Text.Json;
@@ -60,10 +70,27 @@ internal struct BombState
 
 internal sealed class ObservationBuilder
 {
-    private const string SupportedVersion = "v1-104dim";
+    // VERTICALITY (T6, 2026-05-03): v1→v2 bump matches obs schema change — self z, teammate
+    // z-delta, and enemy z-delta (was previously zero-filled placeholders) are now populated.
+    // Sidecar mapdata exposes `centroids_z` for sim-side ground-snap, but the deploy plugin
+    // intentionally does NOT load it: we use `pawn.AbsOrigin.Z` directly (engine truth, same
+    // pattern as the existing X/Y reads at line ~144). For dust2 the sidecar is zero-filled
+    // anyway (verticality deferred for real dust2 maps; spec §3.9 out-of-scope), so reading
+    // it would actually produce wrong z obs in production. The version handshake (this
+    // string ↔ obs_version in the mapdata sidecar) is what gates correct deploy. If a future
+    // map ships with non-trivial centroids_z AND the sim begins relying on centroid z rather
+    // than engine z, revisit this and plumb _centroidsZ through CS2RLBot.cs.
+    private const string SupportedVersion = "v2-105dim";
     private const int    TeamSize         = 5;
     private const int    Terrorist        = 2; // CS2 TeamNum for T-side
     private const int    CounterTerrorist = 3; // CS2 TeamNum for CT-side
+
+    // Z-axis normalization scale for self z and z-delta obs slots (world-space CS units).
+    // Matches the literal `128.0f` divisor in src/c_env/cs2_observations.h:38, :78, :135.
+    // Picked to keep typical map z-spans (catwalk ≈128u above bombsite ≈64u above floor 0)
+    // within roughly [-1, 1] for the network ingest. NOT a clip — values outside the range
+    // (e.g. mid-jump apex) pass through, then get bounded by the global ClipAll() to ±5.
+    private const float  ZNormScale       = 128f;
 
     private readonly int          _obsDim;
     private readonly MapConstants _map;
@@ -75,6 +102,21 @@ internal sealed class ObservationBuilder
     // Pitfall: do NOT use EntityHandle.Raw — CEntityHandle is an opaque CSS type and
     // its .Raw is not publicly exposed in v1.0.364. Use CBaseEntity.Index instead.
     private readonly Dictionary<uint, float> _reloadStartTimes = new();
+
+    // Batch 2: round-fixed designated-carrier latch (obs[104]).
+    // Keyed by bot.Slot (int) because ObservationBuilder is a singleton shared across
+    // all bots — NOT per-bot instance state.
+    //
+    // Semantics (mirroring sim emission at src/c_env/cs2_observations.h:178-185):
+    //   - Set ONCE per round: the first tick a bot is observed to own the bomb
+    //     (HasC4 == true), that bot's Slot is latched as designated carrier.
+    //   - NEVER updated mid-round on drop+pickup — the role bit is intentionally
+    //     stable so the policy learns a consistent role assignment.
+    //   - Reset on every round-end via ClearCarrierLatches() (called from OnRoundEnd
+    //     in CS2RLBot.cs, mirroring how ClearReloadCache() is called there).
+    // Value: the bot.Slot that is the designated carrier for THIS round, or -1 if
+    // no latch has been set yet this round.
+    private readonly Dictionary<int, int> _designatedCarrierByBot = new();
 
     public ObservationBuilder(int obsDim, string obsVersion, MapConstants map)
     {
@@ -88,7 +130,7 @@ internal sealed class ObservationBuilder
     }
 
     /// <summary>
-    /// Build the 104-dim obs vector for one bot.
+    /// Build the 105-dim obs vector for one bot.
     /// Returns the internal buffer — caller must consume it before the next Build call (shared buffer).
     /// All FillX helpers write into _buf; ClipAll runs last to enforce [-5, 5].
     /// </summary>
@@ -124,12 +166,20 @@ internal sealed class ObservationBuilder
         _buf[2] = bot.PawnHasHelmet ? 1f : 0f;
 
         // Absolute position — formula: x * inv_x_range - x_offset  (cs2_observations.h:33-34)
+        // VERTICALITY (T6): self z lives inside the same null-guard as x/y. On null AbsOrigin
+        // (rare — pawn freed mid-tick), all three slots silently retain their previous values
+        // from the buffer (Array.Clear runs once at the top of Build, then FillSelf fills 0..22;
+        // a null skip leaves whatever was last written or 0). Sim parity: cs2_observations.h:38
+        // reads `a->z / 128.0f` unconditionally, but agent.alive=false would zero the obs there
+        // too — so the rare null case is effectively zero in both worlds. Pitfall: do NOT use
+        // `centroids_z[area_idx]` for z — engine truth is the source for xy, use it for z too
+        // (consistency + dust2 sidecar centroids_z is zero-filled per spec §3.9).
         if (pawn.AbsOrigin != null)
         {
             _buf[3] = pawn.AbsOrigin.X * _map.InvXRange - _map.XOffset;
             _buf[4] = pawn.AbsOrigin.Y * _map.InvYRange - _map.YOffset;
+            _buf[5] = pawn.AbsOrigin.Z / ZNormScale;
         }
-        _buf[5] = 0f; // z placeholder (matches sim)
 
         // Velocity / 250 — confirmed: AbsVelocity (not pawn.Velocity = CNetworkVelocityVector)
         _buf[6] = pawn.AbsVelocity.X / 250f;
@@ -277,6 +327,13 @@ internal sealed class ObservationBuilder
     public void ClearReloadCache() => _reloadStartTimes.Clear();
 
     /// <summary>
+    /// Clear the designated-carrier latches for all bots. Must be called on every
+    /// RoundEnd (and RoundStart if used) so each round can re-latch independently.
+    /// Mirrors ClearReloadCache() — both are called from OnRoundEnd in CS2RLBot.cs.
+    /// </summary>
+    public void ClearCarrierLatches() => _designatedCarrierByBot.Clear();
+
+    /// <summary>
     /// Fire cooldown normalized to [0,1] using slot-based cycle_ticks from WEAPON_DEFS.
     /// WEAPON_DEFS cycle_ticks at 16Hz: rifle=2, pistol=3, knife=0.
     /// At 64Hz (CS2 server rate): multiply by 4 → rifle=8, pistol=12.
@@ -317,8 +374,14 @@ internal sealed class ObservationBuilder
 
     private void FillTeammates(CCSPlayerPawn selfPawn, List<CCSPlayerController> teammates)
     {
+        // VERTICALITY (T6, 2026-05-03): teammate z-delta is unconditional (matches sim:78);
+        // i.e. written whenever the teammate is alive — no visibility gate (contrast with
+        // enemy z-delta in FillEnemies, which IS can_see-gated to mirror sim:135 asymmetry).
         float selfX = selfPawn.AbsOrigin?.X ?? 0f;
         float selfY = selfPawn.AbsOrigin?.Y ?? 0f;
+        // selfZ captured once here (not per-teammate) for the same reason as selfX/selfY:
+        // null-safe fallback to 0 if pawn origin is unavailable this tick.
+        float selfZ = selfPawn.AbsOrigin?.Z ?? 0f;
 
         int filled = 0;
         foreach (var tm in teammates)
@@ -339,7 +402,11 @@ internal sealed class ObservationBuilder
 
             _buf[baseIdx + 0] = ObsMath.NormRel(dx, _map.MapDiag);
             _buf[baseIdx + 1] = ObsMath.NormRel(dy, _map.MapDiag);
-            _buf[baseIdx + 2] = 0f; // z placeholder
+            // VERTICALITY (T6): teammate z-delta normalized by ZNormScale (=128, named const
+            // shared with self-z and enemy-z) — matches sim cs2_observations.h:78
+            // (`obs[base + 2] = (tm->z - a->z) / 128.0f`). Reached only inside the alive-teammate
+            // branch (the early-`continue` above ensures tmPawn.AbsOrigin is non-null here).
+            _buf[baseIdx + 2] = (tmPawn.AbsOrigin.Z - selfZ) / ZNormScale;
             _buf[baseIdx + 3] = tmPawn.Health / 100f;
             _buf[baseIdx + 4] = 1f; // alive
             _buf[baseIdx + 5] = MathF.Sin(angle);
@@ -364,6 +431,10 @@ internal sealed class ObservationBuilder
         // mem_s (EnemyMemory key) is the ORIGINAL team-slot index, not the distance rank.
         float selfX = selfPawn.AbsOrigin?.X ?? 0f;
         float selfY = selfPawn.AbsOrigin?.Y ?? 0f;
+        // VERTICALITY (T6, 2026-05-03): enemy z-delta is can_see-gated (matches sim:135
+        // asymmetry vs teammates which are unconditional). selfZ captured once here for the
+        // dx/dy/dz fill below; null-safe fallback to 0 mirrors selfX/selfY pattern.
+        float selfZ = selfPawn.AbsOrigin?.Z ?? 0f;
 
         // Build distance-sorted index array (mirrors sim's order[] array).
         // The sim always reads en->x/en->y regardless of alive status. In CSS, a dead
@@ -427,7 +498,14 @@ internal sealed class ObservationBuilder
 
                     _buf[baseIdx + 0] = ObsMath.NormRel(dx, _map.MapDiag);
                     _buf[baseIdx + 1] = ObsMath.NormRel(dy, _map.MapDiag);
-                    _buf[baseIdx + 2] = 0f; // z placeholder
+                    // VERTICALITY (T6): enemy z-delta normalized by ZNormScale (=128, named
+                    // const shared with self-z and teammate-z) — matches sim
+                    // cs2_observations.h:135 (`obs[base + 2] = (en->z - a->z) / 128.0f`).
+                    // Strictly INSIDE the `if (canSee && enemyPawn?.AbsOrigin != null)` block:
+                    // when can_see=0 the slot stays 0 from the buffer clear (sim parity).
+                    // Pitfall: do NOT mirror this into the stale-lastPos branch below — sim
+                    // does not write z-delta there either.
+                    _buf[baseIdx + 2] = (enemyPawn.AbsOrigin.Z - selfZ) / ZNormScale;
                     _buf[baseIdx + 5] = MathF.Sin(ang);
                     _buf[baseIdx + 6] = MathF.Cos(ang);
                     _buf[baseIdx + 7] = ObsMath.NormRel(dist, _map.MapDiag);
@@ -523,6 +601,37 @@ internal sealed class ObservationBuilder
         int ctAlive = allPlayers.Count(p => p.IsValid && p.TeamNum == CounterTerrorist && p.PawnIsAlive);
         _buf[102] = tAlive  / (float)TeamSize;
         _buf[103] = ctAlive / (float)TeamSize;
+
+        // obs[104]: round-fixed designated-carrier role bit (Batch 2, cs2_observations.h:178-185).
+        //
+        // Latch semantics:
+        //   - First tick this bot is observed owning the bomb (HasC4 == true after
+        //     round-start), its Slot is recorded as the designated carrier for this round.
+        //   - The bit is held for the rest of the round even if the bot later drops
+        //     the bomb — NEVER re-latched mid-round (drop+pickup must not shift the bit).
+        //   - The latch dictionary is cleared on RoundEnd via ClearCarrierLatches()
+        //     (called from CS2RLBot.cs OnRoundEnd, same site as ClearReloadCache()).
+        //
+        // Design rationale: policy was trained with round-fixed carrier semantics in the
+        // sim (obs[104] is set once and frozen). Changing it mid-round would produce obs
+        // the policy has never seen during training → distribution shift / silent corruption.
+        //
+        // Pitfall: ObservationBuilder is a singleton, so state is per-bot.Slot, not
+        // per-instance. Using _designatedCarrierByBot[bot.Slot] instead of a plain int field.
+        int botSlot = bot.Slot;
+        _designatedCarrierByBot.TryGetValue(botSlot, out int latchedSlot); // 0 if missing; see below
+        // TryGetValue returns 0 (default int) for a missing key, which would alias slot 0.
+        // Use -1 sentinel: store as latchedSlot is valid only when key EXISTS.
+        bool hasLatch = _designatedCarrierByBot.ContainsKey(botSlot);
+        if (!hasLatch && HasC4(selfPawn))
+        {
+            // First observation this round where this bot owns the bomb → latch it.
+            _designatedCarrierByBot[botSlot] = botSlot;
+            latchedSlot = botSlot;
+            hasLatch = true;
+        }
+        // 1.0 if this bot is the designated carrier (latched this round), else 0.0.
+        _buf[104] = (hasLatch && latchedSlot == botSlot) ? 1.0f : 0.0f;
     }
 
     // ─────────────────────────────────────────────────────────────────────────

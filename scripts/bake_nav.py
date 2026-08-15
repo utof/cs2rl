@@ -42,7 +42,7 @@ def _arr_int8(arr, name):
 
 # Area bounds: [N * 4] = [x0, y0, x1, y1] per area (from SIMPLE_ROOMS)
 area_bounds = np.zeros((md.N, 4), dtype=np.float32)
-for idx, x0, y0, x1, y1 in SIMPLE_ROOMS:
+for idx, x0, y0, x1, y1, *_ in SIMPLE_ROOMS:           # *_ absorbs z, is_ramp (7-tuple schema)
     area_bounds[idx] = [x0, y0, x1, y1]
 
 # Spawn area_ids → area_idx (area_id == area_idx for simple map)
@@ -62,6 +62,11 @@ aids_flat = md.area_ids.astype(np.int32).flatten()
 bm_flat = md.bombsite_mask.astype(np.int8).flatten()
 bi_flat = md.bombsite_by_idx.astype(np.int8).flatten()
 bd_flat = md.bombsite_dist.astype(np.float32).flatten()
+                                                       # Verticality batch: per-area terrain elevation + ramp flag.
+                                                       # centroids_z is the TOP elevation for ramps (e.g., a 0→64 ramp stores 64).
+                                                       # is_ramp is bool — convert to int8 for nav_data.h consistency with bombsite_mask.
+cz_flat = md.centroids_z.astype(np.float32).flatten()  # [N]
+isr_flat = md.is_ramp.astype(np.int8).flatten()        # [N]
 
 H, W = md.grid.shape
 
@@ -112,6 +117,10 @@ lines = [
     _arr_int8(bm_flat, "NAV_BOMBSITE_MASK"),
     _arr_int8(bi_flat, "NAV_BOMBSITE_BY_IDX"),
     _arr_float(bd_flat, "NAV_BOMBSITE_DIST"),
+                                                                                # Verticality batch — referenced by cs2_movement.h:74 cliff guard
+                                                                                # and cs2_combat.h 3D hit-test (Batch 3.5 T5).
+    _arr_float(cz_flat, "NAV_CENTROIDS_Z"),
+    _arr_int8(isr_flat, "NAV_IS_RAMP"),
     _arr_float(area_bounds.flatten(), "NAV_AREA_BOUNDS"),
     _arr_float(delta_x, "NAV_DELTA_X"),
     _arr_float(delta_y, "NAV_DELTA_Y"),

@@ -6,7 +6,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = REPO_ROOT / "src" / "train.py"
 
 
-def run_train_command(*args, timeout=180):
+# gh#95: 600s (not 180s) because the --smoke subprocess competes with a live GPU
+# training run on this box — the flake was CPU/GPU contention, not runtime growth.
+def run_train_command(*args, timeout=600):
     return subprocess.run(
         [sys.executable, str(TRAIN_SCRIPT), *args],
         cwd=REPO_ROOT,
@@ -28,6 +30,17 @@ def test_train_help_shows_current_cli():
             "--vec-backend",
             "--record-policy",
             "--eval-policy",
+            "--no-dead-run-abort",                     # F14: dead-run abort opt-out must stay exposed
+            "--warmstart-entropy",
+            "--warmstart-grace-steps",
+            "--warmstart-ramp-steps",
+            "--warmstart-alpha-ceiling",
+            "--reward-ct-survival",                    # A1 arm (spec §5)
+            "--reward-win-ct-timeout",                 # A1b arm
+            "--pbrs-nav-weight-t",                     # non-`reward_`-prefixed weight
+            "--reward-symmetrize",                     # A2 arm
+            "--tct-split-heads",                       # Batch 7 heads split (spec 2026-08-13)
+            "--tct-split-trunk",                       # T/CT actor-trunk split (spec 2026-08-15)
     ):
         assert flag in result.stdout, f"{flag} missing from --help output"
 
@@ -73,6 +86,137 @@ def test_dump_config_writes_json(tmp_path):
     for key in ("learning_rate", "gamma", "clip_coef", "batch_size"):
         assert key in config, f"missing key {key}"
     assert isinstance(config["batch_size"], int) and config["batch_size"] > 0
+
+
+def _dump_config(tmp_path, *extra_args):
+    """Run --dump-config through `uv run` (project venv) and return the parsed
+    config.json — the four warmstart keys must round-trip through the REAL
+    argparse surface, not a hand-built Namespace (which would only exercise
+    build_train_config's getattr fallbacks and hide a missing add_argument).
+
+    120s (not 60s) for the same reason as gh#95 on run_train_command: this
+    subprocess competes with a live GPU training run on this box, and the
+    failure mode was contention, not runtime growth."""
+    import json
+
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir(exist_ok=True)
+    r = subprocess.run([
+        "uv", "run", "python",
+        str(TRAIN_SCRIPT), "--dump-config", "--checkpoint-dir",
+        str(ckpt), *extra_args
+    ],
+                       capture_output=True,
+                       text=True,
+                       timeout=120,
+                       cwd=REPO_ROOT)
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    return json.loads((ckpt / "config.json").read_text())
+
+
+def test_warmstart_entropy_config_keys(tmp_path):
+    cfg = _dump_config(tmp_path)
+    assert cfg["warmstart_entropy"] is False
+    assert cfg["warmstart_grace_steps"] == 5_000_000
+    assert cfg["warmstart_ramp_steps"] == 10_000_000
+    assert cfg["warmstart_alpha_ceiling"] == 0.0
+
+    # Override ALL four with non-default values. Overriding only some would let
+    # a misspelled dest= or a deleted add_argument pass silently: for the
+    # untouched flags argparse's default equals build_train_config's getattr
+    # fallback, so the dumped config looks correct either way. The 0.25 ceiling
+    # is also the only exercise of type=float through the real parser.
+    cfg = _dump_config(tmp_path, "--warmstart-entropy", "--warmstart-grace-steps", "1000",
+                       "--warmstart-ramp-steps", "2000", "--warmstart-alpha-ceiling", "0.25")
+    assert cfg["warmstart_entropy"] is True
+    assert cfg["warmstart_grace_steps"] == 1000
+    assert cfg["warmstart_ramp_steps"] == 2000
+    assert cfg["warmstart_alpha_ceiling"] == 0.25
+
+
+def test_reward_weight_config_keys_default_to_make_env_values(tmp_path):
+    """Every threaded weight lands in config.json at its make_env default.
+
+    Together with test_reward_weight_wiring.py (which pins those defaults
+    against the real signature) this is the "unflagged run is identical to
+    today" guarantee, verified through the REAL argparse surface: a typo'd
+    dest= or a missing add_argument would leave the key at the getattr
+    fallback and could not be caught by a hand-built Namespace.
+    """
+    from train import REWARD_WEIGHT_DEFAULTS
+
+    cfg = _dump_config(tmp_path)
+    for name, default in REWARD_WEIGHT_DEFAULTS.items():
+        assert name in cfg, f"{name} missing from config.json"
+        assert cfg[name] == default, f"{name}: {cfg[name]} != {default}"
+    assert cfg["reward_symmetrize"] is False
+
+
+def test_reward_weight_cli_overrides_round_trip(tmp_path):
+    """Representative overrides + the symmetrize flag survive CLI → config.json.
+
+    Uses the two weights the A/B actually moves (spec §5) plus one PBRS weight
+    (proving the six non-`reward_`-prefixed kwargs are wired too) and one
+    per-outcome win magnitude.
+    """
+    cfg = _dump_config(tmp_path, "--reward-ct-survival", "0.0", "--reward-win-ct-timeout", "3.0",
+                       "--pbrs-nav-weight-t", "0.07", "--reward-win-t-detonation", "6.5",
+                       "--reward-symmetrize")
+    assert cfg["reward_ct_survival"] == 0.0
+    assert cfg["reward_win_ct_timeout"] == 3.0
+    assert cfg["pbrs_nav_weight_t"] == 0.07
+    assert cfg["reward_win_t_detonation"] == 6.5
+    assert cfg["reward_symmetrize"] is True
+    # untouched neighbours keep their defaults (no accidental global override)
+    assert cfg["reward_kill"] == 0.3
+
+
+def test_tag_diagnostic_config_keys(tmp_path):
+    """TAG flags land in config.json (provenance) — spec 2026-08-13 §4.1.
+
+    Both keys overridden together: for untouched flags argparse's default
+    equals build_train_config's getattr fallback, so a typo'd dest= would
+    pass silently (same rationale as the warmstart key test above).
+    """
+    cfg = _dump_config(tmp_path)
+    assert cfg["tag_diagnostic"] is False
+    assert cfg["tag_every"] == 5
+
+    cfg = _dump_config(tmp_path, "--tag-diagnostic", "--tag-every", "2")
+    assert cfg["tag_diagnostic"] is True
+    assert cfg["tag_every"] == 2
+
+
+def test_tct_split_heads_config_key(tmp_path):
+    """Batch 7 flag lands in config.json (provenance) — spec 2026-08-13 §2.
+
+    NOTE what this key is and is not: it records the FLAG AS PASSED, not the
+    architecture the run actually built. A flag-less crash-resume of a split
+    run correctly writes false here while running a split policy — which is
+    exactly why the TAG analyzer keys off the per-epoch split/active metric
+    instead of this file (spec §3.4).
+    """
+    cfg = _dump_config(tmp_path)
+    assert cfg["tct_split_heads"] is False
+
+    cfg = _dump_config(tmp_path, "--tct-split-heads")
+    assert cfg["tct_split_heads"] is True
+
+
+def test_tct_split_trunk_config_key(tmp_path):
+    """Trunk-split flag lands in config.json (provenance) — spec 2026-08-15.
+
+    Same contract as test_tct_split_heads_config_key: this key records the
+    FLAG AS PASSED, not the architecture the run actually built. A flag-less
+    crash-resume of a trunk-split run correctly writes false here while
+    running a split-trunk policy — which is exactly why the TAG analyzer
+    keys off the per-epoch split/trunk_active metric instead of this file.
+    """
+    cfg = _dump_config(tmp_path)
+    assert cfg["tct_split_trunk"] is False
+
+    cfg = _dump_config(tmp_path, "--tct-split-trunk")
+    assert cfg["tct_split_trunk"] is True
 
 
 def test_train_smoke_returns_zero():

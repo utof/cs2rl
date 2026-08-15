@@ -42,7 +42,8 @@ static int _wasd_to_local_bin(int w, int a, int s, int d) {
 
 /* human_input — called once per sim tick (16 Hz).
  * Camera yaw/pitch are already updated by update_camera() in c_render().
- * This function writes the current yaw to aim_rad and encodes WASD into actions.
+ * This function writes the current yaw to aim_rad, pitch to agent->pitch, and
+ * encodes WASD into actions.
  */
 void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
     int idx = cl->human_agent_idx;
@@ -51,8 +52,14 @@ void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
 
     AgentState* agent = &env->game.agents[idx];
 
-    /* Continuous aim — write exact radians, set bypass flag */
+    /* Continuous aim — write exact radians, set bypass flag.
+     * Batch 3.5 (gh #36 follow-up): pitch is now plumbed straight from the
+     * camera so the human can shoot ground enemies from the catwalk and
+     * vice-versa. cl->pitch is already clamped to ±1.5533 rad (≈±89°) by
+     * update_camera (cs2_render.h:371-374), well within the agent's ±π/2
+     * bounded clamp in env_step. */
     agent->aim_rad          = cl->yaw;
+    agent->pitch            = cl->pitch;
     agent->human_controlled = 1;
 
     int32_t* act = actions + idx * ACTION_DIM;
@@ -64,7 +71,11 @@ void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
     act[HEAD_MOVE] =
         _wasd_to_local_bin(IsKeyDown(KEY_W), IsKeyDown(KEY_A), IsKeyDown(KEY_S), IsKeyDown(KEY_D));
 
-    act[HEAD_AIM]    = 0; /* aim bin unused — continuous aim via agent->aim_rad */
+    /* Batch 3: HEAD_AIM removed from action enum; human aim is set
+     * directly via agent->aim_rad (line 55 above) and consumed by
+     * cs2_env.h env_step's `if (a->human_controlled)` branch. The
+     * continuous_actions float buffer is irrelevant for human agents —
+     * the env_step path takes the human branch before reading it. */
     act[HEAD_SHOOT]  = IsMouseButtonDown(MOUSE_BUTTON_LEFT) ? 1 : 0;
     act[HEAD_RELOAD] = IsKeyDown(KEY_R) ? 1 : 0;
     act[HEAD_WEAPON] = IsKeyDown(KEY_ONE) ? 1 : IsKeyDown(KEY_TWO) ? 2 : 0;

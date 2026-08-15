@@ -17,7 +17,11 @@ dependencies = [
     "onnx>=1.21.0",
     "onnxruntime>=1.24.4",
     "pettingzoo>=1.24.0",
-    "pufferlib>=3.0.0",
+                                                       # EXACT pin (gh #85): upstream 4.0 deletes pufferlib.vector/pytorch which
+                                                       # our monkey-patches import; a loose specifier would let a future relock
+                                                       # resolve to 4.0 and break loudly at a random moment. Upgrade is a
+                                                       # deliberate migration (see #85 playbook), not a version bump.
+    "pufferlib==3.0.0",
     "pynvml>=13.0.1",
     "rerun-sdk>=0.21.0",
     "shapely>=2.0.4",
@@ -33,6 +37,17 @@ dev = [
     # means a fresh `uv sync` sets up the full hook toolchain in one step
     # (no apt / brew / separate tool installs needed).
     "clang-format>=20.1.0",
+    "pytest-timeout>=2.4.0",
+]
+# NON-DEFAULT group (RL-overhaul task 14, tracker #82): the Modal SDK is needed
+# only for the optional cloud training runner (scripts/run_modal.py). A plain
+# `uv sync` must not pull it — the local/scientific stack stays byte-identical
+# either way — so it lives outside `dev` and is only installed via
+# `uv sync --group modal`. The floor pins the SDK contract the runner relies on
+# (Function.with_options cpu/memory tuples, Dict.put skip_if_exists,
+# objects.create allow_existing); the <2 ceiling avoids tracking a future major.
+modal = [
+    "modal>=1.4.3,<2",
 ]
 
 [tool.uv]
@@ -47,6 +62,11 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# E501 (line-too-long) disabled: YAPF's `spaces_before_comment` aligner pushes
+# trailing comments past column 100 when the preceding code is long, producing
+# fights between the formatter and the linter. YAPF's column_limit=100 still
+# keeps lines reasonable for actual code; we just stop policing trailing comments.
+ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"

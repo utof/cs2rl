@@ -12,7 +12,8 @@ from shapely.geometry import Point
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.strtree import STRtree
 
-from _action_spec import ACTION_DIM    # derived from cs2_types.h
+from _action_spec import ACTION_DIM                    # derived from cs2_types.h
+from _obs_spec import OBS_BLOCKS, OBS_DIM              # noqa: F401  generated; re-exported (see Constants)
 
 # ── Multiprocessing workers for vis matrix (must be module-level to be picklable) ──
 
@@ -454,7 +455,10 @@ MAX_TURN_SPEED_RAD = math.pi / 4
 
 N_AGENTS = 10
 TEAM_SIZE = 5
-OBS_DIM = 104
+# OBS_DIM + OBS_BLOCKS are imported at module top from _obs_spec (generated from
+# cs2_types.h by scripts/sync_action_spec.py) — the single source of truth for
+# the obs layout. Do NOT reintroduce a literal here; a bump is a cs2_types.h edit
+# followed by `uv run python scripts/sync_action_spec.py`.
 
 INVALID_AREA_ID = -1
 STALE_MEMORY_TICK = -9999

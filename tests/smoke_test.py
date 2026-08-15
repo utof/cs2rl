@@ -38,3 +38,67 @@ def test_c_env_smoke():
     print(f"\nC env SPS: {sps:.0f}")
     # Dear AI agents, dont ever fucking turn this value down. if it doesnt pass, it doesnt pass.
     assert sps >= 300_000, f"SPS {sps:.0f} below 300_000 target"
+
+
+def test_batch1_smoke_runs_without_nan():
+    """Batch 1 integration smoke (plan §Task 10).
+
+    Wires the full Batch 1 stack (selfplay patch, return-norm patch, symlog
+    rewards, Welford normalization, event-mask aggregation, prio_probs
+    boost, target_entropy schedule, log_alpha reset, metric exposure) and
+    runs one evaluate()+train() round. Catches the failure modes that
+    individual unit tests can't: NaN propagation through the rollout
+    buffer, attribute pre-init missing on real trainers, and stat
+    interactions across the patches.
+
+    Deliberately tiny (num_envs=32, Serial backend) so it stays under ~30s
+    and can run in CI as a per-PR gate.
+    """
+    import math
+
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        _patch_trainer_with_return_norm(trainer)
+
+        # ── Run one full round ──────────────────────────────────────────
+        trainer.evaluate()
+        trainer.train()
+
+        # ── No NaN/Inf in the rollout reward buffer ─────────────────────
+        rewards = trainer.rewards.detach().cpu()
+        import torch
+        assert torch.isfinite(rewards).all(), (
+            "Batch 1 smoke: trainer.rewards contains NaN/Inf — symlog/Welford"
+            " pipeline likely produced a divergent value")
+
+        # ── All Batch 1 metrics populated and finite ────────────────────
+        for name in (
+                "_batch1_max_entropy",
+                "_batch1_current_target_entropy",
+                "_batch1_log_alpha",
+                "_batch1_effective_alpha",
+                "_batch1_std_combat",
+                "_batch1_std_objective",
+                "_batch1_std_positional",
+                "_batch1_event_oversample_fraction",
+                "_batch1_grad_norm",
+        ):
+            assert hasattr(trainer, name), f"Batch 1 smoke: missing {name}"
+            v = getattr(trainer, name)
+            assert math.isfinite(v), f"Batch 1 smoke: {name}={v} not finite"
+
+        # ── Channel stds non-negative ───────────────────────────────────
+        # During warmup (count < min_count=1000) WelfordStd returns the
+        # prior_std=1.0 floor. With ~num_envs * bptt_horizon ticks per
+        # evaluate() round (~2048 here) the warmup boundary is crossed and
+        # the actual running std takes over. That value can be small (most
+        # channels are zero on most ticks), so the only universal invariant
+        # is non-negative.
+        assert trainer._batch1_std_combat >= 0.0
+        assert trainer._batch1_std_objective >= 0.0
+        assert trainer._batch1_std_positional >= 0.0
+    finally:
+        cleanup()
