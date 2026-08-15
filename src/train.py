@@ -152,6 +152,26 @@ def state_dict_is_split(state_dict):
     return any(k.endswith("aim_log_std_t") for k in state_dict)
 
 
+def state_dict_is_trunk_split(state_dict):
+    """True if encoder/LSTM were written as per-team copies (spec §3.3).
+
+    WHAT: presence of `encoder_t.0.weight` is the trunk-split marker — the T
+    encoder first-layer weight exists in exactly that architecture. Both
+    `encoder_t`/`encoder_ct` (and both LSTMs) are always written together.
+
+    WHY key inference rather than the config flag: same as
+    `state_dict_is_split` — `config.json` is rewritten on every launch, so a
+    flag-less crash-resume must recover trunk-ness from the keys. The heads
+    helper stays the heads marker; loaders consult both bits independently.
+
+    PITFALL: `"encoder_ct.0.weight".endswith("encoder_t.0.weight")` is False,
+    so a CT-only key set does not fire. The `k ==` clause is the bare-key
+    form every checkpoint this project writes; `endswith` covers a future
+    wrapper prefix (e.g. `policy.encoder_t.0.weight`).
+    """
+    return any(k == "encoder_t.0.weight" or k.endswith("encoder_t.0.weight") for k in state_dict)
+
+
 def convert_legacy_state_dict_to_split(state_dict):
     """Warm split: duplicate a legacy checkpoint's heads into both team copies.
 
@@ -200,12 +220,58 @@ def convert_legacy_state_dict_to_split(state_dict):
     return out
 
 
+def convert_shared_trunk_to_split(state_dict):
+    """Warm split: duplicate a shared encoder+LSTM into both team copies.
+
+    WHAT: returns a NEW dict where `encoder.*` → `encoder_t.*` +
+    `encoder_ct.*` and `lstm.*` → `lstm_t.*` + `lstm_ct.*`. Everything else
+    (`aim_log_std`, already-split `encoder_t.*`/`lstm_t.*`, `value_head`,
+    action heads) passes through untouched — this convert is the trunk axis
+    only.
+
+    WHY duplicate rather than re-initialize one side: same as the heads
+    warm split. The BC/legacy trunk encodes "how to see at all"; starting
+    CT from a random encoder+LSTM would confound the experiment with a
+    relearning phase. Both teams start IDENTICAL and the divergence is the
+    treatment.
+
+    PITFALLS:
+      * ORDER (spec §3.3): `reinit_frozen_aim_log_std` on the LEGACY dict
+        FIRST, then `convert_legacy_state_dict_to_split` (needs bare
+        `aim_log_std`), THEN this function. This helper does not touch σ
+        keys, but running it first is still wrong if a later heads convert
+        is expected to see `encoder.*`/`lstm.*` or bare `aim_log_std`.
+      * Keys are matched strictly (`encoder.` / `lstm.` prefixes, no
+        wrapper). Already-split `encoder_t.*` / `lstm_t.*` do not match
+        those prefixes and pass through — a second convert is a no-op on
+        a trunk-split dict.
+      * Tensors are cloned so the two copies never alias — an in-place
+        optimizer step on one would otherwise move the other.
+    """
+    out = {}
+    for key, val in state_dict.items():
+        if key.startswith("encoder."):
+            suf = key[len("encoder."):]
+            out[f"encoder_t.{suf}"] = val.clone()
+            out[f"encoder_ct.{suf}"] = val.clone()
+        elif key.startswith("lstm."):
+            suf = key[len("lstm."):]
+            out[f"lstm_t.{suf}"] = val.clone()
+            out[f"lstm_ct.{suf}"] = val.clone()
+        else:
+            # aim_log_std, value_head, heads, already-split encoder_t/lstm_t.
+            out[key] = val
+    return out
+
+
 def load_state_dict_arch_checked(policy, state_dict, *, source):
     """load_state_dict with a loud architecture-mismatch error (spec §3.3).
 
-    WHAT: compares the checkpoint's architecture (key inference) against the
-    policy's (`policy.tct_split_heads`) and raises a message naming BOTH
-    before loading anything. Never a silent partial load.
+    WHAT: compares the checkpoint's two architecture bits (heads via
+    `state_dict_is_split`, trunk via `state_dict_is_trunk_split`) against
+    the policy's (`policy.tct_split_heads`, `policy.tct_split_trunk`) and
+    raises a message naming BOTH axes before loading anything. Never a
+    silent partial load.
 
     WHY it exists even though every construction site infers: the sites that
     RECEIVE a pre-built policy and then load into it (train main's resume,
@@ -216,63 +282,78 @@ def load_state_dict_arch_checked(policy, state_dict, *, source):
     checkpoint", which is wrong and expensive.
 
     PITFALL: this does NOT convert. Legacy→split conversion is a deliberate
-    act with a σ-re-init ordering constraint, so it stays at the one call site
-    that means it (the train-main warm split).
+    act with a σ-re-init → heads convert → trunk convert ordering
+    constraint, so it stays at the one call site that means it (the
+    train-main warm split). Policies built before the trunk attr exists
+    compare as trunk-off via getattr(..., False).
     """
-    ckpt_split = state_dict_is_split(state_dict)
-    policy_split = bool(getattr(policy, "tct_split_heads", False))
-    if ckpt_split != policy_split:
+    ckpt_heads = state_dict_is_split(state_dict)
+    ckpt_trunk = state_dict_is_trunk_split(state_dict)
+    # Today's policies have no tct_split_trunk attr; treat missing as off.
+    policy_heads = bool(getattr(policy, "tct_split_heads", False))
+    policy_trunk = bool(getattr(policy, "tct_split_trunk", False))
+    if ckpt_heads != policy_heads or ckpt_trunk != policy_trunk:
 
-        def _name(flag):
+        def _name_heads(flag):
             return "SPLIT (per-team T/CT policy heads)" if flag else "LEGACY (shared policy heads)"
+
+        def _name_trunk(flag):
+            return ("SPLIT (per-team T/CT encoder+LSTM)"
+                    if flag else "LEGACY (shared encoder+LSTM)")
 
         raise ValueError(
             f"policy/checkpoint architecture mismatch loading {source}: the checkpoint is "
-            f"{_name(ckpt_split)} but the policy is {_name(policy_split)}. Rebuild the policy "
-            f"with build_policy(..., tct_split_heads={ckpt_split}) — loaders are supposed to "
-            f"infer this from the checkpoint keys (state_dict_is_split), see spec "
-            f"2026-08-13 §3.3.")
+            f"heads={_name_heads(ckpt_heads)}, trunk={_name_trunk(ckpt_trunk)} but the policy is "
+            f"heads={_name_heads(policy_heads)}, trunk={_name_trunk(policy_trunk)}. Rebuild the "
+            f"policy with build_policy(..., tct_split_heads={ckpt_heads}, "
+            f"tct_split_trunk={ckpt_trunk}) — loaders are supposed to infer both axes from the "
+            f"checkpoint keys (state_dict_is_split / state_dict_is_trunk_split), see spec "
+            f"2026-08-15 §3.3.")
     policy.load_state_dict(state_dict)
 
 
-def resolve_resume_split(resume_path, *, flag, map_location="cpu"):
-    """Decide split-ness BEFORE build_policy, from the resume checkpoint.
+def resolve_resume_split(resume_path, *, heads_flag, trunk_flag, map_location="cpu"):
+    """Decide heads- and trunk-split-ness BEFORE build_policy, from resume.
 
-    Returns ``(split_active, state_dict_or_None, resolved_Path_or_None)``.
+    Returns ``(heads_split, trunk_split, state_dict_or_None, Path_or_None)``.
 
     WHY this shape (spec §3.3 ordering constraint): in train() the policy is
-    constructed at ~:3656, but train_config is not built until ~:3661 and the
-    resume checkpoint is not read until ~:3688 — at construction time neither
-    the flag's config key nor the checkpoint's keys are in scope. So the
-    checkpoint is sniffed once here, the decision is passed into build_policy,
-    and the already-loaded dict is handed back for reuse at the load site
+    constructed before train_config is built and before the resume
+    checkpoint is otherwise read — at construction time neither flag's
+    config key nor the checkpoint's keys are in scope. So the checkpoint
+    is sniffed once here, both decisions are passed into build_policy, and
+    the already-loaded dict is handed back for reuse at the load site
     (no double I/O on a 2.5 MB file, and no chance of the two reads
     disagreeing).
 
-    Decision table:
-      no resume            → (bool(flag), None, None)
-      legacy checkpoint    → (bool(flag), sd, path)   flag widens to warm split
-      split checkpoint     → (True,       sd, path)   inference WINS
+    Decision (each bit independently; omitted flags never narrow):
+      no resume            → (bool(heads_flag), bool(trunk_flag), None, None)
+      ckpt bit off + flag  → flag WIDENS that axis (warm split at load)
+      ckpt bit on + flag   → inference WINS (True regardless of flag)
 
-    The flag can only WIDEN legacy→split; it can never narrow a split
-    checkpoint back to a legacy policy. That asymmetry is what makes a
+    Each flag can only WIDEN its axis 0→1; it can never narrow a split
+    checkpoint back to a shared policy. That asymmetry is what makes a
     flag-less crash-resume of a split run correct — the routine reality on
     this box, not an edge case.
 
     PITFALL: loads with map_location="cpu" regardless of the training device.
     load_state_dict copies into the policy's own (possibly CUDA) tensors, so
     this is safe and avoids allocating a second copy on the GPU during
-    startup.
+    startup. Do not keep a 3-tuple / singular ``flag=`` shim — a leftover
+    ``flag=`` call would TypeError, which is the intended tripwire.
     """
     import torch as _torch
 
     if not resume_path:
-        return bool(flag), None, None
+        return bool(heads_flag), bool(trunk_flag), None, None
     resume_path = Path(resume_path)
     if not resume_path.exists():
         raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
     state_dict = _torch.load(resume_path, map_location=map_location, weights_only=True)
-    return bool(flag) or state_dict_is_split(state_dict), state_dict, resume_path
+    # Omitted flags never narrow: flag can only OR the ckpt bit to True.
+    heads = bool(heads_flag) or state_dict_is_split(state_dict)
+    trunk = bool(trunk_flag) or state_dict_is_trunk_split(state_dict)
+    return heads, trunk, state_dict, resume_path
 
 
 # F8 (2026-07-06 adversarial review): per-head [start, end) column ranges of
@@ -515,6 +596,10 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # (spec §3.4). Adding this key also shifts exp_lib.behavior_hash for all
     # future runs — recorded decision, spec §6.
     tct_split_heads = bool(getattr(args, "tct_split_heads", False))
+    # Trunk twin (spec 2026-08-15): same FLAG-not-architecture contract as
+    # heads. A flag-less crash-resume of a trunk-split run writes false
+    # here on purpose; the analyzer reads split/trunk_active instead.
+    tct_split_trunk = bool(getattr(args, "tct_split_trunk", False))
 
     cfg = {
                                                        # Core PPO
@@ -578,6 +663,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "tag_diagnostic": tag_diagnostic,
         "tag_every": tag_every,
         "tct_split_heads": tct_split_heads,
+        "tct_split_trunk": tct_split_trunk,
     }
 
     # ── Reward wiring: 23 make_env weights, verbatim key names ──
@@ -780,8 +866,13 @@ def load_policy_from_checkpoint(checkpoint_path, device):
     # load with it — a checkpoint that fails here is untrusted or corrupt.
     state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
 
-    # Infer obs_dim from checkpoint to handle checkpoints trained with different obs sizes
-    ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
+    # Infer obs_dim from checkpoint to handle checkpoints trained with different obs sizes.
+    # Trunk-split checkpoints have no shared encoder — the T copy is the marker
+    # (same key state_dict_is_trunk_split uses). Both copies share obs_dim.
+    if "encoder_t.0.weight" in state_dict:
+        ckpt_obs_dim = state_dict["encoder_t.0.weight"].shape[1]
+    else:
+        ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
     policy_env = make_puffer_env()
 
     # Batch 3.5 (#24, Opus I3): defensive obs_dim consistency check.
@@ -801,12 +892,14 @@ def load_policy_from_checkpoint(checkpoint_path, device):
             f"checkpoint is from a different obs schema. Retrain or use a matching env.")
 
     try:
-        # Batch 7 (spec §3.3): architecture inferred from the checkpoint keys,
-        # exactly like obs_dim above — this loader gets no flag and needs none.
+        # Batch 7 / trunk split (spec §3.3): both architecture bits inferred
+        # from the checkpoint keys, exactly like obs_dim above — this loader
+        # gets no flag and needs none. A trunk-split file has no encoder.0.weight.
         policy = build_policy(policy_env,
                               device,
                               obs_dim_override=ckpt_obs_dim,
-                              tct_split_heads=state_dict_is_split(state_dict))
+                              tct_split_heads=state_dict_is_split(state_dict),
+                              tct_split_trunk=state_dict_is_trunk_split(state_dict))
     finally:
         policy_env.close()
 
@@ -1254,21 +1347,32 @@ def build_train_env_factory(args, *, shared_ts, map_data):
 # ── SECTION: Policy ────────────────────────────────────────────────────────
 
 
-def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
+def build_policy(vecenv,
+                 device,
+                 obs_dim_override=None,
+                 tct_split_heads=False,
+                 tct_split_trunk=False):
     """Build the Dust2 recurrent policy.
 
     tct_split_heads (Batch 7, spec 2026-08-13): when True the policy-head
     group — the 7 discrete action_heads, the aim_mu projection and the
     aim_log_std parameter — is duplicated per team (`_t` / `_ct` suffixes) and
     each row is routed to its own team's copy by the obs team bit obs[24].
-    Trunk (encoder + LSTM) and value_head stay SHARED. Default False builds
-    the legacy modules and executes the legacy forward lines verbatim, pinned
-    by tests/test_tct_split.py::test_flag_off_builds_exactly_the_legacy_modules.
+    value_head stays SHARED. Default False builds the legacy head modules
+    and executes the legacy head-forward lines verbatim, pinned by
+    tests/test_tct_split.py::test_flag_off_builds_exactly_the_legacy_modules.
+
+    tct_split_trunk (spec 2026-08-15): when True the trunk — encoder + LSTM —
+    is replaced by per-team copies (`encoder_t`/`lstm_t`, `encoder_ct`/`lstm_ct`).
+    Each team LSTM sees only its own encoder's activations; hidden and the
+    rollout (h,c) blend on obs[24]. Default False keeps today's
+    `self.encoder` / `self.lstm` construction verbatim (legacy RNG pin).
 
     PITFALL: callers must not decide split-ness from config alone — every
-    loader infers it from the checkpoint's keys (state_dict_is_split), because
-    config.json is rewritten on each launch and a flag-less crash-resume would
-    otherwise rebuild the wrong architecture (spec §3.3).
+    loader infers it from the checkpoint's keys (state_dict_is_split /
+    state_dict_is_trunk_split), because config.json is rewritten on each
+    launch and a flag-less crash-resume would otherwise rebuild the wrong
+    architecture (spec §3.3).
     """
     import pufferlib.pytorch
     import torch
@@ -1286,18 +1390,52 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
             self.hidden_size = hidden  # required by PufferLib LSTM logic
             self.obs_dim = obs_dim
 
-            self.encoder = nn.Sequential(
-                pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
-                nn.ReLU(),
-                pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
-                nn.ReLU(),
-            )
-            self.lstm = nn.LSTM(hidden, hidden, batch_first=False)
-            for name, p in self.lstm.named_parameters():
-                if "bias" in name:
-                    nn.init.constant_(p, 0)
-                elif "weight" in name:
-                    nn.init.orthogonal_(p, gain=1.0)
+            # Trunk-off keeps today's encoder/lstm construction verbatim so
+            # the flag-off RNG stream (and LEGACY_PARAM_NAMES) stay pinned.
+            # Trunk-on REPLACES those modules — do not keep a shared encoder
+            # or lstm beside the copies.
+            if not tct_split_trunk:
+                self.encoder = nn.Sequential(
+                    pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
+                    nn.ReLU(),
+                    pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
+                    nn.ReLU(),
+                )
+                self.lstm = nn.LSTM(hidden, hidden, batch_first=False)
+                for name, p in self.lstm.named_parameters():
+                    if "bias" in name:
+                        nn.init.constant_(p, 0)
+                    elif "weight" in name:
+                        nn.init.orthogonal_(p, gain=1.0)
+            else:
+                self.encoder_t = nn.Sequential(
+                    pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
+                    nn.ReLU(),
+                    pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
+                    nn.ReLU(),
+                )
+                self.lstm_t = nn.LSTM(hidden, hidden, batch_first=False)
+                for name, p in self.lstm_t.named_parameters():
+                    if "bias" in name:
+                        nn.init.constant_(p, 0)
+                    elif "weight" in name:
+                        nn.init.orthogonal_(p, gain=1.0)
+                # RNG hygiene (same as heads §3.7): CT construction is forked
+                # so the subsequent heads draw stays at the same stream point
+                # as flag-off. devices=[] forks the CPU generator only.
+                with torch.random.fork_rng(devices=[]):
+                    self.encoder_ct = nn.Sequential(
+                        pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
+                        nn.ReLU(),
+                        pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
+                        nn.ReLU(),
+                    )
+                    self.lstm_ct = nn.LSTM(hidden, hidden, batch_first=False)
+                    for name, p in self.lstm_ct.named_parameters():
+                        if "bias" in name:
+                            nn.init.constant_(p, 0)
+                        elif "weight" in name:
+                            nn.init.orthogonal_(p, gain=1.0)
 
             # Batch 7 (spec 2026-08-13 §3.1): plain bool, NOT a buffer — it
             # must never enter state_dict() or every existing checkpoint would
@@ -1305,8 +1443,9 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
             # architecture mismatch (load_state_dict_arch_checked).
             # `tct_split_heads` here is build_policy's parameter, captured by
             # closure exactly like `obs_dim` and `hidden` above — the inner
-            # class takes no new constructor argument.
+            # class takes no new constructor argument. Same for tct_split_trunk.
             self.tct_split_heads = bool(tct_split_heads)
+            self.tct_split_trunk = bool(tct_split_trunk)
 
             # Separate heads for MultiDiscrete(ACTION_HEAD_SIZES)
             #
@@ -1576,24 +1715,47 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
             else:
                 B, TT = x.shape[0], 1
 
-            h = self.encoder(x.reshape(B * TT, x.shape[-1]).float())
-            h = h.reshape(B, TT, self.hidden_size).transpose(0, 1)     # (T, B, H) seq-first
-
             lstm_h = state.get("lstm_h") if isinstance(state, dict) else None
             lstm_c = state.get("lstm_c") if isinstance(state, dict) else None
-            if lstm_h is not None and lstm_c is not None:
-                hc = (lstm_h.reshape(1, B,
-                                     self.hidden_size), lstm_c.reshape(1, B, self.hidden_size))
-            else:
-                hc = (h.new_zeros(1, B, self.hidden_size), h.new_zeros(1, B, self.hidden_size))
-
             terminals = state.get("terminals") if isinstance(state, dict) else None
-            h = self._lstm_bptt(h, hc, terminals)
-            # transpose back to (B, T, H) then flatten row-major so flat row
-            # b*T + t lines up with mb_actions.reshape(-1, ...) in
-            # _hybrid_ppo_loss — segment-major, time-minor. Changing this
-            # ordering silently misaligns every logprob/advantage pairing.
-            hidden_out = h.transpose(0, 1).reshape(B * TT, self.hidden_size)
+            H = self.hidden_size
+
+            if not self.tct_split_trunk:
+                h = self.encoder(x.reshape(B * TT, x.shape[-1]).float())
+                # (T, B, H) seq-first
+                h = h.reshape(B, TT, H).transpose(0, 1)
+                if lstm_h is not None and lstm_c is not None:
+                    hc = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
+                else:
+                    hc = (h.new_zeros(1, B, H), h.new_zeros(1, B, H))
+                h = self._lstm_bptt(self.lstm, h, hc, terminals)
+                # transpose back to (B, T, H) then flatten row-major so flat row
+                # b*T + t lines up with mb_actions.reshape(-1, ...) in
+                # _hybrid_ppo_loss — segment-major, time-minor. Changing this
+                # ordering silently misaligns every logprob/advantage pairing.
+                hidden_out = h.transpose(0, 1).reshape(B * TT, H)
+            else:
+                # Encoder is stateless: both copies see the same flat rows.
+                # LSTM is not a head: each team LSTM sees ONLY its encoder's
+                # activations. Never feed a mixed batch through one LSTM.
+                x_flat = x.reshape(B * TT, x.shape[-1]).float()
+                h_t = self.encoder_t(x_flat).reshape(B, TT, H).transpose(0, 1)
+                h_ct = self.encoder_ct(x_flat).reshape(B, TT, H).transpose(0, 1)
+                # zero-init BOTH team states when the trainer does not pass lstm_h/c
+                if lstm_h is not None and lstm_c is not None:
+                    hc_t = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
+                    hc_ct = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
+                else:
+                    hc_t = (h_t.new_zeros(1, B, H), h_t.new_zeros(1, B, H))
+                    hc_ct = (h_ct.new_zeros(1, B, H), h_ct.new_zeros(1, B, H))
+                y_t = self._lstm_bptt(self.lstm_t, h_t, hc_t, terminals)
+                y_ct = self._lstm_bptt(self.lstm_ct, h_ct, hc_ct, terminals)
+                # PITFALL (spec §3.2): mask from 3D x with x[..., 24], never
+                # x[:, 24] — that silently selects TIMESTEP 24.
+                mask = x[..., 24].reshape(B * TT, 1)
+                hidden_out = self._blend(mask,
+                                         y_t.transpose(0, 1).reshape(B * TT, H),
+                                         y_ct.transpose(0, 1).reshape(B * TT, H))
 
             if self.tct_split_heads:
                 # PITFALL (spec §3.2 — the bug class this comment exists to
@@ -1623,13 +1785,16 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
             value = self.value_head(hidden_out)
             return logits, mu_aim, log_std, value
 
-        def _lstm_bptt(self, h_seq, hc, terminals):
-            """Run the LSTM over a full (T, B, H) segment with done-masking.
+        def _lstm_bptt(self, lstm, h_seq, hc, terminals):
+            """Run one LSTM over a full (T, B, H) segment with done-masking.
 
-            WHAT: one nn.LSTM call when the segment contains no episode
+            WHAT: one `lstm(...)` call when the segment contains no episode
             boundaries (the common case — native PufferLib BPTT); otherwise
             the sequence is split at every tick where ANY row has a done and
             h/c are zero-masked per-row at those ticks before continuing.
+            `lstm` is the module to run — flag-off forward passes
+            `self.lstm`; trunk-on passes `self.lstm_t` / `self.lstm_ct`
+            separately so each copy sees only its encoder's activations.
 
             WHY: the rollout (forward_eval → _forward_core) multiplies the
             carried state by (1 - done) BEFORE processing each tick, so a
@@ -1639,7 +1804,8 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
             and gradients leak across episode boundaries. Upstream
             LSTMWrapper skips this (it never resets on done, rollout OR
             train, so it is self-consistent); we reset in rollout, hence we
-            must also reset here.
+            must also reset here. Passing the module in avoids copy-pasting
+            this done-chunk loop per team.
 
             PITFALLS:
               * terminals[:, t] == 1 means "the obs at tick t is the FIRST
@@ -1652,48 +1818,98 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
                 a no-done minibatch stays a single cuDNN/oneDNN call.
               * .tolist() forces one device→host sync per minibatch —
                 acceptable (the train loop already syncs via .item()s).
+              * LSTM must not see the other team's rows via a shared module:
+                the caller encodes per team, then calls this twice. Do not
+                blend encoder outputs and run one LSTM.
             """
             if terminals is None:
-                out, _ = self.lstm(h_seq, hc)
+                out, _ = lstm(h_seq, hc)
                 return out
             TT, B, _H = h_seq.shape
             term = terminals.reshape(B, TT) > 0.5
             reset_ticks = torch.nonzero(term.any(dim=0)).flatten().tolist()
             if not reset_ticks:
-                out, _ = self.lstm(h_seq, hc)
+                out, _ = lstm(h_seq, hc)
                 return out
             outs = []
             h0, c0 = hc
             t0 = 0
             for t in reset_ticks:
                 if t > t0:
-                    out, (h0, c0) = self.lstm(h_seq[t0:t], (h0, c0))
+                    out, (h0, c0) = lstm(h_seq[t0:t], (h0, c0))
                     outs.append(out)
                 keep = (~term[:, t]).float().view(1, B, 1)
                 h0 = h0 * keep
                 c0 = c0 * keep
                 t0 = t
-            out, _ = self.lstm(h_seq[t0:], (h0, c0))
+            out, _ = lstm(h_seq[t0:], (h0, c0))
             outs.append(out)
             return torch.cat(outs, dim=0)
 
         def _forward_core(self, x, lstm_state, done):
-            h = self.encoder(x.float())
-            # lstm expects (seq, batch, features)
+            """Single-tick encode + LSTM for rollout / eval.
+
+            WHAT: one seq-len-1 LSTM step. Trunk-off is today's
+            `self.encoder` then `self.lstm(h.unsqueeze(0), ...)`. Trunk-on
+            runs both team encoders+lstms the same way, blends hidden, and
+            blends the returned `(h,c)` with `mask.view(1, B, 1)` so the
+            trainer still stores one pair.
+
+            WHY: `forward_eval` / `get_action_and_value` inherit routing
+            from here. The trainer LSTM buffers stay one `(h,c)` per agent
+            (do not change PufferLib's rollout state).
+
+            PITFALLS:
+              * Do not route this through `_lstm_bptt` — that helper is the
+                training-path T-unroll. This must stay the per-tick
+                `lstm(h.unsqueeze(0))` call.
+              * LSTM must not see the other team's encoder activations:
+                each copy is fed only its encoder's h. The incoming blended
+                state is `(1-done)`-reset once, then fed to BOTH team LSTMs
+                (unused output dropped by the 0/1 blend; used path is exact).
+              * 2D mask is `x[:, 24:25]`. The 3D timestep-24 trap lives in
+                `forward()`, not here.
+            """
+            if not self.tct_split_trunk:
+                h = self.encoder(x.float())
+                # lstm expects (seq, batch, features)
+                if lstm_state is not None:
+                    done = done.float()
+                    h, lstm_state = self.lstm(
+                        h.unsqueeze(0),
+                        (
+                            (1.0 - done).view(1, -1, 1) * lstm_state[0],
+                            (1.0 - done).view(1, -1, 1) * lstm_state[1],
+                        ),
+                    )
+                    h = h.squeeze(0)
+                else:
+                    h, lstm_state = self.lstm(h.unsqueeze(0))
+                    h = h.squeeze(0)
+                return h, lstm_state
+
+            # 2D path: team bit is a column.
+            mask = x[:, 24:25]
+            h_t = self.encoder_t(x.float())
+            h_ct = self.encoder_ct(x.float())
             if lstm_state is not None:
                 done = done.float()
-                h, lstm_state = self.lstm(
-                    h.unsqueeze(0),
-                    (
-                        (1.0 - done).view(1, -1, 1) * lstm_state[0],
-                        (1.0 - done).view(1, -1, 1) * lstm_state[1],
-                    ),
+                reset_state = (
+                    (1.0 - done).view(1, -1, 1) * lstm_state[0],
+                    (1.0 - done).view(1, -1, 1) * lstm_state[1],
                 )
-                h = h.squeeze(0)
+                y_t, state_t = self.lstm_t(h_t.unsqueeze(0), reset_state)
+                y_ct, state_ct = self.lstm_ct(h_ct.unsqueeze(0), reset_state)
             else:
-                h, lstm_state = self.lstm(h.unsqueeze(0))
-                h = h.squeeze(0)
-            return h, lstm_state
+                y_t, state_t = self.lstm_t(h_t.unsqueeze(0))
+                y_ct, state_ct = self.lstm_ct(h_ct.unsqueeze(0))
+            hidden_out = self._blend(mask, y_t.squeeze(0), y_ct.squeeze(0))
+            m_state = mask.view(1, x.shape[0], 1)
+            lstm_state = (
+                self._blend(m_state, state_t[0], state_ct[0]),
+                self._blend(m_state, state_t[1], state_ct[1]),
+            )
+            return hidden_out, lstm_state
 
     return Dust2Policy().to(device)
 
@@ -1824,6 +2040,55 @@ def compute_head_divergence(policy):
                 # denom NaN fails both comparisons → emit NaN, not a fake 0.0.
                 val = 0.0 if denom == 0.0 else float("nan")
             out[f"split/head_l2_rel/{name}"] = val
+    return out
+
+
+def compute_trunk_divergence(policy):
+    """split/trunk_l2_rel/<module> — how far the two team trunk copies have moved apart.
+
+    WHAT: relative L2 between the T and CT copies of encoder and lstm.
+    Metric is the same formula as compute_head_divergence (spec §4 Q3):
+        ‖W_t − W_ct‖ / (0.5‖W_t‖ + 0.5‖W_ct‖)
+    Keys: split/trunk_l2_rel/encoder, split/trunk_l2_rel/lstm.
+
+    WHY relative and not raw L2: the optimizer runs weight_decay=1e-4, so
+    even a copy that receives zero gradient keeps moving. Raw L2 has no
+    achievable null. The ratio is scale-free; the honest null is still a
+    decay-aware control. Gate is hasattr(policy, "encoder_t") — the live
+    architecture, never config.json — matching split/trunk_active.
+
+    Returns {} when there is no encoder_t. The metric is undefined with
+    one copy, and emitting a fake 0.0 would read as "the teams agree".
+
+    PITFALL: modules are grouped, not per-tensor — every Linear in the
+    Sequential encoder and every LSTM weight (ih/hh/bias) contribute to
+    one number. A per-layer series is a separate function if ever needed.
+    T=1 + zero LSTM state leaves weight_hh unmoved; that does not make
+    the encoder ratio 0 after a team-asymmetric step.
+    """
+    import torch
+
+    if not hasattr(policy, "encoder_t"):
+        return {}
+
+    def _flat(obj):
+        if isinstance(obj, torch.nn.Parameter):
+            return obj.detach().reshape(-1)
+        return torch.cat([p.detach().reshape(-1) for p in obj.parameters()])
+
+    out = {}
+    with torch.no_grad():
+        for name, mod_t, mod_ct in (
+            ("encoder", policy.encoder_t, policy.encoder_ct),
+            ("lstm", policy.lstm_t, policy.lstm_ct),
+        ):
+            w_t, w_ct = _flat(mod_t), _flat(mod_ct)
+            denom = 0.5 * float(w_t.norm()) + 0.5 * float(w_ct.norm())
+            if denom > 0.0:
+                val = float((w_t - w_ct).norm()) / denom
+            else:
+                val = 0.0 if denom == 0.0 else float("nan")
+            out[f"split/trunk_l2_rel/{name}"] = val
     return out
 
 
@@ -2854,12 +3119,12 @@ class SelfPlayManager:
     def load_past_policy(self, device, vecenv):
         """Load a random past checkpoint. Returns the policy module or None.
 
-        Batch 7 (spec §3.3): the state_dict is read BEFORE build_policy so the
-        architecture can be inferred from its keys. This method receives no
-        config and no flag — during a split run the pool fills with split
-        snapshots, and a flag-only design would raise here on ~30% of epochs
-        (p_past=0.3), hours into the run. Inference also lets a split run mix
-        in pre-split snapshots left over in an older pool.
+        Batch 7 (spec §3.3): the state_dict is read BEFORE build_policy so
+        BOTH architecture bits (heads + trunk) can be inferred from its keys.
+        This method receives no config and no flag — during a split run the
+        pool fills with split snapshots, and a flag-only design would raise
+        here on ~30% of epochs (p_past=0.3), hours into the run. Inference
+        also lets a split run mix in pre-split snapshots from an older pool.
         """
         import torch
 
@@ -2870,7 +3135,11 @@ class SelfPlayManager:
             self.pool.remove(path)
             return None
         state_dict = torch.load(path, map_location=device, weights_only=True)
-        policy = build_policy(vecenv, device, tct_split_heads=state_dict_is_split(state_dict))
+        # Both bits inferred from keys — this method receives no config.
+        policy = build_policy(vecenv,
+                              device,
+                              tct_split_heads=state_dict_is_split(state_dict),
+                              tct_split_trunk=state_dict_is_trunk_split(state_dict))
         load_state_dict_arch_checked(policy, state_dict, source=str(path))
         policy.eval()
         return policy
@@ -3561,7 +3830,12 @@ def _tag_param_groups(policy):
     trunk        — encoder.* + lstm.* (620,544 of 626,971 trainable params,
                    99.0%, LSTM alone 526,336; this is why no 'total' group
                    exists — it would replicate trunk while reading as
-                   independent signal).
+                   independent signal). Trunk-split (spec 2026-08-15 §3.4):
+                   encoder_t./encoder_ct./lstm_t./lstm_ct. map into this
+                   SAME group, doubling it. The union is what makes the
+                   T-vs-CT trunk cross cos-sim exactly 0.0 — each team's
+                   gradient is zero on the other's copy — which the
+                   analyzer labels structural via split/trunk_active.
     policy_heads — action_heads.* + aim_mu.* + the aim_log_std parameter
                    (6,170 params). Batch 7: under --tct-split-heads BOTH team
                    copies (action_heads_t/_ct, aim_mu_t/_ct, aim_log_std_t/_ct)
@@ -3585,7 +3859,8 @@ def _tag_param_groups(policy):
     for name, p in policy.named_parameters():
         if not p.requires_grad:
             continue
-        if name.startswith(("encoder.", "lstm.")):
+        if name.startswith(
+            ("encoder.", "encoder_t.", "encoder_ct.", "lstm.", "lstm_t.", "lstm_ct.")):
             groups["trunk"].append(p)
         elif name.startswith(("action_heads.", "action_heads_t.", "action_heads_ct.",
                               "aim_mu.", "aim_mu_t.", "aim_mu_ct.")) \
@@ -4082,12 +4357,20 @@ def train(args):
     # available yet. The sniffed dict is reused at the load site.
     # getattr on the flag keeps harness/older args objects working.
     resume_path = getattr(args, "resume", None)
-    tct_split_heads, _resume_state_dict, resume_path = resolve_resume_split(
-        resume_path, flag=bool(getattr(args, "tct_split_heads", False)))
+    # Both bits are resolved here so a flag-less crash-resume never narrows
+    # either axis, then passed into build_policy (omitted flags never drop a
+    # split checkpoint back to the shared vintage).
+    tct_split_heads, tct_split_trunk, _resume_state_dict, resume_path = resolve_resume_split(
+        resume_path,
+        heads_flag=bool(getattr(args, "tct_split_heads", False)),
+        trunk_flag=bool(getattr(args, "tct_split_trunk", False)))
 
     print(f"[Train] Building policy on device={device} "
-          f"(tct_split_heads={tct_split_heads})...")
-    policy = build_policy(vecenv, device, tct_split_heads=tct_split_heads)
+          f"(tct_split_heads={tct_split_heads}, tct_split_trunk={tct_split_trunk})...")
+    policy = build_policy(vecenv,
+                          device,
+                          tct_split_heads=tct_split_heads,
+                          tct_split_trunk=tct_split_trunk)
 
     agents_per_env, bptt_horizon, batch_size = compute_batch_dims(args.num_envs)
     # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
@@ -4112,8 +4395,9 @@ def train(args):
         # gh#91: BC warm-start checkpoints carry aim_log_std frozen at
         # LOG_STD_INIT — widen to AIM_LOG_STD_RESUME_INIT before loading or
         # the KL early-stop throttles the whole run (see the helper's doc).
-        # Batch 7: this MUST run before the warm split below — the re-initer
-        # keys off the σ key name, and duplicating first would hide it.
+        # ORDER is load-bearing (spec 2026-08-15 §3.3): σ re-init on the
+        # LEGACY dict, then heads convert (needs bare aim_log_std), then
+        # trunk convert. Duplicating heads first would hide the σ key.
         if reinit_frozen_aim_log_std(state_dict):
             print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "
                   f"re-initialized to log(0.3) ≈ {AIM_LOG_STD_RESUME_INIT:.3f} (gh#91)")
@@ -4121,6 +4405,10 @@ def train(args):
             state_dict = convert_legacy_state_dict_to_split(state_dict)
             print("[Train] Warm split: duplicated the legacy policy heads into per-team "
                   "T/CT copies (spec 2026-08-13 §3.3) — both teams start identical.")
+        if tct_split_trunk and not state_dict_is_trunk_split(state_dict):
+            state_dict = convert_shared_trunk_to_split(state_dict)
+            print("[Train] Warm split: duplicated the shared encoder+LSTM into per-team "
+                  "T/CT copies (spec 2026-08-15 §3.3) — both teams start identical.")
         load_state_dict_arch_checked(policy, state_dict, source=str(resume_path))
         print(f"[Train] Resumed from checkpoint: {resume_path}")
     # ────────────────────────────────────────────────────────────────────────
@@ -4279,7 +4567,15 @@ def train(args):
             # entirely: a split run launched WITHOUT --tag-diagnostic still
             # labels every row.
             logs["split/active"] = float(hasattr(policy, "aim_log_std_t"))
+            # Trunk-split twin (spec 2026-08-15 §3.4): same unconditional
+            # placement as split/active. 1.0 iff the live policy has
+            # encoder_t — derived from the object, never config.json.
+            # Analyzer keys the trunk-structural verdict and the "no actor
+            # TAG cell is a decision metric" footer on this key. Do not
+            # gate on --tag-every / --tag-diagnostic.
+            logs["split/trunk_active"] = float(hasattr(policy, "encoder_t"))
             logs.update(compute_head_divergence(policy))
+            logs.update(compute_trunk_divergence(policy))
 
             # TAG injection — MUST stay after dead_run_detector.check above
             # (deliberate NaNs; see _inject_tag_metrics docstring).
@@ -4469,6 +4765,16 @@ if __name__ == "__main__":
         "Only affects FRESH construction and the legacy->split warm conversion — every "
         "loader infers split-ness from the checkpoint's keys, so a crash-resume without "
         "this flag still rebuilds a split policy.")
+    parser.add_argument(
+        "--tct-split-trunk",
+        action="store_true",
+        dest="tct_split_trunk",
+        help="Give each team its own copy of the actor trunk (encoder, LSTM), routed "
+        "by the obs team bit; policy heads stay as --tct-split-heads decides and the "
+        "value head stays shared. Only affects FRESH construction and the "
+        "legacy->split warm conversion — every loader infers split-ness from the "
+        "checkpoint's keys, so a crash-resume without this flag still rebuilds a "
+        "split-trunk policy.")
     args = parser.parse_args()
 
     if args.dump_config:

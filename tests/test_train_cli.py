@@ -40,6 +40,7 @@ def test_train_help_shows_current_cli():
             "--pbrs-nav-weight-t",                     # non-`reward_`-prefixed weight
             "--reward-symmetrize",                     # A2 arm
             "--tct-split-heads",                       # Batch 7 heads split (spec 2026-08-13)
+            "--tct-split-trunk",                       # T/CT actor-trunk split (spec 2026-08-15)
     ):
         assert flag in result.stdout, f"{flag} missing from --help output"
 
@@ -200,6 +201,22 @@ def test_tct_split_heads_config_key(tmp_path):
 
     cfg = _dump_config(tmp_path, "--tct-split-heads")
     assert cfg["tct_split_heads"] is True
+
+
+def test_tct_split_trunk_config_key(tmp_path):
+    """Trunk-split flag lands in config.json (provenance) — spec 2026-08-15.
+
+    Same contract as test_tct_split_heads_config_key: this key records the
+    FLAG AS PASSED, not the architecture the run actually built. A flag-less
+    crash-resume of a trunk-split run correctly writes false here while
+    running a split-trunk policy — which is exactly why the TAG analyzer
+    keys off the per-epoch split/trunk_active metric instead of this file.
+    """
+    cfg = _dump_config(tmp_path)
+    assert cfg["tct_split_trunk"] is False
+
+    cfg = _dump_config(tmp_path, "--tct-split-trunk")
+    assert cfg["tct_split_trunk"] is True
 
 
 def test_train_smoke_returns_zero():

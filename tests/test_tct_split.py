@@ -86,6 +86,7 @@ def test_flag_off_builds_exactly_the_legacy_modules(env):
     p = train.build_policy(env, device="cpu")
     assert {n for n, _ in p.named_parameters()} == LEGACY_PARAM_NAMES
     assert p.tct_split_heads is False
+    assert p.tct_split_trunk is False
     assert not any(
         n.endswith(("_t", "_ct")) or "_t." in n or "_ct." in n for n, _ in p.named_parameters())
     assert not hasattr(p, "aim_log_std_t")
@@ -257,6 +258,23 @@ def test_state_dict_is_split_discriminates_both_vintages(env):
     assert train.state_dict_is_split(split) is True
 
 
+def test_state_dict_is_trunk_split_and_convert():
+    sd = {
+        "encoder.0.weight": torch.ones(2, 2),
+        "lstm.weight_ih_l0": torch.ones(3, 3),
+        "aim_log_std": torch.zeros(2),
+        "value_head.weight": torch.ones(1, 2),
+    }
+    assert train.state_dict_is_split(sd) is False
+    assert train.state_dict_is_trunk_split(sd) is False
+    out = train.convert_shared_trunk_to_split(sd)
+    assert "encoder_t.0.weight" in out and "encoder_ct.0.weight" in out
+    assert "encoder.0.weight" not in out
+    assert "lstm_t.weight_ih_l0" in out and "lstm_ct.weight_ih_l0" in out
+    assert "aim_log_std" in out        # heads untouched
+    assert train.state_dict_is_trunk_split(out) is True
+
+
 def test_warm_split_duplicates_heads_and_reinits_sigma_in_both_copies(env):
     """Spec §5 test 3: the warm-split path applied in the spec's ORDER
     (re-init σ on the legacy dict FIRST, then duplicate) leaves both copies
@@ -338,31 +356,44 @@ def test_resolve_resume_split_infers_and_never_narrows(env, tmp_path):
     resumed WITHOUT the flag still builds a split policy. That is the
     crash-resume path, and on this GPU box crash-resume is a first-class case,
     not an edge (the operator relaunches without re-reading the flag list).
-    The flag can only WIDEN legacy→split; it can never narrow split→legacy.
+    Each flag can only WIDEN its axis; it can never narrow split→legacy.
+    These fixtures have no encoder_t.0.weight, so the trunk bit stays False
+    when trunk_flag is omitted/False.
     """
     legacy_pt = tmp_path / "legacy.pt"
     split_pt = tmp_path / "split.pt"
     torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
     torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
 
-    split, sd, path = train.resolve_resume_split(None, flag=False)
-    assert (split, sd, path) == (False, None, None)
-    split, sd, _ = train.resolve_resume_split(None, flag=True)
-    assert split is True and sd is None
+    heads, trunk, sd, path = train.resolve_resume_split(None, heads_flag=False, trunk_flag=False)
+    assert (heads, trunk, sd, path) == (False, False, None, None)
+    heads, trunk, sd, _ = train.resolve_resume_split(None, heads_flag=True, trunk_flag=False)
+    assert heads is True and trunk is False and sd is None
 
-    split, sd, path = train.resolve_resume_split(str(legacy_pt), flag=False)
-    assert split is False and sd is not None and path == legacy_pt
-    split, _sd, _ = train.resolve_resume_split(str(legacy_pt), flag=True)
-    assert split is True, "flag must widen a legacy checkpoint to a warm split"
+    heads, trunk, sd, path = train.resolve_resume_split(str(legacy_pt),
+                                                        heads_flag=False,
+                                                        trunk_flag=False)
+    assert heads is False and trunk is False and sd is not None and path == legacy_pt
+    heads, trunk, _sd, _ = train.resolve_resume_split(str(legacy_pt),
+                                                      heads_flag=True,
+                                                      trunk_flag=False)
+    assert heads is True, "flag must widen a legacy checkpoint to a warm split"
+    assert trunk is False
 
-    split, sd, _ = train.resolve_resume_split(str(split_pt), flag=False)
-    assert split is True, "split checkpoint must be detected without the flag"
+    heads, trunk, sd, _ = train.resolve_resume_split(str(split_pt),
+                                                     heads_flag=False,
+                                                     trunk_flag=False)
+    assert heads is True, "split checkpoint must be detected without the flag"
+    assert trunk is False, "heads-split fixtures have no encoder_t.0.weight"
     assert "aim_log_std_t" in sd, "the sniffed dict must be returned for reuse"
-    split, _sd, _ = train.resolve_resume_split(str(split_pt), flag=True)
-    assert split is True
+    heads, trunk, _sd, _ = train.resolve_resume_split(str(split_pt),
+                                                      heads_flag=True,
+                                                      trunk_flag=False)
+    assert heads is True
+    assert trunk is False
 
     with pytest.raises(FileNotFoundError, match="Resume checkpoint not found"):
-        train.resolve_resume_split(str(tmp_path / "nope.pt"), flag=False)
+        train.resolve_resume_split(str(tmp_path / "nope.pt"), heads_flag=False, trunk_flag=False)
 
 
 def test_self_play_loads_both_checkpoint_vintages(env, tmp_path):
@@ -520,3 +551,246 @@ def test_head_divergence_exceeds_the_decay_aware_null(env):
             f"{key}: asymmetric-advantage divergence {treated[key]:.6f} did not exceed "
             f"the zero-advantage weight-decay floor {null[key]:.6f}")
     assert math.isfinite(null["split/head_l2_rel/aim_log_std"])
+
+
+def test_pure_team_batch_zeros_other_trunk_grad(env):
+    """A pure-T batch must leave every CT-trunk parameter's gradient at 0.
+
+    WHAT: encoder_ct/lstm_ct get no autograd contribution from T-only rows;
+    every encoder_t/lstm_t parameter that requires grad is in the graph.
+
+    WHY: this is the trunk routing proof (heads already have
+    test_pure_team_batch_leaves_other_copy_gradient_exactly_zero). A shared
+    LSTM on mixed encoder outputs, or a leftover self.encoder, fails here.
+
+    PITFALL: T=1 + zero LSTM state makes weight_hh a zero-times-h path, so
+    the input is stacked to T>1. 2D `_obs(4, 0)` would leave lstm_t.weight_hh
+    at exactly 0 and fail a correct implementation.
+    """
+    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+    # T>1 so lstm.weight_hh is in the graph (T=1 zero-state zeroes it).
+    x = _obs(4, 0).unsqueeze(1).expand(-1, 3, -1).contiguous()
+    state = {}
+    logits, mu, ls, v = p.forward(x, state)
+    (sum(lg.sum() for lg in logits) + mu.sum() + v.sum()).backward()
+    assert not hasattr(p, "encoder") and not hasattr(p, "lstm")
+    assert hasattr(p, "encoder_t") and hasattr(p, "lstm_t")
+    assert hasattr(p, "encoder_ct") and hasattr(p, "lstm_ct")
+    for n, par in p.named_parameters():
+        if n.startswith(("encoder_ct.", "lstm_ct.")):
+            assert par.grad is None or float(par.grad.abs().sum()) == 0.0, n
+        if n.startswith(("encoder_t.", "lstm_t.")) and par.requires_grad:
+            assert par.grad is not None and float(par.grad.abs().sum()) > 0.0, n
+
+
+def test_mixed_batch_nonzero_both_trunk_grads(env):
+    """A mixed T/CT batch must send grad into BOTH team trunks.
+
+    WHAT: encoder-only AND LSTM-only prefixes are asserted separately for
+    each team, on both the 2D training path and the seq-len-1 eval path.
+
+    WHY: a bug that splits the encoder but shares one LSTM (or never calls
+    lstm_ct) still produces encoder_ct grads from a mixed batch; the LSTM
+    half is what fails that implementation. forward_eval goes through
+    _forward_core, so a trunk-aware forward() with a stale _forward_core
+    would pass the 3D half and fail here.
+
+    PITFALL: T=1 zero-state zeroes weight_hh; the 3D case uses T>1 so the
+    recurrent weights are actually in the graph.
+    """
+    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+
+    def _assert_both_trunks(x):
+        p.zero_grad(set_to_none=True)
+        logits, mu, _ls, v = p.forward(x, state={})
+        (sum(lg.sum() for lg in logits) + mu.sum() + v.sum()).backward()
+        for prefix in ("encoder_t.", "encoder_ct.", "lstm_t.", "lstm_ct."):
+            matched = [(n, par) for n, par in p.named_parameters()
+                       if n.startswith(prefix) and par.requires_grad]
+            assert matched, prefix
+            assert any(par.grad is not None and float(par.grad.abs().sum()) > 0.0
+                       for _n, par in matched), prefix
+
+    _assert_both_trunks(_obs(2, 2))
+    _assert_both_trunks(_obs(2, 2).unsqueeze(1).expand(-1, 3, -1).contiguous())
+
+    p.zero_grad(set_to_none=True)
+    logits, mu, _ls, v = p.forward_eval(_obs(2, 2), state={})
+    (sum(lg.sum() for lg in logits) + mu.sum() + v.sum()).backward()
+    for prefix in ("encoder_t.", "encoder_ct.", "lstm_t.", "lstm_ct."):
+        matched = [(n, par) for n, par in p.named_parameters()
+                   if n.startswith(prefix) and par.requires_grad]
+        assert any(par.grad is not None and float(par.grad.abs().sum()) > 0.0
+                   for _n, par in matched), f"forward_eval {prefix}"
+
+
+def test_obs24_flip_switches_trunk(env):
+    """Flip obs[24] changes value_head output on a trunk-split policy.
+
+    WHAT: the same row with only column 24 flipped must produce a different
+    shared-critic value (and a different hidden), because it is encoded and
+    recurred by the other team trunk.
+
+    WHY: heads-only split still has one encoder+LSTM, so flipping the team
+    bit would not change value_head(hidden). This is the trunk-routing
+    observable that does not depend on the split heads.
+
+    PITFALL (spec §3.2): the 3D case must use x[..., 24] — x[:, 24] on a
+    (B, T, obs) input selects timestep 24. T=6 here is short enough that
+    that form would IndexError; T is still >1 so a silent wrong-timestep
+    mask on a longer horizon is the class of bug the 3D assert pins.
+    """
+    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+    assert p.tct_split_trunk is True
+    assert "tct_split_trunk" not in p.state_dict()
+
+    x = _obs(1, 0)
+    x_flip = x.clone()
+    x_flip[:, 24] = 1.0 - x_flip[:, 24]
+    with torch.no_grad():
+        *_, v = p.forward(x, state={})
+        *_, v_flip = p.forward(x_flip, state={})
+        *_, v_eval = p.forward_eval(x, state={})
+        *_, v_eval_flip = p.forward_eval(x_flip, state={})
+    assert not torch.allclose(v, v_flip), "2D forward: flipping obs[24] must switch trunks"
+    assert not torch.allclose(v_eval, v_eval_flip), "forward_eval must inherit trunk routing"
+
+    x3 = torch.randn(2, 6, train.OBS_DIM) * 0.5
+    x3[:, :, 24] = 1.0
+    x3_flip = x3.clone()
+    x3_flip[:, :, 24] = 0.0
+    with torch.no_grad():
+        *_, v3 = p.forward(x3, state={})
+        *_, v3_flip = p.forward(x3_flip, state={})
+    assert not torch.allclose(v3, v3_flip), "3D forward: flipping obs[24] must switch trunks"
+
+
+def test_resolve_resume_split_two_bits(tmp_path, env):
+    import torch
+    # heads-only ckpt + both flags omitted → heads on, trunk off
+    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=False)
+    path = tmp_path / "heads.pt"
+    torch.save(p.state_dict(), path)
+    h, t, sd, rp = train.resolve_resume_split(path, heads_flag=False, trunk_flag=False)
+    assert (h, t) == (True, False)
+    # trunk-only + omitted flags → trunk on, heads off
+    p2 = train.build_policy(env, "cpu", tct_split_heads=False, tct_split_trunk=True)
+    path2 = tmp_path / "trunk.pt"
+    torch.save(p2.state_dict(), path2)
+    h, t, _, _ = train.resolve_resume_split(path2, heads_flag=False, trunk_flag=False)
+    assert (h, t) == (False, True)
+    # heads-only + trunk_flag True → both on (widen)
+    h, t, _, _ = train.resolve_resume_split(path, heads_flag=False, trunk_flag=True)
+    assert (h, t) == (True, True)
+
+
+def test_legacy_warm_split_both_axes_sigma_then_heads_then_trunk(env):
+    """Spec §3.3 order: σ re-init → heads convert → trunk convert.
+
+    WHAT/WHY: bc_warmstart-shaped dict + both flags. Both head copies equal
+    the re-inited σ; both trunk copies equal the legacy encoder/lstm.
+    Heads-first-then-σ would leave σ=0.1 (gh#91).
+
+    PITFALL: production order only — trunk-first still works on a legacy
+    dict (heads keys pass through) and would hide a σ-order regression.
+    """
+    legacy = _legacy_frozen_state_dict(env)
+    enc = {k: v.clone() for k, v in legacy.items() if k.startswith("encoder.")}
+    lstm = {k: v.clone() for k, v in legacy.items() if k.startswith("lstm.")}
+    assert train.reinit_frozen_aim_log_std(legacy) is True
+    sd = train.convert_legacy_state_dict_to_split(legacy)
+    sd = train.convert_shared_trunk_to_split(sd)
+    for copy in ("aim_log_std_t", "aim_log_std_ct"):
+        assert torch.allclose(sd[copy], torch.full_like(sd[copy],
+                                                        train.AIM_LOG_STD_RESUME_INIT)), copy
+    assert "encoder.0.weight" not in sd
+    assert "encoder_t.0.weight" in sd
+    for suf, src in enc.items():
+        stem = suf[len("encoder."):]
+        assert torch.equal(sd[f"encoder_t.{stem}"], src)
+        assert torch.equal(sd[f"encoder_ct.{stem}"], src)
+    for suf, src in lstm.items():
+        stem = suf[len("lstm."):]
+        assert torch.equal(sd[f"lstm_t.{stem}"], src)
+        assert torch.equal(sd[f"lstm_ct.{stem}"], src)
+
+
+def test_trunk_split_into_heads_only_policy_raises_naming_trunk(env):
+    """Trunk-split ckpt into a heads-only (tct_split_trunk=False) policy.
+
+    WHAT/WHY: the message must name trunk. Heads is SPLIT on both sides
+    here, so a SPLIT/LEGACY-only regex would miss this case.
+    """
+    heads_only = train.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=False)
+    trunk_sd = train.build_policy(env, device="cpu", tct_split_heads=True,
+                                  tct_split_trunk=True).state_dict()
+    with pytest.raises(ValueError, match=r"trunk"):
+        train.load_state_dict_arch_checked(heads_only, trunk_sd, source="trunk.pt")
+
+
+def test_trunk_split_checkpoint_round_trips_bitwise(env):
+    """Trunk-split → trunk-split is a plain load_state_dict."""
+    a = train.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)
+    b = train.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)
+    train.load_state_dict_arch_checked(b, a.state_dict(), source="a")
+    for (n, pa), (_, pb) in zip(a.named_parameters(), b.named_parameters(), strict=True):
+        assert torch.equal(pa, pb), n
+
+
+def test_loaders_infer_both_bits_and_warm_split_trunk_only(env, tmp_path):
+    """Heads-only + trunk_flag widens trunk only; omitted flags infer both;
+    load_policy_from_checkpoint does not KeyError on encoder_t.
+
+    WHAT/WHY: trunk-split files have no encoder.0.weight. Crash-resume
+    without flags must rebuild both axes from keys.
+
+    PITFALL: this warm-split is trunk-only (heads already split).
+    """
+    import inspect
+
+    heads_pt = tmp_path / "heads.pt"
+    both_pt = tmp_path / "both.pt"
+    trunk_pt = tmp_path / "trunk.pt"
+    torch.save(
+        train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=False).state_dict(),
+        heads_pt)
+    torch.save(
+        train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True).state_dict(),
+        both_pt)
+    torch.save(
+        train.build_policy(env, "cpu", tct_split_heads=False, tct_split_trunk=True).state_dict(),
+        trunk_pt)
+
+    # Heads-only + trunk_flag=True → both on; warm-split trunk only.
+    h, t, sd, _ = train.resolve_resume_split(heads_pt, heads_flag=False, trunk_flag=True)
+    assert (h, t) == (True, True)
+    assert train.state_dict_is_split(sd) and not train.state_dict_is_trunk_split(sd)
+    warm = train.convert_shared_trunk_to_split(sd)
+    assert train.state_dict_is_trunk_split(warm)
+    assert "aim_log_std_t" in warm and "aim_log_std" not in warm
+    assert "encoder.0.weight" not in warm and "encoder_t.0.weight" in warm
+
+    # both-split + flags omitted → both bits; build_policy accepts them.
+    h, t, _, _ = train.resolve_resume_split(both_pt, heads_flag=False, trunk_flag=False)
+    assert (h, t) == (True, True)
+    p = train.build_policy(env, "cpu", tct_split_heads=h, tct_split_trunk=t)
+    assert p.tct_split_heads is True and p.tct_split_trunk is True
+
+    # load_policy_from_checkpoint on a trunk-split file (no encoder.0.weight).
+    loaded = train.load_policy_from_checkpoint(trunk_pt, "cpu")
+    assert loaded.tct_split_trunk is True
+    assert loaded.tct_split_heads is False
+    loaded_both = train.load_policy_from_checkpoint(both_pt, "cpu")
+    assert loaded_both.tct_split_heads is True and loaded_both.tct_split_trunk is True
+
+    # self-play pool has no config — must infer both bits from keys.
+    mgr = train.SelfPlayManager()
+    mgr.pool = [trunk_pt]
+    past = mgr.load_past_policy("cpu", env)
+    assert past is not None and past.tct_split_trunk is True and past.tct_split_heads is False
+
+    # Train-main must not discard the resolved trunk bit.
+    src = inspect.getsource(train.train)
+    assert "tct_split_trunk=tct_split_trunk" in src
+    assert ", _tct_split_trunk," not in src
+    assert "duplicated the shared encoder+LSTM into per-team" in src

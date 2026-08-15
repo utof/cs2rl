@@ -553,6 +553,24 @@ def test_exact_allowed_flags_are_kept():
     assert "--tag-every" in request.train_args
 
 
+def test_tct_split_trunk_is_allowed():
+    """--tct-split-trunk is a live store_true on the 7R scientific argv.
+
+    Mirrors test_exact_allowed_flags_are_kept: the flag must survive
+    build_run_request together with the rest of the 7R scientific set
+    (seed / warmstart-entropy / TAG / heads / a reward weight). An
+    unknown-flag spelling still fails — that pin is
+    test_unknown_spelling_rejected_before_ownership.
+    """
+    raw = ("--timesteps 30000000 --seed 2 --warmstart-entropy --no-dead-run-abort "
+           "--tag-diagnostic --tag-every 5 --tct-split-heads --tct-split-trunk "
+           "--reward-win 1.0")
+    request = mrl.build_run_request(**_valid_run_kwargs(train_args=raw))
+    assert request.timesteps == 30_000_000
+    assert "--tct-split-trunk" in request.train_args
+    assert "--tct-split-heads" in request.train_args
+
+
 # ── Task 2 cycle C: runner-owned argv injection ────────────────────────────
 
 
@@ -3602,6 +3620,7 @@ class FakeModal:
         self.secret_lookups = []
         self.base_remote_calls = []
         self.configured_remote_calls = []
+        self.configured_spawn_calls = []
         self.with_options_calls = []
         self.batch_upload_calls = []
         self.read_file_calls = []
@@ -3802,6 +3821,9 @@ class FakeFunction:
         self._fake.base_remote_calls.append((args, kwargs))
         raise AssertionError("base Function must never be called")
 
+    def spawn(self, *args, **kwargs):
+        raise AssertionError("base Function must never be called")
+
     def with_options(self, **kwargs):
         self._fake.with_options_calls.append(dict(kwargs))
         return FakeConfiguredFunction(self._fake, self, kwargs)
@@ -3819,6 +3841,18 @@ class FakeConfiguredFunction:
         if self._fake.invoke_remote:
             return self.base._fn(*args, **kwargs)
         return {"status": "ok"}
+
+    def spawn(self, *args, **kwargs):
+        """ASYNC invocation. Does not wait; returns a FunctionCall-shaped handle.
+
+        invoke_remote still runs the wrapper in-process so launch_run tests that
+        need train_remote side effects keep working. A real Modal spawn would
+        schedule the container and return immediately.
+        """
+        self._fake.configured_spawn_calls.append((self.options, args, kwargs))
+        if self._fake.invoke_remote:
+            self.base._fn(*args, **kwargs)
+        return SimpleNamespace(object_id="fc-test")
 
 
 class FakeVolume:
@@ -4400,8 +4434,9 @@ def test_configured_run_uses_with_options_defaults_and_prints_ids(fake_modal, tm
         **_valid_launch_sentinels(git_sha=sha, resume_local_checkpoint=str(ckpt)))
     stdout = _capture_stdout()
     result = module.launch_run(request, repo=repo, app_obj=module.app, stdout=stdout)
-    assert result["status"] == "ok"
+    assert result["status"] == "spawned"
     assert fake_modal.base_remote_calls == []
+    assert fake_modal.configured_remote_calls == []
     assert len(fake_modal.with_options_calls) == 1
     options = fake_modal.with_options_calls[0]
     assert options["gpu"] == "T4"
@@ -4410,7 +4445,7 @@ def test_configured_run_uses_with_options_defaults_and_prints_ids(fake_modal, tm
     assert options["timeout"] == 120 * 60
     assert list(options["volumes"]) == ["/artifacts"]
     assert "secrets" not in options
-    _opts, args, kwargs = fake_modal.configured_remote_calls[0]
+    _opts, args, kwargs = fake_modal.configured_spawn_calls[0]
     payload = args[0] if args else kwargs["payload"]
     assert payload["run_id"] == request.run_id
     assert payload["resume_mount_path"] == f"/artifacts/inputs/sha256/{digest}.pt"
@@ -4488,7 +4523,7 @@ def test_wandb_attaches_secret_and_records_enabled_flag_only(fake_modal, tmp_pat
     options = fake_modal.with_options_calls[0]
     assert "secrets" in options
     assert len(options["secrets"]) == 1
-    payload = fake_modal.configured_remote_calls[0][1][0]
+    payload = fake_modal.configured_spawn_calls[0][1][0]
     assert payload["wandb_enabled"] is True
     assert "wandb_secret_name" not in payload
     assert secret_name not in json.dumps(payload)
@@ -4582,7 +4617,7 @@ def test_prior_run_resume_sends_only_immutable_digest_path(fake_modal, tmp_path)
                       app_obj=module.app,
                       now=_aware(),
                       stdout=_capture_stdout())
-    payload = fake_modal.configured_remote_calls[0][1][0]
+    payload = fake_modal.configured_spawn_calls[0][1][0]
     assert payload["resume_mount_path"] == f"/artifacts/inputs/sha256/{digest}.pt"
     assert payload["resume_sha256"] == digest
     assert payload["resumed_from_run_id"] == "parent-run"
@@ -4612,7 +4647,7 @@ def test_launch_payload_includes_design_contract_fields(fake_modal, tmp_path):
                       app_obj=module.app,
                       now=_aware(),
                       stdout=_capture_stdout())
-    payload = fake_modal.configured_remote_calls[0][1][0]
+    payload = fake_modal.configured_spawn_calls[0][1][0]
     run_root = mrl.mounted_path(mrl.RUNS_ROOT / request.run_id)
     resume_mount = f"/artifacts/inputs/sha256/{digest}.pt"
     requested = request.timesteps
@@ -4652,7 +4687,7 @@ def test_build_remote_manifest_records_contract_and_rejects_digest_drift(fake_mo
                       app_obj=module.app,
                       now=_aware(),
                       stdout=_capture_stdout())
-    payload = fake_modal.configured_remote_calls[0][1][0]
+    payload = fake_modal.configured_spawn_calls[0][1][0]
     manifest = module.build_remote_manifest(payload)
     assert manifest.modal_version == fake_modal.__version__
     assert manifest.image_digest == PINNED_CUDA_CHILD_DIGEST
@@ -4769,8 +4804,7 @@ def test_train_remote_writes_manifest_and_rejects_completed_without_evidence(
     assert written["resumed_from_run_id"] is None
     assert captured["execute_manifest"].config_hash == captured["prepare_manifest"].config_hash
     assert captured["execute_manifest"].thread_caps == _expected_thread_caps()
-    assert result["status"] == mrl.Status.FAILED.value
-    assert result["reason"] == mrl.REASON_INVALID_EVIDENCE
+    assert result["status"] == "spawned"
     assert json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"] == "failed"
     assert json.loads((run_root / mrl.RESULT_FILENAME).read_text())["status"] == "failed"
 
@@ -4853,8 +4887,7 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
     assert execute_manifest.resumed_from_run_id is None
     assert on_disk["thread_caps"] == _expected_thread_caps()
     assert on_disk["resumed_from_run_id"] is None
-    assert result["status"] == mrl.Status.COMPLETED.value
-    assert result["reason"] is None
+    assert result["status"] == "spawned"
     assert json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"] == "completed"
     assert json.loads((run_root / mrl.RESULT_FILENAME).read_text())["status"] == "completed"
 
@@ -4929,7 +4962,7 @@ def test_train_remote_redelivery_claims_before_prepare(fake_modal, tmp_path, mon
                               stdout=_capture_stdout())
     assert first["status"] != mrl.REDELIVERED
     assert factory_calls
-    payload = fake_modal.configured_remote_calls[0][1][0]
+    payload = fake_modal.configured_spawn_calls[0][1][0]
     run_root = tmp_path / "runs" / request.run_id
     status_bytes = (run_root / mrl.STATUS_FILENAME).read_bytes()
     manifest_bytes = (run_root / mrl.MANIFEST_FILENAME).read_bytes()
@@ -5093,6 +5126,39 @@ def test_detach_is_a_modal_run_cli_flag_not_an_app_option(fake_modal):
     assert "detach" not in module.main.__code__.co_varnames
 
 
+def test_launch_run_spawns_async_so_client_death_does_not_cancel_training(fake_modal, tmp_path):
+    """Client SIGTERM must not cancel the GPU input (150826-trunk-seed2-split).
+
+    WHAT: launch_run invokes the configured Function via spawn, never remote.
+
+    WHY: Function.remote() is FUNCTION_CALL_INVOCATION_TYPE_SYNC. Modal's
+    client cancels that input on shutdown (`Successfully canceled input`).
+    `modal run --detach` only keeps the App; it does not keep a SYNC input
+    alive. Function.spawn() is ASYNC — the same invocation type Modal's own
+    `--detach` Function CLI uses (cli/run.py: spawn then get).
+
+    PITFALL: adding --detach to the App or catching SIGTERM locally does not
+    fix this. The invocation type is the load-bearing bit. Live evidence:
+    21.3M/29.98M T4 cancelled at 2026-08-15T13:51:35Z while STATUS stayed
+    training because the container was hard-cancelled before finalize.
+    """
+    import torch
+
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    ckpt = tmp_path / "warm.pt"
+    torch.save({"weight": torch.tensor([1.0])}, ckpt)
+    request = module.resolve_launch_request(
+        **_valid_launch_sentinels(git_sha=sha, resume_local_checkpoint=str(ckpt)))
+    result = module.launch_run(request, repo=repo, app_obj=module.app, stdout=_capture_stdout())
+    assert fake_modal.configured_remote_calls == []
+    assert fake_modal.base_remote_calls == []
+    assert len(fake_modal.configured_spawn_calls) == 1
+    assert result["status"] == "spawned"
+    assert result["function_call_id"] == "fc-test"
+
+
 # ── Task 8 quality-review: FileEntry types, empty prefixes, reservation ────
 
 
@@ -5148,7 +5214,8 @@ def test_first_launch_lists_empty_volume_prefixes(fake_modal, tmp_path):
     _named_dict(fake_modal)
     request = module.resolve_launch_request(**_valid_launch_sentinels(git_sha=sha))
     module.launch_run(request, repo=repo, app_obj=module.app, stdout=_capture_stdout())
-    assert fake_modal.configured_remote_calls
+    assert fake_modal.configured_spawn_calls
+    assert fake_modal.configured_remote_calls == []
     source_name = next(path for path in volume.files if path.startswith("sources/"))
     assert source_name.endswith(".tar.gz")
 

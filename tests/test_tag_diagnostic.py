@@ -281,3 +281,43 @@ def test_tag_param_groups_partition_a_split_policy():
     assert sum(p.numel() for p in groups["policy_heads"]) == 2 * 6170
     assert sum(p.numel() for p in groups["value_head"]) == 257
     assert sum(p.numel() for p in groups["trunk"]) == 620544
+
+
+def test_tag_param_groups_partition_a_both_flags_policy():
+    """Spec §5 test 5a (trunk): _tag_param_groups RAISES on unmapped names.
+
+    WHAT: a both-flags policy (heads + trunk split) still partitions every
+    trainable param. Both encoder/lstm copies land in `trunk` (count > the
+    shared 620,544); both head copies stay in `policy_heads`.
+
+    WHY: the union trunk group is what makes T-vs-CT cross cos-sim exactly
+    0.0 (each team's gradient is zero on the other copy). Unmapped
+    encoder_t/lstm_t names would raise at the first TAG epoch of the
+    experiment arm.
+
+    PITFALL: this is NOT a rewrite of the heads-only partition test above —
+    that path stays the Batch 7 pin. A prefix matcher that used startswith
+    ("encoder") without the trailing dot would also swallow encoder_t, but
+    the live prefixes keep the dots; this test pins the mapping, not the
+    string form.
+    """
+    env = train.make_puffer_env(seed=0)
+    try:
+        policy = train.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)
+    finally:
+        env.close()
+    groups = train._tag_param_groups(policy)
+    assert set(groups) == {"trunk", "policy_heads", "value_head"}
+    n_grouped = sum(len(ps) for ps in groups.values())
+    assert n_grouped == sum(1 for _, p in policy.named_parameters() if p.requires_grad)
+    trunk_ids = {id(p) for p in groups["trunk"]}
+    heads_ids = {id(p) for p in groups["policy_heads"]}
+    for name, p in policy.named_parameters():
+        if name.startswith(("encoder_t.", "encoder_ct.", "lstm_t.", "lstm_ct.")):
+            assert id(p) in trunk_ids, f"{name} did not land in trunk"
+        if "action_heads_" in name or "aim_mu_" in name or "aim_log_std_" in name:
+            assert id(p) in heads_ids, f"{name} did not land in policy_heads"
+    # Both trunk copies: strictly larger than the shared-trunk 620,544.
+    assert sum(p.numel() for p in groups["trunk"]) > 620544
+    assert sum(p.numel() for p in groups["policy_heads"]) == 2 * 6170
+    assert sum(p.numel() for p in groups["value_head"]) == 257
