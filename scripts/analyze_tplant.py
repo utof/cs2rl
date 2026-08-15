@@ -11,17 +11,27 @@ WHAT: reads one or more run dirs' metrics.jsonl and reports, per run:
     rate, and CT win-by-elimination share. Pre-registered interpretation:
     a flat slope WITH collapsed CT pressure reads as "CT went passive" — a
     confound, NOT a success.
+  - outcome-mix mean (when any row has game/win_by_detonation): t_detonation,
+    ct_defuse, timeout, t_elimination, ct_elimination as rate differences.
 
-WHY t_plant is derived, not logged: the env logs mean round_length and
-plant rate p per epoch row. Inverting
+WHY t_plant is derived, not logged as E[tick | planted]: new-format
+epoch rows (key presence of game/plant_tick or environment/plant_tick —
+not truthiness; a legal all-unplanted window stores 0.0) carry the
+zero-including window mean m = p * E[tick | planted]. Those rows use
+    t_plant = m / p.
+That identity holds for one row's pair of means; never mean(m)/mean(p)
+across a 5M window. Raw m is not t_plant.
+
+Old-format rows (neither plant-tick key) still invert
     round_length = p*(t_plant + BOMB_TIMER) + (1-p)*cap
-gives
+to
     t_plant = (round_length - (1-p)*cap) / p - BOMB_TIMER.
-Assumptions (spec §5, stated, not checked): planted rounds run to
-detonation — defuses / post-plant T eliminations bias t_plant low (both
-~0 today; their growth shows up in the CT-pressure controls) — and the
-1/p factor amplifies noise at low p, so rows with p <= p_min are excluded
-and slopes are fit only within blocks of consecutive kept rows.
+That inversion assumes planted rounds run to detonation — defuses /
+post-plant T eliminations bias t_plant low (their growth shows up in
+the CT-pressure / outcome-mix controls). p_min still drops slope rows
+on both formats (1/p amplifies noise at low p); slopes are fit only
+within blocks of consecutive kept rows. The die-off gate is unchanged
+(p <= p_min for >= 1M steps, late if window end > 15M).
 
 PITFALLS:
   - Absolute t_plant levels are NOT comparable across different round caps
@@ -47,6 +57,7 @@ import math
 import random
 import re
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 BOMB_TIMER_DEFAULT = 640               # ticks; src/nav.py BOMB_TIMER — keep in sync
@@ -75,12 +86,64 @@ def load_rows(run_dir: Path):
 
 
 def t_plant(row, cap, bomb_timer, p_min):
-    """Derived plant latency for one epoch row, or None if p too low / keys missing."""
+    """Derived plant latency for one epoch row, or None if p too low / keys missing.
+
+    New-format iff `game/plant_tick` or `environment/plant_tick` is IN the
+    row (key presence, not truthiness). Then t_plant = m / p, where m is
+    the zero-including window mean — raw m is p * E[tick | planted], not
+    t_plant. Prefer game/plant_tick when both keys exist.
+
+    Old-format (neither key) keeps the round_length inversion. p_min
+    gates both paths; do not divide by p <= p_min (includes p == 0).
+    """
     p = row.get("game/bomb_plant_rate")
+    if "game/plant_tick" in row or "environment/plant_tick" in row:
+        m = row["game/plant_tick"] if "game/plant_tick" in row else row["environment/plant_tick"]
+        if p is None or m is None or p <= p_min:
+            return None
+        return m / p
     rl = row.get("environment/round_length")
     if p is None or rl is None or p <= p_min:
         return None
     return (rl - (1.0 - p) * cap) / p - bomb_timer
+
+
+def outcome_mix(row):
+    """Five mutually exclusive outcome rates from one epoch-window row.
+
+    Presence-gated on `game/win_by_detonation` (key in row, not truthiness
+    — 0.0 is a legal all-non-detonation window). Missing sibling keys
+    default to 0.0 AFTER that gate. Elimination rates are differences:
+    winner_ct already includes timeout, so CT-elim subtracts timeout_rate
+    as well as defuse. Clamp each rate with max(0.0, ·); a negative is
+    float noise (or a wrong subtraction), never a real class. Do not use
+    these floats as Python booleans (`if rate` is False at 0.0).
+    """
+    if "game/win_by_detonation" not in row:
+        return None
+
+    def _rate(key):
+        # str() then Decimal: JSON/Python shortest-repr of 0.6 is "0.6",
+        # but binary 0.6 - 0.1 - 0.4 is 0.0999… not 0.1. The mix is
+        # differences of epoch-window means of 0/1 flags; do the
+        # subtraction in decimal so max(0, ·) sees the intended rate.
+        # Never `if v` — 0.0 is a legal present value.
+        v = row.get(key)
+        return Decimal("0") if v is None else Decimal(str(v))
+
+    zero = Decimal("0")
+    t_detonation = _rate("game/win_by_detonation")
+    ct_defuse = _rate("game/win_by_defuse")
+    timeout = _rate("game/timeout_rate")
+    return {
+        "t_detonation": float(max(zero, t_detonation)),
+        "ct_defuse": float(max(zero, ct_defuse)),
+        "timeout": float(max(zero, timeout)),
+        "t_elimination": float(max(zero,
+                                   _rate("game/win_rate_t") - t_detonation)),
+        "ct_elimination": float(max(zero,
+                                    _rate("game/win_rate_ct") - ct_defuse - timeout)),
+    }
 
 
 def slope(xs, ys):
@@ -216,6 +279,17 @@ def analyze_run(run_dir: Path,
     elim_share = (None if not win_ct_mean else max(0.0, win_ct_mean - (timeout_mean or 0.0)) /
                   win_ct_mean)
 
+    # Second pass over already-loaded rows. Presence-gated: old-format
+    # jsonl has no game/win_by_detonation so mix_mean stays None. Average
+    # per-row mixes (each already m/p-style differences); do NOT form
+    # mean(m)/mean(p) here. Does not touch the 5M plant-rate window or
+    # ct_win_by_elim_share.
+    mix_rows = [outcome_mix(row) for row in rows if "game/win_by_detonation" in row]
+    mix_mean = None
+    if mix_rows:
+        keys = ("t_detonation", "ct_defuse", "timeout", "t_elimination", "ct_elimination")
+        mix_mean = {k: sum(m[k] for m in mix_rows) / len(mix_rows) for k in keys}
+
     return {
         "run": run_dir.name,
         "segments": len(segments),
@@ -234,6 +308,7 @@ def analyze_run(run_dir: Path,
         "ct_win_rate_mean": win_ct_mean,
         "timeout_rate_mean": timeout_mean,
         "ct_win_by_elim_share": elim_share,
+        "outcome_mix_mean": mix_mean,
     }
 
 
@@ -537,6 +612,14 @@ def print_report(r, window_steps):
         f"  kills_ct mean {fmt(r['ct_kills_mean'])}  win_rate_ct {fmt(r['ct_win_rate_mean'])}  "
         f"timeout_rate {fmt(r['timeout_rate_mean'])}  CT-win-by-elim share {fmt(r['ct_win_by_elim_share'])}"
     )
+    mix = r.get("outcome_mix_mean")
+    if mix:
+        print("outcome mix: "
+              f"t_detonation {fmt(mix['t_detonation'])}  "
+              f"ct_defuse {fmt(mix['ct_defuse'])}  "
+              f"timeout {fmt(mix['timeout'])}  "
+              f"t_elim {fmt(mix['t_elimination'])}  "
+              f"ct_elim {fmt(mix['ct_elimination'])}")
 
 
 def main(argv=None):
