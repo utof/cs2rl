@@ -79,3 +79,48 @@ def test_kl_break_metrics_and_granularity():
             "agree under the executed-count divisor")
     finally:
         cleanup()
+
+
+def test_clipfrac_halves_and_event_fraction_are_logged():
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        _patch_trainer_with_return_norm(trainer)
+        trainer.config["target_kl"] = 1e9
+        losses = _run_train_once(trainer)
+        assert "clipfrac_d" in losses
+        assert "clipfrac_c" in losses
+        assert "event_oversample_fraction" in losses
+        assert 0.0 <= losses["clipfrac_d"] <= 1.0
+        assert 0.0 <= losses["clipfrac_c"] <= 1.0
+        assert 0.0 <= losses["event_oversample_fraction"] <= 1.0
+        # This harness sets include_step_stats_in_info=True, so the fraction
+        # is NOT the production #100-closed zero. Do not assert == 0.0 here.
+        assert "clipfrac" in losses
+    finally:
+        cleanup()
+
+
+def test_self_play_used_past_metric():
+    from train import self_play_used_past_metric
+
+    class _T:
+        _selfplay_used_past = True
+
+    class _U:
+        pass
+
+    assert self_play_used_past_metric(_T()) == 1.0
+    assert self_play_used_past_metric(_U()) == 0.0
+
+
+def test_self_play_used_past_is_assigned_on_outer_logs():
+    """The persist site is the outer logs dict, not trainer.losses."""
+    import inspect
+
+    import train
+    src = inspect.getsource(train)
+    assert 'logs["self_play/used_past"] = self_play_used_past_metric(trainer)' in src
+    assert src.index('logs["self_play/pool_size"]') < src.index('logs["self_play/used_past"]')

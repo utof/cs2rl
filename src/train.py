@@ -2398,7 +2398,8 @@ def _patch_trainer_with_return_norm(trainer):
 
         # Task 8: raw event-segment fraction (mask mean) — computed once per
         # train() call because _batch1_event_mask doesn't change inside the
-        # minibatch loop. Reported to the log layer as event_oversample_fraction.
+        # minibatch loop. Persisted onto losses["event_oversample_fraction"]
+        # AFTER the gh#90 divisor loop (per-call scalar, like ret_mean).
         _t8_event_mask = getattr(self, "_batch1_event_mask", None)
         self._batch1_event_oversample_fraction = (float(_t8_event_mask.float().mean())
                                                   if _t8_event_mask is not None else 0.0)
@@ -2479,8 +2480,9 @@ def _patch_trainer_with_return_norm(trainer):
             #   * Cloning before the in-place mul protects callers that
             #     might still hold a reference to the original prio_probs.
             #   * The exposed metric is the RAW event fraction (mask mean),
-            #     NOT the post-boost sampled fraction — that's what the
-            #     wandb/log layer reports as `event_oversample_fraction`.
+            #     NOT the post-boost sampled fraction. Written onto
+            #     losses["event_oversample_fraction"] after the divisor
+            #     loop — do not accumulate it inside this minibatch loop.
             OVERSAMPLE_FACTOR = 4.0
             if _t8_event_mask is not None and _t8_event_mask.any():
                 boosted = prio_probs.clone()
@@ -2588,6 +2590,15 @@ def _patch_trainer_with_return_norm(trainer):
                 old_approx_kl = (-logratio).mean()
                 approx_kl = ((ratio - 1) - logratio).mean()
                 clipfrac = ((ratio - 1.0).abs() > config["clip_coef"]).float().mean()
+                # Observe-only (spec 2026-08-15 §3.4): same formula as the
+                # joint `clipfrac` above, split by the per-factor ratios
+                # `_hybrid_ppo_loss` already returns. `.item()` into the
+                # logging dict only — NEVER add these to the `loss` tensor
+                # (they are diagnostics, not a training signal). Last-
+                # minibatch-only is forbidden; they accumulate like
+                # `clipfrac` and ride the existing `_mb_run` divisor.
+                clipfrac_d = ((ratio_d - 1.0).abs() > config["clip_coef"]).float().mean()
+                clipfrac_c = ((ratio_c - 1.0).abs() > config["clip_coef"]).float().mean()
 
             # Early stopping (gh#90): a KL trip finishes the CURRENT epoch
             # (this minibatch included — matches standard PPO's post-epoch
@@ -2683,6 +2694,8 @@ def _patch_trainer_with_return_norm(trainer):
             losses["old_approx_kl"] += old_approx_kl.item()
             losses["approx_kl"] += approx_kl.item()
             losses["clipfrac"] += clipfrac.item()
+            losses["clipfrac_d"] += clipfrac_d.item()
+            losses["clipfrac_c"] += clipfrac_c.item()
             losses["importance"] += ratio.mean().item()
             # gh#90: count EXECUTED minibatches — the divisor for every
             # accumulated losses/* above and the per-head entropy block.
@@ -2824,6 +2837,17 @@ def _patch_trainer_with_return_norm(trainer):
         losses["explained_variance"] = explained_var.item()
         losses["ret_mean"] = _ret_mean.item()
         losses["ret_std"] = (_ret_var + 1e-8).sqrt().item()
+        # Observe-only persist (spec 2026-08-15 §3.4). Task 8 already
+        # computes `_batch1_event_oversample_fraction` once per train()
+        # call; older comments that say the wandb/log layer already
+        # reports it were stale. MUST sit after the gh#90 divisor loop —
+        # this is a per-call scalar like ret_mean, not a minibatch sum.
+        # Expected ~0.0 while #100 keeps include_step_stats_in_info=False
+        # (no event mask); that zero is the production signal. The
+        # KL-break harness turns the flag on, so its test must not
+        # assert == 0.0.
+        losses["event_oversample_fraction"] = float(
+            getattr(self, "_batch1_event_oversample_fraction", 0.0))
         losses["log_alpha"] = log_alpha.item()
 
         # Task 9C: expose per-train()-call metrics on the trainer for the
@@ -3067,6 +3091,24 @@ class DeadRunDetector:
 
 
 # ── SECTION: Self-Play ─────────────────────────────────────────────────────
+
+
+def self_play_used_past_metric(trainer) -> float:
+    """0.0/1.0 for metrics.jsonl. Persist filter drops non-floats.
+
+    WHAT: expose whether this epoch's evaluate() rollout used a past-policy
+      opponent (`trainer._selfplay_used_past`, set in
+      `_patch_trainer_with_selfplay`).
+    WHY: the persist filter on the outer logs dict drops non-floats, so a
+      bool never reaches metrics.jsonl. Callers write the returned float
+      onto the outer dict next to self_play/pool_size — never under
+      losses/. Missing attr (no-selfplay / unpatched path) is 0.0, not
+      an error.
+    PITFALL: do not log self_play/opponent_id. `load_past_policy` keeps
+      the chosen path as a local; a string would also be dropped by the
+      persist filter, and inventing a pool schema is out of scope.
+    """
+    return float(getattr(trainer, "_selfplay_used_past", False))
 
 
 class SelfPlayManager:
@@ -4567,6 +4609,11 @@ def train(args):
                     win_rate_ct,
                 )
                 logs["self_play/pool_size"] = float(len(self_play_mgr.pool))
+                # Observe-only (spec 2026-08-15 §3.4): 0.0/1.0 float on the
+                # OUTER logs dict, next to pool_size. Not trainer.losses —
+                # `_selfplay_used_past` is set during evaluate(), not train().
+                # Do not log self_play/opponent_id (string, persist-dropped).
+                logs["self_play/used_past"] = self_play_used_past_metric(trainer)
                 # opponent_team flag: 1.0 = CT opponent, 0.0 = T opponent.
                 logs["self_play/opponent_team"] = float(self_play_mgr.opponent_team == "ct")
                 # ────────────────────────────────────────────────────────────
