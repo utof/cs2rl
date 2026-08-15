@@ -861,8 +861,13 @@ def load_policy_from_checkpoint(checkpoint_path, device):
     # load with it — a checkpoint that fails here is untrusted or corrupt.
     state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
 
-    # Infer obs_dim from checkpoint to handle checkpoints trained with different obs sizes
-    ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
+    # Infer obs_dim from checkpoint to handle checkpoints trained with different obs sizes.
+    # Trunk-split checkpoints have no shared encoder — the T copy is the marker
+    # (same key state_dict_is_trunk_split uses). Both copies share obs_dim.
+    if "encoder_t.0.weight" in state_dict:
+        ckpt_obs_dim = state_dict["encoder_t.0.weight"].shape[1]
+    else:
+        ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
     policy_env = make_puffer_env()
 
     # Batch 3.5 (#24, Opus I3): defensive obs_dim consistency check.
@@ -882,12 +887,14 @@ def load_policy_from_checkpoint(checkpoint_path, device):
             f"checkpoint is from a different obs schema. Retrain or use a matching env.")
 
     try:
-        # Batch 7 (spec §3.3): architecture inferred from the checkpoint keys,
-        # exactly like obs_dim above — this loader gets no flag and needs none.
+        # Batch 7 / trunk split (spec §3.3): both architecture bits inferred
+        # from the checkpoint keys, exactly like obs_dim above — this loader
+        # gets no flag and needs none. A trunk-split file has no encoder.0.weight.
         policy = build_policy(policy_env,
                               device,
                               obs_dim_override=ckpt_obs_dim,
-                              tct_split_heads=state_dict_is_split(state_dict))
+                              tct_split_heads=state_dict_is_split(state_dict),
+                              tct_split_trunk=state_dict_is_trunk_split(state_dict))
     finally:
         policy_env.close()
 
@@ -3058,12 +3065,12 @@ class SelfPlayManager:
     def load_past_policy(self, device, vecenv):
         """Load a random past checkpoint. Returns the policy module or None.
 
-        Batch 7 (spec §3.3): the state_dict is read BEFORE build_policy so the
-        architecture can be inferred from its keys. This method receives no
-        config and no flag — during a split run the pool fills with split
-        snapshots, and a flag-only design would raise here on ~30% of epochs
-        (p_past=0.3), hours into the run. Inference also lets a split run mix
-        in pre-split snapshots left over in an older pool.
+        Batch 7 (spec §3.3): the state_dict is read BEFORE build_policy so
+        BOTH architecture bits (heads + trunk) can be inferred from its keys.
+        This method receives no config and no flag — during a split run the
+        pool fills with split snapshots, and a flag-only design would raise
+        here on ~30% of epochs (p_past=0.3), hours into the run. Inference
+        also lets a split run mix in pre-split snapshots from an older pool.
         """
         import torch
 
@@ -3074,7 +3081,11 @@ class SelfPlayManager:
             self.pool.remove(path)
             return None
         state_dict = torch.load(path, map_location=device, weights_only=True)
-        policy = build_policy(vecenv, device, tct_split_heads=state_dict_is_split(state_dict))
+        # Both bits inferred from keys — this method receives no config.
+        policy = build_policy(vecenv,
+                              device,
+                              tct_split_heads=state_dict_is_split(state_dict),
+                              tct_split_trunk=state_dict_is_trunk_split(state_dict))
         load_state_dict_arch_checked(policy, state_dict, source=str(path))
         policy.eval()
         return policy
@@ -4286,16 +4297,20 @@ def train(args):
     # available yet. The sniffed dict is reused at the load site.
     # getattr on the flag keeps harness/older args objects working.
     resume_path = getattr(args, "resume", None)
-    # Trunk bit is resolved here so crash-resume never narrows; build_policy
-    # still only takes tct_split_heads until the trunk constructor lands.
-    tct_split_heads, _tct_split_trunk, _resume_state_dict, resume_path = resolve_resume_split(
+    # Both bits are resolved here so a flag-less crash-resume never narrows
+    # either axis, then passed into build_policy (omitted flags never drop a
+    # split checkpoint back to the shared vintage).
+    tct_split_heads, tct_split_trunk, _resume_state_dict, resume_path = resolve_resume_split(
         resume_path,
         heads_flag=bool(getattr(args, "tct_split_heads", False)),
         trunk_flag=bool(getattr(args, "tct_split_trunk", False)))
 
     print(f"[Train] Building policy on device={device} "
-          f"(tct_split_heads={tct_split_heads})...")
-    policy = build_policy(vecenv, device, tct_split_heads=tct_split_heads)
+          f"(tct_split_heads={tct_split_heads}, tct_split_trunk={tct_split_trunk})...")
+    policy = build_policy(vecenv,
+                          device,
+                          tct_split_heads=tct_split_heads,
+                          tct_split_trunk=tct_split_trunk)
 
     agents_per_env, bptt_horizon, batch_size = compute_batch_dims(args.num_envs)
     # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
@@ -4320,8 +4335,9 @@ def train(args):
         # gh#91: BC warm-start checkpoints carry aim_log_std frozen at
         # LOG_STD_INIT — widen to AIM_LOG_STD_RESUME_INIT before loading or
         # the KL early-stop throttles the whole run (see the helper's doc).
-        # Batch 7: this MUST run before the warm split below — the re-initer
-        # keys off the σ key name, and duplicating first would hide it.
+        # ORDER is load-bearing (spec 2026-08-15 §3.3): σ re-init on the
+        # LEGACY dict, then heads convert (needs bare aim_log_std), then
+        # trunk convert. Duplicating heads first would hide the σ key.
         if reinit_frozen_aim_log_std(state_dict):
             print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "
                   f"re-initialized to log(0.3) ≈ {AIM_LOG_STD_RESUME_INIT:.3f} (gh#91)")
@@ -4329,6 +4345,10 @@ def train(args):
             state_dict = convert_legacy_state_dict_to_split(state_dict)
             print("[Train] Warm split: duplicated the legacy policy heads into per-team "
                   "T/CT copies (spec 2026-08-13 §3.3) — both teams start identical.")
+        if tct_split_trunk and not state_dict_is_trunk_split(state_dict):
+            state_dict = convert_shared_trunk_to_split(state_dict)
+            print("[Train] Warm split: duplicated the shared encoder+LSTM into per-team "
+                  "T/CT copies (spec 2026-08-15 §3.3) — both teams start identical.")
         load_state_dict_arch_checked(policy, state_dict, source=str(resume_path))
         print(f"[Train] Resumed from checkpoint: {resume_path}")
     # ────────────────────────────────────────────────────────────────────────

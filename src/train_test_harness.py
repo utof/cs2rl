@@ -45,6 +45,7 @@ def _build_trainer_for_test(
     device: str = "cpu",
     seed: int = 0,
     tct_split_heads: bool = False,
+    tct_split_trunk: bool = False,
 ):
     """Build a tiny in-process PuffeRL trainer for Batch-1 trainer-level tests.
 
@@ -70,6 +71,10 @@ def _build_trainer_for_test(
         heads. Default False keeps every existing harness caller on the legacy
         architecture bit-for-bit. Exists so trainer-level split contracts (the
         obs-bit ⇔ slot-index invariant) can be pinned against a real rollout.
+    tct_split_trunk : bool
+        Spec 2026-08-15: build the policy with per-team T/CT encoder+LSTM.
+        Default False keeps every existing harness caller on the shared trunk.
+        Independent of ``tct_split_heads`` — either bit can be on alone.
 
     Returns
     -------
@@ -196,7 +201,10 @@ def _build_trainer_for_test(
     )
     train_config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
 
-    policy = build_policy(vecenv, device, tct_split_heads=tct_split_heads)
+    policy = build_policy(vecenv,
+                          device,
+                          tct_split_heads=tct_split_heads,
+                          tct_split_trunk=tct_split_trunk)
     trainer = PuffeRL(train_config, vecenv, policy)
 
     # Batch 3 (T5): the hybrid-aim patcher is REQUIRED for any test that
