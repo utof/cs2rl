@@ -172,6 +172,11 @@ class AgentStateC(ctypes.Structure):
         ("jump_cd", ctypes.c_int32),
                                                        # Batch 3.5: pitch — appended, mirror cs2_types.h AgentState.
         ("pitch", ctypes.c_float),
+                                                       # Sim recoil v1 (#120): punch — appended, never reorder.
+                                                       # Shared by the hit ray / demo camera when recoil_enabled.
+                                                       # Do not write these into facing / aim_rad / stored pitch.
+        ("punch_pitch", ctypes.c_float),
+        ("punch_yaw", ctypes.c_float),
     ]
 
 
@@ -295,6 +300,10 @@ class Dust2EnvC(ctypes.Structure):
         ("rng", ctypes.c_uint32),
         ("masks", ctypes.c_int8 * (N_AGENTS * ACTION_MASK_DIM)),
         ("client", ctypes.c_void_p),                                   # Client* (NULL in training)
+                                                       # Sim recoil v1 (#120): after client, not a binding.init arg.
+                                                       # make_env writes this after from_address; env_reset does not
+                                                       # clear it (memsets GameState only). 0=hitscan, 1=punch on ray.
+        ("recoil_enabled", ctypes.c_int32),
     ]
 
 
@@ -320,19 +329,24 @@ class Dust2EnvC(ctypes.Structure):
 # Dust2EnvC +40 (GameState) +80 (observations: 10×(107−105)×4).
 # Batch 6 Task 2.5: OBS_DIM 107 → 110 (bombsite bearing/distance in self
 # block) — Dust2EnvC observations +120 (10×3×4); agent/game/stats unchanged.
-assert ctypes.sizeof(AgentStateC) == 156, (
-    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 156)")
-assert ctypes.sizeof(GameStateC) == 1628, (
-    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1628)")
+# Sim recoil v1 (#120): AgentState +8 (punch_pitch/punch_yaw), GameState +80
+# (×10 agents). Dust2Env +88: game +80, recoil_enabled int32 after client +4,
+# plus 4-byte trailing pad to 8-byte struct alignment (client is a pointer).
+# Measured with a C printf TU against the headers — do not invent the pad.
+assert ctypes.sizeof(AgentStateC) == 164, (
+    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 164)")
+assert ctypes.sizeof(GameStateC) == 1708, (
+    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1708)")
 # F13: 208→200 / 6752→6736 after removing the dead action_last[2] counter
 # (Dust2Env embeds TWO StepStats — step + episode — hence the −16).
 # Instrumentation 2026-08-15: 200→204 / 6736→6744 after appending
 # plant_tick (int32) to StepStats. Dust2Env embeds TWO StepStats
 # (step + episode), so the env grows by +8.
+# Sim recoil v1 (#120): Dust2Env 6744→6832 (see punch/flag note above).
 assert ctypes.sizeof(StepStatsC) == 204, (
     f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 204)")
-assert ctypes.sizeof(Dust2EnvC) == 6744, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6744)")
+assert ctypes.sizeof(Dust2EnvC) == 6832, (
+    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6832)")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -449,6 +463,7 @@ class Cs2Env(pufferlib.PufferEnv):
             reward_win_ct_elimination=3.0,
             include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)  # noqa: E501
             reward_symmetrize: bool = False,                                    # spec 2026-08-01 §4.3  # noqa: E501
+            recoil: bool = False,                                               # #120: punch on ray; default off (today's hitscan)  # noqa: E501
     ):
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
@@ -619,6 +634,12 @@ class Cs2Env(pufferlib.PufferEnv):
         # BindingEnv has env as first field, so capsule ptr == &env
         env_ptr = _PyCapsule_GetPointer(self._capsule, None)
         self._c_env = Dust2EnvC.from_address(env_ptr)
+        # Sim recoil v1 (#120): write AFTER the overlay, not via binding.init
+        # (69-arg FMT is a footgun; do not extend it). env_init memsets
+        # Dust2Env so this starts 0; env_reset memsets GameState only, so the
+        # flag survives reset. Train / Modal stay off unless a later card
+        # passes recoil=True into make_env.
+        self._c_env.recoil_enabled = 1 if recoil else 0
 
         # Zero-copy NumPy views into C buffers
         obs_ptr, rew_ptr, term_ptr, trunc_ptr = binding.get_buffers(self._capsule)
@@ -1034,6 +1055,7 @@ def make_env(
         reward_win_ct_elimination=3.0,
         include_step_stats_in_info: bool = False,                      # Task 6a (utof/cs2rl#7)
         reward_symmetrize: bool = False,                               # spec 2026-08-01 §4.3
+        recoil: bool = False,                                          # #120: punch on ray; default off
 ):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
@@ -1077,4 +1099,5 @@ def make_env(
         reward_win_ct_elimination=reward_win_ct_elimination,
         include_step_stats_in_info=include_step_stats_in_info,
         reward_symmetrize=reward_symmetrize,
+        recoil=recoil,
     )
