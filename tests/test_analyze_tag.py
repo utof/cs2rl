@@ -246,3 +246,57 @@ def test_structural_verdict_prints_on_its_own_line():
     out = buf.getvalue()
     assert "structural (split run — cross≡0 by architecture)" in out
     assert "trunk cells are the decision metric" in out
+
+
+TRUNK_STRUCTURAL = "structural (trunk split — cross≡0 by architecture)"
+
+
+def test_trunk_active_routes_trunk_cells_and_replaces_footer():
+    rows = []
+    for i in range(30):
+        r = _split_row(i * 1e5, cross_half=0.0, within=0.55, group="policy_heads")
+        r.update(_row(step=i * 1e5, cross_half=0.0, within=0.55, group="trunk"))
+        r["split/trunk_active"] = 1.0
+        rows.append(r)
+    s = tag_summary(rows, dead_windows=[])
+    assert s["trunk"]["mb0"]["healthy"]["verdict"] == TRUNK_STRUCTURAL
+    assert s["_saw_trunk_active"] is True
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_tag_report(s)
+    out = buf.getvalue()
+    assert TRUNK_STRUCTURAL in out
+    assert "no actor TAG cell is a decision metric" in out
+    assert "trunk cells are the decision metric" not in out
+
+
+def test_trunk_active_zero_keeps_batch7_footer():
+    """Key present but 0.0 is heads-only after this batch (float(hasattr))."""
+    rows = [
+        _split_row(i * 1e5, cross_half=0.0, within=0.55, group="policy_heads") for i in range(30)
+    ]
+    for r in rows:
+        r["split/trunk_active"] = 0.0
+    s = tag_summary(rows, dead_windows=[])
+    assert s["_saw_trunk_active"] is False
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_tag_report(s)
+    assert "trunk cells are the decision metric" in buf.getvalue()
+
+
+def test_trunk_active_key_replaces_footer_even_if_trunk_cells_dropped():
+    """Predicate is the raw key scan, not a surviving labeled cell."""
+    rows = [
+        _split_row(i * 1e5, cross_half=0.0, within=0.55, group="policy_heads") for i in range(30)
+    ]
+    for r in rows:
+        r["split/trunk_active"] = 1.0
+        r["tag/selfplay_active"] = 1   # drop every epoch
+    s = tag_summary(rows, dead_windows=[])
+    assert s["_saw_trunk_active"] is True
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_tag_report(s)
+    assert "trunk cells are the decision metric" not in buf.getvalue()
+    assert "no actor TAG cell is a decision metric" in buf.getvalue()

@@ -3776,7 +3776,12 @@ def _tag_param_groups(policy):
     trunk        — encoder.* + lstm.* (620,544 of 626,971 trainable params,
                    99.0%, LSTM alone 526,336; this is why no 'total' group
                    exists — it would replicate trunk while reading as
-                   independent signal).
+                   independent signal). Trunk-split (spec 2026-08-15 §3.4):
+                   encoder_t./encoder_ct./lstm_t./lstm_ct. map into this
+                   SAME group, doubling it. The union is what makes the
+                   T-vs-CT trunk cross cos-sim exactly 0.0 — each team's
+                   gradient is zero on the other's copy — which the
+                   analyzer labels structural via split/trunk_active.
     policy_heads — action_heads.* + aim_mu.* + the aim_log_std parameter
                    (6,170 params). Batch 7: under --tct-split-heads BOTH team
                    copies (action_heads_t/_ct, aim_mu_t/_ct, aim_log_std_t/_ct)
@@ -3800,7 +3805,8 @@ def _tag_param_groups(policy):
     for name, p in policy.named_parameters():
         if not p.requires_grad:
             continue
-        if name.startswith(("encoder.", "lstm.")):
+        if name.startswith(
+            ("encoder.", "encoder_t.", "encoder_ct.", "lstm.", "lstm_t.", "lstm_ct.")):
             groups["trunk"].append(p)
         elif name.startswith(("action_heads.", "action_heads_t.", "action_heads_ct.",
                               "aim_mu.", "aim_mu_t.", "aim_mu_ct.")) \
@@ -4507,6 +4513,13 @@ def train(args):
             # entirely: a split run launched WITHOUT --tag-diagnostic still
             # labels every row.
             logs["split/active"] = float(hasattr(policy, "aim_log_std_t"))
+            # Trunk-split twin (spec 2026-08-15 §3.4): same unconditional
+            # placement as split/active. 1.0 iff the live policy has
+            # encoder_t — derived from the object, never config.json.
+            # Analyzer keys the trunk-structural verdict and the "no actor
+            # TAG cell is a decision metric" footer on this key. Do not
+            # gate on --tag-every / --tag-diagnostic.
+            logs["split/trunk_active"] = float(hasattr(policy, "encoder_t"))
             logs.update(compute_head_divergence(policy))
 
             # TAG injection — MUST stay after dead_run_detector.check above
