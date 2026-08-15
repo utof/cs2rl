@@ -2894,6 +2894,12 @@ def compute_game_metrics(logs):
     already averaged over the collection window, so most just need re-keying
     and minor arithmetic.
 
+    Always-present ``game/*`` keys (already in today's terminal info) are
+    re-keyed with ``_get(..., default=0.0)``. ``game/plant_tick`` and
+    ``game/win_by_*`` are presence-gated: emit them only when the source
+    key already exists in ``logs``. A synthetic 0.0 would make old log
+    dicts look new-format.
+
     Returns a flat dict with ``game/*`` and ``actions/*`` keys ready to be
     merged back into logs for W&B or stdout.
     """
@@ -2920,6 +2926,34 @@ def compute_game_metrics(logs):
         "game/bomb_plant_rate": bomb_planted,
         "game/avg_episode_length": round_length,
     }
+
+    # Always-present splits/rewards: these keys already land in logs today
+    # via _build_terminal_info. game/reward/win nets ~0 (T +1 / CT -1);
+    # that is the zero-sum identity, not a missing-channel bug.
+    game_metrics["game/defuse_rate"] = _get("bomb_defused", 0.0)
+    game_metrics["game/kills_t"] = kills_t
+    game_metrics["game/kills_ct"] = kills_ct
+    for src, dst in (
+        ("reward_win", "game/reward/win"),
+        ("reward_kills", "game/reward/kills"),
+        ("reward_deaths", "game/reward/deaths"),
+        ("reward_bomb", "game/reward/bomb"),
+        ("reward_pbrs", "game/reward/pbrs"),
+        ("reward_shots", "game/reward/shots"),
+        ("reward_survival", "game/reward/survival"),
+        ("reward_inaction", "game/reward/inaction"),
+    ):
+        game_metrics[dst] = _get(src, 0.0)
+
+    # Presence-gate plant_tick / win_by_*: a synthetic 0.0 would make old
+    # log dicts look new-format. Do not _get(..., default=0.0) these three.
+    def _maybe(src, dst):
+        if f"environment/{src}" in logs or src in logs:
+            game_metrics[dst] = _get(src)
+
+    _maybe("plant_tick", "game/plant_tick")
+    _maybe("win_by_detonation", "game/win_by_detonation")
+    _maybe("win_by_defuse", "game/win_by_defuse")
 
     # actions/use_at_site_frac — logged directly by the C env if available
     use_at_site = _get("use_at_site_frac", None)

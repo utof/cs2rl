@@ -436,6 +436,19 @@ def test_no_plant_leaves_plant_tick_zero():
     env.close()
 
 
+def test_terminal_info_exports_plant_tick_and_win_flags():
+    env = make_env(seed=0, auto_reset=False)
+    env.reset()
+    info = env._build_terminal_info()
+    assert "plant_tick" in info
+    assert "win_by_detonation" in info
+    assert "win_by_defuse" in info
+    assert int(info["plant_tick"]) == 0
+    assert int(info["win_by_detonation"]) == 0
+    assert int(info["win_by_defuse"]) == 0
+    env.close()
+
+
 # ── Phase 5 reward-externalization tests ──────────────────────────────────────
 
 

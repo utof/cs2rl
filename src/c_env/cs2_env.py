@@ -978,10 +978,12 @@ class Cs2Env(pufferlib.PufferEnv):
             "alive_ct_end": int(stats.alive_ct_end),
             "round_length": int(stats.round_length),
                                                                        # plant_tick is the observe-only C field (0 = never planted).
-                                                                       # Exported here so terminal info can read the sentinel without
-                                                                       # flipping include_step_stats_in_info. Win-flag keys stay for
-                                                                       # the later terminal-export task.
+                                                                       # Win-type flags are the existing episode_stats ints; export them
+                                                                       # here so compute_game_metrics can re-key rates without turning
+                                                                       # on include_step_stats_in_info or merging per-tick step_stats.
             "plant_tick": int(stats.plant_tick),
+            "win_by_detonation": int(stats.win_by_detonation),
+            "win_by_defuse": int(stats.win_by_defuse),
         })
         summary.update({
             "reward_win": float(stats.reward_win),
