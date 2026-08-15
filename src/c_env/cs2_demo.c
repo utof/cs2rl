@@ -134,8 +134,8 @@ static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* cur
 
 /* View-kick on the local shot only (human agent, else spectate-0).
  * Applied once per sim tick, not per render frame. Do not write yaw /
- * pitch / aim_rad — human_input copies those into the sim. Decay and
- * camera look-dir add are Task 3. */
+ * pitch / aim_rad — human_input copies those into the sim. Render
+ * decays punch and adds it to camera look only. */
 static void demo_apply_local_punch(Client* cl, const Dust2Env* env, unsigned shot_mask) {
     int      local = (cl->human_agent_idx >= 0) ? cl->human_agent_idx : 0;
     unsigned u;
@@ -150,7 +150,7 @@ static void demo_apply_local_punch(Client* cl, const Dust2Env* env, unsigned sho
 }
 
 /* Record alive 1→0 edges for the kill feed. Last 4, timestamped now.
- * Drawing / 3 s fade is Task 3. */
+ * draw_hud fades each row out over 3 s. */
 static void
 demo_record_kill_feed(Client* cl, const DemoWorldTick* prev, const DemoWorldTick* curr) {
     int    i;

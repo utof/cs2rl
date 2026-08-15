@@ -11,6 +11,9 @@
  * pulled in transitively through cs2_env.h in the demo TU, but include it
  * directly so the fog feature doesn't depend on header order. */
 #include "cs2_combat.h"
+/* demo_decay_punch — render-frame view-kick. Header is raylib-free; do
+ * not include this from cs2_env.h (binding stays display-free). */
+#include "cs2_demo_events.h"
 
 #define PLAYER_EYE_HEIGHT 64.0f  /* eye height above agent.z in world units */
 #define WALL_HEIGHT       128.0f /* wall extrusion height                   */
@@ -75,11 +78,12 @@ typedef struct {
     Sound  alias_pool[DEMO_ALIAS_N];
     int    alias_used[DEMO_ALIAS_N];
     int    alias_cursor;
-    /* Applied once on a local shot in the 16 Hz block. Decay + look-dir
-     * add live in Task 3; do not write these into yaw/pitch/aim_rad. */
+    /* Applied once on a local shot in the 16 Hz block. Each render
+     * frame decays these and adds them to camera look only — never
+     * written into yaw/pitch/aim_rad (human_input copies those). */
     float punch_pitch;
     float punch_yaw;
-    /* Alive 1→0 edges recorded on the sim tick. Draw/fade is Task 3. */
+    /* Alive 1→0 edges recorded on the sim tick. Drawn with a 3 s fade. */
     int    kill_feed_n;
     int    kill_feed_idx[DEMO_KILL_FEED_N];
     int    kill_feed_team[DEMO_KILL_FEED_N];
@@ -533,6 +537,12 @@ void c_close(Dust2Env* env) {
  *
  * Reads mouse delta, updates yaw/pitch, syncs camera to human agent position.
  * For spectate (human_agent_idx < 0), camera follows agent 0.
+ *
+ * View-kick: punch is applied on the sim tick. Here we sample look =
+ * (yaw,pitch)+punch first so a just-applied kick is visible at full
+ * strength, then decay with GetFrameTime() (previous frame's dt).
+ * Decaying first would spend last-frame dt on a punch that did not
+ * exist then. Do not write punch into cl->yaw / cl->pitch.
  */
 static void update_camera(Client* cl, Dust2Env* env, float alpha) {
     (void)env;
@@ -604,13 +614,29 @@ static void update_camera(Client* cl, Dust2Env* env, float alpha) {
     float eye_y = pz + PLAYER_EYE_HEIGHT; /* Raylib Y = height */
     float eye_z = py;                     /* Raylib Z = sim Y  */
 
-    /* Direction from yaw/pitch */
-    float dir_x = cosf(cl->yaw) * cosf(cl->pitch);
-    float dir_y = sinf(cl->pitch);
-    float dir_z = sinf(cl->yaw) * cosf(cl->pitch);
+    /* Look dir = aim + punch. Punch can push past ±89° (0.045 + 1.553
+     * > π/2) so clamp the *look* pitch only — stored pitch stays aim. */
+    float look_yaw   = cl->yaw + cl->punch_yaw;
+    float look_pitch = cl->pitch + cl->punch_pitch;
+    if (look_pitch > 1.5533f)
+        look_pitch = 1.5533f;
+    if (look_pitch < -1.5533f)
+        look_pitch = -1.5533f;
+
+    float dir_x = cosf(look_yaw) * cosf(look_pitch);
+    float dir_y = sinf(look_pitch);
+    float dir_z = sinf(look_yaw) * cosf(look_pitch);
 
     cl->camera.position = (Vector3){eye_x, eye_y, eye_z};
     cl->camera.target   = (Vector3){eye_x + dir_x, eye_y + dir_y, eye_z + dir_z};
+
+    /* Advance punch after sampling so the first post-shot frame shows
+     * the full kick. tau=0.08 s. */
+    {
+        float dt        = GetFrameTime();
+        cl->punch_pitch = demo_decay_punch(cl->punch_pitch, dt);
+        cl->punch_yaw   = demo_decay_punch(cl->punch_yaw, dt);
+    }
 }
 
 /* ── draw_floor ─────────────────────────────────────────────────────────── */
@@ -743,18 +769,20 @@ static void draw_hud(Client* cl, Dust2Env* env) {
     int         idx = (cl->human_agent_idx >= 0) ? cl->human_agent_idx : 0;
     AgentState* a   = &g->agents[idx];
 
-    /* Crosshair */
+    /* Crosshair — two short lines, screen-center. Stays put while punch
+     * offsets the camera look (brief aim/crosshair disagreement is OK). */
     int cx = cl->width / 2, cy = cl->height / 2;
     DrawLine(cx - 10, cy, cx + 10, cy, WHITE);
     DrawLine(cx, cy - 10, cx, cy + 10, WHITE);
 
-    /* Health bar */
-    int hp = a->alive ? a->hp : 0;
+    /* HP: red below 25, otherwise green; number on the bar. */
+    int   hp     = a->alive ? a->hp : 0;
+    Color hp_col = (hp < 25) ? (Color){200, 0, 0, 255} : (Color){0, 200, 0, 255};
     DrawRectangle(10, cl->height - 30, 200, 20, DARKGRAY);
-    DrawRectangle(10, cl->height - 30, hp * 2, 20, (Color){0, 200, 0, 255});
+    DrawRectangle(10, cl->height - 30, hp * 2, 20, hp_col);
     DrawText(TextFormat("HP: %d", hp), 15, cl->height - 28, 16, WHITE);
 
-    /* Weapon / ammo */
+    /* Weapon name + clip/reserve. */
     int         slot     = (int)a->weapon_slot;
     int         ammo     = (slot >= 0 && slot < 3) ? a->ammo_clip[slot] : 0;
     int         resrv    = (slot >= 0 && slot < 3) ? a->ammo_reserve[slot] : 0;
@@ -763,18 +791,46 @@ static void draw_hud(Client* cl, Dust2Env* env) {
     DrawText(
         TextFormat("%s %d/%d", wname, ammo, resrv), cl->width - 150, cl->height - 30, 16, WHITE);
 
-    /* Bomb timer */
+    /* Bomb clock M:SS only while planted. ticks/16 = whole seconds. */
     if (g->bomb_planted) {
         int secs = g->bomb_ticks_left / 16;
-        DrawText(TextFormat("BOMB: %ds", secs), cl->width / 2 - 40, 10, 24, RED);
+        if (secs < 0)
+            secs = 0;
+        DrawText(
+            TextFormat("BOMB: %d:%02d", secs / 60, secs % 60), cl->width / 2 - 55, 10, 24, RED);
     }
 
-    /* Round timer */
+    /* Round clock M:SS. */
     int rt = g->round_ticks_left / 16;
+    if (rt < 0)
+        rt = 0;
     DrawText(
         TextFormat("%d:%02d", rt / 60, rt % 60), cl->width / 2 - 20, cl->height - 55, 20, WHITE);
 
-    /* Human / spectate indicator */
+    /* Kill feed: last 4 alive 1→0 rows, 3 s fade. T#n / CT#n. */
+    {
+        double now = GetTime();
+        int    k;
+        int    row = 0;
+        for (k = 0; k < cl->kill_feed_n; k++) {
+            float age = (float)(now - cl->kill_feed_t[k]);
+            if (age < 0.0f || age >= 3.0f)
+                continue;
+            float       fade = 1.0f - age / 3.0f;
+            int         t0   = (cl->kill_feed_team[k] == 0);
+            const char* tag  = t0 ? "T" : "CT";
+            Color       col  = t0 ? (Color){220, 120, 30, 255} : (Color){60, 130, 255, 255};
+            col              = Fade(col, fade);
+            DrawText(TextFormat("%s#%d", tag, cl->kill_feed_idx[k]),
+                     cl->width - 90,
+                     36 + row * 20,
+                     18,
+                     col);
+            row++;
+        }
+    }
+
+    /* Human / spectate indicator — keep existing banner. */
     if (cl->human_agent_idx >= 0)
         DrawText("HUMAN CONTROL", 10, 10, 18, GREEN);
     else

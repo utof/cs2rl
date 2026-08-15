@@ -3,8 +3,9 @@
  * Built/run by `zig build demo_events_test`. No Raylib, no binding.so,
  * no ctypes. The play wrapper's 3 Hz footstep drop is intentionally
  * NOT tested here — a walking tick with hypot>1 must set the foot bit
- * every sim tick.
+ * every sim tick. Punch decay is the formula only; no InitWindow.
  */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -26,6 +27,23 @@ static void check_u(const char* name, unsigned got, unsigned want) {
 static void check_i(const char* name, int got, int want) {
     if (got != want) {
         fprintf(stderr, "FAIL %s: got %d want %d\n", name, got, want);
+        g_fails++;
+    }
+}
+
+static void check_ok(const char* name, int cond) {
+    if (!cond) {
+        fprintf(stderr, "FAIL %s\n", name);
+        g_fails++;
+    }
+}
+
+static void check_f_near(const char* name, float got, float want, float eps) {
+    float d = got - want;
+    if (d < 0.0f)
+        d = -d;
+    if (d > eps) {
+        fprintf(stderr, "FAIL %s: got %g want %g\n", name, (double)got, (double)want);
         g_fails++;
     }
 }
@@ -233,6 +251,32 @@ static void test_unplanted_no_beep(void) {
     check_i("unplanted no plant", ev.plant, 0);
 }
 
+/* Punch decay is render-only juice. next = prev * exp(-dt/0.08).
+ * Same sign, smaller abs. Must not live behind raylib.h. */
+static void test_punch_decay_formula(void) {
+    const float prev = 0.045f;
+    const float dt   = 1.0f / 60.0f;
+    float       next = demo_decay_punch(prev, dt);
+    float       want = prev * expf(-dt / 0.08f);
+    check_f_near("punch decay formula", next, want, 1e-6f);
+}
+
+static void test_punch_decay_same_sign_smaller_abs(void) {
+    const float dt = 1.0f / 60.0f;
+    float       p  = demo_decay_punch(0.045f, dt);
+    check_ok("pos punch same sign", p > 0.0f);
+    check_ok("pos punch smaller abs", p < 0.045f);
+
+    float n = demo_decay_punch(-0.008f, dt);
+    check_ok("neg punch same sign", n < 0.0f);
+    check_ok("neg punch smaller abs", (-n) < 0.008f);
+}
+
+static void test_punch_decay_zero_and_dt0(void) {
+    check_f_near("zero punch stays 0", demo_decay_punch(0.0f, 0.016f), 0.0f, 1e-7f);
+    check_f_near("dt=0 punch unchanged", demo_decay_punch(0.045f, 0.0f), 0.045f, 1e-7f);
+}
+
 int main(void) {
     test_shot_pulse();
     test_no_shot_when_bit0();
@@ -249,6 +293,9 @@ int main(void) {
     test_beep_80_to_79();
     test_prev_eq_curr_after_init();
     test_unplanted_no_beep();
+    test_punch_decay_formula();
+    test_punch_decay_same_sign_smaller_abs();
+    test_punch_decay_zero_and_dt0();
 
     if (g_fails) {
         fprintf(stderr, "demo_events_test: %d check(s) failed\n", g_fails);

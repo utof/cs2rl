@@ -138,7 +138,9 @@ pub fn build(b: *std.Build) void {
     });
     demo_events_test.root_module.addCSourceFile(.{
         .file  = b.path("demo_events_test.c"),
-        .flags = &.{ "-std=c99", "-Wall", "-g" },
+        // Same -Wno-comment as cs2_demo: cs2_types.h has `*_SIZE/*_STRIDE`
+        // inside a block comment. Do not touch the binding-shared header.
+        .flags = &.{ "-std=c99", "-Wall", "-Wno-comment", "-g" },
     });
     demo_events_test.root_module.addIncludePath(b.path("."));
     demo_events_test.linkLibC();

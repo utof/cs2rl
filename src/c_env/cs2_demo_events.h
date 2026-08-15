@@ -82,3 +82,16 @@ static inline DemoEvents demo_detect_events(const DemoWorldTick* prev, const Dem
     }
     return ev;
 }
+
+/* demo_decay_punch — one exponential step of view-kick.
+ *
+ * What: next = prev * exp(-dt / 0.08). Same sign, smaller abs (dt>0).
+ * Why:  render-only recoil juice. Tests compile this without Raylib;
+ *       update_camera adds punch to the camera look dir then decays —
+ *       never writes yaw/pitch/aim_rad.
+ * Pitfalls: tau is 0.08 seconds, not ticks. dt=0 leaves punch unchanged.
+ *           Do not snap tiny values; the product already goes to 0.
+ */
+static inline float demo_decay_punch(float prev, float dt) {
+    return prev * expf(-dt / 0.08f);
+}
