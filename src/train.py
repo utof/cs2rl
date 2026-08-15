@@ -1335,21 +1335,32 @@ def build_train_env_factory(args, *, shared_ts, map_data):
 # ── SECTION: Policy ────────────────────────────────────────────────────────
 
 
-def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
+def build_policy(vecenv,
+                 device,
+                 obs_dim_override=None,
+                 tct_split_heads=False,
+                 tct_split_trunk=False):
     """Build the Dust2 recurrent policy.
 
     tct_split_heads (Batch 7, spec 2026-08-13): when True the policy-head
     group — the 7 discrete action_heads, the aim_mu projection and the
     aim_log_std parameter — is duplicated per team (`_t` / `_ct` suffixes) and
     each row is routed to its own team's copy by the obs team bit obs[24].
-    Trunk (encoder + LSTM) and value_head stay SHARED. Default False builds
-    the legacy modules and executes the legacy forward lines verbatim, pinned
-    by tests/test_tct_split.py::test_flag_off_builds_exactly_the_legacy_modules.
+    value_head stays SHARED. Default False builds the legacy head modules
+    and executes the legacy head-forward lines verbatim, pinned by
+    tests/test_tct_split.py::test_flag_off_builds_exactly_the_legacy_modules.
+
+    tct_split_trunk (spec 2026-08-15): when True the trunk — encoder + LSTM —
+    is replaced by per-team copies (`encoder_t`/`lstm_t`, `encoder_ct`/`lstm_ct`).
+    Each team LSTM sees only its own encoder's activations; hidden and the
+    rollout (h,c) blend on obs[24]. Default False keeps today's
+    `self.encoder` / `self.lstm` construction verbatim (legacy RNG pin).
 
     PITFALL: callers must not decide split-ness from config alone — every
-    loader infers it from the checkpoint's keys (state_dict_is_split), because
-    config.json is rewritten on each launch and a flag-less crash-resume would
-    otherwise rebuild the wrong architecture (spec §3.3).
+    loader infers it from the checkpoint's keys (state_dict_is_split /
+    state_dict_is_trunk_split), because config.json is rewritten on each
+    launch and a flag-less crash-resume would otherwise rebuild the wrong
+    architecture (spec §3.3).
     """
     import pufferlib.pytorch
     import torch
@@ -1367,18 +1378,52 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
             self.hidden_size = hidden  # required by PufferLib LSTM logic
             self.obs_dim = obs_dim
 
-            self.encoder = nn.Sequential(
-                pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
-                nn.ReLU(),
-                pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
-                nn.ReLU(),
-            )
-            self.lstm = nn.LSTM(hidden, hidden, batch_first=False)
-            for name, p in self.lstm.named_parameters():
-                if "bias" in name:
-                    nn.init.constant_(p, 0)
-                elif "weight" in name:
-                    nn.init.orthogonal_(p, gain=1.0)
+            # Trunk-off keeps today's encoder/lstm construction verbatim so
+            # the flag-off RNG stream (and LEGACY_PARAM_NAMES) stay pinned.
+            # Trunk-on REPLACES those modules — do not keep a shared encoder
+            # or lstm beside the copies.
+            if not tct_split_trunk:
+                self.encoder = nn.Sequential(
+                    pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
+                    nn.ReLU(),
+                    pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
+                    nn.ReLU(),
+                )
+                self.lstm = nn.LSTM(hidden, hidden, batch_first=False)
+                for name, p in self.lstm.named_parameters():
+                    if "bias" in name:
+                        nn.init.constant_(p, 0)
+                    elif "weight" in name:
+                        nn.init.orthogonal_(p, gain=1.0)
+            else:
+                self.encoder_t = nn.Sequential(
+                    pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
+                    nn.ReLU(),
+                    pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
+                    nn.ReLU(),
+                )
+                self.lstm_t = nn.LSTM(hidden, hidden, batch_first=False)
+                for name, p in self.lstm_t.named_parameters():
+                    if "bias" in name:
+                        nn.init.constant_(p, 0)
+                    elif "weight" in name:
+                        nn.init.orthogonal_(p, gain=1.0)
+                # RNG hygiene (same as heads §3.7): CT construction is forked
+                # so the subsequent heads draw stays at the same stream point
+                # as flag-off. devices=[] forks the CPU generator only.
+                with torch.random.fork_rng(devices=[]):
+                    self.encoder_ct = nn.Sequential(
+                        pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
+                        nn.ReLU(),
+                        pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
+                        nn.ReLU(),
+                    )
+                    self.lstm_ct = nn.LSTM(hidden, hidden, batch_first=False)
+                    for name, p in self.lstm_ct.named_parameters():
+                        if "bias" in name:
+                            nn.init.constant_(p, 0)
+                        elif "weight" in name:
+                            nn.init.orthogonal_(p, gain=1.0)
 
             # Batch 7 (spec 2026-08-13 §3.1): plain bool, NOT a buffer — it
             # must never enter state_dict() or every existing checkpoint would
@@ -1386,8 +1431,9 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
             # architecture mismatch (load_state_dict_arch_checked).
             # `tct_split_heads` here is build_policy's parameter, captured by
             # closure exactly like `obs_dim` and `hidden` above — the inner
-            # class takes no new constructor argument.
+            # class takes no new constructor argument. Same for tct_split_trunk.
             self.tct_split_heads = bool(tct_split_heads)
+            self.tct_split_trunk = bool(tct_split_trunk)
 
             # Separate heads for MultiDiscrete(ACTION_HEAD_SIZES)
             #
@@ -1657,24 +1703,47 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
             else:
                 B, TT = x.shape[0], 1
 
-            h = self.encoder(x.reshape(B * TT, x.shape[-1]).float())
-            h = h.reshape(B, TT, self.hidden_size).transpose(0, 1)     # (T, B, H) seq-first
-
             lstm_h = state.get("lstm_h") if isinstance(state, dict) else None
             lstm_c = state.get("lstm_c") if isinstance(state, dict) else None
-            if lstm_h is not None and lstm_c is not None:
-                hc = (lstm_h.reshape(1, B,
-                                     self.hidden_size), lstm_c.reshape(1, B, self.hidden_size))
-            else:
-                hc = (h.new_zeros(1, B, self.hidden_size), h.new_zeros(1, B, self.hidden_size))
-
             terminals = state.get("terminals") if isinstance(state, dict) else None
-            h = self._lstm_bptt(h, hc, terminals)
-            # transpose back to (B, T, H) then flatten row-major so flat row
-            # b*T + t lines up with mb_actions.reshape(-1, ...) in
-            # _hybrid_ppo_loss — segment-major, time-minor. Changing this
-            # ordering silently misaligns every logprob/advantage pairing.
-            hidden_out = h.transpose(0, 1).reshape(B * TT, self.hidden_size)
+            H = self.hidden_size
+
+            if not self.tct_split_trunk:
+                h = self.encoder(x.reshape(B * TT, x.shape[-1]).float())
+                # (T, B, H) seq-first
+                h = h.reshape(B, TT, H).transpose(0, 1)
+                if lstm_h is not None and lstm_c is not None:
+                    hc = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
+                else:
+                    hc = (h.new_zeros(1, B, H), h.new_zeros(1, B, H))
+                h = self._lstm_bptt(self.lstm, h, hc, terminals)
+                # transpose back to (B, T, H) then flatten row-major so flat row
+                # b*T + t lines up with mb_actions.reshape(-1, ...) in
+                # _hybrid_ppo_loss — segment-major, time-minor. Changing this
+                # ordering silently misaligns every logprob/advantage pairing.
+                hidden_out = h.transpose(0, 1).reshape(B * TT, H)
+            else:
+                # Encoder is stateless: both copies see the same flat rows.
+                # LSTM is not a head: each team LSTM sees ONLY its encoder's
+                # activations. Never feed a mixed batch through one LSTM.
+                x_flat = x.reshape(B * TT, x.shape[-1]).float()
+                h_t = self.encoder_t(x_flat).reshape(B, TT, H).transpose(0, 1)
+                h_ct = self.encoder_ct(x_flat).reshape(B, TT, H).transpose(0, 1)
+                # zero-init BOTH team states when the trainer does not pass lstm_h/c
+                if lstm_h is not None and lstm_c is not None:
+                    hc_t = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
+                    hc_ct = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
+                else:
+                    hc_t = (h_t.new_zeros(1, B, H), h_t.new_zeros(1, B, H))
+                    hc_ct = (h_ct.new_zeros(1, B, H), h_ct.new_zeros(1, B, H))
+                y_t = self._lstm_bptt(self.lstm_t, h_t, hc_t, terminals)
+                y_ct = self._lstm_bptt(self.lstm_ct, h_ct, hc_ct, terminals)
+                # PITFALL (spec §3.2): mask from 3D x with x[..., 24], never
+                # x[:, 24] — that silently selects TIMESTEP 24.
+                mask = x[..., 24].reshape(B * TT, 1)
+                hidden_out = self._blend(mask,
+                                         y_t.transpose(0, 1).reshape(B * TT, H),
+                                         y_ct.transpose(0, 1).reshape(B * TT, H))
 
             if self.tct_split_heads:
                 # PITFALL (spec §3.2 — the bug class this comment exists to
@@ -1704,13 +1773,16 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
             value = self.value_head(hidden_out)
             return logits, mu_aim, log_std, value
 
-        def _lstm_bptt(self, h_seq, hc, terminals):
-            """Run the LSTM over a full (T, B, H) segment with done-masking.
+        def _lstm_bptt(self, lstm, h_seq, hc, terminals):
+            """Run one LSTM over a full (T, B, H) segment with done-masking.
 
-            WHAT: one nn.LSTM call when the segment contains no episode
+            WHAT: one `lstm(...)` call when the segment contains no episode
             boundaries (the common case — native PufferLib BPTT); otherwise
             the sequence is split at every tick where ANY row has a done and
             h/c are zero-masked per-row at those ticks before continuing.
+            `lstm` is the module to run — flag-off forward passes
+            `self.lstm`; trunk-on passes `self.lstm_t` / `self.lstm_ct`
+            separately so each copy sees only its encoder's activations.
 
             WHY: the rollout (forward_eval → _forward_core) multiplies the
             carried state by (1 - done) BEFORE processing each tick, so a
@@ -1720,7 +1792,8 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
             and gradients leak across episode boundaries. Upstream
             LSTMWrapper skips this (it never resets on done, rollout OR
             train, so it is self-consistent); we reset in rollout, hence we
-            must also reset here.
+            must also reset here. Passing the module in avoids copy-pasting
+            this done-chunk loop per team.
 
             PITFALLS:
               * terminals[:, t] == 1 means "the obs at tick t is the FIRST
@@ -1733,48 +1806,98 @@ def build_policy(vecenv, device, obs_dim_override=None, tct_split_heads=False):
                 a no-done minibatch stays a single cuDNN/oneDNN call.
               * .tolist() forces one device→host sync per minibatch —
                 acceptable (the train loop already syncs via .item()s).
+              * LSTM must not see the other team's rows via a shared module:
+                the caller encodes per team, then calls this twice. Do not
+                blend encoder outputs and run one LSTM.
             """
             if terminals is None:
-                out, _ = self.lstm(h_seq, hc)
+                out, _ = lstm(h_seq, hc)
                 return out
             TT, B, _H = h_seq.shape
             term = terminals.reshape(B, TT) > 0.5
             reset_ticks = torch.nonzero(term.any(dim=0)).flatten().tolist()
             if not reset_ticks:
-                out, _ = self.lstm(h_seq, hc)
+                out, _ = lstm(h_seq, hc)
                 return out
             outs = []
             h0, c0 = hc
             t0 = 0
             for t in reset_ticks:
                 if t > t0:
-                    out, (h0, c0) = self.lstm(h_seq[t0:t], (h0, c0))
+                    out, (h0, c0) = lstm(h_seq[t0:t], (h0, c0))
                     outs.append(out)
                 keep = (~term[:, t]).float().view(1, B, 1)
                 h0 = h0 * keep
                 c0 = c0 * keep
                 t0 = t
-            out, _ = self.lstm(h_seq[t0:], (h0, c0))
+            out, _ = lstm(h_seq[t0:], (h0, c0))
             outs.append(out)
             return torch.cat(outs, dim=0)
 
         def _forward_core(self, x, lstm_state, done):
-            h = self.encoder(x.float())
-            # lstm expects (seq, batch, features)
+            """Single-tick encode + LSTM for rollout / eval.
+
+            WHAT: one seq-len-1 LSTM step. Trunk-off is today's
+            `self.encoder` then `self.lstm(h.unsqueeze(0), ...)`. Trunk-on
+            runs both team encoders+lstms the same way, blends hidden, and
+            blends the returned `(h,c)` with `mask.view(1, B, 1)` so the
+            trainer still stores one pair.
+
+            WHY: `forward_eval` / `get_action_and_value` inherit routing
+            from here. The trainer LSTM buffers stay one `(h,c)` per agent
+            (do not change PufferLib's rollout state).
+
+            PITFALLS:
+              * Do not route this through `_lstm_bptt` — that helper is the
+                training-path T-unroll. This must stay the per-tick
+                `lstm(h.unsqueeze(0))` call.
+              * LSTM must not see the other team's encoder activations:
+                each copy is fed only its encoder's h. The incoming blended
+                state is `(1-done)`-reset once, then fed to BOTH team LSTMs
+                (unused output dropped by the 0/1 blend; used path is exact).
+              * 2D mask is `x[:, 24:25]`. The 3D timestep-24 trap lives in
+                `forward()`, not here.
+            """
+            if not self.tct_split_trunk:
+                h = self.encoder(x.float())
+                # lstm expects (seq, batch, features)
+                if lstm_state is not None:
+                    done = done.float()
+                    h, lstm_state = self.lstm(
+                        h.unsqueeze(0),
+                        (
+                            (1.0 - done).view(1, -1, 1) * lstm_state[0],
+                            (1.0 - done).view(1, -1, 1) * lstm_state[1],
+                        ),
+                    )
+                    h = h.squeeze(0)
+                else:
+                    h, lstm_state = self.lstm(h.unsqueeze(0))
+                    h = h.squeeze(0)
+                return h, lstm_state
+
+            # 2D path: team bit is a column.
+            mask = x[:, 24:25]
+            h_t = self.encoder_t(x.float())
+            h_ct = self.encoder_ct(x.float())
             if lstm_state is not None:
                 done = done.float()
-                h, lstm_state = self.lstm(
-                    h.unsqueeze(0),
-                    (
-                        (1.0 - done).view(1, -1, 1) * lstm_state[0],
-                        (1.0 - done).view(1, -1, 1) * lstm_state[1],
-                    ),
+                reset_state = (
+                    (1.0 - done).view(1, -1, 1) * lstm_state[0],
+                    (1.0 - done).view(1, -1, 1) * lstm_state[1],
                 )
-                h = h.squeeze(0)
+                y_t, state_t = self.lstm_t(h_t.unsqueeze(0), reset_state)
+                y_ct, state_ct = self.lstm_ct(h_ct.unsqueeze(0), reset_state)
             else:
-                h, lstm_state = self.lstm(h.unsqueeze(0))
-                h = h.squeeze(0)
-            return h, lstm_state
+                y_t, state_t = self.lstm_t(h_t.unsqueeze(0))
+                y_ct, state_ct = self.lstm_ct(h_ct.unsqueeze(0))
+            hidden_out = self._blend(mask, y_t.squeeze(0), y_ct.squeeze(0))
+            m_state = mask.view(1, x.shape[0], 1)
+            lstm_state = (
+                self._blend(m_state, state_t[0], state_ct[0]),
+                self._blend(m_state, state_t[1], state_ct[1]),
+            )
+            return hidden_out, lstm_state
 
     return Dust2Policy().to(device)
 

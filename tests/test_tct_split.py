@@ -86,6 +86,7 @@ def test_flag_off_builds_exactly_the_legacy_modules(env):
     p = train.build_policy(env, device="cpu")
     assert {n for n, _ in p.named_parameters()} == LEGACY_PARAM_NAMES
     assert p.tct_split_heads is False
+    assert p.tct_split_trunk is False
     assert not any(
         n.endswith(("_t", "_ct")) or "_t." in n or "_ct." in n for n, _ in p.named_parameters())
     assert not hasattr(p, "aim_log_std_t")
@@ -550,3 +551,115 @@ def test_head_divergence_exceeds_the_decay_aware_null(env):
             f"{key}: asymmetric-advantage divergence {treated[key]:.6f} did not exceed "
             f"the zero-advantage weight-decay floor {null[key]:.6f}")
     assert math.isfinite(null["split/head_l2_rel/aim_log_std"])
+
+
+def test_pure_team_batch_zeros_other_trunk_grad(env):
+    """A pure-T batch must leave every CT-trunk parameter's gradient at 0.
+
+    WHAT: encoder_ct/lstm_ct get no autograd contribution from T-only rows;
+    every encoder_t/lstm_t parameter that requires grad is in the graph.
+
+    WHY: this is the trunk routing proof (heads already have
+    test_pure_team_batch_leaves_other_copy_gradient_exactly_zero). A shared
+    LSTM on mixed encoder outputs, or a leftover self.encoder, fails here.
+
+    PITFALL: T=1 + zero LSTM state makes weight_hh a zero-times-h path, so
+    the input is stacked to T>1. 2D `_obs(4, 0)` would leave lstm_t.weight_hh
+    at exactly 0 and fail a correct implementation.
+    """
+    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+    # T>1 so lstm.weight_hh is in the graph (T=1 zero-state zeroes it).
+    x = _obs(4, 0).unsqueeze(1).expand(-1, 3, -1).contiguous()
+    state = {}
+    logits, mu, ls, v = p.forward(x, state)
+    (sum(lg.sum() for lg in logits) + mu.sum() + v.sum()).backward()
+    assert not hasattr(p, "encoder") and not hasattr(p, "lstm")
+    assert hasattr(p, "encoder_t") and hasattr(p, "lstm_t")
+    assert hasattr(p, "encoder_ct") and hasattr(p, "lstm_ct")
+    for n, par in p.named_parameters():
+        if n.startswith(("encoder_ct.", "lstm_ct.")):
+            assert par.grad is None or float(par.grad.abs().sum()) == 0.0, n
+        if n.startswith(("encoder_t.", "lstm_t.")) and par.requires_grad:
+            assert par.grad is not None and float(par.grad.abs().sum()) > 0.0, n
+
+
+def test_mixed_batch_nonzero_both_trunk_grads(env):
+    """A mixed T/CT batch must send grad into BOTH team trunks.
+
+    WHAT: encoder-only AND LSTM-only prefixes are asserted separately for
+    each team, on both the 2D training path and the seq-len-1 eval path.
+
+    WHY: a bug that splits the encoder but shares one LSTM (or never calls
+    lstm_ct) still produces encoder_ct grads from a mixed batch; the LSTM
+    half is what fails that implementation. forward_eval goes through
+    _forward_core, so a trunk-aware forward() with a stale _forward_core
+    would pass the 3D half and fail here.
+
+    PITFALL: T=1 zero-state zeroes weight_hh; the 3D case uses T>1 so the
+    recurrent weights are actually in the graph.
+    """
+    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+
+    def _assert_both_trunks(x):
+        p.zero_grad(set_to_none=True)
+        logits, mu, _ls, v = p.forward(x, state={})
+        (sum(lg.sum() for lg in logits) + mu.sum() + v.sum()).backward()
+        for prefix in ("encoder_t.", "encoder_ct.", "lstm_t.", "lstm_ct."):
+            matched = [(n, par) for n, par in p.named_parameters()
+                       if n.startswith(prefix) and par.requires_grad]
+            assert matched, prefix
+            assert any(par.grad is not None and float(par.grad.abs().sum()) > 0.0
+                       for _n, par in matched), prefix
+
+    _assert_both_trunks(_obs(2, 2))
+    _assert_both_trunks(_obs(2, 2).unsqueeze(1).expand(-1, 3, -1).contiguous())
+
+    p.zero_grad(set_to_none=True)
+    logits, mu, _ls, v = p.forward_eval(_obs(2, 2), state={})
+    (sum(lg.sum() for lg in logits) + mu.sum() + v.sum()).backward()
+    for prefix in ("encoder_t.", "encoder_ct.", "lstm_t.", "lstm_ct."):
+        matched = [(n, par) for n, par in p.named_parameters()
+                   if n.startswith(prefix) and par.requires_grad]
+        assert any(par.grad is not None and float(par.grad.abs().sum()) > 0.0
+                   for _n, par in matched), f"forward_eval {prefix}"
+
+
+def test_obs24_flip_switches_trunk(env):
+    """Flip obs[24] changes value_head output on a trunk-split policy.
+
+    WHAT: the same row with only column 24 flipped must produce a different
+    shared-critic value (and a different hidden), because it is encoded and
+    recurred by the other team trunk.
+
+    WHY: heads-only split still has one encoder+LSTM, so flipping the team
+    bit would not change value_head(hidden). This is the trunk-routing
+    observable that does not depend on the split heads.
+
+    PITFALL (spec §3.2): the 3D case must use x[..., 24] — x[:, 24] on a
+    (B, T, obs) input selects timestep 24. T=6 here is short enough that
+    that form would IndexError; T is still >1 so a silent wrong-timestep
+    mask on a longer horizon is the class of bug the 3D assert pins.
+    """
+    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+    assert p.tct_split_trunk is True
+    assert "tct_split_trunk" not in p.state_dict()
+
+    x = _obs(1, 0)
+    x_flip = x.clone()
+    x_flip[:, 24] = 1.0 - x_flip[:, 24]
+    with torch.no_grad():
+        *_, v = p.forward(x, state={})
+        *_, v_flip = p.forward(x_flip, state={})
+        *_, v_eval = p.forward_eval(x, state={})
+        *_, v_eval_flip = p.forward_eval(x_flip, state={})
+    assert not torch.allclose(v, v_flip), "2D forward: flipping obs[24] must switch trunks"
+    assert not torch.allclose(v_eval, v_eval_flip), "forward_eval must inherit trunk routing"
+
+    x3 = torch.randn(2, 6, train.OBS_DIM) * 0.5
+    x3[:, :, 24] = 1.0
+    x3_flip = x3.clone()
+    x3_flip[:, :, 24] = 0.0
+    with torch.no_grad():
+        *_, v3 = p.forward(x3, state={})
+        *_, v3_flip = p.forward(x3_flip, state={})
+    assert not torch.allclose(v3, v3_flip), "3D forward: flipping obs[24] must switch trunks"
