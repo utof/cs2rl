@@ -57,7 +57,6 @@ import math
 import random
 import re
 import sys
-from decimal import Decimal
 from pathlib import Path
 
 BOMB_TIMER_DEFAULT = 640               # ticks; src/nav.py BOMB_TIMER — keep in sync
@@ -123,26 +122,22 @@ def outcome_mix(row):
         return None
 
     def _rate(key):
-        # str() then Decimal: JSON/Python shortest-repr of 0.6 is "0.6",
-        # but binary 0.6 - 0.1 - 0.4 is 0.0999… not 0.1. The mix is
-        # differences of epoch-window means of 0/1 flags; do the
-        # subtraction in decimal so max(0, ·) sees the intended rate.
-        # Never `if v` — 0.0 is a legal present value.
+        # Never `if v` / `v or 0.0` — 0.0 is a legal present value.
+        # Missing siblings default to 0.0 AFTER the presence gate above.
         v = row.get(key)
-        return Decimal("0") if v is None else Decimal(str(v))
+        return 0.0 if v is None else v
 
-    zero = Decimal("0")
     t_detonation = _rate("game/win_by_detonation")
     ct_defuse = _rate("game/win_by_defuse")
     timeout = _rate("game/timeout_rate")
     return {
-        "t_detonation": float(max(zero, t_detonation)),
-        "ct_defuse": float(max(zero, ct_defuse)),
-        "timeout": float(max(zero, timeout)),
-        "t_elimination": float(max(zero,
-                                   _rate("game/win_rate_t") - t_detonation)),
-        "ct_elimination": float(max(zero,
-                                    _rate("game/win_rate_ct") - ct_defuse - timeout)),
+        "t_detonation": max(0.0, t_detonation),
+        "ct_defuse": max(0.0, ct_defuse),
+        "timeout": max(0.0, timeout),
+        "t_elimination": max(0.0,
+                             _rate("game/win_rate_t") - t_detonation),
+        "ct_elimination": max(0.0,
+                              _rate("game/win_rate_ct") - ct_defuse - timeout),
     }
 
 
@@ -281,9 +276,9 @@ def analyze_run(run_dir: Path,
 
     # Second pass over already-loaded rows. Presence-gated: old-format
     # jsonl has no game/win_by_detonation so mix_mean stays None. Average
-    # per-row mixes (each already m/p-style differences); do NOT form
-    # mean(m)/mean(p) here. Does not touch the 5M plant-rate window or
-    # ct_win_by_elim_share.
+    # the per-row rate differences (same aggregation as ct_win_rate_mean);
+    # do NOT form mean(m)/mean(p). Does not touch the 5M plant-rate
+    # window or ct_win_by_elim_share.
     mix_rows = [outcome_mix(row) for row in rows if "game/win_by_detonation" in row]
     mix_mean = None
     if mix_rows:
@@ -613,7 +608,7 @@ def print_report(r, window_steps):
         f"timeout_rate {fmt(r['timeout_rate_mean'])}  CT-win-by-elim share {fmt(r['ct_win_by_elim_share'])}"
     )
     mix = r.get("outcome_mix_mean")
-    if mix:
+    if mix is not None:
         print("outcome mix: "
               f"t_detonation {fmt(mix['t_detonation'])}  "
               f"ct_defuse {fmt(mix['ct_defuse'])}  "
