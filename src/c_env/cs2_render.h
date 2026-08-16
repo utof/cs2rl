@@ -447,8 +447,18 @@ Client* make_client(Dust2Env*    env,
     cl->height          = WINDOW_H;
     cl->human_agent_idx = human_agent_idx;
     cl->area_bounds     = area_bounds;
-    cl->mouse_init      = 0;
-    cl->mouse_captured  = 0;
+    /* Share the exact room quad with process_movement (same surface as draw).
+     * Free the raster AABB env_init malloc'd, if any. owned=0: argument is
+     * NAV_AREA_BOUNDS / play.py numpy — do not free it in env_close. */
+    if (env->sd) {
+        if (env->sd->area_bounds_owned) {
+            free((void*)env->sd->area_bounds);
+            env->sd->area_bounds_owned = 0;
+        }
+        env->sd->area_bounds = area_bounds;
+    }
+    cl->mouse_init     = 0;
+    cl->mouse_captured = 0;
 
     InitWindow(cl->width, cl->height, "cs2rl 250326");
     SetTargetFPS(60);

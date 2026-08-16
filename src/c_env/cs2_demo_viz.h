@@ -1,11 +1,12 @@
-/* cs2_demo_viz.h — Raylib-free demo geometry. Do not include from cs2_env.h.
+/* cs2_demo_viz.h — Raylib-free geometry for demo draw AND process_movement.
  *
- * Demo / tests only. Must not include raylib.h or cs2_render.h so
- * binding.so stays display-free. Task 2 draws with these numbers;
- * this file is the math only.
+ * Binding-safe: no raylib.h / cs2_render.h. cs2_movement.h includes this so
+ * grounded snap uses the same interpolated ramp the renderer draws.
+ * Do not include raylib from here — binding.so stays display-free.
  */
 #pragma once
 #include <math.h>
+#include <stdint.h>
 
 /* demo_aim_dir_sim — combat ray direction, no punch.
  *
@@ -220,4 +221,51 @@ static inline void demo_ramp_quad(int           area_i,
         out->z[2] = z_n;
         out->z[3] = z_n;
     }
+}
+
+/* demo_terrain_z — interpolated surface z at (x,y) on area i.
+ *
+ * What: flat rooms / missing bounds / non-ramp → centroids_z[i]. Ramps
+ *       call demo_ramp_quad then bilinear on the four corners; u,v clamped
+ *       to [0,1].
+ * Why:  process_movement snaps a->z to this so grounded agents sit on the
+ *       same slope the renderer draws (not the top-of-ramp centroid).
+ * Pitfalls: area_bounds==NULL (dust2 / train / bombsite) is a no-op via the
+ *           data, not a special-case map. area_i<0 returns 0 (do not index
+ *           centroids_z[-1]). Degenerate AABB (dx/dy==0) uses u/v=0.
+ *           Cliff-guard Δz still uses the top centroid — not this helper.
+ */
+static inline float demo_terrain_z(int           area_i,
+                                   float         x,
+                                   float         y,
+                                   int           n_areas,
+                                   const float*  area_bounds, /* NULL allowed */
+                                   const float*  centroids_z,
+                                   const int8_t* is_ramp) {
+    if (area_i < 0)
+        return 0.0f;
+    if (area_bounds == NULL || is_ramp == NULL || !is_ramp[area_i])
+        return centroids_z[area_i];
+
+    DemoRampQuad q;
+    demo_ramp_quad(area_i, n_areas, area_bounds, centroids_z, &q);
+
+    float x0 = q.x[0], y0 = q.y[0];
+    float x1 = q.x[1], y1 = q.y[2];
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float u  = (dx != 0.0f) ? (x - x0) / dx : 0.0f;
+    float v  = (dy != 0.0f) ? (y - y0) / dy : 0.0f;
+    if (u < 0.0f)
+        u = 0.0f;
+    else if (u > 1.0f)
+        u = 1.0f;
+    if (v < 0.0f)
+        v = 0.0f;
+    else if (v > 1.0f)
+        v = 1.0f;
+
+    /* corners: (x0,y0)=0, (x1,y0)=1, (x1,y1)=2, (x0,y1)=3 */
+    return (1.0f - u) * (1.0f - v) * q.z[0] + u * (1.0f - v) * q.z[1] + u * v * q.z[2] +
+           (1.0f - u) * v * q.z[3];
 }

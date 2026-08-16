@@ -208,6 +208,12 @@ typedef struct {
     float pbrs_nav_weight_ct;          /* CT-side nav approach weight */
     /* Phase 6: renderer wall list — populated by build_walls_from_nav(), C-demo only */
     WallList wall_list;
+    /* Ramp interpolation AABB. After wall_list so StaticDataC (ctypes prefix)
+     * is unchanged. BindingEnv calloc's the full C StaticData — these are
+     * in-bounds and zero until env_init / make_client fill them.
+     * NULL bounds → demo_terrain_z uses centroids_z (dust2 / flat rooms). */
+    const float* area_bounds;       /* [N*4] x0,y0,x1,y1; NULL = no interpolation */
+    int          area_bounds_owned; /* 1 if env_init malloc'd it */
 } StaticData;
 
 /* ── Per-agent state ── */

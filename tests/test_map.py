@@ -201,6 +201,35 @@ def _zero_actions(n_agents=10):
     )
 
 
+def test_agent_on_t_ramp_does_not_snap_to_top():
+    """T-ramp interpolation: grounded agent at the low (west) end stays near z=0.
+
+    Area 13 is T-ramp (750–820, 192–416, top z=64). The old snap used
+    centroids_z=64 everywhere on the ramp. After v1b, (755, 300) is near
+    the west/low edge and must stay well below the top (z < 20), not 64.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 755.0
+        g.agents[0].y = 300.0
+        g.agents[0].area_idx = 13
+        g.agents[0].z = 0.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 0
+        actions, cont = _zero_actions()
+        env.step(actions, cont)
+        assert g.agents[0].z < 20.0, (
+            f"T-ramp must interpolate, not snap to top 64; got z={g.agents[0].z}")
+        assert g.agents[0].is_airborne == 0, (
+            "agent should remain grounded on the interpolated ramp surface")
+        assert g.agents[0].area_idx == 13, (
+            f"agent left T-ramp (area 13) for area_idx={g.agents[0].area_idx}")
+    finally:
+        env.close()
+
+
 def test_agent_walk_to_bombsite_reaches_elevation():
     """T3 load-bearing: agent teleported to bombsite (area_idx=6, z=0) snaps to z=64
     on the next ground-snap tick.

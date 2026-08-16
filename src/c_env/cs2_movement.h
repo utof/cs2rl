@@ -1,6 +1,13 @@
 #pragma once
 #include "cs2_types.h"
 #include "cs2_weapons.h"
+#include "cs2_demo_viz.h"
+
+/* Interpolated surface z at (x,y) on area_idx — same quad the renderer draws.
+ * Cliff-guard Δz still uses centroids_z (top), not this. */
+static inline float _surface_z(const StaticData* sd, int area_idx, float x, float y) {
+    return demo_terrain_z(area_idx, x, y, sd->N, sd->area_bounds, sd->centroids_z, sd->is_ramp);
+}
 
 static inline void
 count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size) {
@@ -331,30 +338,23 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
         a->vy = vel_y;
         a->vz = vel_z;
 
-        /* L5 ground-snap: when grounded, snap a->z to the current area's terrain z.
-         * This handles two cases:
-         *   1. Agent walked onto a new area with a different terrain z — the xy
-         *      collision resolution updated area_idx; we now pin z to that area's
-         *      surface so the agent steps up/down seamlessly.
-         *   2. Grounded agent that didn't change area — this is a no-op (a->z already
-         *      equals terrain_z from the previous tick's snap, and tz = a->z since
-         *      vel_z = 0 when grounded).
-         * MUST come AFTER _resolve_xy_collision axis-split: area_idx is updated there,
-         * so reading centroids_z[a->area_idx] before the area transition would use the
-         * OLD area's z and break ramp ascent.
-         * MUST come AFTER a->z = tz above: tz is computed from the old a->z (before
-         * the xy move), so the ground-snap overrides it with the target area's terrain z.
+        /* L5 ground-snap: when grounded, snap a->z to the current area's surface.
+         * Ramps use bilinear demo_terrain_z (same quad as the renderer); flat
+         * rooms / NULL bounds stay at centroids_z. Two cases:
+         *   1. Agent walked onto a new area — pin z to that area's surface.
+         *   2. Same area — no-op on flats; on ramps this follows the slope as xy moves.
+         * MUST come AFTER _resolve_xy_collision axis-split: area_idx is updated there.
+         * MUST come AFTER a->z = tz above: tz is the ballistic z; snap overrides it.
          * The landing block below gates on a->is_airborne, so grounded agents skip it. */
         if (!a->is_airborne) {
-            a->z = sd->centroids_z[a->area_idx];
+            a->z = _surface_z(sd, a->area_idx, a->x, a->y);
         }
 
-        /* L5 landing rule: terrain z is per-area, not hardcoded 0. Agent has touched
-         * the area's surface when their integrated z dips at or below the area's
-         * terrain z with non-positive vz. Snap to terrain and clear airborne state.
-         * Pitfall: a->area_idx is already updated by _resolve_xy_collision above, so
-         * centroids_z[a->area_idx] is the LANDING area's z — correct. */
-        float terrain_z = sd->centroids_z[a->area_idx];
+        /* L5 landing rule: terrain z is per-area (interpolated on ramps). Agent has
+         * touched the surface when integrated z dips at or below it with vz <= 0.
+         * Pitfall: a->area_idx is already updated by _resolve_xy_collision, so this
+         * is the LANDING area's surface — correct. */
+        float terrain_z = _surface_z(sd, a->area_idx, a->x, a->y);
         if (a->is_airborne && a->z <= terrain_z && a->vz <= 0.0f) {
             a->z           = terrain_z;
             a->vz          = 0.0f;
@@ -374,7 +374,7 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
          * entered. Modify with care: any future grounded-path mutation of vz (e.g., a
          * "stick to ground" damping) could silently flip agents to airborne via FP noise. */
         {
-            float terrain_z_now = sd->centroids_z[a->area_idx];
+            float terrain_z_now = _surface_z(sd, a->area_idx, a->x, a->y);
             if (a->z > terrain_z_now + SV_AIRBORNE_EPS_CS || a->vz != 0.0f) {
                 a->is_airborne = 1;
             }

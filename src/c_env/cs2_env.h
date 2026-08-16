@@ -9,6 +9,93 @@
 #include "cs2_observations.h"
 #include "cs2_rewards.h"
 #include "cs2_round.h"
+#include <limits.h>
+
+/* Derive per-area AABB from raster_grid. Cell (gx,gy) covers
+ * [xmin+gx*cell, xmin+(gx+1)*cell). Empty areas stay 0.
+ *
+ * Not naive min/max of every cell: later rooms overwrite the raster and
+ * leave 1-cell L-stubs (T-corridor keeps col 46 only north of T-ramp).
+ * Those stubs inflate the AABB so demo_edge_cover invents a false N/S
+ * neighbor and the ramp picks the Y slope (z≈66 at y=300) instead of
+ * X (low west → high east). Keep a column/row only if its occupancy
+ * is at least half the area's peak — drops stubs, keeps thin halls. */
+static void _fill_area_bounds_from_raster(StaticData* sd, float* out) {
+    int  i, gx, gy;
+    int  n = sd->N;
+    int  w = sd->grid_w;
+    int  h = sd->grid_h;
+    int* col_n;
+    int* row_n;
+    for (i = 0; i < n * 4; i++)
+        out[i] = 0.0f;
+    if (!sd->raster_grid || w <= 0 || h <= 0 || sd->grid_inv_cell == 0.0f)
+        return;
+    col_n = (int*)calloc((size_t)n * (size_t)w, sizeof(int));
+    row_n = (int*)calloc((size_t)n * (size_t)h, sizeof(int));
+    if (!col_n || !row_n) {
+        free(col_n);
+        free(row_n);
+        return;
+    }
+    {
+        float cell = 1.0f / sd->grid_inv_cell;
+        for (gy = 0; gy < h; gy++) {
+            for (gx = 0; gx < w; gx++) {
+                int idx = sd->raster_grid[gy * w + gx];
+                if (idx < 0 || idx >= n)
+                    continue;
+                col_n[idx * w + gx]++;
+                row_n[idx * h + gy]++;
+            }
+        }
+        for (i = 0; i < n; i++) {
+            int max_c = 0, max_r = 0, thr_c, thr_r;
+            int min_gx = INT_MAX, max_gx = INT_MIN;
+            int min_gy = INT_MAX, max_gy = INT_MIN;
+            for (gx = 0; gx < w; gx++) {
+                if (col_n[i * w + gx] > max_c)
+                    max_c = col_n[i * w + gx];
+            }
+            for (gy = 0; gy < h; gy++) {
+                if (row_n[i * h + gy] > max_r)
+                    max_r = row_n[i * h + gy];
+            }
+            if (max_c <= 0 || max_r <= 0)
+                continue;
+            thr_c = max_c / 2;
+            if (thr_c < 1)
+                thr_c = 1;
+            thr_r = max_r / 2;
+            if (thr_r < 1)
+                thr_r = 1;
+            for (gx = 0; gx < w; gx++) {
+                if (col_n[i * w + gx] < thr_c)
+                    continue;
+                if (gx < min_gx)
+                    min_gx = gx;
+                if (gx > max_gx)
+                    max_gx = gx;
+            }
+            for (gy = 0; gy < h; gy++) {
+                if (row_n[i * h + gy] < thr_r)
+                    continue;
+                if (gy < min_gy)
+                    min_gy = gy;
+                if (gy > max_gy)
+                    max_gy = gy;
+            }
+            if (min_gx == INT_MAX || min_gy == INT_MAX)
+                continue;
+            out[i * 4 + 0] = sd->grid_x_min + (float)min_gx * cell;
+            out[i * 4 + 1] = sd->grid_y_min + (float)min_gy * cell;
+            out[i * 4 + 2] = sd->grid_x_min + (float)(max_gx + 1) * cell;
+            out[i * 4 + 3] = sd->grid_y_min + (float)(max_gy + 1) * cell;
+        }
+    }
+    free(col_n);
+    free(row_n);
+}
 
 static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_spirit) {
     /* Verify ACTION_HEAD_SIZES stays in sync with ACTION_DIM/ACTION_MASK_DIM */
@@ -30,6 +117,18 @@ static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_sp
     env->team_spirit = team_spirit;
     clear_stats(&env->step_stats);
     clear_stats(&env->episode_stats);
+
+    /* Training path: no play.py / NAV_AREA_BOUNDS pointer. Raster AABB lets
+     * process_movement interpolate ramps. make_client may replace this with
+     * the exact room quad so viz and sim share one surface. */
+    if (sd->area_bounds == NULL && sd->N > 0) {
+        float* b = (float*)calloc((size_t)sd->N * 4u, sizeof(float));
+        if (b) {
+            _fill_area_bounds_from_raster(sd, b);
+            sd->area_bounds       = b;
+            sd->area_bounds_owned = 1;
+        }
+    }
 }
 
 /* compute_masks: refresh env->masks (N_AGENTS × ACTION_MASK_DIM int8, 1=valid)
@@ -376,5 +475,10 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
     compute_masks(env);
 }
 static void env_close(Dust2Env* env) {
-    (void)env;
+    StaticData* sd = env->sd;
+    if (sd && sd->area_bounds_owned) {
+        free((void*)sd->area_bounds);
+        sd->area_bounds       = NULL;
+        sd->area_bounds_owned = 0;
+    }
 }
