@@ -58,12 +58,32 @@ static inline int _raster_at(const StaticData* sd, float x, float y) {
 }
 
 /* True if (x,y) is inside area idx's room quad. NULL bounds (dust2) = skip.
- * Inclusive on the max edge so a portal at x=x1 stays in both rooms. */
+ * Inclusive on the max edge so a portal at x=x1 stays in both rooms.
+ * idx < 0 is outside — do not treat a miss as inside. */
 static inline int _in_area_aabb(const StaticData* sd, int idx, float x, float y) {
-    if (sd->area_bounds == NULL || idx < 0)
+    if (sd->area_bounds == NULL)
         return 1;
+    if (idx < 0)
+        return 0;
     const float* b = sd->area_bounds + idx * 4;
     return (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]);
+}
+
+/* Room that contains (x,y). Raster label first (stable on 16-aligned
+ * interiors). If that label's quad misses — later rooms overwrite the
+ * 16u column that straddles 750/820/1100/1170 — search the other rooms.
+ * Returns -1 for true exterior overshoot (catwalk x∈[816,820)). */
+static inline int _area_at(const StaticData* sd, float x, float y) {
+    int idx = _raster_at(sd, x, y);
+    if (idx < 0)
+        return -1;
+    if (sd->area_bounds == NULL || _in_area_aabb(sd, idx, x, y))
+        return idx;
+    for (int j = 0; j < sd->N; j++) {
+        if (j != idx && _in_area_aabb(sd, j, x, y))
+            return j;
+    }
+    return -1;
 }
 
 /* Resolve an attempted XY position against the nav-mesh raster.
@@ -78,12 +98,12 @@ static inline int _in_area_aabb(const StaticData* sd, int idx, float x, float y)
  * velocity component instead of producing a full stop.
  *
  * Hull (area_bounds != NULL only): the four axis offsets at AGENT_HULL_RADIUS
- * must also be on-mesh and inside their cell's room AABB. That keeps the 12u
- * viz cylinder out of the 8u exterior wall. Adjacency / cliff stay
- * center-only — a shoulder over a portal or drop is legal; a shoulder in
- * the void is not. Dust2 skips this (NULL bounds). */
+ * must also resolve via _area_at (raster, then containing room if the
+ * label's quad misses — later rooms own the 16u portal column). That
+ * keeps the 12u cylinder out of the 8u exterior wall without sealing
+ * ramps. Adjacency / cliff stay center-only. Dust2 skips this. */
 static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, float tx, float ty) {
-    int target_idx = _raster_at(sd, tx, ty);
+    int target_idx = _area_at(sd, tx, ty);
     if (target_idx < 0)
         return -1;
     if (target_idx != a->area_idx && !sd->adjacency[a->area_idx * sd->N + target_idx])
@@ -108,14 +128,11 @@ static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, flo
     /* Simple-map rooms publish area_bounds. Dust2 leaves it NULL so thin
      * nav areas stay point-collided (a 12u hull would seal corridors <24u). */
     if (sd->area_bounds != NULL) {
-        if (!_in_area_aabb(sd, target_idx, tx, ty))
-            return -1;
         const float r = AGENT_HULL_RADIUS;
         const float hx[4] = {tx + r, tx - r, tx, tx};
         const float hy[4] = {ty, ty, ty + r, ty - r};
         for (int k = 0; k < 4; k++) {
-            int hi = _raster_at(sd, hx[k], hy[k]);
-            if (hi < 0 || !_in_area_aabb(sd, hi, hx[k], hy[k]))
+            if (_area_at(sd, hx[k], hy[k]) < 0)
                 return -1;
         }
     }
