@@ -39,8 +39,9 @@ class MapData:
     # Verticality — per-area terrain elevation and ramp flag (spec L1, L8).
     # centroids_z: terrain z-height for each area (0.0 for flat/ground areas).
     #   - Ramps store their TOP elevation (e.g., a ramp from z=0 to z=64 has
-    #     centroids_z=64.0). Walking onto a ramp snaps the agent z up instantly
-    #     ("step-wise verticality" per spec L1). Smooth interpolation is v1b.
+    #     centroids_z=64.0). Cliff-guard Δz still uses that top. Grounded z
+    #     interpolates along the room quad when MapData.area_bounds is set
+    #     (simple map). NULL bounds (dust2 / make_cs2_map) still snap to top.
     #   - make_cs2_map zero-fills this; dust2 verticality is a separate future task.
     # is_ramp: True means the C-env cliff guard exempts this area from the
     #   Δz > SV_MAX_STEP_HEIGHT check, allowing grounded agents to step up into it.

@@ -180,10 +180,9 @@ typedef struct {
      * win_by_detonation / win_by_defuse flags in StepStats (set in
      * compute_rewards round-over block). Defaults set Python-side in Cs2Env.
      *
-     * Pitfall: these must be added BEFORE wall_list (which C uses only for the
-     * renderer demo path) so the ctypes overlay in cs2_env.py stays in sync.
-     * The ctypes mirror (StaticDataC) does NOT include wall_list; appending
-     * here keeps ctypes field offsets valid. */
+     * Pitfall: these must stay BEFORE wall_list. StaticDataC now overlays
+     * wall_list + area_bounds after this prefix (offsets asserted in
+     * cs2_env.py). Do not insert fields here without updating that overlay. */
     float reward_win_t_detonation;   /* default 5.0 — T wins by bomb detonation */
     float reward_win_t_elimination;  /* default 3.0 — T wins by eliminating all CT (no plant) */
     float reward_win_ct_defuse;      /* default 5.0 — CT wins by defusing a planted bomb */

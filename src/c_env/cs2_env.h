@@ -378,10 +378,6 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
     compute_masks(env);
 }
 static void env_close(Dust2Env* env) {
-    StaticData* sd = env->sd;
-    if (sd && sd->area_bounds_owned) {
-        free((void*)sd->area_bounds);
-        sd->area_bounds       = NULL;
-        sd->area_bounds_owned = 0;
-    }
+    /* area_bounds is Python/nav-owned. Nothing C-mallocs it. */
+    (void)env;
 }

@@ -447,15 +447,10 @@ Client* make_client(Dust2Env*    env,
     cl->height          = WINDOW_H;
     cl->human_agent_idx = human_agent_idx;
     cl->area_bounds     = area_bounds;
-    /* Same pointer the viz already has (NAV_AREA_BOUNDS / play.py numpy).
-     * Free only if a prior path marked owned. owned=0: do not free in env_close. */
-    if (env->sd) {
-        if (env->sd->area_bounds_owned) {
-            free((void*)env->sd->area_bounds);
-            env->sd->area_bounds_owned = 0;
-        }
+    /* Same room/nav pointer the viz already holds. Python/nav own it —
+     * do not free. owned stays 0; nothing mallocs bounds anymore. */
+    if (env->sd)
         env->sd->area_bounds = area_bounds;
-    }
     cl->mouse_init     = 0;
     cl->mouse_captured = 0;
 

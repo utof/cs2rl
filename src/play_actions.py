@@ -1,7 +1,7 @@
 """Play-vs-bots helpers. No ctypes, no Raylib, safe to import from tests."""
 from pathlib import Path
 import numpy as np
-from map import SIMPLE_ROOMS
+from map import make_simple_map
 from train import init_policy_state
 
 def play_fill_actions(act_buf, cont_buf, pa, pc):
@@ -19,11 +19,8 @@ def play_reset_round(env, policy, device, on_reset=None):
     return init_policy_state(policy, device)
 
 def area_bounds_from_simple_rooms():
-    n = len(SIMPLE_ROOMS)
-    out = np.zeros((n, 4), dtype=np.float32)
-    for idx, x0, y0, x1, y1, *_ in SIMPLE_ROOMS:
-        out[idx] = (x0, y0, x1, y1)
-    return out
+    """Room AABB from MapData — same array make_simple_map publishes to C."""
+    return np.ascontiguousarray(make_simple_map().area_bounds)
 
 def find_repo_root(start: Path) -> Path:
     cur = Path(start).resolve()
