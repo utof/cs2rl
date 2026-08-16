@@ -9,6 +9,12 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* Sim recoil v1 (#120): one-pole punch decay. tau=0.08 s.
+ * demo_decay_punch must call this — do not fork the formula. */
+static inline float recoil_decay_punch(float prev, float dt) {
+    return prev * expf(-dt / 0.08f);
+}
+
 /* ── Constants ─────────────────────────────────────────────────────────── */
 #define TEAM_SIZE 5
 #define N_AGENTS  10
