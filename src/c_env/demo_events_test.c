@@ -14,7 +14,7 @@
 #include "cs2_demo_viz.h"
 
 #ifdef RAYLIB_H
-#error "cs2_demo_events.h must not include raylib.h (demo/tests only)"
+#error "cs2_demo_events.h / cs2_demo_viz.h must not include raylib.h (demo/tests only)"
 #endif
 
 static int g_fails;
@@ -237,6 +237,7 @@ static void test_prev_eq_curr_after_init(void) {
     DemoEvents ev     = demo_detect_events(&w, &w);
     check_u("init no shot", ev.shot_mask, 0u);
     check_u("init no foot", ev.foot_mask, 0u);
+    check_u("init no reload", ev.reload_mask, 0u);
     check_i("init no plant", ev.plant, 0);
     check_i("init no beep", ev.beep, 0);
 }
@@ -380,6 +381,43 @@ static void test_ramp_t_topology(void) {
     check_ok("ramp slope along X", q.z[0] == q.z[3] && q.z[1] == q.z[2]);
 }
 
+/* SIMPLE_ROOMS stairs (16) + catwalk west (15) + CT-corridor north (7).
+ * South/east have no neighbor → this area's z=128. |Δz_y| > |Δz_x|
+ * so the else-Y branch runs. Swapping z_s/z_n would flip 128 and 0. */
+static void test_ramp_y_slope_stairs(void) {
+    const float bounds[] = {
+        1170.0f,
+        80.0f,
+        1300.0f,
+        192.0f, /* 0 stairs */
+        820.0f,
+        80.0f,
+        1170.0f,
+        192.0f, /* 1 catwalk west z=128 */
+        1170.0f,
+        192.0f,
+        1600.0f,
+        512.0f, /* 2 CT-corridor north z=0 */
+    };
+    const float  zs[] = {128.0f, 128.0f, 0.0f};
+    DemoRampQuad q;
+    demo_ramp_quad(0, 3, bounds, zs, &q);
+
+    check_f_near("ystairs c0 x", q.x[0], 1170.0f, 1e-4f);
+    check_f_near("ystairs c0 y", q.y[0], 80.0f, 1e-4f);
+    check_f_near("ystairs c0 z", q.z[0], 128.0f, 1e-4f);
+    check_f_near("ystairs c1 x", q.x[1], 1300.0f, 1e-4f);
+    check_f_near("ystairs c1 y", q.y[1], 80.0f, 1e-4f);
+    check_f_near("ystairs c1 z", q.z[1], 128.0f, 1e-4f);
+    check_f_near("ystairs c2 x", q.x[2], 1300.0f, 1e-4f);
+    check_f_near("ystairs c2 y", q.y[2], 192.0f, 1e-4f);
+    check_f_near("ystairs c2 z", q.z[2], 0.0f, 1e-4f);
+    check_f_near("ystairs c3 x", q.x[3], 1170.0f, 1e-4f);
+    check_f_near("ystairs c3 y", q.y[3], 192.0f, 1e-4f);
+    check_f_near("ystairs c3 z", q.z[3], 0.0f, 1e-4f);
+    check_ok("ystairs slope along Y", q.z[0] == q.z[1] && q.z[2] == q.z[3]);
+}
+
 static void test_reload_start_agent0(void) {
     DemoWorldTick prev          = tick_zero();
     DemoWorldTick curr          = tick_zero();
@@ -438,6 +476,7 @@ int main(void) {
     test_aim_yaw0_pitch_halfpi();
     test_aim_yaw_halfpi_pitch0();
     test_ramp_t_topology();
+    test_ramp_y_slope_stairs();
     test_reload_start_agent0();
     test_reload_start_agent3();
     test_reload_prev_eq_curr_silent();
