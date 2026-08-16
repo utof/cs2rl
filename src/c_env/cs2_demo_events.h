@@ -93,5 +93,5 @@ static inline DemoEvents demo_detect_events(const DemoWorldTick* prev, const Dem
  *           Do not snap tiny values; the product already goes to 0.
  */
 static inline float demo_decay_punch(float prev, float dt) {
-    return prev * expf(-dt / 0.08f);
+    return recoil_decay_punch(prev, dt);
 }

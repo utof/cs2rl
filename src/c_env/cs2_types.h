@@ -9,6 +9,12 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* Sim recoil v1 (#120): one-pole punch decay. tau=0.08 s.
+ * demo_decay_punch must call this — do not fork the formula. */
+static inline float recoil_decay_punch(float prev, float dt) {
+    return prev * expf(-dt / 0.08f);
+}
+
 /* ── Constants ─────────────────────────────────────────────────────────── */
 #define TEAM_SIZE 5
 #define N_AGENTS  10
@@ -244,6 +250,12 @@ typedef struct {
     int32_t jump_cd;     /* ticks until another jump press is honoured (0 = bhop OK)  */
     /* Batch 3.5 additions (pitch / 3D combat) — appended, never reorder. */
     float pitch; /* radians, 0 = horizontal; ABSOLUTE per env_step (v1c, gh #36) */
+    /* Sim recoil v1 (#120): view-kick, appended, never reorder earlier fields.
+     * Shared by the hit ray and cs2_demo camera when Dust2Env.recoil_enabled.
+     * memset on spawn / env_reset zeros them. Do not write these into facing,
+     * aim_rad, or stored pitch — add them at the ray / look site only. */
+    float punch_pitch;
+    float punch_yaw;
 } AgentState;
 
 /* ── Game state ── */
@@ -360,6 +372,12 @@ typedef struct {
     int8_t      masks[N_AGENTS * ACTION_MASK_DIM];
     /* Phase 6: renderer client — NULL during training, set by make_client() */
     struct Client* client;
+    /* Sim recoil v1 (#120): env-wide physics switch, after client.
+     * 0 = today's hitscan (train / make_env default); 1 = punch on the hit ray
+     * (cs2_demo). Not a binding.init argument — that 69-arg FMT is a footgun.
+     * make_env writes this after Dust2EnvC.from_address. env_reset memsets
+     * GameState only, so the flag survives mid-round reset. */
+    int32_t recoil_enabled;
 } Dust2Env;
 
 /* ── Angle utilities ────────────────────────────────────────────────────── */

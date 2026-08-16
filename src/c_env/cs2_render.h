@@ -614,10 +614,9 @@ static void update_camera(Client* cl, Dust2Env* env, float alpha) {
     float eye_y = pz + PLAYER_EYE_HEIGHT; /* Raylib Y = height */
     float eye_z = py;                     /* Raylib Z = sim Y  */
 
-    /* Look dir = aim + punch. Punch can push past ±89° (0.045 + 1.553
-     * > π/2) so clamp the *look* pitch only — stored pitch stays aim. */
-    float look_yaw   = cl->yaw + cl->punch_yaw;
-    float look_pitch = cl->pitch + cl->punch_pitch;
+    /* Look dir = aim + sim punch. Clamp the *look* pitch only. */
+    float look_yaw   = cl->yaw + env->game.agents[idx].punch_yaw;
+    float look_pitch = cl->pitch + env->game.agents[idx].punch_pitch;
     if (look_pitch > 1.5533f)
         look_pitch = 1.5533f;
     if (look_pitch < -1.5533f)
@@ -629,14 +628,6 @@ static void update_camera(Client* cl, Dust2Env* env, float alpha) {
 
     cl->camera.position = (Vector3){eye_x, eye_y, eye_z};
     cl->camera.target   = (Vector3){eye_x + dir_x, eye_y + dir_y, eye_z + dir_z};
-
-    /* Advance punch after sampling so the first post-shot frame shows
-     * the full kick. tau=0.08 s. */
-    {
-        float dt        = GetFrameTime();
-        cl->punch_pitch = demo_decay_punch(cl->punch_pitch, dt);
-        cl->punch_yaw   = demo_decay_punch(cl->punch_yaw, dt);
-    }
 }
 
 /* ── draw_floor ─────────────────────────────────────────────────────────── */

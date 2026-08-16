@@ -78,13 +78,66 @@ def test_stepstats_has_win_type_flags(make_map):
     assert int(ss.win_by_defuse) == 0
 
 
+def test_agentstate_has_punch_fields():
+    """Sim recoil v1 (#120): punch lives on AgentState; flag on Dust2Env.
+
+    Why: P0 punch was Client-only, so the hit ray ignored view-kick. These
+    fields are the ctypes mirror of the C layout — if they drift, from_address
+    overlays garbage. Sizes are filled in after the measured C rebuild;
+    first RED is missing names / old AgentState 156.
+    """
+    import ctypes
+
+    from c_env.cs2_env import AgentStateC, Dust2EnvC, GameStateC
+    names = [n for n, _ in AgentStateC._fields_]
+    assert names[-2:] == ["punch_pitch", "punch_yaw"]
+    assert "recoil_enabled" in [n for n, _ in Dust2EnvC._fields_]
+    assert hasattr(AgentStateC, "punch_pitch")
+    assert hasattr(AgentStateC, "punch_yaw")
+    assert hasattr(Dust2EnvC, "recoil_enabled")
+    # Measured C sizeof (zig cc printf TU against cs2_types.h). Dust2Env 6832
+    # = old 6744 +80 (agents) +4 (flag) +4 (trailing pad to 8-byte align).
+    assert ctypes.sizeof(AgentStateC) == 164
+    assert ctypes.sizeof(GameStateC) == 1708
+    assert ctypes.sizeof(Dust2EnvC) == 6832
+
+
+def test_make_env_writes_recoil_enabled(make_map):
+    """make_env / Cs2Env write recoil_enabled after from_address.
+
+    Why: not a binding.init argument (69-arg FMT stays frozen). env_reset
+    memsets GameState only, so the flag must be set at overlay time — a
+    first-reset-only write would also work today, but would hide a later
+    memset of Dust2Env. Default is today's hitscan (0).
+    """
+    import inspect
+
+    from c_env.cs2_env import make_env
+    assert "recoil" in inspect.signature(make_env).parameters
+    env = make_env(seed=0, map_data=make_map, recoil=False)
+    try:
+        assert int(env._c_env.recoil_enabled) == 0
+        env.reset()
+        assert int(env._c_env.recoil_enabled) == 0, "reset must not clear the flag"
+    finally:
+        env.close()
+    on = make_env(seed=0, map_data=make_map, recoil=True)
+    try:
+        assert int(on._c_env.recoil_enabled) == 1
+        on.reset()
+        assert int(on._c_env.recoil_enabled) == 1
+    finally:
+        on.close()
+
+
 def test_stepstats_has_plant_tick(make_map):
     """StepStatsC must expose plant_tick (g->tick at plant; 0 = never planted).
 
     Why: observe-only plant-latency field is appended after _pad_ss_wins, so
-    sizeof grows 200→204 / 6736→6744. clear_stats memsets the struct, so
-    reset must leave 0. Pitfall: do not read this via a numpy recarray —
-    binding.c has no StepStats dtype; ctypes is the Python-side mirror.
+    sizeof grew 200→204. Dust2EnvC is now 6832 after sim-recoil punch/flag
+    (#120; was 6744). clear_stats memsets the struct, so reset must leave 0.
+    Pitfall: do not read this via a numpy recarray — binding.c has no
+    StepStats dtype; ctypes is the Python-side mirror.
     """
     import ctypes
 
@@ -94,7 +147,7 @@ def test_stepstats_has_plant_tick(make_map):
     env.reset()
     assert int(env._c_env.episode_stats.plant_tick) == 0
     assert ctypes.sizeof(StepStatsC) == 204
-    assert ctypes.sizeof(Dust2EnvC) == 6744
+    assert ctypes.sizeof(Dust2EnvC) == 6832
 
 
 def test_human_controlled_uses_aim_rad_not_bin(make_map):

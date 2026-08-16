@@ -285,6 +285,16 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
         count_action(ss->action_weapon, es->action_weapon, wswitch, 3);
     }
 
+    if (env->recoil_enabled) {
+        for (int i = 0; i < N_AGENTS; i++) {
+            AgentState* a = &g->agents[i];
+            if (!a->alive)
+                continue;
+            a->punch_pitch = recoil_decay_punch(a->punch_pitch, DT_SIM_MOVE);
+            a->punch_yaw   = recoil_decay_punch(a->punch_yaw, DT_SIM_MOVE);
+        }
+    }
+
     build_vis_matrix(g, sd, vis10);
     process_combat(env, actions, vis10, kills, &n_kills, ss, es);
 

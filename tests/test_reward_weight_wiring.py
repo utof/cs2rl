@@ -25,7 +25,9 @@ import pytest
 #     (test_pbrs_gamma_matches_training_gamma);
 #   include_step_stats_in_info — the issue #100 decision, out of scope;
 #   reward_symmetrize — a bool knob, not a weight (Task 3; listed here from
-#   the start so this test does not break when Task 3 lands).
+#   the start so this test does not break when Task 3 lands);
+#   recoil — physics switch (#120), not a weight. Default off so existing
+#     recipes keep today's hitscan; do not thread it through REWARD_WEIGHT_*.
 _NON_WEIGHT_PARAMS = {
     "seed",
     "team_spirit",
@@ -35,6 +37,7 @@ _NON_WEIGHT_PARAMS = {
     "pbrs_gamma",
     "include_step_stats_in_info",
     "reward_symmetrize",
+    "recoil",
 }
 
 

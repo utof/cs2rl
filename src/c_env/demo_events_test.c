@@ -277,6 +277,15 @@ static void test_punch_decay_zero_and_dt0(void) {
     check_f_near("dt=0 punch unchanged", demo_decay_punch(0.045f, 0.0f), 0.045f, 1e-7f);
 }
 
+static void test_recoil_decay_punch_by_name(void) {
+    const float dt = 1.0f / 16.0f;
+    float       n  = recoil_decay_punch(0.045f, dt);
+    check_f_near("recoil_decay_punch formula", n, 0.045f * expf(-dt / 0.08f), 1e-6f);
+    check_ok("recoil_decay same sign", n > 0.0f);
+    check_ok("recoil_decay smaller abs", n < 0.045f);
+    check_f_near("recoil_decay dt=0", recoil_decay_punch(0.045f, 0.0f), 0.045f, 1e-7f);
+}
+
 int main(void) {
     test_shot_pulse();
     test_no_shot_when_bit0();
@@ -296,6 +305,7 @@ int main(void) {
     test_punch_decay_formula();
     test_punch_decay_same_sign_smaller_abs();
     test_punch_decay_zero_and_dt0();
+    test_recoil_decay_punch_by_name();
 
     if (g_fails) {
         fprintf(stderr, "demo_events_test: %d check(s) failed\n", g_fails);

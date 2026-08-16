@@ -132,21 +132,11 @@ static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* cur
             cl, DEMO_VOICE_BEEP, env->game.bomb_x, env->game.bomb_y, env->game.bomb_z, 1200.0f);
 }
 
-/* View-kick on the local shot only (human agent, else spectate-0).
- * Applied once per sim tick, not per render frame. Do not write yaw /
- * pitch / aim_rad — human_input copies those into the sim. Render
- * decays punch and adds it to camera look only. */
+/* View-kick is sim punch (#120). Client fields are unused leftovers. */
 static void demo_apply_local_punch(Client* cl, const Dust2Env* env, unsigned shot_mask) {
-    int      local = (cl->human_agent_idx >= 0) ? cl->human_agent_idx : 0;
-    unsigned u;
-    float    n;
-    if ((shot_mask & (1u << local)) == 0)
-        return;
-    cl->punch_pitch += 0.045f; /* mid-range of spec ~0.03–0.06 rad */
-    /* Deterministic tiny yaw noise from the sim tick; no GetRandomValue. */
-    u              = (unsigned)env->game.tick * 1664525u + 1013904223u;
-    n              = ((float)((u >> 16) & 0xffff) / 32767.5f) - 1.0f;
-    cl->punch_yaw += n * 0.008f;
+    (void)cl;
+    (void)env;
+    (void)shot_mask;
 }
 
 /* Record alive 1→0 edges for the kill feed. Last 4, timestamped now.
@@ -205,6 +195,7 @@ int main(int argc, char** argv) {
     env.sd  = &sd;
     env.rng = 12345;
     env_reset(&env);
+    env.recoil_enabled = 1; /* #120: punch on the hit ray + camera */
 
     int32_t actions[N_AGENTS * ACTION_DIM];
     memset(actions, 0, sizeof(actions));
