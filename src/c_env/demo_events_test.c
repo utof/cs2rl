@@ -1,15 +1,17 @@
-/* demo_events_test.c — headless checks for cs2_demo_events.h.
+/* demo_events_test.c — headless checks for cs2_demo_events.h / cs2_demo_viz.h.
  *
  * Built/run by `zig build demo_events_test`. No Raylib, no binding.so,
  * no ctypes. The play wrapper's 3 Hz footstep drop is intentionally
  * NOT tested here — a walking tick with hypot>1 must set the foot bit
  * every sim tick. Punch decay is the formula only; no InitWindow.
+ * Aim / ramp helpers are Raylib-free math; reload is a snapshot-diff bit.
  */
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "cs2_demo_events.h"
+#include "cs2_demo_viz.h"
 
 #ifdef RAYLIB_H
 #error "cs2_demo_events.h must not include raylib.h (demo/tests only)"
@@ -63,6 +65,7 @@ static void test_shot_pulse(void) {
     DemoEvents ev                  = demo_detect_events(&prev, &curr);
     check_u("shot pulse bit 0", ev.shot_mask, 1u);
     check_u("shot pulse no foot", ev.foot_mask, 0u);
+    check_u("shot pulse no reload", ev.reload_mask, 0u);
     check_i("shot pulse no plant", ev.plant, 0);
     check_i("shot pulse no beep", ev.beep, 0);
 }
@@ -286,6 +289,131 @@ static void test_recoil_decay_punch_by_name(void) {
     check_f_near("recoil_decay dt=0", recoil_decay_punch(0.045f, 0.0f), 0.045f, 1e-7f);
 }
 
+/* Combat aim: d = (cos p cos y, cos p sin y, sin p). Stick is Raylib
+ * (x, z+108, y) + length*(dx, dz, dy). Punch is the caller's job. */
+static void test_aim_yaw0_pitch0(void) {
+    float dx, dy, dz;
+    demo_aim_dir_sim(0.0f, 0.0f, &dx, &dy, &dz);
+    check_f_near("aim y0p0 dx", dx, 1.0f, 1e-5f);
+    check_f_near("aim y0p0 dy", dy, 0.0f, 1e-5f);
+    check_f_near("aim y0p0 dz", dz, 0.0f, 1e-5f);
+    check_f_near("aim y0p0 |d|", sqrtf(dx * dx + dy * dy + dz * dz), 1.0f, 1e-5f);
+
+    float start[3], end[3];
+    demo_aim_stick_rl(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 60.0f, start, end);
+    check_f_near("stick y0p0 start x", start[0], 0.0f, 1e-5f);
+    check_f_near("stick y0p0 start y", start[1], 108.0f, 1e-5f);
+    check_f_near("stick y0p0 start z", start[2], 0.0f, 1e-5f);
+    check_f_near("stick y0p0 end x", end[0], 60.0f, 1e-5f);
+    check_f_near("stick y0p0 end y", end[1], 108.0f, 1e-5f);
+    check_f_near("stick y0p0 end z", end[2], 0.0f, 1e-5f);
+}
+
+static void test_aim_yaw0_pitch_halfpi(void) {
+    const float half_pi = acosf(-1.0f) * 0.5f;
+    float       dx, dy, dz;
+    demo_aim_dir_sim(0.0f, half_pi, &dx, &dy, &dz);
+    check_f_near("aim y0pπ/2 dx", dx, 0.0f, 1e-5f);
+    check_f_near("aim y0pπ/2 dy", dy, 0.0f, 1e-5f);
+    check_f_near("aim y0pπ/2 dz", dz, 1.0f, 1e-5f);
+    check_f_near("aim y0pπ/2 |d|", sqrtf(dx * dx + dy * dy + dz * dz), 1.0f, 1e-5f);
+
+    float start[3], end[3];
+    demo_aim_stick_rl(0.0f, 0.0f, 0.0f, 0.0f, half_pi, 60.0f, start, end);
+    check_f_near("stick y0pπ/2 start y", start[1], 108.0f, 1e-5f);
+    check_f_near("stick y0pπ/2 end x", end[0], 0.0f, 1e-5f);
+    check_f_near("stick y0pπ/2 end y", end[1], 168.0f, 1e-5f);
+    check_f_near("stick y0pπ/2 end z", end[2], 0.0f, 1e-5f);
+}
+
+static void test_aim_yaw_halfpi_pitch0(void) {
+    const float half_pi = acosf(-1.0f) * 0.5f;
+    float       dx, dy, dz;
+    demo_aim_dir_sim(half_pi, 0.0f, &dx, &dy, &dz);
+    check_f_near("aim yπ/2p0 dx", dx, 0.0f, 1e-5f);
+    check_f_near("aim yπ/2p0 dy", dy, 1.0f, 1e-5f);
+    check_f_near("aim yπ/2p0 dz", dz, 0.0f, 1e-5f);
+    check_f_near("aim yπ/2p0 |d|", sqrtf(dx * dx + dy * dy + dz * dz), 1.0f, 1e-5f);
+
+    float start[3], end[3];
+    demo_aim_stick_rl(0.0f, 0.0f, 0.0f, half_pi, 0.0f, 60.0f, start, end);
+    check_f_near("stick yπ/2p0 start y", start[1], 108.0f, 1e-5f);
+    check_f_near("stick yπ/2p0 end x", end[0], 0.0f, 1e-5f);
+    check_f_near("stick yπ/2p0 end y", end[1], 108.0f, 1e-5f);
+    check_f_near("stick yπ/2p0 end z", end[2], 60.0f, 1e-5f);
+}
+
+/* T-ramp: low west room, ramp, high east room. West edge of the ramp
+ * must pick the z=0 neighbor (longest overlap), east the z=64 room. */
+static void test_ramp_t_topology(void) {
+    const float bounds[] = {
+        400.0f,
+        192.0f,
+        750.0f,
+        416.0f, /* area 0 floor */
+        750.0f,
+        192.0f,
+        820.0f,
+        416.0f, /* area 1 ramp */
+        820.0f,
+        192.0f,
+        1100.0f,
+        416.0f, /* area 2 floor */
+    };
+    const float  zs[] = {0.0f, 64.0f, 64.0f};
+    DemoRampQuad q;
+    demo_ramp_quad(1, 3, bounds, zs, &q);
+
+    check_f_near("ramp c0 x", q.x[0], 750.0f, 1e-4f);
+    check_f_near("ramp c0 y", q.y[0], 192.0f, 1e-4f);
+    check_f_near("ramp c0 z", q.z[0], 0.0f, 1e-4f);
+    check_f_near("ramp c1 x", q.x[1], 820.0f, 1e-4f);
+    check_f_near("ramp c1 y", q.y[1], 192.0f, 1e-4f);
+    check_f_near("ramp c1 z", q.z[1], 64.0f, 1e-4f);
+    check_f_near("ramp c2 x", q.x[2], 820.0f, 1e-4f);
+    check_f_near("ramp c2 y", q.y[2], 416.0f, 1e-4f);
+    check_f_near("ramp c2 z", q.z[2], 64.0f, 1e-4f);
+    check_f_near("ramp c3 x", q.x[3], 750.0f, 1e-4f);
+    check_f_near("ramp c3 y", q.y[3], 416.0f, 1e-4f);
+    check_f_near("ramp c3 z", q.z[3], 0.0f, 1e-4f);
+    /* West z=0, east z=64 → |Δz_x| > |Δz_y| so the slope is along X. */
+    check_ok("ramp slope along X", q.z[0] == q.z[3] && q.z[1] == q.z[2]);
+}
+
+static void test_reload_start_agent0(void) {
+    DemoWorldTick prev          = tick_zero();
+    DemoWorldTick curr          = tick_zero();
+    prev.agents[0].reload_ticks = 0;
+    curr.agents[0].reload_ticks = 30;
+    DemoEvents ev               = demo_detect_events(&prev, &curr);
+    check_u("reload start bit 0", ev.reload_mask, 1u);
+}
+
+static void test_reload_start_agent3(void) {
+    DemoWorldTick prev          = tick_zero();
+    DemoWorldTick curr          = tick_zero();
+    prev.agents[3].reload_ticks = 0;
+    curr.agents[3].reload_ticks = 30;
+    DemoEvents ev               = demo_detect_events(&prev, &curr);
+    check_u("reload start bit 3", ev.reload_mask, 1u << 3);
+}
+
+static void test_reload_prev_eq_curr_silent(void) {
+    DemoWorldTick w          = tick_zero();
+    w.agents[0].reload_ticks = 30;
+    DemoEvents ev            = demo_detect_events(&w, &w);
+    check_u("reload prev==curr silent", ev.reload_mask, 0u);
+}
+
+static void test_reload_countdown_silent(void) {
+    DemoWorldTick prev          = tick_zero();
+    DemoWorldTick curr          = tick_zero();
+    prev.agents[0].reload_ticks = 10;
+    curr.agents[0].reload_ticks = 9;
+    DemoEvents ev               = demo_detect_events(&prev, &curr);
+    check_u("reload countdown silent", ev.reload_mask, 0u);
+}
+
 int main(void) {
     test_shot_pulse();
     test_no_shot_when_bit0();
@@ -306,6 +434,14 @@ int main(void) {
     test_punch_decay_same_sign_smaller_abs();
     test_punch_decay_zero_and_dt0();
     test_recoil_decay_punch_by_name();
+    test_aim_yaw0_pitch0();
+    test_aim_yaw0_pitch_halfpi();
+    test_aim_yaw_halfpi_pitch0();
+    test_ramp_t_topology();
+    test_reload_start_agent0();
+    test_reload_start_agent3();
+    test_reload_prev_eq_curr_silent();
+    test_reload_countdown_silent();
 
     if (g_fails) {
         fprintf(stderr, "demo_events_test: %d check(s) failed\n", g_fails);
