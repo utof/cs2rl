@@ -258,12 +258,32 @@ static void process_combat(Dust2Env*      env,
 
         /* Batch 3.5 (#24): 3D aim direction. Pitch tilts the (cos·yaw, sin·yaw)
          * 2D direction to a 3D unit vector. d = (cos·p·cos·y, cos·p·sin·y, sin·p).
-         * |d| = 1 by construction. */
-        float cos_p = cosf(a->pitch);
-        float sin_p = sinf(a->pitch);
-        float dx    = cos_p * cosf(a->facing);
-        float dy    = cos_p * sinf(a->facing);
+         * |d| = 1 by construction.
+         * Sim recoil v1 (#120): when recoil_enabled, add punch to locals only.
+         * Do not write punch into facing / aim_rad / stored pitch. */
+        float ray_yaw   = a->facing;
+        float ray_pitch = a->pitch;
+        if (env->recoil_enabled) {
+            ray_yaw   += a->punch_yaw;
+            ray_pitch += a->punch_pitch;
+            if (ray_pitch > 1.5533f)
+                ray_pitch = 1.5533f;
+            if (ray_pitch < -1.5533f)
+                ray_pitch = -1.5533f;
+        }
+        float cos_p = cosf(ray_pitch);
+        float sin_p = sinf(ray_pitch);
+        float dx    = cos_p * cosf(ray_yaw);
+        float dy    = cos_p * sinf(ray_yaw);
         float dz    = sin_p;
+
+        if (env->recoil_enabled) {
+            /* After d is built, before the enemy loop — misses still kick. */
+            unsigned u      = (unsigned)g->tick * 1664525u + 1013904223u;
+            float    n      = ((float)((u >> 16) & 0xffff) / 32767.5f) - 1.0f;
+            a->punch_pitch += 0.045f;
+            a->punch_yaw   += n * 0.008f;
+        }
 
         /* Shooter eye z (3D combat ray origin) — incorporates stand/crouch.
          * Without this, a crouched defender on an elevated catwalk and a
