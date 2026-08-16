@@ -74,6 +74,10 @@ class MapData:
     # Optional: reference to the underlying NavGraph (needed for viz/snapshot).
     # None for simple maps.
     nav_graph: object = field(default=None, repr=False)
+    # Room AABB float32[N,4] x0,y0,x1,y1 for ramp interpolation.
+    # make_simple_map fills this from the room tuples. make_cs2_map leaves
+    # None so demo_terrain_z stays on centroids_z.
+    area_bounds: np.ndarray | None = field(default=None)
 
     def line_of_sight_2d(self, x1: float, y1: float, x2: float, y2: float) -> bool:
         """Pure-Python mirror of cs2_combat.h::line_of_sight_2d.
@@ -456,6 +460,10 @@ def make_simple_map(
         mx = float(finite.max())
         bombsite_dist_scale = 1.0 / mx if mx > 0 else 0.0
 
+    area_bounds = np.zeros((N, 4), dtype=np.float32)
+    for idx, x0, y0, x1, y1, *_ in rooms:
+        area_bounds[idx] = (x0, y0, x1, y1)
+
     return MapData(
         N=N,
         area_ids=area_ids,
@@ -479,4 +487,5 @@ def make_simple_map(
         y_min=y_min,
         y_max=y_max,
         nav_graph=None,
+        area_bounds=area_bounds,
     )

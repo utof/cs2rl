@@ -1,7 +1,7 @@
 #pragma once
 #include "cs2_types.h"
 #include "cs2_weapons.h"
-#include "cs2_demo_viz.h"
+#include "cs2_terrain.h"
 
 /* Interpolated surface z at (x,y) on area_idx — same quad the renderer draws.
  * Cliff-guard Δz still uses centroids_z (top), not this. */

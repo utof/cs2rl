@@ -447,9 +447,8 @@ Client* make_client(Dust2Env*    env,
     cl->height          = WINDOW_H;
     cl->human_agent_idx = human_agent_idx;
     cl->area_bounds     = area_bounds;
-    /* Share the exact room quad with process_movement (same surface as draw).
-     * Free the raster AABB env_init malloc'd, if any. owned=0: argument is
-     * NAV_AREA_BOUNDS / play.py numpy — do not free it in env_close. */
+    /* Same pointer the viz already has (NAV_AREA_BOUNDS / play.py numpy).
+     * Free only if a prior path marked owned. owned=0: do not free in env_close. */
     if (env->sd) {
         if (env->sd->area_bounds_owned) {
             free((void*)env->sd->area_bounds);

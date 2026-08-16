@@ -201,16 +201,38 @@ def _zero_actions(n_agents=10):
     )
 
 
-def test_agent_on_t_ramp_does_not_snap_to_top():
-    """T-ramp interpolation: grounded agent at the low (west) end stays near z=0.
+def _room_x_lerp(x0, x1, z_w, z_e, x):
+    """X-slope room lerp: z = (1-u)*z_w + u*z_e, u=(x-x0)/(x1-x0)."""
+    return (1.0 - (x - x0) / (x1 - x0)) * z_w + ((x - x0) / (x1 - x0)) * z_e
 
-    Area 13 is T-ramp (750–820, 192–416, top z=64). The old snap used
-    centroids_z=64 everywhere on the ramp. After v1b, (755, 300) is near
-    the west/low edge and must stay well below the top (z < 20), not 64.
+
+def _room_y_lerp(y0, y1, z_s, z_n, y):
+    """Y-slope room lerp: z = (1-v)*z_s + v*z_n, v=(y-y0)/(y1-y0)."""
+    return (1.0 - (y - y0) / (y1 - y0)) * z_s + ((y - y0) / (y1 - y0)) * z_n
+
+
+def test_simple_map_area_bounds_match_rooms(simple_map):
+    """make_simple_map publishes the room tuples, not a raster AABB."""
+    from map import SIMPLE_ROOMS
+    assert simple_map.area_bounds is not None
+    assert simple_map.area_bounds.shape == (simple_map.N, 4)
+    assert simple_map.area_bounds.dtype == np.float32
+    for idx, x0, y0, x1, y1, *_ in SIMPLE_ROOMS:
+        assert list(simple_map.area_bounds[idx]) == [x0, y0, x1, y1]
+
+
+def test_agent_on_t_ramp_does_not_snap_to_top():
+    """T-ramp interpolation: grounded agent at (755, 300) is the room lerp.
+
+    Area 13 is T-ramp (750–820, 192–416). X-slope 0→64 on the SIMPLE_ROOMS
+    quad: z ≈ (755-750)/(820-750)*64. Must not snap to top 64.
     """
     env = _make_simple_env(seed=42)
     try:
         env.reset(seed=42)
+        # Live overlay must be the room quad (750,192,820,416), not a raster AABB.
+        b = env._c_env.sd.contents.area_bounds
+        assert [b[13 * 4 + i] for i in range(4)] == [750.0, 192.0, 820.0, 416.0]
         g = env._c_env.game
         g.agents[0].x = 755.0
         g.agents[0].y = 300.0
@@ -220,12 +242,61 @@ def test_agent_on_t_ramp_does_not_snap_to_top():
         g.agents[0].is_airborne = 0
         actions, cont = _zero_actions()
         env.step(actions, cont)
-        assert g.agents[0].z < 20.0, (
-            f"T-ramp must interpolate, not snap to top 64; got z={g.agents[0].z}")
+        z_want = _room_x_lerp(750.0, 820.0, 0.0, 64.0, 755.0)
+        assert abs(g.agents[0].z - z_want) < 0.5, (
+            f"T-ramp room lerp at (755,300) want {z_want:.3f} ±0.5, got z={g.agents[0].z}")
         assert g.agents[0].is_airborne == 0, (
             "agent should remain grounded on the interpolated ramp surface")
         assert g.agents[0].area_idx == 13, (
             f"agent left T-ramp (area 13) for area_idx={g.agents[0].area_idx}")
+    finally:
+        env.close()
+
+
+def test_agent_on_ct_ramp_follows_x_slope():
+    """CT-ramp (14: 1100–1170, 192–416) is X-slope 64→0 on the room quad."""
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 1135.0
+        g.agents[0].y = 300.0
+        g.agents[0].area_idx = 14
+        g.agents[0].z = 64.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 0
+        actions, cont = _zero_actions()
+        env.step(actions, cont)
+        z_want = _room_x_lerp(1100.0, 1170.0, 64.0, 0.0, 1135.0)
+        assert abs(g.agents[0].z - z_want) < 0.5, (
+            f"CT-ramp room X-slope at (1135,300) want {z_want:.3f} ±0.5, got z={g.agents[0].z}")
+        assert g.agents[0].is_airborne == 0
+        assert g.agents[0].area_idx == 14, (
+            f"agent left CT-ramp (area 14) for area_idx={g.agents[0].area_idx}")
+    finally:
+        env.close()
+
+
+def test_agent_on_stairs_follows_y_slope():
+    """Stairs (16: 1170–1300, 80–192) is Y-slope 128→0 on the room quad."""
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 1235.0
+        g.agents[0].y = 136.0
+        g.agents[0].area_idx = 16
+        g.agents[0].z = 128.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 0
+        actions, cont = _zero_actions()
+        env.step(actions, cont)
+        z_want = _room_y_lerp(80.0, 192.0, 128.0, 0.0, 136.0)
+        assert abs(g.agents[0].z - z_want) < 0.5, (
+            f"stairs room Y-slope at (1235,136) want {z_want:.3f} ±0.5, got z={g.agents[0].z}")
+        assert g.agents[0].is_airborne == 0
+        assert g.agents[0].area_idx == 16, (
+            f"agent left stairs (area 16) for area_idx={g.agents[0].area_idx}")
     finally:
         env.close()
 

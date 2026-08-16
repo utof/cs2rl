@@ -208,12 +208,12 @@ typedef struct {
     float pbrs_nav_weight_ct;          /* CT-side nav approach weight */
     /* Phase 6: renderer wall list — populated by build_walls_from_nav(), C-demo only */
     WallList wall_list;
-    /* Ramp interpolation AABB. After wall_list so StaticDataC (ctypes prefix)
-     * is unchanged. BindingEnv calloc's the full C StaticData — these are
-     * in-bounds and zero until env_init / make_client fill them.
-     * NULL bounds → demo_terrain_z uses centroids_z (dust2 / flat rooms). */
+    /* Ramp interpolation AABB. After wall_list. StaticDataC appends wall_list
+     * then these so Python can publish the room quad after env_init.
+     * Measured gcc offsetof: wall_list=480, area_bounds=496, owned=504
+     * (no pad after pbrs_nav_weight_ct). NULL → centroids_z (dust2). */
     const float* area_bounds;       /* [N*4] x0,y0,x1,y1; NULL = no interpolation */
-    int          area_bounds_owned; /* 1 if env_init malloc'd it */
+    int          area_bounds_owned; /* 1 if C malloc'd it; train/play set 0 */
 } StaticData;
 
 /* ── Per-agent state ── */
@@ -366,7 +366,7 @@ typedef struct {
 
 /* ── Full environment (one per parallel instance) ── */
 typedef struct {
-    StaticData* sd; /* shared pointer, never freed by C        */
+    StaticData* sd; /* Python-owned; env_close frees area_bounds only if owned */
     GameState   game;
     StepStats   step_stats;
     StepStats   episode_stats;

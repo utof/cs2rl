@@ -45,6 +45,27 @@ class VizGameState:
 # ── ctypes struct definitions (read/write overlay for _c_env) ─────────────────
 
 
+class WallC(ctypes.Structure):
+    _fields_ = [
+        ("x0", ctypes.c_float),
+        ("y0", ctypes.c_float),
+        ("x1", ctypes.c_float),
+        ("y1", ctypes.c_float),
+        ("height", ctypes.c_float),
+        ("z0", ctypes.c_float),
+    ]
+
+
+class WallListC(ctypes.Structure):
+    # Mirrors C WallList: ptr + count + capacity. Appended on StaticDataC
+    # after the binding.init prefix so area_bounds can follow at C offsets.
+    _fields_ = [
+        ("walls", ctypes.POINTER(WallC)),
+        ("count", ctypes.c_int),
+        ("capacity", ctypes.c_int),
+    ]
+
+
 class StaticDataC(ctypes.Structure):
     # fmt: off  -- YAPF aligns standalone comments to trailing-comment column; suppress here
     _fields_ = [
@@ -124,6 +145,13 @@ class StaticDataC(ctypes.Structure):
         ("pbrs_bomb_progress_weight", ctypes.c_float),
         ("pbrs_nav_weight_t", ctypes.c_float),
         ("pbrs_nav_weight_ct", ctypes.c_float),
+        # After ctypes prefix: overlay C wall_list then ramp bounds.
+        # Do not insert before wall_list. 69-arg FMT is unchanged.
+        # Measured gcc offsetof(StaticData): wall_list=480, area_bounds=496,
+        # area_bounds_owned=504. No pad after pbrs_nav_weight_ct (ends 480).
+        ("wall_list", WallListC),
+        ("area_bounds", ctypes.POINTER(ctypes.c_float)),
+        ("area_bounds_owned", ctypes.c_int),
     ]
     # fmt: on
 
@@ -300,9 +328,9 @@ class Dust2EnvC(ctypes.Structure):
         ("rng", ctypes.c_uint32),
         ("masks", ctypes.c_int8 * (N_AGENTS * ACTION_MASK_DIM)),
         ("client", ctypes.c_void_p),                                   # Client* (NULL in training)
-                                                       # Sim recoil v1 (#120): after client, not a binding.init arg.
-                                                       # make_env writes this after from_address; env_reset does not
-                                                       # clear it (memsets GameState only). 0=hitscan, 1=punch on ray.
+                                                                       # Sim recoil v1 (#120): after client, not a binding.init arg.
+                                                                       # make_env writes this after from_address; env_reset does not
+                                                                       # clear it (memsets GameState only). 0=hitscan, 1=punch on ray.
         ("recoil_enabled", ctypes.c_int32),
     ]
 
@@ -347,6 +375,13 @@ assert ctypes.sizeof(StepStatsC) == 204, (
     f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 204)")
 assert ctypes.sizeof(Dust2EnvC) == 6832, (
     f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6832)")
+# Live overlay vs gcc offsetof(StaticData). Append of wall_list is safe:
+# pbrs_nav_weight_ct ends at 480, pointer-aligned, no guessed pad.
+assert StaticDataC.pbrs_nav_weight_ct.offset == 476, StaticDataC.pbrs_nav_weight_ct.offset
+assert StaticDataC.wall_list.offset == 480, StaticDataC.wall_list.offset
+assert StaticDataC.area_bounds.offset == 496, StaticDataC.area_bounds.offset
+assert StaticDataC.area_bounds_owned.offset == 504, StaticDataC.area_bounds_owned.offset
+assert ctypes.sizeof(WallListC) == 16, ctypes.sizeof(WallListC)
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -640,6 +675,15 @@ class Cs2Env(pufferlib.PufferEnv):
         # flag survives reset. Train / Modal stay off unless a later card
         # passes recoil=True into make_env.
         self._c_env.recoil_enabled = 1 if recoil else 0
+
+        # Room AABB for ramp interpolation. Not a binding.init arg (69-arg FMT
+        # stays frozen). make_simple_map fills area_bounds from SIMPLE_ROOMS;
+        # make_cs2_map leaves None so interpolation stays centroids_z.
+        if getattr(md, "area_bounds", None) is not None:
+            ab = np.ascontiguousarray(np.asarray(md.area_bounds, dtype=np.float32).reshape(-1))
+            self._refs.append(ab)
+            self._c_env.sd.contents.area_bounds = ab.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            self._c_env.sd.contents.area_bounds_owned = 0
 
         # Zero-copy NumPy views into C buffers
         obs_ptr, rew_ptr, term_ptr, trunc_ptr = binding.get_buffers(self._capsule)

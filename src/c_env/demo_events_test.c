@@ -1,4 +1,5 @@
-/* demo_events_test.c — headless checks for cs2_demo_events.h / cs2_demo_viz.h.
+/* demo_events_test.c — headless checks for cs2_demo_events.h / cs2_demo_viz.h
+ * (viz includes cs2_terrain.h for ramp / terrain_z).
  *
  * Built/run by `zig build demo_events_test`. No Raylib, no binding.so,
  * no ctypes. The play wrapper's 3 Hz footstep drop is intentionally
