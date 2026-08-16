@@ -110,3 +110,40 @@ def test_cs2_demo_policy_missing_exits_nonzero():
     # either printed the uv/venv hint, or exec'd python which FileNotFound
     blob = (r.stderr or "") + (r.stdout or "")
     assert "play.py" in blob or "Checkpoint" in blob or "UV_PROJECT_ENVIRONMENT" in blob
+
+
+def test_env_scripted_movers_not_statues(make_map):
+    from c_env.cs2_env import make_env
+    env = make_env(seed=0, auto_reset=False, recoil=True, map_data=make_map)
+    env.reset()
+    acts = np.zeros((10, 7), np.int32)
+    cont = np.zeros((10, 2), np.float32)
+    acts[1:, 0] = 1
+    p0 = [(env._c_env.game.agents[i].x, env._c_env.game.agents[i].y) for i in range(10)]
+    for _ in range(16):
+        env.step(acts, cont)
+    moved = []
+    for i in range(10):
+        dx = env._c_env.game.agents[i].x - p0[i][0]
+        dy = env._c_env.game.agents[i].y - p0[i][1]
+        moved.append((dx * dx + dy * dy) ** 0.5)
+    assert max(moved[1:]) > 10
+    assert moved[0] < 10
+    env.close()
+
+
+def test_play_cli_missing_pt_exits_2():
+    import subprocess, sys
+    root = Path(__file__).resolve().parents[1]
+    r = subprocess.run(
+        [sys.executable, str(root / "src/play.py"), "--policy", "/no/such/cs2rl-policy.pt"],
+        cwd=str(root), capture_output=True, text=True, timeout=20,
+    )
+    assert r.returncode == 2
+    assert "Checkpoint" in (r.stderr + r.stdout) or "not found" in (r.stderr + r.stdout).lower()
+
+
+def test_find_repo_root_from_this_file():
+    from play_actions import find_repo_root
+    root = find_repo_root(Path(__file__))
+    assert (root / "src" / "play.py").is_file()
