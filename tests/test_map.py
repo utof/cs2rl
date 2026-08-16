@@ -600,11 +600,9 @@ def test_exterior_wall_keeps_body_inside_room():
             env.step(actions, cont)
         assert g.agents[0].area_idx == 0, (
             f"walked off T-spawn-A into area_idx={g.agents[0].area_idx}")
-        assert g.agents[0].x >= _AGENT_VIZ_RADIUS - 0.5, (
-            f"center x={g.agents[0].x:.2f} is inside the west wall; "
-            f"hull must keep x >= {_AGENT_VIZ_RADIUS} so the 12u body "
-            f"stays out of the [-8, 0] cube")
-        assert g.agents[0].x < 40.0
+        assert abs(g.agents[0].x - _AGENT_VIZ_RADIUS) < 2.0, (
+            f"center x={g.agents[0].x:.2f} should stop at the 12u hull "
+            f"on T-spawn-A west (x=0), not inside the [-8, 0] cube")
     finally:
         env.close()
 
@@ -635,10 +633,77 @@ def test_raster_overshoot_cannot_enter_exterior_wall():
         assert g.agents[0].area_idx == 15, (
             f"left catwalk for area_idx={g.agents[0].area_idx}")
         min_x = 820.0 + _AGENT_VIZ_RADIUS
-        assert g.agents[0].x >= min_x - 0.5, (
-            f"center x={g.agents[0].x:.2f} crossed catwalk west 820 "
-            f"(and/or the 12u hull); want x >= {min_x}")
-        assert g.agents[0].x < 860.0
+        assert abs(g.agents[0].x - min_x) < 2.0, (
+            f"center x={g.agents[0].x:.2f} should stop at catwalk west "
+            f"hull ({min_x}), not in the [816, 820) overshoot")
+    finally:
+        env.close()
+
+
+def test_t_ramp_portal_is_walkable():
+    """T-corridor → T-ramp → bombsite must stay walkable after the hull.
+
+    Later rooms own the 16u column that straddles x=750 and x=820. Testing
+    the raster label's AABB on that column rejects the earlier room and
+    severs the ramp. Drive east from (700, 300); area_idx must become 13
+    then 6.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 700.0
+        g.agents[0].y = 300.0
+        g.agents[0].z = 0.0
+        g.agents[0].vx = 0.0
+        g.agents[0].vy = 0.0
+        g.agents[0].area_idx = 5
+        g.agents[0].is_airborne = 0
+        g.agents[0].facing = 0.0  # bin 1 = east (+x)
+        actions, cont = _zero_actions()
+        actions[0, 0] = 1
+        seen = {5}
+        for _ in range(40):
+            env.step(actions, cont)
+            seen.add(int(g.agents[0].area_idx))
+        assert 13 in seen, (
+            f"never entered T-ramp (13); areas={sorted(seen)} x={g.agents[0].x:.1f} "
+            f"— raster AABB at the 750 portal is sealing the doorway")
+        assert 6 in seen, (
+            f"never entered bombsite (6); areas={sorted(seen)} x={g.agents[0].x:.1f} "
+            f"— raster AABB at the 820 portal is sealing the ramp top")
+        assert g.agents[0].x > 820.0, (
+            f"ended at x={g.agents[0].x:.1f}, expected past bombsite west 820")
+    finally:
+        env.close()
+
+
+def test_ct_ramp_portal_is_walkable():
+    """CT-corridor → CT-ramp → bombsite, mirror of the T doorway."""
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 1220.0
+        g.agents[0].y = 300.0
+        g.agents[0].z = 0.0
+        g.agents[0].vx = 0.0
+        g.agents[0].vy = 0.0
+        g.agents[0].area_idx = 7
+        g.agents[0].is_airborne = 0
+        g.agents[0].facing = float(math.pi)
+        actions, cont = _zero_actions()
+        actions[0, 0] = 1
+        seen = {7}
+        for _ in range(40):
+            env.step(actions, cont)
+            seen.add(int(g.agents[0].area_idx))
+        assert 14 in seen, (
+            f"never entered CT-ramp (14); areas={sorted(seen)} x={g.agents[0].x:.1f}")
+        assert 6 in seen, (
+            f"never entered bombsite (6); areas={sorted(seen)} x={g.agents[0].x:.1f}")
+        assert g.agents[0].x < 1100.0, (
+            f"ended at x={g.agents[0].x:.1f}, expected past bombsite east 1100")
     finally:
         env.close()
 
