@@ -1,11 +1,13 @@
+#define _DEFAULT_SOURCE
 /* cs2_demo.c — Standalone CS2RL Raylib demo. Phase 6. */
 #include "cs2_env.h"
 #include "nav_data.h"
-#include "cs2_render.h"
-#include "cs2_input.h"
-#include "cs2_demo_events.h"
+#include "cs2_play_host.h"
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <limits.h>
 
 /* Populate StaticData from baked nav_data.h constants. Verticality fields
  * (centroids_z, is_ramp) are baked alongside the rest by scripts/bake_nav.py
@@ -82,96 +84,179 @@ static void load_nav_data(StaticData* sd) {
     sd->pbrs_gamma                  = 0.99f;
 }
 
-/* Copy env.game into a DemoWorldTick. Pose snapshots (AgentSnapshot) cannot
- * drive audio: they lack fired_this_tick / is_airborne / bomb_ticks_left.
- * Bomb xyz is NOT on DemoWorldTick — plant/beep spatial reads env.game
- * after the step (spec §3.1). */
-static void copy_game_to_world(const Dust2Env* env, DemoWorldTick* w) {
-    const GameState* g = &env->game;
-    int              i;
-    w->bomb_planted    = g->bomb_planted;
-    w->bomb_ticks_left = g->bomb_ticks_left;
-    for (i = 0; i < N_AGENTS; i++) {
-        const AgentState* a          = &g->agents[i];
-        w->agents[i].x               = a->x;
-        w->agents[i].y               = a->y;
-        w->agents[i].z               = a->z;
-        w->agents[i].alive           = a->alive;
-        w->agents[i].team            = a->team;
-        w->agents[i].is_airborne     = a->is_airborne;
-        w->agents[i].fired_this_tick = a->fired_this_tick;
+static int path_exists(const char* p) {
+    return p && p[0] && access(p, F_OK) == 0;
+}
+
+static void join_path(char* out, size_t n, const char* a, const char* b) {
+    size_t la = strlen(a);
+    if (la > 0 && a[la - 1] == '/')
+        snprintf(out, n, "%s%s", a, b);
+    else
+        snprintf(out, n, "%s/%s", a, b);
+}
+
+static int dirname_inplace(char* path) {
+    size_t n = strlen(path);
+    while (n > 1 && path[n - 1] == '/')
+        path[--n] = '\0';
+    char* slash = strrchr(path, '/');
+    if (!slash)
+        return 0;
+    if (slash == path) {
+        path[1] = '\0';
+        return 1;
     }
+    *slash = '\0';
+    return 1;
 }
 
-/* Official-example spatial play of remaining detect bits. 3 Hz foot drop
- * must already have cleared extra bits — this function does not rate-limit. */
-static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* curr, DemoEvents ev) {
-    int i;
-    for (i = 0; i < N_AGENTS; i++) {
-        if (ev.shot_mask & (1u << i))
-            _demo_play_at(cl,
-                          DEMO_VOICE_SHOT,
-                          curr->agents[i].x,
-                          curr->agents[i].y,
-                          curr->agents[i].z,
-                          800.0f);
-        if (ev.foot_mask & (1u << i))
-            _demo_play_at(cl,
-                          DEMO_VOICE_FOOT,
-                          curr->agents[i].x,
-                          curr->agents[i].y,
-                          curr->agents[i].z,
-                          400.0f);
+/* realpath if the file exists; else keep absolute PATH, else cwd + "/" + PATH. */
+static void absolutize_policy(const char* path, char* out, size_t n) {
+    if (realpath(path, out))
+        return;
+    if (path[0] == '/') {
+        snprintf(out, n, "%s", path);
+        return;
     }
-    /* DemoWorldTick has no bomb xyz; wrapper reads the post-step game. */
-    if (ev.plant)
-        _demo_play_at(
-            cl, DEMO_VOICE_PLANT, env->game.bomb_x, env->game.bomb_y, env->game.bomb_z, 800.0f);
-    if (ev.beep)
-        _demo_play_at(
-            cl, DEMO_VOICE_BEEP, env->game.bomb_x, env->game.bomb_y, env->game.bomb_z, 1200.0f);
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        snprintf(out, n, "%s", path);
+        return;
+    }
+    join_path(out, n, cwd, path);
 }
 
-/* View-kick is sim punch (#120). Client fields are unused leftovers. */
-static void demo_apply_local_punch(Client* cl, const Dust2Env* env, unsigned shot_mask) {
-    (void)cl;
-    (void)env;
-    (void)shot_mask;
-}
-
-/* Record alive 1→0 edges for the kill feed. Last 4, timestamped now.
- * draw_hud fades each row out over 3 s. */
-static void
-demo_record_kill_feed(Client* cl, const DemoWorldTick* prev, const DemoWorldTick* curr) {
-    int    i;
-    double t = GetTime();
-    for (i = 0; i < N_AGENTS; i++) {
-        if (!(prev->agents[i].alive && !curr->agents[i].alive))
-            continue;
-        if (cl->kill_feed_n < DEMO_KILL_FEED_N) {
-            int k                 = cl->kill_feed_n++;
-            cl->kill_feed_idx[k]  = i;
-            cl->kill_feed_team[k] = curr->agents[i].team;
-            cl->kill_feed_t[k]    = t;
-        } else {
-            memmove(cl->kill_feed_idx, cl->kill_feed_idx + 1, (DEMO_KILL_FEED_N - 1) * sizeof(int));
-            memmove(
-                cl->kill_feed_team, cl->kill_feed_team + 1, (DEMO_KILL_FEED_N - 1) * sizeof(int));
-            memmove(cl->kill_feed_t, cl->kill_feed_t + 1, (DEMO_KILL_FEED_N - 1) * sizeof(double));
-            cl->kill_feed_idx[DEMO_KILL_FEED_N - 1]  = i;
-            cl->kill_feed_team[DEMO_KILL_FEED_N - 1] = curr->agents[i].team;
-            cl->kill_feed_t[DEMO_KILL_FEED_N - 1]    = t;
+/* Walk up from the binary dir for pyproject.toml + src/play.py. */
+static int find_repo(char* out, size_t n) {
+    const char* app = play_host_app_dir();
+    if (!app || !app[0])
+        return 0;
+    char cur[PATH_MAX];
+    snprintf(cur, sizeof(cur), "%s", app);
+    size_t len = strlen(cur);
+    while (len > 1 && cur[len - 1] == '/')
+        cur[--len] = '\0';
+    for (;;) {
+        char toml[PATH_MAX], play[PATH_MAX];
+        join_path(toml, sizeof(toml), cur, "pyproject.toml");
+        join_path(play, sizeof(play), cur, "src/play.py");
+        if (path_exists(toml) && path_exists(play)) {
+            snprintf(out, n, "%s", cur);
+            return 1;
         }
+        if (cur[0] == '/' && cur[1] == '\0')
+            return 0;
+        if (!dirname_inplace(cur))
+            return 0;
     }
+}
+
+static int resolve_python(const char* repo, char* out, size_t n) {
+    const char* uve = getenv("UV_PROJECT_ENVIRONMENT");
+    if (uve && uve[0]) {
+        join_path(out, n, uve, "bin/python");
+        if (path_exists(out))
+            return 1;
+    }
+    const char* cs2 = getenv("CS2RL_VENV");
+    if (cs2 && cs2[0]) {
+        join_path(out, n, cs2, "bin/python");
+        if (path_exists(out))
+            return 1;
+    }
+    join_path(out, n, repo, ".venv/bin/python");
+    if (path_exists(out))
+        return 1;
+    char cur[PATH_MAX];
+    snprintf(cur, sizeof(cur), "%s", repo);
+    while (dirname_inplace(cur)) {
+        join_path(out, n, cur, ".venv/bin/python");
+        if (path_exists(out))
+            return 1;
+        if (cur[0] == '/' && cur[1] == '\0')
+            break;
+    }
+    return 0;
+}
+
+static void print_borrow_hint(const char* abs_policy, int argc, char** argv) {
+    fprintf(stderr, "cs2_demo: $PYTHON src/play.py --policy %s", abs_policy);
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
+            i++;
+            continue;
+        }
+        fprintf(stderr, " %s", argv[i]);
+    }
+    fprintf(stderr,
+            "\nset UV_PROJECT_ENVIRONMENT to the parent .venv; do not uv sync in the worktree\n");
+}
+
+/* --policy path: never InitWindow / play_host_attach. exec borrowed python. */
+static int demo_exec_play(int argc, char** argv, const char* policy_path) {
+    char abs_policy[PATH_MAX];
+    char repo[PATH_MAX];
+    char python[PATH_MAX];
+
+    absolutize_policy(policy_path, abs_policy, sizeof(abs_policy));
+
+    if (!find_repo(repo, sizeof(repo)) || !resolve_python(repo, python, sizeof(python))) {
+        print_borrow_hint(abs_policy, argc, argv);
+        return 2;
+    }
+
+    /* $UV_PROJECT_ENVIRONMENT / $CS2RL_VENV may be relative to launch cwd.
+     * realpath the parent, not the file: .venv/bin/python is often a symlink
+     * to the base interpreter, and execv of that target drops the venv. */
+    char abs_python[PATH_MAX];
+    char parent[PATH_MAX];
+    char abs_parent[PATH_MAX];
+    const char* base = strrchr(python, '/');
+    if (!base || !base[1]) {
+        print_borrow_hint(abs_policy, argc, argv);
+        return 2;
+    }
+    snprintf(parent, sizeof(parent), "%s", python);
+    if (!dirname_inplace(parent) || !realpath(parent, abs_parent)) {
+        print_borrow_hint(abs_policy, argc, argv);
+        return 2;
+    }
+    join_path(abs_python, sizeof(abs_python), abs_parent, base + 1);
+
+    char* eargv[argc + 5]; /* python, src/play.py, --policy, abs, rest, NULL */
+    int   n = 0;
+    eargv[n++] = abs_python;
+    eargv[n++] = "src/play.py";
+    eargv[n++] = "--policy";
+    eargv[n++] = abs_policy;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
+            i++;
+            continue;
+        }
+        eargv[n++] = argv[i];
+    }
+    eargv[n] = NULL;
+
+    if (chdir(repo) != 0) {
+        print_borrow_hint(abs_policy, argc, argv);
+        return 2;
+    }
+    execv(abs_python, eargv);
+    print_borrow_hint(abs_policy, argc, argv);
+    return 2;
 }
 
 int main(int argc, char** argv) {
-    int human_idx   = 0;
-    int fog_enabled = 0;
+    int         human_idx   = 0;
+    int         fog_enabled = 0;
+    const char* policy      = NULL;
     /* Argv parsing — order-independent so --spectate --fog and --fog --spectate
      * both work. Unknown args are silently ignored (keeps backward compat with
      * existing scripts that pass --record, --eval, etc. to the trainer demo).
      *
+     *   --policy PATH : exec src/play.py (never open a window here).
      *   --spectate : detach camera from any agent (free-fly, render all).
      *   --fog      : human-agent fog-of-war — only draw enemies your agent's
      *                line_of_sight_2d says are visible. Forces you to play
@@ -181,11 +266,16 @@ int main(int argc, char** argv) {
      *                doesn't contain that enemy either. Ignored in spectate
      *                mode (no "viewer" agent to filter from). */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--spectate") == 0)
+        if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc)
+            policy = argv[++i];
+        else if (strcmp(argv[i], "--spectate") == 0)
             human_idx = -1;
         else if (strcmp(argv[i], "--fog") == 0)
             fog_enabled = 1;
     }
+
+    if (policy)
+        return demo_exec_play(argc, argv, policy);
 
     StaticData sd;
     load_nav_data(&sd);
@@ -197,67 +287,38 @@ int main(int argc, char** argv) {
     env_reset(&env);
     env.recoil_enabled = 1; /* #120: punch on the hit ray + camera */
 
-    int32_t actions[N_AGENTS * ACTION_DIM];
-    memset(actions, 0, sizeof(actions));
+    PlayHost* h =
+        play_host_attach(&env, human_idx, fog_enabled, (const float*)NAV_AREA_BOUNDS, NAV_N, NULL);
+    if (!h) {
+        fprintf(stderr, "play_host_attach failed\n");
+        return 2;
+    }
+
+    int32_t actions[N_AGENTS * ACTION_DIM] = {0};
     /* Batch 3 (continuous-aim H-PPO): env_step gained a second action buffer
      * for the Gaussian aim head — (N_AGENTS, AIM_DIM) float32. Demo doesn't
      * need policy-driven aim (the human player has aim_rad set via mouse
      * delta in human_input(); RL agents in this demo path get zeros). */
-    float continuous_actions[N_AGENTS * AIM_DIM];
-    memset(continuous_actions, 0, sizeof(continuous_actions));
+    float cont[N_AGENTS * AIM_DIM] = {0};
 
-    Client* cl      = make_client(&env, human_idx, (const float*)NAV_AREA_BOUNDS);
-    cl->fog_enabled = fog_enabled;
-
-    /* Both world ticks start as a copy of the post-reset game. A
-     * prev!=curr spawn pair would look like a teleport and footstep
-     * every agent (spec §3.1). Same for env_reset below. */
-    DemoWorldTick prev_world, curr_world;
-    copy_game_to_world(&env, &curr_world);
-    prev_world = curr_world;
-
-    double next_step = GetTime();
-    while (!WindowShouldClose()) {
-        double now = GetTime();
+    double next_step = play_host_time(h);
+    while (!play_host_should_close(h)) {
+        double now = play_host_time(h);
         if (now >= next_step) {
-            DemoEvents ev;
-            int        i;
-            snapshot_prev(cl, &env);
-            prev_world = curr_world; /* same shift as pose snapshots */
+            play_host_begin_tick(h);
             if (human_idx >= 0)
-                human_input(cl, &env, actions);
-            env_step(&env, actions, continuous_actions);
-            snapshot_curr(cl, &env);
-            copy_game_to_world(&env, &curr_world);
-            ev = demo_detect_events(&prev_world, &curr_world);
-            /* 3 Hz drop BEFORE PlaySound. Helper emits every hypot>1 walk. */
-            {
-                double tnow = GetTime();
-                for (i = 0; i < N_AGENTS; i++) {
-                    if ((ev.foot_mask & (1u << i)) == 0)
-                        continue;
-                    if (tnow - cl->last_footstep_t[i] < (1.0 / 3.0))
-                        ev.foot_mask &= ~(1u << i);
-                    else
-                        cl->last_footstep_t[i] = tnow;
-                }
-            }
-            demo_play_events(cl, &env, &curr_world, ev);
-            demo_apply_local_punch(cl, &env, ev.shot_mask);
-            demo_record_kill_feed(cl, &prev_world, &curr_world);
-            cl->last_step_time  = now;
-            next_step          += 1.0 / 16.0;
+                play_host_apply_human(h, actions);
+            env_step(&env, actions, cont);
+            play_host_end_tick(h);
+            next_step += 1.0 / 16.0;
         }
-        c_render(cl, &env);
+        play_host_render(h);
         if (env.terminals[0]) {
             env_reset(&env);
-            _copy_agents_to_snapshot(&env, cl->curr);
-            memcpy(cl->prev, cl->curr, sizeof(cl->curr));
-            copy_game_to_world(&env, &curr_world);
-            prev_world = curr_world;
+            play_host_on_reset(h);
         }
     }
 
-    c_close(&env);
+    play_host_detach(h);
     return 0;
 }

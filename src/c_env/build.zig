@@ -103,6 +103,11 @@ pub fn build(b: *std.Build) void {
         // a hard error; do not touch the binding-shared header here.
         .flags = &.{ "-std=c99", "-O2", "-Wall", "-Wno-comment", "-g" },
     });
+    // Same TU as libcs2_play — compiled into the exe, not linked from the .so.
+    demo.root_module.addCSourceFile(.{
+        .file  = b.path("cs2_play_host.c"),
+        .flags = &.{ "-std=c99", "-O2", "-Wall", "-Wno-comment", "-g" },
+    });
     // cs2_demo.c includes cs2_types.h from the same directory
     demo.root_module.addIncludePath(b.path("."));
     demo.root_module.linkLibrary(raylib_dep.artifact("raylib"));
@@ -123,6 +128,27 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "resources",
     });
     cs2_demo_step.dependOn(&install_voices.step);
+
+    // libcs2_play: Raylib attach ABI for src/play.py. Same source as the
+    // statue exe. Installed only via cs2_demo_step — do not
+    // b.installArtifact this on the default/binding path.
+    const play_lib = b.addSharedLibrary(.{
+        .name = "cs2_play",
+        .root_module = b.createModule(.{
+            .target   = target,
+            .optimize = .Debug,
+        }),
+    });
+    play_lib.root_module.addCSourceFile(.{
+        .file  = b.path("cs2_play_host.c"),
+        .flags = &.{ "-std=c99", "-O2", "-Wall", "-Wno-comment", "-g" },
+    });
+    play_lib.root_module.addIncludePath(b.path("."));
+    play_lib.root_module.linkLibrary(raylib_dep.artifact("raylib"));
+    play_lib.linkLibC();
+
+    const install_play_lib = b.addInstallArtifact(play_lib, .{});
+    cs2_demo_step.dependOn(&install_play_lib.step);
 
     // ── demo_events_test: raylib-free detect-helper unit tests ─────────────
     // Invoked explicitly: `zig build demo_events_test`

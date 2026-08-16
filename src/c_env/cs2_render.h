@@ -325,11 +325,18 @@ _demo_join_res(char* out, size_t n, const char* appdir, const char* folder, cons
         snprintf(out, n, "%s%s/%s", appdir, folder, file);
 }
 
-/* Resolve one voice path. Returns 1 and writes out[] on the first hit. */
-static int _demo_find_voice(char* out, size_t n, const char* file) {
+/* Resolve one voice path. Returns 1 and writes out[] on the first hit.
+ * resource_dir (when non-NULL and non-empty) is tried first as the
+ * directory that contains the WAVs; miss falls through to the appdir walk. */
+static int _demo_find_voice(char* out, size_t n, const char* file, const char* resource_dir) {
     const char* appdir    = GetApplicationDirectory();
     const char* folders[] = {"resources", "../resources", "demo_assets", "../demo_assets"};
     int         i;
+    if (resource_dir != NULL && resource_dir[0]) {
+        snprintf(out, n, "%s/%s", resource_dir, file);
+        if (FileExists(out))
+            return 1;
+    }
     for (i = 0; i < 4; i++) {
         _demo_join_res(out, n, appdir, folders[i], file);
         if (FileExists(out))
@@ -339,12 +346,12 @@ static int _demo_find_voice(char* out, size_t n, const char* file) {
 }
 
 /* Load the four voices. Each miss is logged once here (init-time only). */
-static void _demo_load_voices(Client* cl) {
+static void _demo_load_voices(Client* cl, const char* resource_dir) {
     char path[1024];
     int  i;
     for (i = 0; i < DEMO_VOICE_N; i++) {
         cl->snd_ok[i] = 0;
-        if (!_demo_find_voice(path, sizeof(path), DEMO_VOICE_FILES[i])) {
+        if (!_demo_find_voice(path, sizeof(path), DEMO_VOICE_FILES[i], resource_dir)) {
             TraceLog(LOG_WARNING,
                      "cs2_demo: missing voice %s (searched resources/ + demo_assets/)",
                      DEMO_VOICE_FILES[i]);
@@ -436,8 +443,12 @@ static void _demo_play_at(Client* cl, int voice, float x, float y, float z, floa
 /* ── make_client / c_close ───────────────────────────────────────────────
  *
  * area_bounds: float[N*4] = [x0, y0, x1, y1] per area — from nav_data.h
+ * resource_dir: directory that contains the WAVs; may be NULL
  */
-Client* make_client(Dust2Env* env, int human_agent_idx, const float* area_bounds) {
+Client* make_client(Dust2Env*    env,
+                    int          human_agent_idx,
+                    const float* area_bounds,
+                    const char*  resource_dir) {
     Client* cl          = (Client*)calloc(1, sizeof(Client));
     cl->width           = WINDOW_W;
     cl->height          = WINDOW_H;
@@ -493,7 +504,7 @@ Client* make_client(Dust2Env* env, int human_agent_idx, const float* area_bounds
         TraceLog(LOG_WARNING, "cs2_demo: audio device not ready; skipping voices");
     } else {
         SetMasterVolume(cl->master_volume);
-        _demo_load_voices(cl);
+        _demo_load_voices(cl, resource_dir);
     }
 
     env->client = (struct Client*)cl;
