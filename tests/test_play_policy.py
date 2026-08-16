@@ -92,3 +92,21 @@ def test_reset_round_zeros_hidden():
 def test_make_client_takes_resource_dir():
     text = (Path(__file__).resolve().parents[1] / "src/c_env/cs2_render.h").read_text()
     assert "make_client" in text and "const char* resource_dir" in text
+
+
+def test_cs2_demo_policy_missing_exits_nonzero():
+    import os
+    import subprocess
+    demo = Path(__file__).resolve().parents[1] / "src/c_env/zig-out/bin/cs2_demo"
+    if not demo.is_file():
+        pytest.skip("cs2_demo not built")
+    # DISPLAY unset: dispatcher must fail before InitWindow
+    env = {**os.environ, "DISPLAY": ""}
+    r = subprocess.run(
+        [str(demo), "--policy", "/no/such/cs2rl-policy.pt"],
+        cwd=str(demo.parent), env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert r.returncode != 0
+    # either printed the uv/venv hint, or exec'd python which FileNotFound
+    blob = (r.stderr or "") + (r.stdout or "")
+    assert "play.py" in blob or "Checkpoint" in blob or "UV_PROJECT_ENVIRONMENT" in blob

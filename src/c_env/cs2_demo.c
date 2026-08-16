@@ -1,9 +1,13 @@
+#define _DEFAULT_SOURCE
 /* cs2_demo.c — Standalone CS2RL Raylib demo. Phase 6. */
 #include "cs2_env.h"
 #include "nav_data.h"
 #include "cs2_play_host.h"
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <limits.h>
 
 /* Populate StaticData from baked nav_data.h constants. Verticality fields
  * (centroids_z, is_ramp) are baked alongside the rest by scripts/bake_nav.py
@@ -80,13 +84,161 @@ static void load_nav_data(StaticData* sd) {
     sd->pbrs_gamma                  = 0.99f;
 }
 
+static int path_exists(const char* p) {
+    return p && p[0] && access(p, F_OK) == 0;
+}
+
+static void join_path(char* out, size_t n, const char* a, const char* b) {
+    size_t la = strlen(a);
+    if (la > 0 && a[la - 1] == '/')
+        snprintf(out, n, "%s%s", a, b);
+    else
+        snprintf(out, n, "%s/%s", a, b);
+}
+
+static int dirname_inplace(char* path) {
+    size_t n = strlen(path);
+    while (n > 1 && path[n - 1] == '/')
+        path[--n] = '\0';
+    char* slash = strrchr(path, '/');
+    if (!slash)
+        return 0;
+    if (slash == path) {
+        path[1] = '\0';
+        return 1;
+    }
+    *slash = '\0';
+    return 1;
+}
+
+/* realpath if the file exists; else keep absolute PATH, else cwd + "/" + PATH. */
+static void absolutize_policy(const char* path, char* out, size_t n) {
+    if (realpath(path, out))
+        return;
+    if (path[0] == '/') {
+        snprintf(out, n, "%s", path);
+        return;
+    }
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        snprintf(out, n, "%s", path);
+        return;
+    }
+    join_path(out, n, cwd, path);
+}
+
+/* Walk up from the binary dir for pyproject.toml + src/play.py. */
+static int find_repo(char* out, size_t n) {
+    const char* app = play_host_app_dir();
+    if (!app || !app[0])
+        return 0;
+    char cur[PATH_MAX];
+    snprintf(cur, sizeof(cur), "%s", app);
+    size_t len = strlen(cur);
+    while (len > 1 && cur[len - 1] == '/')
+        cur[--len] = '\0';
+    for (;;) {
+        char toml[PATH_MAX], play[PATH_MAX];
+        join_path(toml, sizeof(toml), cur, "pyproject.toml");
+        join_path(play, sizeof(play), cur, "src/play.py");
+        if (path_exists(toml) && path_exists(play)) {
+            snprintf(out, n, "%s", cur);
+            return 1;
+        }
+        if (cur[0] == '/' && cur[1] == '\0')
+            return 0;
+        if (!dirname_inplace(cur))
+            return 0;
+    }
+}
+
+static int resolve_python(const char* repo, char* out, size_t n) {
+    const char* uve = getenv("UV_PROJECT_ENVIRONMENT");
+    if (uve && uve[0]) {
+        join_path(out, n, uve, "bin/python");
+        if (path_exists(out))
+            return 1;
+    }
+    const char* cs2 = getenv("CS2RL_VENV");
+    if (cs2 && cs2[0]) {
+        join_path(out, n, cs2, "bin/python");
+        if (path_exists(out))
+            return 1;
+    }
+    join_path(out, n, repo, ".venv/bin/python");
+    if (path_exists(out))
+        return 1;
+    char cur[PATH_MAX];
+    snprintf(cur, sizeof(cur), "%s", repo);
+    while (dirname_inplace(cur)) {
+        join_path(out, n, cur, ".venv/bin/python");
+        if (path_exists(out))
+            return 1;
+        if (cur[0] == '/' && cur[1] == '\0')
+            break;
+    }
+    return 0;
+}
+
+static void print_borrow_hint(const char* abs_policy, int argc, char** argv) {
+    fprintf(stderr, "cs2_demo: $PYTHON src/play.py --policy %s", abs_policy);
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
+            i++;
+            continue;
+        }
+        fprintf(stderr, " %s", argv[i]);
+    }
+    fprintf(stderr,
+            "\nset UV_PROJECT_ENVIRONMENT to the parent .venv; do not uv sync in the worktree\n");
+}
+
+/* --policy path: never InitWindow / play_host_attach. exec borrowed python. */
+static int demo_exec_play(int argc, char** argv, const char* policy_path) {
+    char abs_policy[PATH_MAX];
+    char repo[PATH_MAX];
+    char python[PATH_MAX];
+
+    absolutize_policy(policy_path, abs_policy, sizeof(abs_policy));
+
+    if (!find_repo(repo, sizeof(repo)) || !resolve_python(repo, python, sizeof(python))) {
+        print_borrow_hint(abs_policy, argc, argv);
+        return 2;
+    }
+
+    char* eargv[argc + 5]; /* python, src/play.py, --policy, abs, rest, NULL */
+    int   n = 0;
+    eargv[n++] = python;
+    eargv[n++] = "src/play.py";
+    eargv[n++] = "--policy";
+    eargv[n++] = abs_policy;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
+            i++;
+            continue;
+        }
+        eargv[n++] = argv[i];
+    }
+    eargv[n] = NULL;
+
+    if (chdir(repo) != 0) {
+        print_borrow_hint(abs_policy, argc, argv);
+        return 2;
+    }
+    execv(python, eargv);
+    print_borrow_hint(abs_policy, argc, argv);
+    return 2;
+}
+
 int main(int argc, char** argv) {
-    int human_idx   = 0;
-    int fog_enabled = 0;
+    int         human_idx   = 0;
+    int         fog_enabled = 0;
+    const char* policy      = NULL;
     /* Argv parsing — order-independent so --spectate --fog and --fog --spectate
      * both work. Unknown args are silently ignored (keeps backward compat with
      * existing scripts that pass --record, --eval, etc. to the trainer demo).
      *
+     *   --policy PATH : exec src/play.py (never open a window here).
      *   --spectate : detach camera from any agent (free-fly, render all).
      *   --fog      : human-agent fog-of-war — only draw enemies your agent's
      *                line_of_sight_2d says are visible. Forces you to play
@@ -96,11 +248,16 @@ int main(int argc, char** argv) {
      *                doesn't contain that enemy either. Ignored in spectate
      *                mode (no "viewer" agent to filter from). */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--spectate") == 0)
+        if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc)
+            policy = argv[++i];
+        else if (strcmp(argv[i], "--spectate") == 0)
             human_idx = -1;
         else if (strcmp(argv[i], "--fog") == 0)
             fog_enabled = 1;
     }
+
+    if (policy)
+        return demo_exec_play(argc, argv, policy);
 
     StaticData sd;
     load_nav_data(&sd);
