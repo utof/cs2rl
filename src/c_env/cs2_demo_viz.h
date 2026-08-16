@@ -51,69 +51,116 @@ typedef struct {
     float x[4], y[4], z[4]; /* (x0,y0), (x1,y0), (x1,y1), (x0,y1) */
 } DemoRampQuad;
 
-/* Coverage from build_walls_from_nav (EPS=1): area j covers edge e of
- * area i from the exterior side iff j's interior reaches across that
- * line. Longest overlap wins; no neighbor → this area's z. */
-static inline float _demo_ramp_edge_z(
-    int area_i, int n_areas, int e, const float* area_bounds, const float* centroids_z) {
-    const float EPS  = 1.0f;
+/* Same "on the line" vs "strictly past it" as build_walls_from_nav. */
+#define DEMO_EDGE_EPS 1.0f
+
+/* demo_edge_covers_j — one neighbor vs one edge (the four halfspaces).
+ *
+ * What: 1 and clipped [out_lo, out_hi] if area j covers edge e of area i
+ *       from the exterior (interior-reaches-across, then clip to i's span).
+ * Why:  one copy of the if (e==0) blocks for ramp_quad, exterior gaps, and
+ *       the lip pass. Longest-overlap and "all covers" both call this.
+ * Pitfalls: does not skip j==i (caller must). Overlap must be > DEMO_EDGE_EPS
+ *           after clip. Do not require exact bound equality.
+ */
+static inline int demo_edge_covers_j(int          area_i,
+                                     int          j,
+                                     int          edge /*0=W 1=E 2=S 3=N*/,
+                                     const float* area_bounds,
+                                     float*       out_lo,
+                                     float*       out_hi) {
+    const float EPS  = DEMO_EDGE_EPS;
     float       x0i  = area_bounds[area_i * 4 + 0];
     float       y0i  = area_bounds[area_i * 4 + 1];
     float       x1i  = area_bounds[area_i * 4 + 2];
     float       y1i  = area_bounds[area_i * 4 + 3];
-    int         vert = (e < 2);
-    float       line = vert ? (e == 0 ? x0i : x1i) : (e == 2 ? y0i : y1i);
+    int         vert = (edge < 2);
+    float       line = vert ? (edge == 0 ? x0i : x1i) : (edge == 2 ? y0i : y1i);
     float       slo  = vert ? y0i : x0i;
     float       shi  = vert ? y1i : x1i;
+    float       x0j = area_bounds[j * 4 + 0], y0j = area_bounds[j * 4 + 1];
+    float       x1j = area_bounds[j * 4 + 2], y1j = area_bounds[j * 4 + 3];
+    int         covers = 0;
+    float       lo = 0.0f, hi = 0.0f;
 
-    float best_ol = 0.0f;
-    int   best_j  = -1;
-    int   j;
-    for (j = 0; j < n_areas; j++) {
-        if (j == area_i)
-            continue;
-        float x0j = area_bounds[j * 4 + 0], y0j = area_bounds[j * 4 + 1];
-        float x1j = area_bounds[j * 4 + 2], y1j = area_bounds[j * 4 + 3];
-        int   covers = 0;
-        float lo = 0.0f, hi = 0.0f;
-        if (e == 0) { /* left: exterior x < line */
-            if (x0j < line - EPS && x1j >= line - EPS) {
-                lo     = y0j;
-                hi     = y1j;
-                covers = 1;
-            }
-        } else if (e == 1) { /* right: exterior x > line */
-            if (x1j > line + EPS && x0j <= line + EPS) {
-                lo     = y0j;
-                hi     = y1j;
-                covers = 1;
-            }
-        } else if (e == 2) { /* bottom: exterior y < line */
-            if (y0j < line - EPS && y1j >= line - EPS) {
-                lo     = x0j;
-                hi     = x1j;
-                covers = 1;
-            }
-        } else { /* top: exterior y > line */
-            if (y1j > line + EPS && y0j <= line + EPS) {
-                lo     = x0j;
-                hi     = x1j;
-                covers = 1;
-            }
+    if (edge == 0) { /* left: exterior x < line */
+        if (x0j < line - EPS && x1j >= line - EPS) {
+            lo     = y0j;
+            hi     = y1j;
+            covers = 1;
         }
-        if (!covers)
-            continue;
-        if (lo < slo)
-            lo = slo;
-        if (hi > shi)
-            hi = shi;
-        float ol = hi - lo;
-        if (ol > EPS && ol > best_ol) {
-            best_ol = ol;
-            best_j  = j;
+    } else if (edge == 1) { /* right: exterior x > line */
+        if (x1j > line + EPS && x0j <= line + EPS) {
+            lo     = y0j;
+            hi     = y1j;
+            covers = 1;
+        }
+    } else if (edge == 2) { /* bottom: exterior y < line */
+        if (y0j < line - EPS && y1j >= line - EPS) {
+            lo     = x0j;
+            hi     = x1j;
+            covers = 1;
+        }
+    } else { /* top: exterior y > line */
+        if (y1j > line + EPS && y0j <= line + EPS) {
+            lo     = x0j;
+            hi     = x1j;
+            covers = 1;
         }
     }
-    return (best_j >= 0) ? centroids_z[best_j] : centroids_z[area_i];
+    if (!covers)
+        return 0;
+    if (lo < slo)
+        lo = slo;
+    if (hi > shi)
+        hi = shi;
+    if (hi - lo <= EPS)
+        return 0;
+    *out_lo = lo;
+    *out_hi = hi;
+    return 1;
+}
+
+/* demo_edge_cover — longest-overlap neighbor on one edge.
+ *
+ * What: 1 and *out_j / *out_lo / *out_hi if some neighbor covers edge e of
+ *       area i from the exterior. Longest overlap wins.
+ * Why:  demo_ramp_quad needs one z per edge; walls reuse the same predicate
+ *       per-j so exterior subtraction and lips share the four ifs.
+ * Pitfalls: several neighbors can cover one edge — longest, not first-found.
+ *           No neighbor → return 0 (caller uses this area's z).
+ */
+static inline int demo_edge_cover(int          area_i,
+                                  int          edge /*0=W 1=E 2=S 3=N*/,
+                                  int          n_areas,
+                                  const float* area_bounds,
+                                  int*         out_j,
+                                  float*       out_lo,
+                                  float*       out_hi) {
+    float best_ol = 0.0f;
+    int   best_j  = -1;
+    float best_lo = 0.0f, best_hi = 0.0f;
+    int   j;
+    for (j = 0; j < n_areas; j++) {
+        float lo, hi;
+        if (j == area_i)
+            continue;
+        if (!demo_edge_covers_j(area_i, j, edge, area_bounds, &lo, &hi))
+            continue;
+        float ol = hi - lo;
+        if (ol > best_ol) {
+            best_ol = ol;
+            best_j  = j;
+            best_lo = lo;
+            best_hi = hi;
+        }
+    }
+    if (best_j < 0)
+        return 0;
+    *out_j  = best_j;
+    *out_lo = best_lo;
+    *out_hi = best_hi;
+    return 1;
 }
 
 /* demo_ramp_quad — sloped floor from neighbor edge zs.
@@ -135,14 +182,23 @@ static inline void demo_ramp_quad(int           area_i,
                                   const float*  area_bounds, /* n*4: x0,y0,x1,y1 */
                                   const float*  centroids_z,
                                   DemoRampQuad* out) {
-    float x0  = area_bounds[area_i * 4 + 0];
-    float y0  = area_bounds[area_i * 4 + 1];
-    float x1  = area_bounds[area_i * 4 + 2];
-    float y1  = area_bounds[area_i * 4 + 3];
-    float z_w = _demo_ramp_edge_z(area_i, n_areas, 0, area_bounds, centroids_z);
-    float z_e = _demo_ramp_edge_z(area_i, n_areas, 1, area_bounds, centroids_z);
-    float z_s = _demo_ramp_edge_z(area_i, n_areas, 2, area_bounds, centroids_z);
-    float z_n = _demo_ramp_edge_z(area_i, n_areas, 3, area_bounds, centroids_z);
+    float x0 = area_bounds[area_i * 4 + 0];
+    float y0 = area_bounds[area_i * 4 + 1];
+    float x1 = area_bounds[area_i * 4 + 2];
+    float y1 = area_bounds[area_i * 4 + 3];
+    float z_w, z_e, z_s, z_n;
+    {
+        int   j;
+        float lo, hi;
+        z_w = demo_edge_cover(area_i, 0, n_areas, area_bounds, &j, &lo, &hi) ? centroids_z[j]
+                                                                             : centroids_z[area_i];
+        z_e = demo_edge_cover(area_i, 1, n_areas, area_bounds, &j, &lo, &hi) ? centroids_z[j]
+                                                                             : centroids_z[area_i];
+        z_s = demo_edge_cover(area_i, 2, n_areas, area_bounds, &j, &lo, &hi) ? centroids_z[j]
+                                                                             : centroids_z[area_i];
+        z_n = demo_edge_cover(area_i, 3, n_areas, area_bounds, &j, &lo, &hi) ? centroids_z[j]
+                                                                             : centroids_z[area_i];
+    }
 
     out->x[0] = x0;
     out->y[0] = y0;

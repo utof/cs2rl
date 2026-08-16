@@ -116,6 +116,7 @@ typedef struct {
 typedef struct {
     float x0, y0, x1, y1; /* segment endpoints in world space (sim XY coords) */
     float height;         /* extrusion height in world units */
+    float z0;             /* sim z of wall base; 0 = ground */
 } Wall;
 
 typedef struct {

@@ -14,6 +14,9 @@
 /* demo_decay_punch — render-frame view-kick. Header is raylib-free; do
  * not include this from cs2_env.h (binding stays display-free). */
 #include "cs2_demo_events.h"
+/* demo_aim_stick_rl / demo_ramp_quad / demo_edge_cover — Raylib-free math.
+ * Do not include this (or cs2_demo_events.h) from cs2_env.h. */
+#include "cs2_demo_viz.h"
 
 #define PLAYER_EYE_HEIGHT 64.0f  /* eye height above agent.z in world units */
 #define WALL_HEIGHT       128.0f /* wall extrusion height                   */
@@ -24,12 +27,13 @@
 
 /* Demo-juice audio (P0). Voices live in src/c_env/demo_assets/ because
  * src/c_env/resources is a pufferlib symlink in the parent tree (and is
- * gitignored). build.zig copies the four WAVs to zig-out/bin/resources/. */
-#define DEMO_VOICE_SHOT  0
-#define DEMO_VOICE_FOOT  1
-#define DEMO_VOICE_PLANT 2
-#define DEMO_VOICE_BEEP  3
-#define DEMO_VOICE_N     4
+ * gitignored). build.zig copies the WAVs to zig-out/bin/resources/. */
+#define DEMO_VOICE_SHOT   0
+#define DEMO_VOICE_FOOT   1
+#define DEMO_VOICE_PLANT  2
+#define DEMO_VOICE_BEEP   3
+#define DEMO_VOICE_RELOAD 4
+#define DEMO_VOICE_N      5
 /* Rotating LoadSoundAlias pool: overlapping shots/feet would cut off if we
  * PlaySound the same Sound twice. Unloaded in c_close, not per PlaySound. */
 #define DEMO_ALIAS_N     24
@@ -37,7 +41,7 @@
 
 /* ── AgentSnapshot — interpolation state per agent ─────────────────────── */
 typedef struct {
-    float x, y, z, facing;
+    float x, y, z, facing, pitch;
     int   hp, alive, team, has_bomb;
 } AgentSnapshot;
 
@@ -68,6 +72,9 @@ typedef struct {
      * "play as the bot" — see only what the trained policy sees in obs.
      * Set via --fog CLI flag in cs2_demo.c. */
     int fog_enabled;
+    /* Pointer passed to make_client (NAV_AREA_BOUNDS / play.py numpy).
+     * Not a malloc copy. Needed by draw_floor for real area sizes. */
+    const float* area_bounds;
     /* Snapshot-diff audio. AgentSnapshot cannot drive this (no
      * fired_this_tick / is_airborne / bomb_ticks_left). */
     int    audio_ok;                  /* 1 iff InitAudioDevice + IsAudioDeviceReady */
@@ -108,14 +115,30 @@ static float _lerp_angle(float a, float b, float t) {
     return a + diff * t;
 }
 
-/* Copy current AgentState → AgentSnapshot array */
+/* Copy current AgentState → AgentSnapshot array.
+ *
+ * facing/pitch are the *look* angles: stored facing/pitch plus punch when
+ * recoil_enabled (same clamp as the combat ray). Human camera stays on
+ * cl->yaw/pitch + sim punch — do not drive it from this snapshot.
+ */
 static void _copy_agents_to_snapshot(Dust2Env* env, AgentSnapshot* snap) {
     for (int i = 0; i < N_AGENTS; i++) {
-        AgentState* a    = &env->game.agents[i];
+        AgentState* a     = &env->game.agents[i];
+        float       yaw   = a->facing;
+        float       pitch = a->pitch;
+        if (env->recoil_enabled) {
+            yaw   += a->punch_yaw;
+            pitch += a->punch_pitch;
+            if (pitch > 1.5533f)
+                pitch = 1.5533f;
+            if (pitch < -1.5533f)
+                pitch = -1.5533f;
+        }
         snap[i].x        = a->x;
         snap[i].y        = a->y;
         snap[i].z        = a->z;
-        snap[i].facing   = a->facing;
+        snap[i].facing   = yaw;
+        snap[i].pitch    = pitch;
         snap[i].hp       = a->hp;
         snap[i].alive    = a->alive;
         snap[i].team     = a->team;
@@ -126,27 +149,25 @@ static void _copy_agents_to_snapshot(Dust2Env* env, AgentSnapshot* snap) {
 /* ── Wall derivation from nav geometry ──────────────────────────────────
  *
  * Each nav area is an axis-aligned rectangle with bounds [x0,y0,x1,y1] in
- * area_bounds[idx*4+0..3]. For each of the 4 edges of every area, we want
- * to emit a wall only where no other area sits on the exterior side — i.e.
- * the outer boundary of the union of all areas. Everything internal (even
- * when coverage is partial, or when areas overlap in 2D) must not become a
- * wall, since agents can walk across those boundaries.
- *
- * Algorithm (per edge):
- *   1. The edge runs along a single varying axis over [seg_lo, seg_hi].
- *   2. For each other area j, compute the sub-interval of the edge that j
- *      covers from the exterior side (j's interior reaches strictly past
- *      the edge line). Both "j abuts the edge from outside" and "j overlaps
- *      across the edge line" count as coverage.
- *   3. Subtract the union of those intervals from [seg_lo, seg_hi].
- *   4. Emit the remaining gaps as wall segments.
+ * area_bounds[idx*4+0..3]. Per edge:
+ *   1. Collect every neighbor that covers the edge from the exterior
+ *      (demo_edge_covers_j — same four halfspaces / EPS=1 as ramp_quad).
+ *   2. Exterior: subtract the union of those intervals; remaining gaps
+ *      become walls from the ground (z0=0, height=WALL_HEIGHT+centroids_z[i]).
+ *      Do not sit walls on centroids_z — that floats bombsite/catwalk and
+ *      leaves a triangular void under ramp sides.
+ *   3. Lips: a *separate* pass on the covered intervals. Never un-cover a
+ *      height-drop into a WALL_HEIGHT wall (that would hide the catwalk).
+ *      Only the higher non-ramp area emits: zi > zj+EPS, and either both
+ *      non-ramp or (i non-ramp and j ramp). Never emit a lip from a ramp.
  *
  * Called once from make_client().
  */
 
-/* Edge-coverage interval, used while subtracting neighbor coverage. */
+/* Edge-coverage interval plus the covering neighbor (lips need j). */
 typedef struct {
     float lo, hi;
+    int   j;
 } _WallIv;
 
 static int _wall_iv_cmp(const void* a, const void* b) {
@@ -155,17 +176,34 @@ static int _wall_iv_cmp(const void* a, const void* b) {
     return (al > bl) - (al < bl);
 }
 
+/* _emit_wall_seg — one axis-aligned wall cube onto the heap list.
+ *
+ * What: positional (x0,y0,x1,y1,height) then z0. Omitted z0 would be 0.
+ * Why:  exterior gaps and lips share the same emit; height/z0 differ.
+ * Pitfalls: z0 is AFTER height — inserting it before height would assign
+ *           WALL_HEIGHT to z0 on existing positional inits.
+ */
+static void _emit_wall_seg(
+    WallList* wl, int is_vertical, float eline, float a, float b, float height, float z0) {
+    Wall w;
+    if (wl->count >= wl->capacity)
+        return;
+    if (is_vertical)
+        w = (Wall){eline, a, eline, b, height};
+    else
+        w = (Wall){a, eline, b, eline, height};
+    w.z0                   = z0;
+    wl->walls[wl->count++] = w;
+}
+
 static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
     WallList* wl = &sd->wall_list;
-    /* Worst case: each edge can be broken into up to N segments by N-1 gaps.
-     * Pad generously — this array is only alive for the lifetime of the demo. */
-    wl->capacity = sd->N * 4 * (sd->N + 1);
+    /* Gaps + one lip per covering neighbor per edge. Heap lives for the demo. */
+    wl->capacity = sd->N * 8 * (sd->N + 1);
     wl->walls    = (Wall*)malloc(wl->capacity * sizeof(Wall));
     wl->count    = 0;
 
-    /* Tolerance for "on the edge line" vs. "strictly past it". Nav bounds are
-     * stored as exact floats on a coarse grid, so 1.0 unit is safely below any
-     * real spatial feature but above float round-off. */
+    /* Same 1.0 as demo_edge_covers_j / DEMO_EDGE_EPS. */
     const float EPS = 1.0f;
 
     _WallIv* covs = (_WallIv*)malloc((size_t)sd->N * sizeof(_WallIv));
@@ -173,6 +211,7 @@ static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
     for (int i = 0; i < sd->N; i++) {
         float x0i = area_bounds[i * 4 + 0], y0i = area_bounds[i * 4 + 1];
         float x1i = area_bounds[i * 4 + 2], y1i = area_bounds[i * 4 + 3];
+        float zi = sd->centroids_z[i];
 
         /* 4 edges: 0=left(x=x0i), 1=right(x=x1i), 2=bottom(y=y0i), 3=top(y=y1i). */
         for (int e = 0; e < 4; e++) {
@@ -181,61 +220,19 @@ static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
             float seg_lo      = is_vertical ? y0i : x0i;
             float seg_hi      = is_vertical ? y1i : x1i;
 
-            /* Collect every other area that covers this edge from the exterior
-             * side. "Exterior" is the halfspace opposite the area's interior:
-             *   left  edge → x <  x0i
-             *   right edge → x >  x1i
-             *   bottom    → y <  y0i
-             *   top       → y >  y1i
-             * Area j covers the edge line iff j's interior reaches across it
-             * (so j either abuts from outside, x0j==line, or straddles it). */
+            /* All covering neighbors, not just longest — catwalk south is
+             * bombsite + CT-ramp; merging first would lose that split. */
             int ncov = 0;
             for (int j = 0; j < sd->N; j++) {
+                float lo, hi;
                 if (j == i)
                     continue;
-                float x0j = area_bounds[j * 4 + 0], y0j = area_bounds[j * 4 + 1];
-                float x1j = area_bounds[j * 4 + 2], y1j = area_bounds[j * 4 + 3];
-
-                int   covers = 0;
-                float lo = 0.f, hi = 0.f;
-
-                if (e == 0) { /* left: exterior x<line */
-                    if (x0j < line - EPS && x1j >= line - EPS) {
-                        lo     = y0j;
-                        hi     = y1j;
-                        covers = 1;
-                    }
-                } else if (e == 1) { /* right: exterior x>line */
-                    if (x1j > line + EPS && x0j <= line + EPS) {
-                        lo     = y0j;
-                        hi     = y1j;
-                        covers = 1;
-                    }
-                } else if (e == 2) { /* bottom: exterior y<line */
-                    if (y0j < line - EPS && y1j >= line - EPS) {
-                        lo     = x0j;
-                        hi     = x1j;
-                        covers = 1;
-                    }
-                } else { /* top: exterior y>line */
-                    if (y1j > line + EPS && y0j <= line + EPS) {
-                        lo     = x0j;
-                        hi     = x1j;
-                        covers = 1;
-                    }
-                }
-
-                if (!covers)
+                if (!demo_edge_covers_j(i, j, e, area_bounds, &lo, &hi))
                     continue;
-                if (lo < seg_lo)
-                    lo = seg_lo;
-                if (hi > seg_hi)
-                    hi = seg_hi;
-                if (hi - lo > EPS) {
-                    covs[ncov].lo = lo;
-                    covs[ncov].hi = hi;
-                    ncov++;
-                }
+                covs[ncov].lo = lo;
+                covs[ncov].hi = hi;
+                covs[ncov].j  = j;
+                ncov++;
             }
 
             qsort(covs, (size_t)ncov, sizeof(_WallIv), _wall_iv_cmp);
@@ -252,32 +249,32 @@ static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
             float shift_y = is_vertical ? 0.0f : ((e == 2) ? -ofs : ofs);
             float eline   = line + (is_vertical ? shift_x : shift_y);
 
-            /* Walk sorted coverage intervals; emit the gaps as walls. */
+            /* Exterior: walk sorted coverage; emit the gaps down to ground. */
             float cursor = seg_lo;
             for (int k = 0; k < ncov; k++) {
                 float lo = covs[k].lo, hi = covs[k].hi;
-                if (lo > cursor + EPS) {
-                    if (wl->count < wl->capacity) {
-                        Wall w;
-                        if (is_vertical) {
-                            w = (Wall){eline, cursor, eline, lo, WALL_HEIGHT};
-                        } else {
-                            w = (Wall){cursor, eline, lo, eline, WALL_HEIGHT};
-                        }
-                        wl->walls[wl->count++] = w;
-                    }
-                }
+                if (lo > cursor + EPS)
+                    _emit_wall_seg(wl, is_vertical, eline, cursor, lo, WALL_HEIGHT + zi, 0.0f);
                 if (hi > cursor)
                     cursor = hi;
             }
-            if (cursor < seg_hi - EPS && wl->count < wl->capacity) {
-                Wall w;
-                if (is_vertical) {
-                    w = (Wall){eline, cursor, eline, seg_hi, WALL_HEIGHT};
-                } else {
-                    w = (Wall){cursor, eline, seg_hi, eline, WALL_HEIGHT};
-                }
-                wl->walls[wl->count++] = w;
+            if (cursor < seg_hi - EPS)
+                _emit_wall_seg(wl, is_vertical, eline, cursor, seg_hi, WALL_HEIGHT + zi, 0.0f);
+
+            /* Lips on covered intervals. Never from a ramp (stairs / T-ramp
+             * stay the connector). Only the higher area emits (zi > zj+EPS)
+             * so catwalk↔bombsite is one cube. i non-ramp + j ramp is the
+             * overlook (catwalk south over CT-ramp); both-non-ramp is the
+             * catwalk↔bombsite face. */
+            if (sd->is_ramp[i])
+                continue;
+            for (int k = 0; k < ncov; k++) {
+                int   j  = covs[k].j;
+                float zj = sd->centroids_z[j];
+                /* i is non-ramp: both-non-ramp OR (i non-ramp and j ramp). */
+                if (!(zi > zj + EPS))
+                    continue;
+                _emit_wall_seg(wl, is_vertical, eline, covs[k].lo, covs[k].hi, zi - zj, zj);
             }
         }
     }
@@ -311,6 +308,7 @@ static const char* DEMO_VOICE_FILES[DEMO_VOICE_N] = {
     "footstep.wav",
     "plant.wav",
     "beep.wav",
+    "reload.wav",
 };
 
 /* Join appdir + folder + file into out. folder may be "resources" or
@@ -345,7 +343,7 @@ static int _demo_find_voice(char* out, size_t n, const char* file, const char* r
     return 0;
 }
 
-/* Load the four voices. Each miss is logged once here (init-time only). */
+/* Load the five voices. Each miss is logged once here (init-time only). */
 static void _demo_load_voices(Client* cl, const char* resource_dir) {
     char path[1024];
     int  i;
@@ -453,6 +451,7 @@ Client* make_client(Dust2Env*    env,
     cl->width           = WINDOW_W;
     cl->height          = WINDOW_H;
     cl->human_agent_idx = human_agent_idx;
+    cl->area_bounds     = area_bounds;
     cl->mouse_init      = 0;
     cl->mouse_captured  = 0;
 
@@ -641,20 +640,45 @@ static void update_camera(Client* cl, Dust2Env* env, float alpha) {
     cl->camera.target   = (Vector3){eye_x + dir_x, eye_y + dir_y, eye_z + dir_z};
 }
 
-/* ── draw_floor ─────────────────────────────────────────────────────────── */
-static void draw_floor(Dust2Env* env) {
-    StaticData* sd = env->sd;
+/* ── draw_floor ───────────────────────────────────────────────────────────
+ *
+ * What: non-ramp = thin cube, top at centroids_z; ramp = sloped quad.
+ * Why:  256×256 planes at Y=0 hide elevation and overlap the catwalk
+ *       into the bombsite. Client.area_bounds is the real size.
+ * Pitfalls: ramp corners are sim (x,y,z) — draw as Raylib (x, z, y).
+ *           Passing sim z as Raylib Z lays the cyan "ramp" in the floor.
+ */
+static void draw_floor(Dust2Env* env, Client* cl) {
+    StaticData*  sd     = env->sd;
+    const float* bounds = cl->area_bounds;
     for (int i = 0; i < sd->N; i++) {
-        float cx = sd->centroid_xy[i * 2 + 0];
-        float cy = sd->centroid_xy[i * 2 + 1];
-        /* Color by bombsite */
+        if (sd->is_ramp[i]) {
+            DemoRampQuad q;
+            Color        cyan = {80, 200, 200, 255};
+            demo_ramp_quad(i, sd->N, bounds, sd->centroids_z, &q);
+            /* Both windings so the slope is visible from above and below. */
+            Vector3 c0 = {q.x[0], q.z[0], q.y[0]};
+            Vector3 c1 = {q.x[1], q.z[1], q.y[1]};
+            Vector3 c2 = {q.x[2], q.z[2], q.y[2]};
+            Vector3 c3 = {q.x[3], q.z[3], q.y[3]};
+            DrawTriangle3D(c0, c1, c2, cyan);
+            DrawTriangle3D(c0, c2, c3, cyan);
+            DrawTriangle3D(c0, c2, c1, cyan);
+            DrawTriangle3D(c0, c3, c2, cyan);
+            continue;
+        }
+        float x0 = bounds[i * 4 + 0], y0 = bounds[i * 4 + 1];
+        float x1 = bounds[i * 4 + 2], y1 = bounds[i * 4 + 3];
+        float cx = (x0 + x1) * 0.5f;
+        float cy = (y0 + y1) * 0.5f;
+        float z  = sd->centroids_z[i];
         Color c;
         if (sd->bombsite_by_idx[i])
             c = (Color){180, 100, 30, 200}; /* orange = bombsite  */
         else
             c = (Color){80, 80, 80, 200};   /* grey   = other     */
-        /* Simple fixed-size tile; real bounds come from nav_data.h in cs2_demo */
-        DrawPlane((Vector3){cx, 0.0f, cy}, (Vector2){256.0f, 256.0f}, c);
+        /* Top face at z; cube height 4, center 2 below the surface. */
+        DrawCube((Vector3){cx, z - 2.0f, cy}, x1 - x0, 4.0f, y1 - y0, c);
     }
 }
 
@@ -667,7 +691,7 @@ static void draw_walls(Dust2Env* env) {
         float cy  = (w->y0 + w->y1) * 0.5f;
         float len = sqrtf((w->x1 - w->x0) * (w->x1 - w->x0) + (w->y1 - w->y0) * (w->y1 - w->y0));
         /* Wall midpoint; Raylib Y=up */
-        Vector3 pos = {cx, w->height * 0.5f, cy};
+        Vector3 pos = {cx, w->z0 + w->height * 0.5f, cy};
         /* Axis-aligned: horizontal wall = extends along X, vertical = extends along Z */
         int   horizontal = fabsf(w->y1 - w->y0) < 1.0f;
         float wx         = horizontal ? len : WALL_DEPTH;
@@ -707,6 +731,7 @@ static void draw_agents(Dust2Env* env, Client* cl, float alpha) {
         float y     = _lerp(cl->prev[i].y, cl->curr[i].y, alpha);
         float z     = _lerp(cl->prev[i].z, cl->curr[i].z, alpha);
         float fa    = _lerp_angle(cl->prev[i].facing, cl->curr[i].facing, alpha);
+        float pa    = _lerp_angle(cl->prev[i].pitch, cl->curr[i].pitch, alpha);
         int   alive = cl->curr[i].alive;
 
         /* Team color: T=orange, CT=blue; dead agents are dark */
@@ -727,12 +752,12 @@ static void draw_agents(Dust2Env* env, Client* cl, float alpha) {
         DrawCylinder((Vector3){x, z, y}, 12.0f, 12.0f, 96.0f, 8, body_col);
         DrawSphere((Vector3){x, z + 108.0f, y}, 16.0f, head_col);
 
-        /* Aim direction line from head */
+        /* Aim stick: combat look (yaw+pitch, punch already in snapshot). */
         if (alive) {
-            float aim_x = x + cosf(fa) * 60.0f;
-            float aim_z = y + sinf(fa) * 60.0f;
-            DrawLine3D((Vector3){x, z + 108.0f, y},
-                       (Vector3){aim_x, z + 108.0f, aim_z},
+            float start[3], end[3];
+            demo_aim_stick_rl(x, y, z, fa, pa, 60.0f, start, end);
+            DrawLine3D((Vector3){start[0], start[1], start[2]},
+                       (Vector3){end[0], end[1], end[2]},
                        (Color){255, 255, 0, 200});
         }
 
@@ -868,7 +893,7 @@ void c_render(Client* cl, Dust2Env* env) {
     ClearBackground((Color){20, 20, 30, 255});
 
     BeginMode3D(cl->camera);
-    draw_floor(env);
+    draw_floor(env, cl);
     draw_walls(env);
     draw_agents(env, cl, alpha);
     draw_bomb(env, cl, alpha);
