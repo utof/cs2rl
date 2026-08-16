@@ -565,6 +565,84 @@ def test_obs_z_delta_populated_for_elevated_teammate():
         env.close()
 
 
+# DrawCylinder radius in cs2_render.h — collision hull must keep the visible
+# body on the walkable side of an exterior wall. Named here so a radius
+# change fails this file, not a silent viz/sim drift.
+_AGENT_VIZ_RADIUS = 12.0
+
+
+def test_exterior_wall_keeps_body_inside_room():
+    """Point collision lets the 12u body sit inside an 8u exterior wall.
+
+    T-spawn-A west face is x=0, 16u-aligned, no raster overshoot. The visual
+    wall is WALL_DEPTH=8 pushed into x<0, so it occupies [-8, 0]. A center
+    at x≈0 puts the cylinder in [-12, 12] — fully through the wall, hugging
+    the outer face. After the hull, the center must stay at x >= 12.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 40.0
+        g.agents[0].y = 500.0
+        g.agents[0].z = 0.0
+        g.agents[0].vx = 0.0
+        g.agents[0].vy = 0.0
+        g.agents[0].area_idx = 0
+        g.agents[0].is_airborne = 0
+        g.agents[0].facing = float(math.pi)  # bin 1 = west (−x)
+        actions, cont = _zero_actions()
+        actions[0, 0] = 1
+        env.step(actions, cont)
+        assert g.agents[0].x < 40.0, (
+            f"facing=π + bin 1 should drive −x; still at x={g.agents[0].x}")
+        for _ in range(19):
+            env.step(actions, cont)
+        assert g.agents[0].area_idx == 0, (
+            f"walked off T-spawn-A into area_idx={g.agents[0].area_idx}")
+        assert g.agents[0].x >= _AGENT_VIZ_RADIUS - 0.5, (
+            f"center x={g.agents[0].x:.2f} is inside the west wall; "
+            f"hull must keep x >= {_AGENT_VIZ_RADIUS} so the 12u body "
+            f"stays out of the [-8, 0] cube")
+        assert g.agents[0].x < 40.0
+    finally:
+        env.close()
+
+
+def test_raster_overshoot_cannot_enter_exterior_wall():
+    """Simple-map raster marks whole cells; catwalk west AABB is x=820.
+
+    col 51 covers [816, 832). Point collision walks to x≈816, which is
+    inside the exterior wall cube centered at 816. The room quad starts
+    at 820 — the center must stay in-bounds by the viz radius.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 860.0
+        g.agents[0].y = 130.0
+        g.agents[0].z = 128.0
+        g.agents[0].vx = 0.0
+        g.agents[0].vy = 0.0
+        g.agents[0].area_idx = 15
+        g.agents[0].is_airborne = 0
+        g.agents[0].facing = float(math.pi)
+        actions, cont = _zero_actions()
+        actions[0, 0] = 1
+        for _ in range(20):
+            env.step(actions, cont)
+        assert g.agents[0].area_idx == 15, (
+            f"left catwalk for area_idx={g.agents[0].area_idx}")
+        min_x = 820.0 + _AGENT_VIZ_RADIUS
+        assert g.agents[0].x >= min_x - 0.5, (
+            f"center x={g.agents[0].x:.2f} crossed catwalk west 820 "
+            f"(and/or the 12u hull); want x >= {min_x}")
+        assert g.agents[0].x < 860.0
+    finally:
+        env.close()
+
+
 # Note: enemy z-delta slot at obs[base+2] (where base=51 for the closest enemy slot2=0)
 # is intentionally NOT covered here. The slot uses a distance-sorted indirection
 # (`order[]` array in cs2_observations.h:100-110) that needs setup-coordination across
