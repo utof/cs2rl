@@ -418,6 +418,71 @@ static void test_ramp_y_slope_stairs(void) {
     check_ok("ystairs slope along Y", q.z[0] == q.z[1] && q.z[2] == q.z[3]);
 }
 
+/* Same T-ramp fixture as test_ramp_t_topology. Bilinear on the quad:
+ * west x=750 → z≈0, east x=820 → z≈64, mid x=785 → z≈32.
+ * Non-ramp area 0 stays 0. NULL bounds fall back to centroids_z (64). */
+static void test_terrain_z_t_ramp(void) {
+    const float bounds[] = {
+        400.0f,
+        192.0f,
+        750.0f,
+        416.0f, /* area 0 floor */
+        750.0f,
+        192.0f,
+        820.0f,
+        416.0f, /* area 1 ramp */
+        820.0f,
+        192.0f,
+        1100.0f,
+        416.0f, /* area 2 floor */
+    };
+    const float  zs[]      = {0.0f, 64.0f, 64.0f};
+    const int8_t is_ramp[] = {0, 1, 0};
+
+    check_f_near(
+        "terrain west", demo_terrain_z(1, 750.0f, 300.0f, 3, bounds, zs, is_ramp), 0.0f, 1e-3f);
+    check_f_near(
+        "terrain east", demo_terrain_z(1, 820.0f, 300.0f, 3, bounds, zs, is_ramp), 64.0f, 1e-3f);
+    check_f_near(
+        "terrain mid", demo_terrain_z(1, 785.0f, 300.0f, 3, bounds, zs, is_ramp), 32.0f, 1e-3f);
+    check_f_near("terrain flat room",
+                 demo_terrain_z(0, 500.0f, 300.0f, 3, bounds, zs, is_ramp),
+                 0.0f,
+                 1e-4f);
+    check_f_near("terrain null bounds",
+                 demo_terrain_z(1, 785.0f, 300.0f, 3, NULL, zs, is_ramp),
+                 64.0f,
+                 1e-4f);
+}
+
+/* Same Y-stairs fixture as test_ramp_y_slope_stairs.
+ * South y=80 → 128, north y=192 → 0, mid y=136 → 64. */
+static void test_terrain_z_y_stairs(void) {
+    const float bounds[] = {
+        1170.0f,
+        80.0f,
+        1300.0f,
+        192.0f, /* 0 stairs */
+        820.0f,
+        80.0f,
+        1170.0f,
+        192.0f, /* 1 catwalk west z=128 */
+        1170.0f,
+        192.0f,
+        1600.0f,
+        512.0f, /* 2 CT-corridor north z=0 */
+    };
+    const float  zs[]      = {128.0f, 128.0f, 0.0f};
+    const int8_t is_ramp[] = {1, 0, 0};
+
+    check_f_near(
+        "ystairs south", demo_terrain_z(0, 1235.0f, 80.0f, 3, bounds, zs, is_ramp), 128.0f, 1e-3f);
+    check_f_near(
+        "ystairs north", demo_terrain_z(0, 1235.0f, 192.0f, 3, bounds, zs, is_ramp), 0.0f, 1e-3f);
+    check_f_near(
+        "ystairs mid", demo_terrain_z(0, 1235.0f, 136.0f, 3, bounds, zs, is_ramp), 64.0f, 1e-3f);
+}
+
 static void test_reload_start_agent0(void) {
     DemoWorldTick prev          = tick_zero();
     DemoWorldTick curr          = tick_zero();
@@ -477,6 +542,8 @@ int main(void) {
     test_aim_yaw_halfpi_pitch0();
     test_ramp_t_topology();
     test_ramp_y_slope_stairs();
+    test_terrain_z_t_ramp();
+    test_terrain_z_y_stairs();
     test_reload_start_agent0();
     test_reload_start_agent3();
     test_reload_prev_eq_curr_silent();
