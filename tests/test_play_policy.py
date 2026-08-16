@@ -1,4 +1,6 @@
 # tests/test_play_policy.py
+from pathlib import Path
+
 import numpy as np
 import pytest
 from play_actions import (
@@ -85,3 +87,8 @@ def test_reset_round_zeros_hidden():
             return None, None
     st2 = play_reset_round(_Env(), policy, "cpu")
     assert torch.count_nonzero(st2["lstm_h"]) == 0
+
+
+def test_make_client_takes_resource_dir():
+    text = (Path(__file__).resolve().parents[1] / "src/c_env/cs2_render.h").read_text()
+    assert "make_client" in text and "const char* resource_dir" in text
