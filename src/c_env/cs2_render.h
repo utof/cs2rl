@@ -748,7 +748,7 @@ static void draw_agents(Dust2Env* env, Client* cl, float alpha) {
         /* Agent rig offsets from feet: body extends 0→96, head at 108, bomb
          * marker at 130. Agent z (ground or airborne) becomes the feet level,
          * so a jumping agent visibly rises with their velocity. */
-        DrawCylinder((Vector3){x, z, y}, 12.0f, 12.0f, 96.0f, 8, body_col);
+        DrawCylinder((Vector3){x, z, y}, AGENT_HULL_RADIUS, AGENT_HULL_RADIUS, 96.0f, 8, body_col);
         DrawSphere((Vector3){x, z + 108.0f, y}, 16.0f, head_col);
 
         /* Aim stick: combat look (yaw+pitch, punch already in snapshot). */

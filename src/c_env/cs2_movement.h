@@ -46,6 +46,26 @@ count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size)
  * avoids a cross-header coupling for a single constant used only here. */
 #define DT_SIM_MOVE (1.0f / 16.0f)
 
+/* Raster cell at (x,y). floorf, not (int)cast: C truncates toward zero, so
+ * x ∈ (grid_x_min − cell, grid_x_min) would look like cell 0 and walk
+ * through the west/south exterior wall. */
+static inline int _raster_at(const StaticData* sd, float x, float y) {
+    int gx = (int)floorf((x - sd->grid_x_min) * sd->grid_inv_cell);
+    int gy = (int)floorf((y - sd->grid_y_min) * sd->grid_inv_cell);
+    if (gx < 0 || gx >= sd->grid_w || gy < 0 || gy >= sd->grid_h)
+        return -1;
+    return sd->raster_grid[gy * sd->grid_w + gx];
+}
+
+/* True if (x,y) is inside area idx's room quad. NULL bounds (dust2) = skip.
+ * Inclusive on the max edge so a portal at x=x1 stays in both rooms. */
+static inline int _in_area_aabb(const StaticData* sd, int idx, float x, float y) {
+    if (sd->area_bounds == NULL || idx < 0)
+        return 1;
+    const float* b = sd->area_bounds + idx * 4;
+    return (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]);
+}
+
 /* Resolve an attempted XY position against the nav-mesh raster.
  *
  * Returns the destination area index if (tx, ty) is walkable from a->area_idx
@@ -55,13 +75,15 @@ count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size)
  * Shared by the axis-split wall-slide logic in process_movement: we first try
  * the full diagonal step, and on block we retry each axis separately — so
  * touching a wall while moving diagonally into it preserves the tangential
- * velocity component instead of producing a full stop. */
+ * velocity component instead of producing a full stop.
+ *
+ * Hull (area_bounds != NULL only): the four axis offsets at AGENT_HULL_RADIUS
+ * must also be on-mesh and inside their cell's room AABB. That keeps the 12u
+ * viz cylinder out of the 8u exterior wall. Adjacency / cliff stay
+ * center-only — a shoulder over a portal or drop is legal; a shoulder in
+ * the void is not. Dust2 skips this (NULL bounds). */
 static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, float tx, float ty) {
-    int gx = (int)((tx - sd->grid_x_min) * sd->grid_inv_cell);
-    int gy = (int)((ty - sd->grid_y_min) * sd->grid_inv_cell);
-    if (gx < 0 || gx >= sd->grid_w || gy < 0 || gy >= sd->grid_h)
-        return -1;
-    int target_idx = sd->raster_grid[gy * sd->grid_w + gx];
+    int target_idx = _raster_at(sd, tx, ty);
     if (target_idx < 0)
         return -1;
     if (target_idx != a->area_idx && !sd->adjacency[a->area_idx * sd->N + target_idx])
@@ -81,6 +103,20 @@ static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, flo
         float dz = sd->centroids_z[target_idx] - sd->centroids_z[a->area_idx];
         if (dz > SV_MAX_STEP_HEIGHT_CS && !sd->is_ramp[target_idx]) {
             return -1; /* cliff: reject — agent slides or stops via axis-split in caller */
+        }
+    }
+    /* Simple-map rooms publish area_bounds. Dust2 leaves it NULL so thin
+     * nav areas stay point-collided (a 12u hull would seal corridors <24u). */
+    if (sd->area_bounds != NULL) {
+        if (!_in_area_aabb(sd, target_idx, tx, ty))
+            return -1;
+        const float r = AGENT_HULL_RADIUS;
+        const float hx[4] = {tx + r, tx - r, tx, tx};
+        const float hy[4] = {ty, ty, ty + r, ty - r};
+        for (int k = 0; k < 4; k++) {
+            int hi = _raster_at(sd, hx[k], hy[k]);
+            if (hi < 0 || !_in_area_aabb(sd, hi, hx[k], hy[k]))
+                return -1;
         }
     }
     return target_idx;

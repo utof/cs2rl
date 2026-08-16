@@ -18,6 +18,11 @@ static inline float recoil_decay_punch(float prev, float dt) {
 /* ── Constants ─────────────────────────────────────────────────────────── */
 #define TEAM_SIZE 5
 #define N_AGENTS  10
+/* Horizontal body radius. Must match DrawCylinder in cs2_render.h. Collision
+ * is a point on the raster; without this hull the 12u mesh sits inside the
+ * 8u exterior wall (and C (int)truncation lets x∈(-cell,0) look like cell 0).
+ * Axis samples only — corners can still clip ~5u. Not a cliff/adjacency test. */
+#define AGENT_HULL_RADIUS 12.0f
 /* Batch 3.5 (#24): self block now carries pitch sin/cos at obs[11..12]; all
  * downstream obs slots shifted +2. SIM_OBS_VERSION below tracks sim's internal
  * obs schema, distinct from deploy's frozen v2-105dim (gh #34 suspension). */
