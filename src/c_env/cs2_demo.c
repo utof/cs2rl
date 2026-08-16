@@ -206,9 +206,27 @@ static int demo_exec_play(int argc, char** argv, const char* policy_path) {
         return 2;
     }
 
+    /* $UV_PROJECT_ENVIRONMENT / $CS2RL_VENV may be relative to launch cwd.
+     * realpath the parent, not the file: .venv/bin/python is often a symlink
+     * to the base interpreter, and execv of that target drops the venv. */
+    char abs_python[PATH_MAX];
+    char parent[PATH_MAX];
+    char abs_parent[PATH_MAX];
+    const char* base = strrchr(python, '/');
+    if (!base || !base[1]) {
+        print_borrow_hint(abs_policy, argc, argv);
+        return 2;
+    }
+    snprintf(parent, sizeof(parent), "%s", python);
+    if (!dirname_inplace(parent) || !realpath(parent, abs_parent)) {
+        print_borrow_hint(abs_policy, argc, argv);
+        return 2;
+    }
+    join_path(abs_python, sizeof(abs_python), abs_parent, base + 1);
+
     char* eargv[argc + 5]; /* python, src/play.py, --policy, abs, rest, NULL */
     int   n = 0;
-    eargv[n++] = python;
+    eargv[n++] = abs_python;
     eargv[n++] = "src/play.py";
     eargv[n++] = "--policy";
     eargv[n++] = abs_policy;
@@ -225,7 +243,7 @@ static int demo_exec_play(int argc, char** argv, const char* policy_path) {
         print_borrow_hint(abs_policy, argc, argv);
         return 2;
     }
-    execv(python, eargv);
+    execv(abs_python, eargv);
     print_borrow_hint(abs_policy, argc, argv);
     return 2;
 }

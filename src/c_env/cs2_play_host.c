@@ -106,9 +106,15 @@ PlayHost* play_host_attach(void*        env_void,
     PlayHost* h;
     if (!env || !env->sd || n_areas != env->sd->N)
         return NULL;
-    h                  = calloc(1, sizeof(*h));
-    h->env             = env;
-    h->cl              = make_client(env, human_idx, area_bounds, resource_dir);
+    h = calloc(1, sizeof(*h));
+    if (!h)
+        return NULL;
+    h->env = env;
+    h->cl  = make_client(env, human_idx, area_bounds, resource_dir);
+    if (!h->cl) {
+        free(h);
+        return NULL;
+    }
     h->cl->fog_enabled = fog_enabled;
     copy_game_to_world(env, &h->curr_world);
     h->prev_world = h->curr_world;

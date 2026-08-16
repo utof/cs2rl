@@ -143,6 +143,46 @@ def test_play_cli_missing_pt_exits_2():
     assert "Checkpoint" in (r.stderr + r.stdout) or "not found" in (r.stderr + r.stdout).lower()
 
 
+def test_load_play_lib_unloadable_so_exits_2(tmp_path, monkeypatch, capsys):
+    from play import _load_play_lib
+    bad = tmp_path / "libcs2_play.so"
+    bad.write_bytes(b"not-an-elf")
+    monkeypatch.setenv("CS2_PLAY_LIB", str(bad))
+    with pytest.raises(SystemExit) as ei:
+        _load_play_lib(tmp_path)
+    assert ei.value.code == 2
+    assert "zig build cs2_demo" in capsys.readouterr().err
+
+
+def test_cs2_demo_relative_venv_is_realpathd(tmp_path):
+    import os
+    import subprocess
+    repo = Path(__file__).resolve().parents[1]
+    demo = repo / "src/c_env/zig-out/bin/cs2_demo"
+    if not demo.is_file():
+        pytest.skip("cs2_demo not built")
+    venv = None
+    for p in [repo, *repo.parents]:
+        cand = p / ".venv"
+        if (cand / "bin" / "python").is_file():
+            venv = cand
+            break
+    if venv is None:
+        pytest.skip("no ancestor .venv to borrow")
+    rel = os.path.relpath(venv, tmp_path)
+    assert not rel.startswith("/")
+    env = {**os.environ, "DISPLAY": "", "UV_PROJECT_ENVIRONMENT": rel}
+    env.pop("CS2RL_VENV", None)
+    r = subprocess.run(
+        [str(demo), "--policy", "/no/such/cs2rl-policy.pt"],
+        cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert r.returncode == 2
+    blob = (r.stderr or "") + (r.stdout or "")
+    assert "Checkpoint" in blob
+    assert "set UV_PROJECT_ENVIRONMENT" not in blob
+
+
 def test_find_repo_root_from_this_file():
     from play_actions import find_repo_root
     root = find_repo_root(Path(__file__))

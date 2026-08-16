@@ -44,9 +44,13 @@ def _load_play_lib(repo: Path):
     ]
     lib = None
     for c in candidates:
-        if c.is_file():
+        if not c.is_file():
+            continue
+        try:
             lib = ctypes.CDLL(str(c))
             break
+        except OSError:
+            continue
     if lib is None:
         print(
             "build with: uv run --with 'ziglang>=0.14,<0.15' zig build cs2_demo (from src/c_env)",
