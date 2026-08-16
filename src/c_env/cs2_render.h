@@ -11,11 +11,8 @@
  * pulled in transitively through cs2_env.h in the demo TU, but include it
  * directly so the fog feature doesn't depend on header order. */
 #include "cs2_combat.h"
-/* demo_decay_punch — render-frame view-kick. Header is raylib-free; do
- * not include this from cs2_env.h (binding stays display-free). */
-#include "cs2_demo_events.h"
 /* demo_aim_stick_rl / demo_ramp_quad / demo_edge_cover — Raylib-free math.
- * Do not include this (or cs2_demo_events.h) from cs2_env.h. */
+ * Do not include this from cs2_env.h (binding stays display-free). */
 #include "cs2_demo_viz.h"
 
 #define PLAYER_EYE_HEIGHT 64.0f  /* eye height above agent.z in world units */
@@ -203,8 +200,7 @@ static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
     wl->walls    = (Wall*)malloc(wl->capacity * sizeof(Wall));
     wl->count    = 0;
 
-    /* Same 1.0 as demo_edge_covers_j / DEMO_EDGE_EPS. */
-    const float EPS = 1.0f;
+    const float EPS = DEMO_EDGE_EPS;
 
     _WallIv* covs = (_WallIv*)malloc((size_t)sd->N * sizeof(_WallIv));
 
@@ -237,13 +233,11 @@ static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
 
             qsort(covs, (size_t)ncov, sizeof(_WallIv), _wall_iv_cmp);
 
-            /* Push the wall segment WALL_DEPTH/2 into the exterior halfspace
-             * so its visible cube sits entirely outside the walkable area.
-             * Without this offset the cube is centred on the nav-area
-             * boundary and overlaps ~4u of walkable tile, letting the player
-             * visually clip into walls as they approach. Sign matches the
-             * edge type (see e=0..3 layout above): left/bottom push negative,
-             * right/top push positive along the normal axis. */
+            /* Exterior only: push WALL_DEPTH/2 into the void halfspace so
+             * the cube sits outside walkable tile. Lips must NOT use this —
+             * their "exterior" is the lower room (bombsite / CT-ramp), and
+             * the same +4 on catwalk north (e=3) would center an 8u cube at
+             * y=196, occupying [192,200] of A-site. */
             float ofs     = WALL_DEPTH * 0.5f;
             float shift_x = is_vertical ? ((e == 0) ? -ofs : ofs) : 0.0f;
             float shift_y = is_vertical ? 0.0f : ((e == 2) ? -ofs : ofs);
@@ -261,11 +255,12 @@ static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
             if (cursor < seg_hi - EPS)
                 _emit_wall_seg(wl, is_vertical, eline, cursor, seg_hi, WALL_HEIGHT + zi, 0.0f);
 
-            /* Lips on covered intervals. Never from a ramp (stairs / T-ramp
-             * stay the connector). Only the higher area emits (zi > zj+EPS)
-             * so catwalk↔bombsite is one cube. i non-ramp + j ramp is the
-             * overlook (catwalk south over CT-ramp); both-non-ramp is the
-             * catwalk↔bombsite face. */
+            /* Lips on covered intervals, on the true nav edge (`line`), not
+             * eline. Never from a ramp (stairs / T-ramp stay the connector).
+             * Only the higher area emits (zi > zj+EPS) so catwalk↔bombsite
+             * is one cube. i non-ramp + j ramp is the overlook (catwalk
+             * south over CT-ramp); both-non-ramp is the catwalk↔bombsite
+             * face. */
             if (sd->is_ramp[i])
                 continue;
             for (int k = 0; k < ncov; k++) {
@@ -274,7 +269,7 @@ static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
                 /* i is non-ramp: both-non-ramp OR (i non-ramp and j ramp). */
                 if (!(zi > zj + EPS))
                     continue;
-                _emit_wall_seg(wl, is_vertical, eline, covs[k].lo, covs[k].hi, zi - zj, zj);
+                _emit_wall_seg(wl, is_vertical, line, covs[k].lo, covs[k].hi, zi - zj, zj);
             }
         }
     }
