@@ -518,6 +518,25 @@ static void test_reload_countdown_silent(void) {
     check_u("reload countdown silent", ev.reload_mask, 0u);
 }
 
+static void test_reload_end_agent0(void) {
+    DemoWorldTick prev = tick_zero();
+    DemoWorldTick curr = tick_zero();
+    prev.agents[0].reload_ticks = 1;
+    curr.agents[0].reload_ticks = 0;
+    DemoEvents ev = demo_detect_events(&prev, &curr);
+    check_u("reload end bit 0", ev.reload_end_mask, 1u);
+    check_u("reload start silent on end", ev.reload_mask, 0u);
+}
+
+static void test_reload_countdown_not_end(void) {
+    DemoWorldTick prev = tick_zero();
+    DemoWorldTick curr = tick_zero();
+    prev.agents[0].reload_ticks = 10;
+    curr.agents[0].reload_ticks = 9;
+    DemoEvents ev = demo_detect_events(&prev, &curr);
+    check_u("countdown not end", ev.reload_end_mask, 0u);
+}
+
 int main(void) {
     test_shot_pulse();
     test_no_shot_when_bit0();
@@ -549,6 +568,8 @@ int main(void) {
     test_reload_start_agent3();
     test_reload_prev_eq_curr_silent();
     test_reload_countdown_silent();
+    test_reload_end_agent0();
+    test_reload_countdown_not_end();
 
     if (g_fails) {
         fprintf(stderr, "demo_events_test: %d check(s) failed\n", g_fails);

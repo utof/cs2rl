@@ -28,7 +28,8 @@ typedef struct {
 typedef struct {
     unsigned shot_mask;   /* bit i = agent i shot this tick */
     unsigned foot_mask;
-    unsigned reload_mask; /* bit i = agent i started a reload this tick */
+    unsigned reload_mask;     /* 0 → >0 start */
+    unsigned reload_end_mask; /* >0 → 0 complete (or cancel) */
     int      plant;
     int      beep;
 } DemoEvents;
@@ -53,18 +54,20 @@ typedef struct {
  *     tick assigns bomb_timer then decrements in process_bomb, so the first
  *     planted snapshot is 639, not 640. Do not use 100→99 as that fixture —
  *     100/16 == 99/16 == 6 is the silent in-bucket case.
- *   - Reload: prev.reload_ticks==0 && curr.reload_ticks>0. Countdown
- *     (10→9) and prev==curr stay silent. Knife never starts reload_ticks.
+ *   - Reload: prev.reload_ticks==0 && curr.reload_ticks>0 for reload_mask.
+ *     prev.reload_ticks>0 && curr.reload_ticks==0 for reload_end_mask.
+ *     Countdown (10→9) and prev==curr stay silent. Knife never starts reload_ticks.
  *   - Init/reset copies env.game into both prev and curr; that pair must be
  *     silent or spawn looks like a teleport (every agent footsteps).
  */
 static inline DemoEvents demo_detect_events(const DemoWorldTick* prev, const DemoWorldTick* curr) {
     DemoEvents ev;
-    ev.shot_mask   = 0;
-    ev.foot_mask   = 0;
-    ev.reload_mask = 0;
-    ev.plant       = 0;
-    ev.beep        = 0;
+    ev.shot_mask       = 0;
+    ev.foot_mask       = 0;
+    ev.reload_mask     = 0;
+    ev.reload_end_mask = 0;
+    ev.plant           = 0;
+    ev.beep            = 0;
 
     int i;
     for (i = 0; i < N_AGENTS; i++) {
@@ -77,6 +80,8 @@ static inline DemoEvents demo_detect_events(const DemoWorldTick* prev, const Dem
             ev.foot_mask |= 1u << i;
         if (p->reload_ticks == 0 && a->reload_ticks > 0)
             ev.reload_mask |= 1u << i;
+        if (p->reload_ticks > 0 && a->reload_ticks == 0)
+            ev.reload_end_mask |= 1u << i;
     }
 
     ev.plant = (prev->bomb_planted == 0 && curr->bomb_planted == 1) ? 1 : 0;

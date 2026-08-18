@@ -55,7 +55,7 @@ static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* cur
                           curr->agents[i].z,
                           400.0f);
         /* Every set bit, including the human. No rate-limit. */
-        if (ev.reload_mask & (1u << i))
+        if ((ev.reload_mask | ev.reload_end_mask) & (1u << i))
             _demo_play_at(cl,
                           DEMO_VOICE_RELOAD,
                           curr->agents[i].x,
