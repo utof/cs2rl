@@ -715,3 +715,14 @@ def test_ct_ramp_portal_is_walkable():
 # and visibility-gating is documented at the write site (cs2_observations.h:122-134).
 # A live deploy-side test in T6 (or a dedicated test_obs_enemy_z_delta after T4 lands)
 # is the better venue. Tracking gap as a follow-up.
+
+
+def test_corridors_do_not_enter_spawn():
+    from map import SIMPLE_ROOMS
+    t = next(r for r in SIMPLE_ROOMS if r[0] == 5)
+    ct = next(r for r in SIMPLE_ROOMS if r[0] == 7)
+    assert t[4] == 416.0 or t[4] == 416, t
+    assert ct[4] == 416.0 or ct[4] == 416, ct
+    assert t[4] <= 416
+    assert ct[4] <= 416
+

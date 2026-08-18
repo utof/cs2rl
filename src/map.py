@@ -278,12 +278,11 @@ SIMPLE_ROOMS = [
     (2, 0, 672, 256, 928, 0.0, False),                 # T-spawn-C
     (3, 256, 672, 512, 928, 0.0, False),               # T-spawn-D
     (4, 0, 928, 512, 1184, 0.0, False),                # T-spawn-E
-                                                       # T-corridor — shrunk on east end (was x=400-800; now 400-750 to make room for T-ramp)
-    (5, 400, 192, 750, 512, 0.0, False),               # T-corridor
+    (5, 400, 192, 750, 416, 0.0, False),               # T-corridor — stops at T-spawn south
                                                        # Bombsite — ELEVATED to z=64; shrunk on x edges (was 800-1100; now 820-1100)
     (6, 820, 192, 1100, 416, 64.0, False),             # Bombsite (elevated)
-                                                       # CT-corridor — shrunk on west end (was 1100-1600; now 1170-1600)
-    (7, 1170, 192, 1600, 512, 0.0, False),             # CT-corridor
+    (7, 1170, 192, 1600, 416, 0.0, False),             # CT-corridor — stops at CT-spawn south
+
                                                        # CT-spawn cluster (areas 8-12) — flat, z=0
     (8, 1500, 416, 1756, 672, 0.0, False),
     (9, 1756, 416, 2012, 672, 0.0, False),
