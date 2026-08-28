@@ -14,6 +14,10 @@
 /* demo_aim_stick_rl / demo_ramp_quad / demo_edge_cover — Raylib-free math.
  * Do not include this from cs2_env.h (binding stays display-free). */
 #include "cs2_demo_viz.h"
+/* build_solids_from_rooms / free_solids — the ONE solid-face list that
+ * movement, LoS and draw_walls all read. Raylib-free on purpose: it must
+ * never learn about WALL_DEPTH, which is a draw-only offset applied below. */
+#include "cs2_solids.h"
 
 #define PLAYER_EYE_HEIGHT 64.0f  /* eye height above agent.z in world units */
 #define WALL_HEIGHT       128.0f /* wall extrusion height                   */
@@ -145,136 +149,30 @@ static void _copy_agents_to_snapshot(Dust2Env* env, AgentSnapshot* snap) {
 
 /* ── Wall derivation from nav geometry ──────────────────────────────────
  *
- * Each nav area is an axis-aligned rectangle with bounds [x0,y0,x1,y1] in
- * area_bounds[idx*4+0..3]. Per edge:
- *   1. Collect every neighbor that covers the edge from the exterior
- *      (demo_edge_covers_j — same four halfspaces / EPS=1 as ramp_quad).
- *   2. Exterior: subtract the union of those intervals; remaining gaps
- *      become walls from the ground (z0=0, height=WALL_HEIGHT+centroids_z[i]).
- *      Do not sit walls on centroids_z — that floats bombsite/catwalk and
- *      leaves a triangular void under ramp sides.
- *   3. Lips: a *separate* pass on the covered intervals. Never un-cover a
- *      height-drop into a WALL_HEIGHT wall (that would hide the catwalk).
- *      Only the higher non-ramp area emits: zi > zj+EPS, and either both
- *      non-ramp or (i non-ramp and j ramp). Never emit a lip from a ramp.
+ * The bake itself lives in cs2_solids.h so movement and line-of-sight can
+ * share the exact geometry that is drawn. This is only the render-side
+ * entry point; see that header for the exterior / portal / lip split.
  *
- * Called once from make_client().
+ * Called once from make_client(); freed by c_close().
  */
 
-/* Edge-coverage interval plus the covering neighbor (lips need j). */
-typedef struct {
-    float lo, hi;
-    int   j;
-} _WallIv;
-
-static int _wall_iv_cmp(const void* a, const void* b) {
-    float al = ((const _WallIv*)a)->lo;
-    float bl = ((const _WallIv*)b)->lo;
-    return (al > bl) - (al < bl);
-}
-
-/* _emit_wall_seg — one axis-aligned wall cube onto the heap list.
+/* build_walls_from_nav — legacy two-arg entry point for the renderer.
  *
- * What: positional (x0,y0,x1,y1,height) then z0. Omitted z0 would be 0.
- * Why:  exterior gaps and lips share the same emit; height/z0 differ.
- * Pitfalls: z0 is AFTER height — inserting it before height would assign
- *           WALL_HEIGHT to z0 on existing positional inits.
+ * What: publishes area_bounds onto sd if nobody did yet, then bakes.
+ * Why:  make_client already assigns sd->area_bounds, but the wall bake used
+ *       to take the pointer explicitly and cs2_play_host.c still passes it.
+ *       Keeping the shim means the demo call site did not have to change.
+ * Pitfalls: does NOT overwrite an already-published sd->area_bounds — the
+ *           Python env owns that pointer and the C side must not retarget
+ *           it. Do not malloc here: build_solids_from_rooms is the single
+ *           allocation site for wall_list.
  */
-static void _emit_wall_seg(
-    WallList* wl, int is_vertical, float eline, float a, float b, float height, float z0) {
-    Wall w;
-    if (wl->count >= wl->capacity)
-        return;
-    if (is_vertical)
-        w = (Wall){eline, a, eline, b, height};
-    else
-        w = (Wall){a, eline, b, eline, height};
-    w.z0                   = z0;
-    wl->walls[wl->count++] = w;
-}
-
 static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
-    WallList* wl = &sd->wall_list;
-    /* Gaps + one lip per covering neighbor per edge. Heap lives for the demo. */
-    wl->capacity = sd->N * 8 * (sd->N + 1);
-    wl->walls    = (Wall*)malloc(wl->capacity * sizeof(Wall));
-    wl->count    = 0;
-
-    const float EPS = DEMO_EDGE_EPS;
-
-    _WallIv* covs = (_WallIv*)malloc((size_t)sd->N * sizeof(_WallIv));
-
-    for (int i = 0; i < sd->N; i++) {
-        float x0i = area_bounds[i * 4 + 0], y0i = area_bounds[i * 4 + 1];
-        float x1i = area_bounds[i * 4 + 2], y1i = area_bounds[i * 4 + 3];
-        float zi = sd->centroids_z[i];
-
-        /* 4 edges: 0=left(x=x0i), 1=right(x=x1i), 2=bottom(y=y0i), 3=top(y=y1i). */
-        for (int e = 0; e < 4; e++) {
-            int   is_vertical = (e < 2);
-            float line        = is_vertical ? (e == 0 ? x0i : x1i) : (e == 2 ? y0i : y1i);
-            float seg_lo      = is_vertical ? y0i : x0i;
-            float seg_hi      = is_vertical ? y1i : x1i;
-
-            /* All covering neighbors, not just longest — catwalk south is
-             * bombsite + CT-ramp; merging first would lose that split. */
-            int ncov = 0;
-            for (int j = 0; j < sd->N; j++) {
-                float lo, hi;
-                if (j == i)
-                    continue;
-                if (!demo_edge_covers_j(i, j, e, area_bounds, &lo, &hi))
-                    continue;
-                covs[ncov].lo = lo;
-                covs[ncov].hi = hi;
-                covs[ncov].j  = j;
-                ncov++;
-            }
-
-            qsort(covs, (size_t)ncov, sizeof(_WallIv), _wall_iv_cmp);
-
-            /* Exterior only: push WALL_DEPTH/2 into the void halfspace so
-             * the cube sits outside walkable tile. Lips must NOT use this —
-             * their "exterior" is the lower room (bombsite / CT-ramp), and
-             * the same +4 on catwalk north (e=3) would center an 8u cube at
-             * y=196, occupying [192,200] of A-site. */
-            float ofs     = WALL_DEPTH * 0.5f;
-            float shift_x = is_vertical ? ((e == 0) ? -ofs : ofs) : 0.0f;
-            float shift_y = is_vertical ? 0.0f : ((e == 2) ? -ofs : ofs);
-            float eline   = line + (is_vertical ? shift_x : shift_y);
-
-            /* Exterior: walk sorted coverage; emit the gaps down to ground. */
-            float cursor = seg_lo;
-            for (int k = 0; k < ncov; k++) {
-                float lo = covs[k].lo, hi = covs[k].hi;
-                if (lo > cursor + EPS)
-                    _emit_wall_seg(wl, is_vertical, eline, cursor, lo, WALL_HEIGHT + zi, 0.0f);
-                if (hi > cursor)
-                    cursor = hi;
-            }
-            if (cursor < seg_hi - EPS)
-                _emit_wall_seg(wl, is_vertical, eline, cursor, seg_hi, WALL_HEIGHT + zi, 0.0f);
-
-            /* Lips on covered intervals, on the true nav edge (`line`), not
-             * eline. Never from a ramp (stairs / T-ramp stay the connector).
-             * Only the higher area emits (zi > zj+EPS) so catwalk↔bombsite
-             * is one cube. i non-ramp + j ramp is the overlook (catwalk
-             * south over CT-ramp); both-non-ramp is the catwalk↔bombsite
-             * face. */
-            if (sd->is_ramp[i])
-                continue;
-            for (int k = 0; k < ncov; k++) {
-                int   j  = covs[k].j;
-                float zj = sd->centroids_z[j];
-                /* i is non-ramp: both-non-ramp OR (i non-ramp and j ramp). */
-                if (!(zi > zj + EPS))
-                    continue;
-                _emit_wall_seg(wl, is_vertical, line, covs[k].lo, covs[k].hi, zi - zj, zj);
-            }
-        }
-    }
-
-    free(covs);
+    if (sd == NULL)
+        return;
+    if (sd->area_bounds == NULL)
+        sd->area_bounds = area_bounds;
+    build_solids_from_rooms(sd);
 }
 
 /* ── Snapshot helpers (called by cs2_demo.c around each sim tick) ─────── */
@@ -531,10 +429,9 @@ void c_close(Dust2Env* env) {
             }
         }
         CloseAudioDevice();
-        if (env->sd && env->sd->wall_list.walls) {
-            free(env->sd->wall_list.walls);
-            env->sd->wall_list.walls = NULL;
-        }
+        /* free + NULL + count/capacity reset — a freed pointer with a
+         * stale count would be a use-after-free on the next draw. */
+        free_solids(env->sd);
         EnableCursor();
         CloseWindow();
         free(env->client);
@@ -689,6 +586,16 @@ static void draw_walls(Dust2Env* env) {
         float cx  = (w->x0 + w->x1) * 0.5f;
         float cy  = (w->y0 + w->y1) * 0.5f;
         float len = sqrtf((w->x1 - w->x0) * (w->x1 - w->x0) + (w->y1 - w->y0) * (w->y1 - w->y0));
+        /* The bake stores the TRUE room edge. An exterior wall is drawn as
+         * an 8u cube, so push its centre WALL_DEPTH/2 along the outward
+         * normal to keep the cube out of walkable tile — this is the only
+         * place that offset exists. Lips and dividers stay centred on the
+         * edge: their "outside" is the neighbouring room, and pushing a
+         * catwalk lip north would park an 8u cube inside the bombsite. */
+        if (w->kind == SOLID_KIND_EXTERIOR) {
+            cx += w->nx * (WALL_DEPTH * 0.5f);
+            cy += w->ny * (WALL_DEPTH * 0.5f);
+        }
         /* Wall midpoint; Raylib Y=up */
         Vector3 pos = {cx, w->z0 + w->height * 0.5f, cy};
         /* Axis-aligned: horizontal wall = extends along X, vertical = extends along Z */

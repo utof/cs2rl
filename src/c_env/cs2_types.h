@@ -118,11 +118,29 @@ typedef struct {
     float   range_modifier; /* damage falloff per 500 units */
 } WeaponDef;
 
-/* ── Renderer wall geometry ── */
+/* ── Solid face geometry (shared by movement, LoS and the renderer) ──
+ *
+ * Baked by build_solids_from_rooms() in cs2_solids.h from the room quads.
+ * Axis-aligned only: either x0==x1 (vertical seg) or y0==y1 (horizontal).
+ *
+ * The endpoints are the TRUE room edge, never the ±WALL_DEPTH/2 line the
+ * demo cube is drawn on — collision and the draw offset must not disagree.
+ * draw_walls() re-applies that offset using (nx, ny) and `kind`.
+ *
+ * Pitfall: nothing on the Python side mirrors this struct (ctypes only
+ * mirrors WallList = ptr + count + capacity), so fields may be appended
+ * here. Fields may NOT be inserted into StaticData before wall_list.
+ */
 typedef struct {
     float x0, y0, x1, y1; /* segment endpoints in world space (sim XY coords) */
     float height;         /* extrusion height in world units */
-    float z0;             /* sim z of wall base; 0 = ground */
+    float z0;             /* sim z of face base; 0 = ground */
+    /* Unit outward normal of the owning room's edge (axis-aligned: exactly
+     * one of nx/ny is ±1, the other 0). Points away from the room that
+     * emitted the face — i.e. into the void for an exterior wall, and down
+     * onto the lower room for a lip. */
+    float nx, ny;
+    int32_t kind; /* SOLID_KIND_* in cs2_solids.h — drives the draw offset */
 } Wall;
 
 typedef struct {

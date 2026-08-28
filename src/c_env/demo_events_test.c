@@ -1,5 +1,5 @@
 /* demo_events_test.c — headless checks for cs2_demo_events.h / cs2_demo_viz.h
- * (viz includes cs2_terrain.h for ramp / terrain_z).
+ * / cs2_solids.h (viz includes cs2_terrain.h for ramp / terrain_z).
  *
  * Built/run by `zig build demo_events_test`. No Raylib, no binding.so,
  * no ctypes. The play wrapper's 3 Hz footstep drop is intentionally
@@ -13,9 +13,13 @@
 
 #include "cs2_demo_events.h"
 #include "cs2_demo_viz.h"
+#include "cs2_solids.h"
 
 #ifdef RAYLIB_H
-#error "cs2_demo_events.h / cs2_demo_viz.h must not include raylib.h (demo/tests only)"
+#error "cs2_demo_events.h / cs2_demo_viz.h / cs2_solids.h must not include raylib.h"
+#endif
+#ifdef WALL_DEPTH
+#error "cs2_solids.h must not pull cs2_render.h — the draw offset stays render-side"
 #endif
 
 static int g_fails;
@@ -519,22 +523,298 @@ static void test_reload_countdown_silent(void) {
 }
 
 static void test_reload_end_agent0(void) {
-    DemoWorldTick prev = tick_zero();
-    DemoWorldTick curr = tick_zero();
+    DemoWorldTick prev          = tick_zero();
+    DemoWorldTick curr          = tick_zero();
     prev.agents[0].reload_ticks = 1;
     curr.agents[0].reload_ticks = 0;
-    DemoEvents ev = demo_detect_events(&prev, &curr);
+    DemoEvents ev               = demo_detect_events(&prev, &curr);
     check_u("reload end bit 0", ev.reload_end_mask, 1u);
     check_u("reload start silent on end", ev.reload_mask, 0u);
 }
 
 static void test_reload_countdown_not_end(void) {
-    DemoWorldTick prev = tick_zero();
-    DemoWorldTick curr = tick_zero();
+    DemoWorldTick prev          = tick_zero();
+    DemoWorldTick curr          = tick_zero();
     prev.agents[0].reload_ticks = 10;
     curr.agents[0].reload_ticks = 9;
-    DemoEvents ev = demo_detect_events(&prev, &curr);
+    DemoEvents ev               = demo_detect_events(&prev, &curr);
     check_u("countdown not end", ev.reload_end_mask, 0u);
+}
+
+/* ── cs2_solids.h — baked room-face solids ────────────────────────────────
+ *
+ * These stack a minimal StaticData (only the fields build_solids_from_rooms
+ * reads: N / area_bounds / centroids_z / is_ramp / adjacency / wall_list) and
+ * assert on the baked seg list plus the two queries movement and LoS will
+ * share. Every fixture frees the list at the end — the bake is the ONLY
+ * malloc site, so a leak here is a leak in the demo too.
+ */
+
+/* Fixture arrays live in the struct so the StaticData pointers stay valid for
+ * the whole test; a StaticData with dangling area_bounds bakes garbage. */
+typedef struct {
+    StaticData sd;
+    float      bounds[8]; /* 2 rooms x (x0,y0,x1,y1) */
+    float      zs[2];
+    int8_t     ramps[2];
+    int8_t     adj[4]; /* row-major [i*N+j] */
+} SolidsFix;
+
+/* solids_fix — wire the raw arrays onto a zeroed StaticData.
+ *
+ * Pitfall: memset the StaticData first. build_solids_from_rooms frees
+ * wall_list.walls if it is non-NULL, so an uninitialised pointer here is a
+ * free() of a stack address.
+ */
+static void solids_fix(SolidsFix* f) {
+    memset(f, 0, sizeof(*f));
+    f->sd.N           = 2;
+    f->sd.area_bounds = f->bounds;
+    f->sd.centroids_z = f->zs;
+    f->sd.is_ramp     = f->ramps;
+    f->sd.adjacency   = f->adj;
+}
+
+/* Two flush 100x100 rooms sharing x=100, connected → that edge is a portal. */
+static void solids_fix_two_rooms(SolidsFix* f) {
+    solids_fix(f);
+    f->bounds[0] = 0.0f;
+    f->bounds[1] = 0.0f;
+    f->bounds[2] = 100.0f;
+    f->bounds[3] = 100.0f;
+    f->bounds[4] = 100.0f;
+    f->bounds[5] = 0.0f;
+    f->bounds[6] = 200.0f;
+    f->bounds[7] = 100.0f;
+    f->zs[0]     = 0.0f;
+    f->zs[1]     = 0.0f;
+    /* A<->B plus both diagonals (self-adjacency is always true in map.py). */
+    f->adj[0] = 1;
+    f->adj[1] = 1;
+    f->adj[2] = 1;
+    f->adj[3] = 1;
+}
+
+/* Room 0 at z=0, room 1 stacked north at z=128, adjacency cliff-pruned.
+ * Mirrors catwalk(128) over bombsite(64): a shared edge that is NOT a
+ * portal, so the drop must come back as a lip, not as a doorway. */
+static void solids_fix_cliff(SolidsFix* f) {
+    solids_fix(f);
+    f->bounds[0] = 0.0f;
+    f->bounds[1] = 0.0f;
+    f->bounds[2] = 100.0f;
+    f->bounds[3] = 100.0f;
+    f->bounds[4] = 0.0f;
+    f->bounds[5] = 100.0f;
+    f->bounds[6] = 100.0f;
+    f->bounds[7] = 200.0f;
+    f->zs[0]     = 0.0f;
+    f->zs[1]     = 128.0f;
+    f->adj[0]    = 1; /* diagonal only — the cross terms stay pruned */
+    f->adj[1]    = 0;
+    f->adj[2]    = 0;
+    f->adj[3]    = 1;
+}
+
+/* Segs whose infinite line is x==v (vertical) / y==v (horizontal). */
+static int solids_count_vline(const StaticData* sd, float v) {
+    int i, n = 0;
+    for (i = 0; i < sd->wall_list.count; i++) {
+        const Wall* w = &sd->wall_list.walls[i];
+        if (fabsf(w->x1 - w->x0) < 1e-3f && fabsf(w->x0 - v) < 1e-3f)
+            n++;
+    }
+    return n;
+}
+
+static int solids_count_hline(const StaticData* sd, float v) {
+    int i, n = 0;
+    for (i = 0; i < sd->wall_list.count; i++) {
+        const Wall* w = &sd->wall_list.walls[i];
+        if (fabsf(w->y1 - w->y0) < 1e-3f && fabsf(w->y0 - v) < 1e-3f)
+            n++;
+    }
+    return n;
+}
+
+/* Outline is solid, the shared edge is not. Six exterior faces: room 0 keeps
+ * west/south/north, room 1 keeps east/south/north. */
+static void test_solids_bake_two_rooms(void) {
+    SolidsFix f;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+
+    check_i("solids 2room count", f.sd.wall_list.count, 6);
+    check_i("solids 2room portal x=100", solids_count_vline(&f.sd, 100.0f), 0);
+    check_i("solids 2room west x=0", solids_count_vline(&f.sd, 0.0f), 1);
+    check_i("solids 2room east x=200", solids_count_vline(&f.sd, 200.0f), 1);
+    check_i("solids 2room south y=0", solids_count_hline(&f.sd, 0.0f), 2);
+    check_i("solids 2room north y=100", solids_count_hline(&f.sd, 100.0f), 2);
+    /* True edge, never line-WALL_DEPTH/2: an x=-4 seg would fail the x=0 count. */
+    check_i("solids 2room no draw offset", solids_count_vline(&f.sd, -4.0f), 0);
+
+    free_solids(&f.sd);
+}
+
+/* Exterior wall height is SOLID_WALL_HEIGHT + this room's terrain z, based at
+ * z0=0 — walls must not float on centroids_z. */
+static void test_solids_exterior_height(void) {
+    SolidsFix f;
+    int       i;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+    for (i = 0; i < f.sd.wall_list.count; i++) {
+        check_f_near("solids exterior z0", f.sd.wall_list.walls[i].z0, 0.0f, 1e-4f);
+        check_f_near(
+            "solids exterior height", f.sd.wall_list.walls[i].height, SOLID_WALL_HEIGHT, 1e-4f);
+    }
+    free_solids(&f.sd);
+}
+
+/* Walking west out of room 0 hits its west face. Normal is the crossed face's
+ * outward normal, so it points -X for a west wall. */
+static void test_solids_sweep_west_wall(void) {
+    SolidsFix f;
+    SolidHit  hit;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+
+    memset(&hit, 0, sizeof(hit));
+    check_i("sweep west hit",
+            solid_sweep_xy(&f.sd, 20.0f, 50.0f, -10.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
+            1);
+    check_ok("sweep west nx<0", hit.nx < 0.0f);
+    check_f_near("sweep west ny", hit.ny, 0.0f, 1e-4f);
+    check_ok("sweep west t in [0,1)", hit.t >= 0.0f && hit.t < 1.0f);
+
+    free_solids(&f.sd);
+}
+
+/* The doorway must stay walkable: crossing x=100 is a miss. */
+static void test_solids_sweep_portal(void) {
+    SolidsFix f;
+    SolidHit  hit;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+    check_i("sweep portal miss",
+            solid_sweep_xy(&f.sd, 80.0f, 50.0f, 120.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
+            0);
+    free_solids(&f.sd);
+}
+
+/* Already past the plane (t<0) is a miss — v1 has no depenetration. */
+static void test_solids_sweep_no_depenetration(void) {
+    SolidsFix f;
+    SolidHit  hit;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+    /* Starts at x=-30, i.e. already outside past the x=0 face, moving further
+     * out: the expanded plane is behind the start, so t<0 and we report free. */
+    check_i("sweep t<0 miss",
+            solid_sweep_xy(&f.sd, -30.0f, 50.0f, -60.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
+            0);
+    free_solids(&f.sd);
+}
+
+/* LoS through the doorway is clear; the shared north wall blocks. */
+static void test_solids_ray_through_door(void) {
+    SolidsFix f;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+    check_i(
+        "ray through door", solid_ray_clear(&f.sd, 10.0f, 50.0f, 48.0f, 190.0f, 50.0f, 48.0f), 1);
+    free_solids(&f.sd);
+}
+
+static void test_solids_ray_north_wall(void) {
+    SolidsFix f;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+    check_i("ray north wall blocks",
+            solid_ray_clear(&f.sd, 50.0f, 50.0f, 48.0f, 50.0f, 150.0f, 48.0f),
+            0);
+    free_solids(&f.sd);
+}
+
+/* Cliff-pruned shared edge → one lip spanning the drop, not a portal and not
+ * a full SOLID_WALL_HEIGHT slab (that would hide the overlook). */
+static void test_solids_cliff_lip(void) {
+    SolidsFix   f;
+    int         i, lips = 0;
+    const Wall* lip = NULL;
+    solids_fix_cliff(&f);
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++) {
+        const Wall* w = &f.sd.wall_list.walls[i];
+        if (fabsf(w->y1 - w->y0) < 1e-3f && fabsf(w->y0 - 100.0f) < 1e-3f) {
+            lips++;
+            lip = w;
+        }
+    }
+    check_i("cliff lip emitted once", lips, 1);
+    if (lip != NULL) {
+        check_f_near("cliff lip z0", lip->z0, 0.0f, 1e-4f);
+        check_f_near("cliff lip height", lip->height, 128.0f, 1e-4f);
+        check_f_near("cliff lip x0", lip->x0, 0.0f, 1e-4f);
+        check_f_near("cliff lip x1", lip->x1, 100.0f, 1e-4f);
+    }
+
+    /* Eye level inside the drop is blocked; above the lip is the overlook. */
+    check_i("cliff lip blocks eye",
+            solid_ray_clear(&f.sd, 50.0f, 50.0f, 48.0f, 50.0f, 150.0f, 48.0f),
+            0);
+    check_i("cliff lip clear above",
+            solid_ray_clear(&f.sd, 50.0f, 50.0f, 176.0f, 50.0f, 150.0f, 176.0f),
+            1);
+
+    /* Standing on the high room at z=128 must not walk off: slab overlap is
+     * inclusive on [z0, z0+height]. One unit higher there is nothing left. */
+    check_i("cliff lip blocks step-off",
+            solid_sweep_xy(&f.sd, 50.0f, 150.0f, 50.0f, 50.0f, 128.0f, AGENT_HULL_RADIUS, NULL),
+            1);
+    check_i("cliff lip above slab is free",
+            solid_sweep_xy(&f.sd, 50.0f, 150.0f, 50.0f, 50.0f, 129.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+
+    free_solids(&f.sd);
+}
+
+/* Rebaking must free the previous list, not leak or double-free it. */
+static void test_solids_rebake(void) {
+    SolidsFix f;
+    int       first;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+    first = f.sd.wall_list.count;
+    build_solids_from_rooms(&f.sd);
+    check_i("rebake same count", f.sd.wall_list.count, first);
+    check_ok("rebake list live", f.sd.wall_list.walls != NULL);
+    free_solids(&f.sd);
+    check_ok("free_solids nulls", f.sd.wall_list.walls == NULL);
+    check_i("free_solids count", f.sd.wall_list.count, 0);
+    check_i("free_solids capacity", f.sd.wall_list.capacity, 0);
+    /* Idempotent: c_close may run after an explicit free. */
+    free_solids(&f.sd);
+    check_ok("free_solids idempotent", f.sd.wall_list.walls == NULL);
+}
+
+/* dust2 publishes no room quads — the bake is a no-op and both queries stay
+ * permissive so the raster path keeps owning collision there. */
+static void test_solids_null_bounds_noop(void) {
+    SolidsFix f;
+    solids_fix_two_rooms(&f);
+    f.sd.area_bounds = NULL;
+    build_solids_from_rooms(&f.sd);
+    check_i("null bounds no walls", f.sd.wall_list.count, 0);
+    check_ok("null bounds no alloc", f.sd.wall_list.walls == NULL);
+    check_i("null bounds sweep free",
+            solid_sweep_xy(&f.sd, 20.0f, 50.0f, -10.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+    check_i("null bounds ray clear",
+            solid_ray_clear(&f.sd, 50.0f, 50.0f, 48.0f, 50.0f, 150.0f, 48.0f),
+            1);
+    free_solids(&f.sd);
 }
 
 int main(void) {
@@ -570,6 +850,16 @@ int main(void) {
     test_reload_countdown_silent();
     test_reload_end_agent0();
     test_reload_countdown_not_end();
+    test_solids_bake_two_rooms();
+    test_solids_exterior_height();
+    test_solids_sweep_west_wall();
+    test_solids_sweep_portal();
+    test_solids_sweep_no_depenetration();
+    test_solids_ray_through_door();
+    test_solids_ray_north_wall();
+    test_solids_cliff_lip();
+    test_solids_rebake();
+    test_solids_null_bounds_noop();
 
     if (g_fails) {
         fprintf(stderr, "demo_events_test: %d check(s) failed\n", g_fails);
