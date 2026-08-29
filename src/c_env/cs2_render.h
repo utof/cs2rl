@@ -147,34 +147,6 @@ static void _copy_agents_to_snapshot(Dust2Env* env, AgentSnapshot* snap) {
     }
 }
 
-/* ── Wall derivation from nav geometry ──────────────────────────────────
- *
- * The bake itself lives in cs2_solids.h so movement and line-of-sight can
- * share the exact geometry that is drawn. This is only the render-side
- * entry point; see that header for the exterior / portal / lip split.
- *
- * Called once from make_client(); freed by c_close().
- */
-
-/* build_walls_from_nav — legacy two-arg entry point for the renderer.
- *
- * What: publishes area_bounds onto sd if nobody did yet, then bakes.
- * Why:  make_client already assigns sd->area_bounds, but the wall bake used
- *       to take the pointer explicitly and cs2_play_host.c still passes it.
- *       Keeping the shim means the demo call site did not have to change.
- * Pitfalls: does NOT overwrite an already-published sd->area_bounds — the
- *           Python env owns that pointer and the C side must not retarget
- *           it. Do not malloc here: build_solids_from_rooms is the single
- *           allocation site for wall_list.
- */
-static void build_walls_from_nav(StaticData* sd, const float* area_bounds) {
-    if (sd == NULL)
-        return;
-    if (sd->area_bounds == NULL)
-        sd->area_bounds = area_bounds;
-    build_solids_from_rooms(sd);
-}
-
 /* ── Snapshot helpers (called by cs2_demo.c around each sim tick) ─────── */
 
 void snapshot_prev(Client* client, Dust2Env* env) {
@@ -375,8 +347,17 @@ Client* make_client(Dust2Env*    env,
     cl->camera.position = (Vector3){0.0f, PLAYER_EYE_HEIGHT, 0.0f};
     cl->camera.target   = (Vector3){1.0f, PLAYER_EYE_HEIGHT, 0.0f};
 
-    /* Derive walls from nav adjacency */
-    build_walls_from_nav(env->sd, area_bounds);
+    /* Bake the solid faces. build_solids_from_rooms reads sd->area_bounds,
+     * which is why the assignment above must come first; it is the one and
+     * only allocation site for sd->wall_list, and c_close() frees it.
+     *
+     * This used to go through a build_walls_from_nav(sd, area_bounds) shim
+     * that took the pointer as an argument and then ignored it in favour of
+     * sd->area_bounds — one caller, two sources of truth, and a "does not
+     * overwrite an already-published pointer" guard that this call site
+     * bypassed two lines earlier. Call the bake directly instead.
+     */
+    build_solids_from_rooms(env->sd);
 
     /* Init snapshots from current state */
     _copy_agents_to_snapshot(env, cl->curr);

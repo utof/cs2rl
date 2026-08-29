@@ -12,7 +12,7 @@ typedef struct {
     float x[4], y[4], z[4]; /* (x0,y0), (x1,y0), (x1,y1), (x0,y1) */
 } DemoRampQuad;
 
-/* Same "on the line" vs "strictly past it" as build_walls_from_nav. */
+/* Same "on the line" vs "strictly past it" as build_solids_from_rooms. */
 #define DEMO_EDGE_EPS 1.0f
 
 /* demo_edge_covers_j — one neighbor vs one edge (the four halfspaces).
@@ -128,7 +128,7 @@ static inline int demo_edge_cover(int          area_i,
  *
  * What: four corners (x0,y0), (x1,y0), (x1,y1), (x0,y1). Each edge takes
  *       the covering neighbor with the longest overlap (EPS=1, same
- *       interior-reaches-across test as build_walls_from_nav). That
+ *       interior-reaches-across test as build_solids_from_rooms). That
  *       neighbor's centroids_z is the edge z; no neighbor → this area's
  *       z. Slope along X if |z_e-z_w| >= |z_n-z_s|, else Y.
  * Why:  ramps must connect the low room to the high room instead of a
