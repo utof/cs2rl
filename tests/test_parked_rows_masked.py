@@ -45,6 +45,7 @@ def test_masked_normalize_adv_matches_subset_normalisation(fixed):
 def test_masked_explained_variance_matches_subset(fixed):
     x, part = fixed
     y_true = x
+    torch.manual_seed(0)               # reproducible failure output; assertion is analytic
     y_pred = x + 0.1 * torch.randn_like(x)
     ev = masked_explained_variance(y_pred.flatten(), y_true.flatten(), part.flatten())
     yt, yp = y_true[part], y_pred[part]

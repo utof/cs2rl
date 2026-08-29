@@ -637,7 +637,8 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # getattr() calls would re-indent every comment in it.
     #
     # CONTRACTS for the trainer wiring (do not re-derive these downstream):
-    # 1. Both *_steps are trainer.global_step units — agent steps, the same
+    # 1. Both *_steps are trainer.global_step units — PARTICIPATING agent steps
+    #    (Rung 0: 5× fewer raw env steps per unit at n_active=1), the same
     #    counter entropy_target_warmup_steps and target_entropy_schedule use.
     # 2. No CLI validation, deliberately. The pure schedule helper
     #    warmstart_entropy_state treats ramp_steps <= 0 as "jump straight to OFF
@@ -2584,7 +2585,10 @@ def _patch_trainer_with_return_norm(trainer):
         # minibatch loop. Persisted onto losses["event_oversample_fraction"]
         # AFTER the gh#90 divisor loop (per-call scalar, like ret_mean).
         _t8_event_mask = getattr(self, "_batch1_event_mask", None)
-        self._batch1_event_oversample_fraction = (float(_t8_event_mask.float().mean())
+        # Masked over participating segments (participating[:, 0] is the
+        # per-segment flag) so parked rows don't dilute the fraction at n<5.
+        self._batch1_event_oversample_fraction = (float(
+            masked_mean(_t8_event_mask.float(), self.participating[:, 0].float()))
                                                   if _t8_event_mask is not None else 0.0)
 
         # ── gh#90: KL early-stop bookkeeping ───────────────────────────────
@@ -2717,6 +2721,8 @@ def _patch_trainer_with_return_norm(trainer):
             # so the gh#90 divisor keeps counting only executed minibatches.
             if n_part.item() == 0:
                 _empty_mb += 1
+                # No zero_grad here: accumulate_minibatches is always 1 today,
+                # so no partial gradient can be pending. Revisit if that changes.
                 continue
             flat_part = mb_part_f.reshape(-1)
 
@@ -4965,7 +4971,7 @@ def train(args):
         assert trainer.participating.any(), "participating buffer never written this epoch"
         logs = trainer.train()
 
-        # Team spirit annealing: 0.3→0.7 over 5M steps
+        # Team spirit annealing: 0.3→0.7 over 5M participating-agent steps
         ts_val = min(0.7, 0.3 + trainer.global_step / 5_000_000)
         shared_ts.value = ts_val
 

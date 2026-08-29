@@ -149,6 +149,7 @@ def _build_trainer_for_test(
     import numpy as np
 
     from _action_spec import ACTION_MASK_DIM
+    from nav import TEAM_SIZE          # row layout: i % TEAM_SIZE indexes within a team
 
     _agents_per_env = 10
     mask_shm = RawArray("b", num_envs * _agents_per_env * ACTION_MASK_DIM)
@@ -242,7 +243,7 @@ def _build_trainer_for_test(
     # Rung 0 §2.2: same env-row-major formula train() uses — slots 0..n-1 of
     # each 5-agent team participate. Built here (not inside the patcher) so
     # the harness stays the single place that knows the harness's row layout.
-    participating_rows = np.array([(i % 5) < n_active_per_team
+    participating_rows = np.array([(i % TEAM_SIZE) < n_active_per_team
                                    for i in range(num_envs * _agents_per_env)],
                                   dtype=bool)
     _patch_trainer_with_hybrid_aim(trainer,
