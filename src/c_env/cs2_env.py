@@ -443,20 +443,23 @@ for _name, _mirror in _C_SIZE_MIRRORS:
     # _mirror.__name__ rather than f"{_name}C": the "C" suffix is a convention
     # the tuple does not enforce, so concatenating it would print a class name
     # that may not exist. __name__ is always the class actually compared.
-    assert _C_SIZES[_name] == ctypes.sizeof(_mirror), (
-        f"{_mirror.__name__} size mismatch (struct_sizes key {_name!r}): "
-        f"ctypes {ctypes.sizeof(_mirror)} vs C {_C_SIZES[_name]}")
+    # RuntimeError, not assert: python -O strips asserts and this is the only
+    # layout guard outside the test suite.
+    if _C_SIZES[_name] != ctypes.sizeof(_mirror):
+        raise RuntimeError(f"{_mirror.__name__} size mismatch (struct_sizes key {_name!r}): "
+                           f"ctypes {ctypes.sizeof(_mirror)} vs C {_C_SIZES[_name]}")
 del _name, _mirror
 for _mirror, _field, _key in _C_OFFSET_FIELDS:
     # _mirror.__name__, not a hard-coded class: the tuple spans every mirror
     # now, so the message must name the one that actually drifted.
-    assert getattr(_mirror, _field).offset == _C_SIZES[_key], (
-        f"{_mirror.__name__}.{_field} offset mismatch (struct_sizes key {_key!r}): "
-        f"ctypes {getattr(_mirror, _field).offset} vs C {_C_SIZES[_key]}")
+    if getattr(_mirror, _field).offset != _C_SIZES[_key]:
+        raise RuntimeError(
+            f"{_mirror.__name__}.{_field} offset mismatch (struct_sizes key {_key!r}): "
+            f"ctypes {getattr(_mirror, _field).offset} vs C {_C_SIZES[_key]}")
 del _mirror, _field, _key
 for _macro, _py_value in _C_MACROS:
-    assert _py_value == _C_SIZES[_macro], (
-        f"{_macro} mismatch: nav {_py_value} vs C {_C_SIZES[_macro]}")
+    if _py_value != _C_SIZES[_macro]:
+        raise RuntimeError(f"{_macro} mismatch: nav {_py_value} vs C {_C_SIZES[_macro]}")
 del _macro, _py_value
 
 # Every struct_sizes() key this module actually compares, derived from the three
