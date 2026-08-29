@@ -446,9 +446,11 @@ typedef struct {
      * by a participating && alive agent; the *_facing/_on_target/_hit/
      * _stance_blocked subsets are scored against the nearest visible
      * participating enemy snapshotted BEFORE process_combat (cs2_env.h), so
-     * a same-tick kill cannot make a shot "unscored". Pair counters use
-     * vis10[i][j] && vis10[j][i] (DDA is not symmetric) over participating &&
-     * alive opposing pairs. min_enemy_distance is 2D, regardless of
+     * a same-tick kill cannot make a shot "unscored". mutual_vis pair
+     * counters use vis10[i][j] && vis10[j][i] (DDA is not symmetric) over
+     * participating && alive opposing pairs; agent_ticks_with_visible_enemy
+     * is ONE-directional (i sees any j), by design. min_enemy_distance is 2D
+     * and counted regardless of
      * visibility; sentinel 1e30f (never INFINITY — -ffast-math) set in
      * clear_stats; converted per episode in cs2_env.py _build_terminal_info.
      * reward_win_t/ct: one-sided terminal payouts (diagnostic; reward_win

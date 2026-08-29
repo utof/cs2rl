@@ -281,7 +281,13 @@ static void process_combat(Dust2Env*      env,
                     ss->shots_facing_enemy++;
                     es->shots_facing_enemy++;
                 }
-                /* exact hit half-window; clamp keeps d < 16 on-target, NaN-free */
+                /* MARGINAL tests: on_target is the yaw error alone against the
+                 * half-window, stance_blocked is |dz| alone. The hit ray's gate
+                 * is the JOINT sqrt(yaw_perp^2 + rz^2) < HIT_HALF_WIDTH plus
+                 * laser_range and forward > 0, so shots_hit / shots_on_target
+                 * < 1 is EXPECTED near the boundary even at pitch 0. Do not
+                 * "fix" either counter to match the ray — they answer
+                 * different questions. Clamp keeps asinf NaN-free. */
                 if (tgt_derr < asinf(fminf(HIT_HALF_WIDTH / fmaxf(tgt_d, 1e-6f), 1.0f))) {
                     ss->shots_on_target++;
                     es->shots_on_target++;

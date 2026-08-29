@@ -38,6 +38,7 @@ def test_scripted_hit_tick(simple_map):
         obs, *_ = env.step(act, cont)
         # Geometry guard first: both agents must share LoS (same room, 40u apart).
         # If this fails the placement straddles a wall — fix _place_duel, not R0-A.
+        # obs layout: enemy block starts at 56, 3 = can_see flag of the nearest enemy slot
         assert obs[0][56 + 3] == 1.0, "agent 0 cannot see agent 5 — _place_duel geometry"
         es = env._c_env.episode_stats
         assert es.shots_fired == 1
