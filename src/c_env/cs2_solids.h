@@ -120,7 +120,7 @@
  * own orientation. */
 typedef struct {
     float t;      /* hit fraction in [0,1) along the query */
-    float nx, ny; /* unit outward normal in sim XY */
+    float nx, ny; /* plane normal oriented along travel — see above; NOT Wall.nx/ny */
 } SolidHit;
 
 /* ── bake ────────────────────────────────────────────────────────────────── */
