@@ -46,6 +46,12 @@ class VizGameState:
 
 
 class WallC(ctypes.Structure):
+    # Field-for-field mirror of `Wall` in cs2_types.h. It is the pointee type of
+    # WallListC.walls, so if it drifts from C, every walls[i] read lands on the
+    # wrong bytes — ctypes has no way to notice. The bake added nx/ny/kind
+    # (24 B -> 36 B) for the draw-offset rule in draw_walls.
+    # Pitfall: append only, and append on BOTH sides. The C side carries a
+    # matching _Static_assert(sizeof(Wall) == 36).
     _fields_ = [
         ("x0", ctypes.c_float),
         ("y0", ctypes.c_float),
@@ -53,6 +59,9 @@ class WallC(ctypes.Structure):
         ("y1", ctypes.c_float),
         ("height", ctypes.c_float),
         ("z0", ctypes.c_float),
+        ("nx", ctypes.c_float),        # unit outward normal of the owning
+        ("ny", ctypes.c_float),        #   room's edge (exactly one is ±1)
+        ("kind", ctypes.c_int32),      # SOLID_KIND_* in cs2_solids.h
     ]
 
 
@@ -382,6 +391,10 @@ assert StaticDataC.wall_list.offset == 480, StaticDataC.wall_list.offset
 assert StaticDataC.area_bounds.offset == 496, StaticDataC.area_bounds.offset
 assert StaticDataC.area_bounds_owned.offset == 504, StaticDataC.area_bounds_owned.offset
 assert ctypes.sizeof(WallListC) == 16, ctypes.sizeof(WallListC)
+# 8 floats + 1 int32, no padding. Mirrors _Static_assert(sizeof(Wall) == 36)
+# in cs2_types.h; if you change Wall, both must move together or walls[i]
+# reads garbage. WallListC's own size is unaffected (walls is a pointer).
+assert ctypes.sizeof(WallC) == 36, ctypes.sizeof(WallC)
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer

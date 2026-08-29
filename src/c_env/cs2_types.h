@@ -127,9 +127,14 @@ typedef struct {
  * demo cube is drawn on — collision and the draw offset must not disagree.
  * draw_walls() re-applies that offset using (nx, ny) and `kind`.
  *
- * Pitfall: nothing on the Python side mirrors this struct (ctypes only
- * mirrors WallList = ptr + count + capacity), so fields may be appended
- * here. Fields may NOT be inserted into StaticData before wall_list.
+ * Pitfall: WallC in cs2_env.py DOES mirror this struct field for field —
+ * it is the pointee type of WallListC.walls, so a stale mirror makes every
+ * Python-side walls[i] read the wrong bytes (and silently: ctypes cannot
+ * see the C layout). Appending a field here means appending it there too;
+ * the _Static_assert below and the matching ctypes.sizeof(WallC) assert in
+ * cs2_env.py are what turn a forgotten update into a build/import error.
+ * Separately: fields may NOT be inserted into StaticData before wall_list,
+ * whose byte offset cs2_env.py also asserts.
  */
 typedef struct {
     float x0, y0, x1, y1; /* segment endpoints in world space (sim XY coords) */
@@ -142,6 +147,15 @@ typedef struct {
     float   nx, ny;
     int32_t kind; /* SOLID_KIND_* in cs2_solids.h — drives the draw offset */
 } Wall;
+
+/* 8 floats + 1 int32, all 4-byte aligned → 36 with no padding on every
+ * target we build for. Kept in lock-step with WallC in cs2_env.py, which
+ * asserts the same number from the ctypes side.
+ * Pitfall: we build with -std=c99, where glibc's <sys/cdefs.h> replaces
+ * _Static_assert with a negative-bitfield trick — a failure here reports
+ * "bit-field '__error_if_negative' has negative width", not the message
+ * below. Same line number, so read this line and ignore the wording. */
+_Static_assert(sizeof(Wall) == 36, "Wall layout changed — update WallC in cs2_env.py");
 
 typedef struct {
     Wall* walls;
