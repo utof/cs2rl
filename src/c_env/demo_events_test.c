@@ -1132,12 +1132,19 @@ static void test_solids_partial_edge_doorway(void) {
         /* Room 0 is elevated: the mid-edge emit must add its zi too. */
         check_f_near("doorway south flank z0", south->z0, 0.0f, 1e-4f);
         check_f_near("doorway south flank height", south->height, SOLID_WALL_HEIGHT + 64.0f, 1e-4f);
+        /* Outward normal (+x: room 0 lies west of its east edge). The mid-edge
+         * emit is the only path that sets nx/ny on a gap wall, and no other
+         * fixture reaches it, so a sign flip there is invisible elsewhere. */
+        check_f_near("doorway south flank nx", south->nx, 1.0f, 1e-4f);
+        check_f_near("doorway south flank ny", south->ny, 0.0f, 1e-4f);
     }
     if (north != NULL) {
         /* The trailing gap after the last covered interval. */
         check_f_near("doorway north flank y0", north->y0, 200.0f, 1e-4f);
         check_f_near("doorway north flank y1", north->y1, 300.0f, 1e-4f);
         check_f_near("doorway north flank height", north->height, SOLID_WALL_HEIGHT + 64.0f, 1e-4f);
+        check_f_near("doorway north flank nx", north->nx, 1.0f, 1e-4f);
+        check_f_near("doorway north flank ny", north->ny, 0.0f, 1e-4f);
     }
 
     /* Walk through the door: free. Walk at the flank: blocked. */
