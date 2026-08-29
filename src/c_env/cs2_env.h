@@ -26,7 +26,13 @@ static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_sp
     assert(OBS_GLOBAL_BASE + OBS_GLOBAL_SIZE == OBS_DIM &&
            "obs block sizes do not tile OBS_DIM (see cs2_types.h OBS_* macros)");
     memset(env, 0, sizeof(Dust2Env));
-    env->sd          = sd;
+    env->sd = sd;
+    /* Rung 0: a zeroed StaticData (cs2_demo.c load_nav_data forgot the field,
+     * or a FMT mis-order) would make env_reset divide by zero. Python callers
+     * never reach this — Cs2Env.__init__ raises ValueError first — so this is
+     * the guard for the C-only callers (cs2_demo.c / make_client). */
+    assert(sd->n_active_per_team >= 1 && sd->n_active_per_team <= TEAM_SIZE &&
+           "StaticData.n_active_per_team must be in 1..TEAM_SIZE");
     env->rng         = seed ? seed : 1;
     env->team_spirit = team_spirit;
     clear_stats(&env->step_stats);
@@ -125,9 +131,29 @@ static void env_reset(Dust2Env* env) {
     g->bomb_being_planted_by = -1;
     g->bomb_being_defused_by = -1;
 
-    int bomb_carrier = (int)(xorshift32(&env->rng) % TEAM_SIZE);
-    spawn_team(g, sd, &env->rng, 0, sd->t_spawns, sd->n_t_spawns, bomb_carrier);
-    spawn_team(g, sd, &env->rng, 1, sd->ct_spawns, sd->n_ct_spawns, bomb_carrier);
+    /* Rung 0: the carrier is drawn among ACTIVE T slots only (a parked
+     * carrier would never drop/plant). Identity at n_active == TEAM_SIZE. */
+    int n_active     = sd->n_active_per_team;
+    int bomb_carrier = (int)(xorshift32(&env->rng) % n_active);
+    spawn_team(g, sd, &env->rng, 0, sd->t_spawns, sd->n_t_spawns, bomb_carrier, n_active);
+    spawn_team(g, sd, &env->rng, 1, sd->ct_spawns, sd->n_ct_spawns, bomb_carrier, n_active);
+    /* Parked slots: the GameState memset above left them all-zero, i.e.
+     * team=0 / alive=0 / area_idx=0 — area 0 is a REAL area and team=0 would
+     * mis-attribute parked CT rows to T in every team-indexed loop. Make
+     * them unambiguously "dead, nowhere, correct team". */
+    for (int i = 0; i < N_AGENTS; i++) {
+        if ((i % TEAM_SIZE) >= n_active) {
+            AgentState* a    = &g->agents[i];
+            a->participating = 0;
+            a->alive         = 0;
+            a->area_idx      = INVALID_AREA_IDX;
+            a->team          = (int8_t)((i < TEAM_SIZE) ? 0 : 1);
+            /* memset left enemy_mem_idx[*] = 0 = a REAL area; the struct
+             * comment promises INVALID_AREA_IDX for parked rows. */
+            for (int k = 0; k < TEAM_SIZE; k++)
+                a->enemy_mem_idx[k] = INVALID_AREA_IDX;
+        }
+    }
 
     g->bomb_carrier_id = bomb_carrier;
     /* Batch 2: round-fixed copy. NEVER reassigned mid-round (see cs2_types.h

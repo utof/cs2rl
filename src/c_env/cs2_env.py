@@ -160,10 +160,15 @@ class StaticDataC(ctypes.Structure):
         ("pbrs_bomb_progress_weight", ctypes.c_float),
         ("pbrs_nav_weight_t", ctypes.c_float),
         ("pbrs_nav_weight_ct", ctypes.c_float),
-        # After ctypes prefix: overlay C wall_list then ramp bounds.
-        # Do not insert before wall_list. 69-arg FMT is unchanged.
-        # Measured gcc offsetof(StaticData): wall_list=480, area_bounds=496.
-        # No pad after pbrs_nav_weight_ct (ends 480).
+        # Rung 0 (spec 2026-08-29): FMT positions 69-71, before wall_list in C.
+        ("n_active_per_team", ctypes.c_int32),
+        ("pin_pitch", ctypes.c_int32),
+        ("crouch_enabled", ctypes.c_int32),
+        # After the binding.init prefix: overlay C wall_list then ramp bounds.
+        # These two stay LAST, matching cs2_types.h. New scalars go above them
+        # (and at the same spot in the C struct); the offset anchors below are
+        # what proves the two sides moved together, so no hand-measured
+        # offsetof literals are quoted here any more — they rot on every insert.
         ("wall_list", WallListC),
         ("area_bounds", ctypes.POINTER(ctypes.c_float)),
     ]
@@ -219,6 +224,10 @@ class AgentStateC(ctypes.Structure):
                                                        # Do not write these into facing / aim_rad / stored pitch.
         ("punch_pitch", ctypes.c_float),
         ("punch_yaw", ctypes.c_float),
+                                                       # Rung 0: 0 for parked slots (spec §2.1).
+                                                       # NOT the same as alive=0 — see cs2_types.h.
+        ("participating", ctypes.c_int8),
+        ("_pad5", ctypes.c_int8 * 3),
     ]
 
 
@@ -418,7 +427,7 @@ _C_OFFSET_FIELDS = (
     (StaticDataC, "pbrs_nav_weight_ct", "StaticData_pbrs_nav_weight_ct_offset"),
     (StaticDataC, "wall_list", "StaticData_wall_list_offset"),
     (StaticDataC, "area_bounds", "StaticData_area_bounds_offset"),
-    (AgentStateC, "punch_yaw", "AgentState_punch_yaw_offset"),
+    (AgentStateC, "_pad5", "AgentState__pad5_offset"),
     # GameState's tail is its explicit pad array, not a "real" field. offsetof
     # on a pad is legal, and the rule is uniform: anchor the LAST field. Picking
     # bomb_is_dropped instead would miss a field slipped in between it and the
@@ -530,9 +539,17 @@ def symmetrize_rewards(rewards):
        (spec §4.3 analysis caveat).
     5. No all-zero fast path. `if not rewards.any(): return` looks free but is
        strictly harmful: measured 5000/5000 ticks carry a nonzero reward,
-       because the PBRS loop adds a term for every agent ungated by alive
-       (src/c_env/cs2_rewards.h:236-243). The guard would never fire and would
-       tax every step with an extra full-array scan.
+       because the PBRS loop adds a term for every PARTICIPATING agent, dead or
+       alive (cs2_rewards.h, the `if (!g->agents[i].participating) continue;`
+       block). The guard would never fire and would tax every step with an
+       extra full-array scan.
+    6. Rung 0 interaction: with n_active_per_team < TEAM_SIZE the parked rows
+       arrive here at exactly 0.0 but leave at -0.5*mean_opponent, because this
+       transform is row-agnostic. That is intentional — zero-sum is a property
+       of the whole vector — and harmless because the trainer masks parked rows
+       out of every loss and statistic via AgentState.participating. Do NOT
+       "fix" it by skipping parked rows: that reintroduces the same
+       non-cancellation PITFALL 1 describes.
     """
     mean_t = rewards[:TEAM_SIZE].mean()
     mean_ct = rewards[TEAM_SIZE:].mean()
@@ -588,6 +605,9 @@ class Cs2Env(pufferlib.PufferEnv):
             include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)  # noqa: E501
             reward_symmetrize: bool = False,                                    # spec 2026-08-01 §4.3  # noqa: E501
             recoil: bool = False,                                               # #120: punch on ray; default off (today's hitscan)  # noqa: E501
+            n_active_per_team: int = TEAM_SIZE,                                 # Rung 0 §2.1: agents per team that spawn  # noqa: E501
+            pin_pitch: int = 0,                                                 # Rung 0 R0-E.2: ignore pitch action  # noqa: E501
+            crouch_enabled: int = 1,                                            # Rung 0 R0-E.2: mask crouch when 0  # noqa: E501
     ):
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
@@ -677,6 +697,20 @@ class Cs2Env(pufferlib.PufferEnv):
             dir_facing,
         ]
 
+        # Rung 0 (spec 2026-08-29 §2.1): validate BEFORE binding.init. env_init
+        # asserts the same range in C, and a failed C assert aborts the whole
+        # process — inside a Puffer worker that is a silent death with no
+        # traceback. Raising here turns a bad training config into an ordinary
+        # Python error. pin_pitch / crouch_enabled are flags, so any truthy
+        # value normalises to 1 rather than being rejected.
+        n_active_per_team = int(n_active_per_team)
+        if not 1 <= n_active_per_team <= TEAM_SIZE:
+            raise ValueError(f"n_active_per_team must be in 1..{TEAM_SIZE}, "
+                             f"got {n_active_per_team}")
+        self.n_active_per_team = n_active_per_team
+        self.pin_pitch = int(bool(pin_pitch))
+        self.crouch_enabled = int(bool(crouch_enabled))
+
         # Call binding.init() — positional order matches C format string.
         # T2 (verticality): centroids_z inserted at pos 4 (after centroid_xy);
         # is_ramp_int8 inserted at pos 8 (after bombsite_by_idx).
@@ -752,21 +786,37 @@ class Cs2Env(pufferlib.PufferEnv):
             float(pbrs_bomb_progress_weight),                          # 66
             float(pbrs_nav_weight_t),                                  # 67
             float(pbrs_nav_weight_ct),                                 # 68
+            n_active_per_team,                                         # 69: Rung 0
+            self.pin_pitch,                                            # 70: Rung 0
+            self.crouch_enabled,                                       # 71: Rung 0
         )
 
         # ctypes overlay of the C-allocated Dust2Env (tests + snapshot only)
         # BindingEnv has env as first field, so capsule ptr == &env
         env_ptr = _PyCapsule_GetPointer(self._capsule, None)
         self._c_env = Dust2EnvC.from_address(env_ptr)
+
+        # Rung 0 §2.2: every env (workers AND the parent driver_env, which is
+        # never reset) proves the C side saw the same knob the trainer will mask
+        # rows by. Read sd, not game.agents — __init__ never resets, so
+        # `participating` is still all-zero here. RuntimeError, not assert:
+        # python -O strips asserts and this guard runs outside the test suite
+        # (same reason as the import-time layout guard above).
+        _sc = binding.static_data_scalars(self._capsule)
+        if _sc["n_active_per_team"] != n_active_per_team:
+            raise RuntimeError(
+                f"C StaticData.n_active_per_team is {_sc['n_active_per_team']}, expected "
+                f"{n_active_per_team} — binding.init's FMT string and the call above disagree")
+
         # Sim recoil v1 (#120): write AFTER the overlay, not via binding.init
-        # (69-arg FMT is a footgun; do not extend it). env_init memsets
+        # (the 72-arg FMT is a footgun; extend it only at the tail). env_init memsets
         # Dust2Env so this starts 0; env_reset memsets GameState only, so the
         # flag survives reset. Train / Modal stay off unless a later card
         # passes recoil=True into make_env.
         self._c_env.recoil_enabled = 1 if recoil else 0
 
-        # Room AABB for ramp interpolation. Not a binding.init arg (69-arg FMT
-        # stays frozen). make_simple_map fills area_bounds from SIMPLE_ROOMS;
+        # Room AABB for ramp interpolation. Not a binding.init arg (it is a
+        # pointer into a Python-owned buffer, not a scalar). make_simple_map fills area_bounds from SIMPLE_ROOMS;
         # make_cs2_map leaves None so interpolation stays centroids_z.
         # Ownership: `ab` stays in self._refs for the life of this Cs2Env and C
         # only borrows the pointer. Dropping that ref while the env is alive
@@ -1191,6 +1241,9 @@ def make_env(
         include_step_stats_in_info: bool = False,                      # Task 6a (utof/cs2rl#7)
         reward_symmetrize: bool = False,                               # spec 2026-08-01 §4.3
         recoil: bool = False,                                          # #120: punch on ray; default off
+        n_active_per_team: int = TEAM_SIZE,                            # Rung 0 §2.1: agents per team that spawn
+        pin_pitch: int = 0,                                            # Rung 0 R0-E.2: ignore pitch action
+        crouch_enabled: int = 1,                                       # Rung 0 R0-E.2: mask crouch when 0
 ):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
@@ -1235,4 +1288,7 @@ def make_env(
         include_step_stats_in_info=include_step_stats_in_info,
         reward_symmetrize=reward_symmetrize,
         recoil=recoil,
+        n_active_per_team=n_active_per_team,
+        pin_pitch=pin_pitch,
+        crouch_enabled=crouch_enabled,
     )

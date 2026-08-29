@@ -159,6 +159,11 @@ static void compute_rewards(Dust2Env* env,
          * timed_out (and per-agent rewards) for outcome metrics, not this
          * accumulator. */
         for (int i = 0; i < N_AGENTS; i++) {
+            /* Rung 0: parked slots are not on the team — no payout. This loop
+             * deliberately ignores `alive` (see PITFALL above), so it needs
+             * its own participating guard. */
+            if (!g->agents[i].participating)
+                continue;
             float w          = (g->agents[i].team == 0) ? t_mag : ct_mag;
             env->rewards[i] += w;
             ss->reward_win  += w;
@@ -236,6 +241,11 @@ static void compute_rewards(Dust2Env* env,
         phi_after[0] = _potential(env, 0);
         phi_after[1] = _potential(env, 1);
         for (int i = 0; i < N_AGENTS; i++) {
+            /* Rung 0: ungated by alive on purpose (dead agents still feel
+             * team potential), but parked rows must not — they would inflate
+             * reward_pbrs by (TEAM_SIZE / n_active)x. */
+            if (!g->agents[i].participating)
+                continue;
             float pbrs =
                 sd->pbrs_gamma * phi_after[g->agents[i].team] - phi_before[g->agents[i].team];
             env->rewards[i] += pbrs;

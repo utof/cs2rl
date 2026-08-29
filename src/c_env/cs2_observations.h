@@ -283,8 +283,9 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
             }
             obs[gb + 10] = defuse_prog;
         }
-        obs[gb + 11] = t_alive / (float)TEAM_SIZE;
-        obs[gb + 12] = ct_alive / (float)TEAM_SIZE;
+        /* Rung 0: normalise by the ACTIVE team size so 1v1 reads 1.0, not 0.2. */
+        obs[gb + 11] = t_alive / (float)sd->n_active_per_team;
+        obs[gb + 12] = ct_alive / (float)sd->n_active_per_team;
 
         /* Batch 2: round-fixed designated-carrier role bit (T-side semantic).
          * 1.0 only when this agent is the round's designated bomb carrier

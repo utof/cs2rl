@@ -243,6 +243,26 @@ typedef struct {
     float pbrs_bomb_progress_weight;   /* bomb-closeness scale in _potential */
     float pbrs_nav_weight_t;           /* T-side nav approach weight */
     float pbrs_nav_weight_ct;          /* CT-side nav approach weight */
+    /* Rung 0 (spec 2026-08-29 §2.1 / R0-E.2): sim-level knobs, all int32,
+     * FMT "iii" at positions 69-71. Inserted BEFORE wall_list so the two
+     * pointer-ish tail fields stay last and their offsets move together on
+     * both sides (StaticDataC mirrors this same position).
+     *   n_active_per_team — agents per team that spawn (1..TEAM_SIZE). Slots
+     *                       >= n are "parked": participating=0, alive=0,
+     *                       area_idx=INVALID_AREA_IDX, enemy_mem_idx[*]=
+     *                       INVALID_AREA_IDX (NOT the zero-init value, which
+     *                       is a valid area); env_init asserts >= 1.
+     *   pin_pitch         — 1 => continuous_actions[i*AIM_DIM+1] is ignored,
+     *                       a->pitch stays 0 (flat maps; R0-E.2). Declared
+     *                       here in Rung 0; the consumer lands in a later task.
+     *   crouch_enabled    — 0 => compute_masks masks HEAD_CROUCH bin 1.
+     *                       Declared here; the consumer lands in a later task.
+     * PITFALL: cs2_demo.c load_nav_data memsets StaticData and assigns by
+     * name — it must set n_active_per_team=TEAM_SIZE, pin_pitch=0 and
+     * crouch_enabled=1 or the demo silently parks everyone / disables crouch. */
+    int32_t n_active_per_team;
+    int32_t pin_pitch;
+    int32_t crouch_enabled;
     /* Baked solid faces (cs2_solids.h). build_solids_from_rooms() is the ONLY
      * allocation site; env_close() and c_close() both free it via free_solids.
      * Per-env: binding.c puts Dust2Env and StaticData in one calloc, so this
@@ -309,6 +329,18 @@ typedef struct {
      * aim_rad, or stored pitch — add them at the ray / look site only. */
     float punch_pitch;
     float punch_yaw;
+    /* Rung 0 (spec 2026-08-29 §2.1): 1 for the n_active_per_team slots per team
+     * that spawned this round, 0 for parked slots. Written by spawn_team for
+     * active slots and by env_reset for parked ones, right after the two
+     * spawn_team calls. Read by the deliberately alive-AGNOSTIC loops in
+     * cs2_rewards.h (terminal win payout, PBRS), which would otherwise pay a
+     * parked row as a team member.
+     * PITFALL: `participating` is NOT redundant with `alive`. A parked slot and
+     * a killed slot are both alive=0, but only the killed one is owed team
+     * reward. Any new loop that ignores `alive` on purpose must gate on this.
+     * PITFALL: explicit pad — AgentStateC mirrors both this and _pad5. */
+    int8_t participating;
+    int8_t _pad5[3];
 } AgentState;
 
 /* ── Game state ── */
@@ -431,7 +463,7 @@ typedef struct {
     struct Client* client;
     /* Sim recoil v1 (#120): env-wide physics switch, after client.
      * 0 = today's hitscan (train / make_env default); 1 = punch on the hit ray
-     * (cs2_demo). Not a binding.init argument — that 69-arg FMT is a footgun.
+     * (cs2_demo). Not a binding.init argument — that 72-arg FMT is a footgun.
      * make_env writes this after Dust2EnvC.from_address. env_reset memsets
      * GameState only, so the flag survives mid-round reset. */
     int32_t recoil_enabled;

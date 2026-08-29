@@ -78,38 +78,43 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
     float reward_win_t_detonation, reward_win_t_elimination;
     float reward_win_ct_defuse, reward_win_ct_timeout, reward_win_ct_elimination;
 
-    /* 69-arg format string — positions match StaticDataC._fields_ order from cs2_env.py.
+    /* Rung 0 (spec 2026-08-29 §2.1 / R0-E.2): sim knobs. `int`, not int32_t —
+     * PyArg_ParseTuple's "i" writes an int and nothing else is safe here. */
+    int n_active_per_team, pin_pitch, crouch_enabled;
+
+    /* 72-arg format string — positions match StaticDataC._fields_ order from cs2_env.py.
      * T2 (verticality): added centroids_z_o after centroid_xy_o (pos 4) and is_ramp_o
      * after bombsite_by_idx_o (pos 8), for 10 O args total instead of 8.
      * Total: 10O + 4i + 8f + i + 2f + 6i + 2f + 2i + f + 4O + i + O + i + f + I + f
-     *      + f(reward_win) + 5f(Batch1) + 17f(Phase5-rest) = 69 args.
+     *      + f(reward_win) + 5f(Batch1) + 17f(Phase5-rest) + 3i(Rung 0) = 72 args.
      * CRITICAL: positions must stay in sync with StaticDataC._fields_ in cs2_env.py
      * and StaticData in cs2_types.h — mismatch silently corrupts pointer assignments. */
     static const char FMT[] =
-        "OOOOOO"             /* 0-5:  vis_matrix, raster_grid, adjacency, centroid_xy,
-                                       centroids_z, area_ids */
-        "OOOO"               /* 6-9:  bombsite_mask, bombsite_by_idx, is_ramp, bombsite_dist */
-        "iiii"               /* 10-13: N, grid_w, grid_h, max_area_id */
-        "ffffffff"           /* 14-21: grid_x_min, grid_y_min, grid_inv_cell,
-                                        inv_x_range, inv_y_range, x_offset, y_offset, bombsite_dist_scale */
-        "i"                  /* 22: laser_damage */
-        "ff"                 /* 23-24: laser_range, laser_range_sq */
-        "iiiiii"             /* 25-30: shoot_cooldown, bomb_plant_time, bomb_defuse_time,
-                                        bomb_defuse_kit, bomb_timer, round_time */
-        "ff"                 /* 31-32: footstep_radius_sq, gunshot_radius_sq */
-        "ii"                 /* 33-34: enemy_memory_ticks, stale_memory_tick */
-        "f"                  /* 35: pbrs_gamma */
-        "OOOO"               /* 36-39: delta_x, delta_y, dir_facing, t_spawns (all arrays) */
-        "i"                  /* 40: n_t_spawns */
-        "O"                  /* 41: ct_spawns (array) */
-        "i"                  /* 42: n_ct_spawns */
-        "f"                  /* 43: max_turn_speed */
-        "I"                  /* 44: seed (unsigned int) */
-        "f"                  /* 45: team_spirit */
-        "f"                  /* 46: reward_win (legacy symmetric) */
-        "fffff"              /* 47-51: Batch 1 per-mechanism win magnitudes */
-        "fffffffffffffffff"; /* 52-68: 17 remaining Phase-5 reward weights
-                                        (reward_kill through pbrs_nav_weight_ct) */
+        "OOOOOO"            /* 0-5:  vis_matrix, raster_grid, adjacency, centroid_xy,
+                                      centroids_z, area_ids */
+        "OOOO"              /* 6-9:  bombsite_mask, bombsite_by_idx, is_ramp, bombsite_dist */
+        "iiii"              /* 10-13: N, grid_w, grid_h, max_area_id */
+        "ffffffff"          /* 14-21: grid_x_min, grid_y_min, grid_inv_cell,
+                                       inv_x_range, inv_y_range, x_offset, y_offset, bombsite_dist_scale */
+        "i"                 /* 22: laser_damage */
+        "ff"                /* 23-24: laser_range, laser_range_sq */
+        "iiiiii"            /* 25-30: shoot_cooldown, bomb_plant_time, bomb_defuse_time,
+                                       bomb_defuse_kit, bomb_timer, round_time */
+        "ff"                /* 31-32: footstep_radius_sq, gunshot_radius_sq */
+        "ii"                /* 33-34: enemy_memory_ticks, stale_memory_tick */
+        "f"                 /* 35: pbrs_gamma */
+        "OOOO"              /* 36-39: delta_x, delta_y, dir_facing, t_spawns (all arrays) */
+        "i"                 /* 40: n_t_spawns */
+        "O"                 /* 41: ct_spawns (array) */
+        "i"                 /* 42: n_ct_spawns */
+        "f"                 /* 43: max_turn_speed */
+        "I"                 /* 44: seed (unsigned int) */
+        "f"                 /* 45: team_spirit */
+        "f"                 /* 46: reward_win (legacy symmetric) */
+        "fffff"             /* 47-51: Batch 1 per-mechanism win magnitudes */
+        "fffffffffffffffff" /* 52-68: 17 remaining Phase-5 reward weights
+                                       (reward_kill through pbrs_nav_weight_ct) */
+        "iii";              /* 69-71: n_active_per_team, pin_pitch, crouch_enabled (Rung 0) */
 
     if (!PyArg_ParseTuple(args,
                           FMT,
@@ -181,7 +186,10 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
                           &pbrs_site_weight,
                           &pbrs_bomb_progress_weight,
                           &pbrs_nav_weight_t,
-                          &pbrs_nav_weight_ct))
+                          &pbrs_nav_weight_ct,
+                          &n_active_per_team,
+                          &pin_pitch,
+                          &crouch_enabled))
         return NULL;
 
     BindingEnv* benv = (BindingEnv*)calloc(1, sizeof(BindingEnv));
@@ -272,6 +280,12 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
     sd->pbrs_bomb_progress_weight   = pbrs_bomb_progress_weight;
     sd->pbrs_nav_weight_t           = pbrs_nav_weight_t;
     sd->pbrs_nav_weight_ct          = pbrs_nav_weight_ct;
+    /* Rung 0 knobs — range-validated Python-side (Cs2Env.__init__ raises
+     * ValueError) and asserted again in env_init, which is the only guard the
+     * non-Python callers (cs2_demo.c) get. */
+    sd->n_active_per_team = n_active_per_team;
+    sd->pin_pitch         = pin_pitch;
+    sd->crouch_enabled    = crouch_enabled;
 
     env_init(&benv->env, sd, (uint32_t)seed, team_spirit);
 
@@ -458,8 +472,8 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
         (Py_ssize_t)offsetof(StaticData, wall_list),
         "StaticData_area_bounds_offset",
         (Py_ssize_t)offsetof(StaticData, area_bounds),
-        "AgentState_punch_yaw_offset",
-        (Py_ssize_t)offsetof(AgentState, punch_yaw),
+        "AgentState__pad5_offset",
+        (Py_ssize_t)offsetof(AgentState, _pad5),
         /* GameState's last field is the explicit tail pad, not a "real"
          * field. offsetof on a pad array is legal, and the rule is uniform:
          * anchor the LAST field. Picking bomb_is_dropped instead would miss
@@ -484,7 +498,7 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
  * Read every scalar StaticData field back out of a live env.
  *
  * WHAT: EVERY plain-number field of StaticData (int / int32_t / float), keyed
- * by its C field name — all 52 of them, not a curated subset. Excluded, because
+ * by its C field name — all 55 of them, not a curated subset. Excluded, because
  * they are not scalars: the pointer fields, the fixed arrays (delta_x, delta_y,
  * dir_facing, t_spawns, ct_spawns) and the nested wall_list / area_bounds,
  * which struct_sizes() covers with offsetof keys instead.
@@ -519,9 +533,10 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
  * PITFALL: add fields ONLY through the SD_INT / SD_FLOAT macros. They stringify
  * the field name, so the key and the value it carries cannot disagree. Do not
  * hand-roll a Py_BuildValue("{s:d,s:d,...}") with 52 pairs: that is the same
- * footgun as py_init's 69-arg FMT (which cs2_env.py explicitly refuses to
- * extend), where one misplaced format char silently mislabels every field after
- * it — and a key/value swap is invisible to the completeness test above. */
+ * footgun as py_init's 72-arg FMT (which cs2_env.py extends only under
+ * protest, and only at the tail), where one misplaced format char silently
+ * mislabels every field after it — and a key/value swap is invisible to the
+ * completeness test above. */
 
 /* Store `v` under `key`, stealing the reference. Returns -1 with a Python
  * exception already set if `v` is NULL (allocation failed) or the insert
@@ -635,6 +650,10 @@ static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
     SD_FLOAT(pbrs_bomb_progress_weight);
     SD_FLOAT(pbrs_nav_weight_t);
     SD_FLOAT(pbrs_nav_weight_ct);
+    /* Rung 0 sim knobs (FMT args 69-71). */
+    SD_INT(n_active_per_team);
+    SD_INT(pin_pitch);
+    SD_INT(crouch_enabled);
     return d;
 fail:
     Py_DECREF(d);

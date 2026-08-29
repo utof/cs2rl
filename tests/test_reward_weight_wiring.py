@@ -28,6 +28,13 @@ import pytest
 #   the start so this test does not break when Task 3 lands);
 #   recoil — physics switch (#120), not a weight. Default off so existing
 #     recipes keep today's hitscan; do not thread it through REWARD_WEIGHT_*.
+#   n_active_per_team / pin_pitch / crouch_enabled — Rung 0 sim knobs (spec
+#     2026-08-29 §2.1, R0-E.2). They change what the SIM DOES (how many agents
+#     spawn, whether pitch/crouch actions are honoured), not how it pays out, so
+#     REWARD_WEIGHT_DEFAULTS is the wrong channel: an "unflagged run is
+#     byte-identical" equality over reward scalars says nothing about them.
+#     They get their own trainer-side path (env_knobs), because the trainer must
+#     also mask parked rows out of the loss — something no reward weight needs.
 _NON_WEIGHT_PARAMS = {
     "seed",
     "team_spirit",
@@ -38,6 +45,9 @@ _NON_WEIGHT_PARAMS = {
     "include_step_stats_in_info",
     "reward_symmetrize",
     "recoil",
+    "n_active_per_team",
+    "pin_pitch",
+    "crouch_enabled",
 }
 
 

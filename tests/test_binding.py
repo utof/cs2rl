@@ -91,7 +91,14 @@ def test_agentstate_has_punch_fields():
 
     from c_env.cs2_env import AgentStateC, Dust2EnvC, GameStateC
     names = [n for n, _ in AgentStateC._fields_]
-    assert names[-2:] == ["punch_pitch", "punch_yaw"]
+    # Adjacency + order, NOT a tail slice. The punch pair stopped being the last
+    # two fields when Rung 0 (spec 2026-08-29 §2.1) appended
+    # participating/_pad5 after them, and every future appended field would
+    # break a `names[-2:]` assert again. What this test actually guards is that
+    # the pair was APPENDED and never reordered relative to each other or moved
+    # into the middle of the struct; the absolute layout is pinned by the
+    # compiler's own offsetof in tests/test_struct_sizes.py.
+    assert names.index("punch_yaw") == names.index("punch_pitch") + 1
     assert "recoil_enabled" in [n for n, _ in Dust2EnvC._fields_]
     assert hasattr(AgentStateC, "punch_pitch")
     assert hasattr(AgentStateC, "punch_yaw")
@@ -108,7 +115,8 @@ def test_agentstate_has_punch_fields():
 def test_make_env_writes_recoil_enabled(make_map):
     """make_env / Cs2Env write recoil_enabled after from_address.
 
-    Why: not a binding.init argument (69-arg FMT stays frozen). env_reset
+    Why: not a binding.init argument (the 72-arg FMT is extended only at the
+    tail, and only for StaticData scalars — this flag lives on Dust2Env). env_reset
     memsets GameState only, so the flag must be set at overlay time — a
     first-reset-only write would also work today, but would hide a later
     memset of Dust2Env. Default is today's hitscan (0).

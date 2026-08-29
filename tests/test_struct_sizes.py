@@ -87,19 +87,42 @@ _INT_KWARG_SCALARS = tuple(
     sorted(n for n, t in _STATIC_DATA_SCALARS if n in _MAKE_ENV_PARAMS and t is not ctypes.c_float))
 _NON_KWARG_SCALARS = tuple(sorted(n for n, _ in _STATIC_DATA_SCALARS if n not in _MAKE_ENV_PARAMS))
 
+# Int kwargs whose C field REJECTS the generic 101, 102, ... run below, with the
+# in-range value to use instead. Rung 0 (spec 2026-08-29 §2.1) added the first
+# three int kwargs and all three are constrained: n_active_per_team is validated
+# to 1..TEAM_SIZE (Cs2Env raises ValueError), and pin_pitch / crouch_enabled are
+# flags Cs2Env normalises with int(bool(...)), so a 101 would come back as 1 and
+# the round trip would fail on a perfectly healthy build.
+#
+# Overriding beats excluding them: an excluded field is an UNGUARDED FMT
+# position, which is the exact hole this module exists to close. Distinctness is
+# the only property the scheme needs, and 3 / 1 / 0 are pairwise distinct — a
+# transposition among the three "iii" positions is still visible.
+#
+# ADDING AN INT KWARG: if it accepts arbitrary ints, add nothing — the fallback
+# covers it automatically. If it is range- or flag-constrained, add it here;
+# test_int_sentinels_are_usable is what tells you which case you are in.
+_INT_SENTINEL_OVERRIDES = {
+    "n_active_per_team": 3,
+    "pin_pitch": 1,
+    "crouch_enabled": 0,
+}
+
 # One distinct sentinel per settable field, generated from the sorted field list
 # so a newly added field automatically gets one. Distinctness is the only
 # property that matters: it is what makes a swapped pair in py_init's FMT string
 # visible. Floats get 0.101, 0.102, ... — not exactly representable in float32,
 # hence pytest.approx on the way back (see the widening PITFALL in binding.c).
-# Ints get 101, 102, ... (none today; the branch exists so a future int kwarg is
-# covered the moment it is added rather than receiving a fractional sentinel).
+# Ints get 101, 102, ... unless _INT_SENTINEL_OVERRIDES names them.
 # Do NOT sentinel with the defaults instead: several collide
 # (reward_win_t_detonation and reward_win_ct_defuse are both 5.0, reward_death
 # and reward_plant_interrupted both 0.1), so a transposition between a colliding
 # pair would stay invisible.
 _SENTINELS = {name: 0.101 + 0.001 * i for i, name in enumerate(_FLOAT_KWARG_SCALARS)}
-_SENTINELS.update({name: 101 + i for i, name in enumerate(_INT_KWARG_SCALARS)})
+_SENTINELS.update({
+    name: _INT_SENTINEL_OVERRIDES.get(name, 101 + i)
+    for i, name in enumerate(_INT_KWARG_SCALARS)
+})
 
 # StaticData scalars that are tunables — the ones a training config sweeps.
 # Every one must stay reachable from make_env or it drops out of the sentinel
@@ -173,7 +196,7 @@ def test_struct_sizes_exposes_team_constants():
 def test_static_data_scalars_round_trip(simple_map):
     """Distinct sentinels in → same sentinels out, per named field.
 
-    This is the FMT-order guard: py_init's 69-arg PyArg_ParseTuple string is the
+    This is the FMT-order guard: py_init's 72-arg PyArg_ParseTuple string is the
     only thing tying Cs2Env's kwargs to StaticData's fields, and a transposition
     there is invisible to sizeof — two swapped floats parse fine and keep every
     size identical while feeding reward_kill into reward_death.
@@ -393,3 +416,65 @@ def test_every_tunable_scalar_is_a_make_env_kwarg():
         f"tunable StaticData scalars not exposed by make_env: {unreachable}; add them as "
         "keyword arguments to make_env and Cs2Env.__init__ so the sentinel sweep in "
         "test_static_data_scalars_round_trip covers them")
+
+
+def test_int_sentinels_are_usable():
+    """The int-sentinel table must stay live and collision-free.
+
+    WHY: _INT_SENTINEL_OVERRIDES is a hand-written map keyed by field name, so it
+    rots in two directions and both fail SILENTLY.
+      - A stale key (field renamed or dropped from make_env) simply stops
+        applying; the field it was protecting then gets 101 back and the round
+        trip fails with a confusing "expected 101, got 1" instead of pointing
+        here. Worse, if the rename landed with a same-shaped replacement, nothing
+        would point at this table at all.
+      - Two overrides sharing a value blinds the transposition check the whole
+        sentinel scheme exists for: swap those two FMT positions and every assert
+        still passes.
+    Neither is visible from test_static_data_scalars_round_trip, which only ever
+    asserts value-in == value-out.
+    """
+    stale = sorted(set(_INT_SENTINEL_OVERRIDES) - set(_INT_KWARG_SCALARS))
+    assert not stale, (
+        f"_INT_SENTINEL_OVERRIDES names non-kwarg / non-int StaticData fields: {stale}; "
+        "drop the entry or fix the name")
+    int_sentinels = [_SENTINELS[name] for name in _INT_KWARG_SCALARS]
+    assert len(set(int_sentinels)) == len(int_sentinels), (
+        f"int sentinels are not pairwise distinct: "
+        f"{dict(zip(_INT_KWARG_SCALARS, int_sentinels, strict=True))}; "
+        "a transposition between two equal-valued fields would be invisible")
+
+
+def test_static_data_scalars_round_trip_rung0_knobs(simple_map):
+    """The three Rung 0 "iii" FMT positions (69-71), read back by name.
+
+    Redundant with the sentinel sweep by construction — and deliberately so.
+    The sweep derives its kwargs from inspect.signature(make_env), so it silently
+    stops covering these the moment they leave make_env's signature (Task 4+
+    touches the same call chain). This test names them literally, so that
+    removal fails loudly. It also documents the intended tuple shape for the
+    next task: n_active is a count, the other two are flags.
+    """
+    env = make_env(map_data=simple_map, n_active_per_team=3, pin_pitch=1, crouch_enabled=0)
+    try:
+        sc = binding.static_data_scalars(env._capsule)
+        assert sc["n_active_per_team"] == 3
+        assert sc["pin_pitch"] == 1
+        assert sc["crouch_enabled"] == 0
+    finally:
+        env.close()
+
+
+def test_n_active_per_team_out_of_range_rejected(simple_map):
+    """Out-of-range n_active_per_team must raise, not abort the process.
+
+    env_init asserts 1 <= n_active_per_team <= TEAM_SIZE, and a C assert kills
+    the interpreter — which in a Puffer vecenv means a worker dying with no
+    traceback. Cs2Env therefore validates first and raises ValueError, so a bad
+    training config surfaces as a normal Python error. Both ends of the range are
+    checked: 0 is the memset-zero value (the failure mode the C assert exists
+    for) and 6 is the "someone typed the real team size wrong" case.
+    """
+    for bad in (0, 6):
+        with pytest.raises(ValueError):
+            make_env(map_data=simple_map, n_active_per_team=bad)

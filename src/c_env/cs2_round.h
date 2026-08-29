@@ -7,8 +7,24 @@ static void clear_stats(StepStats* stats) {
     stats->winner = -1;
 }
 
-static void spawn_team(GameState* g, StaticData* sd, uint32_t* rng, int team,
-                       const int32_t* spawn_list, int n_spawns, int bomb_carrier) {
+/* spawn_team: place the first n_active agents of `team` on spawn areas.
+ * Slots i >= n_active are SKIPPED ENTIRELY (no memset, no init_agent, no RNG
+ * draw) — env_reset marks them parked afterwards. Skipping the RNG draw means
+ * the xorshift32 stream differs from TEAM_SIZE spawning whenever
+ * n_active < TEAM_SIZE; bit-exactness vs. the pre-Rung-0 sim is claimed only
+ * at n_active == TEAM_SIZE (spec §6).
+ * PITFALL: the Fisher-Yates shuffle above the loop still runs over all
+ * TEAM_SIZE entries, deliberately — that keeps the n_active == TEAM_SIZE RNG
+ * stream byte-identical to the pre-Rung-0 sim. Shortening it to n_active would
+ * change the draw count and break the identity claim. */
+static void spawn_team(GameState*     g,
+                       StaticData*    sd,
+                       uint32_t*      rng,
+                       int            team,
+                       const int32_t* spawn_list,
+                       int            n_spawns,
+                       int            bomb_carrier,
+                       int            n_active) {
     int perm[TEAM_SIZE];
     for (int i = 0; i < TEAM_SIZE; i++)
         perm[i] = i;
@@ -21,7 +37,7 @@ static void spawn_team(GameState* g, StaticData* sd, uint32_t* rng, int team,
         }
     }
 
-    for (int i = 0; i < TEAM_SIZE; i++) {
+    for (int i = 0; i < n_active; i++) {
         int sidx;
         if (n_spawns >= TEAM_SIZE) {
             sidx = perm[i];
@@ -37,6 +53,7 @@ static void spawn_team(GameState* g, StaticData* sd, uint32_t* rng, int team,
         a->area_idx = area_idx;
 
         init_agent(a, team, i, bomb_carrier, rng, sd);
+        a->participating = 1;
     }
 }
 
