@@ -364,37 +364,70 @@ class Dust2EnvC(ctypes.Structure):
 #
 # If one of these raises at import time the MIRROR is wrong, not the assert —
 # fix _fields_ above. Adding a struct? Add a key to py_struct_sizes() in
-# binding.c and a line here; a mirror with no key is unguarded.
+# binding.c and an entry to the matching tuple below; a mirror with no key is
+# unguarded (nothing can detect that automatically — a mirror the C side never
+# names is invisible from both ends). The opposite slip IS detected: a key
+# published by binding.c and never consumed here fails the
+# _C_SIZE_KEYS_CHECKED test in tests/test_struct_sizes.py.
 #
 # Pitfall: struct_sizes() reads the CURRENTLY BUILT .so. Editing src/c_env/*.h
 # without rebuilding (`python setup.py build_ext --inplace`) compares a new
 # mirror against a stale binary — it can pass on a broken tree or fail on a
 # correct one. Rebuild first, then trust this.
 _C_SIZES = binding.struct_sizes()
-for _name, _mirror in (("AgentState", AgentStateC), ("GameState", GameStateC),
-                       ("StepStats", StepStatsC), ("Dust2Env", Dust2EnvC),
-                       ("StaticData", StaticDataC), ("WallList", WallListC), ("Wall", WallC)):
+# fmt: off  -- one pair per line; YAPF repacks these into unreadable columns
+# (struct_sizes() key -> ctypes mirror) — sizeof pairs.
+_C_SIZE_MIRRORS = (
+    ("AgentState", AgentStateC),
+    ("GameState", GameStateC),
+    ("StepStats", StepStatsC),
+    ("Dust2Env", Dust2EnvC),
+    ("StaticData", StaticDataC),
+    ("WallList", WallListC),
+    ("Wall", WallC),
+)
+# (StaticData field -> struct_sizes() key) — offsetof pairs. wall_list and
+# area_bounds are appended after a long run of float reward weights, so a field
+# inserted anywhere before them shifts both and silently repoints every
+# Python-side walls[i] read. Sizes alone would not notice: swapping two
+# same-width fields keeps sizeof identical.
+_C_OFFSET_FIELDS = (
+    ("pbrs_nav_weight_ct", "StaticData_pbrs_nav_weight_ct_offset"),
+    ("wall_list", "StaticData_wall_list_offset"),
+    ("area_bounds", "StaticData_area_bounds_offset"),
+)
+# (struct_sizes() key -> Python value) — bare macros nav.py re-declares in
+# Python. Pin them to the header: the reward views below slice
+# rewards[:TEAM_SIZE], so a drift would mis-attribute every team-spirit term
+# rather than crash.
+_C_MACROS = (
+    ("TEAM_SIZE", TEAM_SIZE),
+    ("N_AGENTS", N_AGENTS),
+)
+# fmt: on
+
+for _name, _mirror in _C_SIZE_MIRRORS:
     assert _C_SIZES[_name] == ctypes.sizeof(_mirror), (
         f"{_name}C size mismatch: ctypes {ctypes.sizeof(_mirror)} vs C {_C_SIZES[_name]}")
 del _name, _mirror
-# StaticData tail offsets. wall_list/area_bounds are appended after a long run
-# of float reward weights, so a field inserted anywhere before them shifts both
-# and silently repoints every Python-side walls[i] read. Sizes alone would not
-# notice: swapping two same-width fields keeps sizeof identical.
-for _field, _key in (("pbrs_nav_weight_ct", "StaticData_pbrs_nav_weight_ct_offset"),
-                     ("wall_list", "StaticData_wall_list_offset"),
-                     ("area_bounds", "StaticData_area_bounds_offset")):
+for _field, _key in _C_OFFSET_FIELDS:
     assert getattr(StaticDataC, _field).offset == _C_SIZES[_key], (
         f"StaticDataC.{_field} offset mismatch: ctypes "
         f"{getattr(StaticDataC, _field).offset} vs C {_C_SIZES[_key]}")
 del _field, _key
-# nav.py re-declares the team-size macros in Python (its TEAM_SIZE / N_AGENTS).
-# Pin them to the header: the reward views below slice rewards[:TEAM_SIZE], so a drift
-# would mis-attribute every team-spirit term rather than crash.
-assert TEAM_SIZE == _C_SIZES["TEAM_SIZE"], (
-    f"TEAM_SIZE mismatch: nav {TEAM_SIZE} vs C {_C_SIZES['TEAM_SIZE']}")
-assert N_AGENTS == _C_SIZES["N_AGENTS"], (
-    f"N_AGENTS mismatch: nav {N_AGENTS} vs C {_C_SIZES['N_AGENTS']}")
+for _macro, _py_value in _C_MACROS:
+    assert _py_value == _C_SIZES[_macro], (
+        f"{_macro} mismatch: nav {_py_value} vs C {_C_SIZES[_macro]}")
+del _macro, _py_value
+
+# Every struct_sizes() key this module actually compares, derived from the three
+# tuples above rather than re-listed by hand (a hand-written copy would be the
+# next thing to rot). tests/test_struct_sizes.py asserts
+# set(binding.struct_sizes()) == _C_SIZE_KEYS_CHECKED, which turns "published a
+# key in binding.c and forgot to consume it here" from a silent unguarded field
+# into a failing test. Exported for that test; nothing in the sim reads it.
+_C_SIZE_KEYS_CHECKED = frozenset([_n for _n, _ in _C_SIZE_MIRRORS] +
+                                 [_k for _, _k in _C_OFFSET_FIELDS] + [_m for _m, _ in _C_MACROS])
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer

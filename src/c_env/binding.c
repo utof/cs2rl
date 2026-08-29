@@ -397,10 +397,20 @@ static PyObject* py_get_masks(PyObject* self, PyObject* args) {
  * drift into a confusing assert about the wrong number. These values come from
  * the same compiler invocation that laid the structs out, so they cannot lie.
  *
+ * KEY NAMING — three conventions, do not invent a fourth:
+ *   "<Struct>"                 -> sizeof(<Struct>)             e.g. "StaticData"
+ *   "<Struct>_<field>_offset"  -> offsetof(<Struct>, <field>)   e.g.
+ *                                 "StaticData_wall_list_offset"
+ *   "<MACRO>"                  -> a bare cs2_types.h macro      e.g. "TEAM_SIZE"
+ *
  * PITFALL: append a key here for every struct/macro a ctypes mirror depends on
- * — a struct with no key here is unguarded. Keys are compared in cs2_env.py at
- * import time and in tests/test_struct_sizes.py. Sizes use the "n" (Py_ssize_t)
- * format because sizeof yields size_t; the macros use "i" (plain int). */
+ * — a struct with no key here is unguarded. The converse is enforced, not just
+ * asked for: every key published here MUST be consumed by the _C_SIZES guard in
+ * cs2_env.py, because test_struct_sizes_keys_are_all_consumed (in
+ * tests/test_struct_sizes.py) asserts set(struct_sizes()) == _C_SIZE_KEYS_CHECKED.
+ * A key added here and never compared there fails that test instead of sitting
+ * unguarded. Sizes use the "n" (Py_ssize_t) format because sizeof yields size_t;
+ * the macros use "i" (plain int). */
 static PyObject* py_struct_sizes(PyObject* self, PyObject* args) {
     (void)self;
     (void)args;
@@ -435,16 +445,24 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* args) {
 }
 
 /* ── binding.static_data_scalars(capsule) -> dict ──
- * Read scalar StaticData fields back out of a live env.
+ * Read every scalar StaticData field back out of a live env.
  *
- * WHAT: the subset of StaticData that is a plain number (no pointers, no
- * arrays), keyed by C field name.
+ * WHAT: EVERY plain-number field of StaticData (int / int32_t / float), keyed
+ * by its C field name — all 52 of them, not a curated subset. Excluded, because
+ * they are not scalars: the pointer fields, the fixed arrays (delta_x, delta_y,
+ * dir_facing, t_spawns, ct_spawns) and the nested wall_list / area_bounds,
+ * which struct_sizes() covers with offsetof keys instead.
+ *
+ * That completeness is ENFORCED, not merely documented:
+ * test_static_data_scalars_covers_every_scalar_field in
+ * tests/test_struct_sizes.py compares this dict's key set against the
+ * scalar-typed fields of the StaticDataC ctypes mirror. Appending a field to
+ * cs2_types.h + the mirror and forgetting this function fails that test.
  *
  * WHY: struct_sizes() cannot detect a mis-ordered PyArg_ParseTuple FMT string
  * in py_init — two floats swapped still parse, still have identical sizes, and
  * silently feed reward_kill into reward_death. Tests push distinct sentinels
  * through Cs2Env and read them back here, so a transposition fails loudly.
- * Extend this dict for every new scalar added to StaticData.
  *
  * PITFALL: the capsule must be cast to BindingEnv*, NOT Dust2Env*. py_reset /
  * py_step / py_get_masks cast to Dust2Env* because env is BindingEnv's first
@@ -453,8 +471,43 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* args) {
  * then read whatever follows the env. The capsule is created unnamed
  * (PyCapsule_New(benv, NULL, ...) in py_init), hence the NULL name below.
  *
- * PITFALL: floats are widened to double for Py_BuildValue's "d"; comparisons
- * on the Python side must use pytest.approx, since e.g. 0.123f != 0.123. */
+ * PITFALL: floats are widened to double for PyFloat_FromDouble; comparisons on
+ * the Python side must use pytest.approx, since e.g. 0.123f != 0.123.
+ *
+ * PITFALL: add fields ONLY through the SD_INT / SD_FLOAT macros. They stringify
+ * the field name, so the key and the value it carries cannot disagree. Do not
+ * hand-roll a Py_BuildValue("{s:d,s:d,...}") with 52 pairs: that is the same
+ * footgun as py_init's 69-arg FMT (which cs2_env.py explicitly refuses to
+ * extend), where one misplaced format char silently mislabels every field after
+ * it — and a key/value swap is invisible to the completeness test above. */
+
+/* Store `v` under `key`, stealing the reference. Returns -1 with a Python
+ * exception already set if `v` is NULL (allocation failed) or the insert
+ * failed, so callers only ever have to test the return value.
+ * Helper for SD_INT / SD_FLOAT; nothing else should call it. */
+static int sd_dict_set(PyObject* d, const char* key, PyObject* v) {
+    if (!v)
+        return -1;
+    int rc = PyDict_SetItemString(d, key, v);
+    Py_DECREF(v);
+    return rc;
+}
+
+/* #f stringifies the field name, so key and value are the same token — a
+ * transposition inside this function is impossible by construction.
+ * Casts are explicit (int32_t -> long, float -> double) rather than relying on
+ * the implicit conversion, matching the style of the rest of this file. */
+#define SD_INT(f)                                                                                  \
+    do {                                                                                           \
+        if (sd_dict_set(d, #f, PyLong_FromLong((long)sd->f)) < 0)                                  \
+            goto fail;                                                                             \
+    } while (0)
+#define SD_FLOAT(f)                                                                                \
+    do {                                                                                           \
+        if (sd_dict_set(d, #f, PyFloat_FromDouble((double)sd->f)) < 0)                             \
+            goto fail;                                                                             \
+    } while (0)
+
 static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
     (void)self;
     PyObject* cap;
@@ -466,28 +519,76 @@ static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
         return NULL;
     }
     const StaticData* sd = &benv->sd;
-    return Py_BuildValue("{s:i,s:d,s:d,s:i,s:d,s:d,s:d,s:d,s:d,s:d}",
-                         "round_time",
-                         sd->round_time,
-                         "laser_range",
-                         (double)sd->laser_range,
-                         "laser_range_sq",
-                         (double)sd->laser_range_sq,
-                         "laser_damage",
-                         sd->laser_damage,
-                         "max_turn_speed",
-                         (double)sd->max_turn_speed,
-                         "pbrs_gamma",
-                         (double)sd->pbrs_gamma,
-                         "reward_kill",
-                         (double)sd->reward_kill,
-                         "reward_death",
-                         (double)sd->reward_death,
-                         "reward_win_t_elimination",
-                         (double)sd->reward_win_t_elimination,
-                         "bombsite_dist_scale",
-                         (double)sd->bombsite_dist_scale);
+    PyObject*         d  = PyDict_New();
+    if (!d)
+        return NULL;
+    /* Listed in cs2_types.h declaration order so the two can be diffed
+     * top-to-bottom; the dict is unordered, only the key set is contractual. */
+    /* Nav/raster geometry (FMT args 10–21): map-derived, not tunable. */
+    SD_INT(N);
+    SD_INT(grid_w);
+    SD_INT(grid_h);
+    SD_INT(max_area_id);
+    SD_FLOAT(grid_x_min);
+    SD_FLOAT(grid_y_min);
+    SD_FLOAT(grid_inv_cell);
+    SD_FLOAT(inv_x_range);
+    SD_FLOAT(inv_y_range);
+    SD_FLOAT(x_offset);
+    SD_FLOAT(y_offset);
+    SD_FLOAT(bombsite_dist_scale);
+    /* Weapon + round timing constants, forwarded from nav.py. */
+    SD_INT(laser_damage);
+    SD_FLOAT(laser_range);
+    SD_FLOAT(laser_range_sq);
+    SD_INT(shoot_cooldown);
+    SD_INT(bomb_plant_time);
+    SD_INT(bomb_defuse_time);
+    SD_INT(bomb_defuse_kit);
+    SD_INT(bomb_timer);
+    SD_INT(round_time);
+    SD_FLOAT(footstep_radius_sq);
+    SD_FLOAT(gunshot_radius_sq);
+    SD_INT(enemy_memory_ticks);
+    SD_INT(stale_memory_tick);
+    SD_FLOAT(pbrs_gamma);
+    /* Spawn-array lengths. The arrays themselves are not scalars, so only
+     * their counts appear here; a wrong count is a buffer overrun in C. */
+    SD_INT(n_t_spawns);
+    SD_INT(n_ct_spawns);
+    SD_FLOAT(max_turn_speed);
+    /* Reward weights and PBRS coefficients (FMT args 46–68). This run of
+     * same-width floats is exactly where a transposed FMT string hides. */
+    SD_FLOAT(reward_win);
+    SD_FLOAT(reward_win_t_detonation);
+    SD_FLOAT(reward_win_t_elimination);
+    SD_FLOAT(reward_win_ct_defuse);
+    SD_FLOAT(reward_win_ct_timeout);
+    SD_FLOAT(reward_win_ct_elimination);
+    SD_FLOAT(reward_kill);
+    SD_FLOAT(reward_death);
+    SD_FLOAT(reward_bombsite_entry);
+    SD_FLOAT(reward_plant_bonus);
+    SD_FLOAT(reward_plant_base);
+    SD_FLOAT(reward_plant_progress_scale);
+    SD_FLOAT(reward_plant_interrupted);
+    SD_FLOAT(reward_defuse);
+    SD_FLOAT(reward_shot_penalty);
+    SD_FLOAT(reward_ct_survival);
+    SD_FLOAT(reward_inaction);
+    SD_FLOAT(pbrs_alive_weight);
+    SD_FLOAT(pbrs_hp_weight);
+    SD_FLOAT(pbrs_site_weight);
+    SD_FLOAT(pbrs_bomb_progress_weight);
+    SD_FLOAT(pbrs_nav_weight_t);
+    SD_FLOAT(pbrs_nav_weight_ct);
+    return d;
+fail:
+    Py_DECREF(d);
+    return NULL;
 }
+#undef SD_INT
+#undef SD_FLOAT
 
 static PyMethodDef binding_methods[] = {
     {"init", py_init, METH_VARARGS, "Init env, return capsule"},
