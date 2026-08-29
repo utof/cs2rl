@@ -99,6 +99,9 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--eval": 0,
     "--checkpoint": 1,
     "--resume": 1,
+    "--resume-run": 1,                                 # R0-C (#134) full-state resume
+    "--run-id": 1,
+    "--checkpoint-interval": 1,
     "--timesteps": 1,
     "--num_envs": 1,
     "--seed": 1,
@@ -164,6 +167,8 @@ LIVE_TRAIN_OPTIONS = frozenset(LIVE_TRAIN_OPTION_ARITY)
 RUNNER_OWNED_TRAIN_FLAGS = frozenset({
     "--train",
     "--resume",
+    "--resume-run",                                    # R0-C: local run-dir resume — the runner owns paths/ids
+    "--run-id",
     "--name",
     "--checkpoint-dir",
     "--checkpoint_dir",

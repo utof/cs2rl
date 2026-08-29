@@ -48,6 +48,21 @@ def test_train_help_shows_current_cli():
         assert legacy_flag not in result.stdout, f"{legacy_flag} should not be exposed anymore"
 
 
+def test_dump_config_without_checkpoint_dir_uses_default(tmp_path):
+    """R0-C made --checkpoint-dir default=None; --dump-config must still resolve
+    it to CHECKPOINTS_DIR instead of crashing on Path(None). CHECKPOINTS_DIR is
+    cwd-relative (src/paths.py: Path("outputs") / "checkpoints"), so running
+    with cwd=tmp_path keeps the write out of the repo. sys.executable (not
+    `uv run`) because uv would not find the project from a tmp cwd."""
+    r = subprocess.run([sys.executable, str(TRAIN_SCRIPT), "--dump-config"],
+                       capture_output=True,
+                       text=True,
+                       timeout=120,
+                       cwd=tmp_path)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert (tmp_path / "outputs" / "checkpoints" / "config.json").exists(), r.stdout
+
+
 def test_dump_config_writes_json(tmp_path):
     """--dump-config writes <checkpoint_dir>/config.json and exits without training.
 

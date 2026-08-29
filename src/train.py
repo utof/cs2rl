@@ -601,6 +601,220 @@ def _atomic_save_state_dict(state_dict, path):
     os.replace(tmp, path)
 
 
+# ── R0-C (#134): full-state checkpoint / resume ───────────────────────────
+# PufferLib 3.0 saves model + optimizer + step counters (pufferl.py
+# save_checkpoint) and ships NO loader. Everything train.py layers on top
+# (SAC-α, LR scheduler, return normaliser, warm-start machine, self-play pool,
+# RNGs) lives here in a third file, train_state.pt, next to PufferLib's two.
+# Budget keys are allowlisted ON PURPOSE: the whole point of --resume-run is
+# `while trainer.epoch < trainer.total_epochs` (train()) continuing past a
+# crash, and run_rung1.sh's retry loop must be able to extend --timesteps.
+# check_resume_config prints a WARN line for every allowlisted key that changed.
+# PITFALL: n_active_per_team is deliberately NOT allowlisted — it changes the
+# unit of global_step (participating agent-steps) and the participating buffer
+# layout, so a resumed run under a different value would be nonsense.
+RESUME_CONFIG_ALLOWLIST = frozenset(
+    {"data_dir", "device", "seed", "run_id", "total_timesteps", "participating_timesteps"})
+# Trainer attrs of the warm-start entropy machine + SAC target (all set in
+# _patch_trainer_with_return_norm). Plain Python scalars/None — pickled as-is.
+_WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
+                    "_batch1_log_alpha_reset_done", "_batch1_current_target_entropy",
+                    "_batch1_warmstart_h_anchor", "_batch1_warmstart_h0",
+                    "_batch1_warmstart_warn_epoch")
+
+
+def _rng_state_dict():
+    """Snapshot python/numpy/torch(+cuda) RNG states. Env xorshift32 state is
+    NOT included (lives in C; see load_full_resume's WARN)."""
+    import torch
+    st = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state()
+    }
+    if torch.cuda.is_available():
+        st["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return st
+
+
+def _rng_load_state_dict(st):
+    """Inverse of _rng_state_dict. A CUDA state saved on a GPU box is skipped
+    silently on a CPU-only resume (device is allowlisted)."""
+    import torch
+    random.setstate(st["python"])
+    np.random.set_state(st["numpy"])
+    torch.set_rng_state(st["torch_cpu"])
+    if "torch_cuda" in st and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(st["torch_cuda"])
+
+
+def collect_train_state(trainer, self_play_mgr) -> dict:
+    """Everything train.py adds on top of PuffeRL's trainer_state.pt, CPU-side
+    so the file is device-agnostic. Requires _patch_trainer_with_return_norm
+    (the _log_alpha_tensor / _alpha_optimizer / _ret_* aliases)."""
+    return {
+        "log_alpha": trainer._log_alpha_tensor.detach().cpu().clone(),
+        "alpha_optimizer": trainer._alpha_optimizer.state_dict(),
+                                                                       # CosineAnnealingLR is stepped per epoch, not a fn of global_step;
+                                                                       # its T_max is overridden on restore (see restore_train_state).
+        "scheduler": trainer.scheduler.state_dict(),
+        "ret_mean": trainer._ret_mean.detach().cpu().clone(),
+        "ret_var": trainer._ret_var.detach().cpu().clone(),
+        "ret_count": trainer._ret_count.detach().cpu().clone(),
+        "warmstart": {
+            k: getattr(trainer, k)
+            for k in _WARMSTART_ATTRS
+        },
+        "self_play": self_play_mgr.state_dict(),
+        "rng": _rng_state_dict(),
+    }
+
+
+def restore_train_state(trainer, self_play_mgr, state: dict):
+    """In-place restore of collect_train_state's dict.
+
+    PITFALL: `_ret_*` and `log_alpha` are closure-locals aliased onto the
+    trainer (_patch_trainer_with_return_norm) — copy_() into them, never
+    rebind, or the closure keeps training on its own stale copy.
+    """
+    import torch                                                       # local ON PURPOSE: train.py module scope stays torch-free
+    with torch.no_grad():
+        trainer._log_alpha_tensor.data.copy_(state["log_alpha"].to(
+            trainer._log_alpha_tensor.device))
+        trainer._ret_mean.copy_(state["ret_mean"].to(trainer._ret_mean.device))
+        trainer._ret_var.copy_(state["ret_var"].to(trainer._ret_var.device))
+        trainer._ret_count.copy_(state["ret_count"].to(trainer._ret_count.device))
+    trainer._alpha_optimizer.load_state_dict(state["alpha_optimizer"])
+                                                                       # CosineAnnealingLR.state_dict() carries T_max, so a wholesale load would
+                                                                       # re-install the OLD horizon; past it the recursive cosine (torch
+                                                                       # lr_scheduler CosineAnnealingLR.get_lr) bounces the LR back UP — a
+                                                                       # periodic LR on any allowlisted --timesteps extension. Keep
+                                                                       # last_epoch/_step_count, adopt the NEW trainer's horizon (pufferl.py:
+                                                                       # total_timesteps // batch_size). When the horizon changed, drop the LR
+                                                                       # onto the closed-form cosine at the restored epoch so the extension
+                                                                       # continues annealing from there (the recursive form scales the PREVIOUS
+                                                                       # lr, and an already-finished run sits at lr=0, which would otherwise stay
+                                                                       # 0 forever). Same-budget resumes leave the optimizer lr untouched — the
+                                                                       # round trip stays bit-exact.
+    sd = dict(state["scheduler"])
+    old_t_max, sd["T_max"] = sd["T_max"], trainer.scheduler.T_max
+    trainer.scheduler.load_state_dict(sd)
+    if old_t_max != trainer.scheduler.T_max:
+        sch = trainer.scheduler
+        for group, base in zip(trainer.optimizer.param_groups, sch.base_lrs, strict=True):
+            group["lr"] = sch.eta_min + (base - sch.eta_min) * (
+                1 + math.cos(math.pi * sch.last_epoch / sch.T_max)) / 2
+        sch._last_lr = [g["lr"] for g in trainer.optimizer.param_groups]
+    for k, v in state["warmstart"].items():
+        setattr(trainer, k, v)
+    self_play_mgr.load_state_dict(state["self_play"])
+    _rng_load_state_dict(state["rng"])
+
+
+def _install_full_checkpointing(trainer, self_play_mgr):
+    """Override PuffeRL.save_checkpoint on this instance (same MethodType
+    pattern as _patch_trainer_with_return_norm). Differences from stock:
+    no `model_path exists → return` early-out (a resumed run re-saves the
+    same epoch after loading, and a crash between the model write and the
+    state writes must not freeze the state files), atomic writes for all
+    three files, and the train_state.pt sidecar. Still returns the model
+    path — PuffeRL.close() copies it to <data_dir>/<run_id>.pt."""
+
+    def _save_checkpoint(self):
+        run_id = self.logger.run_id
+        path = Path(self.config["data_dir"]) / run_id
+        path.mkdir(parents=True, exist_ok=True)
+        model_name = f"model_{self.epoch:06d}.pt"
+        model_path = path / model_name
+        _atomic_save_state_dict(self.uncompiled_policy.state_dict(), model_path)
+        _atomic_save_state_dict(
+            {
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "global_step": self.global_step,
+                "agent_step": self.global_step,
+                "update": self.epoch,
+                "model_name": model_name,
+                "run_id": run_id,
+            }, path / "trainer_state.pt")
+        _atomic_save_state_dict(collect_train_state(self, self_play_mgr), path / "train_state.pt")
+        return str(model_path)
+
+    trainer.save_checkpoint = types.MethodType(_save_checkpoint, trainer)
+    return trainer
+
+
+def resolve_resume_run(run_dir: Path, run_id: str | None = None) -> dict:
+    """Locate model_*.pt (max epoch) + trainer_state.pt + train_state.pt under
+    <run_dir>/<run_id>/. run_id=None ⇒ the unique subdir holding
+    trainer_state.pt (error if 0 or >1) and the id is read from
+    trainer_state.pt['run_id']. PITFALL: model_*.pt sorts lexically — the
+    zero-padded %06d name is what makes max-by-sort == max-by-epoch."""
+    import torch
+    run_dir = Path(run_dir)
+    if run_id is None:
+        cands = sorted(p.parent for p in run_dir.glob("*/trainer_state.pt"))
+        if len(cands) != 1:
+            raise SystemExit(f"[Resume] expected exactly one <run_id>/trainer_state.pt under "
+                             f"{run_dir}, found {len(cands)}: pass --run-id")
+        run_id = cands[0].name
+    d = run_dir / run_id
+    ts_path = d / "trainer_state.pt"
+    if not ts_path.exists():
+        raise SystemExit(f"[Resume] {ts_path} not found")
+    ts = torch.load(ts_path, map_location="cpu", weights_only=False)
+    models = sorted(d.glob("model_*.pt"))
+    if not models:
+        raise SystemExit(f"[Resume] no model_*.pt under {d}")
+    return {
+        "run_id": ts.get("run_id", run_id),
+        "model_path": models[-1],
+        "trainer_state_path": ts_path,
+        "train_state_path": d / "train_state.pt"
+    }
+
+
+def check_resume_config(run_dir: Path, new_cfg: dict, allow=RESUME_CONFIG_ALLOWLIST):
+    """Hard-error unless every key of the on-disk config.json equals new_cfg
+    except `allow`. Compared through the JSON round-trip (sort_keys, default=str)
+    so tuples/Paths compare the way they were written. MUST run before the
+    unconditional config.json rewrite in train()."""
+    cfg_path = Path(run_dir) / "config.json"
+    if not cfg_path.exists():
+        raise SystemExit(f"[Resume] {cfg_path} not found — cannot guard against a config change")
+    old = json.loads(cfg_path.read_text())
+    new = json.loads(json.dumps(new_cfg, sort_keys=True, default=str))
+    changed = sorted(k for k in (old.keys() | new.keys())
+                     if old.get(k, "<missing>") != new.get(k, "<missing>"))
+    for k in changed:
+        if k in allow:
+            print(
+                f"[Resume] WARN: allowlisted config key changed: {k}: {old.get(k)!r} -> {new.get(k)!r}"
+            )
+    diffs = [k for k in changed if k not in allow]
+    if diffs:
+        raise SystemExit("[Resume] config.json mismatch on non-allowlisted keys: " + ", ".join(
+            f"{k}: {old.get(k, '<missing>')!r} -> {new.get(k, '<missing>')!r}" for k in diffs))
+
+
+def load_full_resume(trainer, self_play_mgr, paths: dict) -> dict:
+    """Policy weights are loaded by the --resume path (resolve_resume_split);
+    this restores optimizer, counters and the sidecar. Returns
+    {"resumed_from_step", "epoch"}. Must run AFTER every trainer patch so the
+    aliases restore_train_state writes into exist."""
+    import torch
+    ts = torch.load(paths["trainer_state_path"],
+                    map_location=trainer.config["device"],
+                    weights_only=False)
+    trainer.optimizer.load_state_dict(ts["optimizer_state_dict"])
+    trainer.global_step = int(ts["global_step"])
+    trainer.epoch = int(ts["update"])
+    st = torch.load(paths["train_state_path"], map_location="cpu", weights_only=False)
+    restore_train_state(trainer, self_play_mgr, st)
+    print("[Resume] WARN: resume not bit-exact for env sampling (env xorshift32 state is "
+          "not checkpointed).")
+    return {"resumed_from_step": trainer.global_step, "epoch": trainer.epoch}
+
+
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
     """Return (agents_per_env, bptt_horizon, batch_size) used by both training
     and --dump-config. Single source of truth so the fingerprint dict captured
@@ -706,7 +920,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     raw_timesteps = args.timesteps * TEAM_SIZE // n_active
 
     cfg = {
-                                                       # Core PPO
+                                                                        # Core PPO
         "env": "cs2-dust2",
         "device": args.device,
         "seed": args.seed,
@@ -726,12 +940,12 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "clip_coef": 0.15,
         "vf_coef": 0.5,
         "vf_clip_coef": None,
-        "ent_coef": 0.1,                               # fallback; adaptive alpha overrides
+        "ent_coef": 0.1,                                                # fallback; adaptive alpha overrides
         "max_grad_norm": 0.5,
         "target_kl": 0.03,
         "use_rnn": True,
         "weight_decay": 1e-4,
-                                                       # Extras required by PuffeRL constructor
+                                                                        # Extras required by PuffeRL constructor
         "compile": False,
         "compile_mode": "default",
         "compile_fullgraph": False,
@@ -742,27 +956,28 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "adam_beta2": 0.999,
         "adam_eps": 1e-8,
         "anneal_lr": True,
-        "checkpoint_interval": 200,
+        "checkpoint_interval": int(getattr(args, "checkpoint_interval",
+                                           200)),                       # R0-C: --checkpoint-interval
         "data_dir": args.checkpoint_dir,
         "precision": "float32",
         "prio_alpha": 0.0,
         "prio_beta0": 1.0,
         "vtrace_rho_clip": 1.0,
         "vtrace_c_clip": 1.0,
-                                                       # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
-                                                       # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
-                                                       # warmup_steps, held constant after; consumed by the SAC-style α
-                                                       # controller via _scheduled_target_entropy. Previous hardcoded values
-                                                       # (0.7→0.5) kept the target so high the controller steered the policy
-                                                       # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
-                                                       # ≈ 2.87 nats still allows broad exploration but permits commitment.
-                                                       # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
-                                                       # _patch_trainer_with_return_norm clamps α ≥ 0.5 when H < 0.3·max;
-                                                       # a base target below the floor would make the two mechanisms fight.
+                                                                        # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
+                                                                        # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
+                                                                        # warmup_steps, held constant after; consumed by the SAC-style α
+                                                                        # controller via _scheduled_target_entropy. Previous hardcoded values
+                                                                        # (0.7→0.5) kept the target so high the controller steered the policy
+                                                                        # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
+                                                                        # ≈ 2.87 nats still allows broad exploration but permits commitment.
+                                                                        # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
+                                                                        # _patch_trainer_with_return_norm clamps α ≥ 0.5 when H < 0.3·max;
+                                                                        # a base target below the floor would make the two mechanisms fight.
         "entropy_target_warmup_frac": 0.5,
         "entropy_target_base_frac": 0.35,
         "entropy_target_warmup_steps": 10_000_000,
-                                                       # ── Warm-start entropy mode: see the comment above ──
+                                                                        # ── Warm-start entropy mode: see the comment above ──
         "warmstart_entropy": ws_entropy,
         "warmstart_grace_steps": ws_grace,
         "warmstart_ramp_steps": ws_ramp,
@@ -2376,6 +2591,12 @@ def _patch_trainer_with_return_norm(trainer):
 
     log_alpha = torch.tensor([math.log(0.1)], requires_grad=True, device=device)
     alpha_optimizer = torch.optim.Adam([log_alpha], lr=1e-4)
+    # R0-C (#134): the train_state.pt sidecar needs both; they are closure-
+    # locals, so alias them here. Restore MUST be in place
+    # (`log_alpha.data.copy_`) — rebinding the attribute would leave the
+    # closure (and alpha_optimizer's param list) on the old tensor.
+    trainer._log_alpha_tensor = log_alpha
+    trainer._alpha_optimizer = alpha_optimizer
 
     # Task 9A/9B: trainer-level state for target_entropy schedule + log_alpha
     # reset. Attached to the trainer (not closure-local) so:
@@ -3433,6 +3654,30 @@ class SelfPlayManager:
         self.opponent_team = "ct"      # CT is opponent first; T learns to attack
         self._milestone_count = 0
         self._last_save_epoch = -1
+
+    def state_dict(self) -> dict:
+        """R0-C (#134): everything a full-state resume must restore.
+
+        Paths are stringified for torch.save portability. The knobs
+        (pool_size, p_past, ...) are NOT saved — they are rebuilt from args and
+        guarded by check_resume_config via config.json.
+        """
+        return {
+            "pool": [str(p) for p in self.pool],
+            "opponent_team": self.opponent_team,
+            "_milestone_count": self._milestone_count,
+            "_last_save_epoch": self._last_save_epoch,
+        }
+
+    def load_state_dict(self, state: dict):
+        """Inverse of state_dict. Pool entries whose file vanished are dropped
+        (a later past-policy draw would crash on torch.load). opponent_team is
+        restored explicitly: rebuilt-at-default would invert every later
+        maybe_switch_teams toggle relative to the pre-crash run."""
+        self.pool = [Path(p) for p in state["pool"] if Path(p).exists()]
+        self.opponent_team = state["opponent_team"]
+        self._milestone_count = int(state["_milestone_count"])
+        self._last_save_epoch = int(state["_last_save_epoch"])
 
     def maybe_save(
         self,
@@ -4702,6 +4947,33 @@ def train(args):
         args.checkpoint_dir = str(CHECKPOINTS_DIR / resolved_name)
         print(f"[Train] Run name resolved to: {resolved_name}")
 
+    # ── R0-C (#134): --resume-run resolution (before run_label / metrics / config) ──
+    resume_run = getattr(args, "resume_run", None)
+    _resume_paths = None
+    if resume_run:
+        if getattr(args, "resume", None):
+            raise SystemExit("[Resume] --resume and --resume-run are mutually exclusive")
+        _run_dir = Path(resume_run).resolve()
+        # --checkpoint-dir has default=None in the CLI precisely so this check
+        # can tell "given" from "omitted"; None → CHECKPOINTS_DIR is resolved
+        # AFTER this block.
+        if args.checkpoint_dir is not None and Path(args.checkpoint_dir).resolve() != _run_dir:
+            raise SystemExit(f"[Resume] --checkpoint-dir {args.checkpoint_dir} disagrees with "
+                             f"--resume-run {_run_dir}")
+        args.checkpoint_dir = str(_run_dir)
+        _resume_paths = resolve_resume_run(_run_dir, getattr(args, "run_id", None))
+        args.resume = str(_resume_paths["model_path"])                 # weights go through resolve_resume_split
+        args.run_id = _resume_paths["run_id"]
+                                                                       # Config guard runs HERE, before the vecenv is built, so a knob
+                                                                       # mismatch fails in milliseconds instead of after 256 env spawns.
+                                                                       # build_train_config is pure in (args, batch dims), so this is the
+                                                                       # same dict train_config below is built from.
+        _, _g_bptt, _g_bs = compute_batch_dims(args.num_envs)
+        check_resume_config(_run_dir,
+                            build_train_config(args, batch_size=_g_bs, bptt_horizon=_g_bptt))
+    if args.checkpoint_dir is None:                                    # was the argparse default; now resolved here
+        args.checkpoint_dir = str(CHECKPOINTS_DIR)
+
     run_label = Path(args.checkpoint_dir).name
 
     # ── W&B init ────────────────────────────────────────────────────────────
@@ -4726,7 +4998,9 @@ def train(args):
     # Stamp every row with a per-process run id (label + launch timestamp;
     # the label alone is NOT unique because re-runs into the same checkpoint
     # dir share it). Old rows lack the key — segment those the legacy way.
-    run_id = f"{run_label}-{time.strftime('%Y%m%d-%H%M%S')}"
+    # R0-C: --run-id (or the id read back from trainer_state.pt on --resume-run)
+    # overrides the timestamped default so resumed rows share the id.
+    run_id = getattr(args, "run_id", None) or f"{run_label}-{time.strftime('%Y%m%d-%H%M%S')}"
 
     # Shared team spirit value — all envs read it at episode start
     shared_ts = mp.Value("f", 0.3)
@@ -4864,7 +5138,8 @@ def train(args):
         # ORDER is load-bearing (spec 2026-08-15 §3.3): σ re-init on the
         # LEGACY dict, then heads convert (needs bare aim_log_std), then
         # trunk convert. Duplicating heads first would hide the σ key.
-        if reinit_frozen_aim_log_std(state_dict):
+        # R0-C: a full-state resume restores the exact pre-crash σ — never widen.
+        if not resume_run and reinit_frozen_aim_log_std(state_dict):
             print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "
                   f"re-initialized to log(0.3) ≈ {AIM_LOG_STD_RESUME_INIT:.3f} (gh#91)")
         if tct_split_heads and not state_dict_is_split(state_dict):
@@ -4885,6 +5160,9 @@ def train(args):
               "probably not what you want).")
 
     trainer = PuffeRL(train_config, vecenv, policy)
+    # R0-C: PuffeRL's NoLogger invents a timestamp run_id; pin ours so
+    # <data_dir>/<run_id>/ matches the metrics rows and --resume-run can find it.
+    trainer.logger.run_id = run_id
     trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
     _patch_trainer_with_return_norm(trainer)
     # Batch 3 (T5): hybrid-aim patch ALWAYS runs after return_norm because the
@@ -4935,7 +5213,8 @@ def train(args):
         win_threshold=0.6,
         phase_length=50,                               # switch opponent team every ~4M steps
     )
-    if self_play_enabled and resume_path and resume_path.exists():
+                                                       # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
+    if self_play_enabled and resume_path and resume_path.exists() and not resume_run:
         import shutil as _shutil
 
         seed_path = Path(args.checkpoint_dir) / "sp_seed.pt"
@@ -4948,6 +5227,35 @@ def train(args):
               "both teams use the current policy every epoch.")
     # timing is the outermost wrapper so it sees all evaluate() calls regardless of selfplay
     _patch_trainer_with_timing(trainer)
+    # ────────────────────────────────────────────────────────────────────────
+
+    # ── R0-C (#134): full-state checkpointing + restore ─────────────────────
+    # Installed after EVERY patch so the sidecar sees the final aliases.
+    _install_full_checkpointing(trainer, self_play_mgr)
+    _resumed_from_step = None
+    if resume_run:
+        _info = load_full_resume(trainer, self_play_mgr, _resume_paths)
+        _resumed_from_step = _info["resumed_from_step"]
+        # Spec §R0-C bound vs the last metrics row (participating units): the
+        # checkpoint is at most checkpoint_interval epochs behind the last row
+        # and never more than one epoch ahead of it.
+        _B = batch_size * train_config["n_active_per_team"] // TEAM_SIZE
+        _last = None
+        if metrics_path.exists():
+            for _line in metrics_path.read_text().splitlines():
+                try:
+                    _row = json.loads(_line)
+                except json.JSONDecodeError:
+                    continue
+                if _row.get("run_id") == run_id:
+                    _last = _row.get("step", _last)
+        if _last is not None:
+            _lo, _hi = _last - train_config["checkpoint_interval"] * _B, _last + _B
+            assert _lo <= _resumed_from_step <= _hi, (
+                f"[Resume] restored global_step {_resumed_from_step} outside "
+                f"[{_lo}, {_hi}] around last metrics row {_last}")
+            print(f"[Resume] global_step {_resumed_from_step:,} (last metrics row {_last:,}, "
+                  f"gap {_resumed_from_step - _last:+,}) epoch {trainer.epoch}")
     # ────────────────────────────────────────────────────────────────────────
 
     save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
@@ -5083,6 +5391,10 @@ def train(args):
                     for k, v in logs.items() if isinstance(v, (int, float))
                 },
             }
+                                                                            # R0-C: stamp the FIRST row after a --resume-run (analysis seam marker).
+            if _resumed_from_step is not None:
+                log_entry["resumed_from_step"] = _resumed_from_step
+                _resumed_from_step = None
             _metrics_file.write(json.dumps(log_entry) + "\n")
             _metrics_file.flush()
             if wandb_run is not None:
@@ -5137,6 +5449,26 @@ if __name__ == "__main__":
         metavar="CHECKPOINT",
         help="Load policy weights from .pt file before training (optimizer state not restored)",
     )
+    parser.add_argument(
+        "--resume-run",
+        type=str,
+        default=None,
+        metavar="RUN_DIR",
+        dest="resume_run",
+        help="R0-C: full-state resume from <run_dir> (== --checkpoint-dir of the run): "
+        "policy, optimizer, step counters, α/scheduler/return-norm/warm-start/"
+        "self-play/RNG. --timesteps is the TOTAL budget, not additional.")
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        dest="run_id",
+        help="Metrics-row and <checkpoint_dir>/<run_id>/ id (default <label>-<timestamp>).")
+    parser.add_argument("--checkpoint-interval",
+                        type=int,
+                        default=200,
+                        dest="checkpoint_interval",
+                        help="Epochs between full-state checkpoints (default 200; Rung 1 uses 10).")
     parser.add_argument("--timesteps", type=int, default=10_000_000)
     parser.add_argument("--num_envs", type=int, default=256)
     parser.add_argument("--seed", type=int, default=1)
@@ -5146,8 +5478,9 @@ if __name__ == "__main__":
         "--checkpoint_dir",
         "--checkpoint-dir",
         type=str,
-        default=str(CHECKPOINTS_DIR),
+        default=None,
         dest="checkpoint_dir",
+        help="default: CHECKPOINTS_DIR; must match --resume-run when both are given",
     )
     parser.add_argument(
         "--dump-config",
@@ -5284,7 +5617,9 @@ if __name__ == "__main__":
         if args.device is None:
             args.device = "cpu"        # placeholder; never used for training
 
-        ckpt_dir = Path(args.checkpoint_dir)
+        # --checkpoint-dir defaults to None (so --resume-run can tell "given" from
+        # "omitted"); resolve here too — this block never reaches train().
+        ckpt_dir = Path(args.checkpoint_dir if args.checkpoint_dir is not None else CHECKPOINTS_DIR)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         # Shared helper with train() so the fingerprint dict can't drift.

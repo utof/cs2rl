@@ -37,11 +37,11 @@ PITFALLS:
   - Absolute t_plant levels are NOT comparable across different round caps
     (the (1-p)*cap term shifts the constant): never compare against the
     roundtime-1280 run without passing --cap 1280 for that run.
-  - Crash-resumed runs append to the same metrics.jsonl under a NEW run_id
-    with epoch reset to 0 (the box's GPU falls off the bus under thermal
-    load — resume seams are expected, not exceptional). Rows are grouped
-    by run_id and blocks NEVER span a seam, so slopes stay within-segment
-    honest. Step totals concatenate segments.
+  - Crash-resumed runs (--resume-run, R0-C) append to the same metrics.jsonl
+    under the SAME run_id; the resume replays up to checkpoint_interval
+    epochs, so (run_id, step) can repeat — dedupe_resume_rows keeps the LAST
+    row in file order. Legacy resumes (new run_id, epoch reset) still form
+    separate segments and blocks never span a seam.
   - Wall-clock is deliberately absent from the report: A2's symmetrize
     transform costs ~33µs/step, so cross-arm wall-clock comparisons are
     meaningless and pre-registered as out of scope.
@@ -161,6 +161,23 @@ def median(vals):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
+def dedupe_resume_rows(rows):
+    """Last row wins per (run_id, step) — R0-C resume replays overlap.
+
+    Position is that of the FIRST occurrence, so file order is preserved
+    while the value comes from the post-resume replay (the pre-crash rows
+    for the same step were trained on state that was then rolled back)."""
+    out, idx = [], {}
+    for row in rows:
+        key = (row.get("run_id"), row.get("step"))
+        if key in idx:
+            out[idx[key]] = row
+        else:
+            idx[key] = len(out)
+            out.append(row)
+    return out
+
+
 def segment_rows(rows):
     """Split chronological rows into per-run_id segments (resume seams).
 
@@ -194,7 +211,7 @@ def analyze_run(run_dir: Path,
     """Full per-run readout. `rows` lets a caller (main, with --tag) load
     metrics.jsonl once and reuse the SAME row objects for the tag section,
     so both readouts see identical data (and one file read)."""
-    rows = list(load_rows(run_dir)) if rows is None else rows
+    rows = dedupe_resume_rows(list(load_rows(run_dir)) if rows is None else rows)
     if not rows:
         raise ValueError(f"{run_dir}: metrics.jsonl is empty")
     segments = segment_rows(rows)
