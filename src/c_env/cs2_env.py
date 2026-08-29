@@ -492,13 +492,15 @@ _ENV_CACHE: dict = {}
 # ── Zero-sum reward symmetrization (spec 2026-08-01 §4.3) ─────────────────────
 
 
-def symmetrize_rewards(rewards):
+def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
     """Rewrite a 10-agent reward vector to be exactly zero-sum, in place.
 
     WHAT: for agent i on team A facing team B,
-        r_i' = 0.5 * ( r_i - mean_{j in B}(r_j) )
+        r_i' = 0.5 * ( r_i - mean_{j in ACTIVE(B)}(r_j) )
     Agents 0..TEAM_SIZE-1 are T, TEAM_SIZE..N_AGENTS-1 are CT (same split the
-    C CT-survival loop uses, src/c_env/cs2_rewards.h:225).
+    C CT-survival loop uses, src/c_env/cs2_rewards.h:225). Only the first
+    n_active_per_team slots of each team are read or written; the parked
+    remainder (Rung 0, spec 2026-08-29 §2.1) is left untouched at exactly 0.0.
 
     WHY: the shared self-play policy is paid for private, non-zero-sum
     per-team subsidies (the CT survival drip, the timeout-win bonus); that
@@ -512,16 +514,17 @@ def symmetrize_rewards(rewards):
     survives.
 
     PITFALLS:
-    1. The FIXED TEAM_SIZE=5 divisor is LOAD-BEARING — do not "fix" it to an
-       alive-count. Dividing each team's mean by its own alive count breaks the
-       exact zero-sum property this function exists to provide: the sum over
-       all agents is 0.5*(sum_A - 5*mean_B) + 0.5*(sum_B - 5*mean_A), and the
-       two half-terms cancel ONLY because both means are scaled by the same
-       constant. The C team_spirit loop right below the PBRS block IS
-       alive-gated (src/c_env/cs2_rewards.h:247), so mirroring it here looks
-       like the obvious consistency fix; it would silently destroy zero-sum.
+    1. The divisor is a FIXED ROSTER SIZE (n_active_per_team, TEAM_SIZE by
+       default) — do not "fix" it to a per-tick alive-count. Dividing each
+       team's mean by its own alive count breaks the exact zero-sum property
+       this function exists to provide: the sum over the 2n written rows is
+       0.5*(S_A - n*mean_B) + 0.5*(S_B - n*mean_A), and the two half-terms
+       cancel ONLY because both means are scaled by the same constant n. The
+       C team_spirit loop right below the PBRS block IS alive-gated
+       (src/c_env/cs2_rewards.h:247), so mirroring it here looks like the
+       obvious consistency fix; it would silently destroy zero-sum.
        Consequence to carry into analysis, not a wart to repair: late-round
-       with four dead CTs, the lone survivor's stall drip is attenuated to 1/5
+       with n-1 dead CTs, the lone survivor's stall drip is attenuated to 1/n
        before subtraction, so subsidy cancellation is WEAKEST exactly in the
        stall-heavy end-of-round window the A2 experiment targets (review
        finding 7).
@@ -543,18 +546,37 @@ def symmetrize_rewards(rewards):
        alive (cs2_rewards.h, the `if (!g->agents[i].participating) continue;`
        block). The guard would never fire and would tax every step with an
        extra full-array scan.
-    6. Rung 0 interaction: with n_active_per_team < TEAM_SIZE the parked rows
-       arrive here at exactly 0.0 but leave at -0.5*mean_opponent, because this
-       transform is row-agnostic. That is intentional — zero-sum is a property
-       of the whole vector — and harmless because the trainer masks parked rows
-       out of every loss and statistic via AgentState.participating. Do NOT
-       "fix" it by skipping parked rows: that reintroduces the same
-       non-cancellation PITFALL 1 describes.
+    6. Rung 0 (spec 2026-08-29 §2.1): BOTH means and BOTH written slices are
+       restricted to the n_active_per_team ACTIVE slots. Getting either half
+       of that wrong is a real bug, not a cosmetic one — the first Rung 0
+       version kept the TEAM_SIZE divisor and wrote all 10 rows, which broke
+       two things at once:
+         - PARKED rows arrived at 0.0 and left at -0.5*mean_opponent, so the
+           "parked slots get zero reward every tick" contract held only as
+           long as a trainer-side participating mask covered for it;
+         - ACTIVE rows had the opponent-mean subtraction attenuated by
+           n/TEAM_SIZE — at n=1 an agent got 0.5*(r_0 - r_5/5) where the
+           transform is defined as 0.5*(r_0 - r_5), i.e. a 5x weaker subsidy
+           cancellation. No mask repairs that: it is the UNMASKED rows that
+           are wrong.
+       Zero-sum stays EXACT in the active-only form, which is why restricting
+       the slices is the fix and not a violation of PITFALL 1: the written
+       rows sum to 0.5*(S_T - n*mean_ct) + 0.5*(S_CT - n*mean_t) =
+       0.5*(S_T - S_CT) + 0.5*(S_CT - S_T) = 0 (since n*mean_ct == S_CT and
+       n*mean_t == S_T), and the parked rows contribute 0 because they are
+       never written. What PITFALL 1 forbids is a divisor that varies per
+       TICK (an alive count), not one that is constant for the whole run.
     """
-    mean_t = rewards[:TEAM_SIZE].mean()
-    mean_ct = rewards[TEAM_SIZE:].mean()
-    rewards[:TEAM_SIZE] = 0.5 * (rewards[:TEAM_SIZE] - mean_ct)
-    rewards[TEAM_SIZE:] = 0.5 * (rewards[TEAM_SIZE:] - mean_t)
+    n = n_active_per_team
+    # Both means BEFORE either write (PITFALL 2). Sliced, not masked: at the
+    # default n == TEAM_SIZE, rewards[TEAM_SIZE:TEAM_SIZE + n] is the identical
+    # view to the old rewards[TEAM_SIZE:], so .mean() reduces in the same order
+    # and the pre-Rung-0 float results are reproduced bit for bit
+    # (tests/test_parked_agents.py::test_symmetrize_default_matches_pre_rung0_bitwise).
+    mean_t = rewards[:n].mean()
+    mean_ct = rewards[TEAM_SIZE:TEAM_SIZE + n].mean()
+    rewards[:n] = 0.5 * (rewards[:n] - mean_ct)
+    rewards[TEAM_SIZE:TEAM_SIZE + n] = 0.5 * (rewards[TEAM_SIZE:TEAM_SIZE + n] - mean_t)
     return rewards
 
 
@@ -973,7 +995,10 @@ class Cs2Env(pufferlib.PufferEnv):
             # non-external terminal snapshot (_terminal_rewards), and both
             # non-terminal cases. Terminal ticks carry the win/loss magnitudes,
             # so they MUST be symmetrized too (spec §4.3).
-            symmetrize_rewards(rewards)
+            # n_active_per_team, not TEAM_SIZE: parked rows must leave this tick
+            # at exactly 0.0, and the active rows' opponent-mean subtraction must
+            # not be attenuated by n/TEAM_SIZE (PITFALL 6 on the function).
+            symmetrize_rewards(rewards, self.n_active_per_team)
         return self.observations, rewards, terminals, truncations, infos
 
     def set_team_spirit(self, value: float):

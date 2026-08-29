@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from _obs_spec import OBS_BLOCKS
-from c_env.cs2_env import make_env
+from c_env.cs2_env import make_env, symmetrize_rewards
 
 N_AGENTS, TEAM_SIZE, AIM_DIM = 10, 5, 2
 HEAD_SIZES = (9, 2, 2, 3, 2, 2, 2)
@@ -93,5 +93,177 @@ def test_full_team_is_default_and_all_participate(simple_map):
         env.reset()
         ag = env._c_env.game.agents
         assert all(ag[i].participating == 1 and ag[i].alive == 1 for i in range(N_AGENTS))
+    finally:
+        env.close()
+
+
+# ── symmetrize_rewards × parked slots (review fix, 2026-08-29) ────────────────
+#
+# `symmetrize_rewards` is applied AFTER the C step in Cs2Env.step, so the C-side
+# `participating` guards do not protect it: it is pure Python arithmetic over the
+# full 10-row vector. Its first Rung 0 version divided both team means by the
+# constant TEAM_SIZE and wrote all 10 rows, which broke two invariants at once —
+# parked rows left at -0.5*mean_opponent instead of 0.0, and ACTIVE rows had the
+# opponent-mean subtraction attenuated by n/TEAM_SIZE (5x too weak at n=1). The
+# tests below pin both halves; see PITFALL 6 on the function for the proof that
+# restricting the means AND the writes to the active slots keeps zero-sum exact.
+
+
+def _pre_rung0_symmetrize(rewards):
+    """The exact pre-Rung-0 body of symmetrize_rewards, kept verbatim.
+
+    Exists only as the identity oracle for the n_active_per_team == TEAM_SIZE
+    path: Rung 0 must not perturb a single float of the 5v5 sim, and the
+    sim_fingerprint script cannot prove that because it never enables
+    reward_symmetrize.
+    """
+    mean_t = rewards[:TEAM_SIZE].mean()
+    mean_ct = rewards[TEAM_SIZE:].mean()
+    rewards[:TEAM_SIZE] = 0.5 * (rewards[:TEAM_SIZE] - mean_ct)
+    rewards[TEAM_SIZE:] = 0.5 * (rewards[TEAM_SIZE:] - mean_t)
+    return rewards
+
+
+def _active_slots(n):
+    """Row indices of the n active slots per team, T first then CT."""
+    return list(range(n)) + list(range(TEAM_SIZE, TEAM_SIZE + n))
+
+
+def test_symmetrize_default_matches_pre_rung0_bitwise():
+    """n_active_per_team=TEAM_SIZE must be BIT-identical, not merely close.
+
+    Threading a parameter through arithmetic is exactly the kind of change that
+    silently reassociates a float sum (e.g. by masking instead of slicing).
+    np.array_equal, not approx, is the point of this test.
+    """
+    rng = np.random.default_rng(20260829)
+    for _ in range(200):
+        raw = (rng.standard_normal(N_AGENTS) * rng.choice([1e-3, 1.0, 5.0])).astype(np.float32)
+        assert np.array_equal(symmetrize_rewards(raw.copy()), _pre_rung0_symmetrize(raw.copy()))
+        # Explicitly passing the default must be identical too.
+        assert np.array_equal(symmetrize_rewards(raw.copy(), TEAM_SIZE),
+                              _pre_rung0_symmetrize(raw.copy()))
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_symmetrize_leaves_parked_rows_at_exactly_zero(n):
+    """Unit-level: fabricated vector, parked rows must come out bitwise 0.0.
+
+    `== 0.0` (not approx): with the old TEAM_SIZE divisor these rows would read
+    -0.5*mean_opponent, e.g. -0.1 at n=2 below — an approx check with a loose
+    tolerance would have passed the bug.
+    """
+    raw = np.zeros(N_AGENTS, dtype=np.float32)
+    raw[:n] = [2.0, -1.0][:n]
+    raw[TEAM_SIZE:TEAM_SIZE + n] = [0.5, 1.5][:n]
+    out = symmetrize_rewards(raw.copy(), n)
+    parked = [i for i in range(N_AGENTS) if i % TEAM_SIZE >= n]
+    assert np.all(out[parked] == 0.0), out
+
+
+def test_symmetrize_active_rows_match_the_hand_computed_formula():
+    """n=2, known raw vector, arithmetic done by hand off the §4.3 definition.
+
+    raw T = [2.0, -1.0] -> mean_t = 0.5;  raw CT = [0.5, 1.5] -> mean_ct = 1.0
+        T:  0.5*(2.0 - 1.0) =  0.5      0.5*(-1.0 - 1.0) = -1.0
+        CT: 0.5*(0.5 - 0.5) =  0.0      0.5*( 1.5 - 0.5) =  0.5
+        sum = 0.5 - 1.0 + 0.0 + 0.5 = 0.0
+    Under the buggy TEAM_SIZE divisor (mean_ct = 2.0/5 = 0.4, mean_t = 0.2) the
+    T rows would instead be 0.8 / -0.7 — this test is what separates the two.
+    """
+    raw = np.zeros(N_AGENTS, dtype=np.float32)
+    raw[0], raw[1] = 2.0, -1.0
+    raw[TEAM_SIZE], raw[TEAM_SIZE + 1] = 0.5, 1.5
+    out = symmetrize_rewards(raw.copy(), 2)
+    assert out[0] == pytest.approx(0.5)
+    assert out[1] == pytest.approx(-1.0)
+    assert out[TEAM_SIZE] == pytest.approx(0.0)
+    assert out[TEAM_SIZE + 1] == pytest.approx(0.5)
+    assert out.sum() == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_symmetrize_is_exactly_zero_sum_at_reduced_team_size(n):
+    """Zero-sum is the whole reason this transform exists; it must survive the
+    active-slot restriction on arbitrary vectors, not just the tidy one above.
+
+    NOTE this test does NOT discriminate against the bug the block above fixes:
+    the old TEAM_SIZE-divisor form was zero-sum too (over all 10 rows). Zero-sum
+    is necessary, not sufficient — it is the property that must be PRESERVED,
+    and the parked/hand-computed tests are what catch the regression.
+    """
+    rng = np.random.default_rng(7 + n)
+    for _ in range(200):
+        raw = np.zeros(N_AGENTS, dtype=np.float32)
+        act = _active_slots(n)
+        raw[act] = (rng.standard_normal(len(act)) * 3.0).astype(np.float32)
+        out = symmetrize_rewards(raw.copy(), n)
+        assert out.sum() == pytest.approx(0.0, abs=1e-5), (raw, out)
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_symmetrized_env_parked_rows_are_zero_and_ticks_are_zero_sum(simple_map, n):
+    """End-to-end on the path the trainer runs: reward_symmetrize=True.
+
+    The pre-existing test_parked_agents_get_zero_reward_every_tick runs with the
+    default reward_symmetrize=False and therefore never touched this code.
+    """
+    env = make_env(map_data=simple_map,
+                   n_active_per_team=n,
+                   seed=5,
+                   reward_symmetrize=True,
+                   pbrs_alive_weight=0.3,
+                   pbrs_hp_weight=0.002,
+                   reward_ct_survival=0.001,
+                   reward_inaction=0.0005)
+    try:
+        env.reset()
+        rng = np.random.default_rng(1)
+        parked = [i for i in range(N_AGENTS) if i % TEAM_SIZE >= n]
+        for step_n in range(300):
+            _, rew, _, _, _ = env.step(*_random_actions(rng))
+            assert np.all(rew[parked] == 0.0), (step_n, rew)
+            assert rew.sum() == pytest.approx(0.0, abs=1e-4), (step_n, rew)
+    finally:
+        env.close()
+
+
+def test_round_rollover_reparks_the_same_slots(simple_map):
+    """Reviewer minor #4: env_reset parks slots, but auto_reset calls it again
+    mid-rollout. If the parking loop ever moved into __init__ or ran only on the
+    first reset, everything above would still pass and the second round would
+    quietly play 5v5. Drive past a real terminal and re-check the invariants on
+    the FRESH state.
+    """
+    n = 2
+    env = make_env(map_data=simple_map, n_active_per_team=n, seed=5, reward_symmetrize=True)
+    try:
+        env.reset()
+        rng = np.random.default_rng(11)
+        parked = [i for i in range(N_AGENTS) if i % TEAM_SIZE >= n]
+        # A timeout terminal is guaranteed within ROUND_TIME ticks even if the
+        # random actions never produce an elimination.
+        for step_n in range(env.round_time + 5):
+            _, rew, term, _, _ = env.step(*_random_actions(rng))
+            assert np.all(rew[parked] == 0.0), (step_n, rew)
+            if np.any(term):
+                break
+        else:
+            pytest.fail(f"no terminal within {env.round_time + 5} steps — test is not "
+                        "exercising the rollover it exists for")
+        # auto_reset=True: the observation returned above is already the fresh
+        # round's, so game.agents is the re-spawned state.
+        ag = env._c_env.game.agents
+        for i in parked:
+            assert ag[i].participating == 0, i
+            assert ag[i].alive == 0, i
+            assert ag[i].area_idx == -1, i
+            assert ag[i].team == (0 if i < TEAM_SIZE else 1), i
+        for i in _active_slots(n):
+            assert ag[i].participating == 1 and ag[i].alive == 1, i
+        # And the invariant still holds for a further stretch of the new round.
+        for step_n in range(50):
+            _, rew, _, _, _ = env.step(*_random_actions(rng))
+            assert np.all(rew[parked] == 0.0), (step_n, rew)
     finally:
         env.close()
