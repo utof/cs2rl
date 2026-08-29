@@ -79,23 +79,39 @@ static void compute_masks(Dust2Env* env) {
             m[moff[HEAD_JUMP] + 1] = 0;
         int              slot = a->weapon_slot;
         const WeaponDef* def  = &WEAPON_DEFS[slot];
+        /* R0-B (#129): this function runs at the TAIL of env_step, but the
+         * masks it writes are consumed by the NEXT env_step, whose first act
+         * is tick_weapon() — which decrements fire_cd/reload_ticks/switch_ticks
+         * BEFORE process_combat / try_start_reload / try_weapon_switch read
+         * them. Gating on the raw counter therefore reported "blocked" one
+         * tick longer than the sim enforces (rifle cycle_ticks=2 became 1 shot
+         * per 3 ticks; the first legal shot after a reload/switch was masked).
+         * So the mask must describe the POST-decrement value, max(c-1, 0):
+         * the counter is 0 next tick iff it is <= 1 now. Pitfall: has_ammo is
+         * deliberately NOT predicted — an empty-mag reload refills the clip
+         * inside tick_weapon at the zero-crossing, so ammo_clip is still 0 on
+         * the last reload tick and the shoot mask stays closed one extra tick
+         * (empty-mag T+40 vs partial-mag T+39, tests/test_fire_mask.py); that
+         * matches process_combat's dry-fire check exactly. jump_cd is never
+         * set (cs2_movement.h) and crouch_cd is not read here. */
+        int fire_cd_next = a->fire_cd > 0 ? a->fire_cd - 1 : 0;
+        int reload_next  = a->reload_ticks > 0 ? a->reload_ticks - 1 : 0;
+        int switch_next  = a->switch_ticks > 0 ? a->switch_ticks - 1 : 0;
         /* Shoot mask: gate on cooldown, reload, switch, and ammo.
          * Knife (mag_size < 0) is always shootable. */
-        int has_ammo = (def->mag_size < 0) || (a->ammo_clip[slot] > 0);
-        int can_shoot =
-            (a->fire_cd == 0 && a->reload_ticks == 0 && a->switch_ticks == 0 && has_ammo);
+        int has_ammo  = (def->mag_size < 0) || (a->ammo_clip[slot] > 0);
+        int can_shoot = (fire_cd_next == 0 && reload_next == 0 && switch_next == 0 && has_ammo);
         m[moff[HEAD_SHOOT] + 1] = (int8_t)can_shoot;
         /* Reload mask */
-        int can_reload =
-            (def->mag_size > 0 && a->ammo_clip[slot] < def->mag_size && a->ammo_reserve[slot] > 0 &&
-             a->reload_ticks == 0 && a->switch_ticks == 0);
+        int can_reload = (def->mag_size > 0 && a->ammo_clip[slot] < def->mag_size &&
+                          a->ammo_reserve[slot] > 0 && reload_next == 0 && switch_next == 0);
         m[moff[HEAD_RELOAD] + 1] = (int8_t)can_reload;
         /* Weapon switch mask: mask already-held weapon option */
         if (slot == 0)
             m[moff[HEAD_WEAPON] + 1] = 0;
         if (slot == 1)
             m[moff[HEAD_WEAPON] + 2] = 0;
-        if (a->switch_ticks > 0) {
+        if (switch_next > 0) {
             m[moff[HEAD_WEAPON] + 1] = 0;
             m[moff[HEAD_WEAPON] + 2] = 0;
         }
