@@ -16,7 +16,8 @@ def _make_env(map_data=None):
 
 
 def test_binding_functions_present():
-    for name in ("init", "reset", "step", "close", "get_buffers", "get_masks"):
+    for name in ("init", "reset", "step", "close", "get_buffers", "get_masks", "struct_sizes",
+                 "static_data_scalars"):
         assert hasattr(binding, name), f"binding.{name} missing"
 
 
@@ -95,11 +96,13 @@ def test_agentstate_has_punch_fields():
     assert hasattr(AgentStateC, "punch_pitch")
     assert hasattr(AgentStateC, "punch_yaw")
     assert hasattr(Dust2EnvC, "recoil_enabled")
-    # Measured C sizeof (zig cc printf TU against cs2_types.h). Dust2Env 6832
-    # = old 6744 +80 (agents) +4 (flag) +4 (trailing pad to 8-byte align).
-    assert ctypes.sizeof(AgentStateC) == 164
-    assert ctypes.sizeof(GameStateC) == 1708
-    assert ctypes.sizeof(Dust2EnvC) == 6832
+    # Sizes come from binding.struct_sizes() — the C compiler's own sizeof —
+    # not from literals measured by hand with a printf TU (see
+    # tests/test_struct_sizes.py).
+    sizes = binding.struct_sizes()
+    assert ctypes.sizeof(AgentStateC) == sizes["AgentState"]
+    assert ctypes.sizeof(GameStateC) == sizes["GameState"]
+    assert ctypes.sizeof(Dust2EnvC) == sizes["Dust2Env"]
 
 
 def test_make_env_writes_recoil_enabled(make_map):
@@ -133,9 +136,11 @@ def test_make_env_writes_recoil_enabled(make_map):
 def test_stepstats_has_plant_tick(make_map):
     """StepStatsC must expose plant_tick (g->tick at plant; 0 = never planted).
 
-    Why: observe-only plant-latency field is appended after _pad_ss_wins, so
-    sizeof grew 200→204. Dust2EnvC is now 6832 after sim-recoil punch/flag
-    (#120; was 6744). clear_stats memsets the struct, so reset must leave 0.
+    Why: observe-only plant-latency field is appended after _pad_ss_wins, which
+    grows StepStats (and Dust2Env, which embeds two of them) — the sizes are
+    checked against binding.struct_sizes() rather than literals so appending the
+    next field does not require re-measuring by hand.
+    clear_stats memsets the struct, so reset must leave 0.
     Pitfall: do not read this via a numpy recarray — binding.c has no
     StepStats dtype; ctypes is the Python-side mirror.
     """
@@ -146,8 +151,9 @@ def test_stepstats_has_plant_tick(make_map):
     assert hasattr(env._c_env.episode_stats, "plant_tick")
     env.reset()
     assert int(env._c_env.episode_stats.plant_tick) == 0
-    assert ctypes.sizeof(StepStatsC) == 204
-    assert ctypes.sizeof(Dust2EnvC) == 6832
+    sizes = binding.struct_sizes()
+    assert ctypes.sizeof(StepStatsC) == sizes["StepStats"]
+    assert ctypes.sizeof(Dust2EnvC) == sizes["Dust2Env"]
 
 
 def test_human_controlled_uses_aim_rad_not_bin(make_map):

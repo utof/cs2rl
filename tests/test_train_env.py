@@ -951,8 +951,9 @@ def test_obs_dim_constant_consistency():
        - src/train.py
        - env.single_observation_space.shape[0]
     A drift here means the C ↔ Python boundary is misconfigured. The
-    earlier ctypes sizeof asserts (cs2_env.py:280-291) catch struct-size
-    drift; this test is the higher-level constant-agreement check.
+    ctypes-vs-C layout asserts in cs2_env.py (the `_C_SIZES` block, fed by
+    binding.struct_sizes()) catch struct-size drift; this test is the
+    higher-level constant-agreement check.
     """
     import nav
     import train as t

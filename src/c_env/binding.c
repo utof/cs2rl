@@ -10,6 +10,7 @@
 #define NPY_NO_DEPRECATED_API  NPY_1_7_API_VERSION
 #include <Python.h>
 #include <numpy/arrayobject.h>
+#include <stddef.h> /* offsetof — used by py_struct_sizes below */
 #include <stdlib.h>
 #include <string.h>
 #include "cs2_env.h"
@@ -384,6 +385,110 @@ static PyObject* py_get_masks(PyObject* self, PyObject* args) {
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)env->masks);
 }
 
+/* ── binding.struct_sizes() -> dict ──
+ * The single source of truth for the ctypes mirrors in cs2_env.py.
+ *
+ * WHAT: sizeof/offsetof of every struct Python overlays with ctypes, plus the
+ * two team-size macros nav.py duplicates.
+ *
+ * WHY: cs2_env.py used to carry hand-measured literals (164/1708/204/6832 and
+ * offsets 476/480/496) refreshed by compiling a throwaway printf TU by hand.
+ * They rotted on every appended field, and a stale literal turns a real layout
+ * drift into a confusing assert about the wrong number. These values come from
+ * the same compiler invocation that laid the structs out, so they cannot lie.
+ *
+ * PITFALL: append a key here for every struct/macro a ctypes mirror depends on
+ * — a struct with no key here is unguarded. Keys are compared in cs2_env.py at
+ * import time and in tests/test_struct_sizes.py. Sizes use the "n" (Py_ssize_t)
+ * format because sizeof yields size_t; the macros use "i" (plain int). */
+static PyObject* py_struct_sizes(PyObject* self, PyObject* args) {
+    (void)self;
+    (void)args;
+    return Py_BuildValue("{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:i,s:i}",
+                         "AgentState",
+                         (Py_ssize_t)sizeof(AgentState),
+                         "GameState",
+                         (Py_ssize_t)sizeof(GameState),
+                         "StepStats",
+                         (Py_ssize_t)sizeof(StepStats),
+                         "Dust2Env",
+                         (Py_ssize_t)sizeof(Dust2Env),
+                         "StaticData",
+                         (Py_ssize_t)sizeof(StaticData),
+                         "Wall",
+                         (Py_ssize_t)sizeof(Wall),
+                         "WallList",
+                         (Py_ssize_t)sizeof(WallList),
+                         /* StaticData tail offsets. wall_list/area_bounds sit after a long run
+                          * of float reward weights; inserting a field before them shifts both
+                          * and silently repoints every Python-side walls[i] read. */
+                         "StaticData_pbrs_nav_weight_ct_offset",
+                         (Py_ssize_t)offsetof(StaticData, pbrs_nav_weight_ct),
+                         "StaticData_wall_list_offset",
+                         (Py_ssize_t)offsetof(StaticData, wall_list),
+                         "StaticData_area_bounds_offset",
+                         (Py_ssize_t)offsetof(StaticData, area_bounds),
+                         "TEAM_SIZE",
+                         TEAM_SIZE,
+                         "N_AGENTS",
+                         N_AGENTS);
+}
+
+/* ── binding.static_data_scalars(capsule) -> dict ──
+ * Read scalar StaticData fields back out of a live env.
+ *
+ * WHAT: the subset of StaticData that is a plain number (no pointers, no
+ * arrays), keyed by C field name.
+ *
+ * WHY: struct_sizes() cannot detect a mis-ordered PyArg_ParseTuple FMT string
+ * in py_init — two floats swapped still parse, still have identical sizes, and
+ * silently feed reward_kill into reward_death. Tests push distinct sentinels
+ * through Cs2Env and read them back here, so a transposition fails loudly.
+ * Extend this dict for every new scalar added to StaticData.
+ *
+ * PITFALL: the capsule must be cast to BindingEnv*, NOT Dust2Env*. py_reset /
+ * py_step / py_get_masks cast to Dust2Env* because env is BindingEnv's first
+ * field, so both casts "work" — but only BindingEnv* can reach ->sd, which
+ * lives after the embedded Dust2Env. A Dust2Env* cast here would compile and
+ * then read whatever follows the env. The capsule is created unnamed
+ * (PyCapsule_New(benv, NULL, ...) in py_init), hence the NULL name below.
+ *
+ * PITFALL: floats are widened to double for Py_BuildValue's "d"; comparisons
+ * on the Python side must use pytest.approx, since e.g. 0.123f != 0.123. */
+static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
+    (void)self;
+    PyObject* cap;
+    if (!PyArg_ParseTuple(args, "O", &cap))
+        return NULL;
+    BindingEnv* benv = (BindingEnv*)PyCapsule_GetPointer(cap, NULL);
+    if (!benv) {
+        PyErr_SetString(PyExc_ValueError, "invalid env capsule");
+        return NULL;
+    }
+    const StaticData* sd = &benv->sd;
+    return Py_BuildValue("{s:i,s:d,s:d,s:i,s:d,s:d,s:d,s:d,s:d,s:d}",
+                         "round_time",
+                         sd->round_time,
+                         "laser_range",
+                         (double)sd->laser_range,
+                         "laser_range_sq",
+                         (double)sd->laser_range_sq,
+                         "laser_damage",
+                         sd->laser_damage,
+                         "max_turn_speed",
+                         (double)sd->max_turn_speed,
+                         "pbrs_gamma",
+                         (double)sd->pbrs_gamma,
+                         "reward_kill",
+                         (double)sd->reward_kill,
+                         "reward_death",
+                         (double)sd->reward_death,
+                         "reward_win_t_elimination",
+                         (double)sd->reward_win_t_elimination,
+                         "bombsite_dist_scale",
+                         (double)sd->bombsite_dist_scale);
+}
+
 static PyMethodDef binding_methods[] = {
     {"init", py_init, METH_VARARGS, "Init env, return capsule"},
     {"reset", py_reset, METH_VARARGS, "Reset env"},
@@ -391,6 +496,11 @@ static PyMethodDef binding_methods[] = {
     {"close", py_close, METH_VARARGS, "Close env"},
     {"get_buffers", py_get_buffers, METH_VARARGS, "Get buffer addresses as ints"},
     {"get_masks", py_get_masks, METH_VARARGS, "Get masks buffer address as int"},
+    {"struct_sizes", py_struct_sizes, METH_NOARGS, "sizeof/offsetof of the C structs"},
+    {"static_data_scalars",
+     py_static_data_scalars,
+     METH_VARARGS,
+     "Read scalar StaticData fields from a live env capsule"},
     {NULL, NULL, 0, NULL},
 };
 

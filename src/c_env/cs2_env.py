@@ -349,56 +349,52 @@ class Dust2EnvC(ctypes.Structure):
     ]
 
 
-# Sanity-check struct sizes match the C layout — catches future drift early.
-# Sizes updated for Phase 7 (jump): AgentState +12 bytes (vz, is_airborne,
-# pad, jump_cd), StepStats +8 bytes (action_jump[2]). GameState rolls up
-# the agent-array delta (10×12=120). Dust2EnvC rolls up game + 2× stats +
-# 20 bytes of added mask slots + alignment.
-# Batch 1 (RL overhaul): StepStats +4 bytes (win_by_detonation, win_by_defuse,
-# _pad_ss_wins[2]). Dust2EnvC +8 bytes (2× StepStats).
-# Batch 2 task 1: GameState +4 from round_designated_carrier_id (int32).
-# Dust2EnvC grows by +8 (not +4): the extra 4 bytes from `game` push the
-# trailing `client` void* pointer past an 8-byte alignment boundary, so the
-# C compiler inserts a 4-byte pad before `client`, giving a net +8 for
-# Dust2EnvC.
-# Batch 2 task 2: OBS_DIM 104 → 105 — Dust2EnvC `observations` array
-# (c_float * (10 * 105)) is +40 bytes vs task 1.
-# Batch 3: StepStats −52 bytes (action_aim[16]=64B → aim_delta_*=12B).
-# Dust2EnvC −264 bytes nominal: 2× StepStats (−104) + masks shrink
-# (10×38→10×22 = −160). Verify empirically on first build — alignment
-# surprises are routine; values updated below to match observed sizeof.
-# Batch 3.5: AgentStateC +4 (float pitch), GameStateC +40 (×10 agents),
-# Dust2EnvC +40 (GameState) +80 (observations: 10×(107−105)×4).
-# Batch 6 Task 2.5: OBS_DIM 107 → 110 (bombsite bearing/distance in self
-# block) — Dust2EnvC observations +120 (10×3×4); agent/game/stats unchanged.
-# Sim recoil v1 (#120): AgentState +8 (punch_pitch/punch_yaw), GameState +80
-# (×10 agents). Dust2Env +88: game +80, recoil_enabled int32 after client +4,
-# plus 4-byte trailing pad to 8-byte struct alignment (client is a pointer).
-# Measured with a C printf TU against the headers — do not invent the pad.
-assert ctypes.sizeof(AgentStateC) == 164, (
-    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 164)")
-assert ctypes.sizeof(GameStateC) == 1708, (
-    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1708)")
-# F13: 208→200 / 6752→6736 after removing the dead action_last[2] counter
-# (Dust2Env embeds TWO StepStats — step + episode — hence the −16).
-# Instrumentation 2026-08-15: 200→204 / 6736→6744 after appending
-# plant_tick (int32) to StepStats. Dust2Env embeds TWO StepStats
-# (step + episode), so the env grows by +8.
-# Sim recoil v1 (#120): Dust2Env 6744→6832 (see punch/flag note above).
-assert ctypes.sizeof(StepStatsC) == 204, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 204)")
-assert ctypes.sizeof(Dust2EnvC) == 6832, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6832)")
-# Live overlay vs gcc offsetof(StaticData). Append of wall_list is safe:
-# pbrs_nav_weight_ct ends at 480, pointer-aligned, no guessed pad.
-assert StaticDataC.pbrs_nav_weight_ct.offset == 476, StaticDataC.pbrs_nav_weight_ct.offset
-assert StaticDataC.wall_list.offset == 480, StaticDataC.wall_list.offset
-assert StaticDataC.area_bounds.offset == 496, StaticDataC.area_bounds.offset
-assert ctypes.sizeof(WallListC) == 16, ctypes.sizeof(WallListC)
-# 8 floats + 1 int32, no padding. Mirrors _Static_assert(sizeof(Wall) == 36)
-# in cs2_types.h; if you change Wall, both must move together or walls[i]
-# reads garbage. WallListC's own size is unaffected (walls is a pointer).
-assert ctypes.sizeof(WallC) == 36, ctypes.sizeof(WallC)
+# ── ctypes mirror ↔ C layout guard ──────────────────────────────────────────
+# Every struct above is overlaid byte-for-byte on memory the C extension owns,
+# so a mirror that drifts from cs2_types.h reads garbage SILENTLY — ctypes
+# cannot see the real C layout. These asserts pin each mirror to the C
+# compiler's own sizeof/offsetof, published by binding.struct_sizes().
+#
+# Why not literals: this block used to carry hand-measured numbers
+# (164/1708/204/6832; offsets 476/480/496) plus a running changelog explaining
+# each delta. They rotted on every appended field and could only be refreshed
+# by compiling a throwaway printf TU by hand, so a genuine drift surfaced as a
+# confusing assert about the wrong number. The history lives in git; the
+# numbers now come from the same compiler invocation that laid the structs out.
+#
+# If one of these raises at import time the MIRROR is wrong, not the assert —
+# fix _fields_ above. Adding a struct? Add a key to py_struct_sizes() in
+# binding.c and a line here; a mirror with no key is unguarded.
+#
+# Pitfall: struct_sizes() reads the CURRENTLY BUILT .so. Editing src/c_env/*.h
+# without rebuilding (`python setup.py build_ext --inplace`) compares a new
+# mirror against a stale binary — it can pass on a broken tree or fail on a
+# correct one. Rebuild first, then trust this.
+_C_SIZES = binding.struct_sizes()
+for _name, _mirror in (("AgentState", AgentStateC), ("GameState", GameStateC),
+                       ("StepStats", StepStatsC), ("Dust2Env", Dust2EnvC),
+                       ("StaticData", StaticDataC), ("WallList", WallListC), ("Wall", WallC)):
+    assert _C_SIZES[_name] == ctypes.sizeof(_mirror), (
+        f"{_name}C size mismatch: ctypes {ctypes.sizeof(_mirror)} vs C {_C_SIZES[_name]}")
+del _name, _mirror
+# StaticData tail offsets. wall_list/area_bounds are appended after a long run
+# of float reward weights, so a field inserted anywhere before them shifts both
+# and silently repoints every Python-side walls[i] read. Sizes alone would not
+# notice: swapping two same-width fields keeps sizeof identical.
+for _field, _key in (("pbrs_nav_weight_ct", "StaticData_pbrs_nav_weight_ct_offset"),
+                     ("wall_list", "StaticData_wall_list_offset"),
+                     ("area_bounds", "StaticData_area_bounds_offset")):
+    assert getattr(StaticDataC, _field).offset == _C_SIZES[_key], (
+        f"StaticDataC.{_field} offset mismatch: ctypes "
+        f"{getattr(StaticDataC, _field).offset} vs C {_C_SIZES[_key]}")
+del _field, _key
+# nav.py re-declares the team-size macros in Python (its TEAM_SIZE / N_AGENTS).
+# Pin them to the header: the reward views below slice rewards[:TEAM_SIZE], so a drift
+# would mis-attribute every team-spirit term rather than crash.
+assert TEAM_SIZE == _C_SIZES["TEAM_SIZE"], (
+    f"TEAM_SIZE mismatch: nav {TEAM_SIZE} vs C {_C_SIZES['TEAM_SIZE']}")
+assert N_AGENTS == _C_SIZES["N_AGENTS"], (
+    f"N_AGENTS mismatch: nav {N_AGENTS} vs C {_C_SIZES['N_AGENTS']}")
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
