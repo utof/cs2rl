@@ -411,9 +411,12 @@ static PyObject* py_get_masks(PyObject* self, PyObject* args) {
  * A key added here and never compared there fails that test instead of sitting
  * unguarded. Sizes use the "n" (Py_ssize_t) format because sizeof yields size_t;
  * the macros use "i" (plain int). */
-static PyObject* py_struct_sizes(PyObject* self, PyObject* args) {
+/* Py_UNUSED(ignored), not `args`: this is METH_NOARGS, so CPython passes NULL
+ * as the second argument rather than an empty tuple. Naming it `args` invites a
+ * later `PyArg_ParseTuple(args, ...)` to be added here, which would deref NULL.
+ * Py_UNUSED mangles the name so it cannot be referenced at all. */
+static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     (void)self;
-    (void)args;
     return Py_BuildValue("{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:i,s:i}",
                          "AgentState",
                          (Py_ssize_t)sizeof(AgentState),
@@ -464,6 +467,12 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* args) {
  * silently feed reward_kill into reward_death. Tests push distinct sentinels
  * through Cs2Env and read them back here, so a transposition fails loudly.
  *
+ * FMT ARG NUMBERING — stated once, used everywhere in this file and in the
+ * positional comments on cs2_env.py's binding.init() call: FMT arg numbers are
+ * 0-INDEXED (arg 0 is vis_matrix). CPython's own PyArg_ParseTuple failures are
+ * 1-indexed ("argument 22 must be..."), so when cross-referencing a real error
+ * message subtract 1 from what CPython printed to land on the comment's number.
+ *
  * PITFALL: the capsule must be cast to BindingEnv*, NOT Dust2Env*. py_reset /
  * py_step / py_get_masks cast to Dust2Env* because env is BindingEnv's first
  * field, so both casts "work" — but only BindingEnv* can reach ->sd, which
@@ -496,7 +505,15 @@ static int sd_dict_set(PyObject* d, const char* key, PyObject* v) {
 /* #f stringifies the field name, so key and value are the same token — a
  * transposition inside this function is impossible by construction.
  * Casts are explicit (int32_t -> long, float -> double) rather than relying on
- * the implicit conversion, matching the style of the rest of this file. */
+ * the implicit conversion, matching the style of the rest of this file.
+ *
+ * PITFALL: these macros are NOT self-contained. They capture three things from
+ * the enclosing scope and only compile inside a function that provides all
+ * three: a `PyObject* d` (the dict being built), a `const StaticData* sd` (the
+ * struct being read), and a `fail:` label that owns d's cleanup. That is why
+ * they are #undef'd immediately after py_static_data_scalars below — moving a
+ * SD_* line outside that function is a compile error, not a silent misread, and
+ * the #undef keeps it that way. */
 #define SD_INT(f)                                                                                  \
     do {                                                                                           \
         if (sd_dict_set(d, #f, PyLong_FromLong((long)sd->f)) < 0)                                  \
@@ -508,6 +525,9 @@ static int sd_dict_set(PyObject* d, const char* key, PyObject* v) {
             goto fail;                                                                             \
     } while (0)
 
+/* Implements binding.static_data_scalars(); see the "binding.static_data_scalars"
+ * doc block above sd_dict_set for WHAT/WHY/PITFALLs (the helper and the two
+ * macros sit between the two, so the docs are not directly overhead). */
 static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
     (void)self;
     PyObject* cap;

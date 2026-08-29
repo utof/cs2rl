@@ -18,6 +18,7 @@ new field is unguarded.
 """
 
 import ctypes
+import inspect
 import sys
 from pathlib import Path
 
@@ -37,12 +38,73 @@ from c_env.cs2_env import (                                                     
     WallListC, make_env,
 )
 
-# The ctypes types StaticDataC uses for plain numbers. c_int32 IS c_int on every
-# platform this builds for, so the tuple has a duplicate — harmless, and it keeps
-# the intent readable if that ever stops being true. Anything not in here is a
-# pointer, a fixed array, or the nested WallListC, none of which
-# static_data_scalars() can or should return.
-_SCALAR_CTYPES = (ctypes.c_int, ctypes.c_int32, ctypes.c_float)
+
+def _is_scalar_ctype(ctype):
+    """Is `ctype` a plain number that static_data_scalars() can return?
+
+    Defined by EXCLUSION, and that is the whole point. This used to be an
+    allowlist — `(c_int, c_int32, c_float)` — which fails OPEN: the first
+    StaticData field declared c_int8 / c_uint8 / c_uint32 / c_double would be
+    silently absent from the `expected` set in
+    test_static_data_scalars_covers_every_scalar_field, so that test would stop
+    demanding it and the field would ship unguarded. That is exactly the decay
+    this module exists to stop, and it is not hypothetical: Dust2Env already
+    uses int32_t for a flag and AgentState uses int8/uint8 flags heavily.
+    Enumerating what is EXCLUDED cannot fail that way — anything not matching
+    one of the three aggregate shapes is demanded, whether or not anyone
+    anticipated the type.
+
+    Excluded, because none of them is expressible as a single number:
+      - ctypes._Pointer subclasses — POINTER(c_int8), POINTER(c_float), ...
+        The leading underscore is unavoidable: it is the only structural test
+        for "is a pointer". `hasattr(t, "_type_")` is NOT a substitute, because
+        simple types carry _type_ too (ctypes.c_float._type_ == "f").
+      - ctypes.Array subclasses — c_float * 9, c_int32 * 15, ...
+      - ctypes.Structure subclasses — the nested WallListC.
+
+    Deliberately NOT excluded: everything else, including a hypothetical
+    ctypes.Union field. Such a field would be *demanded* and the test would fail
+    loudly, forcing a conscious decision here — the correct failure direction
+    for a guard whose job is to refuse to be forgotten.
+    """
+    return not issubclass(ctype, (ctypes._Pointer, ctypes.Array, ctypes.Structure))
+
+
+# Every scalar StaticData field, derived from the mirror (which the sizeof /
+# offsetof asserts pin to the C header). Never re-listed by hand: a hand-written
+# copy is the next thing to rot.
+_STATIC_DATA_SCALARS = tuple(
+    (name, ctype) for name, ctype in StaticDataC._fields_ if _is_scalar_ctype(ctype))
+
+# Partition those scalars by whether make_env can set them. Anything make_env
+# exposes is sentinel-testable (test_static_data_scalars_round_trip pushes a
+# distinct value through it); anything it does not is map-derived or a nav.py
+# constant and is checked against that source instead.
+_MAKE_ENV_PARAMS = frozenset(inspect.signature(make_env).parameters)
+_FLOAT_KWARG_SCALARS = tuple(
+    sorted(n for n, t in _STATIC_DATA_SCALARS if n in _MAKE_ENV_PARAMS and t is ctypes.c_float))
+_INT_KWARG_SCALARS = tuple(
+    sorted(n for n, t in _STATIC_DATA_SCALARS if n in _MAKE_ENV_PARAMS and t is not ctypes.c_float))
+_NON_KWARG_SCALARS = tuple(sorted(n for n, _ in _STATIC_DATA_SCALARS if n not in _MAKE_ENV_PARAMS))
+
+# One distinct sentinel per settable field, generated from the sorted field list
+# so a newly added field automatically gets one. Distinctness is the only
+# property that matters: it is what makes a swapped pair in py_init's FMT string
+# visible. Floats get 0.101, 0.102, ... — not exactly representable in float32,
+# hence pytest.approx on the way back (see the widening PITFALL in binding.c).
+# Ints get 101, 102, ... (none today; the branch exists so a future int kwarg is
+# covered the moment it is added rather than receiving a fractional sentinel).
+# Do NOT sentinel with the defaults instead: several collide
+# (reward_win_t_detonation and reward_win_ct_defuse are both 5.0, reward_death
+# and reward_plant_interrupted both 0.1), so a transposition between a colliding
+# pair would stay invisible.
+_SENTINELS = {name: 0.101 + 0.001 * i for i, name in enumerate(_FLOAT_KWARG_SCALARS)}
+_SENTINELS.update({name: 101 + i for i, name in enumerate(_INT_KWARG_SCALARS)})
+
+# StaticData scalars that are tunables — the ones a training config sweeps.
+# Every one must stay reachable from make_env or it drops out of the sentinel
+# sweep above; test_every_tunable_scalar_is_a_make_env_kwarg enforces that.
+_TUNABLE_PREFIXES = ("reward_", "pbrs_")
 
 
 def test_struct_sizes_match_ctypes_mirrors():
@@ -62,6 +124,8 @@ def test_struct_sizes_match_ctypes_mirrors():
     comparison running inside the test suite. Real independent checks live in
     test_struct_sizes_exposes_team_constants (literal 5 / 2*TEAM_SIZE) and
     test_static_data_scalars_round_trip (sentinels through the FMT string).
+    The complementary "is every mirror even guarded" question is answered by
+    test_every_ctypes_mirror_is_size_guarded.
     """
     sizes = binding.struct_sizes()
     assert sizes["AgentState"] == ctypes.sizeof(AgentStateC)
@@ -111,31 +175,62 @@ def test_static_data_scalars_round_trip(simple_map):
 
     This is the FMT-order guard: py_init's 69-arg PyArg_ParseTuple string is the
     only thing tying Cs2Env's kwargs to StaticData's fields, and a transposition
-    there is invisible to sizeof. Values chosen so no two fields share a number.
-    Non-configurable fields (round_time, max_turn_speed, laser_range) are checked
-    against the nav.py constants Cs2Env forwards, and the map-derived ones
-    (bombsite_dist_scale, N, grid_w/grid_h, spawn counts) against the fixture map
-    — grid_w/grid_h in particular are adjacent same-width ints, so only a value
-    comparison separates them.
+    there is invisible to sizeof — two swapped floats parse fine and keep every
+    size identical while feeding reward_kill into reward_death.
 
-    Not exhaustive by design: this test covers the fields with a distinguishable
-    expected value. test_static_data_scalars_covers_every_scalar_field is what
-    guarantees the dict itself stays complete.
+    EXHAUSTIVE over the settable fields. Every StaticData scalar make_env
+    exposes as a keyword argument (_SENTINELS, derived by intersecting the
+    make_env signature with the mirror — not hand-listed) gets its own distinct
+    value and is asserted back by name. An earlier version checked 4 of the 24
+    and defended that as "the fields with a distinguishable expected value";
+    that premise was wrong — make_env exposes all of them — and it left 20 of
+    the 23 consecutive same-width reward/PBRS floats, the exact run the code
+    itself calls the hiding place for a transposition, unchecked.
+
+    Fields make_env does NOT expose are checked against their real source
+    instead: the nav.py constants Cs2Env forwards (round_time, max_turn_speed,
+    laser_*) and the map-derived ones (bombsite_dist_scale, N, grid_w/grid_h,
+    max_area_id, spawn counts) against the fixture map. grid_w/grid_h are
+    adjacent same-width ints, so only a value comparison separates them.
+
+    REMAINING GAP, stated plainly. These 16 non-kwarg scalars are covered only
+    by key presence (test_static_data_scalars_covers_every_scalar_field), not by
+    value: grid_x_min, grid_y_min, grid_inv_cell, inv_x_range, inv_y_range,
+    x_offset, y_offset, shoot_cooldown, bomb_plant_time, bomb_defuse_time,
+    bomb_defuse_kit, bomb_timer, footstep_radius_sq, gunshot_radius_sq,
+    enemy_memory_ticks, stale_memory_tick. They are not settable, so a value
+    check would have to recompute the implementation's own formula (the
+    geometry) or restate a nav.py constant (the timings) — weaker than a
+    sentinel, and for the geometry partly degenerate, since a symmetric fixture
+    map can make x_offset == y_offset. Note also nav.BOMB_TIMER ==
+    nav.ROUND_TIME == 640 today, so bomb_timer and round_time are mutually
+    indistinguishable by value however they are checked. Closing this properly
+    means sentinels, which means kwargs; out of scope here, and deliberately not
+    papered over.
     """
     import nav
 
-    env = make_env(map_data=simple_map,
-                   reward_kill=0.123,
-                   reward_death=0.456,
-                   reward_win_t_elimination=7.75,
-                   pbrs_gamma=0.789)
+    env = make_env(map_data=simple_map, **_SENTINELS)
     try:
         sc = binding.static_data_scalars(env._capsule)
-        # Sentinels routed through make_env kwargs.
-        assert sc["reward_kill"] == pytest.approx(0.123)
-        assert sc["reward_death"] == pytest.approx(0.456)
-        assert sc["reward_win_t_elimination"] == pytest.approx(7.75)
-        assert sc["pbrs_gamma"] == pytest.approx(0.789)
+        # ── every settable field, one distinct sentinel each ──
+        absent = sorted(name for name in _SENTINELS if name not in sc)
+        assert not absent, (f"make_env kwargs with no static_data_scalars() key: {absent}; add "
+                            "SD_INT/SD_FLOAT for them in src/c_env/binding.c and rebuild (see "
+                            "test_static_data_scalars_covers_every_scalar_field)")
+        wrong = {}
+        for name, sent in _SENTINELS.items():
+            if sc[name] != pytest.approx(sent):
+                # Which sentinel DID land here? For a transposed FMT string that
+                # names the swap partner outright, which is the whole diagnosis.
+                partner = next(
+                    (other for other, v in _SENTINELS.items() if sc[name] == pytest.approx(v)),
+                    None)
+                wrong[name] = (sent, sc[name], partner)
+        assert not wrong, (
+            "sentinel landed in the wrong StaticData field — py_init's FMT string in "
+            "src/c_env/binding.c is out of order with the binding.init() call in "
+            f"Cs2Env.__init__. {{field: (sent, got, whose_sentinel_got_is)}} = {wrong}")
         # Constants forwarded verbatim from nav.py.
         assert sc["round_time"] == nav.ROUND_TIME == 640
         assert sc["max_turn_speed"] == pytest.approx(nav.MAX_TURN_SPEED_RAD)
@@ -208,6 +303,12 @@ def test_static_data_scalars_covers_every_scalar_field(simple_map):
     pinned to the C header by the sizeof/offsetof asserts above, which is what
     makes it a legitimate oracle for "what scalars does StaticData have".
 
+    "Scalar" is decided by _is_scalar_ctype, which EXCLUDES pointers / arrays /
+    nested structs rather than listing the accepted number types. That direction
+    matters: an allowlist would quietly drop a future c_int8 or c_double field
+    out of `expected`, and this test would go green on an unguarded field. See
+    _is_scalar_ctype's docstring.
+
     If this fails: add SD_INT/SD_FLOAT(<field>) to py_static_data_scalars in
     src/c_env/binding.c, rebuild the .so, and add a value assert for the field to
     test_static_data_scalars_round_trip.
@@ -216,7 +317,7 @@ def test_static_data_scalars_covers_every_scalar_field(simple_map):
     mirror is read from source, the dict from the built binary. Rebuild with
     `python setup.py build_ext --inplace` before believing this test.
     """
-    expected = {name for name, ctype in StaticDataC._fields_ if ctype in _SCALAR_CTYPES}
+    expected = {name for name, _ in _STATIC_DATA_SCALARS}
     env = make_env(map_data=simple_map)
     try:
         exposed = set(binding.static_data_scalars(env._capsule))
@@ -225,3 +326,70 @@ def test_static_data_scalars_covers_every_scalar_field(simple_map):
     assert exposed == expected, (
         f"missing from static_data_scalars(): {sorted(expected - exposed)}; "
         f"exposed but not a scalar in StaticDataC: {sorted(exposed - expected)}")
+
+
+def test_every_ctypes_mirror_is_size_guarded():
+    """Every ctypes.Structure defined in cs2_env.py must be size-guarded.
+
+    WHY: the other direction — a struct_sizes() key nobody consumes — is caught
+    by test_struct_sizes_keys_are_all_consumed. This is its mirror image: a new
+    ctypes mirror added to cs2_env.py with no entry in _C_SIZE_MIRRORS gets
+    overlaid on C-owned memory with NOTHING pinning it to the C layout, so it
+    reads garbage silently. A comment in cs2_env.py used to assert this slip was
+    undetectable ("invisible from both ends"). It is not: the module namespace
+    is itself a second, independent list of the mirrors, so the two lists can be
+    compared. That comment has been corrected.
+
+    Scope: this checks each mirror is *claimed* by _C_SIZE_MIRRORS. Whether the
+    claim is true is what the sizeof assert in cs2_env.py checks; together the
+    two make "declared a mirror and forgot to guard it" impossible.
+
+    `__module__` filtering is what keeps this honest: it counts only classes
+    DEFINED in cs2_env.py, so a ctypes.Structure imported from elsewhere (none
+    today) is not spuriously demanded, and ctypes.Structure itself is excluded.
+
+    If this fails after you added a mirror: add a key to py_struct_sizes() in
+    src/c_env/binding.c and the (key, mirror) pair to _C_SIZE_MIRRORS. Deleting
+    the mirror is the other valid fix; deleting this assert is not.
+    """
+    from c_env import cs2_env
+    from c_env.cs2_env import _C_SIZE_MIRRORS
+    defined = {
+        obj.__name__
+        for obj in vars(cs2_env).values() if isinstance(obj, type)
+        and issubclass(obj, ctypes.Structure) and obj.__module__ == cs2_env.__name__
+    }
+    guarded = {mirror.__name__ for _, mirror in _C_SIZE_MIRRORS}
+    assert defined == guarded, (
+        "ctypes mirrors in cs2_env.py and the _C_SIZE_MIRRORS size guard disagree; "
+        f"declared-but-unguarded={sorted(defined - guarded)}, "
+        f"guarded-but-not-defined-here={sorted(guarded - defined)}")
+    # The struct_sizes() key convention ("AgentState" -> AgentStateC). Not
+    # load-bearing for the asserts above, but it is what would catch a mis-paired
+    # entry between two structs that happen to share a size.
+    mispaired = [(key, mirror.__name__) for key, mirror in _C_SIZE_MIRRORS
+                 if mirror.__name__ != key + "C"]
+    assert not mispaired, ("struct_sizes() key must be the mirror's name minus the trailing 'C'; "
+                           f"mismatched (key, mirror) pairs: {mispaired}")
+
+
+def test_every_tunable_scalar_is_a_make_env_kwarg():
+    """Reward/PBRS scalars must stay reachable from make_env.
+
+    WHY: test_static_data_scalars_round_trip is exhaustive over the fields
+    make_env exposes and silently skips the ones it does not. So a new `reward_*`
+    field added to cs2_types.h, the FMT string, the ctypes mirror and
+    static_data_scalars() — but NOT to make_env — would drop straight into the
+    unchecked-by-value set with every other test still green, re-opening the
+    FMT-transposition hole in exactly the same-width-float run where that hole
+    lives. This makes the omission fail instead.
+
+    Scope: tunables only (reward_*, pbrs_*). Map-derived geometry and nav.py
+    constants are deliberately not kwargs; see the round-trip docstring's
+    REMAINING GAP paragraph.
+    """
+    unreachable = sorted(name for name in _NON_KWARG_SCALARS if name.startswith(_TUNABLE_PREFIXES))
+    assert not unreachable, (
+        f"tunable StaticData scalars not exposed by make_env: {unreachable}; add them as "
+        "keyword arguments to make_env and Cs2Env.__init__ so the sentinel sweep in "
+        "test_static_data_scalars_round_trip covers them")

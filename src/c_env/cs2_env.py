@@ -364,11 +364,18 @@ class Dust2EnvC(ctypes.Structure):
 #
 # If one of these raises at import time the MIRROR is wrong, not the assert —
 # fix _fields_ above. Adding a struct? Add a key to py_struct_sizes() in
-# binding.c and an entry to the matching tuple below; a mirror with no key is
-# unguarded (nothing can detect that automatically — a mirror the C side never
-# names is invisible from both ends). The opposite slip IS detected: a key
-# published by binding.c and never consumed here fails the
-# _C_SIZE_KEYS_CHECKED test in tests/test_struct_sizes.py.
+# binding.c and an entry to the matching tuple below. BOTH halves of that slip
+# are caught, so neither a mirror nor a key can sit unguarded:
+#   - mirror declared here, no key in binding.c ->
+#     test_every_ctypes_mirror_is_size_guarded enumerates the ctypes.Structure
+#     subclasses DEFINED IN THIS MODULE and compares them to _C_SIZE_MIRRORS.
+#     (An earlier version of this comment claimed this direction was
+#     undetectable. It is not: the module namespace is the second, independent
+#     list of mirrors — that is what makes the census possible.)
+#   - key in binding.c, never consumed here ->
+#     test_struct_sizes_keys_are_all_consumed asserts
+#     set(binding.struct_sizes()) == _C_SIZE_KEYS_CHECKED.
+# Both live in tests/test_struct_sizes.py.
 #
 # Pitfall: struct_sizes() reads the CURRENTLY BUILT .so. Editing src/c_env/*.h
 # without rebuilding (`python setup.py build_ext --inplace`) compares a new
@@ -407,8 +414,12 @@ _C_MACROS = (
 # fmt: on
 
 for _name, _mirror in _C_SIZE_MIRRORS:
+    # _mirror.__name__ rather than f"{_name}C": the "C" suffix is a convention
+    # the tuple does not enforce, so concatenating it would print a class name
+    # that may not exist. __name__ is always the class actually compared.
     assert _C_SIZES[_name] == ctypes.sizeof(_mirror), (
-        f"{_name}C size mismatch: ctypes {ctypes.sizeof(_mirror)} vs C {_C_SIZES[_name]}")
+        f"{_mirror.__name__} size mismatch (struct_sizes key {_name!r}): "
+        f"ctypes {ctypes.sizeof(_mirror)} vs C {_C_SIZES[_name]}")
 del _name, _mirror
 for _field, _key in _C_OFFSET_FIELDS:
     assert getattr(StaticDataC, _field).offset == _C_SIZES[_key], (
