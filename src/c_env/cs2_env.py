@@ -725,6 +725,10 @@ class Cs2Env(pufferlib.PufferEnv):
         # traceback. Raising here turns a bad training config into an ordinary
         # Python error. pin_pitch / crouch_enabled are flags, so any truthy
         # value normalises to 1 rather than being rejected.
+        # Reject non-integers rather than truncating (int(2.9) == 2 would
+        # silently park a different roster than the config asked for).
+        if int(n_active_per_team) != n_active_per_team:
+            raise ValueError(f"n_active_per_team must be an integer, got {n_active_per_team!r}")
         n_active_per_team = int(n_active_per_team)
         if not 1 <= n_active_per_team <= TEAM_SIZE:
             raise ValueError(f"n_active_per_team must be in 1..{TEAM_SIZE}, "

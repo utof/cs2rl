@@ -475,6 +475,6 @@ def test_n_active_per_team_out_of_range_rejected(simple_map):
     checked: 0 is the memset-zero value (the failure mode the C assert exists
     for) and 6 is the "someone typed the real team size wrong" case.
     """
-    for bad in (0, 6):
+    for bad in (0, 6, 2.9):            # 2.9: non-integers must be rejected, not truncated
         with pytest.raises(ValueError):
             make_env(map_data=simple_map, n_active_per_team=bad)
