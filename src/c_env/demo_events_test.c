@@ -552,11 +552,11 @@ static void test_reload_countdown_not_end(void) {
 
 /* Fixture arrays live in the struct so the StaticData pointers stay valid for
  * the whole test; a StaticData with dangling area_bounds bakes garbage.
- * Sized for the widest fixture below (the 3-room partial-coverage doorway);
+ * Sized for the widest fixture below (solids_fix_nested_doorway, 3 rooms);
  * sd.N is what the bake reads, so a 2-room fixture just leaves the tail zero.
  * Pitfall: adjacency is indexed [i*sd.N + j], NOT [i*SOLIDS_FIX_ROOMS + j] —
  * solids_fix_adj() below does that arithmetic so tests cannot get it wrong. */
-#define SOLIDS_FIX_ROOMS 4
+#define SOLIDS_FIX_ROOMS 3
 typedef struct {
     StaticData sd;
     float      bounds[SOLIDS_FIX_ROOMS * 4]; /* per room: x0,y0,x1,y1 */
@@ -568,7 +568,10 @@ typedef struct {
 /* solids_fix_n — wire the raw arrays onto a zeroed StaticData with N rooms.
  *
  * Every room starts self-adjacent and mutually unconnected; callers open the
- * portals they want with solids_fix_adj.
+ * portals they want with solids_fix_adj. n is a parameter because the
+ * adjacency stride is sd.N, so a 2-room and a 3-room fixture lay their rows
+ * out differently in the same array; solids_fix() and
+ * solids_fix_nested_doorway() are the two callers.
  *
  * Pitfall: memset the StaticData first. build_solids_from_rooms frees
  * wall_list.walls if it is non-NULL, so an uninitialised pointer here is a
@@ -609,24 +612,50 @@ static void solids_fix_adj(SolidsFix* f, int i, int j, int connected) {
     f->adj[j * n + i] = (int8_t)(connected != 0);
 }
 
-/* Two flush 100x100 rooms sharing x=100, connected → that edge is a portal. */
-static void solids_fix_two_rooms(SolidsFix* f) {
+/* Two flush 100x100 rooms sharing x=100, connected → that edge is a portal.
+ * Both rooms sit at the same z (flush is what makes the shared edge a
+ * divider rather than a lip once the adjacency is pruned); z is a parameter
+ * so the divider test can lift them off the ground and pin the emit's
+ * `SOLID_WALL_HEIGHT + zi` term. */
+static void solids_fix_two_rooms_z(SolidsFix* f, float z) {
     solids_fix(f);
-    solids_fix_room(f, 0, 0.0f, 0.0f, 100.0f, 100.0f, 0.0f, 0);
-    solids_fix_room(f, 1, 100.0f, 0.0f, 200.0f, 100.0f, 0.0f, 0);
+    solids_fix_room(f, 0, 0.0f, 0.0f, 100.0f, 100.0f, z, 0);
+    solids_fix_room(f, 1, 100.0f, 0.0f, 200.0f, 100.0f, z, 0);
     solids_fix_adj(f, 0, 1, 1);
 }
 
-/* Room 0 at z=0, room 1 stacked north at z=128, adjacency cliff-pruned.
- * Mirrors catwalk(128) over bombsite(64): a shared edge that is NOT a
- * portal, so the drop must come back as a lip, not as a doorway.
- * z1 is a parameter because a lip whose drop equals SOLID_WALL_HEIGHT is
- * numerically indistinguishable from an exterior wall of the lower room. */
-static void solids_fix_cliff_z(SolidsFix* f, float z1) {
+static void solids_fix_two_rooms(SolidsFix* f) {
+    solids_fix_two_rooms_z(f, 0.0f);
+}
+
+/* solids_fix_cliff_z2 — room 0 south at z0, room 1 north at z1, cliff-pruned.
+ *
+ * Mirrors catwalk over bombsite: a shared edge (y=100) that is NOT a portal,
+ * so the drop must come back as a lip, not as a doorway.
+ *
+ * BOTH elevations are parameters, and both matter:
+ *  - z1 - z0 must not equal SOLID_WALL_HEIGHT, or the lip (z0=low, height=
+ *    drop) is bit-for-bit what an exterior wall of the low room would be and
+ *    the test cannot tell a lip from a mis-emitted wall.
+ *  - z0 must not be 0 if you want to pin the lip's BASE. The emit passes
+ *    `zj` for z0 and `zi - zj` for height; with zj == 0 those collapse to
+ *    `0` and `zi`, so both terms can be dropped and every assertion still
+ *    passes. That is not academic — the shipping map's one non-exterior face
+ *    is catwalk(128) over bombsite(64), i.e. z0=64, height=64, and the two
+ *    degenerate readings turn it into a ground-level wall across the drop
+ *    ([0,64]) or a slab that walls off the overlook ([64,192]).
+ * solids_fix_cliff_z keeps the flat-low-room shorthand for the tests that
+ * only care about the lip's existence, kind or the ramp/portal guards. */
+static void solids_fix_cliff_z2(SolidsFix* f, float z0, float z1) {
     solids_fix(f);
-    solids_fix_room(f, 0, 0.0f, 0.0f, 100.0f, 100.0f, 0.0f, 0);
+    solids_fix_room(f, 0, 0.0f, 0.0f, 100.0f, 100.0f, z0, 0);
     solids_fix_room(f, 1, 0.0f, 100.0f, 100.0f, 200.0f, z1, 0);
     /* cross terms stay 0 — the cliff prune */
+}
+
+/* Same, low room on the ground. */
+static void solids_fix_cliff_z(SolidsFix* f, float z1) {
+    solids_fix_cliff_z2(f, 0.0f, z1);
 }
 
 /* Segs whose infinite line is x==v (vertical) / y==v (horizontal). */
@@ -727,11 +756,12 @@ static void test_solids_sweep_west_wall(void) {
 /* The doorway must stay walkable: crossing x=100 is a miss. */
 static void test_solids_sweep_portal(void) {
     SolidsFix f;
-    SolidHit  hit;
     solids_fix_two_rooms(&f);
     build_solids_from_rooms(&f.sd);
+    /* NULL, not &hit: the sweep writes *hit only on a hit, so a SolidHit here
+     * would be read by nobody and merely look like it was checked. */
     check_i("sweep portal miss",
-            solid_sweep_xy(&f.sd, 80.0f, 50.0f, 120.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
+            solid_sweep_xy(&f.sd, 80.0f, 50.0f, 120.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
             0);
     free_solids(&f.sd);
 }
@@ -739,13 +769,14 @@ static void test_solids_sweep_portal(void) {
 /* Already past the plane (t<0) is a miss — v1 has no depenetration. */
 static void test_solids_sweep_no_depenetration(void) {
     SolidsFix f;
-    SolidHit  hit;
     solids_fix_two_rooms(&f);
     build_solids_from_rooms(&f.sd);
     /* Starts at x=-30, i.e. already outside past the x=0 face, moving further
-     * out: the expanded plane is behind the start, so t<0 and we report free. */
+     * out: the expanded plane is behind the start, so t<0 and we report free.
+     * NULL for the same reason as test_solids_sweep_portal — nothing here
+     * inspects the hit, so handing it a struct would only be theatre. */
     check_i("sweep t<0 miss",
-            solid_sweep_xy(&f.sd, -30.0f, 50.0f, -60.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
+            solid_sweep_xy(&f.sd, -30.0f, 50.0f, -60.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
             0);
     free_solids(&f.sd);
 }
@@ -874,6 +905,65 @@ static void test_solids_cliff_lip(void) {
     free_solids(&f.sd);
 }
 
+/* The shipping map's lip, to scale: bombsite(z=64) under catwalk(z=128).
+ *
+ * This is the ONLY test that pins the lip's two defining numbers, because it
+ * is the only fixture whose LOW room is off the ground. _solid_emit is called
+ * with `zi - zj` for height and `zj` for z0; test_solids_cliff_lip above has
+ * zj == 0, where those are indistinguishable from `zi` and `0`. Both
+ * degenerate forms pass the entire rest of the suite while wrecking the one
+ * face the real map actually bakes:
+ *   z0 = 0        -> [0, 64]:  a ground-level wall with the drop wide open
+ *   height = zi   -> [64, 192]: walls off the overlook the lip exists to keep
+ * If you change the lip emit, this test is the one that has to stay green.
+ */
+static void test_solids_elevated_cliff_lip(void) {
+    SolidsFix   f;
+    int         i, lips = 0;
+    const Wall* lip = NULL;
+    solids_fix_cliff_z2(&f, 64.0f, 128.0f); /* bombsite under catwalk */
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++) {
+        const Wall* w = &f.sd.wall_list.walls[i];
+        if (w->kind == SOLID_KIND_LIP) {
+            lips++;
+            lip = w;
+        }
+    }
+    check_i("elevated lip emitted once", lips, 1);
+    if (lip != NULL) {
+        /* The slab is exactly the drop, based at the LOW room's floor. */
+        check_f_near("elevated lip z0", lip->z0, 64.0f, 1e-4f);         /* kills z0 = 0  */
+        check_f_near("elevated lip height", lip->height, 64.0f, 1e-4f); /* kills h = zi */
+        check_f_near("elevated lip y0", lip->y0, 100.0f, 1e-4f);
+        check_f_near("elevated lip ny", lip->ny, -1.0f, 1e-4f);
+    }
+
+    /* The behavioural half, with the real map's eye heights. Standing in the
+     * bombsite (feet 64, eye 112) you are inside the drop and blocked;
+     * standing on the catwalk (feet 128, eye 176) you see over it. y=100 is
+     * the only face either ray crosses, so each mutant loses exactly one of
+     * these: z0=0 drops the slab to [0,64] and lets the 112 ray through,
+     * height=zi raises it to [64,192] and blackens the 176 overlook. */
+    check_i("elevated lip blocks bombsite eye",
+            solid_ray_clear(&f.sd, 50.0f, 50.0f, 112.0f, 50.0f, 150.0f, 112.0f),
+            0);
+    check_i("elevated lip clear at catwalk eye",
+            solid_ray_clear(&f.sd, 50.0f, 50.0f, 176.0f, 50.0f, 150.0f, 176.0f),
+            1);
+    /* Standing on the catwalk floor must not walk off (slab inclusive on its
+     * top); one unit higher there is nothing left to hit. */
+    check_i("elevated lip blocks step-off",
+            solid_sweep_xy(&f.sd, 50.0f, 150.0f, 50.0f, 50.0f, 128.0f, AGENT_HULL_RADIUS, NULL),
+            1);
+    check_i("elevated lip above slab is free",
+            solid_sweep_xy(&f.sd, 50.0f, 150.0f, 50.0f, 50.0f, 129.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+
+    free_solids(&f.sd);
+}
+
 /* IMPORTANT: adjacency wins over the drop. map.py exempts ramp endpoints from
  * cliff pruning, so on the real map catwalk(z=128) stays adjacent to
  * CT-ramp(z=64) across a 64u drop. Emitting a lip there put a 64u wall across
@@ -949,12 +1039,18 @@ static void test_solids_ramp_neighbour_emits_no_lip(void) {
 /* Flush + unconnected → ONE divider, emitted by the lower-indexed room.
  * SOLID_KIND_DIVIDER is unreachable on SIMPLE_ROOMS (map.py only prunes on
  * |Δz| > MAX_STEP_HEIGHT, which lands in the lip branch), so without this
- * fixture the whole branch — and the i<jj anti-duplicate guard — is dead. */
+ * fixture the whole branch — and the i<jj anti-duplicate guard — is dead.
+ *
+ * Both rooms sit at z=64, not on the ground: the divider emit asks for
+ * `SOLID_WALL_HEIGHT + zi`, and at z=0 that is indistinguishable from a bare
+ * SOLID_WALL_HEIGHT. They have to be at the SAME z — a difference sends the
+ * edge down the lip branch instead — so lifting the pair is the only way to
+ * reach a non-trivial zi here. */
 static void test_solids_divider(void) {
     SolidsFix   f;
     int         i, divs = 0;
     const Wall* div = NULL;
-    solids_fix_two_rooms(&f);
+    solids_fix_two_rooms_z(&f, 64.0f);
     solids_fix_adj(&f, 0, 1, 0); /* prune the shared edge */
     build_solids_from_rooms(&f.sd);
 
@@ -969,8 +1065,10 @@ static void test_solids_divider(void) {
     check_i("divider total count", f.sd.wall_list.count, 7);
     check_i("divider on the shared line", solids_count_vline(&f.sd, 100.0f), 1);
     if (div != NULL) {
+        /* Based at the ground, not on centroids_z — but as tall as the room
+         * is high, so its top matches a flat neighbour's wall top. */
         check_f_near("divider z0", div->z0, 0.0f, 1e-4f);
-        check_f_near("divider height", div->height, SOLID_WALL_HEIGHT, 1e-4f);
+        check_f_near("divider height", div->height, SOLID_WALL_HEIGHT + 64.0f, 1e-4f);
         check_f_near("divider y0", div->y0, 0.0f, 1e-4f);
         check_f_near("divider y1", div->y1, 100.0f, 1e-4f);
         /* Room 0 owns it (i<jj), so the normal points east, away from room 0. */
@@ -1164,6 +1262,92 @@ static void test_solids_partial_edge_doorway(void) {
     free_solids(&f.sd);
 }
 
+/* solids_fix_nested_doorway — three rooms, two of them covering NESTED
+ * intervals of the same edge.
+ *
+ * Room 0 is a 100x300 hall; both other rooms sit east of its x=100 edge:
+ *   room 1 (wide)   y [50, 250]
+ *   room 2 (narrow) y [100, 200]  ⊂  [50, 250]
+ * Sorted by interval start that is [50,250] then [100,200], i.e. the second
+ * interval ends BEFORE the running cursor. This is the only shape that
+ * distinguishes Pass A's `if (covs[k].hi > cursor) cursor = covs[k].hi;` from
+ * an unconditional `cursor = covs[k].hi`: the guard keeps the cursor at 250,
+ * the unconditional form rewinds it to 200 and then walls off [200,300] —
+ * sealing [200,250], which room 1 covers and which must stay a doorway.
+ *
+ * The two neighbours necessarily OVERLAP in XY — two rooms east of the same
+ * line with nested y-spans cannot avoid it — so room 2 is stacked above room
+ * 1 at z=128, the catwalk-over-room arrangement that makes overlapping quads
+ * legitimate on a real map.
+ *
+ * Everything is mutually connected on purpose: Pass B emits nothing across a
+ * portal, so every face this fixture produces comes from Pass A and the
+ * counts below cannot be muddied by a stray lip.
+ */
+static void solids_fix_nested_doorway(SolidsFix* f) {
+    solids_fix_n(f, 3);
+    solids_fix_room(f, 0, 0.0f, 0.0f, 100.0f, 300.0f, 0.0f, 0);
+    solids_fix_room(f, 1, 100.0f, 50.0f, 200.0f, 250.0f, 0.0f, 0);
+    solids_fix_room(f, 2, 100.0f, 100.0f, 200.0f, 200.0f, 128.0f, 0);
+    solids_fix_adj(f, 0, 1, 1);
+    solids_fix_adj(f, 0, 2, 1);
+    solids_fix_adj(f, 1, 2, 1); /* keeps room 2's south edge a portal too */
+}
+
+/* Nested coverage must not rewind the union cursor. See the fixture comment:
+ * without the `covs[k].hi > cursor` guard the contained interval drags the
+ * cursor back to 200 and the trailing emit swallows [200,250]. */
+static void test_solids_nested_coverage(void) {
+    SolidsFix   f;
+    int         i, flanks = 0, nonexterior = 0;
+    const Wall *south = NULL, *north = NULL;
+    solids_fix_nested_doorway(&f);
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++) {
+        const Wall* w = &f.sd.wall_list.walls[i];
+        if (w->kind != SOLID_KIND_EXTERIOR)
+            nonexterior++;
+        if (fabsf(w->x1 - w->x0) < 1e-3f && fabsf(w->x0 - 100.0f) < 1e-3f) {
+            flanks++;
+            if (w->y0 < 150.0f)
+                south = w;
+            else
+                north = w;
+        }
+    }
+    /* Room 0's east edge: wall [0,50] · doorway [50,250] · wall [250,300]. */
+    check_i("nested two flanking walls", flanks, 2);
+    /* All three pairs are portals, so Pass B is silent and every face here is
+     * a Pass A exterior — otherwise a lip could be masquerading as a flank. */
+    check_i("nested pass B silent", nonexterior, 0);
+    if (south != NULL) {
+        check_f_near("nested south flank y0", south->y0, 0.0f, 1e-4f);
+        check_f_near("nested south flank y1", south->y1, 50.0f, 1e-4f);
+    }
+    if (north != NULL) {
+        /* The number the mutant gets wrong: 250, not 200. */
+        check_f_near("nested north flank y0", north->y0, 250.0f, 1e-4f);
+        check_f_near("nested north flank y1", north->y1, 300.0f, 1e-4f);
+    }
+
+    /* Behavioural half. y=225 is inside the wide neighbour's coverage but
+     * past the narrow one's end, so it is exactly the strip an unconditional
+     * cursor assignment would wall off. */
+    check_i("nested walk through outer band",
+            solid_sweep_xy(&f.sd, 80.0f, 225.0f, 120.0f, 225.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+    /* The real flanks still block, or the guard would be trivially satisfied
+     * by emitting nothing at all. */
+    check_i("nested walk into south flank",
+            solid_sweep_xy(&f.sd, 80.0f, 25.0f, 120.0f, 25.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            1);
+    check_i("nested walk into north flank",
+            solid_sweep_xy(&f.sd, 80.0f, 275.0f, 120.0f, 275.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            1);
+    free_solids(&f.sd);
+}
+
 /* The sweep is a capsule, not a point: r expands the face BOTH along its
  * normal (you are stopped r units early) and past its endpoints (you clip
  * the door jamb). Zeroing r in either place lets agents corner-clip through
@@ -1329,6 +1513,7 @@ int main(void) {
     test_solids_ray_through_door();
     test_solids_ray_north_wall();
     test_solids_cliff_lip();
+    test_solids_elevated_cliff_lip();
     test_solids_connected_drop_is_portal();
     test_solids_ramp_emits_no_lip();
     test_solids_ramp_neighbour_emits_no_lip();
@@ -1338,6 +1523,7 @@ int main(void) {
     test_solids_exterior_normals();
     test_solids_exterior_height_elevated();
     test_solids_partial_edge_doorway();
+    test_solids_nested_coverage();
     test_solids_sweep_hull_radius();
     test_solids_sweep_nearest_hit();
     test_solids_ray_collinear();
