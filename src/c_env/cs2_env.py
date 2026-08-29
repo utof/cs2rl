@@ -363,9 +363,10 @@ class Dust2EnvC(ctypes.Structure):
 # numbers now come from the same compiler invocation that laid the structs out.
 #
 # If one of these raises at import time the MIRROR is wrong, not the assert —
-# fix _fields_ above. Adding a struct? Add a key to py_struct_sizes() in
-# binding.c and an entry to the matching tuple below. BOTH halves of that slip
-# are caught, so neither a mirror nor a key can sit unguarded:
+# fix _fields_ above. Adding a struct? Add a sizeof key AND a tail offsetof key
+# to py_struct_sizes() in binding.c, plus an entry in each matching tuple below
+# (_C_SIZE_MIRRORS and _C_OFFSET_FIELDS). BOTH halves of that slip are caught,
+# so neither a mirror nor a key can sit unguarded:
 #   - mirror declared here, no key in binding.c ->
 #     test_every_ctypes_mirror_is_size_guarded enumerates the ctypes.Structure
 #     subclasses DEFINED IN THIS MODULE and compares them to _C_SIZE_MIRRORS.
@@ -393,15 +394,40 @@ _C_SIZE_MIRRORS = (
     ("WallList", WallListC),
     ("Wall", WallC),
 )
-# (StaticData field -> struct_sizes() key) — offsetof pairs. wall_list and
-# area_bounds are appended after a long run of float reward weights, so a field
-# inserted anywhere before them shifts both and silently repoints every
-# Python-side walls[i] read. Sizes alone would not notice: swapping two
-# same-width fields keeps sizeof identical.
+# (ctypes mirror, field name, struct_sizes() key) — offsetof anchors.
+#
+# EVERY mirror's TAIL field is anchored here, not just StaticData's. sizeof is
+# blind to the drift that costs the most: a field inserted mid-struct in
+# cs2_types.h but appended at the END of the mirror keeps sizeof identical, so
+# the size guard above passes and every field after the insertion point reads
+# the wrong bytes, silently, forever. The last field's offset DOES move under
+# that edit. Swapping two same-width fields is the same story — invisible to
+# sizeof, visible to the anchor when the swap reaches the tail.
+#
+# RULE when adding a field: it goes in the SAME position in the C struct
+# (cs2_types.h) and in the mirror above. Appending — the usual case — makes it
+# the new tail, so retarget that struct's anchor to it in BOTH py_struct_sizes()
+# (binding.c) and the tuple below, in the same commit. Leaving the anchor on the
+# old tail still works (both sides shift together) but stops guarding the tail.
+#
+# StaticData carries three anchors instead of one: wall_list/area_bounds are
+# appended after a long run of float reward weights, and pbrs_nav_weight_ct pins
+# the end of that run, so a drift inside the run is localised rather than only
+# surfacing at the very end.
 _C_OFFSET_FIELDS = (
-    ("pbrs_nav_weight_ct", "StaticData_pbrs_nav_weight_ct_offset"),
-    ("wall_list", "StaticData_wall_list_offset"),
-    ("area_bounds", "StaticData_area_bounds_offset"),
+    (StaticDataC, "pbrs_nav_weight_ct", "StaticData_pbrs_nav_weight_ct_offset"),
+    (StaticDataC, "wall_list", "StaticData_wall_list_offset"),
+    (StaticDataC, "area_bounds", "StaticData_area_bounds_offset"),
+    (AgentStateC, "punch_yaw", "AgentState_punch_yaw_offset"),
+    # GameState's tail is its explicit pad array, not a "real" field. offsetof
+    # on a pad is legal, and the rule is uniform: anchor the LAST field. Picking
+    # bomb_is_dropped instead would miss a field slipped in between it and the
+    # pad on one side only.
+    (GameStateC, "_pad_gs", "GameState__pad_gs_offset"),
+    (StepStatsC, "plant_tick", "StepStats_plant_tick_offset"),
+    (Dust2EnvC, "recoil_enabled", "Dust2Env_recoil_enabled_offset"),
+    (WallC, "kind", "Wall_kind_offset"),
+    (WallListC, "capacity", "WallList_capacity_offset"),
 )
 # (struct_sizes() key -> Python value) — bare macros nav.py re-declares in
 # Python. Pin them to the header: the reward views below slice
@@ -421,11 +447,13 @@ for _name, _mirror in _C_SIZE_MIRRORS:
         f"{_mirror.__name__} size mismatch (struct_sizes key {_name!r}): "
         f"ctypes {ctypes.sizeof(_mirror)} vs C {_C_SIZES[_name]}")
 del _name, _mirror
-for _field, _key in _C_OFFSET_FIELDS:
-    assert getattr(StaticDataC, _field).offset == _C_SIZES[_key], (
-        f"StaticDataC.{_field} offset mismatch: ctypes "
-        f"{getattr(StaticDataC, _field).offset} vs C {_C_SIZES[_key]}")
-del _field, _key
+for _mirror, _field, _key in _C_OFFSET_FIELDS:
+    # _mirror.__name__, not a hard-coded class: the tuple spans every mirror
+    # now, so the message must name the one that actually drifted.
+    assert getattr(_mirror, _field).offset == _C_SIZES[_key], (
+        f"{_mirror.__name__}.{_field} offset mismatch (struct_sizes key {_key!r}): "
+        f"ctypes {getattr(_mirror, _field).offset} vs C {_C_SIZES[_key]}")
+del _mirror, _field, _key
 for _macro, _py_value in _C_MACROS:
     assert _py_value == _C_SIZES[_macro], (
         f"{_macro} mismatch: nav {_py_value} vs C {_C_SIZES[_macro]}")
@@ -437,8 +465,9 @@ del _macro, _py_value
 # set(binding.struct_sizes()) == _C_SIZE_KEYS_CHECKED, which turns "published a
 # key in binding.c and forgot to consume it here" from a silent unguarded field
 # into a failing test. Exported for that test; nothing in the sim reads it.
-_C_SIZE_KEYS_CHECKED = frozenset([_n for _n, _ in _C_SIZE_MIRRORS] +
-                                 [_k for _, _k in _C_OFFSET_FIELDS] + [_m for _m, _ in _C_MACROS])
+_C_SIZE_KEYS_CHECKED = (frozenset(_n for _n, _ in _C_SIZE_MIRRORS)
+                        | frozenset(_k for _, _, _k in _C_OFFSET_FIELDS)
+                        | frozenset(_m for _m, _ in _C_MACROS))
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer

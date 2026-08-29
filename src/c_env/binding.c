@@ -388,8 +388,9 @@ static PyObject* py_get_masks(PyObject* self, PyObject* args) {
 /* ── binding.struct_sizes() -> dict ──
  * The single source of truth for the ctypes mirrors in cs2_env.py.
  *
- * WHAT: sizeof/offsetof of every struct Python overlays with ctypes, plus the
- * two team-size macros nav.py duplicates.
+ * WHAT: sizeof of every struct Python overlays with ctypes, an offsetof anchor
+ * on each of those structs' LAST field, plus the two team-size macros nav.py
+ * duplicates.
  *
  * WHY: cs2_env.py used to carry hand-measured literals (164/1708/204/6832 and
  * offsets 476/480/496) refreshed by compiling a throwaway printf TU by hand.
@@ -404,8 +405,13 @@ static PyObject* py_get_masks(PyObject* self, PyObject* args) {
  *   "<MACRO>"                  -> a bare cs2_types.h macro      e.g. "TEAM_SIZE"
  *
  * PITFALL: append a key here for every struct/macro a ctypes mirror depends on
- * — a struct with no key here is unguarded. The converse is enforced, not just
- * asked for: every key published here MUST be consumed by the _C_SIZES guard in
+ * — a struct with no key here is unguarded, and a struct with ONLY a sizeof key
+ * is guarded against the wrong thing: sizeof is blind to a field inserted
+ * mid-struct in C but appended at the tail of the mirror. Every struct needs a
+ * tail offsetof too, per TAIL ANCHORS below.
+ *
+ * The converse is enforced, not just asked
+ * for: every key published here MUST be consumed by the _C_SIZES guard in
  * cs2_env.py, because test_struct_sizes_keys_are_all_consumed (in
  * tests/test_struct_sizes.py) asserts set(struct_sizes()) == _C_SIZE_KEYS_CHECKED.
  * A key added here and never compared there fails that test instead of sitting
@@ -417,34 +423,61 @@ static PyObject* py_get_masks(PyObject* self, PyObject* args) {
  * Py_UNUSED mangles the name so it cannot be referenced at all. */
 static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     (void)self;
-    return Py_BuildValue("{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:i,s:i}",
-                         "AgentState",
-                         (Py_ssize_t)sizeof(AgentState),
-                         "GameState",
-                         (Py_ssize_t)sizeof(GameState),
-                         "StepStats",
-                         (Py_ssize_t)sizeof(StepStats),
-                         "Dust2Env",
-                         (Py_ssize_t)sizeof(Dust2Env),
-                         "StaticData",
-                         (Py_ssize_t)sizeof(StaticData),
-                         "Wall",
-                         (Py_ssize_t)sizeof(Wall),
-                         "WallList",
-                         (Py_ssize_t)sizeof(WallList),
-                         /* StaticData tail offsets. wall_list/area_bounds sit after a long run
-                          * of float reward weights; inserting a field before them shifts both
-                          * and silently repoints every Python-side walls[i] read. */
-                         "StaticData_pbrs_nav_weight_ct_offset",
-                         (Py_ssize_t)offsetof(StaticData, pbrs_nav_weight_ct),
-                         "StaticData_wall_list_offset",
-                         (Py_ssize_t)offsetof(StaticData, wall_list),
-                         "StaticData_area_bounds_offset",
-                         (Py_ssize_t)offsetof(StaticData, area_bounds),
-                         "TEAM_SIZE",
-                         TEAM_SIZE,
-                         "N_AGENTS",
-                         N_AGENTS);
+    return Py_BuildValue(
+        "{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:i,s:i}",
+        "AgentState",
+        (Py_ssize_t)sizeof(AgentState),
+        "GameState",
+        (Py_ssize_t)sizeof(GameState),
+        "StepStats",
+        (Py_ssize_t)sizeof(StepStats),
+        "Dust2Env",
+        (Py_ssize_t)sizeof(Dust2Env),
+        "StaticData",
+        (Py_ssize_t)sizeof(StaticData),
+        "Wall",
+        (Py_ssize_t)sizeof(Wall),
+        "WallList",
+        (Py_ssize_t)sizeof(WallList),
+        /* TAIL ANCHORS — one offsetof per mirrored struct, on that struct's
+         * LAST field. sizeof alone cannot see a field inserted mid-struct here
+         * but appended at the end of the ctypes mirror: the total stays equal,
+         * every guard passes, and Python reads the wrong bytes forever. The
+         * last field's offset does move under that edit, so it catches it.
+         * Rule: a new field goes in the SAME position in the C struct and in
+         * the mirror. Appending at the tail (the usual case) shifts the anchor
+         * on both sides by the same amount, which is exactly what we want —
+         * the anchor then names the NEW last field, so update the key here and
+         * the entry in _C_OFFSET_FIELDS (cs2_env.py) together.
+         * StaticData carries three anchors, not one: wall_list/area_bounds sit
+         * after a long run of float reward weights, and pbrs_nav_weight_ct pins
+         * the end of that run so a drift inside it is localised. */
+        "StaticData_pbrs_nav_weight_ct_offset",
+        (Py_ssize_t)offsetof(StaticData, pbrs_nav_weight_ct),
+        "StaticData_wall_list_offset",
+        (Py_ssize_t)offsetof(StaticData, wall_list),
+        "StaticData_area_bounds_offset",
+        (Py_ssize_t)offsetof(StaticData, area_bounds),
+        "AgentState_punch_yaw_offset",
+        (Py_ssize_t)offsetof(AgentState, punch_yaw),
+        /* GameState's last field is the explicit tail pad, not a "real"
+         * field. offsetof on a pad array is legal, and the rule is uniform:
+         * anchor the LAST field. Picking bomb_is_dropped instead would miss
+         * a field slipped in between it and the pad on one side only. */
+        "GameState__pad_gs_offset",
+        (Py_ssize_t)offsetof(GameState, _pad_gs),
+        "StepStats_plant_tick_offset",
+        (Py_ssize_t)offsetof(StepStats, plant_tick),
+        "Dust2Env_recoil_enabled_offset",
+        (Py_ssize_t)offsetof(Dust2Env, recoil_enabled),
+        "Wall_kind_offset",
+        (Py_ssize_t)offsetof(Wall, kind),
+        "WallList_capacity_offset",
+        (Py_ssize_t)offsetof(WallList, capacity),
+        "TEAM_SIZE",
+        TEAM_SIZE,
+        "N_AGENTS",
+        N_AGENTS);
 }
 
 /* ── binding.static_data_scalars(capsule) -> dict ──
