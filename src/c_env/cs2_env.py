@@ -568,6 +568,10 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
        TICK (an alive count), not one that is constant for the whole run.
     """
     n = n_active_per_team
+    # Guard the now-public parameter: n > TEAM_SIZE would fold T rows into the
+    # CT mean and write past the roster; n < 1 gives a mean of an empty slice.
+    if not 1 <= n <= TEAM_SIZE:
+        raise ValueError(f"n_active_per_team must be in 1..{TEAM_SIZE}, got {n}")
     # Both means BEFORE either write (PITFALL 2). Sliced, not masked: at the
     # default n == TEAM_SIZE, rewards[TEAM_SIZE:TEAM_SIZE + n] is the identical
     # view to the old rewards[TEAM_SIZE:], so .mean() reduces in the same order
