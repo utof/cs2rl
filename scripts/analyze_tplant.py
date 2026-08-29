@@ -64,7 +64,9 @@ CAP_DEFAULT = 640                      # ticks; src/c_env/nav_data.h CFG_ROUND_T
 
 
 def load_rows(run_dir: Path):
-    """Yield metric rows (dicts) from <run_dir>/metrics.jsonl in file order.
+    """Metric rows (list of dicts) from <run_dir>/metrics.jsonl in file order,
+    deduped ONCE here (dedupe_resume_rows) so every consumer — analyze_run
+    and main's --tag section — sees the identical row list.
 
     File order == chronological order across resume seams (train.py appends);
     malformed lines are skipped loudly on stderr rather than crashing — a
@@ -73,15 +75,17 @@ def load_rows(run_dir: Path):
     path = run_dir / "metrics.jsonl"
     if not path.exists():
         raise FileNotFoundError(f"{path} not found — is this a run dir?")
+    rows = []
     with path.open() as fh:
         for i, line in enumerate(fh, 1):
             line = line.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                rows.append(json.loads(line))
             except json.JSONDecodeError:
                 print(f"[warn] {path}:{i}: torn/malformed line skipped", file=sys.stderr)
+    return dedupe_resume_rows(rows)
 
 
 def t_plant(row, cap, bomb_timer, p_min):
@@ -210,8 +214,9 @@ def analyze_run(run_dir: Path,
                 rows=None):
     """Full per-run readout. `rows` lets a caller (main, with --tag) load
     metrics.jsonl once and reuse the SAME row objects for the tag section,
-    so both readouts see identical data (and one file read)."""
-    rows = dedupe_resume_rows(list(load_rows(run_dir)) if rows is None else rows)
+    so both readouts see identical data (and one file read). Resume dedupe
+    happens in load_rows, not here — a caller-supplied `rows` is used as-is."""
+    rows = load_rows(run_dir) if rows is None else rows
     if not rows:
         raise ValueError(f"{run_dir}: metrics.jsonl is empty")
     segments = segment_rows(rows)
@@ -661,7 +666,7 @@ def main(argv=None):
                     "--tag-diagnostic run)")
     args = ap.parse_args(argv)
     for d in args.run_dirs:
-        rows = list(load_rows(d))
+        rows = load_rows(d)
         r = analyze_run(d,
                         args.cap,
                         args.bomb_timer,

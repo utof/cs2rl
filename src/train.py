@@ -653,6 +653,12 @@ def collect_train_state(trainer, self_play_mgr) -> dict:
     so the file is device-agnostic. Requires _patch_trainer_with_return_norm
     (the _log_alpha_tensor / _alpha_optimizer / _ret_* aliases)."""
     return {
+                                                                       # Set identity (fix round 1, review #1): load_full_resume refuses a
+                                                                       # sidecar whose epoch/global_step disagree with trainer_state.pt — a
+                                                                       # crash between the three writes must never pair epoch-N weights with
+                                                                       # epoch-(N-1) optimizer/α/scheduler state silently.
+        "epoch": int(trainer.epoch),
+        "global_step": int(trainer.global_step),
         "log_alpha": trainer._log_alpha_tensor.detach().cpu().clone(),
         "alpha_optimizer": trainer._alpha_optimizer.state_dict(),
                                                                        # CosineAnnealingLR is stepped per epoch, not a fn of global_step;
@@ -718,7 +724,14 @@ def _install_full_checkpointing(trainer, self_play_mgr):
     same epoch after loading, and a crash between the model write and the
     state writes must not freeze the state files), atomic writes for all
     three files, and the train_state.pt sidecar. Still returns the model
-    path — PuffeRL.close() copies it to <data_dir>/<run_id>.pt."""
+    path — PuffeRL.close() copies it to <data_dir>/<run_id>.pt.
+
+    WRITE ORDER is load-bearing: model → train_state → trainer_state. The
+    LAST file written (trainer_state.pt) names the model (model_name) and
+    carries the epoch the sidecar is checked against, so a crash anywhere
+    in the sequence leaves a set that resolve_resume_run/load_full_resume
+    either accept whole (all three from the same epoch) or refuse — never
+    a newer model with an older optimizer."""
 
     def _save_checkpoint(self):
         run_id = self.logger.run_id
@@ -727,6 +740,7 @@ def _install_full_checkpointing(trainer, self_play_mgr):
         model_name = f"model_{self.epoch:06d}.pt"
         model_path = path / model_name
         _atomic_save_state_dict(self.uncompiled_policy.state_dict(), model_path)
+        _atomic_save_state_dict(collect_train_state(self, self_play_mgr), path / "train_state.pt")
         _atomic_save_state_dict(
             {
                 "optimizer_state_dict": self.optimizer.state_dict(),
@@ -736,7 +750,6 @@ def _install_full_checkpointing(trainer, self_play_mgr):
                 "model_name": model_name,
                 "run_id": run_id,
             }, path / "trainer_state.pt")
-        _atomic_save_state_dict(collect_train_state(self, self_play_mgr), path / "train_state.pt")
         return str(model_path)
 
     trainer.save_checkpoint = types.MethodType(_save_checkpoint, trainer)
@@ -744,11 +757,14 @@ def _install_full_checkpointing(trainer, self_play_mgr):
 
 
 def resolve_resume_run(run_dir: Path, run_id: str | None = None) -> dict:
-    """Locate model_*.pt (max epoch) + trainer_state.pt + train_state.pt under
-    <run_dir>/<run_id>/. run_id=None ⇒ the unique subdir holding
-    trainer_state.pt (error if 0 or >1) and the id is read from
-    trainer_state.pt['run_id']. PITFALL: model_*.pt sorts lexically — the
-    zero-padded %06d name is what makes max-by-sort == max-by-epoch."""
+    """Locate the checkpoint SET under <run_dir>/<run_id>/: the model named by
+    trainer_state.pt['model_name'] (NOT max(model_*.pt) — a crash after the
+    model write but before trainer_state.pt leaves a newer orphan model whose
+    optimizer state was never saved), plus trainer_state.pt + train_state.pt.
+    run_id=None ⇒ the unique subdir holding trainer_state.pt (error if 0 or
+    >1) and the id is read from trainer_state.pt['run_id']. Every failure is
+    a SystemExit with a [Resume] message (a stock-PuffeRL run dir has no
+    train_state.pt sidecar and must not die with a raw traceback)."""
     import torch
     run_dir = Path(run_dir)
     if run_id is None:
@@ -762,14 +778,25 @@ def resolve_resume_run(run_dir: Path, run_id: str | None = None) -> dict:
     if not ts_path.exists():
         raise SystemExit(f"[Resume] {ts_path} not found")
     ts = torch.load(ts_path, map_location="cpu", weights_only=False)
-    models = sorted(d.glob("model_*.pt"))
-    if not models:
-        raise SystemExit(f"[Resume] no model_*.pt under {d}")
+    model_name = ts.get("model_name")
+    if not model_name:
+        raise SystemExit(f"[Resume] {ts_path} has no model_name — not a full-state checkpoint")
+    model_path = d / model_name
+    if not model_path.exists():
+        raise SystemExit(f"[Resume] {ts_path} names {model_name} but {model_path} is missing")
+    newer = [p.name for p in d.glob("model_*.pt") if p.name > model_name]
+    if newer:
+        print(f"[Resume] WARN: ignoring {len(newer)} model file(s) newer than {model_name} "
+              f"({', '.join(sorted(newer))}) — their optimizer state was never saved")
+    st_path = d / "train_state.pt"
+    if not st_path.exists():
+        raise SystemExit(f"[Resume] {st_path} not found — run predates full-state checkpointing "
+                         "(R0-C); use --resume <model.pt> for a weights-only restart")
     return {
         "run_id": ts.get("run_id", run_id),
-        "model_path": models[-1],
+        "model_path": model_path,
         "trainer_state_path": ts_path,
-        "train_state_path": d / "train_state.pt"
+        "train_state_path": st_path
     }
 
 
@@ -783,8 +810,17 @@ def check_resume_config(run_dir: Path, new_cfg: dict, allow=RESUME_CONFIG_ALLOWL
         raise SystemExit(f"[Resume] {cfg_path} not found — cannot guard against a config change")
     old = json.loads(cfg_path.read_text())
     new = json.loads(json.dumps(new_cfg, sort_keys=True, default=str))
-    changed = sorted(k for k in (old.keys() | new.keys())
-                     if old.get(k, "<missing>") != new.get(k, "<missing>"))
+
+    def _same(k):
+        a, b = old.get(k, "<missing>"), new.get(k, "<missing>")
+        # data_dir: train() rewrites args.checkpoint_dir to the ABSOLUTE run
+        # dir on --resume-run, so a run launched with a relative/--name path
+        # would otherwise WARN on every resume and train users to ignore it.
+        if k == "data_dir" and isinstance(a, str) and isinstance(b, str):
+            return Path(a).resolve() == Path(b).resolve()
+        return a == b
+
+    changed = sorted(k for k in (old.keys() | new.keys()) if not _same(k))
     for k in changed:
         if k in allow:
             print(
@@ -796,6 +832,24 @@ def check_resume_config(run_dir: Path, new_cfg: dict, allow=RESUME_CONFIG_ALLOWL
             f"{k}: {old.get(k, '<missing>')!r} -> {new.get(k, '<missing>')!r}" for k in diffs))
 
 
+def check_checkpoint_set(model_path, ts: dict, st: dict) -> None:
+    """Set consistency (review #1): model_<epoch>.pt, trainer_state.pt and
+    train_state.pt must all come from ONE epoch. The model is already the one
+    trainer_state.pt names (resolve_resume_run); this checks the sidecar's
+    own epoch/global_step against both. SystemExit, never a bare assert
+    (stripped under -O). Pure in its inputs so the mismatch cases are unit-
+    testable without a trainer."""
+    model_epoch = int(Path(model_path).stem.split("_")[-1])
+    ts_epoch, st_epoch = int(ts["update"]), int(st.get("epoch", -1))
+    ts_step, st_step = int(ts["global_step"]), int(st.get("global_step", -1))
+    if not (model_epoch == ts_epoch == st_epoch and ts_step == st_step):
+        raise SystemExit(f"[Resume] inconsistent checkpoint set under {Path(model_path).parent}: "
+                         f"model epoch {model_epoch}, trainer_state epoch {ts_epoch} "
+                         f"(global_step {ts_step}), train_state epoch {st_epoch} "
+                         f"(global_step {st_step}) — a crash mid-save; resume from an older "
+                         "complete set or use --resume <model.pt>")
+
+
 def load_full_resume(trainer, self_play_mgr, paths: dict) -> dict:
     """Policy weights are loaded by the --resume path (resolve_resume_split);
     this restores optimizer, counters and the sidecar. Returns
@@ -805,14 +859,38 @@ def load_full_resume(trainer, self_play_mgr, paths: dict) -> dict:
     ts = torch.load(paths["trainer_state_path"],
                     map_location=trainer.config["device"],
                     weights_only=False)
+    st = torch.load(paths["train_state_path"], map_location="cpu", weights_only=False)
+    check_checkpoint_set(paths["model_path"], ts, st)
     trainer.optimizer.load_state_dict(ts["optimizer_state_dict"])
     trainer.global_step = int(ts["global_step"])
     trainer.epoch = int(ts["update"])
-    st = torch.load(paths["train_state_path"], map_location="cpu", weights_only=False)
     restore_train_state(trainer, self_play_mgr, st)
     print("[Resume] WARN: resume not bit-exact for env sampling (env xorshift32 state is "
           "not checkpointed).")
     return {"resumed_from_step": trainer.global_step, "epoch": trainer.epoch}
+
+
+def check_resume_metrics_bound(resumed_step: int, last_row_step: int, checkpoint_interval: int,
+                               steps_per_epoch: int) -> tuple[int, int]:
+    """Spec §R0-C sanity bound of a restored global_step against the last
+    metrics.jsonl row of the same run_id. Returns (lo, hi); raises SystemExit
+    (never a bare assert — stripped under -O) when outside.
+
+    Both sides are checkpoint_interval epochs wide: checkpoints fire every
+    checkpoint_interval epochs unconditionally (pufferl.py train loop), but
+    a row is only written when PuffeRL builds `logs`, which it throttles to
+    ≥0.25 s since the last log — so with fast epochs the last row can be up
+    to checkpoint_interval-1 epochs BEHIND the checkpoint (hence + rather
+    than the one-epoch upper side the brief sketched), and the checkpoint
+    can be up to checkpoint_interval epochs behind the last row."""
+    lo = last_row_step - checkpoint_interval * steps_per_epoch
+    hi = last_row_step + checkpoint_interval * steps_per_epoch
+    if not lo <= resumed_step <= hi:
+        raise SystemExit(f"[Resume] restored global_step {resumed_step} outside [{lo}, {hi}] "
+                         f"around last metrics row {last_row_step} "
+                         f"(checkpoint_interval={checkpoint_interval}, "
+                         f"steps/epoch={steps_per_epoch})")
+    return lo, hi
 
 
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
@@ -3658,12 +3736,15 @@ class SelfPlayManager:
     def state_dict(self) -> dict:
         """R0-C (#134): everything a full-state resume must restore.
 
-        Paths are stringified for torch.save portability. The knobs
+        Paths are stringified AND resolve()d: the pool is filled with paths
+        relative to --checkpoint-dir as given, while --resume-run resolves the
+        run dir to absolute — a resume from another cwd would otherwise fail
+        every exists() check in load_state_dict and empty the pool. The knobs
         (pool_size, p_past, ...) are NOT saved — they are rebuilt from args and
         guarded by check_resume_config via config.json.
         """
         return {
-            "pool": [str(p) for p in self.pool],
+            "pool": [str(Path(p).resolve()) for p in self.pool],
             "opponent_team": self.opponent_team,
             "_milestone_count": self._milestone_count,
             "_last_save_epoch": self._last_save_epoch,
@@ -3675,6 +3756,12 @@ class SelfPlayManager:
         restored explicitly: rebuilt-at-default would invert every later
         maybe_switch_teams toggle relative to the pre-crash run."""
         self.pool = [Path(p) for p in state["pool"] if Path(p).exists()]
+        dropped = len(state["pool"]) - len(self.pool)
+        if dropped:
+            print(f"[SelfPlay] WARN: dropped {dropped}/{len(state['pool'])} pool entries whose "
+                  "file no longer exists")
+        print(f"[SelfPlay] pool restored: {len(self.pool)} entries, "
+              f"opponent_team={state['opponent_team']}")
         self.opponent_team = state["opponent_team"]
         self._milestone_count = int(state["_milestone_count"])
         self._last_save_epoch = int(state["_last_save_epoch"])
@@ -5236,9 +5323,9 @@ def train(args):
     if resume_run:
         _info = load_full_resume(trainer, self_play_mgr, _resume_paths)
         _resumed_from_step = _info["resumed_from_step"]
-        # Spec §R0-C bound vs the last metrics row (participating units): the
-        # checkpoint is at most checkpoint_interval epochs behind the last row
-        # and never more than one epoch ahead of it.
+        # Spec §R0-C bound vs the last metrics row (participating units); see
+        # check_resume_metrics_bound for why both sides are checkpoint_interval
+        # epochs wide.
         _B = batch_size * train_config["n_active_per_team"] // TEAM_SIZE
         _last = None
         if metrics_path.exists():
@@ -5250,10 +5337,8 @@ def train(args):
                 if _row.get("run_id") == run_id:
                     _last = _row.get("step", _last)
         if _last is not None:
-            _lo, _hi = _last - train_config["checkpoint_interval"] * _B, _last + _B
-            assert _lo <= _resumed_from_step <= _hi, (
-                f"[Resume] restored global_step {_resumed_from_step} outside "
-                f"[{_lo}, {_hi}] around last metrics row {_last}")
+            check_resume_metrics_bound(_resumed_from_step, _last,
+                                       train_config["checkpoint_interval"], _B)
             print(f"[Resume] global_step {_resumed_from_step:,} (last metrics row {_last:,}, "
                   f"gap {_resumed_from_step - _last:+,}) epoch {trainer.epoch}")
     # ────────────────────────────────────────────────────────────────────────

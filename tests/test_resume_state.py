@@ -215,12 +215,18 @@ def test_scheduler_restore_adopts_new_t_max():
         cleanup()
 
 
-def test_config_guard_allowlist(tmp_path):
+def test_config_guard_allowlist(tmp_path, capsys):
     from train import RESUME_CONFIG_ALLOWLIST, check_resume_config
     old = {"a": 1, "seed": 1, "device": "cpu", "data_dir": "x", "run_id": "r", "gamma": 0.99}
     (tmp_path / "config.json").write_text(json.dumps(old))
     new = dict(old, seed=2, device="cuda", data_dir="y", run_id="q")
     check_resume_config(tmp_path, new)                 # allowlisted diffs OK
+                                                       # data_dir relative→absolute of the SAME dir is not a change (no WARN noise)
+    capsys.readouterr()                                # drop the WARN lines from the call above
+    (tmp_path / "config.json").write_text(json.dumps(dict(old, data_dir=str(Path("rel/run")))))
+    check_resume_config(tmp_path, dict(old, data_dir=str(Path("rel/run").resolve())))
+    assert "data_dir" not in capsys.readouterr().out
+    (tmp_path / "config.json").write_text(json.dumps(old))
     assert {"data_dir", "device", "seed", "run_id"} <= RESUME_CONFIG_ALLOWLIST
                                                        # Task 7 context ruling: n_active_per_team changes the step unit and the
                                                        # participating buffer layout — it must NEVER be allowlisted.
@@ -229,6 +235,112 @@ def test_config_guard_allowlist(tmp_path):
         check_resume_config(tmp_path, dict(old, gamma=0.5))
     with pytest.raises(SystemExit, match="extra_key"):
         check_resume_config(tmp_path, dict(old, extra_key=1))
+
+
+def _fake_set(d: Path, model_epochs, ts_epoch, st_epoch, *, steps_per_epoch=100):
+    """Manufacture a checkpoint set on disk without a trainer: model files for
+    `model_epochs`, trainer_state.pt naming model_<ts_epoch> and train_state.pt
+    stamped with st_epoch — the shapes a crash between the three atomic writes
+    can leave behind."""
+    d.mkdir(parents=True, exist_ok=True)
+    for e in model_epochs:
+        torch.save({}, d / f"model_{e:06d}.pt")
+    torch.save(
+        {
+            "optimizer_state_dict": {},
+            "global_step": ts_epoch * steps_per_epoch,
+            "agent_step": ts_epoch * steps_per_epoch,
+            "update": ts_epoch,
+            "model_name": f"model_{ts_epoch:06d}.pt",
+            "run_id": "rid",
+        }, d / "trainer_state.pt")
+    torch.save({"epoch": st_epoch, "global_step": st_epoch * steps_per_epoch}, d / "train_state.pt")
+
+
+def test_resolve_uses_trainer_state_model_name_not_max(tmp_path):
+    """model_000010.pt orphaned by a crash after the model write: the set is
+    trainer_state@9 + train_state@9 → resume from 9, and the orphan is
+    reported, not silently paired with epoch-9 optimizer state."""
+    from train import check_checkpoint_set, resolve_resume_run
+    _fake_set(tmp_path / "rid", model_epochs=(9, 10), ts_epoch=9, st_epoch=9)
+    paths = resolve_resume_run(tmp_path)               # run_id discovered
+    assert paths["run_id"] == "rid" and paths["model_path"].name == "model_000009.pt"
+    ts = torch.load(paths["trainer_state_path"], weights_only=False)
+    st = torch.load(paths["train_state_path"], weights_only=False)
+    check_checkpoint_set(paths["model_path"], ts, st)  # consistent → no raise
+
+
+def test_mismatched_set_is_refused(tmp_path):
+    """trainer_state@10 (names model_000010) + train_state@9: a stale sidecar
+    next to a newer model/optimizer (e.g. a torn write, or files copied by
+    hand). Must be refused, naming all three epochs."""
+    from train import check_checkpoint_set, resolve_resume_run
+    _fake_set(tmp_path / "rid", model_epochs=(9, 10), ts_epoch=10, st_epoch=9)
+    paths = resolve_resume_run(tmp_path, run_id="rid")
+    ts = torch.load(paths["trainer_state_path"], weights_only=False)
+    st = torch.load(paths["train_state_path"], weights_only=False)
+    with pytest.raises(SystemExit,
+                       match=r"model epoch 10.*trainer_state epoch 10.*train_state epoch 9"):
+        check_checkpoint_set(paths["model_path"], ts, st)
+        # legacy sidecar without the stamp is refused too (epoch -1 in the message)
+    with pytest.raises(SystemExit, match="train_state epoch -1"):
+        check_checkpoint_set(paths["model_path"], ts, {})
+
+
+def test_resolve_refuses_incomplete_dirs(tmp_path):
+    from train import resolve_resume_run
+    d = tmp_path / "rid"
+    # model named by trainer_state.pt missing (only the orphan exists)
+    _fake_set(d, model_epochs=(10, ), ts_epoch=9, st_epoch=9)
+    with pytest.raises(SystemExit, match="model_000009.pt"):
+        resolve_resume_run(tmp_path, run_id="rid")
+        # stock-PuffeRL dir: no train_state.pt sidecar → [Resume] message, not FileNotFoundError
+    _fake_set(d, model_epochs=(9, ), ts_epoch=9, st_epoch=9)
+    (d / "train_state.pt").unlink()
+    with pytest.raises(SystemExit, match=r"\[Resume\] .*train_state.pt not found"):
+        resolve_resume_run(tmp_path, run_id="rid")
+
+
+def test_metrics_bound_is_checkpoint_interval_wide_both_sides():
+    """Rows are throttled to ≥0.25 s (pufferl.py) while checkpoints fire every
+    checkpoint_interval epochs unconditionally, so the last row may trail the
+    checkpoint by up to checkpoint_interval-1 epochs."""
+    from train import check_resume_metrics_bound as bound
+    B, ci, last = 1000, 5, 50_000
+    assert bound(last, last, ci, B) == (last - ci * B, last + ci * B)  # row exactly at the checkpoint
+    bound(last + (ci - 1) * B, last, ci, B)                            # row ci-1 epochs behind: accepted
+    bound(last - ci * B, last, ci, B)                                  # checkpoint ci epochs behind the row: accepted
+    with pytest.raises(SystemExit, match=r"\[Resume\] restored global_step"):
+        bound(last + (ci + 1) * B, last, ci, B)                        # row further behind: refused
+    with pytest.raises(SystemExit, match=r"\[Resume\] restored global_step"):
+        bound(last - (ci + 1) * B, last, ci, B)                        # row further ahead of the checkpoint: refused
+
+
+def test_selfplay_pool_paths_persist_absolute(tmp_path, monkeypatch, capsys):
+    from train import SelfPlayManager
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "ckpt").mkdir()
+    for n in ("a.pt", "b.pt"):
+        torch.save({}, tmp_path / "ckpt" / n)
+    mgr = SelfPlayManager(pool_size=15,
+                          p_past=0.0,
+                          save_every_epochs=25,
+                          win_threshold=0.6,
+                          phase_length=50)
+    mgr._add_to_pool(Path("ckpt/a.pt"))                # relative, as a relative --checkpoint-dir would give
+    mgr._add_to_pool(Path("ckpt/b.pt"))
+    sd = mgr.state_dict()
+    assert all(Path(p).is_absolute() for p in sd["pool"])
+    (tmp_path / "ckpt" / "b.pt").unlink()
+    monkeypatch.chdir(tmp_path / "ckpt")               # resume from another cwd
+    mgr2 = SelfPlayManager(pool_size=15,
+                           p_past=0.0,
+                           save_every_epochs=25,
+                           win_threshold=0.6,
+                           phase_length=50)
+    mgr2.load_state_dict(sd)
+    assert [p.name for p in mgr2.pool] == ["a.pt"]
+    assert "dropped 1/2" in capsys.readouterr().out
 
 
 def test_analyze_tplant_last_row_wins():
