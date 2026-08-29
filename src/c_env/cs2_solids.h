@@ -217,6 +217,7 @@ static inline void build_solids_from_rooms(StaticData* sd) {
     WallList*    wl;
     const float* ab;
     SolidIv*     covs;
+    Wall*        shrunk;
     int          N, i, e, j, k;
 
     if (sd == NULL)
@@ -237,7 +238,11 @@ static inline void build_solids_from_rooms(StaticData* sd) {
 
     /* Worst case per edge: (ncov + 1) exterior gaps + ncov lips, ncov < N,
      * so 2N+1 per edge and 4*(2N+1) = 8N+4 per room. 8N*(N+1) covers it.
-     */
+     * This bound is O(N^2) and wildly loose — 2448 slots (88 KB) for the 34
+     * faces the 17-room map actually bakes, and ~12 MB at N=200. It is a
+     * transient peak only: the tail of this function reallocs down to
+     * wl->count. Sizing it exactly up front would mean running the whole
+     * double loop twice. */
     wl->capacity = N * 8 * (N + 1);
     wl->walls    = (Wall*)malloc((size_t)wl->capacity * sizeof(Wall));
     if (wl->walls == NULL) {
@@ -379,6 +384,25 @@ static inline void build_solids_from_rooms(StaticData* sd) {
     }
 
     free(covs);
+
+    /* Shrink to fit, so the steady-state cost is the faces that exist rather
+     * than the quadratic upper bound allocated above. Still ONE allocation
+     * site for wall_list — realloc keeps the same block identity.
+     * Pitfalls: realloc(p, 0) is allowed to free and return NULL, so count==0
+     *           is handled separately; and a failed shrink is not an error,
+     *           the oversized block stays valid and capacity keeps describing
+     *           it truthfully. */
+    if (wl->count == 0) {
+        free(wl->walls);
+        wl->walls    = NULL;
+        wl->capacity = 0;
+    } else {
+        shrunk = (Wall*)realloc(wl->walls, (size_t)wl->count * sizeof(Wall));
+        if (shrunk != NULL) {
+            wl->walls    = shrunk;
+            wl->capacity = wl->count;
+        }
+    }
 }
 
 /* ── queries ─────────────────────────────────────────────────────────────── */

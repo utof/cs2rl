@@ -1174,6 +1174,9 @@ static void test_solids_rebake(void) {
     build_solids_from_rooms(&f.sd);
     check_i("rebake same count", f.sd.wall_list.count, first);
     check_ok("rebake list live", f.sd.wall_list.walls != NULL);
+    /* The bake allocates an O(N^2) upper bound and then shrinks to fit; a
+     * capacity still stuck at 8N(N+1) means the realloc tail went missing. */
+    check_i("rebake capacity shrunk", f.sd.wall_list.capacity, first);
     free_solids(&f.sd);
     check_ok("free_solids nulls", f.sd.wall_list.walls == NULL);
     check_i("free_solids count", f.sd.wall_list.count, 0);
