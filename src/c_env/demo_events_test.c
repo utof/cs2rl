@@ -629,10 +629,6 @@ static void solids_fix_cliff_z(SolidsFix* f, float z1) {
     /* cross terms stay 0 — the cliff prune */
 }
 
-static void solids_fix_cliff(SolidsFix* f) {
-    solids_fix_cliff_z(f, 128.0f);
-}
-
 /* Segs whose infinite line is x==v (vertical) / y==v (horizontal). */
 static int solids_count_vline(const StaticData* sd, float v) {
     int i, n = 0;
@@ -652,6 +648,27 @@ static int solids_count_hline(const StaticData* sd, float v) {
             n++;
     }
     return n;
+}
+
+/* solids_poison_hit — seed a SolidHit with a value no real hit can produce.
+ *
+ * What: t = 2.0f, normal zeroed. Call this instead of memset before every
+ *       solid_sweep_xy that inspects `hit`.
+ * Why:  the sweep writes *hit ONLY when it returns 1, so a hit left at zero
+ *       makes assertions about a MISS pass. This bit for real: with the t<0
+ *       clamp reverted, `check_f_near("... t clamped", hit.t, 0.0f, ...)` kept
+ *       passing on the zeroed struct while every other check in the same test
+ *       failed, i.e. the flagship regression test's headline assertion was
+ *       the one thing not being tested.
+ * Pitfall: the sentinel has to break BOTH shapes of t assertion this file
+ *          uses — `== 0` and `< 1`. -1.0f satisfies `t < 1.0f` and would
+ *          leave those vacuous, so the out-of-range value is on the high
+ *          side: 2.0f, the same seed solid_sweep_xy gives best_t.
+ */
+static void solids_poison_hit(SolidHit* h) {
+    h->t  = 2.0f;
+    h->nx = 0.0f;
+    h->ny = 0.0f;
 }
 
 /* Outline is solid, the shared edge is not. Six exterior faces: room 0 keeps
@@ -696,7 +713,7 @@ static void test_solids_sweep_west_wall(void) {
     solids_fix_two_rooms(&f);
     build_solids_from_rooms(&f.sd);
 
-    memset(&hit, 0, sizeof(hit));
+    solids_poison_hit(&hit);
     check_i("sweep west hit",
             solid_sweep_xy(&f.sd, 20.0f, 50.0f, -10.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
             1);
@@ -750,7 +767,7 @@ static void test_solids_sweep_inside_band(void) {
     build_solids_from_rooms(&f.sd);
 
     /* 5u inside the x=0 west face — closer than r=12 — heading out. */
-    memset(&hit, 0, sizeof(hit));
+    solids_poison_hit(&hit);
     check_i("sweep band west hit",
             solid_sweep_xy(&f.sd, 5.0f, 50.0f, -20.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
             1);
@@ -764,7 +781,7 @@ static void test_solids_sweep_inside_band(void) {
             0);
 
     /* Horizontal faces take the same path: 5u inside y=0 heading south. */
-    memset(&hit, 0, sizeof(hit));
+    solids_poison_hit(&hit);
     check_i("sweep band south hit",
             solid_sweep_xy(&f.sd, 50.0f, 5.0f, 50.0f, -20.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
             1);
@@ -1152,7 +1169,7 @@ static void test_solids_sweep_hull_radius(void) {
 
     /* Stops short of x=100: the destination never reaches the plane, but the
      * hull does. With r=0 this is a miss. */
-    memset(&hit, 0, sizeof(hit));
+    solids_poison_hit(&hit);
     check_i("sweep r stops short",
             solid_sweep_xy(&f.sd, 80.0f, 50.0f, 95.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
             1);
@@ -1191,7 +1208,7 @@ static void test_solids_sweep_nearest_hit(void) {
 
     /* From (20,60) to (-40,-60): the west face x=0 is crossed at t≈0.133,
      * the south face y=0 at t≈0.4. */
-    memset(&hit, 0, sizeof(hit));
+    solids_poison_hit(&hit);
     check_i("sweep corner hit",
             solid_sweep_xy(&f.sd, 20.0f, 60.0f, -40.0f, -60.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
             1);
