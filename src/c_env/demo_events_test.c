@@ -551,69 +551,86 @@ static void test_reload_countdown_not_end(void) {
  */
 
 /* Fixture arrays live in the struct so the StaticData pointers stay valid for
- * the whole test; a StaticData with dangling area_bounds bakes garbage. */
+ * the whole test; a StaticData with dangling area_bounds bakes garbage.
+ * Sized for the widest fixture below (the 3-room partial-coverage doorway);
+ * sd.N is what the bake reads, so a 2-room fixture just leaves the tail zero.
+ * Pitfall: adjacency is indexed [i*sd.N + j], NOT [i*SOLIDS_FIX_ROOMS + j] —
+ * solids_fix_adj() below does that arithmetic so tests cannot get it wrong. */
+#define SOLIDS_FIX_ROOMS 4
 typedef struct {
     StaticData sd;
-    float      bounds[8]; /* 2 rooms x (x0,y0,x1,y1) */
-    float      zs[2];
-    int8_t     ramps[2];
-    int8_t     adj[4]; /* row-major [i*N+j] */
+    float      bounds[SOLIDS_FIX_ROOMS * 4]; /* per room: x0,y0,x1,y1 */
+    float      zs[SOLIDS_FIX_ROOMS];
+    int8_t     ramps[SOLIDS_FIX_ROOMS];
+    int8_t     adj[SOLIDS_FIX_ROOMS * SOLIDS_FIX_ROOMS]; /* row-major [i*N+j] */
 } SolidsFix;
 
-/* solids_fix — wire the raw arrays onto a zeroed StaticData.
+/* solids_fix_n — wire the raw arrays onto a zeroed StaticData with N rooms.
+ *
+ * Every room starts self-adjacent and mutually unconnected; callers open the
+ * portals they want with solids_fix_adj.
  *
  * Pitfall: memset the StaticData first. build_solids_from_rooms frees
  * wall_list.walls if it is non-NULL, so an uninitialised pointer here is a
  * free() of a stack address.
  */
-static void solids_fix(SolidsFix* f) {
+static void solids_fix_n(SolidsFix* f, int n) {
+    int i;
     memset(f, 0, sizeof(*f));
-    f->sd.N           = 2;
+    f->sd.N           = n;
     f->sd.area_bounds = f->bounds;
     f->sd.centroids_z = f->zs;
     f->sd.is_ramp     = f->ramps;
     f->sd.adjacency   = f->adj;
+    /* Self-adjacency is always true in map.py. */
+    for (i = 0; i < n; i++)
+        f->adj[i * n + i] = 1;
+}
+
+static void solids_fix(SolidsFix* f) {
+    solids_fix_n(f, 2);
+}
+
+/* One room quad. z is terrain elevation, ramp is the cliff-guard exemption. */
+static void
+solids_fix_room(SolidsFix* f, int i, float x0, float y0, float x1, float y1, float z, int ramp) {
+    f->bounds[i * 4 + 0] = x0;
+    f->bounds[i * 4 + 1] = y0;
+    f->bounds[i * 4 + 2] = x1;
+    f->bounds[i * 4 + 3] = y1;
+    f->zs[i]             = z;
+    f->ramps[i]          = (int8_t)(ramp != 0);
+}
+
+/* Symmetric adjacency, indexed against the fixture's live sd.N. */
+static void solids_fix_adj(SolidsFix* f, int i, int j, int connected) {
+    int n             = f->sd.N;
+    f->adj[i * n + j] = (int8_t)(connected != 0);
+    f->adj[j * n + i] = (int8_t)(connected != 0);
 }
 
 /* Two flush 100x100 rooms sharing x=100, connected → that edge is a portal. */
 static void solids_fix_two_rooms(SolidsFix* f) {
     solids_fix(f);
-    f->bounds[0] = 0.0f;
-    f->bounds[1] = 0.0f;
-    f->bounds[2] = 100.0f;
-    f->bounds[3] = 100.0f;
-    f->bounds[4] = 100.0f;
-    f->bounds[5] = 0.0f;
-    f->bounds[6] = 200.0f;
-    f->bounds[7] = 100.0f;
-    f->zs[0]     = 0.0f;
-    f->zs[1]     = 0.0f;
-    /* A<->B plus both diagonals (self-adjacency is always true in map.py). */
-    f->adj[0] = 1;
-    f->adj[1] = 1;
-    f->adj[2] = 1;
-    f->adj[3] = 1;
+    solids_fix_room(f, 0, 0.0f, 0.0f, 100.0f, 100.0f, 0.0f, 0);
+    solids_fix_room(f, 1, 100.0f, 0.0f, 200.0f, 100.0f, 0.0f, 0);
+    solids_fix_adj(f, 0, 1, 1);
 }
 
 /* Room 0 at z=0, room 1 stacked north at z=128, adjacency cliff-pruned.
  * Mirrors catwalk(128) over bombsite(64): a shared edge that is NOT a
- * portal, so the drop must come back as a lip, not as a doorway. */
-static void solids_fix_cliff(SolidsFix* f) {
+ * portal, so the drop must come back as a lip, not as a doorway.
+ * z1 is a parameter because a lip whose drop equals SOLID_WALL_HEIGHT is
+ * numerically indistinguishable from an exterior wall of the lower room. */
+static void solids_fix_cliff_z(SolidsFix* f, float z1) {
     solids_fix(f);
-    f->bounds[0] = 0.0f;
-    f->bounds[1] = 0.0f;
-    f->bounds[2] = 100.0f;
-    f->bounds[3] = 100.0f;
-    f->bounds[4] = 0.0f;
-    f->bounds[5] = 100.0f;
-    f->bounds[6] = 100.0f;
-    f->bounds[7] = 200.0f;
-    f->zs[0]     = 0.0f;
-    f->zs[1]     = 128.0f;
-    f->adj[0]    = 1; /* diagonal only — the cross terms stay pruned */
-    f->adj[1]    = 0;
-    f->adj[2]    = 0;
-    f->adj[3]    = 1;
+    solids_fix_room(f, 0, 0.0f, 0.0f, 100.0f, 100.0f, 0.0f, 0);
+    solids_fix_room(f, 1, 0.0f, 100.0f, 100.0f, 200.0f, z1, 0);
+    /* cross terms stay 0 — the cliff prune */
+}
+
+static void solids_fix_cliff(SolidsFix* f) {
+    solids_fix_cliff_z(f, 128.0f);
 }
 
 /* Segs whose infinite line is x==v (vertical) / y==v (horizontal). */
@@ -784,12 +801,18 @@ static void test_solids_ray_north_wall(void) {
 }
 
 /* Cliff-pruned shared edge → one lip spanning the drop, not a portal and not
- * a full SOLID_WALL_HEIGHT slab (that would hide the overlook). */
+ * a full SOLID_WALL_HEIGHT slab (that would hide the overlook).
+ *
+ * The drop is 64u, NOT SOLID_WALL_HEIGHT: with a 128u drop the lip
+ * (z0=0, height=128) is bit-for-bit what an exterior wall of the low room
+ * would be, so the test could not tell a lip from a mis-emitted wall. The
+ * kind assertion below is the other half of that — a lip mis-tagged
+ * EXTERIOR draws 4u pushed into the neighbouring room. */
 static void test_solids_cliff_lip(void) {
     SolidsFix   f;
     int         i, lips = 0;
     const Wall* lip = NULL;
-    solids_fix_cliff(&f);
+    solids_fix_cliff_z(&f, 64.0f);
     build_solids_from_rooms(&f.sd);
 
     for (i = 0; i < f.sd.wall_list.count; i++) {
@@ -801,29 +824,138 @@ static void test_solids_cliff_lip(void) {
     }
     check_i("cliff lip emitted once", lips, 1);
     if (lip != NULL) {
+        check_i("cliff lip kind", lip->kind, SOLID_KIND_LIP);
         check_f_near("cliff lip z0", lip->z0, 0.0f, 1e-4f);
-        check_f_near("cliff lip height", lip->height, 128.0f, 1e-4f);
+        check_f_near("cliff lip height", lip->height, 64.0f, 1e-4f);
         check_f_near("cliff lip x0", lip->x0, 0.0f, 1e-4f);
         check_f_near("cliff lip x1", lip->x1, 100.0f, 1e-4f);
+        /* Emitted by the HIGH room (1), so the outward normal points south,
+         * down onto the low room. A flipped sign would draw the cube inside
+         * the catwalk instead of over the drop. */
+        check_f_near("cliff lip nx", lip->nx, 0.0f, 1e-4f);
+        check_f_near("cliff lip ny", lip->ny, -1.0f, 1e-4f);
     }
 
-    /* Eye level inside the drop is blocked; above the lip is the overlook. */
+    /* Eye level inside the drop is blocked; above the lip is the overlook
+     * (an agent standing on the high room has its eye at 64+48=112). */
     check_i("cliff lip blocks eye",
             solid_ray_clear(&f.sd, 50.0f, 50.0f, 48.0f, 50.0f, 150.0f, 48.0f),
             0);
     check_i("cliff lip clear above",
-            solid_ray_clear(&f.sd, 50.0f, 50.0f, 176.0f, 50.0f, 150.0f, 176.0f),
+            solid_ray_clear(&f.sd, 50.0f, 50.0f, 112.0f, 50.0f, 150.0f, 112.0f),
             1);
 
-    /* Standing on the high room at z=128 must not walk off: slab overlap is
+    /* Standing on the high room at z=64 must not walk off: slab overlap is
      * inclusive on [z0, z0+height]. One unit higher there is nothing left. */
     check_i("cliff lip blocks step-off",
-            solid_sweep_xy(&f.sd, 50.0f, 150.0f, 50.0f, 50.0f, 128.0f, AGENT_HULL_RADIUS, NULL),
+            solid_sweep_xy(&f.sd, 50.0f, 150.0f, 50.0f, 50.0f, 64.0f, AGENT_HULL_RADIUS, NULL),
             1);
     check_i("cliff lip above slab is free",
-            solid_sweep_xy(&f.sd, 50.0f, 150.0f, 50.0f, 50.0f, 129.0f, AGENT_HULL_RADIUS, NULL),
+            solid_sweep_xy(&f.sd, 50.0f, 150.0f, 50.0f, 50.0f, 65.0f, AGENT_HULL_RADIUS, NULL),
             0);
 
+    free_solids(&f.sd);
+}
+
+/* IMPORTANT: adjacency wins over the drop. map.py exempts ramp endpoints from
+ * cliff pruning, so on the real map catwalk(z=128) stays adjacent to
+ * CT-ramp(z=64) across a 64u drop. Emitting a lip there put a 64u wall across
+ * an edge the nav graph — and therefore nav-distance shaping — treats as
+ * walkable, i.e. exactly the sim/nav drift this list exists to remove. */
+static void test_solids_connected_drop_is_portal(void) {
+    SolidsFix f;
+    int       i, lips = 0;
+    solids_fix_cliff_z(&f, 64.0f);
+    solids_fix_adj(&f, 0, 1, 1); /* nav says this drop is walkable */
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++)
+        if (f.sd.wall_list.walls[i].kind == SOLID_KIND_LIP)
+            lips++;
+    check_i("connected drop no lip", lips, 0);
+    check_i("connected drop count", f.sd.wall_list.count, 6);
+    check_i("connected drop nothing on y=100", solids_count_hline(&f.sd, 100.0f), 0);
+    /* Walking up the drop must be free in both directions. */
+    check_i("connected drop walk north",
+            solid_sweep_xy(&f.sd, 50.0f, 50.0f, 50.0f, 150.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+    check_i("connected drop walk south",
+            solid_sweep_xy(&f.sd, 50.0f, 150.0f, 50.0f, 50.0f, 64.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+    free_solids(&f.sd);
+}
+
+/* A ramp never emits a lip even when its adjacency is pruned — its high edge
+ * IS the walk-up. Removing the ramp guard walls off every ramp top. */
+static void test_solids_ramp_emits_no_lip(void) {
+    SolidsFix f;
+    int       i, lips = 0;
+    solids_fix_cliff_z(&f, 64.0f);
+    f.ramps[1] = 1; /* the high room is the ramp */
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++)
+        if (f.sd.wall_list.walls[i].kind == SOLID_KIND_LIP)
+            lips++;
+    check_i("ramp no lip", lips, 0);
+    check_i("ramp nothing on y=100", solids_count_hline(&f.sd, 100.0f), 0);
+    free_solids(&f.sd);
+}
+
+/* Flush + unconnected → ONE divider, emitted by the lower-indexed room.
+ * SOLID_KIND_DIVIDER is unreachable on SIMPLE_ROOMS (map.py only prunes on
+ * |Δz| > MAX_STEP_HEIGHT, which lands in the lip branch), so without this
+ * fixture the whole branch — and the i<jj anti-duplicate guard — is dead. */
+static void test_solids_divider(void) {
+    SolidsFix   f;
+    int         i, divs = 0;
+    const Wall* div = NULL;
+    solids_fix_two_rooms(&f);
+    solids_fix_adj(&f, 0, 1, 0); /* prune the shared edge */
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++) {
+        const Wall* w = &f.sd.wall_list.walls[i];
+        if (w->kind == SOLID_KIND_DIVIDER) {
+            divs++;
+            div = w;
+        }
+    }
+    check_i("divider emitted once", divs, 1);
+    check_i("divider total count", f.sd.wall_list.count, 7);
+    check_i("divider on the shared line", solids_count_vline(&f.sd, 100.0f), 1);
+    if (div != NULL) {
+        check_f_near("divider z0", div->z0, 0.0f, 1e-4f);
+        check_f_near("divider height", div->height, SOLID_WALL_HEIGHT, 1e-4f);
+        check_f_near("divider y0", div->y0, 0.0f, 1e-4f);
+        check_f_near("divider y1", div->y1, 100.0f, 1e-4f);
+        /* Room 0 owns it (i<jj), so the normal points east, away from room 0. */
+        check_f_near("divider nx", div->nx, 1.0f, 1e-4f);
+    }
+    /* The pruned edge must actually block, or the prune became a doorway. */
+    check_i("divider blocks",
+            solid_sweep_xy(&f.sd, 80.0f, 50.0f, 120.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            1);
+    free_solids(&f.sd);
+}
+
+/* Same fixture, but the emitting room is a ramp: the guard covers the divider
+ * branch too, not just the lip. A divider on a ramp face walls off the
+ * connector exactly like a lip would. */
+static void test_solids_ramp_emits_no_divider(void) {
+    SolidsFix f;
+    int       i, divs = 0;
+    solids_fix_two_rooms(&f);
+    solids_fix_adj(&f, 0, 1, 0);
+    f.ramps[0] = 1; /* room 0 is the one that would emit (i<jj) */
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++)
+        if (f.sd.wall_list.walls[i].kind == SOLID_KIND_DIVIDER)
+            divs++;
+    check_i("ramp no divider", divs, 0);
+    check_i("ramp divider count", f.sd.wall_list.count, 6);
+    check_i("ramp nothing on x=100", solids_count_vline(&f.sd, 100.0f), 0);
     free_solids(&f.sd);
 }
 
@@ -906,6 +1038,10 @@ int main(void) {
     test_solids_ray_through_door();
     test_solids_ray_north_wall();
     test_solids_cliff_lip();
+    test_solids_connected_drop_is_portal();
+    test_solids_ramp_emits_no_lip();
+    test_solids_divider();
+    test_solids_ramp_emits_no_divider();
     test_solids_rebake();
     test_solids_null_bounds_noop();
 

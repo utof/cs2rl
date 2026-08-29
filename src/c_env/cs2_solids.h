@@ -28,14 +28,20 @@
  *   exterior leftover  no neighbour at all  -> full-height wall
  *                                             z0=0, height=SOLID_WALL_HEIGHT+zi
  *   portal             covered, adjacency   -> NOTHING (walkable doorway),
- *                      true                   including ramp connectors
- *   lip                covered, zi > zj     -> z0=min(zi,zj), height=|zi-zj|
- *                                             (the catwalk face over the
+ *                      true                   including ramp connectors AND
+ *                                             connected drops such as
+ *                                             catwalk->CT-ramp
+ *   lip                covered, adjacency   -> z0=min(zi,zj), height=|zi-zj|
+ *                      false, zi > zj         (the catwalk face over the
  *                                             bombsite; keeps the overlook
  *                                             open above the drop)
  *   divider            covered, adjacency   -> full-height wall, emitted once
  *                      false, no height       (see the i<j note below)
  *                      difference
+ *
+ * Adjacency is checked BEFORE the height test, so "the nav graph says you can
+ * walk here" always wins over "there is a drop here". The two must agree or
+ * nav shaping will steer agents into a face they cannot pass.
  *
  * Walls sit on the ground (z0=0), NOT on centroids_z: a wall floated up to a
  * bombsite's z leaves a triangular void underneath it that you can see and
@@ -181,8 +187,14 @@ static inline void free_solids(StaticData* sd) {
  *  - ONLY malloc site for wall_list. Frees the previous list first, so
  *    calling it twice is safe; calling it on a StaticData whose wall_list
  *    was never zeroed frees a garbage pointer.
- *  - A ramp NEVER emits a lip. The T-ramp / CT-ramp / stairs are the walk-up
- *    affordance; a lip on their high edge would wall the connector off.
+ *  - A connected interval emits NOTHING, whatever the height difference.
+ *    Checking adjacency first is the whole point: map.py exempts ramp
+ *    endpoints from cliff pruning, so catwalk(128)↔CT-ramp(64) is a
+ *    walkable 64u drop, and a lip there would be a 64u wall across an edge
+ *    nav shaping actively routes through.
+ *  - A ramp NEVER emits a lip OR a divider. The T-ramp / CT-ramp / stairs
+ *    are the walk-up affordance; any face on their covered edges would wall
+ *    the connector off. Pass A still walls off the uncovered leftovers.
  *  - Only the higher side of a drop emits the lip (zi > zj + SOLID_EPS), so
  *    catwalk↔bombsite is ONE face, not two coincident cubes that z-fight.
  *    The lower side deliberately emits nothing.
@@ -192,10 +204,10 @@ static inline void free_solids(StaticData* sd) {
  *    |Δz| > MAX_STEP_HEIGHT, which lands in the lip branch instead. It is
  *    emitted once, by the lower-indexed room, for the same anti-duplicate
  *    reason as the lip.
- *  - Not covered: a RAMP that both covers a lower neighbour and has that
- *    adjacency pruned would leave a hole (ramps never emit). map.py exempts
- *    ramp endpoints from cliff pruning, so this cannot happen; revisit if
- *    that rule changes.
+ *  - Not covered: a RAMP whose adjacency to a covering neighbour is pruned
+ *    leaves a hole, because ramps never emit. map.py exempts ramp endpoints
+ *    from cliff pruning, so a pruned ramp edge cannot exist today; revisit
+ *    if that rule changes.
  */
 static inline void build_solids_from_rooms(StaticData* sd) {
     WallList*    wl;
@@ -309,11 +321,28 @@ static inline void build_solids_from_rooms(StaticData* sd) {
                 float zj        = sd->centroids_z[jj];
                 int   connected = (sd->adjacency != NULL) ? (sd->adjacency[i * N + jj] != 0) : 1;
 
+                /* Portal — the nav graph says i<->jj is walkable, so NOTHING
+                 * may be emitted here, not even a lip. map.py exempts ramp
+                 * endpoints from cliff pruning (src/map.py, the L9 post-prune
+                 * loop), so catwalk(z=128) stays adjacent to CT-ramp(z=64)
+                 * across a 64u drop; a lip on that interval would put an
+                 * impassable face exactly where nav-distance shaping is
+                 * steering agents. The same guard covers any future map with
+                 * a connected step of 2..18u — walkable per
+                 * SV_MAX_STEP_HEIGHT_CS, but > SOLID_EPS, so the drop test
+                 * alone would have walled it off. */
+                if (connected)
+                    continue;
+                /* A ramp is the walk-up affordance: its faces are how you get
+                 * on and off it, so it emits neither a lip nor a divider even
+                 * when the adjacency is pruned. (Pass A still walls off the
+                 * parts of a ramp edge that no neighbour covers.) */
+                if (ramp_i)
+                    continue;
+
                 if (zi > zj + SOLID_EPS) {
-                    /* This room stands above its neighbour: emit the drop
-                     * face. Ramps are the walk-up affordance and never do. */
-                    if (ramp_i)
-                        continue;
+                    /* This room stands above an unconnected neighbour: emit
+                     * the drop face, open above it. */
                     _solid_emit(wl,
                                 is_vertical,
                                 line,
@@ -324,7 +353,7 @@ static inline void build_solids_from_rooms(StaticData* sd) {
                                 nx,
                                 ny,
                                 SOLID_KIND_LIP);
-                } else if (!connected && zj <= zi + SOLID_EPS && i < jj) {
+                } else if (zj <= zi + SOLID_EPS && i < jj) {
                     /* Flush but unconnected: neither side has a drop to
                      * express, so a doorway would appear out of nowhere. */
                     _solid_emit(wl,
@@ -338,8 +367,8 @@ static inline void build_solids_from_rooms(StaticData* sd) {
                                 ny,
                                 SOLID_KIND_DIVIDER);
                 }
-                /* else: zj > zi + EPS — the higher room jj owns that lip, or
-                 * the interval is a genuine portal. Nothing to emit here. */
+                /* else: zj > zi + EPS — the higher room jj owns that lip.
+                 * Nothing to emit here. */
             }
         }
     }
