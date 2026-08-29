@@ -959,6 +959,14 @@ def test_obs_dim_constant_consistency():
     import train as t
     assert nav.OBS_DIM == t.OBS_DIM, (f"nav.OBS_DIM ({nav.OBS_DIM}) != train.OBS_DIM ({t.OBS_DIM})")
     assert nav.OBS_DIM == 110, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 110 for Batch 6 Task 2.5"
+    # Rung 0 (spec 2026-08-29 §2.2): train.TEAM_SIZE is a bare literal for the
+    # same import-cost reason as OBS_DIM, so it needs the same drift guard —
+    # it divides the participating-step budget and builds the per-row
+    # participation vector.
+    from c_env import cs2_env
+    assert t.TEAM_SIZE == nav.TEAM_SIZE == cs2_env.TEAM_SIZE, (
+        f"train.TEAM_SIZE ({t.TEAM_SIZE}) / nav.TEAM_SIZE ({nav.TEAM_SIZE}) / "
+        f"cs2_env.TEAM_SIZE ({cs2_env.TEAM_SIZE}) disagree")
     env = t.make_puffer_env(seed=0)
     try:
         assert env.single_observation_space.shape == (nav.OBS_DIM, ), (

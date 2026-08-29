@@ -59,6 +59,14 @@ __all__ = ("AIM_DIM", )
 # On an OBS_DIM bump, update cs2_types.h + rerun the generator, then bump this literal.
 OBS_DIM = 110
 
+# Agents per team. A bare literal ON PURPOSE, for the same class of reason as
+# OBS_DIM above: train.py must stay import-light (`--dump-config` guarantees no
+# torch/nav import — see _atomic_save_state_dict's docstring), and `nav` pulls
+# awpy/polars/shapely (+0.6 s and a polars warning) just to read one 5.
+# Cross-checked against nav.TEAM_SIZE and cs2_env.TEAM_SIZE by
+# tests/test_train_env.py::test_obs_dim_constant_consistency.
+TEAM_SIZE = 5
+
 # Batch 3 (continuous aim H-PPO): state-independent log_std parameter
 # for the Gaussian aim head. σ_init = 0.1 rad ≈ 5.7° matches mega-spec
 # §9 lock and the H-PPO literature default. σ_min = 0.01 rad ≈ 0.6° —
@@ -395,6 +403,81 @@ def _apply_action_masks(logits_list, mask):
     return masked
 
 
+# ── Masked reductions over participating rows (Rung 0, spec 2026-08-29 §2.2) ──
+# WHY these are free functions and not methods on the trainer: the trainer is a
+# monkey-patched PuffeRL instance (pufferl.py is a site-package and is never
+# edited), so every reduction the update path needs has to live here where a
+# unit test can call it without building a trainer.
+# DTYPE CONTRACT used by every caller below: the *bool* [S,T] mask is for
+# INDEXING (`sel[mb_part]`); the *float* copy (`mb_part.to(torch.float32)`) is
+# the weight `w` these helpers take. `sel[mb_part_f]` is an IndexError and
+# `masked_mean(x, bool_mask)` would work only by accident — the helpers
+# `.to(x.dtype)` their weight, so pass whichever, but do not swap the two roles.
+# SHAPE PITFALL: `w` is multiplied (not indexed) against `x`, so it must be
+# broadcast-compatible with `x`. Reducing a FLAT (S*T,) tensor (entropy,
+# per-head entropies, ratio_d/ratio_c) with an [S,T] weight silently
+# broadcasts to [S, S*T] — pass the flattened weight for flat tensors.
+
+
+def masked_mean(x, w):
+    """Mean of x over rows where w == 1. w broadcasts to x; w.sum() == 0 ⇒ 0.
+
+    Rung 0 §2.2: parked agent rows (noop-masked, entropy exactly 0, zero
+    reward) must not enter any trainer statistic, or every all-row mean at
+    n_active=1 is diluted 5×. Masked mean = (x·w).sum() / max(w.sum(), 1).
+    """
+    w = w.to(x.dtype)
+    return (x * w).sum() / w.sum().clamp(min=1.0)
+
+
+def masked_std_unbiased(x, w, mean):
+    """Unbiased (n−1) std over the w == 1 rows, matching torch .std() on the subset.
+
+    `mean` is the caller's already-computed masked_mean — passed in rather than
+    recomputed so the two-pass (mean, then deviation) reduction is done once.
+    PITFALL: the (n−1) clamp means a single participating row yields std 0, not
+    NaN; masked_normalize_adv's +1e-8 then makes that row's normalised
+    advantage 0 rather than inf.
+    """
+    w = w.to(x.dtype)
+    n = w.sum()
+    return (((x - mean)**2 * w).sum() / (n - 1.0).clamp(min=1.0)).sqrt()
+
+
+def masked_normalize_adv(flat_adv, w):
+    """(adv − mean) / (std + 1e-8) over participating rows; parked rows → 0.
+
+    Uses the same unbiased std as the unmasked path so the two agree exactly
+    when w is all-ones. Zeroing parked rows makes their pg contribution 0
+    regardless of ratio, which is what the masked pg mean then divides out.
+    """
+    w = w.to(flat_adv.dtype).reshape(-1)
+    m = masked_mean(flat_adv, w)
+    s = masked_std_unbiased(flat_adv, w, m)
+    return (flat_adv - m) / (s + 1e-8) * w
+
+
+def masked_explained_variance(y_pred, y_true, part):
+    """explained_variance over part == True rows (whole-buffer, Rung 0 §2.2).
+
+    Returns nan when the participating y_true has zero variance, mirroring
+    PufferLib's `torch.nan if var_y == 0` convention. `part` is the BOOL mask
+    here (this one indexes rather than weights — the variance of a weighted
+    tensor is not the variance of the subset).
+    """
+    import torch
+
+    part = part.to(torch.bool)
+    yt = y_true[part]
+    yp = y_pred[part]
+    if yt.numel() < 2:
+        return float("nan")
+    var_y = yt.var()
+    if var_y == 0:
+        return float("nan")
+    return float(1 - (yt - yp).var() / var_y)
+
+
 # ── Reward weights: the single wiring source of truth (spec 2026-08-01 §4.2) ──
 # Config key == make_env kwarg name == CLI flag (dashes) — NO prefix rewriting.
 # Six of the 23 do not start with `reward_` (the pbrs_* group), so any code
@@ -601,12 +684,36 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # here on purpose; the analyzer reads split/trunk_active instead.
     tct_split_trunk = bool(getattr(args, "tct_split_trunk", False))
 
+    # ── Rung 0 §2.2: participating-units budget ──
+    # --timesteps is the PARTICIPATING agent-step budget (what the policy
+    # actually learns from), NOT the raw row count. PufferLib's epoch cap
+    # (total_epochs = total_timesteps // batch_size, pufferl.py:168-170, which
+    # also sets the cosine-LR T_max) counts RAW buffer rows, so the raw budget
+    # handed to it is scaled by TEAM_SIZE / n_active. Both numbers are
+    # recorded: done_training in _train_with_return_norm compares global_step
+    # (participating units) against participating_timesteps, and the epoch
+    # clause catches the floor-division slack.
+    # PITFALL: adding these keys shifts exp_lib.behavior_hash for all future
+    # runs (the hash covers sorted config.json) — recorded decision, same as
+    # the TAG/tct keys above.
+    # (the raw budget is bound to a local, not inlined in the dict below, for
+    # the same yapf reason as the warmstart block above: a long value
+    # expression inside the dict re-indents every trailing comment in it.)
+    knobs = env_knobs_from_args(args)
+    n_active = knobs["n_active_per_team"]
+    assert 1 <= n_active <= TEAM_SIZE, n_active
+    raw_timesteps = args.timesteps * TEAM_SIZE // n_active
+
     cfg = {
                                                        # Core PPO
         "env": "cs2-dust2",
         "device": args.device,
         "seed": args.seed,
-        "total_timesteps": args.timesteps,
+        "total_timesteps": raw_timesteps,
+        "participating_timesteps": args.timesteps,
+        "n_active_per_team": n_active,
+        "pin_pitch": knobs["pin_pitch"],
+        "crouch_enabled": knobs["crouch_enabled"],
         "batch_size": batch_size,
         "bptt_horizon": bptt_horizon,
         "minibatch_size": 8192,
@@ -775,7 +882,10 @@ def make_puffer_env(team_spirit=None,
                     include_step_stats_in_info=False,
                     pbrs_gamma=None,
                     reward_overrides=None,
-                    reward_symmetrize=False):
+                    reward_symmetrize=False,
+                    n_active_per_team=TEAM_SIZE,
+                    pin_pitch=0,
+                    crouch_enabled=1):
     """Create the native C PufferEnv used by smoke/train/eval.
 
     ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
@@ -801,6 +911,15 @@ def make_puffer_env(team_spirit=None,
     rather than a weight, and the override validator above rejects it by name.
     Defaults False so eval/record/smoke keep raw, comparable reward numbers;
     only the training factory turns it on.
+
+    ``n_active_per_team`` / ``pin_pitch`` / ``crouch_enabled`` (Rung 0, spec
+    2026-08-29 §2.1): non-weight env knobs forwarded verbatim to make_env. They
+    are NOT reward_overrides keys for the same reason reward_symmetrize is not.
+    The defaults reproduce the pre-Rung-0 env exactly (full 5v5, pitch live,
+    crouch enabled), so every non-training caller (eval, record, smoke, viz)
+    is unaffected. Training callers get them from env_knobs_from_args(args) —
+    do NOT re-derive them from args anywhere else, or config.json provenance
+    and the envs that actually ran can disagree.
     """
     from c_env.cs2_env import make_env as make_c_env
 
@@ -849,6 +968,9 @@ def make_puffer_env(team_spirit=None,
         map_data=map_data,
         include_step_stats_in_info=include_step_stats_in_info,
         reward_symmetrize=reward_symmetrize,
+        n_active_per_team=n_active_per_team,
+        pin_pitch=pin_pitch,
+        crouch_enabled=crouch_enabled,
         **kwargs,
     )
 
@@ -1252,7 +1374,34 @@ def make_env(team_spirit=None, map_data=None):
     return make_puffer_env(team_spirit=team_spirit, map_data=map_data)
 
 
-def build_env_factory(*, shared_ts, map_data, reward_overrides=None, reward_symmetrize=False):
+def env_knobs_from_args(args) -> dict:
+    """Non-weight env knobs (Rung 0) as make_puffer_env kwargs.
+
+    WHY one helper: build_train_config (provenance), build_train_env_factory
+    (the envs) and train()'s participating-row vector must all read the same
+    values; a second copy of these getattr defaults would be the next
+    silent-baseline bug (the class of bug build_train_env_factory exists to
+    prevent for reward weights). getattr defaults keep harness/dump-config
+    args objects — which predate these flags — working.
+
+    PITFALL: this returns make_puffer_env KWARG names, not config keys. It is
+    splatted straight into make_puffer_env(**env_knobs); renaming a key here
+    without renaming the parameter there raises TypeError inside a forked
+    vecenv worker, far from the mistake.
+    """
+    return {
+        "n_active_per_team": int(getattr(args, "n_active_per_team", TEAM_SIZE)),
+        "pin_pitch": int(getattr(args, "pin_pitch", 0)),
+        "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
+    }
+
+
+def build_env_factory(*,
+                      shared_ts,
+                      map_data,
+                      reward_overrides=None,
+                      reward_symmetrize=False,
+                      env_knobs=None):
     """Return the per-env factory callable handed to pufferlib.vector.make.
 
     WHAT: a closure over the shared team-spirit Value, the preloaded map data
@@ -1275,6 +1424,11 @@ def build_env_factory(*, shared_ts, map_data, reward_overrides=None, reward_symm
     reason, but through its OWN parameter rather than the overrides dict: it is
     a bool knob, not a weight, and make_puffer_env's validator rejects it as an
     override key by name.
+
+    env_knobs (Rung 0 §2.1) is the same story once more: a dict of non-weight
+    make_puffer_env kwargs (n_active_per_team / pin_pitch / crouch_enabled)
+    from env_knobs_from_args, closure state so it survives the fork. None ⇒
+    make_puffer_env's defaults, i.e. the pre-Rung-0 env.
 
     PITFALL (review finding 1): reward_overrides and reward_symmetrize reach
     ONLY the training env factory — the --smoke/--record/--eval paths call
@@ -1307,7 +1461,8 @@ def build_env_factory(*, shared_ts, map_data, reward_overrides=None, reward_symm
                               seed=seed or 0,
                               map_data=map_data,
                               reward_overrides=reward_overrides,
-                              reward_symmetrize=reward_symmetrize)
+                              reward_symmetrize=reward_symmetrize,
+                              **(env_knobs or {}))
         # Attach the shared-memory views so the env (whether running in the
         # main process under Serial, or a forked worker under
         # Multiprocessing) can pull cont_actions written by the trainer and
@@ -1336,12 +1491,15 @@ def build_train_env_factory(args, *, shared_ts, map_data):
     config.json provenance and the envs' actual weights cannot disagree. Same
     for reward_symmetrize: read off args with the identical getattr default
     build_train_config uses, so the logged "reward_symmetrize" key always
-    describes the envs that actually ran.
+    describes the envs that actually ran. Same again for the Rung 0 env knobs
+    via env_knobs_from_args — build_train_config records exactly what this
+    hands the envs, and train() asserts the built driver_env agrees.
     """
     return build_env_factory(shared_ts=shared_ts,
                              map_data=map_data,
                              reward_overrides=reward_overrides_from_args(args),
-                             reward_symmetrize=bool(getattr(args, "reward_symmetrize", False)))
+                             reward_symmetrize=bool(getattr(args, "reward_symmetrize", False)),
+                             env_knobs=env_knobs_from_args(args))
 
 
 # ── SECTION: Policy ────────────────────────────────────────────────────────
@@ -2284,17 +2442,42 @@ def _patch_trainer_with_return_norm(trainer):
             _ret_var.copy_(new_var)
             _ret_count.copy_(tot)
 
-    def _normalize_returns(mb_returns):
-        """Return normalized copy of mb_returns; update running stats first."""
-        _update_return_stats(mb_returns.detach().flatten())
+    def _normalize_returns(mb_returns, mb_part=None):
+        """Return normalized copy of mb_returns; update running stats first.
+
+        mb_part (Rung 0 §2.2): BOOL [S, T] participation mask. The running
+        mean/var are updated from the PARTICIPATING rows ONLY — parked rows
+        carry reward 0 and value 0, so feeding them in would drag the return
+        scale toward 0 by a factor of n_active/TEAM_SIZE and shrink every
+        normalized value target. None ⇒ all rows (pre-Rung-0 behaviour,
+        bit-identical).
+        PITFALL: the whole tensor is still normalized and returned — masking
+        applies to the STATISTICS, not the output. The parked rows' value loss
+        is dropped later, by the masked_mean over the same mask.
+        """
+        sel = mb_returns.detach()
+        if mb_part is not None:
+            sel = sel[mb_part]
+        _update_return_stats(sel.flatten())
         std = (_ret_var + 1e-8).sqrt()
         return (mb_returns - _ret_mean) / std
+
+    # Test hook (tests/test_parked_rows_masked.py): the closure is otherwise
+    # unreachable, and the participating-rows-only stats update is exactly the
+    # part worth pinning.
+    trainer._normalize_returns = _normalize_returns
 
     def _train_with_return_norm(self):
         profile = self.profile
         epoch = self.epoch
         profile("train", epoch)
         losses = defaultdict(float)
+        # Rung 0 §2.2 diagnostics. Local ints (not losses[...] entries) because
+        # they are ABSOLUTE counts: anything accumulated into `losses` inside
+        # the loop gets divided by _mb_run afterwards (gh#90). They are written
+        # onto `losses` after that divisor.
+        _floor_fires = 0               # minibatches where the entropy-floor clamp bound
+        _empty_mb = 0                  # minibatches with zero participating rows (skipped)
         config = self.config
         device = config["device"]
 
@@ -2515,10 +2698,32 @@ def _patch_trainer_with_return_norm(trainer):
             _masks_buf = getattr(self, "action_masks", None)
             mb_masks = _masks_buf[idx] if _masks_buf is not None else None
 
+            # ── Rung 0 §2.2: participating mask for this minibatch ───────────
+            # Two dtypes on purpose (see the masked_* helpers' contract):
+            # mb_part is BOOL for indexing, mb_part_f/flat_part are the FLOAT
+            # weights the reductions take. flat_part is for the flat (S*T,)
+            # tensors (entropy, ratio_d/ratio_c, per-head entropies);
+            # mb_part_f for the [S, T]-shaped ones (v_loss, value writeback).
+            # Shapes: mb_part / mb_part_f are [S, T]; flat_part is (S*T,).
+            mb_part = self.participating[idx]
+            mb_part_f = mb_part.to(torch.float32)
+            n_part = mb_part_f.sum()
+            # Empty-minibatch tripwire: only reachable with non-uniform segment
+            # sampling (prio_alpha != 0 or a marked event segment) that happens
+            # to draw an all-parked minibatch — see spec §2.2. Skipping is the
+            # right call (every reduction below would be 0/0), but it must be
+            # VISIBLE, so it is counted into losses/empty_minibatches rather
+            # than silently swallowed. The `continue` sits before _mb_run += 1,
+            # so the gh#90 divisor keeps counting only executed minibatches.
+            if n_part.item() == 0:
+                _empty_mb += 1
+                continue
+            flat_part = mb_part_f.reshape(-1)
+
             # ── VALUE TARGET NORMALISATION ─────────────────────────────────
             # Normalize returns before value regression.  The value head learns
             # to predict normalized targets; advantages are unaffected.
-            mb_returns_norm = _normalize_returns(mb_returns)
+            mb_returns_norm = _normalize_returns(mb_returns, mb_part)
             # Also normalize the stored baseline values so clipping stays valid
             mb_values_norm = (mb_values - _ret_mean) / (_ret_var + 1e-8).sqrt()
             # ──────────────────────────────────────────────────────────────
@@ -2561,6 +2766,7 @@ def _patch_trainer_with_return_norm(trainer):
                 state,
                 mb_prio=mb_prio,
                 mb_masks=mb_masks,
+                mb_part=mb_part_f,
             )
             # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
             # was used by downstream diagnostics; T5 dropped that consumer
@@ -2587,9 +2793,15 @@ def _patch_trainer_with_return_norm(trainer):
             self.ratio[idx] = ratio_d.detach().reshape(mb_logprobs.shape)
 
             with torch.no_grad():
-                old_approx_kl = (-logratio).mean()
-                approx_kl = ((ratio - 1) - logratio).mean()
-                clipfrac = ((ratio - 1.0).abs() > config["clip_coef"]).float().mean()
+                # Rung 0 §2.2: every diagnostic below is a mean over rows, so
+                # every one of them is masked. _pm is mb_part_f reshaped to the
+                # joint ratio's [S, T] layout; ratio_d/ratio_c are flat, hence
+                # flat_part. An unmasked KL here would be diluted 5× at
+                # n_active=1 and the target_kl early-stop would never fire.
+                _pm = mb_part_f.reshape(logratio.shape)
+                old_approx_kl = masked_mean(-logratio, _pm)
+                approx_kl = masked_mean((ratio - 1) - logratio, _pm)
+                clipfrac = masked_mean(((ratio - 1.0).abs() > config["clip_coef"]).float(), _pm)
                 # Observe-only (spec 2026-08-15 §3.4): same formula as the
                 # joint `clipfrac` above, split by the per-factor ratios
                 # `_hybrid_ppo_loss` already returns. `.item()` into the
@@ -2597,8 +2809,10 @@ def _patch_trainer_with_return_norm(trainer):
                 # (they are diagnostics, not a training signal). Last-
                 # minibatch-only is forbidden; they accumulate like
                 # `clipfrac` and ride the existing `_mb_run` divisor.
-                clipfrac_d = ((ratio_d - 1.0).abs() > config["clip_coef"]).float().mean()
-                clipfrac_c = ((ratio_c - 1.0).abs() > config["clip_coef"]).float().mean()
+                clipfrac_d = masked_mean(((ratio_d - 1.0).abs() > config["clip_coef"]).float(),
+                                         flat_part)
+                clipfrac_c = masked_mean(((ratio_c - 1.0).abs() > config["clip_coef"]).float(),
+                                         flat_part)
 
             # Early stopping (gh#90): a KL trip finishes the CURRENT epoch
             # (this minibatch included — matches standard PPO's post-epoch
@@ -2622,11 +2836,17 @@ def _patch_trainer_with_return_norm(trainer):
                 v_clipped = mb_values_norm + torch.clamp(newvalue - mb_values_norm, -vf_clip,
                                                          vf_clip)
                 v_loss_clipped = (v_clipped - mb_returns_norm)**2
-                v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                v_loss = 0.5 * masked_mean(torch.max(v_loss_unclipped, v_loss_clipped), mb_part_f)
             else:
-                v_loss = 0.5 * v_loss_unclipped.mean()
+                v_loss = 0.5 * masked_mean(v_loss_unclipped, mb_part_f)
 
-            current_entropy = entropy.mean()
+            # Rung 0 §2.2: the entropy the SAC-α dual loop and the collapse
+            # floor react to must be the participating rows' entropy. Parked
+            # rows are noop-masked (exactly one valid bin per head ⇒ discrete
+            # entropy 0), so an unmasked mean at n_active=1 reads ~1/5 of the
+            # truth and would peg alpha at the floor forever.
+            current_entropy = masked_mean(entropy, flat_part)
+            entropy_unmasked = entropy.mean()          # diagnostic only (losses/entropy_unmasked)
 
             # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
             alpha = log_alpha.exp()
@@ -2659,6 +2879,7 @@ def _patch_trainer_with_return_norm(trainer):
             # at ramp_end — a plotted boundary.
             if _ws_floor_active and current_entropy.item() < entropy_floor:
                 effective_alpha = torch.clamp(effective_alpha, min=0.5)
+                _floor_fires += 1
 
             entropy_loss = -effective_alpha * current_entropy
             # ──────────────────────────────────────────────────────────────
@@ -2668,7 +2889,9 @@ def _patch_trainer_with_return_norm(trainer):
 
             # Denormalize before writing back so advantage computation stays in raw scale
             std = (_ret_var + 1e-8).sqrt()
-            self.values[idx] = newvalue.detach().float() * std + _ret_mean
+            # Rung 0 §2.2: keep parked rows at exactly 0 in the value buffer —
+            # the rollout wrote 0 there and the next epoch's GAE reads it.
+            self.values[idx] = (newvalue.detach().float() * std + _ret_mean) * mb_part_f
 
             # ── PER-HEAD ENTROPY ──────────────────────────────────────────
             with torch.no_grad():
@@ -2680,7 +2903,8 @@ def _patch_trainer_with_return_norm(trainer):
                 # _action_spec and the policy logits list.
                 _head_names = list(ACTION_HEAD_NAMES)
                 for _hi, (_hn, _hd) in enumerate(zip(_head_names, _dists, strict=True)):
-                    losses[f"entropy/{_hn}"] += _hd.entropy().mean().item()
+                    # flat_part: _hd.entropy() is flat (S*T,), like `entropy`.
+                    losses[f"entropy/{_hn}"] += masked_mean(_hd.entropy(), flat_part).item()
             losses["entropy/total"] += current_entropy.item()
             # ──────────────────────────────────────────────────────────────
 
@@ -2689,6 +2913,10 @@ def _patch_trainer_with_return_norm(trainer):
             losses["policy_loss"] += pg_loss.item()
             losses["value_loss"] += v_loss.item()
             losses["entropy"] += current_entropy.item()
+            # Rung 0 §2.2: the same mean WITHOUT the mask. Diagnostic only —
+            # its ratio to losses/entropy is the live check that the mask is
+            # actually doing something (≈ n_active/TEAM_SIZE at steady state).
+            losses["entropy_unmasked"] += entropy_unmasked.item()
             losses["alpha"] += alpha.detach().item()
             losses["alpha_loss"] += alpha_loss.item()
             losses["old_approx_kl"] += old_approx_kl.item()
@@ -2696,7 +2924,7 @@ def _patch_trainer_with_return_norm(trainer):
             losses["clipfrac"] += clipfrac.item()
             losses["clipfrac_d"] += clipfrac_d.item()
             losses["clipfrac_c"] += clipfrac_c.item()
-            losses["importance"] += ratio.mean().item()
+            losses["importance"] += masked_mean(ratio, _pm).item()
             # gh#90: count EXECUTED minibatches — the divisor for every
             # accumulated losses/* above and the per-head entropy block.
             # Incremented here (with the stats) so a future early-`continue`
@@ -2757,6 +2985,7 @@ def _patch_trainer_with_return_norm(trainer):
                         mb_returns_norm=mb_returns_norm,
                         idx=idx,
                         mb_label="mb0" if _tag_mb0 else "mbL",
+                        mb_part=mb_part_f,
                     )
                     if getattr(trainer, "_tag_metrics", None) is None:
                         trainer._tag_metrics = {}
@@ -2789,6 +3018,12 @@ def _patch_trainer_with_return_norm(trainer):
         for _lk in list(losses):
             losses[_lk] /= max(_mb_run, 1)
         losses["minibatches_run"] = _mb_run
+
+        # Rung 0 §2.2 counters/absolutes — inserted AFTER the divisor (gh#90
+        # trap: anything written before it is silently scaled by 1/_mb_run).
+        losses["entropy_floor_fires"] = float(_floor_fires)
+        losses["empty_minibatches"] = float(_empty_mb)
+        losses["participating_rows"] = float(self.participating.sum().item())
 
         # Warm-start metrics are ABSOLUTE values — inserted after the gh#90
         # divisor loop above, alongside minibatches_run, or they'd be divided
@@ -2830,11 +3065,14 @@ def _patch_trainer_with_return_norm(trainer):
         if config["anneal_lr"]:
             self.scheduler.step()
 
-        y_pred = self.values.flatten()
-        y_true = advantages.flatten() + self.values.flatten()
-        var_y = y_true.var()
-        explained_var = torch.nan if var_y == 0 else 1 - (y_true - y_pred).var() / var_y
-        losses["explained_variance"] = explained_var.item()
+        # Rung 0 §2.2: whole-buffer EV over PARTICIPATING rows only. Parked
+        # rows have value 0 and advantage 0, i.e. a perfectly-predicted
+        # constant — leaving them in would inflate EV toward 1 by exactly the
+        # parked fraction and make the critic look healthy at n_active=1
+        # regardless of what it learned.
+        losses["explained_variance"] = masked_explained_variance(
+            self.values.flatten(),
+            advantages.flatten() + self.values.flatten(), self.participating.flatten())
         losses["ret_mean"] = _ret_mean.item()
         losses["ret_std"] = (_ret_var + 1e-8).sqrt().item()
         # Observe-only persist (spec 2026-08-15 §3.4). Task 8 already
@@ -2872,6 +3110,13 @@ def _patch_trainer_with_return_norm(trainer):
             trainer._batch1_effective_alpha = float(effective_alpha.detach().item())
         except (NameError, UnboundLocalError):
             pass
+        # Rung 0 §2.2: log the alpha the loss ACTUALLY used (post ceiling /
+        # post floor clamp), not just the raw log_alpha.exp() above — with the
+        # floor now counted by entropy_floor_fires, the pair says whether the
+        # collapse guard is holding the run up. Absolute value, so it sits here
+        # after the gh#90 divisor, and it reads the trainer attr rather than
+        # the loop-local so the KL-early-break edge cannot NameError.
+        losses["effective_alpha"] = float(trainer._batch1_effective_alpha)
         # Welford std exposure: guard with getattr+fallback because
         # _patch_trainer_with_selfplay (Task 6c, where these get attached)
         # may not have been applied — preserves the no-selfplay code path.
@@ -2885,7 +3130,19 @@ def _patch_trainer_with_return_norm(trainer):
         profile.end()
         logs = None
         self.epoch += 1
-        done_training = self.global_step >= config["total_timesteps"]
+        # Rung 0 §2.2: global_step is in PARTICIPATING units, so it must be
+        # compared against participating_timesteps (= the user's --timesteps),
+        # not against total_timesteps (the TEAM_SIZE/n_active-scaled raw-row
+        # budget PufferLib's epoch cap needs). .get() keeps trainers built from
+        # a pre-Rung-0 config.json working. The epoch clause is load-bearing,
+        # not belt-and-braces: total_epochs floor-divides, so at the defaults
+        # (--timesteps 10M, --num_envs 256 ⇒ batch 163840, n_active=1 ⇒ raw
+        # budget 50M) the 305 epochs PufferLib allows collect only
+        # 305 × 163840 / 5 = 9,994,240 participating steps — the first clause
+        # would never fire and the last epoch would never checkpoint.
+        done_training = (self.global_step >= config.get("participating_timesteps",
+                                                        config["total_timesteps"])
+                         or self.epoch >= self.total_epochs)
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
             self.losses = losses
@@ -3332,7 +3589,13 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
-            self.global_step += int(mask.sum())
+            # Rung 0 §2.2: global_step counts PARTICIPATING agent-steps, so
+            # --timesteps means the same thing at any n_active_per_team.
+            # `mask` is the recv() chunk's live-agent mask (all-True for this
+            # env, vector.py:188); env_id is the agent-row slice bound just
+            # above, so the static row flags line up element-for-element.
+            self.global_step += int(
+                (np.asarray(mask, dtype=bool) & self._participating_rows_np[env_id]).sum())
 
             profile("eval_copy", epoch)
             o = torch.as_tensor(o)
@@ -3513,7 +3776,17 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     self.action_masks[batch_rows, seq_pos] = action_mask
                 self.rewards[batch_rows, seq_pos] = r
                 self.terminals[batch_rows, seq_pos] = d.float()
-                self.values[batch_rows, seq_pos] = value.flatten()
+                # Rung 0 §2.2: scatter the static row flag into buffer layout,
+                # and zero the critic output on parked rows (defence in depth —
+                # the masked reductions in train() are what make it correct;
+                # this just keeps GAE from propagating a bootstrap value
+                # through rows whose reward is identically 0).
+                # OUTSIDE the `if action_mask is not None:` guard above ON
+                # PURPOSE: inside it, `participating` would stay all-zero for a
+                # mask-less run and the per-epoch any() assert would fire.
+                _part_rows = self._participating_rows[env_id]
+                self.participating[batch_rows, seq_pos] = _part_rows
+                self.values[batch_rows, seq_pos] = value.flatten() * _part_rows.to(value.dtype)
 
                 self.ep_lengths[env_id] += 1
                 if seq_pos + 1 >= cfg["bptt_horizon"]:
@@ -3750,7 +4023,8 @@ def _hybrid_ppo_loss(policy,
                      state,
                      mb_prio=None,
                      mb_masks=None,
-                     return_pg_rows=False):
+                     return_pg_rows=False,
+                     mb_part=None):
     """Per-factor PPO clipped loss (H-PPO, Fan et al. IJCAI 2019).
 
     THE CORE OF T5. Re-runs the policy on mb_obs with the stored
@@ -3805,6 +4079,18 @@ def _hybrid_ppo_loss(policy,
     default, all production update paths) returns the existing 7-tuple
     bitwise-identically — pinned by
     test_return_pg_rows_default_is_bitwise_identical_7_tuple.
+
+    mb_part (Rung 0 §2.2): FLOAT participation weights, broadcastable to
+    mb_advantages (the trainer passes [S, T]). When given, BOTH reductions in
+    this function switch to their masked forms — advantage normalisation over
+    participating rows only, and a masked mean over the per-row pg terms.
+    Doing only one of the two would be wrong in a way no test at
+    n_active=TEAM_SIZE can see: unmasked normalisation shifts the parked rows'
+    advantage off 0, and that offset survives into pg through their (arbitrary)
+    ratio. None ⇒ the pre-Rung-0 lines run verbatim; that path is what
+    test_return_pg_rows_default_is_bitwise_identical_7_tuple pins, so
+    production at n_active=5 takes the MASKED branch with an all-ones weight
+    and is identical to the old numbers only to fp tolerance, not bitwise.
     """
     import torch
     import torch.nn.functional as F
@@ -3846,7 +4132,14 @@ def _hybrid_ppo_loss(policy,
     #     uniform replay (weight 1), e.g. BC/eval callers.
     #   * A constant-adv minibatch has std 0 ⇒ normalized adv is exactly 0
     #     (0/1e-8); pg_loss 0, no NaN.
-    flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+    #   * mb_part (Rung 0 §2.2): stats over participating rows only, and
+    #     parked rows are zeroed so they contribute nothing to pg regardless
+    #     of their ratio — which is what the masked pg mean below then
+    #     divides out. The mb_prio multiply stays AFTER, unchanged.
+    if mb_part is None:
+        flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+    else:
+        flat_adv = masked_normalize_adv(flat_adv, mb_part.reshape(-1))
     if mb_prio is not None:
         flat_adv = mb_prio.expand_as(mb_advantages).reshape(-1) * flat_adv
 
@@ -3892,7 +4185,14 @@ def _hybrid_ppo_loss(policy,
     pg_c_cl = -flat_adv * torch.clamp(ratio_c, 1 - clip_coef, 1 + clip_coef)
     pg_d_rows = torch.max(pg_d_un, pg_d_cl)
     pg_c_rows = torch.max(pg_c_un, pg_c_cl)
-    pg_loss = pg_d_rows.mean() + pg_c_rows.mean()
+    if mb_part is None:
+        pg_loss = pg_d_rows.mean() + pg_c_rows.mean()
+    else:
+        # Rung 0 §2.2: parked rows are already exactly 0 in these vectors
+        # (their normalised advantage is 0), so the mask only fixes the
+        # DENOMINATOR — without it the gradient is scaled by n_active/5.
+        _w = mb_part.reshape(-1).to(pg_d_rows.dtype)
+        pg_loss = masked_mean(pg_d_rows, _w) + masked_mean(pg_c_rows, _w)
 
     if return_pg_rows:
         return (pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list,
@@ -3950,9 +4250,22 @@ def _tag_param_groups(policy):
     return groups
 
 
-def tag_grad_cossim(policy, *, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d, mb_old_logp_c,
-                    mb_advantages, clip_coef, state, mb_prio, mb_masks, mb_returns_norm, idx,
-                    mb_label):
+def tag_grad_cossim(policy,
+                    *,
+                    mb_obs,
+                    mb_actions,
+                    mb_cont_actions,
+                    mb_old_logp_d,
+                    mb_old_logp_c,
+                    mb_advantages,
+                    clip_coef,
+                    state,
+                    mb_prio,
+                    mb_masks,
+                    mb_returns_norm,
+                    idx,
+                    mb_label,
+                    mb_part=None):
     """T-vs-CT gradient cosine-similarity measurement (spec 2026-08-13 §4.2).
 
     WHAT: ONE extra forward via _hybrid_ppo_loss(return_pg_rows=True), then
@@ -4000,6 +4313,18 @@ def tag_grad_cossim(policy, *, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_
       touches value_head, so those keys would be dead NaN/0 noise.
     * The loss path evaluates stored actions and samples nothing, so there
       is no RNG interaction.
+    * mb_part (Rung 0 §2.2) is forwarded verbatim to _hybrid_ppo_loss so the
+      shared advantage normalisation is the SAME one the real update used —
+      that shared normalisation is what makes each subset gradient a true
+      restriction of the real gradient. Parked rows land in whichever team
+      subset their slot belongs to, but their pg_rows entries are exactly 0,
+      so they only inflate the subset means' denominators (w.sum() here
+      counts rows, not participation) — a uniform rescale that cosine
+      similarity is invariant to. The reported gnorms ARE scaled by it.
+      The vf control is weaker: mb_returns_norm on a parked row is
+      -_ret_mean/std, not 0, so parked rows add a common-mode residual to
+      BOTH team value gradients and bias tag/cossim_vf upward at
+      n_active < TEAM_SIZE. Read that control with n_active in mind.
     """
     import torch
 
@@ -4046,7 +4371,8 @@ def tag_grad_cossim(policy, *, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_
                                                          state,
                                                          mb_prio=mb_prio,
                                                          mb_masks=mb_masks,
-                                                         return_pg_rows=True)
+                                                         return_pg_rows=True,
+                                                         mb_part=mb_part)
 
     pg_grads = {}                                                      # subset -> {group: flat grad}
     vf_grads = {}                                                      # 'T'/'CT' -> flat value_head grad
@@ -4106,7 +4432,10 @@ def _inject_tag_metrics(trainer, logs):
         logs.update(pending)
 
 
-def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_view_main=None):
+def _patch_trainer_with_hybrid_aim(trainer,
+                                   cont_action_view_main=None,
+                                   mask_view_main=None,
+                                   participating_rows=None):
     """Extend trainer with continuous-action rollout storage + vecenv plumbing.
 
     Apply AFTER _patch_trainer_with_return_norm (so train() is wrapped) and
@@ -4138,6 +4467,13 @@ def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_vie
     only the in-process Serial wrapper at the bottom of this function is
     used. The Serial path uses a ``trainer.vecenv._cont_action_buf`` Python
     attr stash + a per-env step wrapper, untouched from T5.
+
+    ``participating_rows`` (Rung 0 §2.2): bool array over agent rows saying
+    which ones the C env actually spawns. Allocated here rather than in a
+    patcher of its own because the buffers it sizes (`trainer.participating`)
+    must match `trainer.actions`, which this function already mirrors — and
+    because the rollout writes that fill it live in the evaluate() this
+    patcher's sibling installs. None ⇒ every row participates.
     """
     import torch
     # Stash on the trainer so _hybrid_send (defined below) can close over
@@ -4175,6 +4511,30 @@ def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_vie
         dtype=torch.bool,
         device=trainer.actions.device,
     )
+
+    # ── Rung 0 §2.2: per-row participation ───────────────────────────────
+    # participating_rows: numpy bool (total_agents,) — STATIC per run, derived
+    # from args.n_active_per_team in train(). None ⇒ all rows participate
+    # (harness default, exact identity with pre-Rung-0 behaviour).
+    # trainer.participating is the BUFFER-LAYOUT flag [segments, bptt],
+    # scattered by evaluate() via ep_indices exactly like action_masks.
+    # ZERO-initialised (unlike action_masks, which defaults to all-ones): a
+    # skipped write must mask EVERYTHING and trip the per-epoch
+    # `participating.any()` assert in train(), never silently train on parked
+    # rows. _participating_rows_np is kept beside the torch copy because
+    # evaluate()'s global_step accounting works on the numpy `mask` recv()
+    # returns; converting per-recv would allocate on every rollout tick.
+    n_rows = trainer.total_agents
+    if participating_rows is None:
+        participating_rows = np.ones(n_rows, dtype=bool)
+    participating_rows = np.asarray(participating_rows, dtype=bool).reshape(-1)
+    assert participating_rows.shape == (n_rows, ), (participating_rows.shape, n_rows)
+    assert participating_rows.any(), "no participating rows — n_active_per_team=0?"
+    trainer._participating_rows_np = participating_rows
+    trainer._participating_rows = torch.as_tensor(participating_rows, device=trainer.actions.device)
+    trainer.participating = torch.zeros(trainer.actions.shape[:-1],
+                                        dtype=torch.bool,
+                                        device=trainer.actions.device)
 
     # ── vecenv.send patch (step 5.5) ──
     # Goal: forward both the int discrete buffer and the float cont buffer
@@ -4508,10 +4868,24 @@ def train(args):
     # this function returns (Python doesn't know workers/numpy views are
     # using it via the OS-level mapping).
     trainer._cont_action_shm = _cont_action_shm
-    trainer._action_mask_shm = _mask_shm                                         # F8: same GC-pinning rationale
+    trainer._action_mask_shm = _mask_shm               # F8: same GC-pinning rationale
+
+    # Rung 0 §2.2: static per-run participation vector, env-row major (10 rows
+    # per env: T at 0-4, CT at 5-9), so `(i % TEAM_SIZE) < n_active` selects
+    # slots 0..n-1 of BOTH teams — the exact slots the C env spawns
+    # (cs2_env.py, n_active_per_team). The assert is the agreement check: the
+    # vector is derived from args while the envs were built from
+    # build_train_env_factory, and a disagreement would mask the wrong rows
+    # silently rather than crash.
+    _n_active = env_knobs_from_args(args)["n_active_per_team"]
+    _participating_rows = np.array([(i % TEAM_SIZE) < _n_active
+                                    for i in range(args.num_envs * _agents_per_env)],
+                                   dtype=bool)
+    assert trainer.vecenv.driver_env.n_active_per_team == _n_active, "driver env / args disagree"
     _patch_trainer_with_hybrid_aim(trainer,
                                    cont_action_view_main=_cont_action_view_main,
-                                   mask_view_main=_mask_view_main)
+                                   mask_view_main=_mask_view_main,
+                                   participating_rows=_participating_rows)
 
     # ── Self-play setup ──────────────────────────────────────────────────────
     # F11 (2026-07-06 adversarial review): the selfplay evaluate() wrapper is
@@ -4559,6 +4933,12 @@ def train(args):
     while trainer.epoch < trainer.total_epochs:
         trainer._tag_metrics = None    # TAG: drop any un-injected measurement
         trainer.evaluate()
+
+        # Rung 0 §2.2: the participating buffer is zero-initialised, so an
+        # all-False buffer means evaluate() never ran its scatter — every
+        # masked reduction below would then divide by the clamp floor and
+        # train on nothing. Fail loudly instead.
+        assert trainer.participating.any(), "participating buffer never written this epoch"
         logs = trainer.train()
 
         # Team spirit annealing: 0.3→0.7 over 5M steps
@@ -4783,6 +5163,13 @@ if __name__ == "__main__":
               "print the banner and keep training (e.g. when deliberately studying "
               "degenerate regimes)."),
     )
+    parser.add_argument("--n-active-per-team",
+                        type=int,
+                        default=5,
+                        dest="n_active_per_team",
+                        help="Rung 0: agents per team that spawn; the rest are parked "
+                        "(noop-masked, zero reward, excluded from every trainer statistic). "
+                        "--timesteps counts PARTICIPATING agent-steps.")
     parser.add_argument("--warmstart-entropy",
                         action="store_true",
                         dest="warmstart_entropy",

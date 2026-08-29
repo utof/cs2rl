@@ -120,6 +120,7 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--wandb-entity": 1,
     "--no-self-play": 0,
     "--no-dead-run-abort": 0,
+    "--n-active-per-team": 1,
     "--warmstart-entropy": 0,
     "--warmstart-grace-steps": 1,
     "--warmstart-ramp-steps": 1,

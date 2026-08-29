@@ -46,6 +46,7 @@ def _build_trainer_for_test(
     seed: int = 0,
     tct_split_heads: bool = False,
     tct_split_trunk: bool = False,
+    n_active_per_team: int = 5,
 ):
     """Build a tiny in-process PuffeRL trainer for Batch-1 trainer-level tests.
 
@@ -75,6 +76,14 @@ def _build_trainer_for_test(
         Spec 2026-08-15: build the policy with per-team T/CT encoder+LSTM.
         Default False keeps every existing harness caller on the shared trunk.
         Independent of ``tct_split_heads`` — either bit can be on alone.
+    n_active_per_team : int
+        Rung 0 (spec 2026-08-29 §2.1/§2.2): agents per team the env spawns;
+        slots ``n..4`` of each team are parked (noop-masked, zero reward).
+        Threaded into BOTH the envs (make_puffer_env) and the trainer
+        (``participating_rows`` → ``trainer.participating``), because a test
+        that set only one of the two would be testing a configuration
+        production can never reach. Default 5 = full 5v5, i.e. an all-ones
+        participation mask, which is what every pre-Rung-0 harness caller gets.
 
     Returns
     -------
@@ -162,6 +171,7 @@ def _build_trainer_for_test(
             seed=0 if seed is None else seed,
             map_data=map_data,
             include_step_stats_in_info=True,
+            n_active_per_team=n_active_per_team,
         )
         if _mask_idx is not None:
             env._attach_mask_view(mask_shm, _mask_idx)
@@ -198,8 +208,20 @@ def _build_trainer_for_test(
         seed=seed,
         timesteps=batch_size * NUM_ROLLOUT_ROUNDS,
         checkpoint_dir=tmp_checkpoint_dir,
+        n_active_per_team=n_active_per_team,
     )
     train_config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
+
+    # Small-env tests: build_train_config pins minibatch_size =
+    # max_minibatch_size = 8192, and PuffeRL raises APIUsageError when
+    # batch_size < minibatch_size (pufferl.py:121-124). batch_size =
+    # num_envs*640, so anything under 16 envs cannot construct a trainer at
+    # all. Clamp HERE (harness only) so tests can use num_envs=4/8 without
+    # touching the production (fingerprinted) config. Subprocess tests that go
+    # through train.py's real CLI must still use --num_envs >= 16.
+    # PITFALL: this changes total_minibatches / accumulate_minibatches for
+    # sub-16-env harness trainers — do not port it into build_train_config.
+    train_config["minibatch_size"] = train_config["max_minibatch_size"] = min(8192, batch_size)
 
     policy = build_policy(vecenv,
                           device,
@@ -217,7 +239,15 @@ def _build_trainer_for_test(
     # F8: mask_view_main plumbed so harness rollouts run MASKED, same as
     # production. Pin the RawArray on the trainer against GC (prod pattern).
     trainer._action_mask_shm = mask_shm
-    _patch_trainer_with_hybrid_aim(trainer, mask_view_main=mask_view_main)
+    # Rung 0 §2.2: same env-row-major formula train() uses — slots 0..n-1 of
+    # each 5-agent team participate. Built here (not inside the patcher) so
+    # the harness stays the single place that knows the harness's row layout.
+    participating_rows = np.array([(i % 5) < n_active_per_team
+                                   for i in range(num_envs * _agents_per_env)],
+                                  dtype=bool)
+    _patch_trainer_with_hybrid_aim(trainer,
+                                   mask_view_main=mask_view_main,
+                                   participating_rows=participating_rows)
 
     # ── Self-play patch (always applied at T5) ──────────────────────────────
     # Pre-Batch-3: this was gated on `with_selfplay` so the no-selfplay path
