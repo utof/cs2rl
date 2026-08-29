@@ -196,9 +196,15 @@ static inline void free_solids(StaticData* sd) {
  *    endpoints from cliff pruning, so catwalk(128)↔CT-ramp(64) is a
  *    walkable 64u drop, and a lip there would be a 64u wall across an edge
  *    nav shaping actively routes through.
- *  - A ramp NEVER emits a lip OR a divider. The T-ramp / CT-ramp / stairs
- *    are the walk-up affordance; any face on their covered edges would wall
- *    the connector off. Pass A still walls off the uncovered leftovers.
+ *  - A covered edge with a ramp on EITHER side emits neither a lip nor a
+ *    divider. The T-ramp / CT-ramp / stairs are the walk-up affordance; any
+ *    face on their covered edges would wall the connector off. The guard has
+ *    to look at both rooms because the two sides share one line: testing
+ *    only the emitting room let the mirrored orientations through — the LOW
+ *    room being the ramp still got a lip dropped over its top, and a divider
+ *    still landed on a ramp face whenever the ramp held the higher array
+ *    index (the i<jj tie-break made the bug index-order dependent). Pass A
+ *    still walls off the uncovered leftovers.
  *  - Only the higher side of a drop emits the lip (zi > zj + SOLID_EPS), so
  *    catwalk↔bombsite is ONE face, not two coincident cubes that z-fight.
  *    The lower side deliberately emits nothing.
@@ -208,10 +214,9 @@ static inline void free_solids(StaticData* sd) {
  *    |Δz| > MAX_STEP_HEIGHT, which lands in the lip branch instead. It is
  *    emitted once, by the lower-indexed room, for the same anti-duplicate
  *    reason as the lip.
- *  - Not covered: a RAMP whose adjacency to a covering neighbour is pruned
- *    leaves a hole, because ramps never emit. map.py exempts ramp endpoints
- *    from cliff pruning, so a pruned ramp edge cannot exist today; revisit
- *    if that rule changes.
+ *  - Not covered: a pruned ramp edge leaves a hole, because neither side of
+ *    it emits. map.py exempts ramp endpoints from cliff pruning, so a pruned
+ *    ramp edge cannot exist today; revisit if that rule changes.
  */
 static inline void build_solids_from_rooms(StaticData* sd) {
     WallList*    wl;
@@ -329,6 +334,7 @@ static inline void build_solids_from_rooms(StaticData* sd) {
             for (k = 0; k < ncov; k++) {
                 int   jj        = covs[k].j;
                 float zj        = sd->centroids_z[jj];
+                int   ramp_j    = (sd->is_ramp != NULL) ? (sd->is_ramp[jj] != 0) : 0;
                 int   connected = (sd->adjacency != NULL) ? (sd->adjacency[i * N + jj] != 0) : 1;
 
                 /* Portal — the nav graph says i<->jj is walkable, so NOTHING
@@ -344,10 +350,17 @@ static inline void build_solids_from_rooms(StaticData* sd) {
                 if (connected)
                     continue;
                 /* A ramp is the walk-up affordance: its faces are how you get
-                 * on and off it, so it emits neither a lip nor a divider even
-                 * when the adjacency is pruned. (Pass A still walls off the
-                 * parts of a ramp edge that no neighbour covers.) */
-                if (ramp_i)
+                 * on and off it, so a covered edge with a ramp on EITHER side
+                 * emits neither a lip nor a divider even when the adjacency
+                 * is pruned. Both sides matter because they name the SAME
+                 * line — `ramp_i` alone left the mirrored orientations open:
+                 * a non-ramp room standing above a ramp still dropped a lip
+                 * onto the ramp top, and the divider branch's `i < jj`
+                 * tie-break meant a flush pruned edge was walled off or not
+                 * depending purely on which room got the lower array index.
+                 * (Pass A still walls off the parts of a ramp edge that no
+                 * neighbour covers.) */
+                if (ramp_i || ramp_j)
                     continue;
 
                 if (zi > zj + SOLID_EPS) {

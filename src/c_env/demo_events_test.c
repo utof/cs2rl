@@ -902,6 +902,33 @@ static void test_solids_ramp_emits_no_lip(void) {
     free_solids(&f.sd);
 }
 
+/* Mirror of the above: the ramp is the LOW room, so the NON-ramp room is the
+ * one that would emit (only the higher side emits a lip). Both sides name the
+ * same line, so a guard that only tests the emitting room passes the test
+ * above and still drops a 64u wall over the ramp's top here — which is the
+ * one face you must be able to walk through to get off the ramp.
+ * Pitfall when editing the bake: keep BOTH orientations, they exercise
+ * different halves of `ramp_i || ramp_j`. */
+static void test_solids_ramp_neighbour_emits_no_lip(void) {
+    SolidsFix f;
+    int       i, lips = 0;
+    solids_fix_cliff_z(&f, 64.0f);
+    f.ramps[0] = 1; /* the LOW room is the ramp; room 1 above would emit */
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++)
+        if (f.sd.wall_list.walls[i].kind == SOLID_KIND_LIP)
+            lips++;
+    check_i("ramp neighbour no lip", lips, 0);
+    check_i("ramp neighbour lip count", f.sd.wall_list.count, 6);
+    check_i("ramp neighbour nothing on y=100", solids_count_hline(&f.sd, 100.0f), 0);
+    /* The whole point: stepping down off the ramp top must stay free. */
+    check_i("ramp neighbour walk off ramp",
+            solid_sweep_xy(&f.sd, 50.0f, 150.0f, 50.0f, 50.0f, 64.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+    free_solids(&f.sd);
+}
+
 /* Flush + unconnected → ONE divider, emitted by the lower-indexed room.
  * SOLID_KIND_DIVIDER is unreachable on SIMPLE_ROOMS (map.py only prunes on
  * |Δz| > MAX_STEP_HEIGHT, which lands in the lip branch), so without this
@@ -956,6 +983,33 @@ static void test_solids_ramp_emits_no_divider(void) {
     check_i("ramp no divider", divs, 0);
     check_i("ramp divider count", f.sd.wall_list.count, 6);
     check_i("ramp nothing on x=100", solids_count_vline(&f.sd, 100.0f), 0);
+    free_solids(&f.sd);
+}
+
+/* Mirror of the above, with the ramp at index 1. The divider is emitted by
+ * the LOWER-indexed room (the `i < jj` anti-duplicate tie-break), so a guard
+ * that only tests the emitting room makes the outcome depend on nothing but
+ * array order: ramp at index 0 was silent, ramp at index 1 got a 128u wall
+ * across its face. Array order is assigned by map.py's room list and carries
+ * no geometric meaning, so this asymmetry is a bug, not a convention. */
+static void test_solids_ramp_neighbour_emits_no_divider(void) {
+    SolidsFix f;
+    int       i, divs = 0;
+    solids_fix_two_rooms(&f);
+    solids_fix_adj(&f, 0, 1, 0);
+    f.ramps[1] = 1; /* the ramp is the NON-emitting side (room 0 has i<jj) */
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++)
+        if (f.sd.wall_list.walls[i].kind == SOLID_KIND_DIVIDER)
+            divs++;
+    check_i("ramp neighbour no divider", divs, 0);
+    check_i("ramp neighbour divider count", f.sd.wall_list.count, 6);
+    check_i("ramp neighbour nothing on x=100", solids_count_vline(&f.sd, 100.0f), 0);
+    /* Crossing onto the ramp must stay free in both directions. */
+    check_i("ramp neighbour walk onto ramp",
+            solid_sweep_xy(&f.sd, 80.0f, 50.0f, 120.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            0);
     free_solids(&f.sd);
 }
 
@@ -1248,8 +1302,10 @@ int main(void) {
     test_solids_cliff_lip();
     test_solids_connected_drop_is_portal();
     test_solids_ramp_emits_no_lip();
+    test_solids_ramp_neighbour_emits_no_lip();
     test_solids_divider();
     test_solids_ramp_emits_no_divider();
+    test_solids_ramp_neighbour_emits_no_divider();
     test_solids_exterior_normals();
     test_solids_exterior_height_elevated();
     test_solids_partial_edge_doorway();
