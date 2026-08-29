@@ -61,8 +61,10 @@
  */
 #pragma once
 
+#include <limits.h> /* INT_MAX — the wall_list capacity bound            */
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h> /* fprintf — the bake's only failure channel         */
 #include <stdlib.h>
 
 #include "cs2_terrain.h" /* demo_edge_covers_j — the shared edge predicate */
@@ -126,6 +128,13 @@ static inline int _solid_iv_cmp(const void* a, const void* b) {
  * Pitfalls: silently drops the face when the list is full — capacity is
  *           sized for the worst case in build_solids_from_rooms, so a drop
  *           here means that bound is wrong, not that the map is unusual.
+ *           That "worst case" headroom exists DURING the bake only: the tail
+ *           of build_solids_from_rooms reallocs down, leaving
+ *           capacity == count. So this is not a general-purpose appender —
+ *           call it on a finished list and it drops every single face
+ *           without a word. An incremental appender needs its own grow step
+ *           first; do not reach for the capacity check here as if it were
+ *           one.
  *           Degenerate (b <= a) spans are skipped; every caller already
  *           filters at SOLID_EPS, so this only guards future callers.
  */
@@ -191,6 +200,10 @@ static inline void free_solids(StaticData* sd) {
  *  - ONLY malloc site for wall_list. Frees the previous list first, so
  *    calling it twice is safe; calling it on a StaticData whose wall_list
  *    was never zeroed frees a garbage pointer.
+ *  - Cannot report failure to its caller. An OOM leaves an EMPTY list, which
+ *    every query reads as "no solids anywhere" — collision and LoS turn off
+ *    map-wide instead of erroring. It shouts on stderr; if you ever give
+ *    this function a return value, that is the first thing to propagate.
  *  - A connected interval emits NOTHING, whatever the height difference.
  *    Checking adjacency first is the whole point: map.py exempts ramp
  *    endpoints from cliff pruning, so catwalk(128)↔CT-ramp(64) is a
@@ -223,6 +236,7 @@ static inline void build_solids_from_rooms(StaticData* sd) {
     const float* ab;
     SolidIv*     covs;
     Wall*        shrunk;
+    size_t       slots;
     int          N, i, e, j, k;
 
     if (sd == NULL)
@@ -247,19 +261,45 @@ static inline void build_solids_from_rooms(StaticData* sd) {
      * faces the 17-room map actually bakes, and ~12 MB at N=200. It is a
      * transient peak only: the tail of this function reallocs down to
      * wl->count. Sizing it exactly up front would mean running the whole
-     * double loop twice. */
-    wl->capacity = N * 8 * (N + 1);
-    wl->walls    = (Wall*)malloc((size_t)wl->capacity * sizeof(Wall));
+     * double loop twice.
+     *
+     * size_t on purpose. `N * 8 * (N + 1)` in int is UB past N≈16k, not a
+     * large number, and wl->capacity is an int so a slot count above INT_MAX
+     * could not be stored truthfully anyway. Both go down the failure path
+     * below rather than wrapping to a small capacity and letting _solid_emit
+     * drop faces into a too-small buffer. N=17 today; this is insurance. */
+    slots     = (size_t)N * 8u * ((size_t)N + 1u);
+    wl->walls = (slots > (size_t)INT_MAX) ? NULL : (Wall*)malloc(slots * sizeof(Wall));
     if (wl->walls == NULL) {
+        /* Loud on purpose. A failed bake leaves walls=NULL/count=0, which is
+         * bit-for-bit what "this map has no room quads" (dust2) looks like:
+         * solid_sweep_xy then returns 0 and solid_ray_clear returns 1 for
+         * EVERY query, so collision and line-of-sight quietly vanish
+         * map-wide. The only symptom is agents strolling through drawn walls
+         * and shooting through drawn corners — nobody debugging that would
+         * arrive at malloc. There is no error code to return (callers are
+         * make_client and the env init path, neither of which can fail), so
+         * stderr is the whole channel. */
+        fprintf(stderr,
+                "cs2_solids: wall-list bake could not allocate %zu faces for N=%d rooms; "
+                "collision and LoS are now DISABLED for this map\n",
+                slots,
+                N);
         wl->capacity = 0;
         return;
     }
+    wl->capacity = (int)slots;
 
     /* Scratch coverage list. Second allocation inside the single bake
      * function, freed before every return path below; wall_list itself is
      * still allocated exactly once, here. */
     covs = (SolidIv*)malloc((size_t)N * sizeof(SolidIv));
     if (covs == NULL) {
+        /* Same silent-disable hazard as above, same reason to shout. */
+        fprintf(stderr,
+                "cs2_solids: wall-list bake could not allocate the %d-room coverage scratch; "
+                "collision and LoS are now DISABLED for this map\n",
+                N);
         free(wl->walls);
         wl->walls    = NULL;
         wl->capacity = 0;
