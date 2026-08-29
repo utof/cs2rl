@@ -1177,7 +1177,12 @@ static void test_solids_sweep_hull_radius(void) {
 }
 
 /* Two faces on one diagonal move → the NEAREST must win, or slide response
- * projects against a wall the agent has not reached yet. */
+ * projects against a wall the agent has not reached yet.
+ *
+ * Scope: the start is OUTSIDE both r-bands, which is the only regime where
+ * this property holds. From inside a band the band face clamps to t=0 and
+ * wins whatever lies ahead — see the CALLER CONTRACT block on solid_sweep_xy.
+ * Do not "strengthen" this test by moving the start closer to a wall. */
 static void test_solids_sweep_nearest_hit(void) {
     SolidsFix f;
     SolidHit  hit;

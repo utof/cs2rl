@@ -443,15 +443,33 @@ static inline int _solid_slab_overlaps(const Wall* w, float lo, float hi) {
     return !(lo > w->z0 + w->height || hi < w->z0);
 }
 
-/* solid_sweep_xy — dest-reject capsule sweep against the baked faces.
+/* solid_sweep_xy — capsule sweep against the baked faces.
  *
  * What: 1 if the agent capsule [z, z + SOLID_AGENT_HEIGHT] overlaps a face's
  *       vertical slab AND the radius-r XY disk crosses that face's plane,
  *       expanded by r, at some t in [0, 1). `hit` (may be NULL) gets the
  *       smallest such t and that face's outward normal.
- * Why:  movement asks "does this step leave the room through a solid?" and
- *       rejects the destination. One list, so what blocks you is what is
- *       drawn.
+ * Why:  movement asks "does this step leave the room through a solid?".
+ *       One list, so what blocks you is what is drawn.
+ *
+ * CALLER CONTRACT — on a hit you MUST slide along `hit->nx/ny` and re-sweep.
+ * A plain dest-reject ("blocked, so stay put") freezes wall-hugging movement,
+ * and not as an edge case: the moment the start sits inside ANY face's
+ * r-band, that face reports t = 0 and wins the min-t race unconditionally,
+ * even when a nearer face lies ahead in the travel direction. So an agent
+ * that ends up within r of a wall — dropping from z=65 to z=64 next to a 64u
+ * lip is enough, since that activates the lip's slab underneath it — would
+ * not be able to move ALONG that wall at all; every step comes back blocked
+ * and the agent is pinned until something else moves it. The intended
+ * response is the usual iterated slide, v' = v - (v·n)n, then sweep again;
+ * that is the whole reason SolidHit carries a normal instead of just a t.
+ *
+ * Corollary: "nearest hit wins" holds only for a start OUTSIDE every r-band.
+ * Inside one, an infinitesimal change of input flips which face is reported
+ * — from (5,50), a 0.01u sidestep swaps the west face at t=0 for the north
+ * face at t=0.95. That is correct for slide response and wrong to lean on as
+ * a nearest-surface query; do not build a raycast on top of this (use
+ * solid_ray_clear).
  *
  * Pitfalls:
  *  - t < 0 means the mover STARTS inside the r-band, i.e. its hull already
@@ -468,10 +486,15 @@ static inline int _solid_slab_overlaps(const Wall* w, float lo, float hi) {
  *          inside a wall keeps moving rather than being teleported out.
  *          Standing exactly on the plane counts as (b) in both directions,
  *          so an agent pinned on a wall line is never frozen.
- *    Consequence of (b): a mover that is already past a face can keep going
- *    further past it, but is blocked from coming back through — the return
- *    trip is case (a). Nothing can reach that state now that the hole is
- *    closed; do not rely on it as an escape hatch.
+ *    Consequence of (b): a mover already past a face can keep going further
+ *    past it, but is blocked from coming back through — the return trip is
+ *    case (a). This state IS reachable in normal play, so it is a documented
+ *    behaviour and not a "can't happen": _solid_slab_overlaps is inclusive,
+ *    so anyone airborne over a lip at z inside [z0, z0 + height] is past that
+ *    face's plane while the face is still live for them. One-way is the right
+ *    answer there — you cleared the lip, you landed past it. What you must
+ *    NOT do is lean on it as a general escape hatch from a geometry bug; it
+ *    exists because v1 has no depenetration, not as a movement feature.
  *  - Motion parallel to a face never hits it, by construction.
  *  - Axis-aligned faces only. A diagonal seg would be mis-classified by
  *    _solid_is_horizontal; the bake never produces one.
