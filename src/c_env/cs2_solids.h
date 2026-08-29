@@ -68,9 +68,13 @@
 #include "cs2_terrain.h" /* demo_edge_covers_j — the shared edge predicate */
 #include "cs2_types.h"   /* StaticData, Wall, WallList, AGENT_HULL_RADIUS   */
 
-/* "On the line" vs "strictly past it". Numerically equal to DEMO_EDGE_EPS,
- * which the coverage predicate uses — keep them in lock-step. */
-#define SOLID_EPS 1.0f
+/* "On the line" vs "strictly past it". This is DEMO_EDGE_EPS, not a copy of
+ * it: the coverage predicate (demo_edge_covers_j) and the gap/lip tests below
+ * MUST use the same tolerance, or an interval this file calls "covered" can be
+ * one the predicate rejected — a face that exists on one side of the edge and
+ * not the other. The alias keeps the name local to this header's vocabulary
+ * while making drift impossible. */
+#define SOLID_EPS DEMO_EDGE_EPS
 
 /* Copy of cs2_render.h WALL_HEIGHT. Do not include the render header here.
  * A drift between the two only changes how tall exterior walls are drawn vs
@@ -232,7 +236,8 @@ static inline void build_solids_from_rooms(StaticData* sd) {
         return;
 
     /* Worst case per edge: (ncov + 1) exterior gaps + ncov lips, ncov < N,
-     * so 2N+1 per edge and 4*(2N+1) = 8N+4 per room. 8N*(N+1) covers it. */
+     * so 2N+1 per edge and 4*(2N+1) = 8N+4 per room. 8N*(N+1) covers it.
+     */
     wl->capacity = N * 8 * (N + 1);
     wl->walls    = (Wall*)malloc((size_t)wl->capacity * sizeof(Wall));
     if (wl->walls == NULL) {
@@ -378,9 +383,20 @@ static inline void build_solids_from_rooms(StaticData* sd) {
 
 /* ── queries ─────────────────────────────────────────────────────────────── */
 
-/* _solid_is_horizontal — seg orientation, same rule draw_walls uses. */
+/* _solid_is_horizontal — seg orientation, the one rule every consumer uses.
+ *
+ * What: 1 for a face that extends along X (y0 == y1), 0 for one along Y.
+ * Why:  the bake stores an EXACT axis-aligned unit normal — horizontal faces
+ *       get ny = ±1 and nx = 0, vertical ones the reverse — so testing the
+ *       normal is exact. The old form compared the endpoints against a 1.0f
+ *       magic threshold, which is a length tolerance standing in for an
+ *       orientation test, and draw_walls had a second copy of the same
+ *       constant.
+ * Pitfalls: only valid for walls that came out of _solid_emit. A hand-built
+ *           Wall with a zeroed normal classifies as vertical.
+ */
 static inline int _solid_is_horizontal(const Wall* w) {
-    return fabsf(w->y1 - w->y0) < 1.0f;
+    return w->ny != 0.0f;
 }
 
 /* _solid_slab_overlaps — does the vertical span [lo, hi] touch the face?

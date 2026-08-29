@@ -26,6 +26,17 @@
 #define WINDOW_W          1280
 #define WINDOW_H          720
 
+/* SOLID_WALL_HEIGHT is a deliberate copy of WALL_HEIGHT living in cs2_solids.h,
+ * which must stay raylib-free and so cannot include this header. The copy is
+ * fine; a silent DRIFT is not — it would make exterior walls block at a
+ * different height than they are drawn, i.e. shots that sail over a wall the
+ * player can see. If the two ever legitimately need to differ, delete this
+ * assert deliberately rather than letting it rot.
+ * Pitfall: -std=c99 + glibc rewrites _Static_assert into a negative bit-field,
+ * so a failure reads "__error_if_negative has negative width" at this line. */
+_Static_assert(WALL_HEIGHT == SOLID_WALL_HEIGHT,
+               "WALL_HEIGHT drifted from SOLID_WALL_HEIGHT in cs2_solids.h");
+
 /* Demo-juice audio (P0). Voices live in src/c_env/demo_assets/ because
  * src/c_env/resources is a pufferlib symlink in the parent tree (and is
  * gitignored). build.zig copies the WAVs to zig-out/bin/resources/. */
@@ -579,8 +590,10 @@ static void draw_walls(Dust2Env* env) {
         }
         /* Wall midpoint; Raylib Y=up */
         Vector3 pos = {cx, w->z0 + w->height * 0.5f, cy};
-        /* Axis-aligned: horizontal wall = extends along X, vertical = extends along Z */
-        int   horizontal = fabsf(w->y1 - w->y0) < 1.0f;
+        /* Axis-aligned: horizontal wall = extends along X, vertical = extends
+         * along Z. Same helper the sweep and the ray use — the draw box and
+         * the collision plane must never disagree about a face's axis. */
+        int   horizontal = _solid_is_horizontal(w);
         float wx         = horizontal ? len : WALL_DEPTH;
         float wz         = horizontal ? WALL_DEPTH : len;
         DrawCube(pos, wx, w->height, wz, (Color){140, 140, 160, 255});
@@ -633,10 +646,19 @@ static void draw_agents(Dust2Env* env, Client* cl, float alpha) {
             head_col = (Color){60, 130, 255, 255};
         }
 
-        /* Agent rig offsets from feet: body extends 0→96, head at 108, bomb
-         * marker at 130. Agent z (ground or airborne) becomes the feet level,
-         * so a jumping agent visibly rises with their velocity. */
-        DrawCylinder((Vector3){x, z, y}, AGENT_HULL_RADIUS, AGENT_HULL_RADIUS, 96.0f, 8, body_col);
+        /* Agent rig offsets from feet: body extends 0→SOLID_AGENT_HEIGHT (96),
+         * head at 108, bomb marker at 130. Agent z (ground or airborne) becomes
+         * the feet level, so a jumping agent visibly rises with their velocity.
+         * The body height IS the collision capsule height solid_sweep_xy uses,
+         * so it is named, not repeated — drawing a taller body than we collide
+         * with is how you get an agent clipping through a lip they visibly
+         * overlap. */
+        DrawCylinder((Vector3){x, z, y},
+                     AGENT_HULL_RADIUS,
+                     AGENT_HULL_RADIUS,
+                     SOLID_AGENT_HEIGHT,
+                     8,
+                     body_col);
         DrawSphere((Vector3){x, z + 108.0f, y}, 16.0f, head_col);
 
         /* Aim stick: combat look (yaw+pitch, punch already in snapshot). */
