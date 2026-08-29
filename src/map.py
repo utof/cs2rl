@@ -39,8 +39,9 @@ class MapData:
     # Verticality — per-area terrain elevation and ramp flag (spec L1, L8).
     # centroids_z: terrain z-height for each area (0.0 for flat/ground areas).
     #   - Ramps store their TOP elevation (e.g., a ramp from z=0 to z=64 has
-    #     centroids_z=64.0). Walking onto a ramp snaps the agent z up instantly
-    #     ("step-wise verticality" per spec L1). Smooth interpolation is v1b.
+    #     centroids_z=64.0). Cliff-guard Δz still uses that top. Grounded z
+    #     interpolates along the room quad when MapData.area_bounds is set
+    #     (simple map). NULL bounds (dust2 / make_cs2_map) still snap to top.
     #   - make_cs2_map zero-fills this; dust2 verticality is a separate future task.
     # is_ramp: True means the C-env cliff guard exempts this area from the
     #   Δz > SV_MAX_STEP_HEIGHT check, allowing grounded agents to step up into it.
@@ -74,6 +75,10 @@ class MapData:
     # Optional: reference to the underlying NavGraph (needed for viz/snapshot).
     # None for simple maps.
     nav_graph: object = field(default=None, repr=False)
+    # Room AABB float32[N,4] x0,y0,x1,y1 for ramp interpolation.
+    # make_simple_map fills this from the room tuples. make_cs2_map leaves
+    # None so demo_terrain_z stays on centroids_z.
+    area_bounds: np.ndarray | None = field(default=None)
 
     def line_of_sight_2d(self, x1: float, y1: float, x2: float, y2: float) -> bool:
         """Pure-Python mirror of cs2_combat.h::line_of_sight_2d.
@@ -273,12 +278,11 @@ SIMPLE_ROOMS = [
     (2, 0, 672, 256, 928, 0.0, False),                 # T-spawn-C
     (3, 256, 672, 512, 928, 0.0, False),               # T-spawn-D
     (4, 0, 928, 512, 1184, 0.0, False),                # T-spawn-E
-                                                       # T-corridor — shrunk on east end (was x=400-800; now 400-750 to make room for T-ramp)
-    (5, 400, 192, 750, 512, 0.0, False),               # T-corridor
+    (5, 400, 192, 750, 416, 0.0, False),               # T-corridor — stops at T-spawn south
                                                        # Bombsite — ELEVATED to z=64; shrunk on x edges (was 800-1100; now 820-1100)
     (6, 820, 192, 1100, 416, 64.0, False),             # Bombsite (elevated)
-                                                       # CT-corridor — shrunk on west end (was 1100-1600; now 1170-1600)
-    (7, 1170, 192, 1600, 512, 0.0, False),             # CT-corridor
+    (7, 1170, 192, 1600, 416, 0.0, False),             # CT-corridor — stops at CT-spawn south
+
                                                        # CT-spawn cluster (areas 8-12) — flat, z=0
     (8, 1500, 416, 1756, 672, 0.0, False),
     (9, 1756, 416, 2012, 672, 0.0, False),
@@ -456,6 +460,10 @@ def make_simple_map(
         mx = float(finite.max())
         bombsite_dist_scale = 1.0 / mx if mx > 0 else 0.0
 
+    area_bounds = np.zeros((N, 4), dtype=np.float32)
+    for idx, x0, y0, x1, y1, *_ in rooms:
+        area_bounds[idx] = (x0, y0, x1, y1)
+
     return MapData(
         N=N,
         area_ids=area_ids,
@@ -479,4 +487,5 @@ def make_simple_map(
         y_min=y_min,
         y_max=y_max,
         nav_graph=None,
+        area_bounds=area_bounds,
     )

@@ -14,9 +14,9 @@ struct PlayHost {
 };
 
 /* Copy env.game into a DemoWorldTick. Pose snapshots (AgentSnapshot) cannot
- * drive audio: they lack fired_this_tick / is_airborne / bomb_ticks_left.
- * Bomb xyz is NOT on DemoWorldTick — plant/beep spatial reads env.game
- * after the step (spec §3.1). */
+ * drive audio: they lack fired_this_tick / is_airborne / bomb_ticks_left /
+ * reload_ticks. Bomb xyz is NOT on DemoWorldTick — plant/beep spatial
+ * reads env.game after the step (spec §3.1). */
 static void copy_game_to_world(const Dust2Env* env, DemoWorldTick* w) {
     const GameState* g = &env->game;
     int              i;
@@ -31,6 +31,7 @@ static void copy_game_to_world(const Dust2Env* env, DemoWorldTick* w) {
         w->agents[i].team            = a->team;
         w->agents[i].is_airborne     = a->is_airborne;
         w->agents[i].fired_this_tick = a->fired_this_tick;
+        w->agents[i].reload_ticks    = a->reload_ticks;
     }
 }
 
@@ -53,6 +54,14 @@ static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* cur
                           curr->agents[i].y,
                           curr->agents[i].z,
                           400.0f);
+        /* Every set bit, including the human. No rate-limit. */
+        if ((ev.reload_mask | ev.reload_end_mask) & (1u << i))
+            _demo_play_at(cl,
+                          DEMO_VOICE_RELOAD,
+                          curr->agents[i].x,
+                          curr->agents[i].y,
+                          curr->agents[i].z,
+                          800.0f);
     }
     /* DemoWorldTick has no bomb xyz; wrapper reads the post-step game. */
     if (ev.plant)

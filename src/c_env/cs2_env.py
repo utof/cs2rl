@@ -45,6 +45,42 @@ class VizGameState:
 # ── ctypes struct definitions (read/write overlay for _c_env) ─────────────────
 
 
+class WallC(ctypes.Structure):
+    # Field-for-field mirror of `Wall` in cs2_types.h, and the pointee type of
+    # WallListC.walls. Nothing in the repo dereferences walls[i] from Python
+    # today — the baked list is produced and consumed entirely in C — so this
+    # mirror exists to already be right the first time something does. Should
+    # it drift from the C struct before then, that first read would land on
+    # the wrong bytes and ctypes has no way to notice: no exception, no shape
+    # mismatch, just plausible-looking garbage coordinates. The bake added
+    # nx/ny/kind (24 B -> 36 B) for the draw-offset rule in draw_walls.
+    # Pitfall: append only, and append on BOTH sides. The C side carries a
+    # matching _Static_assert(sizeof(Wall) == 36); the ctypes.sizeof(WallC)
+    # assert further down is the other half of that pair, and the pair is
+    # what actually catches the drift.
+    _fields_ = [
+        ("x0", ctypes.c_float),
+        ("y0", ctypes.c_float),
+        ("x1", ctypes.c_float),
+        ("y1", ctypes.c_float),
+        ("height", ctypes.c_float),
+        ("z0", ctypes.c_float),
+        ("nx", ctypes.c_float),        # unit outward normal of the owning
+        ("ny", ctypes.c_float),        #   room's edge (exactly one is ±1)
+        ("kind", ctypes.c_int32),      # SOLID_KIND_* in cs2_solids.h
+    ]
+
+
+class WallListC(ctypes.Structure):
+    # Mirrors C WallList: ptr + count + capacity. Appended on StaticDataC
+    # after the binding.init prefix so area_bounds can follow at C offsets.
+    _fields_ = [
+        ("walls", ctypes.POINTER(WallC)),
+        ("count", ctypes.c_int),
+        ("capacity", ctypes.c_int),
+    ]
+
+
 class StaticDataC(ctypes.Structure):
     # fmt: off  -- YAPF aligns standalone comments to trailing-comment column; suppress here
     _fields_ = [
@@ -124,6 +160,12 @@ class StaticDataC(ctypes.Structure):
         ("pbrs_bomb_progress_weight", ctypes.c_float),
         ("pbrs_nav_weight_t", ctypes.c_float),
         ("pbrs_nav_weight_ct", ctypes.c_float),
+        # After ctypes prefix: overlay C wall_list then ramp bounds.
+        # Do not insert before wall_list. 69-arg FMT is unchanged.
+        # Measured gcc offsetof(StaticData): wall_list=480, area_bounds=496.
+        # No pad after pbrs_nav_weight_ct (ends 480).
+        ("wall_list", WallListC),
+        ("area_bounds", ctypes.POINTER(ctypes.c_float)),
     ]
     # fmt: on
 
@@ -300,9 +342,9 @@ class Dust2EnvC(ctypes.Structure):
         ("rng", ctypes.c_uint32),
         ("masks", ctypes.c_int8 * (N_AGENTS * ACTION_MASK_DIM)),
         ("client", ctypes.c_void_p),                                   # Client* (NULL in training)
-                                                       # Sim recoil v1 (#120): after client, not a binding.init arg.
-                                                       # make_env writes this after from_address; env_reset does not
-                                                       # clear it (memsets GameState only). 0=hitscan, 1=punch on ray.
+                                                                       # Sim recoil v1 (#120): after client, not a binding.init arg.
+                                                                       # make_env writes this after from_address; env_reset does not
+                                                                       # clear it (memsets GameState only). 0=hitscan, 1=punch on ray.
         ("recoil_enabled", ctypes.c_int32),
     ]
 
@@ -347,6 +389,16 @@ assert ctypes.sizeof(StepStatsC) == 204, (
     f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 204)")
 assert ctypes.sizeof(Dust2EnvC) == 6832, (
     f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6832)")
+# Live overlay vs gcc offsetof(StaticData). Append of wall_list is safe:
+# pbrs_nav_weight_ct ends at 480, pointer-aligned, no guessed pad.
+assert StaticDataC.pbrs_nav_weight_ct.offset == 476, StaticDataC.pbrs_nav_weight_ct.offset
+assert StaticDataC.wall_list.offset == 480, StaticDataC.wall_list.offset
+assert StaticDataC.area_bounds.offset == 496, StaticDataC.area_bounds.offset
+assert ctypes.sizeof(WallListC) == 16, ctypes.sizeof(WallListC)
+# 8 floats + 1 int32, no padding. Mirrors _Static_assert(sizeof(Wall) == 36)
+# in cs2_types.h; if you change Wall, both must move together or walls[i]
+# reads garbage. WallListC's own size is unaffected (walls is a pointer).
+assert ctypes.sizeof(WallC) == 36, ctypes.sizeof(WallC)
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -640,6 +692,17 @@ class Cs2Env(pufferlib.PufferEnv):
         # flag survives reset. Train / Modal stay off unless a later card
         # passes recoil=True into make_env.
         self._c_env.recoil_enabled = 1 if recoil else 0
+
+        # Room AABB for ramp interpolation. Not a binding.init arg (69-arg FMT
+        # stays frozen). make_simple_map fills area_bounds from SIMPLE_ROOMS;
+        # make_cs2_map leaves None so interpolation stays centroids_z.
+        # Ownership: `ab` stays in self._refs for the life of this Cs2Env and C
+        # only borrows the pointer. Dropping that ref while the env is alive
+        # frees the buffer under the sim; C will not (and must not) free it.
+        if getattr(md, "area_bounds", None) is not None:
+            ab = np.ascontiguousarray(np.asarray(md.area_bounds, dtype=np.float32).reshape(-1))
+            self._refs.append(ab)
+            self._c_env.sd.contents.area_bounds = ab.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
         # Zero-copy NumPy views into C buffers
         obs_ptr, rew_ptr, term_ptr, trunc_ptr = binding.get_buffers(self._capsule)

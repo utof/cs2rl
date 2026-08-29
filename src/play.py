@@ -9,7 +9,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from play_actions import (
-    area_bounds_from_simple_rooms,
     find_repo_root,
     play_fill_actions,
     play_mark_done,
@@ -103,14 +102,16 @@ def main(argv=None):
 
     repo = find_repo_root(Path(__file__))
     lib = _load_play_lib(repo)
+    md = make_simple_map()
     env = make_env(
-        seed=args.seed, auto_reset=False, recoil=True, map_data=make_simple_map())
+        seed=args.seed, auto_reset=False, recoil=True, map_data=md)
     obs, _ = env.reset(seed=args.seed)
     # First select sees zero obs (env_reset does not compute_observations). Same as record.
 
     act_buf = np.zeros((10, 7), dtype=np.int32)
     cont_buf = np.zeros((10, 2), dtype=np.float32)
-    bounds = np.ascontiguousarray(area_bounds_from_simple_rooms().reshape(-1))
+    # Same room quad MapData already published into sd->area_bounds.
+    bounds = np.ascontiguousarray(md.area_bounds.reshape(-1))
     resource_dir = str(repo / "src/c_env/zig-out/bin/resources").encode()
     human_idx = -1 if args.spectate else 0
     mode = "sample" if args.sample else "greedy"

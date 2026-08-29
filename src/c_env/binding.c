@@ -13,6 +13,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "cs2_env.h"
+#ifdef CS2_DEMO_VIZ_H
+#error "binding must not include cs2_demo_viz.h (aim-stick stays out of the env graph)"
+#endif
 
 /* Single heap allocation holding both Dust2Env and its StaticData.
  * env is first field so &benv == &benv->env — Python's env_ptr extracts this address. */

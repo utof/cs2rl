@@ -201,6 +201,106 @@ def _zero_actions(n_agents=10):
     )
 
 
+def _room_x_lerp(x0, x1, z_w, z_e, x):
+    """X-slope room lerp: z = (1-u)*z_w + u*z_e, u=(x-x0)/(x1-x0)."""
+    return (1.0 - (x - x0) / (x1 - x0)) * z_w + ((x - x0) / (x1 - x0)) * z_e
+
+
+def _room_y_lerp(y0, y1, z_s, z_n, y):
+    """Y-slope room lerp: z = (1-v)*z_s + v*z_n, v=(y-y0)/(y1-y0)."""
+    return (1.0 - (y - y0) / (y1 - y0)) * z_s + ((y - y0) / (y1 - y0)) * z_n
+
+
+def test_simple_map_area_bounds_match_rooms(simple_map):
+    """make_simple_map publishes the room tuples, not a raster AABB."""
+    from map import SIMPLE_ROOMS
+    assert simple_map.area_bounds is not None
+    assert simple_map.area_bounds.shape == (simple_map.N, 4)
+    assert simple_map.area_bounds.dtype == np.float32
+    for idx, x0, y0, x1, y1, *_ in SIMPLE_ROOMS:
+        assert list(simple_map.area_bounds[idx]) == [x0, y0, x1, y1]
+
+
+def test_agent_on_t_ramp_does_not_snap_to_top():
+    """T-ramp interpolation: grounded agent at (755, 300) is the room lerp.
+
+    Area 13 is T-ramp (750–820, 192–416). X-slope 0→64 on the SIMPLE_ROOMS
+    quad: z ≈ (755-750)/(820-750)*64. Must not snap to top 64.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        # Live overlay must be the room quad (750,192,820,416), not a raster AABB.
+        b = env._c_env.sd.contents.area_bounds
+        assert [b[13 * 4 + i] for i in range(4)] == [750.0, 192.0, 820.0, 416.0]
+        g = env._c_env.game
+        g.agents[0].x = 755.0
+        g.agents[0].y = 300.0
+        g.agents[0].area_idx = 13
+        g.agents[0].z = 0.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 0
+        actions, cont = _zero_actions()
+        env.step(actions, cont)
+        z_want = _room_x_lerp(750.0, 820.0, 0.0, 64.0, 755.0)
+        assert abs(g.agents[0].z - z_want) < 0.5, (
+            f"T-ramp room lerp at (755,300) want {z_want:.3f} ±0.5, got z={g.agents[0].z}")
+        assert g.agents[0].is_airborne == 0, (
+            "agent should remain grounded on the interpolated ramp surface")
+        assert g.agents[0].area_idx == 13, (
+            f"agent left T-ramp (area 13) for area_idx={g.agents[0].area_idx}")
+    finally:
+        env.close()
+
+
+def test_agent_on_ct_ramp_follows_x_slope():
+    """CT-ramp (14: 1100–1170, 192–416) is X-slope 64→0 on the room quad."""
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 1135.0
+        g.agents[0].y = 300.0
+        g.agents[0].area_idx = 14
+        g.agents[0].z = 64.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 0
+        actions, cont = _zero_actions()
+        env.step(actions, cont)
+        z_want = _room_x_lerp(1100.0, 1170.0, 64.0, 0.0, 1135.0)
+        assert abs(g.agents[0].z - z_want) < 0.5, (
+            f"CT-ramp room X-slope at (1135,300) want {z_want:.3f} ±0.5, got z={g.agents[0].z}")
+        assert g.agents[0].is_airborne == 0
+        assert g.agents[0].area_idx == 14, (
+            f"agent left CT-ramp (area 14) for area_idx={g.agents[0].area_idx}")
+    finally:
+        env.close()
+
+
+def test_agent_on_stairs_follows_y_slope():
+    """Stairs (16: 1170–1300, 80–192) is Y-slope 128→0 on the room quad."""
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 1235.0
+        g.agents[0].y = 136.0
+        g.agents[0].area_idx = 16
+        g.agents[0].z = 128.0
+        g.agents[0].vz = 0.0
+        g.agents[0].is_airborne = 0
+        actions, cont = _zero_actions()
+        env.step(actions, cont)
+        z_want = _room_y_lerp(80.0, 192.0, 128.0, 0.0, 136.0)
+        assert abs(g.agents[0].z - z_want) < 0.5, (
+            f"stairs room Y-slope at (1235,136) want {z_want:.3f} ±0.5, got z={g.agents[0].z}")
+        assert g.agents[0].is_airborne == 0
+        assert g.agents[0].area_idx == 16, (
+            f"agent left stairs (area 16) for area_idx={g.agents[0].area_idx}")
+    finally:
+        env.close()
+
+
 def test_agent_walk_to_bombsite_reaches_elevation():
     """T3 load-bearing: agent teleported to bombsite (area_idx=6, z=0) snaps to z=64
     on the next ground-snap tick.
@@ -465,6 +565,149 @@ def test_obs_z_delta_populated_for_elevated_teammate():
         env.close()
 
 
+# DrawCylinder radius in cs2_render.h — collision hull must keep the visible
+# body on the walkable side of an exterior wall. Named here so a radius
+# change fails this file, not a silent viz/sim drift.
+_AGENT_VIZ_RADIUS = 12.0
+
+
+def test_exterior_wall_keeps_body_inside_room():
+    """Point collision lets the 12u body sit inside an 8u exterior wall.
+
+    T-spawn-A west face is x=0, 16u-aligned, no raster overshoot. The visual
+    wall is WALL_DEPTH=8 pushed into x<0, so it occupies [-8, 0]. A center
+    at x≈0 puts the cylinder in [-12, 12] — fully through the wall, hugging
+    the outer face. After the hull, the center must stay at x >= 12.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 40.0
+        g.agents[0].y = 500.0
+        g.agents[0].z = 0.0
+        g.agents[0].vx = 0.0
+        g.agents[0].vy = 0.0
+        g.agents[0].area_idx = 0
+        g.agents[0].is_airborne = 0
+        g.agents[0].facing = float(math.pi)  # bin 1 = west (−x)
+        actions, cont = _zero_actions()
+        actions[0, 0] = 1
+        env.step(actions, cont)
+        assert g.agents[0].x < 40.0, (
+            f"facing=π + bin 1 should drive −x; still at x={g.agents[0].x}")
+        for _ in range(19):
+            env.step(actions, cont)
+        assert g.agents[0].area_idx == 0, (
+            f"walked off T-spawn-A into area_idx={g.agents[0].area_idx}")
+        assert abs(g.agents[0].x - _AGENT_VIZ_RADIUS) < 2.0, (
+            f"center x={g.agents[0].x:.2f} should stop at the 12u hull "
+            f"on T-spawn-A west (x=0), not inside the [-8, 0] cube")
+    finally:
+        env.close()
+
+
+def test_raster_overshoot_cannot_enter_exterior_wall():
+    """Simple-map raster marks whole cells; catwalk west AABB is x=820.
+
+    col 51 covers [816, 832). Point collision walks to x≈816, which is
+    inside the exterior wall cube centered at 816. The room quad starts
+    at 820 — the center must stay in-bounds by the viz radius.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 860.0
+        g.agents[0].y = 130.0
+        g.agents[0].z = 128.0
+        g.agents[0].vx = 0.0
+        g.agents[0].vy = 0.0
+        g.agents[0].area_idx = 15
+        g.agents[0].is_airborne = 0
+        g.agents[0].facing = float(math.pi)
+        actions, cont = _zero_actions()
+        actions[0, 0] = 1
+        for _ in range(20):
+            env.step(actions, cont)
+        assert g.agents[0].area_idx == 15, (
+            f"left catwalk for area_idx={g.agents[0].area_idx}")
+        min_x = 820.0 + _AGENT_VIZ_RADIUS
+        assert abs(g.agents[0].x - min_x) < 2.0, (
+            f"center x={g.agents[0].x:.2f} should stop at catwalk west "
+            f"hull ({min_x}), not in the [816, 820) overshoot")
+    finally:
+        env.close()
+
+
+def test_t_ramp_portal_is_walkable():
+    """T-corridor → T-ramp → bombsite must stay walkable after the hull.
+
+    Later rooms own the 16u column that straddles x=750 and x=820. Testing
+    the raster label's AABB on that column rejects the earlier room and
+    severs the ramp. Drive east from (700, 300); area_idx must become 13
+    then 6.
+    """
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 700.0
+        g.agents[0].y = 300.0
+        g.agents[0].z = 0.0
+        g.agents[0].vx = 0.0
+        g.agents[0].vy = 0.0
+        g.agents[0].area_idx = 5
+        g.agents[0].is_airborne = 0
+        g.agents[0].facing = 0.0  # bin 1 = east (+x)
+        actions, cont = _zero_actions()
+        actions[0, 0] = 1
+        seen = {5}
+        for _ in range(40):
+            env.step(actions, cont)
+            seen.add(int(g.agents[0].area_idx))
+        assert 13 in seen, (
+            f"never entered T-ramp (13); areas={sorted(seen)} x={g.agents[0].x:.1f} "
+            f"— raster AABB at the 750 portal is sealing the doorway")
+        assert 6 in seen, (
+            f"never entered bombsite (6); areas={sorted(seen)} x={g.agents[0].x:.1f} "
+            f"— raster AABB at the 820 portal is sealing the ramp top")
+        assert g.agents[0].x > 820.0, (
+            f"ended at x={g.agents[0].x:.1f}, expected past bombsite west 820")
+    finally:
+        env.close()
+
+
+def test_ct_ramp_portal_is_walkable():
+    """CT-corridor → CT-ramp → bombsite, mirror of the T doorway."""
+    env = _make_simple_env(seed=42)
+    try:
+        env.reset(seed=42)
+        g = env._c_env.game
+        g.agents[0].x = 1220.0
+        g.agents[0].y = 300.0
+        g.agents[0].z = 0.0
+        g.agents[0].vx = 0.0
+        g.agents[0].vy = 0.0
+        g.agents[0].area_idx = 7
+        g.agents[0].is_airborne = 0
+        g.agents[0].facing = float(math.pi)
+        actions, cont = _zero_actions()
+        actions[0, 0] = 1
+        seen = {7}
+        for _ in range(40):
+            env.step(actions, cont)
+            seen.add(int(g.agents[0].area_idx))
+        assert 14 in seen, (
+            f"never entered CT-ramp (14); areas={sorted(seen)} x={g.agents[0].x:.1f}")
+        assert 6 in seen, (
+            f"never entered bombsite (6); areas={sorted(seen)} x={g.agents[0].x:.1f}")
+        assert g.agents[0].x < 1100.0, (
+            f"ended at x={g.agents[0].x:.1f}, expected past bombsite east 1100")
+    finally:
+        env.close()
+
+
 # Note: enemy z-delta slot at obs[base+2] (where base=51 for the closest enemy slot2=0)
 # is intentionally NOT covered here. The slot uses a distance-sorted indirection
 # (`order[]` array in cs2_observations.h:100-110) that needs setup-coordination across
@@ -472,3 +715,14 @@ def test_obs_z_delta_populated_for_elevated_teammate():
 # and visibility-gating is documented at the write site (cs2_observations.h:122-134).
 # A live deploy-side test in T6 (or a dedicated test_obs_enemy_z_delta after T4 lands)
 # is the better venue. Tracking gap as a follow-up.
+
+
+def test_corridors_do_not_enter_spawn():
+    from map import SIMPLE_ROOMS
+    t = next(r for r in SIMPLE_ROOMS if r[0] == 5)
+    ct = next(r for r in SIMPLE_ROOMS if r[0] == 7)
+    assert t[4] == 416.0 or t[4] == 416, t
+    assert ct[4] == 416.0 or ct[4] == 416, ct
+    assert t[4] <= 416
+    assert ct[4] <= 416
+

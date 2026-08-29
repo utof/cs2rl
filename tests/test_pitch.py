@@ -266,6 +266,14 @@ def _setup_3d_hit_scenario(env, sx, sy, sz, shooter_area_idx, tx, ty, tz, target
         tx, ty, tz: target position in world units.
         target_area_idx: nav area_idx for target position (same sync requirement).
 
+    RAMP PITFALL: sz/tz are only honoured on FLAT areas. On a ramp area
+    (is_ramp=1, e.g. 13/14/16 in make_simple_map) the ground-snap in
+    cs2_movement.h::process_movement overwrites z with the interpolated surface
+    z of the ramp quad on the very next env.step, before combat resolves. Never
+    compute a pitch from an sz you passed here for a ramp — step once without
+    firing and read the settled `agents[i].z` back instead. See
+    test_3d_hit_pitch_down_from_ramp.
+
     Resets fire_cd / reload_ticks / switch_ticks / is_crouching / is_airborne
     on both agents so a single shot can fire immediately. Sets target HP=100.
 
@@ -387,15 +395,33 @@ def test_3d_miss_at_zero_pitch_elevated_target():
 
 
 def test_3d_hit_pitch_down_from_ramp():
-    """T5: down-pitch shot from elevated ramp (z=64) at floor target (z=0).
+    """T5: down-pitch shot from an elevated ramp at a floor target (z=0).
 
     Why this exists: validates the SYMMETRIC down-pitch case (the up-pitch
     test proved positive Δz works; this proves negative Δz). Catches a
     sign-flip bug in the 3D direction vector.
 
-    Geometry: T-ramp (area 13, z=64) → T-corridor (area 5, z=0). adj[13][5]=1
+    Geometry: T-ramp (area 13) → T-corridor (area 5, flat z=0). adj[13][5]=1
     so the position-raycast in build_vis_matrix passes (single adjacent
-    transition). Eye = 64+48 = 112; torso = 0+48 = 48; rz = -64.
+    transition).
+
+    RAMP-SURFACE PITFALL — do NOT hard-code a ramp's z. This test used to place
+    the shooter at a literal z=64 ("area 13 centroid z"), which was right only
+    while every area was flat at its centroids_z. Area 13 is a RAMP: since
+    `feat(sim): interpolate z on ramps`, the ground-snap in
+    cs2_movement.h::process_movement replaces a->z with the interpolated
+    surface z of the ramp quad, and it runs BEFORE combat (cs2_env.h calls
+    process_movement, then build_vis_matrix + process_combat). Area 13 spans
+    x=750..820 rising 0→64 west→east, so at the centroid x=785 the real surface
+    is z=32 — centroids_z holds the ramp's TOP, which the cliff-guard wants but
+    a standing agent does not. Aiming from a hard-coded z=64 over-aims by ~8°:
+    perpendicular offset ≈30u > HIT_HALF_WIDTH=16 → clean miss, even though
+    visibility, walls and the hit-cone math are all fine.
+
+    So: step once WITHOUT firing, let the sim snap the shooter onto the ramp,
+    read the settled z back, and derive the pitch from that. A zero movement
+    action leaves x/y untouched, so the firing step snaps to the same z. This
+    stays correct if the ramp interpolation or the map geometry changes again.
 
     History: this used to be "catwalk z=128 → T-corridor z=0", but the new
     position-raycast `vis_matrix` (gh #36 follow-up) correctly blocks that
@@ -416,29 +442,52 @@ def test_3d_hit_pitch_down_from_ramp():
     env = Cs2Env(map_data=make_simple_map())
     try:
         env.reset(seed=42)
-        # T-ramp (z=64) → T-corridor (z=0); adj[13][5]=1 (ramp connection)
-        sx, sy, sz = 785.0, 304.0, 64.0                # area 13 centroid (T-ramp)
-        tx, ty, tz = 575.0, 352.0, 0.0                 # area 5 centroid (T-corridor)
-        rx, ry = tx - sx, ty - sy
-        eye_z = sz + 48.0                              # EYE_HEIGHT_STAND
-        torso_z = tz + 48.0                            # TORSO_OFFSET_STAND
-        rz = torso_z - eye_z                           # -64
-        dist_2d = math.sqrt(rx * rx + ry * ry)
-        pitch = math.atan2(rz, dist_2d)                # ~-0.29 rad: downward pitch
+        # T-ramp → T-corridor (flat z=0); adj[13][5]=1 (ramp connection).
+        sx, sy = 785.0, 304.0                          # area 13 centroid x/y; z comes from the sim
+        tx, ty, tz = 575.0, 352.0, 0.0                 # inside area 5 (its centroid is (575, 304))
+        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
+        cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
+
+        # Settle step: put the shooter on the ramp and step with NO shoot action
+        # so the ground-snap resolves the true interpolated surface z for us.
+        # sz here is only a seed value — process_movement overwrites it.
         _setup_3d_hit_scenario(env,
                                sx=sx,
                                sy=sy,
-                               sz=sz,
+                               sz=64.0,
+                               shooter_area_idx=13,
+                               tx=tx,
+                               ty=ty,
+                               tz=tz,
+                               target_area_idx=5)
+        env.step(actions, cont)
+        ramp_z = env._c_env.game.agents[0].z
+        assert env._c_env.game.agents[0].area_idx == 13, "shooter left the ramp"
+        # Guard the test's premise: this must stay a genuine DOWN-pitch shot. If
+        # the ramp ever interpolated to the floor, the shot below would become a
+        # flat-ground shot and still "pass" without exercising negative Δz.
+        assert ramp_z > tz + 16.0, f"shooter not elevated above target: {ramp_z} vs {tz}"
+
+        eye_z = ramp_z + 48.0                          # EYE_HEIGHT_STAND
+        torso_z = tz + 48.0                            # TORSO_OFFSET_STAND
+        rz = torso_z - eye_z                           # negative: aiming down
+        dist_2d = math.hypot(tx - sx, ty - sy)
+        pitch = math.atan2(rz, dist_2d)                # ~-0.15 rad at the ramp midpoint
+        assert pitch < 0.0, f"expected a downward pitch, got {pitch}"
+
+        # Fire step: re-arm (fire_cd=0, target hp=100) at the settled ramp z.
+        _setup_3d_hit_scenario(env,
+                               sx=sx,
+                               sy=sy,
+                               sz=ramp_z,
                                shooter_area_idx=13,
                                tx=tx,
                                ty=ty,
                                tz=tz,
                                target_area_idx=5)
         hp_before = env._c_env.game.agents[5].hp
-        actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
         actions[0, 1] = 1
-        cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
-        cont[0, 1] = pitch                             # v1c: pitch is absolute, set via cont
+        cont[0, 1] = pitch             # v1c: pitch is absolute, set via cont
         env.step(actions, cont)
         hp_after = env._c_env.game.agents[5].hp
         assert hp_after < hp_before, (f"down-pitch shot didn't connect; hp {hp_before}→{hp_after}")

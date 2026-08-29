@@ -1,5 +1,6 @@
 #pragma once
 #include "cs2_types.h"
+#include "cs2_solids.h" /* free_solids — env_close owns sd->wall_list */
 #include "cs2_navmesh.h"
 #include "cs2_weapons.h"
 #include "cs2_player.h"
@@ -30,6 +31,8 @@ static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_sp
     env->team_spirit = team_spirit;
     clear_stats(&env->step_stats);
     clear_stats(&env->episode_stats);
+    /* area_bounds stays NULL unless a caller sets it (Cs2Env after init,
+     * make_client). Rooms are the one source — do not derive from raster. */
 }
 
 /* compute_masks: refresh env->masks (N_AGENTS × ACTION_MASK_DIM int8, 1=valid)
@@ -375,6 +378,22 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
 
     compute_masks(env);
 }
+/* env_close — release everything the C side malloc'd for this env.
+ *
+ * What: frees sd->wall_list (the baked solid faces). area_bounds is
+ *       Python/nav-owned and is NOT freed here.
+ * Why:  each BindingEnv carries its OWN StaticData (binding.c allocates
+ *       Dust2Env + StaticData in one calloc), so the wall list is per-env,
+ *       not shared. Today only the demo bakes, but as soon as env_step
+ *       queries solids the training path bakes too and this would leak one
+ *       list per env, per worker, for every run.
+ * Pitfalls: free_solids is idempotent — c_close() also frees the list, and
+ *           binding.py_close + capsule_destructor can both reach here. It
+ *           NULLs the pointer and zeroes count/capacity, so a second call
+ *           (in any order) is a no-op rather than a double free.
+ */
 static void env_close(Dust2Env* env) {
-    (void)env;
+    if (env == NULL)
+        return;
+    free_solids(env->sd);
 }

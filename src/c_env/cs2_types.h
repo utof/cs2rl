@@ -18,6 +18,12 @@ static inline float recoil_decay_punch(float prev, float dt) {
 /* ── Constants ─────────────────────────────────────────────────────────── */
 #define TEAM_SIZE 5
 #define N_AGENTS  10
+/* Horizontal body radius. Must match DrawCylinder in cs2_render.h.
+ * When area_bounds is set this is a 12u axis hull; dust2 (NULL bounds)
+ * stays a point on the raster. Without the hull the 12u mesh sits inside
+ * the 8u exterior wall. Axis samples only — corners can still clip ~5u.
+ * Not a cliff/adjacency test. */
+#define AGENT_HULL_RADIUS 12.0f
 /* Batch 3.5 (#24): self block now carries pitch sin/cos at obs[11..12]; all
  * downstream obs slots shifted +2. SIM_OBS_VERSION below tracks sim's internal
  * obs schema, distinct from deploy's frozen v2-105dim (gh #34 suspension). */
@@ -112,11 +118,44 @@ typedef struct {
     float   range_modifier; /* damage falloff per 500 units */
 } WeaponDef;
 
-/* ── Renderer wall geometry ── */
+/* ── Solid face geometry (shared by movement, LoS and the renderer) ──
+ *
+ * Baked by build_solids_from_rooms() in cs2_solids.h from the room quads.
+ * Axis-aligned only: either x0==x1 (vertical seg) or y0==y1 (horizontal).
+ *
+ * The endpoints are the TRUE room edge, never the ±WALL_DEPTH/2 line the
+ * demo cube is drawn on — collision and the draw offset must not disagree.
+ * draw_walls() re-applies that offset using (nx, ny) and `kind`.
+ *
+ * Pitfall: WallC in cs2_env.py DOES mirror this struct field for field —
+ * it is the pointee type of WallListC.walls, so a stale mirror makes every
+ * Python-side walls[i] read the wrong bytes (and silently: ctypes cannot
+ * see the C layout). Appending a field here means appending it there too;
+ * the _Static_assert below and the matching ctypes.sizeof(WallC) assert in
+ * cs2_env.py are what turn a forgotten update into a build/import error.
+ * Separately: fields may NOT be inserted into StaticData before wall_list,
+ * whose byte offset cs2_env.py also asserts.
+ */
 typedef struct {
     float x0, y0, x1, y1; /* segment endpoints in world space (sim XY coords) */
     float height;         /* extrusion height in world units */
+    float z0;             /* sim z of face base; 0 = ground */
+    /* Unit outward normal of the owning room's edge (axis-aligned: exactly
+     * one of nx/ny is ±1, the other 0). Points away from the room that
+     * emitted the face — i.e. into the void for an exterior wall, and down
+     * onto the lower room for a lip. */
+    float   nx, ny;
+    int32_t kind; /* SOLID_KIND_* in cs2_solids.h — drives the draw offset */
 } Wall;
+
+/* 8 floats + 1 int32, all 4-byte aligned → 36 with no padding on every
+ * target we build for. Kept in lock-step with WallC in cs2_env.py, which
+ * asserts the same number from the ctypes side.
+ * Pitfall: we build with -std=c99, where glibc's <sys/cdefs.h> replaces
+ * _Static_assert with a negative-bitfield trick — a failure here reports
+ * "bit-field '__error_if_negative' has negative width", not the message
+ * below. Same line number, so read this line and ignore the wording. */
+_Static_assert(sizeof(Wall) == 36, "Wall layout changed — update WallC in cs2_env.py");
 
 typedef struct {
     Wall* walls;
@@ -179,10 +218,9 @@ typedef struct {
      * win_by_detonation / win_by_defuse flags in StepStats (set in
      * compute_rewards round-over block). Defaults set Python-side in Cs2Env.
      *
-     * Pitfall: these must be added BEFORE wall_list (which C uses only for the
-     * renderer demo path) so the ctypes overlay in cs2_env.py stays in sync.
-     * The ctypes mirror (StaticDataC) does NOT include wall_list; appending
-     * here keeps ctypes field offsets valid. */
+     * Pitfall: these must stay BEFORE wall_list. StaticDataC now overlays
+     * wall_list + area_bounds after this prefix (offsets asserted in
+     * cs2_env.py). Do not insert fields here without updating that overlay. */
     float reward_win_t_detonation;   /* default 5.0 — T wins by bomb detonation */
     float reward_win_t_elimination;  /* default 3.0 — T wins by eliminating all CT (no plant) */
     float reward_win_ct_defuse;      /* default 5.0 — CT wins by defusing a planted bomb */
@@ -205,8 +243,23 @@ typedef struct {
     float pbrs_bomb_progress_weight;   /* bomb-closeness scale in _potential */
     float pbrs_nav_weight_t;           /* T-side nav approach weight */
     float pbrs_nav_weight_ct;          /* CT-side nav approach weight */
-    /* Phase 6: renderer wall list — populated by build_walls_from_nav(), C-demo only */
+    /* Baked solid faces (cs2_solids.h). build_solids_from_rooms() is the ONLY
+     * allocation site; env_close() and c_close() both free it via free_solids.
+     * Per-env: binding.c puts Dust2Env and StaticData in one calloc, so this
+     * list is never shared between envs. */
     WallList wall_list;
+    /* Ramp interpolation AABB. After wall_list. StaticDataC appends wall_list
+     * then this so Python can publish the room quad after env_init.
+     * Measured gcc offsetof: wall_list=480, area_bounds=496 (no pad after
+     * pbrs_nav_weight_ct). NULL → centroids_z (dust2).
+     *
+     * Ownership: BORROWED, always. The two writers are cs2_env.py (a numpy
+     * array kept alive in Cs2Env._refs) and make_client (nav_data.h statics).
+     * C never allocates it, so nothing here may free it — env_close frees
+     * wall_list and nothing else. There used to be an `area_bounds_owned`
+     * flag beside this pointer for a C-malloc'd variant that never shipped;
+     * it was written by Python, read by no C code, and freed by nobody. */
+    const float* area_bounds; /* [N*4] x0,y0,x1,y1; NULL = no interpolation */
 } StaticData;
 
 /* ── Per-agent state ── */
@@ -359,7 +412,11 @@ typedef struct {
 
 /* ── Full environment (one per parallel instance) ── */
 typedef struct {
-    StaticData* sd; /* shared pointer, never freed by C        */
+    /* Not owned by this struct: binding.c allocates Dust2Env and its
+     * StaticData in one calloc, so the block dies with the capsule.
+     * env_close frees sd->wall_list and nothing else — area_bounds is
+     * borrowed from Python/nav (see the StaticData field comment). */
+    StaticData* sd;
     GameState   game;
     StepStats   step_stats;
     StepStats   episode_stats;

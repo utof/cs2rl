@@ -1,6 +1,13 @@
 #pragma once
 #include "cs2_types.h"
 #include "cs2_weapons.h"
+#include "cs2_terrain.h"
+
+/* Interpolated surface z at (x,y) on area_idx — same quad the renderer draws.
+ * Cliff-guard Δz still uses centroids_z (top), not this. */
+static inline float _surface_z(const StaticData* sd, int area_idx, float x, float y) {
+    return demo_terrain_z(area_idx, x, y, sd->N, sd->area_bounds, sd->centroids_z, sd->is_ramp);
+}
 
 static inline void
 count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size) {
@@ -39,6 +46,46 @@ count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size)
  * avoids a cross-header coupling for a single constant used only here. */
 #define DT_SIM_MOVE (1.0f / 16.0f)
 
+/* Raster cell at (x,y). floorf, not (int)cast: C truncates toward zero, so
+ * x ∈ (grid_x_min − cell, grid_x_min) would look like cell 0 and walk
+ * through the west/south exterior wall. */
+static inline int _raster_at(const StaticData* sd, float x, float y) {
+    int gx = (int)floorf((x - sd->grid_x_min) * sd->grid_inv_cell);
+    int gy = (int)floorf((y - sd->grid_y_min) * sd->grid_inv_cell);
+    if (gx < 0 || gx >= sd->grid_w || gy < 0 || gy >= sd->grid_h)
+        return -1;
+    return sd->raster_grid[gy * sd->grid_w + gx];
+}
+
+/* True if (x,y) is inside area idx's room quad. NULL bounds (dust2) = skip.
+ * Inclusive on the max edge so a portal at x=x1 stays in both rooms.
+ * idx < 0 is outside — do not treat a miss as inside. */
+static inline int _in_area_aabb(const StaticData* sd, int idx, float x, float y) {
+    if (sd->area_bounds == NULL)
+        return 1;
+    if (idx < 0)
+        return 0;
+    const float* b = sd->area_bounds + idx * 4;
+    return (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]);
+}
+
+/* Room that contains (x,y). Raster label first (stable on 16-aligned
+ * interiors). If that label's quad misses — later rooms overwrite the
+ * 16u column that straddles 750/820/1100/1170 — search the other rooms.
+ * Returns -1 for true exterior overshoot (catwalk x∈[816,820)). */
+static inline int _area_at(const StaticData* sd, float x, float y) {
+    int idx = _raster_at(sd, x, y);
+    if (idx < 0)
+        return -1;
+    if (sd->area_bounds == NULL || _in_area_aabb(sd, idx, x, y))
+        return idx;
+    for (int j = 0; j < sd->N; j++) {
+        if (j != idx && _in_area_aabb(sd, j, x, y))
+            return j;
+    }
+    return -1;
+}
+
 /* Resolve an attempted XY position against the nav-mesh raster.
  *
  * Returns the destination area index if (tx, ty) is walkable from a->area_idx
@@ -48,13 +95,15 @@ count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size)
  * Shared by the axis-split wall-slide logic in process_movement: we first try
  * the full diagonal step, and on block we retry each axis separately — so
  * touching a wall while moving diagonally into it preserves the tangential
- * velocity component instead of producing a full stop. */
+ * velocity component instead of producing a full stop.
+ *
+ * Hull (area_bounds != NULL only): the four axis offsets at AGENT_HULL_RADIUS
+ * must also resolve via _area_at (raster, then containing room if the
+ * label's quad misses — later rooms own the 16u portal column). That
+ * keeps the 12u cylinder out of the 8u exterior wall without sealing
+ * ramps. Adjacency / cliff stay center-only. Dust2 skips this. */
 static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, float tx, float ty) {
-    int gx = (int)((tx - sd->grid_x_min) * sd->grid_inv_cell);
-    int gy = (int)((ty - sd->grid_y_min) * sd->grid_inv_cell);
-    if (gx < 0 || gx >= sd->grid_w || gy < 0 || gy >= sd->grid_h)
-        return -1;
-    int target_idx = sd->raster_grid[gy * sd->grid_w + gx];
+    int target_idx = _area_at(sd, tx, ty);
     if (target_idx < 0)
         return -1;
     if (target_idx != a->area_idx && !sd->adjacency[a->area_idx * sd->N + target_idx])
@@ -74,6 +123,17 @@ static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, flo
         float dz = sd->centroids_z[target_idx] - sd->centroids_z[a->area_idx];
         if (dz > SV_MAX_STEP_HEIGHT_CS && !sd->is_ramp[target_idx]) {
             return -1; /* cliff: reject — agent slides or stops via axis-split in caller */
+        }
+    }
+    /* Simple-map rooms publish area_bounds. Dust2 leaves it NULL so thin
+     * nav areas stay point-collided (a 12u hull would seal corridors <24u). */
+    if (sd->area_bounds != NULL) {
+        const float r = AGENT_HULL_RADIUS;
+        const float hx[4] = {tx + r, tx - r, tx, tx};
+        const float hy[4] = {ty, ty, ty + r, ty - r};
+        for (int k = 0; k < 4; k++) {
+            if (_area_at(sd, hx[k], hy[k]) < 0)
+                return -1;
         }
     }
     return target_idx;
@@ -331,30 +391,23 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
         a->vy = vel_y;
         a->vz = vel_z;
 
-        /* L5 ground-snap: when grounded, snap a->z to the current area's terrain z.
-         * This handles two cases:
-         *   1. Agent walked onto a new area with a different terrain z — the xy
-         *      collision resolution updated area_idx; we now pin z to that area's
-         *      surface so the agent steps up/down seamlessly.
-         *   2. Grounded agent that didn't change area — this is a no-op (a->z already
-         *      equals terrain_z from the previous tick's snap, and tz = a->z since
-         *      vel_z = 0 when grounded).
-         * MUST come AFTER _resolve_xy_collision axis-split: area_idx is updated there,
-         * so reading centroids_z[a->area_idx] before the area transition would use the
-         * OLD area's z and break ramp ascent.
-         * MUST come AFTER a->z = tz above: tz is computed from the old a->z (before
-         * the xy move), so the ground-snap overrides it with the target area's terrain z.
+        /* L5 ground-snap: when grounded, snap a->z to the current area's surface.
+         * Ramps use bilinear demo_terrain_z (same quad as the renderer); flat
+         * rooms / NULL bounds stay at centroids_z. Two cases:
+         *   1. Agent walked onto a new area — pin z to that area's surface.
+         *   2. Same area — no-op on flats; on ramps this follows the slope as xy moves.
+         * MUST come AFTER _resolve_xy_collision axis-split: area_idx is updated there.
+         * MUST come AFTER a->z = tz above: tz is the ballistic z; snap overrides it.
          * The landing block below gates on a->is_airborne, so grounded agents skip it. */
         if (!a->is_airborne) {
-            a->z = sd->centroids_z[a->area_idx];
+            a->z = _surface_z(sd, a->area_idx, a->x, a->y);
         }
 
-        /* L5 landing rule: terrain z is per-area, not hardcoded 0. Agent has touched
-         * the area's surface when their integrated z dips at or below the area's
-         * terrain z with non-positive vz. Snap to terrain and clear airborne state.
-         * Pitfall: a->area_idx is already updated by _resolve_xy_collision above, so
-         * centroids_z[a->area_idx] is the LANDING area's z — correct. */
-        float terrain_z = sd->centroids_z[a->area_idx];
+        /* L5 landing rule: terrain z is per-area (interpolated on ramps). Agent has
+         * touched the surface when integrated z dips at or below it with vz <= 0.
+         * Pitfall: a->area_idx is already updated by _resolve_xy_collision, so this
+         * is the LANDING area's surface — correct. */
+        float terrain_z = _surface_z(sd, a->area_idx, a->x, a->y);
         if (a->is_airborne && a->z <= terrain_z && a->vz <= 0.0f) {
             a->z           = terrain_z;
             a->vz          = 0.0f;
@@ -374,7 +427,7 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
          * entered. Modify with care: any future grounded-path mutation of vz (e.g., a
          * "stick to ground" damping) could silently flip agents to airborne via FP noise. */
         {
-            float terrain_z_now = sd->centroids_z[a->area_idx];
+            float terrain_z_now = _surface_z(sd, a->area_idx, a->x, a->y);
             if (a->z > terrain_z_now + SV_AIRBORNE_EPS_CS || a->vz != 0.0f) {
                 a->is_airborne = 1;
             }
