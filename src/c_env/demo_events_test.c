@@ -959,6 +959,211 @@ static void test_solids_ramp_emits_no_divider(void) {
     free_solids(&f.sd);
 }
 
+/* Every exterior face is tagged EXTERIOR and carries the unit outward normal
+ * of the room that emitted it. draw_walls pushes the 8u cube WALL_DEPTH/2
+ * along that normal, so a flipped sign parks the cube INSIDE walkable tile
+ * and a wrong kind moves it on the wrong faces. Checks all four edge
+ * orientations — the west face alone cannot catch a per-edge sign flip. */
+static void test_solids_exterior_normals(void) {
+    SolidsFix f;
+    int       i;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++) {
+        const Wall* w    = &f.sd.wall_list.walls[i];
+        int         vert = fabsf(w->x1 - w->x0) < 1e-3f;
+        check_i("exterior kind", w->kind, SOLID_KIND_EXTERIOR);
+        /* Axis-aligned unit normal: exactly one component is ±1. */
+        check_f_near("exterior normal unit", w->nx * w->nx + w->ny * w->ny, 1.0f, 1e-4f);
+        if (vert) {
+            check_f_near("exterior vert ny", w->ny, 0.0f, 1e-4f);
+            check_f_near("exterior vert nx", w->nx, (fabsf(w->x0) < 1e-3f) ? -1.0f : 1.0f, 1e-4f);
+        } else {
+            check_f_near("exterior horiz nx", w->nx, 0.0f, 1e-4f);
+            check_f_near("exterior horiz ny", w->ny, (fabsf(w->y0) < 1e-3f) ? -1.0f : 1.0f, 1e-4f);
+        }
+    }
+    free_solids(&f.sd);
+}
+
+/* Exterior height is SOLID_WALL_HEIGHT + the EMITTING room's terrain z, so a
+ * wall around an elevated room still reaches the same absolute top as its
+ * flat neighbours. Both other fixtures sit at z=0, where dropping the `+ zi`
+ * term is invisible. */
+static void test_solids_exterior_height_elevated(void) {
+    SolidsFix f;
+    int       i;
+    solids_fix_cliff_z(&f, 64.0f); /* room 0 at z=0, room 1 north at z=64 */
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++) {
+        const Wall* w = &f.sd.wall_list.walls[i];
+        /* Owner: the lip sits on y=100; everything else belongs to whichever
+         * room its span lies in (room 0 south of y=100, room 1 north). */
+        float mid_y = (w->y0 + w->y1) * 0.5f;
+        float want;
+        if (w->kind == SOLID_KIND_LIP)
+            continue;
+        want = (mid_y < 100.0f) ? SOLID_WALL_HEIGHT : SOLID_WALL_HEIGHT + 64.0f;
+        check_f_near("elevated exterior z0", w->z0, 0.0f, 1e-4f);
+        check_f_near("elevated exterior height", w->height, want, 1e-4f);
+    }
+    free_solids(&f.sd);
+}
+
+/* Partial edge coverage: a doorway flanked by two walls on ONE edge.
+ *
+ * This is the case the map is built around and the only one that reaches the
+ * mid-edge gap emit in Pass A (`covs[k].lo > cursor + SOLID_EPS`). Every
+ * other fixture has edges that are either fully covered or fully open, so
+ * that branch never runs and the gap walls could silently vanish.
+ *
+ * Room 0 is a tall 100x300 room; room 1 is a 100x100 room touching the
+ * middle third of its east edge, connected. Room 0's east edge must come
+ * back as: wall [0,100] · doorway [100,200] · wall [200,300].
+ *
+ * Room 0 sits at z=64 so the flank walls also pin the `SOLID_WALL_HEIGHT +
+ * zi` term on the mid-edge emit — every other elevated fixture is fully
+ * covered or fully open, so it only exercises the trailing emit.
+ */
+static void solids_fix_doorway(SolidsFix* f) {
+    solids_fix(f);
+    solids_fix_room(f, 0, 0.0f, 0.0f, 100.0f, 300.0f, 64.0f, 0);
+    solids_fix_room(f, 1, 100.0f, 100.0f, 200.0f, 200.0f, 0.0f, 0);
+    solids_fix_adj(f, 0, 1, 1);
+}
+
+static void test_solids_partial_edge_doorway(void) {
+    SolidsFix   f;
+    int         i, flanks = 0;
+    const Wall *south = NULL, *north = NULL;
+    solids_fix_doorway(&f);
+    build_solids_from_rooms(&f.sd);
+
+    for (i = 0; i < f.sd.wall_list.count; i++) {
+        const Wall* w = &f.sd.wall_list.walls[i];
+        if (fabsf(w->x1 - w->x0) < 1e-3f && fabsf(w->x0 - 100.0f) < 1e-3f) {
+            flanks++;
+            if (w->y0 < 50.0f)
+                south = w;
+            else
+                north = w;
+        }
+    }
+    check_i("doorway two flanking walls", flanks, 2);
+    check_i("doorway total count", f.sd.wall_list.count, 8);
+    if (south != NULL) {
+        /* The gap BEFORE the covered interval — the mid-edge emit. */
+        check_f_near("doorway south flank y0", south->y0, 0.0f, 1e-4f);
+        check_f_near("doorway south flank y1", south->y1, 100.0f, 1e-4f);
+        check_i("doorway south flank kind", south->kind, SOLID_KIND_EXTERIOR);
+        /* Room 0 is elevated: the mid-edge emit must add its zi too. */
+        check_f_near("doorway south flank z0", south->z0, 0.0f, 1e-4f);
+        check_f_near("doorway south flank height", south->height, SOLID_WALL_HEIGHT + 64.0f, 1e-4f);
+    }
+    if (north != NULL) {
+        /* The trailing gap after the last covered interval. */
+        check_f_near("doorway north flank y0", north->y0, 200.0f, 1e-4f);
+        check_f_near("doorway north flank y1", north->y1, 300.0f, 1e-4f);
+        check_f_near("doorway north flank height", north->height, SOLID_WALL_HEIGHT + 64.0f, 1e-4f);
+    }
+
+    /* Walk through the door: free. Walk at the flank: blocked. */
+    check_i("doorway walk through",
+            solid_sweep_xy(&f.sd, 80.0f, 150.0f, 120.0f, 150.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+    check_i("doorway walk into flank",
+            solid_sweep_xy(&f.sd, 80.0f, 50.0f, 120.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            1);
+    /* LoS agrees with movement: clear through the gap, blocked at the flank. */
+    check_i("doorway ray through",
+            solid_ray_clear(&f.sd, 50.0f, 150.0f, 48.0f, 150.0f, 150.0f, 48.0f),
+            1);
+    check_i("doorway ray into flank",
+            solid_ray_clear(&f.sd, 50.0f, 50.0f, 48.0f, 150.0f, 50.0f, 48.0f),
+            0);
+    free_solids(&f.sd);
+}
+
+/* The sweep is a capsule, not a point: r expands the face BOTH along its
+ * normal (you are stopped r units early) and past its endpoints (you clip
+ * the door jamb). Zeroing r in either place lets agents corner-clip through
+ * geometry that is drawn solid. */
+static void test_solids_sweep_hull_radius(void) {
+    SolidsFix f;
+    SolidHit  hit;
+    solids_fix_doorway(&f);
+    build_solids_from_rooms(&f.sd);
+
+    /* Stops short of x=100: the destination never reaches the plane, but the
+     * hull does. With r=0 this is a miss. */
+    memset(&hit, 0, sizeof(hit));
+    check_i("sweep r stops short",
+            solid_sweep_xy(&f.sd, 80.0f, 50.0f, 95.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
+            1);
+    check_ok("sweep r hit before dest", hit.t < 1.0f);
+    check_i("sweep r=0 same move misses",
+            solid_sweep_xy(&f.sd, 80.0f, 50.0f, 95.0f, 50.0f, 0.0f, 0.0f, NULL),
+            0);
+
+    /* Door jamb: crossing at y=108 is 8u inside the doorway [100,200] but
+     * only 8u past the flank wall's end at y=100, so the hull clips it. */
+    check_i("sweep r clips jamb",
+            solid_sweep_xy(&f.sd, 80.0f, 108.0f, 120.0f, 108.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            1);
+    check_i("sweep r=0 clears jamb",
+            solid_sweep_xy(&f.sd, 80.0f, 108.0f, 120.0f, 108.0f, 0.0f, 0.0f, NULL),
+            0);
+    /* Well clear of both jambs is free at any radius. */
+    check_i("sweep mid-door free",
+            solid_sweep_xy(&f.sd, 80.0f, 150.0f, 120.0f, 150.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+    free_solids(&f.sd);
+}
+
+/* Two faces on one diagonal move → the NEAREST must win, or slide response
+ * projects against a wall the agent has not reached yet. */
+static void test_solids_sweep_nearest_hit(void) {
+    SolidsFix f;
+    SolidHit  hit;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+
+    /* From (20,60) to (-40,-60): the west face x=0 is crossed at t≈0.133,
+     * the south face y=0 at t≈0.4. */
+    memset(&hit, 0, sizeof(hit));
+    check_i("sweep corner hit",
+            solid_sweep_xy(&f.sd, 20.0f, 60.0f, -40.0f, -60.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
+            1);
+    check_f_near("sweep nearest t", hit.t, 8.0f / 60.0f, 1e-4f);
+    check_f_near("sweep nearest nx", hit.nx, -1.0f, 1e-4f);
+    check_f_near("sweep nearest ny", hit.ny, 0.0f, 1e-4f);
+    free_solids(&f.sd);
+}
+
+/* A ray lying exactly in a face's plane is blocked — the collinear branch and
+ * _solid_span_range, which no other test reaches. An agent standing dead on a
+ * wall line must not get free LoS along it. */
+static void test_solids_ray_collinear(void) {
+    SolidsFix f;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+
+    /* Along the x=0 face, inside its y span [0,100] and its z slab [0,128]. */
+    check_i(
+        "ray collinear blocked", solid_ray_clear(&f.sd, 0.0f, 10.0f, 48.0f, 0.0f, 90.0f, 48.0f), 0);
+    /* Same line, but the segment sits past the end of the face's span. */
+    check_i("ray collinear off-span clear",
+            solid_ray_clear(&f.sd, 0.0f, 150.0f, 48.0f, 0.0f, 250.0f, 48.0f),
+            1);
+    /* Same line and span, but above the 128u slab. */
+    check_i("ray collinear above slab clear",
+            solid_ray_clear(&f.sd, 0.0f, 10.0f, 200.0f, 0.0f, 90.0f, 200.0f),
+            1);
+    free_solids(&f.sd);
+}
+
 /* Rebaking must free the previous list, not leak or double-free it. */
 static void test_solids_rebake(void) {
     SolidsFix f;
@@ -1042,6 +1247,12 @@ int main(void) {
     test_solids_ramp_emits_no_lip();
     test_solids_divider();
     test_solids_ramp_emits_no_divider();
+    test_solids_exterior_normals();
+    test_solids_exterior_height_elevated();
+    test_solids_partial_edge_doorway();
+    test_solids_sweep_hull_radius();
+    test_solids_sweep_nearest_hit();
+    test_solids_ray_collinear();
     test_solids_rebake();
     test_solids_null_bounds_noop();
 
