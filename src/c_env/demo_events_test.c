@@ -716,6 +716,53 @@ static void test_solids_sweep_no_depenetration(void) {
     free_solids(&f.sd);
 }
 
+/* Regression: starting INSIDE the r-band but still on the approach side of a
+ * face is a hit clamped to t=0, not a miss.
+ *
+ * The old `if (t < 0 || t >= 1) continue;` rejected both cases together and
+ * so left a 12u-wide hole along the approach side of every baked face: an
+ * agent that got within AGENT_HULL_RADIUS of a wall (by jumping over a lip,
+ * say) could then walk straight out through it. Pitfall when editing: keep
+ * the "already past the plane" half a MISS, or v1 gains a depenetration
+ * behaviour that _resolve_xy_collision is not written for.
+ */
+static void test_solids_sweep_inside_band(void) {
+    SolidsFix f;
+    SolidHit  hit;
+    solids_fix_two_rooms(&f);
+    build_solids_from_rooms(&f.sd);
+
+    /* 5u inside the x=0 west face — closer than r=12 — heading out. */
+    memset(&hit, 0, sizeof(hit));
+    check_i("sweep band west hit",
+            solid_sweep_xy(&f.sd, 5.0f, 50.0f, -20.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
+            1);
+    check_f_near("sweep band west t clamped", hit.t, 0.0f, 1e-6f);
+    check_ok("sweep band west nx<0", hit.nx < 0.0f);
+
+    /* Same start, heading back INTO the room: the face is behind us in the
+     * direction of travel, so it must not block. */
+    check_i("sweep band inward miss",
+            solid_sweep_xy(&f.sd, 5.0f, 50.0f, 30.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+
+    /* Horizontal faces take the same path: 5u inside y=0 heading south. */
+    memset(&hit, 0, sizeof(hit));
+    check_i("sweep band south hit",
+            solid_sweep_xy(&f.sd, 50.0f, 5.0f, 50.0f, -20.0f, 0.0f, AGENT_HULL_RADIUS, &hit),
+            1);
+    check_f_near("sweep band south t clamped", hit.t, 0.0f, 1e-6f);
+    check_ok("sweep band south ny<0", hit.ny < 0.0f);
+
+    /* Standing exactly on the wall line is the no-depenetration case in both
+     * directions — an agent pinned on a seg must never be frozen solid. */
+    check_i("sweep on-plane outward miss",
+            solid_sweep_xy(&f.sd, 0.0f, 50.0f, -20.0f, 50.0f, 0.0f, AGENT_HULL_RADIUS, NULL),
+            0);
+
+    free_solids(&f.sd);
+}
+
 /* LoS through the doorway is clear; the shared north wall blocks. */
 static void test_solids_ray_through_door(void) {
     SolidsFix f;
@@ -855,6 +902,7 @@ int main(void) {
     test_solids_sweep_west_wall();
     test_solids_sweep_portal();
     test_solids_sweep_no_depenetration();
+    test_solids_sweep_inside_band();
     test_solids_ray_through_door();
     test_solids_ray_north_wall();
     test_solids_cliff_lip();

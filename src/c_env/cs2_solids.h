@@ -372,10 +372,24 @@ static inline int _solid_slab_overlaps(const Wall* w, float lo, float hi) {
  *       drawn.
  *
  * Pitfalls:
- *  - t < 0 (the expanded plane is already behind the start) is a MISS. v1
- *    has no depenetration: an agent that somehow starts inside a wall band
- *    is allowed to keep moving rather than be teleported. Callers must not
- *    rely on this to push agents out.
+ *  - t < 0 means the mover STARTS inside the r-band, i.e. its hull already
+ *    overlaps the face's expanded plane. That is two different situations
+ *    and they must not share an answer:
+ *      (a) still on the approach side of the face itself, heading at it —
+ *          a genuine hit, reported clamped to t = 0. Blanket-rejecting t<0
+ *          used to open a hole exactly r wide (12u) along the approach side
+ *          of EVERY face: an agent that got within 12u — e.g. by jumping
+ *          off the catwalk and landing next to its lip — could then walk
+ *          straight through it.
+ *      (b) already at or past the face plane in the direction of travel —
+ *          a MISS. v1 has no depenetration: an agent that somehow ended up
+ *          inside a wall keeps moving rather than being teleported out.
+ *          Standing exactly on the plane counts as (b) in both directions,
+ *          so an agent pinned on a wall line is never frozen.
+ *    Consequence of (b): a mover that is already past a face can keep going
+ *    further past it, but is blocked from coming back through — the return
+ *    trip is case (a). Nothing can reach that state now that the hole is
+ *    closed; do not rely on it as an escape hatch.
  *  - Motion parallel to a face never hits it, by construction.
  *  - Axis-aligned faces only. A diagonal seg would be mis-classified by
  *    _solid_is_horizontal; the bake never produces one.
@@ -415,8 +429,15 @@ static inline int solid_sweep_xy(
             n     = (dx > 0.0f) ? 1.0f : -1.0f;
             plane = w->x0 - n * r;
             t     = (plane - x0) / dx;
-            if (t < 0.0f || t >= 1.0f)
+            if (t >= 1.0f)
                 continue;
+            if (t < 0.0f) {
+                /* Started inside the r-band: hit at t=0 unless already at or
+                 * past the face plane itself (see pitfall (a)/(b) above). */
+                if ((dx > 0.0f) ? (x0 >= w->x0) : (x0 <= w->x0))
+                    continue;
+                t = 0.0f;
+            }
             cross = y0 + t * dy;
             if (cross < lo - r || cross > hi + r)
                 continue;
@@ -435,8 +456,14 @@ static inline int solid_sweep_xy(
             n     = (dy > 0.0f) ? 1.0f : -1.0f;
             plane = w->y0 - n * r;
             t     = (plane - y0) / dy;
-            if (t < 0.0f || t >= 1.0f)
+            if (t >= 1.0f)
                 continue;
+            if (t < 0.0f) {
+                /* Same clamp as the vertical branch; see the pitfalls above. */
+                if ((dy > 0.0f) ? (y0 >= w->y0) : (y0 <= w->y0))
+                    continue;
+                t = 0.0f;
+            }
             cross = x0 + t * dx;
             if (cross < lo - r || cross > hi + r)
                 continue;
