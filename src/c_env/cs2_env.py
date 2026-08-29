@@ -46,12 +46,18 @@ class VizGameState:
 
 
 class WallC(ctypes.Structure):
-    # Field-for-field mirror of `Wall` in cs2_types.h. It is the pointee type of
-    # WallListC.walls, so if it drifts from C, every walls[i] read lands on the
-    # wrong bytes — ctypes has no way to notice. The bake added nx/ny/kind
-    # (24 B -> 36 B) for the draw-offset rule in draw_walls.
+    # Field-for-field mirror of `Wall` in cs2_types.h, and the pointee type of
+    # WallListC.walls. Nothing in the repo dereferences walls[i] from Python
+    # today — the baked list is produced and consumed entirely in C — so this
+    # mirror exists to already be right the first time something does. Should
+    # it drift from the C struct before then, that first read would land on
+    # the wrong bytes and ctypes has no way to notice: no exception, no shape
+    # mismatch, just plausible-looking garbage coordinates. The bake added
+    # nx/ny/kind (24 B -> 36 B) for the draw-offset rule in draw_walls.
     # Pitfall: append only, and append on BOTH sides. The C side carries a
-    # matching _Static_assert(sizeof(Wall) == 36).
+    # matching _Static_assert(sizeof(Wall) == 36); the ctypes.sizeof(WallC)
+    # assert further down is the other half of that pair, and the pair is
+    # what actually catches the drift.
     _fields_ = [
         ("x0", ctypes.c_float),
         ("y0", ctypes.c_float),
