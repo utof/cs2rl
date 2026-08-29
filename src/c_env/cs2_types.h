@@ -249,11 +249,17 @@ typedef struct {
      * list is never shared between envs. */
     WallList wall_list;
     /* Ramp interpolation AABB. After wall_list. StaticDataC appends wall_list
-     * then these so Python can publish the room quad after env_init.
-     * Measured gcc offsetof: wall_list=480, area_bounds=496, owned=504
-     * (no pad after pbrs_nav_weight_ct). NULL → centroids_z (dust2). */
-    const float* area_bounds;       /* [N*4] x0,y0,x1,y1; NULL = no interpolation */
-    int          area_bounds_owned; /* 1 if C malloc'd it; train/play set 0 */
+     * then this so Python can publish the room quad after env_init.
+     * Measured gcc offsetof: wall_list=480, area_bounds=496 (no pad after
+     * pbrs_nav_weight_ct). NULL → centroids_z (dust2).
+     *
+     * Ownership: BORROWED, always. The two writers are cs2_env.py (a numpy
+     * array kept alive in Cs2Env._refs) and make_client (nav_data.h statics).
+     * C never allocates it, so nothing here may free it — env_close frees
+     * wall_list and nothing else. There used to be an `area_bounds_owned`
+     * flag beside this pointer for a C-malloc'd variant that never shipped;
+     * it was written by Python, read by no C code, and freed by nobody. */
+    const float* area_bounds; /* [N*4] x0,y0,x1,y1; NULL = no interpolation */
 } StaticData;
 
 /* ── Per-agent state ── */
@@ -406,7 +412,11 @@ typedef struct {
 
 /* ── Full environment (one per parallel instance) ── */
 typedef struct {
-    StaticData* sd; /* Python-owned; env_close frees area_bounds only if owned */
+    /* Not owned by this struct: binding.c allocates Dust2Env and its
+     * StaticData in one calloc, so the block dies with the capsule.
+     * env_close frees sd->wall_list and nothing else — area_bounds is
+     * borrowed from Python/nav (see the StaticData field comment). */
+    StaticData* sd;
     GameState   game;
     StepStats   step_stats;
     StepStats   episode_stats;

@@ -156,11 +156,10 @@ class StaticDataC(ctypes.Structure):
         ("pbrs_nav_weight_ct", ctypes.c_float),
         # After ctypes prefix: overlay C wall_list then ramp bounds.
         # Do not insert before wall_list. 69-arg FMT is unchanged.
-        # Measured gcc offsetof(StaticData): wall_list=480, area_bounds=496,
-        # area_bounds_owned=504. No pad after pbrs_nav_weight_ct (ends 480).
+        # Measured gcc offsetof(StaticData): wall_list=480, area_bounds=496.
+        # No pad after pbrs_nav_weight_ct (ends 480).
         ("wall_list", WallListC),
         ("area_bounds", ctypes.POINTER(ctypes.c_float)),
-        ("area_bounds_owned", ctypes.c_int),
     ]
     # fmt: on
 
@@ -389,7 +388,6 @@ assert ctypes.sizeof(Dust2EnvC) == 6832, (
 assert StaticDataC.pbrs_nav_weight_ct.offset == 476, StaticDataC.pbrs_nav_weight_ct.offset
 assert StaticDataC.wall_list.offset == 480, StaticDataC.wall_list.offset
 assert StaticDataC.area_bounds.offset == 496, StaticDataC.area_bounds.offset
-assert StaticDataC.area_bounds_owned.offset == 504, StaticDataC.area_bounds_owned.offset
 assert ctypes.sizeof(WallListC) == 16, ctypes.sizeof(WallListC)
 # 8 floats + 1 int32, no padding. Mirrors _Static_assert(sizeof(Wall) == 36)
 # in cs2_types.h; if you change Wall, both must move together or walls[i]
@@ -692,11 +690,13 @@ class Cs2Env(pufferlib.PufferEnv):
         # Room AABB for ramp interpolation. Not a binding.init arg (69-arg FMT
         # stays frozen). make_simple_map fills area_bounds from SIMPLE_ROOMS;
         # make_cs2_map leaves None so interpolation stays centroids_z.
+        # Ownership: `ab` stays in self._refs for the life of this Cs2Env and C
+        # only borrows the pointer. Dropping that ref while the env is alive
+        # frees the buffer under the sim; C will not (and must not) free it.
         if getattr(md, "area_bounds", None) is not None:
             ab = np.ascontiguousarray(np.asarray(md.area_bounds, dtype=np.float32).reshape(-1))
             self._refs.append(ab)
             self._c_env.sd.contents.area_bounds = ab.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-            self._c_env.sd.contents.area_bounds_owned = 0
 
         # Zero-copy NumPy views into C buffers
         obs_ptr, rew_ptr, term_ptr, trunc_ptr = binding.get_buffers(self._capsule)
