@@ -68,14 +68,23 @@
 #include <stdlib.h>
 
 #include "cs2_terrain.h" /* demo_edge_covers_j — the shared edge predicate */
-#include "cs2_types.h"   /* StaticData, Wall, WallList, AGENT_HULL_RADIUS   */
+#include "cs2_types.h"   /* StaticData, Wall, WallList                     */
 
 /* "On the line" vs "strictly past it". This is DEMO_EDGE_EPS, not a copy of
  * it: the coverage predicate (demo_edge_covers_j) and the gap/lip tests below
  * MUST use the same tolerance, or an interval this file calls "covered" can be
  * one the predicate rejected — a face that exists on one side of the edge and
  * not the other. The alias keeps the name local to this header's vocabulary
- * while making drift impossible. */
+ * while making drift impossible.
+ *
+ * Scope of that argument: it covers the ALONG-EDGE uses only (the Pass A gap
+ * tests, which compare positions on the edge line against intervals the
+ * predicate produced). The bake also spends this same number as a VERTICAL
+ * tolerance — "is this drop flush?" at the zi/zj comparisons in Pass B — and
+ * that is an independent second use that merely happens to want the same
+ * magnitude. Nothing ties it to DEMO_EDGE_EPS. If you ever need a different
+ * flush threshold, split out a SOLID_Z_EPS for those two comparisons; do not
+ * read the paragraph above as forbidding it. */
 #define SOLID_EPS DEMO_EDGE_EPS
 
 /* Copy of cs2_render.h WALL_HEIGHT. Do not include the render header here.
@@ -95,10 +104,20 @@
 #define SOLID_KIND_DIVIDER  2 /* flush but unconnected rooms: draw centred on the edge */
 
 /* One sweep result. `t` is the fraction along the query segment at which the
- * expanded plane is crossed; (nx, ny) is the unit outward normal of the face
- * that was crossed, so it points the way the mover was heading. Slide
- * response (v - (v·n)n) is invariant to the sign of n, so callers that only
- * project do not care which of the two faces they got. */
+ * expanded plane is crossed; (nx, ny) is the crossed face's plane normal
+ * ORIENTED ALONG THE DIRECTION OF TRAVEL, so it always points the way the
+ * mover was heading.
+ *
+ * That is NOT the face's stored outward normal: solid_sweep_xy derives the
+ * sign from dx/dy and never reads w->nx/ny, so this is -Wall.nx/ny whenever
+ * the mover approaches from the side opposite the room that emitted the face.
+ * Reachable today — the real map's lip is emitted by the catwalk with ny=+1,
+ * so an agent in the bombsite walking south into it gets ny=-1.
+ * Slide response (v - (v·n)n) is invariant to the sign of n, so callers that
+ * only project do not care. A future positional depenetration caller does:
+ * pushing along a normal read as "the face's outward normal" would shove the
+ * agent INTO the wall half the time. Use Wall.nx/ny if you need the face's
+ * own orientation. */
 typedef struct {
     float t;      /* hit fraction in [0,1) along the query */
     float nx, ny; /* unit outward normal in sim XY */
@@ -257,7 +276,7 @@ static inline void build_solids_from_rooms(StaticData* sd) {
 
     /* Worst case per edge: (ncov + 1) exterior gaps + ncov lips, ncov < N,
      * so 2N+1 per edge and 4*(2N+1) = 8N+4 per room. 8N*(N+1) covers it.
-     * This bound is O(N^2) and wildly loose — 2448 slots (88 KB) for the 34
+     * This bound is O(N^2) and wildly loose — 2448 slots (88 KB) for the 33
      * faces the 17-room map actually bakes, and ~12 MB at N=200. It is a
      * transient peak only: the tail of this function reallocs down to
      * wl->count. Sizing it exactly up front would mean running the whole
@@ -536,6 +555,16 @@ static inline int _solid_slab_overlaps(const Wall* w, float lo, float hi) {
  *    NOT do is lean on it as a general escape hatch from a geometry bug; it
  *    exists because v1 has no depenetration, not as a movement feature.
  *  - Motion parallel to a face never hits it, by construction.
+ *  - The hull is a SQUARE at the span ends, not the round disk the "radius-r
+ *    XY disk" wording above suggests. The span test is `cross < lo - r ||
+ *    cross > hi + r`: extending the ends by r along the face while the plane
+ *    test extends by r along the normal is a Minkowski sum with an r-square,
+ *    so within r of a face endpoint the face blocks out to r*sqrt(2) (~17u at
+ *    AGENT_HULL_RADIUS=12) on the diagonal instead of 12u. Only ever
+ *    conservative — it can never let the agent tunnel — but it means door
+ *    jambs are square-cornered and clip a little sooner than the stated 12u
+ *    radius implies. Rounding the corners means a per-endpoint distance test;
+ *    v1 does not need it.
  *  - Axis-aligned faces only. A diagonal seg would be mis-classified by
  *    _solid_is_horizontal; the bake never produces one.
  *  - Faces are planes, not 8u boxes: the draw cube is WALL_DEPTH thick and
