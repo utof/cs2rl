@@ -77,8 +77,6 @@ static void compute_masks(Dust2Env* env) {
         /* Jump mask: no jump while airborne, on cooldown, or crouching */
         if (a->is_airborne || a->jump_cd > 0 || a->is_crouching)
             m[moff[HEAD_JUMP] + 1] = 0;
-        int              slot = a->weapon_slot;
-        const WeaponDef* def  = &WEAPON_DEFS[slot];
         /* R0-B (#129): this function runs at the TAIL of env_step, but the
          * masks it writes are consumed by the NEXT env_step, whose first act
          * is tick_weapon() — which decrements fire_cd/reload_ticks/switch_ticks
@@ -87,24 +85,37 @@ static void compute_masks(Dust2Env* env) {
          * tick longer than the sim enforces (rifle cycle_ticks=2 became 1 shot
          * per 3 ticks; the first legal shot after a reload/switch was masked).
          * So the mask must describe the POST-decrement value, max(c-1, 0):
-         * the counter is 0 next tick iff it is <= 1 now. Pitfall: has_ammo is
-         * deliberately NOT predicted — an empty-mag reload refills the clip
-         * inside tick_weapon at the zero-crossing, so ammo_clip is still 0 on
-         * the last reload tick and the shoot mask stays closed one extra tick
-         * (empty-mag T+40 vs partial-mag T+39, tests/test_fire_mask.py); that
-         * matches process_combat's dry-fire check exactly. jump_cd is never
-         * set (cs2_movement.h) and crouch_cd is not read here. */
-        int fire_cd_next = a->fire_cd > 0 ? a->fire_cd - 1 : 0;
-        int reload_next  = a->reload_ticks > 0 ? a->reload_ticks - 1 : 0;
-        int switch_next  = a->switch_ticks > 0 ? a->switch_ticks - 1 : 0;
+         * the counter is 0 next tick iff it is <= 1 now.
+         * Two side effects ride on those decrements and are predicted too:
+         *  - switch_ticks 1->0: env_step flips weapon_slot to weapon_slot_target
+         *    right after tick_weapon, so `slot`/`def` below describe the weapon
+         *    that will be HELD when actions are parsed (ammo + "already held").
+         *  - reload_ticks 1->0: tick_weapon refills the clip to mag_size and
+         *    takes one mag from reserve, so the reload head must close (a
+         *    reload of a full clip is rejected by try_start_reload).
+         * Pitfall: the SHOOT head's has_ammo deliberately reads the raw
+         * (pre-refill) clip, NOT clip_next. On the refill tick process_combat
+         * would actually accept a shot (refill precedes its dry-fire check),
+         * but spec §3 R0-B pins empty-mag first shot at T+40 vs partial-mag
+         * T+39 (tests/test_fire_mask.py) — the mask is one tick conservative
+         * there by decision, not by equivalence; do not "fix" it to clip_next.
+         * jump_cd is never set (cs2_movement.h); crouch_cd is not read here. */
+        int              fire_cd_next = a->fire_cd > 0 ? a->fire_cd - 1 : 0;
+        int              reload_next  = a->reload_ticks > 0 ? a->reload_ticks - 1 : 0;
+        int              switch_next  = a->switch_ticks > 0 ? a->switch_ticks - 1 : 0;
+        int              slot = (a->switch_ticks == 1) ? a->weapon_slot_target : a->weapon_slot;
+        const WeaponDef* def  = &WEAPON_DEFS[slot];
+        int              clip_next = (a->reload_ticks == 1) ? def->mag_size : a->ammo_clip[slot];
+        int              reserve_next =
+            (a->reload_ticks == 1) ? a->ammo_reserve[slot] - 1 : a->ammo_reserve[slot];
         /* Shoot mask: gate on cooldown, reload, switch, and ammo.
          * Knife (mag_size < 0) is always shootable. */
         int has_ammo  = (def->mag_size < 0) || (a->ammo_clip[slot] > 0);
         int can_shoot = (fire_cd_next == 0 && reload_next == 0 && switch_next == 0 && has_ammo);
         m[moff[HEAD_SHOOT] + 1] = (int8_t)can_shoot;
-        /* Reload mask */
-        int can_reload = (def->mag_size > 0 && a->ammo_clip[slot] < def->mag_size &&
-                          a->ammo_reserve[slot] > 0 && reload_next == 0 && switch_next == 0);
+        /* Reload mask: predicted clip/reserve so the refill tick reads "full" */
+        int can_reload = (def->mag_size > 0 && clip_next < def->mag_size && reserve_next > 0 &&
+                          reload_next == 0 && switch_next == 0);
         m[moff[HEAD_RELOAD] + 1] = (int8_t)can_reload;
         /* Weapon switch mask: mask already-held weapon option */
         if (slot == 0)

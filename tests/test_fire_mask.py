@@ -95,3 +95,83 @@ def test_weapon_switch_first_shot_at_T_plus_8(simple_map):
         assert fired[0] == 7, fired    # T+8
     finally:
         env.close()
+
+
+# --- Direct reads of the reload / weapon heads (fix round 1) -----------------
+# The tests above only exercise reload_next/switch_next through the SHOOT head.
+# These pin the side effects compute_masks must predict on the last tick:
+# clip refill (reload_ticks 1->0) and slot flip (switch_ticks 1->0).
+
+
+def _reload_mask(env, i=0):
+    return int(env._masks_view[i, MOFF[H_RELOAD] + 1])
+
+
+def _weapon_mask(env, opt, i=0):
+    """opt 1 = switch-to-primary(0), opt 2 = switch-to-secondary(1)."""
+    return int(env._masks_view[i, MOFF[H_WEAPON] + opt])
+
+
+def _run_until(env, pred, limit=60):
+    """Step no-op actions until pred(agent0) holds; return ticks stepped."""
+    for t in range(limit):
+        if pred(env._c_env.game.agents[0]):
+            return t
+        _step(env, np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32))
+    raise AssertionError("predicate never held")
+
+
+def test_reload_mask_closed_on_refill_tick(simple_map):
+    """reload_ticks==1 at mask time => next tick_weapon refills the clip to
+    mag_size and takes 1 from reserve before try_start_reload runs, which then
+    rejects (clip full). The mask must say 0 there — and pressing reload on
+    that tick must be a no-op in the sim."""
+    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1)
+    try:
+        env.reset()
+        a = env._c_env.game.agents[0]
+        mag, clip0, res0 = a.ammo_clip[0], 5, a.ammo_reserve[0]
+        a.ammo_clip[0] = clip0
+        act = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
+        act[0, H_RELOAD] = 1
+        _step(env, act)
+        assert a.reload_ticks > 1 and _reload_mask(env) == 0           # mid-reload: closed
+        _run_until(env, lambda s: s.reload_ticks == 1)
+        assert a.ammo_clip[0] == clip0                                 # not refilled yet
+        assert _reload_mask(env) == 0, "refill tick must not offer reload"
+        _step(env, act)                                                # press reload anyway
+        assert a.reload_ticks == 0                                     # sim rejected: clip full
+        assert a.ammo_clip[0] == mag and a.ammo_reserve[0] == res0 - 1
+        assert _reload_mask(env) == 0                                  # still full
+        a.ammo_clip[0] = mag - 1
+        _step(env, np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32))
+        assert _reload_mask(env) == 1                                  # partial + idle: open
+    finally:
+        env.close()
+
+
+def test_weapon_head_describes_target_slot_on_flip_tick(simple_map):
+    """switch_ticks==1 at mask time => env_step flips weapon_slot to the target
+    before the weapon head is parsed, so the mask must show the TARGET as the
+    already-held option and the shoot head must use the TARGET's clip."""
+    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1)
+    try:
+        env.reset()
+        a = env._c_env.game.agents[0]
+        a.ammo_clip[1] = 0                                             # pistol empty, rifle full
+        assert _weapon_mask(env, 1) == 0 and _weapon_mask(env, 2) == 1
+        act = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
+        act[0, H_WEAPON] = 2                                           # switch to pistol
+        _step(env, act)
+        assert a.switch_ticks > 1
+        assert _weapon_mask(env, 1) == 0 and _weapon_mask(env, 2) == 0 # in progress
+        _run_until(env, lambda s: s.switch_ticks == 1)
+        assert a.weapon_slot == 0                                      # flip has not happened yet
+        assert _weapon_mask(env, 2) == 0, "target slot must read as held"
+        assert _weapon_mask(env, 1) == 1, "switch back to rifle is legal next tick"
+        assert _shoot_mask(env) == 0, "shoot head must use the target (empty) clip"
+        _step(env, np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32))
+        assert a.weapon_slot == 1 and a.switch_ticks == 0
+        assert _weapon_mask(env, 2) == 0 and _weapon_mask(env, 1) == 1
+    finally:
+        env.close()
