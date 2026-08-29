@@ -139,7 +139,7 @@ typedef struct {
      * one of nx/ny is ±1, the other 0). Points away from the room that
      * emitted the face — i.e. into the void for an exterior wall, and down
      * onto the lower room for a lip. */
-    float nx, ny;
+    float   nx, ny;
     int32_t kind; /* SOLID_KIND_* in cs2_solids.h — drives the draw offset */
 } Wall;
 
@@ -229,7 +229,10 @@ typedef struct {
     float pbrs_bomb_progress_weight;   /* bomb-closeness scale in _potential */
     float pbrs_nav_weight_t;           /* T-side nav approach weight */
     float pbrs_nav_weight_ct;          /* CT-side nav approach weight */
-    /* Phase 6: renderer wall list — populated by build_walls_from_nav(), C-demo only */
+    /* Baked solid faces (cs2_solids.h). build_solids_from_rooms() is the ONLY
+     * allocation site; env_close() and c_close() both free it via free_solids.
+     * Per-env: binding.c puts Dust2Env and StaticData in one calloc, so this
+     * list is never shared between envs. */
     WallList wall_list;
     /* Ramp interpolation AABB. After wall_list. StaticDataC appends wall_list
      * then these so Python can publish the room quad after env_init.
