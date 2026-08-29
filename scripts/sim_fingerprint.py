@@ -102,10 +102,12 @@ from nav import N_AGENTS, TEAM_SIZE                                             
 # The mask buffer is the discrete heads laid end to end. If a head is ever added
 # or resized without ACTION_MASK_DIM following, the per-head slicing below would
 # read the wrong columns and the oracle would compare garbage — fail loudly.
-assert sum(ACTION_HEAD_SIZES) == ACTION_MASK_DIM, (
-    f"mask layout drift: sum(ACTION_HEAD_SIZES)={sum(ACTION_HEAD_SIZES)} "
-    f"!= ACTION_MASK_DIM={ACTION_MASK_DIM}; regenerate src/_action_spec.py")
-assert len(ACTION_HEAD_SIZES) == ACTION_DIM
+# `raise`, not `assert`: python -O would strip an assert and the oracle would
+# silently hash garbage.
+if sum(ACTION_HEAD_SIZES) != ACTION_MASK_DIM or len(ACTION_HEAD_SIZES) != ACTION_DIM:
+    raise RuntimeError(f"mask layout drift: sum(ACTION_HEAD_SIZES)={sum(ACTION_HEAD_SIZES)} "
+                       f"!= ACTION_MASK_DIM={ACTION_MASK_DIM} or len != ACTION_DIM={ACTION_DIM}; "
+                       "regenerate src/_action_spec.py")
 
 
 def sample_masked_actions(masks, rng):
@@ -220,6 +222,9 @@ def track_aim_actions(game, max_turn):
 
         # Team layout is fixed: agents [0, TEAM_SIZE) are T, [TEAM_SIZE, N_AGENTS) are CT
         # — same `en_start` split process_combat uses to scan for targets.
+        # Unlike process_combat there is NO vis/laser_range filter here: an
+        # occluded nearest enemy is still tracked. The stderr `deaths` counter
+        # is the guard — if it drops to 0, track mode has stopped proving combat.
         en_start = TEAM_SIZE if a.team == 0 else 0
         best, best_d2 = None, None
         for j in range(en_start, en_start + TEAM_SIZE):
@@ -233,7 +238,7 @@ def track_aim_actions(game, max_turn):
             if best_d2 is None or d2 < best_d2:
                 best, best_d2 = (rx, ry, rz), d2
         if best is None:
-            continue                   # team wiped: hold aim (writes stay 0.0)
+            continue                   # team wiped: Δyaw 0 holds yaw; pitch snaps level
         rx, ry, rz = best
 
         # Shortest signed rotation onto the target bearing, wrapped into [-π, π]
