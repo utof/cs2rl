@@ -184,7 +184,8 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
     float       phi_before[2];
     int8_t      vis10[N_AGENTS][N_AGENTS];
     int         kills[N_AGENTS][2];
-    int         n_kills                  = 0;
+    int         n_kills = 0;
+    int         nearest_vis_enemy[N_AGENTS]; /* R0-A: pre-combat target snapshot, -1 = none */
     int         bomb_just_planted        = 0;
     int         bomb_planter_id          = -1;
     int         bomb_just_defused        = 0;
@@ -325,7 +326,54 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
     }
 
     build_vis_matrix(g, sd, vis10);
-    process_combat(env, actions, vis10, kills, &n_kills, ss, es);
+
+    /* ── R0-A pair counters + nearest-visible-enemy snapshot ──
+     * MUST sit between build_vis_matrix and process_combat: process_combat
+     * sets alive=0 on a kill, so anything after it would drop the kill tick
+     * from the pair counters and make the shooter-side scoring depend on the
+     * hitbox roll. One pre-combat liveness snapshot for everything below. */
+    {
+        int   seen_any[N_AGENTS] = {0};
+        float nearest_d2[N_AGENTS];
+        for (int i = 0; i < N_AGENTS; i++) {
+            nearest_vis_enemy[i] = -1;
+            nearest_d2[i]        = 1e30f;
+        }
+        for (int i = 0; i < N_AGENTS; i++) {
+            AgentState* ai = &g->agents[i];
+            if (!ai->participating || !ai->alive)
+                continue;
+            for (int j = 0; j < N_AGENTS; j++) {
+                AgentState* aj = &g->agents[j];
+                if (j == i || aj->team == ai->team || !aj->participating || !aj->alive)
+                    continue;
+                float dx = aj->x - ai->x, dy = aj->y - ai->y;
+                float d2               = dx * dx + dy * dy;
+                float d                = sqrtf(d2);
+                ss->min_enemy_distance = fminf(ss->min_enemy_distance, d);
+                es->min_enemy_distance = fminf(es->min_enemy_distance, d);
+                if (vis10[i][j]) {
+                    seen_any[i] = 1;
+                    if (d2 < nearest_d2[i]) {
+                        nearest_d2[i]        = d2;
+                        nearest_vis_enemy[i] = j;
+                    }
+                    if (j > i && vis10[j][i]) { /* unordered pair, counted once */
+                        ss->mutual_vis_pair_ticks++;
+                        es->mutual_vis_pair_ticks++;
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < N_AGENTS; i++) {
+            if (seen_any[i]) {
+                ss->agent_ticks_with_visible_enemy++;
+                es->agent_ticks_with_visible_enemy++;
+            }
+        }
+    }
+
+    process_combat(env, actions, vis10, kills, &n_kills, ss, es, nearest_vis_enemy);
 
     for (int i = 0; i < N_AGENTS; i++) {
         if (!g->agents[i].alive) {

@@ -168,6 +168,14 @@ static void compute_rewards(Dust2Env* env,
             env->rewards[i] += w;
             ss->reward_win  += w;
             es->reward_win  += w;
+            /* R0-A: one-sided diagnostic split (reward_win nets ~0). */
+            if (g->agents[i].team == 0) {
+                ss->reward_win_t += w;
+                es->reward_win_t += w;
+            } else {
+                ss->reward_win_ct += w;
+                es->reward_win_ct += w;
+            }
         }
     }
 

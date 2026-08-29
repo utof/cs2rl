@@ -480,8 +480,8 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
          * a field slipped in between it and the pad on one side only. */
         "GameState__pad_gs_offset",
         (Py_ssize_t)offsetof(GameState, _pad_gs),
-        "StepStats_plant_tick_offset",
-        (Py_ssize_t)offsetof(StepStats, plant_tick),
+        "StepStats_reward_win_ct_offset",
+        (Py_ssize_t)offsetof(StepStats, reward_win_ct),
         "Dust2Env_recoil_enabled_offset",
         (Py_ssize_t)offsetof(Dust2Env, recoil_enabled),
         "Wall_kind_offset",

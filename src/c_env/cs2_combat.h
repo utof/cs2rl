@@ -174,11 +174,14 @@ static void process_combat(Dust2Env*      env,
                            int            kills[N_AGENTS][2],
                            int*           n_kills,
                            StepStats*     ss,
-                           StepStats*     es) {
+                           StepStats*     es,
+                           const int      nearest_vis_enemy[N_AGENTS]) {
+    /* nearest_vis_enemy: R0-A pre-combat snapshot from env_step (cs2_env.h),
+     * -1 = no visible participating enemy. Scoring target for the shooter
+     * counters below; deliberately NOT the hit-ray's best_enemy, which
+     * depends on the aim roll. */
     StaticData* sd = env->sd;
     GameState*  g  = &env->game;
-    (void)ss;
-    (void)es;
 
     /* Hitbox probabilities: head, chest, stomach, legs */
     /* Standing:  10%, 40%, 25%, 25% */
@@ -255,6 +258,40 @@ static void process_combat(Dust2Env*      env,
         a->fired_this_tick = 1;
         if (def->mag_size > 0)
             a->ammo_clip[a->weapon_slot]--; /* consume one round */
+
+        /* ── R0-A shooter-side counters (spec §3). Scored against the
+         * pre-combat nearest visible participating enemy `tgt` (or none). ── */
+        int tgt = nearest_vis_enemy[i];
+        if (a->participating) {
+            ss->shots_fired++;
+            es->shots_fired++;
+            if (tgt >= 0) {
+                AgentState* en = &g->agents[tgt];
+                float       rx = en->x - a->x, ry = en->y - a->y;
+                float       tgt_d    = sqrtf(rx * rx + ry * ry);
+                float       tgt_derr = fabsf(wrap_pi(atan2f(ry, rx) - a->facing));
+                /* Same eye/torso convention as the hit ray below (v1b). */
+                float eye_z0 = a->z + (a->is_crouching ? EYE_HEIGHT_CROUCH : EYE_HEIGHT_STAND);
+                float torso_z0 =
+                    en->z + (en->is_crouching ? TORSO_OFFSET_CROUCH : TORSO_OFFSET_STAND);
+                float tgt_rz = torso_z0 - eye_z0;
+                ss->shots_with_enemy_in_los++;
+                es->shots_with_enemy_in_los++;
+                if (tgt_derr < (float)M_PI / 4.0f) {
+                    ss->shots_facing_enemy++;
+                    es->shots_facing_enemy++;
+                }
+                /* exact hit half-window; clamp keeps d < 16 on-target, NaN-free */
+                if (tgt_derr < asinf(fminf(HIT_HALF_WIDTH / fmaxf(tgt_d, 1e-6f), 1.0f))) {
+                    ss->shots_on_target++;
+                    es->shots_on_target++;
+                }
+                if (fabsf(tgt_rz) > HIT_HALF_WIDTH) {
+                    ss->shots_stance_blocked++;
+                    es->shots_stance_blocked++;
+                }
+            }
+        }
 
         /* Batch 3.5 (#24): 3D aim direction. Pitch tilts the (cos·yaw, sin·yaw)
          * 2D direction to a 3D unit vector. d = (cos·p·cos·y, cos·p·sin·y, sin·p).
@@ -387,6 +424,14 @@ static void process_combat(Dust2Env*      env,
         if (best_enemy->armor < 0)
             best_enemy->armor = 0;
         best_enemy->hp -= (int32_t)hp_damage;
+        /* R0-A: hit counters. Cast mirrors the line above so damage_dealt
+         * equals the hp actually subtracted, not the float pre-truncation sum. */
+        if (a->participating) {
+            ss->shots_hit++;
+            es->shots_hit++;
+            ss->damage_dealt += (float)(int32_t)hp_damage;
+            es->damage_dealt += (float)(int32_t)hp_damage;
+        }
 
         if (best_enemy->hp <= 0) {
             best_enemy->hp    = 0;

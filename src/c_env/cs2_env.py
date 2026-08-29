@@ -276,16 +276,16 @@ class StepStatsC(ctypes.Structure):
         ("action_move", ctypes.c_int32 * 9),
         ("action_shoot", ctypes.c_int32 * 2),
         ("action_use", ctypes.c_int32 * 2),
-                                                       # action_last removed (F13) — dead legacy counter, see cs2_types.h.  # noqa: E501
-                                                       # Batch 3: continuous-aim Δyaw stats (mirror C StepStats fields).  # noqa: E501
-                                                       # Replaces the 16-bin action_aim histogram (64B) with a Welford-style  # noqa: E501
-                                                       # triple (sum + sq_sum + count = 12B). No explicit _pad_aim_delta —  # noqa: E501
-                                                       # the three int32-aligned fields slot in cleanly between action_use  # noqa: E501
-                                                       # and action_reload. See cs2_types.h StepStats comment.  # noqa: E501
+                                                                       # action_last removed (F13) — dead legacy counter, see cs2_types.h.  # noqa: E501
+                                                                       # Batch 3: continuous-aim Δyaw stats (mirror C StepStats fields).  # noqa: E501
+                                                                       # Replaces the 16-bin action_aim histogram (64B) with a Welford-style  # noqa: E501
+                                                                       # triple (sum + sq_sum + count = 12B). No explicit _pad_aim_delta —  # noqa: E501
+                                                                       # the three int32-aligned fields slot in cleanly between action_use  # noqa: E501
+                                                                       # and action_reload. See cs2_types.h StepStats comment.  # noqa: E501
         ("aim_delta_sum", ctypes.c_float),
         ("aim_delta_sq_sum", ctypes.c_float),
         ("aim_delta_count", ctypes.c_int32),
-                                                       # Batch 3.5: pitch Welford triple (mirror cs2_types.h StepStats fields).
+                                                                       # Batch 3.5: pitch Welford triple (mirror cs2_types.h StepStats fields).
         ("aim_delta_pitch_sum", ctypes.c_float),
         ("aim_delta_pitch_sq_sum", ctypes.c_float),
         ("aim_delta_pitch_count", ctypes.c_int32),
@@ -301,14 +301,29 @@ class StepStatsC(ctypes.Structure):
         ("reward_shots", ctypes.c_float),
         ("reward_survival", ctypes.c_float),
         ("reward_inaction", ctypes.c_float),
-                                                       # Batch 1 (RL overhaul): round-end win classification flags.  # noqa: E501
-                                                       # Cleared by round_reset (Task 2). Set by compute_rewards (Task 3).  # noqa: E501
-                                                       # Consumed by split_into_channels to route reward_win:  # noqa: E501
-                                                       #   detonation/defuse → objective channel; else → combat channel.  # noqa: E501
-        ("win_by_detonation", ctypes.c_int8),          # 1 when bomb detonated (T wins)
-        ("win_by_defuse", ctypes.c_int8),              # 1 when bomb was defused (CT wins)
-        ("_pad_ss_wins", ctypes.c_int8 * 2),           # pad to 4-byte boundary
-        ("plant_tick", ctypes.c_int32),                # g->tick at plant; 0 = never planted
+                                                                       # Batch 1 (RL overhaul): round-end win classification flags.  # noqa: E501
+                                                                       # Cleared by round_reset (Task 2). Set by compute_rewards (Task 3).  # noqa: E501
+                                                                       # Consumed by split_into_channels to route reward_win:  # noqa: E501
+                                                                       #   detonation/defuse → objective channel; else → combat channel.  # noqa: E501
+        ("win_by_detonation", ctypes.c_int8),                          # 1 when bomb detonated (T wins)
+        ("win_by_defuse", ctypes.c_int8),                              # 1 when bomb was defused (CT wins)
+        ("_pad_ss_wins", ctypes.c_int8 * 2),                           # pad to 4-byte boundary
+        ("plant_tick", ctypes.c_int32),                                # g->tick at plant; 0 = never planted
+                                                                       # R0-A (spec 2026-08-29 §3) — appended, never reorder. Mirrors the
+                                                                       # combat-instrumentation tail of C StepStats (cs2_types.h); semantics
+                                                                       # documented there. reward_win_ct is the tail anchor (_C_OFFSET_FIELDS).
+        ("shots_fired", ctypes.c_int32),
+        ("shots_with_enemy_in_los", ctypes.c_int32),
+        ("shots_facing_enemy", ctypes.c_int32),
+        ("shots_on_target", ctypes.c_int32),
+        ("shots_hit", ctypes.c_int32),
+        ("shots_stance_blocked", ctypes.c_int32),
+        ("mutual_vis_pair_ticks", ctypes.c_int32),
+        ("agent_ticks_with_visible_enemy", ctypes.c_int32),
+        ("damage_dealt", ctypes.c_float),
+        ("min_enemy_distance", ctypes.c_float),                        # 1e30 sentinel = no pair coexisted
+        ("reward_win_t", ctypes.c_float),
+        ("reward_win_ct", ctypes.c_float),
     ]
 
 
@@ -433,7 +448,7 @@ _C_OFFSET_FIELDS = (
     # bomb_is_dropped instead would miss a field slipped in between it and the
     # pad on one side only.
     (GameStateC, "_pad_gs", "GameState__pad_gs_offset"),
-    (StepStatsC, "plant_tick", "StepStats_plant_tick_offset"),
+    (StepStatsC, "reward_win_ct", "StepStats_reward_win_ct_offset"),
     (Dust2EnvC, "recoil_enabled", "Dust2Env_recoil_enabled_offset"),
     (WallC, "kind", "Wall_kind_offset"),
     (WallListC, "capacity", "WallList_capacity_offset"),
@@ -1216,10 +1231,10 @@ class Cs2Env(pufferlib.PufferEnv):
             "alive_t_end": int(stats.alive_t_end),
             "alive_ct_end": int(stats.alive_ct_end),
             "round_length": int(stats.round_length),
-                                                                       # plant_tick is the observe-only C field (0 = never planted).
-                                                                       # Win-type flags are the existing episode_stats ints; export them
-                                                                       # here so compute_game_metrics can re-key rates without turning
-                                                                       # on include_step_stats_in_info or merging per-tick step_stats.
+                                                                                         # plant_tick is the observe-only C field (0 = never planted).
+                                                                                         # Win-type flags are the existing episode_stats ints; export them
+                                                                                         # here so compute_game_metrics can re-key rates without turning
+                                                                                         # on include_step_stats_in_info or merging per-tick step_stats.
             "plant_tick": int(stats.plant_tick),
             "win_by_detonation": int(stats.win_by_detonation),
             "win_by_defuse": int(stats.win_by_defuse),
@@ -1233,6 +1248,28 @@ class Cs2Env(pufferlib.PufferEnv):
             "reward_shots": float(stats.reward_shots),
             "reward_survival": float(stats.reward_survival),
             "reward_inaction": float(stats.reward_inaction),
+        })
+                                                                                         # R0-A combat instrumentation. min_enemy_distance is converted HERE,
+                                                                                         # per episode: PufferLib's mean_and_log averages the window before
+                                                                                         # compute_game_metrics sees it, so one 1e30 sentinel in a 40-episode
+                                                                                         # window would average to ~2.5e28. Emit (sum, valid) and let
+                                                                                         # compute_game_metrics divide the two window means.
+        _med = float(stats.min_enemy_distance)
+        _valid = 1 if _med < 1e29 else 0
+        summary.update({
+            "shots_fired": int(stats.shots_fired),
+            "shots_with_enemy_in_los": int(stats.shots_with_enemy_in_los),
+            "shots_facing_enemy": int(stats.shots_facing_enemy),
+            "shots_on_target": int(stats.shots_on_target),
+            "shots_hit": int(stats.shots_hit),
+            "shots_stance_blocked": int(stats.shots_stance_blocked),
+            "damage_dealt": float(stats.damage_dealt),
+            "mutual_vis_pair_ticks": int(stats.mutual_vis_pair_ticks),
+            "agent_ticks_with_visible_enemy": int(stats.agent_ticks_with_visible_enemy),
+            "min_enemy_distance_sum": _med if _valid else 0.0,
+            "min_enemy_distance_valid": _valid,
+            "reward_win_t": float(stats.reward_win_t),
+            "reward_win_ct": float(stats.reward_win_ct),
         })
         return summary
 

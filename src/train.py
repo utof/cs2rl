@@ -3144,6 +3144,15 @@ def _patch_trainer_with_return_norm(trainer):
                                                         config["total_timesteps"])
                          or self.epoch >= self.total_epochs)
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
+            # R0-A: episode count for the window, written INTO self.stats so
+            # mean_and_log (pufferl.py mean_and_log) emits environment/episodes
+            # through the logger too. DECLARED DEVIATION from spec §3 R0-A
+            # ("inject after mean_and_log returns"): the logger call is inside
+            # mean_and_log, so the post-hoc form would reach metrics.jsonl
+            # only. `.get` — a defaultdict(list) `[]` read would insert an
+            # empty list and np.mean([]) → NaN. Unit: terminal infos (rounds),
+            # one per env per round regardless of n_active_per_team.
+            self.stats["episodes"] = [float(len(self.stats.get("kills_t", ())))]
             logs = self.mean_and_log()
             self.losses = losses
             self.print_dashboard()
@@ -3209,13 +3218,13 @@ def compute_game_metrics(logs):
     }
 
     # Always-present splits/rewards: these keys already land in logs today
-    # via _build_terminal_info. game/reward/win nets ~0 (T +1 / CT -1);
-    # that is the zero-sum identity, not a missing-channel bug.
+    # via _build_terminal_info. game/reward/win is NOT emitted (#128, R0-A):
+    # C reward_win is the cross-team sum and nets ~0 by the zero-sum
+    # identity; the one-sided game/reward/win_t|win_ct below carry the signal.
     game_metrics["game/defuse_rate"] = _get("bomb_defused", 0.0)
     game_metrics["game/kills_t"] = kills_t
     game_metrics["game/kills_ct"] = kills_ct
     for src, dst in (
-        ("reward_win", "game/reward/win"),
         ("reward_kills", "game/reward/kills"),
         ("reward_deaths", "game/reward/deaths"),
         ("reward_bomb", "game/reward/bomb"),
@@ -3225,6 +3234,21 @@ def compute_game_metrics(logs):
         ("reward_inaction", "game/reward/inaction"),
     ):
         game_metrics[dst] = _get(src, 0.0)
+
+    # R0-A: combat counters are window MEANS per episode (mean_and_log).
+    for k in ("shots_fired", "shots_with_enemy_in_los", "shots_facing_enemy", "shots_on_target",
+              "shots_hit", "shots_stance_blocked", "damage_dealt", "mutual_vis_pair_ticks",
+              "agent_ticks_with_visible_enemy"):
+        game_metrics[f"game/{k}"] = _get(k, 0.0)
+    game_metrics["game/reward/win_t"] = _get("reward_win_t", 0.0)
+    game_metrics["game/reward/win_ct"] = _get("reward_win_ct", 0.0)
+    # Ratio of window means = conditional mean over episodes where a pair
+    # coexisted. A max(·,1) guard would silently return the unconditional
+    # mean — keep the explicit zero-valid branch.
+    _med_sum = _get("min_enemy_distance_sum", 0.0)
+    _med_valid = _get("min_enemy_distance_valid", 0.0)
+    game_metrics["game/min_enemy_distance"] = (_med_sum / _med_valid) if _med_valid > 0 else 0.0
+    game_metrics["game/min_enemy_distance_valid_frac"] = _med_valid
 
     # Presence-gate plant_tick / win_by_*: a synthetic 0.0 would make old
     # log dicts look new-format. Do not _get(..., default=0.0) these three.

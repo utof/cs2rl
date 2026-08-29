@@ -5,6 +5,8 @@
 static void clear_stats(StepStats* stats) {
     memset(stats, 0, sizeof(StepStats));
     stats->winner = -1;
+    /* R0-A: "no pair coexisted" sentinel; fminf'd down at the pair loop. */
+    stats->min_enemy_distance = 1e30f;
 }
 
 /* spawn_team: place the first n_active agents of `team` on spawn areas.

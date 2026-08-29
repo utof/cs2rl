@@ -440,6 +440,33 @@ typedef struct {
      * struct, so env_reset starts this at 0. Do not reorder earlier fields
      * — ctypes overlay + sizeof asserts must stay in lockstep. */
     int32_t plant_tick; /* g->tick at plant completion; 0 = never planted */
+    /* ── Rung 0 R0-A (spec 2026-08-29 §3): combat instrumentation ──
+     * Written into BOTH step_stats and episode_stats at the accumulation
+     * site (there is no ss→es merge). Shooter counters are per round fired
+     * by a participating && alive agent; the *_facing/_on_target/_hit/
+     * _stance_blocked subsets are scored against the nearest visible
+     * participating enemy snapshotted BEFORE process_combat (cs2_env.h), so
+     * a same-tick kill cannot make a shot "unscored". Pair counters use
+     * vis10[i][j] && vis10[j][i] (DDA is not symmetric) over participating &&
+     * alive opposing pairs. min_enemy_distance is 2D, regardless of
+     * visibility; sentinel 1e30f (never INFINITY — -ffast-math) set in
+     * clear_stats; converted per episode in cs2_env.py _build_terminal_info.
+     * reward_win_t/ct: one-sided terminal payouts (diagnostic; reward_win
+     * stays the cross-team sum). Appended — never reorder. reward_win_ct is
+     * the struct tail: binding.c py_struct_sizes() and cs2_env.py
+     * _C_OFFSET_FIELDS anchor on it. */
+    int32_t shots_fired;
+    int32_t shots_with_enemy_in_los;
+    int32_t shots_facing_enemy;
+    int32_t shots_on_target;
+    int32_t shots_hit;
+    int32_t shots_stance_blocked;
+    int32_t mutual_vis_pair_ticks;
+    int32_t agent_ticks_with_visible_enemy;
+    float   damage_dealt;
+    float   min_enemy_distance;
+    float   reward_win_t;
+    float   reward_win_ct;
 } StepStats;
 
 /* ── Full environment (one per parallel instance) ── */

@@ -66,7 +66,7 @@ def test_compute_game_metrics_surfaces_new_keys_without_backfilling_plant_tick()
     assert out["game/kills_t"] == 1.0
     assert out["game/kills_ct"] == 2.0
     assert out["game/defuse_rate"] == 0.1
-    assert out["game/reward/win"] == 0.0
+    assert "game/reward/win" not in out                # R0-A (#128): dropped, nets ~0 by identity
     assert out["game/reward/kills"] == 0.5
     assert out["game/reward/deaths"] == -0.2
     assert out["game/reward/bomb"] == 1.1
