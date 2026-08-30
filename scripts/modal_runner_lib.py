@@ -117,6 +117,7 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--record-out": 1,
     "--record-policy": 1,
     "--eval-episodes": 1,
+    "--eval-interval": 1,                              # R0-I (Task 13): in-training fixed-baseline eval cadence
     "--eval-policy": 1,
     "--name": 1,
     "--wandb": 0,

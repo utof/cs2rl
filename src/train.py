@@ -1095,6 +1095,10 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "max_turn_speed": getattr(args, "max_turn_speed", None),
         "aim_entropy_bonus": aim_entropy_bonus,
         "aim_log_std_max": aim_log_std_max,
+                                                                        # R0-I: fixed-baseline eval cadence (0 = off). Provenance only —
+                                                                        # not allowlisted for --resume-run (Task 7 rule: new CLI flags are
+                                                                        # config keys, not allowlist entries).
+        "eval_interval": int(getattr(args, "eval_interval", 0) or 0),
         "batch_size": batch_size,
         "bptt_horizon": bptt_horizon,
         "minibatch_size": 8192,
@@ -1270,8 +1274,14 @@ def make_puffer_env(team_spirit=None,
                     crouch_enabled=1,
                     round_time=None,
                     laser_range=None,
-                    max_turn_speed=None):
+                    max_turn_speed=None,
+                    auto_reset=True):
     """Create the native C PufferEnv used by smoke/train/eval.
+
+    ``auto_reset`` (R0-I, Task 13): forwarded to make_env. The training
+    vecenv keeps the default True; the fixed-baseline evaluator passes False
+    so the terminal tick's C state / episode_stats are still readable after
+    step() returns (with auto-reset they would already be the next spawn).
 
     ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
     emits ``info = [{"step_stats": StepStatsView}]`` on every tick so trainer
@@ -1368,6 +1378,7 @@ def make_puffer_env(team_spirit=None,
         round_time=round_time,
         laser_range=laser_range,
         max_turn_speed=max_turn_speed,
+        auto_reset=auto_reset,
         **kwargs,
     )
 
@@ -1681,8 +1692,6 @@ def evaluate_checkpoint(checkpoint_path=None,
                         start_seed=0,
                         num_episodes=50,
                         policy_mode="auto"):
-    from nav import ROUND_TIME
-
     policy = None
     policy_mode = resolve_policy_mode(checkpoint_path, policy_mode)
     if policy_mode != "random":
@@ -1700,7 +1709,9 @@ def evaluate_checkpoint(checkpoint_path=None,
 
         done = False
         step_count = 0
-        while not done and step_count < ROUND_TIME * 2:
+        # R0-G: the env's INSTANCE round_time (a --round-time-ticks run may be
+        # far shorter than nav.ROUND_TIME); ×2 is the runaway guard only.
+        while not done and step_count < env.round_time * 2:
             if policy_mode == "random":
                 actions = np.asarray(env.action_space.sample(), dtype=np.int32)
                 # See record_episode comment: random has no continuous head;
@@ -3673,6 +3684,66 @@ def _patch_trainer_with_return_norm(trainer):
     trainer.train = types.MethodType(_train_with_return_norm, trainer)
     print("[Train] Value target normalization enabled (running mean/std of returns).")
     return trainer
+
+
+# ── SECTION: R0-I fixed-baseline evaluation hooks ─────────────────────────
+
+
+def elimination_only_win_rates(logs):
+    """R0-I: (win_rate_t, win_rate_ct) with timeouts removed from the CT side.
+
+    WHY: cs2_rewards.h scores a timeout as a CT win (`winner_ct`), so on a
+    bombsite-less duel map a CT that never engages "wins" every round and
+    SelfPlayManager.win_threshold would pool-save a statue. `winner_t` is
+    elimination-only on bombsites=[] maps. All three keys are window means
+    over the same episode set, so the subtraction is exact; clamped at 0 for
+    the float-noise case. Missing keys (first epoch) → 0.0, never KeyError.
+    """
+    wt = float(logs.get("environment/winner_t", 0.0))
+    wct = max(
+        0.0,
+        float(logs.get("environment/winner_ct", 0.0)) -
+        float(logs.get("environment/timed_out", 0.0)))
+    return wt, wct
+
+
+class ScheduledEval:
+    """Runs the fixed-baseline eval every `interval` epochs and delivers its
+    keys on the next LOGGED metrics row.
+
+    WHY a buffer: PuffeRL's train() throttles mean_and_log to once per 0.25 s
+    (logs is None on the other epochs). A naive `if isinstance(logs, dict)
+    and epoch % interval == 0` silently skips the eval whenever the eval epoch
+    happens to be throttled — on a fast CPU box that is most epochs. So the
+    eval decision is made on `trainer.epoch` alone, and the result waits in
+    `pending` until a dict row comes through. `eval/epoch` stamps the epoch
+    the numbers were measured at (may lag the row's epoch by a few).
+
+    PITFALL: call after_train() on EVERY epoch, outside any `isinstance(logs,
+    dict)` guard, or the buffer never drains.
+    """
+
+    def __init__(self, evaluator, interval, policy, device):
+        if int(interval) <= 0:
+            raise ValueError(f"ScheduledEval interval must be >= 1, got {interval}")
+        self.evaluator = evaluator
+        self.interval = int(interval)
+        self.policy = policy
+        self.device = device
+        self.pending = {}
+
+    def after_train(self, trainer, logs):
+        if trainer.epoch % self.interval == 0:
+            t0 = time.time()
+            self.pending.update(self.evaluator.evaluate(self.policy, self.device))
+            self.pending["eval/epoch"] = int(trainer.epoch)
+            self.pending["eval/wall_s"] = time.time() - t0
+        if isinstance(logs, dict) and self.pending:
+            logs.update(self.pending)
+            self.pending = {}
+
+    def close(self):
+        self.evaluator.env.close()
 
 
 # ── SECTION: Game Metrics Dashboard ───────────────────────────────────────
@@ -5819,6 +5890,32 @@ def train(args):
                   f"gap {_resumed_from_step - _last:+,}) epoch {trainer.epoch}")
     # ────────────────────────────────────────────────────────────────────────
 
+    # ── R0-I (Task 13): fixed-baseline eval env — parent-process, serial, the
+    # SAME knobs as the workers (env_knobs_from_args + reward_overrides_from_args
+    # so a --laser-range / --round-time-ticks run evaluates on what it trains
+    # on). Seed 10_000_003: worker env seeds are env_seed_base(--seed) + i, so
+    # no collision for --seed <= 4 at any num_envs (only --seed 100 env 3
+    # reaches it). team_spirit=None → raw rewards (eval never feeds training).
+    _eval_hook = None
+    _eval_interval = int(getattr(args, "eval_interval", 0) or 0)
+    if _eval_interval > 0:
+        from eval_baselines import BaselineEvaluator
+        _eval_env = make_puffer_env(team_spirit=None,
+                                    seed=10_000_003,
+                                    map_data=_map_data,
+                                    auto_reset=False,
+                                    reward_overrides=reward_overrides_from_args(args),
+                                    **env_knobs_from_args(args))
+        _d = trainer.vecenv.driver_env
+        for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "round_time"):
+            if getattr(_eval_env, _k) != getattr(_d, _k):
+                raise RuntimeError(f"[Eval] eval env / driver env disagree on {_k}: "
+                                   f"{getattr(_eval_env, _k)!r} vs {getattr(_d, _k)!r}")
+        _eval_hook = ScheduledEval(BaselineEvaluator(_eval_env, episodes=40, seed=args.seed),
+                                   _eval_interval, policy, device)
+        print(f"[Eval] fixed-baseline eval every {_eval_interval} epochs "
+              f"(40 episodes vs random + oracle, round_time={_eval_env.round_time})")
+
     save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
     last_save = time.time()
 
@@ -5843,6 +5940,11 @@ def train(args):
         # Team spirit annealing: 0.3→0.7 over 5M participating-agent steps
         ts_val = min(0.7, 0.3 + trainer.global_step / 5_000_000)
         shared_ts.value = ts_val
+
+        # R0-I: OUTSIDE the isinstance(logs, dict) guard on purpose — see
+        # ScheduledEval (the 0.25 s log throttle must not skip an eval epoch).
+        if _eval_hook is not None:
+            _eval_hook.after_train(trainer, logs)
 
         if isinstance(logs, dict):
             game_metrics = compute_game_metrics(logs)
@@ -5878,8 +5980,9 @@ def train(args):
             # under --no-self-play.
             if self_play_enabled:
                 self_play_mgr.maybe_switch_teams(trainer.epoch)
-                win_rate_t = logs.get("environment/winner_t", 0.0)
-                win_rate_ct = logs.get("environment/winner_ct", 0.0)
+                # R0-I: elimination-only — winner_ct counts timeouts, which
+                # would pool-save a passive CT as "dominant".
+                win_rate_t, win_rate_ct = elimination_only_win_rates(logs)
                 self_play_mgr.maybe_save(
                     policy,
                     Path(args.checkpoint_dir),
@@ -5975,6 +6078,8 @@ def train(args):
                   f"SPS={logs.get('SPS', 0):.0f}")
 
     trainer.close()
+    if _eval_hook is not None:
+        _eval_hook.close()
 
     # Final checkpoint save
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6117,6 +6222,15 @@ if __name__ == "__main__":
     # R0-G env knobs. Default None ⇒ the env's nav.py constant (config.json
     # records None, not a copied constant). Not in RESUME_CONFIG_ALLOWLIST:
     # changing any of them on --resume-run is a different experiment.
+    # R0-I (Task 13): fixed-baseline eval cadence. 0 = off (default: the
+    # 40-episode serial eval costs wall time every epoch it runs).
+    parser.add_argument("--eval-interval",
+                        type=int,
+                        default=0,
+                        dest="eval_interval",
+                        help="R0-I: run the fixed-baseline eval (40 episodes vs random and vs "
+                        "oracle on the training map/knobs) every N epochs; eval/* keys land on "
+                        "the next logged metrics row. 0 = off.")
     parser.add_argument("--round-time-ticks",
                         type=int,
                         default=None,
