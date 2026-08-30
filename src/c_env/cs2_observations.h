@@ -207,9 +207,22 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
 
             if (can_see) {
                 float dx = en->x - a->x, dy = en->y - a->y;
-                float dist    = sqrtf(dx * dx + dy * dy);
-                obs[base + 0] = (map_diag > 0.0f) ? dx / map_diag : 0.0f;
-                obs[base + 1] = (map_diag > 0.0f) ? dy / map_diag : 0.0f;
+                float dist = sqrtf(dx * dx + dy * dy);
+                /* R0-E.1 (#130): FACING-RELATIVE frame, mirroring the bombsite
+                 * bearing in the self block above (wrap_pi(atan2 - facing)).
+                 * rel-pos is rotated by -facing so +x = "ahead", +y = "left";
+                 * bearing sin/cos below are of the same relative angle, so a
+                 * Δyaw = rel puts the enemy dead ahead — the yaw head no
+                 * longer has to learn sin(θ - f) from an absolute θ and its
+                 * own facing. Teammate slots stay absolute — not aim targets.
+                 * PITFALL: obs semantics changed (SIM_OBS_VERSION sim-v3);
+                 * deploy OBS_VERSION / the ONNX sidecar are still absolute —
+                 * do not export post-R0-E.1 policies. */
+                float rel = wrap_pi(atan2f(dy, dx) - a->facing);
+                float cf = cosf(a->facing), sf = sinf(a->facing);
+                float rx = dx * cf + dy * sf, ry = -dx * sf + dy * cf;
+                obs[base + 0] = (map_diag > 0.0f) ? rx / map_diag : 0.0f;
+                obs[base + 1] = (map_diag > 0.0f) ? ry / map_diag : 0.0f;
                 /* Relative z-delta: positive = enemy above us.  Same /128
                  * scale as self obs[5] and teammate slot.  Range mirrors
                  * teammate block.  Was constant-0 placeholder pre-T4.
@@ -219,16 +232,19 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
                  * disambiguate "0 = invisible enemy" from "0 = same height" via
                  * obs[base+3] (can_see flag at base+3). */
                 obs[base + 2] = (en->z - a->z) / 128.0f;
-                float angle   = atan2f(dy, dx);
-                obs[base + 5] = sinf(angle);
-                obs[base + 6] = cosf(angle);
+                obs[base + 5] = sinf(rel);
+                obs[base + 6] = cosf(rel);
                 obs[base + 7] = (map_diag > 0.0f) ? dist / map_diag : 0.0f;
             } else if (a->enemy_mem_idx[mem_s] != INVALID_AREA_IDX) {
-                /* Use last-known position from memory */
-                float mx      = sd->centroid_xy[a->enemy_mem_idx[mem_s] * 2] - a->x;
-                float my      = sd->centroid_xy[a->enemy_mem_idx[mem_s] * 2 + 1] - a->y;
-                obs[base + 0] = (map_diag > 0.0f) ? mx / map_diag : 0.0f;
-                obs[base + 1] = (map_diag > 0.0f) ? my / map_diag : 0.0f;
+                /* Use last-known position from memory — R0-E.1: same
+                 * facing-relative frame as the visible branch, so slot +0/+1
+                 * mean "ahead/left" regardless of which branch wrote them. */
+                float mx = sd->centroid_xy[a->enemy_mem_idx[mem_s] * 2] - a->x;
+                float my = sd->centroid_xy[a->enemy_mem_idx[mem_s] * 2 + 1] - a->y;
+                float cf = cosf(a->facing), sf = sinf(a->facing);
+                float rx = mx * cf + my * sf, ry = -mx * sf + my * cf;
+                obs[base + 0] = (map_diag > 0.0f) ? rx / map_diag : 0.0f;
+                obs[base + 1] = (map_diag > 0.0f) ? ry / map_diag : 0.0f;
             }
         }
 
@@ -283,8 +299,9 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
             }
             obs[gb + 10] = defuse_prog;
         }
-        obs[gb + 11] = t_alive / (float)TEAM_SIZE;
-        obs[gb + 12] = ct_alive / (float)TEAM_SIZE;
+        /* Rung 0: normalise by the ACTIVE team size so 1v1 reads 1.0, not 0.2. */
+        obs[gb + 11] = t_alive / (float)sd->n_active_per_team;
+        obs[gb + 12] = ct_alive / (float)sd->n_active_per_team;
 
         /* Batch 2: round-fixed designated-carrier role bit (T-side semantic).
          * 1.0 only when this agent is the round's designated bomb carrier

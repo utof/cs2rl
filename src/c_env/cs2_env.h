@@ -26,8 +26,21 @@ static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_sp
     assert(OBS_GLOBAL_BASE + OBS_GLOBAL_SIZE == OBS_DIM &&
            "obs block sizes do not tile OBS_DIM (see cs2_types.h OBS_* macros)");
     memset(env, 0, sizeof(Dust2Env));
-    env->sd          = sd;
-    env->rng         = seed ? seed : 1;
+    env->sd = sd;
+    /* Rung 0: a zeroed StaticData (cs2_demo.c load_nav_data forgot the field,
+     * or a FMT mis-order) would make env_reset divide by zero. Python callers
+     * never reach this — Cs2Env.__init__ raises ValueError first — so this is
+     * the guard for the C-only callers (cs2_demo.c / make_client). */
+    assert(sd->n_active_per_team >= 1 && sd->n_active_per_team <= TEAM_SIZE &&
+           "StaticData.n_active_per_team must be in 1..TEAM_SIZE");
+    /* R0-D (#135): seeds 0 and 1 used to alias (`seed ? seed : 1`) — every
+     * env pair (2k, 2k+1) handed adjacent seeds by pufferlib shared a stream.
+     * Golden-ratio (0x9E3779B9) additive mix; uint32 wrap is intended. The
+     * `: 1u` fallback fires ONLY at seed == 0x61C88647 (the one value whose
+     * sum wraps to exactly 0 — xorshift32 would be stuck at 0 forever).
+     * PITFALL: changing this moves every xorshift32 stream => sim fingerprints
+     * (scripts/sim_fingerprint.py) legitimately change; record the new set. */
+    env->rng         = (seed + 0x9E3779B9u) ? (seed + 0x9E3779B9u) : 1u;
     env->team_spirit = team_spirit;
     clear_stats(&env->step_stats);
     clear_stats(&env->episode_stats);
@@ -71,25 +84,60 @@ static void compute_masks(Dust2Env* env) {
         /* Jump mask: no jump while airborne, on cooldown, or crouching */
         if (a->is_airborne || a->jump_cd > 0 || a->is_crouching)
             m[moff[HEAD_JUMP] + 1] = 0;
-        int              slot = a->weapon_slot;
+        /* R0-E.2 (#131): stance parity. With pitch pinned a stand-vs-crouch
+         * mismatch is |rz| = 24 > HIT_HALF_WIDTH = 16 — an unconditional miss
+         * the policy cannot observe (no stance bit in the enemy block). Rung 1
+         * disables crouch outright; 5v5 keeps it (crouch_enabled defaults to 1,
+         * cs2_demo.c forces 1 for the human player). Bin 0 (stand) stays valid
+         * so the head keeps its per-head no-op invariant (see header comment). */
+        if (!sd->crouch_enabled)
+            m[moff[HEAD_CROUCH] + 1] = 0;
+        /* R0-B (#129): this function runs at the TAIL of env_step, but the
+         * masks it writes are consumed by the NEXT env_step, whose first act
+         * is tick_weapon() — which decrements fire_cd/reload_ticks/switch_ticks
+         * BEFORE process_combat / try_start_reload / try_weapon_switch read
+         * them. Gating on the raw counter therefore reported "blocked" one
+         * tick longer than the sim enforces (rifle cycle_ticks=2 became 1 shot
+         * per 3 ticks; the first legal shot after a reload/switch was masked).
+         * So the mask must describe the POST-decrement value, max(c-1, 0):
+         * the counter is 0 next tick iff it is <= 1 now.
+         * Two side effects ride on those decrements and are predicted too:
+         *  - switch_ticks 1->0: env_step flips weapon_slot to weapon_slot_target
+         *    right after tick_weapon, so `slot`/`def` below describe the weapon
+         *    that will be HELD when actions are parsed (ammo + "already held").
+         *  - reload_ticks 1->0: tick_weapon refills the clip to mag_size and
+         *    takes one mag from reserve, so the reload head must close (a
+         *    reload of a full clip is rejected by try_start_reload).
+         * Pitfall: the SHOOT head's has_ammo deliberately reads the raw
+         * (pre-refill) clip, NOT clip_next. On the refill tick process_combat
+         * would actually accept a shot (refill precedes its dry-fire check),
+         * but spec §3 R0-B pins empty-mag first shot at T+40 vs partial-mag
+         * T+39 (tests/test_fire_mask.py) — the mask is one tick conservative
+         * there by decision, not by equivalence; do not "fix" it to clip_next.
+         * jump_cd is never set (cs2_movement.h); crouch_cd is not read here. */
+        int              fire_cd_next = a->fire_cd > 0 ? a->fire_cd - 1 : 0;
+        int              reload_next  = a->reload_ticks > 0 ? a->reload_ticks - 1 : 0;
+        int              switch_next  = a->switch_ticks > 0 ? a->switch_ticks - 1 : 0;
+        int              slot = (a->switch_ticks == 1) ? a->weapon_slot_target : a->weapon_slot;
         const WeaponDef* def  = &WEAPON_DEFS[slot];
+        int              clip_next = (a->reload_ticks == 1) ? def->mag_size : a->ammo_clip[slot];
+        int              reserve_next =
+            (a->reload_ticks == 1) ? a->ammo_reserve[slot] - 1 : a->ammo_reserve[slot];
         /* Shoot mask: gate on cooldown, reload, switch, and ammo.
          * Knife (mag_size < 0) is always shootable. */
-        int has_ammo = (def->mag_size < 0) || (a->ammo_clip[slot] > 0);
-        int can_shoot =
-            (a->fire_cd == 0 && a->reload_ticks == 0 && a->switch_ticks == 0 && has_ammo);
+        int has_ammo  = (def->mag_size < 0) || (a->ammo_clip[slot] > 0);
+        int can_shoot = (fire_cd_next == 0 && reload_next == 0 && switch_next == 0 && has_ammo);
         m[moff[HEAD_SHOOT] + 1] = (int8_t)can_shoot;
-        /* Reload mask */
-        int can_reload =
-            (def->mag_size > 0 && a->ammo_clip[slot] < def->mag_size && a->ammo_reserve[slot] > 0 &&
-             a->reload_ticks == 0 && a->switch_ticks == 0);
+        /* Reload mask: predicted clip/reserve so the refill tick reads "full" */
+        int can_reload = (def->mag_size > 0 && clip_next < def->mag_size && reserve_next > 0 &&
+                          reload_next == 0 && switch_next == 0);
         m[moff[HEAD_RELOAD] + 1] = (int8_t)can_reload;
         /* Weapon switch mask: mask already-held weapon option */
         if (slot == 0)
             m[moff[HEAD_WEAPON] + 1] = 0;
         if (slot == 1)
             m[moff[HEAD_WEAPON] + 2] = 0;
-        if (a->switch_ticks > 0) {
+        if (switch_next > 0) {
             m[moff[HEAD_WEAPON] + 1] = 0;
             m[moff[HEAD_WEAPON] + 2] = 0;
         }
@@ -125,9 +173,29 @@ static void env_reset(Dust2Env* env) {
     g->bomb_being_planted_by = -1;
     g->bomb_being_defused_by = -1;
 
-    int bomb_carrier = (int)(xorshift32(&env->rng) % TEAM_SIZE);
-    spawn_team(g, sd, &env->rng, 0, sd->t_spawns, sd->n_t_spawns, bomb_carrier);
-    spawn_team(g, sd, &env->rng, 1, sd->ct_spawns, sd->n_ct_spawns, bomb_carrier);
+    /* Rung 0: the carrier is drawn among ACTIVE T slots only (a parked
+     * carrier would never drop/plant). Identity at n_active == TEAM_SIZE. */
+    int n_active     = sd->n_active_per_team;
+    int bomb_carrier = (int)(xorshift32(&env->rng) % n_active);
+    spawn_team(g, sd, &env->rng, 0, sd->t_spawns, sd->n_t_spawns, bomb_carrier, n_active);
+    spawn_team(g, sd, &env->rng, 1, sd->ct_spawns, sd->n_ct_spawns, bomb_carrier, n_active);
+    /* Parked slots: the GameState memset above left them all-zero, i.e.
+     * team=0 / alive=0 / area_idx=0 — area 0 is a REAL area and team=0 would
+     * mis-attribute parked CT rows to T in every team-indexed loop. Make
+     * them unambiguously "dead, nowhere, correct team". */
+    for (int i = 0; i < N_AGENTS; i++) {
+        if ((i % TEAM_SIZE) >= n_active) {
+            AgentState* a    = &g->agents[i];
+            a->participating = 0;
+            a->alive         = 0;
+            a->area_idx      = INVALID_AREA_IDX;
+            a->team          = (int8_t)((i < TEAM_SIZE) ? 0 : 1);
+            /* memset left enemy_mem_idx[*] = 0 = a REAL area; the struct
+             * comment promises INVALID_AREA_IDX for parked rows. */
+            for (int k = 0; k < TEAM_SIZE; k++)
+                a->enemy_mem_idx[k] = INVALID_AREA_IDX;
+        }
+    }
 
     g->bomb_carrier_id = bomb_carrier;
     /* Batch 2: round-fixed copy. NEVER reassigned mid-round (see cs2_types.h
@@ -158,7 +226,8 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
     float       phi_before[2];
     int8_t      vis10[N_AGENTS][N_AGENTS];
     int         kills[N_AGENTS][2];
-    int         n_kills                  = 0;
+    int         n_kills = 0;
+    int         nearest_vis_enemy[N_AGENTS]; /* R0-A: pre-combat target snapshot, -1 = none */
     int         bomb_just_planted        = 0;
     int         bomb_planter_id          = -1;
     int         bomb_just_defused        = 0;
@@ -261,14 +330,28 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
              * Pitfall: tests that pre-set agent.pitch via ctypes WRITE then
              * call env.step() will see pitch overwritten by the cont buffer.
              * Set the desired pitch via continuous_actions[i*AIM_DIM+1] instead. */
-            float pitch_target = continuous_actions[i * AIM_DIM + 1];
-            a->pitch           = fminf(fmaxf(pitch_target, -(float)M_PI / 2), (float)M_PI / 2);
-            ss->aim_delta_pitch_sum    += a->pitch;
-            ss->aim_delta_pitch_sq_sum += a->pitch * a->pitch;
-            ss->aim_delta_pitch_count  += 1;
-            es->aim_delta_pitch_sum    += a->pitch;
-            es->aim_delta_pitch_sq_sum += a->pitch * a->pitch;
-            es->aim_delta_pitch_count  += 1;
+            if (!sd->pin_pitch) {
+                float pitch_target = continuous_actions[i * AIM_DIM + 1];
+                a->pitch           = fminf(fmaxf(pitch_target, -(float)M_PI / 2), (float)M_PI / 2);
+                ss->aim_delta_pitch_sum    += a->pitch;
+                ss->aim_delta_pitch_sq_sum += a->pitch * a->pitch;
+                ss->aim_delta_pitch_count  += 1;
+                es->aim_delta_pitch_sum    += a->pitch;
+                es->aim_delta_pitch_sq_sum += a->pitch * a->pitch;
+                es->aim_delta_pitch_count  += 1;
+            } else {
+                /* R0-E.2 (#131): flat maps — continuous_actions[i*AIM_DIM+1] is
+                 * IGNORED and pitch is held at 0 so the 3D hit test reduces to
+                 * yaw (rz = 0 for same-stance shots; see cs2_combat.h). The
+                 * Welford pitch counters stay at 0 on purpose: a "pitch σ" of
+                 * a dimension nobody consumes would read as a live signal in
+                 * the metrics. Trainer side masks the pitch dim out of
+                 * log_prob_c / entropy_c (policy.aim_dim_mask == [1, 0]) and
+                 * assert_pin_pitch_agreement() refuses a mismatch at startup.
+                 * PITFALL: the env still needs crouch_enabled=0 for stance
+                 * parity — a crouched target is |rz| = 24 > HIT_HALF_WIDTH. */
+                a->pitch = 0.0f;
+            }
         }
         count_action(ss->action_shoot, es->action_shoot, shoot_act, 2);
 
@@ -299,7 +382,54 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
     }
 
     build_vis_matrix(g, sd, vis10);
-    process_combat(env, actions, vis10, kills, &n_kills, ss, es);
+
+    /* ── R0-A pair counters + nearest-visible-enemy snapshot ──
+     * MUST sit between build_vis_matrix and process_combat: process_combat
+     * sets alive=0 on a kill, so anything after it would drop the kill tick
+     * from the pair counters and make the shooter-side scoring depend on the
+     * hitbox roll. One pre-combat liveness snapshot for everything below. */
+    {
+        int   seen_any[N_AGENTS] = {0};
+        float nearest_d2[N_AGENTS];
+        for (int i = 0; i < N_AGENTS; i++) {
+            nearest_vis_enemy[i] = -1;
+            nearest_d2[i]        = 1e30f;
+        }
+        for (int i = 0; i < N_AGENTS; i++) {
+            AgentState* ai = &g->agents[i];
+            if (!ai->participating || !ai->alive)
+                continue;
+            for (int j = 0; j < N_AGENTS; j++) {
+                AgentState* aj = &g->agents[j];
+                if (j == i || aj->team == ai->team || !aj->participating || !aj->alive)
+                    continue;
+                float dx = aj->x - ai->x, dy = aj->y - ai->y;
+                float d2               = dx * dx + dy * dy;
+                float d                = sqrtf(d2);
+                ss->min_enemy_distance = fminf(ss->min_enemy_distance, d);
+                es->min_enemy_distance = fminf(es->min_enemy_distance, d);
+                if (vis10[i][j]) {
+                    seen_any[i] = 1;
+                    if (d2 < nearest_d2[i]) {
+                        nearest_d2[i]        = d2;
+                        nearest_vis_enemy[i] = j;
+                    }
+                    if (j > i && vis10[j][i]) { /* unordered pair, counted once */
+                        ss->mutual_vis_pair_ticks++;
+                        es->mutual_vis_pair_ticks++;
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < N_AGENTS; i++) {
+            if (seen_any[i]) {
+                ss->agent_ticks_with_visible_enemy++;
+                es->agent_ticks_with_visible_enemy++;
+            }
+        }
+    }
+
+    process_combat(env, actions, vis10, kills, &n_kills, ss, es, nearest_vis_enemy);
 
     for (int i = 0; i < N_AGENTS; i++) {
         if (!g->agents[i].alive) {

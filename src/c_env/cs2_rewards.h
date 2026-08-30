@@ -28,10 +28,19 @@ static float _potential(Dust2Env* env, int team) {
             if (a->area_idx >= 0 && sd->bombsite_by_idx[a->area_idx]) {
                 site_t += 1.0f;
             }
-            /* Navigation shaping: reward every alive agent for being close to bombsite */
-            if (area_id != INVALID_AREA_IDX && area_id <= sd->max_area_id) {
+            /* Navigation shaping: reward every alive agent for being close to bombsite.
+             * R0-F (#136): guard on scale (a float compare survives -ffast-math;
+             * isfinite() does not — it folds to true and NaN/inf leaks into the
+             * potential). TWO conventions meet here, both handled: map.py fills
+             * unreachable areas with the FINITE value 4×max (closeness = 1-4 < 0
+             * → clamped to 0 below, same effect as the old isfinite skip), and
+             * `dist < 1e29f` is the belt-and-braces guard for a genuinely
+             * non-finite / 1e30-sentinel entry (e.g. bombsites=[] with scale
+             * forced > 0 by a future knob). */
+            if (sd->bombsite_dist_scale > 0.0f && area_id != INVALID_AREA_IDX &&
+                area_id <= sd->max_area_id) {
                 float dist = sd->bombsite_dist[area_id];
-                if (isfinite(dist)) {
+                if (dist < 1e29f) {
                     float closeness = 1.0f - dist * sd->bombsite_dist_scale;
                     if (closeness < 0.0f)
                         closeness = 0.0f;
@@ -51,10 +60,11 @@ static float _potential(Dust2Env* env, int team) {
         }
     }
 
-    if (!env->game.bomb_planted && bomb_carrier_area_id != INVALID_AREA_IDX &&
-        bomb_carrier_area_id <= sd->max_area_id) {
+    /* R0-F (#136): same scale>0 + dist<1e29f guards as the nav block above. */
+    if (sd->bombsite_dist_scale > 0.0f && !env->game.bomb_planted &&
+        bomb_carrier_area_id != INVALID_AREA_IDX && bomb_carrier_area_id <= sd->max_area_id) {
         float dist = sd->bombsite_dist[bomb_carrier_area_id];
-        if (isfinite(dist)) {
+        if (dist < 1e29f) {
             float closeness = 1.0f - dist * sd->bombsite_dist_scale;
             if (closeness < 0.0f) {
                 closeness = 0.0f;
@@ -159,10 +169,24 @@ static void compute_rewards(Dust2Env* env,
          * timed_out (and per-agent rewards) for outcome metrics, not this
          * accumulator. */
         for (int i = 0; i < N_AGENTS; i++) {
+            /* Rung 0: parked slots are not on the team — no payout. This loop
+             * deliberately ignores `alive` (see PITFALL above), so it needs
+             * its own participating guard. */
+            if (!g->agents[i].participating)
+                continue;
             float w          = (g->agents[i].team == 0) ? t_mag : ct_mag;
             env->rewards[i] += w;
             ss->reward_win  += w;
             es->reward_win  += w;
+            /* R0-A: one-sided diagnostic split (reward_win nets ~0). Summed
+             * over participating team members: = n_active x per-agent payout. */
+            if (g->agents[i].team == 0) {
+                ss->reward_win_t += w;
+                es->reward_win_t += w;
+            } else {
+                ss->reward_win_ct += w;
+                es->reward_win_ct += w;
+            }
         }
     }
 
@@ -236,6 +260,11 @@ static void compute_rewards(Dust2Env* env,
         phi_after[0] = _potential(env, 0);
         phi_after[1] = _potential(env, 1);
         for (int i = 0; i < N_AGENTS; i++) {
+            /* Rung 0: ungated by alive on purpose (dead agents still feel
+             * team potential), but parked rows must not — they would inflate
+             * reward_pbrs by (TEAM_SIZE / n_active)x. */
+            if (!g->agents[i].participating)
+                continue;
             float pbrs =
                 sd->pbrs_gamma * phi_after[g->agents[i].team] - phi_before[g->agents[i].team];
             env->rewards[i] += pbrs;

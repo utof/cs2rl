@@ -14,6 +14,15 @@
  * — re-run that whenever map.py or SIMPLE_ROOMS changes. */
 static void load_nav_data(StaticData* sd) {
     memset(sd, 0, sizeof(StaticData));
+    /* Rung 0 knobs (cs2_types.h StaticData tail). The memset above zeroes
+     * them; zero n_active_per_team trips env_init's assert and zero
+     * crouch_enabled would mask crouch for the human player (cs2_input.h).
+     * Every other scalar below is assigned by name from nav_data.h; the
+     * Python side (cs2_env.py binding.init) sets all of these plus the
+     * reward weights — keep this list in sync when adding StaticData fields. */
+    sd->n_active_per_team   = TEAM_SIZE;
+    sd->pin_pitch           = 0;
+    sd->crouch_enabled      = 1;
     sd->N                   = NAV_N;
     sd->vis_matrix          = (int8_t*)NAV_VIS_MATRIX;
     sd->raster_grid         = (int32_t*)NAV_RASTER_GRID;
@@ -209,9 +218,9 @@ static int demo_exec_play(int argc, char** argv, const char* policy_path) {
     /* $UV_PROJECT_ENVIRONMENT / $CS2RL_VENV may be relative to launch cwd.
      * realpath the parent, not the file: .venv/bin/python is often a symlink
      * to the base interpreter, and execv of that target drops the venv. */
-    char abs_python[PATH_MAX];
-    char parent[PATH_MAX];
-    char abs_parent[PATH_MAX];
+    char        abs_python[PATH_MAX];
+    char        parent[PATH_MAX];
+    char        abs_parent[PATH_MAX];
     const char* base = strrchr(python, '/');
     if (!base || !base[1]) {
         print_borrow_hint(abs_policy, argc, argv);
@@ -225,7 +234,7 @@ static int demo_exec_play(int argc, char** argv, const char* policy_path) {
     join_path(abs_python, sizeof(abs_python), abs_parent, base + 1);
 
     char* eargv[argc + 5]; /* python, src/play.py, --policy, abs, rest, NULL */
-    int   n = 0;
+    int   n    = 0;
     eargv[n++] = abs_python;
     eargv[n++] = "src/play.py";
     eargv[n++] = "--policy";

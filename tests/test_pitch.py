@@ -570,3 +570,34 @@ def test_pitch_clamps_at_pi_over_2_down():
     finally:
         if hasattr(env, "close"):
             env.close()
+
+
+# ── R0-E.2 (#131) pin cases ───────────────────────────────────────────────
+
+
+def test_pinned_pitch_stays_zero_across_ticks_and_default_moves():
+    """pin_pitch=1: cont[:,1] is ignored on EVERY tick (not just the first) and
+    the Welford pitch counters never increment. The same actions on the
+    default env move pitch — so the gate is the StaticData flag, not a
+    coincidence of zero inputs."""
+    from c_env.cs2_env import Cs2Env
+    from map import make_simple_map
+    rng = np.random.default_rng(0)
+    for pin in (1, 0):
+        env = Cs2Env(map_data=make_simple_map(), pin_pitch=pin)
+        try:
+            env.reset(seed=42)
+            for _ in range(5):
+                act, cont = _zero_actions()
+                cont[:, 1] = rng.uniform(-0.7, 0.7, size=10).astype(np.float32)
+                env.step(act, cont)
+            pitches = [env._c_env.game.agents[i].pitch for i in range(10)]
+            cnt = env._c_env.episode_stats.aim_delta_pitch_count
+            if pin:
+                assert pitches == [0.0] * 10, pitches
+                assert cnt == 0
+            else:
+                assert any(p != 0.0 for p in pitches), pitches
+                assert cnt == 50
+        finally:
+            env.close()

@@ -59,6 +59,14 @@ __all__ = ("AIM_DIM", )
 # On an OBS_DIM bump, update cs2_types.h + rerun the generator, then bump this literal.
 OBS_DIM = 110
 
+# Agents per team. A bare literal ON PURPOSE, for the same class of reason as
+# OBS_DIM above: train.py must stay import-light (`--dump-config` guarantees no
+# torch/nav import — see _atomic_save_state_dict's docstring), and `nav` pulls
+# awpy/polars/shapely (+0.6 s and a polars warning) just to read one 5.
+# Cross-checked against nav.TEAM_SIZE and cs2_env.TEAM_SIZE by
+# tests/test_train_env.py::test_obs_dim_constant_consistency.
+TEAM_SIZE = 5
+
 # Batch 3 (continuous aim H-PPO): state-independent log_std parameter
 # for the Gaussian aim head. σ_init = 0.1 rad ≈ 5.7° matches mega-spec
 # §9 lock and the H-PPO literature default. σ_min = 0.01 rad ≈ 0.6° —
@@ -71,6 +79,30 @@ OBS_DIM = 110
 LOG_STD_INIT = math.log(0.1)
 LOG_STD_MIN = math.log(0.01)
 LOG_STD_MAX = math.log(0.5)
+
+
+def validate_aim_log_std_max(aim_log_std_max) -> float:
+    """Resolve + range-check the run's aim σ cap (R0-E.3, #131).
+
+    Returns the float cap (LOG_STD_MAX when None). Raises ValueError unless
+    LOG_STD_MIN < cap <= LOG_STD_MAX, i.e. σ in (0.01, 0.5].
+
+    WHY a separate torch-free helper: make_policy() only runs after the env
+    and torch are up, so a bad --aim-log-std-max used to surface ~30 s into a
+    launch AND slip past `--dump-config` (the Modal/run_rung1 fingerprint
+    step). main() now calls this right after parse_args(), above the
+    --dump-config exit, so the fingerprint catches it.
+    PITFALL (2026-08-30, rung1 sweep): the bound is INCLUSIVE at LOG_STD_MAX =
+    log 0.5 = -0.693147..., so a hand-rounded "-0.6931" is > the cap by 5e-5
+    and is REJECTED — pass -0.69315 (or omit the flag) for "σ cap 0.5".
+    """
+    cap = float(LOG_STD_MAX if aim_log_std_max is None else aim_log_std_max)
+    if not (LOG_STD_MIN < cap <= LOG_STD_MAX):
+        raise ValueError(f"aim_log_std_max={cap} must lie in ({LOG_STD_MIN}, {LOG_STD_MAX}] "
+                         f"(σ in (0.01, 0.5])")
+    return cap
+
+
 # gh#91: σ to widen a BC-frozen aim head to at PPO resume. BC detaches
 # aim_log_std (spec D-6) so bc_warmstart.pt carries σ=0.1 while fitting
 # obs-dependent |μ| up to ~0.63 rad — one lr=3e-4 Adam step then moves μ a
@@ -83,7 +115,7 @@ AIM_LOG_STD_RESUME_INIT = math.log(0.3)
 _LOG_2PI = math.log(2.0 * math.pi)
 
 
-def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6):
+def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6, cap=None):
     """gh#91: widen a BC-frozen aim head before PPO resumes from it.
 
     WHAT: if ``state_dict`` carries an ``aim_log_std`` tensor still sitting
@@ -111,6 +143,11 @@ def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6):
       * Batch 7: the matcher covers aim_log_std, aim_log_std_t and
         aim_log_std_ct. The legacy→split warm conversion must still call this
         FIRST, on the legacy dict — see convert_legacy_state_dict_to_split.
+      * R0-E.3 (#131): ``cap`` is the run's --aim-log-std-max. The fill value
+        is min(AIM_LOG_STD_RESUME_INIT, cap) — widening to log(0.3) under a
+        log(0.05) cap would be clamped away in every forward anyway, but the
+        stored parameter would sit outside the band and the σ gradient would
+        be dead (clamp has zero gradient outside its range). None = no cap.
     """
     import re as _re
 
@@ -126,7 +163,9 @@ def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6):
         # the LEGACY dict, before convert_legacy_state_dict_to_split.
         if _re.search(r"aim_log_std(_t|_ct)?$", key) and _torch.allclose(
                 val, _torch.full_like(val, LOG_STD_INIT), atol=atol):
-            state_dict[key] = _torch.full_like(val, AIM_LOG_STD_RESUME_INIT)
+            fill = AIM_LOG_STD_RESUME_INIT if cap is None else min(AIM_LOG_STD_RESUME_INIT,
+                                                                   float(cap))
+            state_dict[key] = _torch.full_like(val, fill)
             changed = True
     return changed
 
@@ -395,6 +434,81 @@ def _apply_action_masks(logits_list, mask):
     return masked
 
 
+# ── Masked reductions over participating rows (Rung 0, spec 2026-08-29 §2.2) ──
+# WHY these are free functions and not methods on the trainer: the trainer is a
+# monkey-patched PuffeRL instance (pufferl.py is a site-package and is never
+# edited), so every reduction the update path needs has to live here where a
+# unit test can call it without building a trainer.
+# DTYPE CONTRACT used by every caller below: the *bool* [S,T] mask is for
+# INDEXING (`sel[mb_part]`); the *float* copy (`mb_part.to(torch.float32)`) is
+# the weight `w` these helpers take. `sel[mb_part_f]` is an IndexError and
+# `masked_mean(x, bool_mask)` would work only by accident — the helpers
+# `.to(x.dtype)` their weight, so pass whichever, but do not swap the two roles.
+# SHAPE PITFALL: `w` is multiplied (not indexed) against `x`, so it must be
+# broadcast-compatible with `x`. Reducing a FLAT (S*T,) tensor (entropy,
+# per-head entropies, ratio_d/ratio_c) with an [S,T] weight silently
+# broadcasts to [S, S*T] — pass the flattened weight for flat tensors.
+
+
+def masked_mean(x, w):
+    """Mean of x over rows where w == 1. w broadcasts to x; w.sum() == 0 ⇒ 0.
+
+    Rung 0 §2.2: parked agent rows (noop-masked, entropy exactly 0, zero
+    reward) must not enter any trainer statistic, or every all-row mean at
+    n_active=1 is diluted 5×. Masked mean = (x·w).sum() / max(w.sum(), 1).
+    """
+    w = w.to(x.dtype)
+    return (x * w).sum() / w.sum().clamp(min=1.0)
+
+
+def masked_std_unbiased(x, w, mean):
+    """Unbiased (n−1) std over the w == 1 rows, matching torch .std() on the subset.
+
+    `mean` is the caller's already-computed masked_mean — passed in rather than
+    recomputed so the two-pass (mean, then deviation) reduction is done once.
+    PITFALL: the (n−1) clamp means a single participating row yields std 0, not
+    NaN; masked_normalize_adv's +1e-8 then makes that row's normalised
+    advantage 0 rather than inf.
+    """
+    w = w.to(x.dtype)
+    n = w.sum()
+    return (((x - mean)**2 * w).sum() / (n - 1.0).clamp(min=1.0)).sqrt()
+
+
+def masked_normalize_adv(flat_adv, w):
+    """(adv − mean) / (std + 1e-8) over participating rows; parked rows → 0.
+
+    Uses the same unbiased std as the unmasked path so the two agree exactly
+    when w is all-ones. Zeroing parked rows makes their pg contribution 0
+    regardless of ratio, which is what the masked pg mean then divides out.
+    """
+    w = w.to(flat_adv.dtype).reshape(-1)
+    m = masked_mean(flat_adv, w)
+    s = masked_std_unbiased(flat_adv, w, m)
+    return (flat_adv - m) / (s + 1e-8) * w
+
+
+def masked_explained_variance(y_pred, y_true, part):
+    """explained_variance over part == True rows (whole-buffer, Rung 0 §2.2).
+
+    Returns nan when the participating y_true has zero variance, mirroring
+    PufferLib's `torch.nan if var_y == 0` convention. `part` is the BOOL mask
+    here (this one indexes rather than weights — the variance of a weighted
+    tensor is not the variance of the subset).
+    """
+    import torch
+
+    part = part.to(torch.bool)
+    yt = y_true[part]
+    yp = y_pred[part]
+    if yt.numel() < 2:
+        return float("nan")
+    var_y = yt.var()
+    if var_y == 0:
+        return float("nan")
+    return float(1 - (yt - yp).var() / var_y)
+
+
 # ── Reward weights: the single wiring source of truth (spec 2026-08-01 §4.2) ──
 # Config key == make_env kwarg name == CLI flag (dashes) — NO prefix rewriting.
 # Six of the 23 do not start with `reward_` (the pbrs_* group), so any code
@@ -413,9 +527,9 @@ def _apply_action_masks(logits_list, mask):
 # the trained baseline; an unflagged run must stay byte-identical to the
 # pre-wiring env.
 #
-# Deliberately NOT threaded: pbrs_gamma (must equal training gamma — dedicated
-# guarded make_puffer_env parameter), team_spirit (config-threaded separately),
-# include_step_stats_in_info (issue #100, out of scope).
+# Deliberately NOT threaded here: pbrs_gamma (threaded as a non-weight knob by
+# env_knobs_from_args via resolve_gammas, R0-J), team_spirit (config-threaded
+# separately), include_step_stats_in_info (issue #100, out of scope).
 REWARD_WEIGHT_DEFAULTS = {
                                                        # ── non-potential (hackable — sweep with care) ──
     "reward_win": 1.0,
@@ -518,6 +632,330 @@ def _atomic_save_state_dict(state_dict, path):
     os.replace(tmp, path)
 
 
+# ── R0-C (#134): full-state checkpoint / resume ───────────────────────────
+# PufferLib 3.0 saves model + optimizer + step counters (pufferl.py
+# save_checkpoint) and ships NO loader. Everything train.py layers on top
+# (SAC-α, LR scheduler, return normaliser, warm-start machine, self-play pool,
+# RNGs) lives here in a third file, train_state.pt, next to PufferLib's two.
+# Budget keys are allowlisted ON PURPOSE: the whole point of --resume-run is
+# `while trainer.epoch < trainer.total_epochs` (train()) continuing past a
+# crash, and run_rung1.sh's retry loop must be able to extend --timesteps.
+# check_resume_config prints a WARN line for every allowlisted key that changed.
+# PITFALL: n_active_per_team is deliberately NOT allowlisted — it changes the
+# unit of global_step (participating agent-steps) and the participating buffer
+# layout, so a resumed run under a different value would be nonsense.
+# PITFALL (R0-D #135): `seed` is NOT allowlisted either. A resumed run's RNG
+# streams come back from train_state.pt (restore_train_state), so a changed
+# --seed would be silently ignored for python/numpy/torch yet still re-seed
+# the freshly built envs — an inconsistent, unlabelled run. Refuse instead;
+# pass the original --seed (config.json has it) when resuming.
+RESUME_CONFIG_ALLOWLIST = frozenset(
+    {"data_dir", "device", "run_id", "total_timesteps", "participating_timesteps"})
+# R0-C: epochs between full-state checkpoint sets. ONE constant for the CLI
+# default and build_train_config's getattr fallback (harness / SimpleNamespace
+# callers without the flag) — two literals drifted once (final review #7).
+DEFAULT_CHECKPOINT_INTERVAL = 200
+# Trainer attrs of the warm-start entropy machine + SAC target (all set in
+# _patch_trainer_with_return_norm). Plain Python scalars/None — pickled as-is.
+_WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
+                    "_batch1_log_alpha_reset_done", "_batch1_current_target_entropy",
+                    "_batch1_warmstart_h_anchor", "_batch1_warmstart_h0",
+                    "_batch1_warmstart_warn_epoch")
+
+
+def _rng_state_dict():
+    """Snapshot python/numpy/torch(+cuda) RNG states. Env xorshift32 state is
+    NOT included (lives in C; see load_full_resume's WARN)."""
+    import torch
+    st = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state()
+    }
+    if torch.cuda.is_available():
+        st["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return st
+
+
+def seed_everything(seed: int) -> None:
+    """R0-D (#135): seed every host-side RNG that _rng_state_dict snapshots.
+
+    WHAT: random, numpy (legacy global), torch CPU and — when available — all
+    CUDA devices. This is the MIRROR of _rng_state_dict/_rng_load_state_dict:
+    the same RNG set, one fresh-seed path here and one resume path there. Add a
+    new RNG to all three or resume will silently diverge from a fresh run.
+    WHY a function: train() used to inline these calls, and no default-suite
+    test noticed when they were dropped (only the 2-subprocess e2e test did;
+    test_two_runs_same_seed_identical[3] now runs in the default suite).
+    test_seed_everything_is_deterministic pins it now.
+    PITFALL: seeds only — it does NOT set torch.use_deterministic_algorithms
+    or cudnn flags, so CUDA runs are seeded but not bit-exact reproducible.
+    Env xorshift32 streams are seeded separately via env_seed_base.
+    """
+    import torch
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _rng_load_state_dict(st):
+    """Inverse of _rng_state_dict. A CUDA state saved on a GPU box is skipped
+    silently on a CPU-only resume (device is allowlisted)."""
+    import torch
+    random.setstate(st["python"])
+    np.random.set_state(st["numpy"])
+    torch.set_rng_state(st["torch_cpu"])
+    if "torch_cuda" in st and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(st["torch_cuda"])
+
+
+def collect_train_state(trainer, self_play_mgr) -> dict:
+    """Everything train.py adds on top of PuffeRL's trainer_state.pt, CPU-side
+    so the file is device-agnostic. Requires _patch_trainer_with_return_norm
+    (the _log_alpha_tensor / _alpha_optimizer / _ret_* aliases)."""
+    return {
+                                                                       # Set identity (fix round 1, review #1): load_full_resume refuses a
+                                                                       # sidecar whose epoch/global_step disagree with trainer_state.pt — a
+                                                                       # crash between the three writes must never pair epoch-N weights with
+                                                                       # epoch-(N-1) optimizer/α/scheduler state silently.
+        "epoch": int(trainer.epoch),
+        "global_step": int(trainer.global_step),
+        "log_alpha": trainer._log_alpha_tensor.detach().cpu().clone(),
+        "alpha_optimizer": trainer._alpha_optimizer.state_dict(),
+                                                                       # CosineAnnealingLR is stepped per epoch, not a fn of global_step;
+                                                                       # its T_max is overridden on restore (see restore_train_state).
+        "scheduler": trainer.scheduler.state_dict(),
+        "ret_mean": trainer._ret_mean.detach().cpu().clone(),
+        "ret_var": trainer._ret_var.detach().cpu().clone(),
+        "ret_count": trainer._ret_count.detach().cpu().clone(),
+        "warmstart": {
+            k: getattr(trainer, k)
+            for k in _WARMSTART_ATTRS
+        },
+        "self_play": self_play_mgr.state_dict(),
+        "rng": _rng_state_dict(),
+    }
+
+
+def restore_train_state(trainer, self_play_mgr, state: dict):
+    """In-place restore of collect_train_state's dict.
+
+    PITFALL: `_ret_*` and `log_alpha` are closure-locals aliased onto the
+    trainer (_patch_trainer_with_return_norm) — copy_() into them, never
+    rebind, or the closure keeps training on its own stale copy.
+    """
+    import torch                                                       # local ON PURPOSE: train.py module scope stays torch-free
+    with torch.no_grad():
+        trainer._log_alpha_tensor.data.copy_(state["log_alpha"].to(
+            trainer._log_alpha_tensor.device))
+        trainer._ret_mean.copy_(state["ret_mean"].to(trainer._ret_mean.device))
+        trainer._ret_var.copy_(state["ret_var"].to(trainer._ret_var.device))
+        trainer._ret_count.copy_(state["ret_count"].to(trainer._ret_count.device))
+    trainer._alpha_optimizer.load_state_dict(state["alpha_optimizer"])
+                                                                       # CosineAnnealingLR.state_dict() carries T_max, so a wholesale load would
+                                                                       # re-install the OLD horizon; past it the recursive cosine (torch
+                                                                       # lr_scheduler CosineAnnealingLR.get_lr) bounces the LR back UP — a
+                                                                       # periodic LR on any allowlisted --timesteps extension. Keep
+                                                                       # last_epoch/_step_count, adopt the NEW trainer's horizon (pufferl.py:
+                                                                       # total_timesteps // batch_size). When the horizon changed, drop the LR
+                                                                       # onto the closed-form cosine at the restored epoch so the extension
+                                                                       # continues annealing from there (the recursive form scales the PREVIOUS
+                                                                       # lr, and an already-finished run sits at lr=0, which would otherwise stay
+                                                                       # 0 forever). Same-budget resumes leave the optimizer lr untouched — the
+                                                                       # round trip stays bit-exact.
+    sd = dict(state["scheduler"])
+    old_t_max, sd["T_max"] = sd["T_max"], trainer.scheduler.T_max
+    trainer.scheduler.load_state_dict(sd)
+    if old_t_max != trainer.scheduler.T_max:
+        sch = trainer.scheduler
+        for group, base in zip(trainer.optimizer.param_groups, sch.base_lrs, strict=True):
+            group["lr"] = sch.eta_min + (base - sch.eta_min) * (
+                1 + math.cos(math.pi * sch.last_epoch / sch.T_max)) / 2
+        sch._last_lr = [g["lr"] for g in trainer.optimizer.param_groups]
+    for k, v in state["warmstart"].items():
+        setattr(trainer, k, v)
+    self_play_mgr.load_state_dict(state["self_play"])
+    _rng_load_state_dict(state["rng"])
+
+
+def _install_full_checkpointing(trainer, self_play_mgr):
+    """Override PuffeRL.save_checkpoint on this instance (same MethodType
+    pattern as _patch_trainer_with_return_norm). Differences from stock:
+    no `model_path exists → return` early-out (a resumed run re-saves the
+    same epoch after loading, and a crash between the model write and the
+    state writes must not freeze the state files), atomic writes for all
+    three files, and the train_state.pt sidecar. Still returns the model
+    path — PuffeRL.close() copies it to <data_dir>/<run_id>.pt.
+
+    WRITE ORDER is load-bearing: model → train_state → trainer_state. The
+    LAST file written (trainer_state.pt) names the model (model_name) and
+    carries the epoch the sidecar is checked against, so a crash anywhere
+    in the sequence leaves a set that resolve_resume_run/load_full_resume
+    either accept whole (all three from the same epoch) or refuse — never
+    a newer model with an older optimizer."""
+
+    def _save_checkpoint(self):
+        run_id = self.logger.run_id
+        path = Path(self.config["data_dir"]) / run_id
+        path.mkdir(parents=True, exist_ok=True)
+        model_name = f"model_{self.epoch:06d}.pt"
+        model_path = path / model_name
+        _atomic_save_state_dict(self.uncompiled_policy.state_dict(), model_path)
+        _atomic_save_state_dict(collect_train_state(self, self_play_mgr), path / "train_state.pt")
+        _atomic_save_state_dict(
+            {
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "global_step": self.global_step,
+                "agent_step": self.global_step,
+                "update": self.epoch,
+                "model_name": model_name,
+                "run_id": run_id,
+            }, path / "trainer_state.pt")
+        return str(model_path)
+
+    trainer.save_checkpoint = types.MethodType(_save_checkpoint, trainer)
+    return trainer
+
+
+def resolve_resume_run(run_dir: Path, run_id: str | None = None) -> dict:
+    """Locate the checkpoint SET under <run_dir>/<run_id>/: the model named by
+    trainer_state.pt['model_name'] (NOT max(model_*.pt) — a crash after the
+    model write but before trainer_state.pt leaves a newer orphan model whose
+    optimizer state was never saved), plus trainer_state.pt + train_state.pt.
+    run_id=None ⇒ the unique subdir holding trainer_state.pt (error if 0 or
+    >1) and the id is read from trainer_state.pt['run_id']. Every failure is
+    a SystemExit with a [Resume] message (a stock-PuffeRL run dir has no
+    train_state.pt sidecar and must not die with a raw traceback)."""
+    import torch
+    run_dir = Path(run_dir)
+    if run_id is None:
+        cands = sorted(p.parent for p in run_dir.glob("*/trainer_state.pt"))
+        if len(cands) != 1:
+            raise SystemExit(f"[Resume] expected exactly one <run_id>/trainer_state.pt under "
+                             f"{run_dir}, found {len(cands)}: pass --run-id")
+        run_id = cands[0].name
+    d = run_dir / run_id
+    ts_path = d / "trainer_state.pt"
+    if not ts_path.exists():
+        raise SystemExit(f"[Resume] {ts_path} not found")
+    ts = torch.load(ts_path, map_location="cpu", weights_only=False)
+    model_name = ts.get("model_name")
+    if not model_name:
+        raise SystemExit(f"[Resume] {ts_path} has no model_name — not a full-state checkpoint")
+    model_path = d / model_name
+    if not model_path.exists():
+        raise SystemExit(f"[Resume] {ts_path} names {model_name} but {model_path} is missing")
+    newer = [p.name for p in d.glob("model_*.pt") if p.name > model_name]
+    if newer:
+        print(f"[Resume] WARN: ignoring {len(newer)} model file(s) newer than {model_name} "
+              f"({', '.join(sorted(newer))}) — their optimizer state was never saved")
+    st_path = d / "train_state.pt"
+    if not st_path.exists():
+        raise SystemExit(f"[Resume] {st_path} not found — run predates full-state checkpointing "
+                         "(R0-C); use --resume <model.pt> for a weights-only restart")
+    return {
+        "run_id": ts.get("run_id", run_id),
+        "model_path": model_path,
+        "trainer_state_path": ts_path,
+        "train_state_path": st_path
+    }
+
+
+def check_resume_config(run_dir: Path, new_cfg: dict, allow=RESUME_CONFIG_ALLOWLIST):
+    """Hard-error unless every key of the on-disk config.json equals new_cfg
+    except `allow`. Compared through the JSON round-trip (sort_keys, default=str)
+    so tuples/Paths compare the way they were written. MUST run before the
+    unconditional config.json rewrite in train()."""
+    cfg_path = Path(run_dir) / "config.json"
+    if not cfg_path.exists():
+        raise SystemExit(f"[Resume] {cfg_path} not found — cannot guard against a config change")
+    old = json.loads(cfg_path.read_text())
+    new = json.loads(json.dumps(new_cfg, sort_keys=True, default=str))
+
+    def _same(k):
+        a, b = old.get(k, "<missing>"), new.get(k, "<missing>")
+        # data_dir: train() rewrites args.checkpoint_dir to the ABSOLUTE run
+        # dir on --resume-run, so a run launched with a relative/--name path
+        # would otherwise WARN on every resume and train users to ignore it.
+        if k == "data_dir" and isinstance(a, str) and isinstance(b, str):
+            return Path(a).resolve() == Path(b).resolve()
+        return a == b
+
+    changed = sorted(k for k in (old.keys() | new.keys()) if not _same(k))
+    for k in changed:
+        if k in allow:
+            print(
+                f"[Resume] WARN: allowlisted config key changed: {k}: {old.get(k)!r} -> {new.get(k)!r}"
+            )
+    diffs = [k for k in changed if k not in allow]
+    if diffs:
+        raise SystemExit("[Resume] config.json mismatch on non-allowlisted keys: " + ", ".join(
+            f"{k}: {old.get(k, '<missing>')!r} -> {new.get(k, '<missing>')!r}" for k in diffs))
+
+
+def check_checkpoint_set(model_path, ts: dict, st: dict) -> None:
+    """Set consistency (review #1): model_<epoch>.pt, trainer_state.pt and
+    train_state.pt must all come from ONE epoch. The model is already the one
+    trainer_state.pt names (resolve_resume_run); this checks the sidecar's
+    own epoch/global_step against both. SystemExit, never a bare assert
+    (stripped under -O). Pure in its inputs so the mismatch cases are unit-
+    testable without a trainer."""
+    model_epoch = int(Path(model_path).stem.split("_")[-1])
+    ts_epoch, st_epoch = int(ts["update"]), int(st.get("epoch", -1))
+    ts_step, st_step = int(ts["global_step"]), int(st.get("global_step", -1))
+    if not (model_epoch == ts_epoch == st_epoch and ts_step == st_step):
+        raise SystemExit(f"[Resume] inconsistent checkpoint set under {Path(model_path).parent}: "
+                         f"model epoch {model_epoch}, trainer_state epoch {ts_epoch} "
+                         f"(global_step {ts_step}), train_state epoch {st_epoch} "
+                         f"(global_step {st_step}) — a crash mid-save; resume from an older "
+                         "complete set or use --resume <model.pt>")
+
+
+def load_full_resume(trainer, self_play_mgr, paths: dict) -> dict:
+    """Policy weights are loaded by the --resume path (resolve_resume_split);
+    this restores optimizer, counters and the sidecar. Returns
+    {"resumed_from_step", "epoch"}. Must run AFTER every trainer patch so the
+    aliases restore_train_state writes into exist."""
+    import torch
+    ts = torch.load(paths["trainer_state_path"],
+                    map_location=trainer.config["device"],
+                    weights_only=False)
+    st = torch.load(paths["train_state_path"], map_location="cpu", weights_only=False)
+    check_checkpoint_set(paths["model_path"], ts, st)
+    trainer.optimizer.load_state_dict(ts["optimizer_state_dict"])
+    trainer.global_step = int(ts["global_step"])
+    trainer.epoch = int(ts["update"])
+    restore_train_state(trainer, self_play_mgr, st)
+    print("[Resume] WARN: resume not bit-exact for env sampling (env xorshift32 state is "
+          "not checkpointed).")
+    return {"resumed_from_step": trainer.global_step, "epoch": trainer.epoch}
+
+
+def check_resume_metrics_bound(resumed_step: int, last_row_step: int, checkpoint_interval: int,
+                               steps_per_epoch: int) -> tuple[int, int]:
+    """Spec §R0-C sanity bound of a restored global_step against the last
+    metrics.jsonl row of the same run_id. Returns (lo, hi); raises SystemExit
+    (never a bare assert — stripped under -O) when outside.
+
+    Both sides are checkpoint_interval epochs wide: checkpoints fire every
+    checkpoint_interval epochs unconditionally (pufferl.py train loop), but
+    a row is only written when PuffeRL builds `logs`, which it throttles to
+    ≥0.25 s since the last log — so with fast epochs the last row can be up
+    to checkpoint_interval-1 epochs BEHIND the checkpoint (hence + rather
+    than the one-epoch upper side the brief sketched), and the checkpoint
+    can be up to checkpoint_interval epochs behind the last row."""
+    lo = last_row_step - checkpoint_interval * steps_per_epoch
+    hi = last_row_step + checkpoint_interval * steps_per_epoch
+    if not lo <= resumed_step <= hi:
+        raise SystemExit(f"[Resume] restored global_step {resumed_step} outside [{lo}, {hi}] "
+                         f"around last metrics row {last_row_step} "
+                         f"(checkpoint_interval={checkpoint_interval}, "
+                         f"steps/epoch={steps_per_epoch})")
+    return lo, hi
+
+
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
     """Return (agents_per_env, bptt_horizon, batch_size) used by both training
     and --dump-config. Single source of truth so the fingerprint dict captured
@@ -527,6 +965,38 @@ def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
     bptt_horizon = 64
     batch_size = num_envs * agents_per_env * bptt_horizon
     return agents_per_env, bptt_horizon, batch_size
+
+
+# First --seed whose base 42_950 * 100_000 = 4_295_000_000 exceeds 2**32 - 1
+# (= 4_294_967_295). At seed 42_949 env i fits for i <= 67_295, i.e. any
+# realistic num_envs. See env_seed_base.
+_MAX_SEED = 42_950
+
+
+def env_seed_base(seed: int) -> int:
+    """R0-D (#135): base seed handed to pufferlib.vector.make from --seed.
+
+    WHAT: --seed * 100_000. Env i (global index, 0..num_envs-1) gets C seed
+    base + i via env_kwargs["_seed"] (see build_env_factory), identically
+    under Serial and Multiprocessing — pufferlib's own (base + w) * E + j
+    composition is NOT used because vector.make drops its `seed` argument.
+    env_init then mixes the value (cs2_env.h) so adjacent seeds never alias.
+    WHY x100_000: keeps the env-seed ranges of consecutive --seed values
+    disjoint for any num_envs < 100_000, so "seed 3" and "seed 4" share no
+    env stream — pinned by test_env_seed_ranges_of_adjacent_seeds_disjoint.
+    PITFALL: Task 13's eval env is pinned at seed 10_000_003 = base(100) + 3;
+    only --seed 100 with >=4 envs collides. For --seed <= 4 no worker env seed
+    equals it (test_eval_seed_cannot_collide_with_worker_seeds).
+    PITFALL (uint32): py_init masks the C seed with & 0xFFFFFFFF, so base + i
+    must stay below 2**32. --seed >= 42_950 (_MAX_SEED) wraps at i=0 and could
+    alias another seed's env streams — rejected with ValueError rather than
+    silently wrapped (test_env_seed_base_rejects_uint32_overflow).
+    """
+    seed = int(seed)
+    if not 0 <= seed < _MAX_SEED:
+        raise ValueError(f"--seed must be in [0, {_MAX_SEED}) so env_seed_base(seed) + i "
+                         f"fits uint32 (C seed is masked & 0xFFFFFFFF); got {seed}")
+    return seed * 100_000
 
 
 def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
@@ -554,7 +1024,8 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # getattr() calls would re-indent every comment in it.
     #
     # CONTRACTS for the trainer wiring (do not re-derive these downstream):
-    # 1. Both *_steps are trainer.global_step units — agent steps, the same
+    # 1. Both *_steps are trainer.global_step units — PARTICIPATING agent steps
+    #    (Rung 0: 5× fewer raw env steps per unit at n_active=1), the same
     #    counter entropy_target_warmup_steps and target_entropy_schedule use.
     # 2. No CLI validation, deliberately. The pure schedule helper
     #    warmstart_entropy_state treats ramp_steps <= 0 as "jump straight to OFF
@@ -601,29 +1072,84 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # here on purpose; the analyzer reads split/trunk_active instead.
     tct_split_trunk = bool(getattr(args, "tct_split_trunk", False))
 
+    # ── Rung 0 §2.2: participating-units budget ──
+    # --timesteps is the PARTICIPATING agent-step budget (what the policy
+    # actually learns from), NOT the raw row count. PufferLib's epoch cap
+    # (total_epochs = total_timesteps // batch_size, pufferl.py:168-170, which
+    # also sets the cosine-LR T_max) counts RAW buffer rows, so the raw budget
+    # handed to it is scaled by TEAM_SIZE / n_active. Both numbers are
+    # recorded: done_training in _train_with_return_norm compares global_step
+    # (participating units) against participating_timesteps, and the epoch
+    # clause catches the floor-division slack.
+    # PITFALL: adding these keys shifts exp_lib.behavior_hash for all future
+    # runs (the hash covers sorted config.json) — recorded decision, same as
+    # the TAG/tct keys above.
+    # (the raw budget is bound to a local, not inlined in the dict below, for
+    # the same yapf reason as the warmstart block above: a long value
+    # expression inside the dict re-indents every trailing comment in it.)
+    knobs = env_knobs_from_args(args)
+    n_active = knobs["n_active_per_team"]
+    assert 1 <= n_active <= TEAM_SIZE, n_active
+    raw_timesteps = args.timesteps * TEAM_SIZE // n_active
+    # R0-E.3/4 (#131): aim-head knobs. CLI gives "on"/"off" for the entropy
+    # bonus (argparse choices); the test harness passes a bool — accept both so
+    # neither caller has to know the other's spelling. None cap ⇒ LOG_STD_MAX,
+    # so config.json always records the EFFECTIVE cap (provenance), never null.
+    # None of these are in RESUME_CONFIG_ALLOWLIST on purpose: a resume with a
+    # changed aim knob is a different experiment and must be refused.
+    _aeb = getattr(args, "aim_entropy_bonus", "on")
+    aim_entropy_bonus = _aeb if isinstance(_aeb, bool) else (_aeb == "on")
+    _cap = getattr(args, "aim_log_std_max", None)
+    aim_log_std_max = float(LOG_STD_MAX if _cap is None else _cap)
+
+    # R0-H: env LABEL from the resolved map name. The CLI always sets args.map
+    # (above the --dump-config exit); the harness / older SimpleNamespace
+    # callers have no `map` attr and keep the historical "cs2-dust2". Not
+    # allowlisted for --resume-run: a different map is a different experiment.
+    map_name = getattr(args, "map", None) or "dust2"
+    # R0-J: --gamma / --pbrs-gamma. Same helper as env_knobs_from_args so the
+    # env's PBRS discount and the PPO discount cannot resolve differently.
+    gamma, pbrs_gamma = resolve_gammas(args)
     cfg = {
-                                                       # Core PPO
-        "env": "cs2-dust2",
+                                                                       # Core PPO
+        "env": f"cs2-{map_name}",
         "device": args.device,
         "seed": args.seed,
-        "total_timesteps": args.timesteps,
+        "total_timesteps": raw_timesteps,
+        "participating_timesteps": args.timesteps,
+        "n_active_per_team": n_active,
+        "pin_pitch": knobs["pin_pitch"],
+        "crouch_enabled": knobs["crouch_enabled"],
+                                                                       # R0-G: recorded as given (None ⇒ env default), read from args
+                                                                       # directly so None survives — env_knobs_from_args drops None keys.
+        **{
+            a: getattr(args, a, None)
+            for a, _ in _R0G_KNOBS
+        },
+        "aim_entropy_bonus": aim_entropy_bonus,
+        "aim_log_std_max": aim_log_std_max,
+                                                                       # R0-I: fixed-baseline eval cadence (0 = off). Provenance only —
+                                                                       # not allowlisted for --resume-run (Task 7 rule: new CLI flags are
+                                                                       # config keys, not allowlist entries).
+        "eval_interval": int(getattr(args, "eval_interval", 0) or 0),
         "batch_size": batch_size,
         "bptt_horizon": bptt_horizon,
         "minibatch_size": 8192,
         "max_minibatch_size": 8192,
         "update_epochs": 3,
         "learning_rate": 3e-4,
-        "gamma": 0.999,
+        "gamma": gamma,
+        "pbrs_gamma": pbrs_gamma,                                      # R0-J: provenance; not allowlisted for --resume-run
         "gae_lambda": 0.95,
         "clip_coef": 0.15,
         "vf_coef": 0.5,
         "vf_clip_coef": None,
-        "ent_coef": 0.1,                               # fallback; adaptive alpha overrides
+        "ent_coef": 0.1,                                               # fallback; adaptive alpha overrides
         "max_grad_norm": 0.5,
         "target_kl": 0.03,
         "use_rnn": True,
         "weight_decay": 1e-4,
-                                                       # Extras required by PuffeRL constructor
+                                                                       # Extras required by PuffeRL constructor
         "compile": False,
         "compile_mode": "default",
         "compile_fullgraph": False,
@@ -634,27 +1160,29 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "adam_beta2": 0.999,
         "adam_eps": 1e-8,
         "anneal_lr": True,
-        "checkpoint_interval": 200,
+        "checkpoint_interval":
+        int(getattr(args, "checkpoint_interval",
+                    DEFAULT_CHECKPOINT_INTERVAL)),                     # R0-C: --checkpoint-interval
         "data_dir": args.checkpoint_dir,
         "precision": "float32",
         "prio_alpha": 0.0,
         "prio_beta0": 1.0,
         "vtrace_rho_clip": 1.0,
         "vtrace_c_clip": 1.0,
-                                                       # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
-                                                       # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
-                                                       # warmup_steps, held constant after; consumed by the SAC-style α
-                                                       # controller via _scheduled_target_entropy. Previous hardcoded values
-                                                       # (0.7→0.5) kept the target so high the controller steered the policy
-                                                       # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
-                                                       # ≈ 2.87 nats still allows broad exploration but permits commitment.
-                                                       # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
-                                                       # _patch_trainer_with_return_norm clamps α ≥ 0.5 when H < 0.3·max;
-                                                       # a base target below the floor would make the two mechanisms fight.
+                                                                       # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
+                                                                       # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
+                                                                       # warmup_steps, held constant after; consumed by the SAC-style α
+                                                                       # controller via _scheduled_target_entropy. Previous hardcoded values
+                                                                       # (0.7→0.5) kept the target so high the controller steered the policy
+                                                                       # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
+                                                                       # ≈ 2.87 nats still allows broad exploration but permits commitment.
+                                                                       # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
+                                                                       # _patch_trainer_with_return_norm clamps α ≥ 0.5 when H < 0.3·max;
+                                                                       # a base target below the floor would make the two mechanisms fight.
         "entropy_target_warmup_frac": 0.5,
         "entropy_target_base_frac": 0.35,
         "entropy_target_warmup_steps": 10_000_000,
-                                                       # ── Warm-start entropy mode: see the comment above ──
+                                                                       # ── Warm-start entropy mode: see the comment above ──
         "warmstart_entropy": ws_entropy,
         "warmstart_grace_steps": ws_grace,
         "warmstart_ramp_steps": ws_ramp,
@@ -775,8 +1303,20 @@ def make_puffer_env(team_spirit=None,
                     include_step_stats_in_info=False,
                     pbrs_gamma=None,
                     reward_overrides=None,
-                    reward_symmetrize=False):
+                    reward_symmetrize=False,
+                    n_active_per_team=TEAM_SIZE,
+                    pin_pitch=0,
+                    crouch_enabled=1,
+                    round_time=None,
+                    laser_range=None,
+                    max_turn_speed=None,
+                    auto_reset=True):
     """Create the native C PufferEnv used by smoke/train/eval.
+
+    ``auto_reset`` (R0-I, Task 13): forwarded to make_env. The training
+    vecenv keeps the default True; the fixed-baseline evaluator passes False
+    so the terminal tick's C state / episode_stats are still readable after
+    step() returns (with auto-reset they would already be the next spawn).
 
     ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
     emits ``info = [{"step_stats": StepStatsView}]`` on every tick so trainer
@@ -801,6 +1341,24 @@ def make_puffer_env(team_spirit=None,
     rather than a weight, and the override validator above rejects it by name.
     Defaults False so eval/record/smoke keep raw, comparable reward numbers;
     only the training factory turns it on.
+
+    ``n_active_per_team`` / ``pin_pitch`` / ``crouch_enabled`` (Rung 0, spec
+    2026-08-29 §2.1): non-weight env knobs forwarded verbatim to make_env. They
+    are NOT reward_overrides keys for the same reason reward_symmetrize is not.
+    The defaults reproduce the pre-Rung-0 env exactly (full 5v5, pitch live,
+    crouch enabled), so every non-training caller (eval, record, smoke, viz)
+    is unaffected. Training callers get them from env_knobs_from_args(args) —
+    do NOT re-derive them from args anywhere else, or config.json provenance
+    and the envs that actually ran can disagree.
+
+    ``round_time`` / ``laser_range`` / ``max_turn_speed`` (Rung 0 R0-G):
+    sim knobs forwarded verbatim to make_env. None (default) ⇒ make_env falls
+    back to the nav.py constant, so this function's default output is
+    byte-identical to before (sim fingerprints at defaults unchanged). Set
+    only via env_knobs_from_args, which omits None-valued knobs. PITFALL:
+    max_turn_speed rescales the aim action (policy.max_turn_speed is read
+    from the driver env at build time); assert_max_turn_speed_agreement
+    guards the pairing at train() startup.
     """
     from c_env.cs2_env import make_env as make_c_env
 
@@ -849,11 +1407,25 @@ def make_puffer_env(team_spirit=None,
         map_data=map_data,
         include_step_stats_in_info=include_step_stats_in_info,
         reward_symmetrize=reward_symmetrize,
+        n_active_per_team=n_active_per_team,
+        pin_pitch=pin_pitch,
+        crouch_enabled=crouch_enabled,
+        round_time=round_time,
+        laser_range=laser_range,
+        max_turn_speed=max_turn_speed,
+        auto_reset=auto_reset,
         **kwargs,
     )
 
 
-def load_policy_from_checkpoint(checkpoint_path, device):
+def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, pin_pitch=False):
+    """Rebuild a policy from a bare state_dict checkpoint (eval / record / probe).
+
+    R0-E (#131): ``aim_log_std_max`` / ``pin_pitch`` are RUN properties, not
+    checkpoint state (non-persistent buffers on the policy), so the caller
+    must pass the run's values — a checkpoint cannot tell you whether its
+    run pinned pitch. Defaults reproduce the pre-R0-E policy.
+    """
     import torch
 
     checkpoint_path = Path(checkpoint_path)
@@ -899,7 +1471,9 @@ def load_policy_from_checkpoint(checkpoint_path, device):
                               device,
                               obs_dim_override=ckpt_obs_dim,
                               tct_split_heads=state_dict_is_split(state_dict),
-                              tct_split_trunk=state_dict_is_trunk_split(state_dict))
+                              tct_split_trunk=state_dict_is_trunk_split(state_dict),
+                              aim_log_std_max=aim_log_std_max,
+                              pin_pitch=pin_pitch)
     finally:
         policy_env.close()
 
@@ -1153,8 +1727,6 @@ def evaluate_checkpoint(checkpoint_path=None,
                         start_seed=0,
                         num_episodes=50,
                         policy_mode="auto"):
-    from nav import ROUND_TIME
-
     policy = None
     policy_mode = resolve_policy_mode(checkpoint_path, policy_mode)
     if policy_mode != "random":
@@ -1172,7 +1744,9 @@ def evaluate_checkpoint(checkpoint_path=None,
 
         done = False
         step_count = 0
-        while not done and step_count < ROUND_TIME * 2:
+        # R0-G: the env's INSTANCE round_time (a --round-time-ticks run may be
+        # far shorter than nav.ROUND_TIME); ×2 is the runaway guard only.
+        while not done and step_count < env.round_time * 2:
             if policy_mode == "random":
                 actions = np.asarray(env.action_space.sample(), dtype=np.int32)
                 # See record_episode comment: random has no continuous head;
@@ -1252,7 +1826,94 @@ def make_env(team_spirit=None, map_data=None):
     return make_puffer_env(team_spirit=team_spirit, map_data=map_data)
 
 
-def build_env_factory(*, shared_ts, map_data, reward_overrides=None, reward_symmetrize=False):
+DEFAULT_GAMMA = 0.999                  # R0-J: the historical PPO discount; --gamma default
+
+
+def resolve_gammas(args) -> tuple[float, float]:
+    """Return ``(gamma, pbrs_gamma)`` from the args object.
+
+    WHAT: ``gamma`` is ``args.gamma`` (default DEFAULT_GAMMA for harness /
+    dump-config args objects that predate the flag); ``pbrs_gamma`` is
+    ``args.pbrs_gamma`` when given, else ``gamma``.
+
+    WHY one helper: build_train_config (provenance + the PPO discount) and
+    env_knobs_from_args (the env's PBRS discount) must agree on the SAME
+    resolution rule — PBRS is only policy-invariant (Ng et al.) when
+    γ_pbrs == γ, and before R0-J the two lived as unrelated literals (train.py
+    0.999 vs cs2_env.py 0.999) held together by a single drift test.
+    ``--pbrs-gamma`` exists ONLY for experiments that deliberately break the
+    pairing; a run that omits it always gets γ_pbrs = γ.
+
+    PITFALL: both values are config.json keys and NOT in
+    RESUME_CONFIG_ALLOWLIST — changing either on --resume-run is refused.
+    """
+    gamma = getattr(args, "gamma", None)
+    gamma = DEFAULT_GAMMA if gamma is None else float(gamma)
+    if not (0.0 < gamma < 1.0):
+        raise ValueError(f"--gamma must be in (0, 1), got {gamma}")
+    pbrs_gamma = getattr(args, "pbrs_gamma", None)
+    pbrs_gamma = gamma if pbrs_gamma is None else float(pbrs_gamma)
+    if not (0.0 < pbrs_gamma <= 1.0):
+        raise ValueError(f"--pbrs-gamma must be in (0, 1], got {pbrs_gamma}")
+    if pbrs_gamma != gamma:
+        print(f"WARNING: --pbrs-gamma {pbrs_gamma} != --gamma {gamma}: PBRS shaping is no "
+              "longer policy-invariant (Ng et al.); only do this on purpose.")
+    return gamma, pbrs_gamma
+
+
+# (args attr, make_puffer_env kwarg) — single source for env_knobs_from_args
+# AND build_train_config, so a knob added to one cannot be missed by the other
+# (config.json would then silently under-record the experiment).
+_R0G_KNOBS = (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
+              ("max_turn_speed", "max_turn_speed"))
+
+
+def env_knobs_from_args(args) -> dict:
+    """Non-weight env knobs (Rung 0) as make_puffer_env kwargs.
+
+    WHY one helper: build_train_config (provenance), build_train_env_factory
+    (the envs) and train()'s participating-row vector must all read the same
+    values; a second copy of these getattr defaults would be the next
+    silent-baseline bug (the class of bug build_train_env_factory exists to
+    prevent for reward weights). getattr defaults keep harness/dump-config
+    args objects — which predate these flags — working.
+
+    PITFALL: this returns make_puffer_env KWARG names, not config keys. It is
+    splatted straight into make_puffer_env(**env_knobs); renaming a key here
+    without renaming the parameter there raises TypeError inside a forked
+    vecenv worker, far from the mistake.
+
+    R0-G knobs (round_time_ticks → round_time, laser_range, max_turn_speed):
+    None-valued ones are OMITTED from the dict rather than forwarded as None,
+    so the env's own nav.py default applies and config.json records None
+    instead of a duplicated constant that would silently drift from nav.py.
+
+    R0-J: ``pbrs_gamma`` is ALWAYS present (resolved via resolve_gammas, so it
+    equals the training gamma unless --pbrs-gamma was given). Unlike the R0-G
+    knobs it is never omitted: the env default (cs2_env.py 0.999) would
+    silently disagree with a non-default --gamma.
+    """
+    knobs = {
+        "n_active_per_team": int(getattr(args, "n_active_per_team", TEAM_SIZE)),
+                                                                                 # R0-E.2: `or 0` — args.pin_pitch is None on the CLI until train()
+                                                                                 # resolves it from map flatness (see the pin_pitch block in train()).
+        "pin_pitch": int(getattr(args, "pin_pitch", 0) or 0),
+        "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
+        "pbrs_gamma": resolve_gammas(args)[1],
+    }
+    for arg_name, env_name in _R0G_KNOBS:
+        v = getattr(args, arg_name, None)
+        if v is not None:
+            knobs[env_name] = v
+    return knobs
+
+
+def build_env_factory(*,
+                      shared_ts,
+                      map_data,
+                      reward_overrides=None,
+                      reward_symmetrize=False,
+                      env_knobs=None):
     """Return the per-env factory callable handed to pufferlib.vector.make.
 
     WHAT: a closure over the shared team-spirit Value, the preloaded map data
@@ -1276,6 +1937,11 @@ def build_env_factory(*, shared_ts, map_data, reward_overrides=None, reward_symm
     a bool knob, not a weight, and make_puffer_env's validator rejects it as an
     override key by name.
 
+    env_knobs (Rung 0 §2.1) is the same story once more: a dict of non-weight
+    make_puffer_env kwargs (n_active_per_team / pin_pitch / crouch_enabled)
+    from env_knobs_from_args, closure state so it survives the fork. None ⇒
+    make_puffer_env's defaults, i.e. the pre-Rung-0 env.
+
     PITFALL (review finding 1): reward_overrides and reward_symmetrize reach
     ONLY the training env factory — the --smoke/--record/--eval paths call
     make_puffer_env without them, so `--smoke --reward-ct-survival 0.0`
@@ -1284,6 +1950,12 @@ def build_env_factory(*, shared_ts, map_data, reward_overrides=None, reward_symm
     limitation, stated here and in the final report; do not fix in this branch.
     PITFALL: `seed or 0` is intentional — pufferlib passes seed=None for some
     backends. Keep it.
+    R0-D (#135) `_seed`: train() routes the per-env seed through env_kwargs
+    (`_seed = env_seed_base(--seed) + i`) because pufferlib.vector.make takes
+    `seed` as ITS OWN named parameter and never forwards it to the backend —
+    `make(..., seed=X)` is a silent no-op and every env lands on pufferlib's
+    default base (env i -> seed i) regardless of --seed. When `_seed` is given
+    it wins over pufferlib's `seed`; the legacy path is unchanged otherwise.
     """
 
     def env_factory(*_args,
@@ -1292,6 +1964,7 @@ def build_env_factory(*, shared_ts, map_data, reward_overrides=None, reward_symm
                     _cont_shm=None,
                     _cont_idx=None,
                     _mask_shm=None,
+                    _seed=None,
                     **kwargs):
         # STRICT catch-all (review fix 1): pufferlib only ever passes buf,
         # seed and the env_kwargs[i] dict, all of which are named parameters
@@ -1304,10 +1977,11 @@ def build_env_factory(*, shared_ts, map_data, reward_overrides=None, reward_symm
                             "closure state")
         env = make_puffer_env(team_spirit=shared_ts,
                               buf=buf,
-                              seed=seed or 0,
+                              seed=_seed if _seed is not None else (seed or 0),
                               map_data=map_data,
                               reward_overrides=reward_overrides,
-                              reward_symmetrize=reward_symmetrize)
+                              reward_symmetrize=reward_symmetrize,
+                              **(env_knobs or {}))
         # Attach the shared-memory views so the env (whether running in the
         # main process under Serial, or a forked worker under
         # Multiprocessing) can pull cont_actions written by the trainer and
@@ -1336,12 +2010,15 @@ def build_train_env_factory(args, *, shared_ts, map_data):
     config.json provenance and the envs' actual weights cannot disagree. Same
     for reward_symmetrize: read off args with the identical getattr default
     build_train_config uses, so the logged "reward_symmetrize" key always
-    describes the envs that actually ran.
+    describes the envs that actually ran. Same again for the Rung 0 env knobs
+    via env_knobs_from_args — build_train_config records exactly what this
+    hands the envs, and train() asserts the built driver_env agrees.
     """
     return build_env_factory(shared_ts=shared_ts,
                              map_data=map_data,
                              reward_overrides=reward_overrides_from_args(args),
-                             reward_symmetrize=bool(getattr(args, "reward_symmetrize", False)))
+                             reward_symmetrize=bool(getattr(args, "reward_symmetrize", False)),
+                             env_knobs=env_knobs_from_args(args))
 
 
 # ── SECTION: Policy ────────────────────────────────────────────────────────
@@ -1351,8 +2028,19 @@ def build_policy(vecenv,
                  device,
                  obs_dim_override=None,
                  tct_split_heads=False,
-                 tct_split_trunk=False):
+                 tct_split_trunk=False,
+                 aim_log_std_max=None,
+                 pin_pitch=False):
     """Build the Dust2 recurrent policy.
+
+    aim_log_std_max / pin_pitch (R0-E.3 / R0-E.2, #131): per-RUN aim-head
+    properties. The cap replaces LOG_STD_MAX at every σ clamp site; pin_pitch
+    sets ``policy.aim_dim_mask`` to [1, 0] so the pitch dim drops out of
+    log_prob_c / entropy_c. Both live as NON-persistent buffers/attrs so old
+    checkpoints still load and a checkpoint never carries them — every loader
+    (SelfPlayManager.load_past_policy, load_policy_from_checkpoint) must pass
+    the run's values explicitly. Raises ValueError if the cap leaves the
+    (LOG_STD_MIN, LOG_STD_MAX] band.
 
     tct_split_heads (Batch 7, spec 2026-08-13): when True the policy-head
     group — the 7 discrete action_heads, the aim_mu projection and the
@@ -1382,6 +2070,7 @@ def build_policy(vecenv,
     obs_dim = (obs_dim_override
                if obs_dim_override is not None else driver_env.single_observation_space.shape[0])
     hidden = 256
+    _cap = validate_aim_log_std_max(aim_log_std_max)
 
     class Dust2Policy(nn.Module):
 
@@ -1518,6 +2207,19 @@ def build_policy(vecenv,
                 'max_turn_speed',
                 torch.tensor(driver_env._c_env.sd.contents.max_turn_speed, dtype=torch.float32),
             )
+            # R0-E.3/4 (#131): run properties, NOT checkpoint state
+            # (persistent=False so old checkpoints load and new ones don't
+            # carry them; SelfPlayManager re-applies them to past policies).
+            # aim_log_std_max caps σ in every forward (replaces LOG_STD_MAX at
+            # all clamp sites below); aim_dim_mask weights the per-dim
+            # Gaussian log-prob/entropy terms ([1,0] when pitch is pinned).
+            # PITFALL: sampling still draws BOTH dims (the env ignores dim 1
+            # when pinned) — only the density is masked, so the stored
+            # cont_action stays byte-identical to what the env consumed.
+            self.aim_log_std_max = _cap
+            self.register_buffer("aim_dim_mask",
+                                 torch.tensor([1.0, 0.0] if pin_pitch else [1.0, 1.0]),
+                                 persistent=False)
 
         @staticmethod
         def _blend(mask, out_t, out_ct):
@@ -1599,11 +2301,13 @@ def build_policy(vecenv,
                 # semantics and keeps §3.6's per-team σ logs interpretable.
                 log_std = self._blend(
                     mask,
-                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
-                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim))
             else:
                 mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX)
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, self.aim_log_std_max)
             sigma = torch.exp(log_std).expand_as(mu_aim)
             aim_dist = torch.distributions.Normal(mu_aim, sigma)
             if continuous_action is None:
@@ -1625,11 +2329,14 @@ def build_policy(vecenv,
                     -self.max_turn_speed,
                     self.max_turn_speed,
                 )
-            log_prob_c = aim_dist.log_prob(continuous_action).sum(-1)
+            # R0-E.2: per-dim weight applied BEFORE the sum so a pinned dim
+            # contributes neither log-prob nor entropy (mirrors
+            # _hybrid_sample_logits / _hybrid_ppo_loss).
+            log_prob_c = (aim_dist.log_prob(continuous_action) * self.aim_dim_mask).sum(-1)
             # Closed-form Gaussian entropy: 0.5·log(2πe·σ²), summed across
             # AIM_DIM. .entropy() returns per-dim, so .sum(-1) is correct
             # for AIM_DIM=1 today and stays correct if AIM_DIM bumps to ≥2.
-            entropy_c = aim_dist.entropy().sum(-1)
+            entropy_c = (aim_dist.entropy() * self.aim_dim_mask).sum(-1)
 
             log_prob = log_prob_d + log_prob_c
             entropy = entropy_d + entropy_c
@@ -1664,15 +2371,18 @@ def build_policy(vecenv,
                                      torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
                 log_std = self._blend(
                     mask,
-                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
-                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim))
             else:
                 logits = [head(hidden_out) for head in self.action_heads]
                                                                                                   # μ is bounded by tanh*max_turn_speed; log_std broadcasts to μ
                                                                                                   # shape so callers can build Normal(mu, exp(log_std)) directly
                                                                                                   # without an extra .expand call.
                 mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN,
+                                      self.aim_log_std_max).expand_as(mu_aim)
             value = self.value_head(hidden_out)
             return logits, mu_aim, log_std, value
 
@@ -1776,12 +2486,15 @@ def build_policy(vecenv,
                                      torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
                 log_std = self._blend(
                     mask,
-                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
-                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim))
             else:
                 logits = [head(hidden_out) for head in self.action_heads]
                 mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN,
+                                      self.aim_log_std_max).expand_as(mu_aim)
             value = self.value_head(hidden_out)
             return logits, mu_aim, log_std, value
 
@@ -1975,19 +2688,32 @@ def log_aim_log_std(policy, logs):
     # for the CLI/help paths) — keep that convention here.
     import torch
 
+    # R0-E.3: clamp to the RUN's cap (policy.aim_log_std_max), not the module
+    # constant — otherwise the log would report a σ the forward never used.
+    cap = float(getattr(policy, "aim_log_std_max", LOG_STD_MAX))
+    # R0-E.2 (#131): when pitch is pinned (aim_dim_mask[1] == 0) the pitch σ
+    # is a dead parameter — never sampled, never in log_prob_c, never
+    # updated. SKIP its keys (not NaN: NaN survives json.dumps only as the
+    # non-standard `NaN` token and would read as a live-but-broken signal on
+    # a dashboard). Every consumer already tolerates absence:
+    # format_train_status uses logs.get(..., 0.0); the T7 gate is 5v5-only.
+    mask = getattr(policy, "aim_dim_mask", None)
+    pitch_live = mask is None or float(mask[1]) != 0.0
     with torch.no_grad():
         if hasattr(policy, "aim_log_std_t"):
-            ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
-            ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
+            ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, cap).cpu().numpy()
+            ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, cap).cpu().numpy()
             logs["policy/aim_log_std_yaw_t"] = float(ls_t[0])
-            logs["policy/aim_log_std_pitch_t"] = float(ls_t[1])
             logs["policy/aim_log_std_yaw_ct"] = float(ls_ct[0])
-            logs["policy/aim_log_std_pitch_ct"] = float(ls_ct[1])
+            if pitch_live:
+                logs["policy/aim_log_std_pitch_t"] = float(ls_t[1])
+                logs["policy/aim_log_std_pitch_ct"] = float(ls_ct[1])
             clamped = 0.5 * (ls_t + ls_ct)
         else:
-            clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
+            clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, cap).cpu().numpy()
     logs["policy/aim_log_std_yaw"] = float(clamped[0])
-    logs["policy/aim_log_std_pitch"] = float(clamped[1])
+    if pitch_live:
+        logs["policy/aim_log_std_pitch"] = float(clamped[1])
 
 
 def compute_head_divergence(policy):
@@ -2204,8 +2930,17 @@ def _patch_trainer_with_return_norm(trainer):
     # the Gaussian contributes 0.5·log(2πe·σ²) per AIM_DIM — using σ_max
     # is the conservative ceiling, since the policy's actual σ is clamped
     # ≤ exp(LOG_STD_MAX) in every forward call.
+    # R0-E (#131): the ceiling follows the run — σ cap (policy.aim_log_std_max),
+    # number of live aim dims (aim_dim_mask.sum(): 1 when pitch is pinned) and
+    # the entropy-bonus switch (0 continuous entropy when the Gaussian is
+    # excluded from the objective, so the target/floor track the discrete
+    # heads only). getattr defaults keep pre-R0-E policies/configs working.
     max_entropy_discrete = sum(np.log(n) for n in ACTION_HEAD_SIZES)
-    max_entropy_continuous = AIM_DIM * 0.5 * np.log(2 * np.pi * np.e * np.exp(LOG_STD_MAX)**2)
+    _cap = float(getattr(trainer.policy, "aim_log_std_max", LOG_STD_MAX))
+    _n_aim = float(getattr(trainer.policy, "aim_dim_mask", torch.ones(AIM_DIM)).sum())
+    _bonus = bool(trainer.config.get("aim_entropy_bonus", True))
+    max_entropy_continuous = (_n_aim * 0.5 * np.log(2 * np.pi * np.e * np.exp(_cap)**2)) \
+        if _bonus else 0.0
     max_entropy = max_entropy_discrete + max_entropy_continuous
     # Task 9A: target_entropy is no longer a static scalar — it's recomputed
     # each train() call from a linear ramp 0.7→0.5*max_entropy across
@@ -2217,6 +2952,12 @@ def _patch_trainer_with_return_norm(trainer):
 
     log_alpha = torch.tensor([math.log(0.1)], requires_grad=True, device=device)
     alpha_optimizer = torch.optim.Adam([log_alpha], lr=1e-4)
+    # R0-C (#134): the train_state.pt sidecar needs both; they are closure-
+    # locals, so alias them here. Restore MUST be in place
+    # (`log_alpha.data.copy_`) — rebinding the attribute would leave the
+    # closure (and alpha_optimizer's param list) on the old tensor.
+    trainer._log_alpha_tensor = log_alpha
+    trainer._alpha_optimizer = alpha_optimizer
 
     # Task 9A/9B: trainer-level state for target_entropy schedule + log_alpha
     # reset. Attached to the trainer (not closure-local) so:
@@ -2284,17 +3025,42 @@ def _patch_trainer_with_return_norm(trainer):
             _ret_var.copy_(new_var)
             _ret_count.copy_(tot)
 
-    def _normalize_returns(mb_returns):
-        """Return normalized copy of mb_returns; update running stats first."""
-        _update_return_stats(mb_returns.detach().flatten())
+    def _normalize_returns(mb_returns, mb_part=None):
+        """Return normalized copy of mb_returns; update running stats first.
+
+        mb_part (Rung 0 §2.2): BOOL [S, T] participation mask. The running
+        mean/var are updated from the PARTICIPATING rows ONLY — parked rows
+        carry reward 0 and value 0, so feeding them in would drag the return
+        scale toward 0 by a factor of n_active/TEAM_SIZE and shrink every
+        normalized value target. None ⇒ all rows (pre-Rung-0 behaviour,
+        bit-identical).
+        PITFALL: the whole tensor is still normalized and returned — masking
+        applies to the STATISTICS, not the output. The parked rows' value loss
+        is dropped later, by the masked_mean over the same mask.
+        """
+        sel = mb_returns.detach()
+        if mb_part is not None:
+            sel = sel[mb_part]
+        _update_return_stats(sel.flatten())
         std = (_ret_var + 1e-8).sqrt()
         return (mb_returns - _ret_mean) / std
+
+    # Test hook (tests/test_parked_rows_masked.py): the closure is otherwise
+    # unreachable, and the participating-rows-only stats update is exactly the
+    # part worth pinning.
+    trainer._normalize_returns = _normalize_returns
 
     def _train_with_return_norm(self):
         profile = self.profile
         epoch = self.epoch
         profile("train", epoch)
         losses = defaultdict(float)
+        # Rung 0 §2.2 diagnostics. Local ints (not losses[...] entries) because
+        # they are ABSOLUTE counts: anything accumulated into `losses` inside
+        # the loop gets divided by _mb_run afterwards (gh#90). They are written
+        # onto `losses` after that divisor.
+        _floor_fires = 0               # minibatches where the entropy-floor clamp bound
+        _empty_mb = 0                  # minibatches with zero participating rows (skipped)
         config = self.config
         device = config["device"]
 
@@ -2401,7 +3167,10 @@ def _patch_trainer_with_return_norm(trainer):
         # minibatch loop. Persisted onto losses["event_oversample_fraction"]
         # AFTER the gh#90 divisor loop (per-call scalar, like ret_mean).
         _t8_event_mask = getattr(self, "_batch1_event_mask", None)
-        self._batch1_event_oversample_fraction = (float(_t8_event_mask.float().mean())
+        # Masked over participating segments (participating[:, 0] is the
+        # per-segment flag) so parked rows don't dilute the fraction at n<5.
+        self._batch1_event_oversample_fraction = (float(
+            masked_mean(_t8_event_mask.float(), self.participating[:, 0].float()))
                                                   if _t8_event_mask is not None else 0.0)
 
         # ── gh#90: KL early-stop bookkeeping ───────────────────────────────
@@ -2515,10 +3284,34 @@ def _patch_trainer_with_return_norm(trainer):
             _masks_buf = getattr(self, "action_masks", None)
             mb_masks = _masks_buf[idx] if _masks_buf is not None else None
 
+            # ── Rung 0 §2.2: participating mask for this minibatch ───────────
+            # Two dtypes on purpose (see the masked_* helpers' contract):
+            # mb_part is BOOL for indexing, mb_part_f/flat_part are the FLOAT
+            # weights the reductions take. flat_part is for the flat (S*T,)
+            # tensors (entropy, ratio_d/ratio_c, per-head entropies);
+            # mb_part_f for the [S, T]-shaped ones (v_loss, value writeback).
+            # Shapes: mb_part / mb_part_f are [S, T]; flat_part is (S*T,).
+            mb_part = self.participating[idx]
+            mb_part_f = mb_part.to(torch.float32)
+            n_part = mb_part_f.sum()
+            # Empty-minibatch tripwire: only reachable with non-uniform segment
+            # sampling (prio_alpha != 0 or a marked event segment) that happens
+            # to draw an all-parked minibatch — see spec §2.2. Skipping is the
+            # right call (every reduction below would be 0/0), but it must be
+            # VISIBLE, so it is counted into losses/empty_minibatches rather
+            # than silently swallowed. The `continue` sits before _mb_run += 1,
+            # so the gh#90 divisor keeps counting only executed minibatches.
+            if n_part.item() == 0:
+                _empty_mb += 1
+                # No zero_grad here: accumulate_minibatches is always 1 today,
+                # so no partial gradient can be pending. Revisit if that changes.
+                continue
+            flat_part = mb_part_f.reshape(-1)
+
             # ── VALUE TARGET NORMALISATION ─────────────────────────────────
             # Normalize returns before value regression.  The value head learns
             # to predict normalized targets; advantages are unaffected.
-            mb_returns_norm = _normalize_returns(mb_returns)
+            mb_returns_norm = _normalize_returns(mb_returns, mb_part)
             # Also normalize the stored baseline values so clipping stays valid
             mb_values_norm = (mb_values - _ret_mean) / (_ret_var + 1e-8).sqrt()
             # ──────────────────────────────────────────────────────────────
@@ -2561,6 +3354,9 @@ def _patch_trainer_with_return_norm(trainer):
                 state,
                 mb_prio=mb_prio,
                 mb_masks=mb_masks,
+                mb_part=mb_part_f,
+                aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
+                aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
             )
             # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
             # was used by downstream diagnostics; T5 dropped that consumer
@@ -2587,9 +3383,15 @@ def _patch_trainer_with_return_norm(trainer):
             self.ratio[idx] = ratio_d.detach().reshape(mb_logprobs.shape)
 
             with torch.no_grad():
-                old_approx_kl = (-logratio).mean()
-                approx_kl = ((ratio - 1) - logratio).mean()
-                clipfrac = ((ratio - 1.0).abs() > config["clip_coef"]).float().mean()
+                # Rung 0 §2.2: every diagnostic below is a mean over rows, so
+                # every one of them is masked. _pm is mb_part_f reshaped to the
+                # joint ratio's [S, T] layout; ratio_d/ratio_c are flat, hence
+                # flat_part. An unmasked KL here would be diluted 5× at
+                # n_active=1 and the target_kl early-stop would never fire.
+                _pm = mb_part_f.reshape(logratio.shape)
+                old_approx_kl = masked_mean(-logratio, _pm)
+                approx_kl = masked_mean((ratio - 1) - logratio, _pm)
+                clipfrac = masked_mean(((ratio - 1.0).abs() > config["clip_coef"]).float(), _pm)
                 # Observe-only (spec 2026-08-15 §3.4): same formula as the
                 # joint `clipfrac` above, split by the per-factor ratios
                 # `_hybrid_ppo_loss` already returns. `.item()` into the
@@ -2597,8 +3399,10 @@ def _patch_trainer_with_return_norm(trainer):
                 # (they are diagnostics, not a training signal). Last-
                 # minibatch-only is forbidden; they accumulate like
                 # `clipfrac` and ride the existing `_mb_run` divisor.
-                clipfrac_d = ((ratio_d - 1.0).abs() > config["clip_coef"]).float().mean()
-                clipfrac_c = ((ratio_c - 1.0).abs() > config["clip_coef"]).float().mean()
+                clipfrac_d = masked_mean(((ratio_d - 1.0).abs() > config["clip_coef"]).float(),
+                                         flat_part)
+                clipfrac_c = masked_mean(((ratio_c - 1.0).abs() > config["clip_coef"]).float(),
+                                         flat_part)
 
             # Early stopping (gh#90): a KL trip finishes the CURRENT epoch
             # (this minibatch included — matches standard PPO's post-epoch
@@ -2622,11 +3426,17 @@ def _patch_trainer_with_return_norm(trainer):
                 v_clipped = mb_values_norm + torch.clamp(newvalue - mb_values_norm, -vf_clip,
                                                          vf_clip)
                 v_loss_clipped = (v_clipped - mb_returns_norm)**2
-                v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                v_loss = 0.5 * masked_mean(torch.max(v_loss_unclipped, v_loss_clipped), mb_part_f)
             else:
-                v_loss = 0.5 * v_loss_unclipped.mean()
+                v_loss = 0.5 * masked_mean(v_loss_unclipped, mb_part_f)
 
-            current_entropy = entropy.mean()
+            # Rung 0 §2.2: the entropy the SAC-α dual loop and the collapse
+            # floor react to must be the participating rows' entropy. Parked
+            # rows are noop-masked (exactly one valid bin per head ⇒ discrete
+            # entropy 0), so an unmasked mean at n_active=1 reads ~1/5 of the
+            # truth and would peg alpha at the floor forever.
+            current_entropy = masked_mean(entropy, flat_part)
+            entropy_unmasked = entropy.mean()          # diagnostic only (losses/entropy_unmasked)
 
             # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
             alpha = log_alpha.exp()
@@ -2659,6 +3469,7 @@ def _patch_trainer_with_return_norm(trainer):
             # at ramp_end — a plotted boundary.
             if _ws_floor_active and current_entropy.item() < entropy_floor:
                 effective_alpha = torch.clamp(effective_alpha, min=0.5)
+                _floor_fires += 1
 
             entropy_loss = -effective_alpha * current_entropy
             # ──────────────────────────────────────────────────────────────
@@ -2668,7 +3479,9 @@ def _patch_trainer_with_return_norm(trainer):
 
             # Denormalize before writing back so advantage computation stays in raw scale
             std = (_ret_var + 1e-8).sqrt()
-            self.values[idx] = newvalue.detach().float() * std + _ret_mean
+            # Rung 0 §2.2: keep parked rows at exactly 0 in the value buffer —
+            # the rollout wrote 0 there and the next epoch's GAE reads it.
+            self.values[idx] = (newvalue.detach().float() * std + _ret_mean) * mb_part_f
 
             # ── PER-HEAD ENTROPY ──────────────────────────────────────────
             with torch.no_grad():
@@ -2680,7 +3493,8 @@ def _patch_trainer_with_return_norm(trainer):
                 # _action_spec and the policy logits list.
                 _head_names = list(ACTION_HEAD_NAMES)
                 for _hi, (_hn, _hd) in enumerate(zip(_head_names, _dists, strict=True)):
-                    losses[f"entropy/{_hn}"] += _hd.entropy().mean().item()
+                    # flat_part: _hd.entropy() is flat (S*T,), like `entropy`.
+                    losses[f"entropy/{_hn}"] += masked_mean(_hd.entropy(), flat_part).item()
             losses["entropy/total"] += current_entropy.item()
             # ──────────────────────────────────────────────────────────────
 
@@ -2689,6 +3503,10 @@ def _patch_trainer_with_return_norm(trainer):
             losses["policy_loss"] += pg_loss.item()
             losses["value_loss"] += v_loss.item()
             losses["entropy"] += current_entropy.item()
+            # Rung 0 §2.2: the same mean WITHOUT the mask. Diagnostic only —
+            # its ratio to losses/entropy is the live check that the mask is
+            # actually doing something (≈ n_active/TEAM_SIZE at steady state).
+            losses["entropy_unmasked"] += entropy_unmasked.item()
             losses["alpha"] += alpha.detach().item()
             losses["alpha_loss"] += alpha_loss.item()
             losses["old_approx_kl"] += old_approx_kl.item()
@@ -2696,7 +3514,7 @@ def _patch_trainer_with_return_norm(trainer):
             losses["clipfrac"] += clipfrac.item()
             losses["clipfrac_d"] += clipfrac_d.item()
             losses["clipfrac_c"] += clipfrac_c.item()
-            losses["importance"] += ratio.mean().item()
+            losses["importance"] += masked_mean(ratio, _pm).item()
             # gh#90: count EXECUTED minibatches — the divisor for every
             # accumulated losses/* above and the per-head entropy block.
             # Incremented here (with the stats) so a future early-`continue`
@@ -2757,6 +3575,9 @@ def _patch_trainer_with_return_norm(trainer):
                         mb_returns_norm=mb_returns_norm,
                         idx=idx,
                         mb_label="mb0" if _tag_mb0 else "mbL",
+                        mb_part=mb_part_f,
+                        aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
+                        aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
                     )
                     if getattr(trainer, "_tag_metrics", None) is None:
                         trainer._tag_metrics = {}
@@ -2789,6 +3610,12 @@ def _patch_trainer_with_return_norm(trainer):
         for _lk in list(losses):
             losses[_lk] /= max(_mb_run, 1)
         losses["minibatches_run"] = _mb_run
+
+        # Rung 0 §2.2 counters/absolutes — inserted AFTER the divisor (gh#90
+        # trap: anything written before it is silently scaled by 1/_mb_run).
+        losses["entropy_floor_fires"] = float(_floor_fires)
+        losses["empty_minibatches"] = float(_empty_mb)
+        losses["participating_rows"] = float(self.participating.sum().item())
 
         # Warm-start metrics are ABSOLUTE values — inserted after the gh#90
         # divisor loop above, alongside minibatches_run, or they'd be divided
@@ -2830,11 +3657,14 @@ def _patch_trainer_with_return_norm(trainer):
         if config["anneal_lr"]:
             self.scheduler.step()
 
-        y_pred = self.values.flatten()
-        y_true = advantages.flatten() + self.values.flatten()
-        var_y = y_true.var()
-        explained_var = torch.nan if var_y == 0 else 1 - (y_true - y_pred).var() / var_y
-        losses["explained_variance"] = explained_var.item()
+        # Rung 0 §2.2: whole-buffer EV over PARTICIPATING rows only. Parked
+        # rows have value 0 and advantage 0, i.e. a perfectly-predicted
+        # constant — leaving them in would inflate EV toward 1 by exactly the
+        # parked fraction and make the critic look healthy at n_active=1
+        # regardless of what it learned.
+        losses["explained_variance"] = masked_explained_variance(
+            self.values.flatten(),
+            advantages.flatten() + self.values.flatten(), self.participating.flatten())
         losses["ret_mean"] = _ret_mean.item()
         losses["ret_std"] = (_ret_var + 1e-8).sqrt().item()
         # Observe-only persist (spec 2026-08-15 §3.4). Task 8 already
@@ -2872,6 +3702,13 @@ def _patch_trainer_with_return_norm(trainer):
             trainer._batch1_effective_alpha = float(effective_alpha.detach().item())
         except (NameError, UnboundLocalError):
             pass
+        # Rung 0 §2.2: log the alpha the loss ACTUALLY used (post ceiling /
+        # post floor clamp), not just the raw log_alpha.exp() above — with the
+        # floor now counted by entropy_floor_fires, the pair says whether the
+        # collapse guard is holding the run up. Absolute value, so it sits here
+        # after the gh#90 divisor, and it reads the trainer attr rather than
+        # the loop-local so the KL-early-break edge cannot NameError.
+        losses["effective_alpha"] = float(trainer._batch1_effective_alpha)
         # Welford std exposure: guard with getattr+fallback because
         # _patch_trainer_with_selfplay (Task 6c, where these get attached)
         # may not have been applied — preserves the no-selfplay code path.
@@ -2885,8 +3722,29 @@ def _patch_trainer_with_return_norm(trainer):
         profile.end()
         logs = None
         self.epoch += 1
-        done_training = self.global_step >= config["total_timesteps"]
+        # Rung 0 §2.2: global_step is in PARTICIPATING units, so it must be
+        # compared against participating_timesteps (= the user's --timesteps),
+        # not against total_timesteps (the TEAM_SIZE/n_active-scaled raw-row
+        # budget PufferLib's epoch cap needs). .get() keeps trainers built from
+        # a pre-Rung-0 config.json working. The epoch clause is load-bearing,
+        # not belt-and-braces: total_epochs floor-divides, so at the defaults
+        # (--timesteps 10M, --num_envs 256 ⇒ batch 163840, n_active=1 ⇒ raw
+        # budget 50M) the 305 epochs PufferLib allows collect only
+        # 305 × 163840 / 5 = 9,994,240 participating steps — the first clause
+        # would never fire and the last epoch would never checkpoint.
+        done_training = (self.global_step >= config.get("participating_timesteps",
+                                                        config["total_timesteps"])
+                         or self.epoch >= self.total_epochs)
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
+            # R0-A: episode count for the window, written INTO self.stats so
+            # mean_and_log (pufferl.py mean_and_log) emits environment/episodes
+            # through the logger too. DECLARED DEVIATION from spec §3 R0-A
+            # ("inject after mean_and_log returns"): the logger call is inside
+            # mean_and_log, so the post-hoc form would reach metrics.jsonl
+            # only. `.get` — a defaultdict(list) `[]` read would insert an
+            # empty list and np.mean([]) → NaN. Unit: terminal infos (rounds),
+            # one per env per round regardless of n_active_per_team.
+            self.stats["episodes"] = [float(len(self.stats.get("kills_t", ())))]
             logs = self.mean_and_log()
             self.losses = losses
             self.print_dashboard()
@@ -2905,6 +3763,66 @@ def _patch_trainer_with_return_norm(trainer):
     trainer.train = types.MethodType(_train_with_return_norm, trainer)
     print("[Train] Value target normalization enabled (running mean/std of returns).")
     return trainer
+
+
+# ── SECTION: R0-I fixed-baseline evaluation hooks ─────────────────────────
+
+
+def elimination_only_win_rates(logs):
+    """R0-I: (win_rate_t, win_rate_ct) with timeouts removed from the CT side.
+
+    WHY: cs2_rewards.h scores a timeout as a CT win (`winner_ct`), so on a
+    bombsite-less duel map a CT that never engages "wins" every round and
+    SelfPlayManager.win_threshold would pool-save a statue. `winner_t` is
+    elimination-only on bombsites=[] maps. All three keys are window means
+    over the same episode set, so the subtraction is exact; clamped at 0 for
+    the float-noise case. Missing keys (first epoch) → 0.0, never KeyError.
+    """
+    wt = float(logs.get("environment/winner_t", 0.0))
+    wct = max(
+        0.0,
+        float(logs.get("environment/winner_ct", 0.0)) -
+        float(logs.get("environment/timed_out", 0.0)))
+    return wt, wct
+
+
+class ScheduledEval:
+    """Runs the fixed-baseline eval every `interval` epochs and delivers its
+    keys on the next LOGGED metrics row.
+
+    WHY a buffer: PuffeRL's train() throttles mean_and_log to once per 0.25 s
+    (logs is None on the other epochs). A naive `if isinstance(logs, dict)
+    and epoch % interval == 0` silently skips the eval whenever the eval epoch
+    happens to be throttled — on a fast CPU box that is most epochs. So the
+    eval decision is made on `trainer.epoch` alone, and the result waits in
+    `pending` until a dict row comes through. `eval/epoch` stamps the epoch
+    the numbers were measured at (may lag the row's epoch by a few).
+
+    PITFALL: call after_train() on EVERY epoch, outside any `isinstance(logs,
+    dict)` guard, or the buffer never drains.
+    """
+
+    def __init__(self, evaluator, interval, policy, device):
+        if int(interval) <= 0:
+            raise ValueError(f"ScheduledEval interval must be >= 1, got {interval}")
+        self.evaluator = evaluator
+        self.interval = int(interval)
+        self.policy = policy
+        self.device = device
+        self.pending = {}
+
+    def after_train(self, trainer, logs):
+        if trainer.epoch % self.interval == 0:
+            t0 = time.time()
+            self.pending.update(self.evaluator.evaluate(self.policy, self.device))
+            self.pending["eval/epoch"] = int(trainer.epoch)
+            self.pending["eval/wall_s"] = time.time() - t0
+        if isinstance(logs, dict) and self.pending:
+            logs.update(self.pending)
+            self.pending = {}
+
+    def close(self):
+        self.evaluator.env.close()
 
 
 # ── SECTION: Game Metrics Dashboard ───────────────────────────────────────
@@ -2952,13 +3870,13 @@ def compute_game_metrics(logs):
     }
 
     # Always-present splits/rewards: these keys already land in logs today
-    # via _build_terminal_info. game/reward/win nets ~0 (T +1 / CT -1);
-    # that is the zero-sum identity, not a missing-channel bug.
+    # via _build_terminal_info. game/reward/win is NOT emitted (#128, R0-A):
+    # C reward_win is the cross-team sum and nets ~0 by the zero-sum
+    # identity; the one-sided game/reward/win_t|win_ct below carry the signal.
     game_metrics["game/defuse_rate"] = _get("bomb_defused", 0.0)
     game_metrics["game/kills_t"] = kills_t
     game_metrics["game/kills_ct"] = kills_ct
     for src, dst in (
-        ("reward_win", "game/reward/win"),
         ("reward_kills", "game/reward/kills"),
         ("reward_deaths", "game/reward/deaths"),
         ("reward_bomb", "game/reward/bomb"),
@@ -2968,6 +3886,21 @@ def compute_game_metrics(logs):
         ("reward_inaction", "game/reward/inaction"),
     ):
         game_metrics[dst] = _get(src, 0.0)
+
+    # R0-A: combat counters are window MEANS per episode (mean_and_log).
+    for k in ("shots_fired", "shots_with_enemy_in_los", "shots_facing_enemy", "shots_on_target",
+              "shots_hit", "shots_stance_blocked", "damage_dealt", "mutual_vis_pair_ticks",
+              "agent_ticks_with_visible_enemy"):
+        game_metrics[f"game/{k}"] = _get(k, 0.0)
+    game_metrics["game/reward/win_t"] = _get("reward_win_t", 0.0)
+    game_metrics["game/reward/win_ct"] = _get("reward_win_ct", 0.0)
+    # Ratio of window means = conditional mean over episodes where a pair
+    # coexisted. A max(·,1) guard would silently return the unconditional
+    # mean — keep the explicit zero-valid branch.
+    _med_sum = _get("min_enemy_distance_sum", 0.0)
+    _med_valid = _get("min_enemy_distance_valid", 0.0)
+    game_metrics["game/min_enemy_distance"] = (_med_sum / _med_valid) if _med_valid > 0 else 0.0
+    game_metrics["game/min_enemy_distance_valid_frac"] = _med_valid
 
     # Presence-gate plant_tick / win_by_*: a synthetic 0.0 would make old
     # log dicts look new-format. Do not _get(..., default=0.0) these three.
@@ -2988,6 +3921,186 @@ def compute_game_metrics(logs):
 
 
 # ── SECTION: Dead Run Detector ─────────────────────────────────────────────
+
+MAP_NAMES = ("simple", "dust2", "arena-duel")
+
+
+def build_map_data(name: str):
+    """R0-H: `--map` name → the MapData the envs run on (None ⇒ the cs2 nav map).
+
+    WHAT: "simple" → map.make_simple_map(); "arena-duel" → map.make_arena_duel_
+    map(); "dust2" → None, which is exactly what make_env(map_data=None)
+    understands (it loads nav via _ENV_CACHE — pin_pitch_for_map resolves None
+    the same way, so the two never disagree on which map "None" is).
+
+    WHY a function: the CLI needs the map ABOVE the --dump-config exit (the
+    Modal runner fingerprints every launch from that dump and config.json must
+    carry the geometry-resolved pin_pitch and the env label), and train()'s
+    spawn-count guard needs the same name → the one table lives here.
+
+    PITFALL: ValueError (never assert) on an unknown name; argparse `choices`
+    already rejects it on the CLI, this is for programmatic callers. Importing
+    `map` costs ~0.8 s (0.76 s measured, Task 12 report); loading dust2 is
+    deferred to make_env / pin_pitch_for_map (cached, ~1 s from the nav cache).
+    """
+    if name not in MAP_NAMES:
+        raise ValueError(f"unknown map {name!r}; expected one of {MAP_NAMES}")
+    if name == "dust2":
+        return None
+    if name == "arena-duel":
+        from map import make_arena_duel_map
+        return make_arena_duel_map()
+    from map import make_simple_map
+    return make_simple_map()
+
+
+def check_spawn_counts(vecenv, map_name: str) -> tuple[int, int]:
+    """R0-H startup guard: the C StaticData spawn lists are within capacity and
+    match the preset. Returns (n_t_spawns, n_ct_spawns).
+
+    WHAT: reads sd->n_t_spawns / n_ct_spawns off the driver env (same path as
+    assert_pin_pitch_agreement). Generic bounds are ASYMMETRIC ON PURPOSE —
+    StaticData has t_spawns[15] / ct_spawns[5] (cs2_types.h) — and the arena
+    must have exactly 4 + 4 (ARENA_DUEL_V1; fewer rows would silently weaken
+    the load-bearing spawn randomisation, ≥ TEAM_SIZE would flip spawn_team to
+    the shuffle path and change the RNG draw count).
+
+    PITFALL: RuntimeError, never a bare assert (python -O strips asserts). A
+    non-Cs2Env driver is a wiring bug and must also stop the run.
+    """
+    env = getattr(vecenv, "driver_env", vecenv)
+    try:
+        sd = env._c_env.sd.contents
+        n_t, n_ct = int(sd.n_t_spawns), int(sd.n_ct_spawns)
+    except AttributeError as e:
+        raise RuntimeError("check_spawn_counts: driver_env is not a Cs2Env") from e
+    if not (1 <= n_t <= 15 and 1 <= n_ct <= 5):
+        raise RuntimeError(f"spawn counts out of StaticData capacity: n_t_spawns={n_t} (1..15) "
+                           f"n_ct_spawns={n_ct} (1..5)")
+    if map_name == "arena-duel" and (n_t, n_ct) != (4, 4):
+        raise RuntimeError(f"ARENA_DUEL_V1 expects 4 T + 4 CT spawn areas, env has {n_t} + {n_ct}")
+    return n_t, n_ct
+
+
+def pin_pitch_for_map(map_data) -> int:
+    """R0-E.2 (#131): 1 iff the map is FLAT (every area centroid shares one z).
+
+    WHAT: pure geometry test on the MapData the envs will actually run on.
+    ``map_data=None`` means "the cs2 nav map" (exactly what make_env(map_data=
+    None) loads, via the same _ENV_CACHE), so None is resolved by LOADING that
+    map — never by treating the sentinel as a map property.
+
+    WHY: a flat map has nothing to aim up/down at, so pitch is pure noise
+    (spec §R0-E.2) and gets pinned; a map with elevation must keep the pitch
+    dim trainable. Deciding on the sentinel (`map_data is None` ⇒ flat) was
+    the Task 9 review's Critical #1: the CLI `--dust2` path passes None, so
+    the value MUST come from the loaded map, not from the marker.
+
+    PITFALL: the in-sim dust2 (map.make_cs2_map, "verticality deferred")
+    zero-fills centroids_z, so today this returns 1 for dust2 — by spec (plan
+    §R0-E.2: pinned on flat maps incl. dust2). There is NO name-based table:
+    the `--map` path (build_map_data → resolve_pin_pitch) and the `--dust2`
+    path both end here. When real dust2 verticality lands this flips to 0 by
+    itself and every dust2 resume is refused by the config guard (pin_pitch is
+    not allowlisted) — the intended tripwire.
+    """
+    md = map_data
+    if md is None:
+        # Same cache key make_env uses, so train() never loads the nav twice.
+        import nav
+        from c_env.cs2_env import _ENV_CACHE
+        from map import make_cs2_map
+        key = (nav.NAV_PATH, nav.CACHE_PATH)
+        md = _ENV_CACHE.get(key)
+        if md is None:
+            md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)
+            _ENV_CACHE[key] = md
+    z = np.asarray(md.centroids_z, dtype=np.float32)
+    return int(float(z.max() - z.min()) == 0.0)
+
+
+def resolve_pin_pitch(args, verbose: bool = True) -> int:
+    """R0-E.2 (#131): set/validate args.pin_pitch from args.map_data; returns it.
+
+    WHAT: ``args.pin_pitch is None`` (CLI default) ⇒ pin_pitch_for_map(
+    args.map_data). An explicit 0/1 is cross-checked against the same test
+    and refused with ValueError (never assert) when it disagrees with the map.
+
+    WHY a separate function: train() is too heavy to exercise in a unit test,
+    and this block MUST run before build_train_env_factory — env_knobs_from_
+    args(args) bakes args.pin_pitch into every worker env at vector.make;
+    resolving later would leave the envs unpinned while the policy gets
+    aim_dim_mask=[1,0] and assert_pin_pitch_agreement aborts the run.
+
+    PITFALL: args.map_data is None for `--map dust2`/`--dust2`; the helper
+    LOADS the map (cached). main() calls this ABOVE the --dump-config exit on
+    purpose — the Modal fingerprint dump must carry the geometry-resolved value
+    (costs ~1 s for dust2 from the nav cache, ~0.8 s for `import map`). train()
+    calls it again as a cache-safe cross-check for programmatic callers (second
+    call is silent, see `verbose`). verbose=False for the train() cross-check
+    so the value is printed once per launch.
+    """
+    flat = bool(pin_pitch_for_map(getattr(args, "map_data", None)))
+    if getattr(args, "pin_pitch", None) is None:
+        args.pin_pitch = int(flat)
+    if bool(args.pin_pitch) != flat:
+        raise ValueError(f"pin_pitch={args.pin_pitch} but map flat={flat}: pin pitch only on "
+                         f"flat maps (pass --pin-pitch {int(flat)} or omit it)")
+    if verbose:
+        print(f"[Train] pin_pitch={int(args.pin_pitch)} (map flat={flat})")
+    return int(args.pin_pitch)
+
+
+def assert_pin_pitch_agreement(vecenv, policy):
+    """R0-E.2 (#131) startup check: env sd->pin_pitch ⇔ policy.aim_dim_mask[1] == 0.
+
+    WHAT: reads StaticData.pin_pitch off the driver env (same path
+    build_policy uses for max_turn_speed) and compares it with the policy's
+    aim-dim mask. Raises RuntimeError on mismatch.
+
+    WHY: the two sides are set independently (env_knobs_from_args bakes the
+    flag into every worker at vector.make time; build_policy sets the mask
+    from args.pin_pitch) and a mismatch is silent — the env would ignore a
+    dim the trainer still scores, or score a dim the env still applies.
+
+    PITFALL: unlike _kill_reward_is_active there is NO soft fallback — a
+    non-C env here is a wiring bug and must stop the run (RuntimeError, never
+    a bare assert: python -O would strip it).
+    """
+    env = getattr(vecenv, "driver_env", vecenv)
+    try:
+        c_pin = int(env._c_env.sd.contents.pin_pitch)
+    except AttributeError as e:
+        raise RuntimeError("assert_pin_pitch_agreement: driver_env is not a Cs2Env") from e
+    p_pin = int(float(policy.aim_dim_mask[1]) == 0.0)
+    if c_pin != p_pin:
+        raise RuntimeError(f"pin_pitch mismatch: env={c_pin} policy={p_pin} "
+                           f"(aim_dim_mask={policy.aim_dim_mask.tolist()})")
+
+
+def assert_max_turn_speed_agreement(vecenv, policy):
+    """R0-G startup check: env sd->max_turn_speed == policy.max_turn_speed.
+
+    WHAT: reads StaticData.max_turn_speed off the driver env and compares it
+    with the policy's non-trainable max_turn_speed buffer (the tanh scale on
+    the aim head). Raises RuntimeError on mismatch (>1e-6 rad/tick).
+
+    WHY: build_policy copies the value from the driver env at construction,
+    but a resumed/warm-started checkpoint carries its OWN buffer — a run
+    resumed with a different --max-turn-speed would have the policy emit aim
+    deltas the env then clamps, silently changing the action semantics.
+
+    PITFALL: RuntimeError, never a bare assert (python -O strips asserts). A
+    non-Cs2Env driver is a wiring bug and must also stop the run.
+    """
+    env = getattr(vecenv, "driver_env", vecenv)
+    try:
+        c = float(env._c_env.sd.contents.max_turn_speed)
+    except AttributeError as e:
+        raise RuntimeError("assert_max_turn_speed_agreement: driver_env is not a Cs2Env") from e
+    p = float(policy.max_turn_speed)
+    if abs(c - p) >= 1e-6:
+        raise RuntimeError(f"max_turn_speed mismatch: env={c} policy={p}")
 
 
 def _kill_reward_is_active(vecenv):
@@ -3051,13 +4164,24 @@ class DeadRunDetector:
             self.alerts = [a for a in self.alerts if "kills" not in a]
 
         if step > 50_000:
-            entropy_total = metrics.get("entropy/total", metrics.get("entropy", 5.0))
+            # R0-J: the outer log dict is prefixed `losses/` (pufferl.py
+            # mean_and_log) — the old `entropy/total` / `approx_kl` keys never
+            # matched, so the entropy and KL rules were dead since day one.
+            # The unprefixed fallbacks keep the harness / older callers working.
+            entropy_total = metrics.get("losses/entropy", metrics.get("entropy/total", 5.0))
             if entropy_total < 0.5:
                 self.alerts.append(
                     f"CRITICAL: Entropy collapsed to {entropy_total:.2f} at step {step}")
             timeout_rate = metrics.get("game/timeout_rate", 0.0)
+            # Non-accumulating (like zero-kills, gh#93): at Rung 1 every
+            # no-kill round is a timeout, so an untrained policy sits at ~1.0
+            # and would abort itself in five checks. One live alert, cleared
+            # when the rate recovers.
             if timeout_rate > 0.95:
-                self.alerts.append(f"WARNING: Timeout rate {timeout_rate:.0%} at step {step}")
+                if not any("Timeout" in a for a in self.alerts):
+                    self.alerts.append(f"WARNING: Timeout rate {timeout_rate:.0%} at step {step}")
+            else:
+                self.alerts = [a for a in self.alerts if "Timeout" not in a]
 
         # gh#93: the zero-kills rule used to append a FRESH alert on every check
         # past 500k while kills stayed 0, so a single persistent condition
@@ -3069,17 +4193,24 @@ class DeadRunDetector:
         #     so zero kills is the configured outcome, not a symptom);
         #   - otherwise at most ONE zero-kills alert is live at a time, so the
         #     rule can contribute to a verdict but never reach it alone.
-        # The other rules keep accumulating on purpose: sustained entropy
-        # collapse / KL blowup genuinely are worse the longer they persist.
+        # R0-J: timeout and KL are single-live alerts too (see above / below);
+        # entropy is the ONLY rule that still accumulates — sustained collapse
+        # genuinely is worse the longer it persists, and it is the one rule
+        # that cannot be a structural artefact of an untrained policy.
         if self.kills_expected and step > 500_000:
             kills_per_ep = metrics.get("game/kills_per_episode", 1.0)
             if kills_per_ep == 0 and not any("Zero kills" in a for a in self.alerts):
                 self.alerts.append(f"WARNING: Zero kills by step {step}")
 
         if step > 100_000:
-            approx_kl = metrics.get("approx_kl", 0.0)
+            approx_kl = metrics.get("losses/approx_kl", metrics.get("approx_kl", 0.0))
+            # R0-J: single live alert (target_kl already clips each epoch, so a
+            # persistently high approx_kl is one condition, not five).
             if approx_kl > 0.05:
-                self.alerts.append(f"WARNING: KL divergence {approx_kl:.3f} at step {step}")
+                if not any("KL" in a for a in self.alerts):
+                    self.alerts.append(f"WARNING: KL divergence {approx_kl:.3f} at step {step}")
+            else:
+                self.alerts = [a for a in self.alerts if "KL" not in a]
 
         if len(self.alerts) >= 5:
             print("DEAD RUN DETECTED:")
@@ -3136,7 +4267,17 @@ class SelfPlayManager:
         save_every_epochs: int = 25,
         win_threshold: float = 0.6,
         phase_length: int = 50,
+        aim_log_std_max=None,
+        pin_pitch: bool = False,
     ):
+        # R0-E (#131): run properties re-applied to every past policy built by
+        # load_past_policy (they are non-persistent on the policy, so the
+        # snapshot cannot carry them). A past opponent with an unpinned mask
+        # would sample a live pitch dim the env ignores — harmless for the
+        # env, but its stored logprob_c would include a factor the live
+        # policy's does not, and self-play ratio_c would silently drift.
+        self.aim_log_std_max = aim_log_std_max
+        self.pin_pitch = bool(pin_pitch)
         self.pool: list[Path] = []
         self.pool_size = pool_size
         self.p_past = p_past
@@ -3146,6 +4287,39 @@ class SelfPlayManager:
         self.opponent_team = "ct"      # CT is opponent first; T learns to attack
         self._milestone_count = 0
         self._last_save_epoch = -1
+
+    def state_dict(self) -> dict:
+        """R0-C (#134): everything a full-state resume must restore.
+
+        Paths are stringified AND resolve()d: the pool is filled with paths
+        relative to --checkpoint-dir as given, while --resume-run resolves the
+        run dir to absolute — a resume from another cwd would otherwise fail
+        every exists() check in load_state_dict and empty the pool. The knobs
+        (pool_size, p_past, ...) are NOT saved — they are rebuilt from args and
+        guarded by check_resume_config via config.json.
+        """
+        return {
+            "pool": [str(Path(p).resolve()) for p in self.pool],
+            "opponent_team": self.opponent_team,
+            "_milestone_count": self._milestone_count,
+            "_last_save_epoch": self._last_save_epoch,
+        }
+
+    def load_state_dict(self, state: dict):
+        """Inverse of state_dict. Pool entries whose file vanished are dropped
+        (a later past-policy draw would crash on torch.load). opponent_team is
+        restored explicitly: rebuilt-at-default would invert every later
+        maybe_switch_teams toggle relative to the pre-crash run."""
+        self.pool = [Path(p) for p in state["pool"] if Path(p).exists()]
+        dropped = len(state["pool"]) - len(self.pool)
+        if dropped:
+            print(f"[SelfPlay] WARN: dropped {dropped}/{len(state['pool'])} pool entries whose "
+                  "file no longer exists")
+        print(f"[SelfPlay] pool restored: {len(self.pool)} entries, "
+              f"opponent_team={state['opponent_team']}")
+        self.opponent_team = state["opponent_team"]
+        self._milestone_count = int(state["_milestone_count"])
+        self._last_save_epoch = int(state["_last_save_epoch"])
 
     def maybe_save(
         self,
@@ -3215,7 +4389,9 @@ class SelfPlayManager:
         policy = build_policy(vecenv,
                               device,
                               tct_split_heads=state_dict_is_split(state_dict),
-                              tct_split_trunk=state_dict_is_trunk_split(state_dict))
+                              tct_split_trunk=state_dict_is_trunk_split(state_dict),
+                              aim_log_std_max=self.aim_log_std_max,
+                              pin_pitch=self.pin_pitch)
         load_state_dict_arch_checked(policy, state_dict, source=str(path))
         policy.eval()
         return policy
@@ -3332,7 +4508,13 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
-            self.global_step += int(mask.sum())
+            # Rung 0 §2.2: global_step counts PARTICIPATING agent-steps, so
+            # --timesteps means the same thing at any n_active_per_team.
+            # `mask` is the recv() chunk's live-agent mask (all-True for this
+            # env, vector.py:188); env_id is the agent-row slice bound just
+            # above, so the static row flags line up element-for-element.
+            self.global_step += int(
+                (np.asarray(mask, dtype=bool) & self._participating_rows_np[env_id]).sum())
 
             profile("eval_copy", epoch)
             o = torch.as_tensor(o)
@@ -3369,6 +4551,7 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     (logits, mu_aim, log_std_aim, value),
                     max_turn_speed=self.policy.max_turn_speed.item(),
                     mask=action_mask,
+                    aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
                 )
                 # Joint log-prob for self.logprobs (back-compat slot read by
                 # PufferLib's diagnostics + the KL/clipfrac path). Per-factor
@@ -3457,6 +4640,7 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                          (opp_logits, opp_mu, opp_log_std, None),
                          max_turn_speed=past_policy.max_turn_speed.item(),
                          mask=action_mask[opp_mask] if action_mask is not None else None,
+                         aim_dim_mask=getattr(past_policy, "aim_dim_mask", None),
                      )
                     opp_logprob = opp_logprob_d + opp_logprob_c
 
@@ -3513,7 +4697,17 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     self.action_masks[batch_rows, seq_pos] = action_mask
                 self.rewards[batch_rows, seq_pos] = r
                 self.terminals[batch_rows, seq_pos] = d.float()
-                self.values[batch_rows, seq_pos] = value.flatten()
+                # Rung 0 §2.2: scatter the static row flag into buffer layout,
+                # and zero the critic output on parked rows (defence in depth —
+                # the masked reductions in train() are what make it correct;
+                # this just keeps GAE from propagating a bootstrap value
+                # through rows whose reward is identically 0).
+                # OUTSIDE the `if action_mask is not None:` guard above ON
+                # PURPOSE: inside it, `participating` would stay all-zero for a
+                # mask-less run and the per-epoch any() assert would fire.
+                _part_rows = self._participating_rows[env_id]
+                self.participating[batch_rows, seq_pos] = _part_rows
+                self.values[batch_rows, seq_pos] = value.flatten() * _part_rows.to(value.dtype)
 
                 self.ep_lengths[env_id] += 1
                 if seq_pos + 1 >= cfg["bptt_horizon"]:
@@ -3617,7 +4811,8 @@ def _hybrid_sample_logits(policy_out,
                           action=None,
                           continuous_action=None,
                           max_turn_speed=None,
-                          mask=None):
+                          mask=None,
+                          aim_dim_mask=None):
     """Hybrid sampler for the 4-tuple HybridPolicy output (Batch 3 task 5).
 
     Replaces the four in-tree usages of
@@ -3649,6 +4844,12 @@ def _hybrid_sample_logits(policy_out,
         the stored logprobs stay consistent with _hybrid_ppo_loss as long as
         the update pass receives the SAME mask (mb_masks). None = unmasked
         (legacy eval/record callers that have no mask plumbing).
+    aim_dim_mask : (AIM_DIM,) float tensor, or None (R0-E.2, #131)
+        Per-dimension weight on the Gaussian log-prob / entropy terms, applied
+        BEFORE the sum over AIM_DIM. [1, 0] when pitch is pinned (the env
+        ignores cont[:, 1], so its density must not enter the ratio). None ⇒
+        all-ones ⇒ today's behaviour bit-for-bit. Sampling is NOT masked —
+        the pinned dim is still drawn (and discarded by the env).
 
     Returns
     -------
@@ -3733,10 +4934,30 @@ def _hybrid_sample_logits(policy_out,
     # log_std_aim has shape (AIM_DIM,); expand_as(mu_aim) broadcasts to (B, AIM_DIM)
     # so .sum(-1) sums over AIM_DIM correctly.
     log_std_b = log_std_aim.expand_as(mu_aim)
-    log_prob_c = (-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI).sum(-1)
-    entropy_c = (0.5 + 0.5 * _LOG_2PI + log_std_b).sum(-1)
+    # R0-E.2: per-dimension weight (AIM_DIM,), ones ⇒ today's behaviour.
+    # Applied BEFORE .sum(-1) so both log-prob and entropy exclude pinned dims.
+    w = _aim_dim_weight(aim_dim_mask, mu_aim)
+    log_prob_c = ((-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI) * w).sum(-1)
+    entropy_c = ((0.5 + 0.5 * _LOG_2PI + log_std_b) * w).sum(-1)
 
     return action, continuous_action, log_prob_d, log_prob_c, entropy_d, entropy_c
+
+
+def _aim_dim_weight(aim_dim_mask, mu_aim):
+    """(AIM_DIM,) weight for the per-dim Gaussian terms (R0-E.2, #131).
+
+    WHAT: ``aim_dim_mask`` moved to mu_aim's device/dtype, or all-ones when
+    None. Shared by _hybrid_sample_logits and _hybrid_ppo_loss so the rollout
+    and the update can never disagree on which dims are live — that
+    disagreement would be an importance-ratio bug no single-site test sees.
+    PITFALL: returns ones (not None) on the None path so callers can multiply
+    unconditionally; the multiply by ones is exact in fp32.
+    """
+    import torch
+
+    if aim_dim_mask is None:
+        return torch.ones(mu_aim.shape[-1], device=mu_aim.device, dtype=mu_aim.dtype)
+    return aim_dim_mask.to(device=mu_aim.device, dtype=mu_aim.dtype)
 
 
 def _hybrid_ppo_loss(policy,
@@ -3750,8 +4971,19 @@ def _hybrid_ppo_loss(policy,
                      state,
                      mb_prio=None,
                      mb_masks=None,
-                     return_pg_rows=False):
+                     return_pg_rows=False,
+                     mb_part=None,
+                     aim_dim_mask=None,
+                     aim_entropy_bonus=True):
     """Per-factor PPO clipped loss (H-PPO, Fan et al. IJCAI 2019).
+
+    aim_dim_mask (R0-E.2): same per-dim weight the rollout sampler used
+    (policy.aim_dim_mask) — MUST match, or ratio_c ≠ 1 for an unchanged
+    policy. None ⇒ all-ones (pre-R0-E behaviour).
+    aim_entropy_bonus (R0-E.4, #131): False ⇒ the returned ``entropy`` is the
+    DISCRETE entropy only, so the entropy objective (and its α dual loop)
+    stops pushing aim σ to the cap. The Gaussian log-prob still enters
+    ratio_c either way — only the bonus is switched off.
 
     THE CORE OF T5. Re-runs the policy on mb_obs with the stored
     mb_actions / mb_cont_actions, computes new log-probs split into
@@ -3805,6 +5037,18 @@ def _hybrid_ppo_loss(policy,
     default, all production update paths) returns the existing 7-tuple
     bitwise-identically — pinned by
     test_return_pg_rows_default_is_bitwise_identical_7_tuple.
+
+    mb_part (Rung 0 §2.2): FLOAT participation weights, broadcastable to
+    mb_advantages (the trainer passes [S, T]). When given, BOTH reductions in
+    this function switch to their masked forms — advantage normalisation over
+    participating rows only, and a masked mean over the per-row pg terms.
+    Doing only one of the two would be wrong in a way no test at
+    n_active=TEAM_SIZE can see: unmasked normalisation shifts the parked rows'
+    advantage off 0, and that offset survives into pg through their (arbitrary)
+    ratio. None ⇒ the pre-Rung-0 lines run verbatim; that path is what
+    test_return_pg_rows_default_is_bitwise_identical_7_tuple pins, so
+    production at n_active=5 takes the MASKED branch with an all-ones weight
+    and is identical to the old numbers only to fp tolerance, not bitwise.
     """
     import torch
     import torch.nn.functional as F
@@ -3846,7 +5090,14 @@ def _hybrid_ppo_loss(policy,
     #     uniform replay (weight 1), e.g. BC/eval callers.
     #   * A constant-adv minibatch has std 0 ⇒ normalized adv is exactly 0
     #     (0/1e-8); pg_loss 0, no NaN.
-    flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+    #   * mb_part (Rung 0 §2.2): stats over participating rows only, and
+    #     parked rows are zeroed so they contribute nothing to pg regardless
+    #     of their ratio — which is what the masked pg mean below then
+    #     divides out. The mb_prio multiply stays AFTER, unchanged.
+    if mb_part is None:
+        flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+    else:
+        flat_adv = masked_normalize_adv(flat_adv, mb_part.reshape(-1))
     if mb_prio is not None:
         flat_adv = mb_prio.expand_as(mb_advantages).reshape(-1) * flat_adv
 
@@ -3873,9 +5124,10 @@ def _hybrid_ppo_loss(policy,
     sigma = torch.exp(log_std_aim).expand_as(mu_aim)
     log_std_b = log_std_aim.expand_as(mu_aim)
     diff = (flat_cont - mu_aim) / sigma
-    new_logp_c = (-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI).sum(-1)
-    entropy_c = (0.5 + 0.5 * _LOG_2PI + log_std_b).sum(-1)
-    entropy = entropy_d + entropy_c
+    w_aim = _aim_dim_weight(aim_dim_mask, mu_aim)
+    new_logp_c = ((-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI) * w_aim).sum(-1)
+    entropy_c = ((0.5 + 0.5 * _LOG_2PI + log_std_b) * w_aim).sum(-1)
+    entropy = entropy_d + entropy_c if aim_entropy_bonus else entropy_d
 
     # ── Per-factor PPO ratios + clipped loss ──
     # max(unclipped, clipped) is taken element-wise per factor; the per-
@@ -3892,7 +5144,14 @@ def _hybrid_ppo_loss(policy,
     pg_c_cl = -flat_adv * torch.clamp(ratio_c, 1 - clip_coef, 1 + clip_coef)
     pg_d_rows = torch.max(pg_d_un, pg_d_cl)
     pg_c_rows = torch.max(pg_c_un, pg_c_cl)
-    pg_loss = pg_d_rows.mean() + pg_c_rows.mean()
+    if mb_part is None:
+        pg_loss = pg_d_rows.mean() + pg_c_rows.mean()
+    else:
+        # Rung 0 §2.2: parked rows are already exactly 0 in these vectors
+        # (their normalised advantage is 0), so the mask only fixes the
+        # DENOMINATOR — without it the gradient is scaled by n_active/5.
+        _w = mb_part.reshape(-1).to(pg_d_rows.dtype)
+        pg_loss = masked_mean(pg_d_rows, _w) + masked_mean(pg_c_rows, _w)
 
     if return_pg_rows:
         return (pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list,
@@ -3950,10 +5209,30 @@ def _tag_param_groups(policy):
     return groups
 
 
-def tag_grad_cossim(policy, *, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_d, mb_old_logp_c,
-                    mb_advantages, clip_coef, state, mb_prio, mb_masks, mb_returns_norm, idx,
-                    mb_label):
+def tag_grad_cossim(policy,
+                    *,
+                    mb_obs,
+                    mb_actions,
+                    mb_cont_actions,
+                    mb_old_logp_d,
+                    mb_old_logp_c,
+                    mb_advantages,
+                    clip_coef,
+                    state,
+                    mb_prio,
+                    mb_masks,
+                    mb_returns_norm,
+                    idx,
+                    mb_label,
+                    mb_part=None,
+                    aim_dim_mask=None,
+                    aim_entropy_bonus=True):
     """T-vs-CT gradient cosine-similarity measurement (spec 2026-08-13 §4.2).
+
+    aim_dim_mask / aim_entropy_bonus (R0-E): forwarded verbatim to the inner
+    _hybrid_ppo_loss so its ratio_c matches the real update's — otherwise the
+    TAG subset gradients would include a pinned pitch factor and stop being
+    restrictions of the actual gradient.
 
     WHAT: ONE extra forward via _hybrid_ppo_loss(return_pg_rows=True), then
     six subset losses as weighted means over the per-row pg vector — T, CT,
@@ -4000,6 +5279,18 @@ def tag_grad_cossim(policy, *, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_
       touches value_head, so those keys would be dead NaN/0 noise.
     * The loss path evaluates stored actions and samples nothing, so there
       is no RNG interaction.
+    * mb_part (Rung 0 §2.2) is forwarded verbatim to _hybrid_ppo_loss so the
+      shared advantage normalisation is the SAME one the real update used —
+      that shared normalisation is what makes each subset gradient a true
+      restriction of the real gradient. Parked rows land in whichever team
+      subset their slot belongs to, but their pg_rows entries are exactly 0,
+      so they only inflate the subset means' denominators (w.sum() here
+      counts rows, not participation) — a uniform rescale that cosine
+      similarity is invariant to. The reported gnorms ARE scaled by it.
+      The vf control is weaker: mb_returns_norm on a parked row is
+      -_ret_mean/std, not 0, so parked rows add a common-mode residual to
+      BOTH team value gradients and bias tag/cossim_vf upward at
+      n_active < TEAM_SIZE. Read that control with n_active in mind.
     """
     import torch
 
@@ -4046,7 +5337,10 @@ def tag_grad_cossim(policy, *, mb_obs, mb_actions, mb_cont_actions, mb_old_logp_
                                                          state,
                                                          mb_prio=mb_prio,
                                                          mb_masks=mb_masks,
-                                                         return_pg_rows=True)
+                                                         return_pg_rows=True,
+                                                         mb_part=mb_part,
+                                                         aim_dim_mask=aim_dim_mask,
+                                                         aim_entropy_bonus=aim_entropy_bonus)
 
     pg_grads = {}                                                      # subset -> {group: flat grad}
     vf_grads = {}                                                      # 'T'/'CT' -> flat value_head grad
@@ -4106,7 +5400,10 @@ def _inject_tag_metrics(trainer, logs):
         logs.update(pending)
 
 
-def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_view_main=None):
+def _patch_trainer_with_hybrid_aim(trainer,
+                                   cont_action_view_main=None,
+                                   mask_view_main=None,
+                                   participating_rows=None):
     """Extend trainer with continuous-action rollout storage + vecenv plumbing.
 
     Apply AFTER _patch_trainer_with_return_norm (so train() is wrapped) and
@@ -4138,6 +5435,13 @@ def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_vie
     only the in-process Serial wrapper at the bottom of this function is
     used. The Serial path uses a ``trainer.vecenv._cont_action_buf`` Python
     attr stash + a per-env step wrapper, untouched from T5.
+
+    ``participating_rows`` (Rung 0 §2.2): bool array over agent rows saying
+    which ones the C env actually spawns. Allocated here rather than in a
+    patcher of its own because the buffers it sizes (`trainer.participating`)
+    must match `trainer.actions`, which this function already mirrors — and
+    because the rollout writes that fill it live in the evaluate() this
+    patcher's sibling installs. None ⇒ every row participates.
     """
     import torch
     # Stash on the trainer so _hybrid_send (defined below) can close over
@@ -4175,6 +5479,30 @@ def _patch_trainer_with_hybrid_aim(trainer, cont_action_view_main=None, mask_vie
         dtype=torch.bool,
         device=trainer.actions.device,
     )
+
+    # ── Rung 0 §2.2: per-row participation ───────────────────────────────
+    # participating_rows: numpy bool (total_agents,) — STATIC per run, derived
+    # from args.n_active_per_team in train(). None ⇒ all rows participate
+    # (harness default, exact identity with pre-Rung-0 behaviour).
+    # trainer.participating is the BUFFER-LAYOUT flag [segments, bptt],
+    # scattered by evaluate() via ep_indices exactly like action_masks.
+    # ZERO-initialised (unlike action_masks, which defaults to all-ones): a
+    # skipped write must mask EVERYTHING and trip the per-epoch
+    # `participating.any()` assert in train(), never silently train on parked
+    # rows. _participating_rows_np is kept beside the torch copy because
+    # evaluate()'s global_step accounting works on the numpy `mask` recv()
+    # returns; converting per-recv would allocate on every rollout tick.
+    n_rows = trainer.total_agents
+    if participating_rows is None:
+        participating_rows = np.ones(n_rows, dtype=bool)
+    participating_rows = np.asarray(participating_rows, dtype=bool).reshape(-1)
+    assert participating_rows.shape == (n_rows, ), (participating_rows.shape, n_rows)
+    assert participating_rows.any(), "no participating rows — n_active_per_team=0?"
+    trainer._participating_rows_np = participating_rows
+    trainer._participating_rows = torch.as_tensor(participating_rows, device=trainer.actions.device)
+    trainer.participating = torch.zeros(trainer.actions.shape[:-1],
+                                        dtype=torch.bool,
+                                        device=trainer.actions.device)
 
     # ── vecenv.send patch (step 5.5) ──
     # Goal: forward both the int discrete buffer and the float cont buffer
@@ -4312,6 +5640,49 @@ def train(args):
         args.checkpoint_dir = str(CHECKPOINTS_DIR / resolved_name)
         print(f"[Train] Run name resolved to: {resolved_name}")
 
+    # ── R0-E.2 (#131): pin_pitch resolution ────────────────────────────────
+    # resolve_pin_pitch loads the REAL map when args.map_data is None (the
+    # `--dust2` CLI path) and decides from geometry; see pin_pitch_for_map for
+    # why the sentinel itself must never decide. MUST run (a) before
+    # build_train_env_factory (env_knobs_from_args bakes args.pin_pitch into
+    # every worker env) and (b) BEFORE the --resume-run config guard below:
+    # the CLI default is pin_pitch=None ⇒ env_knobs_from_args yields 0, while a
+    # pinned run's config.json holds 1 — resolving after the guard refused
+    # every flag-less resume of a flat-map run (Task 12 ruling). The CLI
+    # already resolved it above --dump-config; here it is a cache-safe
+    # cross-check for programmatic callers.
+    resolve_pin_pitch(args, verbose=False)
+    # R0-D: refuse an out-of-range --seed BEFORE W&B init / metrics.jsonl open
+    # (the real call is in _per_env_kwargs below).
+    env_seed_base(args.seed)
+
+    # ── R0-C (#134): --resume-run resolution (before run_label / metrics / config) ──
+    resume_run = getattr(args, "resume_run", None)
+    _resume_paths = None
+    if resume_run:
+        if getattr(args, "resume", None):
+            raise SystemExit("[Resume] --resume and --resume-run are mutually exclusive")
+        _run_dir = Path(resume_run).resolve()
+        # --checkpoint-dir has default=None in the CLI precisely so this check
+        # can tell "given" from "omitted"; None → CHECKPOINTS_DIR is resolved
+        # AFTER this block.
+        if args.checkpoint_dir is not None and Path(args.checkpoint_dir).resolve() != _run_dir:
+            raise SystemExit(f"[Resume] --checkpoint-dir {args.checkpoint_dir} disagrees with "
+                             f"--resume-run {_run_dir}")
+        args.checkpoint_dir = str(_run_dir)
+        _resume_paths = resolve_resume_run(_run_dir, getattr(args, "run_id", None))
+        args.resume = str(_resume_paths["model_path"])                 # weights go through resolve_resume_split
+        args.run_id = _resume_paths["run_id"]
+                                                                       # Config guard runs HERE, before the vecenv is built, so a knob
+                                                                       # mismatch fails in milliseconds instead of after 256 env spawns.
+                                                                       # build_train_config is pure in (args, batch dims), so this is the
+                                                                       # same dict train_config below is built from.
+        _, _g_bptt, _g_bs = compute_batch_dims(args.num_envs)
+        check_resume_config(_run_dir,
+                            build_train_config(args, batch_size=_g_bs, bptt_horizon=_g_bptt))
+    if args.checkpoint_dir is None:                                    # was the argparse default; now resolved here
+        args.checkpoint_dir = str(CHECKPOINTS_DIR)
+
     run_label = Path(args.checkpoint_dir).name
 
     # ── W&B init ────────────────────────────────────────────────────────────
@@ -4336,12 +5707,28 @@ def train(args):
     # Stamp every row with a per-process run id (label + launch timestamp;
     # the label alone is NOT unique because re-runs into the same checkpoint
     # dir share it). Old rows lack the key — segment those the legacy way.
-    run_id = f"{run_label}-{time.strftime('%Y%m%d-%H%M%S')}"
+    # R0-C: --run-id (or the id read back from trainer_state.pt on --resume-run)
+    # overrides the timestamped default so resumed rows share the id.
+    run_id = getattr(args, "run_id", None) or f"{run_label}-{time.strftime('%Y%m%d-%H%M%S')}"
 
     # Shared team spirit value — all envs read it at episode start
     shared_ts = mp.Value("f", 0.3)
 
     _map_data = args.map_data
+
+    # ── R0-D (#135): deterministic seeding ──────────────────────────────────
+    # pufferl.py has its seeding commented out. Seed BEFORE build_policy
+    # (weight init), before the vecenv (env seeds via env_seed_base below) and
+    # before any random.* consumer (SelfPlayManager draws from module-level
+    # random). This runs BEFORE load_full_resume, so on --resume-run the
+    # python/numpy/torch states saved in train_state.pt (_rng_state_dict)
+    # override this fresh seed — the same RNG set, one path. Env xorshift32
+    # state is NOT restored on resume (C side; see load_full_resume's WARN).
+    # Eval env seed 10_000_003 (Task 13) cannot collide with worker env seeds
+    # env_seed_base(--seed) + i for --seed<=4 (any num_envs) — see env_seed_base.
+    # CAVEAT: this makes CPU runs bit-exact; CUDA runs are seeded but NOT
+    # bit-exact (no torch.use_deterministic_algorithms / cudnn flags are set).
+    seed_everything(args.seed)
 
     # ── Batch 3 (T5b): cont-action shared memory across the fork boundary ──
     # PufferLib's Multiprocessing backend forks workers AFTER allocating its
@@ -4385,10 +5772,13 @@ def train(args):
     # (one per env). All args propagate verbatim through fork because
     # they're stored on env_kwargs[i] BEFORE Process.start() (see
     # .venv/lib/.../pufferlib/vector.py:333-346).
+    # R0-D (#135): the env seed rides here too — pufferlib.vector.make would
+    # silently drop a `seed=` kwarg (see build_env_factory's docstring).
     _per_env_kwargs = [{
         "_cont_shm": _cont_action_shm,
         "_cont_idx": i,
         "_mask_shm": _mask_shm,
+        "_seed": env_seed_base(args.seed) + i,
     } for i in range(args.num_envs)]
 
     backend_name = args.vec_backend.lower()
@@ -4426,6 +5816,9 @@ def train(args):
         backend=backend,
         **vec_kwargs,
     )
+    # R0-H: spawn lists within StaticData capacity, and 4 + 4 on the arena.
+    # `map` is absent on harness/legacy args objects ⇒ generic bounds only.
+    check_spawn_counts(vecenv, getattr(args, "map", None) or "")
 
     # Batch 7 (spec §3.3): sniff the resume checkpoint BEFORE build_policy —
     # the architecture decision has to exist at construction time, and neither
@@ -4446,7 +5839,9 @@ def train(args):
     policy = build_policy(vecenv,
                           device,
                           tct_split_heads=tct_split_heads,
-                          tct_split_trunk=tct_split_trunk)
+                          tct_split_trunk=tct_split_trunk,
+                          aim_log_std_max=getattr(args, "aim_log_std_max", None),
+                          pin_pitch=bool(args.pin_pitch))
 
     agents_per_env, bptt_horizon, batch_size = compute_batch_dims(args.num_envs)
     # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
@@ -4474,7 +5869,9 @@ def train(args):
         # ORDER is load-bearing (spec 2026-08-15 §3.3): σ re-init on the
         # LEGACY dict, then heads convert (needs bare aim_log_std), then
         # trunk convert. Duplicating heads first would hide the σ key.
-        if reinit_frozen_aim_log_std(state_dict):
+        # R0-C: a full-state resume restores the exact pre-crash σ — never widen.
+        if not resume_run and reinit_frozen_aim_log_std(state_dict,
+                                                        cap=getattr(args, "aim_log_std_max", None)):
             print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "
                   f"re-initialized to log(0.3) ≈ {AIM_LOG_STD_RESUME_INIT:.3f} (gh#91)")
         if tct_split_heads and not state_dict_is_split(state_dict):
@@ -4495,6 +5892,9 @@ def train(args):
               "probably not what you want).")
 
     trainer = PuffeRL(train_config, vecenv, policy)
+    # R0-C: PuffeRL's NoLogger invents a timestamp run_id; pin ours so
+    # <data_dir>/<run_id>/ matches the metrics rows and --resume-run can find it.
+    trainer.logger.run_id = run_id
     trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
     _patch_trainer_with_return_norm(trainer)
     # Batch 3 (T5): hybrid-aim patch ALWAYS runs after return_norm because the
@@ -4508,10 +5908,24 @@ def train(args):
     # this function returns (Python doesn't know workers/numpy views are
     # using it via the OS-level mapping).
     trainer._cont_action_shm = _cont_action_shm
-    trainer._action_mask_shm = _mask_shm                                         # F8: same GC-pinning rationale
+    trainer._action_mask_shm = _mask_shm               # F8: same GC-pinning rationale
+
+    # Rung 0 §2.2: static per-run participation vector, env-row major (10 rows
+    # per env: T at 0-4, CT at 5-9), so `(i % TEAM_SIZE) < n_active` selects
+    # slots 0..n-1 of BOTH teams — the exact slots the C env spawns
+    # (cs2_env.py, n_active_per_team). The assert is the agreement check: the
+    # vector is derived from args while the envs were built from
+    # build_train_env_factory, and a disagreement would mask the wrong rows
+    # silently rather than crash.
+    _n_active = env_knobs_from_args(args)["n_active_per_team"]
+    _participating_rows = np.array([(i % TEAM_SIZE) < _n_active
+                                    for i in range(args.num_envs * _agents_per_env)],
+                                   dtype=bool)
+    assert trainer.vecenv.driver_env.n_active_per_team == _n_active, "driver env / args disagree"
     _patch_trainer_with_hybrid_aim(trainer,
                                    cont_action_view_main=_cont_action_view_main,
-                                   mask_view_main=_mask_view_main)
+                                   mask_view_main=_mask_view_main,
+                                   participating_rows=_participating_rows)
 
     # ── Self-play setup ──────────────────────────────────────────────────────
     # F11 (2026-07-06 adversarial review): the selfplay evaluate() wrapper is
@@ -4527,11 +5941,14 @@ def train(args):
     self_play_mgr = SelfPlayManager(
         pool_size=15,
         p_past=0.3 if self_play_enabled else 0.0,
-        save_every_epochs=25,                          # ~2M steps per save at batch_size=81920
+        save_every_epochs=25,                                          # ~2M steps per save at batch_size=81920
         win_threshold=0.6,
-        phase_length=50,                               # switch opponent team every ~4M steps
+        phase_length=50,                                               # switch opponent team every ~4M steps
+        aim_log_std_max=getattr(args, "aim_log_std_max", None),
+        pin_pitch=bool(args.pin_pitch),
     )
-    if self_play_enabled and resume_path and resume_path.exists():
+                                                                       # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
+    if self_play_enabled and resume_path and resume_path.exists() and not resume_run:
         import shutil as _shutil
 
         seed_path = Path(args.checkpoint_dir) / "sp_seed.pt"
@@ -4539,12 +5956,70 @@ def train(args):
         self_play_mgr._add_to_pool(seed_path)
         print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
     _patch_trainer_with_selfplay(trainer, self_play_mgr)
+    # R0-E.2: env flag ⇔ policy mask, or stop before the first rollout.
+    assert_pin_pitch_agreement(vecenv, policy)
+    # R0-G: env aim clamp ⇔ policy tanh scale (a resumed checkpoint may carry
+    # a different buffer than the env it is now paired with).
+    assert_max_turn_speed_agreement(vecenv, policy)
     if not self_play_enabled:
         print("[Train] Self-play mixing disabled (--no-self-play): "
               "both teams use the current policy every epoch.")
     # timing is the outermost wrapper so it sees all evaluate() calls regardless of selfplay
     _patch_trainer_with_timing(trainer)
     # ────────────────────────────────────────────────────────────────────────
+
+    # ── R0-C (#134): full-state checkpointing + restore ─────────────────────
+    # Installed after EVERY patch so the sidecar sees the final aliases.
+    _install_full_checkpointing(trainer, self_play_mgr)
+    _resumed_from_step = None
+    if resume_run:
+        _info = load_full_resume(trainer, self_play_mgr, _resume_paths)
+        _resumed_from_step = _info["resumed_from_step"]
+        # Spec §R0-C bound vs the last metrics row (participating units); see
+        # check_resume_metrics_bound for why both sides are checkpoint_interval
+        # epochs wide.
+        _B = batch_size * train_config["n_active_per_team"] // TEAM_SIZE
+        _last = None
+        if metrics_path.exists():
+            for _line in metrics_path.read_text().splitlines():
+                try:
+                    _row = json.loads(_line)
+                except json.JSONDecodeError:
+                    continue
+                if _row.get("run_id") == run_id:
+                    _last = _row.get("step", _last)
+        if _last is not None:
+            check_resume_metrics_bound(_resumed_from_step, _last,
+                                       train_config["checkpoint_interval"], _B)
+            print(f"[Resume] global_step {_resumed_from_step:,} (last metrics row {_last:,}, "
+                  f"gap {_resumed_from_step - _last:+,}) epoch {trainer.epoch}")
+    # ────────────────────────────────────────────────────────────────────────
+
+    # ── R0-I (Task 13): fixed-baseline eval env — parent-process, serial, the
+    # SAME knobs as the workers (env_knobs_from_args + reward_overrides_from_args
+    # so a --laser-range / --round-time-ticks run evaluates on what it trains
+    # on). Seed 10_000_003: worker env seeds are env_seed_base(--seed) + i, so
+    # the only collision is --seed 100 with >= 4 envs (env 3) — see
+    # env_seed_base. team_spirit=None → raw rewards (eval never feeds training).
+    _eval_hook = None
+    _eval_interval = int(getattr(args, "eval_interval", 0) or 0)
+    if _eval_interval > 0:
+        from eval_baselines import BaselineEvaluator
+        _eval_env = make_puffer_env(team_spirit=None,
+                                    seed=10_000_003,
+                                    map_data=_map_data,
+                                    auto_reset=False,
+                                    reward_overrides=reward_overrides_from_args(args),
+                                    **env_knobs_from_args(args))
+        _d = trainer.vecenv.driver_env
+        for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "round_time"):
+            if getattr(_eval_env, _k) != getattr(_d, _k):
+                raise RuntimeError(f"[Eval] eval env / driver env disagree on {_k}: "
+                                   f"{getattr(_eval_env, _k)!r} vs {getattr(_d, _k)!r}")
+        _eval_hook = ScheduledEval(BaselineEvaluator(_eval_env, episodes=40, seed=args.seed),
+                                   _eval_interval, policy, device)
+        print(f"[Eval] fixed-baseline eval every {_eval_interval} epochs "
+              f"(40 episodes vs random + oracle, round_time={_eval_env.round_time})")
 
     save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
     last_save = time.time()
@@ -4559,11 +6034,22 @@ def train(args):
     while trainer.epoch < trainer.total_epochs:
         trainer._tag_metrics = None    # TAG: drop any un-injected measurement
         trainer.evaluate()
+
+        # Rung 0 §2.2: the participating buffer is zero-initialised, so an
+        # all-False buffer means evaluate() never ran its scatter — every
+        # masked reduction below would then divide by the clamp floor and
+        # train on nothing. Fail loudly instead.
+        assert trainer.participating.any(), "participating buffer never written this epoch"
         logs = trainer.train()
 
-        # Team spirit annealing: 0.3→0.7 over 5M steps
+        # Team spirit annealing: 0.3→0.7 over 5M participating-agent steps
         ts_val = min(0.7, 0.3 + trainer.global_step / 5_000_000)
         shared_ts.value = ts_val
+
+        # R0-I: OUTSIDE the isinstance(logs, dict) guard on purpose — see
+        # ScheduledEval (the 0.25 s log throttle must not skip an eval epoch).
+        if _eval_hook is not None:
+            _eval_hook.after_train(trainer, logs)
 
         if isinstance(logs, dict):
             game_metrics = compute_game_metrics(logs)
@@ -4599,8 +6085,9 @@ def train(args):
             # under --no-self-play.
             if self_play_enabled:
                 self_play_mgr.maybe_switch_teams(trainer.epoch)
-                win_rate_t = logs.get("environment/winner_t", 0.0)
-                win_rate_ct = logs.get("environment/winner_ct", 0.0)
+                # R0-I: elimination-only — winner_ct counts timeouts, which
+                # would pool-save a passive CT as "dominant".
+                win_rate_t, win_rate_ct = elimination_only_win_rates(logs)
                 self_play_mgr.maybe_save(
                     policy,
                     Path(args.checkpoint_dir),
@@ -4673,6 +6160,10 @@ def train(args):
                     for k, v in logs.items() if isinstance(v, (int, float))
                 },
             }
+                                                                            # R0-C: stamp the FIRST row after a --resume-run (analysis seam marker).
+            if _resumed_from_step is not None:
+                log_entry["resumed_from_step"] = _resumed_from_step
+                _resumed_from_step = None
             _metrics_file.write(json.dumps(log_entry) + "\n")
             _metrics_file.flush()
             if wandb_run is not None:
@@ -4692,6 +6183,8 @@ def train(args):
                   f"SPS={logs.get('SPS', 0):.0f}")
 
     trainer.close()
+    if _eval_hook is not None:
+        _eval_hook.close()
 
     # Final checkpoint save
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4713,8 +6206,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dust2",
         action="store_true",
-        help="Use the full dust2 map instead of the default simple 5-room map",
+        help="Alias for --map dust2 (kept for the Modal runner / old scripts); --map wins",
     )
+    parser.add_argument("--map",
+                        choices=MAP_NAMES,
+                        default=None,
+                        help="R0-H: map preset; takes precedence over --dust2. Default: "
+                        "dust2 if --dust2 else simple. Sets config['env']=cs2-<map>.")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--record", action="store_true")
@@ -4727,6 +6225,26 @@ if __name__ == "__main__":
         metavar="CHECKPOINT",
         help="Load policy weights from .pt file before training (optimizer state not restored)",
     )
+    parser.add_argument(
+        "--resume-run",
+        type=str,
+        default=None,
+        metavar="RUN_DIR",
+        dest="resume_run",
+        help="R0-C: full-state resume from <run_dir> (== --checkpoint-dir of the run): "
+        "policy, optimizer, step counters, α/scheduler/return-norm/warm-start/"
+        "self-play/RNG. --timesteps is the TOTAL budget, not additional.")
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        dest="run_id",
+        help="Metrics-row and <checkpoint_dir>/<run_id>/ id (default <label>-<timestamp>).")
+    parser.add_argument("--checkpoint-interval",
+                        type=int,
+                        default=DEFAULT_CHECKPOINT_INTERVAL,
+                        dest="checkpoint_interval",
+                        help="Epochs between full-state checkpoints (default 200; Rung 1 uses 10).")
     parser.add_argument("--timesteps", type=int, default=10_000_000)
     parser.add_argument("--num_envs", type=int, default=256)
     parser.add_argument("--seed", type=int, default=1)
@@ -4736,8 +6254,9 @@ if __name__ == "__main__":
         "--checkpoint_dir",
         "--checkpoint-dir",
         type=str,
-        default=str(CHECKPOINTS_DIR),
+        default=None,
         dest="checkpoint_dir",
+        help="default: CHECKPOINTS_DIR; must match --resume-run when both are given",
     )
     parser.add_argument(
         "--dump-config",
@@ -4783,6 +6302,87 @@ if __name__ == "__main__":
               "print the banner and keep training (e.g. when deliberately studying "
               "degenerate regimes)."),
     )
+    parser.add_argument("--n-active-per-team",
+                        type=int,
+                        default=5,
+                        dest="n_active_per_team",
+                        help="Rung 0: agents per team that spawn; the rest are parked "
+                        "(noop-masked, zero reward, excluded from every trainer statistic). "
+                        "--timesteps counts PARTICIPATING agent-steps.")
+    parser.add_argument("--pin-pitch",
+                        type=int,
+                        choices=(0, 1),
+                        default=None,
+                        dest="pin_pitch",
+                        help="R0-E.2: 1 = env ignores the pitch action and the policy drops the "
+                        "pitch dim from log_prob_c. Default: auto (1 iff the map is flat); "
+                        "an explicit value that disagrees with the map is refused.")
+    parser.add_argument("--crouch-enabled",
+                        type=int,
+                        choices=(0, 1),
+                        default=1,
+                        dest="crouch_enabled",
+                        help="R0-E.2: 0 masks the crouch action (stance parity for pinned-pitch "
+                        "duels; a crouched target is an unobservable guaranteed miss).")
+    # R0-G env knobs. Default None ⇒ the env's nav.py constant (config.json
+    # records None, not a copied constant). Not in RESUME_CONFIG_ALLOWLIST:
+    # changing any of them on --resume-run is a different experiment.
+    # PITFALL: a config.json written before R0-G/R0-I/R0-J lacks these keys;
+    # check_resume_config treats missing ≠ None as a mismatch, so such run dirs
+    # cannot --resume-run (by design — same as the R0-E keys).
+    # R0-I (Task 13): fixed-baseline eval cadence. 0 = off (default: the
+    # 40-episode serial eval costs wall time every epoch it runs).
+    parser.add_argument("--eval-interval",
+                        type=int,
+                        default=0,
+                        dest="eval_interval",
+                        help="R0-I: run the fixed-baseline eval (40 episodes vs random and vs "
+                        "oracle on the training map/knobs) every N epochs; eval/* keys land on "
+                        "the next logged metrics row. 0 = off.")
+    parser.add_argument("--round-time-ticks",
+                        type=int,
+                        default=None,
+                        dest="round_time_ticks",
+                        help="R0-G: ticks per round (episode length). Default: nav.ROUND_TIME.")
+    parser.add_argument("--laser-range",
+                        type=float,
+                        default=None,
+                        dest="laser_range",
+                        help="R0-G: hitscan reach in map units. Default: nav.LASER_RANGE.")
+    parser.add_argument(
+        "--max-turn-speed",
+        type=float,
+        default=None,
+        dest="max_turn_speed",
+        help="R0-G: max yaw/pitch delta per tick (rad). Default: nav.MAX_TURN_SPEED_RAD. "
+        "Rung 1 must not set this — it rescales the aim action.")
+    # R0-J (Task 14): PPO discount and PBRS discount. Both are config keys and
+    # NOT allowlisted for --resume-run. --pbrs-gamma default None ⇒ follows
+    # --gamma (resolve_gammas); pass it only to deliberately break invariance.
+    parser.add_argument("--gamma",
+                        type=float,
+                        default=DEFAULT_GAMMA,
+                        help="R0-J: PPO discount factor (default 0.999). Also the PBRS "
+                        "shaping discount unless --pbrs-gamma is given.")
+    parser.add_argument("--pbrs-gamma",
+                        type=float,
+                        default=None,
+                        dest="pbrs_gamma",
+                        help="R0-J: PBRS shaping discount. Default: equal to --gamma (the only "
+                        "policy-invariant choice). Set explicitly only for experiments that "
+                        "deliberately decouple the two.")
+    parser.add_argument("--aim-entropy-bonus",
+                        choices=("on", "off"),
+                        default="on",
+                        dest="aim_entropy_bonus",
+                        help="R0-E.4: include the Gaussian aim entropy in the entropy objective "
+                        "(default on). 'off' stops the +1/dim gradient that pins aim σ at the cap.")
+    parser.add_argument("--aim-log-std-max",
+                        type=float,
+                        default=None,
+                        dest="aim_log_std_max",
+                        help="R0-E.3: per-run cap on aim log σ, in (log 0.01, log 0.5] "
+                        "(default LOG_STD_MAX = log 0.5).")
     parser.add_argument("--warmstart-entropy",
                         action="store_true",
                         dest="warmstart_entropy",
@@ -4857,17 +6457,43 @@ if __name__ == "__main__":
         "checkpoint's keys, so a crash-resume without this flag still rebuilds a "
         "split-trunk policy.")
     args = parser.parse_args()
+    # Every mode (record/eval too) derives env seeds from --seed; fail here,
+    # not deep in a mode.
+    env_seed_base(args.seed)
+    # Same idea for the aim σ cap: range-check it here (torch-free) so
+    # --dump-config / the sweep fingerprint reject a bad --aim-log-std-max
+    # instead of make_policy() 30 s into every retry.
+    validate_aim_log_std_max(args.aim_log_std_max)
+
+    # ── R0-H: map name → MapData → pin_pitch, ABOVE the --dump-config exit ──
+    # The Modal runner fingerprints every launch from --dump-config, so the
+    # dump must carry the same env label and the same geometry-resolved
+    # pin_pitch the run's own config.json will (Task 9 ruling: the value comes
+    # from the LOADED map, never a name table). Cost: ~0.8 s (`import map`)
+    # for simple/arena, ~1 s for dust2 from the nav cache (pin_pitch_for_map(
+    # None) loads it via the same _ENV_CACHE make_env uses, so nothing is
+    # loaded twice). PITFALL: `--dump-config --map dust2` (or --dust2)
+    # therefore needs nav/de_dust2.nav + the vis cache on the HOST that runs
+    # the dump (Modal fingerprints run host-side).
+    if args.map is None:
+        args.map = "dust2" if args.dust2 else "simple"
+    args.map_data = build_map_data(args.map)
+    print(f"[Map] Using {args.map} map")
+    resolve_pin_pitch(args)
 
     if args.dump_config:
         # Zero-side-effect mode: write config.json and exit. Runs BEFORE device
-        # detection and map loading so no torch/map imports are triggered. This
-        # lets scripts/run_experiment.py fingerprint the HPs cheaply (no env,
-        # no CUDA probe). Keep this branch lean — anything imported here adds
+        # detection so no torch import is triggered (the map is built above:
+        # config.json needs its pin_pitch/env label). This lets
+        # scripts/run_experiment.py fingerprint the HPs cheaply (no env, no
+        # CUDA probe). Keep this branch lean — anything imported here adds
         # startup cost to every experiment launch.
         if args.device is None:
             args.device = "cpu"        # placeholder; never used for training
 
-        ckpt_dir = Path(args.checkpoint_dir)
+        # --checkpoint-dir defaults to None (so --resume-run can tell "given" from
+        # "omitted"); resolve here too — this block never reaches train().
+        ckpt_dir = Path(args.checkpoint_dir if args.checkpoint_dir is not None else CHECKPOINTS_DIR)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         # Shared helper with train() so the fingerprint dict can't drift.
@@ -4883,15 +6509,6 @@ if __name__ == "__main__":
         import torch
 
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    if args.dust2:
-        args.map_data = None
-        print("[Map] Using dust2 map")
-    else:
-        from map import make_simple_map
-
-        args.map_data = make_simple_map()
-        print("[Map] Using simple 5-room map")
 
     if args.smoke:
         smoke_test()

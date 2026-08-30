@@ -208,6 +208,17 @@ def make_cs2_map(nav_path: str, cache_path: str) -> MapData:
     if finite_dist.size:
         max_dist = float(finite_dist.max())
         bombsite_dist_scale = 1.0 / max_dist if max_dist > 0 else 0.0
+    # R0-F (#136): scale is computed from the FINITE entries above; only now
+    # replace non-finite hops (area-id gaps + unreachable areas) with 4×max so
+    # closeness = 1 − 4 < 0 → clamps to 0 in C exactly as the old isfinite()
+    # skip did (isfinite folds to true under -ffast-math and leaked inf).
+    # PITFALL: never fill before computing the scale — the sentinel would
+    # shrink it 4× and silently rescale every nav reward. No finite entry
+    # (bombsites=[]) ⇒ leave the array all-inf and scale 0.0; the C guard on
+    # scale > 0 handles it.
+    if finite_dist.size:
+        bombsite_dist = np.where(np.isfinite(bombsite_dist), bombsite_dist,
+                                 4.0 * max_dist).astype(np.float32)
 
     bm_int8 = bombsite_mask.astype(np.int8)
     bombsite_by_idx = np.array(
@@ -302,6 +313,35 @@ SIMPLE_ROOMS = [
 SIMPLE_T_SPAWNS = [0, 1, 2, 3, 4]
 SIMPLE_CT_SPAWNS = [8, 9, 10, 11, 12]
 SIMPLE_BOMBSITES = [6]
+
+# ── R0-H: Rung 1 duel arena (spec 2026-08-29 §3 R0-H) ─────────────────────
+# WHAT: one flat 600×400u rectangle gridded 6×4 into 100u areas
+# (idx = row*6 + col, centroids x ∈ {50..550}, y ∈ {50..350}, z ≡ 0, no ramps).
+# T spawns = the x=150 column (idx 1,7,13,19); CT spawns = x=350 (3,9,15,21).
+# Four rows per side ⇒ 16 pairings, gaps 200–360.6u, opening bearings one of
+# 7 signed values (span 112.6°) that T/CT must READ from the enemy-bearing
+# obs (R0-E.1). No bombsites ⇒ bombsite_dist_scale == 0.0 and the R0-F C
+# guards skip every bombsite potential.
+# WHY the row randomisation is LOAD-BEARING: with one fixed spawn per side the
+# opening obs is bit-identical every round and a constant Δyaw — reachable
+# through the aim head's bias alone — would pass every §5 gate without ever
+# reading the obs. tests/test_arena_duel.py pins this with a bias-only search.
+# PITFALLS: cell_size=20 divides 100 exactly; the default 16 does not and
+# make_simple_map's floor/ceil raster would overlap adjacent areas by a cell.
+# spawn_team's `n_spawns < TEAM_SIZE` branch draws `xorshift32 % n_spawns` per
+# agent, so 4 spawns add no RNG draw versus one (n=5 bit-exactness intact);
+# ≥ TEAM_SIZE spawns per side would switch to the shuffle path (Rung 2).
+# StaticData caps: t_spawns[15] / ct_spawns[5] (cs2_types.h) — asymmetric.
+# yapf: disable
+ARENA_DUEL_V1 = {
+    "rooms": [(r * 6 + c, c * 100.0, r * 100.0, (c + 1) * 100.0, (r + 1) * 100.0, 0.0, False)
+              for r in range(4) for c in range(6)],
+    "t_spawns": [1, 7, 13, 19],
+    "ct_spawns": [3, 9, 15, 21],
+    "bombsites": [],
+    "cell_size": 20.0,
+}
+# yapf: enable
 
 # Maximum grounded up-step (Source `sv_stepsize` default = 18u). MUST stay numerically
 # in lock-step with `SV_MAX_STEP_HEIGHT_CS` in src/c_env/cs2_movement.h (added in T3).
@@ -453,12 +493,17 @@ def make_simple_map(
                 dist_hops[nxt] = dist_hops[cur] + 1.0
                 queue.append(nxt)
 
-    bombsite_dist = dist_hops          # float32[N] (area_id == area_idx)
+    bombsite_dist = dist_hops                                               # float32[N] (area_id == area_idx)
     finite = bombsite_dist[np.isfinite(bombsite_dist)]
     bombsite_dist_scale = 0.0
     if finite.size:
         mx = float(finite.max())
         bombsite_dist_scale = 1.0 / mx if mx > 0 else 0.0
+                                                                            # R0-F (#136): same sentinel fill as the dust2 path — see comment there.
+                                                                            # Scale first (from finite entries), then inf → 4×max (finite, clamps to 0).
+    if finite.size:
+        bombsite_dist = np.where(np.isfinite(bombsite_dist), bombsite_dist,
+                                 4.0 * mx).astype(np.float32)
 
     area_bounds = np.zeros((N, 4), dtype=np.float32)
     for idx, x0, y0, x1, y1, *_ in rooms:
@@ -489,3 +534,23 @@ def make_simple_map(
         nav_graph=None,
         area_bounds=area_bounds,
     )
+
+
+def make_arena_duel_map() -> MapData:
+    """R0-H: build ARENA_DUEL_V1 (see the preset comment for what/why/pitfalls).
+
+    Returns a MapData exactly as make_simple_map produces it — flat (centroids_z
+    ≡ 0 ⇒ train.pin_pitch_for_map == 1), all 24 areas mutually visible, no
+    bombsite. Raises RuntimeError (not assert: python -O strips asserts) if the
+    preset ever drifts from the 6×4 / 4+4-spawn contract the sim and tests pin.
+    """
+    p = ARENA_DUEL_V1
+    md = make_simple_map(rooms=p["rooms"],
+                         t_spawns=p["t_spawns"],
+                         ct_spawns=p["ct_spawns"],
+                         bombsites=p["bombsites"],
+                         cell_size=p["cell_size"])
+    if md.N != 24 or len(md.t_spawn_areas) != 4 or len(md.ct_spawn_areas) != 4:
+        raise RuntimeError(f"ARENA_DUEL_V1 drifted: N={md.N} t_spawns={len(md.t_spawn_areas)} "
+                           f"ct_spawns={len(md.ct_spawn_areas)} (expected 24 / 4 / 4)")
+    return md

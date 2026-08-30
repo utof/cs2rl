@@ -12,7 +12,7 @@ import pufferlib
 import nav
 from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from map import make_cs2_map
-from nav import N_AGENTS, OBS_DIM, ROUND_TIME, TEAM_SIZE
+from nav import N_AGENTS, OBS_DIM, TEAM_SIZE
 
 _DIR = Path(__file__).parent
 if str(_DIR) not in sys.path:
@@ -160,10 +160,15 @@ class StaticDataC(ctypes.Structure):
         ("pbrs_bomb_progress_weight", ctypes.c_float),
         ("pbrs_nav_weight_t", ctypes.c_float),
         ("pbrs_nav_weight_ct", ctypes.c_float),
-        # After ctypes prefix: overlay C wall_list then ramp bounds.
-        # Do not insert before wall_list. 69-arg FMT is unchanged.
-        # Measured gcc offsetof(StaticData): wall_list=480, area_bounds=496.
-        # No pad after pbrs_nav_weight_ct (ends 480).
+        # Rung 0 (spec 2026-08-29): FMT positions 69-71, before wall_list in C.
+        ("n_active_per_team", ctypes.c_int32),
+        ("pin_pitch", ctypes.c_int32),
+        ("crouch_enabled", ctypes.c_int32),
+        # After the binding.init prefix: overlay C wall_list then ramp bounds.
+        # These two stay LAST, matching cs2_types.h. New scalars go above them
+        # (and at the same spot in the C struct); the offset anchors below are
+        # what proves the two sides moved together, so no hand-measured
+        # offsetof literals are quoted here any more — they rot on every insert.
         ("wall_list", WallListC),
         ("area_bounds", ctypes.POINTER(ctypes.c_float)),
     ]
@@ -219,6 +224,10 @@ class AgentStateC(ctypes.Structure):
                                                        # Do not write these into facing / aim_rad / stored pitch.
         ("punch_pitch", ctypes.c_float),
         ("punch_yaw", ctypes.c_float),
+                                                       # Rung 0: 0 for parked slots (spec §2.1).
+                                                       # NOT the same as alive=0 — see cs2_types.h.
+        ("participating", ctypes.c_int8),
+        ("_pad5", ctypes.c_int8 * 3),
     ]
 
 
@@ -267,16 +276,16 @@ class StepStatsC(ctypes.Structure):
         ("action_move", ctypes.c_int32 * 9),
         ("action_shoot", ctypes.c_int32 * 2),
         ("action_use", ctypes.c_int32 * 2),
-                                                       # action_last removed (F13) — dead legacy counter, see cs2_types.h.  # noqa: E501
-                                                       # Batch 3: continuous-aim Δyaw stats (mirror C StepStats fields).  # noqa: E501
-                                                       # Replaces the 16-bin action_aim histogram (64B) with a Welford-style  # noqa: E501
-                                                       # triple (sum + sq_sum + count = 12B). No explicit _pad_aim_delta —  # noqa: E501
-                                                       # the three int32-aligned fields slot in cleanly between action_use  # noqa: E501
-                                                       # and action_reload. See cs2_types.h StepStats comment.  # noqa: E501
+                                                                       # action_last removed (F13) — dead legacy counter, see cs2_types.h.  # noqa: E501
+                                                                       # Batch 3: continuous-aim Δyaw stats (mirror C StepStats fields).  # noqa: E501
+                                                                       # Replaces the 16-bin action_aim histogram (64B) with a Welford-style  # noqa: E501
+                                                                       # triple (sum + sq_sum + count = 12B). No explicit _pad_aim_delta —  # noqa: E501
+                                                                       # the three int32-aligned fields slot in cleanly between action_use  # noqa: E501
+                                                                       # and action_reload. See cs2_types.h StepStats comment.  # noqa: E501
         ("aim_delta_sum", ctypes.c_float),
         ("aim_delta_sq_sum", ctypes.c_float),
         ("aim_delta_count", ctypes.c_int32),
-                                                       # Batch 3.5: pitch Welford triple (mirror cs2_types.h StepStats fields).
+                                                                       # Batch 3.5: pitch Welford triple (mirror cs2_types.h StepStats fields).
         ("aim_delta_pitch_sum", ctypes.c_float),
         ("aim_delta_pitch_sq_sum", ctypes.c_float),
         ("aim_delta_pitch_count", ctypes.c_int32),
@@ -292,14 +301,29 @@ class StepStatsC(ctypes.Structure):
         ("reward_shots", ctypes.c_float),
         ("reward_survival", ctypes.c_float),
         ("reward_inaction", ctypes.c_float),
-                                                       # Batch 1 (RL overhaul): round-end win classification flags.  # noqa: E501
-                                                       # Cleared by round_reset (Task 2). Set by compute_rewards (Task 3).  # noqa: E501
-                                                       # Consumed by split_into_channels to route reward_win:  # noqa: E501
-                                                       #   detonation/defuse → objective channel; else → combat channel.  # noqa: E501
-        ("win_by_detonation", ctypes.c_int8),          # 1 when bomb detonated (T wins)
-        ("win_by_defuse", ctypes.c_int8),              # 1 when bomb was defused (CT wins)
-        ("_pad_ss_wins", ctypes.c_int8 * 2),           # pad to 4-byte boundary
-        ("plant_tick", ctypes.c_int32),                # g->tick at plant; 0 = never planted
+                                                                       # Batch 1 (RL overhaul): round-end win classification flags.  # noqa: E501
+                                                                       # Cleared by round_reset (Task 2). Set by compute_rewards (Task 3).  # noqa: E501
+                                                                       # Consumed by split_into_channels to route reward_win:  # noqa: E501
+                                                                       #   detonation/defuse → objective channel; else → combat channel.  # noqa: E501
+        ("win_by_detonation", ctypes.c_int8),                          # 1 when bomb detonated (T wins)
+        ("win_by_defuse", ctypes.c_int8),                              # 1 when bomb was defused (CT wins)
+        ("_pad_ss_wins", ctypes.c_int8 * 2),                           # pad to 4-byte boundary
+        ("plant_tick", ctypes.c_int32),                                # g->tick at plant; 0 = never planted
+                                                                       # R0-A (spec 2026-08-29 §3) — appended, never reorder. Mirrors the
+                                                                       # combat-instrumentation tail of C StepStats (cs2_types.h); semantics
+                                                                       # documented there. reward_win_ct is the tail anchor (_C_OFFSET_FIELDS).
+        ("shots_fired", ctypes.c_int32),
+        ("shots_with_enemy_in_los", ctypes.c_int32),
+        ("shots_facing_enemy", ctypes.c_int32),
+        ("shots_on_target", ctypes.c_int32),
+        ("shots_hit", ctypes.c_int32),
+        ("shots_stance_blocked", ctypes.c_int32),
+        ("mutual_vis_pair_ticks", ctypes.c_int32),
+        ("agent_ticks_with_visible_enemy", ctypes.c_int32),
+        ("damage_dealt", ctypes.c_float),
+        ("min_enemy_distance", ctypes.c_float),                        # 1e30 sentinel = no pair coexisted
+        ("reward_win_t", ctypes.c_float),
+        ("reward_win_ct", ctypes.c_float),
     ]
 
 
@@ -349,56 +373,128 @@ class Dust2EnvC(ctypes.Structure):
     ]
 
 
-# Sanity-check struct sizes match the C layout — catches future drift early.
-# Sizes updated for Phase 7 (jump): AgentState +12 bytes (vz, is_airborne,
-# pad, jump_cd), StepStats +8 bytes (action_jump[2]). GameState rolls up
-# the agent-array delta (10×12=120). Dust2EnvC rolls up game + 2× stats +
-# 20 bytes of added mask slots + alignment.
-# Batch 1 (RL overhaul): StepStats +4 bytes (win_by_detonation, win_by_defuse,
-# _pad_ss_wins[2]). Dust2EnvC +8 bytes (2× StepStats).
-# Batch 2 task 1: GameState +4 from round_designated_carrier_id (int32).
-# Dust2EnvC grows by +8 (not +4): the extra 4 bytes from `game` push the
-# trailing `client` void* pointer past an 8-byte alignment boundary, so the
-# C compiler inserts a 4-byte pad before `client`, giving a net +8 for
-# Dust2EnvC.
-# Batch 2 task 2: OBS_DIM 104 → 105 — Dust2EnvC `observations` array
-# (c_float * (10 * 105)) is +40 bytes vs task 1.
-# Batch 3: StepStats −52 bytes (action_aim[16]=64B → aim_delta_*=12B).
-# Dust2EnvC −264 bytes nominal: 2× StepStats (−104) + masks shrink
-# (10×38→10×22 = −160). Verify empirically on first build — alignment
-# surprises are routine; values updated below to match observed sizeof.
-# Batch 3.5: AgentStateC +4 (float pitch), GameStateC +40 (×10 agents),
-# Dust2EnvC +40 (GameState) +80 (observations: 10×(107−105)×4).
-# Batch 6 Task 2.5: OBS_DIM 107 → 110 (bombsite bearing/distance in self
-# block) — Dust2EnvC observations +120 (10×3×4); agent/game/stats unchanged.
-# Sim recoil v1 (#120): AgentState +8 (punch_pitch/punch_yaw), GameState +80
-# (×10 agents). Dust2Env +88: game +80, recoil_enabled int32 after client +4,
-# plus 4-byte trailing pad to 8-byte struct alignment (client is a pointer).
-# Measured with a C printf TU against the headers — do not invent the pad.
-assert ctypes.sizeof(AgentStateC) == 164, (
-    f"AgentStateC size mismatch: {ctypes.sizeof(AgentStateC)} (expected 164)")
-assert ctypes.sizeof(GameStateC) == 1708, (
-    f"GameStateC size mismatch: {ctypes.sizeof(GameStateC)} (expected 1708)")
-# F13: 208→200 / 6752→6736 after removing the dead action_last[2] counter
-# (Dust2Env embeds TWO StepStats — step + episode — hence the −16).
-# Instrumentation 2026-08-15: 200→204 / 6736→6744 after appending
-# plant_tick (int32) to StepStats. Dust2Env embeds TWO StepStats
-# (step + episode), so the env grows by +8.
-# Sim recoil v1 (#120): Dust2Env 6744→6832 (see punch/flag note above).
-assert ctypes.sizeof(StepStatsC) == 204, (
-    f"StepStatsC size mismatch: {ctypes.sizeof(StepStatsC)} (expected 204)")
-assert ctypes.sizeof(Dust2EnvC) == 6832, (
-    f"Dust2EnvC size mismatch: {ctypes.sizeof(Dust2EnvC)} (expected 6832)")
-# Live overlay vs gcc offsetof(StaticData). Append of wall_list is safe:
-# pbrs_nav_weight_ct ends at 480, pointer-aligned, no guessed pad.
-assert StaticDataC.pbrs_nav_weight_ct.offset == 476, StaticDataC.pbrs_nav_weight_ct.offset
-assert StaticDataC.wall_list.offset == 480, StaticDataC.wall_list.offset
-assert StaticDataC.area_bounds.offset == 496, StaticDataC.area_bounds.offset
-assert ctypes.sizeof(WallListC) == 16, ctypes.sizeof(WallListC)
-# 8 floats + 1 int32, no padding. Mirrors _Static_assert(sizeof(Wall) == 36)
-# in cs2_types.h; if you change Wall, both must move together or walls[i]
-# reads garbage. WallListC's own size is unaffected (walls is a pointer).
-assert ctypes.sizeof(WallC) == 36, ctypes.sizeof(WallC)
+# ── ctypes mirror ↔ C layout guard ──────────────────────────────────────────
+# Every struct above is overlaid byte-for-byte on memory the C extension owns,
+# so a mirror that drifts from cs2_types.h reads garbage SILENTLY — ctypes
+# cannot see the real C layout. These asserts pin each mirror to the C
+# compiler's own sizeof/offsetof, published by binding.struct_sizes().
+#
+# Why not literals: this block used to carry hand-measured numbers
+# (164/1708/204/6832; offsets 476/480/496) plus a running changelog explaining
+# each delta. They rotted on every appended field and could only be refreshed
+# by compiling a throwaway printf TU by hand, so a genuine drift surfaced as a
+# confusing assert about the wrong number. The history lives in git; the
+# numbers now come from the same compiler invocation that laid the structs out.
+#
+# If one of these raises at import time the MIRROR is wrong, not the assert —
+# fix _fields_ above. Adding a struct? Add a sizeof key AND a tail offsetof key
+# to py_struct_sizes() in binding.c, plus an entry in each matching tuple below
+# (_C_SIZE_MIRRORS and _C_OFFSET_FIELDS). BOTH halves of that slip are caught,
+# so neither a mirror nor a key can sit unguarded:
+#   - mirror declared here, no key in binding.c ->
+#     test_every_ctypes_mirror_is_size_guarded enumerates the ctypes.Structure
+#     subclasses DEFINED IN THIS MODULE and compares them to _C_SIZE_MIRRORS.
+#     (An earlier version of this comment claimed this direction was
+#     undetectable. It is not: the module namespace is the second, independent
+#     list of mirrors — that is what makes the census possible.)
+#   - key in binding.c, never consumed here ->
+#     test_struct_sizes_keys_are_all_consumed asserts
+#     set(binding.struct_sizes()) == _C_SIZE_KEYS_CHECKED.
+# Both live in tests/test_struct_sizes.py.
+#
+# Pitfall: struct_sizes() reads the CURRENTLY BUILT .so. Editing src/c_env/*.h
+# without rebuilding (`python setup.py build_ext --inplace`) compares a new
+# mirror against a stale binary — it can pass on a broken tree or fail on a
+# correct one. Rebuild first, then trust this.
+_C_SIZES = binding.struct_sizes()
+# fmt: off  -- one pair per line; YAPF repacks these into unreadable columns
+# (struct_sizes() key -> ctypes mirror) — sizeof pairs.
+_C_SIZE_MIRRORS = (
+    ("AgentState", AgentStateC),
+    ("GameState", GameStateC),
+    ("StepStats", StepStatsC),
+    ("Dust2Env", Dust2EnvC),
+    ("StaticData", StaticDataC),
+    ("WallList", WallListC),
+    ("Wall", WallC),
+)
+# (ctypes mirror, field name, struct_sizes() key) — offsetof anchors.
+#
+# EVERY mirror's TAIL field is anchored here, not just StaticData's. sizeof is
+# blind to the drift that costs the most: a field inserted mid-struct in
+# cs2_types.h but appended at the END of the mirror keeps sizeof identical, so
+# the size guard above passes and every field after the insertion point reads
+# the wrong bytes, silently, forever. The last field's offset DOES move under
+# that edit. Swapping two same-width fields is the same story — invisible to
+# sizeof, visible to the anchor when the swap reaches the tail.
+#
+# RULE when adding a field: it goes in the SAME position in the C struct
+# (cs2_types.h) and in the mirror above. Appending — the usual case — makes it
+# the new tail, so retarget that struct's anchor to it in BOTH py_struct_sizes()
+# (binding.c) and the tuple below, in the same commit. Leaving the anchor on the
+# old tail still works (both sides shift together) but stops guarding the tail.
+#
+# StaticData carries three anchors instead of one: wall_list/area_bounds are
+# appended after a long run of float reward weights, and pbrs_nav_weight_ct pins
+# the end of that run, so a drift inside the run is localised rather than only
+# surfacing at the very end.
+_C_OFFSET_FIELDS = (
+    (StaticDataC, "pbrs_nav_weight_ct", "StaticData_pbrs_nav_weight_ct_offset"),
+    (StaticDataC, "wall_list", "StaticData_wall_list_offset"),
+    (StaticDataC, "area_bounds", "StaticData_area_bounds_offset"),
+    (AgentStateC, "_pad5", "AgentState__pad5_offset"),
+    # GameState's tail is its explicit pad array, not a "real" field. offsetof
+    # on a pad is legal, and the rule is uniform: anchor the LAST field. Picking
+    # bomb_is_dropped instead would miss a field slipped in between it and the
+    # pad on one side only.
+    (GameStateC, "_pad_gs", "GameState__pad_gs_offset"),
+    (StepStatsC, "reward_win_ct", "StepStats_reward_win_ct_offset"),
+    (Dust2EnvC, "recoil_enabled", "Dust2Env_recoil_enabled_offset"),
+    (WallC, "kind", "Wall_kind_offset"),
+    (WallListC, "capacity", "WallList_capacity_offset"),
+)
+# (struct_sizes() key -> Python value) — bare macros nav.py re-declares in
+# Python. Pin them to the header: the reward views below slice
+# rewards[:TEAM_SIZE], so a drift would mis-attribute every team-spirit term
+# rather than crash.
+_C_MACROS = (
+    ("TEAM_SIZE", TEAM_SIZE),
+    ("N_AGENTS", N_AGENTS),
+)
+# fmt: on
+
+for _name, _mirror in _C_SIZE_MIRRORS:
+    # _mirror.__name__ rather than f"{_name}C": the "C" suffix is a convention
+    # the tuple does not enforce, so concatenating it would print a class name
+    # that may not exist. __name__ is always the class actually compared.
+    # RuntimeError, not assert: python -O strips asserts and this is the only
+    # layout guard outside the test suite.
+    if _C_SIZES[_name] != ctypes.sizeof(_mirror):
+        raise RuntimeError(f"{_mirror.__name__} size mismatch (struct_sizes key {_name!r}): "
+                           f"ctypes {ctypes.sizeof(_mirror)} vs C {_C_SIZES[_name]}")
+del _name, _mirror
+for _mirror, _field, _key in _C_OFFSET_FIELDS:
+    # _mirror.__name__, not a hard-coded class: the tuple spans every mirror
+    # now, so the message must name the one that actually drifted.
+    if getattr(_mirror, _field).offset != _C_SIZES[_key]:
+        raise RuntimeError(
+            f"{_mirror.__name__}.{_field} offset mismatch (struct_sizes key {_key!r}): "
+            f"ctypes {getattr(_mirror, _field).offset} vs C {_C_SIZES[_key]}")
+del _mirror, _field, _key
+for _macro, _py_value in _C_MACROS:
+    if _py_value != _C_SIZES[_macro]:
+        raise RuntimeError(f"{_macro} mismatch: nav {_py_value} vs C {_C_SIZES[_macro]}")
+del _macro, _py_value
+
+# Every struct_sizes() key this module actually compares, derived from the three
+# tuples above rather than re-listed by hand (a hand-written copy would be the
+# next thing to rot). tests/test_struct_sizes.py asserts
+# set(binding.struct_sizes()) == _C_SIZE_KEYS_CHECKED, which turns "published a
+# key in binding.c and forgot to consume it here" from a silent unguarded field
+# into a failing test. Exported for that test; nothing in the sim reads it.
+_C_SIZE_KEYS_CHECKED = (frozenset(_n for _n, _ in _C_SIZE_MIRRORS)
+                        | frozenset(_k for _, _, _k in _C_OFFSET_FIELDS)
+                        | frozenset(_m for _m, _ in _C_MACROS))
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
@@ -411,13 +507,15 @@ _ENV_CACHE: dict = {}
 # ── Zero-sum reward symmetrization (spec 2026-08-01 §4.3) ─────────────────────
 
 
-def symmetrize_rewards(rewards):
+def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
     """Rewrite a 10-agent reward vector to be exactly zero-sum, in place.
 
     WHAT: for agent i on team A facing team B,
-        r_i' = 0.5 * ( r_i - mean_{j in B}(r_j) )
+        r_i' = 0.5 * ( r_i - mean_{j in ACTIVE(B)}(r_j) )
     Agents 0..TEAM_SIZE-1 are T, TEAM_SIZE..N_AGENTS-1 are CT (same split the
-    C CT-survival loop uses, src/c_env/cs2_rewards.h:225).
+    C CT-survival loop uses, src/c_env/cs2_rewards.h:225). Only the first
+    n_active_per_team slots of each team are read or written; the parked
+    remainder (Rung 0, spec 2026-08-29 §2.1) is left untouched at exactly 0.0.
 
     WHY: the shared self-play policy is paid for private, non-zero-sum
     per-team subsidies (the CT survival drip, the timeout-win bonus); that
@@ -431,16 +529,17 @@ def symmetrize_rewards(rewards):
     survives.
 
     PITFALLS:
-    1. The FIXED TEAM_SIZE=5 divisor is LOAD-BEARING — do not "fix" it to an
-       alive-count. Dividing each team's mean by its own alive count breaks the
-       exact zero-sum property this function exists to provide: the sum over
-       all agents is 0.5*(sum_A - 5*mean_B) + 0.5*(sum_B - 5*mean_A), and the
-       two half-terms cancel ONLY because both means are scaled by the same
-       constant. The C team_spirit loop right below the PBRS block IS
-       alive-gated (src/c_env/cs2_rewards.h:247), so mirroring it here looks
-       like the obvious consistency fix; it would silently destroy zero-sum.
+    1. The divisor is a FIXED ROSTER SIZE (n_active_per_team, TEAM_SIZE by
+       default) — do not "fix" it to a per-tick alive-count. Dividing each
+       team's mean by its own alive count breaks the exact zero-sum property
+       this function exists to provide: the sum over the 2n written rows is
+       0.5*(S_A - n*mean_B) + 0.5*(S_B - n*mean_A), and the two half-terms
+       cancel ONLY because both means are scaled by the same constant n. The
+       C team_spirit loop right below the PBRS block IS alive-gated
+       (src/c_env/cs2_rewards.h:247), so mirroring it here looks like the
+       obvious consistency fix; it would silently destroy zero-sum.
        Consequence to carry into analysis, not a wart to repair: late-round
-       with four dead CTs, the lone survivor's stall drip is attenuated to 1/5
+       with n-1 dead CTs, the lone survivor's stall drip is attenuated to 1/n
        before subtraction, so subsidy cancellation is WEAKEST exactly in the
        stall-heavy end-of-round window the A2 experiment targets (review
        finding 7).
@@ -458,14 +557,45 @@ def symmetrize_rewards(rewards):
        (spec §4.3 analysis caveat).
     5. No all-zero fast path. `if not rewards.any(): return` looks free but is
        strictly harmful: measured 5000/5000 ticks carry a nonzero reward,
-       because the PBRS loop adds a term for every agent ungated by alive
-       (src/c_env/cs2_rewards.h:236-243). The guard would never fire and would
-       tax every step with an extra full-array scan.
+       because the PBRS loop adds a term for every PARTICIPATING agent, dead or
+       alive (cs2_rewards.h, the `if (!g->agents[i].participating) continue;`
+       block). The guard would never fire and would tax every step with an
+       extra full-array scan.
+    6. Rung 0 (spec 2026-08-29 §2.1): BOTH means and BOTH written slices are
+       restricted to the n_active_per_team ACTIVE slots. Getting either half
+       of that wrong is a real bug, not a cosmetic one — the first Rung 0
+       version kept the TEAM_SIZE divisor and wrote all 10 rows, which broke
+       two things at once:
+         - PARKED rows arrived at 0.0 and left at -0.5*mean_opponent, so the
+           "parked slots get zero reward every tick" contract held only as
+           long as a trainer-side participating mask covered for it;
+         - ACTIVE rows had the opponent-mean subtraction attenuated by
+           n/TEAM_SIZE — at n=1 an agent got 0.5*(r_0 - r_5/5) where the
+           transform is defined as 0.5*(r_0 - r_5), i.e. a 5x weaker subsidy
+           cancellation. No mask repairs that: it is the UNMASKED rows that
+           are wrong.
+       Zero-sum stays EXACT in the active-only form, which is why restricting
+       the slices is the fix and not a violation of PITFALL 1: the written
+       rows sum to 0.5*(S_T - n*mean_ct) + 0.5*(S_CT - n*mean_t) =
+       0.5*(S_T - S_CT) + 0.5*(S_CT - S_T) = 0 (since n*mean_ct == S_CT and
+       n*mean_t == S_T), and the parked rows contribute 0 because they are
+       never written. What PITFALL 1 forbids is a divisor that varies per
+       TICK (an alive count), not one that is constant for the whole run.
     """
-    mean_t = rewards[:TEAM_SIZE].mean()
-    mean_ct = rewards[TEAM_SIZE:].mean()
-    rewards[:TEAM_SIZE] = 0.5 * (rewards[:TEAM_SIZE] - mean_ct)
-    rewards[TEAM_SIZE:] = 0.5 * (rewards[TEAM_SIZE:] - mean_t)
+    n = n_active_per_team
+    # Guard the now-public parameter: n > TEAM_SIZE would fold T rows into the
+    # CT mean and write past the roster; n < 1 gives a mean of an empty slice.
+    if not 1 <= n <= TEAM_SIZE:
+        raise ValueError(f"n_active_per_team must be in 1..{TEAM_SIZE}, got {n}")
+    # Both means BEFORE either write (PITFALL 2). Sliced, not masked: at the
+    # default n == TEAM_SIZE, rewards[TEAM_SIZE:TEAM_SIZE + n] is the identical
+    # view to the old rewards[TEAM_SIZE:], so .mean() reduces in the same order
+    # and the pre-Rung-0 float results are reproduced bit for bit
+    # (tests/test_parked_agents.py::test_symmetrize_default_matches_pre_rung0_bitwise).
+    mean_t = rewards[:n].mean()
+    mean_ct = rewards[TEAM_SIZE:TEAM_SIZE + n].mean()
+    rewards[:n] = 0.5 * (rewards[:n] - mean_ct)
+    rewards[TEAM_SIZE:TEAM_SIZE + n] = 0.5 * (rewards[TEAM_SIZE:TEAM_SIZE + n] - mean_t)
     return rewards
 
 
@@ -516,6 +646,15 @@ class Cs2Env(pufferlib.PufferEnv):
             include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)  # noqa: E501
             reward_symmetrize: bool = False,                                    # spec 2026-08-01 §4.3  # noqa: E501
             recoil: bool = False,                                               # #120: punch on ray; default off (today's hitscan)  # noqa: E501
+            n_active_per_team: int = TEAM_SIZE,                                 # Rung 0 §2.1: agents per team that spawn  # noqa: E501
+            pin_pitch: int = 0,                                                 # Rung 0 R0-E.2: ignore pitch action  # noqa: E501
+            crouch_enabled: int = 1,                                            # Rung 0 R0-E.2: mask crouch when 0  # noqa: E501
+            round_time: int
+        | None = None,                                                          # Rung 0 R0-G: ticks per round; None ⇒ nav.ROUND_TIME  # noqa: E501
+            laser_range: float
+        | None = None,                                                          # Rung 0 R0-G: hitscan reach; None ⇒ nav.LASER_RANGE  # noqa: E501
+            max_turn_speed: float
+        | None = None,                                                          # Rung 0 R0-G: rad/tick aim clamp; None ⇒ nav.MAX_TURN_SPEED_RAD  # noqa: E501
     ):
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
@@ -605,6 +744,49 @@ class Cs2Env(pufferlib.PufferEnv):
             dir_facing,
         ]
 
+        # Rung 0 (spec 2026-08-29 §2.1): validate BEFORE binding.init. env_init
+        # asserts the same range in C, and a failed C assert aborts the whole
+        # process — inside a Puffer worker that is a silent death with no
+        # traceback. Raising here turns a bad training config into an ordinary
+        # Python error. pin_pitch / crouch_enabled are flags, so any truthy
+        # value normalises to 1 rather than being rejected.
+        # Reject non-integers rather than truncating (int(2.9) == 2 would
+        # silently park a different roster than the config asked for).
+        if int(n_active_per_team) != n_active_per_team:
+            raise ValueError(f"n_active_per_team must be an integer, got {n_active_per_team!r}")
+        n_active_per_team = int(n_active_per_team)
+        if not 1 <= n_active_per_team <= TEAM_SIZE:
+            raise ValueError(f"n_active_per_team must be in 1..{TEAM_SIZE}, "
+                             f"got {n_active_per_team}")
+        self.n_active_per_team = n_active_per_team
+        self.pin_pitch = int(bool(pin_pitch))
+        self.crouch_enabled = int(bool(crouch_enabled))
+
+        # Rung 0 R0-G: env knobs. None ⇒ the nav.py constant, so demo/test/
+        # deploy callers that never pass them keep today's values byte-for-byte
+        # (sim fingerprints at defaults must not move). Validated here, not in
+        # C, for the same reason as n_active_per_team above: a C assert kills a
+        # forked Puffer worker silently. round_time is rejected (not truncated)
+        # when non-integral — int(2.5) would run a different episode length
+        # than the config recorded.
+        # PITFALL: laser_range_sq (FMT 24) is derived from _laser_range below;
+        # never accept it as a separate kwarg or the range check and the
+        # damage falloff would disagree.
+        if round_time is None:
+            round_time = nav.ROUND_TIME
+        if int(round_time) != round_time:
+            raise ValueError(f"round_time must be an integer tick count, got {round_time!r}")
+        self._round_time = int(round_time)
+        self._laser_range = float(nav.LASER_RANGE if laser_range is None else laser_range)
+        self._max_turn_speed = float(nav.MAX_TURN_SPEED_RAD if max_turn_speed is
+                                     None else max_turn_speed)
+        if self._round_time <= 0:
+            raise ValueError(f"round_time must be > 0, got {self._round_time}")
+        if not self._laser_range > 0.0:                # `not >` also rejects NaN
+            raise ValueError(f"laser_range must be > 0, got {self._laser_range}")
+        if not self._max_turn_speed > 0.0:
+            raise ValueError(f"max_turn_speed must be > 0, got {self._max_turn_speed}")
+
         # Call binding.init() — positional order matches C format string.
         # T2 (verticality): centroids_z inserted at pos 4 (after centroid_xy);
         # is_ramp_int8 inserted at pos 8 (after bombsite_by_idx).
@@ -634,14 +816,14 @@ class Cs2Env(pufferlib.PufferEnv):
             float(y_off),                                              # 17-20
             float(md.bombsite_dist_scale),                             # 21
             int(nav.LASER_DAMAGE),                                     # 22
-            float(nav.LASER_RANGE),
-            float(nav.LASER_RANGE * nav.LASER_RANGE),                  # 23-24
+            float(self._laser_range),                                  # R0-G knob
+            float(self._laser_range * self._laser_range),              # 23-24
             int(nav.SHOOT_COOLDOWN),
             int(nav.BOMB_PLANT_TIME),                                  # 25-26
             int(nav.BOMB_DEFUSE_TIME),
             int(nav.BOMB_DEFUSE_KIT),                                  # 27-28
             int(nav.BOMB_TIMER),
-            int(nav.ROUND_TIME),                                       # 29-30
+            int(self._round_time),                                     # 29-30 (30: R0-G knob)
             float(nav.FOOTSTEP_RADIUS * nav.FOOTSTEP_RADIUS),          # 31
             float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),            # 32
             int(nav.ENEMY_MEMORY_TICKS),
@@ -654,7 +836,7 @@ class Cs2Env(pufferlib.PufferEnv):
             int(len(md.t_spawn_areas)),                                # 40: n_t_spawns
             ct_spawns,                                                 # 41
             int(len(md.ct_spawn_areas)),                               # 42: n_ct_spawns
-            float(nav.MAX_TURN_SPEED_RAD),                             # 43
+            float(self._max_turn_speed),                               # 43: R0-G knob
             int(seed) & 0xFFFFFFFF,                                    # 44: seed (uint32)
             float(init_team_spirit),                                   # 45
             float(reward_win),                                         # 46
@@ -680,21 +862,37 @@ class Cs2Env(pufferlib.PufferEnv):
             float(pbrs_bomb_progress_weight),                          # 66
             float(pbrs_nav_weight_t),                                  # 67
             float(pbrs_nav_weight_ct),                                 # 68
+            n_active_per_team,                                         # 69: Rung 0
+            self.pin_pitch,                                            # 70: Rung 0
+            self.crouch_enabled,                                       # 71: Rung 0
         )
 
         # ctypes overlay of the C-allocated Dust2Env (tests + snapshot only)
         # BindingEnv has env as first field, so capsule ptr == &env
         env_ptr = _PyCapsule_GetPointer(self._capsule, None)
         self._c_env = Dust2EnvC.from_address(env_ptr)
+
+        # Rung 0 §2.2: every env (workers AND the parent driver_env, which is
+        # never reset) proves the C side saw the same knob the trainer will mask
+        # rows by. Read sd, not game.agents — __init__ never resets, so
+        # `participating` is still all-zero here. RuntimeError, not assert:
+        # python -O strips asserts and this guard runs outside the test suite
+        # (same reason as the import-time layout guard above).
+        _sc = binding.static_data_scalars(self._capsule)
+        if _sc["n_active_per_team"] != n_active_per_team:
+            raise RuntimeError(
+                f"C StaticData.n_active_per_team is {_sc['n_active_per_team']}, expected "
+                f"{n_active_per_team} — binding.init's FMT string and the call above disagree")
+
         # Sim recoil v1 (#120): write AFTER the overlay, not via binding.init
-        # (69-arg FMT is a footgun; do not extend it). env_init memsets
+        # (the 72-arg FMT is a footgun; extend it only at the tail). env_init memsets
         # Dust2Env so this starts 0; env_reset memsets GameState only, so the
         # flag survives reset. Train / Modal stay off unless a later card
         # passes recoil=True into make_env.
         self._c_env.recoil_enabled = 1 if recoil else 0
 
-        # Room AABB for ramp interpolation. Not a binding.init arg (69-arg FMT
-        # stays frozen). make_simple_map fills area_bounds from SIMPLE_ROOMS;
+        # Room AABB for ramp interpolation. Not a binding.init arg (it is a
+        # pointer into a Python-owned buffer, not a scalar). make_simple_map fills area_bounds from SIMPLE_ROOMS;
         # make_cs2_map leaves None so interpolation stays centroids_z.
         # Ownership: `ab` stays in self._refs for the life of this Cs2Env and C
         # only borrows the pointer. Dropping that ref while the env is alive
@@ -851,7 +1049,10 @@ class Cs2Env(pufferlib.PufferEnv):
             # non-external terminal snapshot (_terminal_rewards), and both
             # non-terminal cases. Terminal ticks carry the win/loss magnitudes,
             # so they MUST be symmetrized too (spec §4.3).
-            symmetrize_rewards(rewards)
+            # n_active_per_team, not TEAM_SIZE: parked rows must leave this tick
+            # at exactly 0.0, and the active rows' opponent-mean subtraction must
+            # not be attenuated by n/TEAM_SIZE (PITFALL 6 on the function).
+            symmetrize_rewards(rewards, self.n_active_per_team)
         return self.observations, rewards, terminals, truncations, infos
 
     def set_team_spirit(self, value: float):
@@ -862,7 +1063,13 @@ class Cs2Env(pufferlib.PufferEnv):
 
     @property
     def round_time(self):
-        return ROUND_TIME
+        """Ticks per round as handed to C (FMT position 30).
+
+        R0-G: reflects the ``round_time`` kwarg, not the module constant —
+        trainer code that sizes horizons / stat windows off this property
+        would otherwise disagree with the env when the knob is set.
+        """
+        return self._round_time
 
     def snapshot_state(self):
         g = self._c_env.game
@@ -1061,10 +1268,10 @@ class Cs2Env(pufferlib.PufferEnv):
             "alive_t_end": int(stats.alive_t_end),
             "alive_ct_end": int(stats.alive_ct_end),
             "round_length": int(stats.round_length),
-                                                                       # plant_tick is the observe-only C field (0 = never planted).
-                                                                       # Win-type flags are the existing episode_stats ints; export them
-                                                                       # here so compute_game_metrics can re-key rates without turning
-                                                                       # on include_step_stats_in_info or merging per-tick step_stats.
+                                                                                         # plant_tick is the observe-only C field (0 = never planted).
+                                                                                         # Win-type flags are the existing episode_stats ints; export them
+                                                                                         # here so compute_game_metrics can re-key rates without turning
+                                                                                         # on include_step_stats_in_info or merging per-tick step_stats.
             "plant_tick": int(stats.plant_tick),
             "win_by_detonation": int(stats.win_by_detonation),
             "win_by_defuse": int(stats.win_by_defuse),
@@ -1078,6 +1285,28 @@ class Cs2Env(pufferlib.PufferEnv):
             "reward_shots": float(stats.reward_shots),
             "reward_survival": float(stats.reward_survival),
             "reward_inaction": float(stats.reward_inaction),
+        })
+                                                                                         # R0-A combat instrumentation. min_enemy_distance is converted HERE,
+                                                                                         # per episode: PufferLib's mean_and_log averages the window before
+                                                                                         # compute_game_metrics sees it, so one 1e30 sentinel in a 40-episode
+                                                                                         # window would average to ~2.5e28. Emit (sum, valid) and let
+                                                                                         # compute_game_metrics divide the two window means.
+        _med = float(stats.min_enemy_distance)
+        _valid = 1 if _med < 1e29 else 0
+        summary.update({
+            "shots_fired": int(stats.shots_fired),
+            "shots_with_enemy_in_los": int(stats.shots_with_enemy_in_los),
+            "shots_facing_enemy": int(stats.shots_facing_enemy),
+            "shots_on_target": int(stats.shots_on_target),
+            "shots_hit": int(stats.shots_hit),
+            "shots_stance_blocked": int(stats.shots_stance_blocked),
+            "damage_dealt": float(stats.damage_dealt),
+            "mutual_vis_pair_ticks": int(stats.mutual_vis_pair_ticks),
+            "agent_ticks_with_visible_enemy": int(stats.agent_ticks_with_visible_enemy),
+            "min_enemy_distance_sum": _med if _valid else 0.0,
+            "min_enemy_distance_valid": _valid,
+            "reward_win_t": float(stats.reward_win_t),
+            "reward_win_ct": float(stats.reward_win_ct),
         })
         return summary
 
@@ -1119,6 +1348,12 @@ def make_env(
         include_step_stats_in_info: bool = False,                      # Task 6a (utof/cs2rl#7)
         reward_symmetrize: bool = False,                               # spec 2026-08-01 §4.3
         recoil: bool = False,                                          # #120: punch on ray; default off
+        n_active_per_team: int = TEAM_SIZE,                            # Rung 0 §2.1: agents per team that spawn
+        pin_pitch: int = 0,                                            # Rung 0 R0-E.2: ignore pitch action
+        crouch_enabled: int = 1,                                       # Rung 0 R0-E.2: mask crouch when 0
+        round_time: int | None = None,                                 # Rung 0 R0-G: None ⇒ nav.ROUND_TIME
+        laser_range: float | None = None,                              # Rung 0 R0-G: None ⇒ nav.LASER_RANGE
+        max_turn_speed: float | None = None,                           # Rung 0 R0-G: None ⇒ nav.MAX_TURN_SPEED_RAD
 ):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
@@ -1163,4 +1398,10 @@ def make_env(
         include_step_stats_in_info=include_step_stats_in_info,
         reward_symmetrize=reward_symmetrize,
         recoil=recoil,
+        n_active_per_team=n_active_per_team,
+        pin_pitch=pin_pitch,
+        crouch_enabled=crouch_enabled,
+        round_time=round_time,
+        laser_range=laser_range,
+        max_turn_speed=max_turn_speed,
     )

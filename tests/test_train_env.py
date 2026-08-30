@@ -66,7 +66,7 @@ def test_compute_game_metrics_surfaces_new_keys_without_backfilling_plant_tick()
     assert out["game/kills_t"] == 1.0
     assert out["game/kills_ct"] == 2.0
     assert out["game/defuse_rate"] == 0.1
-    assert out["game/reward/win"] == 0.0
+    assert "game/reward/win" not in out                # R0-A (#128): dropped, nets ~0 by identity
     assert out["game/reward/kills"] == 0.5
     assert out["game/reward/deaths"] == -0.2
     assert out["game/reward/bomb"] == 1.1
@@ -951,13 +951,22 @@ def test_obs_dim_constant_consistency():
        - src/train.py
        - env.single_observation_space.shape[0]
     A drift here means the C ↔ Python boundary is misconfigured. The
-    earlier ctypes sizeof asserts (cs2_env.py:280-291) catch struct-size
-    drift; this test is the higher-level constant-agreement check.
+    ctypes-vs-C layout asserts in cs2_env.py (the `_C_SIZES` block, fed by
+    binding.struct_sizes()) catch struct-size drift; this test is the
+    higher-level constant-agreement check.
     """
     import nav
     import train as t
     assert nav.OBS_DIM == t.OBS_DIM, (f"nav.OBS_DIM ({nav.OBS_DIM}) != train.OBS_DIM ({t.OBS_DIM})")
     assert nav.OBS_DIM == 110, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 110 for Batch 6 Task 2.5"
+    # Rung 0 (spec 2026-08-29 §2.2): train.TEAM_SIZE is a bare literal for the
+    # same import-cost reason as OBS_DIM, so it needs the same drift guard —
+    # it divides the participating-step budget and builds the per-row
+    # participation vector.
+    from c_env import cs2_env
+    assert t.TEAM_SIZE == nav.TEAM_SIZE == cs2_env.TEAM_SIZE, (
+        f"train.TEAM_SIZE ({t.TEAM_SIZE}) / nav.TEAM_SIZE ({nav.TEAM_SIZE}) / "
+        f"cs2_env.TEAM_SIZE ({cs2_env.TEAM_SIZE}) disagree")
     env = t.make_puffer_env(seed=0)
     try:
         assert env.single_observation_space.shape == (nav.OBS_DIM, ), (
@@ -1479,6 +1488,30 @@ def test_pbrs_gamma_matches_training_gamma():
                         f"PBRS is only policy-invariant when they match — update the "
                         f"cs2_env defaults (Cs2Env.__init__ AND make_env) or thread "
                         f"pbrs_gamma explicitly")
+
+    # R0-J (Task 14): config records BOTH gammas. Default path: pbrs_gamma
+    # follows gamma. Explicit --pbrs-gamma that differs is allowed (an
+    # experiment that deliberately breaks invariance) and recorded verbatim.
+    assert cfg["pbrs_gamma"] == cfg["gamma"] == 0.999
+    args2 = SimpleNamespace(seed=0,
+                            timesteps=1_000,
+                            checkpoint_dir="/tmp/unused",
+                            device="cpu",
+                            gamma=0.999,
+                            pbrs_gamma=0.99)
+    cfg2 = train.build_train_config(args2, batch_size=1024, bptt_horizon=64)
+    assert cfg2["gamma"] == 0.999 and cfg2["pbrs_gamma"] == 0.99
+    args3 = SimpleNamespace(seed=0,
+                            timesteps=1_000,
+                            checkpoint_dir="/tmp/unused",
+                            device="cpu",
+                            gamma=0.99,
+                            pbrs_gamma=None)
+    cfg3 = train.build_train_config(args3, batch_size=1024, bptt_horizon=64)
+    assert cfg3["gamma"] == 0.99 and cfg3["pbrs_gamma"] == 0.99
+    assert train.env_knobs_from_args(args3)["pbrs_gamma"] == 0.99
+    assert "gamma" not in train.RESUME_CONFIG_ALLOWLIST
+    assert "pbrs_gamma" not in train.RESUME_CONFIG_ALLOWLIST
 
     # N3 fix: make_puffer_env must expose pbrs_gamma for per-experiment
     # overrides (previously the training γ could not be threaded through

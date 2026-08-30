@@ -72,8 +72,12 @@ static inline float recoil_decay_punch(float prev, float dt) {
 #define AIM_DIM 2
 /* Sim-side obs schema version (NOT used at runtime — pure documentation;
  * future sim refactors bump this when obs schema changes. Deploy export
- * literals stay frozen at v2-105dim per gh #34.) */
-#define SIM_OBS_VERSION       "sim-v2-110dim"
+ * literals stay frozen at v2-105dim per gh #34.)
+ * sim-v3 (R0-E.1, #130): enemy slots +0/+1 (rel-pos) and +5/+6 (bearing) are
+ * FACING-RELATIVE (rotated by -facing; memory fallback too). Same dim count.
+ * Deploy OBS_VERSION untouched — the deploy sidecar is still absolute, so
+ * policies trained after this bump must NOT be exported. */
+#define SIM_OBS_VERSION       "sim-v3-110dim"
 #define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */
 #define CROUCH_COOLDOWN_TICKS 7 /* ~0.4s at 16 Hz */
 #define INVALID_AREA_IDX      (-1)
@@ -243,6 +247,26 @@ typedef struct {
     float pbrs_bomb_progress_weight;   /* bomb-closeness scale in _potential */
     float pbrs_nav_weight_t;           /* T-side nav approach weight */
     float pbrs_nav_weight_ct;          /* CT-side nav approach weight */
+    /* Rung 0 (spec 2026-08-29 §2.1 / R0-E.2): sim-level knobs, all int32,
+     * FMT "iii" at positions 69-71. Inserted BEFORE wall_list so the two
+     * pointer-ish tail fields stay last and their offsets move together on
+     * both sides (StaticDataC mirrors this same position).
+     *   n_active_per_team — agents per team that spawn (1..TEAM_SIZE). Slots
+     *                       >= n are "parked": participating=0, alive=0,
+     *                       area_idx=INVALID_AREA_IDX, enemy_mem_idx[*]=
+     *                       INVALID_AREA_IDX (NOT the zero-init value, which
+     *                       is a valid area); env_init asserts >= 1.
+     *   pin_pitch         — 1 => continuous_actions[i*AIM_DIM+1] is ignored,
+     *                       a->pitch stays 0 (flat maps; R0-E.2). Declared
+     *                       here in Rung 0; the consumer lands in a later task.
+     *   crouch_enabled    — 0 => compute_masks masks HEAD_CROUCH bin 1.
+     *                       Declared here; the consumer lands in a later task.
+     * PITFALL: cs2_demo.c load_nav_data memsets StaticData and assigns by
+     * name — it must set n_active_per_team=TEAM_SIZE, pin_pitch=0 and
+     * crouch_enabled=1 or the demo silently parks everyone / disables crouch. */
+    int32_t n_active_per_team;
+    int32_t pin_pitch;
+    int32_t crouch_enabled;
     /* Baked solid faces (cs2_solids.h). build_solids_from_rooms() is the ONLY
      * allocation site; env_close() and c_close() both free it via free_solids.
      * Per-env: binding.c puts Dust2Env and StaticData in one calloc, so this
@@ -309,6 +333,18 @@ typedef struct {
      * aim_rad, or stored pitch — add them at the ray / look site only. */
     float punch_pitch;
     float punch_yaw;
+    /* Rung 0 (spec 2026-08-29 §2.1): 1 for the n_active_per_team slots per team
+     * that spawned this round, 0 for parked slots. Written by spawn_team for
+     * active slots and by env_reset for parked ones, right after the two
+     * spawn_team calls. Read by the deliberately alive-AGNOSTIC loops in
+     * cs2_rewards.h (terminal win payout, PBRS), which would otherwise pay a
+     * parked row as a team member.
+     * PITFALL: `participating` is NOT redundant with `alive`. A parked slot and
+     * a killed slot are both alive=0, but only the killed one is owed team
+     * reward. Any new loop that ignores `alive` on purpose must gate on this.
+     * PITFALL: explicit pad — AgentStateC mirrors both this and _pad5. */
+    int8_t participating;
+    int8_t _pad5[3];
 } AgentState;
 
 /* ── Game state ── */
@@ -408,6 +444,35 @@ typedef struct {
      * struct, so env_reset starts this at 0. Do not reorder earlier fields
      * — ctypes overlay + sizeof asserts must stay in lockstep. */
     int32_t plant_tick; /* g->tick at plant completion; 0 = never planted */
+    /* ── Rung 0 R0-A (spec 2026-08-29 §3): combat instrumentation ──
+     * Written into BOTH step_stats and episode_stats at the accumulation
+     * site (there is no ss→es merge). Shooter counters are per round fired
+     * by a participating && alive agent; the *_facing/_on_target/_hit/
+     * _stance_blocked subsets are scored against the nearest visible
+     * participating enemy snapshotted BEFORE process_combat (cs2_env.h), so
+     * a same-tick kill cannot make a shot "unscored". mutual_vis pair
+     * counters use vis10[i][j] && vis10[j][i] (DDA is not symmetric) over
+     * participating && alive opposing pairs; agent_ticks_with_visible_enemy
+     * is ONE-directional (i sees any j), by design. min_enemy_distance is 2D
+     * and counted regardless of
+     * visibility; sentinel 1e30f (never INFINITY — -ffast-math) set in
+     * clear_stats; converted per episode in cs2_env.py _build_terminal_info.
+     * reward_win_t/ct: one-sided terminal payouts (diagnostic; reward_win
+     * stays the cross-team sum). Appended — never reorder. reward_win_ct is
+     * the struct tail: binding.c py_struct_sizes() and cs2_env.py
+     * _C_OFFSET_FIELDS anchor on it. */
+    int32_t shots_fired;
+    int32_t shots_with_enemy_in_los;
+    int32_t shots_facing_enemy;
+    int32_t shots_on_target;
+    int32_t shots_hit;
+    int32_t shots_stance_blocked;
+    int32_t mutual_vis_pair_ticks;
+    int32_t agent_ticks_with_visible_enemy;
+    float   damage_dealt;
+    float   min_enemy_distance;
+    float   reward_win_t;
+    float   reward_win_ct;
 } StepStats;
 
 /* ── Full environment (one per parallel instance) ── */
@@ -431,7 +496,7 @@ typedef struct {
     struct Client* client;
     /* Sim recoil v1 (#120): env-wide physics switch, after client.
      * 0 = today's hitscan (train / make_env default); 1 = punch on the hit ray
-     * (cs2_demo). Not a binding.init argument — that 69-arg FMT is a footgun.
+     * (cs2_demo). Not a binding.init argument — that 72-arg FMT is a footgun.
      * make_env writes this after Dust2EnvC.from_address. env_reset memsets
      * GameState only, so the flag survives mid-round reset. */
     int32_t recoil_enabled;

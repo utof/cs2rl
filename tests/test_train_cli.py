@@ -41,11 +41,42 @@ def test_train_help_shows_current_cli():
             "--reward-symmetrize",                     # A2 arm
             "--tct-split-heads",                       # Batch 7 heads split (spec 2026-08-13)
             "--tct-split-trunk",                       # T/CT actor-trunk split (spec 2026-08-15)
+            "--resume-run",                            # R0-C (Task 7)
+            "--run-id",
+            "--checkpoint-interval",
+            "--seed",                                  # R0-D (Task 8)
+            "--pin-pitch",                             # R0-E.2 (Task 9)
+            "--crouch-enabled",
+            "--aim-entropy-bonus",                     # R0-E.3/4 (Task 10)
+            "--aim-log-std-max",
+            "--n-active-per-team",                     # Rung 0 parking (Task 4)
+            "--round-time-ticks",                      # R0-G (Task 11)
+            "--laser-range",
+            "--max-turn-speed",
+            "--map",                                   # R0-H (Task 12)
+            "--eval-interval",                         # R0-I (Task 13)
+            "--gamma",                                 # R0-J (Task 14)
+            "--pbrs-gamma",
     ):
         assert flag in result.stdout, f"{flag} missing from --help output"
 
     for legacy_flag in ("--num_workers", "--num_envs_per_worker", "--train_dir"):
         assert legacy_flag not in result.stdout, f"{legacy_flag} should not be exposed anymore"
+
+
+def test_dump_config_without_checkpoint_dir_uses_default(tmp_path):
+    """R0-C made --checkpoint-dir default=None; --dump-config must still resolve
+    it to CHECKPOINTS_DIR instead of crashing on Path(None). CHECKPOINTS_DIR is
+    cwd-relative (src/paths.py: Path("outputs") / "checkpoints"), so running
+    with cwd=tmp_path keeps the write out of the repo. sys.executable (not
+    `uv run`) because uv would not find the project from a tmp cwd."""
+    r = subprocess.run([sys.executable, str(TRAIN_SCRIPT), "--dump-config"],
+                       capture_output=True,
+                       text=True,
+                       timeout=120,
+                       cwd=tmp_path)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert (tmp_path / "outputs" / "checkpoints" / "config.json").exists(), r.stdout
 
 
 def test_dump_config_writes_json(tmp_path):
@@ -54,7 +85,8 @@ def test_dump_config_writes_json(tmp_path):
     Runs through `uv run python` so the project venv (and its deps) is active.
     Bumped timeout to 60s because uv's cold warm-up can be slow on first call.
     The whole point of --dump-config is zero side-effects: no torch import,
-    no map load, no env spin-up — so it must return quickly.
+    no env spin-up — so it must return quickly (the MapData is built above the
+    exit since Task 12: config.json carries the geometry-resolved pin_pitch).
     """
     import json
 
