@@ -72,8 +72,12 @@ static inline float recoil_decay_punch(float prev, float dt) {
 #define AIM_DIM 2
 /* Sim-side obs schema version (NOT used at runtime — pure documentation;
  * future sim refactors bump this when obs schema changes. Deploy export
- * literals stay frozen at v2-105dim per gh #34.) */
-#define SIM_OBS_VERSION       "sim-v2-110dim"
+ * literals stay frozen at v2-105dim per gh #34.)
+ * sim-v3 (R0-E.1, #130): enemy slots +0/+1 (rel-pos) and +5/+6 (bearing) are
+ * FACING-RELATIVE (rotated by -facing; memory fallback too). Same dim count.
+ * Deploy OBS_VERSION untouched — the deploy sidecar is still absolute, so
+ * policies trained after this bump must NOT be exported. */
+#define SIM_OBS_VERSION       "sim-v3-110dim"
 #define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */
 #define CROUCH_COOLDOWN_TICKS 7 /* ~0.4s at 16 Hz */
 #define INVALID_AREA_IDX      (-1)
