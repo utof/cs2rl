@@ -54,8 +54,8 @@ def test_flag_on_rifle_three_steps_punch_table(make_map):
     assert env._c_env.game.agents[0].punch_pitch == pytest.approx(0.045 * ALPHA, rel=1e-5)
     acts[0, 1] = 1
     env.step(acts, cont)
-    assert env._c_env.game.agents[0].punch_pitch == pytest.approx(
-        0.045 * ALPHA ** 2 + 0.045, rel=1e-5)
+    assert env._c_env.game.agents[0].punch_pitch == pytest.approx(0.045 * ALPHA**2 + 0.045,
+                                                                  rel=1e-5)
 
 
 def test_increment_is_after_the_ray(make_map):
@@ -77,9 +77,8 @@ def test_increment_is_after_the_ray(make_map):
     acts, cont = _zero_actions()
     acts[0, 1] = 1
     env.step(acts, cont)
-    assert g.agents[5].hp < 100, (
-        "shot-1 must hit (ray at punch 0). If increment ran before d, "
-        "perp≈22 > 16 and HP stays 100")
+    assert g.agents[5].hp < 100, ("shot-1 must hit (ray at punch 0). If increment ran before d, "
+                                  "perp≈22 > 16 and HP stays 100")
 
 
 def test_ray_uses_existing_punch(make_map):
@@ -93,9 +92,11 @@ def test_ray_uses_existing_punch(make_map):
     g.agents[0].ammo_clip[0] = 30
     g.agents[0].weapon_slot = 0
     g.agents[0].fire_cd = g.agents[0].reload_ticks = g.agents[0].switch_ticks = 0
-    # Decay runs before combat: 0.12 * α ≈ 0.055, 496*0.055 ≈ 27 > 16.
-    # 0.05 * α ≈ 0.023 still hits (perp≈11).
-    g.agents[0].punch_pitch = 0.12
+    # Decay runs before combat: 0.2 * α ≈ 0.092, 496*0.092 ≈ 46 > 36 (the
+    # v1c VERTICAL semi-axis, gh #150 — a pitch punch is a vertical offset, so
+    # the old 0.12 → 27u case now HITS: 27 < 36). 0.05 * α ≈ 0.023 still hits
+    # (perp≈11).
+    g.agents[0].punch_pitch = 0.2
     g.agents[0].punch_yaw = 0.0
     g.agents[5].x, g.agents[5].y, g.agents[5].z = 504.0, 1056.0, 0.0
     g.agents[5].area_idx = 4
@@ -103,9 +104,8 @@ def test_ray_uses_existing_punch(make_map):
     acts, cont = _zero_actions()
     acts[0, 1] = 1
     env.step(acts, cont)
-    assert g.agents[5].hp == 100, (
-        "ray must include punch (0.12 after decay still misses). "
-        "HP drop means d ignored punch")
+    assert g.agents[5].hp == 100, ("ray must include punch (0.2 after decay still misses). "
+                                   "HP drop means d ignored punch")
 
 
 def test_dry_fire_does_not_kick(make_map):
