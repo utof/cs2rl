@@ -81,9 +81,14 @@ COMMON=(--train --map arena-duel --n-active-per-team 1 --round-time-ticks 160
         --pbrs-site-weight 0 --pbrs-bomb-progress-weight 0 --pbrs-nav-weight-t 0 --pbrs-nav-weight-ct 0)
 
 last_flag_value() {   # $1 = flag, rest = argv; prints the LAST value (argparse semantics)
+  # Accepts BOTH argparse spellings: "--flag value" and "--flag=value". The
+  # header only forbids spaces in RUNG1_EXTRA values, so "--timesteps=10240" is
+  # legal input; missing the `=` form here would record COMMON's 10000000 in
+  # DONE after a smoke run and make a later full-budget run skip that seed.
   local flag=$1 v=""; shift
-  while (( $# > 1 )); do
-    if [[ $1 == "$flag" ]]; then v=$2; fi
+  while (( $# > 0 )); do
+    if [[ $1 == "$flag" && $# -gt 1 ]]; then v=$2
+    elif [[ $1 == "$flag="* ]]; then v=${1#*=}; fi
     shift
   done
   printf '%s' "$v"

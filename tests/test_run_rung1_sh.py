@@ -208,6 +208,32 @@ def test_done_records_budget(fake, tmp_path):
     assert (out / "rung1-s0" / "DONE").read_text().strip() == "10000000"
 
 
+def test_done_records_budget_given_equals_form(fake, tmp_path):
+    """`--timesteps=10240` is valid argparse; DONE must record 10240, not COMMON's 10000000."""
+    out = tmp_path / "root"
+    r = run_script(fake, out, "ok", extra="--timesteps=10240 --num_envs=16")
+    assert r.returncode == 0, r.stderr
+    (a, ) = argvs(out, "rung1-s0")
+    assert "--timesteps=10240" in a
+    assert (out / "rung1-s0" / "DONE").read_text().strip() == "10240"
+    r = run_script(fake, out, "ok")    # default 10000000 > 10240 -> extends
+    assert r.returncode == 0, r.stderr
+    assert "extending --timesteps 10240 -> 10000000" in r.stdout
+    assert (out / "rung1-s0" / "DONE").read_text().strip() == "10000000"
+
+
+def test_done_records_last_of_mixed_flag_forms(fake, tmp_path):
+    """Mixed spellings: whichever occurrence is LAST wins, in either direction."""
+    out = tmp_path / "root"
+    r = run_script(fake, out, "ok", extra="--timesteps 4096 --timesteps=10240")
+    assert r.returncode == 0, r.stderr
+    assert (out / "rung1-s0" / "DONE").read_text().strip() == "10240"
+    out2 = tmp_path / "root2"
+    r = run_script(fake, out2, "ok", extra="--timesteps=4096 --timesteps 20480")
+    assert r.returncode == 0, r.stderr
+    assert (out2 / "rung1-s0" / "DONE").read_text().strip() == "20480"
+
+
 def _finished_dir(out, label, budget):
     d = out / label
     (d / label).mkdir(parents=True)
