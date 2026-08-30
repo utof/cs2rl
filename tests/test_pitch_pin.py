@@ -16,7 +16,8 @@ from _action_spec import ACTION_HEAD_SIZES
 
 N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
 H_SHOOT = 1
-HEAD_CROUCH = 5                        # cs2_types.h enum (HEAD_JUMP = 6)
+HEAD_CROUCH = 5                        # cs2_types.h enum
+HEAD_JUMP = 6
 
 
 def _zero():
@@ -62,6 +63,31 @@ def test_crouch_masked_when_disabled(simple_map):
             env.reset()
             assert int(env._masks_view[0, moff[HEAD_CROUCH] + 1]) == expect
             assert int(env._masks_view[0, moff[HEAD_CROUCH] + 0]) == 1
+        finally:
+            env.close()
+
+
+def test_jump_masked_when_disabled(simple_map):
+    """jump_enabled (Rung 1a T2a) gates HEAD_JUMP bin 1, exactly as
+    crouch_enabled gates HEAD_CROUCH bin 1.
+
+    The default (1) case is the load-bearing half: the C gate ORs the new flag
+    into a condition that ALREADY masks bin 1 while airborne / on cooldown /
+    crouching (cs2_env.h compute_masks), so a jump_enabled read that is
+    accidentally inverted — or a field that lands on the wrong FMT position and
+    reads 0 — would still look "correctly masked" if only flag=0 were checked.
+    Right after reset every agent is grounded with jump_cd 0, so bin 1 must be
+    OPEN unless the knob closed it. Bin 0 (no jump) stays valid either way: the
+    per-head no-op invariant the masked softmax depends on.
+    """
+    from c_env.cs2_env import make_env
+    moff = np.concatenate([[0], np.cumsum(ACTION_HEAD_SIZES)[:-1]])
+    for flag, expect in ((1, 1), (0, 0)):
+        env = make_env(map_data=simple_map, jump_enabled=flag, seed=1)
+        try:
+            env.reset()
+            assert int(env._masks_view[0, moff[HEAD_JUMP] + 1]) == expect
+            assert int(env._masks_view[0, moff[HEAD_JUMP] + 0]) == 1
         finally:
             env.close()
 

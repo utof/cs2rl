@@ -81,8 +81,14 @@ static void compute_masks(Dust2Env* env) {
                 m[moff[h]] = 1;
             continue;
         }
-        /* Jump mask: no jump while airborne, on cooldown, or crouching */
-        if (a->is_airborne || a->jump_cd > 0 || a->is_crouching)
+        /* Jump mask: no jump while airborne, on cooldown, or crouching.
+         * Rung 1a (spec 2026-08-30 T2a): jump_enabled=0 masks the press for
+         * the whole run — same shape and same rationale as the crouch gate
+         * below (minimal action space for the aim rung; with pitch pinned an
+         * airborne agent also spends most of its airtime outside the hit band,
+         * gh #150). Defaults to 1 (cs2_demo.c forces 1 for the human player).
+         * Bin 0 (no jump) stays valid, preserving the per-head no-op. */
+        if (a->is_airborne || a->jump_cd > 0 || a->is_crouching || !sd->jump_enabled)
             m[moff[HEAD_JUMP] + 1] = 0;
         /* R0-E.2 (#131): stance parity. PRE-v1c rationale (no longer true):
          * with pitch pinned a stand-vs-crouch mismatch was |rz| = 24 >

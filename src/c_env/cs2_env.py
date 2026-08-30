@@ -164,6 +164,8 @@ class StaticDataC(ctypes.Structure):
         ("n_active_per_team", ctypes.c_int32),
         ("pin_pitch", ctypes.c_int32),
         ("crouch_enabled", ctypes.c_int32),
+        # Rung 1a (spec 2026-08-30 T2a): FMT position 72, same block.
+        ("jump_enabled", ctypes.c_int32),
         # After the binding.init prefix: overlay C wall_list then ramp bounds.
         # These two stay LAST, matching cs2_types.h. New scalars go above them
         # (and at the same spot in the C struct); the offset anchors below are
@@ -649,6 +651,7 @@ class Cs2Env(pufferlib.PufferEnv):
             n_active_per_team: int = TEAM_SIZE,                                 # Rung 0 §2.1: agents per team that spawn  # noqa: E501
             pin_pitch: int = 0,                                                 # Rung 0 R0-E.2: ignore pitch action  # noqa: E501
             crouch_enabled: int = 1,                                            # Rung 0 R0-E.2: mask crouch when 0  # noqa: E501
+            jump_enabled: int = 1,                                              # Rung 1a T2a: mask jump when 0  # noqa: E501
             round_time: int
         | None = None,                                                          # Rung 0 R0-G: ticks per round; None ⇒ nav.ROUND_TIME  # noqa: E501
             laser_range: float
@@ -748,8 +751,8 @@ class Cs2Env(pufferlib.PufferEnv):
         # asserts the same range in C, and a failed C assert aborts the whole
         # process — inside a Puffer worker that is a silent death with no
         # traceback. Raising here turns a bad training config into an ordinary
-        # Python error. pin_pitch / crouch_enabled are flags, so any truthy
-        # value normalises to 1 rather than being rejected.
+        # Python error. pin_pitch / crouch_enabled / jump_enabled are flags, so
+        # any truthy value normalises to 1 rather than being rejected.
         # Reject non-integers rather than truncating (int(2.9) == 2 would
         # silently park a different roster than the config asked for).
         if int(n_active_per_team) != n_active_per_team:
@@ -761,6 +764,7 @@ class Cs2Env(pufferlib.PufferEnv):
         self.n_active_per_team = n_active_per_team
         self.pin_pitch = int(bool(pin_pitch))
         self.crouch_enabled = int(bool(crouch_enabled))
+        self.jump_enabled = int(bool(jump_enabled))
 
         # Rung 0 R0-G: env knobs. None ⇒ the nav.py constant, so demo/test/
         # deploy callers that never pass them keep today's values byte-for-byte
@@ -865,6 +869,7 @@ class Cs2Env(pufferlib.PufferEnv):
             n_active_per_team,                                         # 69: Rung 0
             self.pin_pitch,                                            # 70: Rung 0
             self.crouch_enabled,                                       # 71: Rung 0
+            self.jump_enabled,                                         # 72: Rung 1a
         )
 
         # ctypes overlay of the C-allocated Dust2Env (tests + snapshot only)
@@ -1351,6 +1356,7 @@ def make_env(
         n_active_per_team: int = TEAM_SIZE,                            # Rung 0 §2.1: agents per team that spawn
         pin_pitch: int = 0,                                            # Rung 0 R0-E.2: ignore pitch action
         crouch_enabled: int = 1,                                       # Rung 0 R0-E.2: mask crouch when 0
+        jump_enabled: int = 1,                                         # Rung 1a T2a: mask jump when 0
         round_time: int | None = None,                                 # Rung 0 R0-G: None ⇒ nav.ROUND_TIME
         laser_range: float | None = None,                              # Rung 0 R0-G: None ⇒ nav.LASER_RANGE
         max_turn_speed: float | None = None,                           # Rung 0 R0-G: None ⇒ nav.MAX_TURN_SPEED_RAD
@@ -1401,6 +1407,7 @@ def make_env(
         n_active_per_team=n_active_per_team,
         pin_pitch=pin_pitch,
         crouch_enabled=crouch_enabled,
+        jump_enabled=jump_enabled,
         round_time=round_time,
         laser_range=laser_range,
         max_turn_speed=max_turn_speed,

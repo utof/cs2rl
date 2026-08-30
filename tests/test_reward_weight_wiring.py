@@ -35,6 +35,8 @@ import pytest
 #     byte-identical" equality over reward scalars says nothing about them.
 #     They get their own trainer-side path (env_knobs), because the trainer must
 #     also mask parked rows out of the loss — something no reward weight needs.
+#   jump_enabled — Rung 1a sim knob (spec 2026-08-30 T2a), same channel and same
+#     reasoning as crouch_enabled: it gates an action mask, not a payout.
 #   round_time / laser_range / max_turn_speed — R0-G sim knobs (Task 11):
 #     episode length, hitscan reach, aim clamp. Same reasoning; None ⇒ nav.py
 #     constant, threaded via env_knobs_from_args, recorded raw in config.json.
@@ -51,6 +53,7 @@ _NON_WEIGHT_PARAMS = {
     "n_active_per_team",
     "pin_pitch",
     "crouch_enabled",
+    "jump_enabled",
     "round_time",
     "laser_range",
     "max_turn_speed",
