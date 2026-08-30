@@ -14,6 +14,15 @@ WHAT IS PINNED HERE
   |rz| cs2_combat.h actually computed), and the negative control at 57 u, which
   is outside ``HIT_HALF_HEIGHT_STAND`` and must produce zero hits.
 * The gate arithmetic in ``verdict`` and its wiring to the process exit code.
+* ``--obs-only``: the same kill, driven off the OBSERVATION VECTOR instead of
+  the C state. The ground-truth oracle would pass this gate 200/200 with the
+  enemy block of the obs encoded wrongly, because it never reads it — that bug
+  class makes a solvable env unlearnable, and this mode is what sees it. The
+  two modes must agree; where they do not, the difference has to be explainable
+  by the obs the policy actually gets (here: ``env.reset`` returns an all-zero
+  obs, so tick 1 is blind).
+* The FAIL report's diagnostics: censored TTK printed as "n/a (no kills)"
+  rather than "None", and the failing episodes' spawn geometry.
 
 WHY the thresholds here are looser than the script's (0.8 vs 0.90 kill rate):
 this is the fast regression tripwire at N=20, not the gate. The gate is
@@ -51,6 +60,10 @@ def test_oracle_kills_grounded_statue():
     assert res["unmatched_vis_slots"] == 0, res
     assert res["shots_fired"] > 0 and res["shots_stance_blocked"] == 0, res
     assert verdict(res)[0], res
+    # Ground-truth mode never reads an obs slot, so it must not report obs
+    # diagnostics at all — "0 blind ticks" here would be a claim it cannot make.
+    assert res["obs_only"] is False and res["obs_blind_ticks"] is None, res
+    assert res["obs_inconsistent_slots"] is None, res
 
 
 def test_oracle_kills_statue_held_at_crouch_height_offset():
@@ -96,6 +109,77 @@ def test_statue_above_the_standing_semi_axis_is_unkillable():
     assert not verdict(res)[0], res
 
 
+def test_obs_only_oracle_kills_the_statue_it_can_only_see_in_the_obs():
+    """The obs-encoding half of the precondition (``--obs-only``).
+
+    The actor's ONLY source of enemy geometry is the hero's observation row, so
+    this failing while the ground-truth mode passes means the enemy block of
+    ``cs2_observations.h`` is wrong (rotated by the wrong sign, normalised by
+    the wrong constant, gated on the wrong flag) — a bug that leaves the env
+    solvable by actions and unlearnable by a policy.
+
+    ``obs_blind_ticks == episodes`` is exact, not a bound: ``env.reset``
+    returns an all-zero obs, so the hero is blind on tick 1 of every round and
+    on no other tick (both agents are in permanent 2D LoS in the arena). More
+    than one per episode means visibility dropped mid-round, which would make
+    the kill numbers below a statement about LoS rather than about encoding.
+    """
+    from oracle_statue_check import run_check, verdict
+    res = run_check(episodes=20, seed=0, obs_only=True)
+    assert res["kill_rate"] >= 0.8, res
+    assert res["ttk_min"] is not None and res["ttk_min"] < 160, res
+    assert res["shots_fired"] > 0 and res["shots_stance_blocked"] == 0, res
+    assert res["obs_blind_ticks"] == res["episodes"], res
+    # The slot encodes the relative position twice ((rx, ry) vs bearing +
+    # distance); disagreement is an encoding bug the kill rate cannot see,
+    # because the actor steers by only one of the two.
+    assert res["obs_inconsistent_slots"] == 0, res
+    assert verdict(res)[0], res
+
+
+def test_obs_only_decodes_the_enemy_z_delta_the_c_state_reports():
+    """Slot +2, checked against the truth — because no kill count can check it.
+
+    ``pin_pitch=1`` makes the env ignore the pitch this feeds, and the range
+    test never binds at laser_range 3000 on a 360 u arena, so the obs-only run
+    would kill 200/200 with the enemy z-delta scaled by the wrong constant or
+    dropped entirely. The elevated statue puts a known, non-zero offset in that
+    slot (24 u minus one half gravity step) and asserts the actor read it back.
+    """
+    from oracle_statue_check import OBS_RZ_TOL, _rz_disagrees, run_check
+    res = run_check(episodes=4, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, obs_only=True)
+    expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
+    assert res["obs_rz_min"] == pytest.approx(expect_rz, abs=0.05), res
+    assert res["obs_rz_max"] == pytest.approx(expect_rz, abs=0.05), res
+    # ... and agrees with the same quantity read off the live C state.
+    assert not _rz_disagrees(res), res
+    # The agreement check must have teeth: a decode off by more than the
+    # tolerance has to trip it.
+    assert _rz_disagrees({**res, "obs_rz_min": res["obs_rz_min"] + 2 * OBS_RZ_TOL})
+
+
+def test_obs_only_and_ground_truth_modes_agree():
+    """Cross-mode tie: the obs must say the same thing the C state says.
+
+    Both modes run the same env, seed, statue and loop, so a divergence is the
+    encoding — that is the whole design. Tolerances are the known, explainable
+    gap and nothing more: the obs actor loses tick 1 of each round to the
+    all-zero reset obs, which costs it a couple of ticks and a wasted shot on
+    the widest-angle spawn rows (a 56 deg opening turn at 360 u). It must not
+    lose a KILL, and its shots must still overwhelmingly land — an encoding bug
+    shows up here as a collapsed hit rate, not as a two-tick delay.
+    """
+    from oracle_statue_check import run_check
+    truth = run_check(episodes=20, seed=0)
+    obs = run_check(episodes=20, seed=0, obs_only=True)
+    assert obs["kills"] == truth["kills"], (truth, obs)
+    assert abs(obs["ttk_median"] - truth["ttk_median"]) <= 2.0, (truth, obs)
+    assert obs["shots_hit"] / obs["shots_fired"] >= 0.9, obs
+    # Both modes fire only at an enemy the sim says is visible and in range, so
+    # neither may waste a shot with no line of sight.
+    assert obs["shots_with_enemy_in_los"] == obs["shots_fired"], obs
+
+
 def test_verdict_is_the_conjunction_of_all_three_checks():
     """Pure-function gate arithmetic: each check must be able to fail alone."""
     from oracle_statue_check import PASS_MAX_MEDIAN_TTK, PASS_MIN_KILL_RATE, verdict
@@ -122,3 +206,67 @@ def test_main_exit_code_follows_the_verdict(capsys):
     assert "PASS" in capsys.readouterr().out
     assert main(["--episodes", "2", "--seed", "0", "--statue-z", str(ABOVE_SEMI_AXIS_OFFSET)]) == 1
     assert "FAIL" in capsys.readouterr().out
+
+
+def test_obs_only_is_reachable_from_the_cli(capsys):
+    """``--obs-only`` is wired to the actor swap, and the report says so.
+
+    Cheap on purpose (2 episodes): the numbers are pinned by the run_check
+    tests above; what is pinned HERE is that the flag is not silently ignored,
+    which would make an obs-encoding bug read as a pass.
+    """
+    from oracle_statue_check import main
+    assert main(["--episodes", "2", "--seed", "0", "--obs-only"]) == 0
+    out = capsys.readouterr().out
+    assert "OBSERVATION VECTOR" in out and "obs blind ticks" in out
+    assert "PASS" in out
+
+
+def test_fail_report_names_the_facing_denominator_and_the_censored_ttk():
+    """The three FAIL-path reporting fixes, on the run that produces them.
+
+    * shots_facing_enemy is PRINTED (M1). It is collected from the C stats and
+      is the denominator of the Rung 1 §5 aim criterion hit/facing > 0.45; a
+      report that omits it cannot be used to read that criterion.
+    * a zero-kill run says "n/a (no kills)", not "None" (M3) — a bare None
+      reads as a crashed statistic rather than an empty one.
+    * the failing episodes' indices and spawn geometry are printed (M2-lite),
+      which is what separates "one bad spawn row" from "nothing can die".
+    """
+    from oracle_statue_check import format_summary, run_check
+    res = run_check(episodes=1, seed=0, statue_z=ABOVE_SEMI_AXIS_OFFSET)
+    out = format_summary(res)
+    assert res["kills"] == 0 and res["shots_facing_enemy"] > 0, res
+    assert f"shots_facing_enemy       {res['shots_facing_enemy']}" in out, out
+    assert "n/a (no kills)" in out, out
+    assert "None" not in out, out
+    assert "failing episodes (no kill)  1 of 1" in out, out
+    assert "ep    0" in out and "yaw err" in out, out
+    # hit/facing is the §5 ratio, so it must divide by FACING, not by fired.
+    doctored = {**res, "shots_facing_enemy": 100, "shots_hit": 45, "shots_fired": 1000}
+    assert "hit/facing 0.450" in format_summary(doctored), doctored
+
+
+def test_failure_detail_is_capped_but_the_spread_is_always_reported():
+    """A total wipeout must not bury the verdict under one line per episode.
+
+    Pure formatting, no env: the point is the cap and the aggregate quantiles
+    that survive it — with 200 failures the individual rows stop being the
+    useful read, but "did they all share one spawn distance?" still is.
+    """
+    from oracle_statue_check import FAIL_DETAIL_LIMIT, _failure_lines
+    n = FAIL_DETAIL_LIMIT + 15
+    failures = [{
+        "episode": i,
+        "hero_xy": (150.0, 250.0),
+        "statue_xy": (350.0, 250.0),
+        "spawn_dist": 200.0 + i,
+        "yaw_err": 0.1 * i,
+    } for i in range(n)]
+    lines = _failure_lines({"episodes": n, "failures": failures})
+    assert sum(1 for ln in lines if ln.strip().startswith("ep ")) == FAIL_DETAIL_LIMIT, lines
+    assert f"  ... {n - FAIL_DETAIL_LIMIT} more" in lines, lines
+    assert any("spawn distance 2D (u)    min 200.0" in ln for ln in lines), lines
+    assert any(f"max {200.0 + n - 1:.1f}" in ln for ln in lines), lines
+    # No failures at all (a FAIL on median TTK alone) prints nothing.
+    assert _failure_lines({"episodes": 4, "failures": []}) == []
