@@ -19,7 +19,7 @@ H_SHOOT = 1
 HEAD_CROUCH = 5                        # cs2_types.h enum (HEAD_JUMP = 6)
 
 
-def _zero(env_cont=None):
+def _zero():
     return (np.zeros((N_AGENTS, ACTION_DIM), np.int32), np.zeros((N_AGENTS, AIM_DIM), np.float32))
 
 
@@ -82,7 +82,9 @@ def _place_duel(env):
 
 
 def test_arena_stance_parity_hit_and_stance_blocked(simple_map):
-    """Preflight ruling: pin 1 / crouch 0, two standing agents, on-target shot
+    """Task 12 switches this to make_arena_duel_map(); until then simple_map
+    (the hit geometry is per-agent, not per-map, so the map choice is free).
+    Preflight ruling: pin 1 / crouch 0, two standing agents, on-target shot
     ⇒ shots_hit == 1. Then crouch_enabled=1 with a CROUCHED target ⇒ the same
     shot is stance-blocked (|rz| = 24 > 16) — proving the crouch gate is what
     makes the pinned-pitch duel winnable, not the pitch pin alone.
@@ -254,3 +256,79 @@ def test_pin_agreement_rejects_non_c_env():
 
     with pytest.raises(RuntimeError):
         assert_pin_pitch_agreement(object(), _Pol())
+
+
+# ── Fix round 1: Critical #1 — None must resolve the LOADED map, not the sentinel ──
+
+
+def _flat_copy_of(md):
+    """A synthetic FLAT MapData: simple_map with centroids_z zeroed."""
+    import dataclasses
+    return dataclasses.replace(md, centroids_z=np.zeros_like(md.centroids_z))
+
+
+def test_pin_pitch_for_map_geometry(simple_map):
+    """simple_map spans z 0..128 ⇒ 0; the same map flattened ⇒ 1. Pins that the
+    decision is the z-span of the map passed in, nothing else."""
+    from train import pin_pitch_for_map
+    assert float(simple_map.centroids_z.max() - simple_map.centroids_z.min()) == 128.0
+    assert pin_pitch_for_map(simple_map) == 0
+    assert pin_pitch_for_map(_flat_copy_of(simple_map)) == 1
+
+
+def test_pin_pitch_for_map_none_loads_dust2():
+    """None ⇒ the cs2 nav map make_env(map_data=None) loads (same _ENV_CACHE
+    key). The expected value is computed from THAT MapData's centroids_z, so
+    this test keeps holding when dust2 verticality lands (today make_cs2_map
+    zero-fills z ⇒ 1, matching plan §R0-E.2 "true for dust2")."""
+    import nav
+    from c_env.cs2_env import _ENV_CACHE
+    from map import make_cs2_map
+    from train import pin_pitch_for_map
+    md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)
+    expect = int(float(md.centroids_z.max() - md.centroids_z.min()) == 0.0)
+    assert pin_pitch_for_map(None) == expect
+    assert expect == 1                                                 # documents today's in-sim dust2 (map.py zero-fill)
+    assert (nav.NAV_PATH, nav.CACHE_PATH) in _ENV_CACHE                # cached for make_env
+
+
+def test_resolve_pin_pitch_dust2_and_simple(simple_map, capsys):
+    """The train() path with the CLI's `--dust2` args (map_data=None,
+    pin_pitch=None): resolves from the loaded map; an explicit value equal to
+    it is accepted, the other one refused. simple_map: None ⇒ 0, 1 refused."""
+    import argparse
+
+    from train import pin_pitch_for_map, resolve_pin_pitch
+    dust2 = pin_pitch_for_map(None)
+
+    a = argparse.Namespace(map_data=None, pin_pitch=None)
+    assert resolve_pin_pitch(a) == dust2 and a.pin_pitch == dust2
+    assert f"pin_pitch={dust2}" in capsys.readouterr().out
+    a = argparse.Namespace(map_data=None, pin_pitch=dust2)
+    assert resolve_pin_pitch(a) == dust2
+    with pytest.raises(ValueError):
+        resolve_pin_pitch(argparse.Namespace(map_data=None, pin_pitch=1 - dust2))
+
+    a = argparse.Namespace(map_data=simple_map, pin_pitch=None)
+    assert resolve_pin_pitch(a) == 0 and a.pin_pitch == 0
+    assert resolve_pin_pitch(argparse.Namespace(map_data=simple_map, pin_pitch=0)) == 0
+    with pytest.raises(ValueError):
+        resolve_pin_pitch(argparse.Namespace(map_data=simple_map, pin_pitch=1))
+
+
+def test_log_aim_log_std_skips_pitch_when_pinned(simple_map):
+    """Minor: a pinned policy must not report a σ for the dead pitch dim."""
+    from train import log_aim_log_std
+    from train_test_harness import _build_trainer_for_test
+    trainer, cleanup = _build_trainer_for_test(num_envs=4, map_data=simple_map, pin_pitch=1)
+    try:
+        logs = {}
+        log_aim_log_std(trainer.policy, logs)
+        assert "policy/aim_log_std_yaw" in logs
+        assert not any(k.startswith("policy/aim_log_std_pitch") for k in logs)
+        trainer.policy.aim_dim_mask.fill_(1.0)
+        logs = {}
+        log_aim_log_std(trainer.policy, logs)
+        assert "policy/aim_log_std_pitch" in logs
+    finally:
+        cleanup()

@@ -2565,19 +2565,29 @@ def log_aim_log_std(policy, logs):
     # R0-E.3: clamp to the RUN's cap (policy.aim_log_std_max), not the module
     # constant — otherwise the log would report a σ the forward never used.
     cap = float(getattr(policy, "aim_log_std_max", LOG_STD_MAX))
+    # R0-E.2 (#131): when pitch is pinned (aim_dim_mask[1] == 0) the pitch σ
+    # is a dead parameter — never sampled, never in log_prob_c, never
+    # updated. SKIP its keys (not NaN: NaN survives json.dumps only as the
+    # non-standard `NaN` token and would read as a live-but-broken signal on
+    # a dashboard). Every consumer already tolerates absence:
+    # format_train_status uses logs.get(..., 0.0); the T7 gate is 5v5-only.
+    mask = getattr(policy, "aim_dim_mask", None)
+    pitch_live = mask is None or float(mask[1]) != 0.0
     with torch.no_grad():
         if hasattr(policy, "aim_log_std_t"):
             ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, cap).cpu().numpy()
             ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, cap).cpu().numpy()
             logs["policy/aim_log_std_yaw_t"] = float(ls_t[0])
-            logs["policy/aim_log_std_pitch_t"] = float(ls_t[1])
             logs["policy/aim_log_std_yaw_ct"] = float(ls_ct[0])
-            logs["policy/aim_log_std_pitch_ct"] = float(ls_ct[1])
+            if pitch_live:
+                logs["policy/aim_log_std_pitch_t"] = float(ls_t[1])
+                logs["policy/aim_log_std_pitch_ct"] = float(ls_ct[1])
             clamped = 0.5 * (ls_t + ls_ct)
         else:
             clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, cap).cpu().numpy()
     logs["policy/aim_log_std_yaw"] = float(clamped[0])
-    logs["policy/aim_log_std_pitch"] = float(clamped[1])
+    if pitch_live:
+        logs["policy/aim_log_std_pitch"] = float(clamped[1])
 
 
 def compute_head_divergence(policy):
@@ -3725,6 +3735,70 @@ def compute_game_metrics(logs):
 
 
 # ── SECTION: Dead Run Detector ─────────────────────────────────────────────
+
+
+def pin_pitch_for_map(map_data) -> int:
+    """R0-E.2 (#131): 1 iff the map is FLAT (every area centroid shares one z).
+
+    WHAT: pure geometry test on the MapData the envs will actually run on.
+    ``map_data=None`` means "the cs2 nav map" (exactly what make_env(map_data=
+    None) loads, via the same _ENV_CACHE), so None is resolved by LOADING that
+    map — never by treating the sentinel as a map property.
+
+    WHY: a flat map has nothing to aim up/down at, so pitch is pure noise
+    (spec §R0-E.2) and gets pinned; a map with elevation must keep the pitch
+    dim trainable. Deciding on the sentinel (`map_data is None` ⇒ flat) was
+    the Task 9 review's Critical #1: the CLI `--dust2` path passes None, so
+    the value MUST come from the loaded map, not from the marker.
+
+    PITFALL: the in-sim dust2 (map.make_cs2_map, "verticality deferred")
+    zero-fills centroids_z, so today this returns 1 for dust2 — the spec
+    (plan §R0-E.2: "true for dust2") and Task 12's name-based table agree.
+    When real dust2 verticality lands this flips to 0 by itself, and every
+    dust2 resume is then refused by the config guard (pin_pitch is not
+    allowlisted) — that is the intended tripwire, not a bug.
+    """
+    md = map_data
+    if md is None:
+        # Same cache key make_env uses, so train() never loads the nav twice.
+        import nav
+        from c_env.cs2_env import _ENV_CACHE
+        from map import make_cs2_map
+        key = (nav.NAV_PATH, nav.CACHE_PATH)
+        md = _ENV_CACHE.get(key)
+        if md is None:
+            md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)
+            _ENV_CACHE[key] = md
+    z = np.asarray(md.centroids_z, dtype=np.float32)
+    return int(float(z.max() - z.min()) == 0.0)
+
+
+def resolve_pin_pitch(args) -> int:
+    """R0-E.2 (#131): set/validate args.pin_pitch from args.map_data; returns it.
+
+    WHAT: ``args.pin_pitch is None`` (CLI default) ⇒ pin_pitch_for_map(
+    args.map_data). An explicit 0/1 is cross-checked against the same test
+    and refused with ValueError (never assert) when it disagrees with the map.
+
+    WHY a separate function: train() is too heavy to exercise in a unit test,
+    and this block MUST run before build_train_env_factory — env_knobs_from_
+    args(args) bakes args.pin_pitch into every worker env at vector.make;
+    resolving later would leave the envs unpinned while the policy gets
+    aim_dim_mask=[1,0] and assert_pin_pitch_agreement aborts the run.
+
+    PITFALL: args.map_data is None for `--dust2`; the helper loads the map
+    (cached), so calling this before the map block in main() is fine but
+    calling it above the `--dump-config` early exit would defeat that exit's
+    no-heavy-import contract — Task 12 puts the name-based value there.
+    """
+    flat = bool(pin_pitch_for_map(getattr(args, "map_data", None)))
+    if getattr(args, "pin_pitch", None) is None:
+        args.pin_pitch = int(flat)
+    if bool(args.pin_pitch) != flat:
+        raise ValueError(f"pin_pitch={args.pin_pitch} but map flat={flat}: pin pitch only on "
+                         f"flat maps (pass --pin-pitch {int(flat)} or omit it)")
+    print(f"[Train] pin_pitch={int(args.pin_pitch)} (map flat={flat})")
+    return int(args.pin_pitch)
 
 
 def assert_pin_pitch_agreement(vecenv, policy):
@@ -5334,25 +5408,14 @@ def train(args):
     _map_data = args.map_data
 
     # ── R0-E.2 (#131): pin_pitch resolution ────────────────────────────────
-    # A None (CLI default) resolves from map geometry: a map whose area
-    # centroids share one z has nothing to aim up/down at. An explicit value is
-    # cross-checked against the same test (ValueError, not assert). MUST run
-    # before build_train_env_factory — env_knobs_from_args(args) bakes
-    # args.pin_pitch into every worker env at pufferlib.vector.make; resolving
-    # it later would leave the envs unpinned while the policy gets
-    # aim_dim_mask=[1,0] and assert_pin_pitch_agreement aborts the run.
-    # (Task 12 sets args.pin_pitch above the --dump-config exit via
-    # pin_pitch_for_map; the None branch keeps programmatic train(args)
-    # callers working. Until then --dump-config records pin_pitch=0 on a flat
-    # map while the run's rewritten config.json records 1 — expected.)
-    _flat = (_map_data is None) or (float(_map_data.centroids_z.max() - _map_data.centroids_z.min())
-                                    == 0.0)
-    if getattr(args, "pin_pitch", None) is None:
-        args.pin_pitch = int(_flat)
-    if bool(args.pin_pitch) != _flat:
-        raise ValueError(f"pin_pitch={args.pin_pitch} but map flat={_flat}: pin pitch only on "
-                         f"flat maps (pass --pin-pitch {int(_flat)} or omit it)")
-    print(f"[Train] pin_pitch={int(args.pin_pitch)} (map flat={_flat})")
+    # resolve_pin_pitch loads the REAL map when args.map_data is None (the
+    # `--dust2` CLI path) and decides from geometry; see pin_pitch_for_map for
+    # why the sentinel itself must never decide. MUST run before
+    # build_train_env_factory (env_knobs_from_args bakes args.pin_pitch into
+    # every worker env). Until Task 12 moves a name-based value above the
+    # --dump-config exit, --dump-config records pin_pitch=0 on a flat map
+    # while the run's rewritten config.json records 1 — expected.
+    resolve_pin_pitch(args)
 
     # ── R0-D (#135): deterministic seeding ──────────────────────────────────
     # pufferl.py has its seeding commented out. Seed BEFORE build_policy
