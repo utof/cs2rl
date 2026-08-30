@@ -81,9 +81,8 @@ def _place_duel(env):
     return act, cont
 
 
-def test_arena_stance_parity_hit_and_stance_blocked(simple_map):
-    """Task 12 switches this to make_arena_duel_map(); until then simple_map
-    (the hit geometry is per-agent, not per-map, so the map choice is free).
+def test_arena_stance_parity_hit_and_stance_blocked():
+    """On ARENA_DUEL_V1 (R0-H), the map Rung 1 trains on.
     Preflight ruling: pin 1 / crouch 0, two standing agents, on-target shot
     ⇒ shots_hit == 1. Then crouch_enabled=1 with a CROUCHED target ⇒ the same
     shot is stance-blocked (|rz| = 24 > 16) — proving the crouch gate is what
@@ -91,7 +90,9 @@ def test_arena_stance_parity_hit_and_stance_blocked(simple_map):
     auto_reset=False: at n_active=1 a head-roll hit can end the round, and
     the auto-reset would clear episode_stats before the asserts read it."""
     from c_env.cs2_env import make_env
-    env = make_env(map_data=simple_map,
+    from map import make_arena_duel_map
+    arena = make_arena_duel_map()
+    env = make_env(map_data=arena,
                    n_active_per_team=1,
                    pin_pitch=1,
                    crouch_enabled=0,
@@ -111,7 +112,7 @@ def test_arena_stance_parity_hit_and_stance_blocked(simple_map):
     finally:
         env.close()
 
-    env = make_env(map_data=simple_map,
+    env = make_env(map_data=arena,
                    n_active_per_team=1,
                    pin_pitch=1,
                    crouch_enabled=1,
@@ -230,9 +231,9 @@ def test_ratio_c_identity_simple_map_unpinned(simple_map):
     assert _ratio_c_after_rollout(0, simple_map) == [1.0, 1.0]
 
 
-def test_ratio_c_identity_arena_pinned(simple_map):
-    # Task 12 switches this to make_arena_duel_map(); until then simple_map + pin_pitch=1.
-    assert _ratio_c_after_rollout(1, simple_map) == [1.0, 0.0]
+def test_ratio_c_identity_arena_pinned():
+    from map import make_arena_duel_map
+    assert _ratio_c_after_rollout(1, make_arena_duel_map()) == [1.0, 0.0]
 
 
 def test_env_trainer_pin_agreement_raises(simple_map):

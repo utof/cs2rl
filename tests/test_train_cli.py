@@ -69,7 +69,8 @@ def test_dump_config_writes_json(tmp_path):
     Runs through `uv run python` so the project venv (and its deps) is active.
     Bumped timeout to 60s because uv's cold warm-up can be slow on first call.
     The whole point of --dump-config is zero side-effects: no torch import,
-    no map load, no env spin-up — so it must return quickly.
+    no env spin-up — so it must return quickly (the MapData is built above the
+    exit since Task 12: config.json carries the geometry-resolved pin_pitch).
     """
     import json
 

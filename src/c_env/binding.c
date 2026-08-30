@@ -662,6 +662,57 @@ fail:
 #undef SD_INT
 #undef SD_FLOAT
 
+/* ── binding.bake_solids(capsule) -> int ──
+ * Run build_solids_from_rooms on this env's StaticData and return wall_list.count.
+ *
+ * WHAT: the ONE Python entry into cs2_solids.h's bake. The training path never
+ *       bakes (env_step does not query solids today; only make_client in
+ *       cs2_render.h does), so without this a Python test cannot ask "does this
+ *       map survive the solids bake?" (spec 2026-08-29 §8, tests/test_arena_duel.py).
+ * WHY:  build_solids_from_rooms is static inline in a header — not reachable by
+ *       ctypes — and the alternative (re-deriving the face rules in Python)
+ *       would test a copy, not the bake.
+ * PITFALLS: re-baking frees the previous list first (build_solids_from_rooms
+ *       does that itself); env_close / c_close free it, so a baked env leaks
+ *       nothing extra. Reads sd->area_bounds, which cs2_env.py installs AFTER
+ *       binding.init — a map without room quads (dust2) bakes 0 faces, which is
+ *       indistinguishable from a failed malloc (that path prints to stderr). */
+static PyObject* py_bake_solids(PyObject* self, PyObject* args) {
+    (void)self;
+    PyObject* cap;
+    if (!PyArg_ParseTuple(args, "O", &cap))
+        return NULL;
+    BindingEnv* benv = (BindingEnv*)PyCapsule_GetPointer(cap, NULL);
+    if (!benv) {
+        PyErr_SetString(PyExc_ValueError, "invalid env capsule");
+        return NULL;
+    }
+    build_solids_from_rooms(&benv->sd);
+    return PyLong_FromLong((long)benv->sd.wall_list.count);
+}
+
+/* ── binding.solid_ray_clear(capsule, x0, y0, z0, x1, y1, z1) -> int ──
+ * 1 if no baked face blocks the segment, 0 if one does (cs2_solids.h
+ * solid_ray_clear, the LoS/bullet query the demo uses). z0/z1 are EYE heights.
+ *
+ * WHY: lets tests check a spawn→spawn lane through the REAL face list rather
+ *      than a Python re-implementation of the segment/plane test.
+ * PITFALL: with an empty list (never baked, dust2, failed malloc) every ray is
+ *      "clear" — pair any clear-lane assert with a must-block control ray. */
+static PyObject* py_solid_ray_clear(PyObject* self, PyObject* args) {
+    (void)self;
+    PyObject* cap;
+    float     x0, y0, z0, x1, y1, z1;
+    if (!PyArg_ParseTuple(args, "Offffff", &cap, &x0, &y0, &z0, &x1, &y1, &z1))
+        return NULL;
+    BindingEnv* benv = (BindingEnv*)PyCapsule_GetPointer(cap, NULL);
+    if (!benv) {
+        PyErr_SetString(PyExc_ValueError, "invalid env capsule");
+        return NULL;
+    }
+    return PyLong_FromLong((long)solid_ray_clear(&benv->sd, x0, y0, z0, x1, y1, z1));
+}
+
 static PyMethodDef binding_methods[] = {
     {"init", py_init, METH_VARARGS, "Init env, return capsule"},
     {"reset", py_reset, METH_VARARGS, "Reset env"},
@@ -674,6 +725,14 @@ static PyMethodDef binding_methods[] = {
      py_static_data_scalars,
      METH_VARARGS,
      "Read scalar StaticData fields from a live env capsule"},
+    {"bake_solids",
+     py_bake_solids,
+     METH_VARARGS,
+     "Bake sd->wall_list from the room quads; returns count"},
+    {"solid_ray_clear",
+     py_solid_ray_clear,
+     METH_VARARGS,
+     "1 if no baked face blocks the segment (x0,y0,z0)->(x1,y1,z1)"},
     {NULL, NULL, 0, NULL},
 };
 

@@ -1073,9 +1073,14 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     _cap = getattr(args, "aim_log_std_max", None)
     aim_log_std_max = float(LOG_STD_MAX if _cap is None else _cap)
 
+    # R0-H: env LABEL from the resolved map name. The CLI always sets args.map
+    # (above the --dump-config exit); the harness / older SimpleNamespace
+    # callers have no `map` attr and keep the historical "cs2-dust2". Not
+    # allowlisted for --resume-run: a different map is a different experiment.
+    map_name = getattr(args, "map", None) or "dust2"
     cfg = {
                                                                         # Core PPO
-        "env": "cs2-dust2",
+        "env": f"cs2-{map_name}",
         "device": args.device,
         "seed": args.seed,
         "total_timesteps": raw_timesteps,
@@ -3767,6 +3772,65 @@ def compute_game_metrics(logs):
 
 # ── SECTION: Dead Run Detector ─────────────────────────────────────────────
 
+MAP_NAMES = ("simple", "dust2", "arena-duel")
+
+
+def build_map_data(name: str):
+    """R0-H: `--map` name → the MapData the envs run on (None ⇒ the cs2 nav map).
+
+    WHAT: "simple" → map.make_simple_map(); "arena-duel" → map.make_arena_duel_
+    map(); "dust2" → None, which is exactly what make_env(map_data=None)
+    understands (it loads nav via _ENV_CACHE — pin_pitch_for_map resolves None
+    the same way, so the two never disagree on which map "None" is).
+
+    WHY a function: the CLI needs the map ABOVE the --dump-config exit (the
+    Modal runner fingerprints every launch from that dump and config.json must
+    carry the geometry-resolved pin_pitch and the env label), and train()'s
+    spawn-count guard needs the same name → the one table lives here.
+
+    PITFALL: ValueError (never assert) on an unknown name; argparse `choices`
+    already rejects it on the CLI, this is for programmatic callers. Importing
+    `map` costs ~10 ms; loading dust2 is deferred to make_env / pin_pitch_for_
+    map (cached, ~1 s from the nav cache).
+    """
+    if name not in MAP_NAMES:
+        raise ValueError(f"unknown map {name!r}; expected one of {MAP_NAMES}")
+    if name == "dust2":
+        return None
+    if name == "arena-duel":
+        from map import make_arena_duel_map
+        return make_arena_duel_map()
+    from map import make_simple_map
+    return make_simple_map()
+
+
+def check_spawn_counts(vecenv, map_name: str) -> tuple[int, int]:
+    """R0-H startup guard: the C StaticData spawn lists are within capacity and
+    match the preset. Returns (n_t_spawns, n_ct_spawns).
+
+    WHAT: reads sd->n_t_spawns / n_ct_spawns off the driver env (same path as
+    assert_pin_pitch_agreement). Generic bounds are ASYMMETRIC ON PURPOSE —
+    StaticData has t_spawns[15] / ct_spawns[5] (cs2_types.h) — and the arena
+    must have exactly 4 + 4 (ARENA_DUEL_V1; fewer rows would silently weaken
+    the load-bearing spawn randomisation, ≥ TEAM_SIZE would flip spawn_team to
+    the shuffle path and change the RNG draw count).
+
+    PITFALL: RuntimeError, never a bare assert (python -O strips asserts). A
+    non-Cs2Env driver is a wiring bug and must also stop the run.
+    """
+    env = getattr(vecenv, "driver_env", vecenv)
+    try:
+        sd = env._c_env.sd.contents
+        n_t, n_ct = int(sd.n_t_spawns), int(sd.n_ct_spawns)
+    except AttributeError as e:
+        raise RuntimeError("check_spawn_counts: driver_env is not a Cs2Env") from e
+    if not (1 <= n_t <= 15 and 1 <= n_ct <= 5):
+        raise RuntimeError(f"spawn counts out of StaticData capacity: n_t_spawns={n_t} (1..15) "
+                           f"n_ct_spawns={n_ct} (1..5)")
+    if map_name == "arena-duel" and (n_t, n_ct) != (4, 4):
+        raise RuntimeError(f"ARENA_DUEL_V1 expects 4 T + 4 CT spawn areas, env has {n_t} + {n_ct}")
+    return n_t, n_ct
+
 
 def pin_pitch_for_map(map_data) -> int:
     """R0-E.2 (#131): 1 iff the map is FLAT (every area centroid shares one z).
@@ -5403,6 +5467,19 @@ def train(args):
         args.checkpoint_dir = str(CHECKPOINTS_DIR / resolved_name)
         print(f"[Train] Run name resolved to: {resolved_name}")
 
+    # ── R0-E.2 (#131): pin_pitch resolution ────────────────────────────────
+    # resolve_pin_pitch loads the REAL map when args.map_data is None (the
+    # `--dust2` CLI path) and decides from geometry; see pin_pitch_for_map for
+    # why the sentinel itself must never decide. MUST run (a) before
+    # build_train_env_factory (env_knobs_from_args bakes args.pin_pitch into
+    # every worker env) and (b) BEFORE the --resume-run config guard below:
+    # the CLI default is pin_pitch=None ⇒ env_knobs_from_args yields 0, while a
+    # pinned run's config.json holds 1 — resolving after the guard refused
+    # every flag-less resume of a flat-map run (Task 12 ruling). The CLI
+    # already resolved it above --dump-config; here it is a cache-safe
+    # cross-check for programmatic callers.
+    resolve_pin_pitch(args)
+
     # ── R0-C (#134): --resume-run resolution (before run_label / metrics / config) ──
     resume_run = getattr(args, "resume_run", None)
     _resume_paths = None
@@ -5462,16 +5539,6 @@ def train(args):
     shared_ts = mp.Value("f", 0.3)
 
     _map_data = args.map_data
-
-    # ── R0-E.2 (#131): pin_pitch resolution ────────────────────────────────
-    # resolve_pin_pitch loads the REAL map when args.map_data is None (the
-    # `--dust2` CLI path) and decides from geometry; see pin_pitch_for_map for
-    # why the sentinel itself must never decide. MUST run before
-    # build_train_env_factory (env_knobs_from_args bakes args.pin_pitch into
-    # every worker env). Until Task 12 moves a name-based value above the
-    # --dump-config exit, --dump-config records pin_pitch=0 on a flat map
-    # while the run's rewritten config.json records 1 — expected.
-    resolve_pin_pitch(args)
 
     # ── R0-D (#135): deterministic seeding ──────────────────────────────────
     # pufferl.py has its seeding commented out. Seed BEFORE build_policy
@@ -5573,6 +5640,9 @@ def train(args):
         backend=backend,
         **vec_kwargs,
     )
+    # R0-H: spawn lists within StaticData capacity, and 4 + 4 on the arena.
+    # `map` is absent on harness/legacy args objects ⇒ generic bounds only.
+    check_spawn_counts(vecenv, getattr(args, "map", None) or "")
 
     # Batch 7 (spec §3.3): sniff the resume checkpoint BEFORE build_policy —
     # the architecture decision has to exist at construction time, and neither
@@ -5926,8 +5996,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dust2",
         action="store_true",
-        help="Use the full dust2 map instead of the default simple 5-room map",
+        help="Alias for --map dust2 (kept for the Modal runner / old scripts); --map wins",
     )
+    parser.add_argument("--map",
+                        choices=MAP_NAMES,
+                        default=None,
+                        help="R0-H: map preset; takes precedence over --dust2. Default: "
+                        "dust2 if --dust2 else simple. Sets config['env']=cs2-<map>.")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--record", action="store_true")
@@ -6146,11 +6221,25 @@ if __name__ == "__main__":
         "split-trunk policy.")
     args = parser.parse_args()
 
+    # ── R0-H: map name → MapData → pin_pitch, ABOVE the --dump-config exit ──
+    # The Modal runner fingerprints every launch from --dump-config, so the
+    # dump must carry the same env label and the same geometry-resolved
+    # pin_pitch the run's own config.json will (Task 9 ruling: the value comes
+    # from the LOADED map, never a name table). Cost: ~10 ms for simple/arena,
+    # ~1 s for dust2 from the nav cache (pin_pitch_for_map(None) loads it via
+    # the same _ENV_CACHE make_env uses, so nothing is loaded twice).
+    if args.map is None:
+        args.map = "dust2" if args.dust2 else "simple"
+    args.map_data = build_map_data(args.map)
+    print(f"[Map] Using {args.map} map")
+    resolve_pin_pitch(args)
+
     if args.dump_config:
         # Zero-side-effect mode: write config.json and exit. Runs BEFORE device
-        # detection and map loading so no torch/map imports are triggered. This
-        # lets scripts/run_experiment.py fingerprint the HPs cheaply (no env,
-        # no CUDA probe). Keep this branch lean — anything imported here adds
+        # detection so no torch import is triggered (the map is built above:
+        # config.json needs its pin_pitch/env label). This lets
+        # scripts/run_experiment.py fingerprint the HPs cheaply (no env, no
+        # CUDA probe). Keep this branch lean — anything imported here adds
         # startup cost to every experiment launch.
         if args.device is None:
             args.device = "cpu"        # placeholder; never used for training
@@ -6173,15 +6262,6 @@ if __name__ == "__main__":
         import torch
 
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    if args.dust2:
-        args.map_data = None
-        print("[Map] Using dust2 map")
-    else:
-        from map import make_simple_map
-
-        args.map_data = make_simple_map()
-        print("[Map] Using simple 5-room map")
 
     if args.smoke:
         smoke_test()

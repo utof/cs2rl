@@ -93,6 +93,7 @@ _SECRET_NAME_RE = _RUN_ID_RE
 # is intentionally absent so train-args using it fail as unknown.
 LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--dust2": 0,
+    "--map": 1,                                        # R0-H (Task 12): live --map {simple,dust2,arena-duel}
     "--smoke": 0,
     "--train": 0,
     "--record": 0,
@@ -189,6 +190,7 @@ RUNNER_OWNED_TRAIN_FLAGS = frozenset({
     "--record",
     "--eval",
     "--dust2",
+    "--map",                                           # R0-H: the runner owns map choice (effective_map); Task 14 emits it
     "--num_envs",
 })
 

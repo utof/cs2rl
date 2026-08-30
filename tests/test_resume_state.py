@@ -444,3 +444,65 @@ def test_subprocess_resume_run(tmp_path):
     assert r.returncode != 0
     assert "config.json mismatch on non-allowlisted keys" in (r.stderr + r.stdout), r.stderr[-2000:]
     assert "batch_size" in (r.stderr + r.stdout)
+
+
+@pytest.mark.slow
+def test_subprocess_resume_run_flat_map_without_pin_pitch_flag(tmp_path):
+    """Task 12 (R0-H) binding ruling: a flag-less `--resume-run` of a PINNED run
+    must be accepted. The CLI default is pin_pitch=None; the run's config.json
+    holds the resolved 1 (flat map). If the config guard ran before
+    resolve_pin_pitch, env_knobs_from_args would yield 0 and every retry of a
+    Rung 1 arena run (Task 15's loop) would SystemExit "config.json mismatch".
+    16 envs: batch_size floor (see test_subprocess_resume_run)."""
+    ckpt = tmp_path / "run"
+    common = [
+        "--train", "--device", "cpu", "--vec-backend", "serial", "--num_envs", "16", "--map",
+        "arena-duel", "--n-active-per-team", "1", "--no-self-play", "--no-dead-run-abort",
+        "--checkpoint-interval", "1", "--seed", "3", "--save_every_sec", "100000"
+    ]
+    r = subprocess.run([
+        sys.executable,
+        str(TRAIN_SCRIPT), *common, "--timesteps", "10240", "--checkpoint-dir",
+        str(ckpt), "--run-id", "rid-arena"
+    ],
+                       cwd=REPO_ROOT,
+                       capture_output=True,
+                       text=True,
+                       timeout=1500)
+    assert r.returncode == 0, r.stderr[-3000:]
+    cfg = json.loads((ckpt / "config.json").read_text())
+    assert cfg["pin_pitch"] == 1 and cfg["env"] == "cs2-arena-duel"
+    rows = [json.loads(line) for line in (ckpt / "metrics.jsonl").read_text().splitlines()]
+    assert rows, "first run logged nothing"
+    r = subprocess.run([
+        sys.executable,
+        str(TRAIN_SCRIPT), *common, "--timesteps", "20480", "--resume-run",
+        str(ckpt)
+    ],
+                       cwd=REPO_ROOT,
+                       capture_output=True,
+                       text=True,
+                       timeout=1500)
+    assert r.returncode == 0, r.stderr[-3000:]
+    assert "config.json mismatch" not in (r.stderr + r.stdout)
+    # n_active=1 ⇒ raw rows = 5× participating steps, so several epochs are
+    # appended per run; the stamp sits on the FIRST resumed row only.
+    rows2 = [json.loads(line) for line in (ckpt / "metrics.jsonl").read_text().splitlines()]
+    new = rows2[len(rows):]
+    assert new, "no rows appended after resume"
+    assert new[0]["resumed_from_step"] == rows[-1]["step"]
+    assert all(row["run_id"] == "rid-arena" for row in new)
+    # A different map on resume IS refused (env label is not allowlisted).
+    other = list(common)
+    other[other.index("--map") + 1] = "simple"
+    r = subprocess.run([
+        sys.executable,
+        str(TRAIN_SCRIPT), *other, "--timesteps", "30720", "--resume-run",
+        str(ckpt)
+    ],
+                       cwd=REPO_ROOT,
+                       capture_output=True,
+                       text=True,
+                       timeout=600)
+    assert r.returncode != 0
+    assert "config.json mismatch on non-allowlisted keys" in (r.stderr + r.stdout)
