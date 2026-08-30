@@ -3,11 +3,12 @@
 WHAT: pins (a) the C-side seed mixing in env_init (adjacent seeds used to
 alias: `seed ? seed : 1` mapped 0 and 1 onto the same xorshift32 stream),
 (b) the Python-side seed derivation handed to pufferlib.vector.make, and
-(c) end-to-end reproducibility of a one-epoch training run (slow, opt-in).
+(c) end-to-end reproducibility of a one-epoch training run — the seed-3
+same-seed case is always-on (~20 s), the seed-0 case and the differ test are
+`slow`, (d) seed_everything (python/numpy/torch) in-process.
 
-PITFALL: the subprocess tests need the C extension built in-place and take
-minutes each; they are marked `slow` (registered in tests/conftest.py) —
-deselect with `-m 'not slow'`. The always-on tests are the in-process ones.
+PITFALL: the subprocess tests need the C extension built in-place; the `slow`
+ones (registered in tests/conftest.py) are deselected with `-m 'not slow'`.
 """
 
 import json
@@ -53,10 +54,10 @@ def test_c_rng_mixing_zero_fallback_only_at_the_one_wrapping_seed(simple_map):
         env.close()
 
 
-def test_composed_env_seed_derivation_injective():
-    """Env i of --seed s gets env_seed_base(s) + i (train()'s _per_env_kwargs);
-    the map (s, i) -> seed must be injective across seeds for any num_envs
-    below the 100_000 spacing."""
+def test_env_seed_ranges_of_adjacent_seeds_disjoint():
+    """Env i of --seed s gets env_seed_base(s) + i (train()'s _per_env_kwargs)
+    — no pufferlib composition is involved. This only pins the 100_000 spacing:
+    the (s, i) -> seed map stays injective for any num_envs below it."""
     from train import env_seed_base
     seen = {}
     for s in (0, 1):
@@ -80,14 +81,53 @@ def test_eval_seed_cannot_collide_with_worker_seeds():
     assert env_seed_base(100) + 3 == 10_000_003        # documents the one reachable collision
 
 
-def test_train_passes_seed_to_vector_make():
+def test_env_seed_base_rejects_uint32_overflow():
+    """py_init masks the C seed with & 0xFFFFFFFF; base + i must fit uint32.
+    The first overflowing --seed (42_950, i=0) is refused, the last fitting
+    one (42_949) is not, and negatives are refused too."""
+    from train import env_seed_base
+    assert env_seed_base(42_949) < 2**32
+    with pytest.raises(ValueError):
+        env_seed_base(42_950)
+    with pytest.raises(ValueError):
+        env_seed_base(-1)
+
+
+def test_seed_everything_is_deterministic():
+    """Fast always-on pin for the host-side RNG set (python/numpy/torch):
+    seed_everything(3) twice yields identical draws, seed_everything(4) differs.
+    Before this test, deleting those calls from train() passed the default
+    suite (only the opt-in slow e2e test noticed)."""
+    import random
+
+    import torch
+
+    from train import seed_everything
+
+    def draw():
+        return torch.rand(3).tolist(), np.random.random(), random.random()
+
+    seed_everything(3)
+    a = draw()
+    seed_everything(3)
+    b = draw()
+    seed_everything(4)
+    c = draw()
+    assert a == b
+    assert a[0] != c[0] and a[1] != c[1] and a[2] != c[2]
+
+
+def test_train_routes_seed_via_per_env_kwargs():
     """Source-text pin (same style as test_train_uses_build_train_env_factory):
-    a dropped `seed=` kwarg on pufferlib.vector.make is invisible at runtime —
-    every env silently falls back to pufferlib's default base seed."""
+    train() must call seed_everything and hand each env `_seed` through
+    _per_env_kwargs — NOT via pufferlib.vector.make(seed=), which is a silent
+    no-op (vector.make never forwards its own `seed` parameter)."""
     import inspect
 
     import train
     src = inspect.getsource(train.train)
+    assert "seed_everything(args.seed)" in src, \
+        "train() no longer seeds python/numpy/torch via seed_everything"
     assert '"_seed": env_seed_base(args.seed) + i' in src, \
         "train() no longer routes --seed to the envs via _per_env_kwargs"
     # pufferlib.vector.make swallows `seed=` (its own named parameter, never
@@ -166,12 +206,20 @@ def test_in_process_env_determinism(simple_map):
         assert np.array_equal(o1, o2) and np.array_equal(r1, r2)
 
 
-@pytest.mark.slow                      # 4 subprocess trainings
-@pytest.mark.parametrize("seed", [3, 0])
+@pytest.mark.parametrize(
+    "seed",
+    [
+        3,                                             # always-on: the one e2e determinism proof (~20 s)
+        pytest.param(0, marks=pytest.mark.slow),
+    ])
 @pytest.mark.timeout(1800)
-def test_two_runs_same_seed_identical(tmp_path, seed):
-    a = _run(tmp_path / "a", seed)
-    b = _run(tmp_path / "b", seed)
+def test_two_runs_same_seed_identical(tmp_path_factory, seed):
+    """Two 1-epoch CPU trainings with the same --seed write identical
+    metrics.jsonl rows. Uses a per-call mktemp dir (not the shared basetemp
+    numbering) so concurrent pytest invocations cannot collide on --checkpoint-dir."""
+    tmp = tmp_path_factory.mktemp(f"seed{seed}_", numbered=True)
+    a = _run(tmp / "a", seed)
+    b = _run(tmp / "b", seed)
     assert a.keys() == b.keys()
     diff = {k: (a[k], b[k]) for k in a if a[k] != b[k]}
     assert not diff, diff

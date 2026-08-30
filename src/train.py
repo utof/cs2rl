@@ -642,6 +642,28 @@ def _rng_state_dict():
     return st
 
 
+def seed_everything(seed: int) -> None:
+    """R0-D (#135): seed every host-side RNG that _rng_state_dict snapshots.
+
+    WHAT: random, numpy (legacy global), torch CPU and — when available — all
+    CUDA devices. This is the MIRROR of _rng_state_dict/_rng_load_state_dict:
+    the same RNG set, one fresh-seed path here and one resume path there. Add a
+    new RNG to all three or resume will silently diverge from a fresh run.
+    WHY a function: train() used to inline these calls, and no default-suite
+    test noticed when they were dropped (only the opt-in slow e2e test did).
+    test_seed_everything_is_deterministic pins it now.
+    PITFALL: seeds only — it does NOT set torch.use_deterministic_algorithms
+    or cudnn flags, so CUDA runs are seeded but not bit-exact reproducible.
+    Env xorshift32 streams are seeded separately via env_seed_base.
+    """
+    import torch
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def _rng_load_state_dict(st):
     """Inverse of _rng_state_dict. A CUDA state saved on a GPU box is skipped
     silently on a CPU-only resume (device is allowlisted)."""
@@ -909,6 +931,12 @@ def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
     return agents_per_env, bptt_horizon, batch_size
 
 
+# First --seed whose base 42_950 * 100_000 = 4_295_000_000 exceeds 2**32 - 1
+# (= 4_294_967_295). At seed 42_949 env i fits for i <= 67_295, i.e. any
+# realistic num_envs. See env_seed_base.
+_MAX_SEED = 42_950
+
+
 def env_seed_base(seed: int) -> int:
     """R0-D (#135): base seed handed to pufferlib.vector.make from --seed.
 
@@ -923,8 +951,16 @@ def env_seed_base(seed: int) -> int:
     PITFALL: Task 13's eval env is pinned at seed 10_000_003 = base(100) + 3;
     only --seed 100 with >=4 envs collides. For --seed <= 4 no worker env seed
     equals it (test_eval_seed_cannot_collide_with_worker_seeds).
+    PITFALL (uint32): py_init masks the C seed with & 0xFFFFFFFF, so base + i
+    must stay below 2**32. --seed >= 42_950 (_MAX_SEED) wraps at i=0 and could
+    alias another seed's env streams — rejected with ValueError rather than
+    silently wrapped (test_env_seed_base_rejects_uint32_overflow).
     """
-    return int(seed) * 100_000
+    seed = int(seed)
+    if not 0 <= seed < _MAX_SEED:
+        raise ValueError(f"--seed must be in [0, {_MAX_SEED}) so env_seed_base(seed) + i "
+                         f"fits uint32 (C seed is masked & 0xFFFFFFFF); got {seed}")
+    return seed * 100_000
 
 
 def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
@@ -5134,11 +5170,9 @@ def train(args):
     # state is NOT restored on resume (C side; see load_full_resume's WARN).
     # Eval env seed 10_000_003 (Task 13) cannot collide with worker env seeds
     # env_seed_base(--seed) + i for --seed<=4 (any num_envs) — see env_seed_base.
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    # CAVEAT: this makes CPU runs bit-exact; CUDA runs are seeded but NOT
+    # bit-exact (no torch.use_deterministic_algorithms / cudnn flags are set).
+    seed_everything(args.seed)
 
     # ── Batch 3 (T5b): cont-action shared memory across the fork boundary ──
     # PufferLib's Multiprocessing backend forks workers AFTER allocating its
