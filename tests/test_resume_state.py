@@ -445,6 +445,21 @@ def test_subprocess_resume_run(tmp_path):
     assert "config.json mismatch on non-allowlisted keys" in (r.stderr + r.stdout), r.stderr[-2000:]
     assert "batch_size" in (r.stderr + r.stdout)
 
+    # R0-J (Task 14): --gamma is a config key, NOT allowlisted — a resumed run
+    # with a different discount is a different experiment and must be refused.
+    r = subprocess.run([
+        sys.executable,
+        str(TRAIN_SCRIPT), *common, "--timesteps", "40960", "--gamma", "0.9", "--resume-run",
+        str(ckpt)
+    ],
+                       cwd=REPO_ROOT,
+                       capture_output=True,
+                       text=True,
+                       timeout=600)
+    assert r.returncode != 0
+    assert "config.json mismatch on non-allowlisted keys" in (r.stderr + r.stdout), r.stderr[-2000:]
+    assert "gamma" in (r.stderr + r.stdout)
+
 
 @pytest.mark.slow
 def test_subprocess_resume_run_flat_map_without_pin_pitch_flag(tmp_path):

@@ -144,7 +144,7 @@ def test_invalid_secret_names_are_rejected(name):
         mrl.validate_secret_name(name)
 
 
-@pytest.mark.parametrize("effective_map", ["simple", "dust2"])
+@pytest.mark.parametrize("effective_map", ["simple", "dust2", "arena-duel"])
 def test_required_map_allowlist(effective_map):
     request = mrl.build_run_request(**_valid_run_kwargs(effective_map=effective_map))
     assert request.effective_map == effective_map
@@ -457,6 +457,9 @@ _FORBIDDEN_FLAGS = [
     "--record",
     "--eval",
     "--dust2",
+    "--map",                           # R0-J: runner owns map choice (effective_map)
+    "--run-id",
+    "--resume-run",
     "--num_envs",
     "--num-envs",
 ]
@@ -580,6 +583,8 @@ def test_training_argv_is_exact_for_resume_and_defaults():
     remote_resume = "/artifacts/inputs/sha256/abc.pt"
     assert request.training_argv(run_root, remote_resume=remote_resume) == [
         "--train",
+        "--map",                                                                  # R0-J: runner always emits the map, even the old implicit "simple"
+        "simple",
         "--timesteps",
         "30000000",
         "--seed",
@@ -604,14 +609,18 @@ def test_training_argv_is_exact_for_resume_and_defaults():
                                                                         remote_resume=remote_resume)
 
 
-def test_simple_map_omits_dust2_dust2_injects_once():
+def test_runner_emits_map_once_never_dust2():
+    """R0-J (Task 14): the runner emits `--map <effective_map>` for EVERY map
+    (the `--dust2` alias is gone from the argv — train.py's `--map` wins over
+    it anyway, so a stray alias would be silently inert)."""
     run_root = Path("/artifacts/runs/ok-id")
-    simple_request = mrl.build_run_request(**_valid_run_kwargs(effective_map="simple"))
-    dust2_request = mrl.build_run_request(
-        **_valid_run_kwargs(effective_map="dust2", run_id="ok-id"))
-    assert simple_request.effective_map == "simple"
-    assert "--dust2" not in simple_request.training_argv(run_root)
-    assert dust2_request.training_argv(run_root).count("--dust2") == 1
+    for name in ("simple", "dust2", "arena-duel"):
+        request = mrl.build_run_request(**_valid_run_kwargs(effective_map=name, run_id="ok-id"))
+        argv = request.training_argv(run_root)
+        assert request.effective_map == name
+        assert "--dust2" not in argv
+        assert argv.count("--map") == 1
+        assert argv[argv.index("--map") + 1] == name
 
 
 def test_num_envs_injected_exactly_once_with_live_spelling():
@@ -628,7 +637,8 @@ def test_dump_config_argv_uses_same_owned_flags_without_train():
     argv = mrl.build_dump_config_argv(request, None)
     assert argv[0] == "--dump-config"
     assert "--train" not in argv
-    assert argv.count("--dust2") == 1
+    assert "--dust2" not in argv
+    assert argv.count("--map") == 1 and argv[argv.index("--map") + 1] == "dust2"
     assert argv.count("--num_envs") == 1
     assert argv[argv.index("--num_envs") + 1] == "64"
     assert "--resume" not in argv

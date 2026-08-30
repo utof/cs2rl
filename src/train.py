@@ -1078,6 +1078,9 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # callers have no `map` attr and keep the historical "cs2-dust2". Not
     # allowlisted for --resume-run: a different map is a different experiment.
     map_name = getattr(args, "map", None) or "dust2"
+    # R0-J: --gamma / --pbrs-gamma. Same helper as env_knobs_from_args so the
+    # env's PBRS discount and the PPO discount cannot resolve differently.
+    gamma, pbrs_gamma = resolve_gammas(args)
     cfg = {
                                                                         # Core PPO
         "env": f"cs2-{map_name}",
@@ -1105,7 +1108,8 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "max_minibatch_size": 8192,
         "update_epochs": 3,
         "learning_rate": 3e-4,
-        "gamma": 0.999,
+        "gamma": gamma,
+        "pbrs_gamma": pbrs_gamma,                                       # R0-J: provenance; not allowlisted for --resume-run
         "gae_lambda": 0.95,
         "clip_coef": 0.15,
         "vf_coef": 0.5,
@@ -1791,6 +1795,41 @@ def make_env(team_spirit=None, map_data=None):
     return make_puffer_env(team_spirit=team_spirit, map_data=map_data)
 
 
+DEFAULT_GAMMA = 0.999                  # R0-J: the historical PPO discount; --gamma default
+
+
+def resolve_gammas(args) -> tuple[float, float]:
+    """Return ``(gamma, pbrs_gamma)`` from the args object.
+
+    WHAT: ``gamma`` is ``args.gamma`` (default DEFAULT_GAMMA for harness /
+    dump-config args objects that predate the flag); ``pbrs_gamma`` is
+    ``args.pbrs_gamma`` when given, else ``gamma``.
+
+    WHY one helper: build_train_config (provenance + the PPO discount) and
+    env_knobs_from_args (the env's PBRS discount) must agree on the SAME
+    resolution rule — PBRS is only policy-invariant (Ng et al.) when
+    γ_pbrs == γ, and before R0-J the two lived as unrelated literals (train.py
+    0.999 vs cs2_env.py 0.999) held together by a single drift test.
+    ``--pbrs-gamma`` exists ONLY for experiments that deliberately break the
+    pairing; a run that omits it always gets γ_pbrs = γ.
+
+    PITFALL: both values are config.json keys and NOT in
+    RESUME_CONFIG_ALLOWLIST — changing either on --resume-run is refused.
+    """
+    gamma = getattr(args, "gamma", None)
+    gamma = DEFAULT_GAMMA if gamma is None else float(gamma)
+    if not (0.0 < gamma < 1.0):
+        raise ValueError(f"--gamma must be in (0, 1), got {gamma}")
+    pbrs_gamma = getattr(args, "pbrs_gamma", None)
+    pbrs_gamma = gamma if pbrs_gamma is None else float(pbrs_gamma)
+    if not (0.0 < pbrs_gamma <= 1.0):
+        raise ValueError(f"--pbrs-gamma must be in (0, 1], got {pbrs_gamma}")
+    if pbrs_gamma != gamma:
+        print(f"WARNING: --pbrs-gamma {pbrs_gamma} != --gamma {gamma}: PBRS shaping is no "
+              "longer policy-invariant (Ng et al.); only do this on purpose.")
+    return gamma, pbrs_gamma
+
+
 def env_knobs_from_args(args) -> dict:
     """Non-weight env knobs (Rung 0) as make_puffer_env kwargs.
 
@@ -1810,6 +1849,11 @@ def env_knobs_from_args(args) -> dict:
     None-valued ones are OMITTED from the dict rather than forwarded as None,
     so the env's own nav.py default applies and config.json records None
     instead of a duplicated constant that would silently drift from nav.py.
+
+    R0-J: ``pbrs_gamma`` is ALWAYS present (resolved via resolve_gammas, so it
+    equals the training gamma unless --pbrs-gamma was given). Unlike the R0-G
+    knobs it is never omitted: the env default (cs2_env.py 0.999) would
+    silently disagree with a non-default --gamma.
     """
     knobs = {
         "n_active_per_team": int(getattr(args, "n_active_per_team", TEAM_SIZE)),
@@ -1817,6 +1861,7 @@ def env_knobs_from_args(args) -> dict:
                                                                                                    # resolves it from map flatness (see the pin_pitch block in train()).
         "pin_pitch": int(getattr(args, "pin_pitch", 0) or 0),
         "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
+        "pbrs_gamma": resolve_gammas(args)[1],
     }
     for arg_name, env_name in (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
                                ("max_turn_speed", "max_turn_speed")):
@@ -4080,13 +4125,24 @@ class DeadRunDetector:
             self.alerts = [a for a in self.alerts if "kills" not in a]
 
         if step > 50_000:
-            entropy_total = metrics.get("entropy/total", metrics.get("entropy", 5.0))
+            # R0-J: the outer log dict is prefixed `losses/` (pufferl.py
+            # mean_and_log) — the old `entropy/total` / `approx_kl` keys never
+            # matched, so the entropy and KL rules were dead since day one.
+            # The unprefixed fallbacks keep the harness / older callers working.
+            entropy_total = metrics.get("losses/entropy", metrics.get("entropy/total", 5.0))
             if entropy_total < 0.5:
                 self.alerts.append(
                     f"CRITICAL: Entropy collapsed to {entropy_total:.2f} at step {step}")
             timeout_rate = metrics.get("game/timeout_rate", 0.0)
+            # Non-accumulating (like zero-kills, gh#93): at Rung 1 every
+            # no-kill round is a timeout, so an untrained policy sits at ~1.0
+            # and would abort itself in five checks. One live alert, cleared
+            # when the rate recovers.
             if timeout_rate > 0.95:
-                self.alerts.append(f"WARNING: Timeout rate {timeout_rate:.0%} at step {step}")
+                if not any("Timeout" in a for a in self.alerts):
+                    self.alerts.append(f"WARNING: Timeout rate {timeout_rate:.0%} at step {step}")
+            else:
+                self.alerts = [a for a in self.alerts if "Timeout" not in a]
 
         # gh#93: the zero-kills rule used to append a FRESH alert on every check
         # past 500k while kills stayed 0, so a single persistent condition
@@ -4098,17 +4154,24 @@ class DeadRunDetector:
         #     so zero kills is the configured outcome, not a symptom);
         #   - otherwise at most ONE zero-kills alert is live at a time, so the
         #     rule can contribute to a verdict but never reach it alone.
-        # The other rules keep accumulating on purpose: sustained entropy
-        # collapse / KL blowup genuinely are worse the longer they persist.
+        # R0-J: timeout and KL are single-live alerts too (see above / below);
+        # entropy is the ONLY rule that still accumulates — sustained collapse
+        # genuinely is worse the longer it persists, and it is the one rule
+        # that cannot be a structural artefact of an untrained policy.
         if self.kills_expected and step > 500_000:
             kills_per_ep = metrics.get("game/kills_per_episode", 1.0)
             if kills_per_ep == 0 and not any("Zero kills" in a for a in self.alerts):
                 self.alerts.append(f"WARNING: Zero kills by step {step}")
 
         if step > 100_000:
-            approx_kl = metrics.get("approx_kl", 0.0)
+            approx_kl = metrics.get("losses/approx_kl", metrics.get("approx_kl", 0.0))
+            # R0-J: single live alert (target_kl already clips each epoch, so a
+            # persistently high approx_kl is one condition, not five).
             if approx_kl > 0.05:
-                self.alerts.append(f"WARNING: KL divergence {approx_kl:.3f} at step {step}")
+                if not any("KL" in a for a in self.alerts):
+                    self.alerts.append(f"WARNING: KL divergence {approx_kl:.3f} at step {step}")
+            else:
+                self.alerts = [a for a in self.alerts if "KL" not in a]
 
         if len(self.alerts) >= 5:
             print("DEAD RUN DETECTED:")
@@ -6248,6 +6311,21 @@ if __name__ == "__main__":
         dest="max_turn_speed",
         help="R0-G: max yaw/pitch delta per tick (rad). Default: nav.MAX_TURN_SPEED_RAD. "
         "Rung 1 must not set this — it rescales the aim action.")
+    # R0-J (Task 14): PPO discount and PBRS discount. Both are config keys and
+    # NOT allowlisted for --resume-run. --pbrs-gamma default None ⇒ follows
+    # --gamma (resolve_gammas); pass it only to deliberately break invariance.
+    parser.add_argument("--gamma",
+                        type=float,
+                        default=DEFAULT_GAMMA,
+                        help="R0-J: PPO discount factor (default 0.999). Also the PBRS "
+                        "shaping discount unless --pbrs-gamma is given.")
+    parser.add_argument("--pbrs-gamma",
+                        type=float,
+                        default=None,
+                        dest="pbrs_gamma",
+                        help="R0-J: PBRS shaping discount. Default: equal to --gamma (the only "
+                        "policy-invariant choice). Set explicitly only for experiments that "
+                        "deliberately decouple the two.")
     parser.add_argument("--aim-entropy-bonus",
                         choices=("on", "off"),
                         default="on",

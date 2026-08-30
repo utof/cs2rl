@@ -1489,6 +1489,30 @@ def test_pbrs_gamma_matches_training_gamma():
                         f"cs2_env defaults (Cs2Env.__init__ AND make_env) or thread "
                         f"pbrs_gamma explicitly")
 
+    # R0-J (Task 14): config records BOTH gammas. Default path: pbrs_gamma
+    # follows gamma. Explicit --pbrs-gamma that differs is allowed (an
+    # experiment that deliberately breaks invariance) and recorded verbatim.
+    assert cfg["pbrs_gamma"] == cfg["gamma"] == 0.999
+    args2 = SimpleNamespace(seed=0,
+                            timesteps=1_000,
+                            checkpoint_dir="/tmp/unused",
+                            device="cpu",
+                            gamma=0.999,
+                            pbrs_gamma=0.99)
+    cfg2 = train.build_train_config(args2, batch_size=1024, bptt_horizon=64)
+    assert cfg2["gamma"] == 0.999 and cfg2["pbrs_gamma"] == 0.99
+    args3 = SimpleNamespace(seed=0,
+                            timesteps=1_000,
+                            checkpoint_dir="/tmp/unused",
+                            device="cpu",
+                            gamma=0.99,
+                            pbrs_gamma=None)
+    cfg3 = train.build_train_config(args3, batch_size=1024, bptt_horizon=64)
+    assert cfg3["gamma"] == 0.99 and cfg3["pbrs_gamma"] == 0.99
+    assert train.env_knobs_from_args(args3)["pbrs_gamma"] == 0.99
+    assert "gamma" not in train.RESUME_CONFIG_ALLOWLIST
+    assert "pbrs_gamma" not in train.RESUME_CONFIG_ALLOWLIST
+
     # N3 fix: make_puffer_env must expose pbrs_gamma for per-experiment
     # overrides (previously the training γ could not be threaded through
     # without a signature change).

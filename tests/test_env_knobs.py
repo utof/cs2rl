@@ -107,7 +107,8 @@ def test_env_knobs_from_args_and_config():
         "pin_pitch": 1,
         "crouch_enabled": 0,
         "round_time": 160,
-        "laser_range": 300.0
+        "laser_range": 300.0,
+        "pbrs_gamma": 0.999,           # R0-J: always present; None ⇒ resolved to gamma
     }                                  # None knobs omitted ⇒ env default
     _, bptt, bs = compute_batch_dims(16)
     cfg = build_train_config(args, batch_size=bs, bptt_horizon=bptt)
@@ -123,7 +124,8 @@ def test_env_knobs_from_args_legacy_args_object():
 
     from train import env_knobs_from_args
     k = env_knobs_from_args(types.SimpleNamespace())
-    assert set(k) == {"n_active_per_team", "pin_pitch", "crouch_enabled"}
+    assert set(k) == {"n_active_per_team", "pin_pitch", "crouch_enabled", "pbrs_gamma"}
+    assert k["pbrs_gamma"] == 0.999    # legacy args ⇒ default gamma
 
 
 def test_make_puffer_env_forwards_knobs(simple_map):

@@ -57,7 +57,7 @@ PREBUILT_PYTHON = "/opt/cs2rl/.venv/bin/python"
 # a hung interpreter must not stall the interrupt path's terminal write.
 PREBUILT_LOAD_TIMEOUT_SECONDS = 120.0
 
-ALLOWED_MAPS = frozenset({"simple", "dust2"})
+ALLOWED_MAPS = frozenset({"simple", "dust2", "arena-duel"})            # R0-J: arena-duel (Task 12 map)
 ALLOWED_GPUS = frozenset({"T4", "L4", "A10"})
 ALLOWED_NUM_ENVS = frozenset({16, 32, 64, 128, 256})
 ALLOWED_CPU_CORES = frozenset({4, 8, 16})
@@ -133,6 +133,8 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--max-turn-speed": 1,                             # R0-G
     "--aim-entropy-bonus": 1,                          # R0-E.4 (#131)
     "--aim-log-std-max": 1,                            # R0-E.3 (#131)
+    "--gamma": 1,                                      # R0-J (Task 14)
+    "--pbrs-gamma": 1,                                 # R0-J (Task 14)
     "--warmstart-entropy": 0,
     "--warmstart-grace-steps": 1,
     "--warmstart-ramp-steps": 1,
@@ -1450,14 +1452,21 @@ def _assemble_train_argv(
 ) -> list[str]:
     """Build the live argv. Never a shell string; every token is already split.
 
-    Order is part of the contract (tests pin it): mode flag, optional --dust2,
-    the already-validated user train-args, then each runner-owned flag exactly
-    once. --resume is appended only when the caller supplies a remote path —
-    the runner owns that flag, so a user --resume never reaches this function.
+    Order is part of the contract (tests pin it): mode flag, `--map
+    <effective_map>`, the already-validated user train-args, then each
+    runner-owned flag exactly once. --resume is appended only when the caller
+    supplies a remote path — the runner owns that flag, so a user --resume
+    never reaches this function.
+
+    R0-J (Task 14): the map is ALWAYS emitted as `--map` (never the `--dust2`
+    alias): train.py resolves `--map` over `--dust2`, so an alias here would
+    be the one flag whose presence changes nothing — and `simple` was the
+    implicit no-flag default, which is exactly the kind of silent default the
+    runner exists to pin. A user --map/--dust2 in train-args is rejected by
+    validate_train_args, so the count here is exactly one.
     """
     argv: list[str] = ["--dump-config"] if dump_config else ["--train"]
-    if request.effective_map == "dust2":
-        argv.append("--dust2")
+    argv.extend(["--map", request.effective_map])
     argv.extend(request.train_args)
     argv.extend([
         "--num_envs",

@@ -27,8 +27,8 @@ def _healthy_metrics(**over):
     m = {
         "game/kills_per_episode": 1.0,
         "game/timeout_rate": 0.0,
-        "entropy/total": 5.0,
-        "approx_kl": 0.0,
+        "losses/entropy": 5.0,
+        "losses/approx_kl": 0.0,
     }
     m.update(over)
     return m
@@ -45,14 +45,28 @@ def test_zero_kills_alert_does_not_accumulate():
 
 
 def test_zero_kills_alert_is_still_raised_and_still_counts():
-    """The guard bounds the alert; it must not delete it."""
+    """The guard bounds the alert; it must not delete it.
+
+    R0-J: timeout and KL are single-live alerts too, so the verdict here is
+    reached as 1 zero-kills + 1 KL + 1 timeout + 3 accumulating entropy
+    alerts (entropy is the only rule that still accumulates on purpose).
+    """
     d = train.DeadRunDetector()
     d.check(_STEP, _healthy_metrics(**{"game/kills_per_episode": 0}))
     assert any("Zero kills" in a for a in d.alerts)
-    # four genuine alerts from other rules + the zero-kills one = verdict
-    bad = _healthy_metrics(**{"game/kills_per_episode": 0, "approx_kl": 0.9})
-    verdicts = [d.check(_STEP + (i + 1) * 10_000, bad) for i in range(4)]
+    bad = _healthy_metrics(
+        **{
+            "game/kills_per_episode": 0,
+            "losses/approx_kl": 0.9,
+            "game/timeout_rate": 1.0,
+            "losses/entropy": 0.1
+        })
+    verdicts = [d.check(_STEP + (i + 1) * 10_000, bad) for i in range(3)]
     assert verdicts[-1] is True, f"verdict never fired; alerts={d.alerts}"
+    assert sum("Zero kills" in a for a in d.alerts) == 1
+    assert sum("KL" in a for a in d.alerts) == 1
+    assert sum("Timeout" in a for a in d.alerts) == 1
+    assert sum("Entropy" in a for a in d.alerts) == 3
 
 
 def test_zero_kills_rule_disabled_when_kill_reward_is_off():
@@ -107,3 +121,72 @@ def test_kill_reward_probe_reads_the_static_data_weight():
     assert train._kill_reward_is_active(_Vec(0.0)) is False
     # bare env (no vecenv wrapper) is the test-harness shape
     assert train._kill_reward_is_active(_Env(0.0)) is False
+
+
+# ── R0-J (Task 14): key prefixes + non-accumulating timeout / KL rules ────────
+# pufferl.py's outer log dict prefixes every loss stat with `losses/`, so the
+# old `entropy/total` / `approx_kl` lookups never matched and those rules were
+# dead since day one. Timeout and KL are now single-live alerts (like zero
+# kills, gh#93): at Rung 1 every no-kill round is a timeout, so an untrained
+# policy sits at timeout_rate≈1.0 and would otherwise abort itself in 5 checks.
+
+
+def _m(**kw):
+    base = {
+        "game/kills_per_episode": 1.0,
+        "game/timeout_rate": 0.0,
+        "losses/entropy": 5.0,
+        "losses/approx_kl": 0.0,
+    }
+    base.update(kw)
+    return base
+
+
+def test_timeout_alert_does_not_accumulate():
+    d = train.DeadRunDetector()
+    for step in (60_000, 70_000, 80_000, 90_000, 100_000, 110_000):
+        assert not d.check(step, _m(**{"game/timeout_rate": 1.0}))
+    assert sum("Timeout" in a for a in d.alerts) == 1
+
+
+def test_timeout_alert_clears_when_rate_recovers():
+    d = train.DeadRunDetector()
+    d.check(60_000, _m(**{"game/timeout_rate": 1.0}))
+    assert any("Timeout" in a for a in d.alerts)
+    d.check(70_000, _m(**{"game/timeout_rate": 0.5}))
+    assert not any("Timeout" in a for a in d.alerts), d.alerts
+
+
+def test_kl_rule_reads_losses_prefix_and_does_not_accumulate():
+    d = train.DeadRunDetector()
+    for step in (110_000, 120_000, 130_000):
+        d.check(step, _m(**{"losses/approx_kl": 0.5}))
+    assert sum("KL" in a for a in d.alerts) == 1
+
+
+def test_kl_alert_clears_when_kl_recovers():
+    d = train.DeadRunDetector()
+    d.check(110_000, _m(**{"losses/approx_kl": 0.5}))
+    assert any("KL" in a for a in d.alerts)
+    d.check(120_000, _m(**{"losses/approx_kl": 0.01}))
+    assert not any("KL" in a for a in d.alerts), d.alerts
+
+
+def test_entropy_rule_reads_losses_prefix_and_accumulates():
+    d = train.DeadRunDetector()
+    for step in (60_000, 70_000, 80_000):
+        d.check(step, _m(**{"losses/entropy": 0.1}))
+    assert sum("Entropy" in a for a in d.alerts) == 3
+
+
+def test_abort_reachable_with_timeout_kl_and_entropy():
+    d = train.DeadRunDetector()
+    tripped = False
+    for step in (110_000, 120_000, 130_000, 140_000):
+        tripped = d.check(
+            step, _m(**{
+                "game/timeout_rate": 1.0,
+                "losses/approx_kl": 0.5,
+                "losses/entropy": 0.1
+            }))
+    assert tripped                     # 1 timeout + 1 KL + ≥3 entropy ≥ 5

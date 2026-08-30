@@ -41,6 +41,22 @@ def test_train_help_shows_current_cli():
             "--reward-symmetrize",                     # A2 arm
             "--tct-split-heads",                       # Batch 7 heads split (spec 2026-08-13)
             "--tct-split-trunk",                       # T/CT actor-trunk split (spec 2026-08-15)
+            "--resume-run",                            # R0-C (Task 7)
+            "--run-id",
+            "--checkpoint-interval",
+            "--seed",                                  # R0-D (Task 8)
+            "--pin-pitch",                             # R0-E.2 (Task 9)
+            "--crouch-enabled",
+            "--aim-entropy-bonus",                     # R0-E.3/4 (Task 10)
+            "--aim-log-std-max",
+            "--n-active-per-team",                     # Rung 0 parking (Task 4)
+            "--round-time-ticks",                      # R0-G (Task 11)
+            "--laser-range",
+            "--max-turn-speed",
+            "--map",                                   # R0-H (Task 12)
+            "--eval-interval",                         # R0-I (Task 13)
+            "--gamma",                                 # R0-J (Task 14)
+            "--pbrs-gamma",
     ):
         assert flag in result.stdout, f"{flag} missing from --help output"
 
