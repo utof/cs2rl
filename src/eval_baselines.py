@@ -63,6 +63,7 @@ if ACTION_HEAD_NAMES[H_SHOOT] != "shoot" or ACTION_HEAD_NAMES[H_CROUCH] != "crou
                                                                            # Geometry MIRRORS of cs2_combat.h — silent-drift hazard, this branch edits that
                                                                            # header. Verified equal on main: HIT_HALF_WIDTH :200, EYE_HEIGHT_* / TORSO_OFFSET_* :234-237.
 HIT_HALF_WIDTH = 16.0
+HIT_HALF_HEIGHT_STAND, HIT_HALF_HEIGHT_CROUCH = 36.0, 27.0                 # v1c ellipsoid (gh #150)
 EYE_STAND, EYE_CROUCH = 48.0, 24.0
 TORSO_STAND, TORSO_CROUCH = 48.0, 24.0
 TICK_DT = 1.0 / 16.0
@@ -224,18 +225,20 @@ def aim_geometry(st, i, j):
 def perp_and_forward(st, i, j):
     """Replicate cs2_combat.h's 3D gate for shooter i against target j.
 
-    Returns (perp, forward, dist). A shot connects iff dist <= laser_range,
-    dist > 0, forward > 0 and perp <= HIT_HALF_WIDTH.
+    Returns (perp, forward, dist) where `perp` is the v1c ELLIPSOID-normalised
+    perpendicular: HIT_HALF_WIDTH * sqrt((p_h/16)² + (p_v/HH)²), HH by the
+    target's stance — so the v1b rule "connects iff dist <= laser_range,
+    dist > 0, forward > 0 and perp <= HIT_HALF_WIDTH" still reads correctly.
+    At pitch 0 / same z it equals the plain perpendicular distance.
     """
     rx, ry, rz, dist, _, _ = aim_geometry(st, i, j)
     yaw, pitch = st["facing"][i], st["pitch"][i]
     cp, sp = math.cos(pitch), math.sin(pitch)
     dx, dy, dz = cp * math.cos(yaw), cp * math.sin(yaw), sp
     forward = rx * dx + ry * dy + rz * dz
-    cx = ry * dz - rz * dy
-    cy = rz * dx - rx * dz
-    cz = rx * dy - ry * dx
-    perp = math.sqrt(cx * cx + cy * cy + cz * cz)
+    px, py, pz = rx - forward * dx, ry - forward * dy, rz - forward * dz
+    hh = HIT_HALF_HEIGHT_CROUCH if st["is_crouching"][j] else HIT_HALF_HEIGHT_STAND
+    perp = HIT_HALF_WIDTH * math.sqrt((px * px + py * py) / HIT_HALF_WIDTH**2 + pz * pz / hh**2)
     return perp, forward, dist
 
 
