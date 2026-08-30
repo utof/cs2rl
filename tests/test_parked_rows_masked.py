@@ -3,6 +3,11 @@ participating mask, equals the same reduction over the participating
 sub-tensor alone. Plus the harness-level wiring check at n_active_per_team=1.
 §2.2 (ii), the 20-update ratio identity, is APPENDED TO THIS FILE in Task 9
 (it needs the harness's `aim_entropy_bonus=False` kwarg, which Task 9 adds).
+
+Rung 1a T3 (spec 2026-08-30) extends the same subject: `--opponent noop` makes
+the participation vector hero-team-only and halves the participating-step
+budget, so the helper that builds that vector, the budget formula it feeds and
+the statue rollout it implies are pinned at the bottom of this file.
 """
 import numpy as np
 import pytest
@@ -203,3 +208,190 @@ def test_twenty_update_ratio_identity_n_active_1():
         assert alpha[20] <= 2 * alpha[5] and alpha[5] <= 2 * alpha[20], alpha
     finally:
         cleanup()
+
+
+# ── Rung 1a T3: --opponent noop (stationary statue) ─────────────────────────
+
+
+def test_build_participating_rows_noop_marks_the_hero_team_only():
+    """The single source of truth for participation (spec 2026-08-30 §2 T3).
+
+    `self` must stay bit-identical to the pre-T3 expression — it is what every
+    existing run's config.json and every masked-loss test was computed against
+    — while `noop` drops the statue team entirely. Both call sites (train() and
+    train_test_harness) call THIS function, so this test plus the two call
+    sites is what makes the harness and production agree by construction.
+    """
+    from train import TEAM_SIZE, build_participating_rows
+
+    n_envs = 3
+    self_rows = build_participating_rows(n_envs, 1, "self", "t")
+    assert np.array_equal(self_rows,
+                          np.array([(i % TEAM_SIZE) < 1 for i in range(n_envs * 10)], dtype=bool))
+    assert self_rows.sum() == 2 * n_envs               # both teams, 1 slot each
+
+    noop_rows = build_participating_rows(n_envs, 1, "noop", "t")
+    assert noop_rows.sum() == n_envs   # hero team only
+    slot = np.arange(n_envs * 10) % 10
+    assert not noop_rows[slot >= TEAM_SIZE].any(), "CT (statue) rows must never participate"
+    assert np.array_equal(noop_rows, self_rows & (slot < TEAM_SIZE))
+
+    # hero_team is honoured, not assumed: the CT-hero mirror image.
+    ct_hero = build_participating_rows(n_envs, 2, "noop", "ct")
+    assert np.array_equal(
+        ct_hero,
+        np.array([TEAM_SIZE <= (i % 10) < TEAM_SIZE + 2 for i in range(n_envs * 10)], dtype=bool))
+    # SelfPlayManager starts with CT as the opponent, so the hero is T.
+    from train import SelfPlayManager
+    assert SelfPlayManager.initial_hero_team() == "t"
+    assert SelfPlayManager().opponent_team == "ct"
+
+
+@pytest.mark.parametrize("bad", [
+    dict(opponent_mode="statue"),
+    dict(hero_team="T"),
+    dict(n_active=0),
+    dict(n_active=6),
+])
+def test_build_participating_rows_refuses_nonsense(bad):
+    """Every argument is validated: a silently-wrong participation vector is
+    the one failure mode this experiment cannot detect from its metrics."""
+    from train import build_participating_rows
+    kwargs = dict(num_envs=2, n_active=1, opponent_mode="self", hero_team="t")
+    kwargs.update(bad)
+    with pytest.raises(ValueError):
+        build_participating_rows(**kwargs)
+
+
+def test_opponent_mode_resolution_and_self_play_guard():
+    """Rung 1a T3: `--opponent` resolution + the noop/self-play startup guard.
+
+    The legacy-args fallback matters as much as the guard: harness and
+    --dump-config namespaces predate the flag and must keep resolving to
+    "self" (a fallback to "noop" would statue every legacy caller's opponent).
+    """
+    import types
+
+    from train import assert_opponent_self_play_compatible, resolve_opponent_mode
+
+    assert resolve_opponent_mode(types.SimpleNamespace()) == "self"
+    assert resolve_opponent_mode(types.SimpleNamespace(opponent="noop")) == "noop"
+    with pytest.raises(ValueError):
+        resolve_opponent_mode(types.SimpleNamespace(opponent="statue"))
+
+    assert_opponent_self_play_compatible("self", True)                 # today's default: fine
+    assert_opponent_self_play_compatible("noop", False)                # T4's launch: fine
+    with pytest.raises(ValueError, match="no-self-play"):
+        assert_opponent_self_play_compatible("noop", True)
+
+
+def test_noop_budget_doubles_total_timesteps_and_records_the_mode():
+    """Spec §2 T3 budget: --timesteps is a PARTICIPATING-step budget, and under
+    noop only half as many rows participate per env, so the raw horizon handed
+    to PufferLib must double. The concrete Rung 1a T4 launch is asserted:
+    1M requested at n_active=1 / 256 envs ⇒ 10M raw ⇒ 61 epochs. Without the
+    fix the run would stop at ~491k hero steps with exit code 0.
+
+    The `self` half is the regression guard: the generalised formula must
+    reduce EXACTLY to the old `timesteps * TEAM_SIZE // n_active` for every
+    n_active, or every pre-T3 run's horizon silently changes.
+    """
+    import types
+
+    from train import build_train_config, compute_batch_dims
+
+    def cfg(**over):
+        kwargs = dict(device="cpu",
+                      seed=1,
+                      timesteps=1_000_000,
+                      checkpoint_dir="/tmp/x",
+                      n_active_per_team=1)
+        kwargs.update(over)
+        _, bptt, bs = compute_batch_dims(256)
+        return build_train_config(types.SimpleNamespace(**kwargs), batch_size=bs,
+                                  bptt_horizon=bptt), bs
+
+    noop, batch_size = cfg(opponent="noop")
+    assert batch_size == 163_840
+    assert noop["opponent"] == "noop"
+    assert noop["participating_timesteps"] == 1_000_000
+    assert noop["total_timesteps"] == 10_000_000
+    assert noop["total_timesteps"] // batch_size == 61
+
+    selfp, _ = cfg(opponent="self")
+    assert selfp["opponent"] == "self"
+    assert selfp["total_timesteps"] == 5_000_000
+
+    # Legacy args (no `opponent` attribute) resolve to "self" AND to the exact
+    # pre-T3 horizon at every n_active.
+    for n in range(1, 6):
+        legacy, _ = cfg(n_active_per_team=n)
+        assert legacy["opponent"] == "self"
+        assert legacy["total_timesteps"] == 1_000_000 * 5 // n
+
+
+def test_noop_opponent_rows_are_statues_excluded_from_global_step():
+    """Spec §2 T3 test (i), end-to-end through the PRODUCTION rollout path.
+
+    One evaluate() round at n_active_per_team=1 with --opponent noop must:
+      - drive every statue row with the no-op bin on every discrete head and a
+        zero aim delta (the env's own stationarity contract, cs2_env.h:51-63);
+      - leave those rows non-participating, with zero stored log-probs and a
+        zero critic output (they must not bootstrap GAE);
+      - count ONLY the hero rows into global_step — 1 row per env instead of
+        the 2 the `self` path counts (tests/…::test_harness_n_active_1_masks_
+        four_fifths_of_rows pins that comparison at bs // 5), which is the
+        whole reason the budget formula had to change;
+      - and still train the hero rows (losses/participating_rows == the hero
+        row count is exactly T4's pre-flight #1, scaled down).
+
+    Row mapping: the harness's first evaluate() round fills one segment per
+    agent row (segments == total_agents, ep_indices starts as arange), so
+    buffer row i IS agent row i — asserted below rather than assumed.
+    """
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=16, n_active_per_team=1, opponent="noop")
+    try:
+        _patch_trainer_with_return_norm(trainer)
+        bs = trainer.config["batch_size"]
+        assert trainer.config["opponent"] == "noop"
+        assert trainer.config["participating_timesteps"] * 10 == trainer.config["total_timesteps"]
+        assert trainer.segments == trainer.total_agents                # ⇒ buffer row i == agent row i
+
+        trainer.evaluate()
+
+        # T is the hero (SelfPlayManager.initial_hero_team()); CT slots 5-9 of
+        # every env are the statue — ALL of them, parked ones included.
+        slot = np.arange(trainer.total_agents) % 10
+        statue = torch.as_tensor(slot >= 5)
+        hero = torch.as_tensor(slot == 0)              # n_active_per_team=1 ⇒ T slot 0
+
+        assert trainer.global_step == bs // 10, "statue rows must not count toward the budget"
+        assert not trainer.participating[statue].any()
+        assert trainer.participating[hero].all()
+        assert torch.all(trainer.actions[statue] == 0), "statue must play the no-op bin"
+        assert torch.all(trainer.cont_actions[statue] == 0), "statue must not turn"
+        for buf in (trainer.logprobs, trainer.logprobs_d, trainer.logprobs_c, trainer.values):
+            assert torch.all(buf[statue] == 0)
+        # ...and the override is SCOPED: the hero still samples a live policy.
+        assert trainer.actions[hero].any()
+        assert trainer.cont_actions[hero].abs().sum() > 0
+
+        trainer.last_log_time = 0.0    # force the throttled losses assignment
+        trainer.train()
+        n_part = trainer.segments * trainer.config["bptt_horizon"] // 10
+        assert trainer.losses["participating_rows"] == n_part
+        assert np.isfinite(trainer.losses["entropy"])
+    finally:
+        cleanup()
+
+
+def test_harness_refuses_noop_with_selfplay():
+    """The harness mirrors train()'s startup guard, so no test can construct a
+    trainer in a configuration production refuses (a past-policy opponent is
+    not a statue, and maybe_switch_teams would move the statue's team)."""
+    from train_test_harness import _build_trainer_for_test
+    with pytest.raises(ValueError, match="no-self-play"):
+        _build_trainer_for_test(num_envs=4, opponent="noop", with_selfplay=True)

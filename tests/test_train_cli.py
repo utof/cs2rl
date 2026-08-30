@@ -48,6 +48,7 @@ def test_train_help_shows_current_cli():
             "--pin-pitch",                             # R0-E.2 (Task 9)
             "--crouch-enabled",
             "--jump-enabled",                          # Rung 1a T2b (stance parity)
+            "--opponent",                              # Rung 1a T3 (statue opponent)
             "--aim-entropy-bonus",                     # R0-E.3/4 (Task 10)
             "--aim-log-std-max",
             "--n-active-per-team",                     # Rung 0 parking (Task 4)
@@ -250,6 +251,60 @@ def test_tct_split_trunk_config_key(tmp_path):
 
     cfg = _dump_config(tmp_path, "--tct-split-trunk")
     assert cfg["tct_split_trunk"] is True
+
+
+def test_opponent_config_key_and_budget(tmp_path):
+    """Rung 1a T3 test (iv): --opponent reaches config.json through the REAL
+    argparse surface, and the budget it selects travels with it.
+
+    Both halves matter. The key is provenance — months later the run dir alone
+    has to say whether the opponent was a statue — and total_timesteps is the
+    number PufferLib turns into total_epochs and the cosine-LR T_max, so a
+    dumped config that carries `noop` with the `self` horizon would fingerprint
+    as the experiment we meant while running half of it.
+    """
+    cfg = _dump_config(tmp_path)
+    assert cfg["opponent"] == "self"
+    assert cfg["total_timesteps"] == cfg["participating_timesteps"]    # 5v5 default
+
+    noop = _dump_config(tmp_path, "--opponent", "noop", "--no-self-play", "--n-active-per-team",
+                        "1", "--timesteps", "1000000")
+    assert noop["opponent"] == "noop"
+    assert noop["participating_timesteps"] == 1_000_000
+    assert noop["total_timesteps"] == 10_000_000
+
+
+def test_opponent_noop_without_no_self_play_is_refused_at_startup(tmp_path):
+    """Rung 1a T3 test (iii). The guard sits ABOVE the --dump-config exit, so
+    the Modal / run_rung1 fingerprint step refuses the launch in milliseconds
+    instead of the run discovering at epoch 50 that maybe_switch_teams moved
+    the statue to the hero's side of a spawn-asymmetric map. Nothing is
+    written: the error precedes even the map build."""
+    r = subprocess.run(
+        [sys.executable, str(TRAIN_SCRIPT), "--dump-config", "--opponent", "noop"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=tmp_path)
+    assert r.returncode != 0, r.stdout[-2000:]
+    assert "--no-self-play" in r.stderr, r.stderr[-2000:]
+    assert not (tmp_path / "outputs").exists(), "the guard must fire before any side effect"
+
+
+def test_opponent_flag_declared_with_both_modes():
+    """Source-scan pin, same rationale as test_cli_flags_declared_default_none
+    in tests/test_env_knobs.py (the parser is built inline under
+    `if __name__ == "__main__"` and cannot be imported): the flag must offer
+    both modes and default to the historical one."""
+    import re
+
+    src = TRAIN_SCRIPT.read_text()
+    m = re.search(r'add_argument\(\s*"--opponent",(.*?)\)\n', src, re.S)
+    assert m, "--opponent not declared in train.py"
+    body = m.group(1)
+    assert "choices=OPPONENT_MODES" in body and 'default="self"' in body, body
+    assert 'dest="opponent"' in body, body
+    assert 'OPPONENT_MODES = ("self", "noop")' in src
 
 
 def test_train_smoke_returns_zero():

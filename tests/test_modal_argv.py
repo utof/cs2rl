@@ -58,6 +58,16 @@ def test_pbrs_gamma_is_mirrored():
     assert validate_train_args(["--timesteps", "1000000", "--pbrs-gamma", "0.99"]) == 1_000_000
 
 
+def test_opponent_is_mirrored_with_arity_one():
+    """Rung 1a T3: `--opponent noop` is the whole point of the T4 launch, and it
+    takes a VALUE — an arity-0 entry would make the runner treat "noop" as a
+    stray positional and reject the launch (test_unconsumed_positional_tokens_
+    rejected). The name-set mirror is enforced in tests/test_modal_runner.py."""
+    assert LIVE_TRAIN_OPTION_ARITY.get("--opponent") == 1
+    assert validate_train_args(["--timesteps", "1000000", "--opponent", "noop",
+                                "--no-self-play"]) == 1_000_000
+
+
 def test_resume_run_is_local_only():
     # Task 7 lists --resume-run as runner-owned (the runner owns paths/ids), so
     # the rejection reads "runner-owned" rather than "unknown"; either way a

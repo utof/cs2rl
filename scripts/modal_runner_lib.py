@@ -129,6 +129,7 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--pin-pitch": 1,                                  # R0-E.2 (#131)
     "--crouch-enabled": 1,                             # R0-E.2 (#131)
     "--jump-enabled": 1,                               # Rung 1a T2b
+    "--opponent": 1,                                   # Rung 1a T3: {self,noop} statue opponent
     "--round-time-ticks": 1,                           # R0-G
     "--laser-range": 1,                                # R0-G
     "--max-turn-speed": 1,                             # R0-G

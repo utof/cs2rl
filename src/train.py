@@ -1099,6 +1099,113 @@ def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
     return agents_per_env, bptt_horizon, batch_size
 
 
+# ── Rung 1a T3 (spec 2026-08-30 §2): opponent-team control mode ────────────
+#   "self" — the opponent team is driven by the current (or, on a self-play
+#            epoch, a past) policy and its rows train exactly like the hero's.
+#            Every pre-Rung-1a run.
+#   "noop" — the opponent team is a STATIONARY STATUE: discrete bin 0 on every
+#            action head, zero aim delta, and its rows are excluded from
+#            participation (no global_step, no gradient, no loss term) and from
+#            the --timesteps budget.
+OPPONENT_MODES = ("self", "noop")
+
+
+def resolve_opponent_mode(args) -> str:
+    """Read ``--opponent`` off an args object, with the legacy-args fallback.
+
+    WHAT: returns "self" or "noop"; raises ValueError on anything else. The
+    getattr default keeps harness / ``--dump-config`` / older SimpleNamespace
+    callers (which predate the flag) on the historical self-play behaviour —
+    same contract as env_knobs_from_args' stance knobs.
+
+    WHY validate here instead of trusting argparse's ``choices=``:
+    build_train_config is also reached from hand-built namespaces (the test
+    harness, sweep scripts), where a typo'd mode would fall through to the
+    `self` budget formula while the evaluate() statue override silently never
+    fires — a run that looks healthy and trains on the wrong horizon.
+    """
+    mode = getattr(args, "opponent", "self")
+    if mode not in OPPONENT_MODES:
+        raise ValueError(f"opponent={mode!r} must be one of {OPPONENT_MODES}")
+    return mode
+
+
+def assert_opponent_self_play_compatible(opponent: str, self_play_enabled: bool) -> None:
+    """Startup guard: ``--opponent noop`` requires ``--no-self-play``.
+
+    WHY (spec 2026-08-30 §2 T3, "team constancy"): the statue is whichever team
+    SelfPlayManager.opponent_team names. That starts at "ct" but self-play
+    bookkeeping flips it every ``phase_length`` (50) epochs via
+    maybe_switch_teams — which would hand the hero the OTHER side of a
+    spawn-asymmetric map partway through the run while the participation vector
+    (built ONCE, statically, for the initial hero team) kept masking the old
+    side. Self-play also mixes past-policy actions into the opponent rows,
+    which is the opposite of a statue.
+
+    Called from main() ABOVE the --dump-config exit (so the Modal/sweep
+    fingerprint step rejects the combination in milliseconds, like
+    validate_aim_log_std_max) and again at the top of train() for programmatic
+    callers. Raising ValueError matches validate_aim_log_std_max's precedent.
+    """
+    if opponent == "noop" and self_play_enabled:
+        raise ValueError("--opponent noop requires --no-self-play. The statue team is "
+                         "SelfPlayManager.opponent_team, which self-play flips every "
+                         "phase_length epochs (and mixes past policies into), while the "
+                         "participating-rows vector is built once for the initial hero "
+                         "team — the two would silently disagree mid-run.")
+
+
+def build_participating_rows(num_envs: int,
+                             n_active: int,
+                             opponent_mode: str = "self",
+                             hero_team: str = "t") -> np.ndarray:
+    """Static per-run participation vector over agent ROWS (Rung 0 §2.2 / T3).
+
+    WHAT: bool array of length ``num_envs * agents_per_env`` in the env-row-major
+    layout the vecenv hands back (10 rows per env: T at slots 0-4, CT at 5-9).
+    True = the row TRAINS — it counts toward ``global_step``, is scattered into
+    ``trainer.participating`` and survives every masked reduction in train().
+
+      - ``opponent_mode="self"``: slots 0..n_active-1 of BOTH teams. Bit-identical
+        to the pre-T3 expression ``(i % TEAM_SIZE) < n_active``.
+      - ``opponent_mode="noop"``: those slots of the HERO team only. The statue
+        team neither learns nor is counted.
+
+    WHY a shared helper: this vector used to be built by two copies of the same
+    expression (train() and train_test_harness), and it sits UPSTREAM of
+    global_step, the buffer scatter, every masked loss and
+    losses/participating_rows. Patching one copy would have left the headline
+    harness test green while production still trained on both teams — precisely
+    the silent failure this experiment cannot afford.
+
+    PITFALLS
+    - Derived from ARGS, while the envs are built separately from the same
+      args; train() keeps an explicit driver-env agreement assert beside its
+      call site, and _patch_trainer_with_hybrid_aim re-checks the length.
+    - ``hero_team`` must stay the complement of SelfPlayManager.opponent_team
+      (use SelfPlayManager.initial_hero_team()). Under "noop" that team is
+      constant for the whole run because the mode forbids self-play; a
+      disagreement would mask the statue's rows IN and the learner's rows OUT
+      while every metric still looked plausible.
+    """
+    if opponent_mode not in OPPONENT_MODES:
+        raise ValueError(f"opponent_mode={opponent_mode!r} must be one of {OPPONENT_MODES}")
+    if hero_team not in ("t", "ct"):
+        raise ValueError(f"hero_team={hero_team!r} must be 't' or 'ct'")
+    if not 1 <= n_active <= TEAM_SIZE:
+        raise ValueError(f"n_active={n_active} outside 1..{TEAM_SIZE}")
+    agents_per_env, _, _ = compute_batch_dims(num_envs)
+    # The T/CT halves are what make `hero_team` meaningful; assert rather than
+    # assume, so a future roster change fails here instead of silently marking
+    # half of some other layout.
+    assert agents_per_env == 2 * TEAM_SIZE, (agents_per_env, TEAM_SIZE)
+    slot = np.arange(num_envs * agents_per_env) % agents_per_env
+    rows = (slot % TEAM_SIZE) < n_active
+    if opponent_mode == "noop":
+        rows &= (slot < TEAM_SIZE) if hero_team == "t" else (slot >= TEAM_SIZE)
+    return rows
+
+
 # First --seed whose base 42_950 * 100_000 = 4_295_000_000 exceeds 2**32 - 1
 # (= 4_294_967_295). At seed 42_949 env i fits for i <= 67_295, i.e. any
 # realistic num_envs. See env_seed_base.
@@ -1204,25 +1311,41 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # here on purpose; the analyzer reads split/trunk_active instead.
     tct_split_trunk = bool(getattr(args, "tct_split_trunk", False))
 
-    # ── Rung 0 §2.2: participating-units budget ──
+    # ── Rung 0 §2.2 + Rung 1a T3: participating-units budget ──
     # --timesteps is the PARTICIPATING agent-step budget (what the policy
     # actually learns from), NOT the raw row count. PufferLib's epoch cap
     # (total_epochs = total_timesteps // batch_size, pufferl.py:168-170, which
     # also sets the cosine-LR T_max) counts RAW buffer rows, so the raw budget
-    # handed to it is scaled by TEAM_SIZE / n_active. Both numbers are
-    # recorded: done_training in _train_with_return_norm compares global_step
-    # (participating units) against participating_timesteps, and the epoch
-    # clause catches the floor-division slack.
+    # handed to it is scaled by (rows per env) / (participating rows per env).
+    # Both numbers are recorded: done_training in _train_with_return_norm
+    # compares global_step (participating units) against
+    # participating_timesteps, and the epoch clause catches the floor-division
+    # slack.
+    # T3: the pre-T3 formula (args.timesteps * TEAM_SIZE // n_active) hardcoded
+    # "2 participating rows per env per active slot", i.e. BOTH teams. Under
+    # --opponent noop only the hero team participates, so that formula ends the
+    # run at HALF the requested budget with exit 0 — a silent short run
+    # (verified against smoke-v1c/s0: ~491,520 hero steps for a 1M request).
+    # The generalised form below reduces EXACTLY to the old one under
+    # --opponent self (10t/2n and 5t/n are the same rational, so the floor
+    # divisions agree for every t and n), keeping the `self` path bit-identical
+    # while putting cosine-LR T_max on the real horizon under noop:
+    # 1M requested at n_active=1, num_envs=256 ⇒ total_timesteps = 10M ⇒
+    # 61 epochs (batch 163,840; 61 × 16,384 = 999,424 hero steps).
     # PITFALL: adding these keys shifts exp_lib.behavior_hash for all future
     # runs (the hash covers sorted config.json) — recorded decision, same as
-    # the TAG/tct keys above.
+    # the TAG/tct keys above, and the same for `opponent`, `jump_enabled` and
+    # `aim_log_std_init` below (plus the σ weight-decay exclusion of T1, which
+    # changes behaviour for every run without touching config.json at all).
     # (the raw budget is bound to a local, not inlined in the dict below, for
     # the same yapf reason as the warmstart block above: a long value
     # expression inside the dict re-indents every trailing comment in it.)
     knobs = env_knobs_from_args(args)
     n_active = knobs["n_active_per_team"]
     assert 1 <= n_active <= TEAM_SIZE, n_active
-    raw_timesteps = args.timesteps * TEAM_SIZE // n_active
+    opponent = resolve_opponent_mode(args)
+    _part_per_env = n_active * (1 if opponent == "noop" else 2)
+    raw_timesteps = args.timesteps * (TEAM_SIZE * 2) // _part_per_env
     # R0-E.3/4 (#131): aim-head knobs. CLI gives "on"/"off" for the entropy
     # bonus (argparse choices); the test harness passes a bool — accept both so
     # neither caller has to know the other's spelling. None cap ⇒ LOG_STD_MAX,
@@ -1268,6 +1391,13 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
                                                                        # jump is a different experiment) and adding it shifts
                                                                        # exp_lib.behavior_hash for all future runs — recorded decision.
         "jump_enabled": knobs["jump_enabled"],
+                                                                       # Rung 1a T3: "self" (both teams learn) or "noop" (statue opponent —
+                                                                       # hero-team-only participation AND budget, see raw_timesteps above).
+                                                                       # NOT a make_puffer_env knob: the statue is enforced trainer-side, in
+                                                                       # the patched evaluate(), so the env is identical either way. Not
+                                                                       # allowlisted for --resume-run — a different opponent is a different
+                                                                       # experiment.
+        "opponent": opponent,
                                                                        # R0-G: recorded as given (None ⇒ env default), read from args
                                                                        # directly so None survives — env_knobs_from_args drops None keys.
         **{
@@ -4479,6 +4609,26 @@ class SelfPlayManager:
     AGENTS_PER_ENV = 10
     T_SLOTS = slice(0, 5)
     CT_SLOTS = slice(5, 10)
+    # The team that plays OPPONENT at construction (CT attacks second). A
+    # constant, not a bare literal in __init__, because Rung 1a T3 builds the
+    # participation vector for the complement team BEFORE any manager exists —
+    # see initial_hero_team().
+    INITIAL_OPPONENT_TEAM = "ct"
+
+    @classmethod
+    def initial_hero_team(cls) -> str:
+        """Team the HERO policy plays before any maybe_switch_teams flip.
+
+        Rung 1a T3: build_participating_rows needs this at trainer-construction
+        time, which is upstream of the SelfPlayManager instance. Deriving it
+        from INITIAL_OPPONENT_TEAM (rather than hardcoding "t" at the call
+        site) is what keeps the participation vector and the statue mask from
+        silently disagreeing if the initial sides are ever swapped.
+        Under --opponent noop the value is constant for the whole run: the mode
+        forbids self-play, and maybe_switch_teams is the only thing that flips
+        opponent_team.
+        """
+        return "t" if cls.INITIAL_OPPONENT_TEAM == "ct" else "ct"
 
     def __init__(
         self,
@@ -4489,6 +4639,7 @@ class SelfPlayManager:
         phase_length: int = 50,
         aim_log_std_max=None,
         pin_pitch: bool = False,
+        opponent_mode: str = "self",
     ):
         # R0-E (#131): run properties re-applied to every past policy built by
         # load_past_policy (they are non-persistent on the policy, so the
@@ -4498,13 +4649,21 @@ class SelfPlayManager:
         # policy's does not, and self-play ratio_c would silently drift.
         self.aim_log_std_max = aim_log_std_max
         self.pin_pitch = bool(pin_pitch)
+        # Rung 1a T3: "noop" makes the patched evaluate() overwrite this team's
+        # actions with the no-op bin on every head (see _patch_trainer_with_
+        # selfplay). Validated here so a typo'd mode cannot reach the rollout
+        # as a silently-inactive branch. Callers that pass "noop" MUST also
+        # have passed assert_opponent_self_play_compatible.
+        if opponent_mode not in OPPONENT_MODES:
+            raise ValueError(f"opponent_mode={opponent_mode!r} must be one of {OPPONENT_MODES}")
+        self.opponent_mode = opponent_mode
         self.pool: list[Path] = []
         self.pool_size = pool_size
         self.p_past = p_past
         self.save_every_epochs = save_every_epochs
         self.win_threshold = win_threshold
         self.phase_length = phase_length
-        self.opponent_team = "ct"      # CT is opponent first; T learns to attack
+        self.opponent_team = self.INITIAL_OPPONENT_TEAM                # CT is opponent first; T learns to attack
         self._milestone_count = 0
         self._last_save_epoch = -1
 
@@ -4641,6 +4800,12 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
     Training (trainer.train()) sees the overridden actions as if they came from the
     current policy at collection time.  The importance ratio (π_new / π_old) is
     well-defined because we store the *past* policy's logprobs as π_old.
+
+    Rung 1a T3: the patched evaluate() carries a SECOND, unconditional opponent
+    override for ``self_play_mgr.opponent_mode == "noop"`` — the stationary
+    statue. It is independent of the past-policy branch above (which is dead at
+    p_past = 0, the only configuration noop allows) and pairs with the
+    hero-team-only participation vector from build_participating_rows.
     """
     import pufferlib
     import pufferlib.pytorch
@@ -4880,6 +5045,43 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     cont_action[opp_idx] = opp_cont_action.to(cont_action.dtype)
                     logprob_d[opp_idx] = opp_logprob_d.to(logprob_d.dtype)
                     logprob_c[opp_idx] = opp_logprob_c.to(logprob_c.dtype)
+                # ──────────────────────────────────────────────────────────
+
+                # ── STATUE OPPONENT (--opponent noop, Rung 1a T3) ──────────
+                # UNCONDITIONAL branch, deliberately NOT nested in the
+                # `if use_past:` splice above: that branch never runs at
+                # p_past = 0, which is exactly the configuration noop demands
+                # (assert_opponent_self_play_compatible). It sits AFTER the
+                # splice so the statue would win if both were ever live, and
+                # BEFORE both the buffer scatter and vecenv.send below — the
+                # same tensors feed the rollout buffer and the env.
+                #
+                # Bin 0 on every discrete head is the no-op action by
+                # construction (cs2_env.h:51-63; move_dir == 0 is genuinely
+                # stationary, cs2_movement.h:214) and is never masked out by
+                # the C-side action mask, so this cannot sample an illegal
+                # action. cont_action = 0 means zero Δyaw/Δpitch: the statue
+                # keeps its spawn orientation.
+                #
+                # The stored logprobs go to 0 for the same reason the past-
+                # policy splice rewrites them: they are the π_old the PPO
+                # update would divide by. Under noop these rows are
+                # non-participating, so every loss masks them out anyway —
+                # this keeps the buffer self-consistent rather than carrying
+                # log-probs of actions that were never sampled.
+                if self_play_mgr.opponent_mode == "noop":
+                    opp_idx = torch.where(self_play_mgr.get_opponent_mask(o_device.shape[0],
+                                                                          dev))[0]
+                    action[opp_idx] = 0
+                    cont_action[opp_idx] = 0
+                    logprob[opp_idx] = 0
+                    logprob_d[opp_idx] = 0
+                    logprob_c[opp_idx] = 0
+                    # Redundant with the participation scatter below (which
+                    # multiplies values by the row flag) and kept anyway: the
+                    # statue's critic output must never bootstrap GAE, no
+                    # matter which of the two masks a future edit touches.
+                    value[opp_idx] = 0
                 # ──────────────────────────────────────────────────────────
 
             profile("eval_copy", epoch)
@@ -5875,6 +6077,12 @@ def train(args):
     # R0-D: refuse an out-of-range --seed BEFORE W&B init / metrics.jsonl open
     # (the real call is in _per_env_kwargs below).
     env_seed_base(args.seed)
+    # Rung 1a T3: same fail-early rationale for --opponent noop + self-play.
+    # main() already refused it above the --dump-config exit; repeated here so
+    # a programmatic train(args) cannot start a run whose statue team would be
+    # swapped out from under the participation vector at epoch 50.
+    _opponent_mode = resolve_opponent_mode(args)
+    assert_opponent_self_play_compatible(_opponent_mode, bool(getattr(args, "self_play", True)))
 
     # ── R0-C (#134): --resume-run resolution (before run_label / metrics / config) ──
     resume_run = getattr(args, "resume_run", None)
@@ -6139,17 +6347,20 @@ def train(args):
     trainer._cont_action_shm = _cont_action_shm
     trainer._action_mask_shm = _mask_shm               # F8: same GC-pinning rationale
 
-    # Rung 0 §2.2: static per-run participation vector, env-row major (10 rows
-    # per env: T at 0-4, CT at 5-9), so `(i % TEAM_SIZE) < n_active` selects
-    # slots 0..n-1 of BOTH teams — the exact slots the C env spawns
-    # (cs2_env.py, n_active_per_team). The assert is the agreement check: the
-    # vector is derived from args while the envs were built from
-    # build_train_env_factory, and a disagreement would mask the wrong rows
-    # silently rather than crash.
+    # Rung 0 §2.2 + Rung 1a T3: static per-run participation vector, env-row
+    # major (10 rows per env: T at 0-4, CT at 5-9). Under --opponent self it
+    # selects slots 0..n-1 of BOTH teams — the exact slots the C env spawns
+    # (cs2_env.py, n_active_per_team); under --opponent noop, the hero team's
+    # slots only. THE SAME helper backs train_test_harness, so a harness test
+    # can never be green against a formula production does not run.
+    # The assert is the agreement check: the vector is derived from args while
+    # the envs were built from build_train_env_factory, and a disagreement
+    # would mask the wrong rows silently rather than crash.
     _n_active = env_knobs_from_args(args)["n_active_per_team"]
-    _participating_rows = np.array([(i % TEAM_SIZE) < _n_active
-                                    for i in range(args.num_envs * _agents_per_env)],
-                                   dtype=bool)
+    _participating_rows = build_participating_rows(args.num_envs,
+                                                   _n_active,
+                                                   opponent_mode=_opponent_mode,
+                                                   hero_team=SelfPlayManager.initial_hero_team())
     assert trainer.vecenv.driver_env.n_active_per_team == _n_active, "driver env / args disagree"
     _patch_trainer_with_hybrid_aim(trainer,
                                    cont_action_view_main=_cont_action_view_main,
@@ -6175,6 +6386,11 @@ def train(args):
         phase_length=50,                                               # switch opponent team every ~4M steps
         aim_log_std_max=getattr(args, "aim_log_std_max", None),
         pin_pitch=bool(args.pin_pitch),
+                                                                       # Rung 1a T3: "noop" ⇒ the patched evaluate() drives opponent_team as a
+                                                                       # statue. Guarded above: it cannot combine with self-play, so
+                                                                       # opponent_team stays INITIAL_OPPONENT_TEAM — the same team
+                                                                       # build_participating_rows masked out.
+        opponent_mode=_opponent_mode,
     )
                                                                        # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
     if self_play_enabled and resume_path and resume_path.exists() and not resume_run:
@@ -6193,6 +6409,15 @@ def train(args):
     if not self_play_enabled:
         print("[Train] Self-play mixing disabled (--no-self-play): "
               "both teams use the current policy every epoch.")
+    if _opponent_mode == "noop":
+        # Rung 1a T3: the run log is what T4's pre-flight reads, so state which
+        # team is frozen, how many rows actually train, and on what horizon —
+        # the three things a short/mis-masked run would get wrong silently.
+        print(f"[Train] Opponent mode 'noop': team "
+              f"{self_play_mgr.opponent_team.upper()} is a stationary statue; "
+              f"{int(_participating_rows.sum()):,} of {_participating_rows.size:,} agent rows "
+              f"participate (raw horizon {train_config['total_timesteps']:,} rows = "
+              f"{train_config['participating_timesteps']:,} hero steps).")
     # timing is the outermost wrapper so it sees all evaluate() calls regardless of selfplay
     _patch_trainer_with_timing(trainer)
     # ────────────────────────────────────────────────────────────────────────
@@ -6207,6 +6432,10 @@ def train(args):
         # Spec §R0-C bound vs the last metrics row (participating units); see
         # check_resume_metrics_bound for why both sides are checkpoint_interval
         # epochs wide.
+        # Rung 1a T3 (spec, "Rung 1b note"): this bound assumes BOTH teams
+        # participate, so under --opponent noop it is 2× too WIDE — i.e. only
+        # ever too permissive, never a false alarm. Harmless for T4 (which does
+        # not resume); halve it here before Rung 1b resumes a noop run.
         _B = batch_size * train_config["n_active_per_team"] // TEAM_SIZE
         _last = None
         if metrics_path.exists():
@@ -6562,6 +6791,14 @@ if __name__ == "__main__":
                         help="Rung 1a: 0 masks the jump action (height parity for pinned-pitch "
                         "duels; an airborne target sits outside the 36u vertical semi-axis and "
                         "is an unobservable guaranteed miss). Default 1 = today's env.")
+    parser.add_argument("--opponent",
+                        choices=OPPONENT_MODES,
+                        default="self",
+                        dest="opponent",
+                        help="Rung 1a T3: 'noop' turns the opponent team into a stationary "
+                        "statue (no-op bin on every action head, zero aim delta) and excludes "
+                        "its rows from participation, from --timesteps and from every loss. "
+                        "Requires --no-self-play. Default 'self' = today's behaviour.")
     # R0-G env knobs. Default None ⇒ the env's nav.py constant (config.json
     # records None, not a copied constant). Not in RESUME_CONFIG_ALLOWLIST:
     # changing any of them on --resume-run is a different experiment.
@@ -6704,6 +6941,11 @@ if __name__ == "__main__":
     # --dump-config / the sweep fingerprint reject a bad --aim-log-std-max
     # instead of make_policy() 30 s into every retry.
     validate_aim_log_std_max(args.aim_log_std_max)
+    # Rung 1a T3: --opponent noop is only coherent with self-play bookkeeping
+    # off. Checked HERE, above the --dump-config exit, for the same reason as
+    # the σ cap: the Modal/run_rung1 fingerprint step must reject the launch
+    # before any env is built.
+    assert_opponent_self_play_compatible(args.opponent, args.self_play)
 
     # ── R0-H: map name → MapData → pin_pitch, ABOVE the --dump-config exit ──
     # The Modal runner fingerprints every launch from --dump-config, so the
