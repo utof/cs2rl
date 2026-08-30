@@ -31,6 +31,25 @@ pub fn build(b: *std.Build) void {
     const link_python    = b.option(bool, "link_python",
         "Link libpython — required on Windows, wrong on Linux/macOS") orelse false;
 
+    // fast_math: R0-F (#136). Default true = production flags. `-Dfast_math=false`
+    // builds a diagnostic variant WITHOUT -ffast-math so tests/test_fast_math_variant.py
+    // can prove the reward guards do not depend on the optimiser folding isfinite().
+    // PITFALL: never build the production .so with false — setup.py does not
+    // pass this option, so `setup.py build_ext` always yields the fast-math build.
+    const fast_math      = b.option(bool, "fast_math",
+        "Compile binding.c with -ffast-math (default true; false = diagnostic variant)") orelse true;
+    const c_flags_fast: []const []const u8 = &.{
+        "-std=c99",
+        "-O3",           // intentional: C-level flag overrides -Doptimize for this file
+        "-march=native", // safe: all users build from source, no .so committed
+        "-ffast-math",
+        "-Wall",
+        "-Wno-unused-function",
+    };
+    const c_flags_strict: []const []const u8 = &.{
+        "-std=c99", "-O3", "-march=native", "-Wall", "-Wno-unused-function",
+    };
+
     // ── binding: CPython extension module ──────────────────────────────────
     const lib = b.addSharedLibrary(.{
         .name = "binding", // setup.py renames output to SOABI-suffixed name
@@ -42,14 +61,7 @@ pub fn build(b: *std.Build) void {
 
     lib.root_module.addCSourceFile(.{
         .file  = b.path("binding.c"),
-        .flags = &.{
-            "-std=c99",
-            "-O3",           // intentional: C-level flag overrides -Doptimize for this file
-            "-march=native", // safe: all users build from source, no .so committed
-            "-ffast-math",
-            "-Wall",
-            "-Wno-unused-function",
-        },
+        .flags = if (fast_math) c_flags_fast else c_flags_strict,
     });
 
     // Only add include paths when provided — empty string means build.zig

@@ -208,6 +208,17 @@ def make_cs2_map(nav_path: str, cache_path: str) -> MapData:
     if finite_dist.size:
         max_dist = float(finite_dist.max())
         bombsite_dist_scale = 1.0 / max_dist if max_dist > 0 else 0.0
+    # R0-F (#136): scale is computed from the FINITE entries above; only now
+    # replace non-finite hops (area-id gaps + unreachable areas) with 4×max so
+    # closeness = 1 − 4 < 0 → clamps to 0 in C exactly as the old isfinite()
+    # skip did (isfinite folds to true under -ffast-math and leaked inf).
+    # PITFALL: never fill before computing the scale — the sentinel would
+    # shrink it 4× and silently rescale every nav reward. No finite entry
+    # (bombsites=[]) ⇒ leave the array all-inf and scale 0.0; the C guard on
+    # scale > 0 handles it.
+    if finite_dist.size:
+        bombsite_dist = np.where(np.isfinite(bombsite_dist), bombsite_dist,
+                                 4.0 * max_dist).astype(np.float32)
 
     bm_int8 = bombsite_mask.astype(np.int8)
     bombsite_by_idx = np.array(
@@ -453,12 +464,17 @@ def make_simple_map(
                 dist_hops[nxt] = dist_hops[cur] + 1.0
                 queue.append(nxt)
 
-    bombsite_dist = dist_hops          # float32[N] (area_id == area_idx)
+    bombsite_dist = dist_hops                                               # float32[N] (area_id == area_idx)
     finite = bombsite_dist[np.isfinite(bombsite_dist)]
     bombsite_dist_scale = 0.0
     if finite.size:
         mx = float(finite.max())
         bombsite_dist_scale = 1.0 / mx if mx > 0 else 0.0
+                                                                            # R0-F (#136): same sentinel fill as the dust2 path — see comment there.
+                                                                            # Scale first (from finite entries), then inf → 4×max (finite, clamps to 0).
+    if finite.size:
+        bombsite_dist = np.where(np.isfinite(bombsite_dist), bombsite_dist,
+                                 4.0 * mx).astype(np.float32)
 
     area_bounds = np.zeros((N, 4), dtype=np.float32)
     for idx, x0, y0, x1, y1, *_ in rooms:

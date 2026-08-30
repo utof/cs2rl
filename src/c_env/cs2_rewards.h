@@ -28,10 +28,19 @@ static float _potential(Dust2Env* env, int team) {
             if (a->area_idx >= 0 && sd->bombsite_by_idx[a->area_idx]) {
                 site_t += 1.0f;
             }
-            /* Navigation shaping: reward every alive agent for being close to bombsite */
-            if (area_id != INVALID_AREA_IDX && area_id <= sd->max_area_id) {
+            /* Navigation shaping: reward every alive agent for being close to bombsite.
+             * R0-F (#136): guard on scale (a float compare survives -ffast-math;
+             * isfinite() does not — it folds to true and NaN/inf leaks into the
+             * potential). TWO conventions meet here, both handled: map.py fills
+             * unreachable areas with the FINITE value 4×max (closeness = 1-4 < 0
+             * → clamped to 0 below, same effect as the old isfinite skip), and
+             * `dist < 1e29f` is the belt-and-braces guard for a genuinely
+             * non-finite / 1e30-sentinel entry (e.g. bombsites=[] with scale
+             * forced > 0 by a future knob). */
+            if (sd->bombsite_dist_scale > 0.0f && area_id != INVALID_AREA_IDX &&
+                area_id <= sd->max_area_id) {
                 float dist = sd->bombsite_dist[area_id];
-                if (isfinite(dist)) {
+                if (dist < 1e29f) {
                     float closeness = 1.0f - dist * sd->bombsite_dist_scale;
                     if (closeness < 0.0f)
                         closeness = 0.0f;
@@ -51,10 +60,11 @@ static float _potential(Dust2Env* env, int team) {
         }
     }
 
-    if (!env->game.bomb_planted && bomb_carrier_area_id != INVALID_AREA_IDX &&
-        bomb_carrier_area_id <= sd->max_area_id) {
+    /* R0-F (#136): same scale>0 + dist<1e29f guards as the nav block above. */
+    if (sd->bombsite_dist_scale > 0.0f && !env->game.bomb_planted &&
+        bomb_carrier_area_id != INVALID_AREA_IDX && bomb_carrier_area_id <= sd->max_area_id) {
         float dist = sd->bombsite_dist[bomb_carrier_area_id];
-        if (isfinite(dist)) {
+        if (dist < 1e29f) {
             float closeness = 1.0f - dist * sd->bombsite_dist_scale;
             if (closeness < 0.0f) {
                 closeness = 0.0f;
