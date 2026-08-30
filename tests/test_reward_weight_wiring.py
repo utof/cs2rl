@@ -35,6 +35,9 @@ import pytest
 #     byte-identical" equality over reward scalars says nothing about them.
 #     They get their own trainer-side path (env_knobs), because the trainer must
 #     also mask parked rows out of the loss — something no reward weight needs.
+#   round_time / laser_range / max_turn_speed — R0-G sim knobs (Task 11):
+#     episode length, hitscan reach, aim clamp. Same reasoning; None ⇒ nav.py
+#     constant, threaded via env_knobs_from_args, recorded raw in config.json.
 _NON_WEIGHT_PARAMS = {
     "seed",
     "team_spirit",
@@ -48,6 +51,9 @@ _NON_WEIGHT_PARAMS = {
     "n_active_per_team",
     "pin_pitch",
     "crouch_enabled",
+    "round_time",
+    "laser_range",
+    "max_turn_speed",
 }
 
 

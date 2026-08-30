@@ -22,7 +22,6 @@ import inspect
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 # Repo convention (same two sys.path.insert lines at the top of
@@ -211,12 +210,15 @@ def test_static_data_scalars_round_trip(simple_map):
     itself calls the hiding place for a transposition, unchecked.
 
     Fields make_env does NOT expose are checked against their real source
-    instead: the nav.py constants Cs2Env forwards (round_time, max_turn_speed,
-    laser_*) and the map-derived ones (bombsite_dist_scale, N, grid_w/grid_h,
-    max_area_id, spawn counts) against the fixture map. grid_w/grid_h are
+    instead: laser_range_sq against the laser_range sentinel it is derived
+    from (round_time / laser_range / max_turn_speed became kwargs in R0-G and
+    are sentinel-checked like the rest) and the map-derived ones
+    (bombsite_dist_scale, N, grid_w/grid_h, max_area_id, spawn counts) against
+    the fixture map. grid_w/grid_h are
     adjacent same-width ints, so only a value comparison separates them.
 
-    REMAINING GAP, stated plainly. These 16 non-kwarg scalars are covered only
+    REMAINING GAP, stated plainly. These 16 non-kwarg scalars (plus the derived
+    laser_range_sq, checked above) are covered only
     by key presence (test_static_data_scalars_covers_every_scalar_field), not by
     value: grid_x_min, grid_y_min, grid_inv_cell, inv_x_range, inv_y_range,
     x_offset, y_offset, shoot_cooldown, bomb_plant_time, bomb_defuse_time,
@@ -225,11 +227,10 @@ def test_static_data_scalars_round_trip(simple_map):
     check would have to recompute the implementation's own formula (the
     geometry) or restate a nav.py constant (the timings) — weaker than a
     sentinel, and for the geometry partly degenerate, since a symmetric fixture
-    map can make x_offset == y_offset. Note also nav.BOMB_TIMER ==
-    nav.ROUND_TIME == 640 today, so bomb_timer and round_time are mutually
-    indistinguishable by value however they are checked. Closing this properly
-    means sentinels, which means kwargs; out of scope here, and deliberately not
-    papered over.
+    map can make x_offset == y_offset. (nav.BOMB_TIMER == nav.ROUND_TIME == 640
+    at defaults; the round_time sentinel now separates the two.) Closing this
+    properly means sentinels, which means kwargs; out of scope here, and
+    deliberately not papered over.
     """
     import nav
 
@@ -254,13 +255,13 @@ def test_static_data_scalars_round_trip(simple_map):
             "sentinel landed in the wrong StaticData field — py_init's FMT string in "
             "src/c_env/binding.c is out of order with the binding.init() call in "
             f"Cs2Env.__init__. {{field: (sent, got, whose_sentinel_got_is)}} = {wrong}")
-        # Constants forwarded verbatim from nav.py.
-        assert sc["round_time"] == nav.ROUND_TIME == 640
-        assert sc["max_turn_speed"] == pytest.approx(nav.MAX_TURN_SPEED_RAD)
-        assert sc["max_turn_speed"] == pytest.approx(np.pi / 4)
-        assert sc["laser_range"] == pytest.approx(float(nav.LASER_RANGE))
-        assert sc["laser_range"] == pytest.approx(3000.0)
-        assert sc["laser_range_sq"] == pytest.approx(3000.0 * 3000.0)
+        # R0-G (Task 11): round_time / laser_range / max_turn_speed are now
+        # make_env kwargs, so they are in _SENTINELS and were checked above.
+        # laser_range_sq is NOT a kwarg — it is derived from the laser_range
+        # sentinel inside Cs2Env.__init__ (FMT 24 from FMT 23), so check the
+        # derivation rather than a nav constant. The None ⇒ nav.py default path
+        # is covered by tests/test_env_knobs.py::test_default_knobs_match_nav_constants.
+        assert sc["laser_range_sq"] == pytest.approx(_SENTINELS["laser_range"]**2)
         assert sc["laser_damage"] == nav.LASER_DAMAGE
         # Map-derived scalars. These are the only non-reward, non-nav values in
         # StaticData, and bombsite_dist_scale is FMT arg 21 — wedged between

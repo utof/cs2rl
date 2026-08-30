@@ -12,7 +12,7 @@ import pufferlib
 import nav
 from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from map import make_cs2_map
-from nav import N_AGENTS, OBS_DIM, ROUND_TIME, TEAM_SIZE
+from nav import N_AGENTS, OBS_DIM, TEAM_SIZE
 
 _DIR = Path(__file__).parent
 if str(_DIR) not in sys.path:
@@ -649,6 +649,12 @@ class Cs2Env(pufferlib.PufferEnv):
             n_active_per_team: int = TEAM_SIZE,                                 # Rung 0 §2.1: agents per team that spawn  # noqa: E501
             pin_pitch: int = 0,                                                 # Rung 0 R0-E.2: ignore pitch action  # noqa: E501
             crouch_enabled: int = 1,                                            # Rung 0 R0-E.2: mask crouch when 0  # noqa: E501
+            round_time: int
+        | None = None,                                                          # Rung 0 R0-G: ticks per round; None ⇒ nav.ROUND_TIME  # noqa: E501
+            laser_range: float
+        | None = None,                                                          # Rung 0 R0-G: hitscan reach; None ⇒ nav.LASER_RANGE  # noqa: E501
+            max_turn_speed: float
+        | None = None,                                                          # Rung 0 R0-G: rad/tick aim clamp; None ⇒ nav.MAX_TURN_SPEED_RAD  # noqa: E501
     ):
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
@@ -756,6 +762,31 @@ class Cs2Env(pufferlib.PufferEnv):
         self.pin_pitch = int(bool(pin_pitch))
         self.crouch_enabled = int(bool(crouch_enabled))
 
+        # Rung 0 R0-G: env knobs. None ⇒ the nav.py constant, so demo/test/
+        # deploy callers that never pass them keep today's values byte-for-byte
+        # (sim fingerprints at defaults must not move). Validated here, not in
+        # C, for the same reason as n_active_per_team above: a C assert kills a
+        # forked Puffer worker silently. round_time is rejected (not truncated)
+        # when non-integral — int(2.5) would run a different episode length
+        # than the config recorded.
+        # PITFALL: laser_range_sq (FMT 24) is derived from _laser_range below;
+        # never accept it as a separate kwarg or the range check and the
+        # damage falloff would disagree.
+        if round_time is None:
+            round_time = nav.ROUND_TIME
+        if int(round_time) != round_time:
+            raise ValueError(f"round_time must be an integer tick count, got {round_time!r}")
+        self._round_time = int(round_time)
+        self._laser_range = float(nav.LASER_RANGE if laser_range is None else laser_range)
+        self._max_turn_speed = float(nav.MAX_TURN_SPEED_RAD if max_turn_speed is
+                                     None else max_turn_speed)
+        if self._round_time <= 0:
+            raise ValueError(f"round_time must be > 0, got {self._round_time}")
+        if not self._laser_range > 0.0:                # `not >` also rejects NaN
+            raise ValueError(f"laser_range must be > 0, got {self._laser_range}")
+        if not self._max_turn_speed > 0.0:
+            raise ValueError(f"max_turn_speed must be > 0, got {self._max_turn_speed}")
+
         # Call binding.init() — positional order matches C format string.
         # T2 (verticality): centroids_z inserted at pos 4 (after centroid_xy);
         # is_ramp_int8 inserted at pos 8 (after bombsite_by_idx).
@@ -785,14 +816,14 @@ class Cs2Env(pufferlib.PufferEnv):
             float(y_off),                                              # 17-20
             float(md.bombsite_dist_scale),                             # 21
             int(nav.LASER_DAMAGE),                                     # 22
-            float(nav.LASER_RANGE),
-            float(nav.LASER_RANGE * nav.LASER_RANGE),                  # 23-24
+            float(self._laser_range),                                  # R0-G knob
+            float(self._laser_range * self._laser_range),              # 23-24
             int(nav.SHOOT_COOLDOWN),
             int(nav.BOMB_PLANT_TIME),                                  # 25-26
             int(nav.BOMB_DEFUSE_TIME),
             int(nav.BOMB_DEFUSE_KIT),                                  # 27-28
             int(nav.BOMB_TIMER),
-            int(nav.ROUND_TIME),                                       # 29-30
+            int(self._round_time),                                     # 29-30 (30: R0-G knob)
             float(nav.FOOTSTEP_RADIUS * nav.FOOTSTEP_RADIUS),          # 31
             float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),            # 32
             int(nav.ENEMY_MEMORY_TICKS),
@@ -805,7 +836,7 @@ class Cs2Env(pufferlib.PufferEnv):
             int(len(md.t_spawn_areas)),                                # 40: n_t_spawns
             ct_spawns,                                                 # 41
             int(len(md.ct_spawn_areas)),                               # 42: n_ct_spawns
-            float(nav.MAX_TURN_SPEED_RAD),                             # 43
+            float(self._max_turn_speed),                               # 43: R0-G knob
             int(seed) & 0xFFFFFFFF,                                    # 44: seed (uint32)
             float(init_team_spirit),                                   # 45
             float(reward_win),                                         # 46
@@ -1032,7 +1063,13 @@ class Cs2Env(pufferlib.PufferEnv):
 
     @property
     def round_time(self):
-        return ROUND_TIME
+        """Ticks per round as handed to C (FMT position 30).
+
+        R0-G: reflects the ``round_time`` kwarg, not the module constant —
+        trainer code that sizes horizons / stat windows off this property
+        would otherwise disagree with the env when the knob is set.
+        """
+        return self._round_time
 
     def snapshot_state(self):
         g = self._c_env.game
@@ -1314,6 +1351,9 @@ def make_env(
         n_active_per_team: int = TEAM_SIZE,                            # Rung 0 §2.1: agents per team that spawn
         pin_pitch: int = 0,                                            # Rung 0 R0-E.2: ignore pitch action
         crouch_enabled: int = 1,                                       # Rung 0 R0-E.2: mask crouch when 0
+        round_time: int | None = None,                                 # Rung 0 R0-G: None ⇒ nav.ROUND_TIME
+        laser_range: float | None = None,                              # Rung 0 R0-G: None ⇒ nav.LASER_RANGE
+        max_turn_speed: float | None = None,                           # Rung 0 R0-G: None ⇒ nav.MAX_TURN_SPEED_RAD
 ):
     """Load map data and return a ready-to-use Cs2Env."""
     if map_data is None:
@@ -1361,4 +1401,7 @@ def make_env(
         n_active_per_team=n_active_per_team,
         pin_pitch=pin_pitch,
         crouch_enabled=crouch_enabled,
+        round_time=round_time,
+        laser_range=laser_range,
+        max_turn_speed=max_turn_speed,
     )

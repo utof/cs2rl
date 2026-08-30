@@ -1083,6 +1083,11 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "n_active_per_team": n_active,
         "pin_pitch": knobs["pin_pitch"],
         "crouch_enabled": knobs["crouch_enabled"],
+                                                                        # R0-G: recorded as given (None ⇒ env default), read from args
+                                                                        # directly so None survives — env_knobs_from_args drops None keys.
+        "round_time_ticks": getattr(args, "round_time_ticks", None),
+        "laser_range": getattr(args, "laser_range", None),
+        "max_turn_speed": getattr(args, "max_turn_speed", None),
         "aim_entropy_bonus": aim_entropy_bonus,
         "aim_log_std_max": aim_log_std_max,
         "batch_size": batch_size,
@@ -1257,7 +1262,10 @@ def make_puffer_env(team_spirit=None,
                     reward_symmetrize=False,
                     n_active_per_team=TEAM_SIZE,
                     pin_pitch=0,
-                    crouch_enabled=1):
+                    crouch_enabled=1,
+                    round_time=None,
+                    laser_range=None,
+                    max_turn_speed=None):
     """Create the native C PufferEnv used by smoke/train/eval.
 
     ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
@@ -1292,6 +1300,15 @@ def make_puffer_env(team_spirit=None,
     is unaffected. Training callers get them from env_knobs_from_args(args) —
     do NOT re-derive them from args anywhere else, or config.json provenance
     and the envs that actually ran can disagree.
+
+    ``round_time`` / ``laser_range`` / ``max_turn_speed`` (Rung 0 R0-G):
+    sim knobs forwarded verbatim to make_env. None (default) ⇒ make_env falls
+    back to the nav.py constant, so this function's default output is
+    byte-identical to before (sim fingerprints at defaults unchanged). Set
+    only via env_knobs_from_args, which omits None-valued knobs. PITFALL:
+    max_turn_speed rescales the aim action (policy.max_turn_speed is read
+    from the driver env at build time); assert_max_turn_speed_agreement
+    guards the pairing at train() startup.
     """
     from c_env.cs2_env import make_env as make_c_env
 
@@ -1343,6 +1360,9 @@ def make_puffer_env(team_spirit=None,
         n_active_per_team=n_active_per_team,
         pin_pitch=pin_pitch,
         crouch_enabled=crouch_enabled,
+        round_time=round_time,
+        laser_range=laser_range,
+        max_turn_speed=max_turn_speed,
         **kwargs,
     )
 
@@ -1769,14 +1789,25 @@ def env_knobs_from_args(args) -> dict:
     splatted straight into make_puffer_env(**env_knobs); renaming a key here
     without renaming the parameter there raises TypeError inside a forked
     vecenv worker, far from the mistake.
+
+    R0-G knobs (round_time_ticks → round_time, laser_range, max_turn_speed):
+    None-valued ones are OMITTED from the dict rather than forwarded as None,
+    so the env's own nav.py default applies and config.json records None
+    instead of a duplicated constant that would silently drift from nav.py.
     """
-    return {
+    knobs = {
         "n_active_per_team": int(getattr(args, "n_active_per_team", TEAM_SIZE)),
-                                                                                 # R0-E.2: `or 0` — args.pin_pitch is None on the CLI until train()
-                                                                                 # resolves it from map flatness (see the pin_pitch block in train()).
+                                                                                                   # R0-E.2: `or 0` — args.pin_pitch is None on the CLI until train()
+                                                                                                   # resolves it from map flatness (see the pin_pitch block in train()).
         "pin_pitch": int(getattr(args, "pin_pitch", 0) or 0),
         "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
     }
+    for arg_name, env_name in (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
+                               ("max_turn_speed", "max_turn_speed")):
+        v = getattr(args, arg_name, None)
+        if v is not None:
+            knobs[env_name] = v
+    return knobs
 
 
 def build_env_factory(*,
@@ -3828,6 +3859,31 @@ def assert_pin_pitch_agreement(vecenv, policy):
                            f"(aim_dim_mask={policy.aim_dim_mask.tolist()})")
 
 
+def assert_max_turn_speed_agreement(vecenv, policy):
+    """R0-G startup check: env sd->max_turn_speed == policy.max_turn_speed.
+
+    WHAT: reads StaticData.max_turn_speed off the driver env and compares it
+    with the policy's non-trainable max_turn_speed buffer (the tanh scale on
+    the aim head). Raises RuntimeError on mismatch (>1e-6 rad/tick).
+
+    WHY: build_policy copies the value from the driver env at construction,
+    but a resumed/warm-started checkpoint carries its OWN buffer — a run
+    resumed with a different --max-turn-speed would have the policy emit aim
+    deltas the env then clamps, silently changing the action semantics.
+
+    PITFALL: RuntimeError, never a bare assert (python -O strips asserts). A
+    non-Cs2Env driver is a wiring bug and must also stop the run.
+    """
+    env = getattr(vecenv, "driver_env", vecenv)
+    try:
+        c = float(env._c_env.sd.contents.max_turn_speed)
+    except AttributeError as e:
+        raise RuntimeError("assert_max_turn_speed_agreement: driver_env is not a Cs2Env") from e
+    p = float(policy.max_turn_speed)
+    if abs(c - p) >= 1e-6:
+        raise RuntimeError(f"max_turn_speed mismatch: env={c} policy={p}")
+
+
 def _kill_reward_is_active(vecenv):
     """True if the env pays a nonzero per-kill reward (gh#93).
 
@@ -5656,6 +5712,9 @@ def train(args):
     _patch_trainer_with_selfplay(trainer, self_play_mgr)
     # R0-E.2: env flag ⇔ policy mask, or stop before the first rollout.
     assert_pin_pitch_agreement(vecenv, policy)
+    # R0-G: env aim clamp ⇔ policy tanh scale (a resumed checkpoint may carry
+    # a different buffer than the env it is now paired with).
+    assert_max_turn_speed_agreement(vecenv, policy)
     if not self_play_enabled:
         print("[Train] Self-play mixing disabled (--no-self-play): "
               "both teams use the current policy every epoch.")
@@ -5980,6 +6039,26 @@ if __name__ == "__main__":
                         dest="crouch_enabled",
                         help="R0-E.2: 0 masks the crouch action (stance parity for pinned-pitch "
                         "duels; a crouched target is an unobservable guaranteed miss).")
+    # R0-G env knobs. Default None ⇒ the env's nav.py constant (config.json
+    # records None, not a copied constant). Not in RESUME_CONFIG_ALLOWLIST:
+    # changing any of them on --resume-run is a different experiment.
+    parser.add_argument("--round-time-ticks",
+                        type=int,
+                        default=None,
+                        dest="round_time_ticks",
+                        help="R0-G: ticks per round (episode length). Default: nav.ROUND_TIME.")
+    parser.add_argument("--laser-range",
+                        type=float,
+                        default=None,
+                        dest="laser_range",
+                        help="R0-G: hitscan reach in map units. Default: nav.LASER_RANGE.")
+    parser.add_argument(
+        "--max-turn-speed",
+        type=float,
+        default=None,
+        dest="max_turn_speed",
+        help="R0-G: max yaw/pitch delta per tick (rad). Default: nav.MAX_TURN_SPEED_RAD. "
+        "Rung 1 must not set this — it rescales the aim action.")
     parser.add_argument("--aim-entropy-bonus",
                         choices=("on", "off"),
                         default="on",
