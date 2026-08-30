@@ -267,3 +267,48 @@ def test_round_rollover_reparks_the_same_slots(simple_map):
             assert np.all(rew[parked] == 0.0), (step_n, rew)
     finally:
         env.close()
+
+
+def test_oracle_episode_kills_and_credits_rewards():
+    """Spec §8: vendored-oracle 1v1 through env.step() ends in a kill; reward_kill on the
+    shooter's row; elimination win on the terminal tick; parked rows zero throughout."""
+    from eval_baselines import BaselineEvaluator, OracleActor, StateReader, vis_from_obs
+    from map import make_arena_duel_map
+    env = make_env(map_data=make_arena_duel_map(),
+                   n_active_per_team=1,
+                   pin_pitch=1,
+                   crouch_enabled=0,
+                   round_time=320,
+                   auto_reset=False,
+                   seed=2,
+                   reward_kill=0.3)
+    try:
+        ev = BaselineEvaluator(env, episodes=2,
+                               seed=0)                 # even count is required; only constants are read here
+        oracle = OracleActor(np.random.default_rng(0), ev.max_turn_speed, ev.laser_range, ev.nav)
+        obs, _ = env.reset()
+        oracle.reset()
+        reader = StateReader(env)
+        st = reader.read().snapshot()
+        vis_prev = None
+        parked = [i for i in range(10) if i not in (0, 5)]
+        for _ in range(env.round_time):
+            act, cont = oracle.act(obs, st, vis_prev, env)
+            obs, rew, term, trunc, info = env.step(act, cont)
+            assert (rew[parked] == 0).all()
+            st = reader.read().snapshot()
+            vis_prev, _ = vis_from_obs(obs, st,
+                                       ev.map_diag)    # oracle's memory/peek logic needs last-tick vis
+            if term.any() or trunc.any():
+                break
+        assert term.any(), "no elimination within the round"
+        es = env._c_env.episode_stats
+        assert es.shots_hit >= 1 and (es.kills_t + es.kills_ct) == 1
+                                                       # Credit lands on the shooter's row: episode_stats.reward_kills is the
+                                                       # accumulated reward_kill term (cs2_rewards.h); rew[winner] on the
+                                                       # terminal tick also carries the win share + PBRS, so assert the stat.
+        assert es.reward_kills == pytest.approx(0.3, abs=1e-6)
+        winner = 0 if es.kills_t else 5
+        assert rew[winner] > 0.0
+    finally:
+        env.close()
