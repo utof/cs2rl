@@ -229,14 +229,47 @@ static void process_combat(Dust2Env*      env,
      * only affect the 3D-perp gate of "did the shot connect to the target's
      * vertical centerline."
      *
-     * Pitfall: real CS player models are taller (~72u) than wide (~32u); the
-     * spherical HIT_HALF_WIDTH=16 sphere under-counts vertical silhouette at
-     * long range. If a future v1b smoke STILL fails hit-rate, the canonical
-     * fix is the spec Risk 4 ellipsoidal hitbox (perp_h/16)² + (perp_v/36)² < 1. */
-    static const float EYE_HEIGHT_STAND    = 48.0f;
-    static const float EYE_HEIGHT_CROUCH   = 24.0f;
-    static const float TORSO_OFFSET_STAND  = 48.0f;
-    static const float TORSO_OFFSET_CROUCH = 24.0f;
+     * v1c (2026-08-30, gh #150): ELLIPSOIDAL hitbox — the spec Risk 4 fix the
+     * v1b note below predicted. Real CS player models are ~72u tall (54u
+     * crouched) and ~32u wide; the v1b 16u SPHERE at the torso centre made any
+     * target whose centre sat > 16u off the ray an unconditional miss. With
+     * pitch pinned (R0-E.2) that meant a crouched target (|rz| = 24) and —
+     * the Rung 1 sweep finding — ANY agent mid-jump (57u apex,
+     * SV_JUMP_IMPULSE_CS): ~50% of shots were stance-blocked, hit/on_target
+     * ≈ 0.5. Gate is now (perp_h/HIT_HALF_WIDTH)² + (perp_v/HIT_HALF_HEIGHT)²
+     * ≤ 1 where perp_h/perp_v are the horizontal/vertical components of the
+     * perpendicular from target centre to the ray and HIT_HALF_HEIGHT follows
+     * the TARGET's stance (36 standing, 27 crouched = half the model height).
+     * At pitch 0, same z AND SAME STANCE: perp_v = 0 and the gate reduces to
+     * the v1b/2D perp ≤ 16 exactly — §5's yaw-window arithmetic (asin(16/d))
+     * is intact. Mixed stance at pitch 0 is NOT that case: perp_v = rz = ±24,
+     * which is precisely the shot v1c turns from a miss into a hit.
+     * CAVEAT (the box is not centred on the model): the semi-heights are half
+     * the model, but the centre is TORSO_OFFSET (48 / 24) — the v1b eye-parity
+     * value, not the model's mid-point — so the standing box spans z+12 … z+84
+     * (12u above the head, feet excluded) and the crouched box z−3 … z+51 (3u
+     * below the ground). Harmless for parity, which needs only symmetry about
+     * rz = 0, but it is not a faithful player bounding box. Do not "fix"
+     * TORSO_OFFSET without redoing the pitch-0 reduction above.
+     * CAVEAT (conservative): this tests the ray's CLOSEST POINT to the target
+     * centre against the ellipsoid, not a true ray∩ellipsoid intersection
+     * (which would scale d into the unit-sphere frame first). It is strictly
+     * conservative — an oblique graze can read as a miss, never the reverse —
+     * and it matches the spec formula verbatim.
+     * RESIDUAL: a horizontal ray still cannot reach a jumper whose centre is
+     * > 36u above the shooter's eye. For a 57u jump (v0 = 302, g = 800,
+     * T = 0.755 s) the centre sits above the 36u band for t ∈ [0.148, 0.607] s
+     * — ~61% of the airtime, since a projectile spends most of its airtime
+     * near apex — and the horizontal tolerance 16·sqrt(1 − (perp_v/36)²)
+     * collapses to 0 as the centre nears the band edge, so the usable window
+     * is smaller still. That is a pitch-pin limitation, not geometry: v1c is a
+     * PARTIAL mitigation of gh #150, not a close-out. */
+    static const float EYE_HEIGHT_STAND       = 48.0f;
+    static const float EYE_HEIGHT_CROUCH      = 24.0f;
+    static const float TORSO_OFFSET_STAND     = 48.0f;
+    static const float TORSO_OFFSET_CROUCH    = 24.0f;
+    static const float HIT_HALF_HEIGHT_STAND  = 36.0f; /* v1c: half of ~72u model */
+    static const float HIT_HALF_HEIGHT_CROUCH = 27.0f; /* v1c: half of ~54u crouched */
 
     for (int i = 0; i < N_AGENTS; i++) {
         AgentState* a = &g->agents[i];
@@ -282,8 +315,9 @@ static void process_combat(Dust2Env*      env,
                     es->shots_facing_enemy++;
                 }
                 /* MARGINAL tests: on_target is the yaw error alone against the
-                 * half-window, stance_blocked is |dz| alone. The hit ray's gate
-                 * is the JOINT sqrt(yaw_perp^2 + rz^2) < HIT_HALF_WIDTH plus
+                 * half-window, stance_blocked is |dz| alone against the
+                 * target's vertical semi-axis (v1c). The hit ray's gate is the
+                 * JOINT ellipsoid (perp_h/16)² + (perp_v/HH)² ≤ 1 plus
                  * laser_range and forward > 0, so shots_hit / shots_on_target
                  * < 1 is EXPECTED near the boundary even at pitch 0. Do not
                  * "fix" either counter to match the ray — they answer
@@ -292,7 +326,8 @@ static void process_combat(Dust2Env*      env,
                     ss->shots_on_target++;
                     es->shots_on_target++;
                 }
-                if (fabsf(tgt_rz) > HIT_HALF_WIDTH) {
+                float tgt_hh = en->is_crouching ? HIT_HALF_HEIGHT_CROUCH : HIT_HALF_HEIGHT_STAND;
+                if (fabsf(tgt_rz) > tgt_hh) {
                     ss->shots_stance_blocked++;
                     es->shots_stance_blocked++;
                 }
@@ -370,20 +405,29 @@ static void process_combat(Dust2Env*      env,
             if (forward <= 0.0f)
                 continue;                                /* enemy behind shooter */
 
-            /* Cross-product magnitude form for perpendicular distance.
-             * Numerically stable: avoids the catastrophic cancellation of the
-             * sqrt(|r|² - forward²) form when forward ≈ |r| (perfectly aligned
-             * shot). Per spec L4 + Opus review I1.
-             * Since |d| = 1, |r × d| = perpendicular distance from r to the
-             * aim ray in world units. The 2D version (|rx*dy - ry*dx|) is the
-             * pitch=0, rz=0 reduction (cz term only) — verifiable by setting
-             * sin_p=0, cos_p=1: cx = ry*0 - 0*dy = 0; cy = 0*dx - rx*0 = 0;
-             * cz = rx*dy - ry*dx. */
-            float cx   = ry * dz - rz * dy;
-            float cy   = rz * dx - rx * dz;
-            float cz   = rx * dy - ry * dx;
-            float perp = sqrtf(cx * cx + cy * cy + cz * cz);
-            if (perp > HIT_HALF_WIDTH)
+            /* v1c (gh #150): ellipsoidal gate. Decompose the perpendicular
+             * p = r − forward·d into its vertical (p_z) and horizontal
+             * (|p_xy|) parts and test (|p_xy|/16)² + (p_z/HH)² ≤ 1, HH per the
+             * TARGET's stance. See the constant block above for the geometry
+             * caveats (box centre, conservatism, pitch-pin residual).
+             * NUMERICS (spec L4 + Opus review I1): this componentwise vector
+             * rejection is used INSTEAD of the sqrt(|r|² − forward²) form for
+             * the same cancellation reason the old cross-product form was —
+             * that form catastrophically cancels when forward ≈ |r| (perfectly
+             * aligned shot), whereas each component here loses only ~eps·|r|.
+             * Better still, the test is on squared quantities, so no sqrt is
+             * needed at all; `dist` above is the only one, and it is for the
+             * range check and the nearest-enemy tie-break, not the gate.
+             * Reduction: at pitch 0 with rz = 0, p_z = 0 and
+             * |p_xy| = |rx*dy − ry*dx| — the old 2D perpendicular — so the
+             * gate is exactly the v1b perp ≤ 16. */
+            float px = rx - forward * dx;
+            float py = ry - forward * dy;
+            float pz = rz - forward * dz;
+            float hh = en->is_crouching ? HIT_HALF_HEIGHT_CROUCH : HIT_HALF_HEIGHT_STAND;
+            float ell =
+                (px * px + py * py) / (HIT_HALF_WIDTH * HIT_HALF_WIDTH) + (pz * pz) / (hh * hh);
+            if (ell > 1.0f)
                 continue;
 
             if (dist < best_dist) {

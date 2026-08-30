@@ -2,7 +2,7 @@
 
 Also the crouch gate (StaticData.crouch_enabled → compute_masks) and the
 arena hit test the preflight ruled mandatory: pinning pitch in C but
-forgetting the crouch mask leaves |rz| = 24 > HIT_HALF_WIDTH on every
+(pre-v1c) forgetting the crouch mask left |rz| = 24 > HIT_HALF_WIDTH on every
 stand-vs-crouch shot — a miss the policy cannot observe — and every OTHER
 test in this file would still pass.
 """
@@ -84,11 +84,21 @@ def _place_duel(env):
 def test_arena_stance_parity_hit_and_stance_blocked():
     """On ARENA_DUEL_V1 (R0-H), the map Rung 1 trains on.
     Preflight ruling: pin 1 / crouch 0, two standing agents, on-target shot
-    ⇒ shots_hit == 1. Then crouch_enabled=1 with a CROUCHED target ⇒ the same
-    shot is stance-blocked (|rz| = 24 > 16) — proving the crouch gate is what
-    makes the pinned-pitch duel winnable, not the pitch pin alone.
-    auto_reset=False: at n_active=1 a head-roll hit can end the round, and
-    the auto-reset would clear episode_stats before the asserts read it."""
+    ⇒ shots_hit == 1. Then crouch_enabled=1 with a CROUCHED target: under the
+    v1b 16u sphere the same shot was stance-blocked (|rz| = 24 > 16); under
+    the v1c ellipsoid (gh #150) a crouched target is 54u tall, |rz| = 24 <
+    HIT_HALF_HEIGHT_CROUCH = 27, so the horizontal shot still CONNECTS and is
+    not stance-blocked. Third and fourth cases: airborne agents, once with the
+    TARGET off the ground and once with the SHOOTER off it (gh #150 describes
+    both). At the 57u apex |rz| > 36 ⇒ stance-blocked, miss (the pitch-pin
+    residual); at z = 20 it is hittable either way — the geometry is symmetric
+    in the sign of rz. auto_reset=False: at n_active=1 a head-roll hit can end
+    the round, and the auto-reset would clear episode_stats before the asserts.
+
+    Every case states shots_hit and shots_stance_blocked SEPARATELY on purpose:
+    they answer different questions (see the counters' comment in
+    cs2_combat.h), so a coupled `blocked == 1 - hit` assert would pass if both
+    ever flipped together."""
     from c_env.cs2_env import make_env
     from map import make_arena_duel_map
     arena = make_arena_duel_map()
@@ -120,17 +130,45 @@ def test_arena_stance_parity_hit_and_stance_blocked():
                    auto_reset=False)
     try:
         act, cont = _place_duel(env)
-        act[5, HEAD_CROUCH] = 1        # process_movement sets is_crouching before combat
+        act[5, HEAD_CROUCH] = 1                        # process_movement sets is_crouching before combat
         obs, *_ = env.step(act, cont)
         assert obs[0][56 + 3] == 1.0
         es = env._c_env.episode_stats
         assert env._c_env.game.agents[5].is_crouching == 1
         assert es.shots_fired == 1
         assert es.shots_on_target == 1
-        assert es.shots_stance_blocked == 1
-        assert es.shots_hit == 0
+        assert es.shots_stance_blocked == 0            # v1c: 24u < 27u crouched semi-axis
+        assert es.shots_hit == 1
     finally:
         env.close()
+
+    # (which agent leaves the ground, jump height, expected hit, expected block).
+    # |rz| ends ~1.56u under z_off because the leapfrog integrator applies one
+    # tick of gravity (g=800, dt=1/16) before combat — 55.4 and 18.4, so both
+    # sit well clear of the 36u standing semi-axis on the correct side.
+    for airborne_idx, z_off, expect_hit, expect_blocked in ((5, 57.0, 0, 1), (5, 20.0, 1, 0),
+                                                            (0, 57.0, 0, 1), (0, 20.0, 1, 0)):
+        env = make_env(map_data=arena,
+                       n_active_per_team=1,
+                       pin_pitch=1,
+                       crouch_enabled=0,
+                       seed=1,
+                       auto_reset=False)
+        try:
+            act, cont = _place_duel(env)
+            ag = env._c_env.game.agents[airborne_idx]
+            # mid-jump: is_airborne=1 keeps process_movement from snapping z back
+            # to the ground (cs2_movement.h), so the offset survives into combat.
+            ag.z, ag.vz, ag.is_airborne = ag.z + z_off, 0.0, 1
+            obs, *_ = env.step(act, cont)
+            assert obs[0][56 + 3] == 1.0
+            es = env._c_env.episode_stats
+            case = (airborne_idx, z_off)
+            assert es.shots_fired == 1 and es.shots_on_target == 1
+            assert es.shots_hit == expect_hit, case
+            assert es.shots_stance_blocked == expect_blocked, case
+        finally:
+            env.close()
 
 
 def test_aim_dim_mask_shapes_logprob_and_entropy():

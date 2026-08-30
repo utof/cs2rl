@@ -323,11 +323,14 @@ def test_hit_geometry_constants_match_cs2_combat_h():
     import eval_baselines as eb
 
     header = (Path(__file__).resolve().parents[1] / "src" / "c_env" / "cs2_combat.h").read_text()
-    pattern = re.compile(r"static const float\s+(HIT_HALF_WIDTH|EYE_HEIGHT_STAND|EYE_HEIGHT_CROUCH|"
+    pattern = re.compile(r"static const float\s+(HIT_HALF_WIDTH|HIT_HALF_HEIGHT_STAND|"
+                         r"HIT_HALF_HEIGHT_CROUCH|EYE_HEIGHT_STAND|EYE_HEIGHT_CROUCH|"
                          r"TORSO_OFFSET_STAND|TORSO_OFFSET_CROUCH)\s*=\s*([0-9.]+)f")
     found = {name: float(val) for name, val in pattern.findall(header)}
     expected = {
         "HIT_HALF_WIDTH": eb.HIT_HALF_WIDTH,
+        "HIT_HALF_HEIGHT_STAND": eb.HIT_HALF_HEIGHT_STAND,
+        "HIT_HALF_HEIGHT_CROUCH": eb.HIT_HALF_HEIGHT_CROUCH,
         "EYE_HEIGHT_STAND": eb.EYE_STAND,
         "EYE_HEIGHT_CROUCH": eb.EYE_CROUCH,
         "TORSO_OFFSET_STAND": eb.TORSO_STAND,

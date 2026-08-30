@@ -358,8 +358,10 @@ def test_3d_miss_at_zero_pitch_elevated_target():
     """T5: same geometry as hit-test, BUT shooter pitch = 0 → miss (HP unchanged).
 
     Same area 5→6 geometry. When pitch=0 the aim ray is horizontal but the
-    target torso is 32 units ABOVE eye level, so the perpendicular offset
-    from the horizontal ray to the torso is 32u >> HIT_HALF_WIDTH=16 → miss.
+    target torso is rz = 64 units ABOVE eye level (target ground z=64, and
+    since v1b EYE == TORSO == 48 at the same stance, so rz is the ground
+    delta). The vertical offset is measured against the v1c 36u vertical
+    semi-axis, not HIT_HALF_WIDTH: (64/36)² = 3.2 > 1 → miss.
     Pitfall: if the 3D hit-test reduced back to 2D-equivalent (e.g., dz term
     dropped, or perp computed without rz), this test would FAIL — the shot
     would land. This catches an implementation that "compiled but ignored z"."""
