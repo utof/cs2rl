@@ -84,12 +84,18 @@ static void compute_masks(Dust2Env* env) {
         /* Jump mask: no jump while airborne, on cooldown, or crouching */
         if (a->is_airborne || a->jump_cd > 0 || a->is_crouching)
             m[moff[HEAD_JUMP] + 1] = 0;
-        /* R0-E.2 (#131): stance parity. With pitch pinned a stand-vs-crouch
-         * mismatch is |rz| = 24 > HIT_HALF_WIDTH = 16 — an unconditional miss
-         * the policy cannot observe (no stance bit in the enemy block). Rung 1
-         * disables crouch outright; 5v5 keeps it (crouch_enabled defaults to 1,
-         * cs2_demo.c forces 1 for the human player). Bin 0 (stand) stays valid
-         * so the head keeps its per-head no-op invariant (see header comment). */
+        /* R0-E.2 (#131): stance parity. PRE-v1c rationale (no longer true):
+         * with pitch pinned a stand-vs-crouch mismatch was |rz| = 24 >
+         * HIT_HALF_WIDTH = 16 — an unconditional miss the policy cannot
+         * observe (there is still no stance bit in the enemy block). Since
+         * v1c (gh #150) the hitbox is an ellipsoid with a 27u crouched / 36u
+         * standing vertical semi-axis, so 24 ≤ 27 CONNECTS and the mismatch is
+         * a margin cost, not a wall (tests/test_pitch_pin.py asserts exactly
+         * that). The mask STAYS anyway: Rung 1 deliberately keeps the action
+         * space minimal, and stance still eats parity margin the policy cannot
+         * see. 5v5 keeps crouch (crouch_enabled defaults to 1, cs2_demo.c
+         * forces 1 for the human player). Bin 0 (stand) stays valid so the head
+         * keeps its per-head no-op invariant (see header comment). */
         if (!sd->crouch_enabled)
             m[moff[HEAD_CROUCH] + 1] = 0;
         /* R0-B (#129): this function runs at the TAIL of env_step, but the
@@ -348,8 +354,13 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
                  * the metrics. Trainer side masks the pitch dim out of
                  * log_prob_c / entropy_c (policy.aim_dim_mask == [1, 0]) and
                  * assert_pin_pitch_agreement() refuses a mismatch at startup.
-                 * PITFALL: the env still needs crouch_enabled=0 for stance
-                 * parity — a crouched target is |rz| = 24 > HIT_HALF_WIDTH. */
+                 * PITFALL: Rung 1 still runs crouch_enabled=0. The PRE-v1c
+                 * reason ("a crouched target is |rz| = 24 > HIT_HALF_WIDTH =
+                 * 16, an unconditional miss") no longer holds — v1c (gh #150)
+                 * gives a crouched target a 27u vertical semi-axis, so 24
+                 * connects. The mask survives to keep the Rung 1 action space
+                 * minimal and because stance still costs parity margin the
+                 * policy cannot observe. See compute_masks in this file. */
                 a->pitch = 0.0f;
             }
         }

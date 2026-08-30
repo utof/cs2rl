@@ -229,7 +229,9 @@ def perp_and_forward(st, i, j):
     perpendicular: HIT_HALF_WIDTH * sqrt((p_h/16)² + (p_v/HH)²), HH by the
     target's stance — so the v1b rule "connects iff dist <= laser_range,
     dist > 0, forward > 0 and perp <= HIT_HALF_WIDTH" still reads correctly.
-    At pitch 0 / same z it equals the plain perpendicular distance.
+    At pitch 0 with the same z AND the same stance it equals the plain
+    perpendicular distance. Mixed stance is not that case: p_v = rz = ±24 even
+    at pitch 0 and equal z, which is exactly the shot v1c turns into a hit.
     """
     rx, ry, rz, dist, _, _ = aim_geometry(st, i, j)
     yaw, pitch = st["facing"][i], st["pitch"][i]

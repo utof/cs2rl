@@ -240,11 +240,30 @@ static void process_combat(Dust2Env*      env,
      * ≤ 1 where perp_h/perp_v are the horizontal/vertical components of the
      * perpendicular from target centre to the ray and HIT_HALF_HEIGHT follows
      * the TARGET's stance (36 standing, 27 crouched = half the model height).
-     * At pitch 0, same z: perp_v = 0 and the gate reduces to the v1b/2D
-     * perp ≤ 16 exactly — §5's yaw-window arithmetic (asin(16/d)) is intact.
+     * At pitch 0, same z AND SAME STANCE: perp_v = 0 and the gate reduces to
+     * the v1b/2D perp ≤ 16 exactly — §5's yaw-window arithmetic (asin(16/d))
+     * is intact. Mixed stance at pitch 0 is NOT that case: perp_v = rz = ±24,
+     * which is precisely the shot v1c turns from a miss into a hit.
+     * CAVEAT (the box is not centred on the model): the semi-heights are half
+     * the model, but the centre is TORSO_OFFSET (48 / 24) — the v1b eye-parity
+     * value, not the model's mid-point — so the standing box spans z+12 … z+84
+     * (12u above the head, feet excluded) and the crouched box z−3 … z+51 (3u
+     * below the ground). Harmless for parity, which needs only symmetry about
+     * rz = 0, but it is not a faithful player bounding box. Do not "fix"
+     * TORSO_OFFSET without redoing the pitch-0 reduction above.
+     * CAVEAT (conservative): this tests the ray's CLOSEST POINT to the target
+     * centre against the ellipsoid, not a true ray∩ellipsoid intersection
+     * (which would scale d into the unit-sphere frame first). It is strictly
+     * conservative — an oblique graze can read as a miss, never the reverse —
+     * and it matches the spec formula verbatim.
      * RESIDUAL: a horizontal ray still cannot reach a jumper whose centre is
-     * > 36u above the shooter's eye (the top ~39% of a 57u jump's airtime);
-     * that is a pitch-pin limitation, not geometry — see gh #150. */
+     * > 36u above the shooter's eye. For a 57u jump (v0 = 302, g = 800,
+     * T = 0.755 s) the centre sits above the 36u band for t ∈ [0.148, 0.607] s
+     * — ~61% of the airtime, since a projectile spends most of its airtime
+     * near apex — and the horizontal tolerance 16·sqrt(1 − (perp_v/36)²)
+     * collapses to 0 as the centre nears the band edge, so the usable window
+     * is smaller still. That is a pitch-pin limitation, not geometry: v1c is a
+     * PARTIAL mitigation of gh #150, not a close-out. */
     static const float EYE_HEIGHT_STAND       = 48.0f;
     static const float EYE_HEIGHT_CROUCH      = 24.0f;
     static const float TORSO_OFFSET_STAND     = 48.0f;
@@ -386,25 +405,22 @@ static void process_combat(Dust2Env*      env,
             if (forward <= 0.0f)
                 continue;                                /* enemy behind shooter */
 
-            /* Cross-product magnitude form for perpendicular distance.
-             * Numerically stable: avoids the catastrophic cancellation of the
-             * sqrt(|r|² - forward²) form when forward ≈ |r| (perfectly aligned
-             * shot). Per spec L4 + Opus review I1.
-             * Since |d| = 1, |r × d| = perpendicular distance from r to the
-             * aim ray in world units. The 2D version (|rx*dy - ry*dx|) is the
-             * pitch=0, rz=0 reduction (cz term only) — verifiable by setting
-             * sin_p=0, cos_p=1: cx = ry*0 - 0*dy = 0; cy = 0*dx - rx*0 = 0;
-             * cz = rx*dy - ry*dx. */
-            float cx   = ry * dz - rz * dy;
-            float cy   = rz * dx - rx * dz;
-            float cz   = rx * dy - ry * dx;
-            float perp = sqrtf(cx * cx + cy * cy + cz * cz);
             /* v1c (gh #150): ellipsoidal gate. Decompose the perpendicular
-             * p = r − forward·d into vertical (p_z) and horizontal (|p_xy|)
-             * parts and test (|p_xy|/16)² + (p_z/HH)² ≤ 1, HH per the
-             * target's stance. |p| = perp above (kept for the dist tie-break
-             * and as the pitch=0, rz=0 reduction: p_z = 0 ⇒ |p_xy| = perp).
-             * Cheap: no extra sqrt beyond the one already taken. */
+             * p = r − forward·d into its vertical (p_z) and horizontal
+             * (|p_xy|) parts and test (|p_xy|/16)² + (p_z/HH)² ≤ 1, HH per the
+             * TARGET's stance. See the constant block above for the geometry
+             * caveats (box centre, conservatism, pitch-pin residual).
+             * NUMERICS (spec L4 + Opus review I1): this componentwise vector
+             * rejection is used INSTEAD of the sqrt(|r|² − forward²) form for
+             * the same cancellation reason the old cross-product form was —
+             * that form catastrophically cancels when forward ≈ |r| (perfectly
+             * aligned shot), whereas each component here loses only ~eps·|r|.
+             * Better still, the test is on squared quantities, so no sqrt is
+             * needed at all; `dist` above is the only one, and it is for the
+             * range check and the nearest-enemy tie-break, not the gate.
+             * Reduction: at pitch 0 with rz = 0, p_z = 0 and
+             * |p_xy| = |rx*dy − ry*dx| — the old 2D perpendicular — so the
+             * gate is exactly the v1b perp ≤ 16. */
             float px = rx - forward * dx;
             float py = ry - forward * dy;
             float pz = rz - forward * dz;
@@ -413,7 +429,6 @@ static void process_combat(Dust2Env*      env,
                 (px * px + py * py) / (HIT_HALF_WIDTH * HIT_HALF_WIDTH) + (pz * pz) / (hh * hh);
             if (ell > 1.0f)
                 continue;
-            (void)perp;
 
             if (dist < best_dist) {
                 best_dist  = dist;

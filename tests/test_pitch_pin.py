@@ -88,10 +88,17 @@ def test_arena_stance_parity_hit_and_stance_blocked():
     v1b 16u sphere the same shot was stance-blocked (|rz| = 24 > 16); under
     the v1c ellipsoid (gh #150) a crouched target is 54u tall, |rz| = 24 <
     HIT_HALF_HEIGHT_CROUCH = 27, so the horizontal shot still CONNECTS and is
-    not stance-blocked. Third case: a target mid-jump at the 57u apex is
-    |rz| = 57 > 36 ⇒ stance-blocked, miss (pitch-pin residual); at z = 20 it
-    is hittable. auto_reset=False: at n_active=1 a head-roll hit can end the
-    round, and the auto-reset would clear episode_stats before the asserts."""
+    not stance-blocked. Third and fourth cases: airborne agents, once with the
+    TARGET off the ground and once with the SHOOTER off it (gh #150 describes
+    both). At the 57u apex |rz| > 36 ⇒ stance-blocked, miss (the pitch-pin
+    residual); at z = 20 it is hittable either way — the geometry is symmetric
+    in the sign of rz. auto_reset=False: at n_active=1 a head-roll hit can end
+    the round, and the auto-reset would clear episode_stats before the asserts.
+
+    Every case states shots_hit and shots_stance_blocked SEPARATELY on purpose:
+    they answer different questions (see the counters' comment in
+    cs2_combat.h), so a coupled `blocked == 1 - hit` assert would pass if both
+    ever flipped together."""
     from c_env.cs2_env import make_env
     from map import make_arena_duel_map
     arena = make_arena_duel_map()
@@ -135,7 +142,12 @@ def test_arena_stance_parity_hit_and_stance_blocked():
     finally:
         env.close()
 
-    for z_off, expect_hit in ((57.0, 0), (20.0, 1)):
+    # (which agent leaves the ground, jump height, expected hit, expected block).
+    # |rz| ends ~1.56u under z_off because the leapfrog integrator applies one
+    # tick of gravity (g=800, dt=1/16) before combat — 55.4 and 18.4, so both
+    # sit well clear of the 36u standing semi-axis on the correct side.
+    for airborne_idx, z_off, expect_hit, expect_blocked in ((5, 57.0, 0, 1), (5, 20.0, 1, 0),
+                                                            (0, 57.0, 0, 1), (0, 20.0, 1, 0)):
         env = make_env(map_data=arena,
                        n_active_per_team=1,
                        pin_pitch=1,
@@ -144,14 +156,17 @@ def test_arena_stance_parity_hit_and_stance_blocked():
                        auto_reset=False)
         try:
             act, cont = _place_duel(env)
-            a5 = env._c_env.game.agents[5]
-            a5.z, a5.vz, a5.is_airborne = z_off, 0.0, 1                # mid-jump: no ground snap
+            ag = env._c_env.game.agents[airborne_idx]
+            # mid-jump: is_airborne=1 keeps process_movement from snapping z back
+            # to the ground (cs2_movement.h), so the offset survives into combat.
+            ag.z, ag.vz, ag.is_airborne = ag.z + z_off, 0.0, 1
             obs, *_ = env.step(act, cont)
             assert obs[0][56 + 3] == 1.0
             es = env._c_env.episode_stats
+            case = (airborne_idx, z_off)
             assert es.shots_fired == 1 and es.shots_on_target == 1
-            assert es.shots_stance_blocked == 1 - expect_hit, z_off
-            assert es.shots_hit == expect_hit, z_off
+            assert es.shots_hit == expect_hit, case
+            assert es.shots_stance_blocked == expect_blocked, case
         finally:
             env.close()
 

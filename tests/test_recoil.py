@@ -70,6 +70,16 @@ def test_increment_is_after_the_ray(make_map):
     g.agents[0].weapon_slot = 0
     g.agents[0].fire_cd = g.agents[0].reload_ticks = g.agents[0].switch_ticks = 0
     g.agents[0].is_crouching = g.agents[0].is_airborne = 0
+    # Pre-loaded punch straddles the v1c 36u VERTICAL semi-axis (gh #150), which
+    # is what makes this test discriminating again: at punch 0 the shot would
+    # hit under BOTH orderings, so it must start close enough to the edge that
+    # one extra 0.045 kick pushes it out. Decay runs before combat, so 0.131
+    # becomes 0.131*α ≈ 0.060 (α = exp(-1/16/0.08) ≈ 0.4578) at ray time; |r| =
+    # 496, so p_v = 248*sin(2p).
+    #   correct order (ray at 0.060): p_v ≈ 29.7, ell ≈ 0.69 ≤ 1 → HIT
+    #   buggy order  (ray at 0.105): p_v ≈ 51.7, ell ≈ 2.18 > 1  → MISS
+    g.agents[0].punch_pitch = 0.131
+    g.agents[0].punch_yaw = 0.0
     g.agents[5].x, g.agents[5].y, g.agents[5].z = 504.0, 1056.0, 0.0
     g.agents[5].area_idx = 4
     g.agents[5].alive, g.agents[5].hp = 1, 100
@@ -77,8 +87,9 @@ def test_increment_is_after_the_ray(make_map):
     acts, cont = _zero_actions()
     acts[0, 1] = 1
     env.step(acts, cont)
-    assert g.agents[5].hp < 100, ("shot-1 must hit (ray at punch 0). If increment ran before d, "
-                                  "perp≈22 > 16 and HP stays 100")
+    assert g.agents[5].hp < 100, ("shot-1 must hit (ray at the pre-existing punch 0.060). If the "
+                                  "0.045 increment ran before d, the ray is at 0.105, p_v≈52 > "
+                                  "the 36u semi-axis and HP stays 100")
 
 
 def test_ray_uses_existing_punch(make_map):
