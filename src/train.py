@@ -1263,6 +1263,11 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "n_active_per_team": n_active,
         "pin_pitch": knobs["pin_pitch"],
         "crouch_enabled": knobs["crouch_enabled"],
+                                                                       # Rung 1a T2b: provenance for --jump-enabled. Like the other Rung 0
+                                                                       # knobs it is NOT allowlisted for --resume-run (a run that masks
+                                                                       # jump is a different experiment) and adding it shifts
+                                                                       # exp_lib.behavior_hash for all future runs — recorded decision.
+        "jump_enabled": knobs["jump_enabled"],
                                                                        # R0-G: recorded as given (None ⇒ env default), read from args
                                                                        # directly so None survives — env_knobs_from_args drops None keys.
         **{
@@ -1453,6 +1458,7 @@ def make_puffer_env(team_spirit=None,
                     n_active_per_team=TEAM_SIZE,
                     pin_pitch=0,
                     crouch_enabled=1,
+                    jump_enabled=1,
                     round_time=None,
                     laser_range=None,
                     max_turn_speed=None,
@@ -1489,13 +1495,14 @@ def make_puffer_env(team_spirit=None,
     only the training factory turns it on.
 
     ``n_active_per_team`` / ``pin_pitch`` / ``crouch_enabled`` (Rung 0, spec
-    2026-08-29 §2.1): non-weight env knobs forwarded verbatim to make_env. They
-    are NOT reward_overrides keys for the same reason reward_symmetrize is not.
+    2026-08-29 §2.1) and ``jump_enabled`` (Rung 1a, spec 2026-08-30 T2b):
+    non-weight env knobs forwarded verbatim to make_env. They are NOT
+    reward_overrides keys for the same reason reward_symmetrize is not.
     The defaults reproduce the pre-Rung-0 env exactly (full 5v5, pitch live,
-    crouch enabled), so every non-training caller (eval, record, smoke, viz)
-    is unaffected. Training callers get them from env_knobs_from_args(args) —
-    do NOT re-derive them from args anywhere else, or config.json provenance
-    and the envs that actually ran can disagree.
+    crouch and jump enabled), so every non-training caller (eval, record,
+    smoke, viz) is unaffected. Training callers get them from
+    env_knobs_from_args(args) — do NOT re-derive them from args anywhere else,
+    or config.json provenance and the envs that actually ran can disagree.
 
     ``round_time`` / ``laser_range`` / ``max_turn_speed`` (Rung 0 R0-G):
     sim knobs forwarded verbatim to make_env. None (default) ⇒ make_env falls
@@ -1556,6 +1563,7 @@ def make_puffer_env(team_spirit=None,
         n_active_per_team=n_active_per_team,
         pin_pitch=pin_pitch,
         crouch_enabled=crouch_enabled,
+        jump_enabled=jump_enabled,
         round_time=round_time,
         laser_range=laser_range,
         max_turn_speed=max_turn_speed,
@@ -2045,6 +2053,10 @@ def env_knobs_from_args(args) -> dict:
                                                                                  # resolves it from map flatness (see the pin_pitch block in train()).
         "pin_pitch": int(getattr(args, "pin_pitch", 0) or 0),
         "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
+                                                                                 # Rung 1a T2b: same shape as crouch_enabled — always present (1 =
+                                                                                 # today's env), never omitted, so a legacy args object cannot
+                                                                                 # silently leave the env on a different jump setting than config.json.
+        "jump_enabled": int(getattr(args, "jump_enabled", 1)),
         "pbrs_gamma": resolve_gammas(args)[1],
     }
     for arg_name, env_name in _R0G_KNOBS:
@@ -6229,7 +6241,8 @@ def train(args):
                                     reward_overrides=reward_overrides_from_args(args),
                                     **env_knobs_from_args(args))
         _d = trainer.vecenv.driver_env
-        for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "round_time"):
+        for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled",
+                   "round_time"):
             if getattr(_eval_env, _k) != getattr(_d, _k):
                 raise RuntimeError(f"[Eval] eval env / driver env disagree on {_k}: "
                                    f"{getattr(_eval_env, _k)!r} vs {getattr(_d, _k)!r}")
@@ -6541,6 +6554,14 @@ if __name__ == "__main__":
                         dest="crouch_enabled",
                         help="R0-E.2: 0 masks the crouch action (stance parity for pinned-pitch "
                         "duels; a crouched target is an unobservable guaranteed miss).")
+    parser.add_argument("--jump-enabled",
+                        type=int,
+                        choices=(0, 1),
+                        default=1,
+                        dest="jump_enabled",
+                        help="Rung 1a: 0 masks the jump action (height parity for pinned-pitch "
+                        "duels; an airborne target sits outside the 36u vertical semi-axis and "
+                        "is an unobservable guaranteed miss). Default 1 = today's env.")
     # R0-G env knobs. Default None ⇒ the env's nav.py constant (config.json
     # records None, not a copied constant). Not in RESUME_CONFIG_ALLOWLIST:
     # changing any of them on --resume-run is a different experiment.

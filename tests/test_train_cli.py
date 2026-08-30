@@ -47,6 +47,7 @@ def test_train_help_shows_current_cli():
             "--seed",                                  # R0-D (Task 8)
             "--pin-pitch",                             # R0-E.2 (Task 9)
             "--crouch-enabled",
+            "--jump-enabled",                          # Rung 1a T2b (stance parity)
             "--aim-entropy-bonus",                     # R0-E.3/4 (Task 10)
             "--aim-log-std-max",
             "--n-active-per-team",                     # Rung 0 parking (Task 4)

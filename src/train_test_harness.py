@@ -50,6 +50,7 @@ def _build_trainer_for_test(
     map_data=None,
     pin_pitch: int = 0,
     crouch_enabled: int = 1,
+    jump_enabled: int = 1,
     aim_log_std_max=None,
     aim_entropy_bonus: bool = True,
 ):
@@ -99,6 +100,13 @@ def _build_trainer_for_test(
         policy (``build_policy(pin_pitch=)`` → aim_dim_mask) and both
         SelfPlayManager constructions — exactly like production, so
         ``assert_pin_pitch_agreement`` holds on a harness trainer.
+    jump_enabled : int
+        Rung 1a sim knob (spec 2026-08-30 T2b): 0 masks the jump action.
+        Threaded into the envs and into ``args`` (⇒ config ``jump_enabled``),
+        but NOT into build_policy — unlike pin_pitch it changes no action
+        dimension, only a mask bit, so there is no policy-side mirror to keep
+        in agreement. Default 1 = today's env, i.e. every pre-Rung-1a caller
+        is unaffected.
     aim_log_std_max : float or None
         R0-E.3 per-run σ cap → ``policy.aim_log_std_max`` and config
         ``aim_log_std_max``. None ⇒ LOG_STD_MAX.
@@ -197,6 +205,7 @@ def _build_trainer_for_test(
             n_active_per_team=n_active_per_team,
             pin_pitch=pin_pitch,
             crouch_enabled=crouch_enabled,
+            jump_enabled=jump_enabled,
         )
         if _mask_idx is not None:
             env._attach_mask_view(mask_shm, _mask_idx)
@@ -219,7 +228,7 @@ def _build_trainer_for_test(
     )
 
     # ── Minimal argparse-shaped config object ───────────────────────────────
-    # build_train_config reads these four attributes. Everything else in the
+    # build_train_config reads these attributes. Everything else in the
     # production parser (wandb, vec-backend, etc.) is irrelevant once we've
     # already instantiated the vecenv.
     # Tiny horizon — ONE evaluate() round is all downstream tests need.
@@ -236,6 +245,7 @@ def _build_trainer_for_test(
         n_active_per_team=n_active_per_team,
         pin_pitch=pin_pitch,
         crouch_enabled=crouch_enabled,
+        jump_enabled=jump_enabled,
         aim_log_std_max=aim_log_std_max,
         aim_entropy_bonus=aim_entropy_bonus,
     )
