@@ -41,10 +41,9 @@ THE OBS-ONLY VARIANT (``--obs-only``)
 The default oracle reads the enemy's position out of the live C state, so it
 proves the env is solvable BY ACTIONS and nothing more. It would keep passing at
 200/200 with the enemy block of the observation vector encoded wrongly — rotated
-by the wrong sign, normalised by the wrong constant, or gated on the wrong
-visibility flag — because it never looks at it. A policy has only the obs, so
-that bug class turns a solvable env into an unlearnable one while this gate
-stays green.
+by the wrong sign, or normalised by the wrong constant — because it never looks
+at it. A policy has only the obs, so that bug class turns a solvable env into an
+unlearnable one while this gate stays green.
 
 ``--obs-only`` swaps ``OracleActor`` for ``ObsOracleActor``, which derives the
 enemy's bearing, distance and height offset from ``obs[hero]`` (the same array
@@ -52,10 +51,31 @@ the network is fed) and keeps every other decision — the ±max_turn_speed yaw
 clamp, the range test, the fire/reload discipline — byte-for-byte identical. A
 divergence between the two modes therefore isolates the obs encoding.
 
-It is not a second gate with a second threshold: the PASS bar is the same one.
+The kill-rate and TTK bars are the same ones: this is not a second gate with a
+second threshold. It does add three checks that exist only in this mode, and
+they are part of the EXIT CODE rather than advisory prints (see ``verdict``):
+the enemy slot's two encodings of the relative position must agree, the rz
+decoded from slot +2 must match the rz measured off the C state, and the blind
+ticks must not exceed one per episode. They carry the mode, because the failures
+they see are invisible to the kill rate — mutation-tested, both at 1.000 kills:
+``EN_DIST`` pointed one slot over, and ``OBS_Z_SCALE`` halved.
+
 Run it as ``--obs-only --episodes 200 --seed 0`` and expect the same verdict; a
 mode that kills on ground truth and not on obs is a finding about
 ``cs2_observations.h``, not about the sim's combat.
+
+WHAT ``--obs-only`` DOES NOT CERTIFY
+  * The VISIBILITY GATE. ``can_see`` (+3) and ``alive`` (+4) hold the same value
+    on every tick of this env — permanent 2D LoS, and a target that never dies
+    mid-round — so an enemy block gated on the wrong one of the two decodes
+    identically and passes 20/20 with 0 inconsistent slots. Only an env with
+    occlusion (or a target that dies while unseen) can test that flag.
+  * Anything the actor does not read: the last-known-position memory branch
+    (never exercised at 100 % LoS), the weapon-state slots (taken from the C
+    state on purpose — see ``ObsOracleActor``), and every non-enemy block.
+  * That a POLICY can learn from the obs. This says the enemy block carries the
+    geometry needed to aim; it says nothing about scale, normalisation or
+    conditioning of the rest of the vector.
 
 THE ELEVATED-STATUE VARIANT (``--statue-z``)
 --------------------------------------------
@@ -601,15 +621,64 @@ def run_check(episodes: int = 200,
     }
 
 
+def _rz_range(lo, hi) -> str:
+    """``"+lo .. +hi"``, or "n/a" when nothing was sampled. Shared by both rz rows.
+
+    Either endpoint missing means the range is empty (they are filled and
+    cleared together), so a half-populated pair reads "n/a" rather than raising
+    on the format — ``verdict`` renders this detail for hand-built summaries too.
+    """
+    return "n/a" if lo is None or hi is None else f"{lo:+.2f} .. {hi:+.2f}"
+
+
+def _rz_disagrees(res: dict) -> bool:
+    """Does the rz DECODED from enemy slot +2 differ from the one measured in C?
+
+    They are the same physical quantity (eye-to-torso vertical offset) and the
+    obs sample is at most one tick older, which on a flat arena holding a
+    motionless statue is no difference at all. A gap past ``OBS_RZ_TOL`` means
+    the slot is encoded or normalised wrongly — which nothing else in this run
+    would notice, because ``pin_pitch=1`` makes the pitch it feeds inert and the
+    range test never binds (see ``ObsOracleActor``). Vacuously False when either
+    side has no samples.
+
+    PITFALL: the two ranges are drawn from DIFFERENT tick populations — the obs
+    range accumulates only on ticks where the actor engages, the C range on every
+    tick where both agents are alive. Comparing them is exact here only because
+    the statue's height is constant over a round; against a target whose height
+    varies (a jumping or crouching opponent) the two would differ legitimately
+    and this would warn on a correct encoding. Re-scope it to a common tick set
+    before reusing it on such a target.
+    """
+    obs_lo, obs_hi = res.get("obs_rz_min"), res.get("obs_rz_max")
+    c_lo, c_hi = res.get("rz_min"), res.get("rz_max")
+    if any(v is None for v in (obs_lo, obs_hi, c_lo, c_hi)):
+        return False
+    return abs(obs_lo - c_lo) > OBS_RZ_TOL or abs(obs_hi - c_hi) > OBS_RZ_TOL
+
+
 def verdict(res: dict) -> tuple[bool, list[tuple[str, bool, str]]]:
     """(passed, [(name, ok, detail), ...]) — the gate, evaluated on a summary.
 
-    Three checks. The first two are the brief's gate. The third
-    (``shots_stance_blocked == 0``) is trivially true on flat ground and is the
-    entire content of the ``--statue-z`` variant: it says the vertical offset the
-    shots were taken against stayed inside the target's vertical semi-axis, so a
-    kill there is the v1c ellipsoid working and not the offset quietly being
+    Three checks in ground-truth mode. The first two are the brief's gate. The
+    third (``shots_stance_blocked == 0``) is trivially true on flat ground and is
+    the entire content of the ``--statue-z`` variant: it says the vertical offset
+    the shots were taken against stayed inside the target's vertical semi-axis,
+    so a kill there is the v1c ellipsoid working and not the offset quietly being
     ignored.
+
+    ``--obs-only`` adds three more (r1-I1). They existed before as ``<-- WARNING``
+    markers in the report that left the exit code at 0 — so a controller
+    scripting the documented CLI contract ("exit 0 = PASS") read GREEN on exactly
+    the encoding bugs the mode was built to catch. Both mutations that motivated
+    this keep the kill rate at 1.000 and are seen by nothing else: ``EN_DIST``
+    pointed at slot +2 (131 inconsistent slots over 20 episodes), and
+    ``OBS_Z_SCALE`` halved (obs rz +11.22 against a C rz of +22.44).
+
+    Every obs field is read through ``.get``, so the three extra checks are
+    skipped for any summary that is not an obs-only run — a ground-truth summary,
+    which carries the obs keys as None, and a partial dict built by hand in a
+    test both evaluate the ground-truth three and nothing else.
     """
     kill_ok = res["kill_rate"] >= PASS_MIN_KILL_RATE
     ttk_ok = res["ttk_median"] < PASS_MAX_MEDIAN_TTK
@@ -619,6 +688,23 @@ def verdict(res: dict) -> tuple[bool, list[tuple[str, bool, str]]]:
         ("shots_stance_blocked == 0", res["shots_stance_blocked"] == 0,
          str(res["shots_stance_blocked"])),
     ]
+    if res.get("obs_only"):
+        # `or 0` rather than a default: these arrive as None from a summary whose
+        # obs_only flag was set by hand, and None does not compare with int.
+        inconsistent = res.get("obs_inconsistent_slots") or 0
+        blind = res.get("obs_blind_ticks") or 0
+        episodes = res.get("episodes") or 0
+        # The blind-tick bound is `<= episodes`, not `== episodes`: exactly one
+        # blind tick per episode is structural (env.reset returns an all-zero
+        # obs). MORE than that means the hero lost the statue mid-round, which
+        # makes the kill numbers a statement about LoS rather than about the
+        # encoding — the same condition the report has always warned on.
+        checks += [
+            ("obs_inconsistent_slots == 0", inconsistent == 0, str(inconsistent)),
+            (f"|obs_rz - C rz| <= {OBS_RZ_TOL}", not _rz_disagrees(res),
+             _rz_range(res.get("obs_rz_min"), res.get("obs_rz_max"))),
+            (f"obs_blind_ticks <= {episodes}", blind <= episodes, str(blind)),
+        ]
     return all(ok for _, ok, _ in checks), checks
 
 
@@ -655,28 +741,6 @@ def _failure_lines(res: dict) -> list[str]:
     if len(fails) > FAIL_DETAIL_LIMIT:
         lines.append(f"  ... {len(fails) - FAIL_DETAIL_LIMIT} more")
     return lines
-
-
-def _rz_range(lo, hi) -> str:
-    """``"+lo .. +hi"``, or "n/a" when nothing was sampled. Shared by both rz rows."""
-    return "n/a" if lo is None else f"{lo:+.2f} .. {hi:+.2f}"
-
-
-def _rz_disagrees(res: dict) -> bool:
-    """Does the rz DECODED from enemy slot +2 differ from the one measured in C?
-
-    They are the same physical quantity (eye-to-torso vertical offset) and the
-    obs sample is at most one tick older, which on a flat arena holding a
-    motionless statue is no difference at all. A gap past ``OBS_RZ_TOL`` means
-    the slot is encoded or normalised wrongly — which nothing else in this run
-    would notice, because ``pin_pitch=1`` makes the pitch it feeds inert and the
-    range test never binds (see ``ObsOracleActor``). Vacuously False when either
-    side has no samples.
-    """
-    if res["obs_rz_min"] is None or res["rz_min"] is None:
-        return False
-    return (abs(res["obs_rz_min"] - res["rz_min"]) > OBS_RZ_TOL
-            or abs(res["obs_rz_max"] - res["rz_max"]) > OBS_RZ_TOL)
 
 
 def format_summary(res: dict) -> str:

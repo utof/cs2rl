@@ -115,8 +115,10 @@ def test_obs_only_oracle_kills_the_statue_it_can_only_see_in_the_obs():
     The actor's ONLY source of enemy geometry is the hero's observation row, so
     this failing while the ground-truth mode passes means the enemy block of
     ``cs2_observations.h`` is wrong (rotated by the wrong sign, normalised by
-    the wrong constant, gated on the wrong flag) — a bug that leaves the env
-    solvable by actions and unlearnable by a policy.
+    the wrong constant) — a bug that leaves the env solvable by actions and
+    unlearnable by a policy. NOT the visibility gate: ``can_see`` and ``alive``
+    are equal on every tick of this env, so reading the wrong one of the two is
+    undetectable here (see the script's "DOES NOT CERTIFY" list).
 
     ``obs_blind_ticks == episodes`` is exact, not a bound: ``env.reset``
     returns an all-zero obs, so the hero is blind on tick 1 of every round and
@@ -197,6 +199,123 @@ def test_verdict_is_the_conjunction_of_all_three_checks():
     # Boundaries are inclusive/exclusive exactly as the brief words them.
     assert verdict({**ok, "kill_rate": PASS_MIN_KILL_RATE})[0]
     assert verdict({**ok, "ttk_median": PASS_MAX_MEDIAN_TTK - 0.5})[0]
+
+
+def test_obs_only_verdict_gates_on_each_obs_tripwire():
+    """r1-I1: in ``--obs-only`` the three obs diagnostics ARE gate checks.
+
+    They used to be report-only ``<-- WARNING`` markers, so the script printed
+    the bug and still exited 0 — and the documented CLI contract is "exit 0 =
+    PASS", which is what a controller scripts against. Pure-function here; the
+    two mutations that motivated the fix are driven end to end below.
+    """
+    from oracle_statue_check import OBS_RZ_TOL, verdict
+    ok = {
+        "kill_rate": 1.0,
+        "ttk_median": 11.0,
+        "shots_stance_blocked": 0,
+        "obs_only": True,
+        "episodes": 20,
+        "obs_inconsistent_slots": 0,
+        "obs_blind_ticks": 20,
+        "obs_rz_min": 22.44,
+        "obs_rz_max": 22.44,
+        "rz_min": 22.44,
+        "rz_max": 22.44,
+    }
+    passed, checks = verdict(ok)
+    assert passed and len(checks) == 6, checks
+    # EN_DIST pointed one slot over: kills stay 20/20, only this check moves.
+    assert not verdict({**ok, "obs_inconsistent_slots": 131})[0]
+    # OBS_Z_SCALE halved: the decoded rz is half the measured one.
+    assert not verdict({**ok, "obs_rz_min": 11.22, "obs_rz_max": 11.22})[0]
+    assert not verdict({**ok, "obs_rz_max": 22.44 + 2 * OBS_RZ_TOL})[0]
+    # ...but the tolerance is a real band, not a float-equality test.
+    assert verdict({**ok, "obs_rz_min": 22.44 + 0.9 * OBS_RZ_TOL})[0]
+    # Sight lost mid-round; one blind tick per episode is the structural floor.
+    assert not verdict({**ok, "obs_blind_ticks": 21})[0]
+    assert verdict({**ok, "obs_blind_ticks": 19})[0]
+
+
+def test_ground_truth_verdict_ignores_the_obs_diagnostics():
+    """The obs checks must not leak into the default mode's verdict.
+
+    Both dict shapes have to work: the partial one a unit test hands the pure
+    function (no obs keys at all), and the real ground-truth summary, which
+    carries every obs key as None because that actor never read a slot and so
+    cannot claim "0 inconsistent". Neither may grow a fourth check.
+    """
+    from oracle_statue_check import verdict
+    ok = {"kill_rate": 1.0, "ttk_median": 10.0, "shots_stance_blocked": 0}
+    passed, checks = verdict(ok)
+    assert passed and len(checks) == 3, checks
+    full = {
+        **ok,
+        "obs_only": False,
+        "episodes": 20,
+        "obs_inconsistent_slots": None,
+        "obs_blind_ticks": None,
+        "obs_rz_min": None,
+        "obs_rz_max": None,
+        "rz_min": 0.0,
+        "rz_max": 0.0,
+    }
+    passed, checks = verdict(full)
+    assert passed and len(checks) == 3, checks
+    # Values that would fail the gate in obs-only mode are inert here.
+    poisoned = {
+        **full,
+        "obs_inconsistent_slots": 999,
+        "obs_blind_ticks": 10**6,
+        "obs_rz_min": -50.0,
+        "obs_rz_max": -50.0,
+    }
+    assert verdict(poisoned)[0], poisoned
+
+
+def test_a_mutated_enemy_distance_slot_fails_the_obs_only_exit_code(monkeypatch):
+    """End-to-end teeth for r1-I1, mutation 1: ``EN_DIST`` pointed at slot +2.
+
+    Reading the z-delta as the distance is invisible to every kill-based check —
+    ``laser_range`` 3000 never binds on a 360 u arena, so the range test passes
+    on any garbage distance and the run still kills 2/2. Before the fix this
+    printed "obs slot inconsistency 20  <-- WARNING" and exited 0.
+    """
+    import oracle_statue_check as mod
+    argv = ["--episodes", "2", "--seed", "0", "--obs-only"]
+    assert mod.main(argv) == 0
+    monkeypatch.setattr(mod, "EN_DIST", mod.EN_DZ)
+    res = mod.run_check(episodes=2, seed=0, obs_only=True)
+    # The mutation must stay invisible to the kill checks, or this test would
+    # pass for the wrong reason.
+    assert res["kill_rate"] == 1.0 and res["obs_inconsistent_slots"] > 0, res
+    passed, checks = mod.verdict(res)
+    failed = [n for n, ok, _ in checks if not ok]
+    assert not passed and failed == ["obs_inconsistent_slots == 0"], checks
+    assert mod.main(argv) == 1
+
+
+def test_a_mutated_z_normaliser_fails_the_obs_only_exit_code(monkeypatch):
+    """End-to-end teeth for r1-I1, mutation 2: ``OBS_Z_SCALE`` halved.
+
+    ``pin_pitch=1`` makes the decoded height inert in the action path, so this
+    one does not even move the slot-consistency counter (which never touches
+    +2): the rz cross-check against the C state is the only thing in the run
+    that sees it. Needs the elevated statue — at rz 0 both scalings decode 0.
+    """
+    import oracle_statue_check as mod
+    argv = ["--episodes", "2", "--seed", "0", "--statue-z", str(CROUCH_HEIGHT_OFFSET), "--obs-only"]
+    assert mod.main(argv) == 0
+    monkeypatch.setattr(mod, "OBS_Z_SCALE", mod.OBS_Z_SCALE / 2)
+    res = mod.run_check(episodes=2, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, obs_only=True)
+    expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
+    assert res["kill_rate"] == 1.0 and res["obs_inconsistent_slots"] == 0, res
+    assert res["rz_min"] == pytest.approx(expect_rz, abs=0.05), res
+    assert res["obs_rz_min"] == pytest.approx(expect_rz / 2, abs=0.05), res
+    passed, checks = mod.verdict(res)
+    failed = [n for n, ok, _ in checks if not ok]
+    assert not passed and failed == ["|obs_rz - C rz| <= 0.5"], checks
+    assert mod.main(argv) == 1
 
 
 def test_main_exit_code_follows_the_verdict(capsys):
