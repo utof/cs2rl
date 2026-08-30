@@ -21,10 +21,18 @@
 # Per-seed state machine (all decisions are on files, so re-running the script
 # after a crash of the script itself is safe):
 #   <dir>/DONE                          -> finished: skip.  Written by THIS script
-#                                          after train.py exits 0. NOT dust2_policy.pt:
-#                                          that file is rewritten every --save_every_sec,
-#                                          so a seed that died after its first periodic
-#                                          save would look "finished" and never resume.
+#                                          after train.py exits 0 and holds the
+#                                          PARTICIPATING --timesteps budget that run
+#                                          used. If the budget now requested (last
+#                                          --timesteps in the argv, i.e. RUNG1_EXTRA
+#                                          wins) is LARGER, the seed is EXTENDED via
+#                                          --resume-run instead of skipped (budget keys
+#                                          are allowlisted on resume). An empty/legacy
+#                                          DONE skips unconditionally — delete it to
+#                                          extend. NOT dust2_policy.pt: that file is
+#                                          rewritten every --save_every_sec, so a seed
+#                                          that died after its first periodic save
+#                                          would look "finished" and never resume.
 #   <dir>/<label>/trainer_state.pt      -> a full-state checkpoint set exists
 #                                          (what resolve_resume_run keys on): resume.
 #   neither                             -> fresh start; if that dies before its first
@@ -35,6 +43,11 @@
 # re-sent with identical values (allowlisted — harmless).
 # One dead seed must not abort the sweep: failures are collected and reported
 # at the end (exit 1).
+# The retry counter is PER INVOCATION: a seed that exhausted MAX_RETRIES leaves
+# no DONE, so re-running the script grants it MAX_RETRIES more resumes.
+# Every train.py leg's stdout+stderr is appended to <dir>/train.log (tee'd, so
+# it still streams to the console) — the crash traceback that justified a
+# retry survives a 7-seed sweep.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -42,8 +55,15 @@ OUT_ROOT=$(realpath -m "${1:-outputs/checkpoints/rung1}")   # absolute BEFORE th
 MAX_RETRIES=${2:-5}
 cd "$REPO"                                                  # uv run needs the project root
 
-# shellcheck disable=SC2206  # word-split on purpose (see header)
-TRAIN=(${RUNG1_TRAIN_CMD:-env UV_NO_SYNC=1 uv run python "$REPO/src/train.py"})
+# Default command built as an explicit array (quotes inside an unquoted
+# ${VAR:-default} expansion do NOT survive word-splitting). The env override is
+# word-split on whitespace on purpose (see header) — no spaces in paths.
+if [[ -n "${RUNG1_TRAIN_CMD:-}" ]]; then
+  # shellcheck disable=SC2206
+  TRAIN=($RUNG1_TRAIN_CMD)
+else
+  TRAIN=(env UV_NO_SYNC=1 uv run python "$REPO/src/train.py")
+fi
 SEEDS=${RUNG1_SEEDS-0 1 2 3 4}
 NEG_SEEDS=${RUNG1_NEG_SEEDS-0 1}
 
@@ -60,20 +80,54 @@ COMMON=(--train --map arena-duel --n-active-per-team 1 --round-time-ticks 160
         --reward-inaction 0.0005 --pbrs-hp-weight 0.002 --pbrs-alive-weight 0.3
         --pbrs-site-weight 0 --pbrs-bomb-progress-weight 0 --pbrs-nav-weight-t 0 --pbrs-nav-weight-ct 0)
 
+last_flag_value() {   # $1 = flag, rest = argv; prints the LAST value (argparse semantics)
+  local flag=$1 v=""; shift
+  while (( $# > 1 )); do
+    if [[ $1 == "$flag" ]]; then v=$2; fi
+    shift
+  done
+  printf '%s' "$v"
+}
+
+run_train() {   # $1 = log file, rest = train.py argv. Tees output; returns train.py's status.
+  local log=$1; shift
+  # PITFALL: under `pipefail` the pipeline's status is tee's unless we read
+  # PIPESTATUS[0] right after it. Safe under `set -e` only because every caller
+  # is an `if` condition (errexit is suspended inside such calls).
+  "${TRAIN[@]}" "$@" 2>&1 | tee -a "$log"
+  return "${PIPESTATUS[0]}"
+}
+
 run_seed() {   # $1 = label, $2 = seed, rest = arm-specific flags
   local label=$1 seed=$2; shift 2
   local dir="$OUT_ROOT/$label"
+  local log="$dir/train.log"
   local attempt=0
   mkdir -p "$dir"
-  if [[ -f "$dir/DONE" ]]; then echo "[run_rung1] $label already finished"; return 0; fi
   # Original argv, assembled ONCE and reused verbatim on every resume leg.
   # RUNG1_EXTRA goes last so its repeated options win in argparse.
   # shellcheck disable=SC2206
   local argv=("${COMMON[@]}" "$@" --seed "$seed" --checkpoint-dir "$dir" --run-id "$label"
               ${RUNG1_EXTRA:-})
+  local budget; budget=$(last_flag_value --timesteps "${argv[@]}")
+  if [[ -f "$dir/DONE" ]]; then
+    local done_budget; done_budget=$(tr -d '[:space:]' < "$dir/DONE")
+    if [[ -z "$done_budget" ]]; then
+      echo "[run_rung1] $label already finished (DONE has no budget recorded; delete it to extend)"
+      return 0
+    fi
+    if (( done_budget >= budget )); then
+      echo "[run_rung1] $label already finished at --timesteps $done_budget (requested $budget)"
+      return 0
+    fi
+    echo "[run_rung1] $label: extending --timesteps $done_budget -> $budget"
+    if [[ ! -f "$dir/$label/trainer_state.pt" ]]; then
+      echo "[run_rung1] $label has DONE but no checkpoint set — cannot extend" >&2; return 1
+    fi
+  fi
   if [[ ! -f "$dir/$label/trainer_state.pt" ]]; then
     echo "[run_rung1] $label: fresh start"
-    if "${TRAIN[@]}" "${argv[@]}"; then touch "$dir/DONE"; return 0; fi
+    if run_train "$log" "${argv[@]}"; then echo "$budget" > "$dir/DONE"; return 0; fi
     if [[ ! -f "$dir/$label/trainer_state.pt" ]]; then
       echo "[run_rung1] $label died before its first checkpoint set — not resumable" >&2; return 1
     fi
@@ -81,7 +135,7 @@ run_seed() {   # $1 = label, $2 = seed, rest = arm-specific flags
   while (( attempt < MAX_RETRIES )); do
     attempt=$((attempt + 1))
     echo "[run_rung1] $label: resume attempt $attempt"
-    if "${TRAIN[@]}" "${argv[@]}" --resume-run "$dir"; then touch "$dir/DONE"; return 0; fi
+    if run_train "$log" "${argv[@]}" --resume-run "$dir"; then echo "$budget" > "$dir/DONE"; return 0; fi
   done
   echo "[run_rung1] $label FAILED after $MAX_RETRIES resumes" >&2; return 1
 }

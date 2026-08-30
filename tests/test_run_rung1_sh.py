@@ -19,7 +19,12 @@ PITFALLS pinned here:
   - the retry leg must re-emit --map, --seed and every other non-budget flag
     (Task 8/12 rulings: `env`, `seed`, `pin_pitch`, gamma keys are NOT in
     RESUME_CONFIG_ALLOWLIST — a bare `--resume-run` would be refused);
-  - RUNG1_EXTRA is appended LAST so its repeated options win in argparse.
+  - RUNG1_EXTRA is appended LAST so its repeated options win in argparse;
+  - DONE records the participating --timesteps budget: a re-run with a LARGER
+    budget extends the seed (resume), an equal/larger recorded budget skips,
+    an empty (legacy) DONE skips;
+  - every train.py leg's stdout+stderr is tee'd to <dir>/train.log and a
+    non-zero exit still triggers the retry (pipefail / PIPESTATUS handling).
 """
 import json
 import os
@@ -48,6 +53,8 @@ FAKE = textwrap.dedent("""
         fh.write(json.dumps(argv) + "\\n")
     n = sum(1 for _ in (d / "argv.jsonl").open())
     mode = os.environ["FAKE_MODE"]
+    print(f"fake-train stdout call={n}", flush=True)           # both streams must land in train.log
+    print(f"fake-train stderr call={n}", file=sys.stderr, flush=True)
     resuming = "--resume-run" in argv
     def write_ckpt():
         (d / rid).mkdir(exist_ok=True)
@@ -181,13 +188,75 @@ def test_rung1_extra_is_appended_last_so_it_overrides(fake, tmp_path):
 
 
 def test_done_marker_skips_seed(fake, tmp_path):
+    """Legacy DONE (no budget recorded) skips unconditionally."""
     out = tmp_path / "root"
     (out / "rung1-s0").mkdir(parents=True)
     (out / "rung1-s0" / "DONE").write_text("")
-    r = run_script(fake, out, "ok")
+    r = run_script(fake, out, "ok", extra="--timesteps 10240")
     assert r.returncode == 0, r.stderr
     assert argvs(out, "rung1-s0") == []
-    assert "already finished" in r.stdout
+    assert "already finished" in r.stdout and "no budget recorded" in r.stdout
+
+
+def test_done_records_budget(fake, tmp_path):
+    out = tmp_path / "root"
+    r = run_script(fake, out, "ok", extra="--timesteps 10240 --num_envs 16")
+    assert r.returncode == 0, r.stderr
+    assert (out / "rung1-s0" / "DONE").read_text().strip() == "10240"  # LAST --timesteps wins
+    r = run_script(fake, out, "ok")                                    # default 10000000 > 10240
+    assert r.returncode == 0, r.stderr
+    assert (out / "rung1-s0" / "DONE").read_text().strip() == "10000000"
+
+
+def _finished_dir(out, label, budget):
+    d = out / label
+    (d / label).mkdir(parents=True)
+    (d / label / "model_000010.pt").write_bytes(b"m")
+    (d / label / "trainer_state.pt").write_bytes(b"t")
+    (d / "DONE").write_text(f"{budget}\n")
+    return d
+
+
+def test_done_with_smaller_budget_extends_via_resume(fake, tmp_path):
+    out = tmp_path / "root"
+    d = _finished_dir(out, "rung1-s0", 4096)
+    r = run_script(fake, out, "ok", extra="--timesteps 10240")
+    assert r.returncode == 0, r.stderr
+    (a, ) = argvs(out, "rung1-s0")
+    assert _val(a, "--resume-run") == str(d) and _val(a, "--timesteps") == "10240"
+    assert "extending --timesteps 4096 -> 10240" in r.stdout
+    assert (d / "DONE").read_text().strip() == "10240"
+
+
+@pytest.mark.parametrize("recorded", [10240, 20480])
+def test_done_with_equal_or_larger_budget_skips(fake, tmp_path, recorded):
+    out = tmp_path / "root"
+    _finished_dir(out, "rung1-s0", recorded)
+    r = run_script(fake, out, "ok", extra="--timesteps 10240")
+    assert r.returncode == 0, r.stderr
+    assert argvs(out, "rung1-s0") == []
+    assert f"already finished at --timesteps {recorded}" in r.stdout
+
+
+def test_done_with_smaller_budget_but_no_checkpoint_set_fails(fake, tmp_path):
+    out = tmp_path / "root"
+    (out / "rung1-s0").mkdir(parents=True)
+    (out / "rung1-s0" / "DONE").write_text("4096")
+    r = run_script(fake, out, "ok", extra="--timesteps 10240")
+    assert r.returncode == 1
+    assert argvs(out, "rung1-s0") == [] and "cannot extend" in r.stderr
+
+
+def test_train_log_captures_both_streams_and_nonzero_exit_still_retries(fake, tmp_path):
+    out = tmp_path / "root"
+    r = run_script(fake, out, "crash_after_ckpt")
+    assert r.returncode == 0, r.stderr
+    log = (out / "rung1-s0" / "train.log").read_text()
+    # fresh leg (call=1, exit 1) AND the resume leg (call=2) are both appended, both streams.
+    assert "fake-train stdout call=1" in log and "fake-train stderr call=1" in log
+    assert "fake-train stdout call=2" in log and "fake-train stderr call=2" in log
+    assert "resume attempt 1" in r.stdout and "fake-train stdout call=2" in r.stdout # still streams
+    assert len(argvs(out, "rung1-s0")) == 2
 
 
 def test_prepopulated_checkpoint_set_without_done_is_resumed_not_skipped(fake, tmp_path):
