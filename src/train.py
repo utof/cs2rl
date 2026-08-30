@@ -79,6 +79,30 @@ TEAM_SIZE = 5
 LOG_STD_INIT = math.log(0.1)
 LOG_STD_MIN = math.log(0.01)
 LOG_STD_MAX = math.log(0.5)
+
+
+def validate_aim_log_std_max(aim_log_std_max) -> float:
+    """Resolve + range-check the run's aim σ cap (R0-E.3, #131).
+
+    Returns the float cap (LOG_STD_MAX when None). Raises ValueError unless
+    LOG_STD_MIN < cap <= LOG_STD_MAX, i.e. σ in (0.01, 0.5].
+
+    WHY a separate torch-free helper: make_policy() only runs after the env
+    and torch are up, so a bad --aim-log-std-max used to surface ~30 s into a
+    launch AND slip past `--dump-config` (the Modal/run_rung1 fingerprint
+    step). main() now calls this right after parse_args(), above the
+    --dump-config exit, so the fingerprint catches it.
+    PITFALL (2026-08-30, rung1 sweep): the bound is INCLUSIVE at LOG_STD_MAX =
+    log 0.5 = -0.693147..., so a hand-rounded "-0.6931" is > the cap by 5e-5
+    and is REJECTED — pass -0.69315 (or omit the flag) for "σ cap 0.5".
+    """
+    cap = float(LOG_STD_MAX if aim_log_std_max is None else aim_log_std_max)
+    if not (LOG_STD_MIN < cap <= LOG_STD_MAX):
+        raise ValueError(f"aim_log_std_max={cap} must lie in ({LOG_STD_MIN}, {LOG_STD_MAX}] "
+                         f"(σ in (0.01, 0.5])")
+    return cap
+
+
 # gh#91: σ to widen a BC-frozen aim head to at PPO resume. BC detaches
 # aim_log_std (spec D-6) so bc_warmstart.pt carries σ=0.1 while fitting
 # obs-dependent |μ| up to ~0.63 rad — one lr=3e-4 Adam step then moves μ a
@@ -2046,10 +2070,7 @@ def build_policy(vecenv,
     obs_dim = (obs_dim_override
                if obs_dim_override is not None else driver_env.single_observation_space.shape[0])
     hidden = 256
-    _cap = float(LOG_STD_MAX if aim_log_std_max is None else aim_log_std_max)
-    if not (LOG_STD_MIN < _cap <= LOG_STD_MAX):
-        raise ValueError(f"aim_log_std_max={_cap} must lie in ({LOG_STD_MIN}, {LOG_STD_MAX}] "
-                         f"(σ in (0.01, 0.5])")
+    _cap = validate_aim_log_std_max(aim_log_std_max)
 
     class Dust2Policy(nn.Module):
 
@@ -6439,6 +6460,10 @@ if __name__ == "__main__":
     # Every mode (record/eval too) derives env seeds from --seed; fail here,
     # not deep in a mode.
     env_seed_base(args.seed)
+    # Same idea for the aim σ cap: range-check it here (torch-free) so
+    # --dump-config / the sweep fingerprint reject a bad --aim-log-std-max
+    # instead of make_policy() 30 s into every retry.
+    validate_aim_log_std_max(args.aim_log_std_max)
 
     # ── R0-H: map name → MapData → pin_pitch, ABOVE the --dump-config exit ──
     # The Modal runner fingerprints every launch from --dump-config, so the

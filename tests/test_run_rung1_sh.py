@@ -173,7 +173,7 @@ def test_negative_control_flags(fake, tmp_path):
     assert r.returncode == 0, r.stderr
     assert not (out / "rung1-s1").exists()
     (a, ) = argvs(out, "rung1-neg-s1")
-    assert _val(a, "--aim-entropy-bonus") == "on" and _val(a, "--aim-log-std-max") == "-0.6931"
+    assert _val(a, "--aim-entropy-bonus") == "on" and _val(a, "--aim-log-std-max") == "-0.69315"
     assert _val(a, "--seed") == "1" and _val(a, "--run-id") == "rung1-neg-s1"
     assert "--no-dead-run-abort" in a and _val(a, "--crouch-enabled") == "0"
 
@@ -380,3 +380,57 @@ def test_common_argv_is_accepted_by_train_py_dump_config(tmp_path):
     assert cfg["reward_kill"] == 0.3
     assert cfg["pbrs_site_weight"] == 0.0
     assert cfg["checkpoint_interval"] == cfg["eval_interval"] == 10
+
+
+@pytest.mark.parametrize("arm", ["rung1-s", "rung1-neg-s"])
+def test_arm_argv_is_accepted_by_train_py_dump_config(tmp_path, arm):
+    """Sweep-day regression (2026-08-30): the neg-control leg passed
+    --aim-log-std-max -0.6931, which is ABOVE log 0.5 by 5e-5, so train.py
+    rejected it in make_policy() — 30 s into every retry, AFTER all 5 treatment
+    seeds had run, and invisible to the COMMON-only test above. Parse each
+    arm's `run_seed "<arm>$s" "$s" <flags> \\` line out of the script and run
+    the REAL train.py --dump-config with COMMON + those flags; the σ-cap check
+    now lives above the --dump-config exit, so a bad literal fails here."""
+    import re
+    import shlex
+
+    text = SCRIPT.read_text()
+    common = shlex.split(re.search(r"^COMMON=\((.*?)\)\s*$", text, re.S | re.M).group(1))[1:]
+    m = re.search(r'run_seed "' + re.escape(arm) + r'\$s" "\$s" (.*?) \\$', text, re.M)
+    assert m, f"run_seed line for {arm} not found"
+    arm_flags = shlex.split(m.group(1))
+    assert "--aim-log-std-max" in arm_flags
+
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    r = subprocess.run([
+        sys.executable,
+        str(REPO_ROOT / "src" / "train.py"), "--dump-config", *common, *arm_flags, "--seed", "0",
+        "--checkpoint-dir",
+        str(ckpt)
+    ],
+                       capture_output=True,
+                       text=True,
+                       timeout=300,
+                       cwd=REPO_ROOT)
+    assert r.returncode == 0, f"stdout:\n{r.stdout[-2000:]}\nstderr:\n{r.stderr[-2000:]}"
+    cfg = json.loads((ckpt / "config.json").read_text())
+    assert cfg["aim_log_std_max"] == float(arm_flags[arm_flags.index("--aim-log-std-max") + 1])
+
+
+def test_dump_config_rejects_out_of_range_aim_log_std_max(tmp_path):
+    """The literal that burned the sweep must now die at --dump-config."""
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    r = subprocess.run([
+        sys.executable,
+        str(REPO_ROOT / "src" / "train.py"), "--dump-config", "--map", "arena-duel",
+        "--aim-log-std-max", "-0.6931", "--seed", "0", "--checkpoint-dir",
+        str(ckpt)
+    ],
+                       capture_output=True,
+                       text=True,
+                       timeout=300,
+                       cwd=REPO_ROOT)
+    assert r.returncode != 0
+    assert "aim_log_std_max" in r.stderr and not (ckpt / "config.json").exists()

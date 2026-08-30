@@ -150,8 +150,11 @@ for s in $SEEDS; do
   run_seed "rung1-s$s" "$s" --aim-entropy-bonus off --aim-log-std-max -2.9957 \
     || failed+=("rung1-s$s")                    # one dead seed must not abort the sweep (set -e)
 done
-for s in $NEG_SEEDS; do   # negative control (spec §4): bonus on, sigma cap log 0.5
-  run_seed "rung1-neg-s$s" "$s" --aim-entropy-bonus on --aim-log-std-max -0.6931 \
+# Negative control (spec §4): bonus on, sigma cap log 0.5. PITFALL: train.py's
+# bound is INCLUSIVE at log 0.5 = -0.693147..., so the rounded "-0.6931" is
+# ABOVE the cap and rejected (burned 2026-08-30) — -0.69315 sits just inside.
+for s in $NEG_SEEDS; do
+  run_seed "rung1-neg-s$s" "$s" --aim-entropy-bonus on --aim-log-std-max -0.69315 \
     || failed+=("rung1-neg-s$s")
 done
 if (( ${#failed[@]} )); then echo "[run_rung1] FAILED: ${failed[*]}" >&2; exit 1; fi
