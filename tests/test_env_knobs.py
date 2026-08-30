@@ -167,7 +167,9 @@ def test_cli_flags_declared_default_none():
     for flag, dest, typ in (("--round-time-ticks", "round_time_ticks", "int"),
                             ("--laser-range", "laser_range", "float"), ("--max-turn-speed",
                                                                         "max_turn_speed", "float")):
-        m = re.search(rf'add_argument\("{flag}",(.*?)\)\n', src, re.S)
+        # yapf may put the flag on its own line after `add_argument(`; allow
+        # any whitespace between the paren and the flag literal.
+        m = re.search(rf'add_argument\(\s*"{flag}",(.*?)\)\n', src, re.S)
         assert m, flag
         body = m.group(1)
         assert f"type={typ}" in body and "default=None" in body and f'dest="{dest}"' in body, flag
