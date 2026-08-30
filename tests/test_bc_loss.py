@@ -485,3 +485,30 @@ def test_load_demos_dedupes_byte_identical_episodes(tmp_path):
     kept_all = train_bc.load_demos(tmp_path, dedupe=False, verbose=False)
     assert kept_all.n_episodes == 3 and kept_all.n_duplicates == 0
     assert len(kept_all) == 3 * T
+
+
+def test_bc_loss_pinned_policy_excludes_pitch_dim(policy):
+    """R0-E.2 (#131): a policy built with pin_pitch=True carries
+    aim_dim_mask=[1,0]; bc_loss must forward it to _hybrid_sample_logits so
+    nll_c / entropy_c cover the yaw dim ONLY (the env ignores cont[:,1], so
+    fitting demo pitch would be gradient on a dead dimension)."""
+    p = copy.deepcopy(policy)
+    p.aim_dim_mask.copy_(torch.tensor([1.0, 0.0]))
+    obs_t, disc_t, cont_t, valid_t = _fake_batch(seed=5)
+    lam = 1e-3
+    loss, stats = train_bc.bc_loss(p, obs_t, disc_t, cont_t, valid=valid_t, entropy_coef=lam)
+
+    flat_cont = cont_t.reshape(-1, cont_t.shape[-1])
+    with torch.no_grad():
+        _logits, mu_aim, log_std, _v = p(obs_t, {})
+        sigma = torch.exp(log_std).expand_as(mu_aim)
+        diff = (flat_cont - mu_aim) / sigma
+        lp_c_dim = -0.5 * diff * diff - torch.log(sigma) - 0.5 * math.log(2 * math.pi)
+        h_c_dim = 0.5 + 0.5 * math.log(2 * math.pi) + torch.log(sigma)
+    lp_d, _lp_c_full, h_d, _h_c_full, w = _hand_rolled(p, obs_t, disc_t, cont_t, valid_t)
+    mean = lambda x: (x * w).sum() / w.sum()           # noqa: E731
+    expected = -(mean(lp_d) + mean(lp_c_dim[:, 0])) - lam * (mean(h_d) + mean(h_c_dim[:, 0]))
+    assert loss.item() == pytest.approx(expected.item(), rel=1e-5, abs=1e-6)
+    assert stats["nll_c"] == pytest.approx(-mean(lp_c_dim[:, 0]).item(), rel=1e-5)
+                                                       # and it is genuinely different from the unpinned value (dim 1 dropped)
+    assert stats["nll_c"] != pytest.approx(-mean(_lp_c_full).item(), rel=1e-3)

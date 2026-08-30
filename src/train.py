@@ -91,7 +91,7 @@ AIM_LOG_STD_RESUME_INIT = math.log(0.3)
 _LOG_2PI = math.log(2.0 * math.pi)
 
 
-def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6):
+def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6, cap=None):
     """gh#91: widen a BC-frozen aim head before PPO resumes from it.
 
     WHAT: if ``state_dict`` carries an ``aim_log_std`` tensor still sitting
@@ -119,6 +119,11 @@ def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6):
       * Batch 7: the matcher covers aim_log_std, aim_log_std_t and
         aim_log_std_ct. The legacy→split warm conversion must still call this
         FIRST, on the legacy dict — see convert_legacy_state_dict_to_split.
+      * R0-E.3 (#131): ``cap`` is the run's --aim-log-std-max. The fill value
+        is min(AIM_LOG_STD_RESUME_INIT, cap) — widening to log(0.3) under a
+        log(0.05) cap would be clamped away in every forward anyway, but the
+        stored parameter would sit outside the band and the σ gradient would
+        be dead (clamp has zero gradient outside its range). None = no cap.
     """
     import re as _re
 
@@ -134,7 +139,9 @@ def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6):
         # the LEGACY dict, before convert_legacy_state_dict_to_split.
         if _re.search(r"aim_log_std(_t|_ct)?$", key) and _torch.allclose(
                 val, _torch.full_like(val, LOG_STD_INIT), atol=atol):
-            state_dict[key] = _torch.full_like(val, AIM_LOG_STD_RESUME_INIT)
+            fill = AIM_LOG_STD_RESUME_INIT if cap is None else min(AIM_LOG_STD_RESUME_INIT,
+                                                                   float(cap))
+            state_dict[key] = _torch.full_like(val, fill)
             changed = True
     return changed
 
@@ -1055,6 +1062,16 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     n_active = knobs["n_active_per_team"]
     assert 1 <= n_active <= TEAM_SIZE, n_active
     raw_timesteps = args.timesteps * TEAM_SIZE // n_active
+    # R0-E.3/4 (#131): aim-head knobs. CLI gives "on"/"off" for the entropy
+    # bonus (argparse choices); the test harness passes a bool — accept both so
+    # neither caller has to know the other's spelling. None cap ⇒ LOG_STD_MAX,
+    # so config.json always records the EFFECTIVE cap (provenance), never null.
+    # None of these are in RESUME_CONFIG_ALLOWLIST on purpose: a resume with a
+    # changed aim knob is a different experiment and must be refused.
+    _aeb = getattr(args, "aim_entropy_bonus", "on")
+    aim_entropy_bonus = _aeb if isinstance(_aeb, bool) else (_aeb == "on")
+    _cap = getattr(args, "aim_log_std_max", None)
+    aim_log_std_max = float(LOG_STD_MAX if _cap is None else _cap)
 
     cfg = {
                                                                         # Core PPO
@@ -1066,6 +1083,8 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "n_active_per_team": n_active,
         "pin_pitch": knobs["pin_pitch"],
         "crouch_enabled": knobs["crouch_enabled"],
+        "aim_entropy_bonus": aim_entropy_bonus,
+        "aim_log_std_max": aim_log_std_max,
         "batch_size": batch_size,
         "bptt_horizon": bptt_horizon,
         "minibatch_size": 8192,
@@ -1328,7 +1347,14 @@ def make_puffer_env(team_spirit=None,
     )
 
 
-def load_policy_from_checkpoint(checkpoint_path, device):
+def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, pin_pitch=False):
+    """Rebuild a policy from a bare state_dict checkpoint (eval / record / probe).
+
+    R0-E (#131): ``aim_log_std_max`` / ``pin_pitch`` are RUN properties, not
+    checkpoint state (non-persistent buffers on the policy), so the caller
+    must pass the run's values — a checkpoint cannot tell you whether its
+    run pinned pitch. Defaults reproduce the pre-R0-E policy.
+    """
     import torch
 
     checkpoint_path = Path(checkpoint_path)
@@ -1374,7 +1400,9 @@ def load_policy_from_checkpoint(checkpoint_path, device):
                               device,
                               obs_dim_override=ckpt_obs_dim,
                               tct_split_heads=state_dict_is_split(state_dict),
-                              tct_split_trunk=state_dict_is_trunk_split(state_dict))
+                              tct_split_trunk=state_dict_is_trunk_split(state_dict),
+                              aim_log_std_max=aim_log_std_max,
+                              pin_pitch=pin_pitch)
     finally:
         policy_env.close()
 
@@ -1744,7 +1772,9 @@ def env_knobs_from_args(args) -> dict:
     """
     return {
         "n_active_per_team": int(getattr(args, "n_active_per_team", TEAM_SIZE)),
-        "pin_pitch": int(getattr(args, "pin_pitch", 0)),
+                                                                                 # R0-E.2: `or 0` — args.pin_pitch is None on the CLI until train()
+                                                                                 # resolves it from map flatness (see the pin_pitch block in train()).
+        "pin_pitch": int(getattr(args, "pin_pitch", 0) or 0),
         "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
     }
 
@@ -1869,8 +1899,19 @@ def build_policy(vecenv,
                  device,
                  obs_dim_override=None,
                  tct_split_heads=False,
-                 tct_split_trunk=False):
+                 tct_split_trunk=False,
+                 aim_log_std_max=None,
+                 pin_pitch=False):
     """Build the Dust2 recurrent policy.
+
+    aim_log_std_max / pin_pitch (R0-E.3 / R0-E.2, #131): per-RUN aim-head
+    properties. The cap replaces LOG_STD_MAX at every σ clamp site; pin_pitch
+    sets ``policy.aim_dim_mask`` to [1, 0] so the pitch dim drops out of
+    log_prob_c / entropy_c. Both live as NON-persistent buffers/attrs so old
+    checkpoints still load and a checkpoint never carries them — every loader
+    (SelfPlayManager.load_past_policy, load_policy_from_checkpoint) must pass
+    the run's values explicitly. Raises ValueError if the cap leaves the
+    (LOG_STD_MIN, LOG_STD_MAX] band.
 
     tct_split_heads (Batch 7, spec 2026-08-13): when True the policy-head
     group — the 7 discrete action_heads, the aim_mu projection and the
@@ -1900,6 +1941,10 @@ def build_policy(vecenv,
     obs_dim = (obs_dim_override
                if obs_dim_override is not None else driver_env.single_observation_space.shape[0])
     hidden = 256
+    _cap = float(LOG_STD_MAX if aim_log_std_max is None else aim_log_std_max)
+    if not (LOG_STD_MIN < _cap <= LOG_STD_MAX):
+        raise ValueError(f"aim_log_std_max={_cap} must lie in ({LOG_STD_MIN}, {LOG_STD_MAX}] "
+                         f"(σ in (0.01, 0.5])")
 
     class Dust2Policy(nn.Module):
 
@@ -2036,6 +2081,19 @@ def build_policy(vecenv,
                 'max_turn_speed',
                 torch.tensor(driver_env._c_env.sd.contents.max_turn_speed, dtype=torch.float32),
             )
+            # R0-E.3/4 (#131): run properties, NOT checkpoint state
+            # (persistent=False so old checkpoints load and new ones don't
+            # carry them; SelfPlayManager re-applies them to past policies).
+            # aim_log_std_max caps σ in every forward (replaces LOG_STD_MAX at
+            # all clamp sites below); aim_dim_mask weights the per-dim
+            # Gaussian log-prob/entropy terms ([1,0] when pitch is pinned).
+            # PITFALL: sampling still draws BOTH dims (the env ignores dim 1
+            # when pinned) — only the density is masked, so the stored
+            # cont_action stays byte-identical to what the env consumed.
+            self.aim_log_std_max = _cap
+            self.register_buffer("aim_dim_mask",
+                                 torch.tensor([1.0, 0.0] if pin_pitch else [1.0, 1.0]),
+                                 persistent=False)
 
         @staticmethod
         def _blend(mask, out_t, out_ct):
@@ -2117,11 +2175,13 @@ def build_policy(vecenv,
                 # semantics and keeps §3.6's per-team σ logs interpretable.
                 log_std = self._blend(
                     mask,
-                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
-                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim))
             else:
                 mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX)
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, self.aim_log_std_max)
             sigma = torch.exp(log_std).expand_as(mu_aim)
             aim_dist = torch.distributions.Normal(mu_aim, sigma)
             if continuous_action is None:
@@ -2143,11 +2203,14 @@ def build_policy(vecenv,
                     -self.max_turn_speed,
                     self.max_turn_speed,
                 )
-            log_prob_c = aim_dist.log_prob(continuous_action).sum(-1)
+            # R0-E.2: per-dim weight applied BEFORE the sum so a pinned dim
+            # contributes neither log-prob nor entropy (mirrors
+            # _hybrid_sample_logits / _hybrid_ppo_loss).
+            log_prob_c = (aim_dist.log_prob(continuous_action) * self.aim_dim_mask).sum(-1)
             # Closed-form Gaussian entropy: 0.5·log(2πe·σ²), summed across
             # AIM_DIM. .entropy() returns per-dim, so .sum(-1) is correct
             # for AIM_DIM=1 today and stays correct if AIM_DIM bumps to ≥2.
-            entropy_c = aim_dist.entropy().sum(-1)
+            entropy_c = (aim_dist.entropy() * self.aim_dim_mask).sum(-1)
 
             log_prob = log_prob_d + log_prob_c
             entropy = entropy_d + entropy_c
@@ -2182,15 +2245,18 @@ def build_policy(vecenv,
                                      torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
                 log_std = self._blend(
                     mask,
-                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
-                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim))
             else:
                 logits = [head(hidden_out) for head in self.action_heads]
                                                                                                   # μ is bounded by tanh*max_turn_speed; log_std broadcasts to μ
                                                                                                   # shape so callers can build Normal(mu, exp(log_std)) directly
                                                                                                   # without an extra .expand call.
                 mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN,
+                                      self.aim_log_std_max).expand_as(mu_aim)
             value = self.value_head(hidden_out)
             return logits, mu_aim, log_std, value
 
@@ -2294,12 +2360,15 @@ def build_policy(vecenv,
                                      torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
                 log_std = self._blend(
                     mask,
-                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim),
-                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim))
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim))
             else:
                 logits = [head(hidden_out) for head in self.action_heads]
                 mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).expand_as(mu_aim)
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN,
+                                      self.aim_log_std_max).expand_as(mu_aim)
             value = self.value_head(hidden_out)
             return logits, mu_aim, log_std, value
 
@@ -2493,17 +2562,20 @@ def log_aim_log_std(policy, logs):
     # for the CLI/help paths) — keep that convention here.
     import torch
 
+    # R0-E.3: clamp to the RUN's cap (policy.aim_log_std_max), not the module
+    # constant — otherwise the log would report a σ the forward never used.
+    cap = float(getattr(policy, "aim_log_std_max", LOG_STD_MAX))
     with torch.no_grad():
         if hasattr(policy, "aim_log_std_t"):
-            ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
-            ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
+            ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, cap).cpu().numpy()
+            ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, cap).cpu().numpy()
             logs["policy/aim_log_std_yaw_t"] = float(ls_t[0])
             logs["policy/aim_log_std_pitch_t"] = float(ls_t[1])
             logs["policy/aim_log_std_yaw_ct"] = float(ls_ct[0])
             logs["policy/aim_log_std_pitch_ct"] = float(ls_ct[1])
             clamped = 0.5 * (ls_t + ls_ct)
         else:
-            clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, LOG_STD_MAX).cpu().numpy()
+            clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, cap).cpu().numpy()
     logs["policy/aim_log_std_yaw"] = float(clamped[0])
     logs["policy/aim_log_std_pitch"] = float(clamped[1])
 
@@ -2722,8 +2794,17 @@ def _patch_trainer_with_return_norm(trainer):
     # the Gaussian contributes 0.5·log(2πe·σ²) per AIM_DIM — using σ_max
     # is the conservative ceiling, since the policy's actual σ is clamped
     # ≤ exp(LOG_STD_MAX) in every forward call.
+    # R0-E (#131): the ceiling follows the run — σ cap (policy.aim_log_std_max),
+    # number of live aim dims (aim_dim_mask.sum(): 1 when pitch is pinned) and
+    # the entropy-bonus switch (0 continuous entropy when the Gaussian is
+    # excluded from the objective, so the target/floor track the discrete
+    # heads only). getattr defaults keep pre-R0-E policies/configs working.
     max_entropy_discrete = sum(np.log(n) for n in ACTION_HEAD_SIZES)
-    max_entropy_continuous = AIM_DIM * 0.5 * np.log(2 * np.pi * np.e * np.exp(LOG_STD_MAX)**2)
+    _cap = float(getattr(trainer.policy, "aim_log_std_max", LOG_STD_MAX))
+    _n_aim = float(getattr(trainer.policy, "aim_dim_mask", torch.ones(AIM_DIM)).sum())
+    _bonus = bool(trainer.config.get("aim_entropy_bonus", True))
+    max_entropy_continuous = (_n_aim * 0.5 * np.log(2 * np.pi * np.e * np.exp(_cap)**2)) \
+        if _bonus else 0.0
     max_entropy = max_entropy_discrete + max_entropy_continuous
     # Task 9A: target_entropy is no longer a static scalar — it's recomputed
     # each train() call from a linear ramp 0.7→0.5*max_entropy across
@@ -3138,6 +3219,8 @@ def _patch_trainer_with_return_norm(trainer):
                 mb_prio=mb_prio,
                 mb_masks=mb_masks,
                 mb_part=mb_part_f,
+                aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
+                aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
             )
             # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
             # was used by downstream diagnostics; T5 dropped that consumer
@@ -3357,6 +3440,8 @@ def _patch_trainer_with_return_norm(trainer):
                         idx=idx,
                         mb_label="mb0" if _tag_mb0 else "mbL",
                         mb_part=mb_part_f,
+                        aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
+                        aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
                     )
                     if getattr(trainer, "_tag_metrics", None) is None:
                         trainer._tag_metrics = {}
@@ -3642,6 +3727,33 @@ def compute_game_metrics(logs):
 # ── SECTION: Dead Run Detector ─────────────────────────────────────────────
 
 
+def assert_pin_pitch_agreement(vecenv, policy):
+    """R0-E.2 (#131) startup check: env sd->pin_pitch ⇔ policy.aim_dim_mask[1] == 0.
+
+    WHAT: reads StaticData.pin_pitch off the driver env (same path
+    build_policy uses for max_turn_speed) and compares it with the policy's
+    aim-dim mask. Raises RuntimeError on mismatch.
+
+    WHY: the two sides are set independently (env_knobs_from_args bakes the
+    flag into every worker at vector.make time; build_policy sets the mask
+    from args.pin_pitch) and a mismatch is silent — the env would ignore a
+    dim the trainer still scores, or score a dim the env still applies.
+
+    PITFALL: unlike _kill_reward_is_active there is NO soft fallback — a
+    non-C env here is a wiring bug and must stop the run (RuntimeError, never
+    a bare assert: python -O would strip it).
+    """
+    env = getattr(vecenv, "driver_env", vecenv)
+    try:
+        c_pin = int(env._c_env.sd.contents.pin_pitch)
+    except AttributeError as e:
+        raise RuntimeError("assert_pin_pitch_agreement: driver_env is not a Cs2Env") from e
+    p_pin = int(float(policy.aim_dim_mask[1]) == 0.0)
+    if c_pin != p_pin:
+        raise RuntimeError(f"pin_pitch mismatch: env={c_pin} policy={p_pin} "
+                           f"(aim_dim_mask={policy.aim_dim_mask.tolist()})")
+
+
 def _kill_reward_is_active(vecenv):
     """True if the env pays a nonzero per-kill reward (gh#93).
 
@@ -3788,7 +3900,17 @@ class SelfPlayManager:
         save_every_epochs: int = 25,
         win_threshold: float = 0.6,
         phase_length: int = 50,
+        aim_log_std_max=None,
+        pin_pitch: bool = False,
     ):
+        # R0-E (#131): run properties re-applied to every past policy built by
+        # load_past_policy (they are non-persistent on the policy, so the
+        # snapshot cannot carry them). A past opponent with an unpinned mask
+        # would sample a live pitch dim the env ignores — harmless for the
+        # env, but its stored logprob_c would include a factor the live
+        # policy's does not, and self-play ratio_c would silently drift.
+        self.aim_log_std_max = aim_log_std_max
+        self.pin_pitch = bool(pin_pitch)
         self.pool: list[Path] = []
         self.pool_size = pool_size
         self.p_past = p_past
@@ -3900,7 +4022,9 @@ class SelfPlayManager:
         policy = build_policy(vecenv,
                               device,
                               tct_split_heads=state_dict_is_split(state_dict),
-                              tct_split_trunk=state_dict_is_trunk_split(state_dict))
+                              tct_split_trunk=state_dict_is_trunk_split(state_dict),
+                              aim_log_std_max=self.aim_log_std_max,
+                              pin_pitch=self.pin_pitch)
         load_state_dict_arch_checked(policy, state_dict, source=str(path))
         policy.eval()
         return policy
@@ -4060,6 +4184,7 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     (logits, mu_aim, log_std_aim, value),
                     max_turn_speed=self.policy.max_turn_speed.item(),
                     mask=action_mask,
+                    aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
                 )
                 # Joint log-prob for self.logprobs (back-compat slot read by
                 # PufferLib's diagnostics + the KL/clipfrac path). Per-factor
@@ -4148,6 +4273,7 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                          (opp_logits, opp_mu, opp_log_std, None),
                          max_turn_speed=past_policy.max_turn_speed.item(),
                          mask=action_mask[opp_mask] if action_mask is not None else None,
+                         aim_dim_mask=getattr(past_policy, "aim_dim_mask", None),
                      )
                     opp_logprob = opp_logprob_d + opp_logprob_c
 
@@ -4318,7 +4444,8 @@ def _hybrid_sample_logits(policy_out,
                           action=None,
                           continuous_action=None,
                           max_turn_speed=None,
-                          mask=None):
+                          mask=None,
+                          aim_dim_mask=None):
     """Hybrid sampler for the 4-tuple HybridPolicy output (Batch 3 task 5).
 
     Replaces the four in-tree usages of
@@ -4350,6 +4477,12 @@ def _hybrid_sample_logits(policy_out,
         the stored logprobs stay consistent with _hybrid_ppo_loss as long as
         the update pass receives the SAME mask (mb_masks). None = unmasked
         (legacy eval/record callers that have no mask plumbing).
+    aim_dim_mask : (AIM_DIM,) float tensor, or None (R0-E.2, #131)
+        Per-dimension weight on the Gaussian log-prob / entropy terms, applied
+        BEFORE the sum over AIM_DIM. [1, 0] when pitch is pinned (the env
+        ignores cont[:, 1], so its density must not enter the ratio). None ⇒
+        all-ones ⇒ today's behaviour bit-for-bit. Sampling is NOT masked —
+        the pinned dim is still drawn (and discarded by the env).
 
     Returns
     -------
@@ -4434,10 +4567,30 @@ def _hybrid_sample_logits(policy_out,
     # log_std_aim has shape (AIM_DIM,); expand_as(mu_aim) broadcasts to (B, AIM_DIM)
     # so .sum(-1) sums over AIM_DIM correctly.
     log_std_b = log_std_aim.expand_as(mu_aim)
-    log_prob_c = (-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI).sum(-1)
-    entropy_c = (0.5 + 0.5 * _LOG_2PI + log_std_b).sum(-1)
+    # R0-E.2: per-dimension weight (AIM_DIM,), ones ⇒ today's behaviour.
+    # Applied BEFORE .sum(-1) so both log-prob and entropy exclude pinned dims.
+    w = _aim_dim_weight(aim_dim_mask, mu_aim)
+    log_prob_c = ((-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI) * w).sum(-1)
+    entropy_c = ((0.5 + 0.5 * _LOG_2PI + log_std_b) * w).sum(-1)
 
     return action, continuous_action, log_prob_d, log_prob_c, entropy_d, entropy_c
+
+
+def _aim_dim_weight(aim_dim_mask, mu_aim):
+    """(AIM_DIM,) weight for the per-dim Gaussian terms (R0-E.2, #131).
+
+    WHAT: ``aim_dim_mask`` moved to mu_aim's device/dtype, or all-ones when
+    None. Shared by _hybrid_sample_logits and _hybrid_ppo_loss so the rollout
+    and the update can never disagree on which dims are live — that
+    disagreement would be an importance-ratio bug no single-site test sees.
+    PITFALL: returns ones (not None) on the None path so callers can multiply
+    unconditionally; the multiply by ones is exact in fp32.
+    """
+    import torch
+
+    if aim_dim_mask is None:
+        return torch.ones(mu_aim.shape[-1], device=mu_aim.device, dtype=mu_aim.dtype)
+    return aim_dim_mask.to(device=mu_aim.device, dtype=mu_aim.dtype)
 
 
 def _hybrid_ppo_loss(policy,
@@ -4452,8 +4605,18 @@ def _hybrid_ppo_loss(policy,
                      mb_prio=None,
                      mb_masks=None,
                      return_pg_rows=False,
-                     mb_part=None):
+                     mb_part=None,
+                     aim_dim_mask=None,
+                     aim_entropy_bonus=True):
     """Per-factor PPO clipped loss (H-PPO, Fan et al. IJCAI 2019).
+
+    aim_dim_mask (R0-E.2): same per-dim weight the rollout sampler used
+    (policy.aim_dim_mask) — MUST match, or ratio_c ≠ 1 for an unchanged
+    policy. None ⇒ all-ones (pre-R0-E behaviour).
+    aim_entropy_bonus (R0-E.4, #131): False ⇒ the returned ``entropy`` is the
+    DISCRETE entropy only, so the entropy objective (and its α dual loop)
+    stops pushing aim σ to the cap. The Gaussian log-prob still enters
+    ratio_c either way — only the bonus is switched off.
 
     THE CORE OF T5. Re-runs the policy on mb_obs with the stored
     mb_actions / mb_cont_actions, computes new log-probs split into
@@ -4594,9 +4757,10 @@ def _hybrid_ppo_loss(policy,
     sigma = torch.exp(log_std_aim).expand_as(mu_aim)
     log_std_b = log_std_aim.expand_as(mu_aim)
     diff = (flat_cont - mu_aim) / sigma
-    new_logp_c = (-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI).sum(-1)
-    entropy_c = (0.5 + 0.5 * _LOG_2PI + log_std_b).sum(-1)
-    entropy = entropy_d + entropy_c
+    w_aim = _aim_dim_weight(aim_dim_mask, mu_aim)
+    new_logp_c = ((-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI) * w_aim).sum(-1)
+    entropy_c = ((0.5 + 0.5 * _LOG_2PI + log_std_b) * w_aim).sum(-1)
+    entropy = entropy_d + entropy_c if aim_entropy_bonus else entropy_d
 
     # ── Per-factor PPO ratios + clipped loss ──
     # max(unclipped, clipped) is taken element-wise per factor; the per-
@@ -4693,8 +4857,15 @@ def tag_grad_cossim(policy,
                     mb_returns_norm,
                     idx,
                     mb_label,
-                    mb_part=None):
+                    mb_part=None,
+                    aim_dim_mask=None,
+                    aim_entropy_bonus=True):
     """T-vs-CT gradient cosine-similarity measurement (spec 2026-08-13 §4.2).
+
+    aim_dim_mask / aim_entropy_bonus (R0-E): forwarded verbatim to the inner
+    _hybrid_ppo_loss so its ratio_c matches the real update's — otherwise the
+    TAG subset gradients would include a pinned pitch factor and stop being
+    restrictions of the actual gradient.
 
     WHAT: ONE extra forward via _hybrid_ppo_loss(return_pg_rows=True), then
     six subset losses as weighted means over the per-row pg vector — T, CT,
@@ -4800,7 +4971,9 @@ def tag_grad_cossim(policy,
                                                          mb_prio=mb_prio,
                                                          mb_masks=mb_masks,
                                                          return_pg_rows=True,
-                                                         mb_part=mb_part)
+                                                         mb_part=mb_part,
+                                                         aim_dim_mask=aim_dim_mask,
+                                                         aim_entropy_bonus=aim_entropy_bonus)
 
     pg_grads = {}                                                      # subset -> {group: flat grad}
     vf_grads = {}                                                      # 'T'/'CT' -> flat value_head grad
@@ -5160,6 +5333,27 @@ def train(args):
 
     _map_data = args.map_data
 
+    # ── R0-E.2 (#131): pin_pitch resolution ────────────────────────────────
+    # A None (CLI default) resolves from map geometry: a map whose area
+    # centroids share one z has nothing to aim up/down at. An explicit value is
+    # cross-checked against the same test (ValueError, not assert). MUST run
+    # before build_train_env_factory — env_knobs_from_args(args) bakes
+    # args.pin_pitch into every worker env at pufferlib.vector.make; resolving
+    # it later would leave the envs unpinned while the policy gets
+    # aim_dim_mask=[1,0] and assert_pin_pitch_agreement aborts the run.
+    # (Task 12 sets args.pin_pitch above the --dump-config exit via
+    # pin_pitch_for_map; the None branch keeps programmatic train(args)
+    # callers working. Until then --dump-config records pin_pitch=0 on a flat
+    # map while the run's rewritten config.json records 1 — expected.)
+    _flat = (_map_data is None) or (float(_map_data.centroids_z.max() - _map_data.centroids_z.min())
+                                    == 0.0)
+    if getattr(args, "pin_pitch", None) is None:
+        args.pin_pitch = int(_flat)
+    if bool(args.pin_pitch) != _flat:
+        raise ValueError(f"pin_pitch={args.pin_pitch} but map flat={_flat}: pin pitch only on "
+                         f"flat maps (pass --pin-pitch {int(_flat)} or omit it)")
+    print(f"[Train] pin_pitch={int(args.pin_pitch)} (map flat={_flat})")
+
     # ── R0-D (#135): deterministic seeding ──────────────────────────────────
     # pufferl.py has its seeding commented out. Seed BEFORE build_policy
     # (weight init), before the vecenv (env seeds via env_seed_base below) and
@@ -5280,7 +5474,9 @@ def train(args):
     policy = build_policy(vecenv,
                           device,
                           tct_split_heads=tct_split_heads,
-                          tct_split_trunk=tct_split_trunk)
+                          tct_split_trunk=tct_split_trunk,
+                          aim_log_std_max=getattr(args, "aim_log_std_max", None),
+                          pin_pitch=bool(args.pin_pitch))
 
     agents_per_env, bptt_horizon, batch_size = compute_batch_dims(args.num_envs)
     # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
@@ -5309,7 +5505,8 @@ def train(args):
         # LEGACY dict, then heads convert (needs bare aim_log_std), then
         # trunk convert. Duplicating heads first would hide the σ key.
         # R0-C: a full-state resume restores the exact pre-crash σ — never widen.
-        if not resume_run and reinit_frozen_aim_log_std(state_dict):
+        if not resume_run and reinit_frozen_aim_log_std(state_dict,
+                                                        cap=getattr(args, "aim_log_std_max", None)):
             print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "
                   f"re-initialized to log(0.3) ≈ {AIM_LOG_STD_RESUME_INIT:.3f} (gh#91)")
         if tct_split_heads and not state_dict_is_split(state_dict):
@@ -5379,11 +5576,13 @@ def train(args):
     self_play_mgr = SelfPlayManager(
         pool_size=15,
         p_past=0.3 if self_play_enabled else 0.0,
-        save_every_epochs=25,                          # ~2M steps per save at batch_size=81920
+        save_every_epochs=25,                                          # ~2M steps per save at batch_size=81920
         win_threshold=0.6,
-        phase_length=50,                               # switch opponent team every ~4M steps
+        phase_length=50,                                               # switch opponent team every ~4M steps
+        aim_log_std_max=getattr(args, "aim_log_std_max", None),
+        pin_pitch=bool(args.pin_pitch),
     )
-                                                       # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
+                                                                       # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
     if self_play_enabled and resume_path and resume_path.exists() and not resume_run:
         import shutil as _shutil
 
@@ -5392,6 +5591,8 @@ def train(args):
         self_play_mgr._add_to_pool(seed_path)
         print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
     _patch_trainer_with_selfplay(trainer, self_play_mgr)
+    # R0-E.2: env flag ⇔ policy mask, or stop before the first rollout.
+    assert_pin_pitch_agreement(vecenv, policy)
     if not self_play_enabled:
         print("[Train] Self-play mixing disabled (--no-self-play): "
               "both teams use the current policy every epoch.")
@@ -5701,6 +5902,33 @@ if __name__ == "__main__":
                         help="Rung 0: agents per team that spawn; the rest are parked "
                         "(noop-masked, zero reward, excluded from every trainer statistic). "
                         "--timesteps counts PARTICIPATING agent-steps.")
+    parser.add_argument("--pin-pitch",
+                        type=int,
+                        choices=(0, 1),
+                        default=None,
+                        dest="pin_pitch",
+                        help="R0-E.2: 1 = env ignores the pitch action and the policy drops the "
+                        "pitch dim from log_prob_c. Default: auto (1 iff the map is flat); "
+                        "an explicit value that disagrees with the map is refused.")
+    parser.add_argument("--crouch-enabled",
+                        type=int,
+                        choices=(0, 1),
+                        default=1,
+                        dest="crouch_enabled",
+                        help="R0-E.2: 0 masks the crouch action (stance parity for pinned-pitch "
+                        "duels; a crouched target is an unobservable guaranteed miss).")
+    parser.add_argument("--aim-entropy-bonus",
+                        choices=("on", "off"),
+                        default="on",
+                        dest="aim_entropy_bonus",
+                        help="R0-E.4: include the Gaussian aim entropy in the entropy objective "
+                        "(default on). 'off' stops the +1/dim gradient that pins aim σ at the cap.")
+    parser.add_argument("--aim-log-std-max",
+                        type=float,
+                        default=None,
+                        dest="aim_log_std_max",
+                        help="R0-E.3: per-run cap on aim log σ, in (log 0.01, log 0.5] "
+                        "(default LOG_STD_MAX = log 0.5).")
     parser.add_argument("--warmstart-entropy",
                         action="store_true",
                         dest="warmstart_entropy",

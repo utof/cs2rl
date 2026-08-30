@@ -47,6 +47,11 @@ def _build_trainer_for_test(
     tct_split_heads: bool = False,
     tct_split_trunk: bool = False,
     n_active_per_team: int = 5,
+    map_data=None,
+    pin_pitch: int = 0,
+    crouch_enabled: int = 1,
+    aim_log_std_max=None,
+    aim_entropy_bonus: bool = True,
 ):
     """Build a tiny in-process PuffeRL trainer for Batch-1 trainer-level tests.
 
@@ -84,6 +89,22 @@ def _build_trainer_for_test(
         that set only one of the two would be testing a configuration
         production can never reach. Default 5 = full 5v5, i.e. an all-ones
         participation mask, which is what every pre-Rung-0 harness caller gets.
+    map_data : MapData or None
+        R0-E: the map every env is built on. None ⇒ ``make_simple_map()`` (the
+        pre-R0-E hardcoded default). Pass the session ``simple_map`` fixture or
+        an arena map; the harness never inspects flatness (that check lives in
+        train() only), so pin_pitch=1 on a non-flat map is allowed HERE.
+    pin_pitch, crouch_enabled : int
+        R0-E.2 sim knobs, threaded into BOTH the envs (make_puffer_env) and the
+        policy (``build_policy(pin_pitch=)`` → aim_dim_mask) and both
+        SelfPlayManager constructions — exactly like production, so
+        ``assert_pin_pitch_agreement`` holds on a harness trainer.
+    aim_log_std_max : float or None
+        R0-E.3 per-run σ cap → ``policy.aim_log_std_max`` and config
+        ``aim_log_std_max``. None ⇒ LOG_STD_MAX.
+    aim_entropy_bonus : bool
+        R0-E.4 → config ``aim_entropy_bonus`` (the CLI spells it "on"/"off";
+        build_train_config accepts both).
 
     Returns
     -------
@@ -137,8 +158,9 @@ def _build_trainer_for_test(
     shared_ts = mp.Value("f", 0.3)
 
     # Simple 5-room map — the production default for non-dust2 runs. Avoids
-    # depending on any pre-generated mapdata file on disk.
-    map_data = make_simple_map()
+    # depending on any pre-generated mapdata file on disk. R0-E: overridable.
+    if map_data is None:
+        map_data = make_simple_map()
 
     # ── F8: action-mask shm, same env→trainer pattern as production ─────────
     # Serial backend runs envs in-process, but the RawArray pattern is kept
@@ -173,6 +195,8 @@ def _build_trainer_for_test(
             map_data=map_data,
             include_step_stats_in_info=True,
             n_active_per_team=n_active_per_team,
+            pin_pitch=pin_pitch,
+            crouch_enabled=crouch_enabled,
         )
         if _mask_idx is not None:
             env._attach_mask_view(mask_shm, _mask_idx)
@@ -210,6 +234,10 @@ def _build_trainer_for_test(
         timesteps=batch_size * NUM_ROLLOUT_ROUNDS,
         checkpoint_dir=tmp_checkpoint_dir,
         n_active_per_team=n_active_per_team,
+        pin_pitch=pin_pitch,
+        crouch_enabled=crouch_enabled,
+        aim_log_std_max=aim_log_std_max,
+        aim_entropy_bonus=aim_entropy_bonus,
     )
     train_config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
 
@@ -224,10 +252,21 @@ def _build_trainer_for_test(
     # sub-16-env harness trainers — do not port it into build_train_config.
     train_config["minibatch_size"] = train_config["max_minibatch_size"] = min(8192, batch_size)
 
-    policy = build_policy(vecenv,
-                          device,
-                          tct_split_heads=tct_split_heads,
-                          tct_split_trunk=tct_split_trunk)
+    # R0-E: cap + pin go to the policy exactly as train() passes them, so the
+    # harness policy carries aim_log_std_max / aim_dim_mask. build_policy
+    # raises ValueError on a cap outside the band — close the vecenv first so
+    # a refused harness does not leak the Serial envs.
+    try:
+        policy = build_policy(vecenv,
+                              device,
+                              tct_split_heads=tct_split_heads,
+                              tct_split_trunk=tct_split_trunk,
+                              aim_log_std_max=aim_log_std_max,
+                              pin_pitch=bool(pin_pitch))
+    except Exception:
+        vecenv.close()
+        shutil.rmtree(tmp_checkpoint_dir, ignore_errors=True)
+        raise
     trainer = PuffeRL(train_config, vecenv, policy)
 
     # Batch 3 (T5): the hybrid-aim patcher is REQUIRED for any test that
@@ -268,6 +307,8 @@ def _build_trainer_for_test(
             save_every_epochs=25,
             win_threshold=0.6,
             phase_length=50,
+            aim_log_std_max=aim_log_std_max,
+            pin_pitch=bool(pin_pitch),
         )
         _patch_trainer_with_selfplay(trainer, self_play_mgr)
     else:
@@ -277,6 +318,8 @@ def _build_trainer_for_test(
             save_every_epochs=25,
             win_threshold=0.6,
             phase_length=50,
+            aim_log_std_max=aim_log_std_max,
+            pin_pitch=bool(pin_pitch),
         )
         _patch_trainer_with_selfplay(trainer, self_play_mgr)
 

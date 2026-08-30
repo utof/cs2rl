@@ -124,6 +124,10 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--no-self-play": 0,
     "--no-dead-run-abort": 0,
     "--n-active-per-team": 1,
+    "--pin-pitch": 1,                                  # R0-E.2 (#131)
+    "--crouch-enabled": 1,                             # R0-E.2 (#131)
+    "--aim-entropy-bonus": 1,                          # R0-E.4 (#131)
+    "--aim-log-std-max": 1,                            # R0-E.3 (#131)
     "--warmstart-entropy": 0,
     "--warmstart-grace-steps": 1,
     "--warmstart-ramp-steps": 1,

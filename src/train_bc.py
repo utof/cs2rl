@@ -549,10 +549,13 @@ def bc_loss(policy, obs_t, disc_t, cont_t, valid=None, entropy_coef: float = DEF
     flat_cont = cont_t.reshape(-1, cont_t.shape[-1])
 
     logits, mu_aim, log_std, value = policy(obs_t, {})
+    # R0-E.2 (#131): a pin_pitch policy carries aim_dim_mask=[1,0]; forward it
+    # so nll_c / entropy_c cover the yaw dim only (the env ignores cont[:,1]).
     _a, _c, log_prob_d, log_prob_c, entropy_d, entropy_c = _hybrid_sample_logits(
         (logits, mu_aim, log_std.detach(), value),
         action=flat_disc,
         continuous_action=flat_cont,
+        aim_dim_mask=getattr(policy, "aim_dim_mask", None),
     )
 
     if valid is None:

@@ -84,6 +84,14 @@ static void compute_masks(Dust2Env* env) {
         /* Jump mask: no jump while airborne, on cooldown, or crouching */
         if (a->is_airborne || a->jump_cd > 0 || a->is_crouching)
             m[moff[HEAD_JUMP] + 1] = 0;
+        /* R0-E.2 (#131): stance parity. With pitch pinned a stand-vs-crouch
+         * mismatch is |rz| = 24 > HIT_HALF_WIDTH = 16 — an unconditional miss
+         * the policy cannot observe (no stance bit in the enemy block). Rung 1
+         * disables crouch outright; 5v5 keeps it (crouch_enabled defaults to 1,
+         * cs2_demo.c forces 1 for the human player). Bin 0 (stand) stays valid
+         * so the head keeps its per-head no-op invariant (see header comment). */
+        if (!sd->crouch_enabled)
+            m[moff[HEAD_CROUCH] + 1] = 0;
         /* R0-B (#129): this function runs at the TAIL of env_step, but the
          * masks it writes are consumed by the NEXT env_step, whose first act
          * is tick_weapon() — which decrements fire_cd/reload_ticks/switch_ticks
@@ -322,14 +330,28 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
              * Pitfall: tests that pre-set agent.pitch via ctypes WRITE then
              * call env.step() will see pitch overwritten by the cont buffer.
              * Set the desired pitch via continuous_actions[i*AIM_DIM+1] instead. */
-            float pitch_target = continuous_actions[i * AIM_DIM + 1];
-            a->pitch           = fminf(fmaxf(pitch_target, -(float)M_PI / 2), (float)M_PI / 2);
-            ss->aim_delta_pitch_sum    += a->pitch;
-            ss->aim_delta_pitch_sq_sum += a->pitch * a->pitch;
-            ss->aim_delta_pitch_count  += 1;
-            es->aim_delta_pitch_sum    += a->pitch;
-            es->aim_delta_pitch_sq_sum += a->pitch * a->pitch;
-            es->aim_delta_pitch_count  += 1;
+            if (!sd->pin_pitch) {
+                float pitch_target = continuous_actions[i * AIM_DIM + 1];
+                a->pitch           = fminf(fmaxf(pitch_target, -(float)M_PI / 2), (float)M_PI / 2);
+                ss->aim_delta_pitch_sum    += a->pitch;
+                ss->aim_delta_pitch_sq_sum += a->pitch * a->pitch;
+                ss->aim_delta_pitch_count  += 1;
+                es->aim_delta_pitch_sum    += a->pitch;
+                es->aim_delta_pitch_sq_sum += a->pitch * a->pitch;
+                es->aim_delta_pitch_count  += 1;
+            } else {
+                /* R0-E.2 (#131): flat maps — continuous_actions[i*AIM_DIM+1] is
+                 * IGNORED and pitch is held at 0 so the 3D hit test reduces to
+                 * yaw (rz = 0 for same-stance shots; see cs2_combat.h). The
+                 * Welford pitch counters stay at 0 on purpose: a "pitch σ" of
+                 * a dimension nobody consumes would read as a live signal in
+                 * the metrics. Trainer side masks the pitch dim out of
+                 * log_prob_c / entropy_c (policy.aim_dim_mask == [1, 0]) and
+                 * assert_pin_pitch_agreement() refuses a mismatch at startup.
+                 * PITFALL: the env still needs crouch_enabled=0 for stance
+                 * parity — a crouched target is |rz| = 24 > HIT_HALF_WIDTH. */
+                a->pitch = 0.0f;
+            }
         }
         count_action(ss->action_shoot, es->action_shoot, shoot_act, 2);
 

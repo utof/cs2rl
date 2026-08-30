@@ -163,3 +163,43 @@ def test_harness_n_active_1_masks_four_fifths_of_rows():
         assert losses["entropy"] > losses["entropy_unmasked"]
     finally:
         cleanup()
+
+
+@pytest.mark.slow
+def test_twenty_update_ratio_identity_n_active_1():
+    """Spec §2.2 (ii): at n_active=1 with the aim entropy bonus OFF, parked rows are
+    noop-masked ⇒ losses/entropy ≈ 5 × losses/entropy_unmasked over the MEAN of 20
+    updates (±5%; per-update σ≈4.6% from the hypergeometric minibatch draw, ≈1.0% over
+    the mean). Preconditions are load-bearing: prioritised sampling or any event
+    segment would sample parked segments non-uniformly and break the identity."""
+    from train import _patch_trainer_with_return_norm
+    from train_test_harness import _build_trainer_for_test
+    trainer, cleanup = _build_trainer_for_test(num_envs=16,
+                                               n_active_per_team=1,
+                                               aim_entropy_bonus=False)
+    try:
+        _patch_trainer_with_return_norm(trainer)
+        assert trainer.config["prio_alpha"] == 0
+        assert not bool(trainer._batch1_event_mask.any())
+        ent, ent_u, floor, mbs, alpha = [], [], 0.0, 0.0, {}
+        for u in range(1, 21):
+            trainer.evaluate()
+            trainer.last_log_time = 0.0
+            trainer.train()
+            # trainer.losses, not train()'s return: mean_and_log() runs BEFORE
+            # self.losses is assigned, so the returned logs lag one update.
+            logs = trainer.losses
+            ent.append(logs["entropy"])
+            ent_u.append(logs["entropy_unmasked"])
+            floor += logs["entropy_floor_fires"]
+            mbs += logs["minibatches_run"]
+            assert logs["empty_minibatches"] == 0
+            assert logs["participating_rows"] == trainer.participating.sum().item()
+            if u in (5, 20):
+                alpha[u] = logs["effective_alpha"]
+        ratio = np.mean(ent) / np.mean(ent_u)
+        assert ratio == pytest.approx(5.0, rel=0.05), ratio
+        assert floor / mbs < 0.10, (floor, mbs)
+        assert alpha[20] <= 2 * alpha[5] and alpha[5] <= 2 * alpha[20], alpha
+    finally:
+        cleanup()
