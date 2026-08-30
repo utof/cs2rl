@@ -473,6 +473,12 @@ def test_log_aim_log_std_split_emits_mean_plus_per_team(env):
     The clamp is applied per copy BEFORE averaging, matching the forward path:
     aim_log_std_t is set above LOG_STD_MAX here, so a mean-then-clamp
     implementation lands on a different number and fails.
+
+    Rung 1a T1 review (I1/M1): this also pins the FULL emitted key set and
+    every `_raw` key. The two aggregations differ on purpose — the clamped
+    legacy key is the MEAN of the copies, the raw legacy key is the MAX (see
+    log_aim_log_std's docstring) — and yaw_t above the cap is the one setup
+    where raw != clamped, so both conventions are exercised here.
     """
     p = train.build_policy(env, device="cpu", tct_split_heads=True)
     with torch.no_grad():
@@ -480,12 +486,67 @@ def test_log_aim_log_std_split_emits_mean_plus_per_team(env):
         p.aim_log_std_ct.copy_(torch.tensor([-3.0, -1.0]))
     logs = {}
     train.log_aim_log_std(p, logs)
+    assert set(logs) == {
+        "policy/aim_log_std_yaw",
+        "policy/aim_log_std_pitch",
+        "policy/aim_log_std_yaw_raw",
+        "policy/aim_log_std_pitch_raw",
+        "policy/aim_log_std_yaw_t",
+        "policy/aim_log_std_yaw_ct",
+        "policy/aim_log_std_pitch_t",
+        "policy/aim_log_std_pitch_ct",
+        "policy/aim_log_std_yaw_t_raw",
+        "policy/aim_log_std_yaw_ct_raw",
+        "policy/aim_log_std_pitch_t_raw",
+        "policy/aim_log_std_pitch_ct_raw",
+    }
     assert logs["policy/aim_log_std_yaw_t"] == pytest.approx(train.LOG_STD_MAX)
     assert logs["policy/aim_log_std_yaw_ct"] == pytest.approx(-3.0)
     assert logs["policy/aim_log_std_pitch_t"] == pytest.approx(-2.0)
     assert logs["policy/aim_log_std_pitch_ct"] == pytest.approx(-1.0)
     assert logs["policy/aim_log_std_yaw"] == pytest.approx(0.5 * (train.LOG_STD_MAX + -3.0))
     assert logs["policy/aim_log_std_pitch"] == pytest.approx(-1.5)
+                                                                       # Per-team raws are the untouched parameters, cap or no cap.
+    assert logs["policy/aim_log_std_yaw_t_raw"] == pytest.approx(10.0)
+    assert logs["policy/aim_log_std_yaw_ct_raw"] == pytest.approx(-3.0)
+    assert logs["policy/aim_log_std_pitch_t_raw"] == pytest.approx(-2.0)
+    assert logs["policy/aim_log_std_pitch_ct_raw"] == pytest.approx(-1.0)
+                                                                       # Legacy-named raws are the MAX over the copies (10.0, not the mean 3.5;
+                                                                       # -1.0, not the mean -1.5).
+    assert logs["policy/aim_log_std_yaw_raw"] == pytest.approx(10.0)
+    assert logs["policy/aim_log_std_pitch_raw"] == pytest.approx(-1.0)
+
+
+def test_log_aim_log_std_split_raw_key_exposes_a_single_capped_copy(env):
+    """Rung 1a T1 review I1: one team's σ above the cap — i.e. clamp-frozen and
+    gradient-dead — must show through `policy/aim_log_std_yaw_raw`, the key the
+    gate reads to answer "is raw <= cap".
+
+    Regression against the mean aggregation this key used to carry: at
+    cap = log 0.05 = -2.9957, a T copy at cap + 0.5 = -2.4957 (dead) averaged
+    with a healthy CT copy at -4.0 reads -3.2479 — BELOW the cap, so the
+    pre-flight check passes on a frozen sigma. The max reads -2.4957 and the
+    check fails, which is the honest answer.
+    """
+    cap = math.log(0.05)
+    p = train.build_policy(env, device="cpu", tct_split_heads=True, aim_log_std_max=cap)
+    with torch.no_grad():
+        p.aim_log_std_t.copy_(torch.tensor([cap + 0.5, -4.0]))         # yaw: above the cap
+        p.aim_log_std_ct.copy_(torch.tensor([-4.0, -4.0]))             # healthy on both dims
+    logs = {}
+    train.log_aim_log_std(p, logs)
+                                                                       # The dead copy is visible per-team...
+    assert logs["policy/aim_log_std_yaw_t_raw"] == pytest.approx(cap + 0.5)
+    assert logs["policy/aim_log_std_yaw_ct_raw"] == pytest.approx(-4.0)
+                                                                       # ...and, the point of I1, through the legacy-named key the gate reads.
+    assert logs["policy/aim_log_std_yaw_raw"] == pytest.approx(cap + 0.5)
+    assert logs["policy/aim_log_std_yaw_raw"] > cap
+                                                                       # The mean convention would have landed here and read as healthy.
+    assert logs["policy/aim_log_std_yaw_raw"] != pytest.approx(0.5 * (cap + 0.5 + -4.0))
+                                                                       # The CLAMPED twin is untouched by this fix: still the per-copy-clamped mean,
+                                                                       # and still censored at the cap (which is exactly why the raw key exists).
+    assert logs["policy/aim_log_std_yaw_t"] == pytest.approx(cap)
+    assert logs["policy/aim_log_std_yaw"] == pytest.approx(0.5 * (cap + -4.0))
 
 
 def test_status_line_keeps_the_t7_gate_substring(env):

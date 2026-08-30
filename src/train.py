@@ -2813,11 +2813,19 @@ def compute_network_health(model, device):
 def log_aim_log_std(policy, logs):
     """Emit policy/aim_log_std_* into `logs` under BOTH architectures (spec §3.6).
 
-    WHAT: legacy policy → today's two keys, unchanged. Split policy → the same
-    two keys carrying the MEAN of the two CLAMPED copies, plus four per-team
-    keys policy/aim_log_std_{yaw,pitch}_{t,ct}. Every clamped key also gets a
-    `_raw` twin carrying the UNCLAMPED parameter (same per-dim / per-team /
-    pitch-pin convention).
+    WHAT — the exact meaning of every emitted key, per architecture:
+
+      legacy policy (one `aim_log_std`):
+        policy/aim_log_std_{yaw,pitch}         the CLAMPED parameter
+        policy/aim_log_std_{yaw,pitch}_raw     the UNCLAMPED parameter
+
+      split policy (`aim_log_std_t` + `aim_log_std_ct`):
+        policy/aim_log_std_{yaw,pitch}_{t,ct}      that team's CLAMPED copy
+        policy/aim_log_std_{yaw,pitch}_{t,ct}_raw  that team's UNCLAMPED copy
+        policy/aim_log_std_{yaw,pitch}         MEAN of the two CLAMPED copies
+        policy/aim_log_std_{yaw,pitch}_raw     MAX of the two UNCLAMPED copies
+
+    Under pin_pitch (aim_dim_mask[1] == 0) every `pitch` key above is omitted.
 
     WHY the raw twin (Rung 1a T1, spec 2026-08-30 §3): the clamped key is
     censored at the cap, so a σ that the optimizer has pushed past the cap —
@@ -2829,6 +2837,25 @@ def log_aim_log_std(policy, logs):
     weight_norm_aim_log_std already exposes a raw NORM, but only every 5 epochs
     and unsigned/aggregated — per-row, per-dim and signed is what the gate
     needs.
+
+    WHY the legacy-named `_raw` key is a MAX under the split while its clamped
+    twin stays a MEAN: the two keys answer different questions and must be
+    aggregated differently. The clamped key reports the σ the policy actually
+    used, and the mean of the two copies is the honest summary of that. The raw
+    key exists solely to answer "has any σ overshot the cap and gone gradient-
+    dead", and a mean HIDES exactly that: with cap = −2.9957, a T copy at
+    cap + 0.5 = −2.4957 (dead) averaged with a healthy CT copy reads −3.2479,
+    i.e. below the cap, so the pre-flight `raw ≤ cap` check passes on a frozen
+    σ. Max is the aggregation that answers the overshoot question truthfully.
+
+    PITFALL — what the split `_raw` key does NOT promise: for the *movement*
+    question the max is only conservative in one direction. Two copies that
+    both moved up, or any copy that moved up, show through; a single copy that
+    moved only DOWN while the other sat at its init is invisible in the max
+    (max == init ⇒ "no movement"). Read the per-team `_t_raw`/`_ct_raw` keys
+    whenever per-copy movement is the question. This does not affect the Rung
+    1a gate, which runs the legacy architecture, where the key is the exact
+    unclamped parameter.
 
     WHY the legacy keys survive as a mean rather than being replaced: the T7
     acceptance gate greps the status line for `aim_log_std_pitch=` (see
@@ -2881,11 +2908,12 @@ def log_aim_log_std(policy, logs):
                 logs["policy/aim_log_std_pitch_t_raw"] = float(raw_t[1])
                 logs["policy/aim_log_std_pitch_ct_raw"] = float(raw_ct[1])
             clamped = 0.5 * (ls_t + ls_ct)
-            # Mean of the two RAW copies, mirroring the clamped mean above. It
-            # stays a mean (not a max) so the legacy and split architectures
-            # answer the gate's σ question the same way; the per-team `_raw`
-            # keys above are there when the two copies need separating.
-            raw = 0.5 * (raw_t + raw_ct)
+            # MAX, deliberately NOT the mean that the clamped key uses: the raw
+            # key's job is "did any copy overshoot the cap and go gradient-
+            # dead", and averaging a dead copy with a healthy one reads as
+            # healthy. See the docstring for the worked counterexample and for
+            # the one thing max under-reports (a copy that moved only down).
+            raw = np.maximum(raw_t, raw_ct)
         else:
             raw = policy.aim_log_std.detach().cpu().numpy()
             clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, cap).cpu().numpy()
