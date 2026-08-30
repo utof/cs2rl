@@ -80,12 +80,29 @@ LOG_STD_INIT = math.log(0.1)
 LOG_STD_MIN = math.log(0.01)
 LOG_STD_MAX = math.log(0.5)
 
+# Rung 1a T1 (spec 2026-08-30): how far BELOW the run's σ cap a fresh
+# aim_log_std starts. `torch.clamp` back-propagates zero gradient strictly
+# outside [min, max], so a parameter initialised AT the cap is gradient-dead
+# from step 0 — that is exactly what killed the Rung 1 treatment arm (init
+# log 0.1 under a log 0.05 cap: σ was a constant for 10M steps and the logged
+# "log σ = −2.996" was the clamp, not a measurement). 0.2 in log-space ≈ an
+# 18 % σ gap: wide enough that Adam needs many steps to walk into the clamp,
+# small enough that the run still trains near its intended σ.
+AIM_LOG_STD_INIT_MARGIN = 0.2
+# The matching floor-side head-room the cap must leave. The init sits one
+# margin below the cap, so a cap closer than 2× the margin to LOG_STD_MIN puts
+# the init at/below the FLOOR, where the lower clamp kills the gradient just as
+# dead as the upper one. Enforcing head-room on the cap (rather than clamping
+# the init up with a max(LOG_STD_MIN + m, …) floor) is deliberate: a floor
+# merely moves the dead zone from one end of the band to the other, silently.
+AIM_LOG_STD_CAP_MIN_HEADROOM = 2 * AIM_LOG_STD_INIT_MARGIN
+
 
 def validate_aim_log_std_max(aim_log_std_max) -> float:
     """Resolve + range-check the run's aim σ cap (R0-E.3, #131).
 
     Returns the float cap (LOG_STD_MAX when None). Raises ValueError unless
-    LOG_STD_MIN < cap <= LOG_STD_MAX, i.e. σ in (0.01, 0.5].
+    LOG_STD_MIN + 0.4 < cap <= LOG_STD_MAX, i.e. σ in (0.0149, 0.5].
 
     WHY a separate torch-free helper: make_policy() only runs after the env
     and torch are up, so a bad --aim-log-std-max used to surface ~30 s into a
@@ -95,12 +112,127 @@ def validate_aim_log_std_max(aim_log_std_max) -> float:
     PITFALL (2026-08-30, rung1 sweep): the bound is INCLUSIVE at LOG_STD_MAX =
     log 0.5 = -0.693147..., so a hand-rounded "-0.6931" is > the cap by 5e-5
     and is REJECTED — pass -0.69315 (or omit the flag) for "σ cap 0.5".
+    PITFALL (Rung 1a T1): the LOWER bound is no longer LOG_STD_MIN itself but
+    LOG_STD_MIN + AIM_LOG_STD_CAP_MIN_HEADROOM — caps that narrow leave no room
+    for the strictly-inside-the-band init (see resolve_aim_log_std_init) and
+    would hand the run a gradient-dead σ. This NARROWS the accepted CLI range;
+    σ caps below ~0.0149 rad (0.85°) have no experimental use (the recoil/
+    hitbox scale alone is larger), so nothing legitimate is lost.
     """
     cap = float(LOG_STD_MAX if aim_log_std_max is None else aim_log_std_max)
-    if not (LOG_STD_MIN < cap <= LOG_STD_MAX):
-        raise ValueError(f"aim_log_std_max={cap} must lie in ({LOG_STD_MIN}, {LOG_STD_MAX}] "
-                         f"(σ in (0.01, 0.5])")
+    lo = LOG_STD_MIN + AIM_LOG_STD_CAP_MIN_HEADROOM
+    if not (lo < cap <= LOG_STD_MAX):
+        raise ValueError(
+            f"aim_log_std_max={cap} must lie in ({lo}, {LOG_STD_MAX}] "
+            f"(σ in ({math.exp(lo):.4f}, 0.5]). The lower bound is "
+            f"LOG_STD_MIN + {AIM_LOG_STD_CAP_MIN_HEADROOM} rather than LOG_STD_MIN: the aim σ "
+            f"is initialised {AIM_LOG_STD_INIT_MARGIN} below the cap so it starts strictly "
+            f"inside the clamp band, and a cap this close to the σ floor would "
+            f"put that init at or under LOG_STD_MIN={LOG_STD_MIN}, where clamp "
+            f"back-propagates zero gradient and σ can never train.")
     return cap
+
+
+def resolve_aim_log_std_init(cap) -> float:
+    """The log σ a FRESH aim head starts at under this run's cap (Rung 1a T1).
+
+    WHAT: min(LOG_STD_INIT, cap − AIM_LOG_STD_INIT_MARGIN). At the 5v5 default
+    cap (log 0.5) that is LOG_STD_INIT unchanged — every pre-Rung-1a run keeps
+    its σ=0.1 start. Under a tight cap (Rung 1a's log 0.05) it is cap − 0.2,
+    i.e. σ ≈ 0.041, strictly inside [LOG_STD_MIN, cap].
+
+    WHY: `torch.clamp(x, lo, hi)` passes gradient only for lo <= x <= hi. An
+    init at or above the cap is therefore a permanently frozen σ — the policy
+    samples at exactly the cap forever and `policy/aim_log_std_yaw` reports the
+    cap, which reads like a converged value rather than a dead parameter. This
+    is the Rung 1 defect (spec 2026-08-30 §1(iv)).
+
+    PITFALL: this is the FRESH-construction init only. A resume restores the
+    checkpoint's σ verbatim, and the BC-frozen widener has its own rule
+    (reinit_frozen_aim_log_std, min(AIM_LOG_STD_RESUME_INIT, cap) — that one
+    may land exactly ON the cap, gh#91, untouched by T1). Callers that need the
+    value in config.json must go through this helper, never re-derive it, so
+    config and policy cannot drift.
+    NOTE: whenever cap >= LOG_STD_INIT + AIM_LOG_STD_INIT_MARGIN (the 5v5
+    default included) the init IS LOG_STD_INIT, so reinit_frozen_aim_log_std's
+    "still exactly at LOG_STD_INIT ⇒ BC-frozen" signature matches a *fresh*
+    policy. That was already true before T1 and stays harmless — the widener
+    only ever runs on a checkpoint being resumed, never on a fresh build.
+    """
+    return min(LOG_STD_INIT, float(cap) - AIM_LOG_STD_INIT_MARGIN)
+
+
+def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
+    """Give every ``aim_log_std*`` parameter its own decay-free optimizer group.
+
+    WHAT: removes the σ parameters from whatever group Adam put them in and
+    re-adds them as a new param group that clones group 0's hyper-parameters
+    except ``weight_decay`` (0.0 by default). Returns the number of parameters
+    moved (0 if the policy has none — e.g. a stub policy in a unit test).
+
+    WHY (spec 2026-08-30 T1, load-bearing for the Rung 1a gate): the run sets
+    ``param_groups[0]["weight_decay"] = 1e-4`` and Adam's decay adds ``wd·θ``
+    to the gradient. ``aim_log_std`` is always NEGATIVE (σ < 1), so decay pushes
+    it UPWARD even at exactly zero true gradient — measured on smoke-v1c/s0,
+    ``health/weight_norm_aim_log_std`` 3.2564 → 2.87122 over 30 epochs (raw
+    per-dim movement 0.272) while σ was provably gradient-dead the whole run.
+    Left in, decay would (a) fake the gate's "σ moved ≥ 0.1 ⇒ the head receives
+    gradient" signal and (b) eat the −0.2 init margin within ~11 epochs and
+    re-freeze σ against the cap. Weight decay on a log-scale noise parameter is
+    meaningless anyway: it is not a capacity knob, it is a distribution shape.
+
+    PITFALLS:
+      * ``scheduler.base_lrs`` MUST grow with the group. PufferLib builds
+        CosineAnnealingLR from the one-group optimizer (pufferl.py:171), and
+        ``LRScheduler.step()`` zips ``param_groups`` against the values derived
+        from ``base_lrs`` NON-strictly — a missing entry means the σ group's LR
+        silently never anneals. Handled here; ``restore_train_state`` zips the
+        same two lists with strict=True, so a mismatch would also fail loudly
+        on resume.
+      * Call AFTER the weight_decay=1e-4 line and BEFORE load_full_resume.
+        Resuming a PRE-branch checkpoint (whose optimizer state has one group)
+        into the two-group optimizer raises in torch's own load_state_dict —
+        loud, and accepted: every pre-branch run is complete (spec §2 T3).
+      * Parameters are matched by NAME (same regex as
+        reinit_frozen_aim_log_std) so the split-heads copies aim_log_std_t /
+        aim_log_std_ct are covered too, then by identity when pruning the old
+        groups — ``add_param_group`` raises if a parameter ends up in two.
+    """
+    import re as _re
+
+    # uncompiled_policy is the raw module; a torch.compile wrapper would prefix
+    # names with "_orig_mod." and break the name match (the parameter OBJECTS
+    # are shared, so the identity prune below is unaffected either way).
+    policy = getattr(trainer, "uncompiled_policy", None)
+    if policy is None:
+        policy = trainer.policy
+    sigma_params = [
+        p for name, p in policy.named_parameters() if _re.search(r"aim_log_std(_t|_ct)?$", name)
+    ]
+    if not sigma_params:
+        return 0
+    sigma_ids = {id(p) for p in sigma_params}
+    opt = trainer.optimizer
+    # Idempotent: a second call would strand an empty group and push base_lrs
+    # out of step with param_groups for good.
+    for group in opt.param_groups:
+        if {id(p) for p in group["params"]} == sigma_ids:
+            group["weight_decay"] = weight_decay
+            return len(sigma_params)
+    for group in opt.param_groups:
+        group["params"] = [p for p in group["params"] if id(p) not in sigma_ids]
+    # Clone group 0's hypers (lr, betas, eps, and the initial_lr the scheduler
+    # stamped on) so the σ group anneals on the same schedule; only the decay
+    # differs.
+    new_group = {k: v for k, v in opt.param_groups[0].items() if k != "params"}
+    new_group["params"] = sigma_params
+    new_group["weight_decay"] = weight_decay
+    opt.add_param_group(new_group)
+    sch = getattr(trainer, "scheduler", None)
+    if sch is not None and hasattr(sch, "base_lrs"):
+        sch.base_lrs.append(float(new_group.get("initial_lr", new_group["lr"])))
+        sch._last_lr = [g["lr"] for g in opt.param_groups]
+    return len(sigma_params)
 
 
 # gh#91: σ to widen a BC-frozen aim head to at PPO resume. BC detaches
@@ -1101,6 +1233,17 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     aim_entropy_bonus = _aeb if isinstance(_aeb, bool) else (_aeb == "on")
     _cap = getattr(args, "aim_log_std_max", None)
     aim_log_std_max = float(LOG_STD_MAX if _cap is None else _cap)
+    # Rung 1a T1: the σ a fresh aim head actually starts at — DERIVED from the
+    # cap, so it is provenance, not a knob (there is no --aim-log-std-init).
+    # Recorded because the gate's "σ moved ≥ 0.1" reading is |raw − init| and
+    # the reader must not have to re-derive the formula. Goes through the same
+    # helper build_policy uses so config.json and the policy cannot drift.
+    # PITFALL: this key AND the σ weight-decay exclusion
+    # (isolate_aim_log_std_param_group) shift exp_lib.behavior_hash for all
+    # future runs — recorded decision, same convention as the TAG/tct keys
+    # above. The weight-decay change is a real behaviour change for EVERY run,
+    # not just capped ones; the init only moves when cap < LOG_STD_INIT + 0.2.
+    aim_log_std_init = resolve_aim_log_std_init(aim_log_std_max)
 
     # R0-H: env LABEL from the resolved map name. The CLI always sets args.map
     # (above the --dump-config exit); the harness / older SimpleNamespace
@@ -1128,6 +1271,9 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         },
         "aim_entropy_bonus": aim_entropy_bonus,
         "aim_log_std_max": aim_log_std_max,
+                                                                       # Rung 1a T1: DERIVED from the cap (no CLI flag of its own); the
+                                                                       # gate reads σ movement as |raw − init|, so it is provenance.
+        "aim_log_std_init": aim_log_std_init,
                                                                        # R0-I: fixed-baseline eval cadence (0 = off). Provenance only —
                                                                        # not allowlisted for --resume-run (Task 7 rule: new CLI flags are
                                                                        # config keys, not allowlist entries).
@@ -2071,6 +2217,10 @@ def build_policy(vecenv,
                if obs_dim_override is not None else driver_env.single_observation_space.shape[0])
     hidden = 256
     _cap = validate_aim_log_std_max(aim_log_std_max)
+    # Rung 1a T1: the FRESH σ init follows the cap (see resolve_aim_log_std_init)
+    # — LOG_STD_INIT at the 5v5 default cap, cap − 0.2 under a tight one, never
+    # AT the cap where clamp would zero the gradient forever.
+    _log_std_init = resolve_aim_log_std_init(_cap)
 
     class Dust2Policy(nn.Module):
 
@@ -2147,6 +2297,9 @@ def build_policy(vecenv,
             #   per Fan et al. IJCAI 2019 H-PPO baseline. Clamped in forward()
             #   to [LOG_STD_MIN, LOG_STD_MAX] so neither σ collapse (entropy
             #   loss → −∞) nor explosion (σ floods policy) is reachable.
+            #   Rung 1a T1: the init is _log_std_init, not LOG_STD_INIT — it
+            #   must start strictly INSIDE that clamp band or the parameter
+            #   receives zero gradient for the whole run.
             # Pitfall: keep `std=0.01` on aim_mu init so the pre-tanh mean
             #   starts ~zero — otherwise the policy starts saturated and
             #   learning the Gaussian head is much slower.
@@ -2167,7 +2320,7 @@ def build_policy(vecenv,
                 ])
                 self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
                 self.aim_mu = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
-                self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+                self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), _log_std_init))
             else:
                 self.action_heads_t = nn.ModuleList([
                     pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
@@ -2175,7 +2328,7 @@ def build_policy(vecenv,
                 ])
                 self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
                 self.aim_mu_t = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
-                self.aim_log_std_t = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+                self.aim_log_std_t = nn.Parameter(torch.full((AIM_DIM, ), _log_std_init))
                 # RNG hygiene (spec §3.7): the CT copy's construction is what
                 # draws from the default stream, so it is forked — post-hoc
                 # weight cloning would NOT restore stream parity. Without this
@@ -2191,7 +2344,7 @@ def build_policy(vecenv,
                     ])
                     self.aim_mu_ct = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM),
                                                                   std=0.01)
-                self.aim_log_std_ct = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+                self.aim_log_std_ct = nn.Parameter(torch.full((AIM_DIM, ), _log_std_init))
 
             # max_turn_speed mirrors C sd->max_turn_speed (StaticData, π/4
             # default). Pulled from the vecenv's static-data block so the
@@ -2662,7 +2815,20 @@ def log_aim_log_std(policy, logs):
 
     WHAT: legacy policy → today's two keys, unchanged. Split policy → the same
     two keys carrying the MEAN of the two CLAMPED copies, plus four per-team
-    keys policy/aim_log_std_{yaw,pitch}_{t,ct}.
+    keys policy/aim_log_std_{yaw,pitch}_{t,ct}. Every clamped key also gets a
+    `_raw` twin carrying the UNCLAMPED parameter (same per-dim / per-team /
+    pitch-pin convention).
+
+    WHY the raw twin (Rung 1a T1, spec 2026-08-30 §3): the clamped key is
+    censored at the cap, so a σ that the optimizer has pushed past the cap —
+    the state in which clamp zeroes its gradient and σ is dead — is
+    indistinguishable from a σ sitting happily AT the cap. The gate reads
+    `policy/aim_log_std_yaw_raw` for both of its σ questions: "did σ move ≥ 0.1
+    from its init" (⇒ the continuous head receives gradient at all) and "is raw
+    ≤ cap" (⇒ the movement measurement is still meaningful). health/
+    weight_norm_aim_log_std already exposes a raw NORM, but only every 5 epochs
+    and unsigned/aggregated — per-row, per-dim and signed is what the gate
+    needs.
 
     WHY the legacy keys survive as a mean rather than being replaced: the T7
     acceptance gate greps the status line for `aim_log_std_pitch=` (see
@@ -2701,19 +2867,33 @@ def log_aim_log_std(policy, logs):
     pitch_live = mask is None or float(mask[1]) != 0.0
     with torch.no_grad():
         if hasattr(policy, "aim_log_std_t"):
+            raw_t = policy.aim_log_std_t.detach().cpu().numpy()
+            raw_ct = policy.aim_log_std_ct.detach().cpu().numpy()
             ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, cap).cpu().numpy()
             ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, cap).cpu().numpy()
             logs["policy/aim_log_std_yaw_t"] = float(ls_t[0])
             logs["policy/aim_log_std_yaw_ct"] = float(ls_ct[0])
+            logs["policy/aim_log_std_yaw_t_raw"] = float(raw_t[0])
+            logs["policy/aim_log_std_yaw_ct_raw"] = float(raw_ct[0])
             if pitch_live:
                 logs["policy/aim_log_std_pitch_t"] = float(ls_t[1])
                 logs["policy/aim_log_std_pitch_ct"] = float(ls_ct[1])
+                logs["policy/aim_log_std_pitch_t_raw"] = float(raw_t[1])
+                logs["policy/aim_log_std_pitch_ct_raw"] = float(raw_ct[1])
             clamped = 0.5 * (ls_t + ls_ct)
+            # Mean of the two RAW copies, mirroring the clamped mean above. It
+            # stays a mean (not a max) so the legacy and split architectures
+            # answer the gate's σ question the same way; the per-team `_raw`
+            # keys above are there when the two copies need separating.
+            raw = 0.5 * (raw_t + raw_ct)
         else:
+            raw = policy.aim_log_std.detach().cpu().numpy()
             clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, cap).cpu().numpy()
     logs["policy/aim_log_std_yaw"] = float(clamped[0])
+    logs["policy/aim_log_std_yaw_raw"] = float(raw[0])
     if pitch_live:
         logs["policy/aim_log_std_pitch"] = float(clamped[1])
+        logs["policy/aim_log_std_pitch_raw"] = float(raw[1])
 
 
 def compute_head_divergence(policy):
@@ -5896,6 +6076,15 @@ def train(args):
     # <data_dir>/<run_id>/ matches the metrics rows and --resume-run can find it.
     trainer.logger.run_id = run_id
     trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
+    # Rung 1a T1: …but NOT on the aim σ. Decay adds wd·θ to the gradient and
+    # aim_log_std is always negative, so it would drift σ upward at exactly
+    # zero true gradient — faking the gate's learning signal and eating the
+    # init's clamp margin. Must run after the line above (it clones group 0's
+    # hypers) and before load_full_resume (see the helper's PITFALLS).
+    _n_sigma = isolate_aim_log_std_param_group(trainer)
+    print(f"[Train] aim_log_std: {_n_sigma} parameter(s) moved to a weight_decay=0 param group "
+          f"(fresh init {train_config['aim_log_std_init']:.4f}, "
+          f"cap {train_config['aim_log_std_max']:.4f})")
     _patch_trainer_with_return_norm(trainer)
     # Batch 3 (T5): hybrid-aim patch ALWAYS runs after return_norm because the
     # train() wrapper installed by return_norm reads self.cont_actions /
@@ -6381,8 +6570,10 @@ if __name__ == "__main__":
                         type=float,
                         default=None,
                         dest="aim_log_std_max",
-                        help="R0-E.3: per-run cap on aim log σ, in (log 0.01, log 0.5] "
-                        "(default LOG_STD_MAX = log 0.5).")
+                        help="R0-E.3: per-run cap on aim log σ, in (LOG_STD_MIN + 0.4, log 0.5] "
+                        "≈ (-4.205, -0.693] (default LOG_STD_MAX = log 0.5). Rung 1a T1: the "
+                        "lower bound leaves room for the σ init to sit 0.2 BELOW the cap and "
+                        "still stay above LOG_STD_MIN — see validate_aim_log_std_max.")
     parser.add_argument("--warmstart-entropy",
                         action="store_true",
                         dest="warmstart_entropy",

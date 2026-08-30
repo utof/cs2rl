@@ -441,16 +441,26 @@ def test_load_policy_from_checkpoint_infers_split(env, tmp_path):
 
 def test_log_aim_log_std_legacy_keys_unchanged(env):
     """Spec §5 test 10 (legacy half): on a legacy policy the emitted keys are
-    exactly today's two, with today's values.
+    exactly the two clamped ones (no per-team keys), with today's values.
+
+    Rung 1a T1 added a `_raw` twin per clamped key (the UNCLAMPED parameter —
+    see log_aim_log_std's docstring), so the exact set is four. The point of
+    the assert is unchanged: a legacy policy must not emit `_t`/`_ct` keys.
+    Both σ values here are inside the band, so raw == clamped.
     """
     p = train.build_policy(env, device="cpu")
     with torch.no_grad():
         p.aim_log_std.copy_(torch.tensor([-1.5, -2.0]))
     logs = {}
     train.log_aim_log_std(p, logs)
-    assert set(logs) == {"policy/aim_log_std_yaw", "policy/aim_log_std_pitch"}
+    assert set(logs) == {
+        "policy/aim_log_std_yaw", "policy/aim_log_std_pitch", "policy/aim_log_std_yaw_raw",
+        "policy/aim_log_std_pitch_raw"
+    }
     assert logs["policy/aim_log_std_yaw"] == pytest.approx(-1.5)
     assert logs["policy/aim_log_std_pitch"] == pytest.approx(-2.0)
+    assert logs["policy/aim_log_std_yaw_raw"] == pytest.approx(-1.5)
+    assert logs["policy/aim_log_std_pitch_raw"] == pytest.approx(-2.0)
 
 
 def test_log_aim_log_std_split_emits_mean_plus_per_team(env):
