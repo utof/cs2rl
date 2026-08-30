@@ -34,6 +34,12 @@ def pytest_configure(config):
         "markers",
         "performance: performance-sensitive tests excluded from default pytest runs",
     )
+    # R0-D (#135): multi-minute subprocess training tests (test_seed_reproducible).
+    # Unregistered markers are an error under --strict-markers.
+    config.addinivalue_line(
+        "markers",
+        "slow: multi-minute subprocess/rollout tests; deselect with -m 'not slow'",
+    )
 
     # Some tests (e.g. test_run_experiment.py::test_full_run_*) spawn the real
     # scripts/run_experiment.py subprocess, which enforces a >=5 GB free-disk

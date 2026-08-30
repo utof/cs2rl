@@ -33,7 +33,14 @@ static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_sp
      * the guard for the C-only callers (cs2_demo.c / make_client). */
     assert(sd->n_active_per_team >= 1 && sd->n_active_per_team <= TEAM_SIZE &&
            "StaticData.n_active_per_team must be in 1..TEAM_SIZE");
-    env->rng         = seed ? seed : 1;
+    /* R0-D (#135): seeds 0 and 1 used to alias (`seed ? seed : 1`) — every
+     * env pair (2k, 2k+1) handed adjacent seeds by pufferlib shared a stream.
+     * Golden-ratio (0x9E3779B9) additive mix; uint32 wrap is intended. The
+     * `: 1u` fallback fires ONLY at seed == 0x61C88647 (the one value whose
+     * sum wraps to exactly 0 — xorshift32 would be stuck at 0 forever).
+     * PITFALL: changing this moves every xorshift32 stream => sim fingerprints
+     * (scripts/sim_fingerprint.py) legitimately change; record the new set. */
+    env->rng         = (seed + 0x9E3779B9u) ? (seed + 0x9E3779B9u) : 1u;
     env->team_spirit = team_spirit;
     clear_stats(&env->step_stats);
     clear_stats(&env->episode_stats);

@@ -219,7 +219,7 @@ def test_config_guard_allowlist(tmp_path, capsys):
     from train import RESUME_CONFIG_ALLOWLIST, check_resume_config
     old = {"a": 1, "seed": 1, "device": "cpu", "data_dir": "x", "run_id": "r", "gamma": 0.99}
     (tmp_path / "config.json").write_text(json.dumps(old))
-    new = dict(old, seed=2, device="cuda", data_dir="y", run_id="q")
+    new = dict(old, device="cuda", data_dir="y", run_id="q")
     check_resume_config(tmp_path, new)                 # allowlisted diffs OK
                                                        # data_dir relative→absolute of the SAME dir is not a change (no WARN noise)
     capsys.readouterr()                                # drop the WARN lines from the call above
@@ -227,7 +227,12 @@ def test_config_guard_allowlist(tmp_path, capsys):
     check_resume_config(tmp_path, dict(old, data_dir=str(Path("rel/run").resolve())))
     assert "data_dir" not in capsys.readouterr().out
     (tmp_path / "config.json").write_text(json.dumps(old))
-    assert {"data_dir", "device", "seed", "run_id"} <= RESUME_CONFIG_ALLOWLIST
+    assert {"data_dir", "device", "run_id"} <= RESUME_CONFIG_ALLOWLIST
+                                                       # R0-D (#135): a resumed run's RNGs come from train_state.pt, so a
+                                                       # changed --seed must be refused, not silently half-applied.
+    assert "seed" not in RESUME_CONFIG_ALLOWLIST
+    with pytest.raises(SystemExit, match="seed"):
+        check_resume_config(tmp_path, dict(old, seed=2))
                                                        # Task 7 context ruling: n_active_per_team changes the step unit and the
                                                        # participating buffer layout — it must NEVER be allowlisted.
     assert "n_active_per_team" not in RESUME_CONFIG_ALLOWLIST

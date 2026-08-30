@@ -613,8 +613,13 @@ def _atomic_save_state_dict(state_dict, path):
 # PITFALL: n_active_per_team is deliberately NOT allowlisted — it changes the
 # unit of global_step (participating agent-steps) and the participating buffer
 # layout, so a resumed run under a different value would be nonsense.
+# PITFALL (R0-D #135): `seed` is NOT allowlisted either. A resumed run's RNG
+# streams come back from train_state.pt (restore_train_state), so a changed
+# --seed would be silently ignored for python/numpy/torch yet still re-seed
+# the freshly built envs — an inconsistent, unlabelled run. Refuse instead;
+# pass the original --seed (config.json has it) when resuming.
 RESUME_CONFIG_ALLOWLIST = frozenset(
-    {"data_dir", "device", "seed", "run_id", "total_timesteps", "participating_timesteps"})
+    {"data_dir", "device", "run_id", "total_timesteps", "participating_timesteps"})
 # Trainer attrs of the warm-start entropy machine + SAC target (all set in
 # _patch_trainer_with_return_norm). Plain Python scalars/None — pickled as-is.
 _WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
@@ -902,6 +907,24 @@ def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
     bptt_horizon = 64
     batch_size = num_envs * agents_per_env * bptt_horizon
     return agents_per_env, bptt_horizon, batch_size
+
+
+def env_seed_base(seed: int) -> int:
+    """R0-D (#135): base seed handed to pufferlib.vector.make from --seed.
+
+    WHAT: --seed * 100_000. Env i (global index, 0..num_envs-1) gets C seed
+    base + i via env_kwargs["_seed"] (see build_env_factory), identically
+    under Serial and Multiprocessing — pufferlib's own (base + w) * E + j
+    composition is NOT used because vector.make drops its `seed` argument.
+    env_init then mixes the value (cs2_env.h) so adjacent seeds never alias.
+    WHY x100_000: keeps the env-seed ranges of consecutive --seed values
+    disjoint for any num_envs < 100_000, so "seed 3" and "seed 4" share no
+    env stream — pinned by test_composed_env_seed_derivation_injective.
+    PITFALL: Task 13's eval env is pinned at seed 10_000_003 = base(100) + 3;
+    only --seed 100 with >=4 envs collides. For --seed <= 4 no worker env seed
+    equals it (test_eval_seed_cannot_collide_with_worker_seeds).
+    """
+    return int(seed) * 100_000
 
 
 def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
@@ -1732,6 +1755,12 @@ def build_env_factory(*,
     limitation, stated here and in the final report; do not fix in this branch.
     PITFALL: `seed or 0` is intentional — pufferlib passes seed=None for some
     backends. Keep it.
+    R0-D (#135) `_seed`: train() routes the per-env seed through env_kwargs
+    (`_seed = env_seed_base(--seed) + i`) because pufferlib.vector.make takes
+    `seed` as ITS OWN named parameter and never forwards it to the backend —
+    `make(..., seed=X)` is a silent no-op and every env lands on pufferlib's
+    default base (env i -> seed i) regardless of --seed. When `_seed` is given
+    it wins over pufferlib's `seed`; the legacy path is unchanged otherwise.
     """
 
     def env_factory(*_args,
@@ -1740,6 +1769,7 @@ def build_env_factory(*,
                     _cont_shm=None,
                     _cont_idx=None,
                     _mask_shm=None,
+                    _seed=None,
                     **kwargs):
         # STRICT catch-all (review fix 1): pufferlib only ever passes buf,
         # seed and the env_kwargs[i] dict, all of which are named parameters
@@ -1752,7 +1782,7 @@ def build_env_factory(*,
                             "closure state")
         env = make_puffer_env(team_spirit=shared_ts,
                               buf=buf,
-                              seed=seed or 0,
+                              seed=_seed if _seed is not None else (seed or 0),
                               map_data=map_data,
                               reward_overrides=reward_overrides,
                               reward_symmetrize=reward_symmetrize,
@@ -5094,6 +5124,22 @@ def train(args):
 
     _map_data = args.map_data
 
+    # ── R0-D (#135): deterministic seeding ──────────────────────────────────
+    # pufferl.py has its seeding commented out. Seed BEFORE build_policy
+    # (weight init), before the vecenv (env seeds via env_seed_base below) and
+    # before any random.* consumer (SelfPlayManager draws from module-level
+    # random). This runs BEFORE load_full_resume, so on --resume-run the
+    # python/numpy/torch states saved in train_state.pt (_rng_state_dict)
+    # override this fresh seed — the same RNG set, one path. Env xorshift32
+    # state is NOT restored on resume (C side; see load_full_resume's WARN).
+    # Eval env seed 10_000_003 (Task 13) cannot collide with worker env seeds
+    # env_seed_base(--seed) + i for --seed<=4 (any num_envs) — see env_seed_base.
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     # ── Batch 3 (T5b): cont-action shared memory across the fork boundary ──
     # PufferLib's Multiprocessing backend forks workers AFTER allocating its
     # own shm dict, so any Python attribute set on the main vecenv after
@@ -5136,10 +5182,13 @@ def train(args):
     # (one per env). All args propagate verbatim through fork because
     # they're stored on env_kwargs[i] BEFORE Process.start() (see
     # .venv/lib/.../pufferlib/vector.py:333-346).
+    # R0-D (#135): the env seed rides here too — pufferlib.vector.make would
+    # silently drop a `seed=` kwarg (see build_env_factory's docstring).
     _per_env_kwargs = [{
         "_cont_shm": _cont_action_shm,
         "_cont_idx": i,
         "_mask_shm": _mask_shm,
+        "_seed": env_seed_base(args.seed) + i,
     } for i in range(args.num_envs)]
 
     backend_name = args.vec_backend.lower()
