@@ -307,3 +307,33 @@ def test_eval_interval_cli_config_and_modal_mirror():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     import modal_runner_lib as mrl
     assert mrl.LIVE_TRAIN_OPTION_ARITY.get("--eval-interval") == 1
+
+
+def test_hit_geometry_constants_match_cs2_combat_h():
+    """F16 tripwire: eval_baselines vendors the C hit geometry (HIT_HALF_WIDTH,
+    eye heights, torso offsets) as Python literals — the oracle's LoS/aim math
+    silently diverges from the sim if either side is edited alone. Regex the
+    `static const float NAME = X.Yf;` declarations out of cs2_combat.h and
+    compare; a missing name is a failure too (renamed constant = same drift).
+    PITFALL: the header is the source of truth; fix eval_baselines.py, not the
+    regex, when this trips."""
+    import re
+    from pathlib import Path
+
+    import eval_baselines as eb
+
+    header = (Path(__file__).resolve().parents[1] / "src" / "c_env" / "cs2_combat.h").read_text()
+    pattern = re.compile(r"static const float\s+(HIT_HALF_WIDTH|EYE_HEIGHT_STAND|EYE_HEIGHT_CROUCH|"
+                         r"TORSO_OFFSET_STAND|TORSO_OFFSET_CROUCH)\s*=\s*([0-9.]+)f")
+    found = {name: float(val) for name, val in pattern.findall(header)}
+    expected = {
+        "HIT_HALF_WIDTH": eb.HIT_HALF_WIDTH,
+        "EYE_HEIGHT_STAND": eb.EYE_STAND,
+        "EYE_HEIGHT_CROUCH": eb.EYE_CROUCH,
+        "TORSO_OFFSET_STAND": eb.TORSO_STAND,
+        "TORSO_OFFSET_CROUCH": eb.TORSO_CROUCH,
+    }
+    missing = sorted(set(expected) - set(found))
+    assert not missing, f"not found as `static const float` in cs2_combat.h: {missing}"
+    for name, py_val in expected.items():
+        assert found[name] == py_val, f"{name}: cs2_combat.h={found[name]} eval_baselines={py_val}"

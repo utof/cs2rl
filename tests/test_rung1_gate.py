@@ -95,6 +95,16 @@ def test_seed_metrics_window_dedupe_and_episode_weighting():
     assert m["eval/win_vs_random_as_ct"] == pytest.approx(0.9)
 
 
+def test_seed_metrics_missing_shots_key_is_incomplete():
+    """F18 tripwire: game/shots_fired absent from EVERY W row is a metrics-schema
+    drift, not an agent that never fired — must be INCOMPLETE (→ INVALID), never
+    a "shots_fired 0.00 < 10" merit failure that reads as "treatment lost"."""
+    rows = [{k: v for k, v in r.items() if k != "game/shots_fired"} for r in GOOD]
+    m = seed_metrics(rows, PT)
+    assert m.get("incomplete") is True
+    assert "game/shots_fired" in m["fail"]
+
+
 def test_seed_metrics_missing_used_past_key_counts_as_zero():
     rows = [{k: v for k, v in r.items() if k != "self_play/used_past"} for r in GOOD]
     assert seed_metrics(rows, PT)["rows"] == 4         # the used_past=0.5 row is now in W

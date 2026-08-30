@@ -256,6 +256,7 @@ def test_build_map_data_names():
         build_map_data("nope")
 
 
+@pytest.mark.slow                                                                      # 7 train.py --dump-config subprocesses
 def test_config_env_label(tmp_path):
     """Real CLI: --map sets config["env"] and pin_pitch is resolved from the
     built map ABOVE the --dump-config exit (the Modal runner fingerprints

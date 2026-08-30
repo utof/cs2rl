@@ -16,7 +16,8 @@ Rules (all from spec §5 — change the spec first, then this file):
           analyze_tplant.dedupe_resume_rows first (R0-C resume replays).
   seed    is INCOMPLETE (the experiment did not deliver a judgeable window:
           dir/config.json/metrics.jsonl missing, |W| < 3, no row in W carrying
-          both eval/win_vs_random_as_t and _as_ct) or FAILS the gate on its
+          both eval/win_vs_random_as_t and _as_ct, zero episodes in W,
+          game/shots_fired absent from every W row — key drift) or FAILS the gate on its
           own merits (episode-weighted game/shots_fired < 10, a gated ratio
           with a zero denominator). Both are "fail" rows in the table; only
           the first kind invalidates the verdict (below).
@@ -178,6 +179,12 @@ def seed_metrics(rows, participating_timesteps):
     episodes = sum(float(r.get(EPISODES_KEY, 0.0)) for r in window)
     if episodes <= 0:
         return _incomplete("zero episodes in W")
+    # Key-drift tripwire: every game/* counter rides the same compute_game_metrics
+    # row, so shots_fired absent from EVERY W row means the metrics schema moved,
+    # not that the agent never fired. Without this guard weighted_sum reads 0.0
+    # and the seed FAILS "on its merits" — a misleading "treatment lost" verdict.
+    if not _row_values(window, "game/shots_fired"):
+        return _incomplete("game/shots_fired absent from every W row (metrics key drift?)")
     shots_fired = weighted_sum(window, "game/shots_fired") / episodes
     if shots_fired < MIN_SHOTS_FIRED:
         return {"fail": f"episode-weighted game/shots_fired {shots_fired:.2f} < {MIN_SHOTS_FIRED}"}

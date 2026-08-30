@@ -148,7 +148,7 @@ def resolve_launch_request(
     if action != mrl.Action.RUN.value:
         raise mrl.ValidationError("the only App action is run")
     if map is None:
-        raise mrl.ValidationError("map is required and must be simple or dust2")
+        raise mrl.ValidationError(f"map is required and must be one of {sorted(mrl.ALLOWED_MAPS)}")
     if run_id is None:
         raise mrl.ValidationError("--run-id is required")
     if git_sha is None:

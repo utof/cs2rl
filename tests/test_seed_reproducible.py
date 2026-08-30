@@ -97,7 +97,8 @@ def test_seed_everything_is_deterministic():
     """Fast always-on pin for the host-side RNG set (python/numpy/torch):
     seed_everything(3) twice yields identical draws, seed_everything(4) differs.
     Before this test, deleting those calls from train() passed the default
-    suite (only the opt-in slow e2e test noticed)."""
+    suite (only the 2-subprocess e2e test noticed;
+    test_two_runs_same_seed_identical[3] now runs in the default suite)."""
     import random
 
     import torch

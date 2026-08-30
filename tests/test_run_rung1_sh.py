@@ -332,3 +332,51 @@ def test_max_retries_exhausted_does_not_abort_sweep(fake, tmp_path):
         assert [("--resume-run" in c) for c in calls] == [False, True, True]
         assert not (out / label / "DONE").exists()
     assert "FAILED: rung1-s0 rung1-s1 rung1-neg-s0" in r.stderr
+
+
+def test_common_argv_is_accepted_by_train_py_dump_config(tmp_path):
+    """F19 (final review B6): the ONLY link in the launch chain with no local
+    test was COMMON itself against the REAL argparse — every other test here
+    drives a fake trainer. Parse `COMMON=(...)` out of the script, drop
+    --train, run train.py --dump-config with it (no torch, ~1-2 s for
+    `import map`) and pin the spec §4 values config.json must carry, incl. the
+    participating-budget arithmetic (total = 5x participating at n_active=1).
+    PITFALL: a renamed reward key / CLI flag otherwise only dies at argparse on
+    a booked GPU box. sys.executable + cwd=REPO_ROOT like tests/test_train_cli.py."""
+    import re
+    import shlex
+
+    text = SCRIPT.read_text()
+    m = re.search(r"^COMMON=\((.*?)\)\s*$", text, re.S | re.M)
+    assert m, "COMMON=( ... ) array not found in run_rung1.sh"
+    common = shlex.split(m.group(1))
+    assert common[0] == "--train"
+    common = common[1:]
+
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    r = subprocess.run([
+        sys.executable,
+        str(REPO_ROOT / "src" / "train.py"), "--dump-config", *common, "--seed", "0",
+        "--checkpoint-dir",
+        str(ckpt)
+    ],
+                       capture_output=True,
+                       text=True,
+                       timeout=300,
+                       cwd=REPO_ROOT)
+    assert r.returncode == 0, f"stdout:\n{r.stdout[-2000:]}\nstderr:\n{r.stderr[-2000:]}"
+    cfg = json.loads((ckpt / "config.json").read_text())
+
+    assert cfg["env"] == "cs2-arena-duel"
+    assert cfg["seed"] == 0
+    assert cfg["n_active_per_team"] == 1
+    assert cfg["pin_pitch"] == 1
+    assert cfg["crouch_enabled"] == 0
+    assert cfg["round_time_ticks"] == 160
+    assert cfg["gamma"] == cfg["pbrs_gamma"] == 0.99
+    assert cfg["participating_timesteps"] == 10_000_000
+    assert cfg["total_timesteps"] == 50_000_000
+    assert cfg["reward_kill"] == 0.3
+    assert cfg["pbrs_site_weight"] == 0.0
+    assert cfg["checkpoint_interval"] == cfg["eval_interval"] == 10

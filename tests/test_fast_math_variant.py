@@ -93,6 +93,7 @@ def _sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+@pytest.mark.slow                      # two zig variant builds (~20 s)
 @pytest.mark.parametrize("fast_math", ["true", "false"])
 def test_rewards_finite_under_both_fast_math_settings(tmp_path, fast_math):
     try:

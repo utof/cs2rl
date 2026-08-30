@@ -503,9 +503,9 @@ def masked_explained_variance(y_pred, y_true, part):
 # the trained baseline; an unflagged run must stay byte-identical to the
 # pre-wiring env.
 #
-# Deliberately NOT threaded: pbrs_gamma (must equal training gamma — dedicated
-# guarded make_puffer_env parameter), team_spirit (config-threaded separately),
-# include_step_stats_in_info (issue #100, out of scope).
+# Deliberately NOT threaded here: pbrs_gamma (threaded as a non-weight knob by
+# env_knobs_from_args via resolve_gammas, R0-J), team_spirit (config-threaded
+# separately), include_step_stats_in_info (issue #100, out of scope).
 REWARD_WEIGHT_DEFAULTS = {
                                                        # ── non-potential (hackable — sweep with care) ──
     "reward_win": 1.0,
@@ -627,6 +627,10 @@ def _atomic_save_state_dict(state_dict, path):
 # pass the original --seed (config.json has it) when resuming.
 RESUME_CONFIG_ALLOWLIST = frozenset(
     {"data_dir", "device", "run_id", "total_timesteps", "participating_timesteps"})
+# R0-C: epochs between full-state checkpoint sets. ONE constant for the CLI
+# default and build_train_config's getattr fallback (harness / SimpleNamespace
+# callers without the flag) — two literals drifted once (final review #7).
+DEFAULT_CHECKPOINT_INTERVAL = 200
 # Trainer attrs of the warm-start entropy machine + SAC target (all set in
 # _patch_trainer_with_return_norm). Plain Python scalars/None — pickled as-is.
 _WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
@@ -657,7 +661,8 @@ def seed_everything(seed: int) -> None:
     the same RNG set, one fresh-seed path here and one resume path there. Add a
     new RNG to all three or resume will silently diverge from a fresh run.
     WHY a function: train() used to inline these calls, and no default-suite
-    test noticed when they were dropped (only the opt-in slow e2e test did).
+    test noticed when they were dropped (only the 2-subprocess e2e test did;
+    test_two_runs_same_seed_identical[3] now runs in the default suite).
     test_seed_everything_is_deterministic pins it now.
     PITFALL: seeds only — it does NOT set torch.use_deterministic_algorithms
     or cudnn flags, so CUDA runs are seeded but not bit-exact reproducible.
@@ -954,7 +959,7 @@ def env_seed_base(seed: int) -> int:
     env_init then mixes the value (cs2_env.h) so adjacent seeds never alias.
     WHY x100_000: keeps the env-seed ranges of consecutive --seed values
     disjoint for any num_envs < 100_000, so "seed 3" and "seed 4" share no
-    env stream — pinned by test_composed_env_seed_derivation_injective.
+    env stream — pinned by test_env_seed_ranges_of_adjacent_seeds_disjoint.
     PITFALL: Task 13's eval env is pinned at seed 10_000_003 = base(100) + 3;
     only --seed 100 with >=4 envs collides. For --seed <= 4 no worker env seed
     equals it (test_eval_seed_cannot_collide_with_worker_seeds).
@@ -1082,7 +1087,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # env's PBRS discount and the PPO discount cannot resolve differently.
     gamma, pbrs_gamma = resolve_gammas(args)
     cfg = {
-                                                                        # Core PPO
+                                                                       # Core PPO
         "env": f"cs2-{map_name}",
         "device": args.device,
         "seed": args.seed,
@@ -1091,16 +1096,17 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "n_active_per_team": n_active,
         "pin_pitch": knobs["pin_pitch"],
         "crouch_enabled": knobs["crouch_enabled"],
-                                                                        # R0-G: recorded as given (None ⇒ env default), read from args
-                                                                        # directly so None survives — env_knobs_from_args drops None keys.
-        "round_time_ticks": getattr(args, "round_time_ticks", None),
-        "laser_range": getattr(args, "laser_range", None),
-        "max_turn_speed": getattr(args, "max_turn_speed", None),
+                                                                       # R0-G: recorded as given (None ⇒ env default), read from args
+                                                                       # directly so None survives — env_knobs_from_args drops None keys.
+        **{
+            a: getattr(args, a, None)
+            for a, _ in _R0G_KNOBS
+        },
         "aim_entropy_bonus": aim_entropy_bonus,
         "aim_log_std_max": aim_log_std_max,
-                                                                        # R0-I: fixed-baseline eval cadence (0 = off). Provenance only —
-                                                                        # not allowlisted for --resume-run (Task 7 rule: new CLI flags are
-                                                                        # config keys, not allowlist entries).
+                                                                       # R0-I: fixed-baseline eval cadence (0 = off). Provenance only —
+                                                                       # not allowlisted for --resume-run (Task 7 rule: new CLI flags are
+                                                                       # config keys, not allowlist entries).
         "eval_interval": int(getattr(args, "eval_interval", 0) or 0),
         "batch_size": batch_size,
         "bptt_horizon": bptt_horizon,
@@ -1109,17 +1115,17 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "update_epochs": 3,
         "learning_rate": 3e-4,
         "gamma": gamma,
-        "pbrs_gamma": pbrs_gamma,                                       # R0-J: provenance; not allowlisted for --resume-run
+        "pbrs_gamma": pbrs_gamma,                                      # R0-J: provenance; not allowlisted for --resume-run
         "gae_lambda": 0.95,
         "clip_coef": 0.15,
         "vf_coef": 0.5,
         "vf_clip_coef": None,
-        "ent_coef": 0.1,                                                # fallback; adaptive alpha overrides
+        "ent_coef": 0.1,                                               # fallback; adaptive alpha overrides
         "max_grad_norm": 0.5,
         "target_kl": 0.03,
         "use_rnn": True,
         "weight_decay": 1e-4,
-                                                                        # Extras required by PuffeRL constructor
+                                                                       # Extras required by PuffeRL constructor
         "compile": False,
         "compile_mode": "default",
         "compile_fullgraph": False,
@@ -1130,28 +1136,29 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "adam_beta2": 0.999,
         "adam_eps": 1e-8,
         "anneal_lr": True,
-        "checkpoint_interval": int(getattr(args, "checkpoint_interval",
-                                           200)),                       # R0-C: --checkpoint-interval
+        "checkpoint_interval":
+        int(getattr(args, "checkpoint_interval",
+                    DEFAULT_CHECKPOINT_INTERVAL)),                     # R0-C: --checkpoint-interval
         "data_dir": args.checkpoint_dir,
         "precision": "float32",
         "prio_alpha": 0.0,
         "prio_beta0": 1.0,
         "vtrace_rho_clip": 1.0,
         "vtrace_c_clip": 1.0,
-                                                                        # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
-                                                                        # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
-                                                                        # warmup_steps, held constant after; consumed by the SAC-style α
-                                                                        # controller via _scheduled_target_entropy. Previous hardcoded values
-                                                                        # (0.7→0.5) kept the target so high the controller steered the policy
-                                                                        # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
-                                                                        # ≈ 2.87 nats still allows broad exploration but permits commitment.
-                                                                        # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
-                                                                        # _patch_trainer_with_return_norm clamps α ≥ 0.5 when H < 0.3·max;
-                                                                        # a base target below the floor would make the two mechanisms fight.
+                                                                       # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
+                                                                       # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
+                                                                       # warmup_steps, held constant after; consumed by the SAC-style α
+                                                                       # controller via _scheduled_target_entropy. Previous hardcoded values
+                                                                       # (0.7→0.5) kept the target so high the controller steered the policy
+                                                                       # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
+                                                                       # ≈ 2.87 nats still allows broad exploration but permits commitment.
+                                                                       # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
+                                                                       # _patch_trainer_with_return_norm clamps α ≥ 0.5 when H < 0.3·max;
+                                                                       # a base target below the floor would make the two mechanisms fight.
         "entropy_target_warmup_frac": 0.5,
         "entropy_target_base_frac": 0.35,
         "entropy_target_warmup_steps": 10_000_000,
-                                                                        # ── Warm-start entropy mode: see the comment above ──
+                                                                       # ── Warm-start entropy mode: see the comment above ──
         "warmstart_entropy": ws_entropy,
         "warmstart_grace_steps": ws_grace,
         "warmstart_ramp_steps": ws_ramp,
@@ -1830,6 +1837,13 @@ def resolve_gammas(args) -> tuple[float, float]:
     return gamma, pbrs_gamma
 
 
+# (args attr, make_puffer_env kwarg) — single source for env_knobs_from_args
+# AND build_train_config, so a knob added to one cannot be missed by the other
+# (config.json would then silently under-record the experiment).
+_R0G_KNOBS = (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
+              ("max_turn_speed", "max_turn_speed"))
+
+
 def env_knobs_from_args(args) -> dict:
     """Non-weight env knobs (Rung 0) as make_puffer_env kwargs.
 
@@ -1857,14 +1871,13 @@ def env_knobs_from_args(args) -> dict:
     """
     knobs = {
         "n_active_per_team": int(getattr(args, "n_active_per_team", TEAM_SIZE)),
-                                                                                                   # R0-E.2: `or 0` — args.pin_pitch is None on the CLI until train()
-                                                                                                   # resolves it from map flatness (see the pin_pitch block in train()).
+                                                                                 # R0-E.2: `or 0` — args.pin_pitch is None on the CLI until train()
+                                                                                 # resolves it from map flatness (see the pin_pitch block in train()).
         "pin_pitch": int(getattr(args, "pin_pitch", 0) or 0),
         "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
         "pbrs_gamma": resolve_gammas(args)[1],
     }
-    for arg_name, env_name in (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
-                               ("max_turn_speed", "max_turn_speed")):
+    for arg_name, env_name in _R0G_KNOBS:
         v = getattr(args, arg_name, None)
         if v is not None:
             knobs[env_name] = v
@@ -3906,8 +3919,8 @@ def build_map_data(name: str):
 
     PITFALL: ValueError (never assert) on an unknown name; argparse `choices`
     already rejects it on the CLI, this is for programmatic callers. Importing
-    `map` costs ~10 ms; loading dust2 is deferred to make_env / pin_pitch_for_
-    map (cached, ~1 s from the nav cache).
+    `map` costs ~0.8 s (0.76 s measured, Task 12 report); loading dust2 is
+    deferred to make_env / pin_pitch_for_map (cached, ~1 s from the nav cache).
     """
     if name not in MAP_NAMES:
         raise ValueError(f"unknown map {name!r}; expected one of {MAP_NAMES}")
@@ -3963,11 +3976,12 @@ def pin_pitch_for_map(map_data) -> int:
     the value MUST come from the loaded map, not from the marker.
 
     PITFALL: the in-sim dust2 (map.make_cs2_map, "verticality deferred")
-    zero-fills centroids_z, so today this returns 1 for dust2 — the spec
-    (plan §R0-E.2: "true for dust2") and Task 12's name-based table agree.
-    When real dust2 verticality lands this flips to 0 by itself, and every
-    dust2 resume is then refused by the config guard (pin_pitch is not
-    allowlisted) — that is the intended tripwire, not a bug.
+    zero-fills centroids_z, so today this returns 1 for dust2 — by spec (plan
+    §R0-E.2: pinned on flat maps incl. dust2). There is NO name-based table:
+    the `--map` path (build_map_data → resolve_pin_pitch) and the `--dust2`
+    path both end here. When real dust2 verticality lands this flips to 0 by
+    itself and every dust2 resume is refused by the config guard (pin_pitch is
+    not allowlisted) — the intended tripwire.
     """
     md = map_data
     if md is None:
@@ -3984,7 +3998,7 @@ def pin_pitch_for_map(map_data) -> int:
     return int(float(z.max() - z.min()) == 0.0)
 
 
-def resolve_pin_pitch(args) -> int:
+def resolve_pin_pitch(args, verbose: bool = True) -> int:
     """R0-E.2 (#131): set/validate args.pin_pitch from args.map_data; returns it.
 
     WHAT: ``args.pin_pitch is None`` (CLI default) ⇒ pin_pitch_for_map(
@@ -3997,10 +4011,13 @@ def resolve_pin_pitch(args) -> int:
     resolving later would leave the envs unpinned while the policy gets
     aim_dim_mask=[1,0] and assert_pin_pitch_agreement aborts the run.
 
-    PITFALL: args.map_data is None for `--dust2`; the helper loads the map
-    (cached), so calling this before the map block in main() is fine but
-    calling it above the `--dump-config` early exit would defeat that exit's
-    no-heavy-import contract — Task 12 puts the name-based value there.
+    PITFALL: args.map_data is None for `--map dust2`/`--dust2`; the helper
+    LOADS the map (cached). main() calls this ABOVE the --dump-config exit on
+    purpose — the Modal fingerprint dump must carry the geometry-resolved value
+    (costs ~1 s for dust2 from the nav cache, ~0.8 s for `import map`). train()
+    calls it again as a cache-safe cross-check for programmatic callers (second
+    call is silent, see `verbose`). verbose=False for the train() cross-check
+    so the value is printed once per launch.
     """
     flat = bool(pin_pitch_for_map(getattr(args, "map_data", None)))
     if getattr(args, "pin_pitch", None) is None:
@@ -4008,7 +4025,8 @@ def resolve_pin_pitch(args) -> int:
     if bool(args.pin_pitch) != flat:
         raise ValueError(f"pin_pitch={args.pin_pitch} but map flat={flat}: pin pitch only on "
                          f"flat maps (pass --pin-pitch {int(flat)} or omit it)")
-    print(f"[Train] pin_pitch={int(args.pin_pitch)} (map flat={flat})")
+    if verbose:
+        print(f"[Train] pin_pitch={int(args.pin_pitch)} (map flat={flat})")
     return int(args.pin_pitch)
 
 
@@ -5612,7 +5630,10 @@ def train(args):
     # every flag-less resume of a flat-map run (Task 12 ruling). The CLI
     # already resolved it above --dump-config; here it is a cache-safe
     # cross-check for programmatic callers.
-    resolve_pin_pitch(args)
+    resolve_pin_pitch(args, verbose=False)
+    # R0-D: refuse an out-of-range --seed BEFORE W&B init / metrics.jsonl open
+    # (the real call is in _per_env_kwargs below).
+    env_seed_base(args.seed)
 
     # ── R0-C (#134): --resume-run resolution (before run_label / metrics / config) ──
     resume_run = getattr(args, "resume_run", None)
@@ -5957,8 +5978,8 @@ def train(args):
     # SAME knobs as the workers (env_knobs_from_args + reward_overrides_from_args
     # so a --laser-range / --round-time-ticks run evaluates on what it trains
     # on). Seed 10_000_003: worker env seeds are env_seed_base(--seed) + i, so
-    # no collision for --seed <= 4 at any num_envs (only --seed 100 env 3
-    # reaches it). team_spirit=None → raw rewards (eval never feeds training).
+    # the only collision is --seed 100 with >= 4 envs (env 3) — see
+    # env_seed_base. team_spirit=None → raw rewards (eval never feeds training).
     _eval_hook = None
     _eval_interval = int(getattr(args, "eval_interval", 0) or 0)
     if _eval_interval > 0:
@@ -6200,7 +6221,7 @@ if __name__ == "__main__":
         help="Metrics-row and <checkpoint_dir>/<run_id>/ id (default <label>-<timestamp>).")
     parser.add_argument("--checkpoint-interval",
                         type=int,
-                        default=200,
+                        default=DEFAULT_CHECKPOINT_INTERVAL,
                         dest="checkpoint_interval",
                         help="Epochs between full-state checkpoints (default 200; Rung 1 uses 10).")
     parser.add_argument("--timesteps", type=int, default=10_000_000)
@@ -6285,6 +6306,9 @@ if __name__ == "__main__":
     # R0-G env knobs. Default None ⇒ the env's nav.py constant (config.json
     # records None, not a copied constant). Not in RESUME_CONFIG_ALLOWLIST:
     # changing any of them on --resume-run is a different experiment.
+    # PITFALL: a config.json written before R0-G/R0-I/R0-J lacks these keys;
+    # check_resume_config treats missing ≠ None as a mismatch, so such run dirs
+    # cannot --resume-run (by design — same as the R0-E keys).
     # R0-I (Task 13): fixed-baseline eval cadence. 0 = off (default: the
     # 40-episode serial eval costs wall time every epoch it runs).
     parser.add_argument("--eval-interval",
@@ -6412,14 +6436,20 @@ if __name__ == "__main__":
         "checkpoint's keys, so a crash-resume without this flag still rebuilds a "
         "split-trunk policy.")
     args = parser.parse_args()
+    # Every mode (record/eval too) derives env seeds from --seed; fail here,
+    # not deep in a mode.
+    env_seed_base(args.seed)
 
     # ── R0-H: map name → MapData → pin_pitch, ABOVE the --dump-config exit ──
     # The Modal runner fingerprints every launch from --dump-config, so the
     # dump must carry the same env label and the same geometry-resolved
     # pin_pitch the run's own config.json will (Task 9 ruling: the value comes
-    # from the LOADED map, never a name table). Cost: ~10 ms for simple/arena,
-    # ~1 s for dust2 from the nav cache (pin_pitch_for_map(None) loads it via
-    # the same _ENV_CACHE make_env uses, so nothing is loaded twice).
+    # from the LOADED map, never a name table). Cost: ~0.8 s (`import map`)
+    # for simple/arena, ~1 s for dust2 from the nav cache (pin_pitch_for_map(
+    # None) loads it via the same _ENV_CACHE make_env uses, so nothing is
+    # loaded twice). PITFALL: `--dump-config --map dust2` (or --dust2)
+    # therefore needs nav/de_dust2.nav + the vis cache on the HOST that runs
+    # the dump (Modal fingerprints run host-side).
     if args.map is None:
         args.map = "dust2" if args.dust2 else "simple"
     args.map_data = build_map_data(args.map)
