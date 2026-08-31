@@ -328,6 +328,10 @@ typedef struct {
  *              mis-labels a one-element array as a scalar, and the resulting
  *              canonical name would then disagree with ctypes forever.
  *
+ * Both `type` and `is_array` are checked against the real struct member at
+ * compile time by struct sd_prefix_type_checks, right below this table — a row
+ * that describes its field wrongly does not build.
+ *
  * WHY a separate list rather than generating the struct from this macro: the
  * struct above carries ~90 lines of interleaved field documentation that a
  * macro body (every line backslash-continued) would mangle, and rewriting a
@@ -415,6 +419,63 @@ typedef struct {
     X(int32_t, pin_pitch, 0)                                                                       \
     X(int32_t, crouch_enabled, 0)                                                                  \
     X(int32_t, jump_enabled, 0)
+
+/* ── Table-row type == struct-member type (compile-time) ──────────────────────
+ *
+ * WHAT: one check per SD_PREFIX_FIELDS row, asserting that the row's `type`
+ * column is the type the StaticData member above ACTUALLY has. A mismatch is a
+ * compile error naming the field; the table row that caused it shows up in the
+ * macro-expansion note under the error.
+ *
+ * WHY: offset and size in the layout table are offsetof/sizeof EXPRESSIONS, so
+ * the compiler owns them and no one can get them wrong. The type column is not
+ * — it is a hand-written string, and without this check nothing compares it to
+ * the struct. Editing `int32_t stale_memory_tick` to `float` in the STRUCT ONLY
+ * (leaving this table and StaticDataC in cs2_env.py saying int32_t) left all 71
+ * layout tests, the layout hash, and the sizeof(StaticData) guard green — the
+ * struct held a float that both descriptions called an int. A struct-only type
+ * edit must fail HERE, not silently reinterpret packed bytes once Python packs
+ * the prefix itself and the FMT string is gone; a pointer element-type change
+ * (`int8_t*` → `int32_t*`, same 8-byte field) is an out-of-bounds read that no
+ * runtime test in this tree would name.
+ *
+ * `int` and `int32_t` are deliberately COMPATIBLE here on this target — that is
+ * the same folding ctypes does (c_int32 IS c_int), which the whole two-sided
+ * design rests on, so this check must not be stricter than the hash it guards.
+ *
+ * The is_array arm compares `ctype[]` against the member's array type, so a
+ * wrong is_array flag also fails to compile rather than producing a plausible
+ * `arr_<base>_<count>` — the one part of the row the hash could not police.
+ *
+ * PITFALL: GNU builtins, not C11 `_Static_assert`, because build.zig pins
+ * `-std=c99`; both are available in clang (zig cc) in any -std mode. This block
+ * is C-only — `__builtin_types_compatible_p` does not exist in C++, and no C++
+ * TU includes this header today. Deliberately unguarded by `#ifdef __GNUC__`: a
+ * compiler that cannot run the check should fail loudly, not skip a layout
+ * guard in silence. */
+#define SD_ROW_TYPE_MATCHES_0(ctype, f)                                                            \
+    __builtin_types_compatible_p(ctype, __typeof__(((StaticData*)0)->f))
+#define SD_ROW_TYPE_MATCHES_1(ctype, f)                                                            \
+    __builtin_types_compatible_p(ctype[], __typeof__(((StaticData*)0)->f))
+/* Two levels so `is_array` is expanded before it is pasted onto the name. */
+#define SD_ROW_TYPE_MATCHES_(is_array, ctype, f) SD_ROW_TYPE_MATCHES_##is_array(ctype, f)
+#define SD_ROW_TYPE_MATCHES(is_array, ctype, f)  SD_ROW_TYPE_MATCHES_(is_array, ctype, f)
+
+/* A negative array size is the C99 way to fail a compile-time predicate. The
+ * member name IS the diagnostic, since a negative-size error quotes it. */
+#define SD_ROW_TYPE_CHECK(ctype, f, is_array)                                                      \
+    char sd_table_type_must_match_struct_##f[SD_ROW_TYPE_MATCHES(is_array, ctype, f) ? 1 : -1];
+
+/* Type declaration only — never defined, never instantiated, costs no bytes. */
+struct sd_prefix_type_checks {
+    SD_PREFIX_FIELDS(SD_ROW_TYPE_CHECK)
+};
+
+#undef SD_ROW_TYPE_CHECK
+#undef SD_ROW_TYPE_MATCHES
+#undef SD_ROW_TYPE_MATCHES_
+#undef SD_ROW_TYPE_MATCHES_1
+#undef SD_ROW_TYPE_MATCHES_0
 
 /* ── Per-agent state ── */
 typedef struct {
