@@ -1,13 +1,16 @@
 """Structural guards for the modules split out of train.py (W1, spec 2026-08-31).
 
-WHAT: every module carved out of src/train.py gets three properties checked in a
+WHAT: every module carved out of src/train.py gets four properties checked in a
 FRESH interpreter, one subprocess per case:
 
   1. it imports at all, standalone (no "works only because train.py imported it
      first" ordering luck);
   2. it does not pull `train` back in — the dependency graph stays acyclic, so
      the leaf really is a leaf;
-  3. its module scope stays free of torch / nav / c_env.cs2_env.
+  3. its module scope stays free of torch / nav / c_env.cs2_env;
+  4. the only sibling edge any of them has is `-> train_shared`, and
+     train_shared itself has none (the shape spec §2 W1 fixes: one leaf,
+     everything else a spoke off it, never spoke-to-spoke).
 
 WHY a subprocess and not a plain import: pytest's session has already imported
 half the repo by the time any test body runs, so `"torch" not in sys.modules`
@@ -37,7 +40,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 
 # Modules split out of train.py. Grows per task (spec §2 W1 / W3 / W4).
-W1_MODULES = ("train_shared", "resume_state", "train_config")
+W1_MODULES = ("train_shared", "resume_state", "train_config", "train_metrics", "train_update")
+
+# The one module every other split-out module is allowed to depend on. Spec §2 W1:
+# "The leaf imports nothing from train.py or the other new modules; every other new
+# module may import train_shared."
+LEAF = "train_shared"
 
 # Imports whose presence in sys.modules means the import-lightness invariant is
 # gone. `c_env.cs2_env` rather than bare `c_env` on purpose: the package itself
@@ -70,6 +78,30 @@ assert not heavy, f"{mod} module scope imported {{heavy}} — import-lightness i
 assert "train" not in sys.modules, (
     "{mod} imported `train` — that is an import CYCLE: train.py imports {mod} at its "
     "module level, so this only appears to work while some other module got there first")
+""")
+    assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+
+
+@pytest.mark.parametrize("mod", W1_MODULES)
+def test_only_sibling_edge_is_to_the_leaf(mod):
+    """No spoke-to-spoke import: every sibling edge points at train_shared.
+
+    Property 2 (no cycle back to `train`) does not cover this. A NON-cyclic,
+    import-light sibling edge — say train_update importing train_metrics for one
+    helper — passes every other check in this file while quietly recreating the
+    tangle the split exists to remove: the next extraction then has to move two
+    modules to move one, and `import train_config` starts paying for
+    resume_state. Asserting the shape here makes that a test failure at the
+    moment it is written rather than an architecture review two branches later.
+    """
+    r = _run_child(f"""
+import importlib
+importlib.import_module({mod!r})
+allowed = {{{mod!r}, {LEAF!r}}} if {mod!r} != {LEAF!r} else {{{LEAF!r}}}
+siblings = [m for m in {W1_MODULES!r} if m in sys.modules and m not in allowed]
+assert not siblings, (
+    f"{mod} imported {{siblings}} at module scope; the only sibling edge any "
+    "split-out module may have is -> {LEAF} (spec 2026-08-31 §2 W1)")
 """)
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
 
