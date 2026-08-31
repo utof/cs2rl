@@ -43,16 +43,31 @@ its construction — and this file asserts that role's captured-kwargs test then
 FAILS. A captured-kwargs test that passes against a mutilated factory is
 measuring nothing, and nothing else in the suite would tell us.
 
-SCOPE. T5a migrates the two CLOSURE sites (train, harness); the other four
-roles' builders exist here and are checked against the same capture, but their
-CALL SITES still construct directly and are migrated in T5b.
+SCOPE. All six roles' call sites are now migrated — the two closures first, the
+remaining four (smoke, both eval_legacy sites, external, eval) after. Zero direct
+`make_puffer_env(...)` calls remain in `src/` or `scripts/`, which
+`tests/test_env_construction_enforcement.py` asserts permanently.
 
 FACTORY vs CALL SITE. Most of this file hands the fixture's bindings to
 `build_env_for` by hand, which measures the FACTORY only — a call site that
-fills the factory's slots wrongly passes every one of those tests. The two
-tests under the "MIGRATED CALL SITES" banner drive the real closures instead;
-the banner records the swap that used to be silent everywhere.
+fills the factory's slots wrongly passes every one of those tests. The tests
+under the "MIGRATED CALL SITES" banner close that gap, in two layers, because no
+single layer reaches every site:
+
+  * a LIVE drive per site that can be reached without a training run (the two
+    closures, smoke_test, make_env, and both eval_legacy sites). This is the only
+    layer that can catch a SWAP — two arguments crossed between slots — which is
+    why the harness drive feeds one distinct sentinel per closure variable;
+  * an AST comparison of every migrated call against the pre-migration
+    `call_source` the fixture recorded, which is the only layer that reaches
+    `train()`'s eval site at all. It is a NAME-SET and per-kwarg EXPRESSION
+    comparison, so it catches a dropped or re-pointed argument but is blind to a
+    swap of two arguments that read the same names — hence the layer above.
+
+Both layers compare against the frozen pre-migration capture, never against the
+migrated source, which is what keeps them from agreeing with the bug.
 """
+import ast
 import copy
 import json
 from pathlib import Path
@@ -270,6 +285,40 @@ def test_eval_legacy_absent_seed_is_not_seed_none(monkeypatch):
     assert _construct(monkeypatch, "eval_legacy") == {}
     assert _construct(monkeypatch, "eval_legacy", seed=UNSET) == {}
     assert _construct(monkeypatch, "eval_legacy", seed=None) == {"seed": None}
+
+
+def test_every_role_builder_parameter_is_required():
+    """No role builder may default a knob — `eval_legacy`'s seed sentinel aside.
+
+    A default turns a call site that forgot an argument into a WORKING env built
+    on someone else's value, which is the entire failure class W3 removes. The
+    `external` role is the concrete instance: its two parameters used to default
+    to None, mirroring `make_env`'s published signature, so a delegate that
+    forwarded only `team_spirit` would have silently produced a dust2 env instead
+    of raising. The defaulting belongs to the wrapper, not to the builder.
+
+    `seed=UNSET` is the one exemption, and it is the opposite of a default: the
+    sentinel exists precisely BECAUSE `seed=None` would be a silent behaviour
+    change (make_puffer_env's own default is 0), so it is asserted to be the
+    sentinel rather than merely allowed to be anything.
+    """
+    import inspect
+
+    import env_factory
+
+    for role, builder in env_factory._ROLE_BUILDERS.items():
+        for name, param in inspect.signature(builder).parameters.items():
+            if param.kind is param.POSITIONAL_ONLY:
+                continue                                                                          # the injected `_make`
+            assert param.kind is param.KEYWORD_ONLY, f"{role}.{name} is not keyword-only"
+            if (role, name) == ("eval_legacy", "seed"):
+                assert param.default is UNSET, (
+                    f"eval_legacy's seed default is {param.default!r}, not the UNSET sentinel — "
+                    "see _Unset's docstring for why None is not equivalent")
+                continue
+            assert param.default is param.empty, (
+                f"{role} builder defaults {name}={param.default!r}; a call site that drops it "
+                "now builds a working env on that value instead of raising")
 
 
 def test_factory_kwargs_bind_to_the_real_signature(monkeypatch):
@@ -563,6 +612,320 @@ def test_knockout_the_fixture_itself_is_load_bearing(monkeypatch):
     got = _construct(monkeypatch, "train", **_inputs_for("train", capture))
     assert sorted(got) == sorted(capture["explicit_kwargs"])
     assert got != capture["explicit_kwargs"]
+
+
+# ── the four remaining call sites, driven or read ───────────────────────────
+
+
+class _Captured(Exception):
+    """Raised by the recording stand-in once a call site has been observed.
+
+    Used only for sites where nothing has been CONSTRUCTED yet at the moment the
+    factory is called, so aborting leaks nothing. (The self-play manager sites
+    are not like that — see the spy in tests/test_selfplay_factory.py.)
+    """
+
+
+def _drive(monkeypatch, module, fn, *args, **kwargs):
+    """Run `fn(*args, **kwargs)` with `module.build_env_for` recording and aborting.
+
+    Returns the (role, kwargs) the call site asked for. Patching the name on the
+    CALLING module rather than on `env_factory` is deliberate: both call sites'
+    modules do `from env_factory import build_env_for`, so the module-global is
+    the binding production actually reads, and patching the source module would
+    not be seen.
+    """
+    seen = []
+
+    def _record(role, **kw):
+        seen.append((role, kw))
+        raise _Captured
+
+    monkeypatch.setattr(module, "build_env_for", _record)
+    with pytest.raises(_Captured):
+        fn(*args, **kwargs)
+    assert len(seen) == 1, f"{fn.__name__} reached build_env_for {len(seen)} times"
+    return seen[0]
+
+
+def test_smoke_test_call_site_asks_for_the_smoke_role(monkeypatch):
+    """`smoke_test()` builds its env through the factory and passes NO kwargs.
+
+    Seed 42 moved into `_build_smoke`, so the call site passing anything at all
+    would mean the role's payload had been duplicated back out of the factory.
+    The `env.reset(seed=42)` on the next line is NOT part of construction and
+    must stay — the two 42s are a coincidence, not one value.
+    """
+    import train
+
+    role, kwargs = _drive(monkeypatch, train, train.smoke_test)
+    assert (role, kwargs) == ("smoke", {})
+
+
+def test_make_env_delegates_to_the_external_role(monkeypatch):
+    """The public wrapper forwards both of its parameters, unswapped.
+
+    Distinct sentinels: `make_env(team_spirit, map_data)` takes two positional
+    parameters of the same shape, so crossing them is a one-character edit that
+    every value-based comparison in this file would accept.
+    """
+    import train
+
+    seen = []
+    monkeypatch.setattr(train, "build_env_for", lambda role, **kw: seen.append((role, kw)))
+    train.make_env("<team_spirit>", "<map_data>")
+    assert seen == [("external", {"team_spirit": "<team_spirit>", "map_data": "<map_data>"})]
+
+    # The wrapper's own optional defaults stay on the wrapper — `_build_external`
+    # requires both, so a forwarding bug is a TypeError rather than a dust2 env.
+    seen.clear()
+    train.make_env()
+    assert seen == [("external", {"team_spirit": None, "map_data": None})]
+
+
+def test_load_policy_from_checkpoint_asks_for_bare_eval_legacy(monkeypatch, tmp_path):
+    """The bare eval_legacy site: role only, no kwargs, no seed.
+
+    `torch.load` is stubbed because the construction sits AFTER the checkpoint
+    read, and this test is about the construction. The stub returns the one key
+    the loader inspects, so the function reaches the factory the same way a real
+    checkpoint would.
+    """
+    import types
+
+    import torch
+
+    import train
+
+    ckpt = tmp_path / "fake.pt"
+    ckpt.write_bytes(b"")
+    monkeypatch.setattr(
+        torch, "load",
+        lambda *_a, **_kw: {"encoder.0.weight": types.SimpleNamespace(shape=(64, 105))})
+
+    role, kwargs = _drive(monkeypatch, train, train.load_policy_from_checkpoint, ckpt, "cpu")
+    assert (role, kwargs) == ("eval_legacy", {}), (
+        "load_policy_from_checkpoint must pass NO seed — make_puffer_env's own default is 0, "
+        "and forwarding None instead would build a different env that scalars cannot see")
+
+
+def test_evaluate_checkpoint_threads_its_episode_seed(monkeypatch):
+    """The other eval_legacy site: same role, but it MUST pass a seed.
+
+    `policy_mode="random"` with no checkpoint skips the policy load entirely, so
+    the first loop iteration reaches the construction directly. That the seed is
+    the per-episode `start_seed + episode_idx` rather than `start_seed` is not
+    observable from episode 0 — the AST wiring test below is what pins the
+    expression; this pins that the seed reaches the factory at all, under the
+    right role.
+    """
+    import train
+
+    role, kwargs = _drive(monkeypatch,
+                          train,
+                          train.evaluate_checkpoint,
+                          checkpoint_path=None,
+                          policy_mode="random",
+                          start_seed=7717,
+                          num_episodes=1)
+    assert (role, kwargs) == ("eval_legacy", {"seed": 7717})
+
+
+# ── AST: every migrated site still reads what the old site read ─────────────
+#
+# The layer that reaches `train()`'s eval site, which no test can drive. Each
+# check is derived from `capture["call_source"]` — the pre-migration call,
+# recorded verbatim one commit before the factory existed — so it compares the
+# migrated site to the OLD site rather than to the builder it now calls.
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+
+# The one thing not derivable from the capture: which kwarg a `**splat` became.
+# Both splats carry the knob dict; the `or {}` in the train site's
+# `**env_knobs or {}` moved INTO the builder, so only the free NAMES are
+# comparable there, not the expression.
+_SPLAT_BECOMES = {"train": "env_knobs", "eval": "env_knobs"}
+
+
+def _keywords(call_source):
+    """(named, splats) for a call: {kwarg -> unparsed expr}, [unparsed expr]."""
+    call = ast.parse(call_source, mode="eval").body
+    named = {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg is not None}
+    splats = [ast.unparse(kw.value) for kw in call.keywords if kw.arg is None]
+    return named, splats
+
+
+def _free_names(call_source):
+    """Every bare Name read anywhere in a call's arguments.
+
+    The comparison that survives a kwarg being RENAMED by the migration
+    (`team_spirit=shared_ts` became `shared_ts=shared_ts`) and an expression
+    being simplified (`0 if seed is None else seed` became `seed`, the remap
+    having moved into the builder), while still failing the moment a call site
+    stops reading something it used to read — a dropped `reward_overrides`, or an
+    `evaluate_checkpoint` that passed `start_seed` instead of `seed`.
+
+    Set-based, and therefore blind to two arguments SWAPPED between slots. That
+    is what the live drives above are for.
+    """
+    call = ast.parse(call_source, mode="eval").body
+    return {n.id for kw in call.keywords for n in ast.walk(kw.value) if isinstance(n, ast.Name)}
+
+
+def _is_derivation(expr):
+    """True for a conditional/boolean expression — a RULE rather than a value.
+
+    Exactly the two shapes W3 was supposed to move into the builders (both
+    closures' seed remaps, `**env_knobs or {}`'s None guard). Anything else — a
+    name, an attribute, a helper call — is a value the call site sources, and
+    those must still be spelled identically after the migration.
+    """
+    node = ast.parse(expr, mode="eval").body
+    return isinstance(node, (ast.IfExp, ast.BoolOp))
+
+
+def _call_in(path, qualname, func_name):
+    """The one `func_name(...)` call inside `qualname`, unparsed.
+
+    Located by enclosing qualname, never by line number — W1 moved ~56 symbols
+    out of train.py and this branch keeps moving more.
+    """
+    tree = ast.parse(path.read_text())
+    found = []
+
+    def walk(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                walk(child, prefix + [child.name])
+                continue
+            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                    and child.func.id == func_name and ".".join(prefix) == qualname):
+                found.append(child)
+            walk(child, prefix)
+
+    walk(tree, [])
+    assert len(found) == 1, (f"expected exactly one {func_name}(...) in {path.name}:{qualname}, "
+                             f"found {len(found)} — a site was split, duplicated or removed")
+    return found[0]
+
+
+def _migrated_sites():
+    """(role, enclosing qualname, source file, one pre-migration call_source).
+
+    Read entirely out of the frozen fixture: it records each capture's `role`,
+    its `enclosing` qualname and its `site` as `<relpath>:<lineno>`, so the whole
+    table — including which file each site lives in — comes from the
+    pre-migration snapshot rather than from a list someone transcribed off the
+    migrated code.
+    """
+    sites = {}
+    for role, caps in FIXTURE_DATA["roles"].items():
+        for cap in caps:
+            key = (role, cap["enclosing"], cap["site"].split(":")[0])
+            sites.setdefault(key, set()).add(cap["call_source"])
+    out = []
+    for (role, enclosing, relpath), sources in sorted(sites.items()):
+        assert len(sources) == 1, (f"{role}/{enclosing} was captured with {len(sources)} different "
+                                   f"call sources: {sources}")
+        out.append((role, enclosing, Path(__file__).resolve().parents[1] / relpath, sources.pop()))
+    return out
+
+
+@pytest.mark.parametrize(("role", "enclosing", "path", "call_source"),
+                         _migrated_sites(),
+                         ids=[f"{r}-{e}" for r, e, _, _ in _migrated_sites()])
+def test_migrated_site_still_reads_what_the_old_site_read(role, enclosing, path, call_source):
+    """Per site: the role is right, the names are the same, the constants left.
+
+    Three assertions, each catching a different way the migration could be wrong:
+
+      ROLE — the site asks for its own role. `smoke_test` asking for
+      `eval_legacy` builds a working env with the wrong seed and nothing else in
+      the repo notices.
+
+      NAMES — the set of free names the call reads is unchanged. A call site that
+      quietly stopped forwarding `reward_overrides` (the historical bug: every
+      experiment arm trains the baseline weights, checkpoint byte-identical) or
+      that forwards `start_seed` where it used to forward `seed` fails here.
+      Per-kwarg EXPRESSIONS are compared too, for every kwarg both calls name.
+
+      CONSTANTS — every literal the old call passed is GONE from the new one.
+      This is what asserts the migration actually happened: `seed=42` still
+      spelled at the smoke site, or `auto_reset=False` still at the eval site,
+      means the payload was duplicated rather than moved, and the two copies can
+      then drift — which is the entire failure W3 exists to end.
+    """
+    new_call = _call_in(path, enclosing, "build_env_for")
+    new_source = ast.unparse(new_call)
+
+    assert new_call.args and isinstance(new_call.args[0], ast.Constant), (
+        f"{enclosing} calls build_env_for without a literal role: {new_source}")
+    assert new_call.args[0].value == role, (
+        f"{enclosing} asks for role {new_call.args[0].value!r}; the fixture captured it as "
+        f"{role!r}")
+
+    old_named, old_splats = _keywords(call_source)
+    new_named, new_splats = _keywords(new_source)
+
+    assert _free_names(new_source) == _free_names(call_source), (
+        f"{role}/{enclosing}: the names this construction reads changed.\n"
+        f"  no longer read: {sorted(_free_names(call_source) - _free_names(new_source))}\n"
+        f"  newly read:     {sorted(_free_names(new_source) - _free_names(call_source))}\n"
+        f"  pre-migration:  {call_source}\n  now:            {new_source}")
+
+    for kwarg in sorted(set(old_named) & set(new_named)):
+        old_expr, new_expr = old_named[kwarg], new_named[kwarg]
+        if _is_derivation(old_expr):
+            # The one shape allowed to change: a DERIVATION the builder now owns.
+            # Both closures' seed remaps are this — `_seed if _seed is not None
+            # else seed or 0` and `0 if seed is None else seed` moved into
+            # _build_train / _build_harness verbatim, so the call site passes the
+            # raw inputs instead. The rule stays as tight as it can be without
+            # forbidding that: the new expression may read only names the old one
+            # read for THIS kwarg, so a site that started sourcing the seed from
+            # somewhere else still fails. Which of those inputs the builder then
+            # picks is the captured-kwargs oracle's job — it covers all three of
+            # the train remap's branches.
+            assert _free_names(f"f(x={new_expr})") <= _free_names(f"f(x={old_expr})"), (
+                f"{role}/{enclosing}: {kwarg} used to be derived from "
+                f"{sorted(_free_names(f'f(x={old_expr})'))} and is now {new_expr!r}")
+        else:
+            assert new_expr == old_expr, (
+                f"{role}/{enclosing}: {kwarg} was {old_expr!r}, is now {new_expr!r}")
+
+    constants = {
+        k
+        for k, v in old_named.items() if isinstance(ast.parse(v, mode="eval").body, ast.Constant)
+    }
+    assert constants.isdisjoint(new_named), (
+        f"{role}/{enclosing}: {sorted(constants & set(new_named))} are still spelled at the call "
+        f"site. Constants belong to the builder now — two copies drift.\n"
+        f"  pre-migration: {call_source}\n  now:           {new_source}")
+
+    assert not new_splats, (f"{role}/{enclosing} splats into build_env_for ({new_splats}); every "
+                            "role builder takes explicit keywords so a typo is a TypeError")
+    for splat in old_splats:
+        kwarg = _SPLAT_BECOMES[role]
+        assert kwarg in new_named, (
+            f"{role}/{enclosing} dropped the `**{splat}` the old call splatted; it must now be "
+            f"passed as {kwarg}=")
+        assert _free_names(f"f(x={splat})") <= _free_names(f"f(x={new_named[kwarg]})"), (
+            f"{role}/{enclosing}: {kwarg}={new_named[kwarg]!r} no longer reads what "
+            f"`**{splat}` read")
+
+
+def test_the_ast_wiring_check_covers_every_role():
+    """All six roles reach the check above — a site it cannot find is not a pass.
+
+    `_migrated_sites()` is built by grouping captures, so a role whose captures
+    were deleted from the fixture, or whose `enclosing` no longer resolves, would
+    simply produce fewer parametrized cases. Fewer silent cases is exactly the
+    shape of a guard that has stopped guarding.
+    """
+    assert sorted({role for role, _, _, _ in _migrated_sites()}) == sorted(ROLES)
+    # eval_legacy is the one role with two distinct sites; the others have one
+    # each, so seven sites for six roles.
+    assert len(_migrated_sites()) == len(ROLES) + 1
 
 
 def test_mask_view_attach_stays_out_of_the_factory():

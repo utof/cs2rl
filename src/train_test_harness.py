@@ -43,7 +43,7 @@ import types
 # function-local imports), so importing it here costs nothing and is acyclic.
 # `from ... import build_env_for`, never `import env_factory` — the builder
 # below defines a LOCAL named env_factory, which would shadow the module.
-from env_factory import build_env_for
+from env_factory import build_env_for, build_selfplay_manager
 
 
 def _build_trainer_for_test(
@@ -355,33 +355,24 @@ def _build_trainer_for_test(
     # `with_selfplay=True` path additionally pre-seeds the manager. This
     # keeps the test harness honest with production where the hybrid-aim
     # rollout requires the patched evaluate path.
-    if not with_selfplay:
-        self_play_mgr = SelfPlayManager(
-            pool_size=15,
-            p_past=0.0,
-            save_every_epochs=25,
-            win_threshold=0.6,
-            phase_length=50,
-            aim_log_std_max=aim_log_std_max,
-            pin_pitch=bool(pin_pitch),
-            opponent_mode=opponent,
-        )
-        _patch_trainer_with_selfplay(trainer, self_play_mgr)
-    else:
-        self_play_mgr = SelfPlayManager(
-            pool_size=15,
-            p_past=0.3,
-            save_every_epochs=25,
-            win_threshold=0.6,
-            phase_length=50,
-            aim_log_std_max=aim_log_std_max,
-            pin_pitch=bool(pin_pitch),
-                                                       # Always "self" in practice (the guard at the top of this factory
-                                                       # refuses noop + with_selfplay); passed anyway so the two branches
-                                                       # cannot drift if that pairing is ever allowed.
-            opponent_mode=opponent,
-        )
-        _patch_trainer_with_selfplay(trainer, self_play_mgr)
+    #
+    # W3 (#154): this used to be an `if not with_selfplay: ... else: ...` whose
+    # two SelfPlayManager constructions were IDENTICAL apart from
+    # `p_past=0.0` / `p_past=0.3` — and production's third copy computed the same
+    # two values as `0.3 if self_play_enabled else 0.0`. That rule is now
+    # build_selfplay_manager's, taking the FLAG, so all three sites collapse onto
+    # one call and the branch disappears with them. The pre-migration shapes of
+    # all three are frozen in tests/fixtures/selfplay_kwargs_pre_w3.json and
+    # tests/test_selfplay_factory.py asserts the builder still produces each —
+    # which is the only oracle here, since the §3 gate runs --no-self-play and
+    # nothing on this branch reaches the harness at all.
+    self_play_mgr = build_selfplay_manager(
+        self_play_enabled=with_selfplay,
+        aim_log_std_max=aim_log_std_max,
+        pin_pitch=pin_pitch,
+        opponent_mode=opponent,
+    )
+    _patch_trainer_with_selfplay(trainer, self_play_mgr)
 
     def cleanup():
         """Idempotent teardown. Safe to call twice.

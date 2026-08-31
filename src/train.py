@@ -44,7 +44,7 @@ from _action_spec import (
     ACTION_MASK_DIM,
     AIM_DIM,
 )
-from env_factory import build_env_for
+from env_factory import build_env_for, build_selfplay_manager
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from resume_state import (
     _install_full_checkpointing,
@@ -646,7 +646,11 @@ AGENT_IDS = tuple([f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)])
 
 def smoke_test():
     print("[Smoke] Initialising environment...")
-    env = make_puffer_env(seed=42)
+    # W3 (#154): the construction seed now lives in env_factory.SMOKE_SEED. The
+    # reset() seed below is deliberately NOT routed through the factory — it is
+    # this function's own episode seed, not part of the env's construction, and
+    # the two happening to be 42 is a coincidence the factory must not encode.
+    env = build_env_for("smoke")
     try:
         obs, _ = env.reset(seed=42)
 
@@ -839,7 +843,12 @@ def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, p
         ckpt_obs_dim = state_dict["encoder_t.0.weight"].shape[1]
     else:
         ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
-    policy_env = make_puffer_env()
+    # W3 (#154): role eval_legacy — the DOCUMENTED bare-call defaults ("the
+    # defaults reproduce the pre-Rung-0 env exactly" — make_puffer_env's own
+    # docstring). Passing no knobs is the behaviour, not an oversight; #143
+    # tracks whether it should change, and the factory reduces that future fix to
+    # one role's knob source.
+    policy_env = build_env_for("eval_legacy")
 
     # Batch 3.5 (#24, Opus I3): defensive obs_dim consistency check.
     # The function rebuilds the policy with the *checkpoint's* obs_dim
@@ -1132,7 +1141,12 @@ def evaluate_checkpoint(checkpoint_path=None,
 
     for episode_idx in range(num_episodes):
         seed = start_seed + episode_idx
-        env = make_puffer_env(seed=seed)
+        # W3 (#154): the SECOND eval_legacy site, and the only one that passes a
+        # seed. That difference is the whole reason the role's builder takes an
+        # UNSET sentinel rather than seed=None — make_puffer_env's own default is
+        # 0, so spelling the other site's absent seed as None would have changed
+        # the env it builds, invisibly to static_data_scalars().
+        env = build_env_for("eval_legacy", seed=seed)
         obs, _ = env.reset(seed=seed)
         policy_state = init_policy_state(policy, device)
 
@@ -1217,7 +1231,13 @@ def evaluate_checkpoint(checkpoint_path=None,
 
 
 def make_env(team_spirit=None, map_data=None):
-    return make_puffer_env(team_spirit=team_spirit, map_data=map_data)
+    """Public env wrapper. W3 (#154): a thin delegate to the `external` role.
+
+    The optional defaults stay HERE, on the published signature, rather than
+    moving into `_build_external` — that builder requires both arguments so a
+    caller that forgets to forward one gets a TypeError instead of a dust2 env.
+    """
+    return build_env_for("external", team_spirit=team_spirit, map_data=map_data)
 
 
 def build_env_factory(*,
@@ -3624,21 +3644,19 @@ def train(args):
     # is always False, and the pool save / team-switch bookkeeping in the
     # main loop is skipped via self_play_enabled below.
     self_play_enabled = bool(getattr(args, "self_play", True))
-    self_play_mgr = SelfPlayManager(
-        pool_size=15,
-        p_past=0.3 if self_play_enabled else 0.0,
-        save_every_epochs=25,                                          # ~2M steps per save at batch_size=81920
-        win_threshold=0.6,
-        phase_length=50,                                               # switch opponent team every ~4M steps
+    # W3 (#154): the pool constants (15 / 25 / 0.6 / 50) and the
+    # `0.3 if <on> else 0.0` p_past rule now live in
+    # env_factory.build_selfplay_manager, which is also what the two harness
+    # sites call — they used to spell the same construction out twice more.
+    # `self_play_enabled` is passed as the FLAG, not a p_past value, so no caller
+    # can set a different mixing probability at one site than another.
+    self_play_mgr = build_selfplay_manager(
+        self_play_enabled=self_play_enabled,
         aim_log_std_max=getattr(args, "aim_log_std_max", None),
-        pin_pitch=bool(args.pin_pitch),
-                                                                       # Rung 1a T3: "noop" ⇒ the patched evaluate() drives opponent_team as a
-                                                                       # statue. Guarded above: it cannot combine with self-play, so
-                                                                       # opponent_team stays INITIAL_OPPONENT_TEAM — the same team
-                                                                       # build_participating_rows masked out.
+        pin_pitch=args.pin_pitch,
         opponent_mode=_opponent_mode,
     )
-                                                                       # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
+    # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
     if self_play_enabled and resume_path and resume_path.exists() and not resume_run:
         import shutil as _shutil
 
@@ -3719,12 +3737,17 @@ def train(args):
     _eval_interval = int(getattr(args, "eval_interval", 0) or 0)
     if _eval_interval > 0:
         from eval_baselines import BaselineEvaluator
-        _eval_env = make_puffer_env(team_spirit=None,
-                                    seed=10_000_003,
-                                    map_data=_map_data,
-                                    auto_reset=False,
-                                    reward_overrides=reward_overrides_from_args(args),
-                                    **env_knobs_from_args(args))
+        # W3 (#154): role eval. `team_spirit=None`, the 10_000_003 seed and the
+        # load-bearing `auto_reset=False` now live in env_factory._build_eval;
+        # the derived knob/override dicts stay here because they come from THIS
+        # run's args. `env_knobs=` is passed as one dict rather than splatted:
+        # the builder splats it, and requiring the dict is what stops a caller
+        # handing the eval env no knobs while the driver env has them — the
+        # disagreement the loop right below would then be comparing.
+        _eval_env = build_env_for("eval",
+                                  map_data=_map_data,
+                                  reward_overrides=reward_overrides_from_args(args),
+                                  env_knobs=env_knobs_from_args(args))
         _d = trainer.vecenv.driver_env
         for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled",
                    "round_time"):
