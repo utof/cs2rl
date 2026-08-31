@@ -424,6 +424,121 @@ def test_tag_families_are_census_closed_on_both_axes():
         "closed, so nothing under tag/ should glob-match")
 
 
+# Every construct Python has for binding a name, as a statement fragment binding
+# `victim`. The two tests below splice each one into a function whose static
+# resolution otherwise SUCCEEDS, and require the resolution to drop out.
+#
+# WHY this list and not a demonstration on one form: the two resolutions that
+# close the `tag/*` families are only sound while the name they read holds one
+# value, and the failure when it does not is SILENT — the census keeps reporting
+# the pre-rebinding values while the emitter writes different keys, so the
+# registry ends up documenting keys nothing emits while the real ones go
+# unregistered, with every test in this file green. Counting one binding form
+# (plain `=`, which `_local_literal_bindings` used to do) leaves the other
+# sixteen invisible, and "invisible" here means wrong-and-quiet rather than
+# unresolved-and-loud.
+_REBINDING_FORMS = (
+    "victim = 'live'",
+    "victim += ('live',)",
+    "victim: tuple = ('live',)",
+    "for victim in (('live',),):\n    pass",
+    "with open('/dev/null') as victim:\n    pass",
+    "_ = (victim := 'live')",
+    "victim, _other = ('live', 1)",
+    "*victim, _other = ('live', 1)",
+    "del victim",
+    "def victim():\n    pass",
+    "class victim:\n    pass",
+    "import victim",
+    "from x import y as victim",
+    "try:\n    pass\nexcept ValueError as victim:\n    pass",
+    "def _helper(victim):\n    return victim",
+    "global victim",
+    "nonlocal victim",
+    "match ('a',):\n    case victim:\n        pass",
+)
+
+# A local bound once to a literal tuple and looped over to build keys — the exact
+# shape of `tag_grad_cossim`'s `pg_group_names`, reduced to what the resolution
+# needs. `{extra}` is where a rebinding fragment goes.
+_LITERAL_EMITTER = '''
+def emitter():
+    pg_group_names = ("trunk", "policy_heads")
+{extra}
+    for g in pg_group_names:
+        out[f"tag/gnorm_t/{{g}}"] = 0.0
+'''
+
+# The parameter half of the same shape: `mb_label` is a keyword-only argument
+# `tag_grad_cossim` builds keys from and never assigns. Kept under the real
+# function's name so `emitter_param_bindings` indexes the real call sites in src/.
+_PARAM_EMITTER = '''
+def tag_grad_cossim(policy, *, mb_label):
+{extra}
+    return {{f"tag/gnorm_t/{{mb_label}}": 0.0}}
+'''
+
+
+def _emitter_ast(template, extra):
+    """Parse `template` with `extra` spliced in at body indentation."""
+    import textwrap
+    body = textwrap.indent(extra, "    ") if extra else "    pass"
+    return ast.parse(template.format(extra=body)).body[0]
+
+
+@pytest.mark.parametrize("rebind", ("", ) + _REBINDING_FORMS)
+def test_a_rebound_local_stops_resolving_instead_of_keeping_its_first_value(rebind):
+    """`_local_literal_bindings` must bind a name NOTHING else in the function binds.
+
+    The empty-`rebind` case is the positive control and is not decoration: without
+    it a helper that returned `{}` unconditionally would pass every other case
+    here, which is the shape a "fix" takes when someone makes this test green by
+    disabling the resolution instead of narrowing it.
+    """
+    fn = _emitter_ast(_LITERAL_EMITTER, rebind.replace("victim", "pg_group_names"))
+    bound = census._local_literal_bindings(fn)
+    if not rebind:
+        assert bound.get("pg_group_names") == ("trunk", "policy_heads"), (
+            "the one-hop literal resolution no longer binds an un-rebound local — the seven "
+            "tag/* families lose their group axis and reopen")
+        return
+    assert "pg_group_names" not in bound, (
+        f"`{rebind}` rebinds pg_group_names, but the census still resolves it to its first "
+        "value. The family would keep a member list the emitter no longer writes, silently.")
+
+
+@pytest.mark.parametrize("rebind", ("", ) + _REBINDING_FORMS)
+def test_a_rebound_emitter_parameter_stops_resolving_instead_of_using_call_site_values(rebind):
+    """`emitter_param_bindings` must drop a parameter the emitter body rebinds.
+
+    Run against `tag_grad_cossim`'s REAL call sites — `emitter_param_bindings`
+    takes the site (from which it derives the callee name it indexes `src/` by)
+    and the function node separately, so substituting a same-named body with a
+    rebinding in it is the mutation the real hole allows, with nothing else faked.
+
+    The empty-`rebind` case is the positive control and carries it twice: the
+    synthetic body must still bind (so the other cases cannot pass by the
+    resolution having been disabled wholesale), and so must the UNMODIFIED
+    emitter (so they cannot pass by the synthetic shape having drifted away from
+    the real one).
+    """
+    site = next(s for s in census.EMITTER_SITES if s.qualname == "tag_grad_cossim")
+    fn = _emitter_ast(_PARAM_EMITTER, rebind.replace("victim", "mb_label"))
+    bound = census.emitter_param_bindings(site, fn)
+    if not rebind:
+        assert bound.get("mb_label") == ("mb0", "mbL"), (
+            "a parameter that is NOT rebound must still bind from its call sites")
+        real = census._find_qualname(census._module_ast(site.path), site.qualname)
+        assert census.emitter_param_bindings(site, real).get("mb_label") == ("mb0", "mbL"), (
+            "tag_grad_cossim's mb_label no longer resolves from its call sites — the seven "
+            "tag/* families reopen and alibi any tag/* registry entry")
+        return
+    assert "mb_label" not in bound, (
+        f"`{rebind}` rebinds the mb_label parameter, but the census still reports the "
+        "call-site values. The emitter would write one key set while the registry "
+        "documents another, with no test failing.")
+
+
 def _open_family_templates():
     """Registered family templates whose members are UNENUMERABLE — and only those.
 

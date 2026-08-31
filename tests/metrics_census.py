@@ -293,8 +293,64 @@ class KeyFamily(NamedTuple):
     lineno: int
 
 
+# ── Parse cache ───────────────────────────────────────────────────────────
+#
+# Every extractor in this file reads source through `_parse_file`, so each file
+# under src/ (and each frozen reader) is read and parsed AT MOST ONCE per
+# process. That is not micro-optimization: `emitter_param_bindings` needs every
+# call site in src/, and `census()` calls it once per EMITTER_SITES entry, so the
+# uncached version re-parsed the whole ~600 KB tree (232 KB of it train.py) 14
+# times over — measured 9.3 s for one `census()` on the drive this repo lives on,
+# against 0.13 s before parameter binding existed. `test_metrics_schema.py` runs
+# `census()` at module import, so the whole suite paid it on every run.
+#
+# SAFE TO SHARE because nothing in this module mutates an AST node — the trees
+# are read-only inputs to the walks below. The cache is process-lifetime and
+# keyed on the resolved path, so it goes stale only if a source file changes
+# mid-process. No test does that: the mutation probes that check these gates edit
+# a file and then run a FRESH pytest, which is a new interpreter and a cold cache.
+_PARSE_CACHE = {}
+
+
+def _parse_file(path):
+    """The parsed module at `path`, parsed once per process. See _PARSE_CACHE."""
+    key = str(path)
+    tree = _PARSE_CACHE.get(key)
+    if tree is None:
+        tree = ast.parse(Path(key).read_text(), filename=key)
+        _PARSE_CACHE[key] = tree
+    return tree
+
+
+_CALL_INDEX = None
+
+
+def _src_call_index():
+    """{callee short name: [Call nodes]} over every ``*.py`` under src/, built once.
+
+    The sweep `emitter_param_bindings` used to redo per emitter site. Built in
+    `sorted(SRC.rglob("*.py"))` order and, within a file, in `ast.walk` order, so
+    a lookup here returns exactly the list — same nodes, same order — that the
+    per-site sweep produced. Calls whose callee is neither a Name nor an
+    Attribute (`f()()`, `(a or b)()`) get `_callee_name` == "" and are dropped,
+    which is what the old `_callee_name(node) == fname` comparison did too, since
+    an emitter's short name is never empty.
+    """
+    global _CALL_INDEX
+    if _CALL_INDEX is None:
+        index = {}
+        for path in sorted(SRC.rglob("*.py")):
+            for node in ast.walk(_parse_file(path)):
+                if isinstance(node, ast.Call):
+                    name = _callee_name(node)
+                    if name:
+                        index.setdefault(name, []).append(node)
+        _CALL_INDEX = index
+    return _CALL_INDEX
+
+
 def _module_ast(rel_path):
-    return ast.parse((SRC / rel_path).read_text(), filename=str(SRC / rel_path))
+    return _parse_file(SRC / rel_path)
 
 
 def _find_qualname(tree, qualname):
@@ -366,25 +422,107 @@ def _literal_strings(node):
     return None
 
 
+def _binding_counts(fn):
+    """{name: how many times `fn` BINDS it}, over every binding construct Python has.
+
+    The one primitive behind both static resolutions below, because both rest on
+    the same claim — "this name holds one statically known value everywhere it is
+    read" — and that claim is only true if nothing rebinds the name. Counting one
+    construct (plain `ast.Assign`, which is all this used to do) leaves every
+    other one invisible, and an invisible rebinding does not reopen the family: it
+    keeps the STALE member list, silently. `pg_group_names += ("extra_group",)`
+    and `mb_label = f"live_{len(groups)}"` each did exactly that with 29/29 green.
+
+    Counted: the signature's own parameters (a parameter IS a binding, which is
+    what makes `count > 1` mean "the body rebinds it"), `=`, `+=`, annotated
+    assignment, `for` targets, `with ... as`, `:=`, `del`, `except ... as`,
+    `import`, nested `def`/`class` names, `global`/`nonlocal`, and `match`
+    captures. Tuple unpacking, `*rest` and attribute/subscript targets fall out of
+    reading STORE/DEL context off the target expression rather than pattern-
+    matching shapes: `d[k] = v` binds nothing (`d` and `k` are loads), `a, *b = x`
+    binds both.
+
+    NOT counted, on purpose: a comprehension's loop variable. `[g for g in xs]`
+    has its own scope in Python 3 and does not touch an enclosing `g`, so counting
+    it would assert a rebinding that does not happen — and a rule that is wrong in
+    a visible case is a rule someone later deletes. The walrus inside a
+    comprehension DOES leak to the enclosing scope and IS counted.
+
+    OVER-COUNTS a name bound in a nested `def`, which is a separate scope. That is
+    the safe direction (it un-resolves a name, reopening the family loudly) and it
+    costs nothing today: the only two names this file resolves live in
+    `tag_grad_cossim`, whose three nested helpers bind neither.
+    """
+    counts = {}
+
+    def _bump(name, n=1):
+        if name:
+            counts[name] = counts.get(name, 0) + n
+
+    def _bump_target(node):
+        for sub in ast.walk(node) if node is not None else ():
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+                _bump(sub.id)
+
+    def _bump_params(fn_node):
+        a = fn_node.args
+        for arg in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg]:
+            if arg is not None:
+                _bump(arg.arg)
+
+    _bump_params(fn)
+    for node in ast.walk(fn):
+        if isinstance(node, (ast.Assign, ast.Delete)):
+            for tgt in node.targets:
+                _bump_target(tgt)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)):
+            _bump_target(node.target)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            _bump_target(node.target)
+        elif isinstance(node, ast.withitem):
+            _bump_target(node.optional_vars)
+        elif isinstance(node, ast.ClassDef):
+            _bump(node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not fn:
+            _bump(node.name)
+            _bump_params(node)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                _bump((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ExceptHandler):
+            _bump(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                _bump(name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            _bump(node.name)
+        elif isinstance(node, ast.MatchMapping):
+            _bump(node.rest)
+    return counts
+
+
 def _local_literal_bindings(fn):
     """{name: (values,)} for names bound ONCE to a literal iterable inside `fn`.
 
-    Assigned-once is the whole safety rule: a name rebound in a branch is not a
-    constant, so it resolves to nothing and its family stays OPEN. Measured blast
-    radius across the island today: exactly one name, `tag_grad_cossim`'s
-    `pg_group_names` — every other non-literal iterable in an emitter is a
-    method call (`model.named_parameters()`, `subsets.items()`) or a `zip`/
-    `enumerate`, none of which this reaches.
+    Bound-once is the whole safety rule: a name rebound anywhere is not a
+    constant, so it resolves to nothing and its family stays OPEN. `_binding_counts`
+    is what makes that sentence TRUE rather than aspirational — this used to count
+    `ast.Assign` targets only, so `pg_group_names += ("extra_group",)` was invisible
+    and the census went on reporting the two-element axis while the emitter wrote
+    three. Measured blast radius across the island today: exactly one name,
+    `tag_grad_cossim`'s `pg_group_names` — every other non-literal iterable in an
+    emitter is a method call (`model.named_parameters()`, `subsets.items()`) or a
+    `zip`/`enumerate`, none of which this reaches.
     """
-    counts, values = {}, {}
+    counts = _binding_counts(fn)
+    values = {}
     for node in ast.walk(fn):
         if not isinstance(node, ast.Assign):
             continue
         for tgt in node.targets:
             if isinstance(tgt, ast.Name):
-                counts[tgt.id] = counts.get(tgt.id, 0) + 1
                 values[tgt.id] = _literal_strings(node.value)
-    return {n: tuple(v) for n, v in values.items() if v is not None and counts[n] == 1}
+    return {n: tuple(v) for n, v in values.items() if v is not None and counts.get(n) == 1}
 
 
 def _bind_for(node, env, literals=None):
@@ -643,22 +781,31 @@ def emitter_param_bindings(site, fn):
     Both argument forms are read (positional by signature index, keyword by
     name), so switching a call from one to the other does not silently drop the
     binding. `*args`/`**kwargs` call sites resolve to nothing and unbind.
+
+    A parameter the emitter REBINDS is dropped (`_binding_counts` — the signature
+    contributes 1, so any body binding pushes the count past 1). Without that
+    check the census reports the CALL SITE's values while the emitter writes keys
+    built from something else, and it does so silently: one line —
+    ``mb_label = f"live_{len(groups)}"`` at the top of `tag_grad_cossim` — moved
+    every emitted key to `tag/<stat>/<g>/live_2` with the whole suite still green,
+    leaving the registry documenting 26 keys nothing emits while the 26 real ones
+    went unregistered. That is the exact defect W4 exists to catch. Dropping the
+    parameter instead reopens the families, which
+    `test_tag_families_are_census_closed_on_both_axes` reports by name.
     """
     fname = site.qualname.split(".")[-1]
     params = [a.arg for a in fn.args.posonlyargs] + [a.arg for a in fn.args.args]
     kwonly = [a.arg for a in fn.args.kwonlyargs]
 
-    calls = []
-    for path in sorted(SRC.rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _callee_name(node) == fname:
-                calls.append(node)
+    calls = _src_call_index().get(fname, ())
     if not calls:
         return {}
 
+    rebound = {n for n, c in _binding_counts(fn).items() if c > 1}
     out = {}
     for pos, name in enumerate(params + kwonly):
+        if name in rebound:
+            continue
         vals = []
         for call in calls:
             arg = next((kw.value for kw in call.keywords if kw.arg == name), None)
@@ -826,7 +973,7 @@ def metrics_write_sites():
 
     for path in sorted(SRC.rglob("*.py")):
         rel = str(path.relative_to(SRC))
-        _walk_all(rel, ast.parse(path.read_text(), filename=str(path)), "")
+        _walk_all(rel, _parse_file(path), "")
     return sorted(found.values())
 
 
@@ -932,7 +1079,7 @@ def reader_key_literals(rel_path):
     would keep passing against a reader that has moved on.
     """
     path = REPO_ROOT / rel_path
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = _parse_file(path)
     candidates = []
 
     def _collect_literal(node):
@@ -1021,7 +1168,7 @@ def reader_hidden_call_literals(rel_path):
     the regex in prose instead.
     """
     path = REPO_ROOT / rel_path
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = _parse_file(path)
     visible = set(reader_key_literals(rel_path))
     out = {}
     for node in ast.walk(tree):
@@ -1100,7 +1247,7 @@ def reader_derived_column_sources(rel_path="scripts/rung1_gate.py"):
         credits every column with both.
     """
     path = REPO_ROOT / rel_path
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = _parse_file(path)
     env = _reader_module_env(tree)
     mod_fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
 
@@ -1204,7 +1351,7 @@ def reader_report_columns(rel_path="scripts/rung1_gate.py"):
     reader_key_literals above exists alongside.
     """
     path = REPO_ROOT / rel_path
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = _parse_file(path)
     env = _reader_module_env(tree)
     cols = set()
     for node in tree.body:
