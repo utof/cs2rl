@@ -46,6 +46,12 @@ measuring nothing, and nothing else in the suite would tell us.
 SCOPE. T5a migrates the two CLOSURE sites (train, harness); the other four
 roles' builders exist here and are checked against the same capture, but their
 CALL SITES still construct directly and are migrated in T5b.
+
+FACTORY vs CALL SITE. Most of this file hands the fixture's bindings to
+`build_env_for` by hand, which measures the FACTORY only — a call site that
+fills the factory's slots wrongly passes every one of those tests. The two
+tests under the "MIGRATED CALL SITES" banner drive the real closures instead;
+the banner records the swap that used to be silent everywhere.
 """
 import copy
 import json
@@ -286,6 +292,194 @@ def test_factory_kwargs_bind_to_the_real_signature(monkeypatch):
             sig.bind(**got)
         except TypeError as exc:
             pytest.fail(f"role {role!r}/{scenario} passes kwargs make_puffer_env rejects: {exc}")
+
+
+# ── the two MIGRATED CALL SITES, driven for real ────────────────────────────
+#
+# Everything above feeds the fixture's bindings to `build_env_for` directly, so
+# it proves the FACTORY reproduces the pre-migration kwargs and nothing about
+# whether the closures T5a migrated hand it those bindings. The gap is not
+# theoretical: swapping `crouch_enabled=jump_enabled, jump_enabled=crouch_enabled`
+# at the harness call site leaves every test above green, and the §3
+# determinism gate never builds a harness env at all, so nothing in the repo
+# fired. (The train site has an indirect oracle — a `seed=_seed, _seed=seed`
+# swap there moves the gate's checkpoint md5 — but only that one gate, and only
+# for that one kwarg pair.)
+#
+# So the two tests below drive the REAL closures, the one `build_env_factory`
+# returns and the one `_build_trainer_for_test` defines, against the same
+# pre-migration capture.
+
+
+def _kwarg_diff(got, expected):
+    """Per-key report of how two kwarg dicts differ; empty string when equal.
+
+    Used instead of a bare `assert got == expected` so that a routing bug names
+    the slots it crossed — "crouch_enabled: got '<jump_enabled>'" — instead of
+    printing two nine-key dicts and leaving the reader to diff them.
+    """
+    missing = sorted(set(expected) - set(got))
+    added = sorted(set(got) - set(expected))
+    parts = []
+    if missing:
+        parts.append(f"  missing: {missing}")
+    if added:
+        parts.append(f"  added:   {added}")
+    parts += [
+        f"  {k}: got {got[k]!r}, want {expected[k]!r}" for k in sorted(set(got) & set(expected))
+        if got[k] != expected[k]
+    ]
+    return "\n".join(parts)
+
+
+def _call_source_routing(capture):
+    """{make_puffer_env kwarg -> the closure variable the OLD call read for it}.
+
+    Parsed out of `capture["call_source"]`, the pre-migration call recorded
+    verbatim one commit before the factory existed. Deriving the routing from
+    the post-migration call site (or from the factory) instead would compare the
+    migration to itself, which is the whole failure this file exists to avoid.
+
+    Only bare-name arguments are routable. `seed=0 if seed is None else seed`
+    and `include_step_stats_in_info=True` are derived/constant, and the caller
+    checks those against the capture's recorded VALUE instead.
+    """
+    import ast
+
+    call = ast.parse(capture["call_source"], mode="eval").body
+    return {
+        kw.arg: kw.value.id
+        for kw in call.keywords if kw.arg is not None and isinstance(kw.value, ast.Name)
+    }
+
+
+def _real_harness_env_factory(monkeypatch, tmp_path, shared_ts, **harness_kwargs):
+    """Extract the REAL `env_factory` closure `_build_trainer_for_test` builds.
+
+    Taken from `pufferlib.vector.make`'s first argument, at which point the
+    harness build is aborted: everything AFTER that call (build_policy, PuffeRL,
+    the self-play patches) costs seconds and constructs nothing this file looks
+    at, while everything before it — the team-spirit Value, the mask shm, the
+    closure itself — is the wiring under test. The abort is an exception rather
+    than a stub return value so the harness cannot run on against a fake vecenv
+    and fail somewhere confusing.
+
+    `mp` and `tempfile` are replaced on the HARNESS MODULE, not on the stdlib
+    modules themselves: `shared_ts` is built inside the function and cannot be
+    passed in, so it needs a stub to become an observable sentinel, and the
+    scratch dir must not leak from a build that never reaches its own
+    `cleanup()`. Module-scoped patches keep both out of every other test.
+    """
+    import types
+
+    import pufferlib.vector
+
+    import train_test_harness
+
+    captured = []
+
+    class _Captured(Exception):
+        pass
+
+    def _fake_make(env_creators, *_args, **_kwargs):
+        captured.append(env_creators[0])
+        raise _Captured
+
+    monkeypatch.setattr(pufferlib.vector, "make", _fake_make)
+    monkeypatch.setattr(train_test_harness, "mp",
+                        types.SimpleNamespace(Value=lambda *_a, **_kw: shared_ts))
+    monkeypatch.setattr(train_test_harness, "tempfile",
+                        types.SimpleNamespace(mkdtemp=lambda **_kw: str(tmp_path)))
+    with pytest.raises(_Captured):
+        train_test_harness._build_trainer_for_test(**harness_kwargs)
+    assert len(captured) == 1, "pufferlib.vector.make was not reached exactly once"
+    return captured[0]
+
+
+@pytest.mark.parametrize("capture",
+                         FIXTURE_DATA["roles"]["train"],
+                         ids=[c["scenario"] for c in FIXTURE_DATA["roles"]["train"]])
+def test_train_call_site_forwards_the_captured_kwargs(monkeypatch, capture):
+    """`build_env_factory`'s closure, run for real, still produces the capture.
+
+    Distinct failure from the factory tests above: those fire when
+    `build_env_for("train", ...)` builds the wrong env GIVEN the right
+    arguments; this fires when the closure fills the factory's slots wrongly —
+    `seed=_seed, _seed=seed` being the cheap example, which every factory-side
+    test in this file accepts and only the §3 gate's checkpoint md5 notices.
+
+    The fixture's own binding values are used verbatim, no sentinels needed:
+    `seed` 3 against `_seed` 41, plus the distinct `<shared_ts>` / `<map_data>`
+    strings and the two dissimilar dicts the capture already carries, make every
+    slot in this call distinguishable from every other.
+    """
+    import train
+
+    b = capture["bindings"]
+    rec = _Recorder()
+    monkeypatch.setattr(train, "make_puffer_env", rec)
+    factory = train.build_env_factory(shared_ts=b["shared_ts"],
+                                      map_data=b["map_data"],
+                                      reward_overrides=b["reward_overrides"],
+                                      reward_symmetrize=b["reward_symmetrize"],
+                                      env_knobs=b["env_knobs"])
+    factory(buf=b["buf"], seed=b["seed"], _seed=b["_seed"])
+    assert len(rec.calls) == 1, f"the train closure called make_puffer_env {len(rec.calls)} times"
+    diff = _kwarg_diff(rec.calls[0], capture["explicit_kwargs"])
+    assert not diff, (f"train CALL SITE / {capture['scenario']}: what build_env_factory's closure "
+                      f"forwards no longer matches the pre-W3 capture.\n{diff}\n"
+                      f"  pre-migration call was: {capture['call_source']}")
+
+
+@pytest.mark.parametrize("capture",
+                         FIXTURE_DATA["roles"]["harness"],
+                         ids=[c["scenario"] for c in FIXTURE_DATA["roles"]["harness"]])
+def test_harness_call_site_forwards_the_captured_kwargs(monkeypatch, tmp_path, capture):
+    """`_build_trainer_for_test`'s closure, run for real, still produces the capture.
+
+    This is the site with no other oracle at all: the §3 gate cannot see the
+    harness, and no test anywhere passes `crouch_enabled` or `jump_enabled` to
+    `_build_trainer_for_test`.
+
+    WHY SENTINELS RATHER THAN THE FIXTURE'S OWN BINDING VALUES. The two harness
+    captures record crouch/jump as (1, 1) and (0, 0), so a call site that
+    swapped the two would reproduce both captures exactly — value comparison is
+    structurally blind to it. Feeding one distinct sentinel per closure variable
+    makes the SLOT each variable lands in observable, and
+    `_call_source_routing` reads the required slot off the pre-migration call
+    rather than off the code being tested. `seed` and
+    `include_step_stats_in_info` are not routed variables, so those two are
+    still compared against the capture's recorded value — which is what
+    exercises the `0 if seed is None else seed` remap in both directions.
+    """
+    import train
+
+    routing = _call_source_routing(capture)
+    sentinel = {var: f"<{var}>" for var in routing.values()}
+    # Everything routed except `shared_ts`, which _build_trainer_for_test builds
+    # itself (hence the mp stub), and `buf`, which pufferlib passes per call.
+    injectable = sorted(set(routing.values()) - {"shared_ts", "buf"})
+
+    rec = _Recorder()
+    monkeypatch.setattr(train, "make_puffer_env", rec)
+    knobs = {name: sentinel[name] for name in injectable}
+    factory = _real_harness_env_factory(monkeypatch,
+                                        tmp_path,
+                                        sentinel["shared_ts"],
+                                        num_envs=1,
+                                        **knobs)
+    factory(buf=sentinel["buf"], seed=capture["bindings"]["seed"])
+
+    assert len(rec.calls) == 1, f"the harness closure called make_puffer_env {len(rec.calls)}x"
+    expected = {
+        kwarg: sentinel[routing[kwarg]] if kwarg in routing else value
+        for kwarg, value in capture["explicit_kwargs"].items()
+    }
+    diff = _kwarg_diff(rec.calls[0], expected)
+    assert not diff, (
+        f"harness CALL SITE / {capture['scenario']}: what _build_trainer_for_test's closure "
+        f"forwards no longer matches the pre-W3 capture.\n{diff}\n"
+        f"  pre-migration call was: {capture['call_source']}")
 
 
 # ── knock-outs: prove the oracle can actually fail ──────────────────────────
