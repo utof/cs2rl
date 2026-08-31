@@ -571,6 +571,112 @@ def test_rung1_gate_report_columns_are_registered():
     assert ms.REGISTRY["kills_per_episode"].kind == "derived"
 
 
+def test_every_frozen_reader_key_is_registered_or_declared_out_of_surface():
+    """The WHOLE frozen-reader surface — including what the extractor's exclusions hide.
+
+    `test_every_frozen_reader_key_literal_is_registered` covers the literals the
+    extractor SEES. This one covers the seam: `reader_key_literals` drops
+    `.replace` / `.compile` / `Path` arguments by position, and a positional
+    exclusion is the first thing that gets widened when this file goes red. Add
+    `"get"` to `NON_KEY_CALLS` and every key both scripts read leaves the visible
+    surface without a single test noticing.
+
+    So the exclusion is enumerated rather than blanket: whatever it hides must be
+    named in `READER_OUT_OF_SURFACE` with a reason, in both directions. Widening
+    the exclusion moves real keys into the unexplained set (fails); a declaration
+    that stops matching a hidden literal is stale (fails too).
+
+    Today it hides exactly two things, neither a metrics key: a display prefix the
+    gate's column headings are shortened with, and a default run directory.
+    """
+    unexplained, matched = [], {i: 0 for i in range(len(census.READER_OUT_OF_SURFACE))}
+    for script in census.FROZEN_READERS:
+        for literal, lineno in sorted(census.reader_hidden_call_literals(script).items()):
+            hits = [
+                i for i, d in enumerate(census.READER_OUT_OF_SURFACE)
+                if d.script == script and d.literal == literal
+            ]
+            for i in hits:
+                matched[i] += 1
+            if not hits:
+                unexplained.append(f"{script}:{lineno}  {literal!r}")
+    assert not unexplained, (
+        "key-shaped literals hidden from the frozen-reader census by a NON_KEY_CALLS "
+        "exclusion, with no declared reason:\n  " + "\n  ".join(unexplained) +
+        "\nEither the exclusion was widened over a real key — register it and take the call "
+        "out of metrics_census.NON_KEY_CALLS — or add a READER_OUT_OF_SURFACE entry saying "
+        "why it is not a metrics key.")
+
+    stale = [
+        f"{census.READER_OUT_OF_SURFACE[i].script}: {census.READER_OUT_OF_SURFACE[i].literal!r}"
+        for i, n in matched.items() if n == 0
+    ]
+    assert not stale, ("READER_OUT_OF_SURFACE entries matching no hidden literal any more:\n  " +
+                       "\n  ".join(stale) +
+                       "\nA declaration kept past the literal it excuses is how an enumerated "
+                       "exemption decays into a blanket one; delete it.")
+
+    # Anti-vacuity. The visible surface is where the real keys are; if the
+    # extractor stopped seeing them this whole file would go quiet, so assert it
+    # still resolves both scripts' reads and that they are registered as a set.
+    visible = {k for s in census.FROZEN_READERS for k in census.reader_key_literals(s)}
+    assert len(visible) >= 25, (f"the frozen readers resolve to only {len(visible)} key "
+                                "literals — the extractor has gone narrow")
+    assert not sorted(k for k in visible if k not in ms.REGISTRY)
+
+
+def test_derived_gate_columns_declare_the_source_keys_the_gate_actually_reads():
+    """A derived column's `inputs` must be the keys rung1_gate reads to compute it.
+
+    `test_rung1_gate_report_columns_are_registered` proves the NAME is registered.
+    It does not look at `inputs`, which is the substantive half of a `derived`
+    entry and pure documentation about a frozen script — swap
+    `hit_per_on_target`'s numerator in the gate and the registry keeps describing
+    the old ratio with every test green. `reader_derived_column_sources` re-derives
+    the same fact from the script's source (following REPORT_EXTRA's argument
+    tuples and, for GATES/REPORT_ONLY, the `m = {...}` literal in `seed_metrics`),
+    so the claim is checked rather than asserted.
+
+    This is also what makes the five bare `REPORT_ONLY` literals classified rather
+    than merely tolerated: `shots_fired` is not the emitted `game/shots_fired` but
+    is computed from it plus the episode weight; `rows` is `len(W)` and resolves to
+    no key at all, which is the difference between "window bookkeeping" as prose
+    and as a measurement.
+    """
+    sources = census.reader_derived_column_sources()
+    assert sources, "extracted zero derived-column sources from rung1_gate.py — vacuous"
+
+    cols = census.reader_report_columns()
+    derived_cols = sorted(c for c in cols if ms.REGISTRY[c].kind == "derived")
+    assert len(derived_cols) >= 10, (
+        f"only {len(derived_cols)} derived gate columns — the report tables shrank or the "
+        "column extractor did")
+
+    missing, wrong = [], []
+    for col in derived_cols:
+        if col not in sources:
+            missing.append(col)
+            continue
+        declared, actual = set(ms.REGISTRY[col].inputs), set(sources[col])
+        if declared != actual:
+            wrong.append(f"{col}: registry declares inputs {sorted(declared)}, but rung1_gate "
+                         f"computes it from {sorted(actual)}")
+    assert not missing, ("derived rung1_gate columns whose computation this test could not "
+                         "locate in the script:\n  " + "\n  ".join(missing) +
+                         "\nThe column moved out of seed_metrics/REPORT_EXTRA, so its `inputs` "
+                         "are now unchecked — re-point reader_derived_column_sources.")
+    assert not wrong, "\n  ".join([""] + wrong)
+
+    # `rows` is the deliberate empty case: window bookkeeping, no metrics key.
+    assert sources["rows"] == frozenset(), (
+        f"`rows` now resolves to {sorted(sources['rows'])}; it is len(W) and must resolve to "
+        "nothing, which is the registry's claim that it has no inputs")
+    assert sources["shots_fired"] == {
+        "game/shots_fired", "environment/episodes"
+    }, ("the bare `shots_fired` column must resolve to the emitted game/shots_fired it is "
+        "computed from, episode-weighted — that resolution is its classification")
+
+
 def test_rung1_gate_producer_column_matches_its_report_tables_both_ways():
     """`producer` is checked against rung1_gate's own GATES/REPORT_* tables.
 

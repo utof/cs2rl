@@ -969,6 +969,231 @@ def reader_key_literals(rel_path):
     return out
 
 
+def _reader_module_env(tree):
+    """{name: (values,)} for a frozen script's module-level string constants.
+
+    `EPISODES_KEY = "environment/episodes"` and
+    `EVAL_T, EVAL_CT = "eval/...", "eval/..."` are how the gate names half the
+    keys it reads; an extractor that only saw string literals in place would miss
+    every use of them.
+    """
+    env = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if isinstance(node.value, ast.Constant):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    env[tgt.id] = (str(node.value.value), )
+        elif isinstance(node.value, ast.Tuple):
+            vals = [_resolve(e, env) for e in node.value.elts]
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Tuple):
+                    for name, v in zip(tgt.elts, vals, strict=True):
+                        if isinstance(name, ast.Name):
+                            env[name.id] = v
+    return env
+
+
+def _is_reader_key_shaped(val):
+    """The frozen-reader key predicate: slash-namespaced, or a declared bare key."""
+    return bool(KEY_SHAPED.match(val)) and ("/" in val or val in READER_BARE_KEYS)
+
+
+def reader_hidden_call_literals(rel_path):
+    """Key-shaped literals a frozen reader keeps ONLY inside a `NON_KEY_CALLS` call.
+
+    `reader_key_literals` excludes `.replace` / `.compile` / `Path` arguments by
+    POSITION, which is the right call — a display prefix and a filesystem path are
+    not metrics keys. But a positional exclusion is exactly the kind of rule that
+    gets widened to make a red test green: append `"get"` to `NON_KEY_CALLS` and
+    every real key read in both scripts leaves the surface silently.
+
+    This is the other side of that exclusion. It returns what the exclusion HIDES,
+    so `test_metrics_schema` can require each hidden literal to be named in
+    `READER_OUT_OF_SURFACE` with a reason. Widening `NON_KEY_CALLS` then moves keys
+    into an unexplained set and fails, and a literal that stops being hidden makes
+    its declaration stale and fails too — the exemption is enumerated, not blanket.
+
+    `rung1a_smoke_read`'s `MOVE_KEY_RE` pattern is not returned: a regex with `^`
+    and `(\\d+)` in it fails `KEY_SHAPED`, so it is out by SHAPE and never needed
+    the positional rule. The registry entry for `environment/action_move_*` names
+    the regex in prose instead.
+    """
+    path = REPO_ROOT / rel_path
+    tree = ast.parse(path.read_text(), filename=str(path))
+    visible = set(reader_key_literals(rel_path))
+    out = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = (node.func.attr if isinstance(node.func, ast.Attribute) else
+                node.func.id if isinstance(node.func, ast.Name) else "")
+        if name not in NON_KEY_CALLS:
+            continue
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                    and _is_reader_key_shaped(arg.value) and arg.value not in visible):
+                out.setdefault(arg.value, arg.lineno)
+    return out
+
+
+# Key-shaped literals the frozen readers contain that are NOT metrics keys at all,
+# each with the reason. Gated in BOTH directions by
+# test_every_frozen_reader_key_is_registered_or_declared_out_of_surface: an entry
+# matching no hidden literal is stale and fails, and a hidden literal with no entry
+# is unexplained and fails.
+
+
+class ReaderOutOfSurface(NamedTuple):
+    script: str                        # relative to the repo root
+    literal: str
+    reason: str
+
+
+READER_OUT_OF_SURFACE = (
+    ReaderOutOfSurface(
+        "scripts/rung1_gate.py", "eval/win_vs_random_",
+        "A DISPLAY PREFIX. print_report shortens the two eval column HEADINGS with "
+        "`.replace('eval/win_vs_random_', 'eval_')` so they fit a 22-char field. It is a "
+        "fragment of two real keys, not a key — `eval/win_vs_random_as_t` and `_as_ct` are "
+        "registered separately and read from the row under their full names."),
+    ReaderOutOfSurface(
+        "scripts/rung1a_smoke_read.py", "outputs/checkpoints/rung1a/s0",
+        "A FILESYSTEM PATH (RUN_DIR_DEFAULT), slash-namespaced by coincidence. It names the "
+        "registered-evidence run directory the smoke read defaults to, not a metrics key."),
+)
+
+
+def reader_derived_column_sources(rel_path="scripts/rung1_gate.py"):
+    """{report column: frozenset(emitted keys the script reads to compute it)}.
+
+    WHY, given that `reader_report_columns` already forces every column to be
+    registered: registration alone says a NAME exists. The registry additionally
+    claims, per derived column, WHICH emitted keys it is computed from — and that
+    `inputs` column is hand-written documentation about code in a frozen script,
+    with nothing tying the two together. Swap `hit_per_on_target`'s numerator in
+    the gate and the registry keeps describing the old ratio; every test stays
+    green. This derives the same fact from the script's own source so the claim is
+    checked instead of asserted.
+
+    It also makes the brief's classification of the five bare `REPORT_ONLY`
+    literals structural rather than prose: `shots_fired` resolves to
+    `game/shots_fired` + the episode weight, and `rows` resolves to NOTHING, which
+    is what "window bookkeeping, not an emitted key" means when a test says it.
+
+    HOW, and where it deliberately stops:
+      * `REPORT_EXTRA` rows carry `(column, kind, (source keys...))`, so the ARGUMENT
+        tuple is read, not just the column name. The `kind` is resolved against
+        `report_extra`'s own if/elif chain to find which helper that kind dispatches
+        to, so the episode weight `ratio` adds — and `median`/`p90`/`last` do not —
+        comes from the source rather than from a hardcoded assumption here.
+      * `GATES` / `REPORT_ONLY` columns are computed in `seed_metrics`'s `m = {...}`
+        literal. A call to a helper DEFINED IN THE SAME SCRIPT is followed into its
+        body (that is how `weighted_sum`'s `EPISODES_KEY` is found); a call to
+        anything else is not.
+      * A local Name is chased to its binding ONLY at the ROOT of a column's value
+        expression (`m["shots_fired"] = shots_fired`), never as a call ARGUMENT.
+        That line matters: `window` is an argument everywhere, and following it
+        reaches `gate_window`, whose `self_play/used_past` and `agent_steps` are how
+        the WINDOW is selected, not what any column is computed from. Chasing it
+        credits every column with both.
+    """
+    path = REPO_ROOT / rel_path
+    tree = ast.parse(path.read_text(), filename=str(path))
+    env = _reader_module_env(tree)
+    mod_fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+    def _named_keys(node):
+        """Keys a Constant or module-constant Name denotes."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value} if _is_reader_key_shaped(node.value) else set()
+        if isinstance(node, ast.Name):
+            return {v for v in env.get(node.id) or () if _is_reader_key_shaped(v)}
+        return set()
+
+    def _body_keys(fn, seen):
+        """Every key literal reachable in a same-script helper's body."""
+        out = set()
+        for sub in ast.walk(fn):
+            out |= _named_keys(sub)
+            if isinstance(sub, ast.Name) and sub.id in mod_fns and sub.id not in seen:
+                out |= _body_keys(mod_fns[sub.id], seen | {sub.id})
+        return out
+
+    def _sources(node, fn, seen, root):
+        out = set()
+        if isinstance(node, ast.Constant):
+            return _named_keys(node)
+        if isinstance(node, ast.Name):
+            named = _named_keys(node)
+            if named or not root or node.id in seen:
+                return named
+            for bind in _one_hop_bindings(fn, node):
+                if bind is not node:
+                    out |= _sources(bind, fn, seen | {node.id}, True)
+            return out
+        if isinstance(node, ast.Call):
+            callee = _callee_name(node)
+            if callee in mod_fns and callee not in seen:
+                out |= _body_keys(mod_fns[callee], seen | {callee})
+            for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                out |= _sources(arg, fn, seen, False)
+            return out
+        # `root` survives only through arithmetic, so `a / b` keeps chasing both
+        # operands while a comprehension's `for r in window` does not.
+        deeper = root and isinstance(node, (ast.BinOp, ast.UnaryOp))
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.expr):
+                out |= _sources(child, fn, seen, deeper)
+        return out
+
+    out = {}
+    seed_metrics = mod_fns.get("seed_metrics")
+    if seed_metrics is None:
+        raise AssertionError("scripts/rung1_gate.py has no seed_metrics — every GATES and "
+                             "REPORT_ONLY column's provenance was read from its `m = {...}` "
+                             "literal; this extractor now measures nothing")
+    for node in ast.walk(seed_metrics):
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict)
+                and any(isinstance(t, ast.Name) and t.id == "m" for t in node.targets)):
+            continue
+        for key_node, value in _dict_items(node.value):
+            for col in _resolve(key_node, env) or ():
+                out[col] = frozenset(_sources(value, seed_metrics, set(), True))
+
+    # REPORT_EXTRA: (column, kind, (args...)). The kind→helper map comes from
+    # report_extra's own `if kind == "..."` chain.
+    report_extra = mod_fns.get("report_extra")
+    kind_callees = {}
+    for node in ast.walk(report_extra) if report_extra else ():
+        if not (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)):
+            continue
+        lits = [
+            c.value for c in [node.test.left] + node.test.comparators
+            if isinstance(c, ast.Constant) and isinstance(c.value, str)
+        ]
+        if lits:
+            kind_callees.setdefault(lits[0], set()).update(
+                _callee_name(c) for c in ast.walk(node) if isinstance(c, ast.Call))
+
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple)
+                and any(isinstance(t, ast.Name) and t.id == "REPORT_EXTRA" for t in node.targets)):
+            continue
+        for row in node.value.elts:
+            col = (_resolve(row.elts[0], env) or (None, ))[0]
+            kind = row.elts[1].value
+            keys = set()
+            for elt in ast.walk(row.elts[2]):
+                keys |= _named_keys(elt)
+            for callee in kind_callees.get(kind, ()):
+                if callee in mod_fns:
+                    keys |= _body_keys(mod_fns[callee], {callee})
+            out[col] = frozenset(keys)
+    return out
+
+
 def reader_report_columns(rel_path="scripts/rung1_gate.py"):
     """Column names of rung1_gate's GATES / REPORT_ONLY / REPORT_EXTRA tables.
 
@@ -980,19 +1205,7 @@ def reader_report_columns(rel_path="scripts/rung1_gate.py"):
     """
     path = REPO_ROOT / rel_path
     tree = ast.parse(path.read_text(), filename=str(path))
-    env = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
-            for tgt in node.targets:
-                if isinstance(tgt, ast.Name):
-                    env[tgt.id] = (str(node.value.value), )
-        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple):
-            vals = [_resolve(e, env) for e in node.value.elts]
-            for tgt in node.targets:
-                if isinstance(tgt, ast.Tuple):
-                    for name, v in zip(tgt.elts, vals, strict=True):
-                        if isinstance(name, ast.Name):
-                            env[name.id] = v
+    env = _reader_module_env(tree)
     cols = set()
     for node in tree.body:
         if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Tuple):
