@@ -86,26 +86,57 @@ _INT_KWARG_SCALARS = tuple(
     sorted(n for n, t in _STATIC_DATA_SCALARS if n in _MAKE_ENV_PARAMS and t is not ctypes.c_float))
 _NON_KWARG_SCALARS = tuple(sorted(n for n, _ in _STATIC_DATA_SCALARS if n not in _MAKE_ENV_PARAMS))
 
-# Int kwargs whose C field REJECTS the generic 101, 102, ... run below, with the
-# in-range value to use instead. Rung 0 (spec 2026-08-29 §2.1) added the first
-# three int kwargs and all three are constrained: n_active_per_team is validated
-# to 1..TEAM_SIZE (Cs2Env raises ValueError), and pin_pitch / crouch_enabled are
-# flags Cs2Env normalises with int(bool(...)), so a 101 would come back as 1 and
-# the round trip would fail on a perfectly healthy build.
+# Int kwargs whose C field REJECTS the generic 101, 102, ... run below. There
+# are two shapes and they need different treatment:
+#
+#   - RANGE-constrained. n_active_per_team is validated to 1..TEAM_SIZE (Cs2Env
+#     raises ValueError), but any in-range value round-trips unchanged, so ONE
+#     value serves every env config. Those live here.
+#   - FLAG-constrained. pin_pitch / crouch_enabled / jump_enabled are
+#     normalised by Cs2Env with int(bool(...)), so 101 would come back as 1 and
+#     the round trip would fail on a perfectly healthy build. Only 0 and 1
+#     survive, which means three flags CANNOT get three distinct values inside a
+#     single env — see _BOOL_SENTINEL_CONFIGS below for what replaces that.
 #
 # Overriding beats excluding them: an excluded field is an UNGUARDED FMT
-# position, which is the exact hole this module exists to close. Distinctness is
-# the only property the scheme needs, and 3 / 1 / 0 are pairwise distinct — a
-# transposition among the three "iii" positions is still visible.
+# position, which is the exact hole this module exists to close.
 #
 # ADDING AN INT KWARG: if it accepts arbitrary ints, add nothing — the fallback
-# covers it automatically. If it is range- or flag-constrained, add it here;
+# covers it automatically. If it is range-constrained, add it here; if it is a
+# 0/1 flag, add it to EVERY dict in _BOOL_SENTINEL_CONFIGS.
 # test_int_sentinels_are_usable is what tells you which case you are in.
 _INT_SENTINEL_OVERRIDES = {
     "n_active_per_team": 3,
-    "pin_pitch": 1,
-    "crouch_enabled": 0,
 }
+
+# Flag kwargs, one assignment per env config. The round trip builds one env per
+# dict and reads every field back from both, so a flag is identified not by a
+# single value (impossible — there are only two) but by its VECTOR of read-back
+# values across the configs. Those vectors must be pairwise DISTINCT, which is
+# what keeps a transposition between two flag positions in py_init's FMT string
+# visible: a swap then changes at least one config's read-back.
+#
+# The vectors are deliberately NOT complementary. Complementarity would force
+# every flag into {(0,1), (1,0)} and, by pigeonhole, two of the three would
+# collide — that pair could then be swapped in the FMT string invisibly. With
+# crouch = (0,0), pin_pitch = (0,1), jump = (1,0) all three are distinct.
+#
+# Two configs address 2² = 4 vectors, so this scheme holds up to FOUR flags; a
+# fifth needs a third dict here, which costs one more env construction in
+# test_static_data_scalars_round_trip and nothing else.
+_BOOL_SENTINEL_CONFIGS = (
+    {
+        "pin_pitch": 0,
+        "crouch_enabled": 0,
+        "jump_enabled": 1
+    },
+    {
+        "pin_pitch": 1,
+        "crouch_enabled": 0,
+        "jump_enabled": 0
+    },
+)
+_BOOL_KWARG_SCALARS = tuple(sorted({name for cfg in _BOOL_SENTINEL_CONFIGS for name in cfg}))
 
 # One distinct sentinel per settable field, generated from the sorted field list
 # so a newly added field automatically gets one. Distinctness is the only
@@ -117,11 +148,29 @@ _INT_SENTINEL_OVERRIDES = {
 # (reward_win_t_detonation and reward_win_ct_defuse are both 5.0, reward_death
 # and reward_plant_interrupted both 0.1), so a transposition between a colliding
 # pair would stay invisible.
-_SENTINELS = {name: 0.101 + 0.001 * i for i, name in enumerate(_FLOAT_KWARG_SCALARS)}
-_SENTINELS.update({
+#
+# _SENTINELS_BASE is everything whose sentinel is the same in every config (all
+# floats, plus the non-flag ints); the enumerate() index still runs over the
+# FULL sorted int list so skipping the flags cannot make two fallbacks collide.
+# _SENTINEL_CONFIGS layers one flag assignment on top of that base per env.
+_SENTINELS_BASE = {name: 0.101 + 0.001 * i for i, name in enumerate(_FLOAT_KWARG_SCALARS)}
+_SENTINELS_BASE.update({
     name: _INT_SENTINEL_OVERRIDES.get(name, 101 + i)
-    for i, name in enumerate(_INT_KWARG_SCALARS)
+    for i, name in enumerate(_INT_KWARG_SCALARS) if name not in _BOOL_KWARG_SCALARS
 })
+_SENTINEL_CONFIGS = tuple({**_SENTINELS_BASE, **flags} for flags in _BOOL_SENTINEL_CONFIGS)
+
+# Per-int-field vector of sentinels across the configs — the object whose
+# pairwise distinctness test_int_sentinels_are_usable asserts. Non-flag ints get
+# a constant vector (3, 3) / (101, 101) / ...; flags get the 2-vectors above.
+# None marks a flag named by SOME but not all of _BOOL_SENTINEL_CONFIGS: it
+# would be left at its make_env default in the config that omits it, silently
+# weakening the guard. Recorded rather than raised so the diagnosis lands in
+# test_int_sentinels_are_usable instead of as a KeyError during collection.
+_INT_SENTINEL_VECTORS = {
+    name: tuple(cfg.get(name) for cfg in _SENTINEL_CONFIGS)
+    for name in _INT_KWARG_SCALARS
+}
 
 # StaticData scalars that are tunables — the ones a training config sweeps.
 # Every one must stay reachable from make_env or it drops out of the sentinel
@@ -195,19 +244,30 @@ def test_struct_sizes_exposes_team_constants():
 def test_static_data_scalars_round_trip(simple_map):
     """Distinct sentinels in → same sentinels out, per named field.
 
-    This is the FMT-order guard: py_init's 72-arg PyArg_ParseTuple string is the
+    This is the FMT-order guard: py_init's 73-arg PyArg_ParseTuple string is the
     only thing tying Cs2Env's kwargs to StaticData's fields, and a transposition
     there is invisible to sizeof — two swapped floats parse fine and keep every
     size identical while feeding reward_kill into reward_death.
 
     EXHAUSTIVE over the settable fields. Every StaticData scalar make_env
-    exposes as a keyword argument (_SENTINELS, derived by intersecting the
-    make_env signature with the mirror — not hand-listed) gets its own distinct
-    value and is asserted back by name. An earlier version checked 4 of the 24
-    and defended that as "the fields with a distinguishable expected value";
-    that premise was wrong — make_env exposes all of them — and it left 20 of
-    the 23 consecutive same-width reward/PBRS floats, the exact run the code
-    itself calls the hiding place for a transposition, unchecked.
+    exposes as a keyword argument (_SENTINEL_CONFIGS, derived by intersecting
+    the make_env signature with the mirror — not hand-listed) gets its own
+    distinct value and is asserted back by name. An earlier version checked 4 of
+    the 24 and defended that as "the fields with a distinguishable expected
+    value"; that premise was wrong — make_env exposes all of them — and it left
+    20 of the 23 consecutive same-width reward/PBRS floats, the exact run the
+    code itself calls the hiding place for a transposition, unchecked.
+
+    TWO ENVS, one per entry in _BOOL_SENTINEL_CONFIGS. The 0/1 flag kwargs
+    (pin_pitch / crouch_enabled / jump_enabled) cannot all hold distinct values
+    at once — int(bool(...)) leaves two, and there are three flags — so a
+    single-env sweep would have to leave one of them unguarded, which is the
+    hole this module exists to close. Instead each flag is pinned by its vector
+    of read-back values ACROSS the configs; those vectors are pairwise distinct
+    (asserted in test_int_sentinels_are_usable), so any transposition between
+    two flag positions still shows up in at least one config. Everything else
+    (all floats, the non-flag ints) carries the same sentinel in both configs
+    and is simply checked twice.
 
     Fields make_env does NOT expose are checked against their real source
     instead: laser_range_sq against the laser_range sentinel it is derived
@@ -234,50 +294,58 @@ def test_static_data_scalars_round_trip(simple_map):
     """
     import nav
 
-    env = make_env(map_data=simple_map, **_SENTINELS)
-    try:
-        sc = binding.static_data_scalars(env._capsule)
-        # ── every settable field, one distinct sentinel each ──
-        absent = sorted(name for name in _SENTINELS if name not in sc)
-        assert not absent, (f"make_env kwargs with no static_data_scalars() key: {absent}; add "
-                            "SD_INT/SD_FLOAT for them in src/c_env/binding.c and rebuild (see "
-                            "test_static_data_scalars_covers_every_scalar_field)")
-        wrong = {}
-        for name, sent in _SENTINELS.items():
-            if sc[name] != pytest.approx(sent):
-                # Which sentinel DID land here? For a transposed FMT string that
-                # names the swap partner outright, which is the whole diagnosis.
-                partner = next(
-                    (other for other, v in _SENTINELS.items() if sc[name] == pytest.approx(v)),
-                    None)
-                wrong[name] = (sent, sc[name], partner)
-        assert not wrong, (
-            "sentinel landed in the wrong StaticData field — py_init's FMT string in "
-            "src/c_env/binding.c is out of order with the binding.init() call in "
-            f"Cs2Env.__init__. {{field: (sent, got, whose_sentinel_got_is)}} = {wrong}")
-        # R0-G (Task 11): round_time / laser_range / max_turn_speed are now
-        # make_env kwargs, so they are in _SENTINELS and were checked above.
-        # laser_range_sq is NOT a kwarg — it is derived from the laser_range
-        # sentinel inside Cs2Env.__init__ (FMT 24 from FMT 23), so check the
-        # derivation rather than a nav constant. The None ⇒ nav.py default path
-        # is covered by tests/test_env_knobs.py::test_default_knobs_match_nav_constants.
-        assert sc["laser_range_sq"] == pytest.approx(_SENTINELS["laser_range"]**2)
-        assert sc["laser_damage"] == nav.LASER_DAMAGE
-        # Map-derived scalars. These are the only non-reward, non-nav values in
-        # StaticData, and bombsite_dist_scale is FMT arg 21 — wedged between
-        # y_offset (float) and laser_damage (int), exactly where a transposition
-        # would hide. `> 0.0` used to be the check here; any positive garbage
-        # passed it. Cs2Env forwards md.bombsite_dist_scale verbatim, so compare
-        # against the map. float() round-trips through C float32, hence approx.
-        assert sc["bombsite_dist_scale"] == pytest.approx(simple_map.bombsite_dist_scale)
-        assert sc["N"] == simple_map.N
-        assert sc["grid_w"] == simple_map.grid.shape[1]
-        assert sc["grid_h"] == simple_map.grid.shape[0]
-        assert sc["max_area_id"] == int(simple_map.area_ids.max())
-        assert sc["n_t_spawns"] == len(simple_map.t_spawn_areas)
-        assert sc["n_ct_spawns"] == len(simple_map.ct_spawn_areas)
-    finally:
-        env.close()
+    # Sequential, not two live envs at once: nothing here needs them to coexist,
+    # and one env at a time keeps a failure attributable to a single config.
+    for cfg_i, sentinels in enumerate(_SENTINEL_CONFIGS):
+        env = make_env(map_data=simple_map, **sentinels)
+        try:
+            sc = binding.static_data_scalars(env._capsule)
+            # ── every settable field, one sentinel each, in this config ──
+            absent = sorted(name for name in sentinels if name not in sc)
+            assert not absent, (
+                f"config {cfg_i}: make_env kwargs with no static_data_scalars() key: {absent}; add "
+                "SD_INT/SD_FLOAT for them in src/c_env/binding.c and rebuild (see "
+                "test_static_data_scalars_covers_every_scalar_field)")
+            wrong = {}
+            for name, sent in sentinels.items():
+                if sc[name] != pytest.approx(sent):
+                    # Which sentinel DID land here? For a transposed FMT string
+                    # that names the swap partner outright, which is the whole
+                    # diagnosis. Flags share values within a config, so the
+                    # partner is a hint there, not a unique identification —
+                    # the config INDEX is the other half of the diagnosis.
+                    partner = next(
+                        (other for other, v in sentinels.items() if sc[name] == pytest.approx(v)),
+                        None)
+                    wrong[name] = (sent, sc[name], partner)
+            assert not wrong, (
+                f"config {cfg_i} ({_BOOL_SENTINEL_CONFIGS[cfg_i]}): sentinel landed in the wrong "
+                "StaticData field — py_init's FMT string in src/c_env/binding.c is out of order "
+                "with the binding.init() call in Cs2Env.__init__. "
+                f"{{field: (sent, got, whose_sentinel_got_is)}} = {wrong}")
+            # R0-G (Task 11): round_time / laser_range / max_turn_speed are now
+            # make_env kwargs, so they are in the config and were checked above.
+            # laser_range_sq is NOT a kwarg — it is derived from the laser_range
+            # sentinel inside Cs2Env.__init__ (FMT 24 from FMT 23), so check the
+            # derivation rather than a nav constant. The None ⇒ nav.py default path
+            # is covered by tests/test_env_knobs.py::test_default_knobs_match_nav_constants.
+            assert sc["laser_range_sq"] == pytest.approx(sentinels["laser_range"]**2)
+            assert sc["laser_damage"] == nav.LASER_DAMAGE
+            # Map-derived scalars. These are the only non-reward, non-nav values in
+            # StaticData, and bombsite_dist_scale is FMT arg 21 — wedged between
+            # y_offset (float) and laser_damage (int), exactly where a transposition
+            # would hide. `> 0.0` used to be the check here; any positive garbage
+            # passed it. Cs2Env forwards md.bombsite_dist_scale verbatim, so compare
+            # against the map. float() round-trips through C float32, hence approx.
+            assert sc["bombsite_dist_scale"] == pytest.approx(simple_map.bombsite_dist_scale)
+            assert sc["N"] == simple_map.N
+            assert sc["grid_w"] == simple_map.grid.shape[1]
+            assert sc["grid_h"] == simple_map.grid.shape[0]
+            assert sc["max_area_id"] == int(simple_map.area_ids.max())
+            assert sc["n_t_spawns"] == len(simple_map.t_spawn_areas)
+            assert sc["n_ct_spawns"] == len(simple_map.ct_spawn_areas)
+        finally:
+            env.close()
 
 
 def test_static_data_scalars_rejects_non_capsule():
@@ -420,48 +488,79 @@ def test_every_tunable_scalar_is_a_make_env_kwarg():
 
 
 def test_int_sentinels_are_usable():
-    """The int-sentinel table must stay live and collision-free.
+    """The int-sentinel tables must stay live and collision-free.
 
-    WHY: _INT_SENTINEL_OVERRIDES is a hand-written map keyed by field name, so it
-    rots in two directions and both fail SILENTLY.
+    WHY: _INT_SENTINEL_OVERRIDES and _BOOL_SENTINEL_CONFIGS are hand-written maps
+    keyed by field name, so they rot in three directions and all of them fail
+    SILENTLY.
       - A stale key (field renamed or dropped from make_env) simply stops
         applying; the field it was protecting then gets 101 back and the round
         trip fails with a confusing "expected 101, got 1" instead of pointing
         here. Worse, if the rename landed with a same-shaped replacement, nothing
-        would point at this table at all.
-      - Two overrides sharing a value blinds the transposition check the whole
-        sentinel scheme exists for: swap those two FMT positions and every assert
-        still passes.
-    Neither is visible from test_static_data_scalars_round_trip, which only ever
-    asserts value-in == value-out.
+        would point at these tables at all.
+      - A flag named by only SOME of the configs keeps its make_env DEFAULT in
+        the config that omits it, so its vector is half-unguarded — and nothing
+        downstream notices, because a default that happens to match still
+        round-trips.
+      - Two fields sharing a sentinel VECTOR blinds the transposition check the
+        whole sentinel scheme exists for: swap those two FMT positions and every
+        assert still passes. This is the assert that made the third flag
+        (jump_enabled) possible — with only 0 and 1 available per env, the
+        distinctness that matters is across configs, not within one.
+    None of the three is visible from test_static_data_scalars_round_trip, which
+    only ever asserts value-in == value-out.
     """
-    stale = sorted(set(_INT_SENTINEL_OVERRIDES) - set(_INT_KWARG_SCALARS))
+    named = set(_INT_SENTINEL_OVERRIDES) | set(_BOOL_KWARG_SCALARS)
+    stale = sorted(named - set(_INT_KWARG_SCALARS))
     assert not stale, (
-        f"_INT_SENTINEL_OVERRIDES names non-kwarg / non-int StaticData fields: {stale}; "
-        "drop the entry or fix the name")
-    int_sentinels = [_SENTINELS[name] for name in _INT_KWARG_SCALARS]
-    assert len(set(int_sentinels)) == len(int_sentinels), (
-        f"int sentinels are not pairwise distinct: "
-        f"{dict(zip(_INT_KWARG_SCALARS, int_sentinels, strict=True))}; "
-        "a transposition between two equal-valued fields would be invisible")
+        "_INT_SENTINEL_OVERRIDES / _BOOL_SENTINEL_CONFIGS name non-kwarg / non-int StaticData "
+        f"fields: {stale}; drop the entry or fix the name")
+    both = sorted(set(_INT_SENTINEL_OVERRIDES) & set(_BOOL_KWARG_SCALARS))
+    assert not both, (
+        f"fields in BOTH _INT_SENTINEL_OVERRIDES and _BOOL_SENTINEL_CONFIGS: {both}; the "
+        "per-config value wins and the override is dead code — keep each field in exactly one")
+    partial = sorted(n for n, vec in _INT_SENTINEL_VECTORS.items() if None in vec)
+    assert not partial, (
+        f"flags missing from at least one _BOOL_SENTINEL_CONFIGS dict: {partial}; every dict must "
+        "name every flag, or the omitting config silently tests the make_env default instead")
+    collisions = {}
+    for name, vec in _INT_SENTINEL_VECTORS.items():
+        collisions.setdefault(vec, []).append(name)
+    clashing = {vec: names for vec, names in collisions.items() if len(names) > 1}
+    assert not clashing, (
+        f"int sentinel vectors are not pairwise distinct: {clashing}; a transposition between two "
+        "fields sharing a vector would be invisible in EVERY config (add a config dict to "
+        "_BOOL_SENTINEL_CONFIGS if you have run out of 2-vectors)")
 
 
-def test_static_data_scalars_round_trip_rung0_knobs(simple_map):
-    """The three Rung 0 "iii" FMT positions (69-71), read back by name.
+def test_static_data_scalars_round_trip_sim_knobs(simple_map):
+    """The four sim-knob "iiii" FMT positions (69-72), read back by name.
+
+    69-71 are Rung 0 (n_active_per_team, pin_pitch, crouch_enabled); 72 is Rung
+    1a's jump_enabled.
 
     Redundant with the sentinel sweep by construction — and deliberately so.
     The sweep derives its kwargs from inspect.signature(make_env), so it silently
     stops covering these the moment they leave make_env's signature (Task 4+
     touches the same call chain). This test names them literally, so that
-    removal fails loudly. It also documents the intended tuple shape for the
-    next task: n_active is a count, the other two are flags.
+    removal fails loudly. It also documents the intended tuple shape:
+    n_active is a count, the other three are flags.
+
+    The flags are set to a combination NOT used by either _BOOL_SENTINEL_CONFIGS
+    entry (jump and pin_pitch both 1), so this is a genuinely independent read
+    rather than a third copy of a config the sweep already ran.
     """
-    env = make_env(map_data=simple_map, n_active_per_team=3, pin_pitch=1, crouch_enabled=0)
+    env = make_env(map_data=simple_map,
+                   n_active_per_team=3,
+                   pin_pitch=1,
+                   crouch_enabled=0,
+                   jump_enabled=1)
     try:
         sc = binding.static_data_scalars(env._capsule)
         assert sc["n_active_per_team"] == 3
         assert sc["pin_pitch"] == 1
         assert sc["crouch_enabled"] == 0
+        assert sc["jump_enabled"] == 1
     finally:
         env.close()
 

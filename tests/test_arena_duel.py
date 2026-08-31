@@ -260,11 +260,18 @@ def test_build_map_data_names():
 def test_config_env_label(tmp_path):
     """Real CLI: --map sets config["env"] and pin_pitch is resolved from the
     built map ABOVE the --dump-config exit (the Modal runner fingerprints
-    every launch from this dump). --dust2 stays an alias; --map wins."""
+    every launch from this dump). --dust2 stays an alias; --map wins.
+
+    Rung 1a T2b: `--jump-enabled` rides along on the arena-duel case. It is
+    otherwise pinned only at the args→knobs level (tests/test_env_knobs.py), so
+    nothing covered the argparse→config.json leg — a flag that parsed but never
+    reached the dump would launch T4 with jumping ON and the fingerprint would
+    agree with itself.
+    """
     cases = (
         (["--map", "simple"], "cs2-simple", 0),
         (["--map", "dust2"], "cs2-dust2", 1),
-        (["--map", "arena-duel"], "cs2-arena-duel", 1),
+        (["--map", "arena-duel", "--jump-enabled", "0"], "cs2-arena-duel", 1),
         ([], "cs2-simple", 0),                                                         # default map
         (["--dust2"], "cs2-dust2", 1),                                                 # alias
         (["--dust2", "--map", "simple"], "cs2-simple", 0),                             # --map wins
@@ -284,6 +291,9 @@ def test_config_env_label(tmp_path):
         cfg = json.loads((d / "config.json").read_text())
         assert cfg["env"] == label and cfg["pin_pitch"] == pin, (flags, cfg["env"],
                                                                  cfg["pin_pitch"])
+                                                                                       # Explicit 0 must survive to the dump; every other case pins the default (1).
+        assert cfg["jump_enabled"] == (0 if "--jump-enabled" in flags else 1), (flags,
+                                                                                cfg["jump_enabled"])
                                                                                        # An explicit pin that disagrees with the map is refused before the dump.
     r = subprocess.run([
         sys.executable,

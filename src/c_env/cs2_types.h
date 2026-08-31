@@ -247,10 +247,11 @@ typedef struct {
     float pbrs_bomb_progress_weight;   /* bomb-closeness scale in _potential */
     float pbrs_nav_weight_t;           /* T-side nav approach weight */
     float pbrs_nav_weight_ct;          /* CT-side nav approach weight */
-    /* Rung 0 (spec 2026-08-29 §2.1 / R0-E.2): sim-level knobs, all int32,
-     * FMT "iii" at positions 69-71. Inserted BEFORE wall_list so the two
-     * pointer-ish tail fields stay last and their offsets move together on
-     * both sides (StaticDataC mirrors this same position).
+    /* Rung 0 (spec 2026-08-29 §2.1 / R0-E.2) + Rung 1a (spec 2026-08-30 T2a):
+     * sim-level knobs, all int32, FMT "iiii" at positions 69-72. Inserted
+     * BEFORE wall_list so the two pointer-ish tail fields stay last and their
+     * offsets move together on both sides (StaticDataC mirrors this same
+     * position).
      *   n_active_per_team — agents per team that spawn (1..TEAM_SIZE). Slots
      *                       >= n are "parked": participating=0, alive=0,
      *                       area_idx=INVALID_AREA_IDX, enemy_mem_idx[*]=
@@ -261,12 +262,18 @@ typedef struct {
      *                       here in Rung 0; the consumer lands in a later task.
      *   crouch_enabled    — 0 => compute_masks masks HEAD_CROUCH bin 1.
      *                       Declared here; the consumer lands in a later task.
+     *   jump_enabled      — 0 => compute_masks masks HEAD_JUMP bin 1. Exact
+     *                       mirror of crouch_enabled (Rung 1a shrinks the
+     *                       action space to the aim problem; a jumping agent
+     *                       also leaves the pinned-pitch hit band, gh #150).
      * PITFALL: cs2_demo.c load_nav_data memsets StaticData and assigns by
      * name — it must set n_active_per_team=TEAM_SIZE, pin_pitch=0 and
-     * crouch_enabled=1 or the demo silently parks everyone / disables crouch. */
+     * crouch_enabled=jump_enabled=1 or the demo silently parks everyone /
+     * disables crouch / disables jump. */
     int32_t n_active_per_team;
     int32_t pin_pitch;
     int32_t crouch_enabled;
+    int32_t jump_enabled;
     /* Baked solid faces (cs2_solids.h). build_solids_from_rooms() is the ONLY
      * allocation site; env_close() and c_close() both free it via free_solids.
      * Per-env: binding.c puts Dust2Env and StaticData in one calloc, so this
@@ -274,8 +281,17 @@ typedef struct {
     WallList wall_list;
     /* Ramp interpolation AABB. After wall_list. StaticDataC appends wall_list
      * then this so Python can publish the room quad after env_init.
-     * Measured gcc offsetof: wall_list=480, area_bounds=496 (no pad after
-     * pbrs_nav_weight_ct). NULL → centroids_z (dust2).
+     * Measured offsetof: wall_list=496, area_bounds=512 (no pad after
+     * pbrs_nav_weight_ct, which ends at 480). These are DOCUMENTATION ONLY —
+     * binding.c publishes the real offsetof and cs2_env.py asserts the mirror
+     * against it, which is what actually keeps the two sides together. The
+     * quoted pair went stale once already (it still read 480/496 after Rung 0
+     * appended three int32 knobs), so trust the assert, not this line.
+     * Sizing note: the sim-knob block above is 8-aligned as a whole, so
+     * jump_enabled (Rung 1a, the 4th int32) landed in the pad that already sat
+     * between crouch_enabled and wall_list — sizeof(StaticData) stayed 520 and
+     * neither offset moved. A FIFTH int32 knob will move both.
+     * NULL → centroids_z (dust2).
      *
      * Ownership: BORROWED, always. The two writers are cs2_env.py (a numpy
      * array kept alive in Cs2Env._refs) and make_client (nav_data.h statics).
@@ -496,7 +512,7 @@ typedef struct {
     struct Client* client;
     /* Sim recoil v1 (#120): env-wide physics switch, after client.
      * 0 = today's hitscan (train / make_env default); 1 = punch on the hit ray
-     * (cs2_demo). Not a binding.init argument — that 72-arg FMT is a footgun.
+     * (cs2_demo). Not a binding.init argument — that 73-arg FMT is a footgun.
      * make_env writes this after Dust2EnvC.from_address. env_reset memsets
      * GameState only, so the flag survives mid-round reset. */
     int32_t recoil_enabled;

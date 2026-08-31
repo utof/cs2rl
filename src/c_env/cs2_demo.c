@@ -14,15 +14,17 @@
  * — re-run that whenever map.py or SIMPLE_ROOMS changes. */
 static void load_nav_data(StaticData* sd) {
     memset(sd, 0, sizeof(StaticData));
-    /* Rung 0 knobs (cs2_types.h StaticData tail). The memset above zeroes
-     * them; zero n_active_per_team trips env_init's assert and zero
-     * crouch_enabled would mask crouch for the human player (cs2_input.h).
+    /* Rung 0 + Rung 1a knobs (cs2_types.h StaticData tail). The memset above
+     * zeroes them; zero n_active_per_team trips env_init's assert, and zero
+     * crouch_enabled / jump_enabled would mask crouch / jump for the human
+     * player (cs2_input.h).
      * Every other scalar below is assigned by name from nav_data.h; the
      * Python side (cs2_env.py binding.init) sets all of these plus the
      * reward weights — keep this list in sync when adding StaticData fields. */
     sd->n_active_per_team   = TEAM_SIZE;
     sd->pin_pitch           = 0;
     sd->crouch_enabled      = 1;
+    sd->jump_enabled        = 1;
     sd->N                   = NAV_N;
     sd->vis_matrix          = (int8_t*)NAV_VIS_MATRIX;
     sd->raster_grid         = (int32_t*)NAV_RASTER_GRID;

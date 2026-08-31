@@ -50,8 +50,10 @@ def _build_trainer_for_test(
     map_data=None,
     pin_pitch: int = 0,
     crouch_enabled: int = 1,
+    jump_enabled: int = 1,
     aim_log_std_max=None,
     aim_entropy_bonus: bool = True,
+    opponent: str = "self",
 ):
     """Build a tiny in-process PuffeRL trainer for Batch-1 trainer-level tests.
 
@@ -99,12 +101,32 @@ def _build_trainer_for_test(
         policy (``build_policy(pin_pitch=)`` → aim_dim_mask) and both
         SelfPlayManager constructions — exactly like production, so
         ``assert_pin_pitch_agreement`` holds on a harness trainer.
+    jump_enabled : int
+        Rung 1a sim knob (spec 2026-08-30 T2b): 0 masks the jump action.
+        Threaded into the envs and into ``args`` (⇒ config ``jump_enabled``),
+        but NOT into build_policy — unlike pin_pitch it changes no action
+        dimension, only a mask bit, so there is no policy-side mirror to keep
+        in agreement. Default 1 = today's env, i.e. every pre-Rung-1a caller
+        is unaffected.
     aim_log_std_max : float or None
         R0-E.3 per-run σ cap → ``policy.aim_log_std_max`` and config
         ``aim_log_std_max``. None ⇒ LOG_STD_MAX.
     aim_entropy_bonus : bool
         R0-E.4 → config ``aim_entropy_bonus`` (the CLI spells it "on"/"off";
         build_train_config accepts both).
+    opponent : str
+        Rung 1a T3 (spec 2026-08-30): ``"self"`` (default, today's behaviour —
+        both teams train) or ``"noop"`` (the opponent team is a stationary
+        statue: no-op action bin on every head and NON-participating rows).
+        Threaded into ``args`` (⇒ config ``opponent`` and the halved
+        participating-step budget), into ``build_participating_rows`` and into
+        BOTH SelfPlayManager constructions — the same three surfaces train()
+        touches, so a harness rollout exercises the production statue path
+        rather than a harness-only imitation of it.
+        PITFALL: ``opponent="noop"`` with ``with_selfplay=True`` is refused
+        here exactly as train() refuses ``--opponent noop`` without
+        ``--no-self-play`` — a past-policy opponent is not a statue, and
+        maybe_switch_teams would flip the statue's team mid-run.
 
     Returns
     -------
@@ -139,11 +161,18 @@ def _build_trainer_for_test(
         SelfPlayManager,
         _patch_trainer_with_hybrid_aim,
         _patch_trainer_with_selfplay,
+        assert_opponent_self_play_compatible,
+        build_participating_rows,
         build_policy,
         build_train_config,
         compute_batch_dims,
         make_puffer_env,
     )
+
+    # Rung 1a T3: mirror of train()'s startup guard. `with_selfplay` is the
+    # harness's spelling of "self-play bookkeeping on" (it is what sets
+    # p_past > 0), so it is the flag to check.
+    assert_opponent_self_play_compatible(opponent, with_selfplay)
 
     # ── Scratch dir for config.json + any checkpoints PuffeRL writes ────────
     # PuffeRL's constructor doesn't actually write to data_dir during __init__,
@@ -171,8 +200,10 @@ def _build_trainer_for_test(
     import numpy as np
 
     from _action_spec import ACTION_MASK_DIM
-    from nav import TEAM_SIZE          # row layout: i % TEAM_SIZE indexes within a team
 
+    # (`from nav import TEAM_SIZE` used to sit in this import block for the
+    # participation-row formula below; Rung 1a T3 moved that formula into
+    # train.build_participating_rows, the one copy production also calls.)
     _agents_per_env = 10
     mask_shm = RawArray("b", num_envs * _agents_per_env * ACTION_MASK_DIM)
     mask_view_main = np.frombuffer(mask_shm, dtype=np.int8).reshape(num_envs * _agents_per_env,
@@ -197,6 +228,7 @@ def _build_trainer_for_test(
             n_active_per_team=n_active_per_team,
             pin_pitch=pin_pitch,
             crouch_enabled=crouch_enabled,
+            jump_enabled=jump_enabled,
         )
         if _mask_idx is not None:
             env._attach_mask_view(mask_shm, _mask_idx)
@@ -219,7 +251,7 @@ def _build_trainer_for_test(
     )
 
     # ── Minimal argparse-shaped config object ───────────────────────────────
-    # build_train_config reads these four attributes. Everything else in the
+    # build_train_config reads these attributes. Everything else in the
     # production parser (wandb, vec-backend, etc.) is irrelevant once we've
     # already instantiated the vecenv.
     # Tiny horizon — ONE evaluate() round is all downstream tests need.
@@ -236,8 +268,10 @@ def _build_trainer_for_test(
         n_active_per_team=n_active_per_team,
         pin_pitch=pin_pitch,
         crouch_enabled=crouch_enabled,
+        jump_enabled=jump_enabled,
         aim_log_std_max=aim_log_std_max,
         aim_entropy_bonus=aim_entropy_bonus,
+        opponent=opponent,
     )
     train_config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
 
@@ -279,12 +313,15 @@ def _build_trainer_for_test(
     # F8: mask_view_main plumbed so harness rollouts run MASKED, same as
     # production. Pin the RawArray on the trainer against GC (prod pattern).
     trainer._action_mask_shm = mask_shm
-    # Rung 0 §2.2: same env-row-major formula train() uses — slots 0..n-1 of
-    # each 5-agent team participate. Built here (not inside the patcher) so
-    # the harness stays the single place that knows the harness's row layout.
-    participating_rows = np.array([(i % TEAM_SIZE) < n_active_per_team
-                                   for i in range(num_envs * _agents_per_env)],
-                                  dtype=bool)
+    # Rung 0 §2.2 + Rung 1a T3: the SHARED helper train() calls, not a copy of
+    # its formula. The copy was the hazard: a participation change patched into
+    # only one of the two left the headline harness test green against a
+    # formula production never ran. Built here (not inside the patcher) so the
+    # trainer-construction path still mirrors production's call order.
+    participating_rows = build_participating_rows(num_envs,
+                                                  n_active_per_team,
+                                                  opponent_mode=opponent,
+                                                  hero_team=SelfPlayManager.initial_hero_team())
     _patch_trainer_with_hybrid_aim(trainer,
                                    mask_view_main=mask_view_main,
                                    participating_rows=participating_rows)
@@ -309,6 +346,7 @@ def _build_trainer_for_test(
             phase_length=50,
             aim_log_std_max=aim_log_std_max,
             pin_pitch=bool(pin_pitch),
+            opponent_mode=opponent,
         )
         _patch_trainer_with_selfplay(trainer, self_play_mgr)
     else:
@@ -320,6 +358,10 @@ def _build_trainer_for_test(
             phase_length=50,
             aim_log_std_max=aim_log_std_max,
             pin_pitch=bool(pin_pitch),
+                                                       # Always "self" in practice (the guard at the top of this factory
+                                                       # refuses noop + with_selfplay); passed anyway so the two branches
+                                                       # cannot drift if that pairing is ever allowed.
+            opponent_mode=opponent,
         )
         _patch_trainer_with_selfplay(trainer, self_play_mgr)
 

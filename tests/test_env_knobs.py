@@ -86,6 +86,13 @@ def test_invalid_knobs_raise_value_error(simple_map, bad):
 
 
 def test_env_knobs_from_args_and_config():
+    """Knobs resolve from args, and config.json records what the envs ran with.
+
+    The provenance half matters as much as the resolution half: a run that
+    masked crouch/jump has to be distinguishable from one that did not, months
+    later, from the run dir alone — config.json must carry the EFFECTIVE value,
+    never the CLI default.
+    """
     import types
 
     from train import build_train_config, compute_batch_dims, env_knobs_from_args
@@ -99,6 +106,7 @@ def test_env_knobs_from_args_and_config():
                                  n_active_per_team=1,
                                  pin_pitch=1,
                                  crouch_enabled=0,
+                                 jump_enabled=0,
                                  gamma=0.999,
                                  pbrs_gamma=None)
     k = env_knobs_from_args(args)
@@ -106,6 +114,7 @@ def test_env_knobs_from_args_and_config():
         "n_active_per_team": 1,
         "pin_pitch": 1,
         "crouch_enabled": 0,
+        "jump_enabled": 0,             # Rung 1a T2b: always present, like crouch_enabled
         "round_time": 160,
         "laser_range": 300.0,
         "pbrs_gamma": 0.999,           # R0-J: always present; None ⇒ resolved to gamma
@@ -116,16 +125,26 @@ def test_env_knobs_from_args_and_config():
         assert key in cfg
     assert cfg["round_time_ticks"] == 160 and cfg["laser_range"] == 300.0
     assert cfg["max_turn_speed"] is None
+    assert cfg["crouch_enabled"] == 0 and cfg["jump_enabled"] == 0
 
 
 def test_env_knobs_from_args_legacy_args_object():
-    """Harness/dump-config args objects predate the flags: all three omitted."""
+    """Harness/dump-config args objects predate the flags: all three omitted.
+
+    The always-present knobs must fall back to TODAY'S env, not to the Rung 1a
+    diagnostic setting: getattr defaults of 0 would silently mask crouch/jump
+    for every legacy caller (harness trainers, --dump-config, sweep scripts)
+    without a single flag being passed.
+    """
     import types
 
     from train import env_knobs_from_args
     k = env_knobs_from_args(types.SimpleNamespace())
-    assert set(k) == {"n_active_per_team", "pin_pitch", "crouch_enabled", "pbrs_gamma"}
+    assert set(k) == {
+        "n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled", "pbrs_gamma"
+    }
     assert k["pbrs_gamma"] == 0.999    # legacy args ⇒ default gamma
+    assert k["crouch_enabled"] == 1 and k["jump_enabled"] == 1
 
 
 def test_make_puffer_env_forwards_knobs(simple_map):
@@ -143,6 +162,50 @@ def test_make_puffer_env_forwards_knobs(simple_map):
         assert sc["max_turn_speed"] == pytest.approx(0.5)
     finally:
         env.close()
+
+
+@pytest.mark.parametrize("flag", [0, 1])
+def test_stance_knobs_reach_static_data_through_env_knobs(simple_map, flag):
+    """Rung 1a T2b: --crouch-enabled / --jump-enabled reach StaticData through
+    the PRODUCTION path (args → env_knobs_from_args → make_puffer_env →
+    make_env), not just via a direct make_env kwarg (that layer is covered by
+    tests/test_pitch_pin.py).
+
+    PITFALL: env_knobs_from_args returns make_puffer_env KWARG names while the
+    train() eval/driver agreement loop compares Cs2Env ATTRIBUTE names — the
+    knob key, the parameter and the attribute must stay spelled alike, so both
+    are asserted here. A rename in only one of the three surfaces as a
+    TypeError in a forked vecenv worker or an AttributeError hours into a run.
+    """
+    import types
+
+    import binding
+
+    from train import env_knobs_from_args, make_puffer_env
+    args = types.SimpleNamespace(crouch_enabled=flag, jump_enabled=flag)
+    env = make_puffer_env(map_data=simple_map, **env_knobs_from_args(args))
+    try:
+        assert env.crouch_enabled == flag and env.jump_enabled == flag
+        sc = binding.static_data_scalars(env._capsule)
+        assert sc["crouch_enabled"] == flag and sc["jump_enabled"] == flag
+    finally:
+        env.close()
+
+
+def test_jump_enabled_is_in_the_eval_driver_agreement_loop():
+    """The loop lives inside train() (only reachable by launching a run), so
+    pin it in the source: an eval env built from env_knobs_from_args while the
+    workers ran different knobs would silently score the policy on a DIFFERENT
+    sim than it trains on, and the mismatch would never surface in metrics.
+    Mirrors test_cli_flags_declared_default_none's source-scan rationale."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
+    m = re.search(r"for _k in \((.*?)\):", src, re.S)
+    assert m, "eval/driver agreement loop not found in train.py"
+    keys = m.group(1)
+    for knob in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled", "round_time"):
+        assert f'"{knob}"' in keys, f"{knob} missing from the eval/driver agreement loop"
 
 
 def test_policy_max_turn_speed_assert(simple_map):
@@ -175,3 +238,21 @@ def test_cli_flags_declared_default_none():
         assert m, flag
         body = m.group(1)
         assert f"type={typ}" in body and "default=None" in body and f'dest="{dest}"' in body, flag
+
+
+def test_stance_flags_declared_default_on():
+    """--crouch-enabled / --jump-enabled are 0/1 knobs that must default to 1.
+
+    They are NOT default=None like the R0-G knobs: there is no "env decides"
+    value for a mask bit, and a default of 0 would silently mask the action for
+    every run that never asked for the Rung 1a diagnostic. Same source-scan
+    reason as above (the parser is not importable)."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
+    for flag, dest in (("--crouch-enabled", "crouch_enabled"), ("--jump-enabled", "jump_enabled")):
+        m = re.search(rf'add_argument\(\s*"{flag}",(.*?)\)\n', src, re.S)
+        assert m, flag
+        body = m.group(1)
+        assert "type=int" in body and "choices=(0, 1)" in body, flag
+        assert "default=1" in body and f'dest="{dest}"' in body, flag

@@ -78,15 +78,16 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
     float reward_win_t_detonation, reward_win_t_elimination;
     float reward_win_ct_defuse, reward_win_ct_timeout, reward_win_ct_elimination;
 
-    /* Rung 0 (spec 2026-08-29 §2.1 / R0-E.2): sim knobs. `int`, not int32_t —
-     * PyArg_ParseTuple's "i" writes an int and nothing else is safe here. */
-    int n_active_per_team, pin_pitch, crouch_enabled;
+    /* Rung 0 (spec 2026-08-29 §2.1 / R0-E.2) + Rung 1a (jump_enabled): sim
+     * knobs. `int`, not int32_t — PyArg_ParseTuple's "i" writes an int and
+     * nothing else is safe here. */
+    int n_active_per_team, pin_pitch, crouch_enabled, jump_enabled;
 
-    /* 72-arg format string — positions match StaticDataC._fields_ order from cs2_env.py.
+    /* 73-arg format string — positions match StaticDataC._fields_ order from cs2_env.py.
      * T2 (verticality): added centroids_z_o after centroid_xy_o (pos 4) and is_ramp_o
      * after bombsite_by_idx_o (pos 8), for 10 O args total instead of 8.
      * Total: 10O + 4i + 8f + i + 2f + 6i + 2f + 2i + f + 4O + i + O + i + f + I + f
-     *      + f(reward_win) + 5f(Batch1) + 17f(Phase5-rest) + 3i(Rung 0) = 72 args.
+     *      + f(reward_win) + 5f(Batch1) + 17f(Phase5-rest) + 4i(Rung 0 + 1a) = 73 args.
      * CRITICAL: positions must stay in sync with StaticDataC._fields_ in cs2_env.py
      * and StaticData in cs2_types.h — mismatch silently corrupts pointer assignments. */
     static const char FMT[] =
@@ -114,7 +115,8 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
         "fffff"             /* 47-51: Batch 1 per-mechanism win magnitudes */
         "fffffffffffffffff" /* 52-68: 17 remaining Phase-5 reward weights
                                        (reward_kill through pbrs_nav_weight_ct) */
-        "iii";              /* 69-71: n_active_per_team, pin_pitch, crouch_enabled (Rung 0) */
+        "iiii";             /* 69-72: n_active_per_team, pin_pitch, crouch_enabled (Rung 0),
+                                       jump_enabled (Rung 1a) */
 
     if (!PyArg_ParseTuple(args,
                           FMT,
@@ -189,7 +191,8 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
                           &pbrs_nav_weight_ct,
                           &n_active_per_team,
                           &pin_pitch,
-                          &crouch_enabled))
+                          &crouch_enabled,
+                          &jump_enabled))
         return NULL;
 
     BindingEnv* benv = (BindingEnv*)calloc(1, sizeof(BindingEnv));
@@ -286,6 +289,7 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
     sd->n_active_per_team = n_active_per_team;
     sd->pin_pitch         = pin_pitch;
     sd->crouch_enabled    = crouch_enabled;
+    sd->jump_enabled      = jump_enabled;
 
     env_init(&benv->env, sd, (uint32_t)seed, team_spirit);
 
@@ -533,7 +537,7 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
  * PITFALL: add fields ONLY through the SD_INT / SD_FLOAT macros. They stringify
  * the field name, so the key and the value it carries cannot disagree. Do not
  * hand-roll a Py_BuildValue("{s:d,s:d,...}") with 52 pairs: that is the same
- * footgun as py_init's 72-arg FMT (which cs2_env.py extends only under
+ * footgun as py_init's 73-arg FMT (which cs2_env.py extends only under
  * protest, and only at the tail), where one misplaced format char silently
  * mislabels every field after it — and a key/value swap is invisible to the
  * completeness test above. */
@@ -650,10 +654,11 @@ static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
     SD_FLOAT(pbrs_bomb_progress_weight);
     SD_FLOAT(pbrs_nav_weight_t);
     SD_FLOAT(pbrs_nav_weight_ct);
-    /* Rung 0 sim knobs (FMT args 69-71). */
+    /* Rung 0 sim knobs (FMT args 69-71) + Rung 1a jump_enabled (72). */
     SD_INT(n_active_per_team);
     SD_INT(pin_pitch);
     SD_INT(crouch_enabled);
+    SD_INT(jump_enabled);
     return d;
 fail:
     Py_DECREF(d);

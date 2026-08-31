@@ -80,12 +80,29 @@ LOG_STD_INIT = math.log(0.1)
 LOG_STD_MIN = math.log(0.01)
 LOG_STD_MAX = math.log(0.5)
 
+# Rung 1a T1 (spec 2026-08-30): how far BELOW the run's σ cap a fresh
+# aim_log_std starts. `torch.clamp` back-propagates zero gradient strictly
+# outside [min, max], so a parameter initialised AT the cap is gradient-dead
+# from step 0 — that is exactly what killed the Rung 1 treatment arm (init
+# log 0.1 under a log 0.05 cap: σ was a constant for 10M steps and the logged
+# "log σ = −2.996" was the clamp, not a measurement). 0.2 in log-space ≈ an
+# 18 % σ gap: wide enough that Adam needs many steps to walk into the clamp,
+# small enough that the run still trains near its intended σ.
+AIM_LOG_STD_INIT_MARGIN = 0.2
+# The matching floor-side head-room the cap must leave. The init sits one
+# margin below the cap, so a cap closer than 2× the margin to LOG_STD_MIN puts
+# the init at/below the FLOOR, where the lower clamp kills the gradient just as
+# dead as the upper one. Enforcing head-room on the cap (rather than clamping
+# the init up with a max(LOG_STD_MIN + m, …) floor) is deliberate: a floor
+# merely moves the dead zone from one end of the band to the other, silently.
+AIM_LOG_STD_CAP_MIN_HEADROOM = 2 * AIM_LOG_STD_INIT_MARGIN
+
 
 def validate_aim_log_std_max(aim_log_std_max) -> float:
     """Resolve + range-check the run's aim σ cap (R0-E.3, #131).
 
     Returns the float cap (LOG_STD_MAX when None). Raises ValueError unless
-    LOG_STD_MIN < cap <= LOG_STD_MAX, i.e. σ in (0.01, 0.5].
+    LOG_STD_MIN + 0.4 < cap <= LOG_STD_MAX, i.e. σ in (0.0149, 0.5].
 
     WHY a separate torch-free helper: make_policy() only runs after the env
     and torch are up, so a bad --aim-log-std-max used to surface ~30 s into a
@@ -95,12 +112,127 @@ def validate_aim_log_std_max(aim_log_std_max) -> float:
     PITFALL (2026-08-30, rung1 sweep): the bound is INCLUSIVE at LOG_STD_MAX =
     log 0.5 = -0.693147..., so a hand-rounded "-0.6931" is > the cap by 5e-5
     and is REJECTED — pass -0.69315 (or omit the flag) for "σ cap 0.5".
+    PITFALL (Rung 1a T1): the LOWER bound is no longer LOG_STD_MIN itself but
+    LOG_STD_MIN + AIM_LOG_STD_CAP_MIN_HEADROOM — caps that narrow leave no room
+    for the strictly-inside-the-band init (see resolve_aim_log_std_init) and
+    would hand the run a gradient-dead σ. This NARROWS the accepted CLI range;
+    σ caps below ~0.0149 rad (0.85°) have no experimental use (the recoil/
+    hitbox scale alone is larger), so nothing legitimate is lost.
     """
     cap = float(LOG_STD_MAX if aim_log_std_max is None else aim_log_std_max)
-    if not (LOG_STD_MIN < cap <= LOG_STD_MAX):
-        raise ValueError(f"aim_log_std_max={cap} must lie in ({LOG_STD_MIN}, {LOG_STD_MAX}] "
-                         f"(σ in (0.01, 0.5])")
+    lo = LOG_STD_MIN + AIM_LOG_STD_CAP_MIN_HEADROOM
+    if not (lo < cap <= LOG_STD_MAX):
+        raise ValueError(
+            f"aim_log_std_max={cap} must lie in ({lo}, {LOG_STD_MAX}] "
+            f"(σ in ({math.exp(lo):.4f}, 0.5]). The lower bound is "
+            f"LOG_STD_MIN + {AIM_LOG_STD_CAP_MIN_HEADROOM} rather than LOG_STD_MIN: the aim σ "
+            f"is initialised {AIM_LOG_STD_INIT_MARGIN} below the cap so it starts strictly "
+            f"inside the clamp band, and a cap this close to the σ floor would "
+            f"put that init at or under LOG_STD_MIN={LOG_STD_MIN}, where clamp "
+            f"back-propagates zero gradient and σ can never train.")
     return cap
+
+
+def resolve_aim_log_std_init(cap) -> float:
+    """The log σ a FRESH aim head starts at under this run's cap (Rung 1a T1).
+
+    WHAT: min(LOG_STD_INIT, cap − AIM_LOG_STD_INIT_MARGIN). At the 5v5 default
+    cap (log 0.5) that is LOG_STD_INIT unchanged — every pre-Rung-1a run keeps
+    its σ=0.1 start. Under a tight cap (Rung 1a's log 0.05) it is cap − 0.2,
+    i.e. σ ≈ 0.041, strictly inside [LOG_STD_MIN, cap].
+
+    WHY: `torch.clamp(x, lo, hi)` passes gradient only for lo <= x <= hi. An
+    init at or above the cap is therefore a permanently frozen σ — the policy
+    samples at exactly the cap forever and `policy/aim_log_std_yaw` reports the
+    cap, which reads like a converged value rather than a dead parameter. This
+    is the Rung 1 defect (spec 2026-08-30 §1(iv)).
+
+    PITFALL: this is the FRESH-construction init only. A resume restores the
+    checkpoint's σ verbatim, and the BC-frozen widener has its own rule
+    (reinit_frozen_aim_log_std, min(AIM_LOG_STD_RESUME_INIT, cap) — that one
+    may land exactly ON the cap, gh#91, untouched by T1). Callers that need the
+    value in config.json must go through this helper, never re-derive it, so
+    config and policy cannot drift.
+    NOTE: whenever cap >= LOG_STD_INIT + AIM_LOG_STD_INIT_MARGIN (the 5v5
+    default included) the init IS LOG_STD_INIT, so reinit_frozen_aim_log_std's
+    "still exactly at LOG_STD_INIT ⇒ BC-frozen" signature matches a *fresh*
+    policy. That was already true before T1 and stays harmless — the widener
+    only ever runs on a checkpoint being resumed, never on a fresh build.
+    """
+    return min(LOG_STD_INIT, float(cap) - AIM_LOG_STD_INIT_MARGIN)
+
+
+def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
+    """Give every ``aim_log_std*`` parameter its own decay-free optimizer group.
+
+    WHAT: removes the σ parameters from whatever group Adam put them in and
+    re-adds them as a new param group that clones group 0's hyper-parameters
+    except ``weight_decay`` (0.0 by default). Returns the number of parameters
+    moved (0 if the policy has none — e.g. a stub policy in a unit test).
+
+    WHY (spec 2026-08-30 T1, load-bearing for the Rung 1a gate): the run sets
+    ``param_groups[0]["weight_decay"] = 1e-4`` and Adam's decay adds ``wd·θ``
+    to the gradient. ``aim_log_std`` is always NEGATIVE (σ < 1), so decay pushes
+    it UPWARD even at exactly zero true gradient — measured on smoke-v1c/s0,
+    ``health/weight_norm_aim_log_std`` 3.2564 → 2.87122 over 30 epochs (raw
+    per-dim movement 0.272) while σ was provably gradient-dead the whole run.
+    Left in, decay would (a) fake the gate's "σ moved ≥ 0.1 ⇒ the head receives
+    gradient" signal and (b) eat the −0.2 init margin within ~11 epochs and
+    re-freeze σ against the cap. Weight decay on a log-scale noise parameter is
+    meaningless anyway: it is not a capacity knob, it is a distribution shape.
+
+    PITFALLS:
+      * ``scheduler.base_lrs`` MUST grow with the group. PufferLib builds
+        CosineAnnealingLR from the one-group optimizer (pufferl.py:171), and
+        ``LRScheduler.step()`` zips ``param_groups`` against the values derived
+        from ``base_lrs`` NON-strictly — a missing entry means the σ group's LR
+        silently never anneals. Handled here; ``restore_train_state`` zips the
+        same two lists with strict=True, so a mismatch would also fail loudly
+        on resume.
+      * Call AFTER the weight_decay=1e-4 line and BEFORE load_full_resume.
+        Resuming a PRE-branch checkpoint (whose optimizer state has one group)
+        into the two-group optimizer raises in torch's own load_state_dict —
+        loud, and accepted: every pre-branch run is complete (spec §2 T3).
+      * Parameters are matched by NAME (same regex as
+        reinit_frozen_aim_log_std) so the split-heads copies aim_log_std_t /
+        aim_log_std_ct are covered too, then by identity when pruning the old
+        groups — ``add_param_group`` raises if a parameter ends up in two.
+    """
+    import re as _re
+
+    # uncompiled_policy is the raw module; a torch.compile wrapper would prefix
+    # names with "_orig_mod." and break the name match (the parameter OBJECTS
+    # are shared, so the identity prune below is unaffected either way).
+    policy = getattr(trainer, "uncompiled_policy", None)
+    if policy is None:
+        policy = trainer.policy
+    sigma_params = [
+        p for name, p in policy.named_parameters() if _re.search(r"aim_log_std(_t|_ct)?$", name)
+    ]
+    if not sigma_params:
+        return 0
+    sigma_ids = {id(p) for p in sigma_params}
+    opt = trainer.optimizer
+    # Idempotent: a second call would strand an empty group and push base_lrs
+    # out of step with param_groups for good.
+    for group in opt.param_groups:
+        if {id(p) for p in group["params"]} == sigma_ids:
+            group["weight_decay"] = weight_decay
+            return len(sigma_params)
+    for group in opt.param_groups:
+        group["params"] = [p for p in group["params"] if id(p) not in sigma_ids]
+    # Clone group 0's hypers (lr, betas, eps, and the initial_lr the scheduler
+    # stamped on) so the σ group anneals on the same schedule; only the decay
+    # differs.
+    new_group = {k: v for k, v in opt.param_groups[0].items() if k != "params"}
+    new_group["params"] = sigma_params
+    new_group["weight_decay"] = weight_decay
+    opt.add_param_group(new_group)
+    sch = getattr(trainer, "scheduler", None)
+    if sch is not None and hasattr(sch, "base_lrs"):
+        sch.base_lrs.append(float(new_group.get("initial_lr", new_group["lr"])))
+        sch._last_lr = [g["lr"] for g in opt.param_groups]
+    return len(sigma_params)
 
 
 # gh#91: σ to widen a BC-frozen aim head to at PPO resume. BC detaches
@@ -967,6 +1099,113 @@ def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
     return agents_per_env, bptt_horizon, batch_size
 
 
+# ── Rung 1a T3 (spec 2026-08-30 §2): opponent-team control mode ────────────
+#   "self" — the opponent team is driven by the current (or, on a self-play
+#            epoch, a past) policy and its rows train exactly like the hero's.
+#            Every pre-Rung-1a run.
+#   "noop" — the opponent team is a STATIONARY STATUE: discrete bin 0 on every
+#            action head, zero aim delta, and its rows are excluded from
+#            participation (no global_step, no gradient, no loss term) and from
+#            the --timesteps budget.
+OPPONENT_MODES = ("self", "noop")
+
+
+def resolve_opponent_mode(args) -> str:
+    """Read ``--opponent`` off an args object, with the legacy-args fallback.
+
+    WHAT: returns "self" or "noop"; raises ValueError on anything else. The
+    getattr default keeps harness / ``--dump-config`` / older SimpleNamespace
+    callers (which predate the flag) on the historical self-play behaviour —
+    same contract as env_knobs_from_args' stance knobs.
+
+    WHY validate here instead of trusting argparse's ``choices=``:
+    build_train_config is also reached from hand-built namespaces (the test
+    harness, sweep scripts), where a typo'd mode would fall through to the
+    `self` budget formula while the evaluate() statue override silently never
+    fires — a run that looks healthy and trains on the wrong horizon.
+    """
+    mode = getattr(args, "opponent", "self")
+    if mode not in OPPONENT_MODES:
+        raise ValueError(f"opponent={mode!r} must be one of {OPPONENT_MODES}")
+    return mode
+
+
+def assert_opponent_self_play_compatible(opponent: str, self_play_enabled: bool) -> None:
+    """Startup guard: ``--opponent noop`` requires ``--no-self-play``.
+
+    WHY (spec 2026-08-30 §2 T3, "team constancy"): the statue is whichever team
+    SelfPlayManager.opponent_team names. That starts at "ct" but self-play
+    bookkeeping flips it every ``phase_length`` (50) epochs via
+    maybe_switch_teams — which would hand the hero the OTHER side of a
+    spawn-asymmetric map partway through the run while the participation vector
+    (built ONCE, statically, for the initial hero team) kept masking the old
+    side. Self-play also mixes past-policy actions into the opponent rows,
+    which is the opposite of a statue.
+
+    Called from main() ABOVE the --dump-config exit (so the Modal/sweep
+    fingerprint step rejects the combination in milliseconds, like
+    validate_aim_log_std_max) and again at the top of train() for programmatic
+    callers. Raising ValueError matches validate_aim_log_std_max's precedent.
+    """
+    if opponent == "noop" and self_play_enabled:
+        raise ValueError("--opponent noop requires --no-self-play. The statue team is "
+                         "SelfPlayManager.opponent_team, which self-play flips every "
+                         "phase_length epochs (and mixes past policies into), while the "
+                         "participating-rows vector is built once for the initial hero "
+                         "team — the two would silently disagree mid-run.")
+
+
+def build_participating_rows(num_envs: int,
+                             n_active: int,
+                             opponent_mode: str = "self",
+                             hero_team: str = "t") -> np.ndarray:
+    """Static per-run participation vector over agent ROWS (Rung 0 §2.2 / T3).
+
+    WHAT: bool array of length ``num_envs * agents_per_env`` in the env-row-major
+    layout the vecenv hands back (10 rows per env: T at slots 0-4, CT at 5-9).
+    True = the row TRAINS — it counts toward ``global_step``, is scattered into
+    ``trainer.participating`` and survives every masked reduction in train().
+
+      - ``opponent_mode="self"``: slots 0..n_active-1 of BOTH teams. Bit-identical
+        to the pre-T3 expression ``(i % TEAM_SIZE) < n_active``.
+      - ``opponent_mode="noop"``: those slots of the HERO team only. The statue
+        team neither learns nor is counted.
+
+    WHY a shared helper: this vector used to be built by two copies of the same
+    expression (train() and train_test_harness), and it sits UPSTREAM of
+    global_step, the buffer scatter, every masked loss and
+    losses/participating_rows. Patching one copy would have left the headline
+    harness test green while production still trained on both teams — precisely
+    the silent failure this experiment cannot afford.
+
+    PITFALLS
+    - Derived from ARGS, while the envs are built separately from the same
+      args; train() keeps an explicit driver-env agreement assert beside its
+      call site, and _patch_trainer_with_hybrid_aim re-checks the length.
+    - ``hero_team`` must stay the complement of SelfPlayManager.opponent_team
+      (use SelfPlayManager.initial_hero_team()). Under "noop" that team is
+      constant for the whole run because the mode forbids self-play; a
+      disagreement would mask the statue's rows IN and the learner's rows OUT
+      while every metric still looked plausible.
+    """
+    if opponent_mode not in OPPONENT_MODES:
+        raise ValueError(f"opponent_mode={opponent_mode!r} must be one of {OPPONENT_MODES}")
+    if hero_team not in ("t", "ct"):
+        raise ValueError(f"hero_team={hero_team!r} must be 't' or 'ct'")
+    if not 1 <= n_active <= TEAM_SIZE:
+        raise ValueError(f"n_active={n_active} outside 1..{TEAM_SIZE}")
+    agents_per_env, _, _ = compute_batch_dims(num_envs)
+    # The T/CT halves are what make `hero_team` meaningful; assert rather than
+    # assume, so a future roster change fails here instead of silently marking
+    # half of some other layout.
+    assert agents_per_env == 2 * TEAM_SIZE, (agents_per_env, TEAM_SIZE)
+    slot = np.arange(num_envs * agents_per_env) % agents_per_env
+    rows = (slot % TEAM_SIZE) < n_active
+    if opponent_mode == "noop":
+        rows &= (slot < TEAM_SIZE) if hero_team == "t" else (slot >= TEAM_SIZE)
+    return rows
+
+
 # First --seed whose base 42_950 * 100_000 = 4_295_000_000 exceeds 2**32 - 1
 # (= 4_294_967_295). At seed 42_949 env i fits for i <= 67_295, i.e. any
 # realistic num_envs. See env_seed_base.
@@ -1072,25 +1311,41 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # here on purpose; the analyzer reads split/trunk_active instead.
     tct_split_trunk = bool(getattr(args, "tct_split_trunk", False))
 
-    # ── Rung 0 §2.2: participating-units budget ──
+    # ── Rung 0 §2.2 + Rung 1a T3: participating-units budget ──
     # --timesteps is the PARTICIPATING agent-step budget (what the policy
     # actually learns from), NOT the raw row count. PufferLib's epoch cap
     # (total_epochs = total_timesteps // batch_size, pufferl.py:168-170, which
     # also sets the cosine-LR T_max) counts RAW buffer rows, so the raw budget
-    # handed to it is scaled by TEAM_SIZE / n_active. Both numbers are
-    # recorded: done_training in _train_with_return_norm compares global_step
-    # (participating units) against participating_timesteps, and the epoch
-    # clause catches the floor-division slack.
+    # handed to it is scaled by (rows per env) / (participating rows per env).
+    # Both numbers are recorded: done_training in _train_with_return_norm
+    # compares global_step (participating units) against
+    # participating_timesteps, and the epoch clause catches the floor-division
+    # slack.
+    # T3: the pre-T3 formula (args.timesteps * TEAM_SIZE // n_active) hardcoded
+    # "2 participating rows per env per active slot", i.e. BOTH teams. Under
+    # --opponent noop only the hero team participates, so that formula ends the
+    # run at HALF the requested budget with exit 0 — a silent short run
+    # (verified against smoke-v1c/s0: ~491,520 hero steps for a 1M request).
+    # The generalised form below reduces EXACTLY to the old one under
+    # --opponent self (10t/2n and 5t/n are the same rational, so the floor
+    # divisions agree for every t and n), keeping the `self` path bit-identical
+    # while putting cosine-LR T_max on the real horizon under noop:
+    # 1M requested at n_active=1, num_envs=256 ⇒ total_timesteps = 10M ⇒
+    # 61 epochs (batch 163,840; 61 × 16,384 = 999,424 hero steps).
     # PITFALL: adding these keys shifts exp_lib.behavior_hash for all future
     # runs (the hash covers sorted config.json) — recorded decision, same as
-    # the TAG/tct keys above.
+    # the TAG/tct keys above, and the same for `opponent`, `jump_enabled` and
+    # `aim_log_std_init` below (plus the σ weight-decay exclusion of T1, which
+    # changes behaviour for every run without touching config.json at all).
     # (the raw budget is bound to a local, not inlined in the dict below, for
     # the same yapf reason as the warmstart block above: a long value
     # expression inside the dict re-indents every trailing comment in it.)
     knobs = env_knobs_from_args(args)
     n_active = knobs["n_active_per_team"]
     assert 1 <= n_active <= TEAM_SIZE, n_active
-    raw_timesteps = args.timesteps * TEAM_SIZE // n_active
+    opponent = resolve_opponent_mode(args)
+    _part_per_env = n_active * (1 if opponent == "noop" else 2)
+    raw_timesteps = args.timesteps * (TEAM_SIZE * 2) // _part_per_env
     # R0-E.3/4 (#131): aim-head knobs. CLI gives "on"/"off" for the entropy
     # bonus (argparse choices); the test harness passes a bool — accept both so
     # neither caller has to know the other's spelling. None cap ⇒ LOG_STD_MAX,
@@ -1101,6 +1356,17 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     aim_entropy_bonus = _aeb if isinstance(_aeb, bool) else (_aeb == "on")
     _cap = getattr(args, "aim_log_std_max", None)
     aim_log_std_max = float(LOG_STD_MAX if _cap is None else _cap)
+    # Rung 1a T1: the σ a fresh aim head actually starts at — DERIVED from the
+    # cap, so it is provenance, not a knob (there is no --aim-log-std-init).
+    # Recorded because the gate's "σ moved ≥ 0.1" reading is |raw − init| and
+    # the reader must not have to re-derive the formula. Goes through the same
+    # helper build_policy uses so config.json and the policy cannot drift.
+    # PITFALL: this key AND the σ weight-decay exclusion
+    # (isolate_aim_log_std_param_group) shift exp_lib.behavior_hash for all
+    # future runs — recorded decision, same convention as the TAG/tct keys
+    # above. The weight-decay change is a real behaviour change for EVERY run,
+    # not just capped ones; the init only moves when cap < LOG_STD_INIT + 0.2.
+    aim_log_std_init = resolve_aim_log_std_init(aim_log_std_max)
 
     # R0-H: env LABEL from the resolved map name. The CLI always sets args.map
     # (above the --dump-config exit); the harness / older SimpleNamespace
@@ -1120,6 +1386,18 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "n_active_per_team": n_active,
         "pin_pitch": knobs["pin_pitch"],
         "crouch_enabled": knobs["crouch_enabled"],
+                                                                       # Rung 1a T2b: provenance for --jump-enabled. Like the other Rung 0
+                                                                       # knobs it is NOT allowlisted for --resume-run (a run that masks
+                                                                       # jump is a different experiment) and adding it shifts
+                                                                       # exp_lib.behavior_hash for all future runs — recorded decision.
+        "jump_enabled": knobs["jump_enabled"],
+                                                                       # Rung 1a T3: "self" (both teams learn) or "noop" (statue opponent —
+                                                                       # hero-team-only participation AND budget, see raw_timesteps above).
+                                                                       # NOT a make_puffer_env knob: the statue is enforced trainer-side, in
+                                                                       # the patched evaluate(), so the env is identical either way. Not
+                                                                       # allowlisted for --resume-run — a different opponent is a different
+                                                                       # experiment.
+        "opponent": opponent,
                                                                        # R0-G: recorded as given (None ⇒ env default), read from args
                                                                        # directly so None survives — env_knobs_from_args drops None keys.
         **{
@@ -1128,6 +1406,9 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         },
         "aim_entropy_bonus": aim_entropy_bonus,
         "aim_log_std_max": aim_log_std_max,
+                                                                       # Rung 1a T1: DERIVED from the cap (no CLI flag of its own); the
+                                                                       # gate reads σ movement as |raw − init|, so it is provenance.
+        "aim_log_std_init": aim_log_std_init,
                                                                        # R0-I: fixed-baseline eval cadence (0 = off). Provenance only —
                                                                        # not allowlisted for --resume-run (Task 7 rule: new CLI flags are
                                                                        # config keys, not allowlist entries).
@@ -1307,6 +1588,7 @@ def make_puffer_env(team_spirit=None,
                     n_active_per_team=TEAM_SIZE,
                     pin_pitch=0,
                     crouch_enabled=1,
+                    jump_enabled=1,
                     round_time=None,
                     laser_range=None,
                     max_turn_speed=None,
@@ -1343,13 +1625,14 @@ def make_puffer_env(team_spirit=None,
     only the training factory turns it on.
 
     ``n_active_per_team`` / ``pin_pitch`` / ``crouch_enabled`` (Rung 0, spec
-    2026-08-29 §2.1): non-weight env knobs forwarded verbatim to make_env. They
-    are NOT reward_overrides keys for the same reason reward_symmetrize is not.
+    2026-08-29 §2.1) and ``jump_enabled`` (Rung 1a, spec 2026-08-30 T2b):
+    non-weight env knobs forwarded verbatim to make_env. They are NOT
+    reward_overrides keys for the same reason reward_symmetrize is not.
     The defaults reproduce the pre-Rung-0 env exactly (full 5v5, pitch live,
-    crouch enabled), so every non-training caller (eval, record, smoke, viz)
-    is unaffected. Training callers get them from env_knobs_from_args(args) —
-    do NOT re-derive them from args anywhere else, or config.json provenance
-    and the envs that actually ran can disagree.
+    crouch and jump enabled), so every non-training caller (eval, record,
+    smoke, viz) is unaffected. Training callers get them from
+    env_knobs_from_args(args) — do NOT re-derive them from args anywhere else,
+    or config.json provenance and the envs that actually ran can disagree.
 
     ``round_time`` / ``laser_range`` / ``max_turn_speed`` (Rung 0 R0-G):
     sim knobs forwarded verbatim to make_env. None (default) ⇒ make_env falls
@@ -1410,6 +1693,7 @@ def make_puffer_env(team_spirit=None,
         n_active_per_team=n_active_per_team,
         pin_pitch=pin_pitch,
         crouch_enabled=crouch_enabled,
+        jump_enabled=jump_enabled,
         round_time=round_time,
         laser_range=laser_range,
         max_turn_speed=max_turn_speed,
@@ -1899,6 +2183,10 @@ def env_knobs_from_args(args) -> dict:
                                                                                  # resolves it from map flatness (see the pin_pitch block in train()).
         "pin_pitch": int(getattr(args, "pin_pitch", 0) or 0),
         "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
+                                                                                 # Rung 1a T2b: same shape as crouch_enabled — always present (1 =
+                                                                                 # today's env), never omitted, so a legacy args object cannot
+                                                                                 # silently leave the env on a different jump setting than config.json.
+        "jump_enabled": int(getattr(args, "jump_enabled", 1)),
         "pbrs_gamma": resolve_gammas(args)[1],
     }
     for arg_name, env_name in _R0G_KNOBS:
@@ -2071,6 +2359,10 @@ def build_policy(vecenv,
                if obs_dim_override is not None else driver_env.single_observation_space.shape[0])
     hidden = 256
     _cap = validate_aim_log_std_max(aim_log_std_max)
+    # Rung 1a T1: the FRESH σ init follows the cap (see resolve_aim_log_std_init)
+    # — LOG_STD_INIT at the 5v5 default cap, cap − 0.2 under a tight one, never
+    # AT the cap where clamp would zero the gradient forever.
+    _log_std_init = resolve_aim_log_std_init(_cap)
 
     class Dust2Policy(nn.Module):
 
@@ -2147,6 +2439,9 @@ def build_policy(vecenv,
             #   per Fan et al. IJCAI 2019 H-PPO baseline. Clamped in forward()
             #   to [LOG_STD_MIN, LOG_STD_MAX] so neither σ collapse (entropy
             #   loss → −∞) nor explosion (σ floods policy) is reachable.
+            #   Rung 1a T1: the init is _log_std_init, not LOG_STD_INIT — it
+            #   must start strictly INSIDE that clamp band or the parameter
+            #   receives zero gradient for the whole run.
             # Pitfall: keep `std=0.01` on aim_mu init so the pre-tanh mean
             #   starts ~zero — otherwise the policy starts saturated and
             #   learning the Gaussian head is much slower.
@@ -2167,7 +2462,7 @@ def build_policy(vecenv,
                 ])
                 self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
                 self.aim_mu = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
-                self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+                self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), _log_std_init))
             else:
                 self.action_heads_t = nn.ModuleList([
                     pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
@@ -2175,7 +2470,7 @@ def build_policy(vecenv,
                 ])
                 self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
                 self.aim_mu_t = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
-                self.aim_log_std_t = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+                self.aim_log_std_t = nn.Parameter(torch.full((AIM_DIM, ), _log_std_init))
                 # RNG hygiene (spec §3.7): the CT copy's construction is what
                 # draws from the default stream, so it is forked — post-hoc
                 # weight cloning would NOT restore stream parity. Without this
@@ -2191,7 +2486,7 @@ def build_policy(vecenv,
                     ])
                     self.aim_mu_ct = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM),
                                                                   std=0.01)
-                self.aim_log_std_ct = nn.Parameter(torch.full((AIM_DIM, ), LOG_STD_INIT))
+                self.aim_log_std_ct = nn.Parameter(torch.full((AIM_DIM, ), _log_std_init))
 
             # max_turn_speed mirrors C sd->max_turn_speed (StaticData, π/4
             # default). Pulled from the vecenv's static-data block so the
@@ -2660,9 +2955,49 @@ def compute_network_health(model, device):
 def log_aim_log_std(policy, logs):
     """Emit policy/aim_log_std_* into `logs` under BOTH architectures (spec §3.6).
 
-    WHAT: legacy policy → today's two keys, unchanged. Split policy → the same
-    two keys carrying the MEAN of the two CLAMPED copies, plus four per-team
-    keys policy/aim_log_std_{yaw,pitch}_{t,ct}.
+    WHAT — the exact meaning of every emitted key, per architecture:
+
+      legacy policy (one `aim_log_std`):
+        policy/aim_log_std_{yaw,pitch}         the CLAMPED parameter
+        policy/aim_log_std_{yaw,pitch}_raw     the UNCLAMPED parameter
+
+      split policy (`aim_log_std_t` + `aim_log_std_ct`):
+        policy/aim_log_std_{yaw,pitch}_{t,ct}      that team's CLAMPED copy
+        policy/aim_log_std_{yaw,pitch}_{t,ct}_raw  that team's UNCLAMPED copy
+        policy/aim_log_std_{yaw,pitch}         MEAN of the two CLAMPED copies
+        policy/aim_log_std_{yaw,pitch}_raw     MAX of the two UNCLAMPED copies
+
+    Under pin_pitch (aim_dim_mask[1] == 0) every `pitch` key above is omitted.
+
+    WHY the raw twin (Rung 1a T1, spec 2026-08-30 §3): the clamped key is
+    censored at the cap, so a σ that the optimizer has pushed past the cap —
+    the state in which clamp zeroes its gradient and σ is dead — is
+    indistinguishable from a σ sitting happily AT the cap. The gate reads
+    `policy/aim_log_std_yaw_raw` for both of its σ questions: "did σ move ≥ 0.1
+    from its init" (⇒ the continuous head receives gradient at all) and "is raw
+    ≤ cap" (⇒ the movement measurement is still meaningful). health/
+    weight_norm_aim_log_std already exposes a raw NORM, but only every 5 epochs
+    and unsigned/aggregated — per-row, per-dim and signed is what the gate
+    needs.
+
+    WHY the legacy-named `_raw` key is a MAX under the split while its clamped
+    twin stays a MEAN: the two keys answer different questions and must be
+    aggregated differently. The clamped key reports the σ the policy actually
+    used, and the mean of the two copies is the honest summary of that. The raw
+    key exists solely to answer "has any σ overshot the cap and gone gradient-
+    dead", and a mean HIDES exactly that: with cap = −2.9957, a T copy at
+    cap + 0.5 = −2.4957 (dead) averaged with a healthy CT copy reads −3.2479,
+    i.e. below the cap, so the pre-flight `raw ≤ cap` check passes on a frozen
+    σ. Max is the aggregation that answers the overshoot question truthfully.
+
+    PITFALL — what the split `_raw` key does NOT promise: for the *movement*
+    question the max is only conservative in one direction. Two copies that
+    both moved up, or any copy that moved up, show through; a single copy that
+    moved only DOWN while the other sat at its init is invisible in the max
+    (max == init ⇒ "no movement"). Read the per-team `_t_raw`/`_ct_raw` keys
+    whenever per-copy movement is the question. This does not affect the Rung
+    1a gate, which runs the legacy architecture, where the key is the exact
+    unclamped parameter.
 
     WHY the legacy keys survive as a mean rather than being replaced: the T7
     acceptance gate greps the status line for `aim_log_std_pitch=` (see
@@ -2701,19 +3036,34 @@ def log_aim_log_std(policy, logs):
     pitch_live = mask is None or float(mask[1]) != 0.0
     with torch.no_grad():
         if hasattr(policy, "aim_log_std_t"):
+            raw_t = policy.aim_log_std_t.detach().cpu().numpy()
+            raw_ct = policy.aim_log_std_ct.detach().cpu().numpy()
             ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, cap).cpu().numpy()
             ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, cap).cpu().numpy()
             logs["policy/aim_log_std_yaw_t"] = float(ls_t[0])
             logs["policy/aim_log_std_yaw_ct"] = float(ls_ct[0])
+            logs["policy/aim_log_std_yaw_t_raw"] = float(raw_t[0])
+            logs["policy/aim_log_std_yaw_ct_raw"] = float(raw_ct[0])
             if pitch_live:
                 logs["policy/aim_log_std_pitch_t"] = float(ls_t[1])
                 logs["policy/aim_log_std_pitch_ct"] = float(ls_ct[1])
+                logs["policy/aim_log_std_pitch_t_raw"] = float(raw_t[1])
+                logs["policy/aim_log_std_pitch_ct_raw"] = float(raw_ct[1])
             clamped = 0.5 * (ls_t + ls_ct)
+            # MAX, deliberately NOT the mean that the clamped key uses: the raw
+            # key's job is "did any copy overshoot the cap and go gradient-
+            # dead", and averaging a dead copy with a healthy one reads as
+            # healthy. See the docstring for the worked counterexample and for
+            # the one thing max under-reports (a copy that moved only down).
+            raw = np.maximum(raw_t, raw_ct)
         else:
+            raw = policy.aim_log_std.detach().cpu().numpy()
             clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, cap).cpu().numpy()
     logs["policy/aim_log_std_yaw"] = float(clamped[0])
+    logs["policy/aim_log_std_yaw_raw"] = float(raw[0])
     if pitch_live:
         logs["policy/aim_log_std_pitch"] = float(clamped[1])
+        logs["policy/aim_log_std_pitch_raw"] = float(raw[1])
 
 
 def compute_head_divergence(policy):
@@ -3505,7 +3855,12 @@ def _patch_trainer_with_return_norm(trainer):
             losses["entropy"] += current_entropy.item()
             # Rung 0 §2.2: the same mean WITHOUT the mask. Diagnostic only —
             # its ratio to losses/entropy is the live check that the mask is
-            # actually doing something (≈ n_active/TEAM_SIZE at steady state).
+            # actually doing something: the expected ratio is the PARTICIPATING
+            # ROW FRACTION, which is ≈ n_active/TEAM_SIZE under --opponent self
+            # (both teams contribute n_active rows) but ≈ n_active/(2*TEAM_SIZE)
+            # under --opponent noop, where only the hero team participates.
+            # Reading the self-mode number on a noop run looks like a mask that
+            # is masking twice as much as it should.
             losses["entropy_unmasked"] += entropy_unmasked.item()
             losses["alpha"] += alpha.detach().item()
             losses["alpha_loss"] += alpha_loss.item()
@@ -4259,6 +4614,26 @@ class SelfPlayManager:
     AGENTS_PER_ENV = 10
     T_SLOTS = slice(0, 5)
     CT_SLOTS = slice(5, 10)
+    # The team that plays OPPONENT at construction (CT attacks second). A
+    # constant, not a bare literal in __init__, because Rung 1a T3 builds the
+    # participation vector for the complement team BEFORE any manager exists —
+    # see initial_hero_team().
+    INITIAL_OPPONENT_TEAM = "ct"
+
+    @classmethod
+    def initial_hero_team(cls) -> str:
+        """Team the HERO policy plays before any maybe_switch_teams flip.
+
+        Rung 1a T3: build_participating_rows needs this at trainer-construction
+        time, which is upstream of the SelfPlayManager instance. Deriving it
+        from INITIAL_OPPONENT_TEAM (rather than hardcoding "t" at the call
+        site) is what keeps the participation vector and the statue mask from
+        silently disagreeing if the initial sides are ever swapped.
+        Under --opponent noop the value is constant for the whole run: the mode
+        forbids self-play, and maybe_switch_teams is the only thing that flips
+        opponent_team.
+        """
+        return "t" if cls.INITIAL_OPPONENT_TEAM == "ct" else "ct"
 
     def __init__(
         self,
@@ -4269,6 +4644,7 @@ class SelfPlayManager:
         phase_length: int = 50,
         aim_log_std_max=None,
         pin_pitch: bool = False,
+        opponent_mode: str = "self",
     ):
         # R0-E (#131): run properties re-applied to every past policy built by
         # load_past_policy (they are non-persistent on the policy, so the
@@ -4278,13 +4654,21 @@ class SelfPlayManager:
         # policy's does not, and self-play ratio_c would silently drift.
         self.aim_log_std_max = aim_log_std_max
         self.pin_pitch = bool(pin_pitch)
+        # Rung 1a T3: "noop" makes the patched evaluate() overwrite this team's
+        # actions with the no-op bin on every head (see _patch_trainer_with_
+        # selfplay). Validated here so a typo'd mode cannot reach the rollout
+        # as a silently-inactive branch. Callers that pass "noop" MUST also
+        # have passed assert_opponent_self_play_compatible.
+        if opponent_mode not in OPPONENT_MODES:
+            raise ValueError(f"opponent_mode={opponent_mode!r} must be one of {OPPONENT_MODES}")
+        self.opponent_mode = opponent_mode
         self.pool: list[Path] = []
         self.pool_size = pool_size
         self.p_past = p_past
         self.save_every_epochs = save_every_epochs
         self.win_threshold = win_threshold
         self.phase_length = phase_length
-        self.opponent_team = "ct"      # CT is opponent first; T learns to attack
+        self.opponent_team = self.INITIAL_OPPONENT_TEAM                # CT is opponent first; T learns to attack
         self._milestone_count = 0
         self._last_save_epoch = -1
 
@@ -4421,6 +4805,12 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
     Training (trainer.train()) sees the overridden actions as if they came from the
     current policy at collection time.  The importance ratio (π_new / π_old) is
     well-defined because we store the *past* policy's logprobs as π_old.
+
+    Rung 1a T3: the patched evaluate() carries a SECOND, unconditional opponent
+    override for ``self_play_mgr.opponent_mode == "noop"`` — the stationary
+    statue. It is independent of the past-policy branch above (which is dead at
+    p_past = 0, the only configuration noop allows) and pairs with the
+    hero-team-only participation vector from build_participating_rows.
     """
     import pufferlib
     import pufferlib.pytorch
@@ -4660,6 +5050,43 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                     cont_action[opp_idx] = opp_cont_action.to(cont_action.dtype)
                     logprob_d[opp_idx] = opp_logprob_d.to(logprob_d.dtype)
                     logprob_c[opp_idx] = opp_logprob_c.to(logprob_c.dtype)
+                # ──────────────────────────────────────────────────────────
+
+                # ── STATUE OPPONENT (--opponent noop, Rung 1a T3) ──────────
+                # UNCONDITIONAL branch, deliberately NOT nested in the
+                # `if use_past:` splice above: that branch never runs at
+                # p_past = 0, which is exactly the configuration noop demands
+                # (assert_opponent_self_play_compatible). It sits AFTER the
+                # splice so the statue would win if both were ever live, and
+                # BEFORE both the buffer scatter and vecenv.send below — the
+                # same tensors feed the rollout buffer and the env.
+                #
+                # Bin 0 on every discrete head is the no-op action by
+                # construction (cs2_env.h:51-63; move_dir == 0 is genuinely
+                # stationary, cs2_movement.h:214) and is never masked out by
+                # the C-side action mask, so this cannot sample an illegal
+                # action. cont_action = 0 means zero Δyaw/Δpitch: the statue
+                # keeps its spawn orientation.
+                #
+                # The stored logprobs go to 0 for the same reason the past-
+                # policy splice rewrites them: they are the π_old the PPO
+                # update would divide by. Under noop these rows are
+                # non-participating, so every loss masks them out anyway —
+                # this keeps the buffer self-consistent rather than carrying
+                # log-probs of actions that were never sampled.
+                if self_play_mgr.opponent_mode == "noop":
+                    opp_idx = torch.where(self_play_mgr.get_opponent_mask(o_device.shape[0],
+                                                                          dev))[0]
+                    action[opp_idx] = 0
+                    cont_action[opp_idx] = 0
+                    logprob[opp_idx] = 0
+                    logprob_d[opp_idx] = 0
+                    logprob_c[opp_idx] = 0
+                    # Redundant with the participation scatter below (which
+                    # multiplies values by the row flag) and kept anyway: the
+                    # statue's critic output must never bootstrap GAE, no
+                    # matter which of the two masks a future edit touches.
+                    value[opp_idx] = 0
                 # ──────────────────────────────────────────────────────────
 
             profile("eval_copy", epoch)
@@ -5655,6 +6082,12 @@ def train(args):
     # R0-D: refuse an out-of-range --seed BEFORE W&B init / metrics.jsonl open
     # (the real call is in _per_env_kwargs below).
     env_seed_base(args.seed)
+    # Rung 1a T3: same fail-early rationale for --opponent noop + self-play.
+    # main() already refused it above the --dump-config exit; repeated here so
+    # a programmatic train(args) cannot start a run whose statue team would be
+    # swapped out from under the participation vector at epoch 50.
+    _opponent_mode = resolve_opponent_mode(args)
+    assert_opponent_self_play_compatible(_opponent_mode, bool(getattr(args, "self_play", True)))
 
     # ── R0-C (#134): --resume-run resolution (before run_label / metrics / config) ──
     resume_run = getattr(args, "resume_run", None)
@@ -5896,6 +6329,15 @@ def train(args):
     # <data_dir>/<run_id>/ matches the metrics rows and --resume-run can find it.
     trainer.logger.run_id = run_id
     trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
+    # Rung 1a T1: …but NOT on the aim σ. Decay adds wd·θ to the gradient and
+    # aim_log_std is always negative, so it would drift σ upward at exactly
+    # zero true gradient — faking the gate's learning signal and eating the
+    # init's clamp margin. Must run after the line above (it clones group 0's
+    # hypers) and before load_full_resume (see the helper's PITFALLS).
+    _n_sigma = isolate_aim_log_std_param_group(trainer)
+    print(f"[Train] aim_log_std: {_n_sigma} parameter(s) moved to a weight_decay=0 param group "
+          f"(fresh init {train_config['aim_log_std_init']:.4f}, "
+          f"cap {train_config['aim_log_std_max']:.4f})")
     _patch_trainer_with_return_norm(trainer)
     # Batch 3 (T5): hybrid-aim patch ALWAYS runs after return_norm because the
     # train() wrapper installed by return_norm reads self.cont_actions /
@@ -5910,17 +6352,20 @@ def train(args):
     trainer._cont_action_shm = _cont_action_shm
     trainer._action_mask_shm = _mask_shm               # F8: same GC-pinning rationale
 
-    # Rung 0 §2.2: static per-run participation vector, env-row major (10 rows
-    # per env: T at 0-4, CT at 5-9), so `(i % TEAM_SIZE) < n_active` selects
-    # slots 0..n-1 of BOTH teams — the exact slots the C env spawns
-    # (cs2_env.py, n_active_per_team). The assert is the agreement check: the
-    # vector is derived from args while the envs were built from
-    # build_train_env_factory, and a disagreement would mask the wrong rows
-    # silently rather than crash.
+    # Rung 0 §2.2 + Rung 1a T3: static per-run participation vector, env-row
+    # major (10 rows per env: T at 0-4, CT at 5-9). Under --opponent self it
+    # selects slots 0..n-1 of BOTH teams — the exact slots the C env spawns
+    # (cs2_env.py, n_active_per_team); under --opponent noop, the hero team's
+    # slots only. THE SAME helper backs train_test_harness, so a harness test
+    # can never be green against a formula production does not run.
+    # The assert is the agreement check: the vector is derived from args while
+    # the envs were built from build_train_env_factory, and a disagreement
+    # would mask the wrong rows silently rather than crash.
     _n_active = env_knobs_from_args(args)["n_active_per_team"]
-    _participating_rows = np.array([(i % TEAM_SIZE) < _n_active
-                                    for i in range(args.num_envs * _agents_per_env)],
-                                   dtype=bool)
+    _participating_rows = build_participating_rows(args.num_envs,
+                                                   _n_active,
+                                                   opponent_mode=_opponent_mode,
+                                                   hero_team=SelfPlayManager.initial_hero_team())
     assert trainer.vecenv.driver_env.n_active_per_team == _n_active, "driver env / args disagree"
     _patch_trainer_with_hybrid_aim(trainer,
                                    cont_action_view_main=_cont_action_view_main,
@@ -5946,6 +6391,11 @@ def train(args):
         phase_length=50,                                               # switch opponent team every ~4M steps
         aim_log_std_max=getattr(args, "aim_log_std_max", None),
         pin_pitch=bool(args.pin_pitch),
+                                                                       # Rung 1a T3: "noop" ⇒ the patched evaluate() drives opponent_team as a
+                                                                       # statue. Guarded above: it cannot combine with self-play, so
+                                                                       # opponent_team stays INITIAL_OPPONENT_TEAM — the same team
+                                                                       # build_participating_rows masked out.
+        opponent_mode=_opponent_mode,
     )
                                                                        # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
     if self_play_enabled and resume_path and resume_path.exists() and not resume_run:
@@ -5962,8 +6412,27 @@ def train(args):
     # a different buffer than the env it is now paired with).
     assert_max_turn_speed_agreement(vecenv, policy)
     if not self_play_enabled:
-        print("[Train] Self-play mixing disabled (--no-self-play): "
-              "both teams use the current policy every epoch.")
+        # Mode-aware on purpose: "both teams use the current policy" is FALSE
+        # under --opponent noop (the statue team is driven by the evaluate()
+        # override, not by the policy), and it printed one line above the noop
+        # provenance line that T4's pre-flight reads — two adjacent, mutually
+        # contradictory claims about the same run in the same log.
+        if _opponent_mode == "noop":
+            print("[Train] Self-play mixing disabled (--no-self-play): the hero team "
+                  "uses the current policy every epoch; the opponent team is a statue "
+                  "(--opponent noop), not the current policy.")
+        else:
+            print("[Train] Self-play mixing disabled (--no-self-play): "
+                  "both teams use the current policy every epoch.")
+    if _opponent_mode == "noop":
+        # Rung 1a T3: the run log is what T4's pre-flight reads, so state which
+        # team is frozen, how many rows actually train, and on what horizon —
+        # the three things a short/mis-masked run would get wrong silently.
+        print(f"[Train] Opponent mode 'noop': team "
+              f"{self_play_mgr.opponent_team.upper()} is a stationary statue; "
+              f"{int(_participating_rows.sum()):,} of {_participating_rows.size:,} agent rows "
+              f"participate (raw horizon {train_config['total_timesteps']:,} rows = "
+              f"{train_config['participating_timesteps']:,} hero steps).")
     # timing is the outermost wrapper so it sees all evaluate() calls regardless of selfplay
     _patch_trainer_with_timing(trainer)
     # ────────────────────────────────────────────────────────────────────────
@@ -5978,6 +6447,10 @@ def train(args):
         # Spec §R0-C bound vs the last metrics row (participating units); see
         # check_resume_metrics_bound for why both sides are checkpoint_interval
         # epochs wide.
+        # Rung 1a T3 (spec, "Rung 1b note"): this bound assumes BOTH teams
+        # participate, so under --opponent noop it is 2× too WIDE — i.e. only
+        # ever too permissive, never a false alarm. Harmless for T4 (which does
+        # not resume); halve it here before Rung 1b resumes a noop run.
         _B = batch_size * train_config["n_active_per_team"] // TEAM_SIZE
         _last = None
         if metrics_path.exists():
@@ -6012,7 +6485,8 @@ def train(args):
                                     reward_overrides=reward_overrides_from_args(args),
                                     **env_knobs_from_args(args))
         _d = trainer.vecenv.driver_env
-        for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "round_time"):
+        for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled",
+                   "round_time"):
             if getattr(_eval_env, _k) != getattr(_d, _k):
                 raise RuntimeError(f"[Eval] eval env / driver env disagree on {_k}: "
                                    f"{getattr(_eval_env, _k)!r} vs {getattr(_d, _k)!r}")
@@ -6324,6 +6798,22 @@ if __name__ == "__main__":
                         dest="crouch_enabled",
                         help="R0-E.2: 0 masks the crouch action (stance parity for pinned-pitch "
                         "duels; a crouched target is an unobservable guaranteed miss).")
+    parser.add_argument("--jump-enabled",
+                        type=int,
+                        choices=(0, 1),
+                        default=1,
+                        dest="jump_enabled",
+                        help="Rung 1a: 0 masks the jump action (height parity for pinned-pitch "
+                        "duels; an airborne target sits outside the 36u vertical semi-axis and "
+                        "is an unobservable guaranteed miss). Default 1 = today's env.")
+    parser.add_argument("--opponent",
+                        choices=OPPONENT_MODES,
+                        default="self",
+                        dest="opponent",
+                        help="Rung 1a T3: 'noop' turns the opponent team into a stationary "
+                        "statue (no-op bin on every action head, zero aim delta) and excludes "
+                        "its rows from participation, from --timesteps and from every loss. "
+                        "Requires --no-self-play. Default 'self' = today's behaviour.")
     # R0-G env knobs. Default None ⇒ the env's nav.py constant (config.json
     # records None, not a copied constant). Not in RESUME_CONFIG_ALLOWLIST:
     # changing any of them on --resume-run is a different experiment.
@@ -6381,8 +6871,10 @@ if __name__ == "__main__":
                         type=float,
                         default=None,
                         dest="aim_log_std_max",
-                        help="R0-E.3: per-run cap on aim log σ, in (log 0.01, log 0.5] "
-                        "(default LOG_STD_MAX = log 0.5).")
+                        help="R0-E.3: per-run cap on aim log σ, in (LOG_STD_MIN + 0.4, log 0.5] "
+                        "≈ (-4.205, -0.693] (default LOG_STD_MAX = log 0.5). Rung 1a T1: the "
+                        "lower bound leaves room for the σ init to sit 0.2 BELOW the cap and "
+                        "still stay above LOG_STD_MIN — see validate_aim_log_std_max.")
     parser.add_argument("--warmstart-entropy",
                         action="store_true",
                         dest="warmstart_entropy",
@@ -6464,6 +6956,11 @@ if __name__ == "__main__":
     # --dump-config / the sweep fingerprint reject a bad --aim-log-std-max
     # instead of make_policy() 30 s into every retry.
     validate_aim_log_std_max(args.aim_log_std_max)
+    # Rung 1a T3: --opponent noop is only coherent with self-play bookkeeping
+    # off. Checked HERE, above the --dump-config exit, for the same reason as
+    # the σ cap: the Modal/run_rung1 fingerprint step must reject the launch
+    # before any env is built.
+    assert_opponent_self_play_compatible(args.opponent, args.self_play)
 
     # ── R0-H: map name → MapData → pin_pitch, ABOVE the --dump-config exit ──
     # The Modal runner fingerprints every launch from --dump-config, so the

@@ -159,7 +159,7 @@ DEMO_RELEVANT_PATHS = (
 )
 
 # λ_ent from spec D-6 (imitation-lib default). Small on purpose: it only keeps
-# the heads from collapsing to one-hot certainty on a 365-tick dataset, it is
+# the heads from collapsing to one-hot certainty on a 369-tick dataset, it is
 # not meant to compete with the likelihood term.
 DEFAULT_ENTROPY_COEF = 1e-3
 
@@ -895,7 +895,7 @@ def main(argv=None):
                         help="EPISODES (sequences) per minibatch, not ticks")
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--entropy-coef", type=float, default=DEFAULT_ENTROPY_COEF)
-    # CPU is the default on purpose: the dataset is ~365 unique ticks and the
+    # CPU is the default on purpose: the dataset is ~369 unique ticks and the
     # GPU on this box is usually busy with a PPO run.
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=0)
