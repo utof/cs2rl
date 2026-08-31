@@ -1,0 +1,467 @@
+"""src/metrics_schema.py checked against the SOURCE of every emitter and reader.
+
+WHAT is enforced, and why each half exists:
+
+  * AGGREGATION (the headline assert). Every registered `emitted`/`family` entry's
+    declared aggregation must equal the one implied by the SHAPE of its write, as
+    extracted by `metrics_census`. Declaring `environment/episodes` a window mean,
+    or moving a `losses/*` write across the gh#90 divisor loop, fails BY KEY NAME.
+  * COMPLETENESS, BOTH DIRECTIONS. A key an emitter writes but the registry does
+    not carry fails; a key the registry carries but nothing writes fails too. A
+    one-directional check would let the registry rot by accumulation.
+  * CONSUMERS, BOTH DIRECTIONS. A reader that reads a key the entry does not name
+    fails; an entry that names a reader which does not read it fails. The
+    consumers column is the part of a registry that rots first — it is
+    documentation about code somewhere else with nothing tying the two together.
+
+WHY the checks read SOURCE and not a training run: the emitters are gated on flags
+(`--tag-diagnostic`, `--eval-interval`), on architecture (split heads), on epoch
+parity (`epoch % 5`) and on an episode having ended. A census taken from a short
+run sees roughly half the surface and is STRUCTURALLY BLIND to the other half —
+an unemitted key simply does not appear, so "the census matches the registry"
+stays green while the registry silently rots. The §3 gate's two-epoch row, for
+instance, carries none of `game/plant_tick`, `actions/use_at_site_frac`, the
+eight split `policy/aim_log_std_*` keys or `eval/epoch`.
+
+WHY the frozen readers are parsed rather than migrated: `scripts/rung1_gate.py`
+and `scripts/rung1a_smoke_read.py` are registered evidence and must not change.
+The registry chases them; a hardcoded snapshot of their keys would go stale
+silently, since nothing enforces that they stay frozen.
+"""
+import ast
+import sys
+from pathlib import Path
+
+import pytest
+
+# tests/ is NOT on sys.path under this repo's pytest (conftest.py adds only src/,
+# and pytest's own insertion is the rootdir, not the test directory). Inserted
+# here rather than in conftest.py so the extra path stays scoped to the two
+# modules that need it — `metrics_census`, the AST extractor this file checks the
+# registry against, and `test_w1_modules`, whose module list it asserts on.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import metrics_census as census        # noqa: E402
+
+import metrics_schema as ms            # noqa: E402  (src/ is on sys.path via conftest)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# One census per session: every test below reads the same extraction, so a
+# disagreement between two tests is a registry fact, never a re-parse artifact.
+EMITTED, FAMILIES = census.census()
+EMITTED_BY_KEY = {k.key: k for k in EMITTED}
+FAMILY_BY_TEMPLATE = {f.template: f for f in FAMILIES}
+READS = census.consumer_key_reads()
+
+# ── Well-formedness ───────────────────────────────────────────────────────
+
+
+def test_every_entry_uses_the_declared_vocabularies():
+    """kind / aggregation / units / consumers are closed sets, not free text.
+
+    A free-text units column is the part of a registry nobody can check, so
+    nobody maintains it; making the vocabulary closed turns "invent a unit" into
+    a deliberate edit of `metrics_schema.UNITS`.
+    """
+    bad = []
+    for key, s in sorted(ms.REGISTRY.items()):
+        if s.kind not in ms.KINDS:
+            bad.append(f"{key}: kind {s.kind!r}")
+        if s.aggregation not in ms.AGGREGATIONS:
+            bad.append(f"{key}: aggregation {s.aggregation!r}")
+        if s.units not in ms.UNITS:
+            bad.append(f"{key}: units {s.units!r}")
+        for c in s.consumers:
+            if c not in ms.CONSUMERS:
+                bad.append(f"{key}: consumer {c!r}")
+    assert not bad, "registry entries outside the declared vocabularies:\n  " + "\n  ".join(bad)
+
+
+def test_kind_specific_fields_are_used_consistently():
+    """`inputs`/`producer` belong to derived, `members` to family, and only there."""
+    bad = []
+    for key, s in sorted(ms.REGISTRY.items()):
+        if s.inputs and s.kind != "derived":
+            bad.append(f"{key}: kind={s.kind} carries inputs={s.inputs}")
+        if s.producer and s.kind != "derived":
+            bad.append(f"{key}: kind={s.kind} carries producer={s.producer!r}")
+        if s.producer and s.producer not in ms.PRODUCERS:
+            bad.append(f"{key}: producer {s.producer!r} is not in PRODUCERS")
+        if s.members and s.kind != "family":
+            bad.append(f"{key}: kind={s.kind} carries members")
+        if s.kind == "family" and "*" not in key:
+            bad.append(f"{key}: family entries are keyed by a `*` template")
+        if s.kind != "family" and "*" in key:
+            bad.append(f"{key}: `*` in a non-family key")
+    assert not bad, "\n  ".join([""] + bad)
+
+
+# ── THE aggregation assert ────────────────────────────────────────────────
+
+
+def test_declared_aggregation_matches_the_emission_shape():
+    """Every emitted key's declared aggregation == the one its write SHAPE implies.
+
+    This is the T1/I1 bug class: a comment says a key is a per-epoch absolute
+    while the write sits before the gh#90 divisor loop and is silently scaled by
+    1/minibatches. Structure decides, not prose.
+    """
+    bad = []
+    for key, ek in sorted(EMITTED_BY_KEY.items()):
+        s = ms.REGISTRY.get(key)
+        if s is None:
+            continue                                                                        # completeness test reports this
+        expected = census.SHAPES[ek.shape]
+        if s.aggregation != expected:
+            bad.append(f"{key}: registry says {s.aggregation!r} but {ek.site}:{ek.lineno} "
+                       f"writes it as {ek.shape!r} ⇒ {expected!r}")
+    assert not bad, ("declared aggregation contradicts the emission site:\n  " + "\n  ".join(bad))
+
+
+def test_declared_aggregation_matches_the_emission_shape_for_families():
+    """Same assert for f-string families, and for every member of a closed one.
+
+    Members matter separately: a closed family's members carry their own entries
+    (so a reader can be attached to `environment/action_move_0`), and nothing
+    else would notice a member declared differently from its template.
+    """
+    bad = []
+    for template, fam in sorted(FAMILY_BY_TEMPLATE.items()):
+        expected = census.SHAPES[fam.shape]
+        s = ms.REGISTRY.get(template)
+        if s is not None and s.aggregation != expected:
+            bad.append(f"{template}: registry says {s.aggregation!r} but {fam.site}:"
+                       f"{fam.lineno} writes it as {fam.shape!r} ⇒ {expected!r}")
+        for member in fam.members:
+            m = ms.REGISTRY.get(member)
+            if m is not None and m.aggregation != expected:
+                bad.append(f"{member}: registry says {m.aggregation!r} but its family "
+                           f"{template} is written as {fam.shape!r} ⇒ {expected!r}")
+    assert not bad, "\n  ".join([""] + bad)
+
+
+def test_environment_episodes_is_the_one_element_list_identity():
+    """The named special case: `self.stats["episodes"] = [float(...)]`.
+
+    A ONE-element list means PufferLib's np.mean over the window list is an
+    identity, so the key is the window's episode COUNT and aggregates as `last`.
+    It is the denominator of every `weighted_sum(...)/episodes` ratio in both
+    frozen gate scripts, so a silent change to a bare write would divide every
+    gate number by the window length while every one of those scripts kept
+    printing a plausible value.
+    """
+    ek = EMITTED_BY_KEY.get("environment/episodes")
+    assert ek is not None, ("environment/episodes is no longer censused — it moved out of "
+                            "train_update._train_with_return_norm; update EMITTER_SITES")
+    assert ek.shape == "stats-one-element-list", (
+        f"environment/episodes is written as {ek.shape!r} at {ek.site}:{ek.lineno}, not as a "
+        "one-element list. PufferLib would now MEAN it over the collection window and every "
+        "gate ratio that divides by it would be wrong by a factor of the window length.")
+    assert ms.REGISTRY["environment/episodes"].aggregation == "last"
+
+
+def test_environment_star_window_means_still_rest_on_an_append_shaped_collector():
+    """Every `window-mean-pufferlib` environment/* claim needs the collector to append.
+
+    train.py accumulates each episode's terminal info into `self.stats[k]` as a
+    LIST that mean_and_log later np.means. Rewritten to `self.stats[k] = v`, all
+    ~70 of those declarations become wrong at once and nothing else in the suite
+    would notice — the values would still be numbers of a plausible size.
+    """
+    assert census.stats_collection_is_append_shaped(), (
+        "train.py's info-collection loop no longer appends/extends into self.stats — every "
+        "environment/* `window-mean-pufferlib` declaration in metrics_schema.py is now a "
+        "claim about a pipeline that does not exist")
+
+
+def test_the_gh90_divisor_loop_still_separates_mean_from_last():
+    """`losses/*` splits into `mean` (before the divisor) and `last` (after) — both sides
+    must be non-empty, or the classification has quietly collapsed to one class."""
+    means = {k for k, e in EMITTED_BY_KEY.items() if e.shape == "losses-accumulated"}
+    lasts = {k for k, e in EMITTED_BY_KEY.items() if e.shape == "losses-absolute"}
+    assert means and lasts, (
+        f"losses/* no longer splits across the gh#90 divisor loop "
+        f"(accumulated={len(means)}, absolute={len(lasts)}) — the shape that makes this "
+        "distinction enforceable is gone, so every losses/* aggregation is unchecked")
+    assert "losses/minibatches_run" in lasts, (
+        "losses/minibatches_run must be inserted AFTER the divisor loop: it IS the divisor")
+    assert "losses/entropy" in means
+
+
+# ── Completeness, both directions ─────────────────────────────────────────
+
+
+def test_every_emitted_key_has_a_registry_entry():
+    """Forward direction: adding a key to an emitter fails until it is registered."""
+    missing = sorted(k for k in EMITTED_BY_KEY if k not in ms.REGISTRY)
+    assert not missing, ("emitted but unregistered — add them to metrics_schema.REGISTRY:\n  " +
+                         "\n  ".join(f"{k}  ({EMITTED_BY_KEY[k].site}:"
+                                     f"{EMITTED_BY_KEY[k].lineno})" for k in missing))
+
+
+def test_every_emitted_family_has_a_registry_entry():
+    missing = sorted(t for t in FAMILY_BY_TEMPLATE if t not in ms.REGISTRY)
+    assert not missing, ("f-string key families with no `family` registry entry:\n  " +
+                         "\n  ".join(missing))
+
+
+def test_closed_family_members_match_the_census_exactly():
+    """A statically-resolvable family declares its members, and they are checked.
+
+    This is what makes a tenth `action_move` bin, or a fourth split head, a test
+    failure rather than an unregistered key nobody notices — those keys never
+    appear in a two-epoch gate row, so the emission half sees nothing.
+    """
+    bad = []
+    for template, fam in sorted(FAMILY_BY_TEMPLATE.items()):
+        if not fam.members:
+            continue                                                             # OPEN: nothing to compare against
+        s = ms.REGISTRY.get(template)
+        if s is None:
+            continue
+        if tuple(sorted(s.members)) != tuple(sorted(fam.members)):
+            bad.append(f"{template}: registry declares {sorted(s.members)} but "
+                       f"{fam.site}:{fam.lineno} builds {sorted(fam.members)}")
+        for member in fam.members:
+            if member not in ms.REGISTRY:
+                bad.append(f"{member}: closed family member with no entry of its own")
+    assert not bad, "\n  ".join([""] + bad)
+
+
+def test_losses_entropy_family_members_track_the_action_spec():
+    """`losses/entropy/*` is OPEN to the AST census, so its members are declared from
+    `_action_spec.ACTION_HEAD_NAMES` — this pins that the EMITTER iterates the same
+    tuple, which is the only thing making that declaration non-circular."""
+    source = census.losses_entropy_head_source()
+    assert source == "ACTION_HEAD_NAMES", (
+        f"the per-head entropy loop iterates {source!r}, not ACTION_HEAD_NAMES; "
+        "metrics_schema's losses/entropy/* member list is derived from ACTION_HEAD_NAMES "
+        "and is now describing a different set of heads")
+    from _action_spec import ACTION_HEAD_NAMES
+    declared = ms.REGISTRY["losses/entropy/*"].members
+    assert tuple(sorted(declared)) == tuple(sorted(f"losses/entropy/{h}"
+                                                   for h in ACTION_HEAD_NAMES))
+    for h in ACTION_HEAD_NAMES:
+        assert f"losses/entropy/{h}" in ms.REGISTRY
+
+
+def _open_family_templates():
+    """Registered families whose members the census cannot enumerate."""
+    return [k for k, s in ms.REGISTRY.items() if s.kind == "family" and "*" in k]
+
+
+def _matches_family(key):
+    """True when `key` fits some registered family template (`*` = one segment-ish run)."""
+    import fnmatch
+    return any(fnmatch.fnmatchcase(key, t) for t in _open_family_templates())
+
+
+def test_every_registered_emitted_key_is_actually_emitted():
+    """Reverse direction: a registry entry nothing writes is a lie the registry tells.
+
+    Accepted provenance for an `emitted` entry, in order: a concrete census key;
+    a member of a census-closed family; a key matching a registered family
+    template; one of `BaselineEvaluator.evaluate()`'s output keys (censused from
+    that dict literal, since ScheduledEval merges the dict wholesale); or a key
+    `metrics_schema.PUFFERLIB_OWNED` declares as PufferLib's own.
+    """
+    closed_members = {m for f in FAMILIES for m in f.members}
+    eval_keys = census.eval_output_keys() | set(ms.EVAL_EXTRA_KEYS)
+    orphans = []
+    for key in ms.keys_of_kind("emitted"):
+        if key in EMITTED_BY_KEY or key in closed_members or key in eval_keys:
+            continue
+        if key in ms.PUFFERLIB_OWNED or _matches_family(key):
+            continue
+        orphans.append(key)
+    assert not orphans, ("registered as `emitted` but no emitter writes them — delete the "
+                         "entry or fix the key:\n  " + "\n  ".join(orphans))
+
+
+def test_every_registered_family_is_a_real_family_or_declared_foreign():
+    foreign = set(ms.PUFFERLIB_OWNED)
+    orphans = sorted(t for t in ms.keys_of_kind("family")
+                     if t not in FAMILY_BY_TEMPLATE and t not in foreign)
+    assert not orphans, ("`family` entries matching no f-string emitter:\n  " +
+                         "\n  ".join(orphans))
+
+
+def test_pufferlib_owned_keys_are_registered_and_not_ours():
+    """The keys pufferl.mean_and_log writes itself, cross-checked against ITS source.
+
+    `agent_steps` is the participating-step counter both frozen gate scripts key
+    their evaluation window on, and no emitter of ours produces it. If a PufferLib
+    upgrade renames it, both gates start reading a missing key and silently judge
+    an empty window — so the rename has to fail here.
+    """
+    for key in ms.PUFFERLIB_OWNED:
+        assert key in ms.REGISTRY, f"{key} is declared PufferLib-owned but is not registered"
+        assert key not in EMITTED_BY_KEY, (
+            f"{key} is declared PufferLib-owned but one of OUR emitters writes it "
+            f"({EMITTED_BY_KEY[key].site}) — the declaration is wrong")
+
+    import pufferlib.pufferl as pufferl
+    tree = ast.parse(Path(pufferl.__file__).read_text())
+    fn = census._find_qualname(tree, "mean_and_log")
+    literals = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+            for k in node.value.keys:
+                if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    literals.add(k.value)
+    assert literals, ("no `logs = {...}` literal found in pufferl.mean_and_log — this check "
+                      "has gone vacuous; re-derive it against the installed PufferLib")
+    unregistered = sorted(k for k in literals if k not in ms.REGISTRY)
+    assert not unregistered, (
+        f"pufferl.mean_and_log writes {unregistered} into every row and metrics_schema does "
+        "not carry them")
+
+
+def test_derived_inputs_are_registered_keys():
+    bad = []
+    for key in ms.keys_of_kind("derived"):
+        for src in ms.REGISTRY[key].inputs:
+            if src not in ms.REGISTRY:
+                bad.append(f"{key}: input {src!r} is not a registered key")
+    assert not bad, "\n  ".join([""] + bad)
+
+
+# ── The frozen readers ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("script", census.FROZEN_READERS)
+def test_every_frozen_reader_key_literal_is_registered(script):
+    """The gate scripts never migrate to importing from here, so the registry chases
+    them — parsed from source, because nothing enforces that they stay frozen."""
+    literals = census.reader_key_literals(script)
+    assert literals, f"extracted zero key literals from {script} — the extractor is vacuous"
+    missing = sorted(k for k in literals if k not in ms.REGISTRY)
+    assert not missing, (f"{script} reads keys the registry does not carry:\n  " +
+                         "\n  ".join(f"{k}  (:{literals[k]})" for k in missing))
+
+
+def test_rung1_gate_report_columns_are_registered():
+    """GATES / REPORT_ONLY / REPORT_EXTRA column names — several of which are DERIVED
+    (`kills_per_episode` the episode-weighted ratio, `losses/approx_kl_p90`) and are
+    not emitted keys at all. Registering them is what keeps the extractor from being
+    loosened until it demands an emitter for a column heading."""
+    cols = census.reader_report_columns()
+    assert cols, "extracted zero report columns from rung1_gate.py — the extractor is vacuous"
+    missing = sorted(c for c in cols if c not in ms.REGISTRY)
+    assert not missing, "unregistered rung1_gate report columns:\n  " + "\n  ".join(missing)
+    assert ms.REGISTRY["losses/approx_kl_p90"].kind == "derived", (
+        "losses/approx_kl_p90 is a REPORT_EXTRA column name, never an emitted key "
+        "(its source is losses/approx_kl)")
+    assert ms.REGISTRY["kills_per_episode"].kind == "derived"
+
+
+def test_rung1_gate_producer_column_matches_its_report_tables_both_ways():
+    """`producer` is checked against rung1_gate's own GATES/REPORT_* tables.
+
+    Both directions: a column the script defines must be a registered `derived`
+    entry crediting it, and an entry crediting rung1_gate must be a column the
+    script actually defines. Without the reverse half, `producer` is a free-text
+    field that can name any script for any key.
+    """
+    cols = census.reader_report_columns()
+    # Several columns ARE emitted keys used verbatim as headings
+    # (`losses/entropy/shoot`, the two gated `eval/win_vs_random_as_*`); the
+    # registry's own `emitted` set is the right surface to subtract, and
+    # test_every_registered_emitted_key_is_actually_emitted is what keeps that set
+    # honest rather than a place to hide a column.
+    emitted_surface = set(ms.keys_of_kind("emitted"))
+    unclaimed = sorted(c for c in cols
+                       if c not in emitted_surface and ms.REGISTRY[c].producer != "rung1_gate")
+    invented = sorted(k for k in ms.keys_of_kind("derived")
+                      if ms.REGISTRY[k].producer == "rung1_gate" and k not in cols)
+    assert not unclaimed, ("rung1_gate report columns that no emitter writes and no registry "
+                           "entry credits to rung1_gate:\n  " + "\n  ".join(unclaimed))
+    assert not invented, ("registered as computed by rung1_gate, but absent from its "
+                          "GATES/REPORT_ONLY/REPORT_EXTRA tables:\n  " + "\n  ".join(invented))
+
+
+# ── Consumers, both directions ────────────────────────────────────────────
+
+
+def test_consumer_names_cover_every_read_and_no_read_is_invented():
+    """Both directions at once. A `consumers` column checked in one direction only
+    drifts in the other, and it is the first column of a registry to rot."""
+    unregistered, missing_name, invented = [], [], []
+    for consumer, keys in sorted(READS.items()):
+        assert consumer in ms.CONSUMERS, f"census names consumer {consumer!r}, registry does not"
+        for key, lineno in sorted(keys.items()):
+            s = ms.REGISTRY.get(key)
+            if s is None:
+                unregistered.append(f"{consumer} reads unregistered {key} (:{lineno})")
+            elif s.kind == "derived" and s.producer == consumer:
+                # A script naming its own output column is definitional, not a row
+                # read. `losses/approx_kl_p90` sits in rung1_gate's REPORT_EXTRA
+                # tuple beside the real source keys, so the literal extractor
+                # cannot tell them apart by position — the registry's `producer`
+                # is what does, which is why the spec requires it to be classified
+                # rather than have the extractor loosened to drop it.
+                continue
+            elif consumer not in s.consumers:
+                missing_name.append(f"{key}: read by {consumer} (:{lineno}) but its "
+                                    f"consumers are {list(s.consumers)}")
+    for key, s in sorted(ms.REGISTRY.items()):
+        for consumer in s.consumers:
+            if key not in READS.get(consumer, {}):
+                invented.append(f"{key}: names consumer {consumer}, which does not read it")
+    assert not (unregistered or missing_name or invented), "\n  ".join([""] + unregistered +
+                                                                       missing_name + invented)
+
+
+# ── EVAL_KEYS ownership ───────────────────────────────────────────────────
+
+
+def test_eval_keys_match_the_evaluate_output_contract():
+    """EVAL_KEYS is `BaselineEvaluator.evaluate()`'s output contract. eval_baselines
+    raises on a set mismatch at runtime, but only when an eval actually runs — and
+    the §3 gate runs with eval off, so that guard never fires in the suite. Same
+    contract, read from source."""
+    assert set(ms.EVAL_KEYS) == census.eval_output_keys()
+
+
+def test_eval_surface_is_eval_keys_plus_the_two_scheduler_stamps():
+    """ScheduledEval adds eval/epoch and eval/wall_s ON TOP of evaluate()'s output —
+    EVAL_KEYS alone under-declares the registry's eval/* surface by two."""
+    assert set(ms.EVAL_SURFACE) == set(ms.EVAL_KEYS) | {"eval/epoch", "eval/wall_s"}
+    registered = {k for k in ms.REGISTRY if k.startswith("eval/")}
+    assert registered == set(ms.EVAL_SURFACE)
+
+
+def test_eval_baselines_imports_eval_keys_from_here_and_not_the_reverse():
+    """The direction is load-bearing, not stylistic: eval_baselines imports torch and
+    c_env.cs2_env at module scope, so `from eval_baselines import EVAL_KEYS` would make
+    a tuple of eight strings cost a torch import and break metrics_schema's
+    import-lightness (tests/test_w1_modules.py). Checked from SOURCE — importing
+    eval_baselines here to compare the objects would pull torch into this test."""
+    tree = ast.parse((REPO_ROOT / "src" / "eval_baselines.py").read_text())
+    imports_from_schema = any(
+        isinstance(n, ast.ImportFrom) and n.module == "metrics_schema" and any(a.name == "EVAL_KEYS"
+                                                                               for a in n.names)
+        for n in ast.walk(tree))
+    assert imports_from_schema, ("src/eval_baselines.py must do `from metrics_schema import "
+                                 "EVAL_KEYS` — the registry is the single authority")
+    assigns = [
+        n for n in tree.body if isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "EVAL_KEYS" for t in n.targets)
+    ]
+    assert not assigns, ("src/eval_baselines.py still assigns EVAL_KEYS — two authorities for "
+                         "the same contract is exactly what the move removed")
+
+    schema_tree = ast.parse((REPO_ROOT / "src" / "metrics_schema.py").read_text())
+    back_edge = [
+        n for n in ast.walk(schema_tree)
+        if isinstance(n, ast.ImportFrom) and n.module == "eval_baselines"
+    ]
+    assert not back_edge, "metrics_schema must never import eval_baselines (torch at its scope)"
+
+
+def test_metrics_schema_is_in_the_import_lightness_test():
+    """Creating a module and adding it to the subprocess guard is ONE task, by spec —
+    a module that slips in unguarded is how the invariant dies."""
+    from test_w1_modules import W1_MODULES
+    assert "metrics_schema" in W1_MODULES

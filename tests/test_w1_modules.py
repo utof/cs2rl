@@ -46,8 +46,26 @@ SRC = REPO_ROOT / "src"
 # constructing envs. Its `from train import make_puffer_env` has to stay
 # function-local both to break the cycle (train.py imports it at module level)
 # and to keep `import train` free of torch/nav/c_env.
+#
+# `metrics_schema` (W4) is here for the mirror-image reason: it is a registry of
+# STRINGS whose whole value is being cheap to import, and it took ownership of
+# `EVAL_KEYS` from `eval_baselines` — a module with torch and c_env.cs2_env at
+# its scope. If that ownership ever flipped back, or someone imported a policy
+# class to spell a type hint, eight string constants would start costing a torch
+# import, and only this test would say so.
 W1_MODULES = ("train_shared", "resume_state", "train_config", "train_metrics", "train_update",
-              "env_factory")
+              "env_factory", "metrics_schema")
+
+# The subset train.py must import AT ITS MODULE LEVEL. Every module CARVED OUT of
+# train.py is here, because train.py's own body still reads names that moved into
+# it (see test_import_train_stays_light_and_really_imports_the_shims). Not every
+# guarded module qualifies: `metrics_schema` took `EVAL_KEYS` from
+# `eval_baselines`, not from train.py, so train.py has no reference to it —
+# adding an unused module-level import purely to satisfy an assert would be the
+# test dictating a dead line of code. Membership is asserted below so this cannot
+# silently become a way to opt a real shim out.
+TRAIN_MODULE_LEVEL_IMPORTS = ("train_shared", "resume_state", "train_config", "train_metrics",
+                              "train_update", "env_factory")
 
 # The one module every other split-out module is allowed to depend on. Spec §2 W1:
 # "The leaf imports nothing from train.py or the other new modules; every other new
@@ -123,11 +141,13 @@ def test_import_train_stays_light_and_really_imports_the_shims():
     run time while the whole test suite stayed green, because the suite never
     executes that block.
     """
+    assert set(TRAIN_MODULE_LEVEL_IMPORTS) <= set(W1_MODULES), (
+        "TRAIN_MODULE_LEVEL_IMPORTS names a module the import-lightness guard does not cover")
     r = _run_child(f"""
 import train
 heavy = [m for m in {HEAVY!r} if m in sys.modules]
 assert not heavy, f"`import train` pulled {{heavy}} — --dump-config is no longer cheap"
-missing = [m for m in {W1_MODULES!r} if m not in sys.modules]
+missing = [m for m in {TRAIN_MODULE_LEVEL_IMPORTS!r} if m not in sys.modules]
 assert not missing, f"train.py does not import {{missing}} at module level"
 """)
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
