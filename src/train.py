@@ -45,12 +45,111 @@ from _action_spec import (
     AIM_DIM,
 )
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
+from resume_state import (
+    _install_full_checkpointing,
+    _rng_load_state_dict,
+    _rng_state_dict,
+    check_checkpoint_set,
+    check_resume_config,
+    check_resume_metrics_bound,
+    collect_train_state,
+    load_full_resume,
+    resolve_resume_run,
+    restore_train_state,
+    seed_everything,
+)
+from train_config import (
+    OPPONENT_MODES,
+    assert_opponent_self_play_compatible,
+    build_participating_rows,
+    build_train_config,
+    compute_batch_dims,
+    env_knobs_from_args,
+    resolve_opponent_mode,
+    validate_aim_log_std_max,
+)
+from train_shared import (
+    _LOG_2PI,
+    _MASK_HEAD_SLICES,
+    _R0G_KNOBS,
+    _WARMSTART_ATTRS,
+    AIM_LOG_STD_CAP_MIN_HEADROOM,
+    AIM_LOG_STD_INIT_MARGIN,
+    DEFAULT_CHECKPOINT_INTERVAL,
+    DEFAULT_GAMMA,
+    LOG_STD_INIT,
+    LOG_STD_MAX,
+    LOG_STD_MIN,
+    RESUME_CONFIG_ALLOWLIST,
+    REWARD_WEIGHT_DEFAULTS,
+    TEAM_SIZE,
+    _apply_action_masks,
+    _atomic_save_state_dict,
+    pin_pitch_for_map,
+    resolve_aim_log_std_init,
+    resolve_gammas,
+    reward_overrides_from_args,
+)
 
-# Explicit re-export marker: naming AIM_DIM here is what tells ruff that the
+# Explicit re-export marker: naming a symbol here is what tells ruff that an
 # otherwise-unused import is intentional. A trailing per-line F401 suppression cannot
 # be used instead, for the formatter reason above. Nothing does `from train import *`,
-# so narrowing star-imports to this one name has no effect on any caller.
-__all__ = ("AIM_DIM", )
+# so this tuple has no star-import effect on any caller: it is a lint marker AND the
+# inventory of what `train` re-exports.
+#
+# The three `from train_shared/resume_state/train_config import` blocks above are
+# SHIMS (post-rung1a refactor, 2026-08-31): those symbols are now DEFINED in the leaf
+# modules and re-exported here so the ~40 existing `from train import X` call sites in
+# tests/, scripts/ and src/ keep working without being rewritten (rewriting them is a
+# separate, mechanical branch — spec §4).
+# PLACEMENT IS LOAD-BEARING, not an isort accident: train.py's own module body READS
+# moved names while it executes — `REWARD_WEIGHT_KEYS = tuple(REWARD_WEIGHT_DEFAULTS)`,
+# make_puffer_env's `n_active_per_team=TEAM_SIZE` default, and eight more inside
+# `if __name__ == "__main__":` (the argparse defaults/choices and the four main() calls).
+# Every one of those sits BELOW this block and would NameError at import time if the
+# shims were moved down.
+__all__ = (
+    "AIM_DIM",
+    "AIM_LOG_STD_CAP_MIN_HEADROOM",
+    "AIM_LOG_STD_INIT_MARGIN",
+    "DEFAULT_CHECKPOINT_INTERVAL",
+    "DEFAULT_GAMMA",
+    "LOG_STD_INIT",
+    "LOG_STD_MAX",
+    "LOG_STD_MIN",
+    "OPPONENT_MODES",
+    "RESUME_CONFIG_ALLOWLIST",
+    "REWARD_WEIGHT_DEFAULTS",
+    "TEAM_SIZE",
+    "_LOG_2PI",
+    "_MASK_HEAD_SLICES",
+    "_R0G_KNOBS",
+    "_WARMSTART_ATTRS",
+    "_apply_action_masks",
+    "_atomic_save_state_dict",
+    "_install_full_checkpointing",
+    "_rng_load_state_dict",
+    "_rng_state_dict",
+    "assert_opponent_self_play_compatible",
+    "build_participating_rows",
+    "build_train_config",
+    "check_checkpoint_set",
+    "check_resume_config",
+    "check_resume_metrics_bound",
+    "collect_train_state",
+    "compute_batch_dims",
+    "env_knobs_from_args",
+    "load_full_resume",
+    "pin_pitch_for_map",
+    "resolve_aim_log_std_init",
+    "resolve_gammas",
+    "resolve_opponent_mode",
+    "resolve_resume_run",
+    "restore_train_state",
+    "reward_overrides_from_args",
+    "seed_everything",
+    "validate_aim_log_std_max",
+)
 
 # MUST stay a bare integer literal: scripts/exp_lib.py fingerprints the env by
 # regex-grepping `OBS_DIM = <int>` out of this file's source text (env_fingerprint),
@@ -58,108 +157,6 @@ __all__ = ("AIM_DIM", )
 # from cs2_types.h); the three are cross-checked by tests/test_train_env.py:873.
 # On an OBS_DIM bump, update cs2_types.h + rerun the generator, then bump this literal.
 OBS_DIM = 110
-
-# Agents per team. A bare literal ON PURPOSE, for the same class of reason as
-# OBS_DIM above: train.py must stay import-light (`--dump-config` guarantees no
-# torch/nav import — see _atomic_save_state_dict's docstring), and `nav` pulls
-# awpy/polars/shapely (+0.6 s and a polars warning) just to read one 5.
-# Cross-checked against nav.TEAM_SIZE and cs2_env.TEAM_SIZE by
-# tests/test_train_env.py::test_obs_dim_constant_consistency.
-TEAM_SIZE = 5
-
-# Batch 3 (continuous aim H-PPO): state-independent log_std parameter
-# for the Gaussian aim head. σ_init = 0.1 rad ≈ 5.7° matches mega-spec
-# §9 lock and the H-PPO literature default. σ_min = 0.01 rad ≈ 0.6° —
-# floors entropy without flooding the policy with noise; tanh+max_turn_speed
-# clamp dominates the per-tick range regardless of σ. σ_max = 0.5 rad ≈ 28.6°
-# — symmetric bound prevents explosion that would mask μ.
-# Module-level so tests can `import train; train.LOG_STD_MIN` without poking
-# at the inner Dust2Policy class. Used in build_policy() forward paths and
-# in the max_entropy calc that drives the SAC-α dual loop.
-LOG_STD_INIT = math.log(0.1)
-LOG_STD_MIN = math.log(0.01)
-LOG_STD_MAX = math.log(0.5)
-
-# Rung 1a T1 (spec 2026-08-30): how far BELOW the run's σ cap a fresh
-# aim_log_std starts. `torch.clamp` back-propagates zero gradient strictly
-# outside [min, max], so a parameter initialised AT the cap is gradient-dead
-# from step 0 — that is exactly what killed the Rung 1 treatment arm (init
-# log 0.1 under a log 0.05 cap: σ was a constant for 10M steps and the logged
-# "log σ = −2.996" was the clamp, not a measurement). 0.2 in log-space ≈ an
-# 18 % σ gap: wide enough that Adam needs many steps to walk into the clamp,
-# small enough that the run still trains near its intended σ.
-AIM_LOG_STD_INIT_MARGIN = 0.2
-# The matching floor-side head-room the cap must leave. The init sits one
-# margin below the cap, so a cap closer than 2× the margin to LOG_STD_MIN puts
-# the init at/below the FLOOR, where the lower clamp kills the gradient just as
-# dead as the upper one. Enforcing head-room on the cap (rather than clamping
-# the init up with a max(LOG_STD_MIN + m, …) floor) is deliberate: a floor
-# merely moves the dead zone from one end of the band to the other, silently.
-AIM_LOG_STD_CAP_MIN_HEADROOM = 2 * AIM_LOG_STD_INIT_MARGIN
-
-
-def validate_aim_log_std_max(aim_log_std_max) -> float:
-    """Resolve + range-check the run's aim σ cap (R0-E.3, #131).
-
-    Returns the float cap (LOG_STD_MAX when None). Raises ValueError unless
-    LOG_STD_MIN + 0.4 < cap <= LOG_STD_MAX, i.e. σ in (0.0149, 0.5].
-
-    WHY a separate torch-free helper: make_policy() only runs after the env
-    and torch are up, so a bad --aim-log-std-max used to surface ~30 s into a
-    launch AND slip past `--dump-config` (the Modal/run_rung1 fingerprint
-    step). main() now calls this right after parse_args(), above the
-    --dump-config exit, so the fingerprint catches it.
-    PITFALL (2026-08-30, rung1 sweep): the bound is INCLUSIVE at LOG_STD_MAX =
-    log 0.5 = -0.693147..., so a hand-rounded "-0.6931" is > the cap by 5e-5
-    and is REJECTED — pass -0.69315 (or omit the flag) for "σ cap 0.5".
-    PITFALL (Rung 1a T1): the LOWER bound is no longer LOG_STD_MIN itself but
-    LOG_STD_MIN + AIM_LOG_STD_CAP_MIN_HEADROOM — caps that narrow leave no room
-    for the strictly-inside-the-band init (see resolve_aim_log_std_init) and
-    would hand the run a gradient-dead σ. This NARROWS the accepted CLI range;
-    σ caps below ~0.0149 rad (0.85°) have no experimental use (the recoil/
-    hitbox scale alone is larger), so nothing legitimate is lost.
-    """
-    cap = float(LOG_STD_MAX if aim_log_std_max is None else aim_log_std_max)
-    lo = LOG_STD_MIN + AIM_LOG_STD_CAP_MIN_HEADROOM
-    if not (lo < cap <= LOG_STD_MAX):
-        raise ValueError(
-            f"aim_log_std_max={cap} must lie in ({lo}, {LOG_STD_MAX}] "
-            f"(σ in ({math.exp(lo):.4f}, 0.5]). The lower bound is "
-            f"LOG_STD_MIN + {AIM_LOG_STD_CAP_MIN_HEADROOM} rather than LOG_STD_MIN: the aim σ "
-            f"is initialised {AIM_LOG_STD_INIT_MARGIN} below the cap so it starts strictly "
-            f"inside the clamp band, and a cap this close to the σ floor would "
-            f"put that init at or under LOG_STD_MIN={LOG_STD_MIN}, where clamp "
-            f"back-propagates zero gradient and σ can never train.")
-    return cap
-
-
-def resolve_aim_log_std_init(cap) -> float:
-    """The log σ a FRESH aim head starts at under this run's cap (Rung 1a T1).
-
-    WHAT: min(LOG_STD_INIT, cap − AIM_LOG_STD_INIT_MARGIN). At the 5v5 default
-    cap (log 0.5) that is LOG_STD_INIT unchanged — every pre-Rung-1a run keeps
-    its σ=0.1 start. Under a tight cap (Rung 1a's log 0.05) it is cap − 0.2,
-    i.e. σ ≈ 0.041, strictly inside [LOG_STD_MIN, cap].
-
-    WHY: `torch.clamp(x, lo, hi)` passes gradient only for lo <= x <= hi. An
-    init at or above the cap is therefore a permanently frozen σ — the policy
-    samples at exactly the cap forever and `policy/aim_log_std_yaw` reports the
-    cap, which reads like a converged value rather than a dead parameter. This
-    is the Rung 1 defect (spec 2026-08-30 §1(iv)).
-
-    PITFALL: this is the FRESH-construction init only. A resume restores the
-    checkpoint's σ verbatim, and the BC-frozen widener has its own rule
-    (reinit_frozen_aim_log_std, min(AIM_LOG_STD_RESUME_INIT, cap) — that one
-    may land exactly ON the cap, gh#91, untouched by T1). Callers that need the
-    value in config.json must go through this helper, never re-derive it, so
-    config and policy cannot drift.
-    NOTE: whenever cap >= LOG_STD_INIT + AIM_LOG_STD_INIT_MARGIN (the 5v5
-    default included) the init IS LOG_STD_INIT, so reinit_frozen_aim_log_std's
-    "still exactly at LOG_STD_INIT ⇒ BC-frozen" signature matches a *fresh*
-    policy. That was already true before T1 and stays harmless — the widener
-    only ever runs on a checkpoint being resumed, never on a fresh build.
-    """
-    return min(LOG_STD_INIT, float(cap) - AIM_LOG_STD_INIT_MARGIN)
 
 
 def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
@@ -242,9 +239,6 @@ def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
 # throttling every update to ~1 minibatch. σ=0.3 drops that per-step KL ~9×
 # while staying inside [σ_min, σ_max]. Applied by reinit_frozen_aim_log_std.
 AIM_LOG_STD_RESUME_INIT = math.log(0.3)
-# Fix #2: precomputed log(2π) for the analytic Normal log-prob/entropy
-# replacing torch.distributions.Normal in _hybrid_sample_logits.
-_LOG_2PI = math.log(2.0 * math.pi)
 
 
 def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6, cap=None):
@@ -527,45 +521,6 @@ def resolve_resume_split(resume_path, *, heads_flag, trunk_flag, map_location="c
     return heads, trunk, state_dict, resume_path
 
 
-# F8 (2026-07-06 adversarial review): per-head [start, end) column ranges of
-# the flat (ACTION_MASK_DIM,) action-mask row, derived from ACTION_HEAD_SIZES
-# exactly like the C side derives moff[] in compute_masks (cs2_env.h). Layout
-# at time of writing: move 0-8, shoot 9-10, reload 11-12, weapon 13-15,
-# use 16-17, crouch 18-19, jump 20-21.
-_MASK_HEAD_SLICES = []
-_off = 0
-for _sz in ACTION_HEAD_SIZES:
-    _MASK_HEAD_SLICES.append((_off, _off + _sz))
-    _off += _sz
-del _off, _sz
-
-
-def _apply_action_masks(logits_list, mask):
-    """Mask invalid action bins out of the per-head logits (F8).
-
-    mask : (B, ACTION_MASK_DIM) bool/int8 tensor, 1 = valid — the C-computed
-    masks from cs2_env.h compute_masks, sliced per head via _MASK_HEAD_SLICES.
-    Invalid bins are filled with finfo.min/2, NOT -inf: after log_softmax the
-    masked log-prob stays FINITE (≈ dtype-min/2, since any real logit is
-    negligible against it), so entropy terms are exactly p·logp = 0·finite = 0
-    instead of 0·(-inf) = NaN. exp(min/2 - lse) underflows to exactly 0, so
-    multinomial can never draw a masked bin. The C side guarantees ≥1 valid
-    bin per head per agent (dead agents get per-head no-ops), so the masked
-    softmax is always well-defined — do NOT relax that invariant in C without
-    revisiting this function.
-
-    Returns a NEW list; input logits are not mutated (callers may hold them).
-    """
-    import torch
-
-    masked = []
-    for (lo, hi), lg in zip(_MASK_HEAD_SLICES, logits_list, strict=True):
-        head_valid = mask[..., lo:hi] != 0
-        fill = torch.finfo(lg.dtype).min / 2
-        masked.append(lg.masked_fill(~head_valid, fill))
-    return masked
-
-
 # ── Masked reductions over participating rows (Rung 0, spec 2026-08-29 §2.2) ──
 # WHY these are free functions and not methods on the trainer: the trainer is a
 # monkey-patched PuffeRL instance (pufferl.py is a site-package and is never
@@ -641,86 +596,9 @@ def masked_explained_variance(y_pred, y_true, part):
     return float(1 - (yt - yp).var() / var_y)
 
 
-# ── Reward weights: the single wiring source of truth (spec 2026-08-01 §4.2) ──
-# Config key == make_env kwarg name == CLI flag (dashes) — NO prefix rewriting.
-# Six of the 23 do not start with `reward_` (the pbrs_* group), so any code
-# that discovers weights by scanning for a `reward_` prefix is wrong by
-# construction. This dict is the ONLY derivation point: build_train_config's
-# keys, the CLI flags, the env-factory override dict and the §6.1 pin test all
-# read it.
-#
-# WHY the defaults are duplicated here instead of read from the signature:
-# train.py imports c_env lazily (inside functions) so `--dump-config` costs no
-# map/binding import; a module-level inspect.signature(make_env) would undo
-# that. tests/test_reward_weight_wiring.py pins both sides against each other,
-# so the duplication cannot silently drift.
-#
-# PITFALL: do NOT "clean up" a value here or in make_env. These defaults ARE
-# the trained baseline; an unflagged run must stay byte-identical to the
-# pre-wiring env.
-#
-# Deliberately NOT threaded here: pbrs_gamma (threaded as a non-weight knob by
-# env_knobs_from_args via resolve_gammas, R0-J), team_spirit (config-threaded
-# separately), include_step_stats_in_info (issue #100, out of scope).
-REWARD_WEIGHT_DEFAULTS = {
-                                                       # ── non-potential (hackable — sweep with care) ──
-    "reward_win": 1.0,
-    "reward_kill": 0.3,
-    "reward_death": 0.1,
-    "reward_bombsite_entry": 0.3,
-    "reward_plant_bonus": 3.0,
-    "reward_plant_base": 0.2,
-    "reward_plant_progress_scale": 0.05,
-    "reward_plant_interrupted": 0.1,
-    "reward_defuse": 0.2,
-    "reward_shot_penalty": 0.005,
-    "reward_ct_survival": 0.001,                       # the CT stall drip — A1 arm sets this to 0.0
-    "reward_inaction": 0.0005,
-    "reward_win_t_detonation": 5.0,
-    "reward_win_t_elimination": 3.0,
-    "reward_win_ct_defuse": 5.0,
-    "reward_win_ct_timeout": 4.0,                      # NOTE: exceeds ct_elimination — A1b arm
-    "reward_win_ct_elimination": 3.0,
-                                                       # ── PBRS-potential (optimum-safe per Ng et al. 1999; tunes
-                                                       # equilibrium selection in MARL per Devlin & Kudenko 2011) ──
-    "pbrs_alive_weight": 0.3,
-    "pbrs_hp_weight": 0.002,
-    "pbrs_site_weight": 0.2,
-    "pbrs_bomb_progress_weight": 0.3,
-    "pbrs_nav_weight_t": 0.04,
-    "pbrs_nav_weight_ct": 0.15,
-}
+# The dict this reads (and its "single wiring source of truth" rationale) now
+# lives in src/train_shared.py; only this derived tuple stays here.
 REWARD_WEIGHT_KEYS = tuple(REWARD_WEIGHT_DEFAULTS)
-
-
-def reward_overrides_from_args(args) -> dict:
-    """Build the env-side reward-weight override dict from parsed args.
-
-    WHAT: {kwarg_name: float} for all 23 weights, taking the CLI value when
-    present and the make_env default otherwise.
-
-    WHY a shared helper: build_train_config (provenance) and train()'s env
-    factory (behavior) MUST agree exactly. train_config is not available at
-    env-construction time — it is built after pufferlib.vector.make — so both
-    call sites derive from this one function instead.
-
-    PITFALL: the getattr fallbacks are load-bearing for harness/dump-config
-    args objects that predate these flags; do not tighten them to attribute
-    access.
-
-    PITFALL: argparse's type=float accepts "nan"/"inf", so the finiteness
-    check belongs here — the one funnel both call sites pass through. A NaN
-    weight otherwise surfaces hours into a run as a NaN loss with no clue
-    which knob produced it, so raise at startup and name the key.
-    """
-    overrides = {}
-    for k, d in REWARD_WEIGHT_DEFAULTS.items():
-        v = float(getattr(args, k, d))
-        if not math.isfinite(v):
-            raise ValueError(f"reward weight {k}={v} is not finite; "
-                             "pass a real number (this would poison the loss silently)")
-        overrides[k] = v
-    return overrides
 
 
 def auto_vec_workers(num_envs: int, physical_cores: int) -> int:
@@ -741,469 +619,6 @@ def auto_vec_workers(num_envs: int, physical_cores: int) -> int:
         if num_envs % k == 0:
             return k
     return 1
-
-
-def _atomic_save_state_dict(state_dict, path):
-    """torch.save via sibling .tmp + os.replace so a crash never corrupts ``path``.
-
-    WHY: the periodic save in train() overwrites ONE file (dust2_policy.pt)
-    every --save_every_sec. The training box's GPU is known to fall off the
-    PCI bus under thermal load (hard crash, 2026-08-13); a plain torch.save
-    interrupted mid-write would leave the ONLY recovery checkpoint torn.
-    os.replace() is an atomic rename on POSIX, so ``path`` always holds a
-    complete checkpoint — old or new, never partial.
-
-    PITFALL: torch is imported lazily — train.py's module level must stay
-    torch-free so --dump-config keeps its no-heavy-imports guarantee.
-    """
-    import torch
-
-    path = Path(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(state_dict, tmp)
-    os.replace(tmp, path)
-
-
-# ── R0-C (#134): full-state checkpoint / resume ───────────────────────────
-# PufferLib 3.0 saves model + optimizer + step counters (pufferl.py
-# save_checkpoint) and ships NO loader. Everything train.py layers on top
-# (SAC-α, LR scheduler, return normaliser, warm-start machine, self-play pool,
-# RNGs) lives here in a third file, train_state.pt, next to PufferLib's two.
-# Budget keys are allowlisted ON PURPOSE: the whole point of --resume-run is
-# `while trainer.epoch < trainer.total_epochs` (train()) continuing past a
-# crash, and run_rung1.sh's retry loop must be able to extend --timesteps.
-# check_resume_config prints a WARN line for every allowlisted key that changed.
-# PITFALL: n_active_per_team is deliberately NOT allowlisted — it changes the
-# unit of global_step (participating agent-steps) and the participating buffer
-# layout, so a resumed run under a different value would be nonsense.
-# PITFALL (R0-D #135): `seed` is NOT allowlisted either. A resumed run's RNG
-# streams come back from train_state.pt (restore_train_state), so a changed
-# --seed would be silently ignored for python/numpy/torch yet still re-seed
-# the freshly built envs — an inconsistent, unlabelled run. Refuse instead;
-# pass the original --seed (config.json has it) when resuming.
-RESUME_CONFIG_ALLOWLIST = frozenset(
-    {"data_dir", "device", "run_id", "total_timesteps", "participating_timesteps"})
-# R0-C: epochs between full-state checkpoint sets. ONE constant for the CLI
-# default and build_train_config's getattr fallback (harness / SimpleNamespace
-# callers without the flag) — two literals drifted once (final review #7).
-DEFAULT_CHECKPOINT_INTERVAL = 200
-# Trainer attrs of the warm-start entropy machine + SAC target (all set in
-# _patch_trainer_with_return_norm). Plain Python scalars/None — pickled as-is.
-_WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
-                    "_batch1_log_alpha_reset_done", "_batch1_current_target_entropy",
-                    "_batch1_warmstart_h_anchor", "_batch1_warmstart_h0",
-                    "_batch1_warmstart_warn_epoch")
-
-
-def _rng_state_dict():
-    """Snapshot python/numpy/torch(+cuda) RNG states. Env xorshift32 state is
-    NOT included (lives in C; see load_full_resume's WARN)."""
-    import torch
-    st = {
-        "python": random.getstate(),
-        "numpy": np.random.get_state(),
-        "torch_cpu": torch.get_rng_state()
-    }
-    if torch.cuda.is_available():
-        st["torch_cuda"] = torch.cuda.get_rng_state_all()
-    return st
-
-
-def seed_everything(seed: int) -> None:
-    """R0-D (#135): seed every host-side RNG that _rng_state_dict snapshots.
-
-    WHAT: random, numpy (legacy global), torch CPU and — when available — all
-    CUDA devices. This is the MIRROR of _rng_state_dict/_rng_load_state_dict:
-    the same RNG set, one fresh-seed path here and one resume path there. Add a
-    new RNG to all three or resume will silently diverge from a fresh run.
-    WHY a function: train() used to inline these calls, and no default-suite
-    test noticed when they were dropped (only the 2-subprocess e2e test did;
-    test_two_runs_same_seed_identical[3] now runs in the default suite).
-    test_seed_everything_is_deterministic pins it now.
-    PITFALL: seeds only — it does NOT set torch.use_deterministic_algorithms
-    or cudnn flags, so CUDA runs are seeded but not bit-exact reproducible.
-    Env xorshift32 streams are seeded separately via env_seed_base.
-    """
-    import torch
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def _rng_load_state_dict(st):
-    """Inverse of _rng_state_dict. A CUDA state saved on a GPU box is skipped
-    silently on a CPU-only resume (device is allowlisted)."""
-    import torch
-    random.setstate(st["python"])
-    np.random.set_state(st["numpy"])
-    torch.set_rng_state(st["torch_cpu"])
-    if "torch_cuda" in st and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(st["torch_cuda"])
-
-
-def collect_train_state(trainer, self_play_mgr) -> dict:
-    """Everything train.py adds on top of PuffeRL's trainer_state.pt, CPU-side
-    so the file is device-agnostic. Requires _patch_trainer_with_return_norm
-    (the _log_alpha_tensor / _alpha_optimizer / _ret_* aliases)."""
-    return {
-                                                                       # Set identity (fix round 1, review #1): load_full_resume refuses a
-                                                                       # sidecar whose epoch/global_step disagree with trainer_state.pt — a
-                                                                       # crash between the three writes must never pair epoch-N weights with
-                                                                       # epoch-(N-1) optimizer/α/scheduler state silently.
-        "epoch": int(trainer.epoch),
-        "global_step": int(trainer.global_step),
-        "log_alpha": trainer._log_alpha_tensor.detach().cpu().clone(),
-        "alpha_optimizer": trainer._alpha_optimizer.state_dict(),
-                                                                       # CosineAnnealingLR is stepped per epoch, not a fn of global_step;
-                                                                       # its T_max is overridden on restore (see restore_train_state).
-        "scheduler": trainer.scheduler.state_dict(),
-        "ret_mean": trainer._ret_mean.detach().cpu().clone(),
-        "ret_var": trainer._ret_var.detach().cpu().clone(),
-        "ret_count": trainer._ret_count.detach().cpu().clone(),
-        "warmstart": {
-            k: getattr(trainer, k)
-            for k in _WARMSTART_ATTRS
-        },
-        "self_play": self_play_mgr.state_dict(),
-        "rng": _rng_state_dict(),
-    }
-
-
-def restore_train_state(trainer, self_play_mgr, state: dict):
-    """In-place restore of collect_train_state's dict.
-
-    PITFALL: `_ret_*` and `log_alpha` are closure-locals aliased onto the
-    trainer (_patch_trainer_with_return_norm) — copy_() into them, never
-    rebind, or the closure keeps training on its own stale copy.
-    """
-    import torch                                                       # local ON PURPOSE: train.py module scope stays torch-free
-    with torch.no_grad():
-        trainer._log_alpha_tensor.data.copy_(state["log_alpha"].to(
-            trainer._log_alpha_tensor.device))
-        trainer._ret_mean.copy_(state["ret_mean"].to(trainer._ret_mean.device))
-        trainer._ret_var.copy_(state["ret_var"].to(trainer._ret_var.device))
-        trainer._ret_count.copy_(state["ret_count"].to(trainer._ret_count.device))
-    trainer._alpha_optimizer.load_state_dict(state["alpha_optimizer"])
-                                                                       # CosineAnnealingLR.state_dict() carries T_max, so a wholesale load would
-                                                                       # re-install the OLD horizon; past it the recursive cosine (torch
-                                                                       # lr_scheduler CosineAnnealingLR.get_lr) bounces the LR back UP — a
-                                                                       # periodic LR on any allowlisted --timesteps extension. Keep
-                                                                       # last_epoch/_step_count, adopt the NEW trainer's horizon (pufferl.py:
-                                                                       # total_timesteps // batch_size). When the horizon changed, drop the LR
-                                                                       # onto the closed-form cosine at the restored epoch so the extension
-                                                                       # continues annealing from there (the recursive form scales the PREVIOUS
-                                                                       # lr, and an already-finished run sits at lr=0, which would otherwise stay
-                                                                       # 0 forever). Same-budget resumes leave the optimizer lr untouched — the
-                                                                       # round trip stays bit-exact.
-    sd = dict(state["scheduler"])
-    old_t_max, sd["T_max"] = sd["T_max"], trainer.scheduler.T_max
-    trainer.scheduler.load_state_dict(sd)
-    if old_t_max != trainer.scheduler.T_max:
-        sch = trainer.scheduler
-        for group, base in zip(trainer.optimizer.param_groups, sch.base_lrs, strict=True):
-            group["lr"] = sch.eta_min + (base - sch.eta_min) * (
-                1 + math.cos(math.pi * sch.last_epoch / sch.T_max)) / 2
-        sch._last_lr = [g["lr"] for g in trainer.optimizer.param_groups]
-    for k, v in state["warmstart"].items():
-        setattr(trainer, k, v)
-    self_play_mgr.load_state_dict(state["self_play"])
-    _rng_load_state_dict(state["rng"])
-
-
-def _install_full_checkpointing(trainer, self_play_mgr):
-    """Override PuffeRL.save_checkpoint on this instance (same MethodType
-    pattern as _patch_trainer_with_return_norm). Differences from stock:
-    no `model_path exists → return` early-out (a resumed run re-saves the
-    same epoch after loading, and a crash between the model write and the
-    state writes must not freeze the state files), atomic writes for all
-    three files, and the train_state.pt sidecar. Still returns the model
-    path — PuffeRL.close() copies it to <data_dir>/<run_id>.pt.
-
-    WRITE ORDER is load-bearing: model → train_state → trainer_state. The
-    LAST file written (trainer_state.pt) names the model (model_name) and
-    carries the epoch the sidecar is checked against, so a crash anywhere
-    in the sequence leaves a set that resolve_resume_run/load_full_resume
-    either accept whole (all three from the same epoch) or refuse — never
-    a newer model with an older optimizer."""
-
-    def _save_checkpoint(self):
-        run_id = self.logger.run_id
-        path = Path(self.config["data_dir"]) / run_id
-        path.mkdir(parents=True, exist_ok=True)
-        model_name = f"model_{self.epoch:06d}.pt"
-        model_path = path / model_name
-        _atomic_save_state_dict(self.uncompiled_policy.state_dict(), model_path)
-        _atomic_save_state_dict(collect_train_state(self, self_play_mgr), path / "train_state.pt")
-        _atomic_save_state_dict(
-            {
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "global_step": self.global_step,
-                "agent_step": self.global_step,
-                "update": self.epoch,
-                "model_name": model_name,
-                "run_id": run_id,
-            }, path / "trainer_state.pt")
-        return str(model_path)
-
-    trainer.save_checkpoint = types.MethodType(_save_checkpoint, trainer)
-    return trainer
-
-
-def resolve_resume_run(run_dir: Path, run_id: str | None = None) -> dict:
-    """Locate the checkpoint SET under <run_dir>/<run_id>/: the model named by
-    trainer_state.pt['model_name'] (NOT max(model_*.pt) — a crash after the
-    model write but before trainer_state.pt leaves a newer orphan model whose
-    optimizer state was never saved), plus trainer_state.pt + train_state.pt.
-    run_id=None ⇒ the unique subdir holding trainer_state.pt (error if 0 or
-    >1) and the id is read from trainer_state.pt['run_id']. Every failure is
-    a SystemExit with a [Resume] message (a stock-PuffeRL run dir has no
-    train_state.pt sidecar and must not die with a raw traceback)."""
-    import torch
-    run_dir = Path(run_dir)
-    if run_id is None:
-        cands = sorted(p.parent for p in run_dir.glob("*/trainer_state.pt"))
-        if len(cands) != 1:
-            raise SystemExit(f"[Resume] expected exactly one <run_id>/trainer_state.pt under "
-                             f"{run_dir}, found {len(cands)}: pass --run-id")
-        run_id = cands[0].name
-    d = run_dir / run_id
-    ts_path = d / "trainer_state.pt"
-    if not ts_path.exists():
-        raise SystemExit(f"[Resume] {ts_path} not found")
-    ts = torch.load(ts_path, map_location="cpu", weights_only=False)
-    model_name = ts.get("model_name")
-    if not model_name:
-        raise SystemExit(f"[Resume] {ts_path} has no model_name — not a full-state checkpoint")
-    model_path = d / model_name
-    if not model_path.exists():
-        raise SystemExit(f"[Resume] {ts_path} names {model_name} but {model_path} is missing")
-    newer = [p.name for p in d.glob("model_*.pt") if p.name > model_name]
-    if newer:
-        print(f"[Resume] WARN: ignoring {len(newer)} model file(s) newer than {model_name} "
-              f"({', '.join(sorted(newer))}) — their optimizer state was never saved")
-    st_path = d / "train_state.pt"
-    if not st_path.exists():
-        raise SystemExit(f"[Resume] {st_path} not found — run predates full-state checkpointing "
-                         "(R0-C); use --resume <model.pt> for a weights-only restart")
-    return {
-        "run_id": ts.get("run_id", run_id),
-        "model_path": model_path,
-        "trainer_state_path": ts_path,
-        "train_state_path": st_path
-    }
-
-
-def check_resume_config(run_dir: Path, new_cfg: dict, allow=RESUME_CONFIG_ALLOWLIST):
-    """Hard-error unless every key of the on-disk config.json equals new_cfg
-    except `allow`. Compared through the JSON round-trip (sort_keys, default=str)
-    so tuples/Paths compare the way they were written. MUST run before the
-    unconditional config.json rewrite in train()."""
-    cfg_path = Path(run_dir) / "config.json"
-    if not cfg_path.exists():
-        raise SystemExit(f"[Resume] {cfg_path} not found — cannot guard against a config change")
-    old = json.loads(cfg_path.read_text())
-    new = json.loads(json.dumps(new_cfg, sort_keys=True, default=str))
-
-    def _same(k):
-        a, b = old.get(k, "<missing>"), new.get(k, "<missing>")
-        # data_dir: train() rewrites args.checkpoint_dir to the ABSOLUTE run
-        # dir on --resume-run, so a run launched with a relative/--name path
-        # would otherwise WARN on every resume and train users to ignore it.
-        if k == "data_dir" and isinstance(a, str) and isinstance(b, str):
-            return Path(a).resolve() == Path(b).resolve()
-        return a == b
-
-    changed = sorted(k for k in (old.keys() | new.keys()) if not _same(k))
-    for k in changed:
-        if k in allow:
-            print(
-                f"[Resume] WARN: allowlisted config key changed: {k}: {old.get(k)!r} -> {new.get(k)!r}"
-            )
-    diffs = [k for k in changed if k not in allow]
-    if diffs:
-        raise SystemExit("[Resume] config.json mismatch on non-allowlisted keys: " + ", ".join(
-            f"{k}: {old.get(k, '<missing>')!r} -> {new.get(k, '<missing>')!r}" for k in diffs))
-
-
-def check_checkpoint_set(model_path, ts: dict, st: dict) -> None:
-    """Set consistency (review #1): model_<epoch>.pt, trainer_state.pt and
-    train_state.pt must all come from ONE epoch. The model is already the one
-    trainer_state.pt names (resolve_resume_run); this checks the sidecar's
-    own epoch/global_step against both. SystemExit, never a bare assert
-    (stripped under -O). Pure in its inputs so the mismatch cases are unit-
-    testable without a trainer."""
-    model_epoch = int(Path(model_path).stem.split("_")[-1])
-    ts_epoch, st_epoch = int(ts["update"]), int(st.get("epoch", -1))
-    ts_step, st_step = int(ts["global_step"]), int(st.get("global_step", -1))
-    if not (model_epoch == ts_epoch == st_epoch and ts_step == st_step):
-        raise SystemExit(f"[Resume] inconsistent checkpoint set under {Path(model_path).parent}: "
-                         f"model epoch {model_epoch}, trainer_state epoch {ts_epoch} "
-                         f"(global_step {ts_step}), train_state epoch {st_epoch} "
-                         f"(global_step {st_step}) — a crash mid-save; resume from an older "
-                         "complete set or use --resume <model.pt>")
-
-
-def load_full_resume(trainer, self_play_mgr, paths: dict) -> dict:
-    """Policy weights are loaded by the --resume path (resolve_resume_split);
-    this restores optimizer, counters and the sidecar. Returns
-    {"resumed_from_step", "epoch"}. Must run AFTER every trainer patch so the
-    aliases restore_train_state writes into exist."""
-    import torch
-    ts = torch.load(paths["trainer_state_path"],
-                    map_location=trainer.config["device"],
-                    weights_only=False)
-    st = torch.load(paths["train_state_path"], map_location="cpu", weights_only=False)
-    check_checkpoint_set(paths["model_path"], ts, st)
-    trainer.optimizer.load_state_dict(ts["optimizer_state_dict"])
-    trainer.global_step = int(ts["global_step"])
-    trainer.epoch = int(ts["update"])
-    restore_train_state(trainer, self_play_mgr, st)
-    print("[Resume] WARN: resume not bit-exact for env sampling (env xorshift32 state is "
-          "not checkpointed).")
-    return {"resumed_from_step": trainer.global_step, "epoch": trainer.epoch}
-
-
-def check_resume_metrics_bound(resumed_step: int, last_row_step: int, checkpoint_interval: int,
-                               steps_per_epoch: int) -> tuple[int, int]:
-    """Spec §R0-C sanity bound of a restored global_step against the last
-    metrics.jsonl row of the same run_id. Returns (lo, hi); raises SystemExit
-    (never a bare assert — stripped under -O) when outside.
-
-    Both sides are checkpoint_interval epochs wide: checkpoints fire every
-    checkpoint_interval epochs unconditionally (pufferl.py train loop), but
-    a row is only written when PuffeRL builds `logs`, which it throttles to
-    ≥0.25 s since the last log — so with fast epochs the last row can be up
-    to checkpoint_interval-1 epochs BEHIND the checkpoint (hence + rather
-    than the one-epoch upper side the brief sketched), and the checkpoint
-    can be up to checkpoint_interval epochs behind the last row."""
-    lo = last_row_step - checkpoint_interval * steps_per_epoch
-    hi = last_row_step + checkpoint_interval * steps_per_epoch
-    if not lo <= resumed_step <= hi:
-        raise SystemExit(f"[Resume] restored global_step {resumed_step} outside [{lo}, {hi}] "
-                         f"around last metrics row {last_row_step} "
-                         f"(checkpoint_interval={checkpoint_interval}, "
-                         f"steps/epoch={steps_per_epoch})")
-    return lo, hi
-
-
-def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
-    """Return (agents_per_env, bptt_horizon, batch_size) used by both training
-    and --dump-config. Single source of truth so the fingerprint dict captured
-    pre-training cannot drift from what train() actually runs.
-    """
-    agents_per_env = 10
-    bptt_horizon = 64
-    batch_size = num_envs * agents_per_env * bptt_horizon
-    return agents_per_env, bptt_horizon, batch_size
-
-
-# ── Rung 1a T3 (spec 2026-08-30 §2): opponent-team control mode ────────────
-#   "self" — the opponent team is driven by the current (or, on a self-play
-#            epoch, a past) policy and its rows train exactly like the hero's.
-#            Every pre-Rung-1a run.
-#   "noop" — the opponent team is a STATIONARY STATUE: discrete bin 0 on every
-#            action head, zero aim delta, and its rows are excluded from
-#            participation (no global_step, no gradient, no loss term) and from
-#            the --timesteps budget.
-OPPONENT_MODES = ("self", "noop")
-
-
-def resolve_opponent_mode(args) -> str:
-    """Read ``--opponent`` off an args object, with the legacy-args fallback.
-
-    WHAT: returns "self" or "noop"; raises ValueError on anything else. The
-    getattr default keeps harness / ``--dump-config`` / older SimpleNamespace
-    callers (which predate the flag) on the historical self-play behaviour —
-    same contract as env_knobs_from_args' stance knobs.
-
-    WHY validate here instead of trusting argparse's ``choices=``:
-    build_train_config is also reached from hand-built namespaces (the test
-    harness, sweep scripts), where a typo'd mode would fall through to the
-    `self` budget formula while the evaluate() statue override silently never
-    fires — a run that looks healthy and trains on the wrong horizon.
-    """
-    mode = getattr(args, "opponent", "self")
-    if mode not in OPPONENT_MODES:
-        raise ValueError(f"opponent={mode!r} must be one of {OPPONENT_MODES}")
-    return mode
-
-
-def assert_opponent_self_play_compatible(opponent: str, self_play_enabled: bool) -> None:
-    """Startup guard: ``--opponent noop`` requires ``--no-self-play``.
-
-    WHY (spec 2026-08-30 §2 T3, "team constancy"): the statue is whichever team
-    SelfPlayManager.opponent_team names. That starts at "ct" but self-play
-    bookkeeping flips it every ``phase_length`` (50) epochs via
-    maybe_switch_teams — which would hand the hero the OTHER side of a
-    spawn-asymmetric map partway through the run while the participation vector
-    (built ONCE, statically, for the initial hero team) kept masking the old
-    side. Self-play also mixes past-policy actions into the opponent rows,
-    which is the opposite of a statue.
-
-    Called from main() ABOVE the --dump-config exit (so the Modal/sweep
-    fingerprint step rejects the combination in milliseconds, like
-    validate_aim_log_std_max) and again at the top of train() for programmatic
-    callers. Raising ValueError matches validate_aim_log_std_max's precedent.
-    """
-    if opponent == "noop" and self_play_enabled:
-        raise ValueError("--opponent noop requires --no-self-play. The statue team is "
-                         "SelfPlayManager.opponent_team, which self-play flips every "
-                         "phase_length epochs (and mixes past policies into), while the "
-                         "participating-rows vector is built once for the initial hero "
-                         "team — the two would silently disagree mid-run.")
-
-
-def build_participating_rows(num_envs: int,
-                             n_active: int,
-                             opponent_mode: str = "self",
-                             hero_team: str = "t") -> np.ndarray:
-    """Static per-run participation vector over agent ROWS (Rung 0 §2.2 / T3).
-
-    WHAT: bool array of length ``num_envs * agents_per_env`` in the env-row-major
-    layout the vecenv hands back (10 rows per env: T at slots 0-4, CT at 5-9).
-    True = the row TRAINS — it counts toward ``global_step``, is scattered into
-    ``trainer.participating`` and survives every masked reduction in train().
-
-      - ``opponent_mode="self"``: slots 0..n_active-1 of BOTH teams. Bit-identical
-        to the pre-T3 expression ``(i % TEAM_SIZE) < n_active``.
-      - ``opponent_mode="noop"``: those slots of the HERO team only. The statue
-        team neither learns nor is counted.
-
-    WHY a shared helper: this vector used to be built by two copies of the same
-    expression (train() and train_test_harness), and it sits UPSTREAM of
-    global_step, the buffer scatter, every masked loss and
-    losses/participating_rows. Patching one copy would have left the headline
-    harness test green while production still trained on both teams — precisely
-    the silent failure this experiment cannot afford.
-
-    PITFALLS
-    - Derived from ARGS, while the envs are built separately from the same
-      args; train() keeps an explicit driver-env agreement assert beside its
-      call site, and _patch_trainer_with_hybrid_aim re-checks the length.
-    - ``hero_team`` must stay the complement of SelfPlayManager.opponent_team
-      (use SelfPlayManager.initial_hero_team()). Under "noop" that team is
-      constant for the whole run because the mode forbids self-play; a
-      disagreement would mask the statue's rows IN and the learner's rows OUT
-      while every metric still looked plausible.
-    """
-    if opponent_mode not in OPPONENT_MODES:
-        raise ValueError(f"opponent_mode={opponent_mode!r} must be one of {OPPONENT_MODES}")
-    if hero_team not in ("t", "ct"):
-        raise ValueError(f"hero_team={hero_team!r} must be 't' or 'ct'")
-    if not 1 <= n_active <= TEAM_SIZE:
-        raise ValueError(f"n_active={n_active} outside 1..{TEAM_SIZE}")
-    agents_per_env, _, _ = compute_batch_dims(num_envs)
-    # The T/CT halves are what make `hero_team` meaningful; assert rather than
-    # assume, so a future roster change fails here instead of silently marking
-    # half of some other layout.
-    assert agents_per_env == 2 * TEAM_SIZE, (agents_per_env, TEAM_SIZE)
-    slot = np.arange(num_envs * agents_per_env) % agents_per_env
-    rows = (slot % TEAM_SIZE) < n_active
-    if opponent_mode == "noop":
-        rows &= (slot < TEAM_SIZE) if hero_team == "t" else (slot >= TEAM_SIZE)
-    return rows
 
 
 # First --seed whose base 42_950 * 100_000 = 4_295_000_000 exceeds 2**32 - 1
@@ -1236,260 +651,6 @@ def env_seed_base(seed: int) -> int:
         raise ValueError(f"--seed must be in [0, {_MAX_SEED}) so env_seed_base(seed) + i "
                          f"fits uint32 (C seed is masked & 0xFFFFFFFF); got {seed}")
     return seed * 100_000
-
-
-def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
-    """Construct the train_config dict identically to the training path.
-
-    Extracted so --dump-config can produce the exact same dict without
-    spinning up an env. Any future changes to training HPs must live here,
-    not duplicated in train(). Keep this semantically identical to what
-    train() used to build inline — scripts/run_experiment.py hashes this
-    dict as a fingerprint, so silent drift here invalidates experiment
-    provenance.
-    """
-    # ── Warm-start entropy mode (spec 2026-08-01) ──
-    # Two-phase override for BC-warm-started runs: GRACE (alpha clamped to the
-    # ceiling, alpha-optimizer paused, hard entropy floor disabled) then RAMP
-    # (target re-anchored at measured H, rising to base_frac*max; floor still
-    # off, re-arms at ramp end). At the default ceiling of 0.0 the GRACE window
-    # turns the entropy bonus fully OFF — pure PPO on reward, not merely a small
-    # bonus. Explicit flag, NO auto-detection: config.json is dumped BEFORE the
-    # resume block loads the checkpoint, so an auto-set flag would be recorded
-    # False — provenance poison (spec finding 3). The getattr defaults keep
-    # harness/dump-config args objects (which may predate these flags) working.
-    # Read out here rather than inline in the dict below: yapf snaps that dict's
-    # comment column past the longest line in the block, so long inline
-    # getattr() calls would re-indent every comment in it.
-    #
-    # CONTRACTS for the trainer wiring (do not re-derive these downstream):
-    # 1. Both *_steps are trainer.global_step units — PARTICIPATING agent steps
-    #    (Rung 0: 5× fewer raw env steps per unit at n_active=1), the same
-    #    counter entropy_target_warmup_steps and target_entropy_schedule use.
-    # 2. No CLI validation, deliberately. The pure schedule helper
-    #    warmstart_entropy_state treats ramp_steps <= 0 as "jump straight to OFF
-    #    at grace end" (tested: test_ramp_steps_zero_goes_straight_to_off), so 0
-    #    is a legal no-ramp request, NOT a divide-by-zero; negative values are
-    #    documented as equivalent to 0. A negative grace_steps simply means the
-    #    grace window ends immediately (the test is step < grace_steps).
-    # 3. The ceiling applies to the LINEAR effective alpha —
-    #    torch.clamp(alpha, max=ceiling) — never to log_alpha, since the 0.0
-    #    default would be log(0) = -inf. The hard entropy floor must be gated
-    #    off before/independently of the ceiling clamp, or the floor's
-    #    clamp(min=0.5) and this clamp(max=0.0) fight each other.
-    ws_entropy = bool(getattr(args, "warmstart_entropy", False))
-    ws_grace = int(getattr(args, "warmstart_grace_steps", 5_000_000))
-    ws_ramp = int(getattr(args, "warmstart_ramp_steps", 10_000_000))
-    ws_alpha_ceil = float(getattr(args, "warmstart_alpha_ceiling", 0.0))
-
-    # ── Reward weights + symmetrization (spec 2026-08-01) ──
-    # Read out here (not inline in the dict) for the same reason as the
-    # warmstart block above: yapf snaps the returned dict's comment column to
-    # its longest line. Grouping/labelling of the weights lives on
-    # REWARD_WEIGHT_DEFAULTS, the single source of truth.
-    reward_weights = reward_overrides_from_args(args)
-    reward_symmetrize = bool(getattr(args, "reward_symmetrize", False))
-
-    # ── TAG diagnostic (spec 2026-08-13 §4.1) ──
-    # getattr fallbacks keep harness/dump-config args objects that predate
-    # these flags working, same pattern as the warmstart block above.
-    # NOTE: these keys change exp_lib.behavior_hash for ALL future runs
-    # (hash covers sorted config.json) — recorded decision, spec §4.1.
-    tag_diagnostic = bool(getattr(args, "tag_diagnostic", False))
-    tag_every = int(getattr(args, "tag_every", 5))
-
-    # ── Batch 7 heads split (spec 2026-08-13 §2) ──
-    # getattr fallback, same pattern as the TAG block above. This records the
-    # FLAG, not the resolved architecture: a flag-less crash-resume of a split
-    # run writes false here on purpose, which is precisely why the analyzer
-    # reads the per-epoch split/active metric rather than config.json
-    # (spec §3.4). Adding this key also shifts exp_lib.behavior_hash for all
-    # future runs — recorded decision, spec §6.
-    tct_split_heads = bool(getattr(args, "tct_split_heads", False))
-    # Trunk twin (spec 2026-08-15): same FLAG-not-architecture contract as
-    # heads. A flag-less crash-resume of a trunk-split run writes false
-    # here on purpose; the analyzer reads split/trunk_active instead.
-    tct_split_trunk = bool(getattr(args, "tct_split_trunk", False))
-
-    # ── Rung 0 §2.2 + Rung 1a T3: participating-units budget ──
-    # --timesteps is the PARTICIPATING agent-step budget (what the policy
-    # actually learns from), NOT the raw row count. PufferLib's epoch cap
-    # (total_epochs = total_timesteps // batch_size, pufferl.py:168-170, which
-    # also sets the cosine-LR T_max) counts RAW buffer rows, so the raw budget
-    # handed to it is scaled by (rows per env) / (participating rows per env).
-    # Both numbers are recorded: done_training in _train_with_return_norm
-    # compares global_step (participating units) against
-    # participating_timesteps, and the epoch clause catches the floor-division
-    # slack.
-    # T3: the pre-T3 formula (args.timesteps * TEAM_SIZE // n_active) hardcoded
-    # "2 participating rows per env per active slot", i.e. BOTH teams. Under
-    # --opponent noop only the hero team participates, so that formula ends the
-    # run at HALF the requested budget with exit 0 — a silent short run
-    # (verified against smoke-v1c/s0: ~491,520 hero steps for a 1M request).
-    # The generalised form below reduces EXACTLY to the old one under
-    # --opponent self (10t/2n and 5t/n are the same rational, so the floor
-    # divisions agree for every t and n), keeping the `self` path bit-identical
-    # while putting cosine-LR T_max on the real horizon under noop:
-    # 1M requested at n_active=1, num_envs=256 ⇒ total_timesteps = 10M ⇒
-    # 61 epochs (batch 163,840; 61 × 16,384 = 999,424 hero steps).
-    # PITFALL: adding these keys shifts exp_lib.behavior_hash for all future
-    # runs (the hash covers sorted config.json) — recorded decision, same as
-    # the TAG/tct keys above, and the same for `opponent`, `jump_enabled` and
-    # `aim_log_std_init` below (plus the σ weight-decay exclusion of T1, which
-    # changes behaviour for every run without touching config.json at all).
-    # (the raw budget is bound to a local, not inlined in the dict below, for
-    # the same yapf reason as the warmstart block above: a long value
-    # expression inside the dict re-indents every trailing comment in it.)
-    knobs = env_knobs_from_args(args)
-    n_active = knobs["n_active_per_team"]
-    assert 1 <= n_active <= TEAM_SIZE, n_active
-    opponent = resolve_opponent_mode(args)
-    _part_per_env = n_active * (1 if opponent == "noop" else 2)
-    raw_timesteps = args.timesteps * (TEAM_SIZE * 2) // _part_per_env
-    # R0-E.3/4 (#131): aim-head knobs. CLI gives "on"/"off" for the entropy
-    # bonus (argparse choices); the test harness passes a bool — accept both so
-    # neither caller has to know the other's spelling. None cap ⇒ LOG_STD_MAX,
-    # so config.json always records the EFFECTIVE cap (provenance), never null.
-    # None of these are in RESUME_CONFIG_ALLOWLIST on purpose: a resume with a
-    # changed aim knob is a different experiment and must be refused.
-    _aeb = getattr(args, "aim_entropy_bonus", "on")
-    aim_entropy_bonus = _aeb if isinstance(_aeb, bool) else (_aeb == "on")
-    _cap = getattr(args, "aim_log_std_max", None)
-    aim_log_std_max = float(LOG_STD_MAX if _cap is None else _cap)
-    # Rung 1a T1: the σ a fresh aim head actually starts at — DERIVED from the
-    # cap, so it is provenance, not a knob (there is no --aim-log-std-init).
-    # Recorded because the gate's "σ moved ≥ 0.1" reading is |raw − init| and
-    # the reader must not have to re-derive the formula. Goes through the same
-    # helper build_policy uses so config.json and the policy cannot drift.
-    # PITFALL: this key AND the σ weight-decay exclusion
-    # (isolate_aim_log_std_param_group) shift exp_lib.behavior_hash for all
-    # future runs — recorded decision, same convention as the TAG/tct keys
-    # above. The weight-decay change is a real behaviour change for EVERY run,
-    # not just capped ones; the init only moves when cap < LOG_STD_INIT + 0.2.
-    aim_log_std_init = resolve_aim_log_std_init(aim_log_std_max)
-
-    # R0-H: env LABEL from the resolved map name. The CLI always sets args.map
-    # (above the --dump-config exit); the harness / older SimpleNamespace
-    # callers have no `map` attr and keep the historical "cs2-dust2". Not
-    # allowlisted for --resume-run: a different map is a different experiment.
-    map_name = getattr(args, "map", None) or "dust2"
-    # R0-J: --gamma / --pbrs-gamma. Same helper as env_knobs_from_args so the
-    # env's PBRS discount and the PPO discount cannot resolve differently.
-    gamma, pbrs_gamma = resolve_gammas(args)
-    cfg = {
-                                                                       # Core PPO
-        "env": f"cs2-{map_name}",
-        "device": args.device,
-        "seed": args.seed,
-        "total_timesteps": raw_timesteps,
-        "participating_timesteps": args.timesteps,
-        "n_active_per_team": n_active,
-        "pin_pitch": knobs["pin_pitch"],
-        "crouch_enabled": knobs["crouch_enabled"],
-                                                                       # Rung 1a T2b: provenance for --jump-enabled. Like the other Rung 0
-                                                                       # knobs it is NOT allowlisted for --resume-run (a run that masks
-                                                                       # jump is a different experiment) and adding it shifts
-                                                                       # exp_lib.behavior_hash for all future runs — recorded decision.
-        "jump_enabled": knobs["jump_enabled"],
-                                                                       # Rung 1a T3: "self" (both teams learn) or "noop" (statue opponent —
-                                                                       # hero-team-only participation AND budget, see raw_timesteps above).
-                                                                       # NOT a make_puffer_env knob: the statue is enforced trainer-side, in
-                                                                       # the patched evaluate(), so the env is identical either way. Not
-                                                                       # allowlisted for --resume-run — a different opponent is a different
-                                                                       # experiment.
-        "opponent": opponent,
-                                                                       # R0-G: recorded as given (None ⇒ env default), read from args
-                                                                       # directly so None survives — env_knobs_from_args drops None keys.
-        **{
-            a: getattr(args, a, None)
-            for a, _ in _R0G_KNOBS
-        },
-        "aim_entropy_bonus": aim_entropy_bonus,
-        "aim_log_std_max": aim_log_std_max,
-                                                                       # Rung 1a T1: DERIVED from the cap (no CLI flag of its own); the
-                                                                       # gate reads σ movement as |raw − init|, so it is provenance.
-        "aim_log_std_init": aim_log_std_init,
-                                                                       # R0-I: fixed-baseline eval cadence (0 = off). Provenance only —
-                                                                       # not allowlisted for --resume-run (Task 7 rule: new CLI flags are
-                                                                       # config keys, not allowlist entries).
-        "eval_interval": int(getattr(args, "eval_interval", 0) or 0),
-        "batch_size": batch_size,
-        "bptt_horizon": bptt_horizon,
-        "minibatch_size": 8192,
-        "max_minibatch_size": 8192,
-        "update_epochs": 3,
-        "learning_rate": 3e-4,
-        "gamma": gamma,
-        "pbrs_gamma": pbrs_gamma,                                      # R0-J: provenance; not allowlisted for --resume-run
-        "gae_lambda": 0.95,
-        "clip_coef": 0.15,
-        "vf_coef": 0.5,
-        "vf_clip_coef": None,
-        "ent_coef": 0.1,                                               # fallback; adaptive alpha overrides
-        "max_grad_norm": 0.5,
-        "target_kl": 0.03,
-        "use_rnn": True,
-        "weight_decay": 1e-4,
-                                                                       # Extras required by PuffeRL constructor
-        "compile": False,
-        "compile_mode": "default",
-        "compile_fullgraph": False,
-        "cpu_offload": False,
-        "torch_deterministic": False,
-        "optimizer": "adam",
-        "adam_beta1": 0.9,
-        "adam_beta2": 0.999,
-        "adam_eps": 1e-8,
-        "anneal_lr": True,
-        "checkpoint_interval":
-        int(getattr(args, "checkpoint_interval",
-                    DEFAULT_CHECKPOINT_INTERVAL)),                     # R0-C: --checkpoint-interval
-        "data_dir": args.checkpoint_dir,
-        "precision": "float32",
-        "prio_alpha": 0.0,
-        "prio_beta0": 1.0,
-        "vtrace_rho_clip": 1.0,
-        "vtrace_c_clip": 1.0,
-                                                                       # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
-                                                                       # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
-                                                                       # warmup_steps, held constant after; consumed by the SAC-style α
-                                                                       # controller via _scheduled_target_entropy. Previous hardcoded values
-                                                                       # (0.7→0.5) kept the target so high the controller steered the policy
-                                                                       # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
-                                                                       # ≈ 2.87 nats still allows broad exploration but permits commitment.
-                                                                       # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
-                                                                       # _patch_trainer_with_return_norm clamps α ≥ 0.5 when H < 0.3·max;
-                                                                       # a base target below the floor would make the two mechanisms fight.
-        "entropy_target_warmup_frac": 0.5,
-        "entropy_target_base_frac": 0.35,
-        "entropy_target_warmup_steps": 10_000_000,
-                                                                       # ── Warm-start entropy mode: see the comment above ──
-        "warmstart_entropy": ws_entropy,
-        "warmstart_grace_steps": ws_grace,
-        "warmstart_ramp_steps": ws_ramp,
-        "warmstart_alpha_ceiling": ws_alpha_ceil,
-        "reward_symmetrize": reward_symmetrize,
-        "tag_diagnostic": tag_diagnostic,
-        "tag_every": tag_every,
-        "tct_split_heads": tct_split_heads,
-        "tct_split_trunk": tct_split_trunk,
-    }
-
-    # ── Reward wiring: 23 make_env weights, verbatim key names ──
-    # (grouped + annotated on REWARD_WEIGHT_DEFAULTS, the single source of
-    # truth). Merged via an explicit collision check rather than a trailing
-    # `**reward_weights` splat: a splat in last position would SILENTLY
-    # overwrite an existing config key if someone ever adds a make_env weight
-    # named like one of the keys above, and the resulting config would look
-    # perfectly well-formed. This assert is the only thing that actually
-    # catches that — the pin test compares against make_env's signature and
-    # would not notice a collision on this side. Key order does not matter:
-    # every config.json / fingerprint dump uses sort_keys=True.
-    assert not (cfg.keys() & reward_weights.keys()), (
-        "reward weight name collides with an existing config key: "
-        f"{sorted(cfg.keys() & reward_weights.keys())}")
-    cfg.update(reward_weights)
-    return cfg
 
 
 def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> float:
@@ -2108,92 +1269,6 @@ def evaluate_checkpoint(checkpoint_path=None,
 
 def make_env(team_spirit=None, map_data=None):
     return make_puffer_env(team_spirit=team_spirit, map_data=map_data)
-
-
-DEFAULT_GAMMA = 0.999                  # R0-J: the historical PPO discount; --gamma default
-
-
-def resolve_gammas(args) -> tuple[float, float]:
-    """Return ``(gamma, pbrs_gamma)`` from the args object.
-
-    WHAT: ``gamma`` is ``args.gamma`` (default DEFAULT_GAMMA for harness /
-    dump-config args objects that predate the flag); ``pbrs_gamma`` is
-    ``args.pbrs_gamma`` when given, else ``gamma``.
-
-    WHY one helper: build_train_config (provenance + the PPO discount) and
-    env_knobs_from_args (the env's PBRS discount) must agree on the SAME
-    resolution rule — PBRS is only policy-invariant (Ng et al.) when
-    γ_pbrs == γ, and before R0-J the two lived as unrelated literals (train.py
-    0.999 vs cs2_env.py 0.999) held together by a single drift test.
-    ``--pbrs-gamma`` exists ONLY for experiments that deliberately break the
-    pairing; a run that omits it always gets γ_pbrs = γ.
-
-    PITFALL: both values are config.json keys and NOT in
-    RESUME_CONFIG_ALLOWLIST — changing either on --resume-run is refused.
-    """
-    gamma = getattr(args, "gamma", None)
-    gamma = DEFAULT_GAMMA if gamma is None else float(gamma)
-    if not (0.0 < gamma < 1.0):
-        raise ValueError(f"--gamma must be in (0, 1), got {gamma}")
-    pbrs_gamma = getattr(args, "pbrs_gamma", None)
-    pbrs_gamma = gamma if pbrs_gamma is None else float(pbrs_gamma)
-    if not (0.0 < pbrs_gamma <= 1.0):
-        raise ValueError(f"--pbrs-gamma must be in (0, 1], got {pbrs_gamma}")
-    if pbrs_gamma != gamma:
-        print(f"WARNING: --pbrs-gamma {pbrs_gamma} != --gamma {gamma}: PBRS shaping is no "
-              "longer policy-invariant (Ng et al.); only do this on purpose.")
-    return gamma, pbrs_gamma
-
-
-# (args attr, make_puffer_env kwarg) — single source for env_knobs_from_args
-# AND build_train_config, so a knob added to one cannot be missed by the other
-# (config.json would then silently under-record the experiment).
-_R0G_KNOBS = (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
-              ("max_turn_speed", "max_turn_speed"))
-
-
-def env_knobs_from_args(args) -> dict:
-    """Non-weight env knobs (Rung 0) as make_puffer_env kwargs.
-
-    WHY one helper: build_train_config (provenance), build_train_env_factory
-    (the envs) and train()'s participating-row vector must all read the same
-    values; a second copy of these getattr defaults would be the next
-    silent-baseline bug (the class of bug build_train_env_factory exists to
-    prevent for reward weights). getattr defaults keep harness/dump-config
-    args objects — which predate these flags — working.
-
-    PITFALL: this returns make_puffer_env KWARG names, not config keys. It is
-    splatted straight into make_puffer_env(**env_knobs); renaming a key here
-    without renaming the parameter there raises TypeError inside a forked
-    vecenv worker, far from the mistake.
-
-    R0-G knobs (round_time_ticks → round_time, laser_range, max_turn_speed):
-    None-valued ones are OMITTED from the dict rather than forwarded as None,
-    so the env's own nav.py default applies and config.json records None
-    instead of a duplicated constant that would silently drift from nav.py.
-
-    R0-J: ``pbrs_gamma`` is ALWAYS present (resolved via resolve_gammas, so it
-    equals the training gamma unless --pbrs-gamma was given). Unlike the R0-G
-    knobs it is never omitted: the env default (cs2_env.py 0.999) would
-    silently disagree with a non-default --gamma.
-    """
-    knobs = {
-        "n_active_per_team": int(getattr(args, "n_active_per_team", TEAM_SIZE)),
-                                                                                 # R0-E.2: `or 0` — args.pin_pitch is None on the CLI until train()
-                                                                                 # resolves it from map flatness (see the pin_pitch block in train()).
-        "pin_pitch": int(getattr(args, "pin_pitch", 0) or 0),
-        "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
-                                                                                 # Rung 1a T2b: same shape as crouch_enabled — always present (1 =
-                                                                                 # today's env), never omitted, so a legacy args object cannot
-                                                                                 # silently leave the env on a different jump setting than config.json.
-        "jump_enabled": int(getattr(args, "jump_enabled", 1)),
-        "pbrs_gamma": resolve_gammas(args)[1],
-    }
-    for arg_name, env_name in _R0G_KNOBS:
-        v = getattr(args, arg_name, None)
-        if v is not None:
-            knobs[env_name] = v
-    return knobs
 
 
 def build_env_factory(*,
@@ -4335,43 +3410,6 @@ def check_spawn_counts(vecenv, map_name: str) -> tuple[int, int]:
     if map_name == "arena-duel" and (n_t, n_ct) != (4, 4):
         raise RuntimeError(f"ARENA_DUEL_V1 expects 4 T + 4 CT spawn areas, env has {n_t} + {n_ct}")
     return n_t, n_ct
-
-
-def pin_pitch_for_map(map_data) -> int:
-    """R0-E.2 (#131): 1 iff the map is FLAT (every area centroid shares one z).
-
-    WHAT: pure geometry test on the MapData the envs will actually run on.
-    ``map_data=None`` means "the cs2 nav map" (exactly what make_env(map_data=
-    None) loads, via the same _ENV_CACHE), so None is resolved by LOADING that
-    map — never by treating the sentinel as a map property.
-
-    WHY: a flat map has nothing to aim up/down at, so pitch is pure noise
-    (spec §R0-E.2) and gets pinned; a map with elevation must keep the pitch
-    dim trainable. Deciding on the sentinel (`map_data is None` ⇒ flat) was
-    the Task 9 review's Critical #1: the CLI `--dust2` path passes None, so
-    the value MUST come from the loaded map, not from the marker.
-
-    PITFALL: the in-sim dust2 (map.make_cs2_map, "verticality deferred")
-    zero-fills centroids_z, so today this returns 1 for dust2 — by spec (plan
-    §R0-E.2: pinned on flat maps incl. dust2). There is NO name-based table:
-    the `--map` path (build_map_data → resolve_pin_pitch) and the `--dust2`
-    path both end here. When real dust2 verticality lands this flips to 0 by
-    itself and every dust2 resume is refused by the config guard (pin_pitch is
-    not allowlisted) — the intended tripwire.
-    """
-    md = map_data
-    if md is None:
-        # Same cache key make_env uses, so train() never loads the nav twice.
-        import nav
-        from c_env.cs2_env import _ENV_CACHE
-        from map import make_cs2_map
-        key = (nav.NAV_PATH, nav.CACHE_PATH)
-        md = _ENV_CACHE.get(key)
-        if md is None:
-            md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)
-            _ENV_CACHE[key] = md
-    z = np.asarray(md.centroids_z, dtype=np.float32)
-    return int(float(z.max() - z.min()) == 0.0)
 
 
 def resolve_pin_pitch(args, verbose: bool = True) -> int:
