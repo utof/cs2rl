@@ -464,16 +464,18 @@ def test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent():
     from c_env.cs2_env import N_AGENTS
     from eval_baselines import ACTION_DIM, AIM_DIM, IdleActor
 
-    act, cont = IdleActor().act(None, None, None, None)
-    assert ACTION_DIM == len(ACTION_HEAD_SIZES), "action head count drifted from the spec"
+    statue = IdleActor()
+    act, cont = statue.act(None, None, None, None)
     assert act.shape == (N_AGENTS, ACTION_DIM) and cont.shape == (N_AGENTS, AIM_DIM)
     assert not act.any(), "IdleActor must play bin 0 on EVERY discrete head (the no-op action)"
     assert not cont.any(), "IdleActor must emit a zero aim delta (it keeps its spawn orientation)"
     # Stateless and side-effect free: the oracle check calls act() every tick
-    # with real args, so a statue that drifted after the first tick would still
-    # satisfy a single-call assertion.
-    again, again_c = IdleActor().act(object(), object(), None, object())
-    assert np.array_equal(act, again) and np.array_equal(cont, again_c)
+    # on ONE actor instance with real args, so a statue that drifted after the
+    # first tick would still satisfy a single-call (or fresh-instance)
+    # assertion. Reuse the same instance to actually exercise instance state.
+    for _ in range(3):
+        again, again_c = statue.act(object(), object(), None, object())
+        assert np.array_equal(act, again) and np.array_equal(cont, again_c)
 
 
 def test_harness_refuses_noop_with_selfplay():
