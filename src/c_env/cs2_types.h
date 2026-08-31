@@ -272,12 +272,21 @@ typedef struct {
      *   pin_pitch         — 1 => continuous_actions[i*AIM_DIM+1] is ignored,
      *                       a->pitch stays 0 (flat maps; R0-E.2). Declared
      *                       here in Rung 0; the consumer lands in a later task.
-     *   crouch_enabled    — 0 => compute_masks masks HEAD_CROUCH bin 1.
-     *                       Declared here; the consumer lands in a later task.
-     *   jump_enabled      — 0 => compute_masks masks HEAD_JUMP bin 1. Exact
-     *                       mirror of crouch_enabled (Rung 1a shrinks the
-     *                       action space to the aim problem; a jumping agent
-     *                       also leaves the pinned-pitch hit band, gh #150).
+     *   crouch_enabled    — 0 => the sim IGNORES HEAD_CROUCH entirely
+     *                       (W5, #156): process_movement zeroes crouch_act at
+     *                       the read, so the agent never crouches and the
+     *                       crouch histogram never counts the press, on EVERY
+     *                       path — including raw env_step callers that bypass
+     *                       the mask (scripted bots #152, BC replay, tests).
+     *                       compute_masks still masks HEAD_CROUCH bin 1; that
+     *                       is now an optimisation (don't spend policy
+     *                       probability mass on a bin the sim drops), not the
+     *                       mechanism.
+     *   jump_enabled      — 0 => the sim IGNORES HEAD_JUMP entirely. Exact
+     *                       mirror of crouch_enabled, same W5 guard, same
+     *                       surviving mask (Rung 1a shrinks the action space to
+     *                       the aim problem; a jumping agent also leaves the
+     *                       pinned-pitch hit band, gh #150).
      * PITFALL: cs2_demo.c load_nav_data memsets StaticData and assigns by
      * name — it must set n_active_per_team=TEAM_SIZE, pin_pitch=0 and
      * crouch_enabled=jump_enabled=1 or the demo silently parks everyone /

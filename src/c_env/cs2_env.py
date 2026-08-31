@@ -899,8 +899,8 @@ class Cs2Env(pufferlib.PufferEnv):
             recoil: bool = False,                                               # #120: punch on ray; default off (today's hitscan)  # noqa: E501
             n_active_per_team: int = TEAM_SIZE,                                 # Rung 0 §2.1: agents per team that spawn  # noqa: E501
             pin_pitch: int = 0,                                                 # Rung 0 R0-E.2: ignore pitch action  # noqa: E501
-            crouch_enabled: int = 1,                                            # Rung 0 R0-E.2: mask crouch when 0  # noqa: E501
-            jump_enabled: int = 1,                                              # Rung 1a T2a: mask jump when 0  # noqa: E501
+            crouch_enabled: int = 1,                                            # Rung 0 R0-E.2 + W5: sim ignores crouch when 0  # noqa: E501
+            jump_enabled: int = 1,                                              # Rung 1a T2a + W5: sim ignores jump when 0  # noqa: E501
             round_time: int
         | None = None,                                                          # Rung 0 R0-G: ticks per round; None ⇒ nav.ROUND_TIME  # noqa: E501
             laser_range: float
@@ -1659,8 +1659,8 @@ def make_env(
         recoil: bool = False,                                          # #120: punch on ray; default off
         n_active_per_team: int = TEAM_SIZE,                            # Rung 0 §2.1: agents per team that spawn
         pin_pitch: int = 0,                                            # Rung 0 R0-E.2: ignore pitch action
-        crouch_enabled: int = 1,                                       # Rung 0 R0-E.2: mask crouch when 0
-        jump_enabled: int = 1,                                         # Rung 1a T2a: mask jump when 0
+        crouch_enabled: int = 1,                                       # Rung 0 R0-E.2 + W5: sim ignores crouch
+        jump_enabled: int = 1,                                         # Rung 1a T2a + W5: sim ignores jump
         round_time: int | None = None,                                 # Rung 0 R0-G: None ⇒ nav.ROUND_TIME
         laser_range: float | None = None,                              # Rung 0 R0-G: None ⇒ nav.LASER_RANGE
         max_turn_speed: float | None = None,                           # Rung 0 R0-G: None ⇒ nav.MAX_TURN_SPEED_RAD
