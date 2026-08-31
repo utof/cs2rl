@@ -227,8 +227,16 @@ def _capture():
         "round_time": 900,
     }
     overrides = {"reward_ct_survival": 0.0, "reward_t_kill": 2.5}
+    # The three scenarios cover the three branches of the call site's
+    # `_seed if _seed is not None else (seed or 0)`:
+    #   per_env_seed_wins        R0-D — env_kwargs["_seed"] wins over the seed
+    #                            pufferlib passes.
+    #   pufferlib_seed_no_knobs  legacy path, no _seed, so pufferlib's own seed
+    #                            is used verbatim. Also pins that env_knobs=None
+    #                            splats nothing rather than passing None.
+    #   seed_none_becomes_zero   `seed or 0` — pufferlib passes seed=None for
+    #                            some backends.
     roles["train"] = [
-                                                                                         # R0-D: env_kwargs["_seed"] wins over the seed pufferlib passes.
         _record(
             rec, train_py, "build_env_factory.env_factory", "per_env_seed_wins", {
                 "shared_ts": S_SHARED_TS,
@@ -240,8 +248,6 @@ def _capture():
                 "reward_symmetrize": True,
                 "env_knobs": knobs,
             }),
-                                                                                         # Legacy path: no _seed, so pufferlib's own seed is used verbatim. Also
-                                                                                         # pins that env_knobs=None splats nothing rather than passing None.
         _record(
             rec, train_py, "build_env_factory.env_factory", "pufferlib_seed_no_knobs", {
                 "shared_ts": S_SHARED_TS,
@@ -253,7 +259,6 @@ def _capture():
                 "reward_symmetrize": False,
                 "env_knobs": None,
             }),
-                                                                                         # `seed or 0` — pufferlib passes seed=None for some backends.
         _record(
             rec, train_py, "build_env_factory.env_factory", "seed_none_becomes_zero", {
                 "shared_ts": S_SHARED_TS,
@@ -303,7 +308,10 @@ def _capture():
     # defaults to 0 so this env is never built during the §3 run or the suite's
     # train runs. This capture is the only thing that sees it.
     # The two helper functions are bound to the REAL implementations, so the
-    # recorded overrides/knobs are the values a run would actually derive.
+    # recorded overrides/knobs are the values a run would actually derive. The
+    # `resolved` extra below spells those derived values out separately, so the
+    # post-migration test can feed the factory the same inputs without
+    # re-deriving them from the very oracle it is checking.
     eval_args = argparse.Namespace(reward_ct_survival=0.0,
                                    n_active_per_team=3,
                                    pin_pitch=1,
@@ -314,26 +322,21 @@ def _capture():
     roles["eval"] = []
     for name, a in (("default_args", argparse.Namespace()), ("non_default_args", eval_args)):
         roles["eval"].append(
-            _record(
-                rec,
-                train_py,
-                "train",
-                name,
-                {
-                    "_map_data": S_MAP_DATA,
-                    "args": a,
-                    "reward_overrides_from_args": reward_overrides_from_args,
-                    "env_knobs_from_args": env_knobs_from_args,
-                },
-                extra={
-                                                                              # The derived values spelled out, so the post-migration
-                                                                              # test can feed the factory the same inputs without
-                                                                              # re-deriving them from the oracle it is checking.
-                    "resolved": {
-                        "reward_overrides": reward_overrides_from_args(a),
-                        "env_knobs": env_knobs_from_args(a),
-                    }
-                }))
+            _record(rec,
+                    train_py,
+                    "train",
+                    name, {
+                        "_map_data": S_MAP_DATA,
+                        "args": a,
+                        "reward_overrides_from_args": reward_overrides_from_args,
+                        "env_knobs_from_args": env_knobs_from_args,
+                    },
+                    extra={
+                        "resolved": {
+                            "reward_overrides": reward_overrides_from_args(a),
+                            "env_knobs": env_knobs_from_args(a),
+                        }
+                    }))
 
     # ── eval_legacy (TWO sites, differing only in seed) ─────────────────────
     # A bare call and a seed= call. Scalars cannot see the difference — seed is

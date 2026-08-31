@@ -44,6 +44,7 @@ from _action_spec import (
     ACTION_MASK_DIM,
     AIM_DIM,
 )
+from env_factory import build_env_for
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from resume_state import (
     _install_full_checkpointing,
@@ -1286,13 +1287,20 @@ def build_env_factory(*,
             raise TypeError(f"env_factory got unexpected kwargs {sorted(kwargs)}; "
                             "per-env kwargs are discarded — pass via build_env_factory "
                             "closure state")
-        env = make_puffer_env(team_spirit=shared_ts,
-                              buf=buf,
-                              seed=_seed if _seed is not None else (seed or 0),
-                              map_data=map_data,
-                              reward_overrides=reward_overrides,
-                              reward_symmetrize=reward_symmetrize,
-                              **(env_knobs or {}))
+        # W3 (#154): construction — and ONLY construction — routes through the
+        # role factory. The seed-precedence rule and the `env_knobs or {}` splat
+        # moved with it verbatim; tests/fixtures/env_kwargs_pre_w3.json holds the
+        # kwargs this call made before the move, and test_env_factory.py asserts
+        # the factory still produces them for all three seed branches.
+        env = build_env_for("train",
+                            shared_ts=shared_ts,
+                            buf=buf,
+                            seed=seed,
+                            _seed=_seed,
+                            map_data=map_data,
+                            reward_overrides=reward_overrides,
+                            reward_symmetrize=reward_symmetrize,
+                            env_knobs=env_knobs)
         # Attach the shared-memory views so the env (whether running in the
         # main process under Serial, or a forked worker under
         # Multiprocessing) can pull cont_actions written by the trainer and

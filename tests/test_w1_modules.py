@@ -40,7 +40,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 
 # Modules split out of train.py. Grows per task (spec §2 W1 / W3 / W4).
-W1_MODULES = ("train_shared", "resume_state", "train_config", "train_metrics", "train_update")
+#
+# `env_factory` (W3) is here for a reason beyond bookkeeping: it is the module
+# whose module scope is MOST tempting to make heavy, since its whole job is
+# constructing envs. Its `from train import make_puffer_env` has to stay
+# function-local both to break the cycle (train.py imports it at module level)
+# and to keep `import train` free of torch/nav/c_env.
+W1_MODULES = ("train_shared", "resume_state", "train_config", "train_metrics", "train_update",
+              "env_factory")
 
 # The one module every other split-out module is allowed to depend on. Spec §2 W1:
 # "The leaf imports nothing from train.py or the other new modules; every other new
