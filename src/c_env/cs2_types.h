@@ -182,12 +182,18 @@ typedef struct {
      *   - StaticDataC._fields_ in cs2_env.py  (ctypes mirror)
      *   - SD_PREFIX_FIELDS below              (per-field layout table: every
      *     field before wall_list needs a row, in this same order)
+     *   - the ten-pointer argument list in binding.c py_init() — POINTER
+     *     fields only; scalars travel in the packed buffer
      * A mismatch between the first two changes the layout hash on one side
      * only, so binding.init refuses to copy anything (spec 2026-08-31 §2 W2);
      * a missing SD_PREFIX_FIELDS row fails tests/test_static_data_layout.py.
      * For the ten POINTER fields the order also decides which numpy array each
-     * one receives — cs2_env.py derives that order from the mirror
-     * (_SD_POINTER_FIELDS), so keep the two declarations in step. */
+     * one receives. cs2_env.py derives the order it PASSES from the mirror
+     * (_SD_POINTER_FIELDS), so the call site follows a reorder on its own —
+     * but py_init's list is hand-written and does not, and nothing catches
+     * that: a consistent reorder leaves both layout hashes equal, and the
+     * Python-side pointer guard compares sets, not order. Reorder pointer
+     * fields in all three places or in none. */
     float*   centroids_z;     /* [N]             idx-indexed: terrain z per area   */
     int32_t* area_ids;        /* [N]             idx -> raw area_id                */
     int8_t*  bombsite_mask;   /* [max_area_id+1]  area_id-indexed (for _potential) */

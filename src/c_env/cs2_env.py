@@ -95,12 +95,17 @@ class StaticDataC(ctypes.Structure):
         #   - StaticData struct in cs2_types.h  (C canonical source)
         #   - SD_PREFIX_FIELDS in cs2_types.h   (per-field layout table; every
         #     field above wall_list needs a row there, in this same order)
+        #   - the ten-pointer argument list in binding.c py_init() — POINTER
+        #     fields only; scalars travel in the packed buffer
         # A mismatch with the C struct changes this side's layout hash only, so
         # binding.init refuses to copy anything. A missing SD_PREFIX_FIELDS row
         # fails tests/test_static_data_layout.py. Order still decides which
         # numpy array each POINTER field receives — _SD_POINTER_FIELDS below
         # derives that order from this list, so a reordering here moves the
-        # arguments with it.
+        # arguments with it, but py_init's hand-written list does NOT follow and
+        # nothing catches the mismatch: a consistent reorder leaves both layout
+        # hashes equal, and the pointer guard in __init__ compares sets, not
+        # order. Reorder pointer fields in all three places or in none.
         ("centroids_z", ctypes.POINTER(ctypes.c_float)),               # float32[N] — terrain z per area  # noqa: E501
         ("area_ids", ctypes.POINTER(ctypes.c_int32)),
         ("bombsite_mask", ctypes.POINTER(ctypes.c_int8)),
