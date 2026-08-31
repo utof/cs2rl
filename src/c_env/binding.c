@@ -666,7 +666,7 @@ static PyObject* py_static_data_layout(PyObject* self, PyObject* Py_UNUSED(ignor
  * Read every scalar StaticData field back out of a live env.
  *
  * WHAT: EVERY plain-number field of StaticData (int / int32_t / float), keyed
- * by its C field name — all 55 of them, not a curated subset. Excluded, because
+ * by its C field name — all 56 of them, not a curated subset. Excluded, because
  * they are not scalars: the pointer fields, the fixed arrays (delta_x, delta_y,
  * dir_facing, t_spawns, ct_spawns) and the nested wall_list / area_bounds,
  * which struct_sizes() covers with offsetof keys instead.
@@ -677,16 +677,12 @@ static PyObject* py_static_data_layout(PyObject* self, PyObject* Py_UNUSED(ignor
  * scalar-typed fields of the StaticDataC ctypes mirror. Appending a field to
  * cs2_types.h + the mirror and forgetting this function fails that test.
  *
- * WHY: struct_sizes() cannot detect a mis-ordered PyArg_ParseTuple FMT string
- * in py_init — two floats swapped still parse, still have identical sizes, and
- * silently feed reward_kill into reward_death. Tests push distinct sentinels
- * through Cs2Env and read them back here, so a transposition fails loudly.
- *
- * FMT ARG NUMBERING — stated once, used everywhere in this file and in the
- * positional comments on cs2_env.py's binding.init() call: FMT arg numbers are
- * 0-INDEXED (arg 0 is vis_matrix). CPython's own PyArg_ParseTuple failures are
- * 1-indexed ("argument 22 must be..."), so when cross-referencing a real error
- * message subtract 1 from what CPython printed to land on the comment's number.
+ * WHY: neither struct_sizes() nor the layout hash can detect a VALUE routed
+ * into the wrong field — both describe DECLARATIONS, and two floats swapped
+ * between the named assignments in cs2_env.py's `static_data` mapping keep
+ * every size, offset and type identical while silently feeding reward_kill into
+ * reward_death. Tests push distinct sentinels through Cs2Env and read them back
+ * here, so a transposition fails loudly.
  *
  * PITFALL: the capsule must be cast to BindingEnv*, NOT Dust2Env*. py_reset /
  * py_step / py_get_masks cast to Dust2Env* because env is BindingEnv's first
@@ -700,11 +696,11 @@ static PyObject* py_static_data_layout(PyObject* self, PyObject* Py_UNUSED(ignor
  *
  * PITFALL: add fields ONLY through the SD_INT / SD_FLOAT macros. They stringify
  * the field name, so the key and the value it carries cannot disagree. Do not
- * hand-roll a Py_BuildValue("{s:d,s:d,...}") with 52 pairs: that is the same
- * footgun as py_init's 73-arg FMT (which cs2_env.py extends only under
- * protest, and only at the tail), where one misplaced format char silently
- * mislabels every field after it — and a key/value swap is invisible to the
- * completeness test above. */
+ * hand-roll a Py_BuildValue("{s:d,s:d,...}") with 56 pairs: that is the same
+ * footgun as the 73-arg PyArg_ParseTuple format string py_init carried before
+ * spec 2026-08-31 §2 W2, where one misplaced format char silently mislabelled
+ * every field after it — and a key/value swap is invisible to the completeness
+ * test above. */
 
 /* Store `v` under `key`, stealing the reference. Returns -1 with a Python
  * exception already set if `v` is NULL (allocation failed) or the insert
@@ -760,7 +756,7 @@ static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
         return NULL;
     /* Listed in cs2_types.h declaration order so the two can be diffed
      * top-to-bottom; the dict is unordered, only the key set is contractual. */
-    /* Nav/raster geometry (FMT args 10–21): map-derived, not tunable. */
+    /* Nav/raster geometry: map-derived, not tunable. */
     SD_INT(N);
     SD_INT(grid_w);
     SD_INT(grid_h);
@@ -793,8 +789,8 @@ static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
     SD_INT(n_t_spawns);
     SD_INT(n_ct_spawns);
     SD_FLOAT(max_turn_speed);
-    /* Reward weights and PBRS coefficients (FMT args 46–68). This run of
-     * same-width floats is exactly where a transposed FMT string hides. */
+    /* Reward weights and PBRS coefficients. This run of same-width floats is
+     * exactly where a transposed pair of packing assignments hides. */
     SD_FLOAT(reward_win);
     SD_FLOAT(reward_win_t_detonation);
     SD_FLOAT(reward_win_t_elimination);
@@ -818,7 +814,7 @@ static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
     SD_FLOAT(pbrs_bomb_progress_weight);
     SD_FLOAT(pbrs_nav_weight_t);
     SD_FLOAT(pbrs_nav_weight_ct);
-    /* Rung 0 sim knobs (FMT args 69-71) + Rung 1a jump_enabled (72). */
+    /* Rung 0 sim knobs + Rung 1a jump_enabled. */
     SD_INT(n_active_per_team);
     SD_INT(pin_pitch);
     SD_INT(crouch_enabled);

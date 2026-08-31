@@ -93,11 +93,14 @@ class StaticDataC(ctypes.Structure):
         # T2 (verticality): per-area terrain elevation and ramp flag.
         # Field order MUST stay in sync with:
         #   - StaticData struct in cs2_types.h  (C canonical source)
-        #   - PyArg_ParseTuple format string in binding.c py_init()
         #   - SD_PREFIX_FIELDS in cs2_types.h   (per-field layout table; every
         #     field above wall_list needs a row there, in this same order)
-        # Mismatch here silently corrupts all pointer fields that follow.
-        # A missing SD_PREFIX_FIELDS row fails tests/test_static_data_layout.py.
+        # A mismatch with the C struct changes this side's layout hash only, so
+        # binding.init refuses to copy anything. A missing SD_PREFIX_FIELDS row
+        # fails tests/test_static_data_layout.py. Order still decides which
+        # numpy array each POINTER field receives — _SD_POINTER_FIELDS below
+        # derives that order from this list, so a reordering here moves the
+        # arguments with it.
         ("centroids_z", ctypes.POINTER(ctypes.c_float)),               # float32[N] — terrain z per area  # noqa: E501
         ("area_ids", ctypes.POINTER(ctypes.c_int32)),
         ("bombsite_mask", ctypes.POINTER(ctypes.c_int8)),
@@ -164,11 +167,11 @@ class StaticDataC(ctypes.Structure):
         ("pbrs_bomb_progress_weight", ctypes.c_float),
         ("pbrs_nav_weight_t", ctypes.c_float),
         ("pbrs_nav_weight_ct", ctypes.c_float),
-        # Rung 0 (spec 2026-08-29): FMT positions 69-71, before wall_list in C.
+        # Rung 0 (spec 2026-08-29): sim knobs, before wall_list in C.
         ("n_active_per_team", ctypes.c_int32),
         ("pin_pitch", ctypes.c_int32),
         ("crouch_enabled", ctypes.c_int32),
-        # Rung 1a (spec 2026-08-30 T2a): FMT position 72, same block.
+        # Rung 1a (spec 2026-08-30 T2a): same block.
         ("jump_enabled", ctypes.c_int32),
         # After the binding.init prefix: overlay C wall_list then ramp bounds.
         # These two stay LAST, matching cs2_types.h. New scalars go above them
@@ -1014,9 +1017,9 @@ class Cs2Env(pufferlib.PufferEnv):
         # forked Puffer worker silently. round_time is rejected (not truncated)
         # when non-integral — int(2.5) would run a different episode length
         # than the config recorded.
-        # PITFALL: laser_range_sq (FMT 24) is derived from _laser_range below;
-        # never accept it as a separate kwarg or the range check and the
-        # damage falloff would disagree.
+        # PITFALL: laser_range_sq is derived from _laser_range below; never
+        # accept it as a separate kwarg or the range check and the damage
+        # falloff would disagree.
         if round_time is None:
             round_time = nav.ROUND_TIME
         if int(round_time) != round_time:
@@ -1181,13 +1184,15 @@ class Cs2Env(pufferlib.PufferEnv):
         if _sc["n_active_per_team"] != n_active_per_team:
             raise RuntimeError(
                 f"C StaticData.n_active_per_team is {_sc['n_active_per_team']}, expected "
-                f"{n_active_per_team} — binding.init's FMT string and the call above disagree")
+                f"{n_active_per_team} — the buffer C copied and the `static_data` mapping "
+                "packed above disagree")
 
         # Sim recoil v1 (#120): write AFTER the overlay, not via binding.init
-        # (the 73-arg FMT is a footgun; extend it only at the tail). env_init memsets
-        # Dust2Env so this starts 0; env_reset memsets GameState only, so the
-        # flag survives reset. Train / Modal stay off unless a later card
-        # passes recoil=True into make_env.
+        # (that call carries the StaticData prefix and this flag lives on
+        # Dust2Env, so there is no slot for it). env_init memsets Dust2Env so
+        # this starts 0; env_reset memsets GameState only, so the flag survives
+        # reset. Train / Modal stay off unless a later card passes recoil=True
+        # into make_env.
         self._c_env.recoil_enabled = 1 if recoil else 0
 
         # Room AABB for ramp interpolation. Not a binding.init arg (it is a
@@ -1362,7 +1367,7 @@ class Cs2Env(pufferlib.PufferEnv):
 
     @property
     def round_time(self):
-        """Ticks per round as handed to C (FMT position 30).
+        """Ticks per round as handed to C (StaticData.round_time).
 
         R0-G: reflects the ``round_time`` kwarg, not the module constant —
         trainer code that sizes horizons / stat windows off this property

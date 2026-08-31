@@ -138,7 +138,7 @@ def test_centroids_z_plumbed_through_binding():
         f"bombsite area_idx=6 should have centroids_z=64.0, got {map_data.centroids_z[6]}")
     assert bool(map_data.is_ramp[13]), "is_ramp[13] should be True (T-ramp area)"
 
-    # Construct env — if the format string or arg count is wrong, this raises ValueError
+    # Construct env — if the packed layout or the pointer-argument set is wrong, this raises
     env = Cs2Env(map_data=map_data)
 
     # Force GC to try to collect any would-be dangling is_ramp_int8 array.
@@ -590,7 +590,7 @@ def test_exterior_wall_keeps_body_inside_room():
         g.agents[0].vy = 0.0
         g.agents[0].area_idx = 0
         g.agents[0].is_airborne = 0
-        g.agents[0].facing = float(math.pi)  # bin 1 = west (−x)
+        g.agents[0].facing = float(math.pi)                              # bin 1 = west (−x)
         actions, cont = _zero_actions()
         actions[0, 0] = 1
         env.step(actions, cont)
@@ -630,12 +630,11 @@ def test_raster_overshoot_cannot_enter_exterior_wall():
         actions[0, 0] = 1
         for _ in range(20):
             env.step(actions, cont)
-        assert g.agents[0].area_idx == 15, (
-            f"left catwalk for area_idx={g.agents[0].area_idx}")
+        assert g.agents[0].area_idx == 15, (f"left catwalk for area_idx={g.agents[0].area_idx}")
         min_x = 820.0 + _AGENT_VIZ_RADIUS
-        assert abs(g.agents[0].x - min_x) < 2.0, (
-            f"center x={g.agents[0].x:.2f} should stop at catwalk west "
-            f"hull ({min_x}), not in the [816, 820) overshoot")
+        assert abs(g.agents[0].x -
+                   min_x) < 2.0, (f"center x={g.agents[0].x:.2f} should stop at catwalk west "
+                                  f"hull ({min_x}), not in the [816, 820) overshoot")
     finally:
         env.close()
 
@@ -659,7 +658,7 @@ def test_t_ramp_portal_is_walkable():
         g.agents[0].vy = 0.0
         g.agents[0].area_idx = 5
         g.agents[0].is_airborne = 0
-        g.agents[0].facing = 0.0  # bin 1 = east (+x)
+        g.agents[0].facing = 0.0                                                       # bin 1 = east (+x)
         actions, cont = _zero_actions()
         actions[0, 0] = 1
         seen = {5}
@@ -725,4 +724,3 @@ def test_corridors_do_not_enter_spawn():
     assert ct[4] == 416.0 or ct[4] == 416, ct
     assert t[4] <= 416
     assert ct[4] <= 416
-

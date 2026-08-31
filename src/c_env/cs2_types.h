@@ -180,10 +180,14 @@ typedef struct {
      *                  cliff guard in cs2_movement.h _resolve_xy_collision.
      * Field order MUST stay in sync with:
      *   - StaticDataC._fields_ in cs2_env.py  (ctypes mirror)
-     *   - PyArg_ParseTuple format string in binding.c py_init()
      *   - SD_PREFIX_FIELDS below              (per-field layout table: every
      *     field before wall_list needs a row, in this same order)
-     * Mismatch silently corrupts all pointer fields that follow. */
+     * A mismatch between the first two changes the layout hash on one side
+     * only, so binding.init refuses to copy anything (spec 2026-08-31 §2 W2);
+     * a missing SD_PREFIX_FIELDS row fails tests/test_static_data_layout.py.
+     * For the ten POINTER fields the order also decides which numpy array each
+     * one receives — cs2_env.py derives that order from the mirror
+     * (_SD_POINTER_FIELDS), so keep the two declarations in step. */
     float*   centroids_z;     /* [N]             idx-indexed: terrain z per area   */
     int32_t* area_ids;        /* [N]             idx -> raw area_id                */
     int8_t*  bombsite_mask;   /* [max_area_id+1]  area_id-indexed (for _potential) */
@@ -250,10 +254,10 @@ typedef struct {
     float pbrs_nav_weight_t;           /* T-side nav approach weight */
     float pbrs_nav_weight_ct;          /* CT-side nav approach weight */
     /* Rung 0 (spec 2026-08-29 §2.1 / R0-E.2) + Rung 1a (spec 2026-08-30 T2a):
-     * sim-level knobs, all int32, FMT "iiii" at positions 69-72. Inserted
-     * BEFORE wall_list so the two pointer-ish tail fields stay last and their
-     * offsets move together on both sides (StaticDataC mirrors this same
-     * position).
+     * sim-level knobs, all int32, packed by name like every other prefix field.
+     * Inserted BEFORE wall_list so the two pointer-ish tail fields stay last
+     * and their offsets move together on both sides (StaticDataC mirrors this
+     * same position).
      *   n_active_per_team — agents per team that spawn (1..TEAM_SIZE). Slots
      *                       >= n are "parked": participating=0, alive=0,
      *                       area_idx=INVALID_AREA_IDX, enemy_mem_idx[*]=
@@ -434,10 +438,10 @@ typedef struct {
  * (leaving this table and StaticDataC in cs2_env.py saying int32_t) left all 71
  * layout tests, the layout hash, and the sizeof(StaticData) guard green — the
  * struct held a float that both descriptions called an int. A struct-only type
- * edit must fail HERE, not silently reinterpret packed bytes once Python packs
- * the prefix itself and the FMT string is gone; a pointer element-type change
- * (`int8_t*` → `int32_t*`, same 8-byte field) is an out-of-bounds read that no
- * runtime test in this tree would name.
+ * edit must fail HERE, not silently reinterpret the bytes Python packs into the
+ * prefix (spec 2026-08-31 §2 W2); a pointer element-type change (`int8_t*` →
+ * `int32_t*`, same 8-byte field) is an out-of-bounds read that no runtime test
+ * in this tree would name.
  *
  * `int` and `int32_t` are deliberately COMPATIBLE here on this target — that is
  * the same folding ctypes does (c_int32 IS c_int), which the whole two-sided
@@ -687,7 +691,8 @@ typedef struct {
     struct Client* client;
     /* Sim recoil v1 (#120): env-wide physics switch, after client.
      * 0 = today's hitscan (train / make_env default); 1 = punch on the hit ray
-     * (cs2_demo). Not a binding.init argument — that 73-arg FMT is a footgun.
+     * (cs2_demo). Not reachable through binding.init: that call carries the
+     * StaticData prefix, and this flag lives on Dust2Env instead.
      * make_env writes this after Dust2EnvC.from_address. env_reset memsets
      * GameState only, so the flag survives mid-round reset. */
     int32_t recoil_enabled;

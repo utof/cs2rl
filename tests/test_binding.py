@@ -115,11 +115,11 @@ def test_agentstate_has_punch_fields():
 def test_make_env_writes_recoil_enabled(make_map):
     """make_env / Cs2Env write recoil_enabled after from_address.
 
-    Why: not a binding.init argument (the 73-arg FMT is extended only at the
-    tail, and only for StaticData scalars — this flag lives on Dust2Env). env_reset
-    memsets GameState only, so the flag must be set at overlay time — a
-    first-reset-only write would also work today, but would hide a later
-    memset of Dust2Env. Default is today's hitscan (0).
+    Why: not reachable through binding.init — that call carries the StaticData
+    prefix, and this flag lives on Dust2Env instead. env_reset memsets GameState
+    only, so the flag must be set at overlay time — a first-reset-only write
+    would also work today, but would hide a later memset of Dust2Env. Default is
+    today's hitscan (0).
     """
     import inspect
 

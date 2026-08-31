@@ -27,10 +27,11 @@ static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_sp
            "obs block sizes do not tile OBS_DIM (see cs2_types.h OBS_* macros)");
     memset(env, 0, sizeof(Dust2Env));
     env->sd = sd;
-    /* Rung 0: a zeroed StaticData (cs2_demo.c load_nav_data forgot the field,
-     * or a FMT mis-order) would make env_reset divide by zero. Python callers
-     * never reach this — Cs2Env.__init__ raises ValueError first — so this is
-     * the guard for the C-only callers (cs2_demo.c / make_client). */
+    /* Rung 0: a zeroed StaticData (cs2_demo.c load_nav_data forgot the field, or
+     * a C caller that built its own StaticData) would make env_reset divide by
+     * zero. Python callers never reach this — Cs2Env.__init__ raises ValueError
+     * first — so this is the guard for the C-only callers (cs2_demo.c /
+     * make_client). */
     assert(sd->n_active_per_team >= 1 && sd->n_active_per_team <= TEAM_SIZE &&
            "StaticData.n_active_per_team must be in 1..TEAM_SIZE");
     /* R0-D (#135): seeds 0 and 1 used to alias (`seed ? seed : 1`) — every
