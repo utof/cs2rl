@@ -18,8 +18,18 @@ branch.
 WHY it is not a hand list either: the spec's own hand-derived census (review
 round 7) missed ``actions/use_at_site_frac``, three presence-gated ``game/*``
 keys and the eight split-architecture ``policy/aim_log_std_*`` keys. Anything
-hand-maintained here drifts; the point of W4 is that adding a key to an emitter
-FAILS a test until the key is registered.
+hand-maintained here drifts; the point of W4 is that adding a key to a LISTED
+emitter FAILS a test until the key is registered.
+
+SCOPE OF THAT PROMISE — read this before relying on it. ``census()`` sees the
+NAMED island and nothing else, so on its own it can only be wrong by omission: a
+key added to a function nobody put in ``EMITTER_SITES`` is invisible to it and to
+every test built on it. ``_find_qualname`` makes a RENAMED emitter fail loudly; a
+BRAND NEW one would be silent. ``metrics_write_sites()`` and
+``island_merge_sources()`` below are the guard for that boundary — an independent
+sweep of all of ``src/`` that does not consult ``EMITTER_SITES``, plus a one-hop
+resolution of every non-literal dict merged into an island container. What even
+those two do not catch is written down at ``metrics_write_sites``.
 
 THE THREE THINGS THIS FILE PRODUCES, per emitter site:
 
@@ -104,6 +114,83 @@ EMITTER_SITES = (
     EmitterSite("train.py", "self_play_used_past_metric", {"logs": ""}),
     EmitterSite("c_env/cs2_env.py", "Cs2Env._build_terminal_info", {"summary": "environment/"}),
     EmitterSite("c_env/cs2_env.py", "Cs2Env.step", {"summary": "environment/"}),
+)
+
+# ── The island's NEGATIVE list ────────────────────────────────────────────
+#
+# `metrics_write_sites()` sweeps all of src/ for metrics-SHAPED writes without
+# consulting EMITTER_SITES, and every hit it finds outside the island has to be
+# named here with the reason it is not an emitter. This is the audit that
+# otherwise gets redone from scratch by every reviewer — three of these six look
+# exactly like emitters to a grep (`metrics[...]`, `summary = {...}`,
+# `stats = {...}` with the same bare key names cs2_env uses) and are not.
+#
+# The list cannot rot into a blanket exemption: an entry that matches no hit fails
+# too, so deleting an emitter-shaped site here is as loud as adding one.
+
+
+class NonIslandWrite(NamedTuple):
+    path: str                          # relative to src/
+    qualname: str                      # "" = the whole file, including module scope
+    reason: str
+
+
+NON_ISLAND_WRITES = (
+    NonIslandWrite(
+        "metrics_schema.py", "", "The registry ITSELF. Its ~200 dict-literal keys are "
+        "declarations, not writes into a metrics row — they are the thing the census is "
+        "compared against, so counting them as emissions would make every completeness "
+        "test compare the registry with itself."),
+    NonIslandWrite(
+        "eval_baselines.py", "BaselineEvaluator.evaluate",
+        "A REAL source of row keys, censused by its own extractor (`eval_output_keys()`) "
+        "rather than as an island site: ScheduledEval merges the returned dict wholesale, "
+        "so there is no per-key write for `_walk` to classify a shape from."),
+    NonIslandWrite(
+        "eval_baselines.py", "BaselineEvaluator._episode",
+        "Per-episode RETURN VALUE of the evaluator's inner loop (shots_fired, "
+        "shots_with_enemy_in_los, timed_out), consumed by evaluate() to build the eval/* "
+        "numbers. Never written into a row itself."),
+    NonIslandWrite(
+        "train.py", "evaluate_checkpoint",
+        "`--eval` mode's local Counter, PRINTED TO STDOUT. Its 13 bare keys are the same "
+        "names cs2_env's terminal info uses, which is why a grep-based audit reads it as "
+        "an emitter; nothing here reaches metrics.jsonl."),
+    NonIslandWrite(
+        "train.py", "convert_legacy_state_dict_to_split",
+        "state_dict TENSOR names (`aim_log_std_t`/`_ct`), not metrics keys — checkpoint "
+        "surgery for the legacy→split migration."),
+    NonIslandWrite(
+        "train_bc.py", "eval_plant_rate",
+        "The BC-eval report dict (`summary = {...}`) with its own printer — a separate "
+        "analysis path, never merged into a training row."),
+)
+
+# Non-literal dicts merged into an island container that resolve, one hop back, to
+# something OUTSIDE the island. Keyed on the exact source expression so the excuse
+# cannot widen: rewriting the expression fails here rather than staying excused.
+# Everything else must resolve to an EMITTER_SITES member — see
+# `island_merge_sources()` for why a merge is the one write shape the census is
+# structurally unable to see.
+
+
+class IslandMerge(NamedTuple):
+    qualname: str                      # the EMITTER_SITES entry containing the merge
+    source: str                        # ast.unparse of the expression it resolves to
+    reason: str
+
+
+ISLAND_MERGE_SOURCES = (
+    IslandMerge(
+        "ScheduledEval.after_train", "self.evaluator.evaluate(self.policy, self.device)",
+        "BaselineEvaluator.evaluate's `out = {...}` contract, censused by "
+        "`eval_output_keys()` and pinned by "
+        "test_eval_keys_match_the_evaluate_output_contract."),
+    IslandMerge(
+        "_inject_tag_metrics", "getattr(trainer, '_tag_metrics', None)",
+        "A re-read of the island's OWN `trainer._tag_metrics` container: every key in it "
+        "was written under _train_with_return_norm / tag_grad_cossim, both of which are "
+        "EMITTER_SITES entries, so the merge adds no key the census has not already seen."),
 )
 
 # The two frozen gate readers (spec: never migrated, so the registry has to
@@ -532,6 +619,201 @@ def census():
         for child in ast.iter_child_nodes(fn):
             _walk(child, _SiteWithFn(site, fn), {}, ctx, keys, families, seen)
     return keys, families
+
+
+# ── Island completeness: the boundary guard ───────────────────────────────
+
+
+class MetricsWrite(NamedTuple):
+    path: str                          # relative to src/
+    qualname: str                      # enclosing def/class chain; "" at module scope
+    container: str                     # write target's container expr; "" for a bare dict literal
+    key: str                           # the key literal, f-string placeholders as `*`
+    lineno: int
+
+
+def _key_text(node):
+    """The literal text of a key node — an f-string's placeholders become `*`."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        return "".join(str(p.value) if isinstance(p, ast.Constant) else "*" for p in node.values)
+    return None
+
+
+def metrics_write_sites():
+    """Every metrics-SHAPED write in src/, found WITHOUT consulting EMITTER_SITES.
+
+    WHY this exists: EMITTER_SITES is a named island, so `census()` can only be
+    wrong by omission. A brand-new emitter — say a helper returning
+    ``{"game/x": 1.0}`` that `train()` merges with ``logs.update(...)`` — writes a
+    key into every row while all of test_metrics_schema.py stays green. This sweep
+    is the independent second opinion: it finds writes by SHAPE across the whole
+    tree, and test_metrics_schema.py requires every hit to be inside the island or
+    on the reasoned NON_ISLAND_WRITES list.
+
+    THE PREDICATE (deliberately broader than any grep — the review that prompted
+    this used `logs[` / `.stats[` / `losses[` / `summary[` / `log_entry[` and
+    missed `metrics[`, which occurs outside the island):
+
+      write POSITIONS  ``c[k] = ...`` / ``c[k] += ...``, a dict literal bound to a
+                       name, a bare dict literal anywhere, and ``c.update({...})``.
+      key PREDICATE    a key-shaped string that is either slash-namespaced (any
+                       `a/b`, so a NEW namespace is caught too — nothing here reads
+                       the registry, which is what keeps the guard independent of
+                       the thing it guards), or written into a container whose name
+                       matches one the island itself uses (`logs`, `summary`,
+                       `stats`, `losses`, `metrics`, `log_entry`, ...). The second
+                       clause is what covers cs2_env's BARE keys, which carry no
+                       slash until PufferLib prefixes them.
+
+    WHAT IT STILL DOES NOT CATCH, precisely:
+
+      * a computed key — ``logs[some_var]`` or an f-string whose every segment is
+        a placeholder. No source-level extractor can name those; the registry's
+        `family` entries are the mechanism for that class.
+      * a write that is BOTH bare-keyed AND into a container named nothing like
+        the island's (``row["sneaky"] = ...``). Adding that container name to an
+        EMITTER_SITES entry — which is what makes it an emitter — also widens this
+        predicate, so the gap only exists for a container that is never declared.
+      * anything outside ``src/``. Scripts and notebooks are out of scope by spec.
+      * a key that reaches a row without a write shape at all, e.g. PufferLib's
+        own `mean_and_log` literals (covered instead by PUFFERLIB_OWNED and a
+        cross-package AST pin) or `**` splats of a non-literal mapping (covered by
+        `island_merge_sources()` for island containers only).
+    """
+    containers = {c.split(".")[-1] for s in EMITTER_SITES for c in s.containers}
+    found = {}
+
+    def _record(path, qualname, container, key_node, fallback_lineno):
+        text = _key_text(key_node)
+        if text is None or not KEY_SHAPED.match(text.replace("*", "x")):
+            return
+        if "/" not in text and container.split(".")[-1] not in containers:
+            return
+        lineno = getattr(key_node, "lineno", fallback_lineno)
+        # First record wins: the container-bearing shape is always visited before
+        # the bare dict literal nested inside it, so the richer one is kept.
+        found.setdefault((path, qualname, text, lineno),
+                         MetricsWrite(path, qualname, container, text, lineno))
+
+    def _walk_all(path, node, qualname):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            qualname = f"{qualname}.{node.name}" if qualname else node.name
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for tgt in targets:
+                if isinstance(tgt, ast.Subscript):
+                    _record(path, qualname, _container_name(tgt.value), tgt.slice, node.lineno)
+                elif isinstance(tgt, ast.Name) and isinstance(node.value, ast.Dict):
+                    for k, _ in _dict_items(node.value):
+                        _record(path, qualname, tgt.id, k, node.lineno)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "update" and node.args
+                and isinstance(node.args[0], ast.Dict)):
+            for k, _ in _dict_items(node.args[0]):
+                _record(path, qualname, _container_name(node.func.value), k, node.lineno)
+        if isinstance(node, ast.Dict):
+            for k, _ in _dict_items(node):
+                _record(path, qualname, "", k, node.lineno)
+        for child in ast.iter_child_nodes(node):
+            _walk_all(path, child, qualname)
+
+    for path in sorted(SRC.rglob("*.py")):
+        rel = str(path.relative_to(SRC))
+        _walk_all(rel, ast.parse(path.read_text(), filename=str(path)), "")
+    return sorted(found.values())
+
+
+def island_site_of(write):
+    """The EMITTER_SITES qualname `write` belongs to, or None if it is outside.
+
+    A def NESTED in an emitter counts as that emitter, matching `_walk`, which
+    descends into nested helpers (compute_game_metrics._maybe) with their
+    parameters bound to the call site's constants.
+    """
+    for site in EMITTER_SITES:
+        if write.path == site.path and (write.qualname == site.qualname
+                                        or write.qualname.startswith(site.qualname + ".")):
+            return site.qualname
+    return None
+
+
+class MergeSource(NamedTuple):
+    qualname: str                      # the EMITTER_SITES entry containing the merge
+    lineno: int
+    expr: str                          # the merged expression as written
+    source: str                        # one hop back: what that expression is bound to
+    resolved: str                      # callee name of `source`; "" when it is not a call
+
+
+def _callee_name(node):
+    """'compute_game_metrics' / 'evaluate' for a Call node, else ''."""
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Name):
+            return node.func.id
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr
+    return ""
+
+
+def island_merge_sources():
+    """Every NON-LITERAL dict merged into an island container, resolved one hop back.
+
+    A merge is the one write shape `census()` is structurally unable to see: it
+    ignores ``logs.update(<Call>)`` and ``logs.update(<Name>)`` on purpose, because
+    the keys are not in the argument. That is correct only while every merged dict
+    comes from a function that is ITSELF an emitter site — and nothing said so.
+    Seven such merges exist today; five resolve to island members
+    (compute_game_metrics, compute_network_health, compute_head_divergence,
+    compute_trunk_divergence, tag_grad_cossim) and two are declared in
+    ISLAND_MERGE_SOURCES.
+
+    ONE HOP, exactly as `losses_entropy_head_source()` resolves `_head_names`: a
+    Call gives its callee name directly; a Name is chased to the assignments that
+    bind it in the same function. Two hops is where this would start guessing, so a
+    Name bound to something that is not a call resolves to `""` and has to be
+    declared rather than inferred. ``|=`` and keyword-form ``update(**x)`` are
+    collected as well — they are merges with no argument to resolve at all, so they
+    can only ever be declared.
+    """
+    out = []
+    for site in EMITTER_SITES:
+        fn = _find_qualname(_module_ast(site.path), site.qualname)
+        for node in ast.walk(fn):
+            merged = None
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "update"
+                    and _container_name(node.func.value) in site.containers):
+                if node.keywords or not node.args:
+                    merged = [node]                                                  # update(**x) — no positional dict to resolve
+                elif not isinstance(node.args[0], ast.Dict):
+                    merged = [node.args[0]]
+            elif (isinstance(node, ast.AugAssign) and isinstance(node.op, ast.BitOr)
+                  and _container_name(node.target) in site.containers):
+                merged = [node.value]
+            for arg in merged or ():
+                for source in _one_hop_bindings(fn, arg):
+                    out.append(
+                        MergeSource(site.qualname, node.lineno, ast.unparse(arg),
+                                    ast.unparse(source), _callee_name(source)))
+    return out
+
+
+def _one_hop_bindings(fn, node):
+    """`node` itself, or — when it is a Name — the values assigned to it in `fn`.
+
+    A Name with no visible binding yields the Name back rather than nothing, so an
+    unresolvable merge produces a record that must be declared instead of silently
+    disappearing from the check.
+    """
+    if not isinstance(node, ast.Name):
+        return [node]
+    binds = [
+        a.value for a in ast.walk(fn) if isinstance(a, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == node.id for t in a.targets)
+    ]
+    return binds or [node]
 
 
 # ── Frozen-reader key literals ────────────────────────────────────────────

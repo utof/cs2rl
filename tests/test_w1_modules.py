@@ -56,16 +56,50 @@ SRC = REPO_ROOT / "src"
 W1_MODULES = ("train_shared", "resume_state", "train_config", "train_metrics", "train_update",
               "env_factory", "metrics_schema")
 
-# The subset train.py must import AT ITS MODULE LEVEL. Every module CARVED OUT of
-# train.py is here, because train.py's own body still reads names that moved into
-# it (see test_import_train_stays_light_and_really_imports_the_shims). Not every
-# guarded module qualifies: `metrics_schema` took `EVAL_KEYS` from
-# `eval_baselines`, not from train.py, so train.py has no reference to it —
-# adding an unused module-level import purely to satisfy an assert would be the
-# test dictating a dead line of code. Membership is asserted below so this cannot
-# silently become a way to opt a real shim out.
-TRAIN_MODULE_LEVEL_IMPORTS = ("train_shared", "resume_state", "train_config", "train_metrics",
-                              "train_update", "env_factory")
+# W1 modules train.py deliberately does NOT import at its module level, and why.
+#
+# Every module CARVED OUT of train.py must be a module-level import there, because
+# train.py's own body still reads names that moved into it (see
+# test_import_train_stays_light_and_really_imports_the_shims). This is the list of
+# the exceptions — modules the guard covers that train.py has no reason to name.
+#
+# WHY a carve-out list and not a hand-written list of the modules that ARE
+# imported: a hand list only has to shrink for the "the shims are real imports,
+# not lazy function-local ones" check to quietly stop covering a module, which is
+# the exact regression this test exists to catch. The imported set is DERIVED from
+# train.py's own AST below and asserted equal to `W1_MODULES - NOT_IMPORTED_BY_TRAIN`,
+# so both directions bite: a shim that goes lazy fails, and a carve-out that starts
+# being imported fails too. Adding a name here is then a deliberate, reasoned edit
+# rather than a deletion nobody notices.
+NOT_IMPORTED_BY_TRAIN = {
+    "metrics_schema":
+    "took EVAL_KEYS from eval_baselines, not from train.py, so train.py's body holds no "
+    "reference to it; a module-level import added purely to satisfy an assert would be "
+    "the test dictating a dead line of code",
+}
+
+
+def _train_module_level_imports():
+    """W1 modules `src/train.py` imports at its MODULE level, parsed from source.
+
+    Only `tree.body` is scanned — a top-level `import`/`from ... import`, never one
+    nested in a function, a `try:` or the `if __name__ == "__main__":` block. That
+    is the whole point: the property under test is that the shims are imported
+    unconditionally when `train` is imported, so a conditionally-imported module
+    correctly reads as absent here rather than as a satisfied shim.
+    """
+    import ast
+    tree = ast.parse((SRC / "train.py").read_text())
+    imported = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module)
+    return tuple(m for m in W1_MODULES if m in imported)
+
+
+TRAIN_MODULE_LEVEL_IMPORTS = _train_module_level_imports()
 
 # The one module every other split-out module is allowed to depend on. Spec §2 W1:
 # "The leaf imports nothing from train.py or the other new modules; every other new
@@ -141,8 +175,13 @@ def test_import_train_stays_light_and_really_imports_the_shims():
     run time while the whole test suite stayed green, because the suite never
     executes that block.
     """
-    assert set(TRAIN_MODULE_LEVEL_IMPORTS) <= set(W1_MODULES), (
-        "TRAIN_MODULE_LEVEL_IMPORTS names a module the import-lightness guard does not cover")
+    expected = set(W1_MODULES) - set(NOT_IMPORTED_BY_TRAIN)
+    assert set(TRAIN_MODULE_LEVEL_IMPORTS) == expected, (
+        f"train.py's module-level W1 imports are {sorted(TRAIN_MODULE_LEVEL_IMPORTS)}, expected "
+        f"{sorted(expected)}. A module that dropped out went LAZY (function-local) — the ten "
+        "module-level reads of moved names in train.py's body would then NameError at run time "
+        "while this suite stayed green. A module that appeared is listed in "
+        "NOT_IMPORTED_BY_TRAIN and no longer belongs there.")
     r = _run_child(f"""
 import train
 heavy = [m for m in {HEAVY!r} if m in sys.modules]

@@ -13,6 +13,12 @@ WHAT is enforced, and why each half exists:
     fails; an entry that names a reader which does not read it fails. The
     consumers column is the part of a registry that rots first — it is
     documentation about code somewhere else with nothing tying the two together.
+  * THE ISLAND BOUNDARY. All three of the above compare the registry against
+    `census()`, which reads only the NAMED emitter island — so all three are blind
+    to a metrics write in a function nobody listed. Two tests below close that: an
+    island-blind sweep of every metrics-shaped write in `src/`, and a one-hop
+    resolution of the dict merges the census does not look inside. Their residual
+    is stated at `metrics_census.metrics_write_sites`.
 
 WHY the checks read SOURCE and not a training run: the emitters are gated on flags
 (`--tag-diagnostic`, `--eval-interval`), on architecture (split heads), on epoch
@@ -206,6 +212,118 @@ def test_every_emitted_family_has_a_registry_entry():
                          "\n  ".join(missing))
 
 
+# ── The island boundary ───────────────────────────────────────────────────
+#
+# Everything above compares the registry against `census()`, which reads the NAMED
+# island in EMITTER_SITES. Those checks are therefore only as complete as the
+# island is: a metrics write added to a function nobody listed is invisible to all
+# of them, and a renamed emitter fails loudly while a NEW one is silent. These two
+# tests are the boundary — one sweeps all of src/ without consulting the island,
+# the other resolves the merges the census deliberately does not look inside.
+
+
+def test_every_metrics_write_in_src_is_inside_the_island_or_declared_not_a_metric():
+    """A metrics-shaped write anywhere in src/ is an emitter site or a named exception.
+
+    Probe this is built against: a helper returning `{"game/sneaky": 1.0}` merged
+    into `logs` by train(). Two unregistered keys, one in EVERY row, and before
+    this test the whole file stayed green — because `census()` only ever looked at
+    the fourteen functions it was told about.
+
+    `census.metrics_write_sites` documents exactly what the sweep still cannot see;
+    it is a real residual, not a complete proof.
+    """
+    sweep = census.metrics_write_sites()
+    assert sweep, "the src/ metrics-write sweep returned nothing — the predicate is vacuous"
+
+    unexplained = []
+    matched = {i: 0 for i in range(len(census.NON_ISLAND_WRITES))}
+    for w in sweep:
+        if census.island_site_of(w) is not None:
+            continue
+        hits = [
+            i for i, x in enumerate(census.NON_ISLAND_WRITES) if x.path == w.path and
+            (not x.qualname or w.qualname == x.qualname or w.qualname.startswith(x.qualname + "."))
+        ]
+        for i in hits:
+            matched[i] += 1
+        if not hits:
+            unexplained.append(f"{w.path}::{w.qualname or '<module>'}:{w.lineno}  "
+                               f"{w.container or '{...}'}[{w.key!r}]")
+    assert not unexplained, (
+        "metrics-shaped writes outside the emitter island and outside "
+        "metrics_census.NON_ISLAND_WRITES:\n  " + "\n  ".join(sorted(unexplained)) +
+        "\nEither add the enclosing function to EMITTER_SITES (and register its keys), or "
+        "add a NON_ISLAND_WRITES entry saying why it is not a metrics emitter.")
+
+    stale = [
+        census.NON_ISLAND_WRITES[i].path + "::" + (census.NON_ISLAND_WRITES[i].qualname or "*")
+        for i, n in matched.items() if n == 0
+    ]
+    assert not stale, ("NON_ISLAND_WRITES entries that match no write in src/ any more:\n  " +
+                       "\n  ".join(stale) +
+                       "\nA negative list that keeps entries it no longer needs drifts "
+                       "into a blanket exemption; delete them.")
+
+    # Anti-vacuity, and the strongest statement available here: two independent
+    # walks — the island-driven census and this island-blind sweep — must agree on
+    # WHICH emitter sites write keys at all. If the sweep's predicate silently
+    # stopped matching, or an island site stopped emitting, this diverges.
+    sweep_sites = {q for q in (census.island_site_of(w) for w in sweep) if q is not None}
+    census_sites = {e.site for e in EMITTED} | {f.site for f in FAMILIES}
+    assert sweep_sites == census_sites, (
+        f"the island-blind sweep and census() disagree on which emitter sites write keys: "
+        f"sweep-only {sorted(sweep_sites - census_sites)}, "
+        f"census-only {sorted(census_sites - sweep_sites)}")
+
+
+def test_dicts_merged_into_island_containers_come_from_island_emitters():
+    """`logs.update(<Call>)` is the one write shape `census()` cannot look inside.
+
+    It ignores non-literal `.update()` arguments deliberately — the keys are not in
+    the argument — which is correct only while every merged dict is built by a
+    function that is itself an emitter site. Nothing said so, so a new helper
+    merged into `logs` used to add keys to every row invisibly. This resolves each
+    merge ONE HOP and requires the result to be an EMITTER_SITES member or to carry
+    a reason in `metrics_census.ISLAND_MERGE_SOURCES`.
+    """
+    merges = census.island_merge_sources()
+    assert merges, ("no non-literal merge found in any island body — either the extractor "
+                    "broke or the merges moved; this check is vacuous as it stands")
+    island_names = {s.qualname.split(".")[-1] for s in census.EMITTER_SITES}
+    declared = {(m.qualname, m.source) for m in census.ISLAND_MERGE_SOURCES}
+
+    used, bad = set(), []
+    for m in merges:
+        if m.resolved in island_names:
+            continue
+        if (m.qualname, m.source) in declared:
+            used.add((m.qualname, m.source))
+            continue
+        bad.append(f"{m.qualname}:{m.lineno} merges {m.expr} — resolves to "
+                   f"{m.source} ({m.resolved or 'not a call'})")
+    assert not bad, (
+        "dicts merged into an island metrics container from OUTSIDE the island:\n  " +
+        "\n  ".join(sorted(bad)) + "\nEvery key in such a dict lands in the row while the "
+        "census sees none of them. Add the producing function to EMITTER_SITES, or declare "
+        "it in metrics_census.ISLAND_MERGE_SOURCES with the reason it needs no census.")
+    stale = sorted(declared - used)
+    assert not stale, ("ISLAND_MERGE_SOURCES entries matching no merge in the island — the "
+                       f"expression changed or the merge is gone: {stale}")
+
+
+# Registry families that declare `members` the AST census CANNOT confirm, and the
+# test that pins each one instead. A declared member list is accepted provenance in
+# test_every_registered_emitted_key_is_actually_emitted, so an UNPINNED one would
+# let the registry vouch for its own invented keys — the exact accumulation the
+# reverse-completeness half exists to stop. Membership is asserted below in both
+# directions, so a new registry-closed family is a failure until it is either
+# census-resolvable or pinned and named here.
+MEMBERS_PINNED_ELSEWHERE = {
+    "losses/entropy/*": "test_losses_entropy_family_members_track_the_action_spec",
+}
+
+
 def test_closed_family_members_match_the_census_exactly():
     """A statically-resolvable family declares its members, and they are checked.
 
@@ -228,6 +346,20 @@ def test_closed_family_members_match_the_census_exactly():
                 bad.append(f"{member}: closed family member with no entry of its own")
     assert not bad, "\n  ".join([""] + bad)
 
+    # Every members-declaring family is either compared above or pinned elsewhere.
+    census_closed = {t for t, f in FAMILY_BY_TEMPLATE.items() if f.members}
+    declaring = {k for k, s in ms.REGISTRY.items() if s.kind == "family" and s.members}
+    unpinned = sorted(declaring - census_closed - set(MEMBERS_PINNED_ELSEWHERE))
+    assert not unpinned, (
+        "registry families declaring `members` that no census family confirms and no named "
+        "test pins:\n  " + "\n  ".join(unpinned) + "\nTheir members are accepted as provenance "
+        "by test_every_registered_emitted_key_is_actually_emitted, so an unpinned list is the "
+        "registry vouching for keys it invented. Make the family census-resolvable, or pin it "
+        "and add it to MEMBERS_PINNED_ELSEWHERE.")
+    stale = sorted(k for k in MEMBERS_PINNED_ELSEWHERE if k not in declaring or k in census_closed)
+    assert not stale, ("MEMBERS_PINNED_ELSEWHERE names families that no longer need it (the "
+                       f"census now resolves them, or they declare no members): {stale}")
+
 
 def test_losses_entropy_family_members_track_the_action_spec():
     """`losses/entropy/*` is OPEN to the AST census, so its members are declared from
@@ -247,12 +379,42 @@ def test_losses_entropy_family_members_track_the_action_spec():
 
 
 def _open_family_templates():
-    """Registered families whose members the census cannot enumerate."""
-    return [k for k, s in ms.REGISTRY.items() if s.kind == "family" and "*" in k]
+    """Registered family templates whose members are UNENUMERABLE — and only those.
+
+    A family is open when the registry declares no `members` for it: the concrete
+    keys depend on a runtime value (a model's `named_parameters()`, a profiler
+    section name, a minibatch label), so nothing can list them and a glob is the
+    only honest coverage statement.
+
+    PITFALL this signature exists to not repeat: this helper used to return EVERY
+    family template, open or closed, and the caller globbed against it with
+    `fnmatch`, whose `*` matches `/` as well. `game/*` — the largest emitted
+    namespace in the registry — therefore acted as a blanket alibi for any
+    `game/anything` entry, so the reverse-completeness half of this file was
+    vacuous for every key under a closed template. A CLOSED family already knows
+    its members; it must excuse those and nothing else.
+    """
+    return [k for k, s in ms.REGISTRY.items() if s.kind == "family" and "*" in k and not s.members]
 
 
-def _matches_family(key):
-    """True when `key` fits some registered family template (`*` = one segment-ish run)."""
+def _declared_family_members():
+    """Every concrete key a registered CLOSED family names in its `members`.
+
+    This is the provenance that replaces the glob for closed templates, and it is
+    not the registry vouching for itself: for the ten census-closed families
+    `test_closed_family_members_match_the_census_exactly` pins `members` against
+    the emitter's own literals, and for `losses/entropy/*` — closed by declaration
+    because the census sees it as open —
+    `test_losses_entropy_family_members_track_the_action_spec` pins it against
+    `_action_spec` plus a source pin on the loop the emitter iterates. That both
+    checks exist for every members-declaring family is asserted in
+    `test_closed_family_members_match_the_census_exactly`.
+    """
+    return {m for s in ms.REGISTRY.values() if s.kind == "family" for m in s.members}
+
+
+def _matches_open_family(key):
+    """True when `key` fits a registered OPEN family template (glob, `*` spans `/`)."""
     import fnmatch
     return any(fnmatch.fnmatchcase(key, t) for t in _open_family_templates())
 
@@ -260,19 +422,26 @@ def _matches_family(key):
 def test_every_registered_emitted_key_is_actually_emitted():
     """Reverse direction: a registry entry nothing writes is a lie the registry tells.
 
-    Accepted provenance for an `emitted` entry, in order: a concrete census key;
-    a member of a census-closed family; a key matching a registered family
-    template; one of `BaselineEvaluator.evaluate()`'s output keys (censused from
-    that dict literal, since ScheduledEval merges the dict wholesale); or a key
-    `metrics_schema.PUFFERLIB_OWNED` declares as PufferLib's own.
+    Accepted provenance for an `emitted` entry, in order: a concrete census key; a
+    member of a census-closed family; a member a registered family DECLARES; one of
+    `BaselineEvaluator.evaluate()`'s output keys (censused from that dict literal,
+    since ScheduledEval merges the dict wholesale); a key
+    `metrics_schema.PUFFERLIB_OWNED` declares as PufferLib's own; or a glob match
+    against a template that is OPEN, i.e. one whose members are unenumerable.
+
+    The last clause is the load-bearing restriction. Globbing against every
+    template — including the closed ones — makes this test pass for any key at all
+    under `game/`, `environment/action_*`, `split/*` or `losses/entropy/*`, which
+    is most of the emitted surface. `_open_family_templates` carries the detail.
     """
     closed_members = {m for f in FAMILIES for m in f.members}
+    declared_members = _declared_family_members()
     eval_keys = census.eval_output_keys() | set(ms.EVAL_EXTRA_KEYS)
     orphans = []
     for key in ms.keys_of_kind("emitted"):
-        if key in EMITTED_BY_KEY or key in closed_members or key in eval_keys:
+        if key in EMITTED_BY_KEY or key in closed_members or key in declared_members:
             continue
-        if key in ms.PUFFERLIB_OWNED or _matches_family(key):
+        if key in eval_keys or key in ms.PUFFERLIB_OWNED or _matches_open_family(key):
             continue
         orphans.append(key)
     assert not orphans, ("registered as `emitted` but no emitter writes them — delete the "
