@@ -196,7 +196,7 @@ __all__ = (
 # MUST stay a bare integer literal: scripts/exp_lib.py fingerprints the env by
 # regex-grepping `OBS_DIM = <int>` out of this file's source text (env_fingerprint),
 # so it cannot be an `import`. Mirrors nav.OBS_DIM / _obs_spec.OBS_DIM (generated
-# from cs2_types.h); the three are cross-checked by tests/test_train_env.py:873.
+# from cs2_types.h); cross-checked by test_obs_dim_constant_consistency (test_train_env.py).
 # On an OBS_DIM bump, update cs2_types.h + rerun the generator, then bump this literal.
 OBS_DIM = 110
 
