@@ -256,6 +256,27 @@ def test_preflight5_missing_sigma_key_is_invalid(tmp_path):
     assert rep["sigma_capped"] is False                # absent ≠ violated
 
 
+def test_preflight5_is_window_scoped_a_pre_window_breach_does_not_cap(tmp_path):
+    """Pre-flight 5 is the ONE assertion evaluated over the window alone.
+
+    Row 10 (163,840 steps — far outside the >= 900,000 window) parks the raw
+    sigma above the cap; every window row sits at INIT, below it. The frozen
+    text says "in every window row", so this is a clean pre-flight 5: sigma was
+    measurable when it mattered, and an early excursion that the run had already
+    left behind must NOT void the sigma-movement routing. Widening the scope to
+    all rows (the way pre-flights 1/2/4 are scoped) would report SIGMA-CAPPED
+    here and swap the run's rec 6 routing for rec 4(b).
+    """
+    rows = _rows()
+    rows[10]["policy/aim_log_std_yaw_raw"] = CAP + 0.5
+    rep = _read(tmp_path, rows)
+    assert _check(rep, 5)["ok"]
+    assert _check(rep, 5)["observed"] == "max over 7 window rows = -3.1957"
+    assert rep["sigma_capped"] is False
+    assert rep["invalid"] == []
+    assert rep["verdict"] == "FAIL-aim-head-untrained"
+
+
 def test_missing_config_provenance_is_invalid_not_a_crash(tmp_path):
     rep = _read(tmp_path, _rows(), cfg=None)
     assert rep["verdict"] == "SMOKE INVALID"
@@ -301,6 +322,28 @@ def test_fail_aim_route_kills_low_sigma_moved(tmp_path):
     assert rep["verdict"] == "FAIL-aim"
     assert "rec 1" in rep["next_step"]
     assert rep["agg"]["sigma_move"] == pytest.approx(0.15)
+
+
+def test_sigma_movement_is_the_max_over_the_window_not_the_last_row(tmp_path):
+    """`sigma moved` is `max |raw - init|` over the window, not the final row.
+
+    Sigma steps monotonically back up from INIT - 0.15 to INIT - 0.03 across the
+    7 window rows, i.e. the excursion peaked and then decayed. The peak is what
+    the frozen rule reads (0.15 >= 0.1 ⇒ "moved" ⇒ FAIL-aim ⇒ rec 1); reading
+    the last row instead gives 0.03 ⇒ "not moved", and a kills=0.2 run then
+    matches no sigma branch at all and exits FAIL-unrouted. The direction
+    matters: a ramp that ENDS at its peak cannot tell the two rules apart.
+    """
+    rows = _rows(window_over={"game/kills_per_episode": 0.2})
+    devs = [0.15, 0.13, 0.11, 0.09, 0.07, 0.05, 0.03]
+    for row, dev in zip(rows[-7:], devs, strict=True):
+        row["policy/aim_log_std_yaw_raw"] = INIT - dev
+    rep = _read(tmp_path, rows)
+    assert rep["agg"]["sigma_move"] == pytest.approx(0.15)             # not 0.03
+    assert rep["agg"]["sigma_min"] == pytest.approx(INIT - 0.15)
+    assert rep["agg"]["sigma_max"] == pytest.approx(INIT - 0.03)
+    assert _check(rep, 5)["ok"] and rep["sigma_capped"] is False
+    assert rep["verdict"] == "FAIL-aim"
 
 
 def test_untrained_route_no_kills_no_sigma_movement(tmp_path):
