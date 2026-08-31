@@ -1,0 +1,249 @@
+{
+ "_provenance": {
+  "format": "cs2rl-selfplay-kwargs-capture-v1",
+  "captured_at_commit": "554c28e1a751980284f714c0dc4420ba9db97c88",
+  "why": "pre-W3 baseline for build_selfplay_manager (spec 2026-08-31 \u00a72 W3); a snapshot taken after the migration would compare the factory to itself",
+  "how": "each site's call expression is located by enclosing-function qualname (plus a branch index guarded by its own p_past literal), unparsed from the AST and evaluated against a recording stub bound to SelfPlayManager's real signature",
+  "sentinels": "aim_log_std_max / opponent_mode are distinct string sentinels; pin_pitch is 0/1 instead, because both call sites wrap it in bool()",
+  "regenerate": "UV_NO_SYNC=1 uv run python tests/capture_selfplay_kwargs_pre_w3.py --capture"
+ },
+ "sites": {
+  "train": [
+   {
+    "scenario": "self_play_on",
+    "site": "src/train.py:3627",
+    "enclosing": "train",
+    "call_source": "SelfPlayManager(pool_size=15, p_past=0.3 if self_play_enabled else 0.0, save_every_epochs=25, win_threshold=0.6, phase_length=50, aim_log_std_max=getattr(args, 'aim_log_std_max', None), pin_pitch=bool(args.pin_pitch), opponent_mode=_opponent_mode)",
+    "bindings": {
+     "_opponent_mode": "<opponent_mode>",
+     "args": {
+      "__namespace__": {
+       "aim_log_std_max": "<aim_log_std_max>",
+       "pin_pitch": 1
+      }
+     },
+     "self_play_enabled": true
+    },
+    "explicit_kwargs": {
+     "aim_log_std_max": "<aim_log_std_max>",
+     "opponent_mode": "<opponent_mode>",
+     "p_past": 0.3,
+     "phase_length": 50,
+     "pin_pitch": true,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    },
+    "effective_kwargs": {
+     "aim_log_std_max": "<aim_log_std_max>",
+     "opponent_mode": "<opponent_mode>",
+     "p_past": 0.3,
+     "phase_length": 50,
+     "pin_pitch": true,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    }
+   },
+   {
+    "scenario": "self_play_off",
+    "site": "src/train.py:3627",
+    "enclosing": "train",
+    "call_source": "SelfPlayManager(pool_size=15, p_past=0.3 if self_play_enabled else 0.0, save_every_epochs=25, win_threshold=0.6, phase_length=50, aim_log_std_max=getattr(args, 'aim_log_std_max', None), pin_pitch=bool(args.pin_pitch), opponent_mode=_opponent_mode)",
+    "bindings": {
+     "_opponent_mode": "noop",
+     "args": {
+      "__namespace__": {
+       "aim_log_std_max": "<aim_log_std_max>",
+       "pin_pitch": 0
+      }
+     },
+     "self_play_enabled": false
+    },
+    "explicit_kwargs": {
+     "aim_log_std_max": "<aim_log_std_max>",
+     "opponent_mode": "noop",
+     "p_past": 0.0,
+     "phase_length": 50,
+     "pin_pitch": false,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    },
+    "effective_kwargs": {
+     "aim_log_std_max": "<aim_log_std_max>",
+     "opponent_mode": "noop",
+     "p_past": 0.0,
+     "phase_length": 50,
+     "pin_pitch": false,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    }
+   },
+   {
+    "scenario": "aim_log_std_max_absent",
+    "site": "src/train.py:3627",
+    "enclosing": "train",
+    "call_source": "SelfPlayManager(pool_size=15, p_past=0.3 if self_play_enabled else 0.0, save_every_epochs=25, win_threshold=0.6, phase_length=50, aim_log_std_max=getattr(args, 'aim_log_std_max', None), pin_pitch=bool(args.pin_pitch), opponent_mode=_opponent_mode)",
+    "bindings": {
+     "_opponent_mode": "<opponent_mode>",
+     "args": {
+      "__namespace__": {
+       "pin_pitch": 1
+      }
+     },
+     "self_play_enabled": true
+    },
+    "explicit_kwargs": {
+     "aim_log_std_max": null,
+     "opponent_mode": "<opponent_mode>",
+     "p_past": 0.3,
+     "phase_length": 50,
+     "pin_pitch": true,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    },
+    "effective_kwargs": {
+     "aim_log_std_max": null,
+     "opponent_mode": "<opponent_mode>",
+     "p_past": 0.3,
+     "phase_length": 50,
+     "pin_pitch": true,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    }
+   }
+  ],
+  "harness_no_selfplay": [
+   {
+    "scenario": "pin_pitch_truthy",
+    "site": "src/train_test_harness.py:359",
+    "enclosing": "_build_trainer_for_test",
+    "call_source": "SelfPlayManager(pool_size=15, p_past=0.0, save_every_epochs=25, win_threshold=0.6, phase_length=50, aim_log_std_max=aim_log_std_max, pin_pitch=bool(pin_pitch), opponent_mode=opponent)",
+    "bindings": {
+     "aim_log_std_max": "<aim_log_std_max>",
+     "opponent": "<opponent_mode>",
+     "pin_pitch": 1
+    },
+    "explicit_kwargs": {
+     "aim_log_std_max": "<aim_log_std_max>",
+     "opponent_mode": "<opponent_mode>",
+     "p_past": 0.0,
+     "phase_length": 50,
+     "pin_pitch": true,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    },
+    "effective_kwargs": {
+     "aim_log_std_max": "<aim_log_std_max>",
+     "opponent_mode": "<opponent_mode>",
+     "p_past": 0.0,
+     "phase_length": 50,
+     "pin_pitch": true,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    }
+   },
+   {
+    "scenario": "pin_pitch_falsy",
+    "site": "src/train_test_harness.py:359",
+    "enclosing": "_build_trainer_for_test",
+    "call_source": "SelfPlayManager(pool_size=15, p_past=0.0, save_every_epochs=25, win_threshold=0.6, phase_length=50, aim_log_std_max=aim_log_std_max, pin_pitch=bool(pin_pitch), opponent_mode=opponent)",
+    "bindings": {
+     "aim_log_std_max": null,
+     "opponent": "self",
+     "pin_pitch": 0
+    },
+    "explicit_kwargs": {
+     "aim_log_std_max": null,
+     "opponent_mode": "self",
+     "p_past": 0.0,
+     "phase_length": 50,
+     "pin_pitch": false,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    },
+    "effective_kwargs": {
+     "aim_log_std_max": null,
+     "opponent_mode": "self",
+     "p_past": 0.0,
+     "phase_length": 50,
+     "pin_pitch": false,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    }
+   }
+  ],
+  "harness_selfplay": [
+   {
+    "scenario": "pin_pitch_truthy",
+    "site": "src/train_test_harness.py:371",
+    "enclosing": "_build_trainer_for_test",
+    "call_source": "SelfPlayManager(pool_size=15, p_past=0.3, save_every_epochs=25, win_threshold=0.6, phase_length=50, aim_log_std_max=aim_log_std_max, pin_pitch=bool(pin_pitch), opponent_mode=opponent)",
+    "bindings": {
+     "aim_log_std_max": "<aim_log_std_max>",
+     "opponent": "<opponent_mode>",
+     "pin_pitch": 1
+    },
+    "explicit_kwargs": {
+     "aim_log_std_max": "<aim_log_std_max>",
+     "opponent_mode": "<opponent_mode>",
+     "p_past": 0.3,
+     "phase_length": 50,
+     "pin_pitch": true,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    },
+    "effective_kwargs": {
+     "aim_log_std_max": "<aim_log_std_max>",
+     "opponent_mode": "<opponent_mode>",
+     "p_past": 0.3,
+     "phase_length": 50,
+     "pin_pitch": true,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    }
+   },
+   {
+    "scenario": "pin_pitch_falsy",
+    "site": "src/train_test_harness.py:371",
+    "enclosing": "_build_trainer_for_test",
+    "call_source": "SelfPlayManager(pool_size=15, p_past=0.3, save_every_epochs=25, win_threshold=0.6, phase_length=50, aim_log_std_max=aim_log_std_max, pin_pitch=bool(pin_pitch), opponent_mode=opponent)",
+    "bindings": {
+     "aim_log_std_max": null,
+     "opponent": "self",
+     "pin_pitch": 0
+    },
+    "explicit_kwargs": {
+     "aim_log_std_max": null,
+     "opponent_mode": "self",
+     "p_past": 0.3,
+     "phase_length": 50,
+     "pin_pitch": false,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    },
+    "effective_kwargs": {
+     "aim_log_std_max": null,
+     "opponent_mode": "self",
+     "p_past": 0.3,
+     "phase_length": 50,
+     "pin_pitch": false,
+     "pool_size": 15,
+     "save_every_epochs": 25,
+     "win_threshold": 0.6
+    }
+   }
+  ]
+ }
+}
