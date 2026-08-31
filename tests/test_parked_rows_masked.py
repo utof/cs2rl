@@ -247,6 +247,44 @@ def test_build_participating_rows_noop_marks_the_hero_team_only():
     assert SelfPlayManager().opponent_team == "ct"
 
 
+def test_train_passes_the_resolved_opponent_mode_to_build_participating_rows():
+    """AST pin of the PRODUCTION call site (same rationale as the source-scan in
+    tests/test_train_cli.py::test_opponent_flag_declared_with_both_modes:
+    train() is a ~500-line function that cannot be imported and driven).
+
+    WHY: every other noop test reaches the participation vector through
+    train_test_harness, which makes its OWN call to build_participating_rows.
+    So hardwiring `opponent_mode="self"` here — the one line that decides which
+    rows train in a real run — leaves the whole suite green while production
+    trains on the statue's rows and burns half its budget on an opponent that
+    never moves. Reviewer-verified: that mutation passed all 975 tests. This is
+    the only guard on that line, so it also pins where `_opponent_mode` comes
+    from: a literal would satisfy the keyword check alone.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "src" / "train.py").read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "train")
+    calls = [
+        c for c in ast.walk(fn) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        and c.func.id == "build_participating_rows"
+    ]
+    assert len(calls) == 1, f"train() must build the vector exactly once, found {len(calls)}"
+    kw = {k.arg: k.value for k in calls[0].keywords}
+    mode = kw.get("opponent_mode")
+    assert isinstance(mode, ast.Name) and mode.id == "_opponent_mode", (
+        "train() must pass opponent_mode=_opponent_mode; "
+        f"got {ast.dump(mode) if mode is not None else 'no opponent_mode keyword'}")
+    # ...and `_opponent_mode` must be the flag, not a local constant.
+    assert any(
+        isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "_opponent_mode"
+            for t in n.targets) and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name) and n.value.func.id == "resolve_opponent_mode"
+        for n in ast.walk(fn)), "_opponent_mode must come from resolve_opponent_mode(args)"
+
+
 @pytest.mark.parametrize("bad", [
     dict(opponent_mode="statue"),
     dict(hero_team="T"),
@@ -373,6 +411,18 @@ def test_noop_opponent_rows_are_statues_excluded_from_global_step():
         assert trainer.participating[hero].all()
         assert torch.all(trainer.actions[statue] == 0), "statue must play the no-op bin"
         assert torch.all(trainer.cont_actions[statue] == 0), "statue must not turn"
+        # ...and the rows the trainer ACTUALLY produced equal the oracle's
+        # statue, element for element — see
+        # test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent
+        # for why the two definitions have to agree.
+        from eval_baselines import IdleActor
+        _idle_act, _idle_cont = IdleActor().act(None, None, None, None)
+        assert trainer.actions.shape[-1] == _idle_act.shape[-1]
+        assert trainer.cont_actions.shape[-1] == _idle_cont.shape[-1]
+        _dev = trainer.actions.device
+        assert torch.all(trainer.actions[statue] == torch.as_tensor(_idle_act[0], device=_dev))
+        assert torch.all(
+            trainer.cont_actions[statue] == torch.as_tensor(_idle_cont[0], device=_dev))
         for buf in (trainer.logprobs, trainer.logprobs_d, trainer.logprobs_c, trainer.values):
             assert torch.all(buf[statue] == 0)
         # ...and the override is SCOPED: the hero still samples a live policy.
@@ -386,6 +436,44 @@ def test_noop_opponent_rows_are_statues_excluded_from_global_step():
         assert np.isfinite(trainer.losses["entropy"])
     finally:
         cleanup()
+
+
+def test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent():
+    """The two statue definitions must describe ONE opponent.
+
+    There are two, in modules that share no constant:
+      - the trainer's, an inline override in evaluate() under `--opponent noop`
+        (bin 0 on every discrete head, zero aim delta);
+      - the oracle's, ``eval_baselines.IdleActor``, which
+        scripts/oracle_statue_check.py drives as agent 5 to establish Rung 1a's
+        SOLVABILITY PRECONDITION — "a perfect aimer can kill this opponent".
+
+    WHY this coupling is load-bearing: that precondition is what licenses
+    reading a FAIL as "the policy did not learn" rather than "the task was
+    impossible". The licence only transfers if the opponent the oracle was
+    measured against is the opponent the trainer actually creates. Give
+    IdleActor a non-zero bin (a lean, a crouch) or a nudged aim and the oracle
+    still reports a solvable task — about a different opponent than the one the
+    RL run faced, with nothing in either module to notice.
+
+    This pins the oracle half to the same contract the trainer half is asserted
+    against end-to-end in
+    test_noop_opponent_rows_are_statues_excluded_from_global_step (which also
+    compares the trainer's produced rows to IdleActor's output directly).
+    """
+    from c_env.cs2_env import N_AGENTS
+    from eval_baselines import ACTION_DIM, AIM_DIM, IdleActor
+
+    act, cont = IdleActor().act(None, None, None, None)
+    assert ACTION_DIM == len(ACTION_HEAD_SIZES), "action head count drifted from the spec"
+    assert act.shape == (N_AGENTS, ACTION_DIM) and cont.shape == (N_AGENTS, AIM_DIM)
+    assert not act.any(), "IdleActor must play bin 0 on EVERY discrete head (the no-op action)"
+    assert not cont.any(), "IdleActor must emit a zero aim delta (it keeps its spawn orientation)"
+    # Stateless and side-effect free: the oracle check calls act() every tick
+    # with real args, so a statue that drifted after the first tick would still
+    # satisfy a single-call assertion.
+    again, again_c = IdleActor().act(object(), object(), None, object())
+    assert np.array_equal(act, again) and np.array_equal(cont, again_c)
 
 
 def test_harness_refuses_noop_with_selfplay():

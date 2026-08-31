@@ -259,9 +259,10 @@ def test_preflight5_missing_sigma_key_is_invalid(tmp_path):
 def test_preflight5_is_window_scoped_a_pre_window_breach_does_not_cap(tmp_path):
     """Pre-flight 5 is the ONE assertion evaluated over the window alone.
 
-    Row 10 (163,840 steps — far outside the >= 900,000 window) parks the raw
-    sigma above the cap; every window row sits at INIT, below it. The frozen
-    text says "in every window row", so this is a clean pre-flight 5: sigma was
+    `rows[10]` — the 11th row, at 180,224 steps, far outside the >= 900,000
+    window — parks the raw sigma above the cap; every window row sits at INIT,
+    below it. The frozen text says "in every window row", so this is a clean
+    pre-flight 5: sigma was
     measurable when it mattered, and an early excursion that the run had already
     left behind must NOT void the sigma-movement routing. Widening the scope to
     all rows (the way pre-flights 1/2/4 are scoped) would report SIGMA-CAPPED
@@ -350,6 +351,25 @@ def test_untrained_route_no_kills_no_sigma_movement(tmp_path):
     rep = _read(tmp_path, _rows(window_over={"policy/aim_log_std_yaw_raw": INIT - 0.05}))
     assert rep["verdict"] == "FAIL-aim-head-untrained"
     assert "rec 6" in rep["next_step"]
+
+
+def test_kills_between_the_thresholds_without_sigma_movement_is_unrouted(tmp_path):
+    """kills in [0.1, 0.5) with sigma parked ⇒ no branch matches ⇒ FAIL-unrouted.
+
+    This is the fixture that pins KILLS_UNTRAINED_MAX = 0.1 as a value distinct
+    from KILLS_PASS = 0.5. Every other untrained-route test uses the default
+    kills of 0.0, which sits below BOTH constants, so widening
+    KILLS_UNTRAINED_MAX to 0.5 leaves them all green — and the reader would then
+    report "the aim head is not being trained, go to rec 6" about a run killing
+    once every five episodes, i.e. a run whose aim head is demonstrably
+    training. The FAIL-unrouted exit here is the prereg's own documented gap
+    (see route.__doc__), not a defect: the controller adjudicates it.
+    """
+    rep = _read(tmp_path, _rows(window_over={"game/kills_per_episode": 0.2}))
+    assert rep["agg"]["kills"] == pytest.approx(0.2)
+    assert rep["agg"]["sigma_move"] == 0.0             # parked at INIT ⇒ not "moved"
+    assert rep["verdict"] == "FAIL-unrouted"
+    assert "controller adjudicates" in rep["next_step"]
 
 
 def test_sigma_capped_route(tmp_path):

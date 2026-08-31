@@ -3855,7 +3855,12 @@ def _patch_trainer_with_return_norm(trainer):
             losses["entropy"] += current_entropy.item()
             # Rung 0 §2.2: the same mean WITHOUT the mask. Diagnostic only —
             # its ratio to losses/entropy is the live check that the mask is
-            # actually doing something (≈ n_active/TEAM_SIZE at steady state).
+            # actually doing something: the expected ratio is the PARTICIPATING
+            # ROW FRACTION, which is ≈ n_active/TEAM_SIZE under --opponent self
+            # (both teams contribute n_active rows) but ≈ n_active/(2*TEAM_SIZE)
+            # under --opponent noop, where only the hero team participates.
+            # Reading the self-mode number on a noop run looks like a mask that
+            # is masking twice as much as it should.
             losses["entropy_unmasked"] += entropy_unmasked.item()
             losses["alpha"] += alpha.detach().item()
             losses["alpha_loss"] += alpha_loss.item()
@@ -6407,8 +6412,18 @@ def train(args):
     # a different buffer than the env it is now paired with).
     assert_max_turn_speed_agreement(vecenv, policy)
     if not self_play_enabled:
-        print("[Train] Self-play mixing disabled (--no-self-play): "
-              "both teams use the current policy every epoch.")
+        # Mode-aware on purpose: "both teams use the current policy" is FALSE
+        # under --opponent noop (the statue team is driven by the evaluate()
+        # override, not by the policy), and it printed one line above the noop
+        # provenance line that T4's pre-flight reads — two adjacent, mutually
+        # contradictory claims about the same run in the same log.
+        if _opponent_mode == "noop":
+            print("[Train] Self-play mixing disabled (--no-self-play): the hero team "
+                  "uses the current policy every epoch; the opponent team is a statue "
+                  "(--opponent noop), not the current policy.")
+        else:
+            print("[Train] Self-play mixing disabled (--no-self-play): "
+                  "both teams use the current policy every epoch.")
     if _opponent_mode == "noop":
         # Rung 1a T3: the run log is what T4's pre-flight reads, so state which
         # team is frozen, how many rows actually train, and on what horizon —

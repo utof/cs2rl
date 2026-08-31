@@ -890,7 +890,7 @@ class Cs2Env(pufferlib.PufferEnv):
                 f"{n_active_per_team} — binding.init's FMT string and the call above disagree")
 
         # Sim recoil v1 (#120): write AFTER the overlay, not via binding.init
-        # (the 72-arg FMT is a footgun; extend it only at the tail). env_init memsets
+        # (the 73-arg FMT is a footgun; extend it only at the tail). env_init memsets
         # Dust2Env so this starts 0; env_reset memsets GameState only, so the
         # flag survives reset. Train / Modal stay off unless a later card
         # passes recoil=True into make_env.
