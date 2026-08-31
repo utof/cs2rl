@@ -11,9 +11,11 @@
 #include <Python.h>
 #include <numpy/arrayobject.h>
 #include <stddef.h> /* offsetof — used by py_struct_sizes below */
+#include <stdio.h>  /* snprintf — used by py_static_data_layout below */
 #include <stdlib.h>
 #include <string.h>
 #include "cs2_env.h"
+#include "cs2_sha256.h" /* layout hash; included by binding.c only */
 #ifdef CS2_DEMO_VIZ_H
 #error "binding must not include cs2_demo_viz.h (aim-stick stays out of the env graph)"
 #endif
@@ -498,6 +500,231 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
         N_AGENTS);
 }
 
+/* ── binding.static_data_layout() -> dict ──
+ * The C compiler's own account of StaticData's prefix layout, plus a hash of it.
+ *
+ * WHAT: {"format", "preamble", "prefix_size", "fields", "hash"}, where "fields"
+ * is a tuple of (name, offset, size, canonical_type) — one entry per row of
+ * SD_PREFIX_FIELDS (cs2_types.h), in declaration order — and "hash" is the
+ * sha256 of the serialisation described under SD_LAYOUT_FORMAT below.
+ *
+ * WHY a NEW entry point and not three more struct_sizes() keys: struct_sizes()'s
+ * key set is asserted set-equal to cs2_env._C_SIZE_KEYS_CHECKED by
+ * test_struct_sizes_keys_are_all_consumed, i.e. every key it publishes must be
+ * consumed by a hand-written tuple in cs2_env.py. That guard is exactly right
+ * for a handful of sizeofs and anchors and exactly wrong for 71 per-field rows.
+ *
+ * WHY it exists at all: struct_sizes() measures 7 sizeofs and 3 StaticData
+ * offsets. That is blind to a field-for-field disagreement between the C struct
+ * and the ctypes mirror that happens to preserve both — two same-width fields
+ * swapped, or an int declared where the mirror says float. This function makes
+ * the C side state its layout per field so the Python side can compare against
+ * its own introspection of StaticDataC rather than against nothing.
+ *
+ * WHAT IT DOES NOT COVER, stated plainly: this compares two DECLARATIONS. It
+ * cannot see a value-routing mistake — Python assigning jump_enabled into the
+ * crouch_enabled field packs the wrong number into a correctly-described slot,
+ * and every quadruple here still matches. That failure mode belongs to
+ * static_data_scalars() and the two-env sentinel scheme in
+ * tests/test_struct_sizes.py, which is why neither is retired.
+ * It also covers the PREFIX ONLY (up to wall_list): the tail is held by the
+ * three offset anchors in py_struct_sizes above.
+ *
+ * PITFALL: the canonical type names are NOT the C spellings. `int` and
+ * `int32_t` both become "c_int" because ctypes folds c_int32 into c_int and the
+ * two sides have to be able to agree; pointers become "ptr_<elem>" and arrays
+ * "arr_<elem>_<count>". Never widen that mapping to make a failing comparison
+ * pass — the type column is the only part of the hash that sees an int/float
+ * swap between two 4-byte fields.
+ */
+
+/* Serialisation hashed by BOTH sides. Bump the version tag if the line format
+ * changes, so a stale .so fails on the tag rather than on an opaque hex diff.
+ * Lines, each '\n'-terminated:
+ *     <format tag>
+ *     <preamble>
+ *     prefix_size=<offsetof(StaticData, wall_list)>
+ *     <name>|<offset>|<size>|<canonical type>      (once per prefix field)
+ * The Python counterpart is static_data_layout() in cs2_env.py. */
+#define SD_LAYOUT_FORMAT "cs2rl-static-data-layout-v1"
+
+/* C's FIXED expectation about how ctypes must be laying StaticDataC out.
+ * Python does NOT hardcode this string: it DERIVES its own from live
+ * introspection (hasattr(StaticDataC, "_pack_"), getattr(..., "_layout_")). Two
+ * hardcoded constants would compare nothing. `pack=unset` matters because
+ * setting _pack_ on Linux silently switches ctypes to MSVC layout rules, which
+ * would move fields without changing any single field's declared type. */
+#define SD_LAYOUT_PREAMBLE "struct=StaticData;pack=unset;layout=gcc-sysv"
+
+/* Declared C type spelling -> the name ctypes introspection produces for the
+ * same field. Written ONCE, here: the Python side derives its names structurally
+ * (ctype.__name__, "ptr_"/"arr_" prefixes) and asserts they land in this same
+ * vocabulary. A type used in SD_PREFIX_FIELDS but missing here makes
+ * static_data_layout() raise, which is the intended direction — a new field type
+ * must be a conscious decision on both sides, not a silently unhashed column. */
+typedef struct {
+    const char* c_type;
+    const char* canonical;
+} SdTypeName;
+
+static const SdTypeName SD_TYPE_NAMES[] = {
+    {"int", "c_int"},
+    {"int32_t", "c_int"}, /* ctypes: c_int32 IS c_int, so these are one name */
+    {"int8_t", "c_byte"}, /* ctypes: c_int8 IS c_byte */
+    {"float", "c_float"},
+    {"int8_t*", "ptr_c_byte"},
+    {"int32_t*", "ptr_c_int"},
+    {"float*", "ptr_c_float"},
+};
+
+/* Compare two C type spellings ignoring spaces, so that a reformat of
+ * SD_PREFIX_FIELDS from `int8_t*` to `int8_t *` (clang-format's
+ * PointerAlignment could do it) does not turn every pointer field into an
+ * unknown type. */
+static int sd_type_spelling_eq(const char* a, const char* b) {
+    for (;;) {
+        while (*a == ' ')
+            a++;
+        while (*b == ' ')
+            b++;
+        if (*a != *b)
+            return 0;
+        if (*a == '\0')
+            return 1;
+        a++;
+        b++;
+    }
+}
+
+/* Write the canonical type name for one field into `out` (0 on success, -1 if
+ * `c_type` is not in the vocabulary above or the array arithmetic is nonsense).
+ * `field_size`/`elem_size` are sizeof expressions from the caller, so the array
+ * COUNT in the name is compiler-derived rather than copied out of the struct. */
+static int sd_canonical_type(const char* c_type,
+                             int         is_array,
+                             size_t      field_size,
+                             size_t      elem_size,
+                             char*       out,
+                             size_t      out_cap) {
+    const char* base = NULL;
+    size_t      i;
+    int         n;
+    for (i = 0; i < sizeof(SD_TYPE_NAMES) / sizeof(SD_TYPE_NAMES[0]); i++) {
+        if (sd_type_spelling_eq(SD_TYPE_NAMES[i].c_type, c_type)) {
+            base = SD_TYPE_NAMES[i].canonical;
+            break;
+        }
+    }
+    if (!base)
+        return -1;
+    if (!is_array)
+        n = snprintf(out, out_cap, "%s", base);
+    else if (elem_size == 0 || field_size % elem_size != 0)
+        return -1;
+    else
+        /* %lu, not %zu: the Windows CRT historically ignores the z length
+         * modifier. Every count here is < 100, so the narrowing is safe. */
+        n = snprintf(out, out_cap, "arr_%s_%lu", base, (unsigned long)(field_size / elem_size));
+    return (n < 0 || (size_t)n >= out_cap) ? -1 : 0;
+}
+
+/* METH_NOARGS — see the Py_UNUSED note above py_struct_sizes for why the second
+ * parameter is named this way. */
+static PyObject* py_static_data_layout(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    (void)self;
+    Cs2Sha256 h;
+    char      line[256];
+    char      hex[65];
+    int       n;
+    PyObject* fields = NULL;
+    PyObject* tuple  = NULL;
+
+    cs2_sha256_init(&h);
+    n = snprintf(line,
+                 sizeof(line),
+                 "%s\n%s\nprefix_size=%lu\n",
+                 SD_LAYOUT_FORMAT,
+                 SD_LAYOUT_PREAMBLE,
+                 (unsigned long)offsetof(StaticData, wall_list));
+    if (n < 0 || (size_t)n >= sizeof(line)) {
+        PyErr_SetString(PyExc_RuntimeError, "static_data_layout: header line overflow");
+        return NULL;
+    }
+    cs2_sha256_update(&h, line, (size_t)n);
+
+    fields = PyList_New(0);
+    if (!fields)
+        return NULL;
+
+/* One SD_PREFIX_FIELDS row -> one hashed line + one tuple entry. offsetof and
+ * sizeof are evaluated here, so the numbers are the compiler's, never the
+ * table's. #f stringifies the field name, so the name in the hash and the field
+ * the offset was taken from cannot disagree. */
+#define SD_LAYOUT_ROW(ctype, f, is_array)                                                          \
+    do {                                                                                           \
+        char      canon[64];                                                                       \
+        size_t    off = offsetof(StaticData, f);                                                   \
+        size_t    fsz = sizeof(((StaticData*)0)->f);                                               \
+        PyObject* row;                                                                             \
+        if (sd_canonical_type(#ctype, (is_array), fsz, sizeof(ctype), canon, sizeof(canon)) !=     \
+            0) {                                                                                   \
+            PyErr_Format(PyExc_RuntimeError,                                                       \
+                         "static_data_layout: field '%s' declared '%s' has no canonical type "     \
+                         "name; add it to SD_TYPE_NAMES in binding.c and to "                      \
+                         "_CANONICAL_SCALAR_CTYPES in cs2_env.py",                                 \
+                         #f,                                                                       \
+                         #ctype);                                                                  \
+            goto fail;                                                                             \
+        }                                                                                          \
+        n = snprintf(line,                                                                         \
+                     sizeof(line),                                                                 \
+                     "%s|%lu|%lu|%s\n",                                                            \
+                     #f,                                                                           \
+                     (unsigned long)off,                                                           \
+                     (unsigned long)fsz,                                                           \
+                     canon);                                                                       \
+        if (n < 0 || (size_t)n >= sizeof(line)) {                                                  \
+            PyErr_Format(                                                                          \
+                PyExc_RuntimeError, "static_data_layout: line overflow for field '%s'", #f);       \
+            goto fail;                                                                             \
+        }                                                                                          \
+        cs2_sha256_update(&h, line, (size_t)n);                                                    \
+        row = Py_BuildValue("(snns)", #f, (Py_ssize_t)off, (Py_ssize_t)fsz, canon);                \
+        if (!row)                                                                                  \
+            goto fail;                                                                             \
+        if (PyList_Append(fields, row) != 0) {                                                     \
+            Py_DECREF(row);                                                                        \
+            goto fail;                                                                             \
+        }                                                                                          \
+        Py_DECREF(row);                                                                            \
+    } while (0);
+
+    SD_PREFIX_FIELDS(SD_LAYOUT_ROW)
+#undef SD_LAYOUT_ROW
+
+    cs2_sha256_final_hex(&h, hex);
+    tuple = PyList_AsTuple(fields);
+    Py_CLEAR(fields);
+    if (!tuple)
+        return NULL;
+    /* s:N hands `tuple` to the dict and steals the reference, including on
+     * failure — nothing left to clean up here either way. */
+    return Py_BuildValue("{s:s,s:s,s:n,s:N,s:s}",
+                         "format",
+                         SD_LAYOUT_FORMAT,
+                         "preamble",
+                         SD_LAYOUT_PREAMBLE,
+                         "prefix_size",
+                         (Py_ssize_t)offsetof(StaticData, wall_list),
+                         "fields",
+                         tuple,
+                         "hash",
+                         hex);
+fail:
+    Py_XDECREF(fields);
+    return NULL;
+}
+
 /* ── binding.static_data_scalars(capsule) -> dict ──
  * Read every scalar StaticData field back out of a live env.
  *
@@ -726,6 +953,10 @@ static PyMethodDef binding_methods[] = {
     {"get_buffers", py_get_buffers, METH_VARARGS, "Get buffer addresses as ints"},
     {"get_masks", py_get_masks, METH_VARARGS, "Get masks buffer address as int"},
     {"struct_sizes", py_struct_sizes, METH_NOARGS, "sizeof/offsetof of the C structs"},
+    {"static_data_layout",
+     py_static_data_layout,
+     METH_NOARGS,
+     "Per-field layout of StaticData's prefix, plus its sha256"},
     {"static_data_scalars",
      py_static_data_scalars,
      METH_VARARGS,

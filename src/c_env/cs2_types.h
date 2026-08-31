@@ -181,6 +181,8 @@ typedef struct {
      * Field order MUST stay in sync with:
      *   - StaticDataC._fields_ in cs2_env.py  (ctypes mirror)
      *   - PyArg_ParseTuple format string in binding.c py_init()
+     *   - SD_PREFIX_FIELDS below              (per-field layout table: every
+     *     field before wall_list needs a row, in this same order)
      * Mismatch silently corrupts all pointer fields that follow. */
     float*   centroids_z;     /* [N]             idx-indexed: terrain z per area   */
     int32_t* area_ids;        /* [N]             idx -> raw area_id                */
@@ -301,6 +303,118 @@ typedef struct {
      * it was written by Python, read by no C code, and freed by nobody. */
     const float* area_bounds; /* [N*4] x0,y0,x1,y1; NULL = no interpolation */
 } StaticData;
+
+/* ── StaticData prefix layout table (X-macro) ─────────────────────────────────
+ *
+ * WHAT: one row per StaticData field in [0, offsetof(StaticData, wall_list)) —
+ * the "prefix", i.e. everything Python publishes through binding.init — in
+ * declaration order. Consumed by py_static_data_layout() in binding.c, which
+ * turns each row into (name, offset, size, canonical type name) and hashes the
+ * result. tests/test_static_data_layout.py compares that hash against the same
+ * quadruples derived by ctypes introspection of StaticDataC in cs2_env.py.
+ *
+ * X(type, name, is_array):
+ *   type     — the field's declared type, EXACTLY as spelled in the struct
+ *              above. For an array field this is the ELEMENT type (`float` for
+ *              `float delta_x[9]`), because that is what sizeof() needs to
+ *              recover the count. binding.c maps these spellings to the
+ *              canonical vocabulary the ctypes side introspects (`int` and
+ *              `int32_t` both land on c_int, because ctypes folds
+ *              c_int32 into c_int and so cannot tell them apart either).
+ *   name     — the field name. Stringified for the hash, and fed to offsetof /
+ *              sizeof, so key and value cannot disagree.
+ *   is_array — 1 for the fixed-size array fields, 0 otherwise. NOT inferred
+ *              from `sizeof(field) != sizeof(type)`: that inference silently
+ *              mis-labels a one-element array as a scalar, and the resulting
+ *              canonical name would then disagree with ctypes forever.
+ *
+ * WHY a separate list rather than generating the struct from this macro: the
+ * struct above carries ~90 lines of interleaved field documentation that a
+ * macro body (every line backslash-continued) would mangle, and rewriting a
+ * 520-byte layout to add a hash is a worse trade than maintaining one extra
+ * name list. What this list must never contain is a hand-written offset or
+ * size — those are all offsetof/sizeof EXPRESSIONS in binding.c, so the numbers
+ * come from the compiler that laid the struct out. (cs2_types.h has already had
+ * one pair of hand-quoted offsets go stale; see the wall_list comment above.)
+ *
+ * PITFALL: adding a prefix field here but not to StaticDataC in cs2_env.py (or
+ * vice versa) fails tests/test_static_data_layout.py. Adding it to the struct
+ * and to NEITHER is caught by the sizeof(StaticData) guard — unless the new
+ * field fits entirely inside existing padding, which has happened once already
+ * (jump_enabled, see the wall_list comment). So: struct, mirror, and this table,
+ * in the same commit, always. */
+#define SD_PREFIX_FIELDS(X)                                                                        \
+    X(int, N, 0)                                                                                   \
+    X(int8_t*, vis_matrix, 0)                                                                      \
+    X(int32_t*, raster_grid, 0)                                                                    \
+    X(int8_t*, adjacency, 0)                                                                       \
+    X(float*, centroid_xy, 0)                                                                      \
+    X(float*, centroids_z, 0)                                                                      \
+    X(int32_t*, area_ids, 0)                                                                       \
+    X(int8_t*, bombsite_mask, 0)                                                                   \
+    X(int8_t*, bombsite_by_idx, 0)                                                                 \
+    X(int8_t*, is_ramp, 0)                                                                         \
+    X(float*, bombsite_dist, 0)                                                                    \
+    X(int, grid_w, 0)                                                                              \
+    X(int, grid_h, 0)                                                                              \
+    X(int, max_area_id, 0)                                                                         \
+    X(float, grid_x_min, 0)                                                                        \
+    X(float, grid_y_min, 0)                                                                        \
+    X(float, grid_inv_cell, 0)                                                                     \
+    X(float, inv_x_range, 0)                                                                       \
+    X(float, inv_y_range, 0)                                                                       \
+    X(float, x_offset, 0)                                                                          \
+    X(float, y_offset, 0)                                                                          \
+    X(float, bombsite_dist_scale, 0)                                                               \
+    X(int32_t, laser_damage, 0)                                                                    \
+    X(float, laser_range, 0)                                                                       \
+    X(float, laser_range_sq, 0)                                                                    \
+    X(int32_t, shoot_cooldown, 0)                                                                  \
+    X(int32_t, bomb_plant_time, 0)                                                                 \
+    X(int32_t, bomb_defuse_time, 0)                                                                \
+    X(int32_t, bomb_defuse_kit, 0)                                                                 \
+    X(int32_t, bomb_timer, 0)                                                                      \
+    X(int32_t, round_time, 0)                                                                      \
+    X(float, footstep_radius_sq, 0)                                                                \
+    X(float, gunshot_radius_sq, 0)                                                                 \
+    X(int32_t, enemy_memory_ticks, 0)                                                              \
+    X(int32_t, stale_memory_tick, 0)                                                               \
+    X(float, pbrs_gamma, 0)                                                                        \
+    X(float, delta_x, 1)                                                                           \
+    X(float, delta_y, 1)                                                                           \
+    X(float, dir_facing, 1)                                                                        \
+    X(int32_t, t_spawns, 1)                                                                        \
+    X(int, n_t_spawns, 0)                                                                          \
+    X(int32_t, ct_spawns, 1)                                                                       \
+    X(int, n_ct_spawns, 0)                                                                         \
+    X(float, max_turn_speed, 0)                                                                    \
+    X(float, reward_win, 0)                                                                        \
+    X(float, reward_win_t_detonation, 0)                                                           \
+    X(float, reward_win_t_elimination, 0)                                                          \
+    X(float, reward_win_ct_defuse, 0)                                                              \
+    X(float, reward_win_ct_timeout, 0)                                                             \
+    X(float, reward_win_ct_elimination, 0)                                                         \
+    X(float, reward_kill, 0)                                                                       \
+    X(float, reward_death, 0)                                                                      \
+    X(float, reward_bombsite_entry, 0)                                                             \
+    X(float, reward_plant_bonus, 0)                                                                \
+    X(float, reward_plant_base, 0)                                                                 \
+    X(float, reward_plant_progress_scale, 0)                                                       \
+    X(float, reward_plant_interrupted, 0)                                                          \
+    X(float, reward_defuse, 0)                                                                     \
+    X(float, reward_shot_penalty, 0)                                                               \
+    X(float, reward_ct_survival, 0)                                                                \
+    X(float, reward_inaction, 0)                                                                   \
+    X(float, pbrs_alive_weight, 0)                                                                 \
+    X(float, pbrs_hp_weight, 0)                                                                    \
+    X(float, pbrs_site_weight, 0)                                                                  \
+    X(float, pbrs_bomb_progress_weight, 0)                                                         \
+    X(float, pbrs_nav_weight_t, 0)                                                                 \
+    X(float, pbrs_nav_weight_ct, 0)                                                                \
+    X(int32_t, n_active_per_team, 0)                                                               \
+    X(int32_t, pin_pitch, 0)                                                                       \
+    X(int32_t, crouch_enabled, 0)                                                                  \
+    X(int32_t, jump_enabled, 0)
 
 /* ── Per-agent state ── */
 typedef struct {

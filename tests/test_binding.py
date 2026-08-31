@@ -17,7 +17,7 @@ def _make_env(map_data=None):
 
 def test_binding_functions_present():
     for name in ("init", "reset", "step", "close", "get_buffers", "get_masks", "struct_sizes",
-                 "static_data_scalars"):
+                 "static_data_scalars", "static_data_layout"):
         assert hasattr(binding, name), f"binding.{name} missing"
 
 

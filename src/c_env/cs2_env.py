@@ -1,6 +1,7 @@
 # src/c_env/cs2_env.py — PufferEnv subclass backed by binding.c C API bridge.
 
 import ctypes
+import hashlib
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,7 +94,10 @@ class StaticDataC(ctypes.Structure):
         # Field order MUST stay in sync with:
         #   - StaticData struct in cs2_types.h  (C canonical source)
         #   - PyArg_ParseTuple format string in binding.c py_init()
+        #   - SD_PREFIX_FIELDS in cs2_types.h   (per-field layout table; every
+        #     field above wall_list needs a row there, in this same order)
         # Mismatch here silently corrupts all pointer fields that follow.
+        # A missing SD_PREFIX_FIELDS row fails tests/test_static_data_layout.py.
         ("centroids_z", ctypes.POINTER(ctypes.c_float)),               # float32[N] — terrain z per area  # noqa: E501
         ("area_ids", ctypes.POINTER(ctypes.c_int32)),
         ("bombsite_mask", ctypes.POINTER(ctypes.c_int8)),
@@ -497,6 +501,111 @@ del _macro, _py_value
 _C_SIZE_KEYS_CHECKED = (frozenset(_n for _n, _ in _C_SIZE_MIRRORS)
                         | frozenset(_k for _, _, _k in _C_OFFSET_FIELDS)
                         | frozenset(_m for _m, _ in _C_MACROS))
+
+# ── StaticData layout hash, Python side (spec 2026-08-31 §2 W2) ───────────────
+#
+# The counterpart of binding.static_data_layout(). Both sides describe the same
+# StaticData prefix — everything before wall_list — as an ordered list of
+# (name, offset, size, canonical type name), serialise it identically, and
+# sha256 it. tests/test_static_data_layout.py asserts the two agree.
+#
+# The point is that the two operands come from DIFFERENT sources. C reads the
+# compiler's offsetof/sizeof over the SD_PREFIX_FIELDS table in cs2_types.h;
+# everything below is ctypes introspection of StaticDataC and nothing else. If
+# either side is ever "simplified" into reading the other, the comparison stops
+# comparing anything and the mirror is unguarded again — which is the state this
+# replaces, where a 73-position format string was the only thing holding the two
+# declarations together.
+#
+# Honest scope, same as the C-side doc block: this compares DECLARATIONS. A
+# packing mistake that puts the right number in the wrong (correctly described)
+# field is invisible here and is caught by the sentinel round trip in
+# tests/test_struct_sizes.py instead.
+_LAYOUT_FORMAT = "cs2rl-static-data-layout-v1"
+
+# The scalar canonical names binding.c's SD_TYPE_NAMES can emit. Introspection
+# below builds "ptr_<base>" / "arr_<base>_<count>" structurally, so only the
+# BASE names need agreeing on. A StaticData field declared with any other type
+# (c_double, c_uint32, ...) raises rather than silently hashing a name the C
+# side could never produce.
+_CANONICAL_SCALAR_CTYPES = frozenset({"c_int", "c_byte", "c_float"})
+
+
+def _canonical_ctype_name(ctype):
+    """Canonical layout-hash name for one ctypes field type.
+
+    Mirrors the vocabulary in binding.c's SD_TYPE_NAMES, reached from the other
+    direction: C maps its declared spellings onto these names, while this walks
+    the ctypes class structure. Note ctypes has already folded c_int32 into
+    c_int and c_int8 into c_byte before we see them, which is exactly why the C
+    side has to do the mapping at all — `int` and `int32_t` are indistinguishable
+    from here.
+    """
+    if issubclass(ctype, ctypes._Pointer):
+        return "ptr_" + _canonical_ctype_name(ctype._type_)
+    if issubclass(ctype, ctypes.Array):
+        return f"arr_{_canonical_ctype_name(ctype._type_)}_{ctype._length_}"
+    name = ctype.__name__
+    if name not in _CANONICAL_SCALAR_CTYPES:
+        raise RuntimeError(
+            f"StaticDataC field type {name!r} is outside the layout-hash vocabulary "
+            f"{sorted(_CANONICAL_SCALAR_CTYPES)}; add it here AND to SD_TYPE_NAMES in "
+            "src/c_env/binding.c, then rebuild")
+    return name
+
+
+def _static_data_preamble():
+    """Layout assumptions ctypes is making, read out of the live class.
+
+    DERIVED, never hardcoded — binding.c hardcodes its expectation and this
+    reports what ctypes actually did; two constants would compare nothing.
+
+    `_pack_` is the one that bites: setting it on Linux switches ctypes to MSVC
+    layout rules, which moves fields without changing any single field's type.
+    `_layout_` only exists from Python 3.14; before that ctypes had exactly one
+    layout, the platform-native one, which on the x86-64 Linux/macOS targets this
+    builds for IS gcc-sysv — so absent canonicalises to that name rather than to
+    a separate "unknown" token that would split the hash by interpreter version.
+    A 3.14+ interpreter reporting anything else (e.g. "ms") flows through
+    verbatim and fails the comparison, which is the intended direction.
+    """
+    pack = str(StaticDataC._pack_) if hasattr(StaticDataC, "_pack_") else "unset"
+    layout = getattr(StaticDataC, "_layout_", None) or "gcc-sysv"
+    return f"struct=StaticData;pack={pack};layout={layout}"
+
+
+def static_data_layout():
+    """Describe StaticDataC's prefix the way binding.static_data_layout() does.
+
+    Returns the same five keys as the C function: format, preamble, prefix_size,
+    fields, hash. `fields` covers [0, offsetof(StaticData, wall_list)) only; the
+    tail (wall_list, area_bounds) is guarded by the three offset anchors in
+    _C_OFFSET_FIELDS above instead.
+
+    Deliberately uncached. It is one sha256 over ~3 KB, and a cache would make
+    the hash test unable to see a mirror edited at runtime — which is precisely
+    how that test's discrimination check proves it is measuring something.
+    """
+    names = [name for name, _ in StaticDataC._fields_]
+    # ValueError here means the mirror lost its wall_list field, i.e. there is no
+    # prefix boundary left to describe. Better than silently hashing everything.
+    prefix_end = names.index("wall_list")
+    fields = []
+    for name, ctype in StaticDataC._fields_[:prefix_end]:
+        field = getattr(StaticDataC, name)
+        fields.append((name, field.offset, field.size, _canonical_ctype_name(ctype)))
+    preamble = _static_data_preamble()
+    prefix_size = StaticDataC.wall_list.offset
+    blob = f"{_LAYOUT_FORMAT}\n{preamble}\nprefix_size={prefix_size}\n"
+    blob += "".join(f"{n}|{o}|{s}|{t}\n" for n, o, s, t in fields)
+    return {
+        "format": _LAYOUT_FORMAT,
+        "preamble": preamble,
+        "prefix_size": prefix_size,
+        "fields": tuple(fields),
+        "hash": hashlib.sha256(blob.encode("ascii")).hexdigest(),
+    }
+
 
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
