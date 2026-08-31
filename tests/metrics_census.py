@@ -36,11 +36,17 @@ THE THREE THINGS THIS FILE PRODUCES, per emitter site:
   * ``EmittedKey``   — a concrete key literal, with its write shape.
   * ``KeyFamily``    — an f-string-built key template with every placeholder
                        replaced by ``*``. CLOSED when the placeholders are
-                       statically resolvable (``for idx in range(9)``,
-                       ``for k in ("a", "b")``): ``members`` then holds the
-                       exact concrete keys. OPEN otherwise (a parameter, a
-                       ``zip`` over runtime objects): ``members`` is empty and
-                       coverage falls back to the glob.
+                       statically resolvable — a literal iterable
+                       (``for idx in range(9)``, ``for k in ("a", "b")``), a
+                       name one hop back from one, or a PARAMETER every call
+                       site in ``src/`` passes a constant for
+                       (``emitter_param_bindings``, which is what closes the
+                       seven ``tag/*`` families on ``mb_label``): ``members``
+                       then holds the exact concrete keys. OPEN otherwise (a
+                       ``zip`` over runtime objects, ``named_parameters()``):
+                       ``members`` is empty and coverage falls back to the glob.
+                       Open is the weaker state — an open template glob-matches,
+                       so it alibis any registry entry underneath it.
   * ``write shape``  — one of the structural classes in ``SHAPES`` below, from
                        which the expected aggregation follows.
 
@@ -325,12 +331,21 @@ def _container_name(node):
 
 # ── Symbolic resolution of f-string placeholders ──────────────────────────
 #
-# Only LITERAL iterables bind a loop variable: `for idx in range(9)` and
-# `for k in ("a", "b")` are resolvable; `for g in pg_group_names` (a Name) and
-# `zip(_head_names, _dists)` are not. The line is drawn at "the values are
-# visible in this statement" on purpose — chasing a Name one hop back would
-# invite chasing it two, and the point of an OPEN family is to say honestly
-# that the member list is not statically known.
+# A loop variable binds when its iterable is a LITERAL (`for idx in range(9)`,
+# `for k in ("a", "b")`) or a bare Name resolvable ONE HOP back to a literal
+# assigned exactly once in the same function (`for g in pg_group_names`, where
+# `pg_group_names = ("trunk", "policy_heads")` sits eight lines above). One hop
+# is the same depth `losses_entropy_head_source` and `island_merge_sources`
+# already resolve at; two hops is where this would start guessing, so
+# `zip(_head_names, _dists)` and `model.named_parameters()` stay unresolvable and
+# their families stay honestly OPEN.
+#
+# Emitter PARAMETERS bind the same way, from the call sites in src/ — see
+# `emitter_param_bindings`. Both widenings exist for one measured reason: the
+# seven `tag/*` families are built from `f"tag/<stat>/{g}/{mb_label}"`, and
+# without them every member of the repo's only cross-team-gradient diagnostic is
+# statically unknown, which makes `tag/*` an OPEN template that alibis any
+# `tag/anything` registry entry.
 
 
 def _literal_strings(node):
@@ -351,12 +366,41 @@ def _literal_strings(node):
     return None
 
 
-def _bind_for(node, env):
-    """Extend `env` with the loop variables `node` binds to literal values."""
+def _local_literal_bindings(fn):
+    """{name: (values,)} for names bound ONCE to a literal iterable inside `fn`.
+
+    Assigned-once is the whole safety rule: a name rebound in a branch is not a
+    constant, so it resolves to nothing and its family stays OPEN. Measured blast
+    radius across the island today: exactly one name, `tag_grad_cossim`'s
+    `pg_group_names` — every other non-literal iterable in an emitter is a
+    method call (`model.named_parameters()`, `subsets.items()`) or a `zip`/
+    `enumerate`, none of which this reaches.
+    """
+    counts, values = {}, {}
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Assign):
+            continue
+        for tgt in node.targets:
+            if isinstance(tgt, ast.Name):
+                counts[tgt.id] = counts.get(tgt.id, 0) + 1
+                values[tgt.id] = _literal_strings(node.value)
+    return {n: tuple(v) for n, v in values.items() if v is not None and counts[n] == 1}
+
+
+def _bind_for(node, env, literals=None):
+    """Extend `env` with the loop variables `node` binds to literal values.
+
+    `literals` is `_local_literal_bindings` of the enclosing emitter; it is what
+    makes `for g in pg_group_names` resolvable. Omitted (the reads walk) it is
+    empty and only in-statement literals bind.
+    """
     env = dict(env)
+    literals = literals or {}
     target, it = node.target, node.iter
     if isinstance(target, ast.Name):
         vals = _literal_strings(it)
+        if vals is None and isinstance(it, ast.Name):
+            vals = literals.get(it.id)
         env[target.id] = tuple(vals) if vals is not None else None
     elif isinstance(target, ast.Tuple) and isinstance(it, (ast.Tuple, ast.List)):
         # `for name, a, b in (("action_heads", x, y), ...)` — bind position-wise,
@@ -526,7 +570,7 @@ def _dict_items(node):
 def _walk(node, site, env, ctx, keys, families, seen):
     """Recursive collector; `env` carries loop-variable bindings."""
     if isinstance(node, ast.For):
-        env = _bind_for(node, env)
+        env = _bind_for(node, env, ctx["local_literals"])
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not site._fn:
         # A nested helper (compute_game_metrics._maybe) is walked once per call
         # site, with its parameters bound to that call's constant arguments.
@@ -576,6 +620,60 @@ def _walk(node, site, env, ctx, keys, families, seen):
         _walk(child, site, env, ctx, keys, families, seen)
 
 
+def emitter_param_bindings(site, fn):
+    """Constant values `site`'s PARAMETERS take, unioned over every call in src/.
+
+    WHY an emitter's parameters matter to a key census: `tag_grad_cossim` builds
+    its keys as ``f"tag/cossim_cross/{g}/{mb_label}"``, and `mb_label` is a
+    parameter. Read from the function alone it is unknowable, so all seven
+    `tag/*` families come out OPEN — and an OPEN template is a glob alibi in
+    `test_every_registered_emitted_key_is_actually_emitted`, so the registry
+    could carry any `tag/...` key it liked. The single call site passes
+    ``mb_label="mb0" if _tag_mb0 else "mbL"``: two constants, an `ast.IfExp` that
+    `_resolve` already unions. The label axis is a static fact; it just is not
+    written down inside the emitter.
+
+    CONSERVATIVE IN THE SAFE DIRECTION. A parameter binds only when EVERY call
+    site resolves it to constants and at least one call site exists. Add a caller
+    passing a runtime label and the parameter unbinds, the families reopen, and
+    the registry's now-unconfirmed `members` fail
+    `test_closed_family_members_match_the_census_exactly`'s unpinned check —
+    loudly, rather than by quietly describing a member set that moved.
+
+    Both argument forms are read (positional by signature index, keyword by
+    name), so switching a call from one to the other does not silently drop the
+    binding. `*args`/`**kwargs` call sites resolve to nothing and unbind.
+    """
+    fname = site.qualname.split(".")[-1]
+    params = [a.arg for a in fn.args.posonlyargs] + [a.arg for a in fn.args.args]
+    kwonly = [a.arg for a in fn.args.kwonlyargs]
+
+    calls = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _callee_name(node) == fname:
+                calls.append(node)
+    if not calls:
+        return {}
+
+    out = {}
+    for pos, name in enumerate(params + kwonly):
+        vals = []
+        for call in calls:
+            arg = next((kw.value for kw in call.keywords if kw.arg == name), None)
+            if arg is None and name in params and pos < len(call.args):
+                arg = call.args[pos]
+            resolved = _resolve(arg, {}) if arg is not None else None
+            if resolved is None:
+                vals = None
+                break
+            vals.extend(resolved)
+        if vals:
+            out[name] = tuple(dict.fromkeys(vals))
+    return out
+
+
 def _nested_call_args(fn):
     """{helper name: [(const arg nodes), ...]} for helpers defined inside `fn`."""
     local = {n.name for n in ast.walk(fn) if isinstance(n, ast.FunctionDef) and n is not fn}
@@ -614,10 +712,17 @@ def census():
             (_game_passthrough_names(fn) if site.qualname == "compute_game_metrics" else set()),
             "nested_calls":
             _nested_call_args(fn),
+            "local_literals":
+            _local_literal_bindings(fn),
         }
         seen = set()
+        # The site's own parameters are the starting environment: `mb_label` is
+        # a `tag_grad_cossim` argument, not a local, and without it the seven
+        # tag/* families have no statically known members. See
+        # emitter_param_bindings for why this can only ever narrow, not invent.
+        env0 = emitter_param_bindings(site, fn)
         for child in ast.iter_child_nodes(fn):
-            _walk(child, _SiteWithFn(site, fn), {}, ctx, keys, families, seen)
+            _walk(child, _SiteWithFn(site, fn), env0, ctx, keys, families, seen)
     return keys, families
 
 
@@ -1027,6 +1132,36 @@ def losses_entropy_head_source():
         "no `losses[f\"entropy/{...}\"] += ...` loop found in _train_with_return_norm — the "
         "per-head entropy family moved, and metrics_schema's losses/entropy/* member list "
         "is no longer tied to anything")
+
+
+def tag_key_axes():
+    """The two placeholder axes of `tag_grad_cossim`'s keys, read from source.
+
+    Returns ``{"group": (...), "label": (...)}`` — the values `g` and `mb_label`
+    take in ``f"tag/<stat>/{g}/{mb_label}"``. `census()` already resolves both
+    (that is what makes the seven families closed); this names them separately so
+    a test can say WHICH axis moved, and so a silent reopening — both the census
+    and the registry losing the member list in the same edit, leaving `tag/*` an
+    open glob that alibis any invented key — fails instead of passing quietly.
+
+    An axis that stops resolving comes back as `()`, which is a failure for the
+    caller rather than something to paper over here.
+    """
+    fn = _find_qualname(_module_ast("train_update.py"), "tag_grad_cossim")
+    site = next(s for s in EMITTER_SITES if s.qualname == "tag_grad_cossim")
+    literals = _local_literal_bindings(fn)
+    loops = [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.For) and isinstance(n.target, ast.Name) and any(
+            isinstance(w, ast.Subscript) and _container_name(w.value) == "out" for w in ast.walk(n))
+    ]
+    group = ()
+    for loop in loops:
+        bound = _bind_for(loop, {}, literals).get(loop.target.id)
+        if bound:
+            group = tuple(bound)
+            break
+    return {"group": group, "label": tuple(emitter_param_bindings(site, fn).get("mb_label", ()))}
 
 
 def stats_collection_is_append_shaped():

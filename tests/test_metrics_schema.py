@@ -378,6 +378,52 @@ def test_losses_entropy_family_members_track_the_action_spec():
         assert f"losses/entropy/{h}" in ms.REGISTRY
 
 
+def test_tag_families_are_census_closed_on_both_axes():
+    """The seven `tag/*` families must stay CLOSED, with both axes read from source.
+
+    `tag_grad_cossim` is the only emitter of `tag/*`, and it does not write those
+    keys anywhere a reader can see them: `_inject_tag_metrics`, the function that
+    puts them in the row, has the body `logs.update(pending)` and emits nothing.
+    Neither placeholder is visible in the emitter body either — the group axis is
+    a loop over a Name, the label axis is a parameter — so before both were
+    resolved every family was OPEN, and an OPEN template is accepted as
+    provenance by `test_every_registered_emitted_key_is_actually_emitted` for any
+    key matching its glob. `tag/whatever/i/like` passed.
+
+    WHY this is not covered by `test_closed_family_members_match_the_census_exactly`:
+    that test compares two lists, and skips a family whose census members are
+    empty. An edit that reopens the census AND drops the registry's `members` in
+    the same breath leaves both sides empty and it stays green — with `tag/*`
+    back to being a glob alibi. This asserts the closure itself.
+    """
+    axes = census.tag_key_axes()
+    assert axes["group"] == ms.TAG_PARAM_GROUPS, (
+        f"tag_grad_cossim's key loop runs over {axes['group']}, but metrics_schema declares "
+        f"TAG_PARAM_GROUPS={ms.TAG_PARAM_GROUPS} — the registry is describing parameter "
+        "groups the emitter no longer uses")
+    assert axes["label"] == ms.TAG_MB_LABELS, (
+        f"tag_grad_cossim is called with mb_label in {axes['label']}, but metrics_schema "
+        f"declares TAG_MB_LABELS={ms.TAG_MB_LABELS}")
+
+    tag_families = sorted(t for t in FAMILY_BY_TEMPLATE if t.startswith("tag/"))
+    assert len(tag_families) == 7, (
+        f"expected the seven tag/* families tag_grad_cossim builds, censused {tag_families}")
+    open_now = [t for t in tag_families if not FAMILY_BY_TEMPLATE[t].members]
+    assert not open_now, (
+        "tag/* families the census can no longer enumerate: " + ", ".join(open_now) +
+        "\nAn OPEN family alibis every registry entry under its glob. Either the loop "
+        "iterable / call-site label stopped being statically resolvable, or the resolution "
+        "in metrics_census (_local_literal_bindings, emitter_param_bindings) was narrowed.")
+
+    censused = {m for t in tag_families for m in FAMILY_BY_TEMPLATE[t].members}
+    assert len(censused) == 26, f"expected 26 concrete tag/* keys, censused {len(censused)}"
+    declared = {m for t in tag_families for m in ms.REGISTRY[t].members}
+    assert censused == declared
+    assert not _matches_open_family("tag/not_a_real_key"), (
+        "a `tag/...` key matches an OPEN registry template again — the seven families are "
+        "closed, so nothing under tag/ should glob-match")
+
+
 def _open_family_templates():
     """Registered family templates whose members are UNENUMERABLE — and only those.
 

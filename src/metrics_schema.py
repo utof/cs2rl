@@ -31,9 +31,12 @@ THE THREE KINDS
   family   — an f-string-built key template, placeholders written `*`. CLOSED
              families additionally declare `members` (the exact concrete keys),
              which are ALSO registered individually so a reader can be attached
-             to one of them; OPEN families (a runtime-valued placeholder such as
-             a parameter name or a module's named_parameters()) declare no
-             members and the concrete keys are unenumerable by construction.
+             to one of them; OPEN families (a genuinely runtime-valued
+             placeholder — a module's named_parameters(), a `zip` over live
+             objects) declare no members and the concrete keys are unenumerable
+             by construction. Prefer closed: an OPEN template is accepted as a
+             glob alibi by the reverse-completeness test, so every key under it
+             goes unchecked.
   derived  — a registered NAME that no emitter writes: a gate-report column
              computed from emitted keys (`hit_per_facing`), a renamed statistic
              (`losses/approx_kl_p90`), or an OPTIONAL upstream key a reader
@@ -692,26 +695,41 @@ REGISTRY["health/weight_norm_*"] = _f(
 
 # ── tag/* — TAG gradient diagnostics (--tag-diagnostic) ───────────────────
 # tag_grad_cossim (train_update.py) builds these; _inject_tag_metrics merges its
-# dict into logs after mean_and_log and emits NO keys of its own. All families
-# are OPEN on the minibatch-label placeholder, which is a runtime value.
+# dict into logs after mean_and_log and emits NO keys of its own — so a census
+# built from the merging helper alone would register zero tag/* entries and still
+# pass. The families are CLOSED on both placeholders, and neither axis is visible
+# in the emitter body alone:
+#   group axis  `for g in pg_group_names`, one hop back to the literal
+#               `pg_group_names = ("trunk", "policy_heads")` in the same function.
+#   label axis  `mb_label` is a PARAMETER; the single call site passes
+#               `mb_label="mb0" if _tag_mb0 else "mbL"` (mb0 = the epoch's first
+#               minibatch, mbL = the throttled later one).
+# tests/metrics_census.py resolves both from source and
+# test_metrics_schema.test_tag_families_are_census_closed_on_both_axes pins that
+# they stay resolved — an OPEN tag/* template would alibi any `tag/...` entry the
+# registry cared to invent, which is the accumulation the reverse-completeness
+# half exists to stop.
+TAG_PARAM_GROUPS = ("trunk", "policy_heads")
+TAG_MB_LABELS = ("mb0", "mbL")
 _TAG_NOTE = ("FLAG-GATED on --tag-diagnostic and throttled by --tag-every, so absent from "
              "a default run's rows. Carries deliberate NaNs for zero-norm subsets — which "
              "is why injection must happen AFTER dead_run_detector.check.")
+_TAG_STATS = ("cossim_cross", "cossim_cross_half", "cossim_within_t", "cossim_within_ct", "gnorm_t",
+              "gnorm_ct")
+
+
+def _tag_members(stat):
+    return tuple(f"tag/{stat}/{g}/{lbl}" for g in TAG_PARAM_GROUPS for lbl in TAG_MB_LABELS)
+
+
 REGISTRY.update({
-    "tag/cossim_cross/*/*":
-    _f("last", "dimensionless", (), (), _TAG_NOTE),
-    "tag/cossim_cross_half/*/*":
-    _f("last", "dimensionless", (), (), _TAG_NOTE),
-    "tag/cossim_within_t/*/*":
-    _f("last", "dimensionless", (), (), _TAG_NOTE),
-    "tag/cossim_within_ct/*/*":
-    _f("last", "dimensionless", (), (), _TAG_NOTE),
-    "tag/gnorm_t/*/*":
-    _f("last", "dimensionless", (), (), _TAG_NOTE),
-    "tag/gnorm_ct/*/*":
-    _f("last", "dimensionless", (), (), _TAG_NOTE),
+    f"tag/{_s}/*/*": _f("last", "dimensionless", _tag_members(_s), (), _TAG_NOTE)
+    for _s in _TAG_STATS
+})
+REGISTRY.update({
     "tag/cossim_vf/*":
-    _f("last", "dimensionless", (), (), _TAG_NOTE),
+    _f("last", "dimensionless", tuple(f"tag/cossim_vf/{lbl}" for lbl in TAG_MB_LABELS), (),
+       _TAG_NOTE),
     "tag/mbL_index":
     _e(
         "last", "count", (),
@@ -721,6 +739,42 @@ REGISTRY.update({
     "tag/selfplay_active":
     _e("last", "flag", ()),
 })
+# The 26 concrete tag/* keys, one entry per closed-family member (a closed
+# family's members carry their own entries — that is what lets a reader be
+# attached to one, and what makes a member declared differently from its
+# template a failure). Notes are per STAT, since the two axes mean the same
+# thing in all seven: `g` is the parameter group the gradients were flattened
+# over, `mb0`/`mbL` is which minibatch of the epoch was measured.
+_TAG_STAT_NOTES = {
+    "cossim_cross":
+    "cos(g_T, g_CT) over the FULL subsets — the lower-noise descriptive number, NOT the "
+    "criterion statistic: a full-size cosine has a larger expected same-distribution value "
+    "than any n/2 one, so comparing it against the within-team null biases toward 'no "
+    "conflict'. Use cossim_cross_half for that.",
+    "cossim_cross_half":
+    "THE criterion statistic (spec 2026-08-13 §4.2): cos(g_Ta, g_CTa), size-matched at n/2 "
+    "rows to the within-team null so within − cross is an unbiased conflict estimate.",
+    "cossim_within_t":
+    "Within-team null for T: cos(g_Ta, g_Tb) across the env-parity halves, which are "
+    "exchangeable — the same-distribution reference cossim_cross_half is read against.",
+    "cossim_within_ct":
+    "Within-team null for CT, same env-parity construction as the T half.",
+    "gnorm_t":
+    "‖g_T‖ of the subset policy-gradient. Scaled by the parked-row rescale at "
+    "n_active < TEAM_SIZE (cosine is invariant to it; a norm is not).",
+    "gnorm_ct":
+    "‖g_CT‖, the CT twin of gnorm_t and subject to the same parked-row scaling.",
+}
+for _s in _TAG_STATS:
+    for _m in _tag_members(_s):
+        REGISTRY[_m] = _e("last", "dimensionless", (), _TAG_STAT_NOTES[_s] + " " + _TAG_NOTE)
+for _lbl in TAG_MB_LABELS:
+    REGISTRY[f"tag/cossim_vf/{_lbl}"] = _e(
+        "last", "dimensionless", (),
+        "Known-anticorrelated CONTROL over value_head params only (the pg graph never "
+        "touches value_head). Biased UPWARD at n_active < TEAM_SIZE: a parked row's "
+        "normalized return is -mean/std rather than 0, so it adds a common-mode residual to "
+        "both team value gradients. " + _TAG_NOTE)
 
 # ── self_play/* — train.py, next to the pool bookkeeping ──────────────────
 REGISTRY.update({
