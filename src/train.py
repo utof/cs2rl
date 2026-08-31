@@ -3909,6 +3909,37 @@ def train(args):
 # ── SECTION: CLI ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # MUST BE THE FIRST STATEMENT IN THIS BLOCK.
+    #
+    # WHAT: running `python src/train.py` binds THIS file's module object to the
+    # name "__main__", leaving sys.modules["train"] empty. Any runtime
+    # `from train import ...` then RE-EXECUTES this whole module body under the
+    # name "train", and the process ends up holding two independent copies of it:
+    # two sets of module-level constants, two of every class object, and
+    # `isinstance` between them silently False. eval_baselines does exactly that
+    # import, function-locally inside PolicyActor.__init__ and
+    # PolicyActor.from_checkpoint, to dodge a circular top-level import — so a
+    # plain `--eval-interval N` script run is enough to trigger it.
+    #
+    # WHY setdefault and not `=`: under `import train` (the whole test suite,
+    # scripts/, the Modal runner) "train" is already a real, fully-initialised
+    # module and this block is never reached anyway; setdefault keeps the
+    # invariant "the first binding wins" true in every launch mode.
+    #
+    # PITFALL for whoever tests this: an AST pin proves the statement is WRITTEN,
+    # not that it does anything, and the §3 determinism gate cannot see it — that
+    # gate runs `--no-self-play --eval-interval 0`, precisely the flag set on
+    # which no runtime `from train import` ever fires. The behavioural check is a
+    # child interpreter under `-X importtime`: WITHOUT this line its stderr
+    # carries an `import time: ... | train` line (the second body execution),
+    # WITH it none. Do NOT spell that check as
+    # `runpy.run_path(..., run_name="__main__")` plus a post-hoc identity assert:
+    # run_path swaps sys.modules["__main__"] only for the duration of the call
+    # and restores it on return, so the assert compares the alias against the
+    # RESTORED __main__ and reports a false failure (measured: False after the
+    # call, True inside it).
+    sys.modules.setdefault("train", sys.modules["__main__"])
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dust2",

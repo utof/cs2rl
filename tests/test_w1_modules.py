@@ -126,6 +126,127 @@ assert not missing, f"train.py does not import {{missing}} at module level"
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
 
 
+def _main_block_body():
+    """Top-level statements of train.py's `if __name__ == "__main__":` block.
+
+    Parsed from source, never executed: the block builds the argparse parser and
+    then trains, so importing it is not an option.
+    """
+    import ast
+    tree = ast.parse((SRC / "train.py").read_text())
+    for node in tree.body:
+        if (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name) and node.test.left.id == "__name__"):
+            return node.body
+    raise AssertionError('no `if __name__ == "__main__":` block in src/train.py')
+
+
+def test_train_aliases_itself_into_sys_modules_first():
+    """The self-alias is the FIRST statement of train.py's __main__ block.
+
+    WHAT is pinned: `sys.modules.setdefault("train", sys.modules["__main__"])`,
+    and its POSITION. Position is half the contract — anything above it that
+    triggers a `from train import ...` (directly or through a helper) executes
+    train.py's body a second time before the alias can prevent it, and the alias
+    then quietly protects nothing.
+
+    WHY the whole thing exists: a script run binds this file to "__main__", so a
+    runtime `from train import ...` — which eval_baselines does function-locally
+    inside PolicyActor — imports a SECOND copy of the module. Two copies means
+    two sets of module constants and cross-copy `isinstance` returning False.
+
+    This test is a source pin and proves only that the statement is written.
+    That the statement WORKS is test_script_run_has_exactly_one_train_module
+    below; the two are a pair and neither is sufficient alone.
+    """
+    import ast
+    first = _main_block_body()[0]
+    src = ast.unparse(first)
+    assert src == 'sys.modules.setdefault(\'train\', sys.modules[\'__main__\'])', (
+        f"first statement of train.py's __main__ block is {src!r}, not the sys.modules "
+        "self-alias — see the comment block at that line for why order matters")
+
+
+def test_script_run_has_exactly_one_train_module():
+    """BEHAVIOURAL half: run train.py AS A SCRIPT and prove the alias works.
+
+    WHY a separate test from the AST pin: the pin is satisfied by the statement
+    merely existing. This one runs the real file in a real child interpreter and
+    checks the two things the alias is FOR, and it is the only check in the suite
+    that can see them — the §3 determinism gate runs `--eval-interval 0
+    --no-self-play`, exactly the flag set on which no runtime `from train import`
+    occurs, so the gate is structurally blind here.
+
+    Channel (both observations are about the CHILD's interpreter state, so they
+    have to be made inside it):
+
+      1. a sitecustomize.py on the child's PYTHONPATH registers an atexit hook
+         that performs the same `import train` eval_baselines performs and
+         reports whether the result IS sys.modules["__main__"]. atexit runs
+         before module teardown, so sys.modules is intact; it also runs after
+         `--dump-config`'s sys.exit(0), which is why that cheap path suffices
+         instead of a full training run.
+      2. `-X importtime` prints one line per module body EXECUTED. With the
+         alias the hook's `import train` is a sys.modules hit and prints
+         nothing; without it, the body runs again and stderr carries a
+         `... | train` line. Absence is the proof — so the test also asserts
+         importtime produced output at all, or "no train line" would pass
+         vacuously the day the flag stops working.
+
+    PITFALL: do NOT rewrite this as `runpy.run_path(..., run_name="__main__")`
+    plus a post-hoc identity assert. run_path restores the real
+    sys.modules["__main__"] when it returns, so the assert compares the alias
+    against the restored module and fails for a reason that has nothing to do
+    with train.py (measured: `is` -> False after the call, True inside it).
+    """
+    import os
+    import re
+    import tempfile
+
+    # `import train` inside the hook is the exact import eval_baselines makes.
+    probe_src = ("import atexit, sys\n"
+                 "def _probe():\n"
+                 "    import train\n"
+                 "    print('ALIASPROBE identity=%s' % (train is sys.modules['__main__']),\n"
+                 "          file=sys.stderr, flush=True)\n"
+                 "atexit.register(_probe)\n")
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        (td / "sitecustomize.py").write_text(probe_src)
+        argv = [
+            sys.executable, "-X", "importtime",
+            str(SRC / "train.py"), "--dump-config", "--checkpoint-dir",
+            str(td)
+        ]
+        r = subprocess.run(argv,
+                           cwd=REPO_ROOT,
+                           env=dict(os.environ, PYTHONPATH=str(td)),
+                           capture_output=True,
+                           text=True,
+                           timeout=300)
+
+    assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+
+    # Anti-vacuity: the probe must have run, and importtime must have produced
+    # output. Either one silently missing turns both assertions below into
+    # unfalsifiable green.
+    importtime_lines = re.findall(r"^import time:", r.stderr, re.M)
+    assert "ALIASPROBE" in r.stderr, (
+        "the atexit probe never printed — the observation channel is broken, so this "
+        f"test proves nothing. STDERR:\n{r.stderr[-2000:]}")
+    assert importtime_lines, ("-X importtime produced no output; the 'no train import' "
+                              "assertion below would pass vacuously")
+
+    assert "ALIASPROBE identity=True" in r.stderr, (
+        "`import train` in the child did NOT return sys.modules['__main__'] — the "
+        "script run is carrying two copies of train.py")
+    reimports = re.findall(r"^import time:.*\|\s*train$", r.stderr, re.M)
+    assert not reimports, (
+        f"train.py's module body executed a second time under the name 'train': {reimports} — "
+        "the self-alias is missing or is no longer the first statement of the __main__ block")
+
+
 def test_mask_head_slices_is_complete_in_a_leaf_only_interpreter():
     """`train_shared._MASK_HEAD_SLICES` holds one slice per action head.
 
