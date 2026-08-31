@@ -113,12 +113,21 @@ _INT_SENTINEL_OVERRIDES = {
 # dict and reads every field back from both, so a flag is identified not by a
 # single value (impossible — there are only two) but by its VECTOR of read-back
 # values across the configs. Those vectors must be pairwise DISTINCT, which is
-# what keeps a transposition between two flag positions in py_init's FMT string
-# visible: a swap then changes at least one config's read-back.
+# what keeps a transposition between two flags visible: a swap then changes at
+# least one config's read-back.
+#
+# WHAT A TRANSPOSITION LOOKS LIKE NOW (spec 2026-08-31 §2 W2): it used to be two
+# swapped positions in py_init's PyArg_ParseTuple format string. That string is
+# gone; Python packs StaticData by name instead, so the same bug is now two
+# swapped NAMED PACKING ASSIGNMENTS in Cs2Env.__init__ — "crouch_enabled":
+# self.jump_enabled. The layout hash that replaced the format string cannot see
+# it, because it compares DECLARATIONS and this puts a wrong value into a
+# correctly described slot. This scheme is still the only thing that catches it,
+# which is why W2 retired none of it.
 #
 # The vectors are deliberately NOT complementary. Complementarity would force
 # every flag into {(0,1), (1,0)} and, by pigeonhole, two of the three would
-# collide — that pair could then be swapped in the FMT string invisibly. With
+# collide — that pair could then be swapped invisibly. With
 # crouch = (0,0), pin_pitch = (0,1), jump = (1,0) all three are distinct.
 #
 # Two configs address 2² = 4 vectors, so this scheme holds up to FOUR flags; a
@@ -140,8 +149,8 @@ _BOOL_KWARG_SCALARS = tuple(sorted({name for cfg in _BOOL_SENTINEL_CONFIGS for n
 
 # One distinct sentinel per settable field, generated from the sorted field list
 # so a newly added field automatically gets one. Distinctness is the only
-# property that matters: it is what makes a swapped pair in py_init's FMT string
-# visible. Floats get 0.101, 0.102, ... — not exactly representable in float32,
+# property that matters: it is what makes a swapped pair of named packing
+# assignments visible. Floats get 0.101, 0.102, ... — not exactly representable in float32,
 # hence pytest.approx on the way back (see the widening PITFALL in binding.c).
 # Ints get 101, 102, ... unless _INT_SENTINEL_OVERRIDES names them.
 # Do NOT sentinel with the defaults instead: several collide
@@ -244,10 +253,15 @@ def test_struct_sizes_exposes_team_constants():
 def test_static_data_scalars_round_trip(simple_map):
     """Distinct sentinels in → same sentinels out, per named field.
 
-    This is the FMT-order guard: py_init's 73-arg PyArg_ParseTuple string is the
-    only thing tying Cs2Env's kwargs to StaticData's fields, and a transposition
-    there is invisible to sizeof — two swapped floats parse fine and keep every
-    size identical while feeding reward_kill into reward_death.
+    This is the VALUE-ROUTING guard. Cs2Env.__init__ names every StaticData
+    field it packs, and writing the wrong value under a correct name is
+    invisible to sizeof, to the offset anchors, and to the layout hash — all
+    three describe the struct, not the values put into it. Two swapped floats
+    keep every size, offset and type identical while feeding reward_kill into
+    reward_death. (Before spec 2026-08-31 §2 W2 the same bug wore a different
+    costume: two swapped positions in py_init's 73-arg PyArg_ParseTuple format
+    string. The costume changed; the exposure did not, which is why this test
+    survived the migration unchanged.)
 
     EXHAUSTIVE over the settable fields. Every StaticData scalar make_env
     exposes as a keyword argument (_SENTINEL_CONFIGS, derived by intersecting
@@ -309,10 +323,10 @@ def test_static_data_scalars_round_trip(simple_map):
             wrong = {}
             for name, sent in sentinels.items():
                 if sc[name] != pytest.approx(sent):
-                    # Which sentinel DID land here? For a transposed FMT string
-                    # that names the swap partner outright, which is the whole
-                    # diagnosis. Flags share values within a config, so the
-                    # partner is a hint there, not a unique identification —
+                    # Which sentinel DID land here? For a swapped pair of packing
+                    # assignments that names the swap partner outright, which is
+                    # the whole diagnosis. Flags share values within a config, so
+                    # the partner is a hint there, not a unique identification —
                     # the config INDEX is the other half of the diagnosis.
                     partner = next(
                         (other for other, v in sentinels.items() if sc[name] == pytest.approx(v)),
@@ -320,8 +334,8 @@ def test_static_data_scalars_round_trip(simple_map):
                     wrong[name] = (sent, sc[name], partner)
             assert not wrong, (
                 f"config {cfg_i} ({_BOOL_SENTINEL_CONFIGS[cfg_i]}): sentinel landed in the wrong "
-                "StaticData field — py_init's FMT string in src/c_env/binding.c is out of order "
-                "with the binding.init() call in Cs2Env.__init__. "
+                "StaticData field — two of the named assignments in the `static_data` mapping in "
+                "Cs2Env.__init__ (src/c_env/cs2_env.py) carry each other's values. "
                 f"{{field: (sent, got, whose_sentinel_got_is)}} = {wrong}")
             # R0-G (Task 11): round_time / laser_range / max_turn_speed are now
             # make_env kwargs, so they are in the config and were checked above.
