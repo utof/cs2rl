@@ -248,7 +248,11 @@ def test_binding_default_continuous_actions_zero(make_map):
 #   (b) the throttled warning print happens.
 #
 # If the guard's structure changes (new warning string, different zero_grad
-# signature), update BOTH this test and src/train.py:1208-ish in the same PR.
+# signature), update BOTH this test and the real guard in the same PR. The real
+# guard is the `if not torch.isfinite(loss).all():` block inside
+# `_train_with_return_norm`, which moved out of train.py with its patcher on
+# 2026-08-31 and now lives in src/train_update.py (:815 at that commit; search
+# the "Batch 3 (T5) NaN guard" banner rather than trusting the number).
 
 
 def test_continuous_aim_nan_guard():

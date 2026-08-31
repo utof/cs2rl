@@ -39,10 +39,16 @@ def _run_once(trainer):
 
 def test_flag_off_is_inert(monkeypatch):
     """Spec §5 test 1: flag off ⇒ helper never called, no _tag_metrics."""
-    import train as train_mod
+    # PATCH THE DEFINING MODULE, NOT `train`: tag_grad_cossim moved to
+    # train_update.py (post-rung1a refactor, 2026-08-31) and its call site inside
+    # _train_with_return_norm resolves through train_update's globals. `train`
+    # only re-exports it, so a patch there is unreachable and this test would
+    # pass while asserting nothing — verified by forcing the hook on, where the
+    # train-side patch never fires and the train_update-side patch always does.
+    import train_update as tag_mod
     calls = []
-    real = train_mod.tag_grad_cossim
-    monkeypatch.setattr(train_mod, "tag_grad_cossim",
+    real = tag_mod.tag_grad_cossim
+    monkeypatch.setattr(tag_mod, "tag_grad_cossim",
                         lambda *a, **k: calls.append(1) or real(*a, **k))
     trainer, cleanup = _build(tag_on=False)
     try:
