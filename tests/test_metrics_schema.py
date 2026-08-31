@@ -646,8 +646,11 @@ def test_derived_gate_columns_declare_the_source_keys_the_gate_actually_reads():
     sources = census.reader_derived_column_sources()
     assert sources, "extracted zero derived-column sources from rung1_gate.py — vacuous"
 
+    # An UNREGISTERED column is test_rung1_gate_report_columns_are_registered's
+    # failure to report, not this one's — skipped here so that test owns it and
+    # this one does not raise a bare KeyError on top of a clear message.
     cols = census.reader_report_columns()
-    derived_cols = sorted(c for c in cols if ms.REGISTRY[c].kind == "derived")
+    derived_cols = sorted(c for c in cols if c in ms.REGISTRY and ms.REGISTRY[c].kind == "derived")
     assert len(derived_cols) >= 10, (
         f"only {len(derived_cols)} derived gate columns — the report tables shrank or the "
         "column extractor did")
