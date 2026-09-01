@@ -35,10 +35,19 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
                arguments rather than from a CLI-derived dict.
   external     the public `make_env(team_spirit, map_data)` wrapper.
 
-There is deliberately NO `record` role: the `--record` path reaches its env
-through `load_policy_from_checkpoint`, i.e. `eval_legacy`. An enum member no
-call site can reach is a divergence trap — the next person adds a knob to it and
-nothing changes.
+There is deliberately NO `record` role, and the reason is NOT that `--record`
+reuses one of the roles above — it does not. `record_episode` builds its own env
+with a bare `make_c_env(...)` (train.py:1073), the LOWER-layer constructor, which
+W3 never banned; the `eval_legacy` env that `load_policy_from_checkpoint` builds
+on the way in (train.py:851) exists only to read an obs_dim and is closed before
+that function returns (train.py:864/881), so it is not the env anything is
+recorded from. So the recording path is genuinely uncovered by this module, by
+the same deliberate scope decision that leaves the other eleven lower-layer sites
+uncovered — the census and the reasoning are in
+`tests/test_env_construction_enforcement.py`'s LOWER_LAYER_SITES. Adding a role
+here would not change that: `record_episode` would still have to be migrated onto
+it, and an enum member no call site can reach is a divergence trap — the next
+person adds a knob to it and nothing changes.
 
 WHY THE IMPORTS ARE FUNCTION-LOCAL. `make_puffer_env` stays DEFINED in train.py
 (moving it drags a large dependency web and breaks ~42 test uses), and train.py

@@ -1,4 +1,11 @@
-"""No `Cs2Env` or `SelfPlayManager` is constructed outside `src/env_factory.py`.
+"""No `make_puffer_env(...)` or `SelfPlayManager(...)` call outside `src/env_factory.py`.
+
+READ THE SCOPE LINE ABOVE LITERALLY. This file enforces exactly two SYMBOLS in
+two ROOTS, and nothing wider. It is not "no env is built outside the factory" —
+a lower layer of constructors (`make_env` / `Cs2Env`) is called directly at a
+dozen live sites inside those same roots, on purpose, and this scan does not look
+at them. The census and the reasoning are in LOWER_LAYER_SITES below; read it
+before quoting this file as evidence that all env construction is centralised.
 
 WHAT THIS ENFORCES (spec 2026-08-31 §2 W3, #154). W3 exists because
 `make_puffer_env` had seven independently-drifting call sites and
@@ -16,7 +23,7 @@ empty or missing directory, a walk that skips subdirectories, an over-eager
 carve-out. None of those raise — they return an empty list and pass forever. The
 `scripts/` root makes it concrete: it legitimately contains zero constructions
 TODAY, so half of this scan is already indistinguishable from a scan that never
-looked at it. Hence four separate guards ahead of the enforcement assertion:
+looked at it. Hence five separate guards ahead of the enforcement assertion:
 
   1. the roots exist, contain a plausible number of .py files, and contain named
      anchor files — kills "root resolved to nothing";
@@ -27,7 +34,24 @@ looked at it. Hence four separate guards ahead of the enforcement assertion:
   3. a construction PLANTED in a scratch tree is found, in both spellings, in a
      nested subdirectory — kills "the walk or the parse is broken", end to end;
   4. the classmethod carve-out is checked in both directions, against real
-     source — kills "the carve-out was loosened until it swallowed the coverage".
+     source — kills "the carve-out was loosened until it swallowed the coverage";
+  5. an IMPORT-ALIASED construction is planted and found, and a call to the same
+     local name WITHOUT the aliasing import is left alone — kills "a one-line
+     rename walks past the matcher", which it did until the final review's I-4.
+
+ALIAS RESOLUTION, and why it is not optional. `from train import make_puffer_env
+as _mpe` followed by `_mpe(...)` is one line and defeats a matcher that keys on
+the literal spelling of the call. That is not a hypothetical spelling in this
+repo: `from c_env.cs2_env import make_env as make_c_env` is house style at four
+files in the LOWER_LAYER_SITES census below, so the alias form is what this
+codebase actually writes. `import_aliases` therefore binds `asname -> symbol` per
+FILE and the matcher resolves through it, reporting the canonical symbol with the
+local name in the spelling column so a failure names the alias it resolved.
+Only `ImportFrom` is walked: `import X as Y` can bind only a MODULE, and
+`Y.make_puffer_env(...)` is already the attribute spelling. Assignment aliases
+(`f = make_puffer_env`), `getattr`, subclassing, `exec` and `subprocess -c`
+remain OUT of scope — see M-6 in the final review; this scan is a guard against
+drift by ordinary editing, not against a determined bypass.
 
 THE CARVE-OUT, precisely. A construction is `Call(func=Name(X))` or
 `Call(func=Attribute(attr=X))` for X in {make_puffer_env, SelfPlayManager}.
@@ -45,6 +69,21 @@ passes it to the role builder as a VALUE (`builder(_make, **kwargs)`), so no cal
 node in that file names it. That is why guard 2 takes its `make_puffer_env`
 evidence from `tests/`, where ~40 direct constructions legitimately live, rather
 than from the factory.
+
+THE UNSCANNED LOWER LAYER — the honest limit of this file (final review I-1).
+`make_puffer_env` is a wrapper: it applies the reward-override validation and the
+Rung-0 knobs and then calls `make_env` (aliased `make_c_env`), which loads the map
+and calls `Cs2Env`. The spec banned the two TOP-layer symbols only, because that
+is the layer whose per-site knob drift caused #154; a caller that wants a bare
+default env with no training knobs at all — the profiler, the recorder, the BC
+demo generator, the fingerprint script — is not drifting from anything, it is
+using a lower constructor on purpose. Those calls are real, they are inside the
+scanned roots, and a green result here says NOTHING about them. LOWER_LAYER_SITES
+below is their census, pinned by a test so this paragraph cannot rot into a claim
+about a population that has since doubled. Note what they share: all take
+`make_env`'s defaults, so none of them sees a W5 stance flag or a Rung-0 knob from
+config. Extending the ban (or adding factory roles) to that layer is a separate
+decision, tracked as future work, not something this file quietly did.
 """
 import ast
 from pathlib import Path
@@ -74,23 +113,85 @@ MIN_FILES_PER_ROOT = 8
 # test is actually about removes that.
 ANCHORS = ("src/train.py", "src/train_test_harness.py", "src/env_factory.py")
 
+# ── The lower layer this file deliberately does NOT ban ─────────────────────
+#
+# `make_env` (spelled `make_c_env` wherever it is imported into a module that
+# also has a `make_*_env` of its own) and the `Cs2Env` class it returns. See the
+# module docstring's LOWER LAYER paragraph for why they are out of the ban.
+LOWER_LAYER = ("make_env", "Cs2Env")
 
-def constructions(source, label="<source>"):
+# Every call to one of those, per file, as of the final review of
+# refactor/post-rung1a. Two of the twelve are the constructors' own definitions
+# (the `return make_c_env(...)` inside `make_puffer_env`, and the
+# `return Cs2Env(...)` inside `make_env`) — i.e. the wrapper chain itself, not
+# extra callers; the other ten are the direct callers named in review finding
+# I-1. This is a DISCLOSURE list, not a ban: a new entry is allowed, it just has
+# to be written down here so the docstring above keeps telling the truth.
+LOWER_LAYER_SITES = {
+    "src/c_env/cs2_env.py": 1,                         # `make_env`'s own `return Cs2Env(...)`
+    "src/play.py": 1,                                  # the interactive viewer
+    "src/profile_step.py": 3,                          # three step-timing harnesses
+    "src/train.py": 2,                                 # `make_puffer_env`'s own call + `record_episode`
+    "src/train_bc.py": 1,                              # BC demo replay env
+    "scripts/gen_bc_demos.py": 1,
+    "scripts/measure_budget.py": 1,
+    "scripts/oracle_statue_check.py": 1,
+    "scripts/sim_fingerprint.py": 1,
+}
+
+
+def import_aliases(tree, symbols):
+    """`{local name: symbol}` for every `from <mod> import <symbol> as <local>`.
+
+    WHY (final review I-4): the matcher below keys on the literal spelling of the
+    call, so `from train import make_puffer_env as _mpe` + `_mpe(...)` walked
+    straight past it — a one-line bypass. And the alias form is not hypothetical
+    here: `from c_env.cs2_env import make_env as make_c_env` is house style at
+    four files, so it is a spelling this repo genuinely writes.
+
+    ONLY `ImportFrom`. `import X as Y` can bind a MODULE and nothing else, and
+    `Y.make_puffer_env(...)` is already the attribute spelling.
+    """
+    out = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in symbols and alias.asname:
+                    out[alias.asname] = alias.name
+    return out
+
+
+def constructions(source, label="<source>", symbols=CONSTRUCTED):
     """[(symbol, lineno, spelling)] for every construction call in `source`.
 
-    `spelling` is "name" for `X(...)` and "attribute" for `<anything>.X(...)`.
-    Both count: `train.make_puffer_env(...)` builds exactly the same env as
-    `make_puffer_env(...)`, and a scan that only looked for bare names would be
-    trivially bypassed by an `import train` at the top of the new file.
+    `spelling` is "name" for `X(...)`, "attribute" for `<anything>.X(...)`, and
+    "alias:<local>" for a call through an `import ... as` binding. All three
+    count: `train.make_puffer_env(...)` and `_mpe(...)` build exactly the same
+    env as `make_puffer_env(...)`, and a scan that only looked for bare names
+    would be bypassed by one import line at the top of the new file.
+
+    `symbols` is a parameter so the same matcher can take the census of the
+    LOWER_LAYER constructors it does not ban — which is also the strongest
+    available positive control for alias resolution, since it has to resolve the
+    four real `make_env as make_c_env` imports to report those sites at all.
     """
+    tree = ast.parse(source, filename=label)
+    aliases = import_aliases(tree, symbols)
     out = []
-    for node in ast.walk(ast.parse(source, filename=label)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Name) and func.id in CONSTRUCTED:
+        if isinstance(func, ast.Name) and func.id in symbols:
             out.append((func.id, node.lineno, "name"))
-        elif isinstance(func, ast.Attribute) and func.attr in CONSTRUCTED:
+        elif isinstance(func, ast.Name) and func.id in aliases:
+            # Report the CANONICAL symbol, and name the local in the spelling so
+            # a failure message points at the line that has to change. Scoped to
+            # the Name position on purpose: resolving aliases in the attribute
+            # position would flag any unrelated method that happens to share the
+            # local's name.
+            out.append((aliases[func.id], node.lineno, f"alias:{func.id}"))
+        elif isinstance(func, ast.Attribute) and func.attr in symbols:
             # ATTRIBUTE position only. `SelfPlayManager.initial_hero_team()` has
             # attr="initial_hero_team" and is therefore not matched here — see
             # the module docstring, and test_classmethod_access_is_not_a_
@@ -99,7 +200,7 @@ def constructions(source, label="<source>"):
     return out
 
 
-def scan(roots):
+def scan(roots, symbols=CONSTRUCTED):
     """(scanned files, findings) over every .py under `roots`, recursively.
 
     A root may be a directory or a single .py file; the guards below point it at
@@ -111,7 +212,7 @@ def scan(roots):
         root = Path(root)
         for path in ([root] if root.is_file() else sorted(root.rglob("*.py"))):
             files.append(path)
-            for symbol, lineno, spelling in constructions(path.read_text(), str(path)):
+            for symbol, lineno, spelling in constructions(path.read_text(), str(path), symbols):
                 findings.append((path, symbol, lineno, spelling))
     return files, findings
 
@@ -189,6 +290,53 @@ def test_the_factory_itself_is_where_the_construction_lives():
         "NOT — update both rather than deleting this assertion.")
 
 
+def test_alias_resolution_is_exercised_by_real_source_not_only_by_a_plant():
+    """The six live `make_env as make_c_env` calls are reachable ONLY through aliases.
+
+    THE POSITIVE CONTROL FOR ALIAS RESOLUTION, and the reason it is taken from the
+    LOWER_LAYER census rather than from a plant: `train.py`, `train_bc.py` and
+    `profile_step.py` all import the lower constructor under a different local
+    name, so a matcher that keys on literal spellings reports those six sites as
+    zero — the exact I-4 failure, in real source, on every run. If the repo ever
+    stops writing the alias form this fails, which is correct: it means the live
+    control is gone and the plant below is all that is left.
+    """
+    _, found = scan(ROOTS, LOWER_LAYER)
+    aliased = [(str(p.relative_to(REPO_ROOT)), ln) for p, _, ln, sp in found
+               if sp.startswith("alias:")]
+    assert len(aliased) >= 4, (
+        f"only {len(aliased)} import-aliased lower-layer calls resolved: {aliased}. Either the "
+        "alias resolution stopped working, or the repo stopped writing `make_env as make_c_env` "
+        "— check which before relaxing this.")
+
+
+def test_the_unbanned_lower_layer_census_is_accurate():
+    """LOWER_LAYER_SITES matches the tree, per file, exactly.
+
+    This is a DISCLOSURE test, not an enforcement one — read a failure as "the
+    module docstring's LOWER LAYER paragraph just went stale", not as "route this
+    through the factory". The paragraph tells readers that a dozen direct
+    `make_env`/`Cs2Env` calls live inside the scanned roots and are NOT covered by
+    the enforcement assertion below; an un-pinned prose count is exactly the kind
+    of claim that is true on the day it is written and quietly false a year later,
+    which is the whole class of defect (final review I-1) this test closes.
+
+    When it fails: update LOWER_LAYER_SITES, and take the moment to ask whether
+    the new site wants a `build_env_for` role instead. That question is the point
+    of pinning the count; the answer is allowed to be no.
+    """
+    _, found = scan(ROOTS, LOWER_LAYER)
+    counts = {}
+    for path, _, _, _ in found:
+        rel = str(path.relative_to(REPO_ROOT))
+        counts[rel] = counts.get(rel, 0) + 1
+    assert counts == LOWER_LAYER_SITES, (
+        "the census of unbanned lower-layer env constructions has changed.\n"
+        f"  new/changed: {sorted(set(counts.items()) - set(LOWER_LAYER_SITES.items()))}\n"
+        f"  gone/changed: {sorted(set(LOWER_LAYER_SITES.items()) - set(counts.items()))}\n"
+        "Update LOWER_LAYER_SITES and the module docstring's LOWER LAYER paragraph.")
+
+
 # ── guard 3: the knock-out — a planted construction must be found ───────────
 
 
@@ -233,6 +381,48 @@ def test_knockout_the_enforcement_assertion_fails_on_a_planted_offender(tmp_path
     _, found = scan([tmp_path])
     offenders = [f for f in found if f[0] != FACTORY]
     assert offenders, "the exemption filter swallowed a finding in a file that is not the factory"
+
+
+# ── guard 5: import aliases, in both directions ─────────────────────────────
+
+
+@pytest.mark.parametrize("symbol", CONSTRUCTED)
+def test_knockout_an_import_aliased_construction_is_found(tmp_path, symbol):
+    """`from train import <symbol> as _x` + `_x(...)` must be reported as <symbol>.
+
+    THE I-4 KNOCK-OUT. Before alias resolution this planted file scanned clean —
+    one import line was the entire bypass — so this is the test that fails if
+    `import_aliases` is deleted or narrowed. It asserts the CANONICAL symbol name
+    is what gets reported (not the local), because that is what makes the
+    enforcement failure message readable, and that the local name survives in the
+    spelling so the message points at the line to change.
+    """
+    (tmp_path / "offender.py").write_text(f"from train import {symbol} as _aliased\n"
+                                          "def f():\n"
+                                          "    return _aliased(seed=1)\n")
+    _, found = scan([tmp_path])
+    assert [(f[1], f[3]) for f in found] == [
+        (symbol, "alias:_aliased")
+    ], f"the import-aliased {symbol} construction was not reported: {found}"
+
+
+def test_an_unimported_local_of_the_same_name_is_not_a_construction():
+    """The other direction: aliases bind per FILE, from a real import, or not at all.
+
+    Without this, "resolve aliases" could degrade into "flag any call whose name
+    ever appears as an alias somewhere", which would put false positives into a
+    scan whose whole value is that a red result means something. `_aliased` here
+    is an ordinary local function; the file has no aliasing import, so nothing is
+    flagged. The `as` form of an UNRELATED symbol must not bind either.
+    """
+    source = ("from train import build_env_factory as _aliased\n"
+              "from train import make_puffer_env\n"
+              "a = _aliased(seed=1)\n"
+              "b = make_puffer_env(seed=1)\n")
+    assert constructions(source) == [
+        ("make_puffer_env", 4, "name")
+    ], ("alias resolution is binding names it was never told about: "
+        f"{constructions(source)}")
 
 
 # ── guard 4: the carve-out, in both directions ──────────────────────────────
@@ -291,8 +481,13 @@ def test_the_real_classmethod_call_sites_still_exist_and_are_not_flagged():
 # ── the enforcement assertion ───────────────────────────────────────────────
 
 
-def test_no_direct_construction_outside_the_factory():
+def test_no_make_puffer_env_or_selfplaymanager_call_outside_the_factory():
     """Zero `make_puffer_env(...)` / `SelfPlayManager(...)` in src/ or scripts/.
+
+    THE TWO BANNED SYMBOLS AND NOTHING ELSE. Passing does not mean no env is
+    built outside the factory: the twelve LOWER_LAYER_SITES calls to `make_env` /
+    `Cs2Env` are in these same roots and are out of scope by design. Read the
+    module docstring's LOWER LAYER paragraph before citing this test.
 
     Read a failure here as "a new construction site appeared", not as "this test
     is in the way". The fix is a role on `build_env_for` (or the manager

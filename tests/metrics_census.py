@@ -705,6 +705,58 @@ def _dict_items(node):
             yield k, v
 
 
+# A `c.setdefault(k)` with no default writes None. Kept as an explicit node so
+# the one-argument form is censused like any other write instead of being a
+# silent hole — `_classify` reads the value, and None is what it really is.
+_IMPLICIT_NONE = ast.Constant(value=None)
+
+
+def site_write_targets(node, containers):
+    """[(container, key_node, value_node, lineno)] for writes into `containers` at `node`.
+
+    THE FOUR WRITE SHAPES the census counts, in one place so that `_walk` and the
+    unit test that knocks each of them out cannot drift apart:
+
+        c[k] = v / c[k] += v      subscript assignment
+        c = {k: v, ...}           a dict literal bound to a container NAME
+        c.update({k: v, ...})     a literal update
+        c.setdefault(k, v)        (final review I-3)
+
+    WHY setdefault is here at all. It was missing, and the miss was invisible
+    twice over: `census()` did not produce the key, so the registry never had to
+    carry it, AND `metrics_write_sites()` did not treat it as a write shape
+    either, so the island-blind sweep could not report it as an unexplained hit.
+    A probe writing `game_metrics.setdefault("game/probe", 1.0)` inside
+    `compute_game_metrics` left all 67 tests green. It is a plausible spelling —
+    "fill in a default only if the epoch did not compute one" is exactly what a
+    metrics emitter reaches for — not a contrived one.
+
+    `containers` is passed in rather than read off a site so the shapes can be
+    tested against a synthetic snippet.
+    """
+    writes = []
+    if isinstance(node, (ast.Assign, ast.AugAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for tgt in targets:
+            if isinstance(tgt, ast.Subscript) and _container_name(tgt.value) in containers:
+                writes.append((_container_name(tgt.value), tgt.slice, node.value, node.lineno))
+            elif (isinstance(tgt, ast.Name) and tgt.id in containers
+                  and isinstance(node.value, ast.Dict)):
+                for k, v in _dict_items(node.value):
+                    writes.append((tgt.id, k, v, getattr(k, "lineno", node.lineno)))
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        base = _container_name(node.func.value)
+        if base in containers and node.args:
+            if node.func.attr == "update" and isinstance(node.args[0], ast.Dict):
+                for k, v in _dict_items(node.args[0]):
+                    writes.append((base, k, v, getattr(k, "lineno", node.lineno)))
+            elif node.func.attr == "setdefault":
+                value = node.args[1] if len(node.args) > 1 else _IMPLICIT_NONE
+                key = node.args[0]
+                writes.append((base, key, value, getattr(key, "lineno", node.lineno)))
+    return writes
+
+
 def _walk(node, site, env, ctx, keys, families, seen):
     """Recursive collector; `env` carries loop-variable bindings."""
     if isinstance(node, ast.For):
@@ -720,24 +772,7 @@ def _walk(node, site, env, ctx, keys, families, seen):
                 _walk(child, site, inner, ctx, keys, families, seen)
         return
 
-    writes = []
-    if isinstance(node, (ast.Assign, ast.AugAssign)):
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        for tgt in targets:
-            if isinstance(tgt, ast.Subscript) and _container_name(tgt.value) in site.containers:
-                writes.append((_container_name(tgt.value), tgt.slice, node.value, node.lineno))
-            elif (isinstance(tgt, ast.Name) and tgt.id in site.containers
-                  and isinstance(node.value, ast.Dict)):
-                for k, v in _dict_items(node.value):
-                    writes.append((tgt.id, k, v, getattr(k, "lineno", node.lineno)))
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-        if (node.func.attr == "update" and _container_name(node.func.value) in site.containers
-                and node.args and isinstance(node.args[0], ast.Dict)):
-            base = _container_name(node.func.value)
-            for k, v in _dict_items(node.args[0]):
-                writes.append((base, k, v, getattr(k, "lineno", node.lineno)))
-
-    for container, key_node, value, lineno in writes:
+    for container, key_node, value, lineno in site_write_targets(node, site.containers):
         shape = _classify(site, container, value, lineno, ctx)
         prefix = site.containers[container]
         if isinstance(key_node, ast.JoinedStr):
@@ -893,7 +928,7 @@ def _key_text(node):
     return None
 
 
-def metrics_write_sites():
+def metrics_write_sites(src=None):
     """Every metrics-SHAPED write in src/, found WITHOUT consulting EMITTER_SITES.
 
     WHY this exists: EMITTER_SITES is a named island, so `census()` can only be
@@ -909,7 +944,11 @@ def metrics_write_sites():
     missed `metrics[`, which occurs outside the island):
 
       write POSITIONS  ``c[k] = ...`` / ``c[k] += ...``, a dict literal bound to a
-                       name, a bare dict literal anywhere, and ``c.update({...})``.
+                       name, a bare dict literal anywhere, ``c.update({...})`` and
+                       ``c.setdefault(k, ...)`` (the last added by final review
+                       I-3 — it was a write shape NEITHER walk knew about, so a
+                       `setdefault` emission was invisible tree-wide, not just
+                       inside the island).
       key PREDICATE    a key-shaped string that is either slash-namespaced (any
                        `a/b`, so a NEW namespace is caught too — nothing here reads
                        the registry, which is what keeps the guard independent of
@@ -933,6 +972,26 @@ def metrics_write_sites():
         own `mean_and_log` literals (covered instead by PUFFERLIB_OWNED and a
         cross-package AST pin) or `**` splats of a non-literal mapping (covered by
         `island_merge_sources()` for island containers only).
+
+    AND THE ONE THAT IS NOT ABOUT THE PREDICATE AT ALL — read this before adding
+    a function to EMITTER_SITES. A hit INSIDE an island site is not reported as
+    unexplained; that is the whole point of the cross-walk, and it means listing a
+    function DISARMS this sweep for everything written inside it. Three shapes
+    lived in that gap (final review I-3), and two of the three are now caught by
+    ``undeclared_container_writes()``, which requires an in-island write to land
+    in a container the site declares:
+
+      * ``def _emit(out): out["game/x"] = ...`` — container as a PARAMETER. CAUGHT.
+      * ``alias = logs; alias["game/x"] = ...`` — container under a second name. CAUGHT.
+      * ``logs.setdefault("game/x", ...)`` — CAUGHT, by adding the shape to both
+        walks (see ``site_write_targets``).
+
+    What is left of that gap, precisely: an in-island write into an undeclared
+    container whose keys are BARE and whose name resembles no island container
+    (``tmp["kills"] = ...``) — dropped by the key predicate above before the
+    container check can see it — and the one-argument ``c.setdefault(k)``, which
+    writes None and is therefore dropped by train.py's numeric persist filter
+    before it can reach a row.
     """
     containers = {c.split(".")[-1] for s in EMITTER_SITES for c in s.containers}
     found = {}
@@ -965,20 +1024,24 @@ def metrics_write_sites():
                 and isinstance(node.args[0], ast.Dict)):
             for k, _ in _dict_items(node.args[0]):
                 _record(path, qualname, _container_name(node.func.value), k, node.lineno)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "setdefault" and node.args):
+            _record(path, qualname, _container_name(node.func.value), node.args[0], node.lineno)
         if isinstance(node, ast.Dict):
             for k, _ in _dict_items(node):
                 _record(path, qualname, "", k, node.lineno)
         for child in ast.iter_child_nodes(node):
             _walk_all(path, child, qualname)
 
-    for path in sorted(SRC.rglob("*.py")):
-        rel = str(path.relative_to(SRC))
+    root = Path(src) if src is not None else SRC
+    for path in sorted(root.rglob("*.py")):
+        rel = str(path.relative_to(root))
         _walk_all(rel, _parse_file(path), "")
     return sorted(found.values())
 
 
-def island_site_of(write):
-    """The EMITTER_SITES qualname `write` belongs to, or None if it is outside.
+def _island_site(write):
+    """The EMITTER_SITES entry `write` sits inside, or None.
 
     A def NESTED in an emitter counts as that emitter, matching `_walk`, which
     descends into nested helpers (compute_game_metrics._maybe) with their
@@ -987,8 +1050,53 @@ def island_site_of(write):
     for site in EMITTER_SITES:
         if write.path == site.path and (write.qualname == site.qualname
                                         or write.qualname.startswith(site.qualname + ".")):
-            return site.qualname
+            return site
     return None
+
+
+def island_site_of(write):
+    """The EMITTER_SITES qualname `write` belongs to, or None if it is outside."""
+    site = _island_site(write)
+    return site.qualname if site else None
+
+
+def undeclared_container_writes(sweep=None):
+    """Sweep hits INSIDE an emitter that write into a container the site never declares.
+
+    THE HOLE THIS CLOSES (final review I-3). Listing a function in EMITTER_SITES
+    is not only how a key gets censused — it is also what makes the island-blind
+    sweep STOP asking questions about that function, because
+    test_every_metrics_write_in_src_is_inside_the_island_or_declared_not_a_metric
+    treats "inside the island" as the explanation for a hit. So a write inside a
+    listed emitter that goes somewhere `census()` does not look was invisible to
+    both walks at once, and listing the function is what made it invisible. Two
+    ordinary spellings land there:
+
+        def _emit(out):  out["game/x"] = ...   # container arrives as a PARAMETER
+        alias = logs;    alias["game/x"] = ... # container reached under another name
+
+    Both were probe-confirmed: dropped into `compute_game_metrics`, they left all
+    67 metrics tests green while writing an unregistered key into every row.
+
+    THE RULE, and why it is the right shape: a write inside an emitter must go
+    into a container that emitter DECLARES. `_walk` keys on exactly those
+    container names, so "declared" and "censused" are the same set — which makes
+    this a cross-check between the two walks rather than a third opinion that can
+    drift from either. The remedy for a failure is to add the container name to
+    the site's `containers` (with its key prefix), which does not just silence
+    this — it is what makes `census()` see the keys, so the registry then has to
+    carry them.
+
+    NOT covered, deliberately: a container that is neither declared nor named
+    like any island container, written with BARE keys. `metrics_write_sites`'s
+    own predicate drops those before they get here; see its residual list.
+    """
+    out = []
+    for write in (metrics_write_sites() if sweep is None else sweep):
+        site = _island_site(write)
+        if site is not None and write.container not in site.containers:
+            out.append(write)
+    return sorted(out)
 
 
 class MergeSource(NamedTuple):

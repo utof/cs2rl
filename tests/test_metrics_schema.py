@@ -277,6 +277,91 @@ def test_every_metrics_write_in_src_is_inside_the_island_or_declared_not_a_metri
         f"census-only {sorted(census_sites - sweep_sites)}")
 
 
+def test_writes_inside_an_emitter_go_into_a_container_that_site_declares():
+    """The other half of the boundary: listing a function must not create a blind spot.
+
+    The test above explains a sweep hit by "it is inside the island", which is
+    what makes EMITTER_SITES membership a way to go dark rather than a way to be
+    censused — see `census.undeclared_container_writes` for the two probe-
+    confirmed spellings that exploited it. A write into a container the site does
+    not declare is a write `census()` never classifies, so its keys never reach
+    the registry and never fail anything.
+    """
+    stray = census.undeclared_container_writes()
+    assert not stray, (
+        "metrics-shaped writes inside an emitter, into a container that emitter does not "
+        "declare — invisible to census() AND excused by the island cross-walk:\n  " +
+        "\n  ".join(f"{w.path}::{w.qualname}:{w.lineno}  {w.container}[{w.key!r}]" for w in stray) +
+        "\nAdd the container (with its key prefix) to the site's EMITTER_SITES entry, which "
+        "is what makes census() see the keys and the registry carry them.")
+
+
+def test_knockout_the_three_island_interior_blind_shapes_are_now_reported(tmp_path):
+    """Plant the I-3 probes in a fake src/ and require every one of them back.
+
+    THE KNOCK-OUT for the test above and for the `setdefault` write shape. It
+    plants a file at the REAL relative path and qualname of an emitter site
+    (`train_metrics.py` :: `compute_game_metrics`), so the planted writes are
+    genuinely "inside the island" as far as EMITTER_SITES is concerned — which is
+    the condition that made all three invisible. Reproduces the three shapes
+    exactly as they were probed against the live tree, where they left all 67
+    tests in this file green.
+
+    Deleting the setdefault branch of `site_write_targets`/`metrics_write_sites`,
+    or the container check in `undeclared_container_writes`, fails here.
+    """
+    (tmp_path / "train_metrics.py").write_text("def compute_game_metrics(logs):\n"
+                                               "    game_metrics = {}\n"
+                                               "    def _emit(out):\n"
+                                               "        out['game/probe_param'] = 1.0\n"
+                                               "    _emit(game_metrics)\n"
+                                               "    alias = game_metrics\n"
+                                               "    alias['game/probe_alias'] = 1.0\n"
+                                               "    game_metrics.setdefault('game/probe_sd', 1.0)\n"
+                                               "    return game_metrics\n")
+    sweep = census.metrics_write_sites(src=tmp_path)
+    assert {w.key
+            for w in sweep} == {"game/probe_param", "game/probe_alias", "game/probe_sd"
+                                }, (f"the sweep did not see all three planted writes: {sweep}")
+
+    stray = {w.key for w in census.undeclared_container_writes(sweep)}
+    assert stray == {
+        "game/probe_param", "game/probe_alias"
+    }, (f"the undeclared-container check reported {stray}, not the two writes that reach "
+        "`game_metrics` under another name")
+
+    # The third is caught the other way: `game_metrics` IS declared, so the check
+    # above correctly leaves it alone and `census()` has to produce the key. Pin
+    # that the census walk now recognises the shape.
+    fn = ast.parse("def f():\n    game_metrics.setdefault('game/probe_sd', 1.0)\n").body[0]
+    targets = census.site_write_targets(fn.body[0].value, {"game_metrics": ""})
+    assert [census._key_text(k) for _, k, _, _ in targets
+            ] == ["game/probe_sd"
+                  ], (f"site_write_targets no longer recognises setdefault: {targets}")
+
+
+@pytest.mark.parametrize("snippet,expected", [
+    ("logs['game/a'] = 1", "game/a"),
+    ("logs['game/a'] += 1", "game/a"),
+    ("logs = {'game/a': 1}", "game/a"),
+    ("logs.update({'game/a': 1})", "game/a"),
+    ("logs.setdefault('game/a', 1)", "game/a"),
+])
+def test_the_census_recognises_each_write_shape_it_claims_to(snippet, expected):
+    """One assertion per shape named in `site_write_targets`'s docstring.
+
+    A list of supported shapes in a docstring is the kind of claim that is true
+    when written and silently wrong after the next edit; this is the claim being
+    checked rather than described. `setdefault` is the shape that was documented
+    nowhere and implemented nowhere until final review I-3.
+    """
+    node = ast.parse(snippet).body[0]
+    node = node.value if isinstance(node, ast.Expr) else node
+    targets = census.site_write_targets(node, {"logs": ""})
+    assert [census._key_text(k) for _, k, _, _ in targets
+            ] == [expected], (f"{snippet!r} is not recognised as a write into `logs`: {targets}")
+
+
 def test_dicts_merged_into_island_containers_come_from_island_emitters():
     """`logs.update(<Call>)` is the one write shape `census()` cannot look inside.
 
