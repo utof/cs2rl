@@ -53,6 +53,17 @@ from _action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES
 from _obs_spec import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
 from c_env.cs2_env import N_AGENTS, TEAM_SIZE
 
+# The eval/* analysis contract, RE-EXPORTED. It used to be DEFINED in this file;
+# W4 moved it to the metrics registry so there is one authority for every key.
+# The direction is load-bearing, not stylistic: this module imports torch and
+# c_env.cs2_env at module scope (just above), so a registry that did
+# `from eval_baselines import EVAL_KEYS` would make a tuple of eight strings cost
+# a torch import and break the import-lightness invariant every new module is
+# held to (tests/test_w1_modules.py). metrics_schema imports nothing from src
+# except `_action_spec`, so this edge is acyclic and cheap in the one direction
+# that matters.
+from metrics_schema import EVAL_KEYS   # noqa: F401  (re-export)
+
 HEAD_SIZES = ACTION_HEAD_SIZES                                             # probe name, kept for the vendored code
 OBS_ENEMY_BASE = OBS_BLOCKS["enemy"][0]
 ACTION_DIM, AIM_DIM = len(ACTION_HEAD_SIZES), 2
@@ -578,17 +589,10 @@ def episode_outcome(kills_for: int, kills_against: int) -> float:
     return 0.0
 
 
-# eval/* keys emitted by BaselineEvaluator.evaluate — the analysis contract.
-EVAL_KEYS = (
-    "eval/win_vs_random",
-    "eval/win_vs_random_as_t",
-    "eval/win_vs_random_as_ct",
-    "eval/kills_per_episode_vs_random",
-    "eval/win_vs_oracle",
-    "eval/win_vs_oracle_as_t",
-    "eval/win_vs_oracle_as_ct",
-    "eval/kills_per_episode_vs_oracle",
-)
+# EVAL_KEYS — the eval/* keys evaluate() below returns, i.e. the analysis
+# contract — is NOT defined here any more. It lives in src/metrics_schema.py
+# (W4, spec 2026-08-31 §2 W4) and is imported at the top of this file, which
+# re-exports it for existing `eval_baselines.EVAL_KEYS` consumers.
 
 
 class BaselineEvaluator:

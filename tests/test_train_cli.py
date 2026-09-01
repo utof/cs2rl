@@ -295,7 +295,13 @@ def test_opponent_flag_declared_with_both_modes():
     """Source-scan pin, same rationale as test_cli_flags_declared_default_none
     in tests/test_env_knobs.py (the parser is built inline under
     `if __name__ == "__main__"` and cannot be imported): the flag must offer
-    both modes and default to the historical one."""
+    both modes and default to the historical one.
+
+    TWO FILES since the post-rung1a refactor (2026-08-31): the parser (and so
+    the `choices=OPPONENT_MODES` reference) stays in src/train.py, while the
+    OPPONENT_MODES tuple itself moved to src/train_config.py. Both halves are
+    pinned — a `choices=` naming a vocabulary that no longer holds both modes
+    is exactly the silent narrowing this test exists to catch."""
     import re
 
     src = TRAIN_SCRIPT.read_text()
@@ -304,7 +310,8 @@ def test_opponent_flag_declared_with_both_modes():
     body = m.group(1)
     assert "choices=OPPONENT_MODES" in body and 'default="self"' in body, body
     assert 'dest="opponent"' in body, body
-    assert 'OPPONENT_MODES = ("self", "noop")' in src
+    config_src = (REPO_ROOT / "src" / "train_config.py").read_text()
+    assert 'OPPONENT_MODES = ("self", "noop")' in config_src
 
 
 def test_train_smoke_returns_zero():

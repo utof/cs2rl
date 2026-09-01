@@ -1,6 +1,7 @@
 # src/c_env/cs2_env.py — PufferEnv subclass backed by binding.c C API bridge.
 
 import ctypes
+import hashlib
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,8 +93,19 @@ class StaticDataC(ctypes.Structure):
         # T2 (verticality): per-area terrain elevation and ramp flag.
         # Field order MUST stay in sync with:
         #   - StaticData struct in cs2_types.h  (C canonical source)
-        #   - PyArg_ParseTuple format string in binding.c py_init()
-        # Mismatch here silently corrupts all pointer fields that follow.
+        #   - SD_PREFIX_FIELDS in cs2_types.h   (per-field layout table; every
+        #     field above wall_list needs a row there, in this same order)
+        #   - the ten-pointer argument list in binding.c py_init() — POINTER
+        #     fields only; scalars travel in the packed buffer
+        # A mismatch with the C struct changes this side's layout hash only, so
+        # binding.init refuses to copy anything. A missing SD_PREFIX_FIELDS row
+        # fails tests/test_static_data_layout.py. Order still decides which
+        # numpy array each POINTER field receives — _SD_POINTER_FIELDS below
+        # derives that order from this list, so a reordering here moves the
+        # arguments with it, but py_init's hand-written list does NOT follow and
+        # nothing catches the mismatch: a consistent reorder leaves both layout
+        # hashes equal, and the pointer guard in __init__ compares sets, not
+        # order. Reorder pointer fields in all three places or in none.
         ("centroids_z", ctypes.POINTER(ctypes.c_float)),               # float32[N] — terrain z per area  # noqa: E501
         ("area_ids", ctypes.POINTER(ctypes.c_int32)),
         ("bombsite_mask", ctypes.POINTER(ctypes.c_int8)),
@@ -160,11 +172,11 @@ class StaticDataC(ctypes.Structure):
         ("pbrs_bomb_progress_weight", ctypes.c_float),
         ("pbrs_nav_weight_t", ctypes.c_float),
         ("pbrs_nav_weight_ct", ctypes.c_float),
-        # Rung 0 (spec 2026-08-29): FMT positions 69-71, before wall_list in C.
+        # Rung 0 (spec 2026-08-29): sim knobs, before wall_list in C.
         ("n_active_per_team", ctypes.c_int32),
         ("pin_pitch", ctypes.c_int32),
         ("crouch_enabled", ctypes.c_int32),
-        # Rung 1a (spec 2026-08-30 T2a): FMT position 72, same block.
+        # Rung 1a (spec 2026-08-30 T2a): same block.
         ("jump_enabled", ctypes.c_int32),
         # After the binding.init prefix: overlay C wall_list then ramp bounds.
         # These two stay LAST, matching cs2_types.h. New scalars go above them
@@ -498,6 +510,243 @@ _C_SIZE_KEYS_CHECKED = (frozenset(_n for _n, _ in _C_SIZE_MIRRORS)
                         | frozenset(_k for _, _, _k in _C_OFFSET_FIELDS)
                         | frozenset(_m for _m, _ in _C_MACROS))
 
+# ── StaticData layout hash, Python side (spec 2026-08-31 §2 W2) ───────────────
+#
+# The counterpart of binding.static_data_layout(). Both sides describe the same
+# StaticData prefix — everything before wall_list — as an ordered list of
+# (name, offset, size, canonical type name), serialise it identically, and
+# sha256 it. tests/test_static_data_layout.py asserts the two agree.
+#
+# The point is that the two operands come from DIFFERENT sources. C reads the
+# compiler's offsetof/sizeof over the SD_PREFIX_FIELDS table in cs2_types.h;
+# everything below is ctypes introspection of StaticDataC and nothing else. If
+# either side is ever "simplified" into reading the other, the comparison stops
+# comparing anything and the mirror is unguarded again — which is the state this
+# replaces, where a 73-position format string was the only thing holding the two
+# declarations together.
+#
+# Honest scope, same as the C-side doc block: this compares DECLARATIONS. A
+# packing mistake that puts the right number in the wrong (correctly described)
+# field is invisible here and is caught by the sentinel round trip in
+# tests/test_struct_sizes.py instead.
+_LAYOUT_FORMAT = "cs2rl-static-data-layout-v1"
+
+# The scalar canonical names binding.c's SD_TYPE_NAMES can emit. Introspection
+# below builds "ptr_<base>" / "arr_<base>_<count>" structurally, so only the
+# BASE names need agreeing on. A StaticData field declared with any other type
+# (c_double, c_uint32, ...) raises rather than silently hashing a name the C
+# side could never produce.
+_CANONICAL_SCALAR_CTYPES = frozenset({"c_int", "c_byte", "c_float"})
+
+
+def _canonical_ctype_name(ctype):
+    """Canonical layout-hash name for one ctypes field type.
+
+    Mirrors the vocabulary in binding.c's SD_TYPE_NAMES, reached from the other
+    direction: C maps its declared spellings onto these names, while this walks
+    the ctypes class structure. Note ctypes has already folded c_int32 into
+    c_int and c_int8 into c_byte before we see them, which is exactly why the C
+    side has to do the mapping at all — `int` and `int32_t` are indistinguishable
+    from here.
+    """
+    if issubclass(ctype, ctypes._Pointer):
+        return "ptr_" + _canonical_ctype_name(ctype._type_)
+    if issubclass(ctype, ctypes.Array):
+        return f"arr_{_canonical_ctype_name(ctype._type_)}_{ctype._length_}"
+    name = ctype.__name__
+    if name not in _CANONICAL_SCALAR_CTYPES:
+        raise RuntimeError(
+            f"StaticDataC field type {name!r} is outside the layout-hash vocabulary "
+            f"{sorted(_CANONICAL_SCALAR_CTYPES)}; add it here AND to SD_TYPE_NAMES in "
+            "src/c_env/binding.c, then rebuild")
+    return name
+
+
+def _static_data_preamble():
+    """Layout assumptions ctypes is making, read out of the live class.
+
+    DERIVED, never hardcoded — binding.c hardcodes its expectation and this
+    reports what ctypes actually did; two constants would compare nothing.
+
+    `_pack_` is the one that bites: setting it on Linux switches ctypes to MSVC
+    layout rules, which moves fields without changing any single field's type.
+    `_layout_` only exists from Python 3.14; before that ctypes had exactly one
+    layout, the platform-native one, which on the x86-64 Linux/macOS targets this
+    builds for IS gcc-sysv — so absent canonicalises to that name rather than to
+    a separate "unknown" token that would split the hash by interpreter version.
+    A 3.14+ interpreter reporting anything else (e.g. "ms") flows through
+    verbatim and fails the comparison, which is the intended direction.
+    """
+    pack = str(StaticDataC._pack_) if hasattr(StaticDataC, "_pack_") else "unset"
+    layout = getattr(StaticDataC, "_layout_", None) or "gcc-sysv"
+    return f"struct=StaticData;pack={pack};layout={layout}"
+
+
+def static_data_layout():
+    """Describe StaticDataC's prefix the way binding.static_data_layout() does.
+
+    Returns the same five keys as the C function: format, preamble, prefix_size,
+    fields, hash. `fields` covers [0, offsetof(StaticData, wall_list)) only; the
+    tail (wall_list, area_bounds) is guarded by the three offset anchors in
+    _C_OFFSET_FIELDS above instead.
+
+    Deliberately uncached. It is one sha256 over ~3 KB, and a cache would make
+    the hash test unable to see a mirror edited at runtime — which is precisely
+    how that test's discrimination check proves it is measuring something.
+    """
+    names = [name for name, _ in StaticDataC._fields_]
+    # ValueError here means the mirror lost its wall_list field, i.e. there is no
+    # prefix boundary left to describe. Better than silently hashing everything.
+    prefix_end = names.index("wall_list")
+    fields = []
+    for name, ctype in StaticDataC._fields_[:prefix_end]:
+        field = getattr(StaticDataC, name)
+        fields.append((name, field.offset, field.size, _canonical_ctype_name(ctype)))
+    preamble = _static_data_preamble()
+    prefix_size = StaticDataC.wall_list.offset
+    blob = f"{_LAYOUT_FORMAT}\n{preamble}\nprefix_size={prefix_size}\n"
+    blob += "".join(f"{n}|{o}|{s}|{t}\n" for n, o, s, t in fields)
+    return {
+        "format": _LAYOUT_FORMAT,
+        "preamble": preamble,
+        "prefix_size": prefix_size,
+        "fields": tuple(fields),
+        "hash": hashlib.sha256(blob.encode("ascii")).hexdigest(),
+    }
+
+
+# ── StaticData packing (spec 2026-08-31 §2 W2) ────────────────────────────────
+#
+# Python fills a StaticDataC instance BY NAME and hands binding.init the raw
+# prefix bytes; C memcpys them into its own StaticData. This replaced a
+# 73-position PyArg_ParseTuple format string whose entire claim was that the
+# arguments arrived in the order the C struct happens to declare its fields.
+#
+# That string was doing three jobs. Enumerating them is not pedantry — losing
+# one of them quietly is how this kind of migration goes wrong:
+#
+#   ARITY. A missing argument was a TypeError from PyArg_ParseTuple. A missing
+#     dict key would instead leave a ZERO in the buffer, and zero is a plausible
+#     value for most of these fields. Replaced by _SD_PACKED_TYPES below: the
+#     packer's key set must equal the mirror's non-pointer prefix fields
+#     exactly, and that set is DERIVED from StaticDataC, so a field appended to
+#     the mirror and forgotten here raises on the next env construction instead
+#     of shipping a silent zero.
+#   TYPE COERCION. "i" raised OverflowError on a value too wide for a C int.
+#     ctypes truncates that silently, so _pack_field range-checks the integers
+#     against the field's own declared width.
+#   POSITION AGREEMENT. Replaced by the layout hash above, which binding.init
+#     compares against its own C-side digest before it copies anything.
+#
+# What NEITHER the old string nor any of this covers is VALUE ROUTING: writing
+# jump_enabled's value under the "crouch_enabled" key puts the wrong number into
+# a correctly-named, correctly-typed, correctly-offset slot and every check here
+# stays green. That is what the two-env pigeonhole scheme in
+# tests/test_struct_sizes.py is for, and why W2 retires none of it.
+
+_SD_PREFIX_END = [_n for _n, _ in StaticDataC._fields_].index("wall_list")
+
+# The ten pointer fields are NOT packed. C has to end up holding the numpy
+# buffers' own addresses — Cs2Env._refs keeps those alive for the env's lifetime
+# — and an address copied into a transient bytes object would dangle as soon as
+# that object was collected. So they stay real binding.init arguments, and this
+# tuple is the ORDER they are passed in: derived from the mirror rather than
+# hand-kept in step with a second list, which is the last place a positional
+# agreement survived after the format string went.
+_SD_POINTER_FIELDS = tuple(_n for _n, _t in StaticDataC._fields_[:_SD_PREFIX_END]
+                           if issubclass(_t, ctypes._Pointer))
+# Everything else in the prefix travels in the buffer: the 56 scalars plus the
+# five inline arrays (delta_x, delta_y, dir_facing, t_spawns, ct_spawns).
+_SD_PACKED_TYPES = {
+    _n: _t
+    for _n, _t in StaticDataC._fields_[:_SD_PREFIX_END] if not issubclass(_t, ctypes._Pointer)
+}
+
+# Inline spawn-array capacities, DERIVED from the mirror. `.size` is the field's
+# width in BYTES; ctypes.sizeof(StaticDataC.t_spawns) raises TypeError ("this
+# type has no size") because a field read off the class is a descriptor, not a
+# type. The raw 15/5 already exist in cs2_types.h and in StaticDataC above, and
+# a fourth hand-written copy is exactly the kind of mirror W2 is deleting.
+_T_SPAWN_CAPACITY = StaticDataC.t_spawns.size // ctypes.sizeof(ctypes.c_int32)
+_CT_SPAWN_CAPACITY = StaticDataC.ct_spawns.size // ctypes.sizeof(ctypes.c_int32)
+
+
+def _pack_array_field(c, name, ctype, value):
+    """Fill one inline array field, leaving any unused tail at zero.
+
+    Over-capacity is a loud ValueError rather than a truncation: fixed-size
+    packing means C can no longer be made to overrun the array (which the old
+    `memcpy(sd->t_spawns, ..., n * sizeof(int32_t))` could), so the failure mode
+    became silent data loss and needs an error of its own.
+    """
+    seq = list(value)
+    if len(seq) > ctype._length_:
+        raise ValueError(f"StaticData.{name} holds {ctype._length_} elements, got {len(seq)}; "
+                         "widen the array in cs2_types.h and in StaticDataC together")
+    convert = float if ctype._type_ is ctypes.c_float else int
+    # Explicit conversion, not a raw numpy scalar: float32 -> float -> c_float
+    # and int32 -> int -> c_int32 both round-trip exactly, and going through the
+    # Python number keeps the dtype of the caller's array from mattering.
+    getattr(c, name)[:len(seq)] = [convert(v) for v in seq]
+
+
+def _pack_field(c, name, value):
+    """Assign one packed prefix field, preserving the format string's loudness.
+
+    ctypes is more permissive than PyArg_ParseTuple in exactly one direction
+    that matters here: assigning 2**40 to a c_int32 field stores 0 rather than
+    raising OverflowError, which would turn a bad training config into a wrong
+    run instead of a stopped one. The bound comes from the field's own declared
+    width, so it stays correct if a field is ever widened.
+    """
+    ctype = _SD_PACKED_TYPES[name]
+    if issubclass(ctype, ctypes.Array):
+        _pack_array_field(c, name, ctype, value)
+    elif ctype is ctypes.c_float:
+        # double -> float32 here rounds exactly as PyArg_ParseTuple's "f" did.
+        setattr(c, name, value)
+    else:
+        bits = 8 * getattr(StaticDataC, name).size
+        if not -(1 << (bits - 1)) <= value < (1 << (bits - 1)):
+            raise OverflowError(
+                f"StaticData.{name} = {value!r} does not fit in {bits} signed bits; ctypes "
+                "would store a truncated value where binding.init used to raise")
+        setattr(c, name, value)
+
+
+def _pack_static_data(values):
+    """Pack StaticData's prefix bytes from a {C field name: value} mapping.
+
+    Returns exactly offsetof(StaticData, wall_list) bytes — the range
+    binding.init memcpys, and no more. The tail (wall_list, area_bounds) is
+    C-owned or published later through the ctypes overlay, so sending it would
+    be both useless and, if C ever widened its copy, destructive.
+
+    The ten pointer slots inside those bytes are left NULL deliberately.
+    binding.init overwrites them from the numpy arrays it is handed, AFTER the
+    memcpy; that order is normative there, because the copied range covers those
+    slots and a copy done second would NULL every pointer.
+
+    ZERO-FILL IS LOAD-BEARING, not incidental. ctypes zeroes a fresh Structure,
+    and that is what reproduces the old transfer's tail semantics: t_spawns and
+    ct_spawns were memcpy'd only up to n_*_spawns into a calloc'd struct, so the
+    unused slots read as 0. Packing anything else there would be invisible to
+    every check in this file and to static_data_scalars() (which excludes the
+    array fields) — the training checkpoint hash is the only oracle that sees it.
+    """
+    missing = sorted(set(_SD_PACKED_TYPES) - set(values))
+    unknown = sorted(set(values) - set(_SD_PACKED_TYPES))
+    if missing or unknown:
+        raise RuntimeError(
+            "the StaticData packer and the StaticDataC mirror disagree about which fields travel "
+            f"in the buffer. Never assigned (would have shipped as a silent 0): {missing}; "
+            f"assigned but not a packed mirror field: {unknown}")
+    c = StaticDataC()
+    for name, value in values.items():
+        _pack_field(c, name, value)
+    return ctypes.string_at(ctypes.addressof(c), StaticDataC.wall_list.offset)
+
+
 # ctypes helper to extract raw pointer from PyCapsule
 _PyCapsule_GetPointer = ctypes.pythonapi.PyCapsule_GetPointer
 _PyCapsule_GetPointer.restype = ctypes.c_void_p
@@ -650,8 +899,8 @@ class Cs2Env(pufferlib.PufferEnv):
             recoil: bool = False,                                               # #120: punch on ray; default off (today's hitscan)  # noqa: E501
             n_active_per_team: int = TEAM_SIZE,                                 # Rung 0 §2.1: agents per team that spawn  # noqa: E501
             pin_pitch: int = 0,                                                 # Rung 0 R0-E.2: ignore pitch action  # noqa: E501
-            crouch_enabled: int = 1,                                            # Rung 0 R0-E.2: mask crouch when 0  # noqa: E501
-            jump_enabled: int = 1,                                              # Rung 1a T2a: mask jump when 0  # noqa: E501
+            crouch_enabled: int = 1,                                            # Rung 0 R0-E.2 + W5: sim ignores crouch when 0  # noqa: E501
+            jump_enabled: int = 1,                                              # Rung 1a T2a + W5: sim ignores jump when 0  # noqa: E501
             round_time: int
         | None = None,                                                          # Rung 0 R0-G: ticks per round; None ⇒ nav.ROUND_TIME  # noqa: E501
             laser_range: float
@@ -773,9 +1022,9 @@ class Cs2Env(pufferlib.PufferEnv):
         # forked Puffer worker silently. round_time is rejected (not truncated)
         # when non-integral — int(2.5) would run a different episode length
         # than the config recorded.
-        # PITFALL: laser_range_sq (FMT 24) is derived from _laser_range below;
-        # never accept it as a separate kwarg or the range check and the
-        # damage falloff would disagree.
+        # PITFALL: laser_range_sq is derived from _laser_range below; never
+        # accept it as a separate kwarg or the range check and the damage
+        # falloff would disagree.
         if round_time is None:
             round_time = nav.ROUND_TIME
         if int(round_time) != round_time:
@@ -791,85 +1040,138 @@ class Cs2Env(pufferlib.PufferEnv):
         if not self._max_turn_speed > 0.0:
             raise ValueError(f"max_turn_speed must be > 0, got {self._max_turn_speed}")
 
-        # Call binding.init() — positional order matches C format string.
-        # T2 (verticality): centroids_z inserted at pos 4 (after centroid_xy);
-        # is_ramp_int8 inserted at pos 8 (after bombsite_by_idx).
-        # CRITICAL: positions must stay in sync with StaticDataC._fields_ in this file
-        # and StaticData in cs2_types.h — mismatch silently corrupts pointer assignments.
+        # Spawn counts must fit the inline arrays. Fixed-size packing turned
+        # over-capacity from a C-side buffer overrun (the old
+        # `memcpy(sd->t_spawns, ..., n * sizeof(int32_t))` copied whatever it
+        # was told to) into silent truncation, so it needs an error of its own.
+        # Capacities come from the mirror — see _T_SPAWN_CAPACITY.
+        n_t_spawns = len(md.t_spawn_areas)
+        n_ct_spawns = len(md.ct_spawn_areas)
+        if n_t_spawns > _T_SPAWN_CAPACITY:
+            raise ValueError(f"map has {n_t_spawns} T spawn areas but StaticData.t_spawns holds "
+                             f"{_T_SPAWN_CAPACITY}")
+        if n_ct_spawns > _CT_SPAWN_CAPACITY:
+            raise ValueError(f"map has {n_ct_spawns} CT spawn areas but StaticData.ct_spawns "
+                             f"holds {_CT_SPAWN_CAPACITY}")
+
+        # One named assignment per packed StaticData field, listed in
+        # cs2_types.h declaration order so this block and StaticDataC._fields_
+        # can be diffed top to bottom. There are no position numbers any more:
+        # the format string they indexed is gone, and a stale index would be
+        # worse than none.
+        #
+        # PITFALL: the KEY is the C field name and the VALUE is what lands in
+        # it. A swap between two keys — "crouch_enabled": self.jump_enabled — is
+        # the one error class no layout check can see, because it puts a wrong
+        # number into a correctly described slot. That is what the two-env
+        # sentinel scheme in tests/test_struct_sizes.py is for.
+
+        # fmt: off  -- same reason as StaticDataC._fields_ above: YAPF aligns standalone comments to the trailing-comment column
+        static_data = {
+            "N": int(md.N),
+            "grid_w": int(md.grid.shape[1]),
+            "grid_h": int(md.grid.shape[0]),
+            "max_area_id": int(md.area_ids.max()),
+            "grid_x_min": float(md.grid_x_min),
+            "grid_y_min": float(md.grid_y_min),
+            "grid_inv_cell": float(1.0 / md.grid_cell_size),
+            "inv_x_range": float(inv_x),
+            "inv_y_range": float(inv_y),
+            "x_offset": float(x_off),
+            "y_offset": float(y_off),
+            "bombsite_dist_scale": float(md.bombsite_dist_scale),
+            "laser_damage": int(nav.LASER_DAMAGE),
+            "laser_range": float(self._laser_range),                            # R0-G knob
+            # Derived from laser_range, never a kwarg of its own: two independent
+            # values would let the range check and the damage falloff disagree.
+            "laser_range_sq": float(self._laser_range * self._laser_range),
+            "shoot_cooldown": int(nav.SHOOT_COOLDOWN),
+            "bomb_plant_time": int(nav.BOMB_PLANT_TIME),
+            "bomb_defuse_time": int(nav.BOMB_DEFUSE_TIME),
+            "bomb_defuse_kit": int(nav.BOMB_DEFUSE_KIT),
+            "bomb_timer": int(nav.BOMB_TIMER),
+            "round_time": int(self._round_time),                                # R0-G knob
+            "footstep_radius_sq": float(nav.FOOTSTEP_RADIUS * nav.FOOTSTEP_RADIUS),
+            "gunshot_radius_sq": float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),
+            "enemy_memory_ticks": int(nav.ENEMY_MEMORY_TICKS),
+            "stale_memory_tick": int(nav.STALE_MEMORY_TICK),
+            "pbrs_gamma": float(pbrs_gamma),
+            # The five content-copied arrays. Slots past the sequence length stay
+            # zero — see the tail-semantics note in _pack_static_data.
+            "delta_x": delta_x,
+            "delta_y": delta_y,
+            "dir_facing": dir_facing,
+            "t_spawns": t_spawns,
+            "n_t_spawns": n_t_spawns,
+            "ct_spawns": ct_spawns,
+            "n_ct_spawns": n_ct_spawns,
+            "max_turn_speed": float(self._max_turn_speed),                      # R0-G knob
+            "reward_win": float(reward_win),                                    # legacy symmetric
+            "reward_win_t_detonation": float(reward_win_t_detonation),          # Batch 1
+            "reward_win_t_elimination": float(reward_win_t_elimination),
+            "reward_win_ct_defuse": float(reward_win_ct_defuse),
+            "reward_win_ct_timeout": float(reward_win_ct_timeout),
+            "reward_win_ct_elimination": float(reward_win_ct_elimination),
+            "reward_kill": float(reward_kill),
+            "reward_death": float(reward_death),
+            "reward_bombsite_entry": float(reward_bombsite_entry),
+            "reward_plant_bonus": float(reward_plant_bonus),
+            "reward_plant_base": float(reward_plant_base),
+            "reward_plant_progress_scale": float(reward_plant_progress_scale),
+            "reward_plant_interrupted": float(reward_plant_interrupted),
+            "reward_defuse": float(reward_defuse),
+            "reward_shot_penalty": float(reward_shot_penalty),
+            "reward_ct_survival": float(reward_ct_survival),
+            "reward_inaction": float(reward_inaction),
+            "pbrs_alive_weight": float(pbrs_alive_weight),
+            "pbrs_hp_weight": float(pbrs_hp_weight),
+            "pbrs_site_weight": float(pbrs_site_weight),
+            "pbrs_bomb_progress_weight": float(pbrs_bomb_progress_weight),
+            "pbrs_nav_weight_t": float(pbrs_nav_weight_t),
+            "pbrs_nav_weight_ct": float(pbrs_nav_weight_ct),
+            "n_active_per_team": n_active_per_team,                             # Rung 0
+            "pin_pitch": self.pin_pitch,                                        # Rung 0
+            "crouch_enabled": self.crouch_enabled,                              # Rung 0
+            "jump_enabled": self.jump_enabled,                                  # Rung 1a
+        }
+        # fmt: on
+
+        # The ten pointer fields, keyed by C field name and unpacked through
+        # _SD_POINTER_FIELDS below so the ORDER they reach binding.init is
+        # derived from StaticDataC rather than kept in step by hand. T2's
+        # centroids_z (after centroid_xy) and is_ramp (after bombsite_by_idx)
+        # are the reason that used to be fragile: an insertion in the middle of
+        # the struct silently handed one array's buffer to the next field's
+        # pointer.
+        pointer_arrays = {
+            "vis_matrix": vis_matrix,
+            "raster_grid": raster_grid,
+            "adjacency": adjacency,
+            "centroid_xy": centroid_xy,
+            "centroids_z": centroids_z,
+            "area_ids": area_ids,
+            "bombsite_mask": bombsite_mask,
+            "bombsite_by_idx": bombsite_by_idx,
+            "is_ramp": is_ramp_int8,
+            "bombsite_dist": bombsite_dist,
+        }
+        if set(pointer_arrays) != set(_SD_POINTER_FIELDS):
+            raise RuntimeError(
+                "the pointer arguments to binding.init and StaticDataC's pointer fields disagree: "
+                f"no array for {sorted(set(_SD_POINTER_FIELDS) - set(pointer_arrays))}, "
+                f"not a pointer field {sorted(set(pointer_arrays) - set(_SD_POINTER_FIELDS))}")
+
+        # seed and team_spirit are not StaticData fields — env_init takes them
+        # directly — so they keep argument slots. The layout hash is Python's own
+        # (derived from StaticDataC, the same declaration the buffer was packed
+        # from); binding.init compares it against the digest compiled into the
+        # .so and raises before copying anything if the two builds disagree.
         self._capsule = binding.init(
-            vis_matrix,
-            raster_grid,
-            adjacency,
-            centroid_xy,                                               # 0-3
-            centroids_z,                                               # 4: T2 terrain z per area
-            area_ids,
-            bombsite_mask,
-            bombsite_by_idx,
-            is_ramp_int8,                                              # 8: T2 ramp (int8)
-            bombsite_dist,                                             # 9
-            int(md.N),
-            int(md.grid.shape[1]),
-            int(md.grid.shape[0]),                                     # 10-12: N, grid_w, grid_h
-            int(md.area_ids.max()),                                    # 13: max_area_id
-            float(md.grid_x_min),
-            float(md.grid_y_min),                                      # 14-15
-            float(1.0 / md.grid_cell_size),                            # 16: grid_inv_cell
-            float(inv_x),
-            float(inv_y),
-            float(x_off),
-            float(y_off),                                              # 17-20
-            float(md.bombsite_dist_scale),                             # 21
-            int(nav.LASER_DAMAGE),                                     # 22
-            float(self._laser_range),                                  # R0-G knob
-            float(self._laser_range * self._laser_range),              # 23-24
-            int(nav.SHOOT_COOLDOWN),
-            int(nav.BOMB_PLANT_TIME),                                  # 25-26
-            int(nav.BOMB_DEFUSE_TIME),
-            int(nav.BOMB_DEFUSE_KIT),                                  # 27-28
-            int(nav.BOMB_TIMER),
-            int(self._round_time),                                     # 29-30 (30: R0-G knob)
-            float(nav.FOOTSTEP_RADIUS * nav.FOOTSTEP_RADIUS),          # 31
-            float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),            # 32
-            int(nav.ENEMY_MEMORY_TICKS),
-            int(nav.STALE_MEMORY_TICK),                                # 33-34
-            float(pbrs_gamma),                                         # 35: pbrs_gamma
-            delta_x,
-            delta_y,
-            dir_facing,
-            t_spawns,                                                  # 36-39
-            int(len(md.t_spawn_areas)),                                # 40: n_t_spawns
-            ct_spawns,                                                 # 41
-            int(len(md.ct_spawn_areas)),                               # 42: n_ct_spawns
-            float(self._max_turn_speed),                               # 43: R0-G knob
-            int(seed) & 0xFFFFFFFF,                                    # 44: seed (uint32)
-            float(init_team_spirit),                                   # 45
-            float(reward_win),                                         # 46
-            float(reward_win_t_detonation),                            # 47: Batch 1 per-mechanism
-            float(reward_win_t_elimination),                           # 48
-            float(reward_win_ct_defuse),                               # 49
-            float(reward_win_ct_timeout),                              # 50
-            float(reward_win_ct_elimination),                          # 51
-            float(reward_kill),                                        # 52
-            float(reward_death),                                       # 53
-            float(reward_bombsite_entry),                              # 54
-            float(reward_plant_bonus),                                 # 55
-            float(reward_plant_base),                                  # 56
-            float(reward_plant_progress_scale),                        # 57
-            float(reward_plant_interrupted),                           # 58
-            float(reward_defuse),                                      # 59
-            float(reward_shot_penalty),                                # 60
-            float(reward_ct_survival),                                 # 61
-            float(reward_inaction),                                    # 62
-            float(pbrs_alive_weight),                                  # 63
-            float(pbrs_hp_weight),                                     # 64
-            float(pbrs_site_weight),                                   # 65
-            float(pbrs_bomb_progress_weight),                          # 66
-            float(pbrs_nav_weight_t),                                  # 67
-            float(pbrs_nav_weight_ct),                                 # 68
-            n_active_per_team,                                         # 69: Rung 0
-            self.pin_pitch,                                            # 70: Rung 0
-            self.crouch_enabled,                                       # 71: Rung 0
-            self.jump_enabled,                                         # 72: Rung 1a
+            _pack_static_data(static_data),
+            static_data_layout()["hash"],
+            int(seed) & 0xFFFFFFFF,
+            float(init_team_spirit),
+            *(pointer_arrays[name] for name in _SD_POINTER_FIELDS),
         )
 
         # ctypes overlay of the C-allocated Dust2Env (tests + snapshot only)
@@ -887,13 +1189,15 @@ class Cs2Env(pufferlib.PufferEnv):
         if _sc["n_active_per_team"] != n_active_per_team:
             raise RuntimeError(
                 f"C StaticData.n_active_per_team is {_sc['n_active_per_team']}, expected "
-                f"{n_active_per_team} — binding.init's FMT string and the call above disagree")
+                f"{n_active_per_team} — the buffer C copied and the `static_data` mapping "
+                "packed above disagree")
 
         # Sim recoil v1 (#120): write AFTER the overlay, not via binding.init
-        # (the 73-arg FMT is a footgun; extend it only at the tail). env_init memsets
-        # Dust2Env so this starts 0; env_reset memsets GameState only, so the
-        # flag survives reset. Train / Modal stay off unless a later card
-        # passes recoil=True into make_env.
+        # (that call carries the StaticData prefix and this flag lives on
+        # Dust2Env, so there is no slot for it). env_init memsets Dust2Env so
+        # this starts 0; env_reset memsets GameState only, so the flag survives
+        # reset. Train / Modal stay off unless a later card passes recoil=True
+        # into make_env.
         self._c_env.recoil_enabled = 1 if recoil else 0
 
         # Room AABB for ramp interpolation. Not a binding.init arg (it is a
@@ -1068,7 +1372,7 @@ class Cs2Env(pufferlib.PufferEnv):
 
     @property
     def round_time(self):
-        """Ticks per round as handed to C (FMT position 30).
+        """Ticks per round as handed to C (StaticData.round_time).
 
         R0-G: reflects the ``round_time`` kwarg, not the module constant —
         trainer code that sizes horizons / stat windows off this property
@@ -1355,8 +1659,8 @@ def make_env(
         recoil: bool = False,                                          # #120: punch on ray; default off
         n_active_per_team: int = TEAM_SIZE,                            # Rung 0 §2.1: agents per team that spawn
         pin_pitch: int = 0,                                            # Rung 0 R0-E.2: ignore pitch action
-        crouch_enabled: int = 1,                                       # Rung 0 R0-E.2: mask crouch when 0
-        jump_enabled: int = 1,                                         # Rung 1a T2a: mask jump when 0
+        crouch_enabled: int = 1,                                       # Rung 0 R0-E.2 + W5: sim ignores crouch
+        jump_enabled: int = 1,                                         # Rung 1a T2a + W5: sim ignores jump
         round_time: int | None = None,                                 # Rung 0 R0-G: None ⇒ nav.ROUND_TIME
         laser_range: float | None = None,                              # Rung 0 R0-G: None ⇒ nav.LASER_RANGE
         max_turn_speed: float | None = None,                           # Rung 0 R0-G: None ⇒ nav.MAX_TURN_SPEED_RAD

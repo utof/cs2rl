@@ -38,6 +38,13 @@ import shutil
 import tempfile
 import types
 
+# Module level, unlike the `from train import ...` block inside the builder:
+# env_factory's own module scope pulls nothing (torch/nav/c_env stay behind its
+# function-local imports), so importing it here costs nothing and is acyclic.
+# `from ... import build_env_for`, never `import env_factory` — the builder
+# below defines a LOCAL named env_factory, which would shadow the module.
+from env_factory import build_env_for, build_selfplay_manager
+
 
 def _build_trainer_for_test(
     num_envs: int = 32,
@@ -166,7 +173,6 @@ def _build_trainer_for_test(
         build_policy,
         build_train_config,
         compute_batch_dims,
-        make_puffer_env,
     )
 
     # Rung 1a T3: mirror of train()'s startup guard. `with_selfplay` is the
@@ -210,26 +216,38 @@ def _build_trainer_for_test(
                                                                     ACTION_MASK_DIM)
 
     def env_factory(*_args, buf=None, seed=None, _mask_idx=None, **_kwargs):
-        # Mirrors the closure in train.train() lines ~1367-1368. The seed
-        # forwarded by pufferlib.vector can be None for the first reset; use
-        # explicit `is None` check so a legitimate seed=0 is preserved rather
-        # than silently falsy-remapped.
+        # W3 (#154): construction routes through the role factory. What USED to
+        # be spelled out here — the `0 if seed is None else seed` remap (an
+        # explicit None check, not `seed or 0`, so a legitimate seed=0 survives)
+        # and the unconditional include_step_stats_in_info=True (uniform
+        # attribute/info surface across selfplay and no-selfplay modes; one
+        # pre-built singleton dict per env, no per-tick allocation) — now lives
+        # in env_factory._build_harness with the same reasoning attached.
         #
-        # include_step_stats_in_info: always True so the harness-built trainer
-        # has a uniform attribute/info surface across selfplay and no-selfplay
-        # modes (Task 6c consumes it; Tasks 7-11 ignore it). Cost is a single
-        # pre-built singleton dict per env; no per-tick allocation.
-        env = make_puffer_env(
-            team_spirit=shared_ts,
+        # The harness is production-SHAPED on purpose, but it is not the `train`
+        # role: it adds include_step_stats_in_info and takes its knobs as plain
+        # arguments rather than from a CLI-derived dict, so it has its own.
+        #
+        # tests/fixtures/env_kwargs_pre_w3.json holds the kwargs this call made
+        # before the move and test_env_factory.py asserts the factory still
+        # produces them. That is the ONLY check that can see crouch_enabled or
+        # jump_enabled going missing: no test passes either to
+        # _build_trainer_for_test and both defaults equal make_puffer_env's, so
+        # dropping them is green across the whole suite.
+        env = build_env_for(
+            "harness",
+            shared_ts=shared_ts,
             buf=buf,
-            seed=0 if seed is None else seed,
+            seed=seed,
             map_data=map_data,
-            include_step_stats_in_info=True,
             n_active_per_team=n_active_per_team,
             pin_pitch=pin_pitch,
             crouch_enabled=crouch_enabled,
             jump_enabled=jump_enabled,
         )
+        # STAYS AT THE CALL SITE, outside the factory: this needs the harness's
+        # own shm handle and the per-env index pufferlib passes in, neither of
+        # which is the factory's business.
         if _mask_idx is not None:
             env._attach_mask_view(mask_shm, _mask_idx)
         return env
@@ -337,33 +355,24 @@ def _build_trainer_for_test(
     # `with_selfplay=True` path additionally pre-seeds the manager. This
     # keeps the test harness honest with production where the hybrid-aim
     # rollout requires the patched evaluate path.
-    if not with_selfplay:
-        self_play_mgr = SelfPlayManager(
-            pool_size=15,
-            p_past=0.0,
-            save_every_epochs=25,
-            win_threshold=0.6,
-            phase_length=50,
-            aim_log_std_max=aim_log_std_max,
-            pin_pitch=bool(pin_pitch),
-            opponent_mode=opponent,
-        )
-        _patch_trainer_with_selfplay(trainer, self_play_mgr)
-    else:
-        self_play_mgr = SelfPlayManager(
-            pool_size=15,
-            p_past=0.3,
-            save_every_epochs=25,
-            win_threshold=0.6,
-            phase_length=50,
-            aim_log_std_max=aim_log_std_max,
-            pin_pitch=bool(pin_pitch),
-                                                       # Always "self" in practice (the guard at the top of this factory
-                                                       # refuses noop + with_selfplay); passed anyway so the two branches
-                                                       # cannot drift if that pairing is ever allowed.
-            opponent_mode=opponent,
-        )
-        _patch_trainer_with_selfplay(trainer, self_play_mgr)
+    #
+    # W3 (#154): this used to be an `if not with_selfplay: ... else: ...` whose
+    # two SelfPlayManager constructions were IDENTICAL apart from
+    # `p_past=0.0` / `p_past=0.3` — and production's third copy computed the same
+    # two values as `0.3 if self_play_enabled else 0.0`. That rule is now
+    # build_selfplay_manager's, taking the FLAG, so all three sites collapse onto
+    # one call and the branch disappears with them. The pre-migration shapes of
+    # all three are frozen in tests/fixtures/selfplay_kwargs_pre_w3.json and
+    # tests/test_selfplay_factory.py asserts the builder still produces each —
+    # which is the only oracle here, since the §3 gate runs --no-self-play and
+    # nothing on this branch reaches the harness at all.
+    self_play_mgr = build_selfplay_manager(
+        self_play_enabled=with_selfplay,
+        aim_log_std_max=aim_log_std_max,
+        pin_pitch=pin_pitch,
+        opponent_mode=opponent,
+    )
+    _patch_trainer_with_selfplay(trainer, self_play_mgr)
 
     def cleanup():
         """Idempotent teardown. Safe to call twice.

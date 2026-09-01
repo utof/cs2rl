@@ -44,122 +44,162 @@ from _action_spec import (
     ACTION_MASK_DIM,
     AIM_DIM,
 )
+from env_factory import build_env_for, build_selfplay_manager
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
+from resume_state import (
+    _install_full_checkpointing,
+    _rng_load_state_dict,
+    _rng_state_dict,
+    check_checkpoint_set,
+    check_resume_config,
+    check_resume_metrics_bound,
+    collect_train_state,
+    load_full_resume,
+    resolve_resume_run,
+    restore_train_state,
+    seed_everything,
+)
+from train_config import (
+    OPPONENT_MODES,
+    assert_opponent_self_play_compatible,
+    build_participating_rows,
+    build_train_config,
+    compute_batch_dims,
+    env_knobs_from_args,
+    resolve_opponent_mode,
+    validate_aim_log_std_max,
+)
+from train_metrics import (
+    ScheduledEval,
+    _inject_tag_metrics,
+    compute_game_metrics,
+    compute_head_divergence,
+    compute_network_health,
+    compute_trunk_divergence,
+    log_aim_log_std,
+)
+from train_shared import (
+    _LOG_2PI,
+    _MASK_HEAD_SLICES,
+    _R0G_KNOBS,
+    _WARMSTART_ATTRS,
+    AIM_LOG_STD_CAP_MIN_HEADROOM,
+    AIM_LOG_STD_INIT_MARGIN,
+    DEFAULT_CHECKPOINT_INTERVAL,
+    DEFAULT_GAMMA,
+    LOG_STD_INIT,
+    LOG_STD_MAX,
+    LOG_STD_MIN,
+    RESUME_CONFIG_ALLOWLIST,
+    REWARD_WEIGHT_DEFAULTS,
+    TEAM_SIZE,
+    _apply_action_masks,
+    _atomic_save_state_dict,
+    pin_pitch_for_map,
+    resolve_aim_log_std_init,
+    resolve_gammas,
+    reward_overrides_from_args,
+)
+from train_update import (
+    _aim_dim_weight,
+    _hybrid_ppo_loss,
+    _patch_trainer_with_return_norm,
+    _scheduled_target_entropy,
+    _tag_param_groups,
+    masked_explained_variance,
+    masked_mean,
+    masked_normalize_adv,
+    masked_std_unbiased,
+    tag_grad_cossim,
+)
 
-# Explicit re-export marker: naming AIM_DIM here is what tells ruff that the
+# Explicit re-export marker: naming a symbol here is what tells ruff that an
 # otherwise-unused import is intentional. A trailing per-line F401 suppression cannot
 # be used instead, for the formatter reason above. Nothing does `from train import *`,
-# so narrowing star-imports to this one name has no effect on any caller.
-__all__ = ("AIM_DIM", )
+# so this tuple has no star-import effect on any caller: it is a lint marker AND the
+# inventory of what `train` re-exports.
+#
+# The five `from train_shared/resume_state/train_config/train_metrics/train_update
+# import` blocks above are SHIMS (post-rung1a refactor, 2026-08-31): those symbols are
+# now DEFINED in the split-out modules and re-exported here so the existing
+# `from train import X` call sites in tests/, scripts/ and src/ keep working without
+# being rewritten (rewriting them is a separate, mechanical branch — spec §4).
+# A SHIM IS NOT A PATCH POINT: `monkeypatch.setattr(train, "<name>", ...)` on any name
+# below rebinds only train's own reference. Call sites inside the defining module
+# resolve through THAT module's globals and never see the patch, so such a test passes
+# while asserting nothing. Patch the defining module (see tests/test_tag_trainer.py).
+# PLACEMENT IS LOAD-BEARING, not an isort accident: train.py's own module body READS
+# moved names while it executes — `REWARD_WEIGHT_KEYS = tuple(REWARD_WEIGHT_DEFAULTS)`,
+# make_puffer_env's `n_active_per_team=TEAM_SIZE` default, and eight more inside
+# `if __name__ == "__main__":` (the argparse defaults/choices and the four main() calls).
+# Every one of those sits BELOW this block and would NameError at import time if the
+# shims were moved down.
+__all__ = (
+    "AIM_DIM",
+    "AIM_LOG_STD_CAP_MIN_HEADROOM",
+    "AIM_LOG_STD_INIT_MARGIN",
+    "DEFAULT_CHECKPOINT_INTERVAL",
+    "DEFAULT_GAMMA",
+    "LOG_STD_INIT",
+    "LOG_STD_MAX",
+    "LOG_STD_MIN",
+    "OPPONENT_MODES",
+    "RESUME_CONFIG_ALLOWLIST",
+    "REWARD_WEIGHT_DEFAULTS",
+    "ScheduledEval",
+    "TEAM_SIZE",
+    "_LOG_2PI",
+    "_MASK_HEAD_SLICES",
+    "_R0G_KNOBS",
+    "_WARMSTART_ATTRS",
+    "_aim_dim_weight",
+    "_apply_action_masks",
+    "_atomic_save_state_dict",
+    "_hybrid_ppo_loss",
+    "_inject_tag_metrics",
+    "_install_full_checkpointing",
+    "_patch_trainer_with_return_norm",
+    "_rng_load_state_dict",
+    "_rng_state_dict",
+    "_scheduled_target_entropy",
+    "_tag_param_groups",
+    "assert_opponent_self_play_compatible",
+    "build_participating_rows",
+    "build_train_config",
+    "check_checkpoint_set",
+    "check_resume_config",
+    "check_resume_metrics_bound",
+    "collect_train_state",
+    "compute_batch_dims",
+    "compute_game_metrics",
+    "compute_head_divergence",
+    "compute_network_health",
+    "compute_trunk_divergence",
+    "env_knobs_from_args",
+    "load_full_resume",
+    "log_aim_log_std",
+    "masked_explained_variance",
+    "masked_mean",
+    "masked_normalize_adv",
+    "masked_std_unbiased",
+    "pin_pitch_for_map",
+    "resolve_aim_log_std_init",
+    "resolve_gammas",
+    "resolve_opponent_mode",
+    "resolve_resume_run",
+    "restore_train_state",
+    "reward_overrides_from_args",
+    "seed_everything",
+    "tag_grad_cossim",
+    "validate_aim_log_std_max",
+)
 
 # MUST stay a bare integer literal: scripts/exp_lib.py fingerprints the env by
 # regex-grepping `OBS_DIM = <int>` out of this file's source text (env_fingerprint),
 # so it cannot be an `import`. Mirrors nav.OBS_DIM / _obs_spec.OBS_DIM (generated
-# from cs2_types.h); the three are cross-checked by tests/test_train_env.py:873.
+# from cs2_types.h); cross-checked by test_obs_dim_constant_consistency (test_train_env.py).
 # On an OBS_DIM bump, update cs2_types.h + rerun the generator, then bump this literal.
 OBS_DIM = 110
-
-# Agents per team. A bare literal ON PURPOSE, for the same class of reason as
-# OBS_DIM above: train.py must stay import-light (`--dump-config` guarantees no
-# torch/nav import — see _atomic_save_state_dict's docstring), and `nav` pulls
-# awpy/polars/shapely (+0.6 s and a polars warning) just to read one 5.
-# Cross-checked against nav.TEAM_SIZE and cs2_env.TEAM_SIZE by
-# tests/test_train_env.py::test_obs_dim_constant_consistency.
-TEAM_SIZE = 5
-
-# Batch 3 (continuous aim H-PPO): state-independent log_std parameter
-# for the Gaussian aim head. σ_init = 0.1 rad ≈ 5.7° matches mega-spec
-# §9 lock and the H-PPO literature default. σ_min = 0.01 rad ≈ 0.6° —
-# floors entropy without flooding the policy with noise; tanh+max_turn_speed
-# clamp dominates the per-tick range regardless of σ. σ_max = 0.5 rad ≈ 28.6°
-# — symmetric bound prevents explosion that would mask μ.
-# Module-level so tests can `import train; train.LOG_STD_MIN` without poking
-# at the inner Dust2Policy class. Used in build_policy() forward paths and
-# in the max_entropy calc that drives the SAC-α dual loop.
-LOG_STD_INIT = math.log(0.1)
-LOG_STD_MIN = math.log(0.01)
-LOG_STD_MAX = math.log(0.5)
-
-# Rung 1a T1 (spec 2026-08-30): how far BELOW the run's σ cap a fresh
-# aim_log_std starts. `torch.clamp` back-propagates zero gradient strictly
-# outside [min, max], so a parameter initialised AT the cap is gradient-dead
-# from step 0 — that is exactly what killed the Rung 1 treatment arm (init
-# log 0.1 under a log 0.05 cap: σ was a constant for 10M steps and the logged
-# "log σ = −2.996" was the clamp, not a measurement). 0.2 in log-space ≈ an
-# 18 % σ gap: wide enough that Adam needs many steps to walk into the clamp,
-# small enough that the run still trains near its intended σ.
-AIM_LOG_STD_INIT_MARGIN = 0.2
-# The matching floor-side head-room the cap must leave. The init sits one
-# margin below the cap, so a cap closer than 2× the margin to LOG_STD_MIN puts
-# the init at/below the FLOOR, where the lower clamp kills the gradient just as
-# dead as the upper one. Enforcing head-room on the cap (rather than clamping
-# the init up with a max(LOG_STD_MIN + m, …) floor) is deliberate: a floor
-# merely moves the dead zone from one end of the band to the other, silently.
-AIM_LOG_STD_CAP_MIN_HEADROOM = 2 * AIM_LOG_STD_INIT_MARGIN
-
-
-def validate_aim_log_std_max(aim_log_std_max) -> float:
-    """Resolve + range-check the run's aim σ cap (R0-E.3, #131).
-
-    Returns the float cap (LOG_STD_MAX when None). Raises ValueError unless
-    LOG_STD_MIN + 0.4 < cap <= LOG_STD_MAX, i.e. σ in (0.0149, 0.5].
-
-    WHY a separate torch-free helper: make_policy() only runs after the env
-    and torch are up, so a bad --aim-log-std-max used to surface ~30 s into a
-    launch AND slip past `--dump-config` (the Modal/run_rung1 fingerprint
-    step). main() now calls this right after parse_args(), above the
-    --dump-config exit, so the fingerprint catches it.
-    PITFALL (2026-08-30, rung1 sweep): the bound is INCLUSIVE at LOG_STD_MAX =
-    log 0.5 = -0.693147..., so a hand-rounded "-0.6931" is > the cap by 5e-5
-    and is REJECTED — pass -0.69315 (or omit the flag) for "σ cap 0.5".
-    PITFALL (Rung 1a T1): the LOWER bound is no longer LOG_STD_MIN itself but
-    LOG_STD_MIN + AIM_LOG_STD_CAP_MIN_HEADROOM — caps that narrow leave no room
-    for the strictly-inside-the-band init (see resolve_aim_log_std_init) and
-    would hand the run a gradient-dead σ. This NARROWS the accepted CLI range;
-    σ caps below ~0.0149 rad (0.85°) have no experimental use (the recoil/
-    hitbox scale alone is larger), so nothing legitimate is lost.
-    """
-    cap = float(LOG_STD_MAX if aim_log_std_max is None else aim_log_std_max)
-    lo = LOG_STD_MIN + AIM_LOG_STD_CAP_MIN_HEADROOM
-    if not (lo < cap <= LOG_STD_MAX):
-        raise ValueError(
-            f"aim_log_std_max={cap} must lie in ({lo}, {LOG_STD_MAX}] "
-            f"(σ in ({math.exp(lo):.4f}, 0.5]). The lower bound is "
-            f"LOG_STD_MIN + {AIM_LOG_STD_CAP_MIN_HEADROOM} rather than LOG_STD_MIN: the aim σ "
-            f"is initialised {AIM_LOG_STD_INIT_MARGIN} below the cap so it starts strictly "
-            f"inside the clamp band, and a cap this close to the σ floor would "
-            f"put that init at or under LOG_STD_MIN={LOG_STD_MIN}, where clamp "
-            f"back-propagates zero gradient and σ can never train.")
-    return cap
-
-
-def resolve_aim_log_std_init(cap) -> float:
-    """The log σ a FRESH aim head starts at under this run's cap (Rung 1a T1).
-
-    WHAT: min(LOG_STD_INIT, cap − AIM_LOG_STD_INIT_MARGIN). At the 5v5 default
-    cap (log 0.5) that is LOG_STD_INIT unchanged — every pre-Rung-1a run keeps
-    its σ=0.1 start. Under a tight cap (Rung 1a's log 0.05) it is cap − 0.2,
-    i.e. σ ≈ 0.041, strictly inside [LOG_STD_MIN, cap].
-
-    WHY: `torch.clamp(x, lo, hi)` passes gradient only for lo <= x <= hi. An
-    init at or above the cap is therefore a permanently frozen σ — the policy
-    samples at exactly the cap forever and `policy/aim_log_std_yaw` reports the
-    cap, which reads like a converged value rather than a dead parameter. This
-    is the Rung 1 defect (spec 2026-08-30 §1(iv)).
-
-    PITFALL: this is the FRESH-construction init only. A resume restores the
-    checkpoint's σ verbatim, and the BC-frozen widener has its own rule
-    (reinit_frozen_aim_log_std, min(AIM_LOG_STD_RESUME_INIT, cap) — that one
-    may land exactly ON the cap, gh#91, untouched by T1). Callers that need the
-    value in config.json must go through this helper, never re-derive it, so
-    config and policy cannot drift.
-    NOTE: whenever cap >= LOG_STD_INIT + AIM_LOG_STD_INIT_MARGIN (the 5v5
-    default included) the init IS LOG_STD_INIT, so reinit_frozen_aim_log_std's
-    "still exactly at LOG_STD_INIT ⇒ BC-frozen" signature matches a *fresh*
-    policy. That was already true before T1 and stays harmless — the widener
-    only ever runs on a checkpoint being resumed, never on a fresh build.
-    """
-    return min(LOG_STD_INIT, float(cap) - AIM_LOG_STD_INIT_MARGIN)
 
 
 def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
@@ -242,9 +282,6 @@ def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
 # throttling every update to ~1 minibatch. σ=0.3 drops that per-step KL ~9×
 # while staying inside [σ_min, σ_max]. Applied by reinit_frozen_aim_log_std.
 AIM_LOG_STD_RESUME_INIT = math.log(0.3)
-# Fix #2: precomputed log(2π) for the analytic Normal log-prob/entropy
-# replacing torch.distributions.Normal in _hybrid_sample_logits.
-_LOG_2PI = math.log(2.0 * math.pi)
 
 
 def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6, cap=None):
@@ -309,7 +346,9 @@ def state_dict_is_split(state_dict):
     in exactly one architecture and nowhere else in the key space.
 
     WHY key inference rather than the config flag: config.json is rewritten
-    unconditionally on every launch (src/train.py:3668), so a flag-less
+    unconditionally on every launch (the try-wrapped `write_text` inside
+    `train()`, src/train.py:3522 as of 2026-08-31 — NOT the `--dump-config`
+    early-exit write, which is conditional), so a flag-less
     crash-resume would stamp `tct_split_heads: false` over a split run's
     provenance. Deciding from the keys means resume, self-play snapshot
     loading and the eval/record loader all do the right thing with no flag at
@@ -527,200 +566,9 @@ def resolve_resume_split(resume_path, *, heads_flag, trunk_flag, map_location="c
     return heads, trunk, state_dict, resume_path
 
 
-# F8 (2026-07-06 adversarial review): per-head [start, end) column ranges of
-# the flat (ACTION_MASK_DIM,) action-mask row, derived from ACTION_HEAD_SIZES
-# exactly like the C side derives moff[] in compute_masks (cs2_env.h). Layout
-# at time of writing: move 0-8, shoot 9-10, reload 11-12, weapon 13-15,
-# use 16-17, crouch 18-19, jump 20-21.
-_MASK_HEAD_SLICES = []
-_off = 0
-for _sz in ACTION_HEAD_SIZES:
-    _MASK_HEAD_SLICES.append((_off, _off + _sz))
-    _off += _sz
-del _off, _sz
-
-
-def _apply_action_masks(logits_list, mask):
-    """Mask invalid action bins out of the per-head logits (F8).
-
-    mask : (B, ACTION_MASK_DIM) bool/int8 tensor, 1 = valid — the C-computed
-    masks from cs2_env.h compute_masks, sliced per head via _MASK_HEAD_SLICES.
-    Invalid bins are filled with finfo.min/2, NOT -inf: after log_softmax the
-    masked log-prob stays FINITE (≈ dtype-min/2, since any real logit is
-    negligible against it), so entropy terms are exactly p·logp = 0·finite = 0
-    instead of 0·(-inf) = NaN. exp(min/2 - lse) underflows to exactly 0, so
-    multinomial can never draw a masked bin. The C side guarantees ≥1 valid
-    bin per head per agent (dead agents get per-head no-ops), so the masked
-    softmax is always well-defined — do NOT relax that invariant in C without
-    revisiting this function.
-
-    Returns a NEW list; input logits are not mutated (callers may hold them).
-    """
-    import torch
-
-    masked = []
-    for (lo, hi), lg in zip(_MASK_HEAD_SLICES, logits_list, strict=True):
-        head_valid = mask[..., lo:hi] != 0
-        fill = torch.finfo(lg.dtype).min / 2
-        masked.append(lg.masked_fill(~head_valid, fill))
-    return masked
-
-
-# ── Masked reductions over participating rows (Rung 0, spec 2026-08-29 §2.2) ──
-# WHY these are free functions and not methods on the trainer: the trainer is a
-# monkey-patched PuffeRL instance (pufferl.py is a site-package and is never
-# edited), so every reduction the update path needs has to live here where a
-# unit test can call it without building a trainer.
-# DTYPE CONTRACT used by every caller below: the *bool* [S,T] mask is for
-# INDEXING (`sel[mb_part]`); the *float* copy (`mb_part.to(torch.float32)`) is
-# the weight `w` these helpers take. `sel[mb_part_f]` is an IndexError and
-# `masked_mean(x, bool_mask)` would work only by accident — the helpers
-# `.to(x.dtype)` their weight, so pass whichever, but do not swap the two roles.
-# SHAPE PITFALL: `w` is multiplied (not indexed) against `x`, so it must be
-# broadcast-compatible with `x`. Reducing a FLAT (S*T,) tensor (entropy,
-# per-head entropies, ratio_d/ratio_c) with an [S,T] weight silently
-# broadcasts to [S, S*T] — pass the flattened weight for flat tensors.
-
-
-def masked_mean(x, w):
-    """Mean of x over rows where w == 1. w broadcasts to x; w.sum() == 0 ⇒ 0.
-
-    Rung 0 §2.2: parked agent rows (noop-masked, entropy exactly 0, zero
-    reward) must not enter any trainer statistic, or every all-row mean at
-    n_active=1 is diluted 5×. Masked mean = (x·w).sum() / max(w.sum(), 1).
-    """
-    w = w.to(x.dtype)
-    return (x * w).sum() / w.sum().clamp(min=1.0)
-
-
-def masked_std_unbiased(x, w, mean):
-    """Unbiased (n−1) std over the w == 1 rows, matching torch .std() on the subset.
-
-    `mean` is the caller's already-computed masked_mean — passed in rather than
-    recomputed so the two-pass (mean, then deviation) reduction is done once.
-    PITFALL: the (n−1) clamp means a single participating row yields std 0, not
-    NaN; masked_normalize_adv's +1e-8 then makes that row's normalised
-    advantage 0 rather than inf.
-    """
-    w = w.to(x.dtype)
-    n = w.sum()
-    return (((x - mean)**2 * w).sum() / (n - 1.0).clamp(min=1.0)).sqrt()
-
-
-def masked_normalize_adv(flat_adv, w):
-    """(adv − mean) / (std + 1e-8) over participating rows; parked rows → 0.
-
-    Uses the same unbiased std as the unmasked path so the two agree exactly
-    when w is all-ones. Zeroing parked rows makes their pg contribution 0
-    regardless of ratio, which is what the masked pg mean then divides out.
-    """
-    w = w.to(flat_adv.dtype).reshape(-1)
-    m = masked_mean(flat_adv, w)
-    s = masked_std_unbiased(flat_adv, w, m)
-    return (flat_adv - m) / (s + 1e-8) * w
-
-
-def masked_explained_variance(y_pred, y_true, part):
-    """explained_variance over part == True rows (whole-buffer, Rung 0 §2.2).
-
-    Returns nan when the participating y_true has zero variance, mirroring
-    PufferLib's `torch.nan if var_y == 0` convention. `part` is the BOOL mask
-    here (this one indexes rather than weights — the variance of a weighted
-    tensor is not the variance of the subset).
-    """
-    import torch
-
-    part = part.to(torch.bool)
-    yt = y_true[part]
-    yp = y_pred[part]
-    if yt.numel() < 2:
-        return float("nan")
-    var_y = yt.var()
-    if var_y == 0:
-        return float("nan")
-    return float(1 - (yt - yp).var() / var_y)
-
-
-# ── Reward weights: the single wiring source of truth (spec 2026-08-01 §4.2) ──
-# Config key == make_env kwarg name == CLI flag (dashes) — NO prefix rewriting.
-# Six of the 23 do not start with `reward_` (the pbrs_* group), so any code
-# that discovers weights by scanning for a `reward_` prefix is wrong by
-# construction. This dict is the ONLY derivation point: build_train_config's
-# keys, the CLI flags, the env-factory override dict and the §6.1 pin test all
-# read it.
-#
-# WHY the defaults are duplicated here instead of read from the signature:
-# train.py imports c_env lazily (inside functions) so `--dump-config` costs no
-# map/binding import; a module-level inspect.signature(make_env) would undo
-# that. tests/test_reward_weight_wiring.py pins both sides against each other,
-# so the duplication cannot silently drift.
-#
-# PITFALL: do NOT "clean up" a value here or in make_env. These defaults ARE
-# the trained baseline; an unflagged run must stay byte-identical to the
-# pre-wiring env.
-#
-# Deliberately NOT threaded here: pbrs_gamma (threaded as a non-weight knob by
-# env_knobs_from_args via resolve_gammas, R0-J), team_spirit (config-threaded
-# separately), include_step_stats_in_info (issue #100, out of scope).
-REWARD_WEIGHT_DEFAULTS = {
-                                                       # ── non-potential (hackable — sweep with care) ──
-    "reward_win": 1.0,
-    "reward_kill": 0.3,
-    "reward_death": 0.1,
-    "reward_bombsite_entry": 0.3,
-    "reward_plant_bonus": 3.0,
-    "reward_plant_base": 0.2,
-    "reward_plant_progress_scale": 0.05,
-    "reward_plant_interrupted": 0.1,
-    "reward_defuse": 0.2,
-    "reward_shot_penalty": 0.005,
-    "reward_ct_survival": 0.001,                       # the CT stall drip — A1 arm sets this to 0.0
-    "reward_inaction": 0.0005,
-    "reward_win_t_detonation": 5.0,
-    "reward_win_t_elimination": 3.0,
-    "reward_win_ct_defuse": 5.0,
-    "reward_win_ct_timeout": 4.0,                      # NOTE: exceeds ct_elimination — A1b arm
-    "reward_win_ct_elimination": 3.0,
-                                                       # ── PBRS-potential (optimum-safe per Ng et al. 1999; tunes
-                                                       # equilibrium selection in MARL per Devlin & Kudenko 2011) ──
-    "pbrs_alive_weight": 0.3,
-    "pbrs_hp_weight": 0.002,
-    "pbrs_site_weight": 0.2,
-    "pbrs_bomb_progress_weight": 0.3,
-    "pbrs_nav_weight_t": 0.04,
-    "pbrs_nav_weight_ct": 0.15,
-}
+# The dict this reads (and its "single wiring source of truth" rationale) now
+# lives in src/train_shared.py; only this derived tuple stays here.
 REWARD_WEIGHT_KEYS = tuple(REWARD_WEIGHT_DEFAULTS)
-
-
-def reward_overrides_from_args(args) -> dict:
-    """Build the env-side reward-weight override dict from parsed args.
-
-    WHAT: {kwarg_name: float} for all 23 weights, taking the CLI value when
-    present and the make_env default otherwise.
-
-    WHY a shared helper: build_train_config (provenance) and train()'s env
-    factory (behavior) MUST agree exactly. train_config is not available at
-    env-construction time — it is built after pufferlib.vector.make — so both
-    call sites derive from this one function instead.
-
-    PITFALL: the getattr fallbacks are load-bearing for harness/dump-config
-    args objects that predate these flags; do not tighten them to attribute
-    access.
-
-    PITFALL: argparse's type=float accepts "nan"/"inf", so the finiteness
-    check belongs here — the one funnel both call sites pass through. A NaN
-    weight otherwise surfaces hours into a run as a NaN loss with no clue
-    which knob produced it, so raise at startup and name the key.
-    """
-    overrides = {}
-    for k, d in REWARD_WEIGHT_DEFAULTS.items():
-        v = float(getattr(args, k, d))
-        if not math.isfinite(v):
-            raise ValueError(f"reward weight {k}={v} is not finite; "
-                             "pass a real number (this would poison the loss silently)")
-        overrides[k] = v
-    return overrides
 
 
 def auto_vec_workers(num_envs: int, physical_cores: int) -> int:
@@ -741,469 +589,6 @@ def auto_vec_workers(num_envs: int, physical_cores: int) -> int:
         if num_envs % k == 0:
             return k
     return 1
-
-
-def _atomic_save_state_dict(state_dict, path):
-    """torch.save via sibling .tmp + os.replace so a crash never corrupts ``path``.
-
-    WHY: the periodic save in train() overwrites ONE file (dust2_policy.pt)
-    every --save_every_sec. The training box's GPU is known to fall off the
-    PCI bus under thermal load (hard crash, 2026-08-13); a plain torch.save
-    interrupted mid-write would leave the ONLY recovery checkpoint torn.
-    os.replace() is an atomic rename on POSIX, so ``path`` always holds a
-    complete checkpoint — old or new, never partial.
-
-    PITFALL: torch is imported lazily — train.py's module level must stay
-    torch-free so --dump-config keeps its no-heavy-imports guarantee.
-    """
-    import torch
-
-    path = Path(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(state_dict, tmp)
-    os.replace(tmp, path)
-
-
-# ── R0-C (#134): full-state checkpoint / resume ───────────────────────────
-# PufferLib 3.0 saves model + optimizer + step counters (pufferl.py
-# save_checkpoint) and ships NO loader. Everything train.py layers on top
-# (SAC-α, LR scheduler, return normaliser, warm-start machine, self-play pool,
-# RNGs) lives here in a third file, train_state.pt, next to PufferLib's two.
-# Budget keys are allowlisted ON PURPOSE: the whole point of --resume-run is
-# `while trainer.epoch < trainer.total_epochs` (train()) continuing past a
-# crash, and run_rung1.sh's retry loop must be able to extend --timesteps.
-# check_resume_config prints a WARN line for every allowlisted key that changed.
-# PITFALL: n_active_per_team is deliberately NOT allowlisted — it changes the
-# unit of global_step (participating agent-steps) and the participating buffer
-# layout, so a resumed run under a different value would be nonsense.
-# PITFALL (R0-D #135): `seed` is NOT allowlisted either. A resumed run's RNG
-# streams come back from train_state.pt (restore_train_state), so a changed
-# --seed would be silently ignored for python/numpy/torch yet still re-seed
-# the freshly built envs — an inconsistent, unlabelled run. Refuse instead;
-# pass the original --seed (config.json has it) when resuming.
-RESUME_CONFIG_ALLOWLIST = frozenset(
-    {"data_dir", "device", "run_id", "total_timesteps", "participating_timesteps"})
-# R0-C: epochs between full-state checkpoint sets. ONE constant for the CLI
-# default and build_train_config's getattr fallback (harness / SimpleNamespace
-# callers without the flag) — two literals drifted once (final review #7).
-DEFAULT_CHECKPOINT_INTERVAL = 200
-# Trainer attrs of the warm-start entropy machine + SAC target (all set in
-# _patch_trainer_with_return_norm). Plain Python scalars/None — pickled as-is.
-_WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
-                    "_batch1_log_alpha_reset_done", "_batch1_current_target_entropy",
-                    "_batch1_warmstart_h_anchor", "_batch1_warmstart_h0",
-                    "_batch1_warmstart_warn_epoch")
-
-
-def _rng_state_dict():
-    """Snapshot python/numpy/torch(+cuda) RNG states. Env xorshift32 state is
-    NOT included (lives in C; see load_full_resume's WARN)."""
-    import torch
-    st = {
-        "python": random.getstate(),
-        "numpy": np.random.get_state(),
-        "torch_cpu": torch.get_rng_state()
-    }
-    if torch.cuda.is_available():
-        st["torch_cuda"] = torch.cuda.get_rng_state_all()
-    return st
-
-
-def seed_everything(seed: int) -> None:
-    """R0-D (#135): seed every host-side RNG that _rng_state_dict snapshots.
-
-    WHAT: random, numpy (legacy global), torch CPU and — when available — all
-    CUDA devices. This is the MIRROR of _rng_state_dict/_rng_load_state_dict:
-    the same RNG set, one fresh-seed path here and one resume path there. Add a
-    new RNG to all three or resume will silently diverge from a fresh run.
-    WHY a function: train() used to inline these calls, and no default-suite
-    test noticed when they were dropped (only the 2-subprocess e2e test did;
-    test_two_runs_same_seed_identical[3] now runs in the default suite).
-    test_seed_everything_is_deterministic pins it now.
-    PITFALL: seeds only — it does NOT set torch.use_deterministic_algorithms
-    or cudnn flags, so CUDA runs are seeded but not bit-exact reproducible.
-    Env xorshift32 streams are seeded separately via env_seed_base.
-    """
-    import torch
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def _rng_load_state_dict(st):
-    """Inverse of _rng_state_dict. A CUDA state saved on a GPU box is skipped
-    silently on a CPU-only resume (device is allowlisted)."""
-    import torch
-    random.setstate(st["python"])
-    np.random.set_state(st["numpy"])
-    torch.set_rng_state(st["torch_cpu"])
-    if "torch_cuda" in st and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(st["torch_cuda"])
-
-
-def collect_train_state(trainer, self_play_mgr) -> dict:
-    """Everything train.py adds on top of PuffeRL's trainer_state.pt, CPU-side
-    so the file is device-agnostic. Requires _patch_trainer_with_return_norm
-    (the _log_alpha_tensor / _alpha_optimizer / _ret_* aliases)."""
-    return {
-                                                                       # Set identity (fix round 1, review #1): load_full_resume refuses a
-                                                                       # sidecar whose epoch/global_step disagree with trainer_state.pt — a
-                                                                       # crash between the three writes must never pair epoch-N weights with
-                                                                       # epoch-(N-1) optimizer/α/scheduler state silently.
-        "epoch": int(trainer.epoch),
-        "global_step": int(trainer.global_step),
-        "log_alpha": trainer._log_alpha_tensor.detach().cpu().clone(),
-        "alpha_optimizer": trainer._alpha_optimizer.state_dict(),
-                                                                       # CosineAnnealingLR is stepped per epoch, not a fn of global_step;
-                                                                       # its T_max is overridden on restore (see restore_train_state).
-        "scheduler": trainer.scheduler.state_dict(),
-        "ret_mean": trainer._ret_mean.detach().cpu().clone(),
-        "ret_var": trainer._ret_var.detach().cpu().clone(),
-        "ret_count": trainer._ret_count.detach().cpu().clone(),
-        "warmstart": {
-            k: getattr(trainer, k)
-            for k in _WARMSTART_ATTRS
-        },
-        "self_play": self_play_mgr.state_dict(),
-        "rng": _rng_state_dict(),
-    }
-
-
-def restore_train_state(trainer, self_play_mgr, state: dict):
-    """In-place restore of collect_train_state's dict.
-
-    PITFALL: `_ret_*` and `log_alpha` are closure-locals aliased onto the
-    trainer (_patch_trainer_with_return_norm) — copy_() into them, never
-    rebind, or the closure keeps training on its own stale copy.
-    """
-    import torch                                                       # local ON PURPOSE: train.py module scope stays torch-free
-    with torch.no_grad():
-        trainer._log_alpha_tensor.data.copy_(state["log_alpha"].to(
-            trainer._log_alpha_tensor.device))
-        trainer._ret_mean.copy_(state["ret_mean"].to(trainer._ret_mean.device))
-        trainer._ret_var.copy_(state["ret_var"].to(trainer._ret_var.device))
-        trainer._ret_count.copy_(state["ret_count"].to(trainer._ret_count.device))
-    trainer._alpha_optimizer.load_state_dict(state["alpha_optimizer"])
-                                                                       # CosineAnnealingLR.state_dict() carries T_max, so a wholesale load would
-                                                                       # re-install the OLD horizon; past it the recursive cosine (torch
-                                                                       # lr_scheduler CosineAnnealingLR.get_lr) bounces the LR back UP — a
-                                                                       # periodic LR on any allowlisted --timesteps extension. Keep
-                                                                       # last_epoch/_step_count, adopt the NEW trainer's horizon (pufferl.py:
-                                                                       # total_timesteps // batch_size). When the horizon changed, drop the LR
-                                                                       # onto the closed-form cosine at the restored epoch so the extension
-                                                                       # continues annealing from there (the recursive form scales the PREVIOUS
-                                                                       # lr, and an already-finished run sits at lr=0, which would otherwise stay
-                                                                       # 0 forever). Same-budget resumes leave the optimizer lr untouched — the
-                                                                       # round trip stays bit-exact.
-    sd = dict(state["scheduler"])
-    old_t_max, sd["T_max"] = sd["T_max"], trainer.scheduler.T_max
-    trainer.scheduler.load_state_dict(sd)
-    if old_t_max != trainer.scheduler.T_max:
-        sch = trainer.scheduler
-        for group, base in zip(trainer.optimizer.param_groups, sch.base_lrs, strict=True):
-            group["lr"] = sch.eta_min + (base - sch.eta_min) * (
-                1 + math.cos(math.pi * sch.last_epoch / sch.T_max)) / 2
-        sch._last_lr = [g["lr"] for g in trainer.optimizer.param_groups]
-    for k, v in state["warmstart"].items():
-        setattr(trainer, k, v)
-    self_play_mgr.load_state_dict(state["self_play"])
-    _rng_load_state_dict(state["rng"])
-
-
-def _install_full_checkpointing(trainer, self_play_mgr):
-    """Override PuffeRL.save_checkpoint on this instance (same MethodType
-    pattern as _patch_trainer_with_return_norm). Differences from stock:
-    no `model_path exists → return` early-out (a resumed run re-saves the
-    same epoch after loading, and a crash between the model write and the
-    state writes must not freeze the state files), atomic writes for all
-    three files, and the train_state.pt sidecar. Still returns the model
-    path — PuffeRL.close() copies it to <data_dir>/<run_id>.pt.
-
-    WRITE ORDER is load-bearing: model → train_state → trainer_state. The
-    LAST file written (trainer_state.pt) names the model (model_name) and
-    carries the epoch the sidecar is checked against, so a crash anywhere
-    in the sequence leaves a set that resolve_resume_run/load_full_resume
-    either accept whole (all three from the same epoch) or refuse — never
-    a newer model with an older optimizer."""
-
-    def _save_checkpoint(self):
-        run_id = self.logger.run_id
-        path = Path(self.config["data_dir"]) / run_id
-        path.mkdir(parents=True, exist_ok=True)
-        model_name = f"model_{self.epoch:06d}.pt"
-        model_path = path / model_name
-        _atomic_save_state_dict(self.uncompiled_policy.state_dict(), model_path)
-        _atomic_save_state_dict(collect_train_state(self, self_play_mgr), path / "train_state.pt")
-        _atomic_save_state_dict(
-            {
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "global_step": self.global_step,
-                "agent_step": self.global_step,
-                "update": self.epoch,
-                "model_name": model_name,
-                "run_id": run_id,
-            }, path / "trainer_state.pt")
-        return str(model_path)
-
-    trainer.save_checkpoint = types.MethodType(_save_checkpoint, trainer)
-    return trainer
-
-
-def resolve_resume_run(run_dir: Path, run_id: str | None = None) -> dict:
-    """Locate the checkpoint SET under <run_dir>/<run_id>/: the model named by
-    trainer_state.pt['model_name'] (NOT max(model_*.pt) — a crash after the
-    model write but before trainer_state.pt leaves a newer orphan model whose
-    optimizer state was never saved), plus trainer_state.pt + train_state.pt.
-    run_id=None ⇒ the unique subdir holding trainer_state.pt (error if 0 or
-    >1) and the id is read from trainer_state.pt['run_id']. Every failure is
-    a SystemExit with a [Resume] message (a stock-PuffeRL run dir has no
-    train_state.pt sidecar and must not die with a raw traceback)."""
-    import torch
-    run_dir = Path(run_dir)
-    if run_id is None:
-        cands = sorted(p.parent for p in run_dir.glob("*/trainer_state.pt"))
-        if len(cands) != 1:
-            raise SystemExit(f"[Resume] expected exactly one <run_id>/trainer_state.pt under "
-                             f"{run_dir}, found {len(cands)}: pass --run-id")
-        run_id = cands[0].name
-    d = run_dir / run_id
-    ts_path = d / "trainer_state.pt"
-    if not ts_path.exists():
-        raise SystemExit(f"[Resume] {ts_path} not found")
-    ts = torch.load(ts_path, map_location="cpu", weights_only=False)
-    model_name = ts.get("model_name")
-    if not model_name:
-        raise SystemExit(f"[Resume] {ts_path} has no model_name — not a full-state checkpoint")
-    model_path = d / model_name
-    if not model_path.exists():
-        raise SystemExit(f"[Resume] {ts_path} names {model_name} but {model_path} is missing")
-    newer = [p.name for p in d.glob("model_*.pt") if p.name > model_name]
-    if newer:
-        print(f"[Resume] WARN: ignoring {len(newer)} model file(s) newer than {model_name} "
-              f"({', '.join(sorted(newer))}) — their optimizer state was never saved")
-    st_path = d / "train_state.pt"
-    if not st_path.exists():
-        raise SystemExit(f"[Resume] {st_path} not found — run predates full-state checkpointing "
-                         "(R0-C); use --resume <model.pt> for a weights-only restart")
-    return {
-        "run_id": ts.get("run_id", run_id),
-        "model_path": model_path,
-        "trainer_state_path": ts_path,
-        "train_state_path": st_path
-    }
-
-
-def check_resume_config(run_dir: Path, new_cfg: dict, allow=RESUME_CONFIG_ALLOWLIST):
-    """Hard-error unless every key of the on-disk config.json equals new_cfg
-    except `allow`. Compared through the JSON round-trip (sort_keys, default=str)
-    so tuples/Paths compare the way they were written. MUST run before the
-    unconditional config.json rewrite in train()."""
-    cfg_path = Path(run_dir) / "config.json"
-    if not cfg_path.exists():
-        raise SystemExit(f"[Resume] {cfg_path} not found — cannot guard against a config change")
-    old = json.loads(cfg_path.read_text())
-    new = json.loads(json.dumps(new_cfg, sort_keys=True, default=str))
-
-    def _same(k):
-        a, b = old.get(k, "<missing>"), new.get(k, "<missing>")
-        # data_dir: train() rewrites args.checkpoint_dir to the ABSOLUTE run
-        # dir on --resume-run, so a run launched with a relative/--name path
-        # would otherwise WARN on every resume and train users to ignore it.
-        if k == "data_dir" and isinstance(a, str) and isinstance(b, str):
-            return Path(a).resolve() == Path(b).resolve()
-        return a == b
-
-    changed = sorted(k for k in (old.keys() | new.keys()) if not _same(k))
-    for k in changed:
-        if k in allow:
-            print(
-                f"[Resume] WARN: allowlisted config key changed: {k}: {old.get(k)!r} -> {new.get(k)!r}"
-            )
-    diffs = [k for k in changed if k not in allow]
-    if diffs:
-        raise SystemExit("[Resume] config.json mismatch on non-allowlisted keys: " + ", ".join(
-            f"{k}: {old.get(k, '<missing>')!r} -> {new.get(k, '<missing>')!r}" for k in diffs))
-
-
-def check_checkpoint_set(model_path, ts: dict, st: dict) -> None:
-    """Set consistency (review #1): model_<epoch>.pt, trainer_state.pt and
-    train_state.pt must all come from ONE epoch. The model is already the one
-    trainer_state.pt names (resolve_resume_run); this checks the sidecar's
-    own epoch/global_step against both. SystemExit, never a bare assert
-    (stripped under -O). Pure in its inputs so the mismatch cases are unit-
-    testable without a trainer."""
-    model_epoch = int(Path(model_path).stem.split("_")[-1])
-    ts_epoch, st_epoch = int(ts["update"]), int(st.get("epoch", -1))
-    ts_step, st_step = int(ts["global_step"]), int(st.get("global_step", -1))
-    if not (model_epoch == ts_epoch == st_epoch and ts_step == st_step):
-        raise SystemExit(f"[Resume] inconsistent checkpoint set under {Path(model_path).parent}: "
-                         f"model epoch {model_epoch}, trainer_state epoch {ts_epoch} "
-                         f"(global_step {ts_step}), train_state epoch {st_epoch} "
-                         f"(global_step {st_step}) — a crash mid-save; resume from an older "
-                         "complete set or use --resume <model.pt>")
-
-
-def load_full_resume(trainer, self_play_mgr, paths: dict) -> dict:
-    """Policy weights are loaded by the --resume path (resolve_resume_split);
-    this restores optimizer, counters and the sidecar. Returns
-    {"resumed_from_step", "epoch"}. Must run AFTER every trainer patch so the
-    aliases restore_train_state writes into exist."""
-    import torch
-    ts = torch.load(paths["trainer_state_path"],
-                    map_location=trainer.config["device"],
-                    weights_only=False)
-    st = torch.load(paths["train_state_path"], map_location="cpu", weights_only=False)
-    check_checkpoint_set(paths["model_path"], ts, st)
-    trainer.optimizer.load_state_dict(ts["optimizer_state_dict"])
-    trainer.global_step = int(ts["global_step"])
-    trainer.epoch = int(ts["update"])
-    restore_train_state(trainer, self_play_mgr, st)
-    print("[Resume] WARN: resume not bit-exact for env sampling (env xorshift32 state is "
-          "not checkpointed).")
-    return {"resumed_from_step": trainer.global_step, "epoch": trainer.epoch}
-
-
-def check_resume_metrics_bound(resumed_step: int, last_row_step: int, checkpoint_interval: int,
-                               steps_per_epoch: int) -> tuple[int, int]:
-    """Spec §R0-C sanity bound of a restored global_step against the last
-    metrics.jsonl row of the same run_id. Returns (lo, hi); raises SystemExit
-    (never a bare assert — stripped under -O) when outside.
-
-    Both sides are checkpoint_interval epochs wide: checkpoints fire every
-    checkpoint_interval epochs unconditionally (pufferl.py train loop), but
-    a row is only written when PuffeRL builds `logs`, which it throttles to
-    ≥0.25 s since the last log — so with fast epochs the last row can be up
-    to checkpoint_interval-1 epochs BEHIND the checkpoint (hence + rather
-    than the one-epoch upper side the brief sketched), and the checkpoint
-    can be up to checkpoint_interval epochs behind the last row."""
-    lo = last_row_step - checkpoint_interval * steps_per_epoch
-    hi = last_row_step + checkpoint_interval * steps_per_epoch
-    if not lo <= resumed_step <= hi:
-        raise SystemExit(f"[Resume] restored global_step {resumed_step} outside [{lo}, {hi}] "
-                         f"around last metrics row {last_row_step} "
-                         f"(checkpoint_interval={checkpoint_interval}, "
-                         f"steps/epoch={steps_per_epoch})")
-    return lo, hi
-
-
-def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
-    """Return (agents_per_env, bptt_horizon, batch_size) used by both training
-    and --dump-config. Single source of truth so the fingerprint dict captured
-    pre-training cannot drift from what train() actually runs.
-    """
-    agents_per_env = 10
-    bptt_horizon = 64
-    batch_size = num_envs * agents_per_env * bptt_horizon
-    return agents_per_env, bptt_horizon, batch_size
-
-
-# ── Rung 1a T3 (spec 2026-08-30 §2): opponent-team control mode ────────────
-#   "self" — the opponent team is driven by the current (or, on a self-play
-#            epoch, a past) policy and its rows train exactly like the hero's.
-#            Every pre-Rung-1a run.
-#   "noop" — the opponent team is a STATIONARY STATUE: discrete bin 0 on every
-#            action head, zero aim delta, and its rows are excluded from
-#            participation (no global_step, no gradient, no loss term) and from
-#            the --timesteps budget.
-OPPONENT_MODES = ("self", "noop")
-
-
-def resolve_opponent_mode(args) -> str:
-    """Read ``--opponent`` off an args object, with the legacy-args fallback.
-
-    WHAT: returns "self" or "noop"; raises ValueError on anything else. The
-    getattr default keeps harness / ``--dump-config`` / older SimpleNamespace
-    callers (which predate the flag) on the historical self-play behaviour —
-    same contract as env_knobs_from_args' stance knobs.
-
-    WHY validate here instead of trusting argparse's ``choices=``:
-    build_train_config is also reached from hand-built namespaces (the test
-    harness, sweep scripts), where a typo'd mode would fall through to the
-    `self` budget formula while the evaluate() statue override silently never
-    fires — a run that looks healthy and trains on the wrong horizon.
-    """
-    mode = getattr(args, "opponent", "self")
-    if mode not in OPPONENT_MODES:
-        raise ValueError(f"opponent={mode!r} must be one of {OPPONENT_MODES}")
-    return mode
-
-
-def assert_opponent_self_play_compatible(opponent: str, self_play_enabled: bool) -> None:
-    """Startup guard: ``--opponent noop`` requires ``--no-self-play``.
-
-    WHY (spec 2026-08-30 §2 T3, "team constancy"): the statue is whichever team
-    SelfPlayManager.opponent_team names. That starts at "ct" but self-play
-    bookkeeping flips it every ``phase_length`` (50) epochs via
-    maybe_switch_teams — which would hand the hero the OTHER side of a
-    spawn-asymmetric map partway through the run while the participation vector
-    (built ONCE, statically, for the initial hero team) kept masking the old
-    side. Self-play also mixes past-policy actions into the opponent rows,
-    which is the opposite of a statue.
-
-    Called from main() ABOVE the --dump-config exit (so the Modal/sweep
-    fingerprint step rejects the combination in milliseconds, like
-    validate_aim_log_std_max) and again at the top of train() for programmatic
-    callers. Raising ValueError matches validate_aim_log_std_max's precedent.
-    """
-    if opponent == "noop" and self_play_enabled:
-        raise ValueError("--opponent noop requires --no-self-play. The statue team is "
-                         "SelfPlayManager.opponent_team, which self-play flips every "
-                         "phase_length epochs (and mixes past policies into), while the "
-                         "participating-rows vector is built once for the initial hero "
-                         "team — the two would silently disagree mid-run.")
-
-
-def build_participating_rows(num_envs: int,
-                             n_active: int,
-                             opponent_mode: str = "self",
-                             hero_team: str = "t") -> np.ndarray:
-    """Static per-run participation vector over agent ROWS (Rung 0 §2.2 / T3).
-
-    WHAT: bool array of length ``num_envs * agents_per_env`` in the env-row-major
-    layout the vecenv hands back (10 rows per env: T at slots 0-4, CT at 5-9).
-    True = the row TRAINS — it counts toward ``global_step``, is scattered into
-    ``trainer.participating`` and survives every masked reduction in train().
-
-      - ``opponent_mode="self"``: slots 0..n_active-1 of BOTH teams. Bit-identical
-        to the pre-T3 expression ``(i % TEAM_SIZE) < n_active``.
-      - ``opponent_mode="noop"``: those slots of the HERO team only. The statue
-        team neither learns nor is counted.
-
-    WHY a shared helper: this vector used to be built by two copies of the same
-    expression (train() and train_test_harness), and it sits UPSTREAM of
-    global_step, the buffer scatter, every masked loss and
-    losses/participating_rows. Patching one copy would have left the headline
-    harness test green while production still trained on both teams — precisely
-    the silent failure this experiment cannot afford.
-
-    PITFALLS
-    - Derived from ARGS, while the envs are built separately from the same
-      args; train() keeps an explicit driver-env agreement assert beside its
-      call site, and _patch_trainer_with_hybrid_aim re-checks the length.
-    - ``hero_team`` must stay the complement of SelfPlayManager.opponent_team
-      (use SelfPlayManager.initial_hero_team()). Under "noop" that team is
-      constant for the whole run because the mode forbids self-play; a
-      disagreement would mask the statue's rows IN and the learner's rows OUT
-      while every metric still looked plausible.
-    """
-    if opponent_mode not in OPPONENT_MODES:
-        raise ValueError(f"opponent_mode={opponent_mode!r} must be one of {OPPONENT_MODES}")
-    if hero_team not in ("t", "ct"):
-        raise ValueError(f"hero_team={hero_team!r} must be 't' or 'ct'")
-    if not 1 <= n_active <= TEAM_SIZE:
-        raise ValueError(f"n_active={n_active} outside 1..{TEAM_SIZE}")
-    agents_per_env, _, _ = compute_batch_dims(num_envs)
-    # The T/CT halves are what make `hero_team` meaningful; assert rather than
-    # assume, so a future roster change fails here instead of silently marking
-    # half of some other layout.
-    assert agents_per_env == 2 * TEAM_SIZE, (agents_per_env, TEAM_SIZE)
-    slot = np.arange(num_envs * agents_per_env) % agents_per_env
-    rows = (slot % TEAM_SIZE) < n_active
-    if opponent_mode == "noop":
-        rows &= (slot < TEAM_SIZE) if hero_team == "t" else (slot >= TEAM_SIZE)
-    return rows
 
 
 # First --seed whose base 42_950 * 100_000 = 4_295_000_000 exceeds 2**32 - 1
@@ -1238,281 +623,6 @@ def env_seed_base(seed: int) -> int:
     return seed * 100_000
 
 
-def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
-    """Construct the train_config dict identically to the training path.
-
-    Extracted so --dump-config can produce the exact same dict without
-    spinning up an env. Any future changes to training HPs must live here,
-    not duplicated in train(). Keep this semantically identical to what
-    train() used to build inline — scripts/run_experiment.py hashes this
-    dict as a fingerprint, so silent drift here invalidates experiment
-    provenance.
-    """
-    # ── Warm-start entropy mode (spec 2026-08-01) ──
-    # Two-phase override for BC-warm-started runs: GRACE (alpha clamped to the
-    # ceiling, alpha-optimizer paused, hard entropy floor disabled) then RAMP
-    # (target re-anchored at measured H, rising to base_frac*max; floor still
-    # off, re-arms at ramp end). At the default ceiling of 0.0 the GRACE window
-    # turns the entropy bonus fully OFF — pure PPO on reward, not merely a small
-    # bonus. Explicit flag, NO auto-detection: config.json is dumped BEFORE the
-    # resume block loads the checkpoint, so an auto-set flag would be recorded
-    # False — provenance poison (spec finding 3). The getattr defaults keep
-    # harness/dump-config args objects (which may predate these flags) working.
-    # Read out here rather than inline in the dict below: yapf snaps that dict's
-    # comment column past the longest line in the block, so long inline
-    # getattr() calls would re-indent every comment in it.
-    #
-    # CONTRACTS for the trainer wiring (do not re-derive these downstream):
-    # 1. Both *_steps are trainer.global_step units — PARTICIPATING agent steps
-    #    (Rung 0: 5× fewer raw env steps per unit at n_active=1), the same
-    #    counter entropy_target_warmup_steps and target_entropy_schedule use.
-    # 2. No CLI validation, deliberately. The pure schedule helper
-    #    warmstart_entropy_state treats ramp_steps <= 0 as "jump straight to OFF
-    #    at grace end" (tested: test_ramp_steps_zero_goes_straight_to_off), so 0
-    #    is a legal no-ramp request, NOT a divide-by-zero; negative values are
-    #    documented as equivalent to 0. A negative grace_steps simply means the
-    #    grace window ends immediately (the test is step < grace_steps).
-    # 3. The ceiling applies to the LINEAR effective alpha —
-    #    torch.clamp(alpha, max=ceiling) — never to log_alpha, since the 0.0
-    #    default would be log(0) = -inf. The hard entropy floor must be gated
-    #    off before/independently of the ceiling clamp, or the floor's
-    #    clamp(min=0.5) and this clamp(max=0.0) fight each other.
-    ws_entropy = bool(getattr(args, "warmstart_entropy", False))
-    ws_grace = int(getattr(args, "warmstart_grace_steps", 5_000_000))
-    ws_ramp = int(getattr(args, "warmstart_ramp_steps", 10_000_000))
-    ws_alpha_ceil = float(getattr(args, "warmstart_alpha_ceiling", 0.0))
-
-    # ── Reward weights + symmetrization (spec 2026-08-01) ──
-    # Read out here (not inline in the dict) for the same reason as the
-    # warmstart block above: yapf snaps the returned dict's comment column to
-    # its longest line. Grouping/labelling of the weights lives on
-    # REWARD_WEIGHT_DEFAULTS, the single source of truth.
-    reward_weights = reward_overrides_from_args(args)
-    reward_symmetrize = bool(getattr(args, "reward_symmetrize", False))
-
-    # ── TAG diagnostic (spec 2026-08-13 §4.1) ──
-    # getattr fallbacks keep harness/dump-config args objects that predate
-    # these flags working, same pattern as the warmstart block above.
-    # NOTE: these keys change exp_lib.behavior_hash for ALL future runs
-    # (hash covers sorted config.json) — recorded decision, spec §4.1.
-    tag_diagnostic = bool(getattr(args, "tag_diagnostic", False))
-    tag_every = int(getattr(args, "tag_every", 5))
-
-    # ── Batch 7 heads split (spec 2026-08-13 §2) ──
-    # getattr fallback, same pattern as the TAG block above. This records the
-    # FLAG, not the resolved architecture: a flag-less crash-resume of a split
-    # run writes false here on purpose, which is precisely why the analyzer
-    # reads the per-epoch split/active metric rather than config.json
-    # (spec §3.4). Adding this key also shifts exp_lib.behavior_hash for all
-    # future runs — recorded decision, spec §6.
-    tct_split_heads = bool(getattr(args, "tct_split_heads", False))
-    # Trunk twin (spec 2026-08-15): same FLAG-not-architecture contract as
-    # heads. A flag-less crash-resume of a trunk-split run writes false
-    # here on purpose; the analyzer reads split/trunk_active instead.
-    tct_split_trunk = bool(getattr(args, "tct_split_trunk", False))
-
-    # ── Rung 0 §2.2 + Rung 1a T3: participating-units budget ──
-    # --timesteps is the PARTICIPATING agent-step budget (what the policy
-    # actually learns from), NOT the raw row count. PufferLib's epoch cap
-    # (total_epochs = total_timesteps // batch_size, pufferl.py:168-170, which
-    # also sets the cosine-LR T_max) counts RAW buffer rows, so the raw budget
-    # handed to it is scaled by (rows per env) / (participating rows per env).
-    # Both numbers are recorded: done_training in _train_with_return_norm
-    # compares global_step (participating units) against
-    # participating_timesteps, and the epoch clause catches the floor-division
-    # slack.
-    # T3: the pre-T3 formula (args.timesteps * TEAM_SIZE // n_active) hardcoded
-    # "2 participating rows per env per active slot", i.e. BOTH teams. Under
-    # --opponent noop only the hero team participates, so that formula ends the
-    # run at HALF the requested budget with exit 0 — a silent short run
-    # (verified against smoke-v1c/s0: ~491,520 hero steps for a 1M request).
-    # The generalised form below reduces EXACTLY to the old one under
-    # --opponent self (10t/2n and 5t/n are the same rational, so the floor
-    # divisions agree for every t and n), keeping the `self` path bit-identical
-    # while putting cosine-LR T_max on the real horizon under noop:
-    # 1M requested at n_active=1, num_envs=256 ⇒ total_timesteps = 10M ⇒
-    # 61 epochs (batch 163,840; 61 × 16,384 = 999,424 hero steps).
-    # PITFALL: adding these keys shifts exp_lib.behavior_hash for all future
-    # runs (the hash covers sorted config.json) — recorded decision, same as
-    # the TAG/tct keys above, and the same for `opponent`, `jump_enabled` and
-    # `aim_log_std_init` below (plus the σ weight-decay exclusion of T1, which
-    # changes behaviour for every run without touching config.json at all).
-    # (the raw budget is bound to a local, not inlined in the dict below, for
-    # the same yapf reason as the warmstart block above: a long value
-    # expression inside the dict re-indents every trailing comment in it.)
-    knobs = env_knobs_from_args(args)
-    n_active = knobs["n_active_per_team"]
-    assert 1 <= n_active <= TEAM_SIZE, n_active
-    opponent = resolve_opponent_mode(args)
-    _part_per_env = n_active * (1 if opponent == "noop" else 2)
-    raw_timesteps = args.timesteps * (TEAM_SIZE * 2) // _part_per_env
-    # R0-E.3/4 (#131): aim-head knobs. CLI gives "on"/"off" for the entropy
-    # bonus (argparse choices); the test harness passes a bool — accept both so
-    # neither caller has to know the other's spelling. None cap ⇒ LOG_STD_MAX,
-    # so config.json always records the EFFECTIVE cap (provenance), never null.
-    # None of these are in RESUME_CONFIG_ALLOWLIST on purpose: a resume with a
-    # changed aim knob is a different experiment and must be refused.
-    _aeb = getattr(args, "aim_entropy_bonus", "on")
-    aim_entropy_bonus = _aeb if isinstance(_aeb, bool) else (_aeb == "on")
-    _cap = getattr(args, "aim_log_std_max", None)
-    aim_log_std_max = float(LOG_STD_MAX if _cap is None else _cap)
-    # Rung 1a T1: the σ a fresh aim head actually starts at — DERIVED from the
-    # cap, so it is provenance, not a knob (there is no --aim-log-std-init).
-    # Recorded because the gate's "σ moved ≥ 0.1" reading is |raw − init| and
-    # the reader must not have to re-derive the formula. Goes through the same
-    # helper build_policy uses so config.json and the policy cannot drift.
-    # PITFALL: this key AND the σ weight-decay exclusion
-    # (isolate_aim_log_std_param_group) shift exp_lib.behavior_hash for all
-    # future runs — recorded decision, same convention as the TAG/tct keys
-    # above. The weight-decay change is a real behaviour change for EVERY run,
-    # not just capped ones; the init only moves when cap < LOG_STD_INIT + 0.2.
-    aim_log_std_init = resolve_aim_log_std_init(aim_log_std_max)
-
-    # R0-H: env LABEL from the resolved map name. The CLI always sets args.map
-    # (above the --dump-config exit); the harness / older SimpleNamespace
-    # callers have no `map` attr and keep the historical "cs2-dust2". Not
-    # allowlisted for --resume-run: a different map is a different experiment.
-    map_name = getattr(args, "map", None) or "dust2"
-    # R0-J: --gamma / --pbrs-gamma. Same helper as env_knobs_from_args so the
-    # env's PBRS discount and the PPO discount cannot resolve differently.
-    gamma, pbrs_gamma = resolve_gammas(args)
-    cfg = {
-                                                                       # Core PPO
-        "env": f"cs2-{map_name}",
-        "device": args.device,
-        "seed": args.seed,
-        "total_timesteps": raw_timesteps,
-        "participating_timesteps": args.timesteps,
-        "n_active_per_team": n_active,
-        "pin_pitch": knobs["pin_pitch"],
-        "crouch_enabled": knobs["crouch_enabled"],
-                                                                       # Rung 1a T2b: provenance for --jump-enabled. Like the other Rung 0
-                                                                       # knobs it is NOT allowlisted for --resume-run (a run that masks
-                                                                       # jump is a different experiment) and adding it shifts
-                                                                       # exp_lib.behavior_hash for all future runs — recorded decision.
-        "jump_enabled": knobs["jump_enabled"],
-                                                                       # Rung 1a T3: "self" (both teams learn) or "noop" (statue opponent —
-                                                                       # hero-team-only participation AND budget, see raw_timesteps above).
-                                                                       # NOT a make_puffer_env knob: the statue is enforced trainer-side, in
-                                                                       # the patched evaluate(), so the env is identical either way. Not
-                                                                       # allowlisted for --resume-run — a different opponent is a different
-                                                                       # experiment.
-        "opponent": opponent,
-                                                                       # R0-G: recorded as given (None ⇒ env default), read from args
-                                                                       # directly so None survives — env_knobs_from_args drops None keys.
-        **{
-            a: getattr(args, a, None)
-            for a, _ in _R0G_KNOBS
-        },
-        "aim_entropy_bonus": aim_entropy_bonus,
-        "aim_log_std_max": aim_log_std_max,
-                                                                       # Rung 1a T1: DERIVED from the cap (no CLI flag of its own); the
-                                                                       # gate reads σ movement as |raw − init|, so it is provenance.
-        "aim_log_std_init": aim_log_std_init,
-                                                                       # R0-I: fixed-baseline eval cadence (0 = off). Provenance only —
-                                                                       # not allowlisted for --resume-run (Task 7 rule: new CLI flags are
-                                                                       # config keys, not allowlist entries).
-        "eval_interval": int(getattr(args, "eval_interval", 0) or 0),
-        "batch_size": batch_size,
-        "bptt_horizon": bptt_horizon,
-        "minibatch_size": 8192,
-        "max_minibatch_size": 8192,
-        "update_epochs": 3,
-        "learning_rate": 3e-4,
-        "gamma": gamma,
-        "pbrs_gamma": pbrs_gamma,                                      # R0-J: provenance; not allowlisted for --resume-run
-        "gae_lambda": 0.95,
-        "clip_coef": 0.15,
-        "vf_coef": 0.5,
-        "vf_clip_coef": None,
-        "ent_coef": 0.1,                                               # fallback; adaptive alpha overrides
-        "max_grad_norm": 0.5,
-        "target_kl": 0.03,
-        "use_rnn": True,
-        "weight_decay": 1e-4,
-                                                                       # Extras required by PuffeRL constructor
-        "compile": False,
-        "compile_mode": "default",
-        "compile_fullgraph": False,
-        "cpu_offload": False,
-        "torch_deterministic": False,
-        "optimizer": "adam",
-        "adam_beta1": 0.9,
-        "adam_beta2": 0.999,
-        "adam_eps": 1e-8,
-        "anneal_lr": True,
-        "checkpoint_interval":
-        int(getattr(args, "checkpoint_interval",
-                    DEFAULT_CHECKPOINT_INTERVAL)),                     # R0-C: --checkpoint-interval
-        "data_dir": args.checkpoint_dir,
-        "precision": "float32",
-        "prio_alpha": 0.0,
-        "prio_beta0": 1.0,
-        "vtrace_rho_clip": 1.0,
-        "vtrace_c_clip": 1.0,
-                                                                       # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
-                                                                       # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
-                                                                       # warmup_steps, held constant after; consumed by the SAC-style α
-                                                                       # controller via _scheduled_target_entropy. Previous hardcoded values
-                                                                       # (0.7→0.5) kept the target so high the controller steered the policy
-                                                                       # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
-                                                                       # ≈ 2.87 nats still allows broad exploration but permits commitment.
-                                                                       # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
-                                                                       # _patch_trainer_with_return_norm clamps α ≥ 0.5 when H < 0.3·max;
-                                                                       # a base target below the floor would make the two mechanisms fight.
-        "entropy_target_warmup_frac": 0.5,
-        "entropy_target_base_frac": 0.35,
-        "entropy_target_warmup_steps": 10_000_000,
-                                                                       # ── Warm-start entropy mode: see the comment above ──
-        "warmstart_entropy": ws_entropy,
-        "warmstart_grace_steps": ws_grace,
-        "warmstart_ramp_steps": ws_ramp,
-        "warmstart_alpha_ceiling": ws_alpha_ceil,
-        "reward_symmetrize": reward_symmetrize,
-        "tag_diagnostic": tag_diagnostic,
-        "tag_every": tag_every,
-        "tct_split_heads": tct_split_heads,
-        "tct_split_trunk": tct_split_trunk,
-    }
-
-    # ── Reward wiring: 23 make_env weights, verbatim key names ──
-    # (grouped + annotated on REWARD_WEIGHT_DEFAULTS, the single source of
-    # truth). Merged via an explicit collision check rather than a trailing
-    # `**reward_weights` splat: a splat in last position would SILENTLY
-    # overwrite an existing config key if someone ever adds a make_env weight
-    # named like one of the keys above, and the resulting config would look
-    # perfectly well-formed. This assert is the only thing that actually
-    # catches that — the pin test compares against make_env's signature and
-    # would not notice a collision on this side. Key order does not matter:
-    # every config.json / fingerprint dump uses sort_keys=True.
-    assert not (cfg.keys() & reward_weights.keys()), (
-        "reward weight name collides with an existing config key: "
-        f"{sorted(cfg.keys() & reward_weights.keys())}")
-    cfg.update(reward_weights)
-    return cfg
-
-
-def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> float:
-    """Config-driven entropy target for the SAC-style α controller.
-
-    Single source for both the patch-time seed and the per-train()-call
-    recompute in _patch_trainer_with_return_norm — keeping them identical
-    means a checkpoint-resumed trainer seeds at its true scheduled value
-    instead of a hardcoded warmup constant. `config` is anything with
-    .get() (PuffeRL config or a plain dict); missing keys fall back to the
-    build_train_config defaults so harness/older-checkpoint configs keep
-    working.
-    """
-    from train_helpers_batch1 import target_entropy_schedule
-    return target_entropy_schedule(
-        global_step,
-        max_entropy,
-        warmup_end=config.get("entropy_target_warmup_steps", 10_000_000),
-        warmup_high_frac=config.get("entropy_target_warmup_frac", 0.5),
-        base_frac=config.get("entropy_target_base_frac", 0.35),
-    )
-
-
 def resolve_run_name(name: str) -> str:
     """Return a run name prefixed with DDMMYY-N- where N is the count of existing
     checkpoint dirs that already start with today's date prefix."""
@@ -1536,7 +646,11 @@ AGENT_IDS = tuple([f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)])
 
 def smoke_test():
     print("[Smoke] Initialising environment...")
-    env = make_puffer_env(seed=42)
+    # W3 (#154): the construction seed now lives in env_factory.SMOKE_SEED. The
+    # reset() seed below is deliberately NOT routed through the factory — it is
+    # this function's own episode seed, not part of the env's construction, and
+    # the two happening to be 42 is a coincidence the factory must not encode.
+    env = build_env_for("smoke")
     try:
         obs, _ = env.reset(seed=42)
 
@@ -1729,7 +843,12 @@ def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, p
         ckpt_obs_dim = state_dict["encoder_t.0.weight"].shape[1]
     else:
         ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
-    policy_env = make_puffer_env()
+    # W3 (#154): role eval_legacy — the DOCUMENTED bare-call defaults ("the
+    # defaults reproduce the pre-Rung-0 env exactly" — make_puffer_env's own
+    # docstring). Passing no knobs is the behaviour, not an oversight; #143
+    # tracks whether it should change, and the factory reduces that future fix to
+    # one role's knob source.
+    policy_env = build_env_for("eval_legacy")
 
     # Batch 3.5 (#24, Opus I3): defensive obs_dim consistency check.
     # The function rebuilds the policy with the *checkpoint's* obs_dim
@@ -2022,7 +1141,12 @@ def evaluate_checkpoint(checkpoint_path=None,
 
     for episode_idx in range(num_episodes):
         seed = start_seed + episode_idx
-        env = make_puffer_env(seed=seed)
+        # W3 (#154): the SECOND eval_legacy site, and the only one that passes a
+        # seed. That difference is the whole reason the role's builder takes an
+        # UNSET sentinel rather than seed=None — make_puffer_env's own default is
+        # 0, so spelling the other site's absent seed as None would have changed
+        # the env it builds, invisibly to static_data_scalars().
+        env = build_env_for("eval_legacy", seed=seed)
         obs, _ = env.reset(seed=seed)
         policy_state = init_policy_state(policy, device)
 
@@ -2107,93 +1231,13 @@ def evaluate_checkpoint(checkpoint_path=None,
 
 
 def make_env(team_spirit=None, map_data=None):
-    return make_puffer_env(team_spirit=team_spirit, map_data=map_data)
+    """Public env wrapper. W3 (#154): a thin delegate to the `external` role.
 
-
-DEFAULT_GAMMA = 0.999                  # R0-J: the historical PPO discount; --gamma default
-
-
-def resolve_gammas(args) -> tuple[float, float]:
-    """Return ``(gamma, pbrs_gamma)`` from the args object.
-
-    WHAT: ``gamma`` is ``args.gamma`` (default DEFAULT_GAMMA for harness /
-    dump-config args objects that predate the flag); ``pbrs_gamma`` is
-    ``args.pbrs_gamma`` when given, else ``gamma``.
-
-    WHY one helper: build_train_config (provenance + the PPO discount) and
-    env_knobs_from_args (the env's PBRS discount) must agree on the SAME
-    resolution rule — PBRS is only policy-invariant (Ng et al.) when
-    γ_pbrs == γ, and before R0-J the two lived as unrelated literals (train.py
-    0.999 vs cs2_env.py 0.999) held together by a single drift test.
-    ``--pbrs-gamma`` exists ONLY for experiments that deliberately break the
-    pairing; a run that omits it always gets γ_pbrs = γ.
-
-    PITFALL: both values are config.json keys and NOT in
-    RESUME_CONFIG_ALLOWLIST — changing either on --resume-run is refused.
+    The optional defaults stay HERE, on the published signature, rather than
+    moving into `_build_external` — that builder requires both arguments so a
+    caller that forgets to forward one gets a TypeError instead of a dust2 env.
     """
-    gamma = getattr(args, "gamma", None)
-    gamma = DEFAULT_GAMMA if gamma is None else float(gamma)
-    if not (0.0 < gamma < 1.0):
-        raise ValueError(f"--gamma must be in (0, 1), got {gamma}")
-    pbrs_gamma = getattr(args, "pbrs_gamma", None)
-    pbrs_gamma = gamma if pbrs_gamma is None else float(pbrs_gamma)
-    if not (0.0 < pbrs_gamma <= 1.0):
-        raise ValueError(f"--pbrs-gamma must be in (0, 1], got {pbrs_gamma}")
-    if pbrs_gamma != gamma:
-        print(f"WARNING: --pbrs-gamma {pbrs_gamma} != --gamma {gamma}: PBRS shaping is no "
-              "longer policy-invariant (Ng et al.); only do this on purpose.")
-    return gamma, pbrs_gamma
-
-
-# (args attr, make_puffer_env kwarg) — single source for env_knobs_from_args
-# AND build_train_config, so a knob added to one cannot be missed by the other
-# (config.json would then silently under-record the experiment).
-_R0G_KNOBS = (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
-              ("max_turn_speed", "max_turn_speed"))
-
-
-def env_knobs_from_args(args) -> dict:
-    """Non-weight env knobs (Rung 0) as make_puffer_env kwargs.
-
-    WHY one helper: build_train_config (provenance), build_train_env_factory
-    (the envs) and train()'s participating-row vector must all read the same
-    values; a second copy of these getattr defaults would be the next
-    silent-baseline bug (the class of bug build_train_env_factory exists to
-    prevent for reward weights). getattr defaults keep harness/dump-config
-    args objects — which predate these flags — working.
-
-    PITFALL: this returns make_puffer_env KWARG names, not config keys. It is
-    splatted straight into make_puffer_env(**env_knobs); renaming a key here
-    without renaming the parameter there raises TypeError inside a forked
-    vecenv worker, far from the mistake.
-
-    R0-G knobs (round_time_ticks → round_time, laser_range, max_turn_speed):
-    None-valued ones are OMITTED from the dict rather than forwarded as None,
-    so the env's own nav.py default applies and config.json records None
-    instead of a duplicated constant that would silently drift from nav.py.
-
-    R0-J: ``pbrs_gamma`` is ALWAYS present (resolved via resolve_gammas, so it
-    equals the training gamma unless --pbrs-gamma was given). Unlike the R0-G
-    knobs it is never omitted: the env default (cs2_env.py 0.999) would
-    silently disagree with a non-default --gamma.
-    """
-    knobs = {
-        "n_active_per_team": int(getattr(args, "n_active_per_team", TEAM_SIZE)),
-                                                                                 # R0-E.2: `or 0` — args.pin_pitch is None on the CLI until train()
-                                                                                 # resolves it from map flatness (see the pin_pitch block in train()).
-        "pin_pitch": int(getattr(args, "pin_pitch", 0) or 0),
-        "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
-                                                                                 # Rung 1a T2b: same shape as crouch_enabled — always present (1 =
-                                                                                 # today's env), never omitted, so a legacy args object cannot
-                                                                                 # silently leave the env on a different jump setting than config.json.
-        "jump_enabled": int(getattr(args, "jump_enabled", 1)),
-        "pbrs_gamma": resolve_gammas(args)[1],
-    }
-    for arg_name, env_name in _R0G_KNOBS:
-        v = getattr(args, arg_name, None)
-        if v is not None:
-            knobs[env_name] = v
-    return knobs
+    return build_env_for("external", team_spirit=team_spirit, map_data=map_data)
 
 
 def build_env_factory(*,
@@ -2263,13 +1307,20 @@ def build_env_factory(*,
             raise TypeError(f"env_factory got unexpected kwargs {sorted(kwargs)}; "
                             "per-env kwargs are discarded — pass via build_env_factory "
                             "closure state")
-        env = make_puffer_env(team_spirit=shared_ts,
-                              buf=buf,
-                              seed=_seed if _seed is not None else (seed or 0),
-                              map_data=map_data,
-                              reward_overrides=reward_overrides,
-                              reward_symmetrize=reward_symmetrize,
-                              **(env_knobs or {}))
+        # W3 (#154): construction — and ONLY construction — routes through the
+        # role factory. The seed-precedence rule and the `env_knobs or {}` splat
+        # moved with it verbatim; tests/fixtures/env_kwargs_pre_w3.json holds the
+        # kwargs this call made before the move, and test_env_factory.py asserts
+        # the factory still produces them for all three seed branches.
+        env = build_env_for("train",
+                            shared_ts=shared_ts,
+                            buf=buf,
+                            seed=seed,
+                            _seed=_seed,
+                            map_data=map_data,
+                            reward_overrides=reward_overrides,
+                            reward_symmetrize=reward_symmetrize,
+                            env_knobs=env_knobs)
         # Attach the shared-memory views so the env (whether running in the
         # main process under Serial, or a forked worker under
         # Multiprocessing) can pull cont_actions written by the trainer and
@@ -2922,252 +1973,6 @@ def build_policy(vecenv,
     return Dust2Policy().to(device)
 
 
-# ── SECTION: Network Health Monitoring ────────────────────────────────────
-
-
-def compute_network_health(model, device):
-    """Compute network health metrics for logging.
-
-    Returns a dict with:
-      - health/weight_norm_<name>: L2 norm of each named parameter
-      - health/lstm_h_norm: norm of LSTM hidden state (TODO: requires trainer access)
-
-    Alarm thresholds (informational, not enforced here):
-      - dead neurons > 20% (not tracked — would require forward hooks)
-      - effective rank < 30 (not tracked — expensive)
-      - lstm_h_norm > 50
-    """
-
-    metrics = {}
-
-    # Weight norms per named parameter
-    for name, param in model.named_parameters():
-        safe_name = name.replace(".", "_")
-        metrics[f"health/weight_norm_{safe_name}"] = param.norm().item()
-
-    # TODO: LSTM hidden state norm requires access to trainer's stored LSTM state,
-    # which is not easily accessible from outside PufferLib's training loop.
-    # Would need trainer.policy or similar. Skipping for now.
-
-    return metrics
-
-
-def log_aim_log_std(policy, logs):
-    """Emit policy/aim_log_std_* into `logs` under BOTH architectures (spec §3.6).
-
-    WHAT — the exact meaning of every emitted key, per architecture:
-
-      legacy policy (one `aim_log_std`):
-        policy/aim_log_std_{yaw,pitch}         the CLAMPED parameter
-        policy/aim_log_std_{yaw,pitch}_raw     the UNCLAMPED parameter
-
-      split policy (`aim_log_std_t` + `aim_log_std_ct`):
-        policy/aim_log_std_{yaw,pitch}_{t,ct}      that team's CLAMPED copy
-        policy/aim_log_std_{yaw,pitch}_{t,ct}_raw  that team's UNCLAMPED copy
-        policy/aim_log_std_{yaw,pitch}         MEAN of the two CLAMPED copies
-        policy/aim_log_std_{yaw,pitch}_raw     MAX of the two UNCLAMPED copies
-
-    Under pin_pitch (aim_dim_mask[1] == 0) every `pitch` key above is omitted.
-
-    WHY the raw twin (Rung 1a T1, spec 2026-08-30 §3): the clamped key is
-    censored at the cap, so a σ that the optimizer has pushed past the cap —
-    the state in which clamp zeroes its gradient and σ is dead — is
-    indistinguishable from a σ sitting happily AT the cap. The gate reads
-    `policy/aim_log_std_yaw_raw` for both of its σ questions: "did σ move ≥ 0.1
-    from its init" (⇒ the continuous head receives gradient at all) and "is raw
-    ≤ cap" (⇒ the movement measurement is still meaningful). health/
-    weight_norm_aim_log_std already exposes a raw NORM, but only every 5 epochs
-    and unsigned/aggregated — per-row, per-dim and signed is what the gate
-    needs.
-
-    WHY the legacy-named `_raw` key is a MAX under the split while its clamped
-    twin stays a MEAN: the two keys answer different questions and must be
-    aggregated differently. The clamped key reports the σ the policy actually
-    used, and the mean of the two copies is the honest summary of that. The raw
-    key exists solely to answer "has any σ overshot the cap and gone gradient-
-    dead", and a mean HIDES exactly that: with cap = −2.9957, a T copy at
-    cap + 0.5 = −2.4957 (dead) averaged with a healthy CT copy reads −3.2479,
-    i.e. below the cap, so the pre-flight `raw ≤ cap` check passes on a frozen
-    σ. Max is the aggregation that answers the overshoot question truthfully.
-
-    PITFALL — what the split `_raw` key does NOT promise: for the *movement*
-    question the max is only conservative in one direction. Two copies that
-    both moved up, or any copy that moved up, show through; a single copy that
-    moved only DOWN while the other sat at its init is invisible in the max
-    (max == init ⇒ "no movement"). Read the per-team `_t_raw`/`_ct_raw` keys
-    whenever per-copy movement is the question. This does not affect the Rung
-    1a gate, which runs the legacy architecture, where the key is the exact
-    unclamped parameter.
-
-    WHY the legacy keys survive as a mean rather than being replaced: the T7
-    acceptance gate greps the status line for `aim_log_std_pitch=` (see
-    format_train_status), and every dashboard/analysis consumer reads those
-    two names. Adding the per-team keys alongside is what exposes the actually
-    interesting Batch 7 signal — whether the teams learn different aim noise.
-
-    WHY this is a function and not three inline lines in the outer loop: the
-    pre-Batch-7 code read policy.aim_log_std unconditionally, which raises
-    AttributeError on a split policy before the run writes a single metrics
-    row. Extracting it makes that path directly testable (spec §5 test 10,
-    which re-review N3 flagged as untested).
-
-    PITFALL: CLAMP EACH COPY, THEN AVERAGE — never average then clamp. The
-    forward path clamps per copy (spec §3.2), so a mean-then-clamp here would
-    report a σ the policy never used whenever one copy sits outside the band.
-
-    Architecture is detected from the policy object (hasattr aim_log_std_t),
-    never from config — config.json is rewritten every launch and lies after a
-    flag-less resume (spec §3.4).
-    """
-    # train.py imports torch lazily inside functions (module import stays cheap
-    # for the CLI/help paths) — keep that convention here.
-    import torch
-
-    # R0-E.3: clamp to the RUN's cap (policy.aim_log_std_max), not the module
-    # constant — otherwise the log would report a σ the forward never used.
-    cap = float(getattr(policy, "aim_log_std_max", LOG_STD_MAX))
-    # R0-E.2 (#131): when pitch is pinned (aim_dim_mask[1] == 0) the pitch σ
-    # is a dead parameter — never sampled, never in log_prob_c, never
-    # updated. SKIP its keys (not NaN: NaN survives json.dumps only as the
-    # non-standard `NaN` token and would read as a live-but-broken signal on
-    # a dashboard). Every consumer already tolerates absence:
-    # format_train_status uses logs.get(..., 0.0); the T7 gate is 5v5-only.
-    mask = getattr(policy, "aim_dim_mask", None)
-    pitch_live = mask is None or float(mask[1]) != 0.0
-    with torch.no_grad():
-        if hasattr(policy, "aim_log_std_t"):
-            raw_t = policy.aim_log_std_t.detach().cpu().numpy()
-            raw_ct = policy.aim_log_std_ct.detach().cpu().numpy()
-            ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, cap).cpu().numpy()
-            ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, cap).cpu().numpy()
-            logs["policy/aim_log_std_yaw_t"] = float(ls_t[0])
-            logs["policy/aim_log_std_yaw_ct"] = float(ls_ct[0])
-            logs["policy/aim_log_std_yaw_t_raw"] = float(raw_t[0])
-            logs["policy/aim_log_std_yaw_ct_raw"] = float(raw_ct[0])
-            if pitch_live:
-                logs["policy/aim_log_std_pitch_t"] = float(ls_t[1])
-                logs["policy/aim_log_std_pitch_ct"] = float(ls_ct[1])
-                logs["policy/aim_log_std_pitch_t_raw"] = float(raw_t[1])
-                logs["policy/aim_log_std_pitch_ct_raw"] = float(raw_ct[1])
-            clamped = 0.5 * (ls_t + ls_ct)
-            # MAX, deliberately NOT the mean that the clamped key uses: the raw
-            # key's job is "did any copy overshoot the cap and go gradient-
-            # dead", and averaging a dead copy with a healthy one reads as
-            # healthy. See the docstring for the worked counterexample and for
-            # the one thing max under-reports (a copy that moved only down).
-            raw = np.maximum(raw_t, raw_ct)
-        else:
-            raw = policy.aim_log_std.detach().cpu().numpy()
-            clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, cap).cpu().numpy()
-    logs["policy/aim_log_std_yaw"] = float(clamped[0])
-    logs["policy/aim_log_std_yaw_raw"] = float(raw[0])
-    if pitch_live:
-        logs["policy/aim_log_std_pitch"] = float(clamped[1])
-        logs["policy/aim_log_std_pitch_raw"] = float(raw[1])
-
-
-def compute_head_divergence(policy):
-    """split/head_l2_rel/<module> — how far the two team head copies have moved apart.
-
-    Metric (spec §4 Q3):  ‖W_t − W_ct‖ / (0.5‖W_t‖ + 0.5‖W_ct‖)
-
-    WHY relative and not raw L2: the optimizer runs weight_decay=1e-4
-    (see the Adam construction in train()), so even a copy that receives zero
-    gradient keeps moving. Raw L2 therefore has no achievable null. Normalising
-    by the mean norm of the two copies makes "how different are the teams'
-    heads" scale-free; the honest null is still a decay-aware control (zero-
-    advantage steps), which is what tests/test_tct_split.py exercises, and the
-    run readout reports the TRAJECTORY, not a binary.
-
-    Returns {} for a legacy policy — the metric is undefined with one copy,
-    and emitting a fake 0.0 would read as "the teams agree" to anyone
-    plotting it.
-
-    PITFALL: modules are grouped, not per-tensor — all 7 discrete heads
-    contribute to one `action_heads` number. Per-head keys would be 9 series
-    per epoch of mostly-identical curves; if a per-head breakdown is ever
-    needed, add it as a separate function rather than widening this one.
-    """
-    import torch
-
-    if not hasattr(policy, "aim_log_std_t"):
-        return {}
-
-    def _flat(obj):
-        if isinstance(obj, torch.nn.Parameter):
-            return obj.detach().reshape(-1)
-        return torch.cat([p.detach().reshape(-1) for p in obj.parameters()])
-
-    out = {}
-    with torch.no_grad():
-        for name, mod_t, mod_ct in (
-            ("action_heads", policy.action_heads_t, policy.action_heads_ct),
-            ("aim_mu", policy.aim_mu_t, policy.aim_mu_ct),
-            ("aim_log_std", policy.aim_log_std_t, policy.aim_log_std_ct),
-        ):
-            w_t, w_ct = _flat(mod_t), _flat(mod_ct)
-            denom = 0.5 * float(w_t.norm()) + 0.5 * float(w_ct.norm())
-            if denom > 0.0:
-                # NaN in either copy propagates through the ratio — visible,
-                # never masked as "teams identical".
-                val = float((w_t - w_ct).norm()) / denom
-            else:
-                # denom == 0.0 → both copies all-zero → genuinely identical.
-                # denom NaN fails both comparisons → emit NaN, not a fake 0.0.
-                val = 0.0 if denom == 0.0 else float("nan")
-            out[f"split/head_l2_rel/{name}"] = val
-    return out
-
-
-def compute_trunk_divergence(policy):
-    """split/trunk_l2_rel/<module> — how far the two team trunk copies have moved apart.
-
-    WHAT: relative L2 between the T and CT copies of encoder and lstm.
-    Metric is the same formula as compute_head_divergence (spec §4 Q3):
-        ‖W_t − W_ct‖ / (0.5‖W_t‖ + 0.5‖W_ct‖)
-    Keys: split/trunk_l2_rel/encoder, split/trunk_l2_rel/lstm.
-
-    WHY relative and not raw L2: the optimizer runs weight_decay=1e-4, so
-    even a copy that receives zero gradient keeps moving. Raw L2 has no
-    achievable null. The ratio is scale-free; the honest null is still a
-    decay-aware control. Gate is hasattr(policy, "encoder_t") — the live
-    architecture, never config.json — matching split/trunk_active.
-
-    Returns {} when there is no encoder_t. The metric is undefined with
-    one copy, and emitting a fake 0.0 would read as "the teams agree".
-
-    PITFALL: modules are grouped, not per-tensor — every Linear in the
-    Sequential encoder and every LSTM weight (ih/hh/bias) contribute to
-    one number. A per-layer series is a separate function if ever needed.
-    T=1 + zero LSTM state leaves weight_hh unmoved; that does not make
-    the encoder ratio 0 after a team-asymmetric step.
-    """
-    import torch
-
-    if not hasattr(policy, "encoder_t"):
-        return {}
-
-    def _flat(obj):
-        if isinstance(obj, torch.nn.Parameter):
-            return obj.detach().reshape(-1)
-        return torch.cat([p.detach().reshape(-1) for p in obj.parameters()])
-
-    out = {}
-    with torch.no_grad():
-        for name, mod_t, mod_ct in (
-            ("encoder", policy.encoder_t, policy.encoder_ct),
-            ("lstm", policy.lstm_t, policy.lstm_ct),
-        ):
-            w_t, w_ct = _flat(mod_t), _flat(mod_ct)
-            denom = 0.5 * float(w_t.norm()) + 0.5 * float(w_ct.norm())
-            if denom > 0.0:
-                val = float((w_t - w_ct).norm()) / denom
-            else:
-                val = 0.0 if denom == 0.0 else float("nan")
-            out[f"split/trunk_l2_rel/{name}"] = val
-    return out
-
-
 # ── SECTION: Timing patch ─────────────────────────────────────────────────
 
 
@@ -3204,922 +2009,6 @@ def _patch_trainer_with_timing(trainer):
     trainer.train = _timed_train
 
 
-# ── SECTION: Value target normalization ───────────────────────────────────
-
-
-def _patch_trainer_with_return_norm(trainer):
-    """Monkey-patch a PuffeRL instance to normalize value regression targets.
-
-    MAPPO's strongest recommendation: normalize the returns (advantages + values)
-    that the value function regresses against.  This stabilizes value learning
-    especially with high gamma (0.999) where return variance is large.
-
-    Implementation: maintain a running mean/std of returns on the training
-    device; before the value loss, normalize mb_returns to zero-mean unit-std.
-    The value head learns to predict normalized returns; no denormalization is
-    needed (unlike PopArt) because we don't use the raw value for anything
-    outside the loss.
-    """
-    # gh #85: BPTT zero-init exactness (Dust2Policy.forward/_lstm_bptt) is only
-    # EXACT when each agent row fills exactly one buffer segment per evaluate(),
-    # i.e. segments == total_agents. Upstream PuffeRL only enforces
-    # total_agents <= segments (pufferl.py:83-86); our equality holds by
-    # construction in compute_batch_dims but nothing asserted it — one
-    # batch_size/bptt_horizon config edit away from silently-biased importance
-    # ratios. Fail loudly at patch time instead.
-    assert trainer.segments == trainer.total_agents, (
-        f"segments ({trainer.segments}) != total_agents ({trainer.total_agents}): "
-        "BPTT zero-init exactness broken — revisit batch_size/bptt_horizon "
-        "(compute_batch_dims) or the _lstm_bptt initial-state design. See gh #85.")
-
-    import time
-    import types
-    from collections import defaultdict
-
-    import torch
-    from pufferlib.pufferl import compute_puff_advantage
-
-    # Warm-start entropy mode (spec 2026-08-01). Function-local like every
-    # other import here — train.py has no module-level train_helpers_batch1
-    # import. _train_with_return_norm is nested inside this function, so it
-    # picks these up as closure freevars. WS_RAMP is not needed here.
-    from train_helpers_batch1 import WS_GRACE, WS_OFF, warmstart_entropy_state
-
-    # Running stats for return normalization (Welford-style, torch tensors)
-    device = trainer.config["device"]
-    _ret_mean = torch.zeros(1, device=device)
-    _ret_var = torch.ones(1, device=device)
-    _ret_count = torch.zeros(1, device=device)
-
-    # ── Batch 1 Task 9a: force-reset return-norm stats + expose on trainer ──
-    # WHAT: zero _ret_mean/_ret_count and set _ret_var=1 in-place at patch
-    #   apply time, then attach the tensors to the trainer instance.
-    # WHY: Task 6c symlog-compresses rewards before they enter the rollout
-    #   buffer, so mb_returns = advantages + values lives in symlog space.
-    #   The return-norm running stats must therefore start fresh — carrying
-    #   stale raw-scale stats from a pre-Batch-1 checkpoint would contaminate
-    #   the symlog-space computation throughout warmup.
-    # PITFALL: use in-place .zero_()/.fill_() rather than reassigning the
-    #   names. The trainer attribute below is meant to be the same tensor
-    #   reference the closure mutates, so `_update_return_stats` writes are
-    #   visible via trainer._ret_var (and conversely tests reading the attr
-    #   see the live value, not a stale snapshot).
-    _ret_mean.zero_()
-    _ret_var.fill_(1.0)
-    _ret_count.zero_()
-    trainer._ret_mean = _ret_mean
-    trainer._ret_var = _ret_var
-    trainer._ret_count = _ret_count
-    # ──────────────────────────────────────────────────────────────────────
-
-    # ── ADAPTIVE ENTROPY (Lagrangian / SAC-style alpha) ────────────────────
-    # Batch 3: max_entropy = sum of discrete max entropies + closed-form
-    # Gaussian entropy at σ = exp(LOG_STD_MAX). Used for entropy-coefficient
-    # annealing schedules (target_entropy ramp in Task 9A) and the SAC-α
-    # dual loop's bookkeeping. Discrete heads contribute log(N_i) each;
-    # the Gaussian contributes 0.5·log(2πe·σ²) per AIM_DIM — using σ_max
-    # is the conservative ceiling, since the policy's actual σ is clamped
-    # ≤ exp(LOG_STD_MAX) in every forward call.
-    # R0-E (#131): the ceiling follows the run — σ cap (policy.aim_log_std_max),
-    # number of live aim dims (aim_dim_mask.sum(): 1 when pitch is pinned) and
-    # the entropy-bonus switch (0 continuous entropy when the Gaussian is
-    # excluded from the objective, so the target/floor track the discrete
-    # heads only). getattr defaults keep pre-R0-E policies/configs working.
-    max_entropy_discrete = sum(np.log(n) for n in ACTION_HEAD_SIZES)
-    _cap = float(getattr(trainer.policy, "aim_log_std_max", LOG_STD_MAX))
-    _n_aim = float(getattr(trainer.policy, "aim_dim_mask", torch.ones(AIM_DIM)).sum())
-    _bonus = bool(trainer.config.get("aim_entropy_bonus", True))
-    max_entropy_continuous = (_n_aim * 0.5 * np.log(2 * np.pi * np.e * np.exp(_cap)**2)) \
-        if _bonus else 0.0
-    max_entropy = max_entropy_discrete + max_entropy_continuous
-    # Task 9A: target_entropy is no longer a static scalar — it's recomputed
-    # each train() call from a linear ramp 0.7→0.5*max_entropy across
-    # [0, 10_000_000] global steps (see target_entropy_schedule). The live
-    # value lives in the closure-local _t9_target_entropy in
-    # _train_with_return_norm and on trainer._batch1_current_target_entropy.
-    entropy_floor = 0.3 * max_entropy  # collapse threshold
-    import math
-
-    log_alpha = torch.tensor([math.log(0.1)], requires_grad=True, device=device)
-    alpha_optimizer = torch.optim.Adam([log_alpha], lr=1e-4)
-    # R0-C (#134): the train_state.pt sidecar needs both; they are closure-
-    # locals, so alias them here. Restore MUST be in place
-    # (`log_alpha.data.copy_`) — rebinding the attribute would leave the
-    # closure (and alpha_optimizer's param list) on the old tensor.
-    trainer._log_alpha_tensor = log_alpha
-    trainer._alpha_optimizer = alpha_optimizer
-
-    # Task 9A/9B: trainer-level state for target_entropy schedule + log_alpha
-    # reset. Attached to the trainer (not closure-local) so:
-    #   - tests can inspect/pin _batch1_max_entropy and current_target_entropy
-    #   - the wandb log layer can read _batch1_current_target_entropy without
-    #     reaching into the closure of _train_with_return_norm.
-    # _batch1_log_alpha_reset_done is the idempotency flag for Task 9B —
-    # the first train() call after this patch is applied resets log_alpha to
-    # log(ent_coef); every later train() call leaves log_alpha alone so the
-    # SAC dual-gradient loop can do its job.
-    trainer._batch1_max_entropy = float(max_entropy)
-    trainer._batch1_log_alpha_reset_done = False
-    # Seed from the schedule at the CURRENT global_step (not a hardcoded
-    # warmup constant) so checkpoint-resumed trainers start consistent;
-    # the per-train()-call recompute below overwrites it every call anyway.
-    trainer._batch1_current_target_entropy = _scheduled_target_entropy(
-        trainer.config, trainer.global_step, float(max_entropy))
-    # Pre-init effective_alpha + grad_norm metrics (utof/cs2rl#16). The
-    # post-loop reads in _train_with_return_norm refresh these, but if the
-    # target_kl early-break trips on mb=0 OR no accumulation boundary fires,
-    # the local names are never bound — leaving the trainer attrs
-    # AttributeError on first read. Seeding them with sane defaults here
-    # turns those edge cases into "stale-from-previous-call" instead of a
-    # crash, and the post-loop refresh overwrites whenever the loop runs
-    # all the way through.
-    trainer._batch1_effective_alpha = float(trainer.config["ent_coef"])
-    trainer._batch1_grad_norm = 0.0
-
-    # ── Warm-start entropy mode state (spec 2026-08-01) ────────────────────
-    # h_anchor: mean policy entropy captured at grace end (None until then);
-    # last_entropy_mean: previous update's post-divisor losses["entropy"] —
-    # the ONLY valid anchor source (there is no entropy EMA in this codebase,
-    # and trainer.losses is refreshed only inside the throttled log-flush
-    # block, so it can be several updates stale — spec finding 4).
-    # h0: first update's mean entropy, denominator of warmstart_h_over_h0
-    # (grace collapse watch — with the floor disabled AND alpha~0 the run
-    # has no anti-collapse guard, spec finding 6).
-    trainer._batch1_warmstart_h_anchor = None
-    trainer._batch1_warmstart_h0 = None
-    trainer._batch1_warmstart_phase = WS_OFF
-    trainer._batch1_last_entropy_mean = None
-    trainer._batch1_warmstart_warn_epoch = -10**9
-
-    # ──────────────────────────────────────────────────────────────────────
-
-    def _update_return_stats(returns_flat):
-        nonlocal _ret_mean, _ret_var, _ret_count
-        with torch.no_grad():
-            n = returns_flat.numel()
-            if n == 0:
-                return
-            batch_mean = returns_flat.mean()
-            batch_var = returns_flat.var(unbiased=False)
-            batch_count = torch.tensor(float(n), device=device)
-
-            delta = batch_mean - _ret_mean
-            tot = _ret_count + batch_count
-            new_mean = _ret_mean + delta * batch_count / tot
-            m_a = _ret_var * _ret_count
-            m_b = batch_var * batch_count
-            m2 = m_a + m_b + delta.pow(2) * _ret_count * batch_count / tot
-            new_var = m2 / tot
-
-            _ret_mean.copy_(new_mean)
-            _ret_var.copy_(new_var)
-            _ret_count.copy_(tot)
-
-    def _normalize_returns(mb_returns, mb_part=None):
-        """Return normalized copy of mb_returns; update running stats first.
-
-        mb_part (Rung 0 §2.2): BOOL [S, T] participation mask. The running
-        mean/var are updated from the PARTICIPATING rows ONLY — parked rows
-        carry reward 0 and value 0, so feeding them in would drag the return
-        scale toward 0 by a factor of n_active/TEAM_SIZE and shrink every
-        normalized value target. None ⇒ all rows (pre-Rung-0 behaviour,
-        bit-identical).
-        PITFALL: the whole tensor is still normalized and returned — masking
-        applies to the STATISTICS, not the output. The parked rows' value loss
-        is dropped later, by the masked_mean over the same mask.
-        """
-        sel = mb_returns.detach()
-        if mb_part is not None:
-            sel = sel[mb_part]
-        _update_return_stats(sel.flatten())
-        std = (_ret_var + 1e-8).sqrt()
-        return (mb_returns - _ret_mean) / std
-
-    # Test hook (tests/test_parked_rows_masked.py): the closure is otherwise
-    # unreachable, and the participating-rows-only stats update is exactly the
-    # part worth pinning.
-    trainer._normalize_returns = _normalize_returns
-
-    def _train_with_return_norm(self):
-        profile = self.profile
-        epoch = self.epoch
-        profile("train", epoch)
-        losses = defaultdict(float)
-        # Rung 0 §2.2 diagnostics. Local ints (not losses[...] entries) because
-        # they are ABSOLUTE counts: anything accumulated into `losses` inside
-        # the loop gets divided by _mb_run afterwards (gh#90). They are written
-        # onto `losses` after that divisor.
-        _floor_fires = 0               # minibatches where the entropy-floor clamp bound
-        _empty_mb = 0                  # minibatches with zero participating rows (skipped)
-        config = self.config
-        device = config["device"]
-
-        b0 = config["prio_beta0"]
-        a = config["prio_alpha"]
-        clip_coef = config["clip_coef"]
-        vf_clip = config["vf_clip_coef"]
-        anneal_beta = b0 + (1 - b0) * a * self.epoch / self.total_epochs
-        self.ratio[:] = 1
-
-        # Task 9A: recompute target_entropy from the linear ramp once per
-        # train() call. WHY here (not inside the minibatch loop): the schedule
-        # is keyed on global_step which is fixed for the duration of a single
-        # train() call, so recomputing per-minibatch would burn cycles for no
-        # signal. We mirror the value onto trainer._batch1_current_target_entropy
-        # so the wandb log layer can read it without touching this closure.
-        # Fracs/warmup_steps come from config via _scheduled_target_entropy
-        # (finding 4 residual — previously hardcoded 0.7→0.5).
-        # PITFALL: do NOT capture max_entropy from the outer closure here —
-        # use trainer._batch1_max_entropy. Closure capture would silently break
-        # if the patch were re-applied on the same trainer instance.
-        _t9_target_entropy = _scheduled_target_entropy(config, self.global_step,
-                                                       trainer._batch1_max_entropy)
-        trainer._batch1_current_target_entropy = float(_t9_target_entropy)
-
-        # Task 9B: one-shot log_alpha reset on the first train() call after
-        # this patch. WHY: the entropy schedule + log_alpha are coupled — the
-        # outer training loop can leave log_alpha at a stale value from a
-        # previous run / re-init, and we need a deterministic starting point
-        # of log(ent_coef) so the SAC dual-gradient loop converges from a
-        # known floor. The flag is on the trainer (not the closure) so a
-        # checkpoint-restored trainer that gets re-patched still resets once.
-        if not trainer._batch1_log_alpha_reset_done:
-            with torch.no_grad():
-                log_alpha.fill_(math.log(config["ent_coef"]))
-            trainer._batch1_log_alpha_reset_done = True
-
-        # ── Warm-start entropy mode: resolve phase once per train() call ───
-        # (global_step only advances in evaluate(), so it is constant here —
-        # same reasoning as the Task 9A recompute above; all transitions land
-        # on update boundaries.) Ordering vs Task 9B: 9B runs FIRST and sets
-        # log_alpha to log(ent_coef) — exactly the operating point warm-start
-        # wants (continuity comes from target==h_anchor at release, never
-        # from moving log_alpha: Adam(lr=1e-4) travels ~1e-4/minibatch, so a
-        # parked log_alpha is stranded — spec finding 1).
-        # PITFALL: keep grace+ramp >= entropy_target_warmup_steps. OFF falls
-        # through to the Task 9A schedule (see the override condition below),
-        # and 9A ramps DOWNWARD — warmup_high_frac*max (0.5) at step 0 to
-        # base_frac*max (0.35) at entropy_target_warmup_steps — so during
-        # warmup it reads strictly ABOVE the base_frac*max the warm-start ramp
-        # lands on. With defaults (grace 5M + ramp 10M = 15M >= 10M warmup) 9A
-        # has already flattened at base_frac*max and the handoff is exactly
-        # continuous. But e.g. grace=2M+ramp=3M puts ramp_end at 5M, where 9A
-        # still reads 0.425*max: the target jumps UPWARD 0.35*max -> 0.425*max,
-        # i.e. 2.87 -> 3.49 nats (+0.62, at max_entropy=8.21), at the exact
-        # boundary the spec promises is clean.
-        _ws_enabled = bool(config.get("warmstart_entropy", False))
-        _ws_floor_active = True
-        if _ws_enabled:
-            _ws_grace = int(config.get("warmstart_grace_steps", 5_000_000))
-            if (trainer._batch1_warmstart_h_anchor is None and self.global_step >= _ws_grace
-                    and trainer._batch1_last_entropy_mean is not None):
-                # one-shot anchor capture (idempotent: guarded on None).
-                # Finite-check (Task 1 review): a NaN/inf entropy mean latched
-                # here would poison target and alpha_loss for the whole ramp —
-                # skip the capture (stay GRACE) and shout instead.
-                if math.isfinite(trainer._batch1_last_entropy_mean):
-                    trainer._batch1_warmstart_h_anchor = float(trainer._batch1_last_entropy_mean)
-                else:
-                    print(f"[Train] WARN warm-start: non-finite entropy mean "
-                          f"{trainer._batch1_last_entropy_mean} at grace end — "
-                          f"anchor capture skipped, staying in GRACE.")
-            _ws = warmstart_entropy_state(
-                self.global_step,
-                grace_steps=_ws_grace,
-                ramp_steps=int(config.get("warmstart_ramp_steps", 10_000_000)),
-                h_anchor=trainer._batch1_warmstart_h_anchor,
-                base_target=(config.get("entropy_target_base_frac", 0.35) *
-                             trainer._batch1_max_entropy))
-            trainer._batch1_warmstart_phase = _ws.phase
-            _ws_floor_active = _ws.floor_active
-            if _ws.phase != WS_OFF and _ws.target is not None:
-                # Override the Task 9A schedule during the ramp AND mirror it,
-                # or the wandb target trace plots the unmodified base schedule
-                # (spec finding 9). Effectively RAMP-only: GRACE carries
-                # target=None (no target is consumed while alpha is ceilinged).
-                # PITFALL: the WS_OFF guard is load-bearing — the helper returns
-                # target=base_target (NOT None) once OFF, so testing target
-                # alone would pin the target at base_frac*max for the rest of
-                # the run and silently flatten the tail of the 9A warmup ramp
-                # whenever grace+ramp < entropy_target_warmup_steps. Falling
-                # through here is what makes OFF byte-for-byte pre-feature
-                # behavior at ANY config, which is what the spec promises.
-                _t9_target_entropy = _ws.target
-                trainer._batch1_current_target_entropy = float(_ws.target)
-        else:
-            # Config can be toggled off in-process (tests do this; production
-            # builds the config once). Re-seed the phase so a stale GRACE can
-            # never keep the alpha optimizer frozen after the mode is disabled.
-            trainer._batch1_warmstart_phase = WS_OFF
-
-        # Task 8: raw event-segment fraction (mask mean) — computed once per
-        # train() call because _batch1_event_mask doesn't change inside the
-        # minibatch loop. Persisted onto losses["event_oversample_fraction"]
-        # AFTER the gh#90 divisor loop (per-call scalar, like ret_mean).
-        _t8_event_mask = getattr(self, "_batch1_event_mask", None)
-        # Masked over participating segments (participating[:, 0] is the
-        # per-segment flag) so parked rows don't dilute the fraction at n<5.
-        self._batch1_event_oversample_fraction = (float(
-            masked_mean(_t8_event_mask.float(), self.participating[:, 0].float()))
-                                                  if _t8_event_mask is not None else 0.0)
-
-        # ── gh#90: KL early-stop bookkeeping ───────────────────────────────
-        # WHAT: the target_kl early-stop is (a) gated to update-epoch
-        #   boundaries and (b) decoupled from the losses/* divisor.
-        # WHY (root-caused 2026-08-01, run checkpoints-20260801-022606):
-        #   the old inline `break` sat before the logging block while every
-        #   losses/* metric divided by the PLANNED self.total_minibatches —
-        #   a truncated update silently scaled all logged losses by k/N
-        #   ("importance=0.0167" was really ratio=1.0 with k=1). And because
-        #   this flattened loop collapses all update_epochs into one range,
-        #   one KL spike aborted passes over data never visited — harsher
-        #   than standard PPO, which finishes the current epoch first.
-        # HOW: losses accumulate RAW sums inside the loop and are divided by
-        #   the EXECUTED count (_mb_run) after it; a KL trip sets _kl_stop
-        #   and the loop exits at the next epoch boundary, so epoch 0 always
-        #   completes (⇒ _mb_run >= 1, and the effective_alpha / advantages
-        #   post-loop reads can no longer see an mb=0 abort).
-        # PITFALL: total_minibatches need not divide update_epochs evenly
-        #   (harness: 7 mbs / 3 epochs) — the boundary stride uses floor
-        #   division with a >=1 clamp, never a modulo of zero.
-        target_kl = config.get("target_kl", None)
-        _mbs_per_epoch = max(1,
-                             self.total_minibatches // max(1, int(config.get("update_epochs", 1))))
-        _kl_stop = False
-        _mb_run = 0
-
-        for mb in range(self.total_minibatches):
-            if _kl_stop and mb % _mbs_per_epoch == 0:
-                break                  # epoch boundary: honor the KL trip
-            profile("train_misc", epoch, nest=True)
-            self.amp_context.__enter__()
-
-            shape = self.values.shape
-            advantages = torch.zeros(shape, device=device)
-            advantages = compute_puff_advantage(
-                self.values,
-                self.rewards,
-                self.terminals,
-                self.ratio,
-                advantages,
-                config["gamma"],
-                config["gae_lambda"],
-                config["vtrace_rho_clip"],
-                config["vtrace_c_clip"],
-            )
-
-            profile("train_copy", epoch)
-            adv = advantages.abs().sum(axis=1)
-            prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
-            prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
-
-            # ── Batch 1 Task 8: event-biased prio_probs oversampling ──────
-            # WHAT: when the segment-level event mask is populated and at
-            #   least one segment contains a bomb-plant event, multiply the
-            #   prio_probs of those segments by OVERSAMPLE_FACTOR before
-            #   renormalising. The downstream torch.multinomial call then
-            #   draws biased samples without any further changes — and the
-            #   importance-sampling correction (mb_prio, consumed inside
-            #   _hybrid_ppo_loss) uses the BOOSTED prio_probs[idx], so the
-            #   gradient stays unbiased.
-            # WHY: bomb-plant events are sparse in early training (the exact
-            #   fraction is itself a Task 9 metric, reported via
-            #   _batch1_event_oversample_fraction). Uniform prio sampling
-            #   under-replays them; oversampling accelerates value-function
-            #   fit on the rare-but-decisive transitions. Plan §Task 8
-            #   target: event-mask hit-rate among sampled segments >= 25%.
-            # PITFALLS:
-            #   * mask absent / all-False → skip the boost so pre-Batch-1
-            #     training paths and the warm-up pass before any plant
-            #     happens still work (no division by zero, no NaN).
-            #   * Boost the prob, not the weight — boosting `prio_weights`
-            #     and re-running the (w+1e-6)/(sum+1e-6) renorm would alter
-            #     the abs-advantage prior shape; multiplying prio_probs and
-            #     dividing by sum keeps the prior intact on non-event rows.
-            #   * Cloning before the in-place mul protects callers that
-            #     might still hold a reference to the original prio_probs.
-            #   * The exposed metric is the RAW event fraction (mask mean),
-            #     NOT the post-boost sampled fraction. Written onto
-            #     losses["event_oversample_fraction"] after the divisor
-            #     loop — do not accumulate it inside this minibatch loop.
-            OVERSAMPLE_FACTOR = 4.0
-            if _t8_event_mask is not None and _t8_event_mask.any():
-                boosted = prio_probs.clone()
-                boosted[_t8_event_mask] *= OVERSAMPLE_FACTOR
-                prio_probs = boosted / boosted.sum()
-            # ──────────────────────────────────────────────────────────────
-
-            idx = torch.multinomial(prio_probs, self.minibatch_segments)
-            mb_prio = (self.segments * prio_probs[idx, None])**-anneal_beta
-            mb_obs = self.observations[idx]
-            mb_actions = self.actions[idx]
-            mb_logprobs = self.logprobs[idx]
-            # (mb_rewards pull removed with the dead per-minibatch
-            # compute_puff_advantage recompute — see finding-1 note below)
-            mb_terminals = self.terminals[idx]
-            mb_values = self.values[idx]
-            mb_returns = advantages[idx] + mb_values
-            mb_advantages = advantages[idx]
-            # Batch 3 (T5): pull continuous actions + per-factor old logprobs
-            # from the parallel buffers added by _patch_trainer_with_hybrid_aim.
-            # mb_logprobs (the SUM) stays the canonical "logp from rollout" for
-            # KL/clipfrac diagnostics below; the per-factor halves drive the
-            # per-factor PPO clip in _hybrid_ppo_loss.
-            mb_cont_actions = self.cont_actions[idx]
-            mb_old_logp_d = self.logprobs_d[idx]
-            mb_old_logp_c = self.logprobs_c[idx]
-            # F8: rollout-stored action masks (all-ones = unmasked fallback).
-            # getattr for trainers built before _patch_trainer_with_hybrid_aim
-            # ran (shouldn't happen in prod; keeps direct-call tests working).
-            _masks_buf = getattr(self, "action_masks", None)
-            mb_masks = _masks_buf[idx] if _masks_buf is not None else None
-
-            # ── Rung 0 §2.2: participating mask for this minibatch ───────────
-            # Two dtypes on purpose (see the masked_* helpers' contract):
-            # mb_part is BOOL for indexing, mb_part_f/flat_part are the FLOAT
-            # weights the reductions take. flat_part is for the flat (S*T,)
-            # tensors (entropy, ratio_d/ratio_c, per-head entropies);
-            # mb_part_f for the [S, T]-shaped ones (v_loss, value writeback).
-            # Shapes: mb_part / mb_part_f are [S, T]; flat_part is (S*T,).
-            mb_part = self.participating[idx]
-            mb_part_f = mb_part.to(torch.float32)
-            n_part = mb_part_f.sum()
-            # Empty-minibatch tripwire: only reachable with non-uniform segment
-            # sampling (prio_alpha != 0 or a marked event segment) that happens
-            # to draw an all-parked minibatch — see spec §2.2. Skipping is the
-            # right call (every reduction below would be 0/0), but it must be
-            # VISIBLE, so it is counted into losses/empty_minibatches rather
-            # than silently swallowed. The `continue` sits before _mb_run += 1,
-            # so the gh#90 divisor keeps counting only executed minibatches.
-            if n_part.item() == 0:
-                _empty_mb += 1
-                # No zero_grad here: accumulate_minibatches is always 1 today,
-                # so no partial gradient can be pending. Revisit if that changes.
-                continue
-            flat_part = mb_part_f.reshape(-1)
-
-            # ── VALUE TARGET NORMALISATION ─────────────────────────────────
-            # Normalize returns before value regression.  The value head learns
-            # to predict normalized targets; advantages are unaffected.
-            mb_returns_norm = _normalize_returns(mb_returns, mb_part)
-            # Also normalize the stored baseline values so clipping stays valid
-            mb_values_norm = (mb_values - _ret_mean) / (_ret_var + 1e-8).sqrt()
-            # ──────────────────────────────────────────────────────────────
-
-            profile("train_forward", epoch)
-            if not config["use_rnn"]:
-                mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
-
-            # LSTM-BPTT fix: lstm_h/lstm_c None → zero initial state, which
-            # is exact (each stored segment began at evaluate()'s zeroed
-            # state — see Dust2Policy.forward doc). terminals drives the
-            # mid-segment done-reset inside _lstm_bptt so the training
-            # forward replicates the rollout's (1-done)*state masking.
-            state = dict(
-                action=mb_actions,
-                lstm_h=None,
-                lstm_c=None,
-                terminals=mb_terminals,
-            )
-
-            # Batch 3 (T5): hybrid PPO update — per-factor clipped loss
-            # (Fan et al. IJCAI 2019). The helper does the policy forward
-            # pass (returning mu_aim/log_std + value) and assembles the
-            # clipped policy loss with INDEPENDENT discrete and continuous
-            # ratios. F16 (2026-07-06 adversarial review): it now also
-            # returns the logits it computed, killing the redundant no-grad
-            # diagnostic forward that used to run here per minibatch
-            # (halves update-forward cost). Post-F8 the returned logits are
-            # MASKED, so the per-head entropy diagnostics below report the
-            # true sampled distribution.
-            (pg_loss, entropy, newvalue, newlogprob, ratio_d, ratio_c, logits) = _hybrid_ppo_loss(
-                self.policy,
-                mb_obs,
-                mb_actions,
-                mb_cont_actions,
-                mb_old_logp_d,
-                mb_old_logp_c,
-                mb_advantages,
-                clip_coef,
-                state,
-                mb_prio=mb_prio,
-                mb_masks=mb_masks,
-                mb_part=mb_part_f,
-                aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
-                aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
-            )
-            # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
-            # was used by downstream diagnostics; T5 dropped that consumer
-            # (mb_actions is the canonical stored discrete action). No
-            # rebinding here — the variable is unused after this point.
-            # (F16: the former no-grad diagnostic re-forward that lived here
-            # is gone — `logits` now comes straight from _hybrid_ppo_loss.)
-
-            profile("train_misc", epoch)
-            newlogprob = newlogprob.reshape(mb_logprobs.shape)
-            logratio = newlogprob - mb_logprobs
-            # Batch 3: keep the joint ratio for KL/clipfrac diagnostics so the
-            # existing log surface (approx_kl, clipfrac, importance) is
-            # backwards-compatible. ratio_d is what gets stored in self.ratio
-            # because compute_puff_advantage was tuned for the discrete-head
-            # importance ratio in pre-Batch-3 runs; substituting ratio_d here
-            # preserves vtrace's behaviour.
-            ratio = logratio.exp()
-            # Batch 3 (T5): _hybrid_ppo_loss returns flat (B*T,) ratios.
-            # self.ratio is (segments, bptt_horizon); reshape ratio_d to
-            # match so the indexed-write writes the right shape. ratio
-            # (joint) is already reshaped by mb_logprobs.shape on the
-            # previous line.
-            self.ratio[idx] = ratio_d.detach().reshape(mb_logprobs.shape)
-
-            with torch.no_grad():
-                # Rung 0 §2.2: every diagnostic below is a mean over rows, so
-                # every one of them is masked. _pm is mb_part_f reshaped to the
-                # joint ratio's [S, T] layout; ratio_d/ratio_c are flat, hence
-                # flat_part. An unmasked KL here would be diluted 5× at
-                # n_active=1 and the target_kl early-stop would never fire.
-                _pm = mb_part_f.reshape(logratio.shape)
-                old_approx_kl = masked_mean(-logratio, _pm)
-                approx_kl = masked_mean((ratio - 1) - logratio, _pm)
-                clipfrac = masked_mean(((ratio - 1.0).abs() > config["clip_coef"]).float(), _pm)
-                # Observe-only (spec 2026-08-15 §3.4): same formula as the
-                # joint `clipfrac` above, split by the per-factor ratios
-                # `_hybrid_ppo_loss` already returns. `.item()` into the
-                # logging dict only — NEVER add these to the `loss` tensor
-                # (they are diagnostics, not a training signal). Last-
-                # minibatch-only is forbidden; they accumulate like
-                # `clipfrac` and ride the existing `_mb_run` divisor.
-                clipfrac_d = masked_mean(((ratio_d - 1.0).abs() > config["clip_coef"]).float(),
-                                         flat_part)
-                clipfrac_c = masked_mean(((ratio_c - 1.0).abs() > config["clip_coef"]).float(),
-                                         flat_part)
-
-            # Early stopping (gh#90): a KL trip finishes the CURRENT epoch
-            # (this minibatch included — matches standard PPO's post-epoch
-            # check) and stops at the next epoch boundary via the loop-top
-            # gate, instead of the old immediate mid-pass break.
-            if target_kl is not None and approx_kl.item() > target_kl:
-                _kl_stop = True
-
-            # Batch 3 (T5): pg_loss already computed by _hybrid_ppo_loss above
-            # via per-factor clipping (the pre-Batch-3 single-ratio block
-            # would over-clip — spec L8 decision). Advantage normalization +
-            # the mb_prio importance weight now live INSIDE _hybrid_ppo_loss
-            # (finding 1, 2026-07-06 adversarial review); the orphaned
-            # normalization stub and the discarded per-minibatch
-            # compute_puff_advantage recompute that used to sit here were
-            # dead compute and have been removed.
-
-            newvalue = newvalue.view(mb_returns_norm.shape)
-            v_loss_unclipped = (newvalue - mb_returns_norm)**2
-            if vf_clip is not None:
-                v_clipped = mb_values_norm + torch.clamp(newvalue - mb_values_norm, -vf_clip,
-                                                         vf_clip)
-                v_loss_clipped = (v_clipped - mb_returns_norm)**2
-                v_loss = 0.5 * masked_mean(torch.max(v_loss_unclipped, v_loss_clipped), mb_part_f)
-            else:
-                v_loss = 0.5 * masked_mean(v_loss_unclipped, mb_part_f)
-
-            # Rung 0 §2.2: the entropy the SAC-α dual loop and the collapse
-            # floor react to must be the participating rows' entropy. Parked
-            # rows are noop-masked (exactly one valid bin per head ⇒ discrete
-            # entropy 0), so an unmasked mean at n_active=1 reads ~1/5 of the
-            # truth and would peg alpha at the floor forever.
-            current_entropy = masked_mean(entropy, flat_part)
-            entropy_unmasked = entropy.mean()          # diagnostic only (losses/entropy_unmasked)
-
-            # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
-            alpha = log_alpha.exp()
-            # Task 9A: use the scheduled target_entropy (recomputed at top of
-            # this train() call) instead of the static fallback. _t9_target_entropy
-            # is a Python float; .detach() on a tensor minus a float is fine —
-            # autograd treats the float as a constant.
-            # alpha_loss is computed UNCONDITIONALLY (the logging block below
-            # accumulates it every minibatch — spec finding 7); during the
-            # warm-start GRACE phase only the optimizer step is skipped, so
-            # log_alpha stays at its operating point (see phase-resolution
-            # comment above for why that matters).
-            alpha_loss = (log_alpha * (current_entropy - _t9_target_entropy).detach()).mean()
-            if trainer._batch1_warmstart_phase != WS_GRACE:
-                alpha_optimizer.zero_grad()
-                alpha_loss.backward()
-                alpha_optimizer.step()
-
-            effective_alpha = alpha.detach()
-            if trainer._batch1_warmstart_phase == WS_GRACE:
-                # grace: entropy pressure ceilinged (default 0.0 — pure
-                # PPO+reward; the knob exists for a nonzero-alpha rerun if
-                # the collapse watch fires)
-                effective_alpha = torch.clamp(effective_alpha,
-                                              max=float(config.get("warmstart_alpha_ceiling", 0.0)))
-            # Entropy floor: prevent collapse. Gated off for the ENTIRE
-            # warm-start window (grace+ramp): the BC policy lives below the
-            # floor by design, and re-arming mid-ramp would jump effective
-            # alpha ~1e-3 -> 0.5 in one minibatch (spec finding 2). It re-arms
-            # at ramp_end — a plotted boundary.
-            if _ws_floor_active and current_entropy.item() < entropy_floor:
-                effective_alpha = torch.clamp(effective_alpha, min=0.5)
-                _floor_fires += 1
-
-            entropy_loss = -effective_alpha * current_entropy
-            # ──────────────────────────────────────────────────────────────
-
-            loss = pg_loss + config["vf_coef"] * v_loss + entropy_loss
-            self.amp_context.__enter__()
-
-            # Denormalize before writing back so advantage computation stays in raw scale
-            std = (_ret_var + 1e-8).sqrt()
-            # Rung 0 §2.2: keep parked rows at exactly 0 in the value buffer —
-            # the rollout wrote 0 there and the next epoch's GAE reads it.
-            self.values[idx] = (newvalue.detach().float() * std + _ret_mean) * mb_part_f
-
-            # ── PER-HEAD ENTROPY ──────────────────────────────────────────
-            with torch.no_grad():
-                _dists = [torch.distributions.Categorical(logits=lgt) for lgt in logits]
-                # Batch 3: head names sourced from _action_spec.ACTION_HEAD_NAMES
-                # (auto-gen from cs2_types.h). Pre-Batch-3 hardcoded "aim" here;
-                # now removed since aim is a continuous head emitted on a separate
-                # path. zip(strict=True) catches any future drift between
-                # _action_spec and the policy logits list.
-                _head_names = list(ACTION_HEAD_NAMES)
-                for _hi, (_hn, _hd) in enumerate(zip(_head_names, _dists, strict=True)):
-                    # flat_part: _hd.entropy() is flat (S*T,), like `entropy`.
-                    losses[f"entropy/{_hn}"] += masked_mean(_hd.entropy(), flat_part).item()
-            losses["entropy/total"] += current_entropy.item()
-            # ──────────────────────────────────────────────────────────────
-
-            # Logging
-            profile("train_misc", epoch)
-            losses["policy_loss"] += pg_loss.item()
-            losses["value_loss"] += v_loss.item()
-            losses["entropy"] += current_entropy.item()
-            # Rung 0 §2.2: the same mean WITHOUT the mask. Diagnostic only —
-            # its ratio to losses/entropy is the live check that the mask is
-            # actually doing something: the expected ratio is the PARTICIPATING
-            # ROW FRACTION, which is ≈ n_active/TEAM_SIZE under --opponent self
-            # (both teams contribute n_active rows) but ≈ n_active/(2*TEAM_SIZE)
-            # under --opponent noop, where only the hero team participates.
-            # Reading the self-mode number on a noop run looks like a mask that
-            # is masking twice as much as it should.
-            losses["entropy_unmasked"] += entropy_unmasked.item()
-            losses["alpha"] += alpha.detach().item()
-            losses["alpha_loss"] += alpha_loss.item()
-            losses["old_approx_kl"] += old_approx_kl.item()
-            losses["approx_kl"] += approx_kl.item()
-            losses["clipfrac"] += clipfrac.item()
-            losses["clipfrac_d"] += clipfrac_d.item()
-            losses["clipfrac_c"] += clipfrac_c.item()
-            losses["importance"] += masked_mean(ratio, _pm).item()
-            # gh#90: count EXECUTED minibatches — the divisor for every
-            # accumulated losses/* above and the per-head entropy block.
-            # Incremented here (with the stats) so a future early-`continue`
-            # placed above the logging block can't desync count from sums.
-            _mb_run += 1
-
-            # Learn on accumulated minibatches
-            profile("learn", epoch)
-            # ── Batch 3 (T5) NaN guard ─────────────────────────────────────
-            # The continuous Gaussian aim head can emit non-finite μ / log_std
-            # during pathological early training (e.g. an obs that drives the
-            # tanh into hard saturation while σ explores LOG_STD_MAX — the
-            # log-prob of a far-tail sample under near-zero σ blows up).
-            # Skip optimizer.step() with a throttled stdout warning and
-            # zero out grads so the next minibatch starts from a clean slate.
-            # Do NOT raise — one bad minibatch shouldn't kill a run. `continue`
-            # is correct here: the enclosing `for mb in range(...)` is the
-            # PPO update loop. There is no nested loop between this check and
-            # that for-statement (verified before landing T5).
-            if not torch.isfinite(loss).all():
-                _now = time.time()
-                _last = getattr(self, '_last_nan_warn_t', 0.0)
-                if _now - _last > 60.0:
-                    print(f"[hybrid_aim NaN guard] non-finite loss "
-                          f"({float(loss.detach())}); skipping optimizer step")
-                    self._last_nan_warn_t = _now
-                self.optimizer.zero_grad(set_to_none=True)
-                continue
-
-            # ── TAG diagnostic hook (spec 2026-08-13 §4.2/§4.3) ────────────
-            # mb0 = pre-update on-policy regime. mbL = last EXECUTED
-            # minibatch: total_minibatches-1 normally, or the final mb of
-            # the epoch the KL gate tripped on (the loop-top gate exits at
-            # the next epoch boundary) — conditioning mbL on the gate NOT
-            # tripping would select against the late-update regime it
-            # exists to observe. Placed AFTER the NaN guard (never measure
-            # a batch the update skips) and BEFORE loss.backward() (.grad
-            # still untouched). Results stash on the TRAINER — see
-            # _inject_tag_metrics for the two routing constraints.
-            if config.get("tag_diagnostic", False) \
-                    and epoch % max(1, int(config.get("tag_every", 5))) == 0:
-                _tag_mb0 = (mb == 0)
-                _tag_mbL = (mb == self.total_minibatches - 1
-                            or (_kl_stop and (mb + 1) % _mbs_per_epoch == 0))
-                if _tag_mb0 or _tag_mbL:
-                    _tag = tag_grad_cossim(
-                        self.policy,
-                        mb_obs=mb_obs,
-                        mb_actions=mb_actions,
-                        mb_cont_actions=mb_cont_actions,
-                        mb_old_logp_d=mb_old_logp_d,
-                        mb_old_logp_c=mb_old_logp_c,
-                        mb_advantages=mb_advantages,
-                        clip_coef=clip_coef,
-                        state=state,
-                        mb_prio=mb_prio,
-                        mb_masks=mb_masks,
-                        mb_returns_norm=mb_returns_norm,
-                        idx=idx,
-                        mb_label="mb0" if _tag_mb0 else "mbL",
-                        mb_part=mb_part_f,
-                        aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
-                        aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
-                    )
-                    if getattr(trainer, "_tag_metrics", None) is None:
-                        trainer._tag_metrics = {}
-                    trainer._tag_metrics.update(_tag)
-                    if not _tag_mb0:
-                        trainer._tag_metrics["tag/mbL_index"] = float(mb)
-                    trainer._tag_metrics["tag/selfplay_active"] = float(
-                        getattr(self, "_selfplay_used_past", False))
-            # ──────────────────────────────────────────────────────────────
-            loss.backward()
-            if (mb + 1) % self.accumulate_minibatches == 0:
-                # Task 9C: capture pre-clip grad norm. clip_grad_norm_ returns
-                # the total norm computed BEFORE clipping (PyTorch contract,
-                # see torch.nn.utils.clip_grad_norm_ docs). Storing it on the
-                # trainer makes it available to the log layer; the .item()
-                # call forces a host sync which is fine here because the
-                # caller already syncs via .item() on losses below.
-                _t9_grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(),
-                                                               config["max_grad_norm"])
-                trainer._batch1_grad_norm = float(_t9_grad_norm)
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-
-        # gh#90: normalize the accumulated losses/* sums by the EXECUTED
-        # minibatch count. Must run BEFORE the scalar (non-accumulated) keys
-        # below (explained_variance, ret_mean, ...) are inserted — dividing
-        # those would corrupt them. minibatches_run itself is added after
-        # the division for the same reason. max(_mb_run, 1) is pure belt-and-
-        # braces: the epoch-boundary gate guarantees epoch 0 completes.
-        for _lk in list(losses):
-            losses[_lk] /= max(_mb_run, 1)
-        losses["minibatches_run"] = _mb_run
-
-        # Rung 0 §2.2 counters/absolutes — inserted AFTER the divisor (gh#90
-        # trap: anything written before it is silently scaled by 1/_mb_run).
-        losses["entropy_floor_fires"] = float(_floor_fires)
-        losses["empty_minibatches"] = float(_empty_mb)
-        losses["participating_rows"] = float(self.participating.sum().item())
-
-        # Warm-start metrics are ABSOLUTE values — inserted after the gh#90
-        # divisor loop above, alongside minibatches_run, or they'd be divided
-        # by the executed-minibatch count (the exact bug class gh#90 fixed).
-        if config.get("warmstart_entropy", False):
-            losses["warmstart_phase"] = trainer._batch1_warmstart_phase
-            # h0 is captured on the mode's first update, when entropy is
-            # healthy (BC policy ~1.8 nats) — the >1e-9 guard exists because
-            # total entropy (discrete + Gaussian differential) CAN go
-            # non-positive in the collapse regime, and a non-positive
-            # denominator would flip the watch's sign. If capture is ever
-            # skipped, say so once instead of silently disabling the watch.
-            if trainer._batch1_warmstart_h0 is None:
-                if losses["entropy"] > 1e-9:
-                    trainer._batch1_warmstart_h0 = float(losses["entropy"])
-                else:
-                    print(f"[Train] WARN warm-start: first-update entropy "
-                          f"{losses['entropy']:.3f} <= 0 — h_over_h0 collapse "
-                          f"watch cannot arm (will retry next update).")
-            if trainer._batch1_warmstart_h0:
-                losses["warmstart_h_over_h0"] = losses["entropy"] / trainer._batch1_warmstart_h0
-                # collapse watch (spec finding 6): grace disables BOTH
-                # anti-collapse guards (floor clamp + alpha), so shout —
-                # throttled to every 20 epochs — if H halves.
-                if (trainer._batch1_warmstart_phase == WS_GRACE
-                        and losses["warmstart_h_over_h0"] < 0.5
-                        and self.epoch - trainer._batch1_warmstart_warn_epoch >= 20):
-                    trainer._batch1_warmstart_warn_epoch = self.epoch
-                    print(f"[Train] WARN warm-start grace: entropy at "
-                          f"{losses['warmstart_h_over_h0']:.2f} of its start value "
-                          f"({losses['entropy']:.3f} nats) with alpha ceilinged and the "
-                          f"entropy floor disabled — collapse watch (spec finding 6).")
-        # Anchor source: maintained EVERY update, unconditionally (mode may be
-        # enabled on a later resume of this process in tests; cost is one float).
-        trainer._batch1_last_entropy_mean = float(losses["entropy"])
-
-        # Reprioritize experience
-        profile("train_misc", epoch)
-        if config["anneal_lr"]:
-            self.scheduler.step()
-
-        # Rung 0 §2.2: whole-buffer EV over PARTICIPATING rows only. Parked
-        # rows have value 0 and advantage 0, i.e. a perfectly-predicted
-        # constant — leaving them in would inflate EV toward 1 by exactly the
-        # parked fraction and make the critic look healthy at n_active=1
-        # regardless of what it learned.
-        losses["explained_variance"] = masked_explained_variance(
-            self.values.flatten(),
-            advantages.flatten() + self.values.flatten(), self.participating.flatten())
-        losses["ret_mean"] = _ret_mean.item()
-        losses["ret_std"] = (_ret_var + 1e-8).sqrt().item()
-        # Observe-only persist (spec 2026-08-15 §3.4). Task 8 already
-        # computes `_batch1_event_oversample_fraction` once per train()
-        # call; older comments that say the wandb/log layer already
-        # reports it were stale. MUST sit after the gh#90 divisor loop —
-        # this is a per-call scalar like ret_mean, not a minibatch sum.
-        # Expected ~0.0 while #100 keeps include_step_stats_in_info=False
-        # (no event mask); that zero is the production signal. The
-        # KL-break harness turns the flag on, so its test must not
-        # assert == 0.0.
-        losses["event_oversample_fraction"] = float(
-            getattr(self, "_batch1_event_oversample_fraction", 0.0))
-        losses["log_alpha"] = log_alpha.item()
-
-        # Task 9C: expose per-train()-call metrics on the trainer for the
-        # wandb log layer. Captured here (not inside the minibatch loop)
-        # because the log layer reports one value per train() call, not
-        # per-minibatch — and effective_alpha / log_alpha are last-write-
-        # wins after the inner loop anyway.
-        # PITFALL: effective_alpha is bound inside the minibatch loop;
-        # Python keeps the last bound value visible at this scope so
-        # reading it here works in the happy path. Since gh#90 the
-        # target_kl early-stop can only exit at an epoch boundary (epoch 0
-        # always completes), so the old "break on mb=0 leaves
-        # effective_alpha unbound" NameError is structurally impossible —
-        # the try/except below stays as defense-in-depth only. The NaN
-        # guard's `continue` can still skip the optimizer-step site, so
-        # _batch1_grad_norm keeps its pre-seeded default in that edge.
-        trainer._batch1_log_alpha = float(log_alpha.item())
-        # effective_alpha may be unbound this call if target_kl early-broke
-        # on mb=0 — leave the pre-initialised trainer attr (set in the patch
-        # block above) intact in that case rather than crashing.
-        try:
-            trainer._batch1_effective_alpha = float(effective_alpha.detach().item())
-        except (NameError, UnboundLocalError):
-            pass
-        # Rung 0 §2.2: log the alpha the loss ACTUALLY used (post ceiling /
-        # post floor clamp), not just the raw log_alpha.exp() above — with the
-        # floor now counted by entropy_floor_fires, the pair says whether the
-        # collapse guard is holding the run up. Absolute value, so it sits here
-        # after the gh#90 divisor, and it reads the trainer attr rather than
-        # the loop-local so the KL-early-break edge cannot NameError.
-        losses["effective_alpha"] = float(trainer._batch1_effective_alpha)
-        # Welford std exposure: guard with getattr+fallback because
-        # _patch_trainer_with_selfplay (Task 6c, where these get attached)
-        # may not have been applied — preserves the no-selfplay code path.
-        _w_combat = getattr(trainer, "_batch1_welford_combat", None)
-        trainer._batch1_std_combat = (float(_w_combat.std()) if _w_combat is not None else 1.0)
-        _w_obj = getattr(trainer, "_batch1_welford_objective", None)
-        trainer._batch1_std_objective = (float(_w_obj.std()) if _w_obj is not None else 1.0)
-        _w_pos = getattr(trainer, "_batch1_welford_positional", None)
-        trainer._batch1_std_positional = (float(_w_pos.std()) if _w_pos is not None else 1.0)
-
-        profile.end()
-        logs = None
-        self.epoch += 1
-        # Rung 0 §2.2: global_step is in PARTICIPATING units, so it must be
-        # compared against participating_timesteps (= the user's --timesteps),
-        # not against total_timesteps (the TEAM_SIZE/n_active-scaled raw-row
-        # budget PufferLib's epoch cap needs). .get() keeps trainers built from
-        # a pre-Rung-0 config.json working. The epoch clause is load-bearing,
-        # not belt-and-braces: total_epochs floor-divides, so at the defaults
-        # (--timesteps 10M, --num_envs 256 ⇒ batch 163840, n_active=1 ⇒ raw
-        # budget 50M) the 305 epochs PufferLib allows collect only
-        # 305 × 163840 / 5 = 9,994,240 participating steps — the first clause
-        # would never fire and the last epoch would never checkpoint.
-        done_training = (self.global_step >= config.get("participating_timesteps",
-                                                        config["total_timesteps"])
-                         or self.epoch >= self.total_epochs)
-        if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
-            # R0-A: episode count for the window, written INTO self.stats so
-            # mean_and_log (pufferl.py mean_and_log) emits environment/episodes
-            # through the logger too. DECLARED DEVIATION from spec §3 R0-A
-            # ("inject after mean_and_log returns"): the logger call is inside
-            # mean_and_log, so the post-hoc form would reach metrics.jsonl
-            # only. `.get` — a defaultdict(list) `[]` read would insert an
-            # empty list and np.mean([]) → NaN. Unit: terminal infos (rounds),
-            # one per env per round regardless of n_active_per_team.
-            self.stats["episodes"] = [float(len(self.stats.get("kills_t", ())))]
-            logs = self.mean_and_log()
-            self.losses = losses
-            self.print_dashboard()
-            self.stats = defaultdict(list)
-            self.last_log_time = time.time()
-            self.last_log_step = self.global_step
-            profile.clear()
-
-        if self.epoch % config["checkpoint_interval"] == 0 or done_training:
-            self.save_checkpoint()
-            self.msg = f"Checkpoint saved at update {self.epoch}"
-
-        return logs
-
-    # Bind the patched method to the specific trainer instance
-    trainer.train = types.MethodType(_train_with_return_norm, trainer)
-    print("[Train] Value target normalization enabled (running mean/std of returns).")
-    return trainer
-
-
 # ── SECTION: R0-I fixed-baseline evaluation hooks ─────────────────────────
 
 
@@ -4139,140 +2028,6 @@ def elimination_only_win_rates(logs):
         float(logs.get("environment/winner_ct", 0.0)) -
         float(logs.get("environment/timed_out", 0.0)))
     return wt, wct
-
-
-class ScheduledEval:
-    """Runs the fixed-baseline eval every `interval` epochs and delivers its
-    keys on the next LOGGED metrics row.
-
-    WHY a buffer: PuffeRL's train() throttles mean_and_log to once per 0.25 s
-    (logs is None on the other epochs). A naive `if isinstance(logs, dict)
-    and epoch % interval == 0` silently skips the eval whenever the eval epoch
-    happens to be throttled — on a fast CPU box that is most epochs. So the
-    eval decision is made on `trainer.epoch` alone, and the result waits in
-    `pending` until a dict row comes through. `eval/epoch` stamps the epoch
-    the numbers were measured at (may lag the row's epoch by a few).
-
-    PITFALL: call after_train() on EVERY epoch, outside any `isinstance(logs,
-    dict)` guard, or the buffer never drains.
-    """
-
-    def __init__(self, evaluator, interval, policy, device):
-        if int(interval) <= 0:
-            raise ValueError(f"ScheduledEval interval must be >= 1, got {interval}")
-        self.evaluator = evaluator
-        self.interval = int(interval)
-        self.policy = policy
-        self.device = device
-        self.pending = {}
-
-    def after_train(self, trainer, logs):
-        if trainer.epoch % self.interval == 0:
-            t0 = time.time()
-            self.pending.update(self.evaluator.evaluate(self.policy, self.device))
-            self.pending["eval/epoch"] = int(trainer.epoch)
-            self.pending["eval/wall_s"] = time.time() - t0
-        if isinstance(logs, dict) and self.pending:
-            logs.update(self.pending)
-            self.pending = {}
-
-    def close(self):
-        self.evaluator.env.close()
-
-
-# ── SECTION: Game Metrics Dashboard ───────────────────────────────────────
-
-
-def compute_game_metrics(logs):
-    """Extract and normalize game metrics from the training logs dict.
-
-    The C env exposes per-episode stats as ``environment/<key>`` entries in
-    the logs dict returned by PufferLib's ``mean_and_log()``.  Values are
-    already averaged over the collection window, so most just need re-keying
-    and minor arithmetic.
-
-    Always-present ``game/*`` keys (already in today's terminal info) are
-    re-keyed with ``_get(..., default=0.0)``. ``game/plant_tick`` and
-    ``game/win_by_*`` are presence-gated: emit them only when the source
-    key already exists in ``logs``. A synthetic 0.0 would make old log
-    dicts look new-format.
-
-    Returns a flat dict with ``game/*`` and ``actions/*`` keys ready to be
-    merged back into logs for W&B or stdout.
-    """
-    if not isinstance(logs, dict):
-        return {}
-
-    def _get(key, default=0.0):
-        return logs.get(f"environment/{key}", logs.get(key, default))
-
-    winner_t = _get("winner_t", 0.0)
-    winner_ct = _get("winner_ct", 0.0)
-    timed_out = _get("timed_out", 0.0)
-    kills_t = _get("kills_t", 0.0)
-    kills_ct = _get("kills_ct", 0.0)
-    bomb_planted = _get("bomb_planted", 0.0)
-    round_length = _get("round_length", 0.0)
-
-    # win rates: already normalised per-episode by PufferLib's mean_and_log
-    game_metrics = {
-        "game/win_rate_t": winner_t,
-        "game/win_rate_ct": winner_ct,
-        "game/timeout_rate": timed_out,
-        "game/kills_per_episode": kills_t + kills_ct,
-        "game/bomb_plant_rate": bomb_planted,
-        "game/avg_episode_length": round_length,
-    }
-
-    # Always-present splits/rewards: these keys already land in logs today
-    # via _build_terminal_info. game/reward/win is NOT emitted (#128, R0-A):
-    # C reward_win is the cross-team sum and nets ~0 by the zero-sum
-    # identity; the one-sided game/reward/win_t|win_ct below carry the signal.
-    game_metrics["game/defuse_rate"] = _get("bomb_defused", 0.0)
-    game_metrics["game/kills_t"] = kills_t
-    game_metrics["game/kills_ct"] = kills_ct
-    for src, dst in (
-        ("reward_kills", "game/reward/kills"),
-        ("reward_deaths", "game/reward/deaths"),
-        ("reward_bomb", "game/reward/bomb"),
-        ("reward_pbrs", "game/reward/pbrs"),
-        ("reward_shots", "game/reward/shots"),
-        ("reward_survival", "game/reward/survival"),
-        ("reward_inaction", "game/reward/inaction"),
-    ):
-        game_metrics[dst] = _get(src, 0.0)
-
-    # R0-A: combat counters are window MEANS per episode (mean_and_log).
-    for k in ("shots_fired", "shots_with_enemy_in_los", "shots_facing_enemy", "shots_on_target",
-              "shots_hit", "shots_stance_blocked", "damage_dealt", "mutual_vis_pair_ticks",
-              "agent_ticks_with_visible_enemy"):
-        game_metrics[f"game/{k}"] = _get(k, 0.0)
-    game_metrics["game/reward/win_t"] = _get("reward_win_t", 0.0)
-    game_metrics["game/reward/win_ct"] = _get("reward_win_ct", 0.0)
-    # Ratio of window means = conditional mean over episodes where a pair
-    # coexisted. A max(·,1) guard would silently return the unconditional
-    # mean — keep the explicit zero-valid branch.
-    _med_sum = _get("min_enemy_distance_sum", 0.0)
-    _med_valid = _get("min_enemy_distance_valid", 0.0)
-    game_metrics["game/min_enemy_distance"] = (_med_sum / _med_valid) if _med_valid > 0 else 0.0
-    game_metrics["game/min_enemy_distance_valid_frac"] = _med_valid
-
-    # Presence-gate plant_tick / win_by_*: a synthetic 0.0 would make old
-    # log dicts look new-format. Do not _get(..., default=0.0) these three.
-    def _maybe(src, dst):
-        if f"environment/{src}" in logs or src in logs:
-            game_metrics[dst] = _get(src)
-
-    _maybe("plant_tick", "game/plant_tick")
-    _maybe("win_by_detonation", "game/win_by_detonation")
-    _maybe("win_by_defuse", "game/win_by_defuse")
-
-    # actions/use_at_site_frac — logged directly by the C env if available
-    use_at_site = _get("use_at_site_frac", None)
-    if use_at_site is not None:
-        game_metrics["actions/use_at_site_frac"] = use_at_site
-
-    return game_metrics
 
 
 # ── SECTION: Dead Run Detector ─────────────────────────────────────────────
@@ -4335,43 +2090,6 @@ def check_spawn_counts(vecenv, map_name: str) -> tuple[int, int]:
     if map_name == "arena-duel" and (n_t, n_ct) != (4, 4):
         raise RuntimeError(f"ARENA_DUEL_V1 expects 4 T + 4 CT spawn areas, env has {n_t} + {n_ct}")
     return n_t, n_ct
-
-
-def pin_pitch_for_map(map_data) -> int:
-    """R0-E.2 (#131): 1 iff the map is FLAT (every area centroid shares one z).
-
-    WHAT: pure geometry test on the MapData the envs will actually run on.
-    ``map_data=None`` means "the cs2 nav map" (exactly what make_env(map_data=
-    None) loads, via the same _ENV_CACHE), so None is resolved by LOADING that
-    map — never by treating the sentinel as a map property.
-
-    WHY: a flat map has nothing to aim up/down at, so pitch is pure noise
-    (spec §R0-E.2) and gets pinned; a map with elevation must keep the pitch
-    dim trainable. Deciding on the sentinel (`map_data is None` ⇒ flat) was
-    the Task 9 review's Critical #1: the CLI `--dust2` path passes None, so
-    the value MUST come from the loaded map, not from the marker.
-
-    PITFALL: the in-sim dust2 (map.make_cs2_map, "verticality deferred")
-    zero-fills centroids_z, so today this returns 1 for dust2 — by spec (plan
-    §R0-E.2: pinned on flat maps incl. dust2). There is NO name-based table:
-    the `--map` path (build_map_data → resolve_pin_pitch) and the `--dust2`
-    path both end here. When real dust2 verticality lands this flips to 0 by
-    itself and every dust2 resume is refused by the config guard (pin_pitch is
-    not allowlisted) — the intended tripwire.
-    """
-    md = map_data
-    if md is None:
-        # Same cache key make_env uses, so train() never loads the nav twice.
-        import nav
-        from c_env.cs2_env import _ENV_CACHE
-        from map import make_cs2_map
-        key = (nav.NAV_PATH, nav.CACHE_PATH)
-        md = _ENV_CACHE.get(key)
-        if md is None:
-            md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)
-            _ENV_CACHE[key] = md
-    z = np.asarray(md.centroids_z, dtype=np.float32)
-    return int(float(z.max() - z.min()) == 0.0)
 
 
 def resolve_pin_pitch(args, verbose: bool = True) -> int:
@@ -5370,463 +3088,6 @@ def _hybrid_sample_logits(policy_out,
     return action, continuous_action, log_prob_d, log_prob_c, entropy_d, entropy_c
 
 
-def _aim_dim_weight(aim_dim_mask, mu_aim):
-    """(AIM_DIM,) weight for the per-dim Gaussian terms (R0-E.2, #131).
-
-    WHAT: ``aim_dim_mask`` moved to mu_aim's device/dtype, or all-ones when
-    None. Shared by _hybrid_sample_logits and _hybrid_ppo_loss so the rollout
-    and the update can never disagree on which dims are live — that
-    disagreement would be an importance-ratio bug no single-site test sees.
-    PITFALL: returns ones (not None) on the None path so callers can multiply
-    unconditionally; the multiply by ones is exact in fp32.
-    """
-    import torch
-
-    if aim_dim_mask is None:
-        return torch.ones(mu_aim.shape[-1], device=mu_aim.device, dtype=mu_aim.dtype)
-    return aim_dim_mask.to(device=mu_aim.device, dtype=mu_aim.dtype)
-
-
-def _hybrid_ppo_loss(policy,
-                     mb_obs,
-                     mb_actions,
-                     mb_cont_actions,
-                     mb_old_logp_d,
-                     mb_old_logp_c,
-                     mb_advantages,
-                     clip_coef,
-                     state,
-                     mb_prio=None,
-                     mb_masks=None,
-                     return_pg_rows=False,
-                     mb_part=None,
-                     aim_dim_mask=None,
-                     aim_entropy_bonus=True):
-    """Per-factor PPO clipped loss (H-PPO, Fan et al. IJCAI 2019).
-
-    aim_dim_mask (R0-E.2): same per-dim weight the rollout sampler used
-    (policy.aim_dim_mask) — MUST match, or ratio_c ≠ 1 for an unchanged
-    policy. None ⇒ all-ones (pre-R0-E behaviour).
-    aim_entropy_bonus (R0-E.4, #131): False ⇒ the returned ``entropy`` is the
-    DISCRETE entropy only, so the entropy objective (and its α dual loop)
-    stops pushing aim σ to the cap. The Gaussian log-prob still enters
-    ratio_c either way — only the bonus is switched off.
-
-    THE CORE OF T5. Re-runs the policy on mb_obs with the stored
-    mb_actions / mb_cont_actions, computes new log-probs split into
-    discrete and continuous halves, and applies the PPO clip
-    INDEPENDENTLY to each half before summing. This is the spec L8
-    decision: discrete head saturating doesn't have to drag the
-    continuous head's gradient through clipping (and vice versa).
-
-    Returns
-    -------
-    pg_loss : scalar — sum of clipped discrete + clipped continuous losses.
-    entropy : (B,) — joint factorised entropy (same shape as old logprobs).
-    new_value : (B, 1) — fresh value estimate for the value-loss path.
-    new_logp_total : (B,) — sum of new discrete + new continuous log-probs;
-        used for KL/clipfrac diagnostics in the caller.
-    ratio_d, ratio_c : (B,) — exposed so the caller can attribute clipfrac
-        per factor and substitute ratio_d into the existing self.ratio
-        slot for vtrace advantages (spec carry-forward: keep diagnostics
-        backwards-compatible by using the discrete ratio there).
-    logits_list : list of 7 (B, head_size) tensors — the per-head logits
-        this loss was computed from (F16: post-mask when mb_masks is given,
-        so per-head entropy diagnostics reflect the TRUE sampled
-        distribution). Returned so the caller doesn't need a second full
-        forward pass for diagnostics — that redundant no-grad forward used
-        to double the update-forward cost. Autograd-attached; consume under
-        torch.no_grad() and don't hold past backward() if memory matters.
-
-    LSTM-BPTT fix: `state` must carry `terminals` (the minibatch's
-    (segments, bptt_horizon) done flags) so the policy forward runs
-    done-masked BPTT over the time dimension — without it the recomputed
-    logprobs at post-done ticks silently diverge from the rollout-stored
-    ones (state["lstm_h"]/["lstm_c"]=None means zero init, which is exact;
-    see Dust2Policy.forward). Test-path callers passing flat 2D tensors may
-    omit terminals: T=1 has no through-time state to reset.
-
-    mb_masks (F8): the rollout-stored action masks for this minibatch,
-    (segments, bptt_horizon, ACTION_MASK_DIM) bool (or flat (B, MASK_DIM) on
-    the test path). MUST be the same masks the rollout sampler used —
-    masking here but not there (or vice versa) silently skews the PPO
-    ratios for any agent-step where a mask bit was 0. None = unmasked
-    (pre-F8 callers / BC paths).
-
-    return_pg_rows (TAG diagnostic, spec 2026-08-13 §4.3): when True the
-    return tuple gains an 8th element — the per-row pg loss vector
-    max(pg_d_un, pg_d_cl) + max(pg_c_un, pg_c_cl), flat (B*T,), graph-
-    attached, advantage-normalized + prio-weighted exactly like pg_loss
-    (whose value is the mean of the two factor vectors separately; the sum
-    vector's .mean() equals it up to fp reduction order). TAG forms subset
-    losses as weighted means over this vector so every subset gradient is a
-    true restriction of the real gradient from ONE forward pass. False (the
-    default, all production update paths) returns the existing 7-tuple
-    bitwise-identically — pinned by
-    test_return_pg_rows_default_is_bitwise_identical_7_tuple.
-
-    mb_part (Rung 0 §2.2): FLOAT participation weights, broadcastable to
-    mb_advantages (the trainer passes [S, T]). When given, BOTH reductions in
-    this function switch to their masked forms — advantage normalisation over
-    participating rows only, and a masked mean over the per-row pg terms.
-    Doing only one of the two would be wrong in a way no test at
-    n_active=TEAM_SIZE can see: unmasked normalisation shifts the parked rows'
-    advantage off 0, and that offset survives into pg through their (arbitrary)
-    ratio. None ⇒ the pre-Rung-0 lines run verbatim; that path is what
-    test_return_pg_rows_default_is_bitwise_identical_7_tuple pins, so
-    production at n_active=5 takes the MASKED branch with an all-ones weight
-    and is identical to the old numbers only to fp tolerance, not bitwise.
-    """
-    import torch
-    import torch.nn.functional as F
-
-    logits_list, mu_aim, log_std_aim, new_value = policy(mb_obs, state)
-
-    # ── Shape harmonisation ──
-    # PufferLib's PPO update path passes mb_obs with shape (segments,
-    # bptt_horizon, OBS_DIM); HybridPolicy.forward flattens to (B*T, ...)
-    # before the heads, so logits/mu_aim/log_std/new_value come back at the
-    # FLAT batch dim while mb_actions / mb_cont_actions / mb_advantages /
-    # mb_old_logp_{d,c} retain their original (segments, bptt_horizon, …)
-    # shape. Flatten the latter to match logits' batch dim. If mb_actions
-    # is already 2D (test path passing flat tensors directly), .view keeps
-    # it 2D — a no-op.
-    flat_actions = mb_actions.reshape(-1, mb_actions.shape[-1])
-    flat_cont = mb_cont_actions.reshape(-1, mb_cont_actions.shape[-1])
-    flat_old_d = mb_old_logp_d.reshape(-1)
-    flat_old_c = mb_old_logp_c.reshape(-1)
-    flat_adv = mb_advantages.reshape(-1)
-
-    # ── Advantage normalization + prio-IS weight (finding 1, 2026-07-06
-    # adversarial review) ──
-    # Stock PufferLib normalizes per-minibatch and applies the prioritized-
-    # replay importance weight BEFORE the pg term:
-    #     adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
-    # The T5 refactor moved the pg term into this function but fed it RAW
-    # advantages, orphaning the normalization at the call site. Consequence
-    # (verified at 98e3f32): with sparse rewards the pg gradient scale was
-    # ~0, so the entropy objective faced no counter-pressure and the 30M
-    # run drifted to an exactly-uniform discrete policy. Normalizing HERE
-    # (not at the call site) makes the contract self-contained and lets the
-    # test assert scale-invariance of pg_loss directly.
-    # PITFALLS:
-    #   * Normalize the RAW adv first, then multiply by mb_prio — reversing
-    #     the order changes the statistics (matches stock).
-    #   * mb_prio arrives as (segments, 1) from the trainer (broadcast over
-    #     bptt_horizon) or (B,) from tests; expand_as handles both. None ⇒
-    #     uniform replay (weight 1), e.g. BC/eval callers.
-    #   * A constant-adv minibatch has std 0 ⇒ normalized adv is exactly 0
-    #     (0/1e-8); pg_loss 0, no NaN.
-    #   * mb_part (Rung 0 §2.2): stats over participating rows only, and
-    #     parked rows are zeroed so they contribute nothing to pg regardless
-    #     of their ratio — which is what the masked pg mean below then
-    #     divides out. The mb_prio multiply stays AFTER, unchanged.
-    if mb_part is None:
-        flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
-    else:
-        flat_adv = masked_normalize_adv(flat_adv, mb_part.reshape(-1))
-    if mb_prio is not None:
-        flat_adv = mb_prio.expand_as(mb_advantages).reshape(-1) * flat_adv
-
-    # ── Re-evaluate discrete and continuous halves under the new policy ──
-    # Fix #3 (perf): replaces 7× torch.distributions.Categorical(logits=lg) +
-    # 1× torch.distributions.Normal(mu, sigma) construction per minibatch
-    # with the same hand-rolled forms used in _hybrid_sample_logits (Fix #2).
-    # Microbench measured 8.6 ms/MB savings; PPO update calls this 10×4 = 40
-    # times per epoch → ~345 ms/epoch saved on heavy-update epochs. Same
-    # numerical contract as before: |Δ| ≤ ~2e-6 vs torch.distributions
-    # reference (different softmax reduction order; well within fp32 noise).
-    # F8: apply the rollout's action masks to the fresh logits so new_logp /
-    # entropy are computed over the SAME masked distribution the sampler drew
-    # from — otherwise ratios drift wherever a mask bit was 0.
-    if mb_masks is not None:
-        flat_masks = mb_masks.reshape(-1, mb_masks.shape[-1])
-        logits_list = _apply_action_masks(logits_list, flat_masks)
-    log_probs_per_head = [F.log_softmax(lg, dim=-1) for lg in logits_list]
-    new_logp_d = sum(
-        lp.gather(-1, flat_actions[..., i:i + 1]).squeeze(-1)
-        for i, lp in enumerate(log_probs_per_head))
-    entropy_d = sum(-(lp.exp() * lp).sum(-1) for lp in log_probs_per_head)
-
-    sigma = torch.exp(log_std_aim).expand_as(mu_aim)
-    log_std_b = log_std_aim.expand_as(mu_aim)
-    diff = (flat_cont - mu_aim) / sigma
-    w_aim = _aim_dim_weight(aim_dim_mask, mu_aim)
-    new_logp_c = ((-0.5 * diff * diff - log_std_b - 0.5 * _LOG_2PI) * w_aim).sum(-1)
-    entropy_c = ((0.5 + 0.5 * _LOG_2PI + log_std_b) * w_aim).sum(-1)
-    entropy = entropy_d + entropy_c if aim_entropy_bonus else entropy_d
-
-    # ── Per-factor PPO ratios + clipped loss ──
-    # max(unclipped, clipped) is taken element-wise per factor; the per-
-    # element scalars are then meaned. Summing the two means matches the
-    # H-PPO Eq. 8 in Fan et al. — equal weighting of the two heads. If a
-    # future variant wants weighted heads (e.g. up-weight continuous early
-    # in training), introduce per-factor coefficients HERE, not by scaling
-    # ratios.
-    ratio_d = torch.exp(new_logp_d - flat_old_d)
-    ratio_c = torch.exp(new_logp_c - flat_old_c)
-    pg_d_un = -flat_adv * ratio_d
-    pg_d_cl = -flat_adv * torch.clamp(ratio_d, 1 - clip_coef, 1 + clip_coef)
-    pg_c_un = -flat_adv * ratio_c
-    pg_c_cl = -flat_adv * torch.clamp(ratio_c, 1 - clip_coef, 1 + clip_coef)
-    pg_d_rows = torch.max(pg_d_un, pg_d_cl)
-    pg_c_rows = torch.max(pg_c_un, pg_c_cl)
-    if mb_part is None:
-        pg_loss = pg_d_rows.mean() + pg_c_rows.mean()
-    else:
-        # Rung 0 §2.2: parked rows are already exactly 0 in these vectors
-        # (their normalised advantage is 0), so the mask only fixes the
-        # DENOMINATOR — without it the gradient is scaled by n_active/5.
-        _w = mb_part.reshape(-1).to(pg_d_rows.dtype)
-        pg_loss = masked_mean(pg_d_rows, _w) + masked_mean(pg_c_rows, _w)
-
-    if return_pg_rows:
-        return (pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list,
-                pg_d_rows + pg_c_rows)
-    return pg_loss, entropy, new_value, new_logp_d + new_logp_c, ratio_d, ratio_c, logits_list
-
-
-def _tag_param_groups(policy):
-    """Partition policy params into the TAG groups (spec 2026-08-13 §4.2).
-
-    trunk        — encoder.* + lstm.* (620,544 of 626,971 trainable params,
-                   99.0%, LSTM alone 526,336; this is why no 'total' group
-                   exists — it would replicate trunk while reading as
-                   independent signal). Trunk-split (spec 2026-08-15 §3.4):
-                   encoder_t./encoder_ct./lstm_t./lstm_ct. map into this
-                   SAME group, doubling it. The union is what makes the
-                   T-vs-CT trunk cross cos-sim exactly 0.0 — each team's
-                   gradient is zero on the other's copy — which the
-                   analyzer labels structural via split/trunk_active.
-    policy_heads — action_heads.* + aim_mu.* + the aim_log_std parameter
-                   (6,170 params). Batch 7: under --tct-split-heads BOTH team
-                   copies (action_heads_t/_ct, aim_mu_t/_ct, aim_log_std_t/_ct)
-                   map to this ONE group, doubling it to 12,340. The union is
-                   deliberate — it is what makes the T-vs-CT cross cos-sim
-                   exactly 0.0 (each team's gradient is zero on the other's
-                   copy), which the analyzer labels as a structural artifact
-                   rather than a conflict (spec §3.4). Splitting the group per
-                   team instead would produce a within-copy number that
-                   answers a different question than the trunk cells.
-    value_head   — value_head.* (257 params; used ONLY for the vf control —
-                   pg metrics skip it, the pg graph never touches it).
-
-    Uses named_parameters() filtered to requires_grad — NOT state_dict(),
-    which would sweep in non-trainable buffers (e.g. max_turn_speed).
-    PITFALL: an unmapped parameter RAISES. Silent fallthrough would let a
-    renamed module drop out of every group and the metric would quietly
-    measure a subset of the network.
-    """
-    groups = {"trunk": [], "policy_heads": [], "value_head": []}
-    for name, p in policy.named_parameters():
-        if not p.requires_grad:
-            continue
-        if name.startswith(
-            ("encoder.", "encoder_t.", "encoder_ct.", "lstm.", "lstm_t.", "lstm_ct.")):
-            groups["trunk"].append(p)
-        elif name.startswith(("action_heads.", "action_heads_t.", "action_heads_ct.",
-                              "aim_mu.", "aim_mu_t.", "aim_mu_ct.")) \
-                or name in ("aim_log_std", "aim_log_std_t", "aim_log_std_ct"):
-            groups["policy_heads"].append(p)
-        elif name.startswith("value_head."):
-            groups["value_head"].append(p)
-        else:
-            raise AssertionError(
-                f"TAG: unmapped policy parameter {name!r} — update _tag_param_groups")
-    return groups
-
-
-def tag_grad_cossim(policy,
-                    *,
-                    mb_obs,
-                    mb_actions,
-                    mb_cont_actions,
-                    mb_old_logp_d,
-                    mb_old_logp_c,
-                    mb_advantages,
-                    clip_coef,
-                    state,
-                    mb_prio,
-                    mb_masks,
-                    mb_returns_norm,
-                    idx,
-                    mb_label,
-                    mb_part=None,
-                    aim_dim_mask=None,
-                    aim_entropy_bonus=True):
-    """T-vs-CT gradient cosine-similarity measurement (spec 2026-08-13 §4.2).
-
-    aim_dim_mask / aim_entropy_bonus (R0-E): forwarded verbatim to the inner
-    _hybrid_ppo_loss so its ratio_c matches the real update's — otherwise the
-    TAG subset gradients would include a pinned pitch factor and stop being
-    restrictions of the actual gradient.
-
-    WHAT: ONE extra forward via _hybrid_ppo_loss(return_pg_rows=True), then
-    six subset losses as weighted means over the per-row pg vector — T, CT,
-    and the env-parity halves T_a/T_b, CT_a/CT_b — each differentiated with
-    torch.autograd.grad against the SAME graph (retain_graph=True because
-    successive grad calls need it; the real update's graph is a separate,
-    untouched object). Advantage normalization is shared over the full
-    minibatch (it lives inside _hybrid_ppo_loss, before the per-row max),
-    so every subset gradient is a true restriction of the real gradient.
-    vf-only T/CT losses on the same forward's new_value feed the
-    known-anticorrelated tag/cossim_vf control over value_head params.
-
-    Cost per measured minibatch: 1 forward + 8 backwards (spec §4.3 budget:
-    ≤5% of epoch time at --tag-every 5; raise tag_every if exceeded, don't
-    optimize).
-
-    WHY cross_half exists: the criterion statistic is cos(g_Ta, g_CTa) —
-    size-matched to the within-team null (all arms at n/2 rows). The
-    full-size cos(g_T, g_CT) is reported as the lower-noise descriptive
-    number but has a LARGER expected same-distribution cosine than any n/2
-    statistic, which would bias within − cross toward "no conflict"
-    (plan-review finding 2).
-
-    WHY the entropy term is absent: the pg vector contains no entropy —
-    deliberate (spec §4.2): entropy is team-agnostic (pushes cos-sim toward
-    +1 mechanically) and its effective_alpha is warmstart-phase-dependent.
-
-    ROW IDENTITY: segment index ≡ global agent index (env-major, 10/env, T
-    at slots 0-4 — the trainer asserts segments == total_agents, gh#85), so
-    team T rows are (idx % 10) < 5 and env parity is (idx // 10) % 2, where
-    idx is the minibatch's multinomial segment gather.
-
-    PITFALLS:
-    * Never touches .grad, self.ratio, KL bookkeeping, or the Welford
-      return-norm state — mb_returns_norm arrives already normalized.
-      Training with the flag on is bitwise-identical (pinned by
-      tests/test_tag_trainer.py).
-    * Zero-norm subsets (subset advantage exactly 0 after shared
-      normalization) yield a DELIBERATE NaN cos-sim (0/0) and gnorm 0 —
-      analysis drops them; do not "fix" with an epsilon. These NaNs are
-      also why the outer-loop injection must stay after
-      dead_run_detector.check (see _inject_tag_metrics).
-    * pg metrics cover trunk + policy_heads only — the pg graph never
-      touches value_head, so those keys would be dead NaN/0 noise.
-    * The loss path evaluates stored actions and samples nothing, so there
-      is no RNG interaction.
-    * mb_part (Rung 0 §2.2) is forwarded verbatim to _hybrid_ppo_loss so the
-      shared advantage normalisation is the SAME one the real update used —
-      that shared normalisation is what makes each subset gradient a true
-      restriction of the real gradient. Parked rows land in whichever team
-      subset their slot belongs to, but their pg_rows entries are exactly 0,
-      so they only inflate the subset means' denominators (w.sum() here
-      counts rows, not participation) — a uniform rescale that cosine
-      similarity is invariant to. The reported gnorms ARE scaled by it.
-      The vf control is weaker: mb_returns_norm on a parked row is
-      -_ret_mean/std, not 0, so parked rows add a common-mode residual to
-      BOTH team value gradients and bias tag/cossim_vf upward at
-      n_active < TEAM_SIZE. Read that control with n_active in mind.
-    """
-    import torch
-
-    groups = _tag_param_groups(policy)
-    pg_group_names = ("trunk", "policy_heads")
-    pg_params = [p for g in pg_group_names for p in groups[g]]
-    sizes = [len(groups[g]) for g in pg_group_names]
-    bounds = [sum(sizes[:i]) for i in range(len(sizes) + 1)]
-
-    team_t = (idx % 10) < 5
-    env_even = ((idx // 10) % 2) == 0                  # env-parity split (exchangeable)
-    subsets = {
-        "T": team_t,
-        "CT": ~team_t,
-        "T_a": team_t & env_even,
-        "T_b": team_t & ~env_even,
-        "CT_a": (~team_t) & env_even,
-        "CT_b": (~team_t) & ~env_even,
-    }
-
-    def _row_weights(mask):
-        # segment mask → flat per-row weights, matching pg_rows' layout
-        # ((segments, bptt).reshape(-1) segment-major; flat test path is 1:1)
-        w = mask.to(mb_advantages.dtype)
-        if mb_advantages.dim() > 1:
-            w = w.unsqueeze(1)
-        return w.expand_as(mb_advantages).reshape(-1)
-
-    def _flat(grads):
-        return torch.cat([g.reshape(-1) for g in grads])
-
-    def _cos(a, b):
-        # 0-norm ⇒ 0/0 ⇒ NaN, deliberately (see docstring)
-        return float((a @ b) / (a.norm() * b.norm()))
-
-    (_, _, newvalue, *_rest, pg_rows) = _hybrid_ppo_loss(policy,
-                                                         mb_obs,
-                                                         mb_actions,
-                                                         mb_cont_actions,
-                                                         mb_old_logp_d,
-                                                         mb_old_logp_c,
-                                                         mb_advantages,
-                                                         clip_coef,
-                                                         state,
-                                                         mb_prio=mb_prio,
-                                                         mb_masks=mb_masks,
-                                                         return_pg_rows=True,
-                                                         mb_part=mb_part,
-                                                         aim_dim_mask=aim_dim_mask,
-                                                         aim_entropy_bonus=aim_entropy_bonus)
-
-    pg_grads = {}                                                      # subset -> {group: flat grad}
-    vf_grads = {}                                                      # 'T'/'CT' -> flat value_head grad
-    for name, mask in subsets.items():
-        w = _row_weights(mask)
-        loss_s = (pg_rows * w).sum() / w.sum()
-        gs = torch.autograd.grad(loss_s,
-                                 pg_params,
-                                 retain_graph=True,
-                                 allow_unused=True,
-                                 materialize_grads=True)
-        pg_grads[name] = {
-            g: _flat(gs[bounds[i]:bounds[i + 1]]).detach()
-            for i, g in enumerate(pg_group_names)
-        }
-        if name in ("T", "CT"):
-                                                                       # vf-only control: unclipped value loss restricted to the subset
-            newv = newvalue.view(mb_returns_norm.shape)
-            w_full = w.reshape(mb_returns_norm.shape)
-            vf_s = 0.5 * (((newv - mb_returns_norm)**2) * w_full).sum() / w_full.sum()
-            vgs = torch.autograd.grad(vf_s,
-                                      groups["value_head"],
-                                      retain_graph=True,
-                                      allow_unused=True,
-                                      materialize_grads=True)
-            vf_grads[name] = _flat(vgs).detach()
-
-    out = {}
-    for g in pg_group_names:
-        out[f"tag/cossim_cross/{g}/{mb_label}"] = _cos(pg_grads["T"][g], pg_grads["CT"][g])
-        out[f"tag/cossim_cross_half/{g}/{mb_label}"] = _cos(pg_grads["T_a"][g], pg_grads["CT_a"][g])
-        out[f"tag/cossim_within_t/{g}/{mb_label}"] = _cos(pg_grads["T_a"][g], pg_grads["T_b"][g])
-        out[f"tag/cossim_within_ct/{g}/{mb_label}"] = _cos(pg_grads["CT_a"][g], pg_grads["CT_b"][g])
-        out[f"tag/gnorm_t/{g}/{mb_label}"] = float(pg_grads["T"][g].norm())
-        out[f"tag/gnorm_ct/{g}/{mb_label}"] = float(pg_grads["CT"][g].norm())
-    out[f"tag/cossim_vf/{mb_label}"] = _cos(vf_grads["T"], vf_grads["CT"])
-    return out
-
-
-def _inject_tag_metrics(trainer, logs):
-    """Move pending TAG metrics into this epoch's logs dict (spec §4.2).
-
-    CALL-ORDER CONSTRAINT: must run AFTER dead_run_detector.check(...) in
-    the outer loop — tag/* carries deliberate NaNs (zero-norm subsets,
-    documented in tag_grad_cossim) and check() raises RuntimeError on any
-    NaN in the metrics dict; injecting earlier aborts the run with exit
-    code 3 on the first degenerate subset. Also never route these through
-    the `losses` dict: its keys are divided by _mb_run (gh#90), prefixed
-    losses/, and lag environment/* by one epoch.
-
-    logs=None (throttled epoch) is a no-op: the top-of-loop reset then
-    DROPS the measurement — injecting it next epoch would mislabel its
-    step/epoch (spec §4.2 drop semantics).
-    """
-    pending = getattr(trainer, "_tag_metrics", None)
-    if pending and isinstance(logs, dict):
-        logs.update(pending)
-
-
 def _patch_trainer_with_hybrid_aim(trainer,
                                    cont_action_view_main=None,
                                    mask_view_main=None,
@@ -6383,21 +3644,19 @@ def train(args):
     # is always False, and the pool save / team-switch bookkeeping in the
     # main loop is skipped via self_play_enabled below.
     self_play_enabled = bool(getattr(args, "self_play", True))
-    self_play_mgr = SelfPlayManager(
-        pool_size=15,
-        p_past=0.3 if self_play_enabled else 0.0,
-        save_every_epochs=25,                                          # ~2M steps per save at batch_size=81920
-        win_threshold=0.6,
-        phase_length=50,                                               # switch opponent team every ~4M steps
+    # W3 (#154): the pool constants (15 / 25 / 0.6 / 50) and the
+    # `0.3 if <on> else 0.0` p_past rule now live in
+    # env_factory.build_selfplay_manager, which is also what the two harness
+    # sites call — they used to spell the same construction out twice more.
+    # `self_play_enabled` is passed as the FLAG, not a p_past value, so no caller
+    # can set a different mixing probability at one site than another.
+    self_play_mgr = build_selfplay_manager(
+        self_play_enabled=self_play_enabled,
         aim_log_std_max=getattr(args, "aim_log_std_max", None),
-        pin_pitch=bool(args.pin_pitch),
-                                                                       # Rung 1a T3: "noop" ⇒ the patched evaluate() drives opponent_team as a
-                                                                       # statue. Guarded above: it cannot combine with self-play, so
-                                                                       # opponent_team stays INITIAL_OPPONENT_TEAM — the same team
-                                                                       # build_participating_rows masked out.
+        pin_pitch=args.pin_pitch,
         opponent_mode=_opponent_mode,
     )
-                                                                       # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
+    # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
     if self_play_enabled and resume_path and resume_path.exists() and not resume_run:
         import shutil as _shutil
 
@@ -6478,12 +3737,17 @@ def train(args):
     _eval_interval = int(getattr(args, "eval_interval", 0) or 0)
     if _eval_interval > 0:
         from eval_baselines import BaselineEvaluator
-        _eval_env = make_puffer_env(team_spirit=None,
-                                    seed=10_000_003,
-                                    map_data=_map_data,
-                                    auto_reset=False,
-                                    reward_overrides=reward_overrides_from_args(args),
-                                    **env_knobs_from_args(args))
+        # W3 (#154): role eval. `team_spirit=None`, the 10_000_003 seed and the
+        # load-bearing `auto_reset=False` now live in env_factory._build_eval;
+        # the derived knob/override dicts stay here because they come from THIS
+        # run's args. `env_knobs=` is passed as one dict rather than splatted:
+        # the builder splats it, and requiring the dict is what stops a caller
+        # handing the eval env no knobs while the driver env has them — the
+        # disagreement the loop right below would then be comparing.
+        _eval_env = build_env_for("eval",
+                                  map_data=_map_data,
+                                  reward_overrides=reward_overrides_from_args(args),
+                                  env_knobs=env_knobs_from_args(args))
         _d = trainer.vecenv.driver_env
         for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled",
                    "round_time"):
@@ -6676,6 +3940,37 @@ def train(args):
 # ── SECTION: CLI ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # MUST BE THE FIRST STATEMENT IN THIS BLOCK.
+    #
+    # WHAT: running `python src/train.py` binds THIS file's module object to the
+    # name "__main__", leaving sys.modules["train"] empty. Any runtime
+    # `from train import ...` then RE-EXECUTES this whole module body under the
+    # name "train", and the process ends up holding two independent copies of it:
+    # two sets of module-level constants, two of every class object, and
+    # `isinstance` between them silently False. eval_baselines does exactly that
+    # import, function-locally inside PolicyActor.__init__ and
+    # PolicyActor.from_checkpoint, to dodge a circular top-level import — so a
+    # plain `--eval-interval N` script run is enough to trigger it.
+    #
+    # WHY setdefault and not `=`: under `import train` (the whole test suite,
+    # scripts/, the Modal runner) "train" is already a real, fully-initialised
+    # module and this block is never reached anyway; setdefault keeps the
+    # invariant "the first binding wins" true in every launch mode.
+    #
+    # PITFALL for whoever tests this: an AST pin proves the statement is WRITTEN,
+    # not that it does anything, and the §3 determinism gate cannot see it — that
+    # gate runs `--no-self-play --eval-interval 0`, precisely the flag set on
+    # which no runtime `from train import` ever fires. The behavioural check is a
+    # child interpreter under `-X importtime`: WITHOUT this line its stderr
+    # carries an `import time: ... | train` line (the second body execution),
+    # WITH it none. Do NOT spell that check as
+    # `runpy.run_path(..., run_name="__main__")` plus a post-hoc identity assert:
+    # run_path swaps sys.modules["__main__"] only for the duration of the call
+    # and restores it on return, so the assert compares the alias against the
+    # RESTORED __main__ and reports a false failure (measured: False after the
+    # call, True inside it).
+    sys.modules.setdefault("train", sys.modules["__main__"])
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dust2",

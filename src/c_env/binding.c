@@ -8,12 +8,19 @@
  */
 #define PY_ARRAY_UNIQUE_SYMBOL cs2rl_binding_ARRAY_API
 #define NPY_NO_DEPRECATED_API  NPY_1_7_API_VERSION
+/* REQUIRED by py_init's "y#" argument, and it must precede <Python.h>. Since
+ * 3.10 a "#" format without this macro is not "int instead of Py_ssize_t" —
+ * PyArg_ParseTuple raises SystemError outright, so binding.init would fail on
+ * every call. It is a compile-time-invisible runtime break; do not drop it. */
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <numpy/arrayobject.h>
 #include <stddef.h> /* offsetof — used by py_struct_sizes below */
+#include <stdio.h>  /* snprintf — used by py_static_data_layout below */
 #include <stdlib.h>
 #include <string.h>
 #include "cs2_env.h"
+#include "cs2_sha256.h" /* layout hash; included by binding.c only */
 #ifdef CS2_DEMO_VIZ_H
 #error "binding must not include cs2_demo_viz.h (aim-stick stays out of the env graph)"
 #endif
@@ -35,91 +42,95 @@ static void capsule_destructor(PyObject* cap) {
     }
 }
 
-/* ── binding.init(...) -> PyCapsule ── */
+/* Defined further down, next to the SD_PREFIX_FIELDS table it walks and the
+ * type vocabulary it needs. Declared here because py_init consumes the digest
+ * as a precondition, and moving 200 lines up would separate that machinery
+ * from the doc block that explains it. */
+static int sd_layout_digest(char out_hex[65], PyObject* fields);
+
+/* ── binding.init(...) -> PyCapsule ──
+ *
+ * init(buffer, layout_hash, seed, team_spirit,
+ *      vis_matrix, raster_grid, adjacency, centroid_xy, centroids_z,
+ *      area_ids, bombsite_mask, bombsite_by_idx, is_ramp, bombsite_dist)
+ *
+ * WHAT: `buffer` is StaticData's prefix — [0, offsetof(StaticData, wall_list)) —
+ * packed field-by-field by _pack_static_data() in cs2_env.py out of the
+ * StaticDataC ctypes mirror. `layout_hash` is that mirror's layout digest.
+ * `seed` and `team_spirit` are NOT StaticData fields (env_init takes them
+ * directly), so they keep argument slots.
+ *
+ * The TEN pointer fields also keep argument slots and are never packed: C must
+ * end up holding the numpy buffers' own addresses — kept alive for the env's
+ * lifetime by Cs2Env._refs — and an address packed into a transient bytes
+ * object would dangle the moment that object was collected.
+ *
+ * WHY a buffer instead of the 73-arg PyArg_ParseTuple format string this
+ * replaces: that string tied Python's arguments to C's fields BY POSITION and
+ * said nothing about names or types, so inserting a field mid-struct on one
+ * side silently shifted every field after it. Packing by name moves the
+ * agreement onto a comparison of DECLARATIONS — the layout hash, which the C
+ * compiler and ctypes derive independently of each other.
+ *
+ * THREE PRECONDITIONS, in this order, ALL BEFORE THE MEMCPY. The order is
+ * normative, not incidental:
+ *
+ *   1. `layout_hash` must equal THIS BUILD's own digest. That comparison is the
+ *      only RUNTIME check that the .so and the installed cs2_env.py describe
+ *      the same struct. It matters because the extension is a gitignored local
+ *      artifact, so "headers edited, .so not rebuilt" is the realistic failure,
+ *      and tests/test_static_data_layout.py only compares the two at TEST time.
+ *      It runs FIRST because a buffer packed against a different declaration
+ *      has an unknown prefix size, which would make check 2 compare the length
+ *      against the wrong number.
+ *   2. buffer LENGTH >= prefix size. The hash compares declarations, not the
+ *      buffer that arrived; a short buffer is an out-of-bounds read the hash
+ *      cannot see.
+ *   3. only then the memcpy, and only then the ten pointer assignments.
+ *
+ * MEMCPY SCOPE is [0, offsetof(StaticData, wall_list)), never sizeof(StaticData):
+ * wall_list is C-owned (build_solids_from_rooms allocates it, env_close frees
+ * it) and area_bounds, which follows it, is published by Python AFTER init
+ * through the ctypes overlay. An unscoped copy would clobber both.
+ *
+ * ORDER of memcpy vs pointer assignment is normative for the mirror-image
+ * reason: the copied range CONTAINS the ten pointer slots, because they live in
+ * the prefix. Assigning first and copying second would overwrite every pointer
+ * with the buffer's zeros and hand env_init ten NULLs.
+ *
+ * NOT CHECKED HERE, deliberately: that the ten arguments are numpy arrays of
+ * the right dtype and length. PyArray_DATA is taken on trust exactly as it was
+ * before this rewrite — Cs2Env.__init__ builds all ten itself — and adding
+ * validation here is a separate change with its own behavioural surface. */
 static PyObject* py_init(PyObject* self, PyObject* args) {
-    PyObject *vis_matrix_o, *raster_grid_o, *adjacency_o, *centroid_xy_o;
-    /* T2 (verticality): centroids_z immediately after centroid_xy; is_ramp immediately
-     * after bombsite_by_idx.  Field order here MUST match:
-     *   - StaticData struct in cs2_types.h   (C canonical source)
-     *   - StaticDataC._fields_ in cs2_env.py (ctypes mirror)
-     * Mismatch silently hands area_ids data to is_ramp ptr (etc.). */
-    PyObject*    centroids_z_o;
-    PyObject *   area_ids_o, *bombsite_mask_o, *bombsite_by_idx_o;
-    PyObject*    is_ramp_o;
-    PyObject*    bombsite_dist_o;
-    int          N, grid_w, grid_h, max_area_id;
-    float        grid_x_min, grid_y_min, grid_inv_cell;
-    float        inv_x_range, inv_y_range, x_offset, y_offset, bombsite_dist_scale;
-    int          laser_damage;
-    float        laser_range, laser_range_sq;
-    int          shoot_cooldown, bomb_plant_time, bomb_defuse_time;
-    int          bomb_defuse_kit, bomb_timer, round_time;
-    float        footstep_radius_sq, gunshot_radius_sq;
-    int          enemy_memory_ticks, stale_memory_tick;
-    float        pbrs_gamma;
-    PyObject *   delta_x_o, *delta_y_o, *dir_facing_o, *t_spawns_o;
-    int          n_t_spawns;
-    PyObject*    ct_spawns_o;
-    int          n_ct_spawns;
-    float        max_turn_speed;
+    (void)self;
+    const char* buffer;
+    Py_ssize_t  buffer_len;
+    const char* layout_hash;
+    /* These ten are in StaticData's pointer-field order (cs2_types.h), which is
+     * also StaticDataC's — T2 put centroids_z straight after centroid_xy and
+     * is_ramp straight after bombsite_by_idx, and getting that wrong hands
+     * area_ids' buffer to the is_ramp pointer with nothing complaining.
+     *
+     * The layout hash does NOT cover this: it describes the struct, not the
+     * call. What covers it is that cs2_env.py DERIVES the order it passes them
+     * in from StaticDataC (_SD_POINTER_FIELDS), so only this list is
+     * hand-written, and a pointer field inserted mid-struct shifts the caller
+     * automatically. Keep it that way: re-hardcoding the order on the Python
+     * side would put the positional footgun back. */
+    PyObject *   vis_matrix_o, *raster_grid_o, *adjacency_o, *centroid_xy_o;
+    PyObject *   centroids_z_o, *area_ids_o, *bombsite_mask_o, *bombsite_by_idx_o;
+    PyObject *   is_ramp_o, *bombsite_dist_o;
     unsigned int seed;
     float        team_spirit;
 
-    /* Phase 5 reward weights */
-    float reward_win, reward_kill, reward_death, reward_bombsite_entry;
-    float reward_plant_bonus, reward_plant_base, reward_plant_progress_scale;
-    float reward_plant_interrupted, reward_defuse, reward_shot_penalty;
-    float reward_ct_survival, reward_inaction;
-    float pbrs_alive_weight, pbrs_hp_weight, pbrs_site_weight;
-    float pbrs_bomb_progress_weight, pbrs_nav_weight_t, pbrs_nav_weight_ct;
-
-    /* Batch 1 (RL overhaul): per-outcome win magnitudes — appended after reward_win
-     * to match the StaticData field order in cs2_types.h. */
-    float reward_win_t_detonation, reward_win_t_elimination;
-    float reward_win_ct_defuse, reward_win_ct_timeout, reward_win_ct_elimination;
-
-    /* Rung 0 (spec 2026-08-29 §2.1 / R0-E.2) + Rung 1a (jump_enabled): sim
-     * knobs. `int`, not int32_t — PyArg_ParseTuple's "i" writes an int and
-     * nothing else is safe here. */
-    int n_active_per_team, pin_pitch, crouch_enabled, jump_enabled;
-
-    /* 73-arg format string — positions match StaticDataC._fields_ order from cs2_env.py.
-     * T2 (verticality): added centroids_z_o after centroid_xy_o (pos 4) and is_ramp_o
-     * after bombsite_by_idx_o (pos 8), for 10 O args total instead of 8.
-     * Total: 10O + 4i + 8f + i + 2f + 6i + 2f + 2i + f + 4O + i + O + i + f + I + f
-     *      + f(reward_win) + 5f(Batch1) + 17f(Phase5-rest) + 4i(Rung 0 + 1a) = 73 args.
-     * CRITICAL: positions must stay in sync with StaticDataC._fields_ in cs2_env.py
-     * and StaticData in cs2_types.h — mismatch silently corrupts pointer assignments. */
-    static const char FMT[] =
-        "OOOOOO"            /* 0-5:  vis_matrix, raster_grid, adjacency, centroid_xy,
-                                      centroids_z, area_ids */
-        "OOOO"              /* 6-9:  bombsite_mask, bombsite_by_idx, is_ramp, bombsite_dist */
-        "iiii"              /* 10-13: N, grid_w, grid_h, max_area_id */
-        "ffffffff"          /* 14-21: grid_x_min, grid_y_min, grid_inv_cell,
-                                       inv_x_range, inv_y_range, x_offset, y_offset, bombsite_dist_scale */
-        "i"                 /* 22: laser_damage */
-        "ff"                /* 23-24: laser_range, laser_range_sq */
-        "iiiiii"            /* 25-30: shoot_cooldown, bomb_plant_time, bomb_defuse_time,
-                                       bomb_defuse_kit, bomb_timer, round_time */
-        "ff"                /* 31-32: footstep_radius_sq, gunshot_radius_sq */
-        "ii"                /* 33-34: enemy_memory_ticks, stale_memory_tick */
-        "f"                 /* 35: pbrs_gamma */
-        "OOOO"              /* 36-39: delta_x, delta_y, dir_facing, t_spawns (all arrays) */
-        "i"                 /* 40: n_t_spawns */
-        "O"                 /* 41: ct_spawns (array) */
-        "i"                 /* 42: n_ct_spawns */
-        "f"                 /* 43: max_turn_speed */
-        "I"                 /* 44: seed (unsigned int) */
-        "f"                 /* 45: team_spirit */
-        "f"                 /* 46: reward_win (legacy symmetric) */
-        "fffff"             /* 47-51: Batch 1 per-mechanism win magnitudes */
-        "fffffffffffffffff" /* 52-68: 17 remaining Phase-5 reward weights
-                                       (reward_kill through pbrs_nav_weight_ct) */
-        "iiii";             /* 69-72: n_active_per_team, pin_pitch, crouch_enabled (Rung 0),
-                                       jump_enabled (Rung 1a) */
-
     if (!PyArg_ParseTuple(args,
-                          FMT,
+                          "y#sIfOOOOOOOOOO",
+                          &buffer,
+                          &buffer_len,
+                          &layout_hash,
+                          &seed,
+                          &team_spirit,
                           &vis_matrix_o,
                           &raster_grid_o,
                           &adjacency_o,
@@ -129,167 +140,72 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
                           &bombsite_mask_o,
                           &bombsite_by_idx_o,
                           &is_ramp_o, /* T2: ramp flag per area (int8[N]) */
-                          &bombsite_dist_o,
-                          &N,
-                          &grid_w,
-                          &grid_h,
-                          &max_area_id,
-                          &grid_x_min,
-                          &grid_y_min,
-                          &grid_inv_cell,
-                          &inv_x_range,
-                          &inv_y_range,
-                          &x_offset,
-                          &y_offset,
-                          &bombsite_dist_scale,
-                          &laser_damage,
-                          &laser_range,
-                          &laser_range_sq,
-                          &shoot_cooldown,
-                          &bomb_plant_time,
-                          &bomb_defuse_time,
-                          &bomb_defuse_kit,
-                          &bomb_timer,
-                          &round_time,
-                          &footstep_radius_sq,
-                          &gunshot_radius_sq,
-                          &enemy_memory_ticks,
-                          &stale_memory_tick,
-                          &pbrs_gamma,
-                          &delta_x_o,
-                          &delta_y_o,
-                          &dir_facing_o,
-                          &t_spawns_o,
-                          &n_t_spawns,
-                          &ct_spawns_o,
-                          &n_ct_spawns,
-                          &max_turn_speed,
-                          &seed,
-                          &team_spirit,
-                          &reward_win,
-                          &reward_win_t_detonation,
-                          &reward_win_t_elimination,
-                          &reward_win_ct_defuse,
-                          &reward_win_ct_timeout,
-                          &reward_win_ct_elimination,
-                          &reward_kill,
-                          &reward_death,
-                          &reward_bombsite_entry,
-                          &reward_plant_bonus,
-                          &reward_plant_base,
-                          &reward_plant_progress_scale,
-                          &reward_plant_interrupted,
-                          &reward_defuse,
-                          &reward_shot_penalty,
-                          &reward_ct_survival,
-                          &reward_inaction,
-                          &pbrs_alive_weight,
-                          &pbrs_hp_weight,
-                          &pbrs_site_weight,
-                          &pbrs_bomb_progress_weight,
-                          &pbrs_nav_weight_t,
-                          &pbrs_nav_weight_ct,
-                          &n_active_per_team,
-                          &pin_pitch,
-                          &crouch_enabled,
-                          &jump_enabled))
+                          &bombsite_dist_o))
         return NULL;
+
+    /* Precondition 1 — the incoming hash must be CONSUMED, not just accepted.
+     * A parameter nothing compares is the same defect as a layout table nothing
+     * knocks out: every test still passes while the guard does nothing. */
+    char c_layout_hash[65];
+    if (sd_layout_digest(c_layout_hash, NULL) != 0)
+        return NULL;
+    /* ASCII ONLY in this format string. PyErr_Format goes through
+     * PyUnicode_FromFormatV, which raises ValueError on a non-ASCII byte -- so
+     * an em dash here would replace the diagnosis with a confusing codec error
+     * at exactly the moment someone needs to read it. */
+    if (strcmp(layout_hash, c_layout_hash) != 0) {
+        PyErr_Format(PyExc_RuntimeError,
+                     "StaticData layout hash mismatch: this build of binding says %s, the caller "
+                     "packed its buffer against %s. The built extension and cs2_env.py describe "
+                     "different structs; rebuild with "
+                     "`uv run --with \"ziglang>=0.14.0,<0.15\" python setup.py build_ext "
+                     "--inplace`, and if that does not fix it, run "
+                     "tests/test_static_data_layout.py to see which field disagrees.",
+                     c_layout_hash,
+                     layout_hash);
+        return NULL;
+    }
+
+    /* Precondition 2 — LENGTH. >=, not ==: the hash has already established
+     * that both sides agree on prefix_size, so a longer buffer is a caller that
+     * sent the whole struct rather than a caller that is confused, and the copy
+     * below reads only the prefix either way. Shorter is an OOB read. */
+    const size_t prefix_size = offsetof(StaticData, wall_list);
+    if (buffer_len < (Py_ssize_t)prefix_size) {
+        PyErr_Format(PyExc_ValueError,
+                     "StaticData buffer is %zd bytes, need at least %zu "
+                     "(offsetof(StaticData, wall_list))",
+                     buffer_len,
+                     prefix_size);
+        return NULL;
+    }
 
     BindingEnv* benv = (BindingEnv*)calloc(1, sizeof(BindingEnv));
     if (!benv)
         return PyErr_NoMemory();
 
-    StaticData* sd  = &benv->sd;
-    sd->N           = N;
-    sd->vis_matrix  = (int8_t*)PyArray_DATA((PyArrayObject*)vis_matrix_o);
-    sd->raster_grid = (int32_t*)PyArray_DATA((PyArrayObject*)raster_grid_o);
-    sd->adjacency   = (int8_t*)PyArray_DATA((PyArrayObject*)adjacency_o);
-    sd->centroid_xy = (float*)PyArray_DATA((PyArrayObject*)centroid_xy_o);
-    /* T2 (verticality): store terrain-z and ramp-flag pointers.
-     * Python side passes centroids_z as float32 and is_ramp as int8 (bool converted
-     * via .astype(np.int8) before passing — see cs2_env.py _refs).  The numpy arrays
-     * are kept alive by self._refs on the Cs2Env instance; these raw pointers are valid
-     * for the env's lifetime as long as the Python-side Cs2Env stays alive. */
+    StaticData* sd = &benv->sd;
+    /* Precondition 3 / step one: the scoped copy, FIRST. Everything Python
+     * owns — all 56 scalars, delta_x/delta_y/dir_facing and the two spawn
+     * arrays — arrives in this single memcpy. The spawn arrays' unused tail
+     * slots read as zero because cs2_env.py packs from a fresh (zeroed)
+     * StaticDataC, which reproduces exactly what the old partial memcpy left in
+     * this calloc'd struct. */
+    memcpy(sd, buffer, prefix_size);
+
+    /* Step two: the ten borrowed pointers, AFTER the copy that would have
+     * NULLed them. Python keeps every one of these arrays alive in Cs2Env._refs
+     * for the env's lifetime; C never frees them. */
+    sd->vis_matrix      = (int8_t*)PyArray_DATA((PyArrayObject*)vis_matrix_o);
+    sd->raster_grid     = (int32_t*)PyArray_DATA((PyArrayObject*)raster_grid_o);
+    sd->adjacency       = (int8_t*)PyArray_DATA((PyArrayObject*)adjacency_o);
+    sd->centroid_xy     = (float*)PyArray_DATA((PyArrayObject*)centroid_xy_o);
     sd->centroids_z     = (float*)PyArray_DATA((PyArrayObject*)centroids_z_o);
     sd->area_ids        = (int32_t*)PyArray_DATA((PyArrayObject*)area_ids_o);
     sd->bombsite_mask   = (int8_t*)PyArray_DATA((PyArrayObject*)bombsite_mask_o);
     sd->bombsite_by_idx = (int8_t*)PyArray_DATA((PyArrayObject*)bombsite_by_idx_o);
     sd->is_ramp         = (int8_t*)PyArray_DATA((PyArrayObject*)is_ramp_o);
     sd->bombsite_dist   = (float*)PyArray_DATA((PyArrayObject*)bombsite_dist_o);
-
-    sd->grid_w              = grid_w;
-    sd->grid_h              = grid_h;
-    sd->max_area_id         = max_area_id;
-    sd->grid_x_min          = grid_x_min;
-    sd->grid_y_min          = grid_y_min;
-    sd->grid_inv_cell       = grid_inv_cell;
-    sd->inv_x_range         = inv_x_range;
-    sd->inv_y_range         = inv_y_range;
-    sd->x_offset            = x_offset;
-    sd->y_offset            = y_offset;
-    sd->bombsite_dist_scale = bombsite_dist_scale;
-
-    sd->laser_damage       = (int32_t)laser_damage;
-    sd->laser_range        = laser_range;
-    sd->laser_range_sq     = laser_range_sq;
-    sd->shoot_cooldown     = (int32_t)shoot_cooldown;
-    sd->bomb_plant_time    = (int32_t)bomb_plant_time;
-    sd->bomb_defuse_time   = (int32_t)bomb_defuse_time;
-    sd->bomb_defuse_kit    = (int32_t)bomb_defuse_kit;
-    sd->bomb_timer         = (int32_t)bomb_timer;
-    sd->round_time         = (int32_t)round_time;
-    sd->footstep_radius_sq = footstep_radius_sq;
-    sd->gunshot_radius_sq  = gunshot_radius_sq;
-    sd->enemy_memory_ticks = (int32_t)enemy_memory_ticks;
-    sd->stale_memory_tick  = (int32_t)stale_memory_tick;
-    sd->pbrs_gamma         = pbrs_gamma;
-
-    memcpy(sd->delta_x, PyArray_DATA((PyArrayObject*)delta_x_o), 9 * sizeof(float));
-    memcpy(sd->delta_y, PyArray_DATA((PyArrayObject*)delta_y_o), 9 * sizeof(float));
-    memcpy(sd->dir_facing, PyArray_DATA((PyArrayObject*)dir_facing_o), 9 * sizeof(float));
-
-    sd->n_t_spawns = n_t_spawns;
-    memcpy(sd->t_spawns,
-           PyArray_DATA((PyArrayObject*)t_spawns_o),
-           (size_t)n_t_spawns * sizeof(int32_t));
-    sd->n_ct_spawns = n_ct_spawns;
-    memcpy(sd->ct_spawns,
-           PyArray_DATA((PyArrayObject*)ct_spawns_o),
-           (size_t)n_ct_spawns * sizeof(int32_t));
-
-    sd->max_turn_speed = max_turn_speed;
-
-    sd->reward_win = reward_win;
-    /* Batch 1 (RL overhaul): per-outcome win magnitudes */
-    sd->reward_win_t_detonation     = reward_win_t_detonation;
-    sd->reward_win_t_elimination    = reward_win_t_elimination;
-    sd->reward_win_ct_defuse        = reward_win_ct_defuse;
-    sd->reward_win_ct_timeout       = reward_win_ct_timeout;
-    sd->reward_win_ct_elimination   = reward_win_ct_elimination;
-    sd->reward_kill                 = reward_kill;
-    sd->reward_death                = reward_death;
-    sd->reward_bombsite_entry       = reward_bombsite_entry;
-    sd->reward_plant_bonus          = reward_plant_bonus;
-    sd->reward_plant_base           = reward_plant_base;
-    sd->reward_plant_progress_scale = reward_plant_progress_scale;
-    sd->reward_plant_interrupted    = reward_plant_interrupted;
-    sd->reward_defuse               = reward_defuse;
-    sd->reward_shot_penalty         = reward_shot_penalty;
-    sd->reward_ct_survival          = reward_ct_survival;
-    sd->reward_inaction             = reward_inaction;
-    sd->pbrs_alive_weight           = pbrs_alive_weight;
-    sd->pbrs_hp_weight              = pbrs_hp_weight;
-    sd->pbrs_site_weight            = pbrs_site_weight;
-    sd->pbrs_bomb_progress_weight   = pbrs_bomb_progress_weight;
-    sd->pbrs_nav_weight_t           = pbrs_nav_weight_t;
-    sd->pbrs_nav_weight_ct          = pbrs_nav_weight_ct;
-    /* Rung 0 knobs — range-validated Python-side (Cs2Env.__init__ raises
-     * ValueError) and asserted again in env_init, which is the only guard the
-     * non-Python callers (cs2_demo.c) get. */
-    sd->n_active_per_team = n_active_per_team;
-    sd->pin_pitch         = pin_pitch;
-    sd->crouch_enabled    = crouch_enabled;
-    sd->jump_enabled      = jump_enabled;
 
     env_init(&benv->env, sd, (uint32_t)seed, team_spirit);
 
@@ -498,11 +414,259 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
         N_AGENTS);
 }
 
+/* ── binding.static_data_layout() -> dict ──
+ * The C compiler's own account of StaticData's prefix layout, plus a hash of it.
+ *
+ * WHAT: {"format", "preamble", "prefix_size", "fields", "hash"}, where "fields"
+ * is a tuple of (name, offset, size, canonical_type) — one entry per row of
+ * SD_PREFIX_FIELDS (cs2_types.h), in declaration order — and "hash" is the
+ * sha256 of the serialisation described under SD_LAYOUT_FORMAT below.
+ *
+ * WHY a NEW entry point and not three more struct_sizes() keys: struct_sizes()'s
+ * key set is asserted set-equal to cs2_env._C_SIZE_KEYS_CHECKED by
+ * test_struct_sizes_keys_are_all_consumed, i.e. every key it publishes must be
+ * consumed by a hand-written tuple in cs2_env.py. That guard is exactly right
+ * for a handful of sizeofs and anchors and exactly wrong for 71 per-field rows.
+ *
+ * WHY it exists at all: struct_sizes() measures 7 sizeofs and 3 StaticData
+ * offsets. That is blind to a field-for-field disagreement between the C struct
+ * and the ctypes mirror that happens to preserve both — two same-width fields
+ * swapped, or an int declared where the mirror says float. This function makes
+ * the C side state its layout per field so the Python side can compare against
+ * its own introspection of StaticDataC rather than against nothing.
+ *
+ * WHAT IT DOES NOT COVER, stated plainly: this compares two DECLARATIONS. It
+ * cannot see a value-routing mistake — Python assigning jump_enabled into the
+ * crouch_enabled field packs the wrong number into a correctly-described slot,
+ * and every quadruple here still matches. That failure mode belongs to
+ * static_data_scalars() and the two-env sentinel scheme in
+ * tests/test_struct_sizes.py, which is why neither is retired.
+ * It also covers the PREFIX ONLY (up to wall_list): the tail is held by the
+ * three offset anchors in py_struct_sizes above.
+ *
+ * PITFALL: the canonical type names are NOT the C spellings. `int` and
+ * `int32_t` both become "c_int" because ctypes folds c_int32 into c_int and the
+ * two sides have to be able to agree; pointers become "ptr_<elem>" and arrays
+ * "arr_<elem>_<count>". Never widen that mapping to make a failing comparison
+ * pass — the type column is the only part of the hash that sees an int/float
+ * swap between two 4-byte fields.
+ */
+
+/* Serialisation hashed by BOTH sides. Bump the version tag if the line format
+ * changes, so a stale .so fails on the tag rather than on an opaque hex diff.
+ * Lines, each '\n'-terminated:
+ *     <format tag>
+ *     <preamble>
+ *     prefix_size=<offsetof(StaticData, wall_list)>
+ *     <name>|<offset>|<size>|<canonical type>      (once per prefix field)
+ * The Python counterpart is static_data_layout() in cs2_env.py. */
+#define SD_LAYOUT_FORMAT "cs2rl-static-data-layout-v1"
+
+/* C's FIXED expectation about how ctypes must be laying StaticDataC out.
+ * Python does NOT hardcode this string: it DERIVES its own from live
+ * introspection (hasattr(StaticDataC, "_pack_"), getattr(..., "_layout_")). Two
+ * hardcoded constants would compare nothing. `pack=unset` matters because
+ * setting _pack_ on Linux silently switches ctypes to MSVC layout rules, which
+ * would move fields without changing any single field's declared type. */
+#define SD_LAYOUT_PREAMBLE "struct=StaticData;pack=unset;layout=gcc-sysv"
+
+/* Declared C type spelling -> the name ctypes introspection produces for the
+ * same field. Written ONCE, here: the Python side derives its names structurally
+ * (ctype.__name__, "ptr_"/"arr_" prefixes) and asserts they land in this same
+ * vocabulary. A type used in SD_PREFIX_FIELDS but missing here makes
+ * static_data_layout() raise, which is the intended direction — a new field type
+ * must be a conscious decision on both sides, not a silently unhashed column. */
+typedef struct {
+    const char* c_type;
+    const char* canonical;
+} SdTypeName;
+
+static const SdTypeName SD_TYPE_NAMES[] = {
+    {"int", "c_int"},
+    {"int32_t", "c_int"}, /* ctypes: c_int32 IS c_int, so these are one name */
+    {"int8_t", "c_byte"}, /* ctypes: c_int8 IS c_byte */
+    {"float", "c_float"},
+    {"int8_t*", "ptr_c_byte"},
+    {"int32_t*", "ptr_c_int"},
+    {"float*", "ptr_c_float"},
+};
+
+/* Compare two C type spellings ignoring spaces, so that a reformat of
+ * SD_PREFIX_FIELDS from `int8_t*` to `int8_t *` (clang-format's
+ * PointerAlignment could do it) does not turn every pointer field into an
+ * unknown type. */
+static int sd_type_spelling_eq(const char* a, const char* b) {
+    for (;;) {
+        while (*a == ' ')
+            a++;
+        while (*b == ' ')
+            b++;
+        if (*a != *b)
+            return 0;
+        if (*a == '\0')
+            return 1;
+        a++;
+        b++;
+    }
+}
+
+/* Write the canonical type name for one field into `out` (0 on success, -1 if
+ * `c_type` is not in the vocabulary above or the array arithmetic is nonsense).
+ * `field_size`/`elem_size` are sizeof expressions from the caller, so the array
+ * COUNT in the name is compiler-derived rather than copied out of the struct. */
+static int sd_canonical_type(const char* c_type,
+                             int         is_array,
+                             size_t      field_size,
+                             size_t      elem_size,
+                             char*       out,
+                             size_t      out_cap) {
+    const char* base = NULL;
+    size_t      i;
+    int         n;
+    for (i = 0; i < sizeof(SD_TYPE_NAMES) / sizeof(SD_TYPE_NAMES[0]); i++) {
+        if (sd_type_spelling_eq(SD_TYPE_NAMES[i].c_type, c_type)) {
+            base = SD_TYPE_NAMES[i].canonical;
+            break;
+        }
+    }
+    if (!base)
+        return -1;
+    if (!is_array)
+        n = snprintf(out, out_cap, "%s", base);
+    else if (elem_size == 0 || field_size % elem_size != 0)
+        return -1;
+    else
+        /* %lu, not %zu: the Windows CRT historically ignores the z length
+         * modifier. Every count here is < 100, so the narrowing is safe. */
+        n = snprintf(out, out_cap, "arr_%s_%lu", base, (unsigned long)(field_size / elem_size));
+    return (n < 0 || (size_t)n >= out_cap) ? -1 : 0;
+}
+
+/* Walk SD_PREFIX_FIELDS once: hash the canonical serialisation into `out_hex`
+ * (64 lowercase hex chars + NUL) and, when `fields` is non-NULL, append one
+ * (name, offset, size, canonical type) tuple per row to that list.
+ *
+ * ONE walk with TWO callers, and that is the point. py_static_data_layout needs
+ * the rows, because the test that reports WHICH field drifted compares them
+ * against ctypes; py_init needs only the digest, to reject a buffer packed
+ * against a different declaration. A second copy of this loop for the second
+ * caller could drift from the first, and then py_init would reject exactly the
+ * buffers cs2_env.py packs correctly — a guard that fires on healthy trees is
+ * worse than no guard, because it gets deleted.
+ *
+ * Returns 0, or -1 with a Python exception already set. On failure `fields` is
+ * left to the caller: it owns the list either way. */
+static int sd_layout_digest(char out_hex[65], PyObject* fields) {
+    Cs2Sha256 h;
+    char      line[256];
+    int       n;
+
+    cs2_sha256_init(&h);
+    n = snprintf(line,
+                 sizeof(line),
+                 "%s\n%s\nprefix_size=%lu\n",
+                 SD_LAYOUT_FORMAT,
+                 SD_LAYOUT_PREAMBLE,
+                 (unsigned long)offsetof(StaticData, wall_list));
+    if (n < 0 || (size_t)n >= sizeof(line)) {
+        PyErr_SetString(PyExc_RuntimeError, "static_data_layout: header line overflow");
+        return -1;
+    }
+    cs2_sha256_update(&h, line, (size_t)n);
+
+/* One SD_PREFIX_FIELDS row -> one hashed line and, when the caller asked for
+ * them, one tuple entry. offsetof and sizeof are evaluated here, so the numbers
+ * are the compiler's, never the table's. #f stringifies the field name, so the
+ * name in the hash and the field the offset was taken from cannot disagree.
+ *
+ * The `if (fields)` arm is what lets py_init share this walk without paying for
+ * a list it would immediately throw away. The HASH is built unconditionally —
+ * the two callers must never be able to hash different things. */
+#define SD_LAYOUT_ROW(ctype, f, is_array)                                                          \
+    do {                                                                                           \
+        char      canon[64];                                                                       \
+        size_t    off = offsetof(StaticData, f);                                                   \
+        size_t    fsz = sizeof(((StaticData*)0)->f);                                               \
+        PyObject* row;                                                                             \
+        if (sd_canonical_type(#ctype, (is_array), fsz, sizeof(ctype), canon, sizeof(canon)) !=     \
+            0) {                                                                                   \
+            PyErr_Format(PyExc_RuntimeError,                                                       \
+                         "static_data_layout: field '%s' declared '%s' has no canonical type "     \
+                         "name; add it to SD_TYPE_NAMES in binding.c and to "                      \
+                         "_CANONICAL_SCALAR_CTYPES in cs2_env.py",                                 \
+                         #f,                                                                       \
+                         #ctype);                                                                  \
+            return -1;                                                                             \
+        }                                                                                          \
+        n = snprintf(line,                                                                         \
+                     sizeof(line),                                                                 \
+                     "%s|%lu|%lu|%s\n",                                                            \
+                     #f,                                                                           \
+                     (unsigned long)off,                                                           \
+                     (unsigned long)fsz,                                                           \
+                     canon);                                                                       \
+        if (n < 0 || (size_t)n >= sizeof(line)) {                                                  \
+            PyErr_Format(                                                                          \
+                PyExc_RuntimeError, "static_data_layout: line overflow for field '%s'", #f);       \
+            return -1;                                                                             \
+        }                                                                                          \
+        cs2_sha256_update(&h, line, (size_t)n);                                                    \
+        if (fields) {                                                                              \
+            row = Py_BuildValue("(snns)", #f, (Py_ssize_t)off, (Py_ssize_t)fsz, canon);            \
+            if (!row)                                                                              \
+                return -1;                                                                         \
+            if (PyList_Append(fields, row) != 0) {                                                 \
+                Py_DECREF(row);                                                                    \
+                return -1;                                                                         \
+            }                                                                                      \
+            Py_DECREF(row);                                                                        \
+        }                                                                                          \
+    } while (0);
+
+    SD_PREFIX_FIELDS(SD_LAYOUT_ROW)
+#undef SD_LAYOUT_ROW
+
+    cs2_sha256_final_hex(&h, out_hex);
+    return 0;
+}
+
+/* METH_NOARGS — see the Py_UNUSED note above py_struct_sizes for why the second
+ * parameter is named this way. */
+static PyObject* py_static_data_layout(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    (void)self;
+    char      hex[65];
+    PyObject* tuple;
+    PyObject* fields = PyList_New(0);
+    if (!fields)
+        return NULL;
+    if (sd_layout_digest(hex, fields) != 0) {
+        Py_DECREF(fields);
+        return NULL;
+    }
+    tuple = PyList_AsTuple(fields);
+    Py_DECREF(fields);
+    if (!tuple)
+        return NULL;
+    /* s:N hands `tuple` to the dict and steals the reference, including on
+     * failure — nothing left to clean up here either way. */
+    return Py_BuildValue("{s:s,s:s,s:n,s:N,s:s}",
+                         "format",
+                         SD_LAYOUT_FORMAT,
+                         "preamble",
+                         SD_LAYOUT_PREAMBLE,
+                         "prefix_size",
+                         (Py_ssize_t)offsetof(StaticData, wall_list),
+                         "fields",
+                         tuple,
+                         "hash",
+                         hex);
+}
+
 /* ── binding.static_data_scalars(capsule) -> dict ──
  * Read every scalar StaticData field back out of a live env.
  *
  * WHAT: EVERY plain-number field of StaticData (int / int32_t / float), keyed
- * by its C field name — all 55 of them, not a curated subset. Excluded, because
+ * by its C field name — all 56 of them, not a curated subset. Excluded, because
  * they are not scalars: the pointer fields, the fixed arrays (delta_x, delta_y,
  * dir_facing, t_spawns, ct_spawns) and the nested wall_list / area_bounds,
  * which struct_sizes() covers with offsetof keys instead.
@@ -513,16 +677,12 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
  * scalar-typed fields of the StaticDataC ctypes mirror. Appending a field to
  * cs2_types.h + the mirror and forgetting this function fails that test.
  *
- * WHY: struct_sizes() cannot detect a mis-ordered PyArg_ParseTuple FMT string
- * in py_init — two floats swapped still parse, still have identical sizes, and
- * silently feed reward_kill into reward_death. Tests push distinct sentinels
- * through Cs2Env and read them back here, so a transposition fails loudly.
- *
- * FMT ARG NUMBERING — stated once, used everywhere in this file and in the
- * positional comments on cs2_env.py's binding.init() call: FMT arg numbers are
- * 0-INDEXED (arg 0 is vis_matrix). CPython's own PyArg_ParseTuple failures are
- * 1-indexed ("argument 22 must be..."), so when cross-referencing a real error
- * message subtract 1 from what CPython printed to land on the comment's number.
+ * WHY: neither struct_sizes() nor the layout hash can detect a VALUE routed
+ * into the wrong field — both describe DECLARATIONS, and two floats swapped
+ * between the named assignments in cs2_env.py's `static_data` mapping keep
+ * every size, offset and type identical while silently feeding reward_kill into
+ * reward_death. Tests push distinct sentinels through Cs2Env and read them back
+ * here, so a transposition fails loudly.
  *
  * PITFALL: the capsule must be cast to BindingEnv*, NOT Dust2Env*. py_reset /
  * py_step / py_get_masks cast to Dust2Env* because env is BindingEnv's first
@@ -536,11 +696,11 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
  *
  * PITFALL: add fields ONLY through the SD_INT / SD_FLOAT macros. They stringify
  * the field name, so the key and the value it carries cannot disagree. Do not
- * hand-roll a Py_BuildValue("{s:d,s:d,...}") with 52 pairs: that is the same
- * footgun as py_init's 73-arg FMT (which cs2_env.py extends only under
- * protest, and only at the tail), where one misplaced format char silently
- * mislabels every field after it — and a key/value swap is invisible to the
- * completeness test above. */
+ * hand-roll a Py_BuildValue("{s:d,s:d,...}") with 56 pairs: that is the same
+ * footgun as the 73-arg PyArg_ParseTuple format string py_init carried before
+ * spec 2026-08-31 §2 W2, where one misplaced format char silently mislabelled
+ * every field after it — and a key/value swap is invisible to the completeness
+ * test above. */
 
 /* Store `v` under `key`, stealing the reference. Returns -1 with a Python
  * exception already set if `v` is NULL (allocation failed) or the insert
@@ -596,7 +756,7 @@ static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
         return NULL;
     /* Listed in cs2_types.h declaration order so the two can be diffed
      * top-to-bottom; the dict is unordered, only the key set is contractual. */
-    /* Nav/raster geometry (FMT args 10–21): map-derived, not tunable. */
+    /* Nav/raster geometry: map-derived, not tunable. */
     SD_INT(N);
     SD_INT(grid_w);
     SD_INT(grid_h);
@@ -629,8 +789,8 @@ static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
     SD_INT(n_t_spawns);
     SD_INT(n_ct_spawns);
     SD_FLOAT(max_turn_speed);
-    /* Reward weights and PBRS coefficients (FMT args 46–68). This run of
-     * same-width floats is exactly where a transposed FMT string hides. */
+    /* Reward weights and PBRS coefficients. This run of same-width floats is
+     * exactly where a transposed pair of packing assignments hides. */
     SD_FLOAT(reward_win);
     SD_FLOAT(reward_win_t_detonation);
     SD_FLOAT(reward_win_t_elimination);
@@ -654,7 +814,7 @@ static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
     SD_FLOAT(pbrs_bomb_progress_weight);
     SD_FLOAT(pbrs_nav_weight_t);
     SD_FLOAT(pbrs_nav_weight_ct);
-    /* Rung 0 sim knobs (FMT args 69-71) + Rung 1a jump_enabled (72). */
+    /* Rung 0 sim knobs + Rung 1a jump_enabled. */
     SD_INT(n_active_per_team);
     SD_INT(pin_pitch);
     SD_INT(crouch_enabled);
@@ -726,6 +886,10 @@ static PyMethodDef binding_methods[] = {
     {"get_buffers", py_get_buffers, METH_VARARGS, "Get buffer addresses as ints"},
     {"get_masks", py_get_masks, METH_VARARGS, "Get masks buffer address as int"},
     {"struct_sizes", py_struct_sizes, METH_NOARGS, "sizeof/offsetof of the C structs"},
+    {"static_data_layout",
+     py_static_data_layout,
+     METH_NOARGS,
+     "Per-field layout of StaticData's prefix, plus its sha256"},
     {"static_data_scalars",
      py_static_data_scalars,
      METH_VARARGS,

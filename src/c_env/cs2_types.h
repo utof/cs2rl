@@ -180,8 +180,20 @@ typedef struct {
      *                  cliff guard in cs2_movement.h _resolve_xy_collision.
      * Field order MUST stay in sync with:
      *   - StaticDataC._fields_ in cs2_env.py  (ctypes mirror)
-     *   - PyArg_ParseTuple format string in binding.c py_init()
-     * Mismatch silently corrupts all pointer fields that follow. */
+     *   - SD_PREFIX_FIELDS below              (per-field layout table: every
+     *     field before wall_list needs a row, in this same order)
+     *   - the ten-pointer argument list in binding.c py_init() — POINTER
+     *     fields only; scalars travel in the packed buffer
+     * A mismatch between the first two changes the layout hash on one side
+     * only, so binding.init refuses to copy anything (spec 2026-08-31 §2 W2);
+     * a missing SD_PREFIX_FIELDS row fails tests/test_static_data_layout.py.
+     * For the ten POINTER fields the order also decides which numpy array each
+     * one receives. cs2_env.py derives the order it PASSES from the mirror
+     * (_SD_POINTER_FIELDS), so the call site follows a reorder on its own —
+     * but py_init's list is hand-written and does not, and nothing catches
+     * that: a consistent reorder leaves both layout hashes equal, and the
+     * Python-side pointer guard compares sets, not order. Reorder pointer
+     * fields in all three places or in none. */
     float*   centroids_z;     /* [N]             idx-indexed: terrain z per area   */
     int32_t* area_ids;        /* [N]             idx -> raw area_id                */
     int8_t*  bombsite_mask;   /* [max_area_id+1]  area_id-indexed (for _potential) */
@@ -248,10 +260,10 @@ typedef struct {
     float pbrs_nav_weight_t;           /* T-side nav approach weight */
     float pbrs_nav_weight_ct;          /* CT-side nav approach weight */
     /* Rung 0 (spec 2026-08-29 §2.1 / R0-E.2) + Rung 1a (spec 2026-08-30 T2a):
-     * sim-level knobs, all int32, FMT "iiii" at positions 69-72. Inserted
-     * BEFORE wall_list so the two pointer-ish tail fields stay last and their
-     * offsets move together on both sides (StaticDataC mirrors this same
-     * position).
+     * sim-level knobs, all int32, packed by name like every other prefix field.
+     * Inserted BEFORE wall_list so the two pointer-ish tail fields stay last
+     * and their offsets move together on both sides (StaticDataC mirrors this
+     * same position).
      *   n_active_per_team — agents per team that spawn (1..TEAM_SIZE). Slots
      *                       >= n are "parked": participating=0, alive=0,
      *                       area_idx=INVALID_AREA_IDX, enemy_mem_idx[*]=
@@ -260,12 +272,21 @@ typedef struct {
      *   pin_pitch         — 1 => continuous_actions[i*AIM_DIM+1] is ignored,
      *                       a->pitch stays 0 (flat maps; R0-E.2). Declared
      *                       here in Rung 0; the consumer lands in a later task.
-     *   crouch_enabled    — 0 => compute_masks masks HEAD_CROUCH bin 1.
-     *                       Declared here; the consumer lands in a later task.
-     *   jump_enabled      — 0 => compute_masks masks HEAD_JUMP bin 1. Exact
-     *                       mirror of crouch_enabled (Rung 1a shrinks the
-     *                       action space to the aim problem; a jumping agent
-     *                       also leaves the pinned-pitch hit band, gh #150).
+     *   crouch_enabled    — 0 => the sim IGNORES HEAD_CROUCH entirely
+     *                       (W5, #156): process_movement zeroes crouch_act at
+     *                       the read, so the agent never crouches and the
+     *                       crouch histogram never counts the press, on EVERY
+     *                       path — including raw env_step callers that bypass
+     *                       the mask (scripted bots #152, BC replay, tests).
+     *                       compute_masks still masks HEAD_CROUCH bin 1; that
+     *                       is now an optimisation (don't spend policy
+     *                       probability mass on a bin the sim drops), not the
+     *                       mechanism.
+     *   jump_enabled      — 0 => the sim IGNORES HEAD_JUMP entirely. Exact
+     *                       mirror of crouch_enabled, same W5 guard, same
+     *                       surviving mask (Rung 1a shrinks the action space to
+     *                       the aim problem; a jumping agent also leaves the
+     *                       pinned-pitch hit band, gh #150).
      * PITFALL: cs2_demo.c load_nav_data memsets StaticData and assigns by
      * name — it must set n_active_per_team=TEAM_SIZE, pin_pitch=0 and
      * crouch_enabled=jump_enabled=1 or the demo silently parks everyone /
@@ -301,6 +322,179 @@ typedef struct {
      * it was written by Python, read by no C code, and freed by nobody. */
     const float* area_bounds; /* [N*4] x0,y0,x1,y1; NULL = no interpolation */
 } StaticData;
+
+/* ── StaticData prefix layout table (X-macro) ─────────────────────────────────
+ *
+ * WHAT: one row per StaticData field in [0, offsetof(StaticData, wall_list)) —
+ * the "prefix", i.e. everything Python publishes through binding.init — in
+ * declaration order. Consumed by py_static_data_layout() in binding.c, which
+ * turns each row into (name, offset, size, canonical type name) and hashes the
+ * result. tests/test_static_data_layout.py compares that hash against the same
+ * quadruples derived by ctypes introspection of StaticDataC in cs2_env.py.
+ *
+ * X(type, name, is_array):
+ *   type     — the field's declared type, EXACTLY as spelled in the struct
+ *              above. For an array field this is the ELEMENT type (`float` for
+ *              `float delta_x[9]`), because that is what sizeof() needs to
+ *              recover the count. binding.c maps these spellings to the
+ *              canonical vocabulary the ctypes side introspects (`int` and
+ *              `int32_t` both land on c_int, because ctypes folds
+ *              c_int32 into c_int and so cannot tell them apart either).
+ *   name     — the field name. Stringified for the hash, and fed to offsetof /
+ *              sizeof, so key and value cannot disagree.
+ *   is_array — 1 for the fixed-size array fields, 0 otherwise. NOT inferred
+ *              from `sizeof(field) != sizeof(type)`: that inference silently
+ *              mis-labels a one-element array as a scalar, and the resulting
+ *              canonical name would then disagree with ctypes forever.
+ *
+ * Both `type` and `is_array` are checked against the real struct member at
+ * compile time by struct sd_prefix_type_checks, right below this table — a row
+ * that describes its field wrongly does not build.
+ *
+ * WHY a separate list rather than generating the struct from this macro: the
+ * struct above carries ~90 lines of interleaved field documentation that a
+ * macro body (every line backslash-continued) would mangle, and rewriting a
+ * 520-byte layout to add a hash is a worse trade than maintaining one extra
+ * name list. What this list must never contain is a hand-written offset or
+ * size — those are all offsetof/sizeof EXPRESSIONS in binding.c, so the numbers
+ * come from the compiler that laid the struct out. (cs2_types.h has already had
+ * one pair of hand-quoted offsets go stale; see the wall_list comment above.)
+ *
+ * PITFALL: adding a prefix field here but not to StaticDataC in cs2_env.py (or
+ * vice versa) fails tests/test_static_data_layout.py. Adding it to the struct
+ * and to NEITHER is caught by the sizeof(StaticData) guard — unless the new
+ * field fits entirely inside existing padding, which has happened once already
+ * (jump_enabled, see the wall_list comment). So: struct, mirror, and this table,
+ * in the same commit, always. */
+#define SD_PREFIX_FIELDS(X)                                                                        \
+    X(int, N, 0)                                                                                   \
+    X(int8_t*, vis_matrix, 0)                                                                      \
+    X(int32_t*, raster_grid, 0)                                                                    \
+    X(int8_t*, adjacency, 0)                                                                       \
+    X(float*, centroid_xy, 0)                                                                      \
+    X(float*, centroids_z, 0)                                                                      \
+    X(int32_t*, area_ids, 0)                                                                       \
+    X(int8_t*, bombsite_mask, 0)                                                                   \
+    X(int8_t*, bombsite_by_idx, 0)                                                                 \
+    X(int8_t*, is_ramp, 0)                                                                         \
+    X(float*, bombsite_dist, 0)                                                                    \
+    X(int, grid_w, 0)                                                                              \
+    X(int, grid_h, 0)                                                                              \
+    X(int, max_area_id, 0)                                                                         \
+    X(float, grid_x_min, 0)                                                                        \
+    X(float, grid_y_min, 0)                                                                        \
+    X(float, grid_inv_cell, 0)                                                                     \
+    X(float, inv_x_range, 0)                                                                       \
+    X(float, inv_y_range, 0)                                                                       \
+    X(float, x_offset, 0)                                                                          \
+    X(float, y_offset, 0)                                                                          \
+    X(float, bombsite_dist_scale, 0)                                                               \
+    X(int32_t, laser_damage, 0)                                                                    \
+    X(float, laser_range, 0)                                                                       \
+    X(float, laser_range_sq, 0)                                                                    \
+    X(int32_t, shoot_cooldown, 0)                                                                  \
+    X(int32_t, bomb_plant_time, 0)                                                                 \
+    X(int32_t, bomb_defuse_time, 0)                                                                \
+    X(int32_t, bomb_defuse_kit, 0)                                                                 \
+    X(int32_t, bomb_timer, 0)                                                                      \
+    X(int32_t, round_time, 0)                                                                      \
+    X(float, footstep_radius_sq, 0)                                                                \
+    X(float, gunshot_radius_sq, 0)                                                                 \
+    X(int32_t, enemy_memory_ticks, 0)                                                              \
+    X(int32_t, stale_memory_tick, 0)                                                               \
+    X(float, pbrs_gamma, 0)                                                                        \
+    X(float, delta_x, 1)                                                                           \
+    X(float, delta_y, 1)                                                                           \
+    X(float, dir_facing, 1)                                                                        \
+    X(int32_t, t_spawns, 1)                                                                        \
+    X(int, n_t_spawns, 0)                                                                          \
+    X(int32_t, ct_spawns, 1)                                                                       \
+    X(int, n_ct_spawns, 0)                                                                         \
+    X(float, max_turn_speed, 0)                                                                    \
+    X(float, reward_win, 0)                                                                        \
+    X(float, reward_win_t_detonation, 0)                                                           \
+    X(float, reward_win_t_elimination, 0)                                                          \
+    X(float, reward_win_ct_defuse, 0)                                                              \
+    X(float, reward_win_ct_timeout, 0)                                                             \
+    X(float, reward_win_ct_elimination, 0)                                                         \
+    X(float, reward_kill, 0)                                                                       \
+    X(float, reward_death, 0)                                                                      \
+    X(float, reward_bombsite_entry, 0)                                                             \
+    X(float, reward_plant_bonus, 0)                                                                \
+    X(float, reward_plant_base, 0)                                                                 \
+    X(float, reward_plant_progress_scale, 0)                                                       \
+    X(float, reward_plant_interrupted, 0)                                                          \
+    X(float, reward_defuse, 0)                                                                     \
+    X(float, reward_shot_penalty, 0)                                                               \
+    X(float, reward_ct_survival, 0)                                                                \
+    X(float, reward_inaction, 0)                                                                   \
+    X(float, pbrs_alive_weight, 0)                                                                 \
+    X(float, pbrs_hp_weight, 0)                                                                    \
+    X(float, pbrs_site_weight, 0)                                                                  \
+    X(float, pbrs_bomb_progress_weight, 0)                                                         \
+    X(float, pbrs_nav_weight_t, 0)                                                                 \
+    X(float, pbrs_nav_weight_ct, 0)                                                                \
+    X(int32_t, n_active_per_team, 0)                                                               \
+    X(int32_t, pin_pitch, 0)                                                                       \
+    X(int32_t, crouch_enabled, 0)                                                                  \
+    X(int32_t, jump_enabled, 0)
+
+/* ── Table-row type == struct-member type (compile-time) ──────────────────────
+ *
+ * WHAT: one check per SD_PREFIX_FIELDS row, asserting that the row's `type`
+ * column is the type the StaticData member above ACTUALLY has. A mismatch is a
+ * compile error naming the field; the table row that caused it shows up in the
+ * macro-expansion note under the error.
+ *
+ * WHY: offset and size in the layout table are offsetof/sizeof EXPRESSIONS, so
+ * the compiler owns them and no one can get them wrong. The type column is not
+ * — it is a hand-written string, and without this check nothing compares it to
+ * the struct. Editing `int32_t stale_memory_tick` to `float` in the STRUCT ONLY
+ * (leaving this table and StaticDataC in cs2_env.py saying int32_t) left all 71
+ * layout tests, the layout hash, and the sizeof(StaticData) guard green — the
+ * struct held a float that both descriptions called an int. A struct-only type
+ * edit must fail HERE, not silently reinterpret the bytes Python packs into the
+ * prefix (spec 2026-08-31 §2 W2); a pointer element-type change (`int8_t*` →
+ * `int32_t*`, same 8-byte field) is an out-of-bounds read that no runtime test
+ * in this tree would name.
+ *
+ * `int` and `int32_t` are deliberately COMPATIBLE here on this target — that is
+ * the same folding ctypes does (c_int32 IS c_int), which the whole two-sided
+ * design rests on, so this check must not be stricter than the hash it guards.
+ *
+ * The is_array arm compares `ctype[]` against the member's array type, so a
+ * wrong is_array flag also fails to compile rather than producing a plausible
+ * `arr_<base>_<count>` — the one part of the row the hash could not police.
+ *
+ * PITFALL: GNU builtins, not C11 `_Static_assert`, because build.zig pins
+ * `-std=c99`; both are available in clang (zig cc) in any -std mode. This block
+ * is C-only — `__builtin_types_compatible_p` does not exist in C++, and no C++
+ * TU includes this header today. Deliberately unguarded by `#ifdef __GNUC__`: a
+ * compiler that cannot run the check should fail loudly, not skip a layout
+ * guard in silence. */
+#define SD_ROW_TYPE_MATCHES_0(ctype, f)                                                            \
+    __builtin_types_compatible_p(ctype, __typeof__(((StaticData*)0)->f))
+#define SD_ROW_TYPE_MATCHES_1(ctype, f)                                                            \
+    __builtin_types_compatible_p(ctype[], __typeof__(((StaticData*)0)->f))
+/* Two levels so `is_array` is expanded before it is pasted onto the name. */
+#define SD_ROW_TYPE_MATCHES_(is_array, ctype, f) SD_ROW_TYPE_MATCHES_##is_array(ctype, f)
+#define SD_ROW_TYPE_MATCHES(is_array, ctype, f)  SD_ROW_TYPE_MATCHES_(is_array, ctype, f)
+
+/* A negative array size is the C99 way to fail a compile-time predicate. The
+ * member name IS the diagnostic, since a negative-size error quotes it. */
+#define SD_ROW_TYPE_CHECK(ctype, f, is_array)                                                      \
+    char sd_table_type_must_match_struct_##f[SD_ROW_TYPE_MATCHES(is_array, ctype, f) ? 1 : -1];
+
+/* Type declaration only — never defined, never instantiated, costs no bytes. */
+struct sd_prefix_type_checks {
+    SD_PREFIX_FIELDS(SD_ROW_TYPE_CHECK)
+};
+
+#undef SD_ROW_TYPE_CHECK
+#undef SD_ROW_TYPE_MATCHES
+#undef SD_ROW_TYPE_MATCHES_
+#undef SD_ROW_TYPE_MATCHES_1
+#undef SD_ROW_TYPE_MATCHES_0
 
 /* ── Per-agent state ── */
 typedef struct {
@@ -512,7 +706,8 @@ typedef struct {
     struct Client* client;
     /* Sim recoil v1 (#120): env-wide physics switch, after client.
      * 0 = today's hitscan (train / make_env default); 1 = punch on the hit ray
-     * (cs2_demo). Not a binding.init argument — that 73-arg FMT is a footgun.
+     * (cs2_demo). Not reachable through binding.init: that call carries the
+     * StaticData prefix, and this flag lives on Dust2Env instead.
      * make_env writes this after Dust2EnvC.from_address. env_reset memsets
      * GameState only, so the flag survives mid-round reset. */
     int32_t recoil_enabled;

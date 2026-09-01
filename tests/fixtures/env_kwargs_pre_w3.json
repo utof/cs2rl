@@ -1,0 +1,718 @@
+{
+ "_provenance": {
+  "format": "cs2rl-env-kwargs-capture-v1",
+  "captured_at_commit": "9920724ae409238bb53fd40ab6c2e36982e2edba",
+  "why": "pre-W3 baseline for the make_puffer_env construction factory (spec 2026-08-31 \u00a72 W3); a snapshot taken after the migration would compare the factory to itself",
+  "how": "each site's call expression is located by enclosing-function qualname, unparsed from the AST (recorded verbatim as call_source) and evaluated against a recording stub bound to make_puffer_env's real signature",
+  "sentinels": "opaque pass-through arguments are distinct sentinel strings so a routed-into-the-wrong-slot bug shows up as a value mismatch",
+  "regenerate": "UV_NO_SYNC=1 uv run python tests/capture_env_kwargs_pre_w3.py --capture"
+ },
+ "roles": {
+  "train": [
+   {
+    "scenario": "per_env_seed_wins",
+    "site": "src/train.py:1289",
+    "enclosing": "build_env_factory.env_factory",
+    "call_source": "make_puffer_env(team_spirit=shared_ts, buf=buf, seed=_seed if _seed is not None else seed or 0, map_data=map_data, reward_overrides=reward_overrides, reward_symmetrize=reward_symmetrize, **env_knobs or {})",
+    "bindings": {
+     "_seed": 41,
+     "buf": "<buf>",
+     "env_knobs": {
+      "n_active_per_team": 3,
+      "pin_pitch": 1,
+      "crouch_enabled": 0,
+      "jump_enabled": 1,
+      "pbrs_gamma": 0.995,
+      "round_time": 900
+     },
+     "map_data": "<map_data>",
+     "reward_overrides": {
+      "reward_ct_survival": 0.0,
+      "reward_t_kill": 2.5
+     },
+     "reward_symmetrize": true,
+     "seed": 3,
+     "shared_ts": "<shared_ts>"
+    },
+    "explicit_kwargs": {
+     "buf": "<buf>",
+     "crouch_enabled": 0,
+     "jump_enabled": 1,
+     "map_data": "<map_data>",
+     "n_active_per_team": 3,
+     "pbrs_gamma": 0.995,
+     "pin_pitch": 1,
+     "reward_overrides": {
+      "reward_ct_survival": 0.0,
+      "reward_t_kill": 2.5
+     },
+     "reward_symmetrize": true,
+     "round_time": 900,
+     "seed": 41,
+     "team_spirit": "<shared_ts>"
+    },
+    "effective_kwargs": {
+     "auto_reset": true,
+     "buf": "<buf>",
+     "crouch_enabled": 0,
+     "episode_stats": true,
+     "include_step_stats_in_info": false,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": "<map_data>",
+     "max_turn_speed": null,
+     "n_active_per_team": 3,
+     "pbrs_gamma": 0.995,
+     "pin_pitch": 1,
+     "record_fn": null,
+     "reward_overrides": {
+      "reward_ct_survival": 0.0,
+      "reward_t_kill": 2.5
+     },
+     "reward_symmetrize": true,
+     "round_time": 900,
+     "seed": 41,
+     "team_spirit": "<shared_ts>"
+    }
+   },
+   {
+    "scenario": "pufferlib_seed_no_knobs",
+    "site": "src/train.py:1289",
+    "enclosing": "build_env_factory.env_factory",
+    "call_source": "make_puffer_env(team_spirit=shared_ts, buf=buf, seed=_seed if _seed is not None else seed or 0, map_data=map_data, reward_overrides=reward_overrides, reward_symmetrize=reward_symmetrize, **env_knobs or {})",
+    "bindings": {
+     "_seed": null,
+     "buf": "<buf>",
+     "env_knobs": null,
+     "map_data": "<map_data>",
+     "reward_overrides": null,
+     "reward_symmetrize": false,
+     "seed": 5,
+     "shared_ts": "<shared_ts>"
+    },
+    "explicit_kwargs": {
+     "buf": "<buf>",
+     "map_data": "<map_data>",
+     "reward_overrides": null,
+     "reward_symmetrize": false,
+     "seed": 5,
+     "team_spirit": "<shared_ts>"
+    },
+    "effective_kwargs": {
+     "auto_reset": true,
+     "buf": "<buf>",
+     "crouch_enabled": 1,
+     "episode_stats": true,
+     "include_step_stats_in_info": false,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": "<map_data>",
+     "max_turn_speed": null,
+     "n_active_per_team": 5,
+     "pbrs_gamma": null,
+     "pin_pitch": 0,
+     "record_fn": null,
+     "reward_overrides": null,
+     "reward_symmetrize": false,
+     "round_time": null,
+     "seed": 5,
+     "team_spirit": "<shared_ts>"
+    }
+   },
+   {
+    "scenario": "seed_none_becomes_zero",
+    "site": "src/train.py:1289",
+    "enclosing": "build_env_factory.env_factory",
+    "call_source": "make_puffer_env(team_spirit=shared_ts, buf=buf, seed=_seed if _seed is not None else seed or 0, map_data=map_data, reward_overrides=reward_overrides, reward_symmetrize=reward_symmetrize, **env_knobs or {})",
+    "bindings": {
+     "_seed": null,
+     "buf": "<buf>",
+     "env_knobs": {
+      "n_active_per_team": 3,
+      "pin_pitch": 1,
+      "crouch_enabled": 0,
+      "jump_enabled": 1,
+      "pbrs_gamma": 0.995,
+      "round_time": 900
+     },
+     "map_data": "<map_data>",
+     "reward_overrides": {
+      "reward_ct_survival": 0.0,
+      "reward_t_kill": 2.5
+     },
+     "reward_symmetrize": false,
+     "seed": null,
+     "shared_ts": "<shared_ts>"
+    },
+    "explicit_kwargs": {
+     "buf": "<buf>",
+     "crouch_enabled": 0,
+     "jump_enabled": 1,
+     "map_data": "<map_data>",
+     "n_active_per_team": 3,
+     "pbrs_gamma": 0.995,
+     "pin_pitch": 1,
+     "reward_overrides": {
+      "reward_ct_survival": 0.0,
+      "reward_t_kill": 2.5
+     },
+     "reward_symmetrize": false,
+     "round_time": 900,
+     "seed": 0,
+     "team_spirit": "<shared_ts>"
+    },
+    "effective_kwargs": {
+     "auto_reset": true,
+     "buf": "<buf>",
+     "crouch_enabled": 0,
+     "episode_stats": true,
+     "include_step_stats_in_info": false,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": "<map_data>",
+     "max_turn_speed": null,
+     "n_active_per_team": 3,
+     "pbrs_gamma": 0.995,
+     "pin_pitch": 1,
+     "record_fn": null,
+     "reward_overrides": {
+      "reward_ct_survival": 0.0,
+      "reward_t_kill": 2.5
+     },
+     "reward_symmetrize": false,
+     "round_time": 900,
+     "seed": 0,
+     "team_spirit": "<shared_ts>"
+    }
+   }
+  ],
+  "harness": [
+   {
+    "scenario": "seed_none_becomes_zero",
+    "site": "src/train_test_harness.py:222",
+    "enclosing": "_build_trainer_for_test.env_factory",
+    "call_source": "make_puffer_env(team_spirit=shared_ts, buf=buf, seed=0 if seed is None else seed, map_data=map_data, include_step_stats_in_info=True, n_active_per_team=n_active_per_team, pin_pitch=pin_pitch, crouch_enabled=crouch_enabled, jump_enabled=jump_enabled)",
+    "bindings": {
+     "buf": "<buf>",
+     "crouch_enabled": 1,
+     "jump_enabled": 1,
+     "map_data": "<map_data>",
+     "n_active_per_team": 5,
+     "pin_pitch": 0,
+     "seed": null,
+     "shared_ts": "<shared_ts>"
+    },
+    "explicit_kwargs": {
+     "buf": "<buf>",
+     "crouch_enabled": 1,
+     "include_step_stats_in_info": true,
+     "jump_enabled": 1,
+     "map_data": "<map_data>",
+     "n_active_per_team": 5,
+     "pin_pitch": 0,
+     "seed": 0,
+     "team_spirit": "<shared_ts>"
+    },
+    "effective_kwargs": {
+     "auto_reset": true,
+     "buf": "<buf>",
+     "crouch_enabled": 1,
+     "episode_stats": true,
+     "include_step_stats_in_info": true,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": "<map_data>",
+     "max_turn_speed": null,
+     "n_active_per_team": 5,
+     "pbrs_gamma": null,
+     "pin_pitch": 0,
+     "record_fn": null,
+     "reward_overrides": null,
+     "reward_symmetrize": false,
+     "round_time": null,
+     "seed": 0,
+     "team_spirit": "<shared_ts>"
+    }
+   },
+   {
+    "scenario": "explicit_seed_zero_kept",
+    "site": "src/train_test_harness.py:222",
+    "enclosing": "_build_trainer_for_test.env_factory",
+    "call_source": "make_puffer_env(team_spirit=shared_ts, buf=buf, seed=0 if seed is None else seed, map_data=map_data, include_step_stats_in_info=True, n_active_per_team=n_active_per_team, pin_pitch=pin_pitch, crouch_enabled=crouch_enabled, jump_enabled=jump_enabled)",
+    "bindings": {
+     "buf": "<buf>",
+     "crouch_enabled": 0,
+     "jump_enabled": 0,
+     "map_data": "<map_data>",
+     "n_active_per_team": 2,
+     "pin_pitch": 1,
+     "seed": 0,
+     "shared_ts": "<shared_ts>"
+    },
+    "explicit_kwargs": {
+     "buf": "<buf>",
+     "crouch_enabled": 0,
+     "include_step_stats_in_info": true,
+     "jump_enabled": 0,
+     "map_data": "<map_data>",
+     "n_active_per_team": 2,
+     "pin_pitch": 1,
+     "seed": 0,
+     "team_spirit": "<shared_ts>"
+    },
+    "effective_kwargs": {
+     "auto_reset": true,
+     "buf": "<buf>",
+     "crouch_enabled": 0,
+     "episode_stats": true,
+     "include_step_stats_in_info": true,
+     "jump_enabled": 0,
+     "laser_range": null,
+     "map_data": "<map_data>",
+     "max_turn_speed": null,
+     "n_active_per_team": 2,
+     "pbrs_gamma": null,
+     "pin_pitch": 1,
+     "record_fn": null,
+     "reward_overrides": null,
+     "reward_symmetrize": false,
+     "round_time": null,
+     "seed": 0,
+     "team_spirit": "<shared_ts>"
+    }
+   }
+  ],
+  "eval": [
+   {
+    "scenario": "default_args",
+    "site": "src/train.py:3714",
+    "enclosing": "train",
+    "call_source": "make_puffer_env(team_spirit=None, seed=10000003, map_data=_map_data, auto_reset=False, reward_overrides=reward_overrides_from_args(args), **env_knobs_from_args(args))",
+    "bindings": {
+     "_map_data": "<map_data>",
+     "args": {
+      "__namespace__": {}
+     },
+     "env_knobs_from_args": "<train_config.env_knobs_from_args>",
+     "reward_overrides_from_args": "<train_shared.reward_overrides_from_args>"
+    },
+    "explicit_kwargs": {
+     "auto_reset": false,
+     "crouch_enabled": 1,
+     "jump_enabled": 1,
+     "map_data": "<map_data>",
+     "n_active_per_team": 5,
+     "pbrs_gamma": 0.999,
+     "pin_pitch": 0,
+     "reward_overrides": {
+      "reward_win": 1.0,
+      "reward_kill": 0.3,
+      "reward_death": 0.1,
+      "reward_bombsite_entry": 0.3,
+      "reward_plant_bonus": 3.0,
+      "reward_plant_base": 0.2,
+      "reward_plant_progress_scale": 0.05,
+      "reward_plant_interrupted": 0.1,
+      "reward_defuse": 0.2,
+      "reward_shot_penalty": 0.005,
+      "reward_ct_survival": 0.001,
+      "reward_inaction": 0.0005,
+      "reward_win_t_detonation": 5.0,
+      "reward_win_t_elimination": 3.0,
+      "reward_win_ct_defuse": 5.0,
+      "reward_win_ct_timeout": 4.0,
+      "reward_win_ct_elimination": 3.0,
+      "pbrs_alive_weight": 0.3,
+      "pbrs_hp_weight": 0.002,
+      "pbrs_site_weight": 0.2,
+      "pbrs_bomb_progress_weight": 0.3,
+      "pbrs_nav_weight_t": 0.04,
+      "pbrs_nav_weight_ct": 0.15
+     },
+     "seed": 10000003,
+     "team_spirit": null
+    },
+    "effective_kwargs": {
+     "auto_reset": false,
+     "buf": null,
+     "crouch_enabled": 1,
+     "episode_stats": true,
+     "include_step_stats_in_info": false,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": "<map_data>",
+     "max_turn_speed": null,
+     "n_active_per_team": 5,
+     "pbrs_gamma": 0.999,
+     "pin_pitch": 0,
+     "record_fn": null,
+     "reward_overrides": {
+      "reward_win": 1.0,
+      "reward_kill": 0.3,
+      "reward_death": 0.1,
+      "reward_bombsite_entry": 0.3,
+      "reward_plant_bonus": 3.0,
+      "reward_plant_base": 0.2,
+      "reward_plant_progress_scale": 0.05,
+      "reward_plant_interrupted": 0.1,
+      "reward_defuse": 0.2,
+      "reward_shot_penalty": 0.005,
+      "reward_ct_survival": 0.001,
+      "reward_inaction": 0.0005,
+      "reward_win_t_detonation": 5.0,
+      "reward_win_t_elimination": 3.0,
+      "reward_win_ct_defuse": 5.0,
+      "reward_win_ct_timeout": 4.0,
+      "reward_win_ct_elimination": 3.0,
+      "pbrs_alive_weight": 0.3,
+      "pbrs_hp_weight": 0.002,
+      "pbrs_site_weight": 0.2,
+      "pbrs_bomb_progress_weight": 0.3,
+      "pbrs_nav_weight_t": 0.04,
+      "pbrs_nav_weight_ct": 0.15
+     },
+     "reward_symmetrize": false,
+     "round_time": null,
+     "seed": 10000003,
+     "team_spirit": null
+    },
+    "resolved": {
+     "reward_overrides": {
+      "reward_win": 1.0,
+      "reward_kill": 0.3,
+      "reward_death": 0.1,
+      "reward_bombsite_entry": 0.3,
+      "reward_plant_bonus": 3.0,
+      "reward_plant_base": 0.2,
+      "reward_plant_progress_scale": 0.05,
+      "reward_plant_interrupted": 0.1,
+      "reward_defuse": 0.2,
+      "reward_shot_penalty": 0.005,
+      "reward_ct_survival": 0.001,
+      "reward_inaction": 0.0005,
+      "reward_win_t_detonation": 5.0,
+      "reward_win_t_elimination": 3.0,
+      "reward_win_ct_defuse": 5.0,
+      "reward_win_ct_timeout": 4.0,
+      "reward_win_ct_elimination": 3.0,
+      "pbrs_alive_weight": 0.3,
+      "pbrs_hp_weight": 0.002,
+      "pbrs_site_weight": 0.2,
+      "pbrs_bomb_progress_weight": 0.3,
+      "pbrs_nav_weight_t": 0.04,
+      "pbrs_nav_weight_ct": 0.15
+     },
+     "env_knobs": {
+      "n_active_per_team": 5,
+      "pin_pitch": 0,
+      "crouch_enabled": 1,
+      "jump_enabled": 1,
+      "pbrs_gamma": 0.999
+     }
+    }
+   },
+   {
+    "scenario": "non_default_args",
+    "site": "src/train.py:3714",
+    "enclosing": "train",
+    "call_source": "make_puffer_env(team_spirit=None, seed=10000003, map_data=_map_data, auto_reset=False, reward_overrides=reward_overrides_from_args(args), **env_knobs_from_args(args))",
+    "bindings": {
+     "_map_data": "<map_data>",
+     "args": {
+      "__namespace__": {
+       "crouch_enabled": 0,
+       "gamma": 0.995,
+       "jump_enabled": 1,
+       "n_active_per_team": 3,
+       "pin_pitch": 1,
+       "reward_ct_survival": 0.0,
+       "round_time_ticks": 900
+      }
+     },
+     "env_knobs_from_args": "<train_config.env_knobs_from_args>",
+     "reward_overrides_from_args": "<train_shared.reward_overrides_from_args>"
+    },
+    "explicit_kwargs": {
+     "auto_reset": false,
+     "crouch_enabled": 0,
+     "jump_enabled": 1,
+     "map_data": "<map_data>",
+     "n_active_per_team": 3,
+     "pbrs_gamma": 0.995,
+     "pin_pitch": 1,
+     "reward_overrides": {
+      "reward_win": 1.0,
+      "reward_kill": 0.3,
+      "reward_death": 0.1,
+      "reward_bombsite_entry": 0.3,
+      "reward_plant_bonus": 3.0,
+      "reward_plant_base": 0.2,
+      "reward_plant_progress_scale": 0.05,
+      "reward_plant_interrupted": 0.1,
+      "reward_defuse": 0.2,
+      "reward_shot_penalty": 0.005,
+      "reward_ct_survival": 0.0,
+      "reward_inaction": 0.0005,
+      "reward_win_t_detonation": 5.0,
+      "reward_win_t_elimination": 3.0,
+      "reward_win_ct_defuse": 5.0,
+      "reward_win_ct_timeout": 4.0,
+      "reward_win_ct_elimination": 3.0,
+      "pbrs_alive_weight": 0.3,
+      "pbrs_hp_weight": 0.002,
+      "pbrs_site_weight": 0.2,
+      "pbrs_bomb_progress_weight": 0.3,
+      "pbrs_nav_weight_t": 0.04,
+      "pbrs_nav_weight_ct": 0.15
+     },
+     "round_time": 900,
+     "seed": 10000003,
+     "team_spirit": null
+    },
+    "effective_kwargs": {
+     "auto_reset": false,
+     "buf": null,
+     "crouch_enabled": 0,
+     "episode_stats": true,
+     "include_step_stats_in_info": false,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": "<map_data>",
+     "max_turn_speed": null,
+     "n_active_per_team": 3,
+     "pbrs_gamma": 0.995,
+     "pin_pitch": 1,
+     "record_fn": null,
+     "reward_overrides": {
+      "reward_win": 1.0,
+      "reward_kill": 0.3,
+      "reward_death": 0.1,
+      "reward_bombsite_entry": 0.3,
+      "reward_plant_bonus": 3.0,
+      "reward_plant_base": 0.2,
+      "reward_plant_progress_scale": 0.05,
+      "reward_plant_interrupted": 0.1,
+      "reward_defuse": 0.2,
+      "reward_shot_penalty": 0.005,
+      "reward_ct_survival": 0.0,
+      "reward_inaction": 0.0005,
+      "reward_win_t_detonation": 5.0,
+      "reward_win_t_elimination": 3.0,
+      "reward_win_ct_defuse": 5.0,
+      "reward_win_ct_timeout": 4.0,
+      "reward_win_ct_elimination": 3.0,
+      "pbrs_alive_weight": 0.3,
+      "pbrs_hp_weight": 0.002,
+      "pbrs_site_weight": 0.2,
+      "pbrs_bomb_progress_weight": 0.3,
+      "pbrs_nav_weight_t": 0.04,
+      "pbrs_nav_weight_ct": 0.15
+     },
+     "reward_symmetrize": false,
+     "round_time": 900,
+     "seed": 10000003,
+     "team_spirit": null
+    },
+    "resolved": {
+     "reward_overrides": {
+      "reward_win": 1.0,
+      "reward_kill": 0.3,
+      "reward_death": 0.1,
+      "reward_bombsite_entry": 0.3,
+      "reward_plant_bonus": 3.0,
+      "reward_plant_base": 0.2,
+      "reward_plant_progress_scale": 0.05,
+      "reward_plant_interrupted": 0.1,
+      "reward_defuse": 0.2,
+      "reward_shot_penalty": 0.005,
+      "reward_ct_survival": 0.0,
+      "reward_inaction": 0.0005,
+      "reward_win_t_detonation": 5.0,
+      "reward_win_t_elimination": 3.0,
+      "reward_win_ct_defuse": 5.0,
+      "reward_win_ct_timeout": 4.0,
+      "reward_win_ct_elimination": 3.0,
+      "pbrs_alive_weight": 0.3,
+      "pbrs_hp_weight": 0.002,
+      "pbrs_site_weight": 0.2,
+      "pbrs_bomb_progress_weight": 0.3,
+      "pbrs_nav_weight_t": 0.04,
+      "pbrs_nav_weight_ct": 0.15
+     },
+     "env_knobs": {
+      "n_active_per_team": 3,
+      "pin_pitch": 1,
+      "crouch_enabled": 0,
+      "jump_enabled": 1,
+      "pbrs_gamma": 0.995,
+      "round_time": 900
+     }
+    }
+   }
+  ],
+  "eval_legacy": [
+   {
+    "scenario": "bare_defaults",
+    "site": "src/train.py:841",
+    "enclosing": "load_policy_from_checkpoint",
+    "call_source": "make_puffer_env()",
+    "bindings": {},
+    "explicit_kwargs": {},
+    "effective_kwargs": {
+     "auto_reset": true,
+     "buf": null,
+     "crouch_enabled": 1,
+     "episode_stats": true,
+     "include_step_stats_in_info": false,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": null,
+     "max_turn_speed": null,
+     "n_active_per_team": 5,
+     "pbrs_gamma": null,
+     "pin_pitch": 0,
+     "record_fn": null,
+     "reward_overrides": null,
+     "reward_symmetrize": false,
+     "round_time": null,
+     "seed": 0,
+     "team_spirit": null
+    }
+   },
+   {
+    "scenario": "explicit_seed",
+    "site": "src/train.py:1134",
+    "enclosing": "evaluate_checkpoint",
+    "call_source": "make_puffer_env(seed=seed)",
+    "bindings": {
+     "seed": 12345
+    },
+    "explicit_kwargs": {
+     "seed": 12345
+    },
+    "effective_kwargs": {
+     "auto_reset": true,
+     "buf": null,
+     "crouch_enabled": 1,
+     "episode_stats": true,
+     "include_step_stats_in_info": false,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": null,
+     "max_turn_speed": null,
+     "n_active_per_team": 5,
+     "pbrs_gamma": null,
+     "pin_pitch": 0,
+     "record_fn": null,
+     "reward_overrides": null,
+     "reward_symmetrize": false,
+     "round_time": null,
+     "seed": 12345,
+     "team_spirit": null
+    }
+   }
+  ],
+  "smoke": [
+   {
+    "scenario": "fixed_seed_42",
+    "site": "src/train.py:648",
+    "enclosing": "smoke_test",
+    "call_source": "make_puffer_env(seed=42)",
+    "bindings": {},
+    "explicit_kwargs": {
+     "seed": 42
+    },
+    "effective_kwargs": {
+     "auto_reset": true,
+     "buf": null,
+     "crouch_enabled": 1,
+     "episode_stats": true,
+     "include_step_stats_in_info": false,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": null,
+     "max_turn_speed": null,
+     "n_active_per_team": 5,
+     "pbrs_gamma": null,
+     "pin_pitch": 0,
+     "record_fn": null,
+     "reward_overrides": null,
+     "reward_symmetrize": false,
+     "round_time": null,
+     "seed": 42,
+     "team_spirit": null
+    }
+   }
+  ],
+  "external": [
+   {
+    "scenario": "both_passed",
+    "site": "src/train.py:1219",
+    "enclosing": "make_env",
+    "call_source": "make_puffer_env(team_spirit=team_spirit, map_data=map_data)",
+    "bindings": {
+     "map_data": "<map_data>",
+     "team_spirit": "<team_spirit>"
+    },
+    "explicit_kwargs": {
+     "map_data": "<map_data>",
+     "team_spirit": "<team_spirit>"
+    },
+    "effective_kwargs": {
+     "auto_reset": true,
+     "buf": null,
+     "crouch_enabled": 1,
+     "episode_stats": true,
+     "include_step_stats_in_info": false,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": "<map_data>",
+     "max_turn_speed": null,
+     "n_active_per_team": 5,
+     "pbrs_gamma": null,
+     "pin_pitch": 0,
+     "record_fn": null,
+     "reward_overrides": null,
+     "reward_symmetrize": false,
+     "round_time": null,
+     "seed": 0,
+     "team_spirit": "<team_spirit>"
+    }
+   },
+   {
+    "scenario": "wrapper_defaults",
+    "site": "src/train.py:1219",
+    "enclosing": "make_env",
+    "call_source": "make_puffer_env(team_spirit=team_spirit, map_data=map_data)",
+    "bindings": {
+     "map_data": null,
+     "team_spirit": null
+    },
+    "explicit_kwargs": {
+     "map_data": null,
+     "team_spirit": null
+    },
+    "effective_kwargs": {
+     "auto_reset": true,
+     "buf": null,
+     "crouch_enabled": 1,
+     "episode_stats": true,
+     "include_step_stats_in_info": false,
+     "jump_enabled": 1,
+     "laser_range": null,
+     "map_data": null,
+     "max_turn_speed": null,
+     "n_active_per_team": 5,
+     "pbrs_gamma": null,
+     "pin_pitch": 0,
+     "record_fn": null,
+     "reward_overrides": null,
+     "reward_symmetrize": false,
+     "round_time": null,
+     "seed": 0,
+     "team_spirit": null
+    }
+   }
+  ]
+ }
+}

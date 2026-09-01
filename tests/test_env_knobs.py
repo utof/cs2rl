@@ -1,8 +1,9 @@
 """R0-G (Rung 0 spec 2026-08-29): env knobs via CLI.
 
 `--round-time-ticks` / `--laser-range` / `--max-turn-speed` flow
-CLI → env_knobs_from_args → make_puffer_env → make_env → binding.init FMT
-(positions 23-24 / 30 / 43). None ⇒ nav.py constant, so every caller that
+CLI → env_knobs_from_args → make_puffer_env → make_env → the packed StaticData
+buffer binding.init copies (StaticData.round_time / laser_range +
+laser_range_sq / max_turn_speed). None ⇒ nav.py constant, so every caller that
 does not pass a knob keeps today's values (fingerprints unchanged at default).
 
 PITFALL (Task 14): the exact-key assertion in test_env_knobs_from_args_and_config
@@ -43,7 +44,7 @@ def test_laser_and_turn_speed_reach_static_data(simple_map):
         sc = binding.static_data_scalars(env._capsule)
         assert sc["laser_range"] == pytest.approx(300.0)
         # laser_range_sq is not a kwarg: it must be derived from the SAME value
-        # (FMT 23-24 disagreeing would make range checks and damage falloff disagree).
+        # (two independent values would make range checks and damage falloff disagree).
         assert sc["laser_range_sq"] == pytest.approx(90000.0)
         assert sc["max_turn_speed"] == pytest.approx(0.5)
         assert sc["round_time"] == env.round_time

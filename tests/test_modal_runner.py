@@ -400,24 +400,38 @@ def _live_train_long_options_from_source() -> set[str]:
     Reads source (no `import src.train`) so collection cannot pull CUDA.
     Generated `add_argument(f"--{_rw_name...}")` is a JoinedStr and is
     recovered from the defaults dict instead.
+
+    TWO FILES, unioned (post-rung1a refactor 2026-08-31): the argparse parser
+    still lives in src/train.py (it is built inline under
+    `if __name__ == "__main__"`), but REWARD_WEIGHT_DEFAULTS moved to the leaf
+    src/train_shared.py, which train.py imports. Parsing only one of them
+    silently drops half the option set — train.py alone loses all 23
+    `--reward-*`/`--pbrs-*` flags, train_shared.py alone loses every other flag
+    — and the set-equality assert below would then "fail" against the runner
+    mirror for a reason that has nothing to do with the mirror. Neither file's
+    contribution is optional; if a symbol moves again, extend this tuple.
     """
-    tree = ast.parse((ROOT / "src" / "train.py").read_text())
     names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "REWARD_WEIGHT_DEFAULTS":
-                    assert isinstance(node.value, ast.Dict)
-                    for key in node.value.keys:
-                        assert isinstance(key, ast.Constant) and isinstance(key.value, str)
-                        names.add(f"--{key.value.replace('_', '-')}")
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if node.func.attr != "add_argument":
-                continue
-            for arg in node.args:
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    if arg.value.startswith("--"):
-                        names.add(arg.value)
+    for rel in ("src/train_shared.py", "src/train.py"):
+        tree = ast.parse((ROOT / rel).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "REWARD_WEIGHT_DEFAULTS":
+                        # Unconditional: an alias-assign or a non-dict rebinding
+                        # of this name is exactly the drift this pin exists to
+                        # catch, so it must fail loudly rather than be skipped.
+                        assert isinstance(node.value, ast.Dict)
+                        for key in node.value.keys:
+                            assert isinstance(key, ast.Constant) and isinstance(key.value, str)
+                            names.add(f"--{key.value.replace('_', '-')}")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr != "add_argument":
+                    continue
+                for arg in node.args:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        if arg.value.startswith("--"):
+                            names.add(arg.value)
     return names
 
 
@@ -1369,7 +1383,10 @@ def test_normalize_config_strips_only_checkpoint_data_dir():
 
 
 def test_validate_completed_run_accepts_representative_metrics(tmp_path):
-    train_src = (ROOT / "src" / "train.py").read_text()
+    # compute_batch_dims moved train.py -> train_config.py in the post-rung1a
+    # refactor (2026-08-31); the runner's AGENTS_PER_ENV/BPTT_HORIZON mirror is
+    # pinned against wherever it actually lives, not against train.py by habit.
+    train_src = (ROOT / "src" / "train_config.py").read_text()
     fn = ast.parse(train_src)
     for node in ast.walk(fn):
         if isinstance(node, ast.FunctionDef) and node.name == "compute_batch_dims":
@@ -1380,7 +1397,7 @@ def test_validate_completed_run_accepts_representative_metrics(tmp_path):
             assert "num_envs * agents_per_env * bptt_horizon" in body
             break
     else:
-        raise AssertionError("live compute_batch_dims not found")
+        raise AssertionError("live compute_batch_dims not found in src/train_config.py")
     assert mrl.AGENTS_PER_ENV == 10
     assert mrl.BPTT_HORIZON == 64
     run_root, manifest, effective, ckpt = _minimal_completed_tree(tmp_path)

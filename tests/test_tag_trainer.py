@@ -39,16 +39,61 @@ def _run_once(trainer):
 
 def test_flag_off_is_inert(monkeypatch):
     """Spec §5 test 1: flag off ⇒ helper never called, no _tag_metrics."""
-    import train as train_mod
+    # PATCH THE DEFINING MODULE, NOT `train`: tag_grad_cossim moved to
+    # train_update.py (post-rung1a refactor, 2026-08-31) and its call site inside
+    # _train_with_return_norm resolves through train_update's globals. `train`
+    # only re-exports it, so a patch there is unreachable and this test would
+    # pass while asserting nothing — verified by forcing the hook on, where the
+    # train-side patch never fires and the train_update-side patch always does.
+    import train_update as tag_mod
     calls = []
-    real = train_mod.tag_grad_cossim
-    monkeypatch.setattr(train_mod, "tag_grad_cossim",
+    real = tag_mod.tag_grad_cossim
+    monkeypatch.setattr(tag_mod, "tag_grad_cossim",
                         lambda *a, **k: calls.append(1) or real(*a, **k))
     trainer, cleanup = _build(tag_on=False)
     try:
         _run_once(trainer)
         assert calls == [], "tag_grad_cossim ran with the flag off"
         assert getattr(trainer, "_tag_metrics", None) in (None, {})
+    finally:
+        cleanup()
+
+
+def test_monkeypatch_target_actually_reaches_the_hook(monkeypatch):
+    """Positive pin on the PATCH POINT used by test_flag_off_is_inert above.
+
+    WHAT: force the flag ON with the same monkeypatch and assert the
+    interceptor fired. Nothing else — this measures reachability, not TAG.
+
+    WHY it is a separate test: `test_flag_off_is_inert` asserts `calls == []`,
+    which is green whether or not the patch can reach the call site at all. A
+    patch aimed at the wrong module is therefore indistinguishable from a
+    correctly-inert hook, and the test silently stops testing anything. That
+    is not hypothetical: the call site inside `_train_with_return_norm`
+    resolves `tag_grad_cossim` through `train_update`'s globals, so patching
+    `train` (its pre-2026-08-31 home, now only a re-exporting shim) is
+    unreachable — measured, both directions. This test goes red for that,
+    for a future move of `tag_grad_cossim`, and for a changed call site.
+
+    PITFALL: assert ONLY `calls != []`. With the flag on, `_tag_metrics` is
+    populated, so reusing the inert test's second assert here would fail for
+    a reason that has nothing to do with the patch point.
+
+    COST: one real trainer build (~12 s). That is the price of the pin — do
+    not swap in a stub trainer, which would stop exercising the real call
+    site and reintroduce exactly the vacuity this test exists to prevent.
+    """
+    import train_update as tag_mod
+    calls = []
+    real = tag_mod.tag_grad_cossim
+    monkeypatch.setattr(tag_mod, "tag_grad_cossim",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    trainer, cleanup = _build(tag_on=True)
+    try:
+        _run_once(trainer)
+        assert calls != [], (
+            "monkeypatch never intercepted tag_grad_cossim with the flag ON — the patch "
+            "point is unreachable, so test_flag_off_is_inert is green while asserting nothing")
     finally:
         cleanup()
 
@@ -165,8 +210,11 @@ def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
     path.
 
     Two independent identity sources must agree or the whole batch is
-    meaningless: TAG partitions by slot index ((idx % 10) < 5, src/train.py
-    ~:3237) while the split routes by the obs bit obs[24]. If they ever
+    meaningless: TAG partitions by slot index ((idx % 10) < 5, inside
+    `tag_grad_cossim` — which moved out of train.py with its patcher on
+    2026-08-31 and now lives in src/train_update.py, :1403 at that commit;
+    search the symbol, not the line) while the split routes by the obs bit
+    obs[24]. If they ever
     disagree, TAG would silently measure the wrong partition of a correctly
     routed network — and nothing would crash. The legacy-path version of this
     pin is test_row_mask_matches_obs_team_bit above; this one proves the

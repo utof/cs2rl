@@ -17,7 +17,7 @@ def _make_env(map_data=None):
 
 def test_binding_functions_present():
     for name in ("init", "reset", "step", "close", "get_buffers", "get_masks", "struct_sizes",
-                 "static_data_scalars"):
+                 "static_data_scalars", "static_data_layout"):
         assert hasattr(binding, name), f"binding.{name} missing"
 
 
@@ -115,11 +115,11 @@ def test_agentstate_has_punch_fields():
 def test_make_env_writes_recoil_enabled(make_map):
     """make_env / Cs2Env write recoil_enabled after from_address.
 
-    Why: not a binding.init argument (the 73-arg FMT is extended only at the
-    tail, and only for StaticData scalars — this flag lives on Dust2Env). env_reset
-    memsets GameState only, so the flag must be set at overlay time — a
-    first-reset-only write would also work today, but would hide a later
-    memset of Dust2Env. Default is today's hitscan (0).
+    Why: not reachable through binding.init — that call carries the StaticData
+    prefix, and this flag lives on Dust2Env instead. env_reset memsets GameState
+    only, so the flag must be set at overlay time — a first-reset-only write
+    would also work today, but would hide a later memset of Dust2Env. Default is
+    today's hitscan (0).
     """
     import inspect
 
@@ -248,7 +248,11 @@ def test_binding_default_continuous_actions_zero(make_map):
 #   (b) the throttled warning print happens.
 #
 # If the guard's structure changes (new warning string, different zero_grad
-# signature), update BOTH this test and src/train.py:1208-ish in the same PR.
+# signature), update BOTH this test and the real guard in the same PR. The real
+# guard is the `if not torch.isfinite(loss).all():` block inside
+# `_train_with_return_norm`, which moved out of train.py with its patcher on
+# 2026-08-31 and now lives in src/train_update.py (:815 at that commit; search
+# the "Batch 3 (T5) NaN guard" banner rather than trusting the number).
 
 
 def test_continuous_aim_nan_guard():

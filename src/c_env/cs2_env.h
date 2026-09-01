@@ -27,10 +27,11 @@ static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_sp
            "obs block sizes do not tile OBS_DIM (see cs2_types.h OBS_* macros)");
     memset(env, 0, sizeof(Dust2Env));
     env->sd = sd;
-    /* Rung 0: a zeroed StaticData (cs2_demo.c load_nav_data forgot the field,
-     * or a FMT mis-order) would make env_reset divide by zero. Python callers
-     * never reach this — Cs2Env.__init__ raises ValueError first — so this is
-     * the guard for the C-only callers (cs2_demo.c / make_client). */
+    /* Rung 0: a zeroed StaticData (cs2_demo.c load_nav_data forgot the field, or
+     * a C caller that built its own StaticData) would make env_reset divide by
+     * zero. Python callers never reach this — Cs2Env.__init__ raises ValueError
+     * first — so this is the guard for the C-only callers (cs2_demo.c /
+     * make_client). */
     assert(sd->n_active_per_team >= 1 && sd->n_active_per_team <= TEAM_SIZE &&
            "StaticData.n_active_per_team must be in 1..TEAM_SIZE");
     /* R0-D (#135): seeds 0 and 1 used to alias (`seed ? seed : 1`) — every
@@ -87,7 +88,12 @@ static void compute_masks(Dust2Env* env) {
          * below (minimal action space for the aim rung; with pitch pinned an
          * airborne agent also spends most of its airtime outside the hit band,
          * gh #150). Defaults to 1 (cs2_demo.c forces 1 for the human player).
-         * Bin 0 (no jump) stays valid, preserving the per-head no-op. */
+         * Bin 0 (no jump) stays valid, preserving the per-head no-op.
+         * W5 (#156): this mask is NO LONGER the enforcement. process_movement
+         * zeroes jump_act at the read when jump_enabled=0, so the flag holds on
+         * every path, mask or not. Keeping the mask is a policy-side
+         * optimisation — a masked policy should not spend probability mass on a
+         * bin the sim is going to drop. */
         if (a->is_airborne || a->jump_cd > 0 || a->is_crouching || !sd->jump_enabled)
             m[moff[HEAD_JUMP] + 1] = 0;
         /* R0-E.2 (#131): stance parity. PRE-v1c rationale (no longer true):
@@ -101,7 +107,11 @@ static void compute_masks(Dust2Env* env) {
          * space minimal, and stance still eats parity margin the policy cannot
          * see. 5v5 keeps crouch (crouch_enabled defaults to 1, cs2_demo.c
          * forces 1 for the human player). Bin 0 (stand) stays valid so the head
-         * keeps its per-head no-op invariant (see header comment). */
+         * keeps its per-head no-op invariant (see header comment).
+         * W5 (#156): as with the jump mask above, the mask is no longer what
+         * makes crouch_enabled=0 stick — process_movement zeroes crouch_act at
+         * the read. The mask is now the policy-side half of a sim-enforced
+         * invariant. */
         if (!sd->crouch_enabled)
             m[moff[HEAD_CROUCH] + 1] = 0;
         /* R0-B (#129): this function runs at the TAIL of env_step, but the
@@ -364,9 +374,14 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
                  * reason ("a crouched target is |rz| = 24 > HIT_HALF_WIDTH =
                  * 16, an unconditional miss") no longer holds — v1c (gh #150)
                  * gives a crouched target a 27u vertical semi-axis, so 24
-                 * connects. The mask survives to keep the Rung 1 action space
-                 * minimal and because stance still costs parity margin the
-                 * policy cannot observe. See compute_masks in this file. */
+                 * connects. The restriction survives to keep the Rung 1 action
+                 * space minimal and because stance still costs parity margin
+                 * the policy cannot observe. W5 (#156) went further: with
+                 * crouch_enabled=0 the sim itself drops the press
+                 * (process_movement), so under Rung 1 settings NO path can
+                 * produce a crouched agent and the pinned-pitch shot geometry is
+                 * stance-uniform by construction. See compute_masks in this
+                 * file. */
                 a->pitch = 0.0f;
             }
         }

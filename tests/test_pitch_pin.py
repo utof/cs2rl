@@ -74,8 +74,8 @@ def test_jump_masked_when_disabled(simple_map):
     The default (1) case is the load-bearing half: the C gate ORs the new flag
     into a condition that ALREADY masks bin 1 while airborne / on cooldown /
     crouching (cs2_env.h compute_masks), so a jump_enabled read that is
-    accidentally inverted — or a field that lands on the wrong FMT position and
-    reads 0 — would still look "correctly masked" if only flag=0 were checked.
+    accidentally inverted — or a field packed under the wrong name, reading 0 —
+    would still look "correctly masked" if only flag=0 were checked.
     Right after reset every agent is grounded with jump_cd 0, so bin 1 must be
     OPEN unless the knob closed it. Bin 0 (no jump) stays valid either way: the
     per-head no-op invariant the masked softmax depends on.

@@ -219,9 +219,11 @@ def test_log_std_is_clamped_per_copy_then_blended(env):
 
 def test_get_action_and_value_routes_by_team(env):
     """Spec §3.1: get_action_and_value is split for consistency even though no
-    production path calls it (its only in-tree caller is
-    tests/test_train_env.py:1181; train_bc.py uses forward_eval). Same marker
-    trick as the forward test, read off the returned value/continuous action.
+    production path calls it — every in-tree caller is a test
+    (test_hybrid_sample_writes_two_buffers in tests/test_train_env.py, plus
+    tests/test_aim_log_std_max.py and tests/test_pitch_pin.py); train_bc.py
+    uses forward_eval. Same marker trick as the forward test, read off the
+    returned value/continuous action.
     """
     p = train.build_policy(env, device="cpu", tct_split_heads=True)
     with torch.no_grad():

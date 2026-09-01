@@ -128,7 +128,7 @@ static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, flo
     /* Simple-map rooms publish area_bounds. Dust2 leaves it NULL so thin
      * nav areas stay point-collided (a 12u hull would seal corridors <24u). */
     if (sd->area_bounds != NULL) {
-        const float r = AGENT_HULL_RADIUS;
+        const float r     = AGENT_HULL_RADIUS;
         const float hx[4] = {tx + r, tx - r, tx, tx};
         const float hy[4] = {ty, ty, ty + r, ty - r};
         for (int k = 0; k < 4; k++) {
@@ -208,12 +208,36 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
         /* Crouch (head 6) — hold-to-crouch, matching CS's +duck behaviour.
          * crouch_act directly sets the state each tick: holding the key
          * keeps you crouched, releasing stands you back up. */
-        int crouch_act  = actions[i * ACTION_DIM + HEAD_CROUCH];
+        int crouch_act = actions[i * ACTION_DIM + HEAD_CROUCH];
+        /* W5 (#156): crouch_enabled is a SIM invariant, not just a policy mask.
+         * compute_masks still masks the bin, but env_step takes raw actions —
+         * scripted bots (#152), BC replay and tests all bypass the mask, so the
+         * enforcement has to live here. Zeroed at the READ, i.e. BEFORE both the
+         * is_crouching write below and the count_action feed, so the histogram
+         * reports EFFECTIVE actions: gate readers treat action histograms as
+         * ground truth of sim behaviour, and a disabled press that still counts
+         * would poison that reading. Zeroing after the is_crouching write would
+         * green the histogram while leaving the agent crouched; zeroing after
+         * count_action would stop the crouch but keep counting attempts. Both
+         * are covered by tests/test_stance_flags.py. */
+        if (!sd->crouch_enabled)
+            crouch_act = 0;
         a->is_crouching = (crouch_act == 1) ? 1 : 0;
         count_action(ss->action_crouch, es->action_crouch, crouch_act, 2);
 
         int valid_dir = (move_dir >= 1 && move_dir <= 8);
         int jump_act  = actions[i * ACTION_DIM + HEAD_JUMP];
+        /* W5 (#156): same invariant as the crouch guard above, but note the
+         * geometry is inverted — jump's state effect is ~55 lines DOWN, at the
+         * `jump_act == 1 && !a->is_airborne` impulse. "Guard before its state
+         * effects" would therefore admit an insertion just above that impulse,
+         * which is AFTER this count_action and would leave the jump histogram
+         * counting ATTEMPTED jumps forever. Hence: zero at the READ, above the
+         * feed. tests/test_stance_flags.py asserts action_jump_1 == 0 under a
+         * forced jump at jump_enabled=0 precisely to keep that placement
+         * observable — a vel_z-only test passes with the weak placement. */
+        if (!sd->jump_enabled)
+            jump_act = 0;
         count_action(ss->action_jump, es->action_jump, jump_act, 2);
 
         if (a->area_idx < 0) {

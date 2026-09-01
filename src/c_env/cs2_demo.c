@@ -16,8 +16,10 @@ static void load_nav_data(StaticData* sd) {
     memset(sd, 0, sizeof(StaticData));
     /* Rung 0 + Rung 1a knobs (cs2_types.h StaticData tail). The memset above
      * zeroes them; zero n_active_per_team trips env_init's assert, and zero
-     * crouch_enabled / jump_enabled would mask crouch / jump for the human
-     * player (cs2_input.h).
+     * crouch_enabled / jump_enabled would leave the human player unable to
+     * crouch / jump at all: cs2_input.h still builds the press, but since W5
+     * (#156) process_movement zeroes it at the read. These flags are sim-level
+     * invariants now, not just policy masks, so the demo must set them here.
      * Every other scalar below is assigned by name from nav_data.h; the
      * Python side (cs2_env.py binding.init) sets all of these plus the
      * reward weights — keep this list in sync when adding StaticData fields. */
