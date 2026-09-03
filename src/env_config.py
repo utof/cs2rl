@@ -45,6 +45,32 @@ class _Unset:
 UNSET = _Unset()
 
 
+def _knob_number(name, value, cast):
+    """Coerce a knob, re-raising the conversion failure as a ValueError that NAMES it.
+
+    WHY: `float(None)` and `int("x")` raise messages that describe the builtin,
+    not the knob, and these values arrive from an args namespace with ten
+    candidates. ValueError (not the underlying TypeError) so every bad-knob path
+    has one class, matching the reward-weight rule above.
+    """
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name}={value!r} is not a number") from None
+
+
+def _reject_unset(name, value):
+    """UNSET is the "caller did not pass this" sentinel, never a value.
+
+    It is truthy and float-less, so an UNSET that reaches a field would
+    normalise to True/1 (flags) or explode far from the caller. Rejected in both
+    __post_init__s, BEFORE coercion, naming the field.
+    """
+    if value is UNSET:
+        raise TypeError(f"{name}=UNSET: the sentinel means 'not given', not a value; "
+                        "omit the argument instead")
+
+
 def _check_weight(name, value):
     """Today's make_puffer_env rule (the last boundary before C): real, non-bool, finite."""
     if isinstance(value, bool) or not isinstance(value, numbers.Real):
@@ -93,7 +119,9 @@ class RewardWeights:
     def __post_init__(self):
         # Frozen dataclass: coercion has to go through object.__setattr__.
         for f in fields(self):
-            object.__setattr__(self, f.name, _check_weight(f.name, getattr(self, f.name)))
+            v = getattr(self, f.name)
+            _reject_unset(f.name, v)
+            object.__setattr__(self, f.name, _check_weight(f.name, v))
 
     def as_dict(self) -> dict[str, float]:
         """field -> value in declaration order (the CLI loop and pin tests read this)."""
@@ -133,16 +161,19 @@ class EnvConfig:
 
     def __post_init__(self):
         s = object.__setattr__
+        for f in fields(self):
+            _reject_unset(f.name, getattr(self, f.name))
         if not isinstance(self.rewards, RewardWeights):
             raise TypeError(f"rewards must be a RewardWeights, got {type(self.rewards).__name__}")
-        g = float(self.pbrs_gamma)
+        g = _knob_number("pbrs_gamma", self.pbrs_gamma, float)
         if not math.isfinite(g):
             raise ValueError(f"pbrs_gamma={self.pbrs_gamma!r} is not finite")
         s(self, "pbrs_gamma", g)
         s(self, "reward_symmetrize", bool(self.reward_symmetrize))
         s(self, "recoil", bool(self.recoil))
         n = self.n_active_per_team
-        if int(n) != n:                # reject, never truncate (int(2.9) parks a different roster)
+        # reject, never truncate (int(2.9) parks a different roster)
+        if _knob_number("n_active_per_team", n, int) != n:
             raise ValueError(f"n_active_per_team must be an integer, got {n!r}")
         n = int(n)
         if not 1 <= n <= TEAM_SIZE:
@@ -152,7 +183,7 @@ class EnvConfig:
             s(self, name, int(bool(getattr(self, name))))
         rt = self.round_time
         if rt is not None:
-            if int(rt) != rt:
+            if _knob_number("round_time", rt, int) != rt:
                 raise ValueError(f"round_time must be an integer tick count, got {rt!r}")
             if int(rt) <= 0:
                 raise ValueError(f"round_time must be > 0, got {rt}")
@@ -160,7 +191,7 @@ class EnvConfig:
         for name in ("laser_range", "max_turn_speed"):
             v = getattr(self, name)
             if v is not None:
-                v = float(v)
+                v = _knob_number(name, v, float)
                 if not v > 0.0:        # `not >` also rejects NaN
                     raise ValueError(f"{name} must be > 0, got {v}")
                 s(self, name, v)

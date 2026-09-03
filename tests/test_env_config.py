@@ -131,6 +131,60 @@ def test_bad_knob_values_raise_value_error(field, bad):
         EnvConfig(**{field: bad})
 
 
+@pytest.mark.parametrize(("field", "bad"), [
+    ("pbrs_gamma", None),
+    ("n_active_per_team", None),
+    ("laser_range", "not a number"),
+    ("max_turn_speed", "fast"),
+])
+def test_unconvertible_knob_raises_value_error_naming_the_field(field, bad):
+    """A knob that will not convert must name itself, like the weights do.
+
+    These values arrive from a CLI namespace with ten knob candidates, and
+    `float(None)`'s own message ("float() argument must be a string or a real
+    number") says nothing about WHICH knob was wrong. ValueError, not the bare
+    TypeError the conversion raises, so callers have one class to catch — the
+    same rule parent §2.1's error table sets for the weights.
+
+    `max_turn_speed` is exercised with a STRING, not with None: None is that
+    field's documented sentinel ("use the nav.py constant"), `EnvConfig()` sets
+    it, and `test_none_r0g_knobs_survive_untouched` pins that it survives — so a None
+    param here could only ever pass by breaking `EnvConfig()` itself.
+    """
+    with pytest.raises(ValueError, match=field):
+        EnvConfig(**{field: bad})
+
+
+def test_unset_is_rejected_by_both_dataclasses():
+    """The sentinel means "not given"; as a VALUE it is silently wrong.
+
+    UNSET is truthy, so before this guard `EnvConfig(reward_symmetrize=UNSET)`
+    normalised to True and `EnvConfig(pin_pitch=UNSET)` to 1 — an env running a
+    knob nobody set, with every test green. `replace()` is the live path: Phase B
+    adds its first caller.
+    """
+    with pytest.raises(TypeError, match="reward_symmetrize"):
+        EnvConfig(reward_symmetrize=UNSET)
+    with pytest.raises(TypeError, match="reward_kill"):
+        RewardWeights(reward_kill=UNSET)
+    with pytest.raises(TypeError, match="jump_enabled"):
+        EnvConfig().replace(jump_enabled=UNSET)
+    with pytest.raises(TypeError, match="rewards"):
+        EnvConfig(rewards=UNSET)
+
+
+def test_unset_repr_is_the_documented_spelling():
+    """`<unset>` is the sentinel's public spelling; changing it must be deliberate.
+
+    NOT because users see it in an error message — `from_legacy_kwargs` filters
+    UNSET out (`if local[n] is not UNSET`) before every message it raises, so no
+    error text can contain it. It is asserted because the repr is what shows up
+    in a debugger, a failed-assert dump and this suite's own output, and
+    `_Unset.__repr__` is three lines nobody would otherwise notice editing.
+    """
+    assert repr(UNSET) == "<unset>"
+
+
 def test_flag_knobs_normalise_to_int_bool():
     cfg = EnvConfig(pin_pitch=2, crouch_enabled=True, jump_enabled=0.0)
     assert (cfg.pin_pitch, cfg.crouch_enabled, cfg.jump_enabled) == (1, 1, 0)
@@ -208,7 +262,15 @@ def test_from_legacy_kwargs_error_contract():
         EnvConfig.from_legacy_kwargs(reward_overrides={"reward_kill": float("nan")})
 
 
-def test_to_config_dict_key_set_is_exactly_todays():
+def test_to_config_dict_key_set_matches_the_pinned_literal():
+    """The key set equals CONFIG_DICT_KEYS above — a literal, not today's output.
+
+    Renamed from "..._is_exactly_todays", which overclaimed: this compares the
+    dict to a hand-written list in this file, so it cannot see a key that a real
+    `config.json` needs and neither side has. That check is
+    tests/test_train_cli.py::test_dump_config_matches_the_pre_165_fixture, which
+    compares against a config.json captured from the real CLI.
+    """
     d = EnvConfig().to_config_dict()
     assert sorted(d) == sorted(CONFIG_DICT_KEYS)
     assert d["reward_kill"] == 0.3 and d["pbrs_gamma"] == 0.999 and d["reward_symmetrize"] is False
