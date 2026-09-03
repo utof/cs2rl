@@ -395,36 +395,35 @@ def test_live_option_mirror_contains_exact_long_names_only():
 
 
 def _live_train_long_options_from_source() -> set[str]:
-    """Static train.py long options + hyphenated REWARD_WEIGHT_DEFAULTS keys.
+    """Static train.py long options + hyphenated RewardWeights field names.
 
     Reads source (no `import src.train`) so collection cannot pull CUDA.
     Generated `add_argument(f"--{_rw_name...}")` is a JoinedStr and is
-    recovered from the defaults dict instead.
+    recovered from the dataclass fields instead.
 
-    TWO FILES, unioned (post-rung1a refactor 2026-08-31): the argparse parser
+    ONE FILE PLUS THE DATACLASS (spec 2026-09-03 §2.3): the argparse parser
     still lives in src/train.py (it is built inline under
-    `if __name__ == "__main__"`), but REWARD_WEIGHT_DEFAULTS moved to the leaf
-    src/train_shared.py, which train.py imports. Parsing only one of them
-    silently drops half the option set — train.py alone loses all 23
-    `--reward-*`/`--pbrs-*` flags, train_shared.py alone loses every other flag
-    — and the set-equality assert below would then "fail" against the runner
-    mirror for a reason that has nothing to do with the mirror. Neither file's
-    contribution is optional; if a symbol moves again, extend this tuple.
+    `if __name__ == "__main__"`), but the 23 `--reward-*`/`--pbrs-*` flag names
+    are now the field names of `env_config.RewardWeights`, which
+    REWARD_WEIGHT_DEFAULTS is itself derived from. Taking only one of the two
+    sources silently drops half the option set — train.py alone loses all 23
+    reward flags, the dataclass alone loses every other flag — and the
+    set-equality assert below would then "fail" against the runner mirror for a
+    reason that has nothing to do with the mirror. Neither contribution is
+    optional; if a symbol moves again, extend this function.
     """
     names: set[str] = set()
-    for rel in ("src/train_shared.py", "src/train.py"):
+    # The 23 --reward-*/--pbrs-* flags are generated from RewardWeights' fields
+    # (spec 2026-09-03 §2.3); env_config is stdlib-only so importing it here
+    # keeps collection free of torch/CUDA. train.py's static add_argument
+    # calls are still recovered from source below.
+    import dataclasses
+    sys.path.insert(0, str(ROOT / "src"))
+    from env_config import RewardWeights
+    names.update(f"--{f.name.replace('_', '-')}" for f in dataclasses.fields(RewardWeights))
+    for rel in ("src/train.py", ):
         tree = ast.parse((ROOT / rel).read_text())
         for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id == "REWARD_WEIGHT_DEFAULTS":
-                        # Unconditional: an alias-assign or a non-dict rebinding
-                        # of this name is exactly the drift this pin exists to
-                        # catch, so it must fail loudly rather than be skipped.
-                        assert isinstance(node.value, ast.Dict)
-                        for key in node.value.keys:
-                            assert isinstance(key, ast.Constant) and isinstance(key.value, str)
-                            names.add(f"--{key.value.replace('_', '-')}")
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 if node.func.attr != "add_argument":
                     continue

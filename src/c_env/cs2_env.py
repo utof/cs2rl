@@ -12,6 +12,7 @@ import pufferlib
 
 import nav
 from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
+from env_config import EnvConfig
 from map import make_cs2_map
 from nav import N_AGENTS, OBS_DIM, TEAM_SIZE
 
@@ -150,11 +151,11 @@ class StaticDataC(ctypes.Structure):
         ("reward_win", ctypes.c_float),
         # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).
         # Must stay in same order as StaticData in cs2_types.h.
-        ("reward_win_t_detonation", ctypes.c_float),                   # default 5.0
-        ("reward_win_t_elimination", ctypes.c_float),                  # default 3.0
-        ("reward_win_ct_defuse", ctypes.c_float),                      # default 5.0
-        ("reward_win_ct_timeout", ctypes.c_float),                     # default 4.0
-        ("reward_win_ct_elimination", ctypes.c_float),                 # default 3.0
+        ("reward_win_t_detonation", ctypes.c_float),                   # default: see env_config.RewardWeights
+        ("reward_win_t_elimination", ctypes.c_float),                  # default: see env_config.RewardWeights
+        ("reward_win_ct_defuse", ctypes.c_float),                      # default: see env_config.RewardWeights
+        ("reward_win_ct_timeout", ctypes.c_float),                     # default: see env_config.RewardWeights
+        ("reward_win_ct_elimination", ctypes.c_float),                 # default: see env_config.RewardWeights
         ("reward_kill", ctypes.c_float),
         ("reward_death", ctypes.c_float),
         ("reward_bombsite_entry", ctypes.c_float),
@@ -857,57 +858,31 @@ class Cs2Env(pufferlib.PufferEnv):
 
     def __init__(
             self,
+            config: EnvConfig,
+            *,
             seed=0,
             team_spirit=0.0,
             buf=None,
             nav_graph=None,
-            auto_reset=True,
             map_data=None,
-            reward_win=1.0,
-            reward_kill=0.3,
-            reward_death=0.1,
-            reward_bombsite_entry=0.3,
-            reward_plant_bonus=3.0,
-            reward_plant_base=0.2,
-            reward_plant_progress_scale=0.05,
-            reward_plant_interrupted=0.1,
-            reward_defuse=0.2,
-            reward_shot_penalty=0.005,
-            reward_ct_survival=0.001,
-            reward_inaction=0.0005,
-            pbrs_alive_weight=0.3,
-            pbrs_hp_weight=0.002,
-            pbrs_site_weight=0.2,
-            pbrs_bomb_progress_weight=0.3,
-            pbrs_nav_weight_t=0.04,
-            pbrs_nav_weight_ct=0.15,
-                                                                                # MUST equal the training discount (build_train_config "gamma") —  # noqa: E501
-                                                                                # PBRS F(s,s') = γ_pbrs·φ(s') − φ(s) is policy-invariant only when  # noqa: E501
-                                                                                # γ_pbrs == γ (finding 2, 2026-07-06 review; was 0.99 vs 0.999).  # noqa: E501
-                                                                                # Drift-guarded by test_pbrs_gamma_matches_training_gamma.  # noqa: E501
-            pbrs_gamma=0.999,
-                                                                                # Batch 1 (RL overhaul): per-outcome win magnitudes.  # noqa: E501
-                                                                                # These supersede the symmetric reward_win at round end.  # noqa: E501
-                                                                                # Defaults chosen to make detonation/defuse > timeout > elimination.  # noqa: E501
-            reward_win_t_detonation=5.0,
-            reward_win_t_elimination=3.0,
-            reward_win_ct_defuse=5.0,
-            reward_win_ct_timeout=4.0,
-            reward_win_ct_elimination=3.0,
-            include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)  # noqa: E501
-            reward_symmetrize: bool = False,                                    # spec 2026-08-01 §4.3  # noqa: E501
-            recoil: bool = False,                                               # #120: punch on ray; default off (today's hitscan)  # noqa: E501
-            n_active_per_team: int = TEAM_SIZE,                                 # Rung 0 §2.1: agents per team that spawn  # noqa: E501
-            pin_pitch: int = 0,                                                 # Rung 0 R0-E.2: ignore pitch action  # noqa: E501
-            crouch_enabled: int = 1,                                            # Rung 0 R0-E.2 + W5: sim ignores crouch when 0  # noqa: E501
-            jump_enabled: int = 1,                                              # Rung 1a T2a + W5: sim ignores jump when 0  # noqa: E501
-            round_time: int
-        | None = None,                                                          # Rung 0 R0-G: ticks per round; None ⇒ nav.ROUND_TIME  # noqa: E501
-            laser_range: float
-        | None = None,                                                          # Rung 0 R0-G: hitscan reach; None ⇒ nav.LASER_RANGE  # noqa: E501
-            max_turn_speed: float
-        | None = None,                                                          # Rung 0 R0-G: rad/tick aim clamp; None ⇒ nav.MAX_TURN_SPEED_RAD  # noqa: E501
+            auto_reset=True,
+            include_step_stats_in_info: bool = False,                                     # Task 6a (utof/cs2rl#7)
     ):
+        """Construct the native env from one EnvConfig plus runtime inputs.
+
+        `config` (spec 2026-09-03 §2.1) is the ONLY source of reward weights and
+        sim knobs; it is validated on construction, so by the time it reaches
+        here every non-None value is in range and every flag is 0/1. The None
+        R0-G knobs are resolved to the nav.py constant BELOW and re-validated
+        there — that resolved-value check is deliberately kept (spec §2.1).
+        The keyword-only inputs describe this instance, not the dynamics, and
+        config.json does not record them (spec §2.2).
+        """
+        if not isinstance(config, EnvConfig):
+            raise TypeError(f"config must be an EnvConfig, got {type(config).__name__}; "
+                            "legacy keyword arguments go through make_env(**legacy)")
+        self.config = config
+        rw = config.rewards
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
                                                              shape=(OBS_DIM, ),
@@ -996,24 +971,20 @@ class Cs2Env(pufferlib.PufferEnv):
             dir_facing,
         ]
 
-        # Rung 0 (spec 2026-08-29 §2.1): validate BEFORE binding.init. env_init
-        # asserts the same range in C, and a failed C assert aborts the whole
-        # process — inside a Puffer worker that is a silent death with no
-        # traceback. Raising here turns a bad training config into an ordinary
-        # Python error. pin_pitch / crouch_enabled / jump_enabled are flags, so
-        # any truthy value normalises to 1 rather than being rejected.
-        # Reject non-integers rather than truncating (int(2.9) == 2 would
-        # silently park a different roster than the config asked for).
-        if int(n_active_per_team) != n_active_per_team:
-            raise ValueError(f"n_active_per_team must be an integer, got {n_active_per_team!r}")
-        n_active_per_team = int(n_active_per_team)
-        if not 1 <= n_active_per_team <= TEAM_SIZE:
-            raise ValueError(f"n_active_per_team must be in 1..{TEAM_SIZE}, "
-                             f"got {n_active_per_team}")
-        self.n_active_per_team = n_active_per_team
-        self.pin_pitch = int(bool(pin_pitch))
-        self.crouch_enabled = int(bool(crouch_enabled))
-        self.jump_enabled = int(bool(jump_enabled))
+        # Rung 0 (spec 2026-08-29 §2.1): these are validated BEFORE binding.init,
+        # in Python, and since #165 that validation lives in
+        # EnvConfig.__post_init__ (src/env_config.py) rather than here. WHY
+        # Python-side at all: env_init asserts the same range in C, and a failed
+        # C assert aborts the whole process — inside a Puffer worker that is a
+        # silent death with no traceback. Raising in Python turns a bad training
+        # config into an ordinary error at config-construction time, before any
+        # env exists. The values below are already normalised (non-integers
+        # rejected rather than truncated, flags coerced to 0/1), so they are
+        # copied straight onto self.
+        self.n_active_per_team = config.n_active_per_team
+        self.pin_pitch = config.pin_pitch
+        self.crouch_enabled = config.crouch_enabled
+        self.jump_enabled = config.jump_enabled
 
         # Rung 0 R0-G: env knobs. None ⇒ the nav.py constant, so demo/test/
         # deploy callers that never pass them keep today's values byte-for-byte
@@ -1025,6 +996,9 @@ class Cs2Env(pufferlib.PufferEnv):
         # PITFALL: laser_range_sq is derived from _laser_range below; never
         # accept it as a separate kwarg or the range check and the damage
         # falloff would disagree.
+        round_time = config.round_time
+        laser_range = config.laser_range
+        max_turn_speed = config.max_turn_speed
         if round_time is None:
             round_time = nav.ROUND_TIME
         if int(round_time) != round_time:
@@ -1095,7 +1069,7 @@ class Cs2Env(pufferlib.PufferEnv):
             "gunshot_radius_sq": float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),
             "enemy_memory_ticks": int(nav.ENEMY_MEMORY_TICKS),
             "stale_memory_tick": int(nav.STALE_MEMORY_TICK),
-            "pbrs_gamma": float(pbrs_gamma),
+            "pbrs_gamma": float(config.pbrs_gamma),
             # The five content-copied arrays. Slots past the sequence length stay
             # zero — see the tail-semantics note in _pack_static_data.
             "delta_x": delta_x,
@@ -1106,30 +1080,30 @@ class Cs2Env(pufferlib.PufferEnv):
             "ct_spawns": ct_spawns,
             "n_ct_spawns": n_ct_spawns,
             "max_turn_speed": float(self._max_turn_speed),                      # R0-G knob
-            "reward_win": float(reward_win),                                    # legacy symmetric
-            "reward_win_t_detonation": float(reward_win_t_detonation),          # Batch 1
-            "reward_win_t_elimination": float(reward_win_t_elimination),
-            "reward_win_ct_defuse": float(reward_win_ct_defuse),
-            "reward_win_ct_timeout": float(reward_win_ct_timeout),
-            "reward_win_ct_elimination": float(reward_win_ct_elimination),
-            "reward_kill": float(reward_kill),
-            "reward_death": float(reward_death),
-            "reward_bombsite_entry": float(reward_bombsite_entry),
-            "reward_plant_bonus": float(reward_plant_bonus),
-            "reward_plant_base": float(reward_plant_base),
-            "reward_plant_progress_scale": float(reward_plant_progress_scale),
-            "reward_plant_interrupted": float(reward_plant_interrupted),
-            "reward_defuse": float(reward_defuse),
-            "reward_shot_penalty": float(reward_shot_penalty),
-            "reward_ct_survival": float(reward_ct_survival),
-            "reward_inaction": float(reward_inaction),
-            "pbrs_alive_weight": float(pbrs_alive_weight),
-            "pbrs_hp_weight": float(pbrs_hp_weight),
-            "pbrs_site_weight": float(pbrs_site_weight),
-            "pbrs_bomb_progress_weight": float(pbrs_bomb_progress_weight),
-            "pbrs_nav_weight_t": float(pbrs_nav_weight_t),
-            "pbrs_nav_weight_ct": float(pbrs_nav_weight_ct),
-            "n_active_per_team": n_active_per_team,                             # Rung 0
+            "reward_win": float(rw.reward_win),                                    # legacy symmetric
+            "reward_win_t_detonation": float(rw.reward_win_t_detonation),          # Batch 1
+            "reward_win_t_elimination": float(rw.reward_win_t_elimination),
+            "reward_win_ct_defuse": float(rw.reward_win_ct_defuse),
+            "reward_win_ct_timeout": float(rw.reward_win_ct_timeout),
+            "reward_win_ct_elimination": float(rw.reward_win_ct_elimination),
+            "reward_kill": float(rw.reward_kill),
+            "reward_death": float(rw.reward_death),
+            "reward_bombsite_entry": float(rw.reward_bombsite_entry),
+            "reward_plant_bonus": float(rw.reward_plant_bonus),
+            "reward_plant_base": float(rw.reward_plant_base),
+            "reward_plant_progress_scale": float(rw.reward_plant_progress_scale),
+            "reward_plant_interrupted": float(rw.reward_plant_interrupted),
+            "reward_defuse": float(rw.reward_defuse),
+            "reward_shot_penalty": float(rw.reward_shot_penalty),
+            "reward_ct_survival": float(rw.reward_ct_survival),
+            "reward_inaction": float(rw.reward_inaction),
+            "pbrs_alive_weight": float(rw.pbrs_alive_weight),
+            "pbrs_hp_weight": float(rw.pbrs_hp_weight),
+            "pbrs_site_weight": float(rw.pbrs_site_weight),
+            "pbrs_bomb_progress_weight": float(rw.pbrs_bomb_progress_weight),
+            "pbrs_nav_weight_t": float(rw.pbrs_nav_weight_t),
+            "pbrs_nav_weight_ct": float(rw.pbrs_nav_weight_ct),
+            "n_active_per_team": self.n_active_per_team,                             # Rung 0
             "pin_pitch": self.pin_pitch,                                        # Rung 0
             "crouch_enabled": self.crouch_enabled,                              # Rung 0
             "jump_enabled": self.jump_enabled,                                  # Rung 1a
@@ -1186,10 +1160,10 @@ class Cs2Env(pufferlib.PufferEnv):
         # python -O strips asserts and this guard runs outside the test suite
         # (same reason as the import-time layout guard above).
         _sc = binding.static_data_scalars(self._capsule)
-        if _sc["n_active_per_team"] != n_active_per_team:
+        if _sc["n_active_per_team"] != self.n_active_per_team:
             raise RuntimeError(
                 f"C StaticData.n_active_per_team is {_sc['n_active_per_team']}, expected "
-                f"{n_active_per_team} — the buffer C copied and the `static_data` mapping "
+                f"{self.n_active_per_team} — the buffer C copied and the `static_data` mapping "
                 "packed above disagree")
 
         # Sim recoil v1 (#120): write AFTER the overlay, not via binding.init
@@ -1198,7 +1172,7 @@ class Cs2Env(pufferlib.PufferEnv):
         # this starts 0; env_reset memsets GameState only, so the flag survives
         # reset. Train / Modal stay off unless a later card passes recoil=True
         # into make_env.
-        self._c_env.recoil_enabled = 1 if recoil else 0
+        self._c_env.recoil_enabled = 1 if config.recoil else 0
 
         # Room AABB for ramp interpolation. Not a binding.init arg (it is a
         # pointer into a Python-owned buffer, not a scalar). make_simple_map fills area_bounds from SIMPLE_ROOMS;
@@ -1274,7 +1248,7 @@ class Cs2Env(pufferlib.PufferEnv):
         # Spec 2026-08-01 §4.3: Python-layer zero-sum transform, applied at the
         # very end of step(). No StaticDataC field and no C rebuild — the
         # binding cannot be rebuilt on this box (issue #101).
-        self._reward_symmetrize = bool(reward_symmetrize)
+        self._reward_symmetrize = bool(config.reward_symmetrize)
         # Task 6a: optional per-tick step_stats view in info (see utof/cs2rl#7).
         # Zero cost when flag is off; constructed once at init when flag is on.
         # _nonterminal_infos is a pre-built list[dict] reused every non-terminal
@@ -1624,48 +1598,34 @@ class Cs2Env(pufferlib.PufferEnv):
 
 
 def make_env(
-        seed=0,
-        team_spirit=0.0,
-        auto_reset=True,
-        buf=None,
-        map_data=None,
-        reward_win=1.0,
-        reward_kill=0.3,
-        reward_death=0.1,
-        reward_bombsite_entry=0.3,
-        reward_plant_bonus=3.0,
-        reward_plant_base=0.2,
-        reward_plant_progress_scale=0.05,
-        reward_plant_interrupted=0.1,
-        reward_defuse=0.2,
-        reward_shot_penalty=0.005,
-        reward_ct_survival=0.001,
-        reward_inaction=0.0005,
-        pbrs_alive_weight=0.3,
-        pbrs_hp_weight=0.002,
-        pbrs_site_weight=0.2,
-        pbrs_bomb_progress_weight=0.3,
-        pbrs_nav_weight_t=0.04,
-        pbrs_nav_weight_ct=0.15,
-        pbrs_gamma=0.999,                                              # must equal training gamma — see Cs2Env.__init__ note
-                                                                       # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).  # noqa: E501
-    reward_win_t_detonation=5.0,
-        reward_win_t_elimination=3.0,
-        reward_win_ct_defuse=5.0,
-        reward_win_ct_timeout=4.0,
-        reward_win_ct_elimination=3.0,
-        include_step_stats_in_info: bool = False,                      # Task 6a (utof/cs2rl#7)
-        reward_symmetrize: bool = False,                               # spec 2026-08-01 §4.3
-        recoil: bool = False,                                          # #120: punch on ray; default off
-        n_active_per_team: int = TEAM_SIZE,                            # Rung 0 §2.1: agents per team that spawn
-        pin_pitch: int = 0,                                            # Rung 0 R0-E.2: ignore pitch action
-        crouch_enabled: int = 1,                                       # Rung 0 R0-E.2 + W5: sim ignores crouch
-        jump_enabled: int = 1,                                         # Rung 1a T2a + W5: sim ignores jump
-        round_time: int | None = None,                                 # Rung 0 R0-G: None ⇒ nav.ROUND_TIME
-        laser_range: float | None = None,                              # Rung 0 R0-G: None ⇒ nav.LASER_RANGE
-        max_turn_speed: float | None = None,                           # Rung 0 R0-G: None ⇒ nav.MAX_TURN_SPEED_RAD
+    config: EnvConfig | None = None,
+    *,
+    seed=0,
+    team_spirit=0.0,
+    auto_reset=True,
+    buf=None,
+    map_data=None,
+    include_step_stats_in_info: bool = False,
+    **legacy,
 ):
-    """Load map data and return a ready-to-use Cs2Env."""
+    """Load map data and return a ready-to-use Cs2Env.
+
+    Pass the configuration BY KEYWORD as `config=EnvConfig(...)`. The
+    `**legacy` channel accepts the pre-#165 keyword names (the 23 weights, the
+    10 knobs, and `reward_overrides`) and translates them through
+    `EnvConfig.from_legacy_kwargs`, which has an explicit parameter list, so a
+    misspelled name is a TypeError here, in-process, before binding.init.
+
+    DEPRECATED — see the follow-up issue filed at Phase-A branch end
+    (gh#173). `**legacy` exists for the ~38 test
+    files that still spell kwargs the old way; tests/test_env_config_migration.py
+    (Phase B) pins their count and that issue drives it to zero, after which this
+    channel is deleted. New callers must not use it.
+    """
+    if legacy and config is not None:
+        raise TypeError(f"make_env got config= AND legacy kwargs {sorted(legacy)}; pass one")
+    if config is None:
+        config = EnvConfig.from_legacy_kwargs(**legacy) if legacy else EnvConfig()
     if map_data is None:
         key = (nav.NAV_PATH, nav.CACHE_PATH)
         md = _ENV_CACHE.get(key)
@@ -1674,45 +1634,11 @@ def make_env(
             _ENV_CACHE[key] = md
     else:
         md = map_data
-    return Cs2Env(
-        seed=seed,
-        team_spirit=team_spirit,
-        buf=buf,
-        nav_graph=md.nav_graph,
-        auto_reset=auto_reset,
-        map_data=md,
-        reward_win=reward_win,
-        reward_kill=reward_kill,
-        reward_death=reward_death,
-        reward_bombsite_entry=reward_bombsite_entry,
-        reward_plant_bonus=reward_plant_bonus,
-        reward_plant_base=reward_plant_base,
-        reward_plant_progress_scale=reward_plant_progress_scale,
-        reward_plant_interrupted=reward_plant_interrupted,
-        reward_defuse=reward_defuse,
-        reward_shot_penalty=reward_shot_penalty,
-        reward_ct_survival=reward_ct_survival,
-        reward_inaction=reward_inaction,
-        pbrs_alive_weight=pbrs_alive_weight,
-        pbrs_hp_weight=pbrs_hp_weight,
-        pbrs_site_weight=pbrs_site_weight,
-        pbrs_bomb_progress_weight=pbrs_bomb_progress_weight,
-        pbrs_nav_weight_t=pbrs_nav_weight_t,
-        pbrs_nav_weight_ct=pbrs_nav_weight_ct,
-        pbrs_gamma=pbrs_gamma,
-        reward_win_t_detonation=reward_win_t_detonation,
-        reward_win_t_elimination=reward_win_t_elimination,
-        reward_win_ct_defuse=reward_win_ct_defuse,
-        reward_win_ct_timeout=reward_win_ct_timeout,
-        reward_win_ct_elimination=reward_win_ct_elimination,
-        include_step_stats_in_info=include_step_stats_in_info,
-        reward_symmetrize=reward_symmetrize,
-        recoil=recoil,
-        n_active_per_team=n_active_per_team,
-        pin_pitch=pin_pitch,
-        crouch_enabled=crouch_enabled,
-        jump_enabled=jump_enabled,
-        round_time=round_time,
-        laser_range=laser_range,
-        max_turn_speed=max_turn_speed,
-    )
+    return Cs2Env(config=config,
+                  seed=seed,
+                  team_spirit=team_spirit,
+                  buf=buf,
+                  nav_graph=md.nav_graph,
+                  map_data=md,
+                  auto_reset=auto_reset,
+                  include_step_stats_in_info=include_step_stats_in_info)

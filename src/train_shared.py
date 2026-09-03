@@ -30,6 +30,11 @@ import numpy as np
 
 from _action_spec import ACTION_HEAD_SIZES
 
+# env_config is stdlib-only (its own IMPORT BUDGET docstring says so), so importing it
+# at module level here keeps this leaf light — the invariant tests/test_w1_modules.py
+# enforces in a fresh interpreter. Do not move it below into a function.
+from env_config import RewardWeights
+
 # Agents per team. A bare literal ON PURPOSE, for the same class of reason as
 # train.py's OBS_DIM: this leaf and train.py must both stay import-light
 # (`--dump-config` guarantees no torch/nav import — see
@@ -142,55 +147,25 @@ def _apply_action_masks(logits_list, mask):
     return masked
 
 
-# ── Reward weights: the single wiring source of truth (spec 2026-08-01 §4.2) ──
-# Config key == make_env kwarg name == CLI flag (dashes) — NO prefix rewriting.
-# Six of the 23 do not start with `reward_` (the pbrs_* group), so any code
-# that discovers weights by scanning for a `reward_` prefix is wrong by
-# construction. This dict is the ONLY derivation point: build_train_config's
-# keys, the CLI flags, the env-factory override dict and the §6.1 pin test all
-# read it.
+# Reward weights (spec 2026-08-01 §4.2 → spec 2026-09-03 §2.3). Config key ==
+# make_env legacy kwarg == CLI flag (dashes). DERIVED from env_config.RewardWeights,
+# the single declaration; this dict exists so that the CLI loop, build_train_config
+# and the pin tests keep their current spelling until Phase B deletes it. Nothing
+# is duplicated any more, so there is no drift to pin — which is why the three
+# signature-introspection tests in test_reward_weight_wiring.py were deleted in
+# #165 Phase A.
 #
-# WHY the defaults are duplicated here instead of read from the signature:
-# train.py imports c_env lazily (inside functions) so `--dump-config` costs no
-# map/binding import; a module-level inspect.signature(make_env) would undo
-# that. tests/test_reward_weight_wiring.py pins both sides against each other,
-# so the duplication cannot silently drift.
+# Six of the 23 do not start with `reward_` (the pbrs_* group), so any code that
+# discovers weights by scanning for a `reward_` prefix is wrong by construction.
 #
-# PITFALL: do NOT "clean up" a value here or in make_env. These defaults ARE
-# the trained baseline; an unflagged run must stay byte-identical to the
-# pre-wiring env.
+# PITFALL: do NOT "clean up" a value here or in env_config.RewardWeights. These
+# defaults ARE the trained baseline; an unflagged run must stay byte-identical to
+# the pre-wiring env.
 #
 # Deliberately NOT threaded here: pbrs_gamma (threaded as a non-weight knob by
 # env_knobs_from_args via resolve_gammas, R0-J), team_spirit (config-threaded
 # separately), include_step_stats_in_info (issue #100, out of scope).
-REWARD_WEIGHT_DEFAULTS = {
-                                                       # ── non-potential (hackable — sweep with care) ──
-    "reward_win": 1.0,
-    "reward_kill": 0.3,
-    "reward_death": 0.1,
-    "reward_bombsite_entry": 0.3,
-    "reward_plant_bonus": 3.0,
-    "reward_plant_base": 0.2,
-    "reward_plant_progress_scale": 0.05,
-    "reward_plant_interrupted": 0.1,
-    "reward_defuse": 0.2,
-    "reward_shot_penalty": 0.005,
-    "reward_ct_survival": 0.001,                       # the CT stall drip — A1 arm sets this to 0.0
-    "reward_inaction": 0.0005,
-    "reward_win_t_detonation": 5.0,
-    "reward_win_t_elimination": 3.0,
-    "reward_win_ct_defuse": 5.0,
-    "reward_win_ct_timeout": 4.0,                      # NOTE: exceeds ct_elimination — A1b arm
-    "reward_win_ct_elimination": 3.0,
-                                                       # ── PBRS-potential (optimum-safe per Ng et al. 1999; tunes
-                                                       # equilibrium selection in MARL per Devlin & Kudenko 2011) ──
-    "pbrs_alive_weight": 0.3,
-    "pbrs_hp_weight": 0.002,
-    "pbrs_site_weight": 0.2,
-    "pbrs_bomb_progress_weight": 0.3,
-    "pbrs_nav_weight_t": 0.04,
-    "pbrs_nav_weight_ct": 0.15,
-}
+REWARD_WEIGHT_DEFAULTS = RewardWeights().as_dict()
 
 
 def reward_overrides_from_args(args) -> dict:
