@@ -27,6 +27,7 @@ import math
 
 import numpy as np
 
+from env_config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
 from train_shared import (
     _R0G_KNOBS,
     AIM_LOG_STD_CAP_MIN_HEADROOM,
@@ -446,6 +447,68 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         f"{sorted(cfg.keys() & reward_weights.keys())}")
     cfg.update(reward_weights)
     return cfg
+
+
+# Knobs whose CLI dest IS the field name. Hand-written on purpose, and paired
+# with train_shared._R0G_KNOBS (which maps DIFFERENT names, e.g.
+# --round-time-ticks → round_time): together they are the CLI-name ↔ field-name
+# map, and tests/test_env_knobs.py::test_args_knob_coverage_is_exhaustive asserts
+# the two cover every EnvConfig knob except pbrs_gamma (resolved through
+# resolve_gammas) and recoil (no flag). Kept separate from _R0G_KNOBS so the
+# R0-G "None is the stored value" rule is never applied to a flag knob.
+_ARGS_KNOB_FIELDS = ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled",
+                     "reward_symmetrize")
+
+
+def env_config_from_args(args) -> EnvConfig:
+    """The single args → EnvConfig resolver (spec 2026-09-03 §2.3, Phase B R3).
+
+    WHAT: reads the 23 reward flags, the five flag knobs, the R0-G trio and
+    pbrs_gamma off `args` and returns one frozen EnvConfig. Replaces
+    env_knobs_from_args + reward_overrides_from_args, whose two dicts had to be
+    kept in step by hand.
+
+    WHY NO DEFAULT IS RESTATED HERE: every absent flag is reached by OMISSION —
+    `getattr(args, name, UNSET)` and then simply not passing it — so the field
+    default in env_config.py is the only declaration of the value. Spelling a
+    fallback as `getattr(args, "<knob>", <the field default>)` instead would put
+    a second copy of six defaults in this file, which is the duplication #165
+    exists to remove and which tests/test_no_restated_env_defaults.py fails on.
+    That probe reads PROSE as well as code, so this paragraph names no value
+    either.
+
+    PITFALL: the getattr fallbacks are load-bearing for harness / --dump-config
+    args objects that predate these flags; do not tighten them to attribute
+    access.
+
+    R0-G (round_time / laser_range / max_turn_speed): read as `None` and STORED
+    as None — None means "the nav.py constant", resolved inside Cs2Env, and
+    config.json records None rather than a copied constant that would drift.
+
+    R0-J: pbrs_gamma is ALWAYS resolved through resolve_gammas, never omitted —
+    the field default (0.999) would silently disagree with a non-default --gamma.
+
+    `recoil` is deliberately never read: there is no CLI flag, and inventing one
+    here would be new behaviour (tests/test_recoil.py pins that).
+    """
+    weights = {}
+    for name in REWARD_FIELDS:
+        v = getattr(args, name, UNSET)
+        if v is not UNSET:
+            weights[name] = v
+    knobs = {}
+    # The historical `or 0` on pin_pitch is subsumed, not dropped: on the CLI
+    # that flag stays None until train() resolves it from map flatness, and
+    # EnvConfig.__post_init__ runs every flag knob through int(bool(...)), which
+    # maps that None to the same value `or 0` produced.
+    for name in _ARGS_KNOB_FIELDS:
+        v = getattr(args, name, UNSET)
+        if v is not UNSET:
+            knobs[name] = v
+    knobs["pbrs_gamma"] = resolve_gammas(args)[1]
+    for arg_name, field_name in _R0G_KNOBS:
+        knobs[field_name] = getattr(args, arg_name, None)
+    return EnvConfig(rewards=RewardWeights(**weights), **knobs)
 
 
 def env_knobs_from_args(args) -> dict:

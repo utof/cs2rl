@@ -146,7 +146,28 @@ def test_obs_dim_unchanged():
     assert OBS_DIM == 110
 
 
-def test_train_make_puffer_env_does_not_pass_recoil():
-    import train
-    src = inspect.getsource(train.make_puffer_env)
-    assert "recoil" not in src
+def test_recoil_is_not_reachable_from_the_cli():
+    """No --recoil flag exists, and the parse layer must not invent one.
+
+    Re-pointed from a source scan of `train.make_puffer_env` (spec Phase B R3):
+    once that function accepts legacy names through **legacy, "recoil" not in
+    its source stays true while `make_puffer_env(recoil=True)` — a TypeError
+    today — quietly builds a recoil env. The real property is that the args →
+    EnvConfig path never reads it, so a namespace that happens to carry
+    recoil=True builds a recoil-free env. The source pin stays as a cheap
+    second check on the same function.
+    """
+    import ast
+    import textwrap
+    from argparse import Namespace
+
+    import train_config
+    assert train_config.env_config_from_args(Namespace(recoil=True)).recoil is False
+    # AST, not a raw getsource scan: getsource INCLUDES the docstring, and that
+    # docstring is where the rule is explained — a plain substring pin would
+    # forbid the function from documenting itself. Strip the docstring and pin
+    # the CODE, which is what the rule is about.
+    fn = ast.parse(textwrap.dedent(inspect.getsource(train_config.env_config_from_args))).body[0]
+    if ast.get_docstring(fn) is not None:
+        fn.body = fn.body[1:]
+    assert "recoil" not in ast.unparse(fn)
