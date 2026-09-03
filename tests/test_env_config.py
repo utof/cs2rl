@@ -217,13 +217,33 @@ def test_to_config_dict_key_set_is_exactly_todays():
 
 
 def test_module_is_stdlib_only():
+    """Whitelist gate: env_config may import NOTHING outside the stdlib.
+
+    Why a whitelist and not a blacklist of known-bad names: the stdlib-only
+    import budget is this module's single hardest global constraint, and a
+    blacklist of six names stays GREEN the day someone adds `import polars`,
+    `import yaml` or `import env_factory`. That is exactly the silent failure
+    this test exists to prevent. So we diff sys.modules across the import and
+    require every newly-added TOP-LEVEL name to be in sys.stdlib_module_names
+    (Python 3.10+). Top-level, so `import cs2_env` and `import c_env.cs2_env`
+    are both caught.
+
+    Pitfall: this MUST stay in a subprocess. The parent pytest process has
+    already imported numpy, torch and the whole src tree, so an in-process
+    check on sys.modules cannot distinguish "env_config imported it" from
+    "someone else did" and would mask every violation.
+    """
     import subprocess
     src = Path(__file__).resolve().parents[1] / "src"
-    r = subprocess.run([
-        sys.executable, "-c", f"import sys; sys.path.insert(0, {str(src)!r}); import env_config; "
-        "bad=[m for m in ('nav','train_shared','train','c_env.cs2_env','numpy','torch') "
-        "if m in sys.modules]; assert not bad, bad"
-    ],
-                       capture_output=True,
-                       text=True)
-    assert r.returncode == 0, r.stderr
+    child = ("import sys\n"
+             f"sys.path.insert(0, {str(src)!r})\n"
+             "before = set(sys.modules)\n"
+             "import env_config\n"
+             "added = {m.split('.')[0] for m in set(sys.modules) - before}\n"
+             "bad = sorted(m for m in added\n"
+             "             if m != 'env_config' and m not in sys.stdlib_module_names)\n"
+             "print('NON_STDLIB=' + ','.join(bad))\n"
+             "sys.exit(1 if bad else 0)\n")
+    r = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True)
+    assert r.returncode == 0, (f"env_config must import stdlib only; it pulled in "
+                               f"{r.stdout.strip()}\n{r.stderr}")
