@@ -22,7 +22,9 @@ key holds its own directory and then stores the placeholder `<checkpoint_dir>`;
 the test asserts the same thing about ITS directory and substitutes before
 comparing. Everything else in the dict is argv-determined: `env` is
 `cs2-simple` (set by the R0-H map block above the --dump-config exit, not by
-`--map`'s own default) and `device` is the `cpu` placeholder the dump path sets.
+`--map`'s own default), and `device` is `cpu` because BOTH arms pass
+`--device cpu` explicitly on argv — the dump path's own placeholder branch for
+an unset device is never reached here, so `device` is argv-determined too.
 
 REGENERATING is legitimate only when a config key changes ON PURPOSE, and never
 to make a failing migration go green — that deletes the only evidence the
@@ -61,8 +63,12 @@ ARMS = {
 
 
 def _git(*args):
-    return subprocess.run(["git", *args], cwd=REPO_ROOT, capture_output=True,
-                          text=True).stdout.strip()
+    # check=True is load-bearing: without it any git failure returns an empty
+    # stdout, which _require_clean_src reads as "src/ is clean" and capture()
+    # records as an empty captured_at_commit — a guard that fails open and a
+    # fixture with no provenance. Fail loudly instead.
+    return subprocess.run(["git", *args], cwd=REPO_ROOT, capture_output=True, text=True,
+                          check=True).stdout.strip()
 
 
 def _require_clean_src():
