@@ -19,6 +19,25 @@ edit that breaks both.
 WHAT IT MUST NOT DO: re-run the capture. B2 legitimately changes the call
 sources this fixture records, so a re-capture assertion here would fail in B2 by
 design and be deleted for the wrong reason.
+
+WHEN A TEST HERE GOES RED, re-running `--capture` is NEVER the fix. It rewrites
+every recorded value to post-migration behaviour, and it usually DOES turn the
+red green — that is the trap, not a sign it was right. The format tag, the
+role/scenario table and the site census do not move, so nothing downstream
+notices, and B2 then checks the new builders against themselves. The only
+assertion here that catches a re-capture at all is the `PRE_165B_CAPTURE_COMMIT`
+pin, and the message below invites re-pinning it when a construction site
+genuinely changed. The two cases that actually come up:
+
+* A new `EnvConfig` field was added ON PURPOSE, so
+  `test_both_configs_carry_every_env_config_field` fails on a key set. HAND-ADD
+  that key, holding the field's default, to the `expected_config` and
+  `input_config` dicts of every row in the fixture. Leave
+  `PRE_165B_CAPTURE_COMMIT` and every already-recorded value alone: the file is
+  still a capture of pre-migration behaviour, and you are only widening its
+  schema to match the dataclass.
+* A recorded VALUE changed. That is the oracle doing its job, not a stale
+  fixture. Find out which builder started sending something different, and why.
 """
 import json
 import sys
@@ -93,9 +112,11 @@ def test_format_tag_and_provenance():
         "post-migration payloads, and B2's test_env_factory.py then checks the new "
         "builders against themselves while staying green. The format tag and the "
         "shape would not move, so this assertion is the only thing that catches it. "
-        "The ONLY legitimate way to change this fixture is to change "
-        "PRE_165B_CAPTURE_COMMIT deliberately, in a commit whose message explains "
-        "which construction site changed and why.")
+        "The only legitimate way to change a RECORDED VALUE in this fixture is to "
+        "change PRE_165B_CAPTURE_COMMIT deliberately, in a commit whose message "
+        "explains which construction site changed and why. Adding a new EnvConfig "
+        "field is NOT that case — see this module's docstring; hand-add the key and "
+        "leave this pin alone.")
 
 
 def test_thirteen_scenarios_over_six_roles_and_seven_sites():

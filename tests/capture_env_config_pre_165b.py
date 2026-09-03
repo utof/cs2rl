@@ -373,11 +373,21 @@ def capture():
     real_make_env = cs2_env.make_env
 
     # Every build_env_for site is expected to exist; a site the capture cannot
-    # find is an ERROR, not a missing scenario (spec §4.1).
+    # find is an ERROR, not a missing scenario (spec §4.1). The sweep is EVERY
+    # .py file under src/, not the two modules today's thirteen scenarios happen
+    # to live in: B2/B3 may add a builder call in a module that does not exist
+    # yet, and a census anchored to a literal file list would not see it.
+    # What it does NOT cover, so the promise is not read wider than it is: a
+    # build_env_for call outside src/ (tests construct their own), and a site
+    # spelled as an attribute (`env_factory.build_env_for(...)`), which
+    # _qualified_calls does not match and env_factory.py's docstring forbids.
+    # Paths are made REPO_ROOT-relative with forward slashes — the spelling
+    # SCENARIOS uses — and sorted, so a mismatch here is a real new site and
+    # never a path-spelling or iteration-order difference.
+    src_files = sorted(
+        f.relative_to(REPO_ROOT).as_posix() for f in (REPO_ROOT / "src").rglob("*.py"))
     sites = {(s["file"], s["enclosing"]) for s in SCENARIOS}
-    found = {(f, q)
-             for f in ("src/train.py", "src/train_test_harness.py")
-             for q, _ in _qualified_calls(f, "build_env_for")}
+    found = {(f, q) for f in src_files for q, _ in _qualified_calls(f, "build_env_for")}
     assert sites == found, (f"build_env_for site census changed.\n  expected: {sorted(sites)}\n"
                             f"  found:    {sorted(found)}")
 
