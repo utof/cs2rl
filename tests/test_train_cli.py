@@ -2,6 +2,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = REPO_ROOT / "src" / "train.py"
 
@@ -203,6 +205,57 @@ def test_reward_weight_cli_overrides_round_trip(tmp_path):
     assert cfg["reward_symmetrize"] is True
     # untouched neighbours keep their defaults (no accidental global override)
     assert cfg["reward_kill"] == 0.3
+
+
+FIXTURE_DUMP_CONFIG = REPO_ROOT / "tests" / "fixtures" / "dump_config_pre_165.json"
+
+
+@pytest.mark.parametrize("arm", ["default", "non_default"])
+def test_dump_config_matches_the_pre_165_fixture(tmp_path, arm):
+    """config.json is byte-identical to the pre-#165 capture (spec Phase B R7).
+
+    This is the provenance half of "not one value moves": build_train_config
+    stops restating six keys and starts merging EnvConfig.to_config_dict(), and
+    scripts/run_experiment.py hashes this dict as the experiment fingerprint, so
+    a single reordered or retyped value silently invalidates every future
+    comparison against past runs. The .pt gate cannot see it — that command sets
+    no --reward-*/knob flag at all, which is why the non_default arm exists.
+
+    Compared as `json.dumps(..., sort_keys=True, indent=2, default=str)`, the
+    exact spelling train.py writes, so a float that became an int fails here.
+    PITFALL: `data_dir` is the --checkpoint-dir string verbatim and can never
+    match a fixture captured elsewhere; it is asserted to be THIS test's own
+    directory and then replaced by the same placeholder the capture stored.
+    """
+    import json
+
+    fixture = json.loads(FIXTURE_DUMP_CONFIG.read_text())
+    assert fixture["_provenance"]["format"] == "cs2rl-dump-config-capture-v1"
+    entry = fixture["arms"][arm]
+
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    r = subprocess.run(
+        [sys.executable,
+         str(TRAIN_SCRIPT), *entry["argv"], "--checkpoint-dir",
+         str(ckpt)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300)
+    assert r.returncode == 0, f"stdout:\n{r.stdout[-2000:]}\nstderr:\n{r.stderr[-3000:]}"
+
+    cfg = json.loads((ckpt / "config.json").read_text())
+    assert cfg["data_dir"] == str(ckpt), "data_dir is no longer the --checkpoint-dir string"
+    cfg["data_dir"] = "<checkpoint_dir>"
+
+    def _dumps(d):
+        return json.dumps(d, sort_keys=True, indent=2, default=str)
+
+    assert _dumps(cfg) == _dumps(entry["config"]), (
+        f"config.json for the {arm!r} arm changed against tests/fixtures/"
+        "dump_config_pre_165.json. Regenerate the fixture ONLY if a key changed on "
+        "purpose — otherwise this is the provenance regression it exists to catch.")
 
 
 def test_tag_diagnostic_config_keys(tmp_path):
