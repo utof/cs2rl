@@ -15,7 +15,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import env_config                                                      # noqa: E402
+# I001 is suppressed, not fixed: yapf snaps these trailing `noqa` comments to its
+# spaces_before_comment stops while ruff's isort wants one space, and the two then
+# fight forever (gh#97; same waiver as tests/test_modal_runner.py:51).
+import env_config                                                      # noqa: E402, I001
 from env_config import TEAM_SIZE, UNSET, EnvConfig, RewardWeights      # noqa: E402
 
 DEFAULTS_AT_139a3a3 = {
