@@ -1617,7 +1617,7 @@ def make_env(
     misspelled name is a TypeError here, in-process, before binding.init.
 
     DEPRECATED — see the follow-up issue filed at Phase-A branch end
-    (gh#<number filled in by Task 4 Step 0>). `**legacy` exists for the ~38 test
+    (gh#173). `**legacy` exists for the ~38 test
     files that still spell kwargs the old way; tests/test_env_config_migration.py
     (Phase B) pins their count and that issue drives it to zero, after which this
     channel is deleted. New callers must not use it.
