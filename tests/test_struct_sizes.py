@@ -105,7 +105,8 @@ def test_sentinel_partition_census_is_pinned():
     5 int (n_active_per_team, pin_pitch, crouch_enabled, jump_enabled, round_time),
     25 non-kwarg. reward_symmetrize and recoil have no StaticData slot and belong
     to neither kwarg tuple. Knock-out: delete one RewardWeights field and the
-    float count drops to 25 while non-kwarg rises to 26."""
+    first assert fires — the float count drops to 25 (by construction the
+    non-kwarg count then rises to 26, but that assert is never reached)."""
     assert len(_FLOAT_KWARG_SCALARS) == 26, _FLOAT_KWARG_SCALARS
     assert len(_INT_KWARG_SCALARS) == 5, _INT_KWARG_SCALARS
     assert len(_NON_KWARG_SCALARS) == 25, _NON_KWARG_SCALARS

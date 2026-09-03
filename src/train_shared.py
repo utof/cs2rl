@@ -152,7 +152,8 @@ def _apply_action_masks(logits_list, mask):
 # the single declaration; this dict exists so that the CLI loop, build_train_config
 # and the pin tests keep their current spelling until Phase B deletes it. Nothing
 # is duplicated any more, so there is no drift to pin — which is why the three
-# signature-introspection tests in test_reward_weight_wiring.py go in Step 4.
+# signature-introspection tests in test_reward_weight_wiring.py were deleted in
+# #165 Phase A.
 #
 # Six of the 23 do not start with `reward_` (the pbrs_* group), so any code that
 # discovers weights by scanning for a `reward_` prefix is wrong by construction.

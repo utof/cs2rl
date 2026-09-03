@@ -114,6 +114,10 @@ class EnvConfig:
     config.json must record it to reproduce the run it is a field; if it differs
     per env instance or per role without changing the dynamics it is a runtime
     input (spec 2026-09-03 §2.2).
+
+    pin_pitch, crouch_enabled and jump_enabled are flags: __post_init__ maps them
+    through int(bool(...)), so any truthy value normalises rather than being
+    rejected — the rule Cs2Env applied inline before #165.
     """
     rewards: RewardWeights = field(default_factory=RewardWeights)
     pbrs_gamma: float = 0.999                          # MUST equal the training gamma (PBRS policy-invariance)
@@ -145,8 +149,6 @@ class EnvConfig:
             raise ValueError(f"n_active_per_team must be in 1..{TEAM_SIZE}, got {n}")
         s(self, "n_active_per_team", n)
         for name in ("pin_pitch", "crouch_enabled", "jump_enabled"):
-                                       # Flags, so any truthy value normalises rather than being rejected —
-                                       # the rule Cs2Env applied inline before #165.
             s(self, name, int(bool(getattr(self, name))))
         rt = self.round_time
         if rt is not None:

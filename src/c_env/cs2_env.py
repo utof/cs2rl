@@ -151,11 +151,11 @@ class StaticDataC(ctypes.Structure):
         ("reward_win", ctypes.c_float),
         # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).
         # Must stay in same order as StaticData in cs2_types.h.
-        ("reward_win_t_detonation", ctypes.c_float),                   # default 5.0
-        ("reward_win_t_elimination", ctypes.c_float),                  # default 3.0
-        ("reward_win_ct_defuse", ctypes.c_float),                      # default 5.0
-        ("reward_win_ct_timeout", ctypes.c_float),                     # default 4.0
-        ("reward_win_ct_elimination", ctypes.c_float),                 # default 3.0
+        ("reward_win_t_detonation", ctypes.c_float),                   # default: see env_config.RewardWeights
+        ("reward_win_t_elimination", ctypes.c_float),                  # default: see env_config.RewardWeights
+        ("reward_win_ct_defuse", ctypes.c_float),                      # default: see env_config.RewardWeights
+        ("reward_win_ct_timeout", ctypes.c_float),                     # default: see env_config.RewardWeights
+        ("reward_win_ct_elimination", ctypes.c_float),                 # default: see env_config.RewardWeights
         ("reward_kill", ctypes.c_float),
         ("reward_death", ctypes.c_float),
         ("reward_bombsite_entry", ctypes.c_float),
