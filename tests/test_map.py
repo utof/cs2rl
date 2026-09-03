@@ -129,6 +129,7 @@ def test_centroids_z_plumbed_through_binding():
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
 
     map_data = make_simple_map()
@@ -139,7 +140,7 @@ def test_centroids_z_plumbed_through_binding():
     assert bool(map_data.is_ramp[13]), "is_ramp[13] should be True (T-ramp area)"
 
     # Construct env — if the packed layout or the pointer-argument set is wrong, this raises
-    env = Cs2Env(map_data=map_data)
+    env = Cs2Env(config=EnvConfig(), map_data=map_data)
 
     # Force GC to try to collect any would-be dangling is_ramp_int8 array.
     # If it's NOT in self._refs, this can expose a use-after-free on the next step().

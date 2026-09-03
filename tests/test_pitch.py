@@ -37,8 +37,9 @@ def test_pitch_initialized_to_zero():
     every alive agent should report pitch == 0.0 immediately after env.reset.
     """
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         for i in range(10):
@@ -79,8 +80,9 @@ def test_pitch_consumed_from_continuous_actions():
     env_step pitch read. This test catches a missed consumer (would-be silent
     bug: pitch stays at 0.0 even when continuous_actions[1] is non-zero)."""
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         actions, cont = _zero_actions()
@@ -104,8 +106,9 @@ def test_pitch_clamps_at_pi_over_2_up():
     import math
 
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         actions, cont = _zero_actions()
@@ -140,8 +143,9 @@ def test_welford_pitch_accumulates():
     multi-step totals. After 5 ticks: 10 agents × 5 ticks = 50.
     """
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map(), include_step_stats_in_info=True)
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map(), include_step_stats_in_info=True)
     try:
         obs, info = env.reset(seed=42)
         actions, cont = _zero_actions()
@@ -180,8 +184,9 @@ def test_binding_rejects_wrong_aim_dim_shape():
     Python wrapper OR binding.c's defensive check (Opus C4 review note)."""
     import _action_spec as spec
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
@@ -213,8 +218,9 @@ def test_obs_pitch_sin_cos_populated():
     import math
 
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         actions, cont = _zero_actions()
@@ -236,8 +242,9 @@ def test_obs_dim_is_110_in_runtime():
     observations buffer. If cs2_observations.h misses an obs[N] write (or writes
     past 110), this catches it at runtime."""
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         actions, cont = _zero_actions()
@@ -319,8 +326,9 @@ def test_3d_hit_at_correct_pitch_elevated_target():
 
     import _action_spec as spec
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         # Area 5 (T-side, z=0) → area 6 (elevated z=64): vis[5][6]=True
@@ -367,8 +375,9 @@ def test_3d_miss_at_zero_pitch_elevated_target():
     would land. This catches an implementation that "compiled but ignored z"."""
     import _action_spec as spec
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         # Same area 5→6 geometry, but pitch=0 (wrong — horizontal, not upward)
@@ -440,8 +449,9 @@ def test_3d_hit_pitch_down_from_ramp():
 
     import _action_spec as spec
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         # T-ramp → T-corridor (flat z=0); adj[13][5]=1 (ramp connection).
@@ -512,8 +522,9 @@ def test_3d_perp_perfectly_aligned_no_nan():
 
     import _action_spec as spec
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         # Area 5→6: same geometry as the hit test — perfectly aimed
@@ -558,8 +569,9 @@ def test_pitch_clamps_at_pi_over_2_down():
     import math
 
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
-    env = Cs2Env(map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         actions, cont = _zero_actions()
@@ -583,10 +595,11 @@ def test_pinned_pitch_stays_zero_across_ticks_and_default_moves():
     default env move pitch — so the gate is the StaticData flag, not a
     coincidence of zero inputs."""
     from c_env.cs2_env import Cs2Env
+    from env_config import EnvConfig
     from map import make_simple_map
     rng = np.random.default_rng(0)
     for pin in (1, 0):
-        env = Cs2Env(map_data=make_simple_map(), pin_pitch=pin)
+        env = Cs2Env(config=EnvConfig(pin_pitch=pin), map_data=make_simple_map())
         try:
             env.reset(seed=42)
             for _ in range(5):
