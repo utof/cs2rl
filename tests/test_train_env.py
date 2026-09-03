@@ -976,6 +976,17 @@ def test_obs_dim_constant_consistency():
         env.close()
 
 
+def test_team_size_literals_agree():
+    """env_config.TEAM_SIZE and train_shared.TEAM_SIZE are literals (both leaves
+    refuse to import nav just to read a 5). This is the cross-check that makes
+    the literals safe (spec 2026-09-03 §2.1)."""
+    import env_config
+    import nav
+    import train_shared
+    from c_env.cs2_env import TEAM_SIZE as c_team
+    assert env_config.TEAM_SIZE == train_shared.TEAM_SIZE == nav.TEAM_SIZE == c_team
+
+
 def test_obs_blocks_tile_obs_dim():
     """OBS_BLOCKS (generated from cs2_types.h OBS_* macros) must tile [0, OBS_DIM)
     with no gaps/overlaps, in order. This is the Python mirror of the env_init

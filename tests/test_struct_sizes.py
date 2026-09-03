@@ -18,7 +18,7 @@ new field is unguarded.
 """
 
 import ctypes
-import inspect
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -30,12 +30,16 @@ import pytest
 # src/. Anchored by name, not by line number — line anchors rot.
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "c_env"))
-import binding                         # noqa: E402
+# I001 is suppressed, not fixed: yapf snaps these trailing `noqa` comments to its
+# spaces_before_comment stops while ruff's isort wants one space, and the two then
+# fight forever (gh#97; same waiver as tests/test_env_config.py:21).
+import binding                         # noqa: E402, I001
 
 from c_env.cs2_env import (                                                                   # noqa: E402
     _C_SIZE_KEYS_CHECKED, AgentStateC, Dust2EnvC, GameStateC, StaticDataC, StepStatsC, WallC,
     WallListC, make_env,
 )
+from env_config import KNOB_FIELDS, RewardWeights                                             # noqa: E402
 
 
 def _is_scalar_ctype(ctype):
@@ -75,16 +79,40 @@ def _is_scalar_ctype(ctype):
 _STATIC_DATA_SCALARS = tuple(
     (name, ctype) for name, ctype in StaticDataC._fields_ if _is_scalar_ctype(ctype))
 
-# Partition those scalars by whether make_env can set them. Anything make_env
-# exposes is sentinel-testable (test_static_data_scalars_round_trip pushes a
-# distinct value through it); anything it does not is map-derived or a nav.py
-# constant and is checked against that source instead.
-_MAKE_ENV_PARAMS = frozenset(inspect.signature(make_env).parameters)
+# Partition those scalars by whether the env CONFIG can set them. Anything the
+# config exposes is sentinel-testable (test_static_data_scalars_round_trip
+# pushes a distinct value through it); anything it does not is map-derived or a
+# nav.py constant and is checked against that source instead.
+#
+# The settable surface is the CONFIG surface, not make_env's signature: after
+# spec 2026-09-03 the weights and knobs sit behind make_env's **legacy, and
+# inspect.signature would see eight names (none a weight), empty these tuples,
+# and let the sweep below pass while iterating nothing. Derive from the
+# dataclass fields instead and pin the census so an emptied partition fails on
+# the count before the values. KNOB_FIELDS is itself derived from
+# fields(EnvConfig), so a knob added to the dataclass arrives here for free.
+_CONFIG_NAMES = frozenset(f.name
+                          for f in dataclasses.fields(RewardWeights)) | frozenset(KNOB_FIELDS)
 _FLOAT_KWARG_SCALARS = tuple(
-    sorted(n for n, t in _STATIC_DATA_SCALARS if n in _MAKE_ENV_PARAMS and t is ctypes.c_float))
+    sorted(n for n, t in _STATIC_DATA_SCALARS if n in _CONFIG_NAMES and t is ctypes.c_float))
 _INT_KWARG_SCALARS = tuple(
-    sorted(n for n, t in _STATIC_DATA_SCALARS if n in _MAKE_ENV_PARAMS and t is not ctypes.c_float))
-_NON_KWARG_SCALARS = tuple(sorted(n for n, _ in _STATIC_DATA_SCALARS if n not in _MAKE_ENV_PARAMS))
+    sorted(n for n, t in _STATIC_DATA_SCALARS if n in _CONFIG_NAMES and t is not ctypes.c_float))
+_NON_KWARG_SCALARS = tuple(sorted(n for n, _ in _STATIC_DATA_SCALARS if n not in _CONFIG_NAMES))
+
+
+def test_sentinel_partition_census_is_pinned():
+    """26 float kwarg scalars (23 weights + pbrs_gamma, laser_range, max_turn_speed),
+    5 int (n_active_per_team, pin_pitch, crouch_enabled, jump_enabled, round_time),
+    25 non-kwarg. reward_symmetrize and recoil have no StaticData slot and belong
+    to neither kwarg tuple. Knock-out: delete one RewardWeights field and the
+    float count drops to 25 while non-kwarg rises to 26."""
+    assert len(_FLOAT_KWARG_SCALARS) == 26, _FLOAT_KWARG_SCALARS
+    assert len(_INT_KWARG_SCALARS) == 5, _INT_KWARG_SCALARS
+    assert len(_NON_KWARG_SCALARS) == 25, _NON_KWARG_SCALARS
+    assert set(_INT_KWARG_SCALARS) == {
+        "n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled", "round_time"
+    }
+
 
 # Int kwargs whose C field REJECTS the generic 101, 102, ... run below. There
 # are two shapes and they need different treatment:
@@ -265,10 +293,10 @@ def test_static_data_scalars_round_trip(simple_map):
 
     EXHAUSTIVE over the settable fields. Every StaticData scalar make_env
     exposes as a keyword argument (_SENTINEL_CONFIGS, derived by intersecting
-    the make_env signature with the mirror — not hand-listed) gets its own
-    distinct value and is asserted back by name. An earlier version checked 4 of
-    the 24 and defended that as "the fields with a distinguishable expected
-    value"; that premise was wrong — make_env exposes all of them — and it left
+    the EnvConfig/RewardWeights field names with the mirror — not hand-listed)
+    gets its own distinct value and is asserted back by name. An earlier version
+    checked 4 of the 24 and defended that as "the fields with a distinguishable
+    expected value"; that premise was wrong — make_env exposes all of them — and it left
     20 of the 23 consecutive same-width reward/PBRS floats, the exact run the
     code itself calls the hiding place for a transposition, unchecked.
 
@@ -554,10 +582,8 @@ def test_static_data_scalars_round_trip_sim_knobs(simple_map):
     is Rung 1a's jump_enabled.
 
     Redundant with the sentinel sweep by construction — and deliberately so.
-    The sweep derives its kwargs from inspect.signature(make_env), so it silently
-    stops covering these the moment they leave make_env's signature (Task 4+
-    touches the same call chain). This test names them literally, so that
-    removal fails loudly. It also documents the intended tuple shape:
+    The sweep derives its kwargs from the dataclass fields; this test names them
+    literally as an independent read. It also documents the intended tuple shape:
     n_active is a count, the other three are flags.
 
     The flags are set to a combination NOT used by either _BOOL_SENTINEL_CONFIGS

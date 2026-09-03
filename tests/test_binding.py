@@ -121,10 +121,11 @@ def test_make_env_writes_recoil_enabled(make_map):
     would also work today, but would hide a later memset of Dust2Env. Default is
     today's hitscan (0).
     """
-    import inspect
+    import dataclasses
 
     from c_env.cs2_env import make_env
-    assert "recoil" in inspect.signature(make_env).parameters
+    from env_config import EnvConfig
+    assert "recoil" in {f.name for f in dataclasses.fields(EnvConfig)}
     env = make_env(seed=0, map_data=make_map, recoil=False)
     try:
         assert int(env._c_env.recoil_enabled) == 0

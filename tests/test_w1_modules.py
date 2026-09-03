@@ -8,9 +8,10 @@ FRESH interpreter, one subprocess per case:
   2. it does not pull `train` back in — the dependency graph stays acyclic, so
      the leaf really is a leaf;
   3. its module scope stays free of torch / nav / c_env.cs2_env;
-  4. the only sibling edge any of them has is `-> train_shared`, and
-     train_shared itself has none (the shape spec §2 W1 fixes: one leaf,
-     everything else a spoke off it, never spoke-to-spoke).
+  4. the only sibling edge any of them has is into a LEAF, and the leaves
+     import no sibling except each other in the one allowed direction
+     (train_shared -> env_config). The shape spec §2 W1 fixes: leaves at the
+     bottom, everything else a spoke off them, never spoke-to-spoke.
 
 WHY a subprocess and not a plain import: pytest's session has already imported
 half the repo by the time any test body runs, so `"torch" not in sys.modules`
@@ -39,7 +40,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 
-# Modules split out of train.py. Grows per task (spec §2 W1 / W3 / W4).
+# Modules split out of train.py (W1, spec 2026-08-31), plus env_config, which
+# owns the env contract that used to live partly in train_shared (spec
+# 2026-09-03 §2.1). Every module here must import standalone and stay light.
 #
 # `env_factory` (W3) is here for a reason beyond bookkeeping: it is the module
 # whose module scope is MOST tempting to make heavy, since its whole job is
@@ -54,7 +57,7 @@ SRC = REPO_ROOT / "src"
 # class to spell a type hint, eight string constants would start costing a torch
 # import, and only this test would say so.
 W1_MODULES = ("train_shared", "resume_state", "train_config", "train_metrics", "train_update",
-              "env_factory", "metrics_schema")
+              "env_factory", "metrics_schema", "env_config")
 
 # W1 modules train.py deliberately does NOT import at its module level, and why.
 #
@@ -76,6 +79,10 @@ NOT_IMPORTED_BY_TRAIN = {
     "took EVAL_KEYS from eval_baselines, not from train.py, so train.py's body holds no "
     "reference to it; a module-level import added purely to satisfy an assert would be "
     "the test dictating a dead line of code",
+    "env_config":
+    "Phase A of spec 2026-09-03 gives train.py no reason to name it (train_shared and "
+    "c_env.cs2_env import it); Phase B's --reward-* argparse loop imports RewardWeights "
+    "at module level and removes this entry",
 }
 
 
@@ -101,10 +108,11 @@ def _train_module_level_imports():
 
 TRAIN_MODULE_LEVEL_IMPORTS = _train_module_level_imports()
 
-# The one module every other split-out module is allowed to depend on. Spec §2 W1:
-# "The leaf imports nothing from train.py or the other new modules; every other new
-# module may import train_shared."
-LEAF = "train_shared"
+# TWO leaves. train_shared owns the names moved out of train.py; env_config owns
+# the env contract. train_shared -> env_config is the one edge between them
+# (REWARD_WEIGHT_DEFAULTS is derived from RewardWeights). The reverse edge would
+# make "leaf" meaningless — test_the_leaf_edge_has_a_direction pins it.
+LEAVES = frozenset({"train_shared", "env_config"})
 
 # Imports whose presence in sys.modules means the import-lightness invariant is
 # gone. `c_env.cs2_env` rather than bare `c_env` on purpose: the package itself
@@ -156,11 +164,11 @@ def test_only_sibling_edge_is_to_the_leaf(mod):
     r = _run_child(f"""
 import importlib
 importlib.import_module({mod!r})
-allowed = {{{mod!r}, {LEAF!r}}} if {mod!r} != {LEAF!r} else {{{LEAF!r}}}
+allowed = {{{mod!r}}} | {set(LEAVES)!r}
 siblings = [m for m in {W1_MODULES!r} if m in sys.modules and m not in allowed]
 assert not siblings, (
     f"{mod} imported {{siblings}} at module scope; the only sibling edge any "
-    "split-out module may have is -> {LEAF} (spec 2026-08-31 §2 W1)")
+    "split-out module may have is -> one of {sorted(LEAVES)} (spec 2026-08-31 §2 W1)")
 """)
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
 
@@ -349,5 +357,22 @@ for (lo, hi), size in zip(train_shared._MASK_HEAD_SLICES, ACTION_HEAD_SIZES, str
 for (_, hi), (lo, _) in zip(train_shared._MASK_HEAD_SLICES,
                             train_shared._MASK_HEAD_SLICES[1:], strict=False):
     assert hi == lo, "mask head slices are not contiguous"
+""")
+    assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+
+
+def test_the_leaf_edge_has_a_direction():
+    """train_shared -> env_config is allowed; env_config -> train_shared is not.
+
+    `allowed = {mod} | LEAVES` is symmetric, so nothing above would notice
+    env_config importing train_shared — and train_shared is light, so the HEAVY
+    probe would not either. This is the only test that says the edge has a
+    direction (spec 2026-09-03 §6).
+    """
+    r = _run_child("""
+import importlib
+importlib.import_module("env_config")
+assert "train_shared" not in sys.modules, "env_config must not import train_shared"
+assert "nav" not in sys.modules and "c_env.cs2_env" not in sys.modules
 """)
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
