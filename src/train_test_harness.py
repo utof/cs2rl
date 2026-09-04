@@ -105,28 +105,34 @@ def _build_trainer_for_test(
     n_active_per_team : int
         Rung 0 (spec 2026-08-29 §2.1/§2.2): agents per team the env spawns;
         slots ``n..4`` of each team are parked (noop-masked, zero reward).
-        Threaded into BOTH the envs (make_puffer_env) and the trainer
-        (``participating_rows`` → ``trainer.participating``), because a test
+        Threaded into BOTH the envs (through the EnvConfig the closure below
+        builds) and the trainer (``participating_rows`` →
+        ``trainer.participating``), because a test
         that set only one of the two would be testing a configuration
-        production can never reach. Default 5 = full 5v5, i.e. an all-ones
-        participation mask, which is what every pre-Rung-0 harness caller gets.
+        production can never reach. The default is EnvConfig's own field default
+        — full N-vs-N, i.e. an all-ones participation mask — which is what every
+        pre-Rung-0 harness caller gets. Named, never spelled: a literal here is
+        a second declaration of the value, and it sits on a different line from
+        the parameter so tests/test_no_restated_env_defaults.py's line probe
+        cannot see it go stale.
     map_data : MapData or None
         R0-E: the map every env is built on. None ⇒ ``make_simple_map()`` (the
         pre-R0-E hardcoded default). Pass the session ``simple_map`` fixture or
         an arena map; the harness never inspects flatness (that check lives in
         train() only), so pin_pitch=1 on a non-flat map is allowed HERE.
     pin_pitch, crouch_enabled : int
-        R0-E.2 sim knobs, threaded into BOTH the envs (make_puffer_env) and the
-        policy (``build_policy(pin_pitch=)`` → aim_dim_mask) and both
-        SelfPlayManager constructions — exactly like production, so
+        R0-E.2 sim knobs, threaded into BOTH the envs (through the EnvConfig
+        the closure below builds) and the policy (``build_policy(pin_pitch=)``
+        → aim_dim_mask) and both SelfPlayManager constructions — exactly like production, so
         ``assert_pin_pitch_agreement`` holds on a harness trainer.
     jump_enabled : int
         Rung 1a sim knob (spec 2026-08-30 T2b): 0 masks the jump action.
         Threaded into the envs and into ``args`` (⇒ config ``jump_enabled``),
         but NOT into build_policy — unlike pin_pitch it changes no action
         dimension, only a mask bit, so there is no policy-side mirror to keep
-        in agreement. Default 1 = today's env, i.e. every pre-Rung-1a caller
-        is unaffected.
+        in agreement. The default is EnvConfig's own field default — jump live,
+        i.e. every pre-Rung-1a caller is unaffected. Named rather than spelled,
+        for the reason under n_active_per_team above.
     aim_log_std_max : float or None
         R0-E.3 per-run σ cap → ``policy.aim_log_std_max`` and config
         ``aim_log_std_max``. None ⇒ LOG_STD_MAX.
@@ -227,6 +233,16 @@ def _build_trainer_for_test(
     mask_view_main = np.frombuffer(mask_shm, dtype=np.int8).reshape(num_envs * _agents_per_env,
                                                                     ACTION_MASK_DIM)
 
+    # One config for every env this trainer builds, so the harness cannot drift
+    # from production in the only way that matters: what the env is constructed
+    # with. The four values come from this function's own parameters, and the
+    # `args` namespace below is built from the SAME four, so build_train_config
+    # records exactly what the envs ran with.
+    config = EnvConfig(n_active_per_team=n_active_per_team,
+                       pin_pitch=pin_pitch,
+                       crouch_enabled=crouch_enabled,
+                       jump_enabled=jump_enabled)
+
     def env_factory(*_args, buf=None, seed=None, _mask_idx=None, **_kwargs):
         # W3 (#154): construction routes through the role factory. What USED to
         # be spelled out here — the `0 if seed is None else seed` remap (an
@@ -240,23 +256,36 @@ def _build_trainer_for_test(
         # role: it adds include_step_stats_in_info and takes its knobs as plain
         # arguments rather than from a CLI-derived dict, so it has its own.
         #
-        # tests/fixtures/env_kwargs_pre_w3.json holds the kwargs this call made
-        # before the move and test_env_factory.py asserts the factory still
-        # produces them. That is the ONLY check that can see crouch_enabled or
-        # jump_enabled going missing: no test passes either to
-        # _build_trainer_for_test and both defaults equal make_puffer_env's, so
-        # dropping them is green across the whole suite.
-        env = build_env_for(
-            "harness",
-            shared_ts=shared_ts,
-            buf=buf,
-            seed=seed,
-            map_data=map_data,
-            n_active_per_team=n_active_per_team,
-            pin_pitch=pin_pitch,
-            crouch_enabled=crouch_enabled,
-            jump_enabled=jump_enabled,
-        )
+        # WHAT COVERS THE FOUR-KNOB MAPPING ABOVE, knob by knob — it is not one
+        # test, and #165 PR B2 changed which.
+        # tests/fixtures/env_config_pre_165b.json holds the config and runtime
+        # kwargs this call produced before the builders were typed, and
+        # tests/test_env_factory.py drives this closure against both harness rows
+        # (test_harness_call_site_forwards_the_captured_kwargs). Those two rows
+        # differ from each other in n_active_per_team and jump_enabled, so the
+        # fixture sees either of THOSE dropped from the mapping — but both rows
+        # hold the FIELD DEFAULT for pin_pitch and for crouch_enabled, so it is
+        # blind to either of those two going missing.
+        #   pin_pitch     is caught outside this file, by
+        #                 tests/test_pitch_pin.py::test_env_trainer_pin_agreement_raises:
+        #                 it builds a harness trainer with a non-default pin and
+        #                 then calls assert_pin_pitch_agreement, which reads
+        #                 StaticData.pin_pitch off the DRIVER ENV and compares it
+        #                 with the policy mask. A mapping that dropped pin_pitch
+        #                 would send the envs the field default while build_policy
+        #                 still got the parameter, and that check would raise.
+        #   crouch_enabled is caught by NOTHING ELSE — no test in the tree passes
+        #                 it to _build_trainer_for_test. Its only cover is
+        #                 test_harness_config_carries_the_knobs_no_fixture_row_varies
+        #                 in tests/test_env_factory.py, which drives this closure
+        #                 off-fixture with a non-default crouch. Delete that test
+        #                 and this comment becomes false in the same edit.
+        env = build_env_for("harness",
+                            shared_ts=shared_ts,
+                            buf=buf,
+                            seed=seed,
+                            map_data=map_data,
+                            config=config)
         # STAYS AT THE CALL SITE, outside the factory: this needs the harness's
         # own shm handle and the per-env index pufferlib passes in, neither of
         # which is the factory's business.

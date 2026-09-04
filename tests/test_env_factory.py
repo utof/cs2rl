@@ -1,52 +1,67 @@
-"""`env_factory.build_env_for` must construct exactly what the old sites did.
+"""`env_factory.build_env_for` must construct exactly the env the old sites did.
 
-WHY THIS FILE EXISTS. Spec 2026-08-31 §2 W3 routes every `make_puffer_env`
-construction through one role-keyed factory. The failure that migration risks is
-not a crash — it is a kwarg quietly going missing, which produces a WORKING env
-built on a default. That failure is invisible to almost every gate this branch
-has:
+WHY THIS FILE EXISTS. Spec 2026-08-31 §2 W3 routed every construction through
+one role-keyed factory; #165 PR B2 then retyped every role builder to take ONE
+frozen `EnvConfig` instead of loose keyword knobs. The failure both migrations
+risk is not a crash — it is a value quietly going missing, which produces a
+WORKING env built on a default. That failure is invisible to almost every gate
+this branch has:
 
   * the §3 determinism gate sets no `--reward-*` and no R0-G flag, so a factory
-    that dropped `reward_overrides`, `reward_symmetrize` or any omittable env
+    that dropped the reward weights, `reward_symmetrize` or any omittable env
     knob still writes a BYTE-IDENTICAL `dust2_policy.pt`. This is not
     hypothetical: build_env_factory's own docstring records reward keys being
     silently dropped once, which would have made every experiment arm train the
     default weights;
-  * `static_data_scalars()` is blind to 8 of make_env's 39 kwargs — `auto_reset`,
-    `buf`, `include_step_stats_in_info`, `map_data`, `recoil`,
-    `reward_symmetrize`, `seed`, `team_spirit` — and those 8 are precisely what
-    distinguishes the roles from each other;
-  * the full suite never passes `crouch_enabled` or `jump_enabled` to the
-    harness builder, and their defaults equal `make_puffer_env`'s, so dropping
-    either from the harness role is green across all ~1075 tests;
+  * `static_data_scalars()` is blind to the six RUNTIME inputs — `auto_reset`,
+    `buf`, `include_step_stats_in_info`, `map_data`, `seed`, `team_spirit` —
+    and those are precisely what distinguishes the roles from each other;
+  * the full suite never passes `crouch_enabled` to the harness builder and its
+    default equals the field default, so dropping it from the harness role's
+    config mapping is green across the whole suite except for one test written
+    for that alone (test_harness_config_carries_the_knobs_no_fixture_row_varies);
   * `--eval-interval` defaults to 0, so the `eval` role's env — the one whose
-    `auto_reset=False` eval_baselines raises without — is never constructed
-    during the §3 run or any train test.
+    `auto_reset=False` eval_baselines raises without, and the one PR B2 makes
+    force raw rewards — is never constructed during the §3 run or any train test.
 
-So the oracle is a CAPTURE, taken before the factory existed
-(`tests/fixtures/env_kwargs_pre_w3.json`, recorded by
-`tests/capture_env_kwargs_pre_w3.py` one commit earlier). Comparing against a
-list transcribed from the factory would compare the factory to itself.
+So the oracle is a CAPTURE, taken before the builders were typed
+(`tests/fixtures/env_config_pre_165b.json`, recorded by
+`tests/capture_env_config_pre_165b.py` one commit earlier). Comparing against a
+list transcribed from the typed factory would compare the factory to itself. The
+fixture is FROZEN: re-capturing it on the migrated tree would rewrite the oracle
+to match whatever was built and turn every red green.
 
-WHAT IS ASSERTED, per role and per recorded scenario: the kwarg NAME SET and
-every VALUE that `make_puffer_env` receives. The name set matters on its own —
-a factory that passed `crouch_enabled=1` explicitly where the old site relied on
-the default is value-identical today and diverges the day that default moves.
+WHAT IS ASSERTED, per role and per recorded scenario, is two things that used to
+be one. `make_env` takes a CONFIG plus six runtime inputs, so the comparison is:
 
-WHY THE ARGUMENTS ARE SENTINEL STRINGS. `make_puffer_env` is replaced by a
-recording stub, so nothing validates them, and a DISTINCT sentinel per
-pass-through argument turns "routed map_data into the team_spirit slot" into a
-value mismatch instead of two equal-looking real objects comparing equal.
+  * the CONFIG the role builds, by value, against the config the OLD chain
+    resolved (the fixture's `expected_config`, which differs from its
+    `input_config` in exactly one row — `eval/symmetrize_requested`, where the
+    eval role's raw-reward RULE turns `reward_symmetrize` off);
+  * the RUNTIME kwargs, by EFFECTIVE value: both sides are bound against
+    `make_env`'s own signature with the VAR_KEYWORD parameter removed and
+    defaulted, so a typed builder may omit a runtime kwarg whose value equals
+    `make_env`'s default without failing, while any kwarg whose VALUE moved
+    fails. Name-set EQUALITY is not available here, because the capture went
+    through `make_puffer_env`, which forwarded all six unconditionally.
 
-KNOCK-OUT COVERAGE. Every role's builder is knocked out — one kwarg deleted from
-its construction — and this file asserts that role's captured-kwargs test then
-FAILS. A captured-kwargs test that passes against a mutilated factory is
-measuring nothing, and nothing else in the suite would tell us.
+WHY THE ARGUMENTS ARE SENTINEL STRINGS. `make_env` is replaced by a recording
+stub, so nothing validates them, and a DISTINCT sentinel per pass-through
+argument turns "routed map_data into the team_spirit slot" into a value mismatch
+instead of two equal-looking real objects comparing equal.
 
-SCOPE. All six roles' call sites are now migrated — the two closures first, the
-remaining four (smoke, both eval_legacy sites, external, eval) after. Zero direct
-`make_puffer_env(...)` calls remain in `src/` or `scripts/`, which
-`tests/test_env_construction_enforcement.py` asserts permanently.
+KNOCK-OUT COVERAGE. Every role's construction is knocked out — one kwarg deleted
+at the recording boundary — and the oracle must then FAIL. The knock-out runs
+the SAME comparison the oracle runs (`_oracle_failures`), so it cannot drift into
+knocking out a copy of the oracle. The triples where a drop provably cannot be
+seen are pinned in `_VACUOUS_KNOCKOUTS`, in both directions. An oracle that
+passes against a mutilated factory is measuring nothing, and nothing else in the
+suite would tell us.
+
+SCOPE. All six roles' call sites are migrated, and none of them names
+`make_puffer_env`; `tests/test_env_construction_enforcement.py` asserts that
+permanently. Since PR B2 `build_env_for` imports `c_env.cs2_env.make_env`
+directly, so the stub in `_construct` is installed there.
 
 FACTORY vs CALL SITE. Most of this file hands the fixture's bindings to
 `build_env_for` by hand, which measures the FACTORY only — a call site that
@@ -56,8 +71,7 @@ single layer reaches every site:
 
   * a LIVE drive per site that can be reached without a training run (the two
     closures, smoke_test, make_env, and both eval_legacy sites). This is the only
-    layer that can catch a SWAP — two arguments crossed between slots — which is
-    why the harness drive feeds one distinct sentinel per closure variable;
+    layer that can catch a SWAP — two values crossed between slots;
   * an AST comparison of every migrated call against the pre-migration
     `call_source` the fixture recorded, which is the only layer that reaches
     `train()`'s eval site at all. It is a NAME-SET and per-kwarg EXPRESSION
@@ -74,14 +88,15 @@ from pathlib import Path
 
 import pytest
 
+from env_config import KNOB_FIELDS, REWARD_FIELDS, EnvConfig, RewardWeights
 from env_factory import ROLES, UNSET, build_env_for
 
-FIXTURE = Path(__file__).parent / "fixtures" / "env_kwargs_pre_w3.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "env_config_pre_165b.json"
 
-# Must match capture_env_kwargs_pre_w3.CAPTURE_FORMAT. Duplicated rather than
+# Must match capture_env_config_pre_165b.CAPTURE_FORMAT. Duplicated rather than
 # imported so a stale fixture fails on the tag here, in the file that consumes
 # it, rather than on a KeyError deep inside a comparison.
-CAPTURE_FORMAT = "cs2rl-env-kwargs-capture-v1"
+CAPTURE_FORMAT = "cs2rl-env-config-capture-v1"
 
 
 def _fixture():
@@ -89,21 +104,28 @@ def _fixture():
         data = json.load(fh)
     assert data["_provenance"]["format"] == CAPTURE_FORMAT, (
         f"{FIXTURE.name} was written in format {data['_provenance']['format']!r}, this module "
-        f"reads {CAPTURE_FORMAT!r} — regenerate it with --capture")
+        f"reads {CAPTURE_FORMAT!r} — and it must NOT be regenerated to fix that: the capture is "
+        f"the pre-migration oracle")
     return data
 
 
 FIXTURE_DATA = _fixture()
 
+# The six inputs `make_env` takes alongside the config, read off the capture
+# rather than written down: the capture script recorded them from the real
+# signature, so a runtime parameter added to `make_env` cannot leave this file
+# silently classifying it as a stray.
+RUNTIME_NAMES = tuple(FIXTURE_DATA["_provenance"]["runtime_names"])
+
 
 class _Recorder:
-    """Stands in for `make_puffer_env` and records what the factory handed it.
+    """Stands in for `c_env.cs2_env.make_env` and records what the builder passed.
 
-    Records the call as a plain dict of what was PASSED, mirroring the capture
-    script's `explicit_kwargs`. Signature binding is not repeated here: the
-    builders call `make_puffer_env` with keywords only, so the kwargs dict IS
-    the bound explicit set, and test_factory_kwargs_bind_to_the_real_signature
-    checks the whole recorded set against the real signature separately.
+    Records the call as a plain dict of what was PASSED. Signature binding is not
+    repeated here: the builders call `make_env` with keywords only, so the kwargs
+    dict IS the bound explicit set, and
+    test_factory_kwargs_bind_to_the_real_signature checks the whole recorded set
+    against the real signature separately.
     """
 
     def __init__(self):
@@ -114,44 +136,84 @@ class _Recorder:
         return "<env>"
 
 
-def _construct(monkeypatch, role, **kwargs):
-    """Run `build_env_for(role, ...)` against a recording stub; return the kwargs.
+def _config_from(d):
+    """Rebuild an EnvConfig from a fixture `asdict`.
 
-    Patches `train.make_puffer_env`, which is where `build_env_for`'s
-    function-local import reads from — so this also proves that import is a
-    per-call attribute read rather than something cached at module scope.
+    Deliberately NOT `EnvConfig.from_legacy_kwargs`: the test side must not
+    depend on a method gh#173 deletes (spec R8), and the fixture stores FIELD
+    names, which is what the constructor takes.
     """
-    import train
+    d = dict(d)
+    return EnvConfig(rewards=RewardWeights(**d.pop("rewards")), **d)
+
+
+def _construct(monkeypatch, role, **kwargs):
+    """Run `build_env_for(role, ...)` against a recording stub at
+    `c_env.cs2_env.make_env` — where build_env_for's function-local import now
+    reads from, so this also proves that import is a per-call attribute read."""
+    import c_env.cs2_env
 
     rec = _Recorder()
-    monkeypatch.setattr(train, "make_puffer_env", rec)
+    monkeypatch.setattr(c_env.cs2_env, "make_env", rec)
     build_env_for(role, **kwargs)
-    assert len(rec.calls) == 1, f"role {role!r} called make_puffer_env {len(rec.calls)} times"
+    assert len(rec.calls) == 1, f"role {role!r} called make_env {len(rec.calls)} times"
+    return rec.calls[0]
+
+
+def _construct_dropping(monkeypatch, role, dropped, **kwargs):
+    """`_construct`, with `dropped` deleted at the recording boundary.
+
+    Simulating the drop here rather than by editing `env_factory.py` is
+    indistinguishable — from the oracle's point of view — from a builder that
+    never passed it, and it keeps the knock-out reproducible in CI instead of a
+    procedure someone has to remember to perform by hand.
+    """
+    import c_env.cs2_env
+
+    class _Dropping(_Recorder):
+
+        def __call__(self, **kwargs):
+            kwargs.pop(dropped, None)
+            return super().__call__(**kwargs)
+
+    rec = _Dropping()
+    monkeypatch.setattr(c_env.cs2_env, "make_env", rec)
+    build_env_for(role, **kwargs)
+    assert len(rec.calls) == 1, f"role {role!r} called make_env {len(rec.calls)} times"
     return rec.calls[0]
 
 
 # ── the scenario bindings -> build_env_for kwargs adapters ──────────────────
 #
-# For train and harness the factory's parameter names are deliberately the SAME
-# as the closures' free-variable names, so their adapter is the identity. The
-# other four roles' pre-migration call sites closed over things the factory does
-# not take (an argparse Namespace, `make_env`'s own parameters), so they get an
-# explicit two-line adapter each rather than a clever generic one.
+# Each role's pre-migration call site closed over things the factory does not
+# take (an argparse Namespace, `make_env`'s own parameters, the harness's four
+# plain knob arguments), so every role gets an explicit adapter rather than a
+# clever generic one.
 
 
 def _inputs_for(role, capture):
-    b = capture["bindings"]
-    if role in ("train", "harness"):
-        return dict(b)
-    if role == "eval":
-        # The call site derives these from args; the factory takes the derived
-        # values. `resolved` is recorded in the fixture BY the capture script,
-        # from the real helpers — not re-derived here from the oracle.
+    b, rt = capture["bindings"], capture["runtime_kwargs"]
+    config = _config_from(capture["input_config"])
+    if role == "train":
+        # shared_ts and map_data were CLOSURE state at capture time, so they are
+        # not in `bindings`; they are read back off the runtime kwargs the old
+        # chain produced. Both are DISTINCT sentinel strings, so a builder that
+        # crossed the two slots still fails the comparison.
         return {
-            "map_data": b["_map_data"],
-            "reward_overrides": capture["resolved"]["reward_overrides"],
-            "env_knobs": capture["resolved"]["env_knobs"],
+            "shared_ts": rt["team_spirit"],
+            "map_data": rt["map_data"],
+            "buf": b["buf"],
+            "seed": b["seed"],
+            "_seed": b["_seed"],
+            "config": config
         }
+    if role == "harness":
+        # The four knobs are now INSIDE the config, so they stop being builder
+        # arguments; everything else the closure bound still is one.
+        knobs = ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled")
+        return {**{k: v for k, v in b.items() if k not in knobs}, "config": config}
+    if role == "eval":
+        return {"map_data": b["_map_data"], "config": config}
     if role == "eval_legacy":
         return {"seed": b["seed"]} if "seed" in b else {}
     if role == "smoke":
@@ -171,23 +233,166 @@ def _ids():
     return [f"{role}-{scenario}" for role, scenario, _ in _cases()]
 
 
-@pytest.mark.parametrize(("role", "scenario", "capture"), _cases(), ids=_ids())
-def test_factory_reproduces_the_pre_migration_kwargs(monkeypatch, role, scenario, capture):
-    """THE oracle: the factory hands make_puffer_env what the old site handed it.
+def _role_captures(role):
+    """(scenario, capture) for ONE role — the knock-out's slice of _cases()."""
+    return [(c["scenario"], c) for c in FIXTURE_DATA["roles"][role]]
 
-    Failure here is not "the factory is shaped differently" — it is "the env
-    this role builds is not the env it used to build". Read the diff as a
-    behaviour change and check `capture["call_source"]`, which is the
-    pre-migration call verbatim, before touching the fixture.
+
+def _real_runtime_signature():
+    """`make_env`'s signature with the VAR_KEYWORD parameter removed.
+
+    Stripping `**legacy` is what makes an unknown name a TypeError here instead
+    of being swallowed: with it in place every misspelling binds happily, which
+    is exactly how the pre-B2 version of
+    test_factory_kwargs_bind_to_the_real_signature went vacuous.
+
+    PITFALL — WHY THIS IS BOUND ONCE AT IMPORT AND NEVER RE-READ. `_construct`
+    monkeypatches `c_env.cs2_env.make_env` with the recording stub, whose own
+    signature is `(**kwargs)`. Re-reading the attribute inside a comparison
+    would therefore pick up the STUB, strip its VAR_KEYWORD and leave an EMPTY
+    parameter list — at which point every runtime name is unbindable and every
+    comparison in this file raises TypeError. Binding at import time is what
+    makes `RUNTIME_SIG` the real contract rather than whatever a test last
+    installed.
+    """
+    import inspect
+
+    from c_env.cs2_env import make_env
+
+    sig = inspect.signature(make_env)
+    return sig.replace(
+        parameters=[p for p in sig.parameters.values() if p.kind is not p.VAR_KEYWORD])
+
+
+RUNTIME_SIG = _real_runtime_signature()
+
+# Cross-check against the capture's own record of the runtime names. Both sides
+# are derived — one from today's signature, one from the signature as it stood
+# before the migration — so this fires if a runtime parameter was added, removed
+# or renamed under the oracle rather than passing silently.
+assert set(RUNTIME_NAMES) == {
+    n
+    for n in RUNTIME_SIG.parameters if n != "config"
+}, (f"make_env's runtime parameters are {sorted(RUNTIME_SIG.parameters)}, but the capture "
+    f"recorded {sorted(RUNTIME_NAMES)} — the fixture and the signature disagree about what a "
+    f"runtime input IS, so every comparison below is comparing the wrong thing")
+
+
+def _effective(d):
+    """A kwarg mapping reduced to the RUNTIME values `make_env` would see.
+
+    Binds against `RUNTIME_SIG` and applies defaults, then drops `config`. One
+    definition, shared by `_oracle_failures` and the two call-site tests, so
+    "what counts as the same runtime call" cannot mean two different things in
+    one file.
+    """
+    bound = RUNTIME_SIG.bind(**{k: v for k, v in d.items() if k != "config"})
+    bound.apply_defaults()
+    args = dict(bound.arguments)
+    args.pop("config", None)
+    return args
+
+
+def _oracle_failures(got, capture, role, scenario):
+    """Every reason `got` is not the captured construction, as a LIST.
+
+    THREE checks, each catching a different failure:
+
+      KEY SET, as a two-sided CONTAINMENT and deliberately not an equality.
+      `config` must be there (its absence means the whole payload vanished) and
+      nothing outside make_env's six runtime parameters may be. Equality is not
+      available: the capture was taken through make_puffer_env, which forwarded
+      all six unconditionally, while a typed builder names only what it needs.
+      The upper bound is what still catches the failure that matters — a legacy
+      name leaking through `_make(...)`, which the migration census cannot see
+      because `_make` is a parameter.
+
+      CONFIG, by value, against the config the OLD chain resolved.
+
+      RUNTIME, by EFFECTIVE value: both sides go through `_effective`, so a
+      builder may omit a kwarg whose value equals make_env's default without
+      failing, while any kwarg whose VALUE moved fails.
+
+    WHY THIS RETURNS FAILURES RATHER THAN RAISING, and why the oracle below is
+    two lines over it: test_knockout_dropping_one_kwarg_fails_that_roles_capture
+    perturbs the construction and asserts this list is NON-empty, so the
+    knock-out perturbs the SAME comparison the oracle runs. A knock-out that
+    re-implemented these checks would stop being a knock-out of the oracle the
+    moment either copy drifted.
+
+    PITFALL: the KEY SET check GATES the other two, which is why this returns
+    early instead of appending four times (one check, two appends). CONFIG and
+    RUNTIME are ill-defined without it — `got["config"]` is a KeyError the
+    moment the `config` knock-out has dropped it, and the runtime bind is a
+    TypeError on a stray legacy name. Written as four independent appends this
+    helper RAISES for every `config` knock-out instead of reporting one, and the
+    knock-out test errors out for all six roles. The early return is also what
+    preserves the assert-by-assert short-circuit the caller would have had.
+    """
+    import dataclasses
+
+    out = []
+    if "config" not in got:
+        out.append(f"role {role!r}/{scenario} passed no config — the entire payload. "
+                   f"pre-migration call: {capture['call_source']}")
+    extra = sorted(set(got) - {"config"} - set(RUNTIME_NAMES))
+    if extra:
+        out.append(f"role {role!r}/{scenario} passes {extra}, which are neither `config` nor "
+                   f"one of make_env's runtime parameters {sorted(RUNTIME_NAMES)}")
+    if out:
+        return out
+
+    if dataclasses.asdict(got["config"]) != capture["expected_config"]:
+        out.append(f"role {role!r}/{scenario}: the CONFIG this role builds changed.\n"
+                   f"  pre-migration call was: {capture['call_source']}")
+
+    if _effective(got) != _effective(capture["runtime_kwargs"]):
+        out.append(f"role {role!r}/{scenario}: a RUNTIME value changed.\n"
+                   f"  pre-migration call was: {capture['call_source']}")
+    return out
+
+
+@pytest.mark.parametrize(("role", "scenario", "capture"), _cases(), ids=_ids())
+def test_factory_builds_the_captured_config(monkeypatch, role, scenario, capture):
+    """The env this role builds is the env it used to build.
+
+    The three comparisons, and the reason for each, are in `_oracle_failures`
+    above — this test and the knock-out below are the only two callers, which
+    is the point. Failure here is not "the factory is shaped differently", it
+    is "the env this role builds is not the env it used to build": read the
+    `call_source` the message carries, which is the pre-migration call
+    verbatim, before touching the fixture.
+
+    THE EVAL-ONLY ARG -> CONFIG ASSERTION at the end (spec §4.2) is not part of
+    that comparison and no knock-out can perturb it, because it never reads
+    `got`. It is here because `train` and `harness` DRIVE their real closures,
+    so their `input_config` is PRODUCED and therefore checked, whereas
+    `_inputs_for("eval", ...)` hands `_config_from(input_config)` straight back
+    from the fixture and the production eval site lives inside `train()` where
+    nothing can drive it — the AST layer only pins its SPELLING. Without this,
+    nothing in PR B2 checks the eval role's arg -> config link at all, and
+    `eval/symmetrize_requested` degrades from a real knock-out into a fixture
+    round-trip that proves only that `.replace(...)` ran.
+
+    It is eval-only because only the `eval` and `train` rows carry an `args`
+    dict; the other seven record `args: null`, so `Namespace(**capture["args"])`
+    would raise there. A guard spelled `"args" in capture` would guard nothing —
+    that key is present on all 13 rows.
     """
     got = _construct(monkeypatch, role, **_inputs_for(role, capture))
-    expected = capture["explicit_kwargs"]
-    assert sorted(got) == sorted(expected), (f"role {role!r}/{scenario}: kwarg SET changed.\n"
-                                             f"  missing: {sorted(set(expected) - set(got))}\n"
-                                             f"  added:   {sorted(set(got) - set(expected))}\n"
-                                             f"  pre-migration call was: {capture['call_source']}")
-    assert got == expected, (f"role {role!r}/{scenario}: kwarg VALUES changed.\n"
-                             f"  pre-migration call was: {capture['call_source']}")
+    failures = _oracle_failures(got, capture, role, scenario)
+    assert not failures, "\n".join(failures)
+
+    if role == "eval":
+        from argparse import Namespace
+
+        from train_config import env_config_from_args
+
+        assert env_config_from_args(Namespace(**capture["args"])) == _config_from(
+            capture["input_config"]), (
+                f"eval/{scenario}: env_config_from_args no longer turns the captured ARGS into "
+                f"the config the old chain resolved — the oracle above would still pass, because "
+                f"it feeds itself _config_from(input_config)")
 
 
 def test_every_role_in_the_enum_is_covered_by_the_capture():
@@ -217,21 +422,25 @@ def test_unknown_role_is_a_named_error():
 
 
 def test_train_closure_still_rejects_stray_kwargs(monkeypatch):
-    """`build_env_factory`'s STRICT catch-all survived the W3 rewrite.
+    """`build_env_factory`'s STRICT catch-all survived both rewrites.
 
     The guard raises on anything pufferlib did not name, and it is the loud form
     of the historical bug: a reward key routed through `_per_env_kwargs` used to
     be silently discarded, so the arm trained the baseline weights. It had ZERO
     test coverage while W3 rewrote the very closure body it guards, and the
-    captured-kwargs oracle above cannot see it — that oracle only ever observes
-    the happy path, i.e. what `make_puffer_env` receives when nothing strays.
+    oracle above cannot see it — that oracle only ever observes the happy path,
+    i.e. what `make_env` receives when nothing strays.
 
     Asserted through the real `build_env_factory`, not the factory module: the
     guard belongs to the closure, which is where pufferlib's kwargs arrive.
+    `config=` is omitted deliberately — since PR B2 it defaults to `EnvConfig()`,
+    resolved above the closure, so this call is legal and the guard is still the
+    only thing that can fire.
     """
+    import c_env.cs2_env
     import train
 
-    monkeypatch.setattr(train, "make_puffer_env", _Recorder())
+    monkeypatch.setattr(c_env.cs2_env, "make_env", _Recorder())
     factory = train.build_env_factory(shared_ts=None, map_data=None)
     with pytest.raises(TypeError, match="unexpected kwargs.*reward_ct_survival"):
         factory(buf=None, seed=0, reward_ct_survival=0.0)
@@ -240,32 +449,46 @@ def test_train_closure_still_rejects_stray_kwargs(monkeypatch):
 def test_eval_legacy_absent_seed_is_not_seed_none(monkeypatch):
     """The two eval_legacy sites differ ONLY in whether `seed` is passed.
 
-    `make_puffer_env`'s default is `seed=0`, so spelling the absent case as
-    `seed=None` would forward None where the bare call forwarded nothing — a
-    real behaviour change that `static_data_scalars()` cannot see, because seed
-    is not a StaticData field. The captured-kwargs test above already pins the
-    bare shape; this states the sentinel is the mechanism, so a future
-    "simplification" to `seed=None` fails here with the reason attached.
+    `make_env`'s default is `seed=0`, so spelling the absent case as `seed=None`
+    would forward None where the bare call forwarded nothing — a real behaviour
+    change that `static_data_scalars()` cannot see, because seed is not a
+    StaticData field. The oracle above already pins the bare shape; this states
+    the sentinel is the mechanism, so a future "simplification" to `seed=None`
+    fails here with the reason attached.
+
+    The comparison is against the RAW received kwargs, which is why
+    `team_spirit` appears: since PR B2 the builder spells it explicitly rather
+    than inheriting `make_puffer_env`'s parameter default.
     """
-    assert _construct(monkeypatch, "eval_legacy") == {}
-    assert _construct(monkeypatch, "eval_legacy", seed=UNSET) == {}
-    assert _construct(monkeypatch, "eval_legacy", seed=None) == {"seed": None}
+    assert _construct(monkeypatch, "eval_legacy") == {"config": EnvConfig(), "team_spirit": None}
+    assert _construct(monkeypatch, "eval_legacy", seed=UNSET) == {
+        "config": EnvConfig(),
+        "team_spirit": None
+    }
+    assert _construct(monkeypatch, "eval_legacy", seed=None) == {
+        "config": EnvConfig(),
+        "team_spirit": None,
+        "seed": None
+    }
 
 
 def test_every_role_builder_parameter_is_required():
     """No role builder may default a knob — `eval_legacy`'s seed sentinel aside.
 
     A default turns a call site that forgot an argument into a WORKING env built
-    on someone else's value, which is the entire failure class W3 removes. The
-    `external` role is the concrete instance: its two parameters used to default
-    to None, mirroring `make_env`'s published signature, so a delegate that
-    forwarded only `team_spirit` would have silently produced a dust2 env instead
-    of raising. The defaulting belongs to the wrapper, not to the builder.
+    on someone else's value, which is the entire failure class W3 removes. Since
+    PR B2 the concrete instance is `config`: a builder that defaulted it to
+    `EnvConfig()` would give a caller who forgot the run's config an env on the
+    baseline weights, silently. The `external` role is the older instance: its
+    two parameters used to default to None, mirroring `make_env`'s published
+    signature, so a delegate that forwarded only `team_spirit` would have
+    quietly produced a dust2 env instead of raising. The defaulting belongs to
+    the wrapper, not to the builder.
 
     `seed=UNSET` is the one exemption, and it is the opposite of a default: the
     sentinel exists precisely BECAUSE `seed=None` would be a silent behaviour
-    change (make_puffer_env's own default is 0), so it is asserted to be the
-    sentinel rather than merely allowed to be anything.
+    change (make_env's own default is 0), so it is asserted to be the sentinel
+    rather than merely allowed to be anything.
     """
     import inspect
 
@@ -287,38 +510,66 @@ def test_every_role_builder_parameter_is_required():
 
 
 def test_factory_kwargs_bind_to_the_real_signature(monkeypatch):
-    """Every kwarg every role passes is a real `make_puffer_env` parameter.
+    """Every RUNTIME kwarg every role passes is a real `make_env` parameter.
 
-    The recorder accepts anything, so the captured-kwargs comparison would
-    happily pass a typo'd kwarg name through as long as the FIXTURE carried the
-    same typo. Binding against the real signature closes that: the production
-    call would have raised TypeError inside a forked vecenv worker, far from the
-    mistake.
+    WHAT THIS DOES, and it is not what the pre-B2 version did. The recorder
+    accepts anything, so the value comparison would happily pass a typo'd name
+    through as long as the FIXTURE carried the same typo. Binding closes that —
+    but only against a signature with `**legacy` REMOVED. The pre-B2 version
+    bound against `make_puffer_env`, which grew a VAR_KEYWORD channel, and from
+    that moment every name bound: `total_nonsense=1`, `jmup_enabled=1` and
+    `reward_kil=2.0` all returned OK, so the test asserted nothing while its
+    docstring still claimed it did.
+
+    `config` is excluded from the bind and checked by
+    test_captured_configs_name_only_declared_fields instead — `**legacy` is not
+    the config's channel, and a config field name is not a `make_env` parameter.
+
+    In production a stray name would raise TypeError inside a forked vecenv
+    worker, far from the mistake.
     """
-    import inspect
-
-    import train
-
-    sig = inspect.signature(train.make_puffer_env)
+    sig = RUNTIME_SIG
     for role, scenario, capture in _cases():
         got = _construct(monkeypatch, role, **_inputs_for(role, capture))
         try:
-            sig.bind(**got)
+            sig.bind(**{k: v for k, v in got.items() if k != "config"})
         except TypeError as exc:
-            pytest.fail(f"role {role!r}/{scenario} passes kwargs make_puffer_env rejects: {exc}")
+            pytest.fail(f"role {role!r}/{scenario} passes kwargs make_env rejects: {exc}")
+
+
+def test_captured_configs_name_only_declared_fields():
+    """The other half of the bind: every captured config key is a real field.
+
+    The runtime bind above cannot see inside `config`, and `_config_from` would
+    raise on a bogus key — but only for the rows a test actually rebuilds. This
+    reads the fixture directly, so a hand-edited `expected_config` carrying a
+    misspelled knob (or a weight that no longer exists) fails here rather than
+    silently teaching the oracle the wrong shape.
+
+    Both bounds come from `env_config`, never from a list written down here: a
+    field added to the dataclass widens them automatically, and a field removed
+    narrows them, which is the whole point of deriving them.
+    """
+    allowed = {"rewards"} | set(KNOB_FIELDS)
+    for role, scenario, capture in _cases():
+        for which in ("input_config", "expected_config"):
+            cfg = capture[which]
+            extra = sorted(set(cfg) - allowed)
+            assert not extra, f"{role}/{scenario} {which} names non-fields {extra}"
+            bad = sorted(set(cfg.get("rewards", {})) - set(REWARD_FIELDS))
+            assert not bad, f"{role}/{scenario} {which}.rewards names non-weights {bad}"
 
 
 # ── the two MIGRATED CALL SITES, driven for real ────────────────────────────
 #
 # Everything above feeds the fixture's bindings to `build_env_for` directly, so
-# it proves the FACTORY reproduces the pre-migration kwargs and nothing about
-# whether the closures T5a migrated hand it those bindings. The gap is not
-# theoretical: swapping `crouch_enabled=jump_enabled, jump_enabled=crouch_enabled`
-# at the harness call site leaves every test above green, and the §3
-# determinism gate never builds a harness env at all, so nothing in the repo
-# fired. (The train site has an indirect oracle — a `seed=_seed, _seed=seed`
-# swap there moves the gate's checkpoint md5 — but only that one gate, and only
-# for that one kwarg pair.)
+# it proves the FACTORY reproduces the pre-migration construction and nothing
+# about whether the closures hand it those bindings. The gap is not theoretical:
+# swapping two knobs at the harness call site's EnvConfig(...) mapping leaves
+# every test above green, and the §3 determinism gate never builds a harness env
+# at all, so nothing in the repo fires. (The train site has an indirect oracle —
+# a `seed=_seed, _seed=seed` swap there moves the gate's checkpoint md5 — but
+# only that one gate, and only for that one kwarg pair.)
 #
 # So the two tests below drive the REAL closures, the one `build_env_factory`
 # returns and the one `_build_trainer_for_test` defines, against the same
@@ -329,8 +580,8 @@ def _kwarg_diff(got, expected):
     """Per-key report of how two kwarg dicts differ; empty string when equal.
 
     Used instead of a bare `assert got == expected` so that a routing bug names
-    the slots it crossed — "crouch_enabled: got '<jump_enabled>'" — instead of
-    printing two nine-key dicts and leaving the reader to diff them.
+    the slots it crossed — "map_data: got '<shared_ts>'" — instead of printing
+    two dicts and leaving the reader to diff them.
     """
     missing = sorted(set(expected) - set(got))
     added = sorted(set(got) - set(expected))
@@ -346,27 +597,6 @@ def _kwarg_diff(got, expected):
     return "\n".join(parts)
 
 
-def _call_source_routing(capture):
-    """{make_puffer_env kwarg -> the closure variable the OLD call read for it}.
-
-    Parsed out of `capture["call_source"]`, the pre-migration call recorded
-    verbatim one commit before the factory existed. Deriving the routing from
-    the post-migration call site (or from the factory) instead would compare the
-    migration to itself, which is the whole failure this file exists to avoid.
-
-    Only bare-name arguments are routable. `seed=0 if seed is None else seed`
-    and `include_step_stats_in_info=True` are derived/constant, and the caller
-    checks those against the capture's recorded VALUE instead.
-    """
-    import ast
-
-    call = ast.parse(capture["call_source"], mode="eval").body
-    return {
-        kw.arg: kw.value.id
-        for kw in call.keywords if kw.arg is not None and isinstance(kw.value, ast.Name)
-    }
-
-
 def _real_harness_env_factory(monkeypatch, tmp_path, shared_ts, **harness_kwargs):
     """Extract the REAL `env_factory` closure `_build_trainer_for_test` builds.
 
@@ -374,9 +604,9 @@ def _real_harness_env_factory(monkeypatch, tmp_path, shared_ts, **harness_kwargs
     harness build is aborted: everything AFTER that call (build_policy, PuffeRL,
     the self-play patches) costs seconds and constructs nothing this file looks
     at, while everything before it — the team-spirit Value, the mask shm, the
-    closure itself — is the wiring under test. The abort is an exception rather
-    than a stub return value so the harness cannot run on against a fake vecenv
-    and fail somewhere confusing.
+    EnvConfig mapping and the closure itself — is the wiring under test. The
+    abort is an exception rather than a stub return value so the harness cannot
+    run on against a fake vecenv and fail somewhere confusing.
 
     `mp` and `tempfile` are replaced on the HARNESS MODULE, not on the stdlib
     modules themselves: `shared_ts` is built inside the function and cannot be
@@ -422,26 +652,35 @@ def test_train_call_site_forwards_the_captured_kwargs(monkeypatch, capture):
     `seed=_seed, _seed=seed` being the cheap example, which every factory-side
     test in this file accepts and only the §3 gate's checkpoint md5 notices.
 
-    The fixture's own binding values are used verbatim, no sentinels needed:
-    `seed` 3 against `_seed` 41, plus the distinct `<shared_ts>` / `<map_data>`
-    strings and the two dissimilar dicts the capture already carries, make every
-    slot in this call distinguishable from every other.
+    Driven from the captured ARGS through `build_train_env_factory`, not from
+    the captured config, so the whole args -> EnvConfig -> closure -> builder
+    chain is what produces the config being compared. The fixture's own binding
+    values are used verbatim, no sentinels needed: `seed` 3 against `_seed` 41,
+    plus the distinct `<shared_ts>` / `<map_data>` strings, make every slot in
+    this call distinguishable from every other.
     """
+    from argparse import Namespace
+
+    import c_env.cs2_env
     import train
 
-    b = capture["bindings"]
+    b, rt = capture["bindings"], capture["runtime_kwargs"]
     rec = _Recorder()
-    monkeypatch.setattr(train, "make_puffer_env", rec)
-    factory = train.build_env_factory(shared_ts=b["shared_ts"],
-                                      map_data=b["map_data"],
-                                      reward_overrides=b["reward_overrides"],
-                                      reward_symmetrize=b["reward_symmetrize"],
-                                      env_knobs=b["env_knobs"])
+    monkeypatch.setattr(c_env.cs2_env, "make_env", rec)
+    factory = train.build_train_env_factory(Namespace(**capture["args"]),
+                                            shared_ts=rt["team_spirit"],
+                                            map_data=rt["map_data"])
     factory(buf=b["buf"], seed=b["seed"], _seed=b["_seed"])
-    assert len(rec.calls) == 1, f"the train closure called make_puffer_env {len(rec.calls)} times"
-    diff = _kwarg_diff(rec.calls[0], capture["explicit_kwargs"])
-    assert not diff, (f"train CALL SITE / {capture['scenario']}: what build_env_factory's closure "
-                      f"forwards no longer matches the pre-W3 capture.\n{diff}\n"
+    assert len(rec.calls) == 1, f"the train closure called make_env {len(rec.calls)} times"
+
+    got = rec.calls[0]
+    assert got["config"] == _config_from(capture["expected_config"]), (
+        f"train CALL SITE / {capture['scenario']}: the CONFIG build_env_factory's closure "
+        f"forwards is no longer the one the pre-migration chain resolved.\n"
+        f"  pre-migration call was: {capture['call_source']}")
+    diff = _kwarg_diff(_effective(got), _effective(rt))
+    assert not diff, (f"train CALL SITE / {capture['scenario']}: a RUNTIME value the closure "
+                      f"forwards no longer matches the capture.\n{diff}\n"
                       f"  pre-migration call was: {capture['call_source']}")
 
 
@@ -452,131 +691,208 @@ def test_harness_call_site_forwards_the_captured_kwargs(monkeypatch, tmp_path, c
     """`_build_trainer_for_test`'s closure, run for real, still produces the capture.
 
     This is the site with no other oracle at all: the §3 gate cannot see the
-    harness, and no test anywhere passes `crouch_enabled` or `jump_enabled` to
+    harness, and no test anywhere passes `crouch_enabled` to
     `_build_trainer_for_test`.
 
-    WHY SENTINELS RATHER THAN THE FIXTURE'S OWN BINDING VALUES. The two harness
-    captures record crouch/jump as (1, 1) and (0, 0), so a call site that
-    swapped the two would reproduce both captures exactly — value comparison is
-    structurally blind to it. Feeding one distinct sentinel per closure variable
-    makes the SLOT each variable lands in observable, and
-    `_call_source_routing` reads the required slot off the pre-migration call
-    rather than off the code being tested. `seed` and
-    `include_step_stats_in_info` are not routed variables, so those two are
-    still compared against the capture's recorded value — which is what
-    exercises the `0 if seed is None else seed` remap in both directions.
+    WHY BOTH SCENARIOS ARE NEEDED, and why dropping either reopens a swap. Since
+    PR B2 the four knobs land in ONE EnvConfig, so there are no per-knob slots
+    left to route sentinel strings into and swap detection has to be by VALUE.
+    Neither captured scenario separates all four on its own:
+      seed_none_becomes_zero separates pin_pitch from jump_enabled, and both
+        from n_active_per_team;
+      explicit_seed_zero_kept separates crouch_enabled from jump_enabled.
+    Together every pair of the three flags differs in at least one scenario, and
+    each differs from n_active_per_team in both. A future author looking at one
+    scenario will see two knobs holding the same value and think it is noise —
+    it is not; deleting that scenario reopens a swap.
+
+    WHAT THESE TWO SCENARIOS DO NOT COVER. `pin_pitch` and `crouch_enabled` both
+    hold the FIELD DEFAULT in both rows, so this value comparison is blind to
+    either being DROPPED from the closure's EnvConfig(...) mapping — swap
+    coverage is not drop coverage. The pre-B2 W3 fixture did cover them (its
+    harness rows differed in both), and `env_config_pre_165b.json` is FROZEN and
+    must NOT be re-captured to fix that, so the coverage is restored by a drive
+    instead: test_harness_config_carries_the_knobs_no_fixture_row_varies below.
+
+    `shared_ts` and `buf` remain distinct sentinels, so those two runtime slots
+    are still swap-checked by value.
     """
-    import train
+    import c_env.cs2_env
 
-    routing = _call_source_routing(capture)
-    sentinel = {var: f"<{var}>" for var in routing.values()}
-    # Everything routed except `shared_ts`, which _build_trainer_for_test builds
-    # itself (hence the mp stub), and `buf`, which pufferlib passes per call.
-    injectable = sorted(set(routing.values()) - {"shared_ts", "buf"})
-
+    b, rt = capture["bindings"], capture["runtime_kwargs"]
     rec = _Recorder()
-    monkeypatch.setattr(train, "make_puffer_env", rec)
-    knobs = {name: sentinel[name] for name in injectable}
+    monkeypatch.setattr(c_env.cs2_env, "make_env", rec)
     factory = _real_harness_env_factory(monkeypatch,
                                         tmp_path,
-                                        sentinel["shared_ts"],
+                                        rt["team_spirit"],
                                         num_envs=1,
-                                        **knobs)
-    factory(buf=sentinel["buf"], seed=capture["bindings"]["seed"])
+                                        map_data=b["map_data"],
+                                        n_active_per_team=b["n_active_per_team"],
+                                        pin_pitch=b["pin_pitch"],
+                                        crouch_enabled=b["crouch_enabled"],
+                                        jump_enabled=b["jump_enabled"])
+    factory(buf=b["buf"], seed=b["seed"])
 
-    assert len(rec.calls) == 1, f"the harness closure called make_puffer_env {len(rec.calls)}x"
-    expected = {
-        kwarg: sentinel[routing[kwarg]] if kwarg in routing else value
-        for kwarg, value in capture["explicit_kwargs"].items()
-    }
-    diff = _kwarg_diff(rec.calls[0], expected)
-    assert not diff, (
-        f"harness CALL SITE / {capture['scenario']}: what _build_trainer_for_test's closure "
-        f"forwards no longer matches the pre-W3 capture.\n{diff}\n"
+    assert len(rec.calls) == 1, f"the harness closure called make_env {len(rec.calls)}x"
+    got = rec.calls[0]
+    assert got["config"] == _config_from(capture["input_config"]), (
+        f"harness CALL SITE / {capture['scenario']}: the CONFIG _build_trainer_for_test's "
+        f"closure forwards no longer matches the pre-migration capture.\n"
+        f"  got      {got['config']}\n  expected {_config_from(capture['input_config'])}\n"
         f"  pre-migration call was: {capture['call_source']}")
+    diff = _kwarg_diff(_effective(got), _effective(rt))
+    assert not diff, (
+        f"harness CALL SITE / {capture['scenario']}: a RUNTIME value _build_trainer_for_test's "
+        f"closure forwards no longer matches the pre-migration capture.\n{diff}\n"
+        f"  pre-migration call was: {capture['call_source']}")
+
+
+def test_harness_config_carries_the_knobs_no_fixture_row_varies(monkeypatch, tmp_path):
+    """Drive the harness closure OFF-FIXTURE for the two knobs it cannot see.
+
+    Both harness captures hold the field default for pin_pitch and for
+    crouch_enabled, so the fixture-driven test above is blind to either being
+    dropped from _build_trainer_for_test's EnvConfig(...) mapping. pin_pitch is
+    still caught outside this file (test_pitch_pin.py drives the env/policy
+    agreement check with a non-default pin); crouch_enabled is caught by
+    NOTHING else — no test in the tree passes it to _build_trainer_for_test.
+    Before PR B2 it was the harness knock-out for that reason; B2 retires that
+    knock-out, so the coverage moves here.
+
+    Non-default on BOTH, in one call, so a mapping that dropped either fails.
+    jump_enabled is asserted at its default in the same breath: with
+    crouch_enabled non-default and jump_enabled default, a mapping that crossed
+    the two fails here too. (pin_pitch and jump_enabled hold the same value in
+    this drive; that pair is separated by the seed_none_becomes_zero scenario
+    above, which is why both tests are needed.)
+    """
+    import c_env.cs2_env
+
+    rec = _Recorder()
+    monkeypatch.setattr(c_env.cs2_env, "make_env", rec)
+    factory = _real_harness_env_factory(monkeypatch,
+                                        tmp_path,
+                                        "<shared_ts>",
+                                        num_envs=1,
+                                        crouch_enabled=0,
+                                        pin_pitch=1)
+    factory(buf="<buf>", seed=0)
+
+    assert len(rec.calls) == 1, rec.calls
+    cfg = rec.calls[0]["config"]
+    assert (cfg.n_active_per_team, cfg.pin_pitch,
+            cfg.crouch_enabled, cfg.jump_enabled) == (EnvConfig().n_active_per_team, 1, 0,
+                                                      EnvConfig().jump_enabled), cfg
 
 
 # ── knock-outs: prove the oracle can actually fail ──────────────────────────
 #
-# One dropped kwarg per role, applied to the role's builder, asserting the
-# captured-kwargs test then fails. Without this the whole file could be green
-# against a factory that passed nothing at all — which is exactly what a
-# defaults-producing bug looks like.
-
-# One kwarg per role, each chosen as the one whose loss is HARDEST to see
-# anywhere else — a knock-out on an easily-noticed kwarg would prove much less.
+# One dropped kwarg per role is not enough once `config` carries the whole
+# payload: `config` alone would pass even against a builder that stopped
+# forwarding every RUNTIME slot. Each tuple is `config` (the payload) plus
+# every runtime slot whose loss this role's captures can actually see.
 #
-#   train        reward_overrides: the historical bug verbatim. Losing it makes
-#                every experiment arm train the baseline weights while the §3
-#                checkpoint stays byte-identical.
-#   eval         auto_reset: unreachable by every run-level gate on this branch,
-#                and eval_baselines raises without it.
-#   eval_legacy  seed: the only thing separating this role's two call sites, and
-#                not a StaticData field, so scalars cannot see it either.
-#   harness      crouch_enabled: no test passes it and its default matches
-#                make_puffer_env's, so the whole suite is blind to it.
-#   smoke        seed / external map_data: each role's entire payload.
+#   team_spirit  is in EVERY tuple, and it is the one that generalises: the
+#                three defaulting roles spell it explicitly against make_env's
+#                own different default, so dropping it is visible even where
+#                every other slot equals a default.
+#   train        buf / map_data: distinct sentinels on all three scenarios.
+#                `seed` is NOT here — the seed_none_becomes_zero scenario
+#                resolves to make_env's own seed default, so dropping it is
+#                invisible there. Do not "complete" this tuple with it.
+#   eval         auto_reset (unreachable by every run-level gate on this
+#                branch; eval_baselines raises without it), plus seed and
+#                map_data, both distinct from the defaults on all three.
+#   harness      include_step_stats_in_info: the flag that makes this role its
+#                own role at all, plus buf / map_data.
+#   eval_legacy  seed: the only thing separating this role's two call sites.
+#   external     map_data: half of this role's entire payload.
 #
 # NOTE the comments live above the dict, not inside it. Trailing comments in a
 # literal get snapped to yapf's comment stops while ruff's isort wants one
 # space, and the two then fight forever (gh#97, and the warning in train.py's
 # import block).
 _KNOCKOUT_KWARG = {
-    "train": "reward_overrides",
-    "eval": "auto_reset",
-    "eval_legacy": "seed",
-    "smoke": "seed",
-    "harness": "crouch_enabled",
-    "external": "map_data",
+    "train": ("config", "team_spirit", "buf", "map_data"),
+    "eval": ("config", "team_spirit", "auto_reset", "map_data", "seed"),
+    "eval_legacy": ("config", "team_spirit", "seed"),
+    "external": ("config", "team_spirit", "map_data"),
+    "harness": ("config", "team_spirit", "buf", "map_data", "include_step_stats_in_info"),
+    "smoke": ("config", "team_spirit", "seed"),
+}
+
+# (role, scenario, kwarg) triples where the drop provably CANNOT be seen, with
+# the reason. Pinned in BOTH directions: a new green triple means a knock-out
+# went vacuous, and a triple that starts going red means this row is stale and
+# must be deleted. Both entries have the same cause — for these two scenarios
+# `team_spirit` is the ONLY load-bearing runtime slot; every other value the
+# old chain sent equals make_env's own default, so a builder that stopped
+# sending it produces an identical effective mapping.
+_VACUOUS_KNOCKOUTS = {
+    ("eval_legacy", "bare_defaults", "seed"),
+    ("external", "wrapper_defaults", "map_data"),
 }
 
 
 @pytest.mark.parametrize("role", ROLES)
 def test_knockout_dropping_one_kwarg_fails_that_roles_capture(monkeypatch, role):
-    """Delete one kwarg from a role's construction; that role's oracle must fail.
+    """Delete one kwarg from a role's construction; the ORACLE must then fail.
 
-    The drop is simulated at the recording boundary rather than by editing
-    `env_factory.py`: the stub discards the named kwarg before recording, which
-    is indistinguishable — from the oracle's point of view — from a builder that
-    never passed it. That keeps the knock-out reproducible in CI instead of a
-    procedure someone has to remember to perform by hand.
+    Not a re-implementation of the comparison: this runs `_oracle_failures`, the
+    same helper `test_factory_builds_the_captured_config` runs, and asserts the
+    list is NON-empty where that test asserts it is empty. A knock-out written
+    against a second copy of the three checks would stop being a knock-out of
+    the oracle the moment either copy drifted.
+
+    THE VERDICT IS A SET EQUALITY, not "assert it failed". "Is the kwarg
+    recorded in the capture?" — the pre-B2 vacuity filter — cannot be asked of
+    the typed fixture at all: it has no `explicit_kwargs` key, and `config`
+    appears in no capture's `runtime_kwargs`. So the question becomes "does the
+    drop change the oracle's VERDICT?", and the triples where it provably does
+    not are pinned in `_VACUOUS_KNOCKOUTS` in both directions — a newly green
+    triple means a knock-out went vacuous, a newly red one means a pinned row is
+    stale and must be deleted.
     """
-    import train
-
-    dropped = _KNOCKOUT_KWARG[role]
-    captures = [c for r, _, c in _cases() if r == role and dropped in c["explicit_kwargs"]]
-    assert captures, (f"knock-out kwarg {dropped!r} appears in no captured scenario for role "
-                      f"{role!r} — it cannot demonstrate anything")
-
-    class _Dropping(_Recorder):
-
-        def __call__(self, **kwargs):
-            kwargs.pop(dropped, None)
-            return super().__call__(**kwargs)
-
-    for capture in captures:
-        rec = _Dropping()
-        monkeypatch.setattr(train, "make_puffer_env", rec)
-        build_env_for(role, **_inputs_for(role, capture))
-        got = rec.calls[0]
-        assert got != capture["explicit_kwargs"], (
-            f"role {role!r}/{capture['scenario']}: dropping {dropped!r} from the construction "
-            "still matched the capture — this role's oracle is vacuous")
+    green = set()
+    for dropped in _KNOCKOUT_KWARG[role]:
+        for scenario, capture in _role_captures(role):
+            got = _construct_dropping(monkeypatch, role, dropped, **_inputs_for(role, capture))
+            if not _oracle_failures(got, capture, role, scenario):
+                green.add((role, scenario, dropped))
+    assert green == {
+        v
+        for v in _VACUOUS_KNOCKOUTS if v[0] == role
+    }, (f"role {role!r}: the set of knock-outs the oracle CANNOT see moved. "
+        f"got {sorted(green)}, pinned {sorted(v for v in _VACUOUS_KNOCKOUTS if v[0] == role)}")
 
 
 def test_knockout_the_fixture_itself_is_load_bearing(monkeypatch):
-    """Corrupt a captured VALUE and the oracle must notice.
+    """Corrupt a captured VALUE and the oracle must notice — on both halves.
 
-    Distinct from the kwarg-drop knock-outs above, which perturb the factory.
-    This perturbs the EXPECTATION, and catches a comparison that only ever looks
-    at key sets — `sorted(got) == sorted(expected)` alone would pass here.
+    Distinct from the kwarg-drop knock-outs above, which perturb the FACTORY.
+    This perturbs the EXPECTATION, once per comparison, because the two halves
+    fail for different reasons and a comparison that only looked at one of them
+    would still pass here if the other were deleted:
+
+      expected_config — the payload half. Caught by the CONFIG comparison only;
+        the runtime mapping is untouched by it.
+      runtime seed    — the runtime half. Caught by the effective-runtime
+        comparison only; the config is untouched by it.
     """
     capture = copy.deepcopy(FIXTURE_DATA["roles"]["train"][0])
-    assert capture["explicit_kwargs"]["seed"] == 41
-    capture["explicit_kwargs"]["seed"] = 999
     got = _construct(monkeypatch, "train", **_inputs_for("train", capture))
-    assert sorted(got) == sorted(capture["explicit_kwargs"])
-    assert got != capture["explicit_kwargs"]
+    assert not _oracle_failures(got, capture, "train", "control"), "the unperturbed row must pass"
+
+    bad_config = copy.deepcopy(capture)
+    bad_config["expected_config"]["n_active_per_team"] += 1
+    assert _oracle_failures(got, bad_config, "train", "bad_config"), (
+        "a corrupted expected_config went unnoticed — the CONFIG comparison is not running")
+
+    bad_runtime = copy.deepcopy(capture)
+    assert bad_runtime["runtime_kwargs"]["seed"] == 41
+    bad_runtime["runtime_kwargs"]["seed"] = 999
+    assert _oracle_failures(got, bad_runtime, "train", "bad_runtime"), (
+        "a corrupted runtime seed went unnoticed — the RUNTIME comparison is not running")
 
 
 # ── the four remaining call sites, driven or read ───────────────────────────
@@ -648,6 +964,28 @@ def test_make_env_delegates_to_the_external_role(monkeypatch):
     assert seen == [("external", {"team_spirit": None, "map_data": None})]
 
 
+def test_external_role_returns_under_a_stub(monkeypatch):
+    """The `external` role has no recursion trap left, and this is what proves it.
+
+    Before PR B2 the chain was `train.make_env` -> `build_env_for("external")`
+    -> `_build_external` -> the function-local `from train import
+    make_puffer_env`. Repointing that import at `train.make_env` — the PUBLIC
+    wrapper, whose name this module now mentions twice — would have made the
+    external role call itself forever. Since B2 the import is
+    `c_env.cs2_env.make_env`, the lower-layer constructor, and this test is the
+    behavioural statement of that: with the stub installed the call RETURNS.
+
+    A pure-AST guard (test_env_factory_never_names_train_make_env below) states
+    the same thing statically; this one would still fail if a future indirection
+    reintroduced the cycle by some spelling the AST check does not enumerate.
+    """
+    import c_env.cs2_env
+
+    rec = _Recorder()
+    monkeypatch.setattr(c_env.cs2_env, "make_env", rec)
+    assert build_env_for("external", team_spirit=None, map_data=None) == "<env>"
+
+
 def test_load_policy_from_checkpoint_asks_for_bare_eval_legacy(monkeypatch, tmp_path):
     """The bare eval_legacy site: role only, no kwargs, no seed.
 
@@ -670,8 +1008,8 @@ def test_load_policy_from_checkpoint_asks_for_bare_eval_legacy(monkeypatch, tmp_
 
     role, kwargs = _drive(monkeypatch, train, train.load_policy_from_checkpoint, ckpt, "cpu")
     assert (role, kwargs) == ("eval_legacy", {}), (
-        "load_policy_from_checkpoint must pass NO seed — make_puffer_env's own default is 0, "
-        "and forwarding None instead would build a different env that scalars cannot see")
+        "load_policy_from_checkpoint must pass NO seed — make_env's own default is 0, and "
+        "forwarding None instead would build a different env that scalars cannot see")
 
 
 def test_evaluate_checkpoint_threads_its_episode_seed(monkeypatch):
@@ -715,13 +1053,13 @@ def test_eval_env_agreement_two_directions(simple_map):
                     match of plain `jump_enabled` passes under both and so
                     pins nothing; this case is what distinguishes the two
                     messages, not what proves (a) runs.
-      reward_symmetrize — must NOT raise. Eval never forwards it, so the two
-                    configs are meant to differ here; a check that compared it
-                    would abort every run with --reward-symmetrize.
+      reward_symmetrize — must NOT raise. The eval role FORCES it off while the
+                    driver env takes it from args, so the two configs are meant
+                    to differ here; a check that compared it would abort every
+                    run with --reward-symmetrize.
     """
     import train
     from c_env.cs2_env import make_env
-    from env_config import EnvConfig
 
     def _env(**changes):
         return make_env(config=EnvConfig(**changes), map_data=simple_map, seed=0)
@@ -764,16 +1102,21 @@ def test_train_calls_assert_eval_env_agreement():
 #
 # The layer that reaches `train()`'s eval site, which no test can drive. Each
 # check is derived from `capture["call_source"]` — the pre-migration call,
-# recorded verbatim one commit before the factory existed — so it compares the
-# migrated site to the OLD site rather than to the builder it now calls.
+# recorded verbatim one commit before the builders were typed — so it compares
+# the migrated site to the OLD site rather than to the builder it now calls.
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
-# The one thing not derivable from the capture: which kwarg a `**splat` became.
-# Both splats carry the knob dict; the `or {}` in the train site's
-# `**env_knobs or {}` moved INTO the builder, so only the free NAMES are
-# comparable there, not the expression.
-_SPLAT_BECOMES = {"train": "env_knobs", "eval": "env_knobs"}
+# The ONLY change PR B2 is allowed to make to what a site READS. Everything
+# else about the call — the role literal, the per-kwarg expressions, the
+# absence of a splat — must be unchanged, and the three unlisted roles must be
+# byte-identical. Derived from the frozen pre-migration capture, never from the
+# migrated source, which is what stops this from agreeing with the bug.
+_REWIRED = {
+    "train": ({"reward_overrides", "reward_symmetrize", "env_knobs"}, {"config"}),
+    "eval": ({"reward_overrides_from_args", "env_knobs_from_args"}, {"env_config_from_args"}),
+    "harness": ({"n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled"}, {"config"}),
+}
 
 
 def _keywords(call_source):
@@ -791,7 +1134,7 @@ def _free_names(call_source):
     (`team_spirit=shared_ts` became `shared_ts=shared_ts`) and an expression
     being simplified (`0 if seed is None else seed` became `seed`, the remap
     having moved into the builder), while still failing the moment a call site
-    stops reading something it used to read — a dropped `reward_overrides`, or an
+    stops reading something it used to read — a dropped reward source, or an
     `evaluate_checkpoint` that passed `start_seed` instead of `seed`.
 
     Set-based, and therefore blind to two arguments SWAPPED between slots. That
@@ -804,10 +1147,10 @@ def _free_names(call_source):
 def _is_derivation(expr):
     """True for a conditional/boolean expression — a RULE rather than a value.
 
-    Exactly the two shapes W3 was supposed to move into the builders (both
-    closures' seed remaps, `**env_knobs or {}`'s None guard). Anything else — a
-    name, an attribute, a helper call — is a value the call site sources, and
-    those must still be spelled identically after the migration.
+    Exactly the shapes W3 moved into the builders (both closures' seed remaps,
+    `**env_knobs or {}`'s None guard). Anything else — a name, an attribute, a
+    helper call — is a value the call site sources, and those must still be
+    spelled identically after the migration.
     """
     node = ast.parse(expr, mode="eval").body
     return isinstance(node, (ast.IfExp, ast.BoolOp))
@@ -842,8 +1185,8 @@ def _migrated_sites():
     """(role, enclosing qualname, source file, one pre-migration call_source).
 
     Read entirely out of the frozen fixture: it records each capture's `role`,
-    its `enclosing` qualname and its `site` as `<relpath>:<lineno>`, so the whole
-    table — including which file each site lives in — comes from the
+    its `enclosing` qualname and its `site` as `<relpath>[:<lineno>]`, so the
+    whole table — including which file each site lives in — comes from the
     pre-migration snapshot rather than from a list someone transcribed off the
     migrated code.
     """
@@ -864,25 +1207,36 @@ def _migrated_sites():
                          _migrated_sites(),
                          ids=[f"{r}-{e}" for r, e, _, _ in _migrated_sites()])
 def test_migrated_site_still_reads_what_the_old_site_read(role, enclosing, path, call_source):
-    """Per site: the role is right, the names are the same, the constants left.
+    """Per site: the role is right, the names moved by exactly the rewiring, the
+    constants left, and the three rewired sites read `config` the one way each is
+    allowed to.
 
-    Three assertions, each catching a different way the migration could be wrong:
+    Each assertion catches a different way the migration could be wrong:
 
       ROLE — the site asks for its own role. `smoke_test` asking for
       `eval_legacy` builds a working env with the wrong seed and nothing else in
       the repo notices.
 
-      NAMES — the set of free names the call reads is unchanged. A call site that
-      quietly stopped forwarding `reward_overrides` (the historical bug: every
-      experiment arm trains the baseline weights, checkpoint byte-identical) or
-      that forwards `start_seed` where it used to forward `seed` fails here.
-      Per-kwarg EXPRESSIONS are compared too, for every kwarg both calls name.
+      NAMES — the set of free names the call reads changed by EXACTLY the
+      rewiring `_REWIRED` records and nothing else, which for the three unlisted
+      roles is the identity. A call site that quietly stopped forwarding the
+      run's reward source (the historical bug: every experiment arm trains the
+      baseline weights, checkpoint byte-identical) or that forwards `start_seed`
+      where it used to forward `seed` fails here. Per-kwarg EXPRESSIONS are
+      compared too, for every kwarg both calls name.
 
       CONSTANTS — every literal the old call passed is GONE from the new one.
-      This is what asserts the migration actually happened: `seed=42` still
-      spelled at the smoke site, or `auto_reset=False` still at the eval site,
-      means the payload was duplicated rather than moved, and the two copies can
-      then drift — which is the entire failure W3 exists to end.
+      Vacuous against today's captures, which carry no keyword literals, and
+      kept so a constant cannot creep back: `seed=42` respelled at the smoke
+      site, or `auto_reset=False` at the eval site, would mean the payload was
+      duplicated rather than moved, and the two copies can then drift.
+
+      THE `config=` EXPRESSION, for the rewired roles only. `train` and
+      `harness` must read a bare local named `config` — anything else means the
+      site rebuilt a config of its own instead of forwarding the one resolved
+      above its closure — and `eval` must read `env_config_from_args(args)`, the
+      SAME resolver build_train_env_factory uses, because that identity is what
+      makes assert_eval_env_agreement's disclosure true.
     """
     new_call = _call_in(path, enclosing, "build_env_for")
     new_source = ast.unparse(new_call)
@@ -896,10 +1250,14 @@ def test_migrated_site_still_reads_what_the_old_site_read(role, enclosing, path,
     old_named, old_splats = _keywords(call_source)
     new_named, new_splats = _keywords(new_source)
 
-    assert _free_names(new_source) == _free_names(call_source), (
-        f"{role}/{enclosing}: the names this construction reads changed.\n"
-        f"  no longer read: {sorted(_free_names(call_source) - _free_names(new_source))}\n"
-        f"  newly read:     {sorted(_free_names(new_source) - _free_names(call_source))}\n"
+    removed, added = _REWIRED.get(role, (set(), set()))
+    want_names = (_free_names(call_source) - removed) | added
+    assert _free_names(new_source) == want_names, (
+        f"{role}/{enclosing}: the names this construction reads changed by something other than "
+        f"the rewiring PR B2 declares.\n"
+        f"  unexpectedly no longer read: {sorted(want_names - _free_names(new_source))}\n"
+        f"  unexpectedly newly read:     {sorted(_free_names(new_source) - want_names)}\n"
+        f"  declared rewiring: -{sorted(removed)} +{sorted(added)}\n"
         f"  pre-migration:  {call_source}\n  now:            {new_source}")
 
     for kwarg in sorted(set(old_named) & set(new_named)):
@@ -913,8 +1271,8 @@ def test_migrated_site_still_reads_what_the_old_site_read(role, enclosing, path,
             # forbidding that: the new expression may read only names the old one
             # read for THIS kwarg, so a site that started sourcing the seed from
             # somewhere else still fails. Which of those inputs the builder then
-            # picks is the captured-kwargs oracle's job — it covers all three of
-            # the train remap's branches.
+            # picks is the oracle's job — it covers all three of the train
+            # remap's branches.
             assert _free_names(f"f(x={new_expr})") <= _free_names(f"f(x={old_expr})"), (
                 f"{role}/{enclosing}: {kwarg} used to be derived from "
                 f"{sorted(_free_names(f'f(x={old_expr})'))} and is now {new_expr!r}")
@@ -933,14 +1291,25 @@ def test_migrated_site_still_reads_what_the_old_site_read(role, enclosing, path,
 
     assert not new_splats, (f"{role}/{enclosing} splats into build_env_for ({new_splats}); every "
                             "role builder takes explicit keywords so a typo is a TypeError")
-    for splat in old_splats:
-        kwarg = _SPLAT_BECOMES[role]
-        assert kwarg in new_named, (
-            f"{role}/{enclosing} dropped the `**{splat}` the old call splatted; it must now be "
-            f"passed as {kwarg}=")
-        assert _free_names(f"f(x={splat})") <= _free_names(f"f(x={new_named[kwarg]})"), (
-            f"{role}/{enclosing}: {kwarg}={new_named[kwarg]!r} no longer reads what "
-            f"`**{splat}` read")
+    assert not old_splats, (
+        f"{role}/{enclosing}: the captured call splatted {old_splats}, which no capture in this "
+        "fixture does — the fixture changed shape, so re-derive this check rather than deleting it")
+
+    if role in _REWIRED:
+        expr = new_named.get("config")
+        assert expr is not None, f"{role}/{enclosing} passes no config="
+        node = ast.parse(expr, mode="eval").body
+        if role == "eval":
+            assert (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "env_config_from_args"
+                    and _free_names(f"f(x={expr})") == {"env_config_from_args", "args"}), (
+                        f"{role}/{enclosing}: config= is {expr!r}; it must be "
+                        "env_config_from_args(args) — the SAME resolver build_train_env_factory "
+                        "uses, which is what makes assert_eval_env_agreement's disclosure true")
+        else:
+            assert isinstance(node, ast.Name) and node.id == "config", (
+                f"{role}/{enclosing}: config= is {expr!r}; it must be the bare local `config` "
+                "resolved above the closure, not a config rebuilt at the call site")
 
 
 def test_the_ast_wiring_check_covers_every_role():
@@ -971,8 +1340,6 @@ def test_mask_view_attach_stays_out_of_the_factory():
     substring check would either fail on the prose or be weakened until it
     stopped checking anything.
     """
-    import ast
-
     import env_factory
 
     tree = ast.parse(Path(env_factory.__file__).read_text())
@@ -983,3 +1350,156 @@ def test_mask_view_attach_stays_out_of_the_factory():
     ]
     assert not attached, (f"env_factory.py calls {attached} — shared-memory attach is the "
                           "caller's job; see this test's docstring")
+
+
+def test_env_factory_never_names_train_make_env():
+    """`env_factory` must not reach `train.make_env` — statically, by any spelling.
+
+    Since PR B2 `build_env_for` imports the LOWER-layer `c_env.cs2_env.make_env`.
+    Re-pointing that at `train`'s public wrapper would make the `external` role
+    call itself forever, and would put the whole training stack back on
+    `--dump-config`'s import path. Three shapes are refused: a
+    `from train import make_env`, a `train.make_env` attribute access, and any
+    module-LEVEL import of `train` at all.
+
+    Scoped to module-level imports plus the name `make_env`, deliberately:
+    `build_selfplay_manager`'s FUNCTION-LOCAL `from train import SelfPlayManager`
+    is legitimate — it is why train.py's `__main__` self-alias is still a hard
+    prerequisite of this module — and must not be flagged.
+    """
+    import env_factory
+
+    tree = ast.parse(Path(env_factory.__file__).read_text())
+    offenders = []
+    for node in tree.body:                                                                       # module level ONLY
+        if isinstance(node, ast.Import):
+            offenders += [
+                f"line {node.lineno}: import {a.name}" for a in node.names
+                if a.name.split(".")[0] == "train"
+            ]
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "train":
+            offenders.append(f"line {node.lineno}: from {node.module} import ...")
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.ImportFrom) and node.module == "train"
+                and any(a.name == "make_env" for a in node.names)):
+            offenders.append(f"line {node.lineno}: from train import make_env")
+        if (isinstance(node, ast.Attribute) and node.attr == "make_env"
+                and isinstance(node.value, ast.Name) and node.value.id == "train"):
+            offenders.append(f"line {node.lineno}: train.make_env")
+    assert not offenders, ("env_factory reaches train's env wrapper or imports train at module "
+                           f"scope: {offenders}")
+
+
+# ── reward wiring, relocated from tests/test_reward_weight_wiring.py ────────
+#
+# That file was retired by PR B2 (it existed to pin the legacy override dict).
+# What survives it is everything DOWNSTREAM of the declaration: that the env
+# factory actually injects the config it is handed, and that the seam between
+# train()'s args and the factory carries it. The three "the last boundary
+# rejects a bad key/value" tests went to tests/test_env_config.py, where the
+# validator they exercise now lives.
+
+
+def test_env_factory_injects_reward_overrides():
+    """Spec §6.3: the run's weights must arrive through the FACTORY path.
+
+    Deliberately does not construct an env directly — the discard trap
+    (env_factory swallows **kwargs) lives in the factory, so a direct
+    construction would pass while training ran the baseline.
+    Read back through the ctypes overlay: sd is a POINTER, .contents required.
+    """
+    import multiprocessing as mp
+
+    import train
+
+    # PARTIAL RewardWeights on purpose (review fix 5): naming all 23 would set
+    # reward_kill to its default explicitly, so the "untouched" assertion below
+    # would pass even with the omitted-field fallback broken. Naming three and
+    # letting the dataclass supply the rest is what keeps that assertion live.
+    factory = train.build_env_factory(
+        shared_ts=mp.Value("f", 0.3),
+        map_data=None,
+        config=EnvConfig(rewards=RewardWeights(
+            reward_ct_survival=0.0, reward_win_ct_timeout=3.0, pbrs_nav_weight_t=0.07)))
+    env = factory(seed=0)
+    try:
+        sd = env._c_env.sd.contents
+        assert sd.reward_ct_survival == pytest.approx(0.0)             # A1 arm
+        assert sd.reward_win_ct_timeout == pytest.approx(3.0)          # A1b arm
+        assert sd.pbrs_nav_weight_t == pytest.approx(0.07)             # non-`reward_`-prefixed
+        assert sd.reward_kill == pytest.approx(
+            RewardWeights().reward_kill), "untouched weight must keep its default"
+    finally:
+        env.close()
+
+
+def test_env_factory_without_overrides_keeps_defaults():
+    """`config=None` must reproduce today's env exactly."""
+    import multiprocessing as mp
+
+    import train
+
+    factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
+    env = factory(seed=0)
+    try:
+        sd = env._c_env.sd.contents
+        for name, default in RewardWeights().as_dict().items():
+            assert getattr(sd, name) == pytest.approx(default), name
+    finally:
+        env.close()
+
+
+def test_env_factory_rejects_unexpected_kwargs():
+    """Review fix 1: the catch-all **kwargs must be fatal, not silent.
+
+    pufferlib only passes buf/seed/env_kwargs[i], all named parameters, so a
+    stray kwarg means someone routed reward keys through _per_env_kwargs —
+    the discard trap. Crash instead of training the baseline.
+    """
+    import multiprocessing as mp
+
+    import train
+
+    factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
+    with pytest.raises(TypeError, match="reward_ct_survival"):
+        factory(seed=0, reward_ct_survival=0.0)
+
+
+def test_build_train_env_factory_carries_args_config():
+    """Review fix 2: the train() → factory seam, without launching a run.
+
+    Reads the returned closure's cells: if the wiring ever regresses to
+    `config=None` (or to a config built from something other than args), the
+    non-default weight below stops arriving and this fails. It also pins the
+    `config=None ⇒ EnvConfig()` resolution as happening ABOVE the closure — the
+    cell holds an EnvConfig, never a None.
+    """
+    import multiprocessing as mp
+    from argparse import Namespace
+
+    import train
+    from train_config import env_config_from_args
+
+    args = Namespace(reward_ct_survival=0.0)
+    factory = train.build_train_env_factory(args, shared_ts=mp.Value("f", 0.3), map_data=None)
+    cells = dict(
+        zip(factory.__code__.co_freevars, (c.cell_contents for c in factory.__closure__),
+            strict=True))
+    assert cells["config"] == env_config_from_args(args)
+    assert cells["config"].rewards.reward_ct_survival == 0.0
+
+
+def test_train_uses_build_train_env_factory():
+    """Pin train()'s call site itself — the one line no test can execute.
+
+    PITFALL: this is a source-text assertion, deliberately. Everything else in
+    train() needs a real run to reach, and the failure this guards (dropping
+    the run's config) is invisible at runtime: the arm just trains the baseline.
+    If you legitimately rename the helper, update this string.
+    """
+    import inspect
+
+    import train
+
+    src = inspect.getsource(train.train)
+    assert "build_train_env_factory(" in src, "train() no longer builds envs through the seam"

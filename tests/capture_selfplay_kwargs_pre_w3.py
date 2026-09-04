@@ -1,14 +1,18 @@
 """Record the PRE-W3 `SelfPlayManager(...)` call shape at all three sites.
 
-WHY A SECOND CAPTURE FILE. `tests/fixtures/env_kwargs_pre_w3.json` froze the six
-`make_puffer_env` roles one commit before `src/env_factory.py` existed, and it is
-IMMUTABLE — regenerating it on the migrated tree would compare the factory to
+WHY A SECOND CAPTURE FILE. The ENV-construction oracle this capture was written
+beside froze the six roles one commit before `src/env_factory.py` existed; #165
+PR B2 retired it and its successor is `tests/fixtures/env_config_pre_165b.json`,
+frozen one commit before the role builders were typed. Every such capture is
+IMMUTABLE — regenerating one on the migrated tree would compare the factory to
 itself, which is the single failure the capture-before-migration rule exists to
-prevent. The three `SelfPlayManager` sites were deliberately left standing in
-their pre-migration shape by that task (see the "NOT HERE YET" note at the end of
-`env_factory`'s module docstring) precisely so this capture would still be
-possible. This file is that capture; `tests/fixtures/selfplay_kwargs_pre_w3.json`
-is its frozen output, and it lands in its own commit BEFORE any migration edit.
+prevent, and it is why a retired capture is REPLACED by a new pre-migration
+snapshot rather than re-run. The three `SelfPlayManager` sites were deliberately
+left standing in their pre-migration shape by the W3 task (see the "NOT HERE YET"
+note at the end of `env_factory`'s module docstring) precisely so this capture
+would still be possible. This file is that capture;
+`tests/fixtures/selfplay_kwargs_pre_w3.json` is its frozen output, and it lands
+in its own commit BEFORE any migration edit.
 
 WHY THE SITES NEED AN ORACLE AT ALL. The §3 determinism gate runs
 `--no-self-play`, so it constructs a manager with `p_past=0.0` and an empty pool
@@ -27,7 +31,7 @@ shapes separately is what lets the migration collapse them onto one builder
 WITHOUT that collapse being an unchecked assertion: the fixture states the three
 pre-migration shapes, and the post-migration factory has to reproduce each.
 
-HOW THE CAPTURE WORKS — identical protocol to `capture_env_kwargs_pre_w3.py`:
+HOW THE CAPTURE WORKS — identical protocol to `capture_env_config_pre_165b.py`:
 locate the Call node by ENCLOSING FUNCTION QUALNAME (never by line number; every
 workstream in this branch invalidates those), `ast.unparse` it back to source and
 record that text verbatim, then `eval` that exact string in a namespace where

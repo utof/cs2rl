@@ -15,24 +15,26 @@ docstring in train.py), and #143 is the still-open one. Naming the roles turns
 
 THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
 
-  train        the vecenv factory's per-env construction. Reward overrides,
-               reward symmetrization and the Rung-0 env knobs all ride closure
-               state from build_env_factory; the per-env seed (R0-D) wins over
-               the one pufferlib passes.
+  train        the vecenv factory's per-env construction. The whole payload —
+               reward weights, symmetrization and the sim knobs — rides
+               build_env_factory's closure as ONE EnvConfig; the per-env seed
+               (R0-D) wins over the one pufferlib passes.
   eval         the fixed-baseline evaluator's env. `auto_reset=False` is
                load-bearing — eval_baselines raises without it, because it reads
                the terminal tick's C state after step() returns.
-  eval_legacy  `load_policy_from_checkpoint` and `evaluate_checkpoint`. These
-               keep today's DOCUMENTED bare-call defaults ("the defaults
-               reproduce the pre-Rung-0 env exactly"): they deliberately do NOT
-               get the training knobs. #143 tracks that; this module is not the
-               fix, it just reduces the future fix to one role's knob source.
+  eval_legacy  `load_policy_from_checkpoint` and `evaluate_checkpoint`. Both
+               build `config=EnvConfig()`, so every knob they get is the field
+               default `src/env_config.py` DECLARES — that module is the one
+               declaration, and tests/test_env_config.py pins those fields
+               against the trained baseline. They deliberately do NOT get the
+               training knobs. #143 tracks that; this module is not the fix, it
+               just reduces the future fix to one role's config source.
   smoke        `smoke_test`, fixed seed 42.
   harness      `train_test_harness._build_trainer_for_test`, whose contract is
                "shaped exactly like production" — hence its own role rather
                than a reuse of `train`, since it adds
-               `include_step_stats_in_info=True` and takes its knobs as plain
-               arguments rather than from a CLI-derived dict.
+               `include_step_stats_in_info=True` and builds its config from
+               plain function arguments rather than from a CLI args namespace.
   external     the public `make_env(team_spirit, map_data)` wrapper.
 
 There is deliberately NO `record` role, and the reason is NOT that `--record`
@@ -49,28 +51,34 @@ here would not change that: `record_episode` would still have to be migrated ont
 it, and an enum member no call site can reach is a divergence trap — the next
 person adds a knob to it and nothing changes.
 
-WHY THE IMPORTS ARE FUNCTION-LOCAL. `make_puffer_env` stays DEFINED in train.py
-(moving it drags a large dependency web and breaks ~42 test uses), and train.py
-imports this module at its own module level. The function-local
-`from train import make_puffer_env` inside `build_env_for` is the standard
-module-cycle breaker, and it keeps this module's scope free of torch / nav /
-c_env — the import-lightness invariant `tests/test_w1_modules.py` enforces,
-which is what makes `train.py --dump-config` cost ~1 s instead of ~30 s.
+WHY THE IMPORTS ARE FUNCTION-LOCAL, and it is no longer one reason. Since #165
+PR B2 `build_env_for` imports `c_env.cs2_env.make_env` DIRECTLY, so the module
+cycle that import used to break is gone — env construction has no L3 dependency
+at all and this module never names `train` on the env path. The import stays
+function-local anyway because `c_env.cs2_env` is HEAVY (ctypes plus the compiled
+binding) and train.py imports this module at ITS module level: a module-scope
+import here would put the C env on `--dump-config`'s path and break the
+import-lightness invariant `tests/test_w1_modules.py` enforces, which is what
+makes `train.py --dump-config` cost ~1 s instead of ~30 s. Only `env_config` is
+imported at module scope, and it is the stdlib-only leaf.
 
-PITFALL — WHY THAT IMPORT NEEDS train.py's `__main__` SELF-ALIAS. Every real run
-executes train.py as a SCRIPT, so the module sits in `sys.modules` as
-`__main__`, not `train`. Without the
+PITFALL — THIS MODULE STILL NEEDS train.py's `__main__` SELF-ALIAS, and removing
+it because `build_env_for` stopped importing `train` would break every real run.
+`build_selfplay_manager` below still does `from train import SelfPlayManager`.
+Every real run executes train.py as a SCRIPT, so the module sits in `sys.modules`
+as `__main__`, not `train`. Without the
 `sys.modules.setdefault("train", sys.modules["__main__"])` at the top of
-train.py's `if __name__ == "__main__":` block, the import below would EXECUTE
-TRAIN.PY A SECOND TIME under the name `train`, leaving two live copies of it per
-process — two sets of module constants, cross-copy `isinstance` silently False,
-and any `train.<attr>` monkeypatch unreachable from script runs. That alias is a
-hard prerequisite of this module, pinned by
-`test_train_aliases_itself_into_sys_modules_first` and its behavioural twin.
+train.py's `if __name__ == "__main__":` block, that import would EXECUTE TRAIN.PY
+A SECOND TIME under the name `train`, leaving two live copies of it per process —
+two sets of module constants, cross-copy `isinstance` silently False, and any
+`train.<attr>` monkeypatch unreachable from script runs. The alias is pinned by
+`test_train_aliases_itself_into_sys_modules_first` and its behavioural twin; keep
+both the alias and this paragraph.
 
-PITFALL — the import is INSIDE the call, not cached at module scope, on purpose:
-it re-reads `train.make_puffer_env` every time, so a test that rebinds that
-attribute still sees its stand-in used.
+PITFALL — both imports are INSIDE their call, not cached at module scope, on
+purpose: `build_env_for` re-reads `c_env.cs2_env.make_env` every time, so a test
+that rebinds that attribute still sees its stand-in used, and
+tests/test_env_factory.py's `_construct` is built on exactly that.
 
 `build_selfplay_manager` covers the three `SelfPlayManager` sites (train.py's
 `train()` plus two in `_build_trainer_for_test`). Its own pre-migration capture is
@@ -78,18 +86,31 @@ attribute still sees its stand-in used.
 builder was written for the same reason the env capture was — a builder
 transcribed from the sites it is meant to check asserts nothing.
 
-WHY THE ENFORCEMENT SCAN CANNOT SEE THE `make_puffer_env` HALF OF THIS MODULE.
-`tests/test_env_construction_enforcement.py` flags `make_puffer_env(...)` and
-`SelfPlayManager(...)` calls in `src/` and `scripts/`, exempting this file. It
-finds the `SelfPlayManager(...)` below, but it finds NO `make_puffer_env(...)`
-here: `build_env_for` imports that function and passes it to the role builder as
-a VALUE (`builder(_make, **kwargs)`), so no call node in this file names it. That
-is why the enforcement test takes its `make_puffer_env` positive control from
-`tests/` (where ~40 direct constructions legitimately live) and from a planted
-construction in a scratch tree, rather than from here. If the `_make` parameter is
-ever inlined into the builders, this file will start showing up in that scan and
-the exemption already covers it.
+WHY NEITHER `make_env` GUARD HAS A SUBJECT IN THIS FILE — and they are two
+DIFFERENT guards, which is the part that is easy to get wrong.
+
+`tests/test_env_construction_enforcement.py`'s enforcement scan bans exactly two
+symbols in `src/` and `scripts/`: `make_puffer_env` and `SelfPlayManager`.
+`make_env` is not one of them. That scan DOES have a subject here — the
+`SelfPlayManager(...)` below, which is what this file's exemption exists for.
+What #165 PR B2 changed is that this module stops naming `make_puffer_env` at
+all.
+
+`make_env` belongs instead to `LOWER_LAYER_SITES`, the per-file DISCLOSURE census
+that `test_the_unbanned_lower_layer_census_is_accurate` asserts by exact
+equality. This file needs no entry there either: `build_env_for` imports
+`c_env.cs2_env.make_env` and hands it to the role builder as a VALUE
+(`builder(make_env, **kwargs)`), so no CALL node here names it. If the `_make`
+parameter is ever inlined into the builders, this file starts showing up in that
+census and the entry has to be added.
 """
+# Module scope, unlike this module's two function-local imports (`make_env` in
+# `build_env_for` and `SelfPlayManager` in `build_selfplay_manager`):
+# `env_config` is the stdlib-only leaf of the config graph — it imports nothing
+# heavier than `dataclasses` — so this costs nothing on `--dump-config`'s path
+# and cannot cycle. tests/test_w1_modules.py::test_only_sibling_edge_is_to_the_leaf
+# allows exactly this edge.
+from env_config import EnvConfig
 
 # The role names, in the order the spec lists them. Callers pass one of these
 # strings; anything else is a ValueError naming the whole set, because a typo'd
@@ -110,11 +131,11 @@ class _Unset:
     """Sentinel distinguishing "no seed argument" from "seed=None".
 
     Load-bearing for `eval_legacy`, whose two call sites differ ONLY in whether
-    they pass `seed`, and `make_puffer_env`'s own default is `seed=0`. Spelling
-    the absent case as `seed=None` would forward None where the pre-migration
-    bare call forwarded nothing and the env therefore saw 0 — a real behaviour
-    change that `static_data_scalars()` cannot see, because seed is not a
-    StaticData field.
+    they pass `seed`, and `make_env`'s own default is `seed=0`. Spelling the
+    absent case as `seed=None` would forward None where the pre-migration bare
+    call forwarded nothing and the env therefore saw 0 — a real behaviour change
+    that `static_data_scalars()` cannot see, because seed is not a StaticData
+    field.
     """
 
     def __repr__(self):
@@ -124,8 +145,7 @@ class _Unset:
 UNSET = _Unset()
 
 
-def _build_train(_make, /, *, shared_ts, buf, seed, _seed, map_data, reward_overrides,
-                 reward_symmetrize, env_knobs):
+def _build_train(_make, /, *, shared_ts, buf, seed, _seed, map_data, config):
     """The training vecenv's per-env construction.
 
     ``_seed`` (R0-D, #135) is the per-env seed train() routes through
@@ -135,19 +155,21 @@ def _build_train(_make, /, *, shared_ts, buf, seed, _seed, map_data, reward_over
     --seed. ``seed or 0`` for the fallback is intentional: pufferlib passes
     seed=None for some backends.
 
-    ``env_knobs or {}`` rather than ``**env_knobs``: None means "make_puffer_env's
-    own defaults", i.e. the pre-Rung-0 env, and must splat nothing.
+    ``config`` is REQUIRED and passed straight through. Before #165 PR B2 this
+    builder took three separate payload arguments and the middle one carried a
+    ``or {}`` None-guard, so "the caller passed nothing" and "the caller passed
+    the defaults" were different code paths here. One frozen EnvConfig collapses
+    that: build_env_factory resolves the default ABOVE its closure, so a forked
+    worker can never be handed a None to guard against.
     """
-    return _make(team_spirit=shared_ts,
+    return _make(config=config,
+                 team_spirit=shared_ts,
                  buf=buf,
                  seed=_seed if _seed is not None else (seed or 0),
-                 map_data=map_data,
-                 reward_overrides=reward_overrides,
-                 reward_symmetrize=reward_symmetrize,
-                 **(env_knobs or {}))
+                 map_data=map_data)
 
 
-def _build_eval(_make, /, *, map_data, reward_overrides, env_knobs):
+def _build_eval(_make, /, *, map_data, config):
     """The fixed-baseline evaluator's env.
 
     ``auto_reset=False`` is the reason this role cannot be folded into any
@@ -155,18 +177,27 @@ def _build_eval(_make, /, *, map_data, reward_overrides, env_knobs):
     AFTER step() returns, which auto-reset would already have overwritten, and
     it raises outright without it.
 
-    ``env_knobs`` is required and splatted directly (no ``or {}``): the call site
-    derives it from `env_knobs_from_args`, which always returns a dict, and the
-    eval env's knobs are cross-checked against the driver env's immediately
-    after construction. Accepting None here would let that check compare an
-    unknobbed eval env against a knobbed driver.
+    ``config.replace(reward_symmetrize=False)`` is a RULE, not a default. Eval
+    reports RAW rewards so its numbers stay comparable across runs and against a
+    ``--reward-symmetrize`` training run; the zero-sum transform is a
+    training-time device. The line would read the same if the field default were
+    the other way round, which is why `tests/test_no_restated_env_defaults.py`
+    ALLOWLISTS it instead of counting it as a restatement. Before #165 this fell
+    out of `make_puffer_env`'s own parameter default, i.e. eval got raw rewards
+    by ACCIDENT of the caller not passing the flag; stating it here is the point
+    of the migration.
+
+    ``config`` is required, with no None default: the call site derives it from
+    `env_config_from_args`, which always returns an EnvConfig, and the eval env's
+    config is cross-checked against the driver env's immediately after
+    construction (`train.assert_eval_env_agreement`). Accepting None here would
+    let that check compare a default eval env against a knobbed driver.
     """
-    return _make(team_spirit=None,
+    return _make(config=config.replace(reward_symmetrize=False),
+                 team_spirit=None,
                  seed=EVAL_SEED,
                  map_data=map_data,
-                 auto_reset=False,
-                 reward_overrides=reward_overrides,
-                 **env_knobs)
+                 auto_reset=False)
 
 
 def _build_eval_legacy(_make, /, *, seed=UNSET):
@@ -175,22 +206,42 @@ def _build_eval_legacy(_make, /, *, seed=UNSET):
     Two call shapes, one role. See `_Unset` for why the absent case is not
     spelled `seed=None`.
 
-    These deliberately carry NO training knobs — that is today's documented
-    behaviour ("the defaults reproduce the pre-Rung-0 env exactly") and #143,
-    not a bug to fix in passing here.
+    These deliberately carry NO training knobs. `config=EnvConfig()` is what
+    says so: a bare EnvConfig IS the declared field defaults, and
+    `src/env_config.py` is the single place those are declared. That is today's
+    behaviour and #143, not a bug to fix in passing here. Naming the config
+    object moved no value, and that is asserted rather than asserted-by-hand:
+    the pre-migration capture's two `eval_legacy` rows record an
+    `expected_config` equal to `EnvConfig()` field for field, and
+    tests/test_env_factory.py compares this builder's output against them.
+
+    ``team_spirit=None`` is spelled explicitly, and the two defaults it sits
+    between genuinely differ: the old chain reached the env through
+    `make_puffer_env`, whose `team_spirit` parameter defaults to None, while
+    `make_env`'s own defaults to a float. `Cs2Env.__init__` maps BOTH to the
+    same initial team spirit (it special-cases None), so nothing observable
+    turns on it — but the per-role oracle compares the kwargs by VALUE, and
+    spelling this one keeps that comparison a measurement instead of an argument
+    about equivalence.
     """
     if seed is UNSET:
-        return _make()
-    return _make(seed=seed)
+        return _make(config=EnvConfig(), team_spirit=None)
+    return _make(config=EnvConfig(), team_spirit=None, seed=seed)
 
 
 def _build_smoke(_make, /):
-    """`smoke_test`'s env: one fixed seed, nothing else."""
-    return _make(seed=SMOKE_SEED)
+    """`smoke_test`'s env: one fixed seed, nothing else.
+
+    ``team_spirit=None`` is spelled explicitly for the same reason as
+    `_build_eval_legacy`'s: the pre-#165-B2 chain inherited it from
+    `make_puffer_env`'s parameter default, `make_env`'s own default differs, and
+    `Cs2Env` maps both to the same initial team spirit — so stating it keeps the
+    oracle comparing values rather than arguing equivalence.
+    """
+    return _make(config=EnvConfig(), team_spirit=None, seed=SMOKE_SEED)
 
 
-def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, n_active_per_team, pin_pitch,
-                   crouch_enabled, jump_enabled):
+def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
     """`train_test_harness._build_trainer_for_test`'s per-env construction.
 
     ``0 if seed is None else seed`` — an explicit None check, NOT ``seed or 0``:
@@ -202,37 +253,40 @@ def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, n_active_per_tea
     ``include_step_stats_in_info=True`` always, so a harness-built trainer has a
     uniform attribute/info surface across selfplay and no-selfplay modes.
 
-    ``crouch_enabled`` / ``jump_enabled`` are forwarded explicitly even though no
-    test passes either to `_build_trainer_for_test` today and their defaults
-    equal `make_puffer_env`'s. Dropping them here would therefore be invisible to
-    the entire suite; the captured-kwargs oracle is the only thing that sees it.
+    ``config`` is REQUIRED and passed straight through. The four knobs it
+    carries used to be four separate parameters here; since #165 PR B2 the
+    mapping from `_build_trainer_for_test`'s plain arguments into an EnvConfig
+    lives at the CALL SITE, and that is where the coverage question moved with
+    it — see the closure comment in `src/train_test_harness.py` for which knob
+    each test can and cannot see going missing.
 
     NOTE the mask view is NOT attached here. `env._attach_mask_view(mask_shm,
     _mask_idx)` is post-construction wiring that needs the caller's shm handle
     and per-env index, and it stays at the call site — this module builds envs,
     it does not own the trainer's shared memory.
     """
-    return _make(team_spirit=shared_ts,
+    return _make(config=config,
+                 team_spirit=shared_ts,
                  buf=buf,
                  seed=0 if seed is None else seed,
                  map_data=map_data,
-                 include_step_stats_in_info=True,
-                 n_active_per_team=n_active_per_team,
-                 pin_pitch=pin_pitch,
-                 crouch_enabled=crouch_enabled,
-                 jump_enabled=jump_enabled)
+                 include_step_stats_in_info=True)
 
 
 def _build_external(_make, /, *, team_spirit, map_data):
     """The public `make_env(team_spirit, map_data)` wrapper's env.
 
-    Both parameters are REQUIRED even though `make_env`'s own are optional. The
-    defaulting belongs to the wrapper — it is `make_env`'s published signature —
+    Both parameters are REQUIRED even though the PUBLIC WRAPPER `train.make_env`
+    declares its own two as optional. (Qualified deliberately: since #165 PR B2
+    this module names two different `make_env`s — the wrapper, and the lower-layer
+    `c_env.cs2_env.make_env` that `build_env_for` now imports — and both default
+    those parameters, so an unqualified sentence would say nothing.) The
+    defaulting belongs to the wrapper, because that is its published signature,
     and repeating it here would mean a caller that forgot to forward `map_data`
     got a dust2 env instead of a TypeError, which is the silent-default failure
     every other builder in this module is spelled to avoid.
     """
-    return _make(team_spirit=team_spirit, map_data=map_data)
+    return _make(config=EnvConfig(), team_spirit=team_spirit, map_data=map_data)
 
 
 _ROLE_BUILDERS = {
@@ -246,7 +300,7 @@ _ROLE_BUILDERS = {
 
 
 def build_env_for(role, **kwargs):
-    """Construct the Cs2Env for ``role``. The only `make_puffer_env` call site.
+    """Construct the Cs2Env for ``role`` — the one place a role's env is built.
 
     Each role's builder has an EXPLICIT keyword signature rather than a
     ``**kwargs`` passthrough, so a caller that misspells a knob gets a TypeError
@@ -267,11 +321,20 @@ def build_env_for(role, **kwargs):
     except KeyError:
         raise ValueError(f"unknown env role {role!r}; expected one of {ROLES}") from None
 
-    # Function-local and re-read per call — see the module docstring for the
-    # cycle, the import-lightness invariant and the `__main__` alias it needs.
-    from train import make_puffer_env
+    # Function-local and re-read per call. Two reasons, and the second is new:
+    # the cycle THIS import used to break is gone (`build_env_for` no longer
+    # names `train` at all), but `c_env.cs2_env` is HEAVY — ctypes plus the
+    # compiled binding — and this module is imported at train.py's module
+    # level, so a module-scope import here would put the C env on
+    # `--dump-config`'s path and break the import-lightness invariant
+    # tests/test_w1_modules.py enforces. The MODULE still reaches `train`:
+    # `build_selfplay_manager` below imports `SelfPlayManager` function-locally,
+    # so train.py's `__main__` self-alias remains a hard prerequisite here.
+    # Re-reading per call also keeps a test that rebinds
+    # c_env.cs2_env.make_env able to see its stand-in used.
+    from c_env.cs2_env import make_env
 
-    return builder(make_puffer_env, **kwargs)
+    return builder(make_env, **kwargs)
 
 
 def build_selfplay_manager(*, self_play_enabled, aim_log_std_max, pin_pitch, opponent_mode):

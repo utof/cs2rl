@@ -309,3 +309,48 @@ def test_module_is_stdlib_only():
     r = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True)
     assert r.returncode == 0, (f"env_config must import stdlib only; it pulled in "
                                f"{r.stdout.strip()}\n{r.stderr}")
+
+
+# ── the make_puffer_env shim's validator path (relocated by #165 PR B2) ─────
+#
+# These three came from tests/test_reward_weight_wiring.py, which PR B2 retired
+# along with the legacy override dict it existed to pin. They are NOT duplicates
+# of test_from_legacy_kwargs_error_contract above: that one calls the validator
+# DIRECTLY, while these three go through the deprecated `make_puffer_env` shim,
+# so they also prove the shim still routes its `reward_overrides` channel into
+# `from_legacy_kwargs` rather than swallowing it or forwarding it to the C env.
+# When gh#173 deletes the shim, delete these three with it — the direct test
+# above is what survives.
+#
+# They live in THIS file rather than in tests/test_env_factory.py because what
+# they exercise is the config contract's error surface, not env construction:
+# every one of them raises before any env is built.
+
+
+def test_unknown_reward_override_key_is_rejected():
+    """Fail loud, not with a bare TypeError deep in a forked worker."""
+    import train
+
+    with pytest.raises(ValueError, match="reward_ct_surival"):
+        train.make_puffer_env(reward_overrides={"reward_ct_surival": 0.0})
+
+
+def test_unknown_reward_override_error_suggests_the_flag():
+    """Review fix 4: a typo'd key should name the flag the user meant."""
+    import train
+
+    with pytest.raises(ValueError, match=r"--reward-ct-survival"):
+        train.make_puffer_env(reward_overrides={"reward_ct_surival": 0.0})
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "0.3", None])
+def test_make_puffer_env_validates_override_values(bad):
+    """Review fix 3: validate at the last boundary before the C env too.
+
+    Direct callers (sweep scripts, anything still on the legacy surface) bypass
+    the args-level resolver, so its finiteness check alone is not enough.
+    """
+    import train
+
+    with pytest.raises(ValueError, match="reward_kill"):
+        train.make_puffer_env(reward_overrides={"reward_kill": bad})

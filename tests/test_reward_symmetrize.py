@@ -17,6 +17,7 @@ from _action_spec import (             # definition site — nav/train only re-e
     ACTION_DIM, ACTION_HEAD_SIZES,
 )
 from c_env.cs2_env import make_env, symmetrize_rewards
+from env_config import EnvConfig
 from nav import TEAM_SIZE
 
 
@@ -175,7 +176,7 @@ def test_symmetrization_holds_on_the_external_buffer_vecenv_path():
     def _make(symmetrize):
         factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3),
                                           map_data=None,
-                                          reward_symmetrize=symmetrize)
+                                          config=EnvConfig(reward_symmetrize=symmetrize))
         return pufferlib.vector.make([factory],
                                      env_args=[[]],
                                      env_kwargs=[{}],
@@ -229,7 +230,7 @@ def test_env_factory_threads_the_flag():
     import train
     factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3),
                                       map_data=None,
-                                      reward_symmetrize=True)
+                                      config=EnvConfig(reward_symmetrize=True))
     env = factory(seed=0)
     try:
         assert env._reward_symmetrize is True
