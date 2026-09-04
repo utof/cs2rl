@@ -356,11 +356,17 @@ def test_stance_knobs_reach_static_data_through_env_knobs(simple_map, flag):
 
 
 def test_jump_enabled_is_in_the_eval_driver_agreement_loop():
-    """The loop lives inside train() (only reachable by launching a run), so
-    pin it in the source: an eval env built from env_knobs_from_args while the
-    workers ran different knobs would silently score the policy on a DIFFERENT
-    sim than it trains on, and the mismatch would never surface in metrics.
-    Mirrors test_cli_flags_declared_default_none's source-scan rationale."""
+    """The loop now lives in train.assert_eval_env_agreement, which
+    tests/test_env_factory.py::test_eval_env_agreement_two_directions calls
+    directly — so the BEHAVIOUR (that a knob mismatch raises) is covered there,
+    not here. This source scan survives as a cheap belt-and-braces check on the
+    KEY LIST itself: that behavioural test differs one knob at a time, so a key
+    silently dropped from the tuple would leave it green for every key it does
+    not happen to use. What is at stake is unchanged — an eval env built from
+    env_knobs_from_args while the workers ran different knobs would silently
+    score the policy on a DIFFERENT sim than it trains on, and the mismatch
+    would never surface in metrics. Mirrors test_cli_flags_declared_default_none's
+    source-scan rationale."""
     import re
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()

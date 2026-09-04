@@ -731,6 +731,62 @@ def test_evaluate_checkpoint_threads_its_episode_seed(monkeypatch):
     assert (role, kwargs) == ("eval_legacy", {"seed": 7717})
 
 
+def test_eval_env_agreement_two_directions(simple_map):
+    """Both checks in assert_eval_env_agreement fire, and the exclusion holds.
+
+    THREE cases, and the choice of field in each is the whole point:
+
+      pbrs_gamma  — the knock-out for check (b). It is NOT one of the five
+                    attributes check (a) compares, so it can only be caught by
+                    the config comparison. Any field INSIDE that tuple would
+                    raise from (a) first and leave this test green even if (b)
+                    had been deleted or had excluded every field.
+      jump_enabled — the pin for check (a): a knob that IS in the tuple.
+      reward_symmetrize — must NOT raise. Eval never forwards it, so the two
+                    configs are meant to differ here; a check that compared it
+                    would abort every run with --reward-symmetrize.
+    """
+    import train
+    from c_env.cs2_env import make_env
+    from env_config import EnvConfig
+
+    def _env(**changes):
+        return make_env(config=EnvConfig(**changes), map_data=simple_map, seed=0)
+
+    base = _env()
+    try:
+        cases = ((dict(pbrs_gamma=0.99), "pbrs_gamma"), (dict(jump_enabled=0), "jump_enabled"))
+        for changes, wanted in cases:
+            other = _env(**changes)
+            try:
+                with pytest.raises(RuntimeError, match=wanted):
+                    train.assert_eval_env_agreement(base, other)
+            finally:
+                other.close()
+        sym = _env(reward_symmetrize=True)
+        try:
+            train.assert_eval_env_agreement(base, sym)                 # must not raise
+        finally:
+            sym.close()
+    finally:
+        base.close()
+
+
+def test_train_calls_assert_eval_env_agreement():
+    """Pin train()'s call site — the one line no test can execute.
+
+    Same mechanism and same reason as test_train_uses_build_train_env_factory:
+    everything else in train() needs a real run to reach, and this check's
+    failure mode is silent (the policy is scored on a different sim than it
+    trains on, and the numbers just look worse).
+    """
+    import inspect
+
+    import train
+
+    assert "assert_eval_env_agreement(" in inspect.getsource(train.train)
+
+
 # ── AST: every migrated site still reads what the old site read ─────────────
 #
 # The layer that reaches `train()`'s eval site, which no test can drive. Each

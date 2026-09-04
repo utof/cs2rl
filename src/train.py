@@ -15,6 +15,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
+import dataclasses
 import json
 import math
 import multiprocessing as mp
@@ -2172,6 +2173,68 @@ def assert_max_turn_speed_agreement(vecenv, policy):
         raise RuntimeError(f"max_turn_speed mismatch: env={c} policy={p}")
 
 
+def assert_eval_env_agreement(eval_env, driver_env):
+    """R0-I startup check: the fixed-baseline eval env matches the training envs.
+
+    WHAT: two comparisons, in this order.
+      (a) the five APPLIED attributes, read off the two live Cs2Envs. These
+          are the RESOLVED values: for round_time that is the tick count the
+          sentinel becomes, not the sentinel — but the resolution is a
+          deterministic function of the config field (Cs2Env.__init__ falls
+          back to the nav.py constant when it is None), and the other four are
+          plain copies of the config fields, so (a) cannot fire anywhere (b)
+          is silent. It runs FIRST so that a divergence in one of the five
+          still raises with the message the inline loop raised before this
+          function existed — bare knob name, no `config.` prefix.
+          NEITHER (a) NOR (b) reads C state: (a) reads Python attributes (and
+          the round_time property, which returns Cs2Env._round_time) and (b)
+          reads the frozen config object. The two agreement checks above go
+          through env._c_env.sd.contents; this one never touches ctypes.
+      (b) every EnvConfig field except reward_symmetrize, read off the two
+          objects' `.config`. This is INTENT, and it covers the 27 scalars
+          (a) cannot see — the 23 reward weights (no attribute of the env
+          exposes them) plus the four knobs that are fields but not attributes
+          of the env. (EnvConfig has 11 fields; (b) compares 10 of them, and
+          the four non-attribute knobs are pbrs_gamma, recoil, laser_range and
+          max_turn_speed. 23 + 4 = 27; MEASURE this again if a field is ever
+          added, and do not write a number here you have not counted off
+          dataclasses.fields.)
+
+    WHY reward_symmetrize is skipped and nothing else is: env_factory._build_eval
+    never forwards it, so the eval env always takes make_puffer_env's parameter
+    default while the training envs take it from args — the two configs are MEANT
+    to differ there and only there. Skipping any other field would hide a real
+    divergence.
+
+    WHY THIS IS A MODULE-LEVEL FUNCTION and not the inline loop it replaces:
+    the loop sat inside train(), which needs a real run to reach — and not even
+    that by default, since it is behind `--eval-interval`, which is 0 unless
+    asked for. So the check nobody could run was also the check nobody could
+    test. assert_pin_pitch_agreement and assert_max_turn_speed_agreement above
+    have the same shape — module-level, called from train(), and called
+    DIRECTLY by tests (tests/test_pitch_pin.py and
+    tests/test_env_knobs.py::test_policy_max_turn_speed_assert respectively).
+
+    PITFALL: check (a) runs FIRST, so a test that tries to prove (b) exists by
+    differing one of the five names in the tuple below will raise from (a) and
+    prove nothing. tests/test_env_factory.py::test_eval_env_agreement_two_directions
+    uses pbrs_gamma — outside the tuple — for exactly that reason.
+
+    PITFALL: RuntimeError, never a bare assert (python -O strips asserts).
+    """
+    for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled", "round_time"):
+        if getattr(eval_env, _k) != getattr(driver_env, _k):
+            raise RuntimeError(f"[Eval] eval env / driver env disagree on {_k}: "
+                               f"{getattr(eval_env, _k)!r} vs {getattr(driver_env, _k)!r}")
+    for _f in dataclasses.fields(EnvConfig):
+        if _f.name == "reward_symmetrize":
+            continue
+        if getattr(eval_env.config, _f.name) != getattr(driver_env.config, _f.name):
+            raise RuntimeError(f"[Eval] eval env / driver env disagree on config.{_f.name}: "
+                               f"{getattr(eval_env.config, _f.name)!r} vs "
+                               f"{getattr(driver_env.config, _f.name)!r}")
+
+
 def _kill_reward_is_active(vecenv):
     """True if the env pays a nonzero per-kill reward (gh#93).
 
@@ -3739,17 +3802,13 @@ def train(args):
         # run's args. `env_knobs=` is passed as one dict rather than splatted:
         # the builder splats it, and requiring the dict is what stops a caller
         # handing the eval env no knobs while the driver env has them — the
-        # disagreement the loop right below would then be comparing.
+        # disagreement assert_eval_env_agreement right below would then be
+        # comparing.
         _eval_env = build_env_for("eval",
                                   map_data=_map_data,
                                   reward_overrides=reward_overrides_from_args(args),
                                   env_knobs=env_knobs_from_args(args))
-        _d = trainer.vecenv.driver_env
-        for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled",
-                   "round_time"):
-            if getattr(_eval_env, _k) != getattr(_d, _k):
-                raise RuntimeError(f"[Eval] eval env / driver env disagree on {_k}: "
-                                   f"{getattr(_eval_env, _k)!r} vs {getattr(_d, _k)!r}")
+        assert_eval_env_agreement(_eval_env, trainer.vecenv.driver_env)
         _eval_hook = ScheduledEval(BaselineEvaluator(_eval_env, episodes=40, seed=args.seed),
                                    _eval_interval, policy, device)
         print(f"[Eval] fixed-baseline eval every {_eval_interval} epochs "
