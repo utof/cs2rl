@@ -363,9 +363,13 @@ def _routing(call_source):
 
     `ast.unparse` of each argument rather than a bare Name id: the two SPM sites
     pass wrapped expressions (`bool(args.pin_pitch)`,
-    `getattr(args, 'aim_log_std_max', None)`) that a Name-only routing map — like
-    `test_env_factory._call_source_routing`, whose call sites pass bare names —
-    would silently drop, leaving those kwargs unchecked.
+    `getattr(args, 'aim_log_std_max', None)`) that a map keyed on `kw.value.id`
+    would have no entry for at all, so it would route only the kwargs that
+    happen to be bare names. The env oracle's AST layer unparses per kwarg for
+    the same reason (`test_env_factory._keywords`); its `_free_names` companion
+    reads bare Name ids, but it unions them across ALL arguments instead of
+    keying by kwarg, so it is a different comparison rather than a cheaper
+    spelling of this one.
     """
     call = ast.parse(call_source, mode="eval").body
     return {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg is not None}

@@ -1190,7 +1190,8 @@ def build_env_factory(*, shared_ts, map_data, config=None):
     config, and test_build_train_env_factory_carries_args_config pins that.
 
     PITFALL (review finding 1): the run's config reaches ONLY the training env
-    factory — the --smoke/--record/--eval-legacy paths build `EnvConfig()`, so
+    factory — the --smoke/--record/--eval paths build `EnvConfig()` (`--eval`
+    reaches it through the `eval_legacy` ROLE; there is no --eval-legacy flag), so
     `--smoke --reward-ct-survival 0.0` silently runs default weights. For
     symmetrization that is deliberate: eval/record must report raw,
     cross-run-comparable rewards. Known limitation, #143's neighbourhood; do not

@@ -86,7 +86,7 @@ tests/test_env_factory.py's `_construct` is built on exactly that.
 builder was written for the same reason the env capture was — a builder
 transcribed from the sites it is meant to check asserts nothing.
 
-WHY NEITHER `make_env` GUARD HAS A SUBJECT IN THIS FILE — and they are two
+WHY NEITHER GUARD FLAGS `make_env` IN THIS FILE — and they are two
 DIFFERENT guards, which is the part that is easy to get wrong.
 
 `tests/test_env_construction_enforcement.py`'s enforcement scan bans exactly two
@@ -109,7 +109,8 @@ census and the entry has to be added.
 # `env_config` is the stdlib-only leaf of the config graph — it imports nothing
 # heavier than `dataclasses` — so this costs nothing on `--dump-config`'s path
 # and cannot cycle. tests/test_w1_modules.py::test_only_sibling_edge_is_to_the_leaf
-# allows exactly this edge.
+# lets a split-out module import only the two LEAVES — `train_shared` and
+# `env_config` — and this is one of them.
 from env_config import EnvConfig
 
 # The role names, in the order the spec lists them. Callers pass one of these
@@ -156,7 +157,8 @@ def _build_train(_make, /, *, shared_ts, buf, seed, _seed, map_data, config):
     seed=None for some backends.
 
     ``config`` is REQUIRED and passed straight through. Before #165 PR B2 this
-    builder took three separate payload arguments and the middle one carried a
+    builder took three separate payload arguments — ``reward_overrides``,
+    ``reward_symmetrize`` and ``env_knobs`` — and the LAST of them carried an
     ``or {}`` None-guard, so "the caller passed nothing" and "the caller passed
     the defaults" were different code paths here. One frozen EnvConfig collapses
     that: build_env_factory resolves the default ABOVE its closure, so a forked
