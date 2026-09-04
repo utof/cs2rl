@@ -79,10 +79,6 @@ NOT_IMPORTED_BY_TRAIN = {
     "took EVAL_KEYS from eval_baselines, not from train.py, so train.py's body holds no "
     "reference to it; a module-level import added purely to satisfy an assert would be "
     "the test dictating a dead line of code",
-    "env_config":
-    "Phase A of spec 2026-09-03 gives train.py no reason to name it (train_shared and "
-    "c_env.cs2_env import it); Phase B's --reward-* argparse loop imports RewardWeights "
-    "at module level and removes this entry",
 }
 
 
@@ -109,9 +105,10 @@ def _train_module_level_imports():
 TRAIN_MODULE_LEVEL_IMPORTS = _train_module_level_imports()
 
 # TWO leaves. train_shared owns the names moved out of train.py; env_config owns
-# the env contract. train_shared -> env_config is the one edge between them
-# (REWARD_WEIGHT_DEFAULTS is derived from RewardWeights). The reverse edge would
-# make "leaf" meaningless — test_the_leaf_edge_has_a_direction pins it.
+# the env contract. train_config -> env_config is the load-bearing edge between
+# the leaves and the spokes (env_config_from_args builds an EnvConfig); train.py
+# imports both. The reverse edge would make "leaf" meaningless —
+# test_the_leaf_edge_has_a_direction pins it.
 LEAVES = frozenset({"train_shared", "env_config"})
 
 # Imports whose presence in sys.modules means the import-lightness invariant is

@@ -38,7 +38,6 @@ from train_shared import (
     TEAM_SIZE,
     resolve_aim_log_std_init,
     resolve_gammas,
-    reward_overrides_from_args,
 )
 
 
@@ -239,13 +238,12 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     ws_ramp = int(getattr(args, "warmstart_ramp_steps", 10_000_000))
     ws_alpha_ceil = float(getattr(args, "warmstart_alpha_ceiling", 0.0))
 
-    # ── Reward weights + symmetrization (spec 2026-08-01) ──
-    # Read out here (not inline in the dict) for the same reason as the
-    # warmstart block above: yapf snaps the returned dict's comment column to
-    # its longest line. Grouping/labelling of the weights lives on
-    # REWARD_WEIGHT_DEFAULTS, the single source of truth.
-    reward_weights = reward_overrides_from_args(args)
-    reward_symmetrize = bool(getattr(args, "reward_symmetrize", False))
+    # ── Env config (spec 2026-09-03 §2.3) ──
+    # ONE resolver for the weights, the flag knobs, the R0-G trio and pbrs_gamma,
+    # shared with the env factory so config.json provenance and the envs' actual
+    # values cannot disagree. Bound to `env_cfg`, never `env_config`: that name
+    # is the MODULE this function's own import comes from.
+    env_cfg = env_config_from_args(args)
 
     # ── TAG diagnostic (spec 2026-08-13 §4.1) ──
     # getattr fallbacks keep harness/dump-config args objects that predate
@@ -297,8 +295,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # (the raw budget is bound to a local, not inlined in the dict below, for
     # the same yapf reason as the warmstart block above: a long value
     # expression inside the dict re-indents every trailing comment in it.)
-    knobs = env_knobs_from_args(args)
-    n_active = knobs["n_active_per_team"]
+    n_active = env_cfg.n_active_per_team
     assert 1 <= n_active <= TEAM_SIZE, n_active
     opponent = resolve_opponent_mode(args)
     _part_per_env = n_active * (1 if opponent == "noop" else 2)
@@ -332,7 +329,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     map_name = getattr(args, "map", None) or "dust2"
     # R0-J: --gamma / --pbrs-gamma. Same helper as env_knobs_from_args so the
     # env's PBRS discount and the PPO discount cannot resolve differently.
-    gamma, pbrs_gamma = resolve_gammas(args)
+    gamma = resolve_gammas(args)[0]
     cfg = {
                                                                        # Core PPO
         "env": f"cs2-{map_name}",
@@ -340,14 +337,6 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "seed": args.seed,
         "total_timesteps": raw_timesteps,
         "participating_timesteps": args.timesteps,
-        "n_active_per_team": n_active,
-        "pin_pitch": knobs["pin_pitch"],
-        "crouch_enabled": knobs["crouch_enabled"],
-                                                                       # Rung 1a T2b: provenance for --jump-enabled. Like the other Rung 0
-                                                                       # knobs it is NOT allowlisted for --resume-run (a run that masks
-                                                                       # jump is a different experiment) and adding it shifts
-                                                                       # exp_lib.behavior_hash for all future runs — recorded decision.
-        "jump_enabled": knobs["jump_enabled"],
                                                                        # Rung 1a T3: "self" (both teams learn) or "noop" (statue opponent —
                                                                        # hero-team-only participation AND budget, see raw_timesteps above).
                                                                        # NOT a make_puffer_env knob: the statue is enforced trainer-side, in
@@ -377,7 +366,6 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "update_epochs": 3,
         "learning_rate": 3e-4,
         "gamma": gamma,
-        "pbrs_gamma": pbrs_gamma,                                      # R0-J: provenance; not allowlisted for --resume-run
         "gae_lambda": 0.95,
         "clip_coef": 0.15,
         "vf_coef": 0.5,
@@ -425,27 +413,32 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "warmstart_grace_steps": ws_grace,
         "warmstart_ramp_steps": ws_ramp,
         "warmstart_alpha_ceiling": ws_alpha_ceil,
-        "reward_symmetrize": reward_symmetrize,
         "tag_diagnostic": tag_diagnostic,
         "tag_every": tag_every,
         "tct_split_heads": tct_split_heads,
         "tct_split_trunk": tct_split_trunk,
     }
 
-    # ── Reward wiring: 23 make_env weights, verbatim key names ──
-    # (grouped + annotated on REWARD_WEIGHT_DEFAULTS, the single source of
-    # truth). Merged via an explicit collision check rather than a trailing
-    # `**reward_weights` splat: a splat in last position would SILENTLY
-    # overwrite an existing config key if someone ever adds a make_env weight
-    # named like one of the keys above, and the resulting config would look
-    # perfectly well-formed. This assert is the only thing that actually
-    # catches that — the pin test compares against make_env's signature and
-    # would not notice a collision on this side. Key order does not matter:
-    # every config.json / fingerprint dump uses sort_keys=True.
-    assert not (cfg.keys() & reward_weights.keys()), (
-        "reward weight name collides with an existing config key: "
-        f"{sorted(cfg.keys() & reward_weights.keys())}")
-    cfg.update(reward_weights)
+    # ── Env provenance: 23 weights + 6 knobs, verbatim key names ──
+    # EnvConfig.to_config_dict() is the single declaration of what config.json
+    # records about the env (spec 2026-09-03 §2.1): the 23 weights plus
+    # pbrs_gamma, reward_symmetrize, n_active_per_team, pin_pitch,
+    # crouch_enabled and jump_enabled. The R0-G trio is NOT in it — those are
+    # recorded above under their CLI names so a None survives as None.
+    # None of these keys is in RESUME_CONFIG_ALLOWLIST: a run with different
+    # weights, a different roster or a different PBRS discount is a different
+    # experiment. Adding or removing one shifts exp_lib.behavior_hash for every
+    # future run.
+    # Merged via an explicit collision check rather than a trailing splat: a
+    # splat in last position would SILENTLY overwrite an existing config key if
+    # a weight were ever named like one of the keys above, and the result would
+    # look perfectly well-formed. Key order does not matter — every config.json
+    # dump uses sort_keys=True.
+    env_keys = env_cfg.to_config_dict()
+    assert not (cfg.keys() & env_keys.keys()), (
+        "env config key collides with an existing config key: "
+        f"{sorted(cfg.keys() & env_keys.keys())}")
+    cfg.update(env_keys)
     return cfg
 
 

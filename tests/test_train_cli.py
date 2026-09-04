@@ -173,16 +173,16 @@ def test_warmstart_entropy_config_keys(tmp_path):
 def test_reward_weight_config_keys_default_to_make_env_values(tmp_path):
     """Every threaded weight lands in config.json at its make_env default.
 
-    Together with test_reward_weight_wiring.py (which pins those defaults
-    against the real signature) this is the "unflagged run is identical to
+    Together with tests/test_env_config.py (which pins the declaration
+    itself, on RewardWeights) this is the "unflagged run is identical to
     today" guarantee, verified through the REAL argparse surface: a typo'd
     dest= or a missing add_argument would leave the key at the getattr
     fallback and could not be caught by a hand-built Namespace.
     """
-    from train import REWARD_WEIGHT_DEFAULTS
+    from env_config import RewardWeights
 
     cfg = _dump_config(tmp_path)
-    for name, default in REWARD_WEIGHT_DEFAULTS.items():
+    for name, default in RewardWeights().as_dict().items():
         assert name in cfg, f"{name} missing from config.json"
         assert cfg[name] == default, f"{name}: {cfg[name]} != {default}"
     assert cfg["reward_symmetrize"] is False

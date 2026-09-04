@@ -1520,7 +1520,7 @@ def test_pbrs_gamma_matches_training_gamma():
                             pbrs_gamma=None)
     cfg3 = train.build_train_config(args3, batch_size=1024, bptt_horizon=64)
     assert cfg3["gamma"] == 0.99 and cfg3["pbrs_gamma"] == 0.99
-    assert train.env_knobs_from_args(args3)["pbrs_gamma"] == 0.99
+    assert train.env_config_from_args(args3).pbrs_gamma == 0.99
     assert "gamma" not in train.RESUME_CONFIG_ALLOWLIST
     assert "pbrs_gamma" not in train.RESUME_CONFIG_ALLOWLIST
 

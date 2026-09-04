@@ -44,6 +44,7 @@ from _action_spec import (
     ACTION_MASK_DIM,
     AIM_DIM,
 )
+from env_config import REWARD_FIELDS, EnvConfig, RewardWeights
 from env_factory import build_env_for, build_selfplay_manager
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from resume_state import (
@@ -729,7 +730,7 @@ def make_puffer_env(team_spirit=None,
     the two MUST move together or PBRS loses policy-invariance.
 
     ``reward_overrides`` (spec 2026-08-01 §4.2): optional {kwarg: value} dict
-    over train.REWARD_WEIGHT_KEYS, forwarded verbatim to make_env. None
+    over env_config.REWARD_FIELDS, forwarded verbatim to make_env. None
     (default) means every weight keeps its make_env default, so all existing
     callers (eval, record, smoke, tests) are unaffected.
 
@@ -773,17 +774,17 @@ def make_puffer_env(team_spirit=None,
         # the C env, so it also re-checks value sanity — direct callers
         # (train_test_harness, future sweep scripts) can hand us a dict that
         # never passed through reward_overrides_from_args.
-        unknown = set(reward_overrides) - set(REWARD_WEIGHT_KEYS)
+        unknown = set(reward_overrides) - set(REWARD_FIELDS)
         if unknown:
             import difflib
             hints = []
             for key in sorted(unknown):
-                near = difflib.get_close_matches(key, REWARD_WEIGHT_KEYS, n=1)
+                near = difflib.get_close_matches(key, REWARD_FIELDS, n=1)
                 if near:
                     hints.append(f"{key!r} — did you mean --{near[0].replace('_', '-')}?")
             raise ValueError(f"unknown reward override keys: {sorted(unknown)}. " +
                              (" ".join(hints) + " " if hints else "") +
-                             f"Valid keys: {sorted(REWARD_WEIGHT_KEYS)}. Non-weight env knobs "
+                             f"Valid keys: {sorted(REWARD_FIELDS)}. Non-weight env knobs "
                              "(pbrs_gamma, reward_symmetrize) are NOT overrides — they have "
                              "dedicated make_puffer_env parameters.")
         for key, val in reward_overrides.items():
@@ -3973,6 +3974,12 @@ if __name__ == "__main__":
     # call, True inside it).
     sys.modules.setdefault("train", sys.modules["__main__"])
 
+    # The env's own defaults, read from the dataclass that declares them, so the
+    # CLI cannot drift from the env (spec 2026-09-03 R11). Bound once here rather
+    # than per-flag: three flags below read it, and a second EnvConfig() would be
+    # a second place to look when a default changes.
+    _ENV_DEFAULTS = EnvConfig()
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dust2",
@@ -4075,7 +4082,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n-active-per-team",
                         type=int,
-                        default=5,
+                        default=_ENV_DEFAULTS.n_active_per_team,
                         dest="n_active_per_team",
                         help="Rung 0: agents per team that spawn; the rest are parked "
                         "(noop-masked, zero reward, excluded from every trainer statistic). "
@@ -4091,14 +4098,14 @@ if __name__ == "__main__":
     parser.add_argument("--crouch-enabled",
                         type=int,
                         choices=(0, 1),
-                        default=1,
+                        default=_ENV_DEFAULTS.crouch_enabled,
                         dest="crouch_enabled",
                         help="R0-E.2: 0 masks the crouch action (stance parity for pinned-pitch "
                         "duels; a crouched target is an unobservable guaranteed miss).")
     parser.add_argument("--jump-enabled",
                         type=int,
                         choices=(0, 1),
-                        default=1,
+                        default=_ENV_DEFAULTS.jump_enabled,
                         dest="jump_enabled",
                         help="Rung 1a: 0 masks the jump action (height parity for pinned-pitch "
                         "duels; an airborne target sits outside the 36u vertical semi-axis and "
@@ -4190,13 +4197,12 @@ if __name__ == "__main__":
                         type=float,
                         default=0.0,
                         dest="warmstart_alpha_ceiling")
-    # ── Reward weights (spec 2026-08-01 §4.2) ──
-    # Generated from REWARD_WEIGHT_DEFAULTS so flag name, dest and default can
+    # ── Reward weights (spec 2026-08-01 §4.2 → 2026-09-03 §2.3) ──
+    # Generated from RewardWeights' fields so flag name, dest and default can
     # never disagree with the config key — the dest-typo class of bug (commit
-    # 4d9dfa0) is impossible by construction here. Flag == kwarg name with
-    # dashes; default == the make_env default, so omitting a flag reproduces
-    # today's env exactly.
-    for _rw_name, _rw_default in REWARD_WEIGHT_DEFAULTS.items():
+    # 4d9dfa0) is impossible by construction. Flag == field name with dashes;
+    # default == the field default, so omitting a flag reproduces today's env.
+    for _rw_name, _rw_default in RewardWeights().as_dict().items():
         parser.add_argument(f"--{_rw_name.replace('_', '-')}",
                             type=float,
                             default=_rw_default,

@@ -380,7 +380,11 @@ def test_stance_flags_declared_default_on():
     They are NOT default=None like the R0-G knobs: there is no "env decides"
     value for a mask bit, and a default of 0 would silently mask the action for
     every run that never asked for the Rung 1a diagnostic. Same source-scan
-    reason as above (the parser is not importable)."""
+    reason as above (the parser is not importable).
+
+    The default is read from `EnvConfig()` (bound once as `_ENV_DEFAULTS` above
+    the parser) rather than written as `1`, so the flag and the env cannot
+    drift; R11's argparse probe is what enforces that direction."""
     import re
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
@@ -389,4 +393,4 @@ def test_stance_flags_declared_default_on():
         assert m, flag
         body = m.group(1)
         assert "type=int" in body and "choices=(0, 1)" in body, flag
-        assert "default=1" in body and f'dest="{dest}"' in body, flag
+        assert f"default=_ENV_DEFAULTS.{dest}" in body and f'dest="{dest}"' in body, flag
