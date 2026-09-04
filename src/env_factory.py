@@ -38,12 +38,22 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
   external     the public `make_env(team_spirit, map_data)` wrapper.
 
 There is deliberately NO `record` role, and the reason is NOT that `--record`
-reuses one of the roles above — it does not. `record_episode` builds its own env
-with a bare `make_c_env(...)` (train.py:1073), the LOWER-layer constructor, which
-W3 never banned; the `eval_legacy` env that `load_policy_from_checkpoint` builds
-on the way in (train.py:851) exists only to read an obs_dim and is closed before
-that function returns (train.py:864/881), so it is not the env anything is
-recorded from. So the recording path is genuinely uncovered by this module, by
+reuses one of the roles above — it does not. `train.record_episode` builds its
+own env with a bare `make_c_env(...)`, the LOWER-layer constructor, which W3
+never banned; the `eval_legacy` env `train.load_policy_from_checkpoint` builds on
+the way in exists only to read an obs_dim off, since it then passes `build_policy`
+an explicit `obs_dim_override` and `build_policy` reads nothing off the env on
+that branch. It is closed before that function returns, on both of its exits —
+explicitly ahead of the obs_dim-mismatch raise, and in a `finally` on the normal
+path — so it is not the env anything is recorded from.
+
+CITED BY QUALNAME, NOT BY LINE, and that is the rule for the paragraph above: the
+four `train.py:<lineno>` citations it used to carry pointed four lines past their
+subjects on `main` and eighty-one past them here, after #165 PR B2 shrank
+`make_puffer_env` (measured 2026-09-04). A qualname survives every edit short of a
+rename, and a rename that breaks it is the one case where being wrong is loud.
+
+So the recording path is genuinely uncovered by this module, by
 the same deliberate scope decision that leaves the other eleven lower-layer sites
 uncovered — the census and the reasoning are in
 `tests/test_env_construction_enforcement.py`'s LOWER_LAYER_SITES. Adding a role
@@ -162,7 +172,15 @@ def _build_train(_make, /, *, shared_ts, buf, seed, _seed, map_data, config):
     ``or {}`` None-guard, so "the caller passed nothing" and "the caller passed
     the defaults" were different code paths here. One frozen EnvConfig collapses
     that: build_env_factory resolves the default ABOVE its closure, so a forked
-    worker can never be handed a None to guard against.
+    worker can never be handed a None to guard against — pinned by the BARE
+    `build_env_factory(...)` call in
+    tests/test_env_factory.py::test_build_train_env_factory_carries_args_config,
+    which reads the resolved config back out of the closure's cell. Five bare
+    calls in tests/ REACH that resolution (AST census, 2026-09-04) and only that
+    one can SEE it: a None in the cell would arrive here and be forwarded to
+    `make_env`, which resolves None itself, so every env the other four build
+    comes out identical either way. That is what made deleting the resolution
+    invisible to the whole suite until the assertion was added.
     """
     return _make(config=config,
                  team_spirit=shared_ts,

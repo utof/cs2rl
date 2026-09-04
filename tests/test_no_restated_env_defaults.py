@@ -84,6 +84,10 @@ FIELD_DEFAULTS = {
 # so it states a rule; it does not restate a default. Before #165 the same
 # behaviour came from the caller simply not passing the flag, which is why this
 # list was empty until PR B2.
+# Every entry must SUPPRESS a hit, not merely appear in the tree; a dead one is
+# standing permission for nothing and
+# test_every_allowlist_entry_suppresses_a_real_hit fails on it, in both
+# directions, the way _assert_exactly does for a stale PENDING row.
 # Adding a second entry needs a written reason in the spec. Loosening a regex
 # instead is NOT an acceptable fix — `NAME = False` is precisely the shape the
 # probes exist to catch, and widening it away would blind the gate to every
@@ -449,6 +453,70 @@ def test_the_allowlist_exempts_only_its_own_expression(tmp_path):
                        "    cfg = config.replace(pin_pitch=0)\n")
     found = [(lineno, n) for _, lineno, n in _hits_in([planted], _line_pattern)]
     assert found == [(2, "crouch_enabled"), (3, "pin_pitch")], found
+
+
+def test_every_allowlist_entry_suppresses_a_real_hit(monkeypatch):
+    """Both directions on ALLOWLIST, the property `_assert_exactly` pins on PENDING.
+
+    WHY (review finding, Minor 2). `_assert_exactly` refuses a PENDING row that
+    no longer matches, because "a stale row is standing permission for a
+    restatement nobody is watching". ALLOWLIST is standing permission of exactly
+    that kind and broader: a PENDING row pins a COUNT at one (file, field), while
+    an ALLOWLIST entry strips its span out of every line of every scanned file.
+    Nothing watched it.
+
+    THE TEST IS "SUPPRESSES A HIT", NOT "APPEARS SOMEWHERE", and the difference
+    is the whole test. The review's proposed check was that each entry matches at
+    least one scanned line; measured, that check CANNOT FAIL for the reason it
+    was proposed. The review's own knock-out — removing `_build_eval`'s
+    `config.replace(reward_symmetrize=False)`, described there as "the entry's
+    only subject" — leaves the entry matching two more lines, because the
+    expression is also spelled in `_build_eval`'s docstring and in
+    `train.assert_eval_env_agreement`'s (3 occurrences, measured 2026-09-04, 2 of
+    them prose). Prose is scanned here on purpose, so those two lines genuinely
+    still need the exemption. What makes an entry DEAD is not that the text
+    vanished but that removing the entry changes no probe's verdict: permission
+    that permits nothing.
+
+    HOW: re-run both count probes with the entry taken out of ALLOWLIST and
+    require strictly more hits. `_hits_in` reads the module global on every call,
+    so monkeypatching it is enough — the same redirection
+    test_the_probes_find_a_planted_restatement uses on REPO_ROOT. BOTH probes,
+    because a future entry could be load-bearing for the getattr shape only. The
+    scan is narrowed to the files that CONTAIN an entry, which changes no verdict
+    and is not an optimisation shortcut: `_hits_in` strips entries with
+    `str.replace`, a no-op on a file none of them occurs in, so such a file
+    contributes the same hits to both sides of every comparison below. Measured
+    2026-09-04: narrowed it runs in 4.7 s against the ~12 s the other ten tests
+    here cost; over the full list it is four whole-tree scans and doubled this
+    file's runtime.
+
+    Set equality rather than a bare `not dead`: `live` is a subset of ALLOWLIST
+    by construction, so equality reads as the two-directions statement it is, and
+    a future entry that this loop cannot classify at all fails here rather than
+    being silently excluded.
+    """
+    entries = tuple(ALLOWLIST)         # before any patching
+    files = [p for p in _scanned_files() if any(a in p.read_text() for a in entries)]
+
+    def _total():
+        return len(_hits_in(files, _line_pattern)) + len(_hits_in(files, _getattr_pattern))
+
+    baseline = _total()
+    live = set()
+    for entry in entries:
+        monkeypatch.setattr(sys.modules[__name__], "ALLOWLIST",
+                            tuple(a for a in entries if a != entry))
+        if _total() > baseline:
+            live.add(entry)
+    monkeypatch.undo()
+
+    assert live == set(entries), (
+        f"ALLOWLIST entr(ies) that suppress nothing: {sorted(set(entries) - live)}\n"
+        f"Both count probes report the same {baseline} hit(s) with and without them, so they are "
+        "standing permission for a restatement nobody is watching — delete them. Do NOT repoint "
+        "an entry at a different expression to keep this green: a new exemption needs its own "
+        "written reason in the spec, per the ALLOWLIST comment above.")
 
 
 def test_the_argparse_probe_can_actually_fail():

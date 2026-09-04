@@ -310,17 +310,27 @@ def test_stance_knobs_reach_static_data_through_env_knobs(simple_map, flag):
 
 
 def test_jump_enabled_is_in_the_eval_driver_agreement_loop():
-    """The loop now lives in train.assert_eval_env_agreement, which
+    """The loop lives in train.assert_eval_env_agreement, which
     tests/test_env_factory.py::test_eval_env_agreement_two_directions calls
-    directly — so the BEHAVIOUR (that a knob mismatch raises) is covered there,
-    not here. This source scan survives as a cheap belt-and-braces check on the
-    KEY LIST itself: that behavioural test differs one knob at a time, so a key
-    silently dropped from the tuple would leave it green for every key it does
-    not happen to use. What is at stake is unchanged — an eval env built from
-    one EnvConfig while the workers ran another would silently score the policy
-    on a DIFFERENT sim than it trains on, and the mismatch
-    would never surface in metrics. Mirrors test_cli_flags_declared_default_none's
-    source-scan rationale."""
+    directly — so the BEHAVIOUR (that a knob mismatch raises, from which check,
+    with which message) is covered there, not here.
+
+    THIS SCAN IS NO LONGER WHAT GUARDS THE KEY LIST, and reading it as that is
+    the mistake. Until #165 PR B2's fix wave the behavioural test differed two
+    fields, so a key dropped from the tuple stayed invisible to it and this scan
+    was the only cover. That test is now parametrized over every EnvConfig field
+    AND writes these five names down, so a drop turns it red on that key's own
+    case — measured 2026-09-04 by dropping crouch_enabled: the crouch_enabled
+    case failed.
+
+    WHAT IT STILL ADDS, cheaply: the behavioural test walks
+    `dataclasses.fields(EnvConfig)`, so it says nothing about a name in the tuple
+    that is not a field, and this asserts the loop is FINDABLE at all — the
+    precondition every source scan in this file shares. What is at stake is
+    unchanged — an eval env built from one EnvConfig while the workers ran
+    another would silently score the policy on a DIFFERENT sim than it trains on,
+    and the mismatch would never surface in metrics. Mirrors
+    test_cli_flags_declared_default_none's source-scan rationale."""
     import re
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()

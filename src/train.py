@@ -128,11 +128,24 @@ from train_update import (
 # resolve through THAT module's globals and never see the patch, so such a test passes
 # while asserting nothing. Patch the defining module (see tests/test_tag_trainer.py).
 # PLACEMENT IS LOAD-BEARING, not an isort accident: train.py's own module body READS
-# moved names while it executes — make_puffer_env's `n_active_per_team=TEAM_SIZE`
-# default, and eight more inside `if __name__ == "__main__":` (the argparse
-# defaults/choices and the four main() calls).
-# Every one of those sits BELOW this block and would NameError at import time if the
-# shims were moved down.
+# moved names while it executes. SEVEN such reads, measured 2026-09-04, and ALL of
+# them now sit inside `if __name__ == "__main__":` — three argparse defaults and
+# choices (DEFAULT_CHECKPOINT_INTERVAL, OPPONENT_MODES, DEFAULT_GAMMA) and four
+# calls (validate_aim_log_std_max, assert_opponent_self_play_compatible,
+# compute_batch_dims, build_train_config). WHAT THE NUMBER COUNTS, so the next
+# reader can re-derive it rather than trust it: `ast.Name` loads of a
+# shim-imported name reachable from a module-level statement, counting `def`
+# default expressions (they DO execute at import) and not function bodies (they
+# do not). #165 PR B2 deleted the one read outside the __main__ block —
+# make_puffer_env's `n_active_per_team=TEAM_SIZE` default — so this comment no
+# longer cites it.
+# Every one of those sits BELOW this block, so moving the shims below the
+# __main__ block breaks every real launch — and ONLY a real launch, now that no
+# read is left outside it. Measured by doing it: `import train` still succeeds,
+# while `python src/train.py --help` dies in its own argparse setup with
+# `NameError: name 'DEFAULT_CHECKPOINT_INTERVAL' is not defined`. The whole test
+# suite would stay green through that, which is why the placement needs a comment
+# rather than a test.
 __all__ = (
     "AIM_DIM",
     "AIM_LOG_STD_CAP_MIN_HEADROOM",
@@ -709,10 +722,28 @@ def make_puffer_env(config=None,
     `record_fn` is refused, as before: only the Python recording env supports it.
     `episode_stats` is accepted and unused, as before.
 
+    THE SIGNATURE ALSO NARROWED, which the keyword list above does not show on
+    its own: `team_spirit` and everything after it are now KEYWORD-ONLY, and the
+    first positional slot is `config`. A pre-#165 positional call that meant
+    team_spirit would therefore bind a float to `config` and carry it to Cs2Env
+    as a non-EnvConfig. Nothing in the tree does that — AST census over the 130
+    `.py` files git tracks, 2026-09-04: 41 `make_puffer_env` call sites, every one
+    of them under `tests/`, 0 with a positional argument. (Count the TRACKED
+    files, not `rglob("*.py")`: a review worktree under `.worktrees/` puts a whole
+    second checkout on disk and turns 130 into 424.) It is recorded rather than
+    defended because this function is `train.__all__`-exported and gh#173 deletes
+    it whole.
+
     THE TWO CHANNELS ARE EXCLUSIVE. `config=` plus legacy names is a TypeError,
     not a silent merge — a caller who passes both has two different intents and
     picking one of them quietly is the failure this whole workstream exists to
-    end.
+    end. That rule and the misspelled-legacy-name one above are pinned by
+    tests/test_env_config.py::test_make_puffer_env_rejects_config_plus_legacy_kwargs
+    and ::test_make_puffer_env_misspelled_legacy_name_dies_naming_the_key, added
+    in this branch's fix wave — before them, deleting EITHER guard here left the
+    whole suite green, even though the SAME two rules on `c_env.cs2_env.make_env`
+    have been pinned by tests/test_make_env_shim.py since #165 Phase A (ae478f8).
+    Two layers, two copies of the rules, two sets of tests.
     """
     from c_env.cs2_env import make_env as make_c_env
 
@@ -1183,7 +1214,13 @@ def build_env_factory(*, shared_ts, map_data, config=None):
     `config=None` ⇒ `EnvConfig()`, resolved ONCE above the closure so the
     closure captures a config and never a None. Same shape as `make_env`'s own
     default; the one production caller (build_train_env_factory) always passes a
-    config, and test_build_train_env_factory_carries_args_config pins that.
+    config. test_build_train_env_factory_carries_args_config pins BOTH halves and
+    needs two calls to do it: the args-built factory for "the caller passes a
+    config", and a BARE `build_env_factory(...)` for the resolution itself, which
+    no call that always passes a config can reach. Until that second call was
+    added, deleting the resolution below left the pre-fix test green (re-measured
+    2026-09-04; the review measured the whole non-slow suite green with it) while
+    this paragraph claimed it was pinned.
 
     PITFALL (review finding 1): within a training run the run's config reaches
     TWO envs, not one — this factory's, and the fixed-baseline eval env behind
@@ -2178,7 +2215,18 @@ def assert_eval_env_agreement(eval_env, driver_env):
     PITFALL: check (a) runs FIRST, so a test that tries to prove (b) exists by
     differing one of the five names in the tuple below will raise from (a) and
     prove nothing. tests/test_env_factory.py::test_eval_env_agreement_two_directions
-    uses pbrs_gamma — outside the tuple — for exactly that reason.
+    handles that by demanding the MESSAGE rather than just a raise: it differs
+    EVERY EnvConfig field, one per parametrized case, and requires `on <knob>`
+    (which is (a)'s spelling, and which (b)'s `on config.<knob>` does not contain)
+    for the five names below, `on config.<field>` for the five fields that are
+    outside the tuple and still compared by (b) — rewards, pbrs_gamma, recoil,
+    laser_range, max_turn_speed — and NO raise for reward_symmetrize, the sixth
+    field outside the tuple and the one (b) skips. Those five are the only cases
+    that can come from (b) alone, so they are what makes a widened skip list
+    above visible. Before that parametrization the test differed two fields, and
+    widening the skip list to nine left it green (re-measured 2026-09-04 against
+    the pre-fix test body; the review measured the whole non-slow suite green
+    with it).
 
     PITFALL: RuntimeError, never a bare assert (python -O strips asserts).
     """

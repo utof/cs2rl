@@ -313,14 +313,25 @@ def test_module_is_stdlib_only():
 
 # ── the make_puffer_env shim's validator path (relocated by #165 PR B2) ─────
 #
-# These three came from tests/test_reward_weight_wiring.py, which PR B2 retired
-# along with the legacy override dict it existed to pin. They are NOT duplicates
-# of test_from_legacy_kwargs_error_contract above: that one calls the validator
-# DIRECTLY, while these three go through the deprecated `make_puffer_env` shim,
-# so they also prove the shim still routes its `reward_overrides` channel into
-# `from_legacy_kwargs` rather than swallowing it or forwarding it to the C env.
-# When gh#173 deletes the shim, delete these three with it — the direct test
-# above is what survives.
+# FIVE tests, from two sources. The first three came from
+# tests/test_reward_weight_wiring.py, which PR B2 retired along with the legacy
+# override dict it existed to pin. The last two close a review finding on this
+# branch: BOTH guards the shim itself adds were untested, and defeating either
+# one left the whole suite green — the review measured 1302 passed with the
+# two-channel raise deleted and unknown legacy names silently dropped.
+#
+# They are NOT duplicates of test_from_legacy_kwargs_error_contract above: that
+# one calls the validator DIRECTLY, while all five go through the deprecated
+# `make_puffer_env` shim, so they also prove the shim still routes its legacy
+# channel into `from_legacy_kwargs` rather than swallowing it or forwarding it
+# to the C env. Nor are the last two duplicates of the pair in
+# tests/test_make_env_shim.py: that file owns the LOWER layer,
+# `c_env.cs2_env.make_env`. make_puffer_env carries its OWN copy of both rules,
+# and a copy nothing tests is a copy that can be deleted — which is exactly what
+# the review measured.
+#
+# When gh#173 deletes the shim, delete all five with it — the direct test above
+# and tests/test_make_env_shim.py's lower-layer pair are what survive.
 #
 # They live in THIS file rather than in tests/test_env_factory.py because what
 # they exercise is the config contract's error surface, not env construction:
@@ -354,3 +365,40 @@ def test_make_puffer_env_validates_override_values(bad):
 
     with pytest.raises(ValueError, match="reward_kill"):
         train.make_puffer_env(reward_overrides={"reward_kill": bad})
+
+
+def test_make_puffer_env_rejects_config_plus_legacy_kwargs():
+    """The shim's TWO CHANNELS ARE EXCLUSIVE — its own docstring states it as a rule.
+
+    A caller passing `config=` AND a legacy name has two different intents, and
+    picking one quietly is the failure this workstream exists to end: the
+    swept weight is ignored for a whole run and the arm trains the baseline.
+
+    The match pins the MESSAGE, not just the exception type: it must name the
+    offending legacy key, because "you passed both" without saying which name
+    collided leaves the caller guessing. `c_env.cs2_env.make_env` has the same
+    rule and its own test (tests/test_make_env_shim.py); this pins the shim's
+    separate copy, which the review deleted with the whole suite still green.
+    """
+    import train
+
+    with pytest.raises(TypeError, match=r"reward_ct_survival.*pass one"):
+        train.make_puffer_env(config=EnvConfig(), reward_ct_survival=0.0)
+
+
+def test_make_puffer_env_misspelled_legacy_name_dies_naming_the_key():
+    """Spec §8.5 gate B2 (f): `make_puffer_env(rewrad_kill=1)` -> TypeError naming the key.
+
+    WHY THE MATCH NAMES `from_legacy_kwargs` TOO, and not only the typo: the
+    guard is not a hand-written check, it is the EXPLICIT PARAMETER LIST on
+    `EnvConfig.from_legacy_kwargs`, and that is the whole design — a `**kwargs`
+    splat onward would carry the typo into a forked vecenv worker, where it dies
+    (if at all) far from the caller. Requiring the validator's name in the
+    message is what distinguishes "the shim routes legacy through the validator"
+    from "the shim filtered the unknown name out and built a default env" — the
+    knock-out the review measured at 135 tests green.
+    """
+    import train
+
+    with pytest.raises(TypeError, match=r"from_legacy_kwargs.*rewrad_kill"):
+        train.make_puffer_env(rewrad_kill=1)

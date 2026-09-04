@@ -83,7 +83,9 @@ migrated source, which is what keeps them from agreeing with the bug.
 """
 import ast
 import copy
+import dataclasses
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -1034,51 +1036,120 @@ def test_evaluate_checkpoint_threads_its_episode_seed(monkeypatch):
     assert (role, kwargs) == ("eval_legacy", {"seed": 7717})
 
 
-def test_eval_env_agreement_two_directions(simple_map):
-    """Both checks in assert_eval_env_agreement fire, and the exclusion holds.
+# The five attributes check (a) compares, WRITTEN DOWN rather than AST-read out
+# of `assert_eval_env_agreement`. That is deliberate and it is the opposite of
+# the discipline this file uses elsewhere, so the reason matters: the two checks
+# report the SAME input with DIFFERENT messages — (a) says `on <knob>`, (b) says
+# `on config.<knob>` — and the parametrization below decides which message to
+# demand from this tuple. Read out of the source it would ADAPT to a name
+# leaving or joining (a)'s tuple and prove nothing about it; written down, either
+# drift flips a message and turns the matching case red. This tuple is therefore
+# pinned in BOTH directions by the test itself, which is what makes writing it
+# down safe here and would not make it safe anywhere else.
+_CHECK_A_KNOBS = ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled", "round_time")
 
-    THREE cases, and the choice of field in each is the whole point:
 
-      pbrs_gamma  — the knock-out for check (b). It is NOT one of the five
-                    attributes check (a) compares, so it can only be caught by
-                    the config comparison. Any field INSIDE that tuple would
-                    raise from (a) first and leave this test green even if (b)
-                    had been deleted or had excluded every field.
-      jump_enabled — pins check (a) BY ITS MESSAGE, the only thing that CAN
-                    pin it: the knob is in (a)'s tuple, but (b) compares it
-                    too, so with (a) deleted (b) raises on the same input as
-                    `... disagree on config.jump_enabled`. The match is
-                    therefore `on jump_enabled` — (a)'s bare-knob spelling,
-                    which (b)'s `on config.jump_enabled` does not contain. A
-                    match of plain `jump_enabled` passes under both and so
-                    pins nothing; this case is what distinguishes the two
-                    messages, not what proves (a) runs.
-      reward_symmetrize — must NOT raise. The eval role FORCES it off while the
-                    driver env takes it from args, so the two configs are meant
-                    to differ here; a check that compared it would abort every
-                    run with --reward-symmetrize.
+def _differing_config(base_env, name):
+    """An EnvConfig differing from `EnvConfig()` in exactly `name`, and valid.
+
+    DERIVED from EnvConfig()'s own values wherever the type allows it — flip the
+    bool, step the int, add to the float — so a changed default can never leave a
+    case comparing a value to itself. `n_active_per_team` steps DOWN because the
+    validator caps it at TEAM_SIZE.
+
+    `round_time` is read off the BASE ENV, not off the config: its field default
+    is the None sentinel and check (a) compares the RESOLVED tick count, so the
+    differing value has to be one tick away from whatever Cs2Env resolved None
+    to. `laser_range` and `max_turn_speed` are sentinels too but only (b) sees
+    them, and (b) compares the field, where any non-None value already differs.
+
+    A FIELD ADDED TO EnvConfig LANDS HERE AS A KeyError, and that is the point:
+    the parametrization walks `dataclasses.fields(EnvConfig)`, so a new field
+    joins the pin automatically and cannot join it silently unpinned.
+    """
+    cfg = EnvConfig()
+    other = {
+        "rewards": cfg.rewards.replace(reward_kill=cfg.rewards.reward_kill + 1.0),
+        "pbrs_gamma": cfg.pbrs_gamma / 2,
+        "reward_symmetrize": not cfg.reward_symmetrize,
+        "recoil": not cfg.recoil,
+        "n_active_per_team": cfg.n_active_per_team - 1,
+        "pin_pitch": 1 - cfg.pin_pitch,
+        "crouch_enabled": 1 - cfg.crouch_enabled,
+        "jump_enabled": 1 - cfg.jump_enabled,
+        "round_time": base_env.round_time + 1,
+        "laser_range": 1.0 + (cfg.laser_range or 0.0),
+        "max_turn_speed": 1.0 + (cfg.max_turn_speed or 0.0),
+    }[name]
+    changed = cfg.replace(**{name: other})
+    assert getattr(changed, name) != getattr(
+        cfg, name), (f"the differing value for {name} normalised back to the default "
+                     f"({getattr(changed, name)!r}); this case would assert nothing")
+    return changed
+
+
+@pytest.mark.parametrize("field_name", [f.name for f in dataclasses.fields(EnvConfig)])
+def test_eval_env_agreement_two_directions(simple_map, field_name):
+    """Both checks fire, the exclusion holds, and EVERY EnvConfig field is covered.
+
+    WHY IT IS PARAMETRIZED OVER THE DATACLASS and not over a hand-picked few
+    (review finding, Important 1). `assert_eval_env_agreement` cannot fire on any
+    input reachable today — its own DISCLOSURE paragraph says so — so it exists
+    purely to catch a FUTURE divergence, and check (b)'s skip set is the only
+    thing that decides what it will then catch. When this test differed two
+    fields, widening that skip set from `{reward_symmetrize}` to nine names left
+    it green — and, as the review measured, the whole non-slow suite with it. The
+    guard was comparing 2 of 11 fields and nothing could see it. The skip set is
+    now watched by construction — one case per `dataclasses.fields(EnvConfig)`
+    entry, so a field silently added to the skip set (or to the dataclass) has
+    nowhere to hide.
+
+    WHAT EACH CASE DEMANDS, and it is a MESSAGE, never just "it raised":
+
+      the five in _CHECK_A_KNOBS — `on <knob>`, (a)'s bare-knob spelling, which
+                    (b)'s `on config.<knob>` does not contain. (b) compares all
+                    five of these too, so with (a) deleted (b) would raise on the
+                    same input; matching plain `<knob>` would pass under both and
+                    pin nothing. This is what proves (a) still runs, and it runs
+                    FIRST, which is why no case here can prove (b) with one of
+                    these names.
+      every other field — `on config.<field>`, which ONLY (b) produces, because
+                    (a) reads Python attributes and `pbrs_gamma`, `recoil`,
+                    `laser_range` and `max_turn_speed` are not attributes of a
+                    Cs2Env (measured). `rewards` is the trap: `env.rewards` DOES
+                    exist and is the per-agent reward BUFFER, an ndarray with
+                    nothing to do with `config.rewards`, so adding `rewards` to
+                    (a)'s tuple would compare two buffers and quietly stop
+                    covering the 23 weights. These cases are the ones a widened
+                    skip set kills.
+      reward_symmetrize — must NOT raise. The eval role FORCES it off
+                    (`config.replace(reward_symmetrize=False)`) while the driver
+                    env takes it from args, so the two configs are MEANT to
+                    differ here; a check that compared it would abort every run
+                    launched with --reward-symmetrize.
+
+    COST: one base env plus one differing env per field. Measured 2026-09-04 on
+    this tree, all 11 cases run in 3.0 s — cheap because `make_env` on the simple
+    map is cheap. Do not "optimise" it into one env pair reused across fields:
+    reusing a pair is what forced the old two-case shape that produced the
+    finding.
     """
     import train
     from c_env.cs2_env import make_env
 
-    def _env(**changes):
-        return make_env(config=EnvConfig(**changes), map_data=simple_map, seed=0)
-
-    base = _env()
+    base = make_env(config=EnvConfig(), map_data=simple_map, seed=0)
     try:
-        cases = ((dict(pbrs_gamma=0.99), "pbrs_gamma"), (dict(jump_enabled=0), r"on jump_enabled"))
-        for changes, wanted in cases:
-            other = _env(**changes)
-            try:
-                with pytest.raises(RuntimeError, match=wanted):
-                    train.assert_eval_env_agreement(base, other)
-            finally:
-                other.close()
-        sym = _env(reward_symmetrize=True)
+        other = make_env(config=_differing_config(base, field_name), map_data=simple_map, seed=0)
         try:
-            train.assert_eval_env_agreement(base, sym)                 # must not raise
+            if field_name == "reward_symmetrize":
+                train.assert_eval_env_agreement(base, other)           # must not raise
+                return
+            wanted = (f"on {field_name}"
+                      if field_name in _CHECK_A_KNOBS else f"on config.{field_name}")
+            with pytest.raises(RuntimeError, match=re.escape(wanted)):
+                train.assert_eval_env_agreement(base, other)
         finally:
-            sym.close()
+            other.close()
     finally:
         base.close()
 
@@ -1465,14 +1536,44 @@ def test_env_factory_rejects_unexpected_kwargs():
         factory(seed=0, reward_ct_survival=0.0)
 
 
+def _closure_cells(fn):
+    """{free variable -> captured value} for a closure, by name.
+
+    `co_freevars` and `__closure__` are positionally aligned; `strict=True` makes
+    a length mismatch an error instead of a silently truncated dict.
+    """
+    return dict(zip(fn.__code__.co_freevars, (c.cell_contents for c in fn.__closure__),
+                    strict=True))
+
+
 def test_build_train_env_factory_carries_args_config():
     """Review fix 2: the train() → factory seam, without launching a run.
 
-    Reads the returned closure's cells: if the wiring ever regresses to
-    `config=None` (or to a config built from something other than args), the
-    non-default weight below stops arriving and this fails. It also pins the
-    `config=None ⇒ EnvConfig()` resolution as happening ABOVE the closure — the
-    cell holds an EnvConfig, never a None.
+    TWO closures, because they pin two different lines and the second one used
+    to be uncovered (review finding, Important 3).
+
+      the args-built factory — if the wiring ever regresses to `config=None` (or
+                    to a config built from something other than args), the
+                    non-default weight below stops arriving and this fails.
+      the BARE factory — pins `config = EnvConfig() if config is None else config`
+                    in build_env_factory, i.e. that the resolution happens ABOVE
+                    the closure so the cell holds an EnvConfig and never a None.
+                    The first call CANNOT see that line: build_train_env_factory
+                    always passes `env_config_from_args(args)`, never None, so
+                    the cell holds an EnvConfig whether or not the resolution
+                    exists. Deleting the line left the pre-fix version of this
+                    test green (re-measured 2026-09-04; the review measured the
+                    whole non-slow suite green with it) while this docstring and
+                    two `src/` paragraphs — build_env_factory's own and
+                    _build_train's in env_factory.py — cited this test as the
+                    evidence for it. Only a call that OMITS config reaches the
+                    resolution; five in tests/ do, and this is the one that
+                    asserts what it resolved to.
+
+    WHY THE PROPERTY IS WORTH A LINE: the cell crosses the fork boundary into
+    every vecenv worker. A None there is a None `_build_train` would forward to
+    `make_env` — harmless today, because `make_env` resolves None itself, and
+    that is precisely what makes the regression silent rather than loud.
     """
     import multiprocessing as mp
     from argparse import Namespace
@@ -1482,11 +1583,16 @@ def test_build_train_env_factory_carries_args_config():
 
     args = Namespace(reward_ct_survival=0.0)
     factory = train.build_train_env_factory(args, shared_ts=mp.Value("f", 0.3), map_data=None)
-    cells = dict(
-        zip(factory.__code__.co_freevars, (c.cell_contents for c in factory.__closure__),
-            strict=True))
+    cells = _closure_cells(factory)
     assert cells["config"] == env_config_from_args(args)
     assert cells["config"].rewards.reward_ct_survival == 0.0
+
+    bare = train.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
+    bare_cells = _closure_cells(bare)
+    assert bare_cells["config"] == EnvConfig(), (
+        f"build_env_factory(config=None) captured {bare_cells['config']!r}; the "
+        f"`config=None ⇒ EnvConfig()` resolution must run ABOVE the closure, so that no forked "
+        f"worker is ever handed a None to guard against")
 
 
 def test_train_uses_build_train_env_factory():
