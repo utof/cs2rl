@@ -741,7 +741,15 @@ def test_eval_env_agreement_two_directions(simple_map):
                     the config comparison. Any field INSIDE that tuple would
                     raise from (a) first and leave this test green even if (b)
                     had been deleted or had excluded every field.
-      jump_enabled — the pin for check (a): a knob that IS in the tuple.
+      jump_enabled — pins check (a) BY ITS MESSAGE, the only thing that CAN
+                    pin it: the knob is in (a)'s tuple, but (b) compares it
+                    too, so with (a) deleted (b) raises on the same input as
+                    `... disagree on config.jump_enabled`. The match is
+                    therefore `on jump_enabled` — (a)'s bare-knob spelling,
+                    which (b)'s `on config.jump_enabled` does not contain. A
+                    match of plain `jump_enabled` passes under both and so
+                    pins nothing; this case is what distinguishes the two
+                    messages, not what proves (a) runs.
       reward_symmetrize — must NOT raise. Eval never forwards it, so the two
                     configs are meant to differ here; a check that compared it
                     would abort every run with --reward-symmetrize.
@@ -755,7 +763,7 @@ def test_eval_env_agreement_two_directions(simple_map):
 
     base = _env()
     try:
-        cases = ((dict(pbrs_gamma=0.99), "pbrs_gamma"), (dict(jump_enabled=0), "jump_enabled"))
+        cases = ((dict(pbrs_gamma=0.99), "pbrs_gamma"), (dict(jump_enabled=0), r"on jump_enabled"))
         for changes, wanted in cases:
             other = _env(**changes)
             try:

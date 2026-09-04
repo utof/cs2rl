@@ -2206,6 +2206,20 @@ def assert_eval_env_agreement(eval_env, driver_env):
     to differ there and only there. Skipping any other field would hide a real
     divergence.
 
+    DISCLOSURE — NEITHER CHECK CAN FIRE ON ANY INPUT REACHABLE TODAY. train()'s
+    only call site compares the env from build_env_for("eval", ...) against the
+    driver env from build_train_env_factory(args, ...): both derive map_data,
+    reward_overrides and env_knobs from the same expressions, and among
+    EnvConfig fields only reward_symmetrize is set by one builder and not the
+    other — the field (b) skips and (a) does not compare. Measured
+    2026-09-04 by driving those two real constructions over four arg sets (no
+    knobs; --reward-symmetrize; both R0-E toggles off; --reward-symmetrize with
+    --round-time-ticks and --laser-range): reward_symmetrize was the ONLY
+    EnvConfig field that ever differed, and neither check raised. Both are
+    therefore guards against a FUTURE divergence, not checks with anything to
+    catch now — keep them, and re-measure this paragraph the day either builder
+    starts setting a field the other does not.
+
     WHY THIS IS A MODULE-LEVEL FUNCTION and not the inline loop it replaces:
     the loop sat inside train(), which needs a real run to reach — and not even
     that by default, since it is behind `--eval-interval`, which is 0 unless
