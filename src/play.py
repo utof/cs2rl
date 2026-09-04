@@ -58,8 +58,12 @@ def _load_play_lib(repo: Path):
         raise SystemExit(2)
     lib.play_host_attach.restype = ctypes.c_void_p
     lib.play_host_attach.argtypes = [
-        ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
-        ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
     ]
     lib.play_host_should_close.restype = ctypes.c_int
     lib.play_host_should_close.argtypes = [ctypes.c_void_p]
@@ -89,22 +93,22 @@ def main(argv=None):
         return 2
 
     from train import (
+        init_policy_state,
         load_policy_from_checkpoint,
         select_policy_actions_native,
-        init_policy_state,
     )
     policy = load_policy_from_checkpoint(str(ckpt), args.device)
     policy_state = init_policy_state(policy, args.device)
 
+    import numpy as np
+
     from c_env.cs2_env import make_env
     from map import make_simple_map
-    import numpy as np
 
     repo = find_repo_root(Path(__file__))
     lib = _load_play_lib(repo)
     md = make_simple_map()
-    env = make_env(
-        seed=args.seed, auto_reset=False, recoil=True, map_data=md)
+    env = make_env(seed=args.seed, auto_reset=False, recoil=True, map_data=md)
     obs, _ = env.reset(seed=args.seed)
     # First select sees zero obs (env_reset does not compute_observations). Same as record.
 
@@ -134,20 +138,19 @@ def main(argv=None):
             now = lib.play_host_time(h)
             if now >= next_step:
                 lib.play_host_begin_tick(h)
-                pa, pc = select_policy_actions_native(
-                    policy, obs, args.device, policy_state, mode)
+                pa, pc = select_policy_actions_native(policy, obs, args.device, policy_state, mode)
                 play_fill_actions(act_buf, cont_buf, pa, pc)
-                lib.play_host_apply_human(
-                    h, act_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)))
+                lib.play_host_apply_human(h, act_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)))
                 obs, _, terms, truncs, _ = env.step(act_buf, cont_buf)
                 lib.play_host_end_tick(h)
                 play_mark_done(policy_state, terms, truncs)
                 next_step += 1.0 / 16.0
             lib.play_host_render(h)
             if env.terminals[0]:
-                policy_state = play_reset_round(
-                    env, policy, args.device,
-                    on_reset=lambda: lib.play_host_on_reset(h))
+                policy_state = play_reset_round(env,
+                                                policy,
+                                                args.device,
+                                                on_reset=lambda: lib.play_host_on_reset(h))
     finally:
         lib.play_host_detach(h)
         env.close()
