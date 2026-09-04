@@ -242,12 +242,13 @@ def build_env(seed: int, round_time: int = ROUND_TIME):
     different env is asking a different question and should say so in code.
     """
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     from map import make_arena_duel_map
-    return make_env(map_data=make_arena_duel_map(),
-                    n_active_per_team=N_ACTIVE_PER_TEAM,
-                    pin_pitch=PIN_PITCH,
-                    crouch_enabled=CROUCH_ENABLED,
-                    round_time=round_time,
+    return make_env(config=EnvConfig(n_active_per_team=N_ACTIVE_PER_TEAM,
+                                     pin_pitch=PIN_PITCH,
+                                     crouch_enabled=CROUCH_ENABLED,
+                                     round_time=round_time),
+                    map_data=make_arena_duel_map(),
                     auto_reset=False,
                     seed=seed)
 

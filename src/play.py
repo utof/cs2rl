@@ -103,12 +103,17 @@ def main(argv=None):
     import numpy as np
 
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     from map import make_simple_map
 
     repo = find_repo_root(Path(__file__))
     lib = _load_play_lib(repo)
     md = make_simple_map()
-    env = make_env(seed=args.seed, auto_reset=False, recoil=True, map_data=md)
+    # `recoil` is the one non-default this viewer wants; everything else is
+    # EnvConfig's default. Pre-#165 this was `recoil=True` as a bare keyword,
+    # which `make_env` translated through `from_legacy_kwargs` into exactly this
+    # object — same env, one frame earlier and type-checked.
+    env = make_env(config=EnvConfig(recoil=True), seed=args.seed, auto_reset=False, map_data=md)
     obs, _ = env.reset(seed=args.seed)
     # First select sees zero obs (env_reset does not compute_observations). Same as record.
 
