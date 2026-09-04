@@ -19,7 +19,6 @@ import dataclasses
 import json
 import math
 import multiprocessing as mp
-import numbers
 import random
 import sys
 import time
@@ -45,7 +44,7 @@ from _action_spec import (
     ACTION_MASK_DIM,
     AIM_DIM,
 )
-from env_config import REWARD_FIELDS, EnvConfig, RewardWeights
+from env_config import EnvConfig, RewardWeights
 from env_factory import build_env_for, build_selfplay_manager
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from resume_state import (
@@ -686,131 +685,55 @@ def smoke_test():
 # ── SECTION: Shared eval / record helpers ──────────────────────────────────
 
 
-def make_puffer_env(team_spirit=None,
+def make_puffer_env(config=None,
+                    *,
+                    team_spirit=None,
                     record_fn=None,
                     buf=None,
                     seed=0,
                     episode_stats=True,
                     map_data=None,
                     include_step_stats_in_info=False,
-                    pbrs_gamma=None,
-                    reward_overrides=None,
-                    reward_symmetrize=False,
-                    n_active_per_team=TEAM_SIZE,
-                    pin_pitch=0,
-                    crouch_enabled=1,
-                    jump_enabled=1,
-                    round_time=None,
-                    laser_range=None,
-                    max_turn_speed=None,
-                    auto_reset=True):
-    """Create the native C PufferEnv used by smoke/train/eval.
+                    auto_reset=True,
+                    **legacy):
+    """DEPRECATED legacy shim over `c_env.cs2_env.make_env` — see gh#173.
 
-    ``auto_reset`` (R0-I, Task 13): forwarded to make_env. The training
-    vecenv keeps the default True; the fixed-baseline evaluator passes False
-    so the terminal tick's C state / episode_stats are still readable after
-    step() returns (with auto-reset they would already be the next spawn).
+    WHAT IT IS NOW: the pre-#165 keyword surface, translated. Pass
+    `config=EnvConfig(...)`; the `**legacy` channel accepts the old weight and
+    knob names and routes them through `EnvConfig.from_legacy_kwargs`, which has
+    an explicit parameter list, so a misspelled name dies here with Python's own
+    TypeError instead of inside a forked vecenv worker.
 
-    ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
-    emits ``info = [{"step_stats": StepStatsView}]`` on every tick so trainer
-    patches (Task 6c onward) can read per-channel raw reward fields. Defaults
-    to False so production code paths that don't consume step_stats (e.g. eval
-    scripts, viz) stay zero-cost.
+    WHY THE SHIM RESOLVES THE CONFIG ITSELF instead of splatting `**legacy`
+    onward: a `**splat` into `make_c_env` would make this function a LEGACY
+    make_env call site under clause 2 of the migration census (spec §4.1),
+    which PR B3 adds and which pins `src`=0. Resolving here makes it a TYPED
+    site, and that is the only reason the pin is reachable at all.
 
-    ``pbrs_gamma`` (finding 2 / N3, 2026-07-06 review): PBRS shaping discount.
-    None (default) uses the env-side default, which is pinned to the training
-    gamma (0.999) and drift-guarded by test_pbrs_gamma_matches_training_gamma.
-    Pass explicitly only for experiments that also change the training gamma —
-    the two MUST move together or PBRS loses policy-invariance.
+    `record_fn` is refused, as before: only the Python recording env supports it.
+    `episode_stats` is accepted and unused, as before.
 
-    ``reward_overrides`` (spec 2026-08-01 §4.2): optional {kwarg: value} dict
-    over env_config.REWARD_FIELDS, forwarded verbatim to make_env. None
-    (default) means every weight keeps its make_env default, so all existing
-    callers (eval, record, smoke, tests) are unaffected.
-
-    ``reward_symmetrize`` (spec 2026-08-01 §4.3): when True the env applies the
-    zero-sum post-step transform r_i' = 0.5*(r_i - mean of the opposing five).
-    It is a dedicated parameter, NOT a reward_overrides key — it is a bool knob
-    rather than a weight, and the override validator above rejects it by name.
-    Defaults False so eval/record/smoke keep raw, comparable reward numbers;
-    only the training factory turns it on.
-
-    ``n_active_per_team`` / ``pin_pitch`` / ``crouch_enabled`` (Rung 0, spec
-    2026-08-29 §2.1) and ``jump_enabled`` (Rung 1a, spec 2026-08-30 T2b):
-    non-weight env knobs forwarded verbatim to make_env. They are NOT
-    reward_overrides keys for the same reason reward_symmetrize is not.
-    The defaults reproduce the pre-Rung-0 env exactly (full 5v5, pitch live,
-    crouch and jump enabled), so every non-training caller (eval, record,
-    smoke, viz) is unaffected. Training callers get them from
-    env_knobs_from_args(args) — do NOT re-derive them from args anywhere else,
-    or config.json provenance and the envs that actually ran can disagree.
-
-    ``round_time`` / ``laser_range`` / ``max_turn_speed`` (Rung 0 R0-G):
-    sim knobs forwarded verbatim to make_env. None (default) ⇒ make_env falls
-    back to the nav.py constant, so this function's default output is
-    byte-identical to before (sim fingerprints at defaults unchanged). Set
-    only via env_knobs_from_args, which omits None-valued knobs. PITFALL:
-    max_turn_speed rescales the aim action (policy.max_turn_speed is read
-    from the driver env at build time); assert_max_turn_speed_agreement
-    guards the pairing at train() startup.
+    THE TWO CHANNELS ARE EXCLUSIVE. `config=` plus legacy names is a TypeError,
+    not a silent merge — a caller who passes both has two different intents and
+    picking one of them quietly is the failure this whole workstream exists to
+    end.
     """
     from c_env.cs2_env import make_env as make_c_env
 
     if record_fn is not None:
         raise ValueError("record_fn is only supported by the Python recording env")
-    kwargs = {}
-    if pbrs_gamma is not None:
-        kwargs["pbrs_gamma"] = pbrs_gamma
-    if reward_overrides:
-        # Validate here, not at make_env: an unknown key would otherwise
-        # surface as a TypeError inside a forked vecenv worker, where the
-        # traceback is far from the mistake. This is the LAST boundary before
-        # the C env, so it also re-checks value sanity — direct callers
-        # (train_test_harness, future sweep scripts) can hand us a dict that
-        # never passed through reward_overrides_from_args.
-        unknown = set(reward_overrides) - set(REWARD_FIELDS)
-        if unknown:
-            import difflib
-            hints = []
-            for key in sorted(unknown):
-                near = difflib.get_close_matches(key, REWARD_FIELDS, n=1)
-                if near:
-                    hints.append(f"{key!r} — did you mean --{near[0].replace('_', '-')}?")
-            raise ValueError(f"unknown reward override keys: {sorted(unknown)}. " +
-                             (" ".join(hints) + " " if hints else "") +
-                             f"Valid keys: {sorted(REWARD_FIELDS)}. Non-weight env knobs "
-                             "(pbrs_gamma, reward_symmetrize) are NOT overrides — they have "
-                             "dedicated make_puffer_env parameters.")
-        for key, val in reward_overrides.items():
-            # numbers.Real, not a bare float() call: float("0.3") succeeds, so
-            # a string weight from a YAML sweep file would sail through here
-            # and only misbehave at the ctypes boundary. bool is a Real in
-            # Python, hence the explicit exclusion.
-            if isinstance(val, bool) or not isinstance(val, numbers.Real):
-                raise ValueError(f"reward override {key}={val!r} is not a real number "
-                                 f"(got {type(val).__name__})")
-            fval = float(val)
-            if not math.isfinite(fval):
-                raise ValueError(f"reward weight {key}={fval} is not finite; "
-                                 "pass a real number (this would poison the loss silently)")
-            kwargs[key] = fval
-    return make_c_env(
-        seed=seed,
-        team_spirit=team_spirit,
-        buf=buf,
-        map_data=map_data,
-        include_step_stats_in_info=include_step_stats_in_info,
-        reward_symmetrize=reward_symmetrize,
-        n_active_per_team=n_active_per_team,
-        pin_pitch=pin_pitch,
-        crouch_enabled=crouch_enabled,
-        jump_enabled=jump_enabled,
-        round_time=round_time,
-        laser_range=laser_range,
-        max_turn_speed=max_turn_speed,
-        auto_reset=auto_reset,
-        **kwargs,
-    )
+    if legacy and config is not None:
+        raise TypeError(f"make_puffer_env got config= AND legacy kwargs {sorted(legacy)}; "
+                        "pass one")
+    cfg = config if config is not None else (EnvConfig.from_legacy_kwargs(
+        **legacy) if legacy else EnvConfig())
+    return make_c_env(config=cfg,
+                      seed=seed,
+                      team_spirit=team_spirit,
+                      buf=buf,
+                      map_data=map_data,
+                      auto_reset=auto_reset,
+                      include_step_stats_in_info=include_step_stats_in_info)
 
 
 def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, pin_pitch=False):
@@ -840,11 +763,14 @@ def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, p
         ckpt_obs_dim = state_dict["encoder_t.0.weight"].shape[1]
     else:
         ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
-    # W3 (#154): role eval_legacy — the DOCUMENTED bare-call defaults ("the
-    # defaults reproduce the pre-Rung-0 env exactly" — make_puffer_env's own
-    # docstring). Passing no knobs is the behaviour, not an oversight; #143
-    # tracks whether it should change, and the factory reduces that future fix to
-    # one role's knob source.
+    # W3 (#154): role eval_legacy — the DOCUMENTED bare-call defaults, which are
+    # now EnvConfig()'s own field defaults: a knob-free make_puffer_env() call
+    # resolves to EnvConfig(), and env_config.py declares those fields to be the
+    # trained baseline, which is exactly the pre-Rung-0 env (full 5v5, pitch
+    # live, crouch and jump enabled); test_defaults_equal_the_139a3a3_values in
+    # tests/test_env_config.py pins them. Passing no knobs is the behaviour, not
+    # an oversight; #143 tracks whether it should change, and the factory reduces
+    # that future fix to one role's knob source.
     policy_env = build_env_for("eval_legacy")
 
     # Batch 3.5 (#24, Opus I3): defensive obs_dim consistency check.

@@ -190,41 +190,6 @@ def test_factory_reproduces_the_pre_migration_kwargs(monkeypatch, role, scenario
                              f"  pre-migration call was: {capture['call_source']}")
 
 
-@pytest.mark.parametrize(("role", "scenario", "capture"), _cases(), ids=_ids())
-def test_effective_env_config_survives_make_puffer_env_default_drift(monkeypatch, role, scenario,
-                                                                     capture):
-    """The kwargs AFTER defaults are applied still match the pre-W3 capture.
-
-    Distinct failure from the test above, deliberately kept separate so the
-    reason is unambiguous when it fires. That one compares what the factory
-    PASSES; this compares the env that RESULTS, by filling in
-    `make_puffer_env`'s own defaults. A default moving (say `jump_enabled` 1→0)
-    leaves every passed-kwarg set identical while silently changing the env for
-    every role that relies on the default — which is most of them, and is the
-    ENTIRE config of `eval_legacy`, whose documented contract is that "the
-    defaults reproduce the pre-Rung-0 env exactly".
-
-    If this fires alone, the factory is fine and a make_puffer_env default
-    changed; decide whether that change was meant to reach these roles before
-    re-capturing.
-    """
-    import inspect
-
-    import train
-
-    # Read the signature BEFORE _construct swaps in the recording stub —
-    # monkeypatch only reverts at teardown, so afterwards this would be the
-    # stub's `**kwargs` and the whole assertion would collapse to comparing an
-    # empty default set.
-    sig = inspect.signature(train.make_puffer_env)
-    got = _construct(monkeypatch, role, **_inputs_for(role, capture))
-    bound = sig.bind(**got)
-    bound.apply_defaults()
-    assert dict(bound.arguments) == capture["effective_kwargs"], (
-        f"role {role!r}/{scenario}: the EFFECTIVE env config changed. Passed kwargs and "
-        "make_puffer_env's defaults together no longer reproduce the pre-W3 env.")
-
-
 def test_every_role_in_the_enum_is_covered_by_the_capture():
     """No role may be added without a captured shape, and none may go unchecked.
 

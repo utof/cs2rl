@@ -108,12 +108,11 @@ ALLOWLIST = ()
 # went 0 -> 2834 bytes when an explanatory suffix was all that was left of it.
 # yapf: disable
 PENDING_B2 = {
-    # the shim's own knob defaults (2 sites for reward_symmetrize: make_puffer_env,
-    # deleted by R5, and build_env_factory's parameter, deleted by R4)
-    ("src/train.py", "reward_symmetrize"): 2,
-    ("src/train.py", "pin_pitch"): 1,
-    ("src/train.py", "crouch_enabled"): 1,
-    ("src/train.py", "jump_enabled"): 1,
+    # All that is left is build_env_factory's own `reward_symmetrize` parameter,
+    # deleted by R4. R5 replaced make_puffer_env's explicit knob signature with a
+    # `**legacy` channel, which took the other three rows and the second
+    # reward_symmetrize site with it.
+    ("src/train.py", "reward_symmetrize"): 1,
 }
 PENDING_B2_GETATTR = {
     # build_train_env_factory's symmetrize fallback, deleted with the function's
