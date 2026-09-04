@@ -38,12 +38,24 @@ import shutil
 import tempfile
 import types
 
+# Module level for the same reason as env_factory below: env_config is the
+# stdlib-only leaf of the config graph, so importing it here pulls in nothing
+# and cannot cycle.
+from env_config import EnvConfig
+
 # Module level, unlike the `from train import ...` block inside the builder:
 # env_factory's own module scope pulls nothing (torch/nav/c_env stay behind its
 # function-local imports), so importing it here costs nothing and is acyclic.
 # `from ... import build_env_for`, never `import env_factory` — the builder
 # below defines a LOCAL named env_factory, which would shadow the module.
 from env_factory import build_env_for, build_selfplay_manager
+
+# The harness's four env-knob defaults are the dataclass's, read once rather
+# than copied. Four literals here would be four more places #165 has to keep in
+# step with env_config.py, and tests/test_no_restated_env_defaults.py fails on
+# exactly that shape — including the `: int = <literal>` spelling, which a
+# regex written for `name = value` alone cannot see.
+_ENV_DEFAULTS = EnvConfig()
 
 
 def _build_trainer_for_test(
@@ -53,11 +65,11 @@ def _build_trainer_for_test(
     seed: int = 0,
     tct_split_heads: bool = False,
     tct_split_trunk: bool = False,
-    n_active_per_team: int = 5,
+    n_active_per_team: int = _ENV_DEFAULTS.n_active_per_team,
     map_data=None,
-    pin_pitch: int = 0,
-    crouch_enabled: int = 1,
-    jump_enabled: int = 1,
+    pin_pitch: int = _ENV_DEFAULTS.pin_pitch,
+    crouch_enabled: int = _ENV_DEFAULTS.crouch_enabled,
+    jump_enabled: int = _ENV_DEFAULTS.jump_enabled,
     aim_log_std_max=None,
     aim_entropy_bonus: bool = True,
     opponent: str = "self",

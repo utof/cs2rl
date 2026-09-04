@@ -89,9 +89,7 @@ FIELD_DEFAULTS = {
 ALLOWLIST = ()
 
 # Sites that are known restatements today and are expected to go with PR B2's
-# rewrite. Where a B1 document assigns a ruling, the row's comment names it; the
-# four src/train_test_harness.py rows carry a description only, because NO B1
-# document assigns the harness signature to B2 or to B3.
+# rewrite. Where a B1 document assigns a ruling, the row's comment names it.
 # Keyed by (file, field) and holding the expected HIT COUNT — never line
 # numbers. This file lands last in B1, after five commits
 # have moved code inside src/train.py, so line-keyed rows would report every
@@ -116,13 +114,6 @@ PENDING_B2 = {
     ("src/train.py", "pin_pitch"): 1,
     ("src/train.py", "crouch_enabled"): 1,
     ("src/train.py", "jump_enabled"): 1,
-    # _build_trainer_for_test's four annotated defaults. PR unassigned as of B1
-    # (B2 or B3); see the B2 plan. The row is correct either way — if B3 owns the
-    # signature the row simply survives B2 instead of being deleted with it.
-    ("src/train_test_harness.py", "n_active_per_team"): 1,
-    ("src/train_test_harness.py", "pin_pitch"): 1,
-    ("src/train_test_harness.py", "crouch_enabled"): 1,
-    ("src/train_test_harness.py", "jump_enabled"): 1,
 }
 PENDING_B2_GETATTR = {
     # build_train_env_factory's symmetrize fallback, deleted with the function's
