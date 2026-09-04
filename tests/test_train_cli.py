@@ -2,6 +2,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = REPO_ROOT / "src" / "train.py"
 
@@ -171,16 +173,16 @@ def test_warmstart_entropy_config_keys(tmp_path):
 def test_reward_weight_config_keys_default_to_make_env_values(tmp_path):
     """Every threaded weight lands in config.json at its make_env default.
 
-    Together with test_reward_weight_wiring.py (which pins those defaults
-    against the real signature) this is the "unflagged run is identical to
+    Together with tests/test_env_config.py (which pins the declaration
+    itself, on RewardWeights) this is the "unflagged run is identical to
     today" guarantee, verified through the REAL argparse surface: a typo'd
     dest= or a missing add_argument would leave the key at the getattr
     fallback and could not be caught by a hand-built Namespace.
     """
-    from train import REWARD_WEIGHT_DEFAULTS
+    from env_config import RewardWeights
 
     cfg = _dump_config(tmp_path)
-    for name, default in REWARD_WEIGHT_DEFAULTS.items():
+    for name, default in RewardWeights().as_dict().items():
         assert name in cfg, f"{name} missing from config.json"
         assert cfg[name] == default, f"{name}: {cfg[name]} != {default}"
     assert cfg["reward_symmetrize"] is False
@@ -203,6 +205,71 @@ def test_reward_weight_cli_overrides_round_trip(tmp_path):
     assert cfg["reward_symmetrize"] is True
     # untouched neighbours keep their defaults (no accidental global override)
     assert cfg["reward_kill"] == 0.3
+
+
+FIXTURE_DUMP_CONFIG = REPO_ROOT / "tests" / "fixtures" / "dump_config_pre_165.json"
+
+# The commit the fixture was captured at: main's Phase-A merge, which is also this
+# branch's base and therefore the last commit BEFORE #165 Phase B rewrites the code
+# that produces config.json. Pinned here so a re-capture cannot pass unnoticed.
+PRE_165_CAPTURE_COMMIT = "54d7da01b7df28414dbcda346a2f8c4f6d2b2ee7"
+
+
+@pytest.mark.parametrize("arm", ["default", "non_default"])
+def test_dump_config_matches_the_pre_165_fixture(tmp_path, arm):
+    """config.json is byte-identical to the pre-#165 capture (spec Phase B R7).
+
+    This is the provenance half of "not one value moves": build_train_config
+    stops restating six keys and starts merging EnvConfig.to_config_dict(), and
+    scripts/run_experiment.py hashes this dict as the experiment fingerprint, so
+    a single reordered or retyped value silently invalidates every future
+    comparison against past runs. The .pt gate cannot see it — that command sets
+    no --reward-*/knob flag at all, which is why the non_default arm exists.
+
+    Compared as `json.dumps(..., sort_keys=True, indent=2, default=str)`, the
+    exact spelling train.py writes, so a float that became an int fails here.
+    PITFALL: `data_dir` is the --checkpoint-dir string verbatim and can never
+    match a fixture captured elsewhere; it is asserted to be THIS test's own
+    directory and then replaced by the same placeholder the capture stored.
+    """
+    import json
+
+    fixture = json.loads(FIXTURE_DUMP_CONFIG.read_text())
+    assert fixture["_provenance"]["format"] == "cs2rl-dump-config-capture-v1"
+    assert fixture["_provenance"]["captured_at_commit"] == PRE_165_CAPTURE_COMMIT, (
+        "the fixture was regenerated at a different commit. Re-running "
+        "tests/capture_dump_config_pre_165.py --capture to turn a red test green is "
+        "exactly how this oracle becomes a mirror: the new capture records "
+        "post-migration values, and the comparison below then checks the new code "
+        "against itself while staying green. The format tag would not move, so this "
+        "assertion is the only thing that catches it. The ONLY legitimate way to "
+        "change this fixture is to change PRE_165_CAPTURE_COMMIT deliberately, in a "
+        "commit whose message explains which config key moved and why.")
+    entry = fixture["arms"][arm]
+
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    r = subprocess.run(
+        [sys.executable,
+         str(TRAIN_SCRIPT), *entry["argv"], "--checkpoint-dir",
+         str(ckpt)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300)
+    assert r.returncode == 0, f"stdout:\n{r.stdout[-2000:]}\nstderr:\n{r.stderr[-3000:]}"
+
+    cfg = json.loads((ckpt / "config.json").read_text())
+    assert cfg["data_dir"] == str(ckpt), "data_dir is no longer the --checkpoint-dir string"
+    cfg["data_dir"] = "<checkpoint_dir>"
+
+    def _dumps(d):
+        return json.dumps(d, sort_keys=True, indent=2, default=str)
+
+    assert _dumps(cfg) == _dumps(entry["config"]), (
+        f"config.json for the {arm!r} arm changed against tests/fixtures/"
+        "dump_config_pre_165.json. Regenerate the fixture ONLY if a key changed on "
+        "purpose — otherwise this is the provenance regression it exists to catch.")
 
 
 def test_tag_diagnostic_config_keys(tmp_path):

@@ -404,9 +404,8 @@ def _live_train_long_options_from_source() -> set[str]:
     ONE FILE PLUS THE DATACLASS (spec 2026-09-03 §2.3): the argparse parser
     still lives in src/train.py (it is built inline under
     `if __name__ == "__main__"`), but the 23 `--reward-*`/`--pbrs-*` flag names
-    are now the field names of `env_config.RewardWeights`, which
-    REWARD_WEIGHT_DEFAULTS is itself derived from. Taking only one of the two
-    sources silently drops half the option set — train.py alone loses all 23
+    are now the field names of `env_config.RewardWeights`. Taking only one of
+    the two sources silently drops half the option set — train.py alone loses all 23
     reward flags, the dataclass alone loses every other flag — and the
     set-equality assert below would then "fail" against the runner mirror for a
     reason that has nothing to do with the mirror. Neither contribution is
@@ -418,7 +417,9 @@ def _live_train_long_options_from_source() -> set[str]:
     # keeps collection free of torch/CUDA. train.py's static add_argument
     # calls are still recovered from source below.
     import dataclasses
-    sys.path.insert(0, str(ROOT / "src"))
+    src_path = str(ROOT / "src")
+    if src_path not in sys.path:
+        sys.path.insert(0, src_path)
     from env_config import RewardWeights
     names.update(f"--{f.name.replace('_', '-')}" for f in dataclasses.fields(RewardWeights))
     for rel in ("src/train.py", ):

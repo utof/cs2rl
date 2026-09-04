@@ -27,6 +27,7 @@ import math
 
 import numpy as np
 
+from env_config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
 from train_shared import (
     _R0G_KNOBS,
     AIM_LOG_STD_CAP_MIN_HEADROOM,
@@ -37,7 +38,6 @@ from train_shared import (
     TEAM_SIZE,
     resolve_aim_log_std_init,
     resolve_gammas,
-    reward_overrides_from_args,
 )
 
 
@@ -238,13 +238,13 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     ws_ramp = int(getattr(args, "warmstart_ramp_steps", 10_000_000))
     ws_alpha_ceil = float(getattr(args, "warmstart_alpha_ceiling", 0.0))
 
-    # ── Reward weights + symmetrization (spec 2026-08-01) ──
-    # Read out here (not inline in the dict) for the same reason as the
-    # warmstart block above: yapf snaps the returned dict's comment column to
-    # its longest line. Grouping/labelling of the weights lives on
-    # REWARD_WEIGHT_DEFAULTS, the single source of truth.
-    reward_weights = reward_overrides_from_args(args)
-    reward_symmetrize = bool(getattr(args, "reward_symmetrize", False))
+    # ── Env config (spec 2026-09-03 §2.3) ──
+    # ONE resolver for the weights, the flag knobs, the R0-G trio and pbrs_gamma;
+    # the env factory reaches it through the wrappers below (PR B2 hands it the
+    # EnvConfig itself), so provenance and the envs cannot disagree. Bound to
+    # `env_cfg`, never `env_config`: that name is the MODULE this function's own
+    # import comes from.
+    env_cfg = env_config_from_args(args)
 
     # ── TAG diagnostic (spec 2026-08-13 §4.1) ──
     # getattr fallbacks keep harness/dump-config args objects that predate
@@ -296,8 +296,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # (the raw budget is bound to a local, not inlined in the dict below, for
     # the same yapf reason as the warmstart block above: a long value
     # expression inside the dict re-indents every trailing comment in it.)
-    knobs = env_knobs_from_args(args)
-    n_active = knobs["n_active_per_team"]
+    n_active = env_cfg.n_active_per_team
     assert 1 <= n_active <= TEAM_SIZE, n_active
     opponent = resolve_opponent_mode(args)
     _part_per_env = n_active * (1 if opponent == "noop" else 2)
@@ -329,9 +328,9 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # callers have no `map` attr and keep the historical "cs2-dust2". Not
     # allowlisted for --resume-run: a different map is a different experiment.
     map_name = getattr(args, "map", None) or "dust2"
-    # R0-J: --gamma / --pbrs-gamma. Same helper as env_knobs_from_args so the
-    # env's PBRS discount and the PPO discount cannot resolve differently.
-    gamma, pbrs_gamma = resolve_gammas(args)
+    # R0-J: --gamma / --pbrs-gamma. Same helper env_config_from_args ran for
+    # env_cfg.pbrs_gamma, so the two discounts cannot resolve differently.
+    gamma = resolve_gammas(args)[0]
     cfg = {
                                                                        # Core PPO
         "env": f"cs2-{map_name}",
@@ -339,14 +338,6 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "seed": args.seed,
         "total_timesteps": raw_timesteps,
         "participating_timesteps": args.timesteps,
-        "n_active_per_team": n_active,
-        "pin_pitch": knobs["pin_pitch"],
-        "crouch_enabled": knobs["crouch_enabled"],
-                                                                       # Rung 1a T2b: provenance for --jump-enabled. Like the other Rung 0
-                                                                       # knobs it is NOT allowlisted for --resume-run (a run that masks
-                                                                       # jump is a different experiment) and adding it shifts
-                                                                       # exp_lib.behavior_hash for all future runs — recorded decision.
-        "jump_enabled": knobs["jump_enabled"],
                                                                        # Rung 1a T3: "self" (both teams learn) or "noop" (statue opponent —
                                                                        # hero-team-only participation AND budget, see raw_timesteps above).
                                                                        # NOT a make_puffer_env knob: the statue is enforced trainer-side, in
@@ -355,7 +346,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
                                                                        # experiment.
         "opponent": opponent,
                                                                        # R0-G: recorded as given (None ⇒ env default), read from args
-                                                                       # directly so None survives — env_knobs_from_args drops None keys.
+                                                                       # directly under their CLI names — env_cfg renames and coerces.
         **{
             a: getattr(args, a, None)
             for a, _ in _R0G_KNOBS
@@ -376,7 +367,6 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "update_epochs": 3,
         "learning_rate": 3e-4,
         "gamma": gamma,
-        "pbrs_gamma": pbrs_gamma,                                      # R0-J: provenance; not allowlisted for --resume-run
         "gae_lambda": 0.95,
         "clip_coef": 0.15,
         "vf_coef": 0.5,
@@ -424,69 +414,188 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "warmstart_grace_steps": ws_grace,
         "warmstart_ramp_steps": ws_ramp,
         "warmstart_alpha_ceiling": ws_alpha_ceil,
-        "reward_symmetrize": reward_symmetrize,
         "tag_diagnostic": tag_diagnostic,
         "tag_every": tag_every,
         "tct_split_heads": tct_split_heads,
         "tct_split_trunk": tct_split_trunk,
     }
 
-    # ── Reward wiring: 23 make_env weights, verbatim key names ──
-    # (grouped + annotated on REWARD_WEIGHT_DEFAULTS, the single source of
-    # truth). Merged via an explicit collision check rather than a trailing
-    # `**reward_weights` splat: a splat in last position would SILENTLY
-    # overwrite an existing config key if someone ever adds a make_env weight
-    # named like one of the keys above, and the resulting config would look
-    # perfectly well-formed. This assert is the only thing that actually
-    # catches that — the pin test compares against make_env's signature and
-    # would not notice a collision on this side. Key order does not matter:
-    # every config.json / fingerprint dump uses sort_keys=True.
-    assert not (cfg.keys() & reward_weights.keys()), (
-        "reward weight name collides with an existing config key: "
-        f"{sorted(cfg.keys() & reward_weights.keys())}")
-    cfg.update(reward_weights)
+    # ── Env provenance: 23 weights + 6 knobs, verbatim key names ──
+    # EnvConfig.to_config_dict() is the single declaration of what config.json
+    # records about the env (spec 2026-09-03 §2.1): the 23 weights plus
+    # pbrs_gamma, reward_symmetrize, n_active_per_team, pin_pitch,
+    # crouch_enabled and jump_enabled. The R0-G trio is NOT in it — those are
+    # recorded above under their CLI names so a None survives as None.
+    # None of these keys is in RESUME_CONFIG_ALLOWLIST: a run with different
+    # weights, a different roster or a different PBRS discount is a different
+    # experiment. Adding or removing one shifts exp_lib.behavior_hash for every
+    # future run.
+    # Merged via an explicit collision check rather than a trailing splat: a
+    # splat in last position would SILENTLY overwrite an existing config key if
+    # a weight were ever named like one of the keys above, and the result would
+    # look perfectly well-formed. Key order does not matter — every config.json
+    # dump uses sort_keys=True.
+    env_keys = env_cfg.to_config_dict()
+    assert not (cfg.keys() & env_keys.keys()), (
+        "env config key collides with an existing config key: "
+        f"{sorted(cfg.keys() & env_keys.keys())}")
+    cfg.update(env_keys)
     return cfg
 
 
-def env_knobs_from_args(args) -> dict:
-    """Non-weight env knobs (Rung 0) as make_puffer_env kwargs.
+# Knobs whose CLI dest IS the field name. Hand-written on purpose, and paired
+# with train_shared._R0G_KNOBS (which maps DIFFERENT names, e.g.
+# --round-time-ticks → round_time): together they are the CLI-name ↔ field-name
+# map, and tests/test_env_knobs.py::test_args_knob_coverage_is_exhaustive asserts
+# the two cover every EnvConfig knob except pbrs_gamma (resolved through
+# resolve_gammas) and recoil (no flag). Kept separate from _R0G_KNOBS so the
+# R0-G "None is the stored value" rule is never applied to a flag knob.
+_ARGS_KNOB_FIELDS = ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled",
+                     "reward_symmetrize")
 
-    WHY one helper: build_train_config (provenance), build_train_env_factory
-    (the envs) and train()'s participating-row vector must all read the same
-    values; a second copy of these getattr defaults would be the next
-    silent-baseline bug (the class of bug build_train_env_factory exists to
-    prevent for reward weights). getattr defaults keep harness/dump-config
-    args objects — which predate these flags — working.
+
+def env_config_from_args(args) -> EnvConfig:
+    """The single args → EnvConfig resolver (spec 2026-09-03 §2.3, Phase B R3).
+
+    WHAT: reads the 23 reward flags, the five flag knobs, the R0-G trio and
+    pbrs_gamma off `args` and returns one frozen EnvConfig. Replaces
+    env_knobs_from_args + reward_overrides_from_args, whose two dicts had to be
+    kept in step by hand.
+
+    WHY NO DEFAULT IS RESTATED HERE: every absent flag is reached by OMISSION —
+    `getattr(args, name, UNSET)` and then simply not passing it — so the field
+    default in env_config.py is the only declaration of the value. Spelling a
+    fallback as `getattr(args, "<knob>", <the field default>)` instead would put
+    a second copy of six defaults in this file, which is the duplication #165
+    exists to remove and which tests/test_no_restated_env_defaults.py fails on.
+    That probe reads PROSE as well as code, so this paragraph names no value
+    either.
+
+    PITFALL: the getattr fallbacks are load-bearing for harness / --dump-config
+    args objects that predate these flags; do not tighten them to attribute
+    access.
+
+    R0-G (round_time / laser_range / max_turn_speed): read as `None` and STORED
+    as None — None means "the nav.py constant", resolved inside Cs2Env, and
+    config.json records None rather than a copied constant that would drift.
+
+    R0-J: pbrs_gamma is ALWAYS resolved through resolve_gammas, never omitted —
+    the field default (0.999) would silently disagree with a non-default --gamma.
+
+    `recoil` is deliberately never read: there is no CLI flag, and inventing one
+    here would be new behaviour (tests/test_recoil.py pins that).
+    """
+    weights = {}
+    for name in REWARD_FIELDS:
+        v = getattr(args, name, UNSET)
+        if v is not UNSET:
+            weights[name] = v
+    knobs = {}
+    # The historical `or 0` on pin_pitch is subsumed, not dropped: on the CLI
+    # that flag stays None until train() resolves it from map flatness, and
+    # EnvConfig.__post_init__ runs every flag knob through int(bool(...)), which
+    # maps that None to the same value `or 0` produced.
+    for name in _ARGS_KNOB_FIELDS:
+        v = getattr(args, name, UNSET)
+        if v is not UNSET:
+            knobs[name] = v
+    knobs["pbrs_gamma"] = resolve_gammas(args)[1]
+    for arg_name, field_name in _R0G_KNOBS:
+        knobs[field_name] = getattr(args, arg_name, None)
+    return EnvConfig(rewards=RewardWeights(**weights), **knobs)
+
+
+def reward_overrides_from_args(args) -> dict:
+    """DEPRECATED derived wrapper: the 23 weights as a dict, from env_config_from_args.
+
+    WHY IT STILL EXISTS: its last readers (build_train_env_factory, train()'s
+    eval site, tests/test_env_factory_mp.py) move to EnvConfig in PR B2, and
+    deleting the name here would make this commit red for the sake of one PR
+    boundary. It is DERIVED, so it cannot drift from the resolver.
+
+    WHY IT LIVES IN THIS FILE and not in train_shared, where it was born: it now
+    calls env_config_from_args, which is defined here, and train_config already
+    imports train_shared — a wrapper left over there would close a module cycle.
+    Every caller reaches it through `train`, so the move is invisible to them.
+
+    NARROWINGS (disclosed; none is reachable from argv, because every --reward-*
+    flag is type=float — a hand-built Namespace is the only way in):
+      1. String and bool weights are now ValueErrors. The old body was
+         `float(getattr(args, k, d))`, so a sweep file's string weight and a
+         `True` both became floats; RewardWeights requires a non-bool Real.
+      2. This helper now builds a whole EnvConfig, so it also validates the
+         KNOBS: a bad n_active_per_team raises from here, not only from
+         env_knobs_from_args.
+      3. It now runs resolve_gammas, so an out-of-range --gamma or --pbrs-gamma
+         raises on the reward path too, and the "PBRS shaping is no longer
+         policy-invariant" warning can print from one more call site. No test
+         asserts on that line.
+    """
+    return env_config_from_args(args).rewards.as_dict()
+
+
+def env_knobs_from_args(args) -> dict:
+    """DEPRECATED derived wrapper: the non-weight knobs as make_puffer_env kwargs.
+
+    WHY IT STILL EXISTS: same reason as reward_overrides_from_args above — its
+    last readers (build_train_env_factory, train()'s row vector and eval site,
+    tests/) move to EnvConfig in PR B2. Being DERIVED, it cannot drift from
+    env_config_from_args; the KEY SET and the values are what they were.
 
     PITFALL: this returns make_puffer_env KWARG names, not config keys. It is
     splatted straight into make_puffer_env(**env_knobs); renaming a key here
     without renaming the parameter there raises TypeError inside a forked
-    vecenv worker, far from the mistake.
+    vecenv worker, far from the mistake. The R0-G pairs happen to spell the
+    kwarg and the EnvConfig field the same way, which is why one loop serves
+    both — that is a coincidence of naming, not a rule to rely on.
 
-    R0-G knobs (round_time_ticks → round_time, laser_range, max_turn_speed):
+    R0-G knobs (round_time_ticks -> round_time, laser_range, max_turn_speed):
     None-valued ones are OMITTED from the dict rather than forwarded as None,
     so the env's own nav.py default applies and config.json records None
     instead of a duplicated constant that would silently drift from nav.py.
 
     R0-J: ``pbrs_gamma`` is ALWAYS present (resolved via resolve_gammas, so it
     equals the training gamma unless --pbrs-gamma was given). Unlike the R0-G
-    knobs it is never omitted: the env default (cs2_env.py 0.999) would
-    silently disagree with a non-default --gamma.
+    knobs it is never omitted: the env default would silently disagree with a
+    non-default --gamma.
+
+    NARROWINGS (disclosed; none is reachable from argv — the flags are type=int
+    and type=float — so a hand-built Namespace is the only way in):
+      1. A non-integral n_active_per_team now RAISES where today's int(...)
+         truncated it (parent spec 2.3). It arrives one commit before this
+         helper is deleted.
+      2. This helper now builds a whole EnvConfig, so it also validates the
+         WEIGHTS: a NaN weight raises from here, not only from
+         reward_overrides_from_args.
+      3. All three R0-G values are COERCED, not forwarded verbatim, and all
+         three gained a validated domain the old helper did not enforce.
+         round_time comes back an int (a float tick count that is integral is
+         accepted and narrowed; a non-integral one raises "must be an integer
+         tick count"), laser_range and max_turn_speed come back as floats, and
+         each of the three rejects a value <= 0 with "must be > 0" — which for
+         the two float knobs also catches NaN. round_time IS set on this
+         branch — dump_config_pre_165.json's non_default arm and four capture
+         scenarios in env_config_pre_165b.json (roles.train[0, 2],
+         roles.eval[1, 2]) all pass --round-time-ticks 900 — but 900 is
+         integral and positive, so it exercises neither the float -> int
+         narrowing nor any domain rejection, and laser_range and max_turn_speed
+         are null in all three B1 fixtures: nothing on this branch gates any of
+         the new behaviour.
+      4. pin_pitch / crouch_enabled / jump_enabled are now normalised through
+         int(bool(...)) instead of int(...), so a value outside {0, 1} comes
+         back as 1 rather than itself. argparse gives all three choices=(0, 1);
+         gh#175 tracks that normalisation for the dataclass as a whole.
     """
+    cfg = env_config_from_args(args)
     knobs = {
-        "n_active_per_team": int(getattr(args, "n_active_per_team", TEAM_SIZE)),
-                                                                                 # R0-E.2: `or 0` — args.pin_pitch is None on the CLI until train()
-                                                                                 # resolves it from map flatness (see the pin_pitch block in train()).
-        "pin_pitch": int(getattr(args, "pin_pitch", 0) or 0),
-        "crouch_enabled": int(getattr(args, "crouch_enabled", 1)),
-                                                                                 # Rung 1a T2b: same shape as crouch_enabled — always present (1 =
-                                                                                 # today's env), never omitted, so a legacy args object cannot
-                                                                                 # silently leave the env on a different jump setting than config.json.
-        "jump_enabled": int(getattr(args, "jump_enabled", 1)),
-        "pbrs_gamma": resolve_gammas(args)[1],
+        "n_active_per_team": cfg.n_active_per_team,
+        "pin_pitch": cfg.pin_pitch,
+        "crouch_enabled": cfg.crouch_enabled,
+        "jump_enabled": cfg.jump_enabled,
+        "pbrs_gamma": cfg.pbrs_gamma,
     }
-    for arg_name, env_name in _R0G_KNOBS:
-        v = getattr(args, arg_name, None)
+    for _, field_name in _R0G_KNOBS:
+        v = getattr(cfg, field_name)
         if v is not None:
-            knobs[env_name] = v
+            knobs[field_name] = v
     return knobs

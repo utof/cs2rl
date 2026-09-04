@@ -148,6 +148,168 @@ def test_env_knobs_from_args_legacy_args_object():
     assert k["crouch_enabled"] == 1 and k["jump_enabled"] == 1
 
 
+def test_reward_overrides_from_args_is_the_whole_weight_dict():
+    """The sibling derived wrapper, against the DECLARATION as its oracle.
+
+    WHY THE RIGHT-HAND SIDE IS `RewardWeights()`: a wrapper that dropped or
+    misspelled a key is invisible to every other check on this branch. The env
+    would simply fall back to that same field default, while config.json —
+    built from EnvConfig — recorded the flagged value, so the run would train
+    on one number and be provenanced with another. Comparing the helper against
+    itself (or feeding a captured override dict back in as an INPUT) cannot see
+    that: both sides move together.
+
+    The second half is the knock-out for the first. An implementation that
+    ignored `args` entirely and returned the field defaults verbatim satisfies
+    the equality above, so a flagged weight must also arrive — off-default on
+    purpose, or the assertion would hold for a resolver that never reads args.
+
+    PR B2 deletes the helper and this test with it.
+    """
+    from argparse import Namespace
+
+    from env_config import RewardWeights
+    from train import reward_overrides_from_args
+    declared = RewardWeights().as_dict()
+    assert reward_overrides_from_args(Namespace()) == declared
+    flagged = reward_overrides_from_args(Namespace(reward_ct_survival=0.0))
+    assert flagged.keys() == declared.keys(), "a flagged run must carry all 23 weights"
+    assert flagged["reward_ct_survival"] == 0.0 != declared["reward_ct_survival"]
+
+
+def test_env_config_from_args_reads_every_channel():
+    """args → EnvConfig: weights, flag knobs, the R0-G trio and pbrs_gamma.
+
+    One test over all four channels on purpose: they are read by four different
+    mechanisms (REWARD_FIELDS loop, _ARGS_KNOB_FIELDS loop, _R0G_KNOBS pairs,
+    resolve_gammas) and a per-channel test would let a whole mechanism go
+    missing while its neighbours stayed green.
+    """
+    import types
+
+    from env_config import EnvConfig
+    from train import env_config_from_args
+    args = types.SimpleNamespace(reward_ct_survival=0.0,
+                                 pbrs_nav_weight_t=0.07,
+                                 n_active_per_team=1,
+                                 pin_pitch=1,
+                                 crouch_enabled=0,
+                                 jump_enabled=0,
+                                 reward_symmetrize=True,
+                                 round_time_ticks=160,
+                                 laser_range=300.0,
+                                 max_turn_speed=None,
+                                 gamma=0.999,
+                                 pbrs_gamma=None)
+    cfg = env_config_from_args(args)
+    assert isinstance(cfg, EnvConfig)
+    assert cfg.rewards.reward_ct_survival == 0.0 and cfg.rewards.pbrs_nav_weight_t == 0.07
+    assert cfg.rewards.reward_kill == 0.3, "an unflagged weight must keep its field default"
+    assert (cfg.n_active_per_team, cfg.pin_pitch, cfg.crouch_enabled, cfg.jump_enabled) == (1, 1, 0,
+                                                                                            0)
+    assert cfg.reward_symmetrize is True
+    assert cfg.round_time == 160 and cfg.laser_range == 300.0 and cfg.max_turn_speed is None
+    assert cfg.pbrs_gamma == 0.999, "R0-J: pbrs_gamma follows gamma when --pbrs-gamma is absent"
+
+
+def test_env_config_from_args_pbrs_gamma_follows_gamma_unless_overridden():
+    """R0-J in both directions: --gamma carries into pbrs_gamma, --pbrs-gamma wins.
+
+    Kept apart from test_env_config_from_args_reads_every_channel because that
+    namespace is checked channel-by-channel against the dataclass defaults, so
+    its gamma equals the pbrs_gamma field default and its pbrs_gamma assertion
+    holds even for a resolver that never consults gamma at all. Here both probe
+    values sit off the field default, so the first case goes red for a resolver
+    that drops the gamma fallback and the second goes red for one that ignores
+    an explicit --pbrs-gamma. Neither can be satisfied by the field default.
+
+    WHY THIS EARNS ITS OWN TEST: PBRS is only policy-invariant (Ng et al.) when
+    the shaping discount equals the PPO discount, so a --gamma that failed to
+    reach the env would mis-shape an entire run with nothing in the logs to say
+    so. The precedence itself lives in resolve_gammas — this pins that
+    env_config_from_args keeps delegating to it rather than inventing a rule.
+    """
+    import types
+
+    from env_config import EnvConfig
+    from train import env_config_from_args
+    field_default = EnvConfig().pbrs_gamma
+    carried, explicit = 0.97, 0.95
+    # Both probe values must sit off the field default, or a resolver that never
+    # reads args at all would satisfy the assertions below.
+    assert carried != field_default and explicit != field_default
+    cfg = env_config_from_args(types.SimpleNamespace(gamma=carried, pbrs_gamma=None))
+    assert cfg.pbrs_gamma == carried, "R0-J: pbrs_gamma follows gamma when --pbrs-gamma is absent"
+    cfg = env_config_from_args(types.SimpleNamespace(gamma=carried, pbrs_gamma=explicit))
+    assert cfg.pbrs_gamma == explicit, "an explicit --pbrs-gamma must win over --gamma"
+
+
+def test_env_config_from_args_on_a_bare_namespace_is_the_default_config():
+    """Harness / dump-config namespaces predate every flag: all defaults, by OMISSION.
+
+    This is the "unflagged run is today's env" guarantee at the parse layer. It
+    is spelled as equality against `EnvConfig()` rather than field-by-field so a
+    knob added to the dataclass without a reading rule fails here.
+    """
+    import types
+
+    from env_config import EnvConfig
+    from train import env_config_from_args
+    assert env_config_from_args(types.SimpleNamespace()) == EnvConfig()
+
+
+def test_env_config_from_args_coerces_and_rejects_weights():
+    """int in, float out; nan/inf out, naming the key.
+
+    argparse's type=float accepts "nan" and "inf" happily, and a NaN weight
+    surfaces hours into a run as a NaN loss with no provenance — so it must die
+    at parse time, naming the knob. (Moved here from test_reward_weight_wiring.py
+    when reward_overrides_from_args stopped being the funnel.)
+    """
+    import types
+
+    import pytest as _pytest
+
+    from train import env_config_from_args
+    cfg = env_config_from_args(types.SimpleNamespace(reward_kill=1))   # int on purpose
+    assert type(cfg.rewards.reward_kill) is float and cfg.rewards.reward_kill == 1.0
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with _pytest.raises(ValueError, match="reward_kill"):
+            env_config_from_args(types.SimpleNamespace(reward_kill=bad))
+
+
+def test_env_config_from_args_takes_exactly_one_positional_parameter():
+    """§8.5 gate (f) / spec §6 criterion 2's B1 third: one parameter, no modes.
+
+    R3's whole claim is that there is ONE args → EnvConfig rule. A later
+    `def env_config_from_args(args, *, strict=False)` would give the resolver a
+    second mode, and every existing caller would keep passing — nothing else in
+    the suite looks at this signature, so the drift would be invisible.
+    """
+    import inspect
+
+    from train_config import env_config_from_args
+    params = list(inspect.signature(env_config_from_args).parameters.values())
+    assert [p.name for p in params] == ["args"]
+    assert params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+
+
+def test_args_knob_coverage_is_exhaustive():
+    """Every EnvConfig knob has a decided route from args — or this fails.
+
+    _ARGS_KNOB_FIELDS and _R0G_KNOBS are hand-written (they are the CLI-name ↔
+    field-name map), so an eleventh knob added to EnvConfig would otherwise be
+    silently unreachable from the CLI and every run would keep its default with
+    the whole suite green. `recoil` is listed as deliberately unreachable: there
+    is no flag and reading one would be new behaviour.
+    """
+    from env_config import KNOB_FIELDS
+    from train_config import _ARGS_KNOB_FIELDS
+    from train_shared import _R0G_KNOBS
+    routed = set(_ARGS_KNOB_FIELDS) | {f for _, f in _R0G_KNOBS} | {"pbrs_gamma", "recoil"}
+    assert routed == set(KNOB_FIELDS)
+
+
 def test_make_puffer_env_forwards_knobs(simple_map):
     import binding
 
@@ -247,7 +409,11 @@ def test_stance_flags_declared_default_on():
     They are NOT default=None like the R0-G knobs: there is no "env decides"
     value for a mask bit, and a default of 0 would silently mask the action for
     every run that never asked for the Rung 1a diagnostic. Same source-scan
-    reason as above (the parser is not importable)."""
+    reason as above (the parser is not importable).
+
+    The default is read from `EnvConfig()` (bound once as `_ENV_DEFAULTS` above
+    the parser) rather than written as `1`, so the flag and the env cannot
+    drift; R11's argparse probe is what enforces that direction."""
     import re
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
@@ -256,4 +422,4 @@ def test_stance_flags_declared_default_on():
         assert m, flag
         body = m.group(1)
         assert "type=int" in body and "choices=(0, 1)" in body, flag
-        assert "default=1" in body and f'dest="{dest}"' in body, flag
+        assert f"default=_ENV_DEFAULTS.{dest}" in body and f'dest="{dest}"' in body, flag

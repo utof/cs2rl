@@ -30,11 +30,6 @@ import numpy as np
 
 from _action_spec import ACTION_HEAD_SIZES
 
-# env_config is stdlib-only (its own IMPORT BUDGET docstring says so), so importing it
-# at module level here keeps this leaf light — the invariant tests/test_w1_modules.py
-# enforces in a fresh interpreter. Do not move it below into a function.
-from env_config import RewardWeights
-
 # Agents per team. A bare literal ON PURPOSE, for the same class of reason as
 # train.py's OBS_DIM: this leaf and train.py must both stay import-light
 # (`--dump-config` guarantees no torch/nav import — see
@@ -147,57 +142,6 @@ def _apply_action_masks(logits_list, mask):
     return masked
 
 
-# Reward weights (spec 2026-08-01 §4.2 → spec 2026-09-03 §2.3). Config key ==
-# make_env legacy kwarg == CLI flag (dashes). DERIVED from env_config.RewardWeights,
-# the single declaration; this dict exists so that the CLI loop, build_train_config
-# and the pin tests keep their current spelling until Phase B deletes it. Nothing
-# is duplicated any more, so there is no drift to pin — which is why the three
-# signature-introspection tests in test_reward_weight_wiring.py were deleted in
-# #165 Phase A.
-#
-# Six of the 23 do not start with `reward_` (the pbrs_* group), so any code that
-# discovers weights by scanning for a `reward_` prefix is wrong by construction.
-#
-# PITFALL: do NOT "clean up" a value here or in env_config.RewardWeights. These
-# defaults ARE the trained baseline; an unflagged run must stay byte-identical to
-# the pre-wiring env.
-#
-# Deliberately NOT threaded here: pbrs_gamma (threaded as a non-weight knob by
-# env_knobs_from_args via resolve_gammas, R0-J), team_spirit (config-threaded
-# separately), include_step_stats_in_info (issue #100, out of scope).
-REWARD_WEIGHT_DEFAULTS = RewardWeights().as_dict()
-
-
-def reward_overrides_from_args(args) -> dict:
-    """Build the env-side reward-weight override dict from parsed args.
-
-    WHAT: {kwarg_name: float} for all 23 weights, taking the CLI value when
-    present and the make_env default otherwise.
-
-    WHY a shared helper: build_train_config (provenance) and train()'s env
-    factory (behavior) MUST agree exactly. train_config is not available at
-    env-construction time — it is built after pufferlib.vector.make — so both
-    call sites derive from this one function instead.
-
-    PITFALL: the getattr fallbacks are load-bearing for harness/dump-config
-    args objects that predate these flags; do not tighten them to attribute
-    access.
-
-    PITFALL: argparse's type=float accepts "nan"/"inf", so the finiteness
-    check belongs here — the one funnel both call sites pass through. A NaN
-    weight otherwise surfaces hours into a run as a NaN loss with no clue
-    which knob produced it, so raise at startup and name the key.
-    """
-    overrides = {}
-    for k, d in REWARD_WEIGHT_DEFAULTS.items():
-        v = float(getattr(args, k, d))
-        if not math.isfinite(v):
-            raise ValueError(f"reward weight {k}={v} is not finite; "
-                             "pass a real number (this would poison the loss silently)")
-        overrides[k] = v
-    return overrides
-
-
 def _atomic_save_state_dict(state_dict, path):
     """torch.save via sibling .tmp + os.replace so a crash never corrupts ``path``.
 
@@ -260,11 +204,13 @@ def resolve_gammas(args) -> tuple[float, float]:
     dump-config args objects that predate the flag); ``pbrs_gamma`` is
     ``args.pbrs_gamma`` when given, else ``gamma``.
 
-    WHY one helper: build_train_config (provenance + the PPO discount) and
-    env_knobs_from_args (the env's PBRS discount) must agree on the SAME
-    resolution rule — PBRS is only policy-invariant (Ng et al.) when
+    WHY one helper: its two callers, build_train_config (provenance + the PPO
+    discount) and env_config_from_args (the env's PBRS discount, which
+    env_knobs_from_args then reads back off the EnvConfig), must agree on the
+    SAME resolution rule — PBRS is only policy-invariant (Ng et al.) when
     γ_pbrs == γ, and before R0-J the two lived as unrelated literals (train.py
-    0.999 vs cs2_env.py 0.999) held together by a single drift test.
+    0.999 vs cs2_env.py 0.999, now one field default in env_config.py) held
+    together by a single drift test.
     ``--pbrs-gamma`` exists ONLY for experiments that deliberately break the
     pairing; a run that omits it always gets γ_pbrs = γ.
 

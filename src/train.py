@@ -44,6 +44,7 @@ from _action_spec import (
     ACTION_MASK_DIM,
     AIM_DIM,
 )
+from env_config import REWARD_FIELDS, EnvConfig, RewardWeights
 from env_factory import build_env_for, build_selfplay_manager
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from resume_state import (
@@ -65,8 +66,10 @@ from train_config import (
     build_participating_rows,
     build_train_config,
     compute_batch_dims,
+    env_config_from_args,
     env_knobs_from_args,
     resolve_opponent_mode,
+    reward_overrides_from_args,
     validate_aim_log_std_max,
 )
 from train_metrics import (
@@ -91,14 +94,12 @@ from train_shared import (
     LOG_STD_MAX,
     LOG_STD_MIN,
     RESUME_CONFIG_ALLOWLIST,
-    REWARD_WEIGHT_DEFAULTS,
     TEAM_SIZE,
     _apply_action_masks,
     _atomic_save_state_dict,
     pin_pitch_for_map,
     resolve_aim_log_std_init,
     resolve_gammas,
-    reward_overrides_from_args,
 )
 from train_update import (
     _aim_dim_weight,
@@ -129,9 +130,9 @@ from train_update import (
 # resolve through THAT module's globals and never see the patch, so such a test passes
 # while asserting nothing. Patch the defining module (see tests/test_tag_trainer.py).
 # PLACEMENT IS LOAD-BEARING, not an isort accident: train.py's own module body READS
-# moved names while it executes — `REWARD_WEIGHT_KEYS = tuple(REWARD_WEIGHT_DEFAULTS)`,
-# make_puffer_env's `n_active_per_team=TEAM_SIZE` default, and eight more inside
-# `if __name__ == "__main__":` (the argparse defaults/choices and the four main() calls).
+# moved names while it executes — make_puffer_env's `n_active_per_team=TEAM_SIZE`
+# default, and eight more inside `if __name__ == "__main__":` (the argparse
+# defaults/choices and the four main() calls).
 # Every one of those sits BELOW this block and would NameError at import time if the
 # shims were moved down.
 __all__ = (
@@ -145,7 +146,6 @@ __all__ = (
     "LOG_STD_MIN",
     "OPPONENT_MODES",
     "RESUME_CONFIG_ALLOWLIST",
-    "REWARD_WEIGHT_DEFAULTS",
     "ScheduledEval",
     "TEAM_SIZE",
     "_LOG_2PI",
@@ -175,6 +175,7 @@ __all__ = (
     "compute_head_divergence",
     "compute_network_health",
     "compute_trunk_divergence",
+    "env_config_from_args",
     "env_knobs_from_args",
     "load_full_resume",
     "log_aim_log_std",
@@ -566,11 +567,6 @@ def resolve_resume_split(resume_path, *, heads_flag, trunk_flag, map_location="c
     return heads, trunk, state_dict, resume_path
 
 
-# The dict this reads (and its "single wiring source of truth" rationale) now
-# lives in src/train_shared.py; only this derived tuple stays here.
-REWARD_WEIGHT_KEYS = tuple(REWARD_WEIGHT_DEFAULTS)
-
-
 def auto_vec_workers(num_envs: int, physical_cores: int) -> int:
     """Largest worker count <= min(num_envs, physical_cores) that divides num_envs.
 
@@ -727,7 +723,7 @@ def make_puffer_env(team_spirit=None,
     the two MUST move together or PBRS loses policy-invariance.
 
     ``reward_overrides`` (spec 2026-08-01 §4.2): optional {kwarg: value} dict
-    over train.REWARD_WEIGHT_KEYS, forwarded verbatim to make_env. None
+    over env_config.REWARD_FIELDS, forwarded verbatim to make_env. None
     (default) means every weight keeps its make_env default, so all existing
     callers (eval, record, smoke, tests) are unaffected.
 
@@ -771,17 +767,17 @@ def make_puffer_env(team_spirit=None,
         # the C env, so it also re-checks value sanity — direct callers
         # (train_test_harness, future sweep scripts) can hand us a dict that
         # never passed through reward_overrides_from_args.
-        unknown = set(reward_overrides) - set(REWARD_WEIGHT_KEYS)
+        unknown = set(reward_overrides) - set(REWARD_FIELDS)
         if unknown:
             import difflib
             hints = []
             for key in sorted(unknown):
-                near = difflib.get_close_matches(key, REWARD_WEIGHT_KEYS, n=1)
+                near = difflib.get_close_matches(key, REWARD_FIELDS, n=1)
                 if near:
                     hints.append(f"{key!r} — did you mean --{near[0].replace('_', '-')}?")
             raise ValueError(f"unknown reward override keys: {sorted(unknown)}. " +
                              (" ".join(hints) + " " if hints else "") +
-                             f"Valid keys: {sorted(REWARD_WEIGHT_KEYS)}. Non-weight env knobs "
+                             f"Valid keys: {sorted(REWARD_FIELDS)}. Non-weight env knobs "
                              "(pbrs_gamma, reward_symmetrize) are NOT overrides — they have "
                              "dedicated make_puffer_env parameters.")
         for key, val in reward_overrides.items():
@@ -3971,6 +3967,12 @@ if __name__ == "__main__":
     # call, True inside it).
     sys.modules.setdefault("train", sys.modules["__main__"])
 
+    # The env's own defaults, read from the dataclass that declares them, so the
+    # CLI cannot drift from the env (spec 2026-09-03 R11). Bound once here rather
+    # than per-flag: three flags below read it, and a second EnvConfig() would be
+    # a second place to look when a default changes.
+    _ENV_DEFAULTS = EnvConfig()
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dust2",
@@ -4073,7 +4075,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n-active-per-team",
                         type=int,
-                        default=5,
+                        default=_ENV_DEFAULTS.n_active_per_team,
                         dest="n_active_per_team",
                         help="Rung 0: agents per team that spawn; the rest are parked "
                         "(noop-masked, zero reward, excluded from every trainer statistic). "
@@ -4089,14 +4091,14 @@ if __name__ == "__main__":
     parser.add_argument("--crouch-enabled",
                         type=int,
                         choices=(0, 1),
-                        default=1,
+                        default=_ENV_DEFAULTS.crouch_enabled,
                         dest="crouch_enabled",
                         help="R0-E.2: 0 masks the crouch action (stance parity for pinned-pitch "
                         "duels; a crouched target is an unobservable guaranteed miss).")
     parser.add_argument("--jump-enabled",
                         type=int,
                         choices=(0, 1),
-                        default=1,
+                        default=_ENV_DEFAULTS.jump_enabled,
                         dest="jump_enabled",
                         help="Rung 1a: 0 masks the jump action (height parity for pinned-pitch "
                         "duels; an airborne target sits outside the 36u vertical semi-axis and "
@@ -4188,13 +4190,12 @@ if __name__ == "__main__":
                         type=float,
                         default=0.0,
                         dest="warmstart_alpha_ceiling")
-    # ── Reward weights (spec 2026-08-01 §4.2) ──
-    # Generated from REWARD_WEIGHT_DEFAULTS so flag name, dest and default can
+    # ── Reward weights (spec 2026-08-01 §4.2 → 2026-09-03 §2.3) ──
+    # Generated from RewardWeights' fields so flag name, dest and default can
     # never disagree with the config key — the dest-typo class of bug (commit
-    # 4d9dfa0) is impossible by construction here. Flag == kwarg name with
-    # dashes; default == the make_env default, so omitting a flag reproduces
-    # today's env exactly.
-    for _rw_name, _rw_default in REWARD_WEIGHT_DEFAULTS.items():
+    # 4d9dfa0) is impossible by construction. Flag == field name with dashes;
+    # default == the field default, so omitting a flag reproduces today's env.
+    for _rw_name, _rw_default in RewardWeights().as_dict().items():
         parser.add_argument(f"--{_rw_name.replace('_', '-')}",
                             type=float,
                             default=_rw_default,
