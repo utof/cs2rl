@@ -25,6 +25,13 @@ NOT SCANNED: `default=None` in argparse. In this codebase a None argparse
 default is never a copy of a field default, it is the "resolve this later"
 sentinel — from the map for --pin-pitch, from nav.py for the R0-G trio.
 
+NOT SCANNED: tests/, and widening the roots to reach it would BURY this gate
+rather than strengthen it. The line probe finds 88 hits under tests/ (measured
+2026-09-04), 30 of them in tests/test_env_config.py — the ORACLE for these very
+defaults, which must write the literals down; that is how it can tell EnvConfig()
+still returns them. A test asserting a value is the opposite of a source
+restating one, so do not "fix" this exclusion.
+
 PITFALL: prose is scanned too, deliberately. A comment that restates a number is
 a real finding — comments drift silently and are what readers trust. That cuts
 both ways: a docstring anywhere under src/ that spells a counter-example as
@@ -81,19 +88,26 @@ FIELD_DEFAULTS = {
 # exist to catch.
 ALLOWLIST = ()
 
-# Sites that are known restatements today and are removed by PR B2, each with
-# the ruling that removes it. Keyed by (file, field) and holding the expected
-# HIT COUNT — never line numbers. This file lands last in B1, after five commits
+# Sites that are known restatements today and are expected to go with PR B2's
+# rewrite. Where a B1 document assigns a ruling, the row's comment names it; the
+# four src/train_test_harness.py rows carry a description only, because NO B1
+# document assigns the harness signature to B2 or to B3.
+# Keyed by (file, field) and holding the expected HIT COUNT — never line
+# numbers. This file lands last in B1, after five commits
 # have moved code inside src/train.py, so line-keyed rows would report every
 # entry as both extra (new line) and stale (old line) on their first run and the
 # gate would fail on bookkeeping. Counts survive the churn and still bite in both
 # directions: a new restatement raises a count or adds a key, a fixed site lowers
 # one and the row must then be deleted. PR B2 deletes both dicts; PR B3 adds
 # nothing to them.
-# yapf: disable — pyproject's spaces_before_comment stops shove these standalone
-# comments out to column 71 and split every `key:` from its count onto its own
-# line, which is unreadable for the two tables a reader comes here to read.
-# Same waiver as src/map.py:335.
+# The two tables are yapf-exempt: pyproject's spaces_before_comment stops shove
+# these standalone comments out to column 71 and split every `key:` from its
+# count onto its own line, which is unreadable for the two tables a reader comes
+# here to read. Same waiver as src/map.py:335.
+# Keep the pragma the LAST physical line of this comment block. yapf reads only
+# a block's first and last line (yapf_api._DisableYAPF), so a pragma with prose
+# both above and below it is silently inert — measured 2026-09-04, `yapf --diff`
+# went 0 -> 2834 bytes when an explanatory suffix was all that was left of it.
 # yapf: disable
 PENDING_B2 = {
     # the shim's own knob defaults (2 sites for reward_symmetrize: make_puffer_env,
@@ -102,7 +116,9 @@ PENDING_B2 = {
     ("src/train.py", "pin_pitch"): 1,
     ("src/train.py", "crouch_enabled"): 1,
     ("src/train.py", "jump_enabled"): 1,
-    # _build_trainer_for_test's four annotated defaults
+    # _build_trainer_for_test's four annotated defaults. PR unassigned as of B1
+    # (B2 or B3); see the B2 plan. The row is correct either way — if B3 owns the
+    # signature the row simply survives B2 instead of being deleted with it.
     ("src/train_test_harness.py", "n_active_per_team"): 1,
     ("src/train_test_harness.py", "pin_pitch"): 1,
     ("src/train_test_harness.py", "crouch_enabled"): 1,
@@ -138,8 +154,18 @@ def _line_pattern(name, value):
     # `["']?` so dict entries match; the annotation alternation so `: int = 5`
     # matches — with `float` alone every `: int =` default is invisible, which is
     # exactly the harness signature's four knobs.
+    #
+    # The trailing `(?![\w.])` is the value's RIGHT EDGE. Without it the literal
+    # is only a prefix: `pin_pitch=0` also matched `pin_pitch=0.5`, and
+    # `crouch_enabled = 1` also matched `crouch_enabled = 100` and
+    # `jump_enabled: int = 10` — none of which restates anything, and a PENDING
+    # count can absorb one silently. The `.` inside the class costs one false
+    # negative the other way: `crouch_enabled = 1.0` is no longer read as a
+    # restatement of `1`. That trade is deliberate — a spelling nobody in this
+    # tree uses, against a wrong count nobody would notice. Adding the boundary
+    # left all three probe counts unchanged (9 / 1 / 0, same hit lines).
     return (rf'["\']?{re.escape(name)}["\']?\s*[:=]\s*'
-            rf'(?:(?:int|float|bool)\s*=\s*)?{re.escape(repr(value))}')
+            rf'(?:(?:int|float|bool)\s*=\s*)?{re.escape(repr(value))}(?![\w.])')
 
 
 def _getattr_pattern(name, value):
@@ -231,13 +257,69 @@ def test_no_argparse_default_restates_a_field_default():
     line regex, so without this probe R3 could delete a `getattr` fallback while
     argparse kept the same number one line away — the restatement moved, not
     removed.
+
+    SCOPE: every file the other two probes read, not just src/train.py. Measured
+    2026-09-04: 131 add_argument calls live in 17 of the 44 scanned files and
+    only 54 of them are in train.py. None of the other 77 names an env knob
+    today — that is the point. A probe scoped to one file reports the same 0
+    whether or not that stays true, so it could never raise the alarm on the day
+    a new parser in scripts/ copies a default.
+
+    An unparseable file FAILS here, loudly and by name, instead of being skipped:
+    a silently dropped file is the same blindness this scope fix removes, just
+    wearing a different hat.
     """
-    offenders = _argparse_default_offenders(ast.parse((SRC / "train.py").read_text()),
-                                            "src/train.py")
+    offenders = []
+    for path in _scanned_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError as exc:
+            pytest.fail(f"{rel} cannot be parsed, so this probe cannot see its add_argument "
+                        f"calls: {exc}. Fix the file — never skip it, and never quietly narrow "
+                        f"the scan to the files that happen to parse.")
+        offenders += _argparse_default_offenders(tree, rel)
     assert not offenders, ("argparse default(s) restate a field default:\n  " +
                            "\n  ".join(offenders) +
                            "\nUse `default=_ENV_DEFAULTS.<field>` (EnvConfig() bound once above "
                            "the parser).")
+
+
+def test_field_defaults_covers_every_declared_default():
+    """Vacuity guard: the value table must hold EVERY default env_config declares.
+
+    Both count probes above search for the values in FIELD_DEFAULTS and compare
+    what they find against a PENDING list. An emptied or truncated table makes
+    them find nothing — and today that is caught only as a SIDE EFFECT, because
+    the PENDING rows then go unmatched and the `stale` assert fires. PR B2
+    deletes both PENDING dicts (this file's own header schedules it), and on that
+    day "nothing is restated" and "I am looking for nothing" become the same
+    green. This assert is what tells them apart afterwards, which is why it is
+    written now rather than in B2.
+
+    Everything here is DERIVED from RewardWeights()/EnvConfig(); not one value is
+    written down. Spelling the numbers out would make this file the first
+    violation of the rule it exists to gate.
+    """
+    cfg = EnvConfig()
+    weights = RewardWeights().as_dict()
+    knobs = {k: getattr(cfg, k) for k in KNOB_FIELDS if getattr(cfg, k) is not None}
+    sentinels = {k for k in KNOB_FIELDS if getattr(cfg, k) is None}
+
+    assert weights and knobs, ("env_config declares no reward weights, or no non-None knobs. The "
+                               "dataclass changed shape and every probe in this file now guards "
+                               "nothing.")
+    missing = sorted((set(weights) | set(knobs)) - set(FIELD_DEFAULTS))
+    assert not missing, (f"FIELD_DEFAULTS does not cover {missing}. The probes cannot see a "
+                         "restatement of a field they hold no value for, and blind reads as "
+                         "green.")
+    wrong = sorted(n for n, v in {**weights, **knobs}.items() if FIELD_DEFAULTS[n] != v)
+    assert not wrong, (f"FIELD_DEFAULTS holds a value env_config no longer declares for {wrong}. "
+                       "The probes are searching the tree for the wrong number.")
+    leaked = sorted(sentinels & set(FIELD_DEFAULTS))
+    assert not leaked, (f"{leaked} are None in EnvConfig — the resolve-later sentinel, not a "
+                        "default. `x = None` restates nothing, and searching for it would flag "
+                        "every unrelated sentinel in the tree.")
 
 
 @pytest.mark.parametrize("probe", ["line", "getattr"])
@@ -248,11 +330,22 @@ def test_the_probes_can_actually_fail(probe):
     (an empty FIELD_DEFAULTS, say) makes every assertion above pass vacuously.
     This plants the two shapes in a scratch line and checks the patterns
     themselves rather than the roots.
+
+    Name and value come OUT of FIELD_DEFAULTS — KeyError the moment the table
+    stops covering the knob — so this self-test cannot keep passing against a
+    table it no longer reads. Hardcoding the literal here would also be the very
+    shape the getattr probe hunts, written inside the gate that hunts it.
     """
+    name = "crouch_enabled"
+    value = FIELD_DEFAULTS[name]
+    other = (not value) if isinstance(value, bool) else value + 1
     pattern = _line_pattern if probe == "line" else _getattr_pattern
-    line = ("crouch_enabled = 1" if probe == "line" else 'x = getattr(args, "crouch_enabled", 1)')
-    assert re.search(pattern("crouch_enabled", 1), line)
-    assert not re.search(pattern("crouch_enabled", 1), line.replace("1", "0"))
+
+    def plant(v):
+        return (f"{name} = {v!r}" if probe == "line" else f'x = getattr(args, "{name}", {v!r})')
+
+    assert re.search(pattern(name, value), plant(value))
+    assert not re.search(pattern(name, value), plant(other))
 
 
 def test_the_argparse_probe_can_actually_fail():
@@ -262,18 +355,26 @@ def test_the_argparse_probe_can_actually_fail():
     be knocked out against a parsed tree, which is why the walk lives in a
     helper. Positive, negative and the None-sentinel branch, so "reports 0" is a
     measurement rather than an assumption.
+
+    The planted default is READ from FIELD_DEFAULTS, for both reasons the other
+    knock-out gives: a hardcoded literal would keep this test green against a
+    table the probes no longer populate, and `default=<literal>` typed out here
+    is precisely the shape this probe exists to catch.
     """
-    planted = textwrap.dedent("""
-        parser.add_argument("--crouch-enabled", dest="crouch_enabled", default=1)
+    name = "crouch_enabled"
+    value = FIELD_DEFAULTS[name]
+    flag = "--" + name.replace("_", "-")
+    planted = textwrap.dedent(f"""
+        parser.add_argument("{flag}", dest="{name}", default={value!r})
         """)
-    derived = textwrap.dedent("""
-        parser.add_argument("--crouch-enabled", dest="crouch_enabled",
-                            default=_ENV_DEFAULTS.crouch_enabled)
+    derived = textwrap.dedent(f"""
+        parser.add_argument("{flag}", dest="{name}",
+                            default=_ENV_DEFAULTS.{name})
         """)
     sentinel = textwrap.dedent("""
         parser.add_argument("--pin-pitch", dest="pin_pitch", default=None)
         """)
     assert _argparse_default_offenders(ast.parse(planted),
-                                       "<planted>") == ["<planted>:2  --crouch_enabled default=1"]
+                                       "<planted>") == [f"<planted>:2  --{name} default={value!r}"]
     assert _argparse_default_offenders(ast.parse(derived), "<derived>") == []
     assert _argparse_default_offenders(ast.parse(sentinel), "<sentinel>") == []
