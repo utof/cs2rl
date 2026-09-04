@@ -183,6 +183,38 @@ def test_env_config_from_args_reads_every_channel():
     assert cfg.pbrs_gamma == 0.999, "R0-J: pbrs_gamma follows gamma when --pbrs-gamma is absent"
 
 
+def test_env_config_from_args_pbrs_gamma_follows_gamma_unless_overridden():
+    """R0-J in both directions: --gamma carries into pbrs_gamma, --pbrs-gamma wins.
+
+    Kept apart from test_env_config_from_args_reads_every_channel because that
+    namespace is checked channel-by-channel against the dataclass defaults, so
+    its gamma equals the pbrs_gamma field default and its pbrs_gamma assertion
+    holds even for a resolver that never consults gamma at all. Here both probe
+    values sit off the field default, so the first case goes red for a resolver
+    that drops the gamma fallback and the second goes red for one that ignores
+    an explicit --pbrs-gamma. Neither can be satisfied by the field default.
+
+    WHY THIS EARNS ITS OWN TEST: PBRS is only policy-invariant (Ng et al.) when
+    the shaping discount equals the PPO discount, so a --gamma that failed to
+    reach the env would mis-shape an entire run with nothing in the logs to say
+    so. The precedence itself lives in resolve_gammas — this pins that
+    env_config_from_args keeps delegating to it rather than inventing a rule.
+    """
+    import types
+
+    from env_config import EnvConfig
+    from train import env_config_from_args
+    field_default = EnvConfig().pbrs_gamma
+    carried, explicit = 0.97, 0.95
+    # Both probe values must sit off the field default, or a resolver that never
+    # reads args at all would satisfy the assertions below.
+    assert carried != field_default and explicit != field_default
+    cfg = env_config_from_args(types.SimpleNamespace(gamma=carried, pbrs_gamma=None))
+    assert cfg.pbrs_gamma == carried, "R0-J: pbrs_gamma follows gamma when --pbrs-gamma is absent"
+    cfg = env_config_from_args(types.SimpleNamespace(gamma=carried, pbrs_gamma=explicit))
+    assert cfg.pbrs_gamma == explicit, "an explicit --pbrs-gamma must win over --gamma"
+
+
 def test_env_config_from_args_on_a_bare_namespace_is_the_default_config():
     """Harness / dump-config namespaces predate every flag: all defaults, by OMISSION.
 
