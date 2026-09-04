@@ -15,10 +15,10 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
+import dataclasses
 import json
 import math
 import multiprocessing as mp
-import numbers
 import random
 import sys
 import time
@@ -44,7 +44,7 @@ from _action_spec import (
     ACTION_MASK_DIM,
     AIM_DIM,
 )
-from env_config import REWARD_FIELDS, EnvConfig, RewardWeights
+from env_config import EnvConfig, RewardWeights
 from env_factory import build_env_for, build_selfplay_manager
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from resume_state import (
@@ -67,9 +67,7 @@ from train_config import (
     build_train_config,
     compute_batch_dims,
     env_config_from_args,
-    env_knobs_from_args,
     resolve_opponent_mode,
-    reward_overrides_from_args,
     validate_aim_log_std_max,
 )
 from train_metrics import (
@@ -130,11 +128,32 @@ from train_update import (
 # resolve through THAT module's globals and never see the patch, so such a test passes
 # while asserting nothing. Patch the defining module (see tests/test_tag_trainer.py).
 # PLACEMENT IS LOAD-BEARING, not an isort accident: train.py's own module body READS
-# moved names while it executes — make_puffer_env's `n_active_per_team=TEAM_SIZE`
-# default, and eight more inside `if __name__ == "__main__":` (the argparse
-# defaults/choices and the four main() calls).
-# Every one of those sits BELOW this block and would NameError at import time if the
-# shims were moved down.
+# moved names while it executes. SEVEN such reads, measured 2026-09-04, and ALL of
+# them now sit inside `if __name__ == "__main__":` — three argparse defaults and
+# choices (DEFAULT_CHECKPOINT_INTERVAL, OPPONENT_MODES, DEFAULT_GAMMA) and four
+# calls (validate_aim_log_std_max, assert_opponent_self_play_compatible,
+# compute_batch_dims, build_train_config). WHAT THE NUMBER COUNTS, so the next
+# reader can re-derive it rather than trust it: `ast.Name` loads of a
+# shim-imported name reachable from a module-level statement, counting `def`
+# default expressions (they DO execute at import) and not function bodies (they
+# do not). #165 PR B2 deleted the one read outside the __main__ block —
+# make_puffer_env's `n_active_per_team=TEAM_SIZE` default — so this comment no
+# longer cites it.
+# Every one of those sits BELOW this block, so moving the shims below the
+# __main__ block breaks every real launch — and ONLY a real launch, now that no
+# read is left outside it. Measured by doing it: `import train` still succeeds,
+# while `python src/train.py --help` dies in its own argparse setup with
+# `NameError: name 'DEFAULT_CHECKPOINT_INTERVAL' is not defined`. The SUITE DOES
+# catch that, so this comment is not standing in for a missing test: 25 tests go
+# red under exactly that move (measured 2026-09-04, whole suite, -p no:randomly),
+# and every one of the 22 functions behind them launches this file in a child
+# interpreter — 14 of the 15 in tests/test_train_cli.py, the rest in
+# tests/test_arena_duel.py, tests/test_resume_state.py, tests/test_run_rung1_sh.py,
+# tests/test_seed_reproducible.py and tests/test_w1_modules.py. The 15th
+# test_train_cli case stays green because it is a source scan — the
+# "an import-only test cannot see this" point in miniature. What the comment adds
+# is not coverage but a NAME: all 25 report a NameError inside argparse, which
+# tells you the symbol and not the rule.
 __all__ = (
     "AIM_DIM",
     "AIM_LOG_STD_CAP_MIN_HEADROOM",
@@ -176,7 +195,6 @@ __all__ = (
     "compute_network_health",
     "compute_trunk_divergence",
     "env_config_from_args",
-    "env_knobs_from_args",
     "load_full_resume",
     "log_aim_log_std",
     "masked_explained_variance",
@@ -189,7 +207,6 @@ __all__ = (
     "resolve_opponent_mode",
     "resolve_resume_run",
     "restore_train_state",
-    "reward_overrides_from_args",
     "seed_everything",
     "tag_grad_cossim",
     "validate_aim_log_std_max",
@@ -685,131 +702,73 @@ def smoke_test():
 # ── SECTION: Shared eval / record helpers ──────────────────────────────────
 
 
-def make_puffer_env(team_spirit=None,
+def make_puffer_env(config=None,
+                    *,
+                    team_spirit=None,
                     record_fn=None,
                     buf=None,
                     seed=0,
                     episode_stats=True,
                     map_data=None,
                     include_step_stats_in_info=False,
-                    pbrs_gamma=None,
-                    reward_overrides=None,
-                    reward_symmetrize=False,
-                    n_active_per_team=TEAM_SIZE,
-                    pin_pitch=0,
-                    crouch_enabled=1,
-                    jump_enabled=1,
-                    round_time=None,
-                    laser_range=None,
-                    max_turn_speed=None,
-                    auto_reset=True):
-    """Create the native C PufferEnv used by smoke/train/eval.
+                    auto_reset=True,
+                    **legacy):
+    """DEPRECATED legacy shim over `c_env.cs2_env.make_env` — see gh#173.
 
-    ``auto_reset`` (R0-I, Task 13): forwarded to make_env. The training
-    vecenv keeps the default True; the fixed-baseline evaluator passes False
-    so the terminal tick's C state / episode_stats are still readable after
-    step() returns (with auto-reset they would already be the next spawn).
+    WHAT IT IS NOW: the pre-#165 keyword surface, translated. Pass
+    `config=EnvConfig(...)`; the `**legacy` channel accepts the old weight and
+    knob names and routes them through `EnvConfig.from_legacy_kwargs`, which has
+    an explicit parameter list, so a misspelled name dies here with Python's own
+    TypeError instead of inside a forked vecenv worker.
 
-    ``include_step_stats_in_info`` (Task 6a, utof/cs2rl#7): when True the env
-    emits ``info = [{"step_stats": StepStatsView}]`` on every tick so trainer
-    patches (Task 6c onward) can read per-channel raw reward fields. Defaults
-    to False so production code paths that don't consume step_stats (e.g. eval
-    scripts, viz) stay zero-cost.
+    WHY THE SHIM RESOLVES THE CONFIG ITSELF instead of splatting `**legacy`
+    onward: a `**splat` into `make_c_env` would make this function a LEGACY
+    make_env call site under clause 2 of the migration census (spec §4.1),
+    which PR B3 adds and which pins `src`=0. Resolving here makes it a TYPED
+    site, and that is the only reason the pin is reachable at all.
 
-    ``pbrs_gamma`` (finding 2 / N3, 2026-07-06 review): PBRS shaping discount.
-    None (default) uses the env-side default, which is pinned to the training
-    gamma (0.999) and drift-guarded by test_pbrs_gamma_matches_training_gamma.
-    Pass explicitly only for experiments that also change the training gamma —
-    the two MUST move together or PBRS loses policy-invariance.
+    `record_fn` is refused, as before: only the Python recording env supports it.
+    `episode_stats` is accepted and unused, as before.
 
-    ``reward_overrides`` (spec 2026-08-01 §4.2): optional {kwarg: value} dict
-    over env_config.REWARD_FIELDS, forwarded verbatim to make_env. None
-    (default) means every weight keeps its make_env default, so all existing
-    callers (eval, record, smoke, tests) are unaffected.
+    THE SIGNATURE ALSO NARROWED, which the keyword list above does not show on
+    its own: `team_spirit` and everything after it are now KEYWORD-ONLY, and the
+    first positional slot is `config`. A pre-#165 positional call that meant
+    team_spirit would therefore bind a float to `config` and carry it to Cs2Env
+    as a non-EnvConfig. Nothing in the tree does that — AST census over the 130
+    `.py` files git tracks, 2026-09-04: 41 `make_puffer_env` call sites, every one
+    of them under `tests/`, 0 with a positional argument. (Count the TRACKED
+    files, not `rglob("*.py")`: a review worktree under `.worktrees/` puts a whole
+    second checkout on disk and turns 130 into 424.) It is recorded rather than
+    defended because this function is `train.__all__`-exported and gh#173 deletes
+    it whole.
 
-    ``reward_symmetrize`` (spec 2026-08-01 §4.3): when True the env applies the
-    zero-sum post-step transform r_i' = 0.5*(r_i - mean of the opposing five).
-    It is a dedicated parameter, NOT a reward_overrides key — it is a bool knob
-    rather than a weight, and the override validator above rejects it by name.
-    Defaults False so eval/record/smoke keep raw, comparable reward numbers;
-    only the training factory turns it on.
-
-    ``n_active_per_team`` / ``pin_pitch`` / ``crouch_enabled`` (Rung 0, spec
-    2026-08-29 §2.1) and ``jump_enabled`` (Rung 1a, spec 2026-08-30 T2b):
-    non-weight env knobs forwarded verbatim to make_env. They are NOT
-    reward_overrides keys for the same reason reward_symmetrize is not.
-    The defaults reproduce the pre-Rung-0 env exactly (full 5v5, pitch live,
-    crouch and jump enabled), so every non-training caller (eval, record,
-    smoke, viz) is unaffected. Training callers get them from
-    env_knobs_from_args(args) — do NOT re-derive them from args anywhere else,
-    or config.json provenance and the envs that actually ran can disagree.
-
-    ``round_time`` / ``laser_range`` / ``max_turn_speed`` (Rung 0 R0-G):
-    sim knobs forwarded verbatim to make_env. None (default) ⇒ make_env falls
-    back to the nav.py constant, so this function's default output is
-    byte-identical to before (sim fingerprints at defaults unchanged). Set
-    only via env_knobs_from_args, which omits None-valued knobs. PITFALL:
-    max_turn_speed rescales the aim action (policy.max_turn_speed is read
-    from the driver env at build time); assert_max_turn_speed_agreement
-    guards the pairing at train() startup.
+    THE TWO CHANNELS ARE EXCLUSIVE. `config=` plus legacy names is a TypeError,
+    not a silent merge — a caller who passes both has two different intents and
+    picking one of them quietly is the failure this whole workstream exists to
+    end. That rule and the misspelled-legacy-name one above are pinned by
+    tests/test_env_config.py::test_make_puffer_env_rejects_config_plus_legacy_kwargs
+    and ::test_make_puffer_env_misspelled_legacy_name_dies_naming_the_key, added
+    in this branch's fix wave — before them, deleting EITHER guard here left the
+    whole suite green, even though the SAME two rules on `c_env.cs2_env.make_env`
+    have been pinned by tests/test_make_env_shim.py since #165 Phase A (ae478f8).
+    Two layers, two copies of the rules, two sets of tests.
     """
     from c_env.cs2_env import make_env as make_c_env
 
     if record_fn is not None:
         raise ValueError("record_fn is only supported by the Python recording env")
-    kwargs = {}
-    if pbrs_gamma is not None:
-        kwargs["pbrs_gamma"] = pbrs_gamma
-    if reward_overrides:
-        # Validate here, not at make_env: an unknown key would otherwise
-        # surface as a TypeError inside a forked vecenv worker, where the
-        # traceback is far from the mistake. This is the LAST boundary before
-        # the C env, so it also re-checks value sanity — direct callers
-        # (train_test_harness, future sweep scripts) can hand us a dict that
-        # never passed through reward_overrides_from_args.
-        unknown = set(reward_overrides) - set(REWARD_FIELDS)
-        if unknown:
-            import difflib
-            hints = []
-            for key in sorted(unknown):
-                near = difflib.get_close_matches(key, REWARD_FIELDS, n=1)
-                if near:
-                    hints.append(f"{key!r} — did you mean --{near[0].replace('_', '-')}?")
-            raise ValueError(f"unknown reward override keys: {sorted(unknown)}. " +
-                             (" ".join(hints) + " " if hints else "") +
-                             f"Valid keys: {sorted(REWARD_FIELDS)}. Non-weight env knobs "
-                             "(pbrs_gamma, reward_symmetrize) are NOT overrides — they have "
-                             "dedicated make_puffer_env parameters.")
-        for key, val in reward_overrides.items():
-            # numbers.Real, not a bare float() call: float("0.3") succeeds, so
-            # a string weight from a YAML sweep file would sail through here
-            # and only misbehave at the ctypes boundary. bool is a Real in
-            # Python, hence the explicit exclusion.
-            if isinstance(val, bool) or not isinstance(val, numbers.Real):
-                raise ValueError(f"reward override {key}={val!r} is not a real number "
-                                 f"(got {type(val).__name__})")
-            fval = float(val)
-            if not math.isfinite(fval):
-                raise ValueError(f"reward weight {key}={fval} is not finite; "
-                                 "pass a real number (this would poison the loss silently)")
-            kwargs[key] = fval
-    return make_c_env(
-        seed=seed,
-        team_spirit=team_spirit,
-        buf=buf,
-        map_data=map_data,
-        include_step_stats_in_info=include_step_stats_in_info,
-        reward_symmetrize=reward_symmetrize,
-        n_active_per_team=n_active_per_team,
-        pin_pitch=pin_pitch,
-        crouch_enabled=crouch_enabled,
-        jump_enabled=jump_enabled,
-        round_time=round_time,
-        laser_range=laser_range,
-        max_turn_speed=max_turn_speed,
-        auto_reset=auto_reset,
-        **kwargs,
-    )
+    if legacy and config is not None:
+        raise TypeError(f"make_puffer_env got config= AND legacy kwargs {sorted(legacy)}; "
+                        "pass one")
+    cfg = config if config is not None else (EnvConfig.from_legacy_kwargs(
+        **legacy) if legacy else EnvConfig())
+    return make_c_env(config=cfg,
+                      seed=seed,
+                      team_spirit=team_spirit,
+                      buf=buf,
+                      map_data=map_data,
+                      auto_reset=auto_reset,
+                      include_step_stats_in_info=include_step_stats_in_info)
 
 
 def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, pin_pitch=False):
@@ -839,11 +798,14 @@ def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, p
         ckpt_obs_dim = state_dict["encoder_t.0.weight"].shape[1]
     else:
         ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
-    # W3 (#154): role eval_legacy — the DOCUMENTED bare-call defaults ("the
-    # defaults reproduce the pre-Rung-0 env exactly" — make_puffer_env's own
-    # docstring). Passing no knobs is the behaviour, not an oversight; #143
-    # tracks whether it should change, and the factory reduces that future fix to
-    # one role's knob source.
+    # W3 (#154): role eval_legacy — the DOCUMENTED bare-call defaults, which are
+    # now EnvConfig()'s own field defaults: a knob-free make_puffer_env() call
+    # resolves to EnvConfig(), and env_config.py declares those fields to be the
+    # trained baseline, which is exactly the pre-Rung-0 env (full 5v5, pitch
+    # live, crouch and jump enabled); test_defaults_equal_the_139a3a3_values in
+    # tests/test_env_config.py pins them. Passing no knobs is the behaviour, not
+    # an oversight; #143 tracks whether it should change, and the factory reduces
+    # that future fix to one role's knob source.
     policy_env = build_env_for("eval_legacy")
 
     # Batch 3.5 (#24, Opus I3): defensive obs_dim consistency check.
@@ -1236,46 +1198,53 @@ def make_env(team_spirit=None, map_data=None):
     return build_env_for("external", team_spirit=team_spirit, map_data=map_data)
 
 
-def build_env_factory(*,
-                      shared_ts,
-                      map_data,
-                      reward_overrides=None,
-                      reward_symmetrize=False,
-                      env_knobs=None):
+def build_env_factory(*, shared_ts, map_data, config=None):
     """Return the per-env factory callable handed to pufferlib.vector.make.
 
     WHAT: a closure over the shared team-spirit Value, the preloaded map data
-    and the reward-weight overrides; it builds one Cs2Env and attaches the
-    cont-action / action-mask shared-memory views.
+    and ONE frozen EnvConfig; it builds one Cs2Env and attaches the cont-action
+    / action-mask shared-memory views.
 
-    WHY the overrides are CLOSURE state and not per-env kwargs (spec §4.2):
-    the returned factory's parameters are all explicitly named, and anything
-    else is now a hard error (see below). Reward keys added to the
-    _per_env_kwargs list in train() used to be silently dropped, which would
-    have made every experiment arm train the default weights. Closure state
-    crosses the fork boundary the same way shared_ts and map_data already do
-    (proven).
+    WHY the config is CLOSURE state and not per-env kwargs (spec §4.2): the
+    returned factory's parameters are all explicitly named, and anything else is
+    now a hard error (see below). Reward keys added to the _per_env_kwargs list
+    in train() used to be silently dropped, which would have made every
+    experiment arm train the default weights. Closure state crosses the fork
+    boundary the same way shared_ts and map_data already do (proven). Before
+    #165 PR B2 this was THREE parameters — the override dict, the symmetrize
+    bool and the knob dict — kept in step by hand for the same reason; one
+    frozen object is the same argument made once.
 
     WHY module-level rather than nested in train(): the §6.3 test has to
     exercise this exact code path, and a closure defined inside train() is
     unreachable without launching a run.
 
-    reward_symmetrize (spec §4.3) rides along as closure state for the same
-    reason, but through its OWN parameter rather than the overrides dict: it is
-    a bool knob, not a weight, and make_puffer_env's validator rejects it as an
-    override key by name.
+    `config=None` ⇒ `EnvConfig()`, resolved ONCE above the closure so the
+    closure captures a config and never a None. Same shape as `make_env`'s own
+    default; the one production caller (build_train_env_factory) always passes a
+    config. test_build_train_env_factory_carries_args_config pins BOTH halves and
+    needs two calls to do it: the args-built factory for "the caller passes a
+    config", and a BARE `build_env_factory(...)` for the resolution itself, which
+    no call that always passes a config can reach. Until that second call was
+    added, deleting the resolution below left the pre-fix test green (re-measured
+    2026-09-04; the review measured the whole non-slow suite green with it) while
+    this paragraph claimed it was pinned.
 
-    env_knobs (Rung 0 §2.1) is the same story once more: a dict of non-weight
-    make_puffer_env kwargs (n_active_per_team / pin_pitch / crouch_enabled)
-    from env_knobs_from_args, closure state so it survives the fork. None ⇒
-    make_puffer_env's defaults, i.e. the pre-Rung-0 env.
-
-    PITFALL (review finding 1): reward_overrides and reward_symmetrize reach
-    ONLY the training env factory — the --smoke/--record/--eval paths call
-    make_puffer_env without them, so `--smoke --reward-ct-survival 0.0`
-    silently runs default weights. For symmetrization that is deliberate:
-    eval/record must report raw, cross-run-comparable rewards. Known
-    limitation, stated here and in the final report; do not fix in this branch.
+    PITFALL (review finding 1): within a training run the run's config reaches
+    TWO envs, not one — this factory's, and the fixed-baseline eval env behind
+    `--eval-interval`, which train() builds as `build_env_for("eval", ...,
+    config=env_config_from_args(args))` from the same resolver
+    `build_train_env_factory` reads here, with `assert_eval_env_agreement`
+    cross-checking the two right after. What the run's config does NOT reach is
+    the OTHER entry points: `--smoke` and `--eval` get `EnvConfig()` from their
+    role builders (`--eval` reaches `_build_eval_legacy`; there is no
+    --eval-legacy flag), and `--record` builds its env straight off the
+    lower-layer `make_env` naming no config at all, which lands on the same
+    thing. So `--smoke --reward-ct-survival 0.0` silently runs default weights.
+    Symmetrization is the one field even the config-carrying eval env
+    deliberately diverges on — `_build_eval` forces it off so eval reports raw,
+    cross-run-comparable rewards. Known limitation, #143's neighbourhood; do not
+    fix in this branch.
     PITFALL: `seed or 0` is intentional — pufferlib passes seed=None for some
     backends. Keep it.
     R0-D (#135) `_seed`: train() routes the per-env seed through env_kwargs
@@ -1285,6 +1254,7 @@ def build_env_factory(*,
     default base (env i -> seed i) regardless of --seed. When `_seed` is given
     it wins over pufferlib's `seed`; the legacy path is unchanged otherwise.
     """
+    config = EnvConfig() if config is None else config
 
     def env_factory(*_args,
                     buf=None,
@@ -1303,20 +1273,25 @@ def build_env_factory(*,
             raise TypeError(f"env_factory got unexpected kwargs {sorted(kwargs)}; "
                             "per-env kwargs are discarded — pass via build_env_factory "
                             "closure state")
-        # W3 (#154): construction — and ONLY construction — routes through the
-        # role factory. The seed-precedence rule and the `env_knobs or {}` splat
-        # moved with it verbatim; tests/fixtures/env_kwargs_pre_w3.json holds the
-        # kwargs this call made before the move, and test_env_factory.py asserts
-        # the factory still produces them for all three seed branches.
+        # W3 (#154), retyped by #165 PR B2: construction — and ONLY
+        # construction — routes through the role factory. The `_seed`/`seed`
+        # precedence rule moved with it and now lives in
+        # env_factory._build_train; the three payload arguments this call used
+        # to pass are one EnvConfig, resolved above the closure so a forked
+        # worker can never receive None.
+        # tests/fixtures/env_config_pre_165b.json recorded this call before it
+        # was typed — its three `train` rows ARE the three seed branches — and
+        # tests/test_env_factory.py drives this closure against each of them
+        # (test_train_call_site_forwards_the_captured_kwargs) as well as
+        # pinning its spelling against the recorded call source
+        # (test_migrated_site_still_reads_what_the_old_site_read).
         env = build_env_for("train",
                             shared_ts=shared_ts,
                             buf=buf,
                             seed=seed,
                             _seed=_seed,
                             map_data=map_data,
-                            reward_overrides=reward_overrides,
-                            reward_symmetrize=reward_symmetrize,
-                            env_knobs=env_knobs)
+                            config=config)
         # Attach the shared-memory views so the env (whether running in the
         # main process under Serial, or a forked worker under
         # Multiprocessing) can pull cont_actions written by the trainer and
@@ -1333,27 +1308,27 @@ def build_env_factory(*,
 
 
 def build_train_env_factory(args, *, shared_ts, map_data):
-    """The training path's env factory: reward overrides derived from args.
+    """The training path's env factory: the run's EnvConfig, derived from args.
 
     WHY this exists as its own function (review fix 2): it is the seam between
     the CLI and the envs. Inlined in train() it was untestable without
-    launching a run, so nothing caught a regression that dropped the overrides
-    — exactly the silent-baseline failure this whole change is guarding
-    against. test_train_uses_build_train_env_factory pins train() to it.
+    launching a run, so nothing caught a regression that dropped the run's
+    weights — exactly the silent-baseline failure this whole change is guarding
+    against. test_train_uses_build_train_env_factory pins train() to it, and
+    test_build_train_env_factory_carries_args_config reads the config back out
+    of the closure it returns.
 
-    Derives the overrides from the same helper build_train_config uses, so
-    config.json provenance and the envs' actual weights cannot disagree. Same
-    for reward_symmetrize: read off args with the identical getattr default
-    build_train_config uses, so the logged "reward_symmetrize" key always
-    describes the envs that actually ran. Same again for the Rung 0 env knobs
-    via env_knobs_from_args — build_train_config records exactly what this
-    hands the envs, and train() asserts the built driver_env agrees.
+    Derives ONE config from the SAME resolver build_train_config uses
+    (`env_config_from_args`), so config.json provenance and the envs that
+    actually ran cannot disagree — about a weight, about symmetrization or about
+    a sim knob. Before #165 PR B2 that was three separate derivations here, each
+    with its own way to fall out of step; train() also asserts the built
+    driver_env agrees with the participation vector it derives from the same
+    args.
     """
     return build_env_factory(shared_ts=shared_ts,
                              map_data=map_data,
-                             reward_overrides=reward_overrides_from_args(args),
-                             reward_symmetrize=bool(getattr(args, "reward_symmetrize", False)),
-                             env_knobs=env_knobs_from_args(args))
+                             config=env_config_from_args(args))
 
 
 # ── SECTION: Policy ────────────────────────────────────────────────────────
@@ -2096,10 +2071,11 @@ def resolve_pin_pitch(args, verbose: bool = True) -> int:
     and refused with ValueError (never assert) when it disagrees with the map.
 
     WHY a separate function: train() is too heavy to exercise in a unit test,
-    and this block MUST run before build_train_env_factory — env_knobs_from_
-    args(args) bakes args.pin_pitch into every worker env at vector.make;
-    resolving later would leave the envs unpinned while the policy gets
-    aim_dim_mask=[1,0] and assert_pin_pitch_agreement aborts the run.
+    and this block MUST run before build_train_env_factory — that call reads
+    args.pin_pitch through env_config_from_args and bakes the resulting
+    EnvConfig into every worker env at vector.make; resolving later would leave
+    the envs unpinned while the policy gets aim_dim_mask=[1,0] and
+    assert_pin_pitch_agreement aborts the run.
 
     PITFALL: args.map_data is None for `--map dust2`/`--dust2`; the helper
     LOADS the map (cached). main() calls this ABOVE the --dump-config exit on
@@ -2127,10 +2103,11 @@ def assert_pin_pitch_agreement(vecenv, policy):
     build_policy uses for max_turn_speed) and compares it with the policy's
     aim-dim mask. Raises RuntimeError on mismatch.
 
-    WHY: the two sides are set independently (env_knobs_from_args bakes the
-    flag into every worker at vector.make time; build_policy sets the mask
-    from args.pin_pitch) and a mismatch is silent — the env would ignore a
-    dim the trainer still scores, or score a dim the env still applies.
+    WHY: the two sides are set independently (env_config_from_args bakes the
+    flag into the EnvConfig every worker is built with at vector.make time;
+    build_policy sets the mask from args.pin_pitch) and a mismatch is silent —
+    the env would ignore a dim the trainer still scores, or score a dim the env
+    still applies.
 
     PITFALL: unlike _kill_reward_is_active there is NO soft fallback — a
     non-C env here is a wiring bug and must stop the run (RuntimeError, never
@@ -2170,6 +2147,108 @@ def assert_max_turn_speed_agreement(vecenv, policy):
     p = float(policy.max_turn_speed)
     if abs(c - p) >= 1e-6:
         raise RuntimeError(f"max_turn_speed mismatch: env={c} policy={p}")
+
+
+def assert_eval_env_agreement(eval_env, driver_env):
+    """R0-I startup check: the fixed-baseline eval env matches the training envs.
+
+    WHAT: two comparisons, in this order.
+      (a) the five APPLIED attributes, read off the two live Cs2Envs. These
+          are the RESOLVED values: for round_time that is the tick count the
+          sentinel becomes, not the sentinel — but the resolution is a
+          deterministic function of the config field (Cs2Env.__init__ falls
+          back to the nav.py constant when it is None), and the other four are
+          plain copies of the config fields, so (a) cannot fire anywhere (b)
+          is silent. It runs FIRST so that a divergence in one of the five
+          still raises with the message the inline loop raised before this
+          function existed — bare knob name, no `config.` prefix.
+          NEITHER (a) NOR (b) reads C state: (a) reads Python attributes (and
+          the round_time property, which returns Cs2Env._round_time) and (b)
+          reads the frozen config object. The two agreement checks above go
+          through env._c_env.sd.contents; this one never touches ctypes.
+      (b) every EnvConfig field except reward_symmetrize, read off the two
+          objects' `.config`. This is INTENT, and it covers the 27 scalars
+          (a) cannot see — the 23 reward weights (no attribute of the env
+          exposes them) plus the four knobs that are fields but not attributes
+          of the env. (EnvConfig has 11 fields; (b) compares 10 of them, and
+          the four non-attribute knobs are pbrs_gamma, recoil, laser_range and
+          max_turn_speed. 23 + 4 = 27; MEASURE this again if a field is ever
+          added, and do not write a number here you have not counted off
+          dataclasses.fields.)
+
+    WHY reward_symmetrize is skipped and nothing else is: env_factory._build_eval
+    FORCES it off — `config.replace(reward_symmetrize=False)` — so the eval env
+    reports raw rewards while the training envs take the flag from args. Since
+    #165 PR B2 that is an explicit rule at the builder rather than, as before, a
+    parameter the eval chain simply never passed. Either way the two configs are
+    MEANT to differ there and only there, and skipping any other field would
+    hide a real divergence.
+
+    DISCLOSURE — NEITHER CHECK CAN FIRE ON ANY INPUT REACHABLE TODAY, and since
+    #165 PR B2 that is structural rather than measured. train()'s only call site
+    compares the env from build_env_for("eval", ..., config=env_config_from_args(
+    args)) against the driver env from build_train_env_factory(args, ...), which
+    passes build_env_factory the config from that SAME resolver called on the
+    same args. So the two sides are one config expression evaluated twice, and
+    the only field either builder then touches is reward_symmetrize — the field
+    (b) skips and (a) does not compare. Corroborated by measurement, re-run
+    2026-09-04 on this tree by driving those two real constructions over four
+    arg sets (no knobs; --reward-symmetrize; crouch_enabled and jump_enabled
+    both off; --reward-symmetrize with --round-time-ticks and --laser-range):
+    reward_symmetrize was the ONLY EnvConfig field that ever differed, and
+    neither check raised. Both checks are therefore guards against a FUTURE
+    divergence, not checks with anything to catch now; keep them, and re-derive
+    this paragraph the day either builder starts setting a field the other does
+    not.
+
+    PITFALL — WHAT THAT SINGLE EXPRESSION IS KEEPING SAFE. (b) compares
+    `round_time` as a CONFIG FIELD, and that field has two spellings for one
+    applied value: None means "the nav.py constant" and Cs2Env resolves it, so a
+    config pair holding None on one side and that same constant on the other is
+    behaviourally identical and would still abort the run here. Unreachable only
+    because both sides come from one `env_config_from_args(args)`, never from
+    two independently-written knob sources. If a future caller ever builds the
+    eval config separately, normalise round_time before comparing it — do not
+    discover this by aborting a run for no behavioural reason.
+
+    WHY THIS IS A MODULE-LEVEL FUNCTION and not the inline loop it replaces:
+    the loop sat inside train(), which needs a real run to reach — and not even
+    that by default, since it is behind `--eval-interval`, which is 0 unless
+    asked for. So the check nobody could run was also the check nobody could
+    test. assert_pin_pitch_agreement and assert_max_turn_speed_agreement above
+    have the same shape — module-level, called from train(), and called
+    DIRECTLY by tests (tests/test_pitch_pin.py and
+    tests/test_env_knobs.py::test_policy_max_turn_speed_assert respectively).
+
+    PITFALL: check (a) runs FIRST, so a test that tries to prove (b) exists by
+    differing one of the five names in the tuple below will raise from (a) and
+    prove nothing. tests/test_env_factory.py::test_eval_env_agreement_two_directions
+    handles that by demanding the MESSAGE rather than just a raise: it differs
+    EVERY EnvConfig field, one per parametrized case, and requires `on <knob>`
+    (which is (a)'s spelling, and which (b)'s `on config.<knob>` does not contain)
+    for the five names below, `on config.<field>` for the five fields that are
+    outside the tuple and still compared by (b) — rewards, pbrs_gamma, recoil,
+    laser_range, max_turn_speed — and NO raise for reward_symmetrize, the sixth
+    field outside the tuple and the one (b) skips. Those five are the only cases
+    that can come from (b) alone, so they are what makes a widened skip list
+    above visible. Before that parametrization the test differed two fields, and
+    widening the skip list to nine left it green (re-measured 2026-09-04 against
+    the pre-fix test body; the review measured the whole non-slow suite green
+    with it).
+
+    PITFALL: RuntimeError, never a bare assert (python -O strips asserts).
+    """
+    for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled", "round_time"):
+        if getattr(eval_env, _k) != getattr(driver_env, _k):
+            raise RuntimeError(f"[Eval] eval env / driver env disagree on {_k}: "
+                               f"{getattr(eval_env, _k)!r} vs {getattr(driver_env, _k)!r}")
+    for _f in dataclasses.fields(EnvConfig):
+        if _f.name == "reward_symmetrize":
+            continue
+        if getattr(eval_env.config, _f.name) != getattr(driver_env.config, _f.name):
+            raise RuntimeError(f"[Eval] eval env / driver env disagree on config.{_f.name}: "
+                               f"{getattr(eval_env.config, _f.name)!r} vs "
+                               f"{getattr(driver_env.config, _f.name)!r}")
 
 
 def _kill_reward_is_active(vecenv):
@@ -3328,9 +3407,10 @@ def train(args):
     # resolve_pin_pitch loads the REAL map when args.map_data is None (the
     # `--dust2` CLI path) and decides from geometry; see pin_pitch_for_map for
     # why the sentinel itself must never decide. MUST run (a) before
-    # build_train_env_factory (env_knobs_from_args bakes args.pin_pitch into
-    # every worker env) and (b) BEFORE the --resume-run config guard below:
-    # the CLI default is pin_pitch=None ⇒ env_knobs_from_args yields 0, while a
+    # build_train_env_factory (env_config_from_args bakes args.pin_pitch into
+    # the EnvConfig every worker env is built with) and (b) BEFORE the
+    # --resume-run config guard below: the CLI default is pin_pitch=None, which
+    # EnvConfig normalises to the un-pinned flag value, while a
     # pinned run's config.json holds 1 — resolving after the guard refused
     # every flag-less resume of a flat-map run (Task 12 ruling). The CLI
     # already resolved it above --dump-config; here it is a cache-safe
@@ -3618,7 +3698,7 @@ def train(args):
     # The assert is the agreement check: the vector is derived from args while
     # the envs were built from build_train_env_factory, and a disagreement
     # would mask the wrong rows silently rather than crash.
-    _n_active = env_knobs_from_args(args)["n_active_per_team"]
+    _n_active = env_config_from_args(args).n_active_per_team
     _participating_rows = build_participating_rows(args.num_envs,
                                                    _n_active,
                                                    opponent_mode=_opponent_mode,
@@ -3724,32 +3804,27 @@ def train(args):
     # ────────────────────────────────────────────────────────────────────────
 
     # ── R0-I (Task 13): fixed-baseline eval env — parent-process, serial, the
-    # SAME knobs as the workers (env_knobs_from_args + reward_overrides_from_args
-    # so a --laser-range / --round-time-ticks run evaluates on what it trains
-    # on). Seed 10_000_003: worker env seeds are env_seed_base(--seed) + i, so
-    # the only collision is --seed 100 with >= 4 envs (env 3) — see
-    # env_seed_base. team_spirit=None → raw rewards (eval never feeds training).
+    # SAME config as the workers: it comes from env_config_from_args, the one
+    # resolver build_train_env_factory also uses, so a --laser-range /
+    # --round-time-ticks run evaluates on what it trains on. Seed 10_000_003:
+    # worker env seeds are env_seed_base(--seed) + i, so the only collision is
+    # --seed 100 with >= 4 envs (env 3) — see env_seed_base. team_spirit=None →
+    # raw rewards (eval never feeds training).
     _eval_hook = None
     _eval_interval = int(getattr(args, "eval_interval", 0) or 0)
     if _eval_interval > 0:
         from eval_baselines import BaselineEvaluator
-        # W3 (#154): role eval. `team_spirit=None`, the 10_000_003 seed and the
-        # load-bearing `auto_reset=False` now live in env_factory._build_eval;
-        # the derived knob/override dicts stay here because they come from THIS
-        # run's args. `env_knobs=` is passed as one dict rather than splatted:
-        # the builder splats it, and requiring the dict is what stops a caller
-        # handing the eval env no knobs while the driver env has them — the
-        # disagreement the loop right below would then be comparing.
-        _eval_env = build_env_for("eval",
-                                  map_data=_map_data,
-                                  reward_overrides=reward_overrides_from_args(args),
-                                  env_knobs=env_knobs_from_args(args))
-        _d = trainer.vecenv.driver_env
-        for _k in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled",
-                   "round_time"):
-            if getattr(_eval_env, _k) != getattr(_d, _k):
-                raise RuntimeError(f"[Eval] eval env / driver env disagree on {_k}: "
-                                   f"{getattr(_eval_env, _k)!r} vs {getattr(_d, _k)!r}")
+        # W3 (#154), retyped by #165 PR B2: role eval. `team_spirit=None`, the
+        # 10_000_003 seed, the load-bearing `auto_reset=False` AND the
+        # raw-reward rule all live in env_factory._build_eval; this site passes
+        # only what comes from THIS run's args, which is now one EnvConfig from
+        # the same resolver the workers' factory reads. Requiring that config
+        # (the builder has no default) is what stops a caller handing the eval
+        # env a bare config while the driver env has the run's knobs — a
+        # disagreement assert_eval_env_agreement right below would then have
+        # something to catch.
+        _eval_env = build_env_for("eval", map_data=_map_data, config=env_config_from_args(args))
+        assert_eval_env_agreement(_eval_env, trainer.vecenv.driver_env)
         _eval_hook = ScheduledEval(BaselineEvaluator(_eval_env, episodes=40, seed=args.seed),
                                    _eval_interval, policy, device)
         print(f"[Eval] fixed-baseline eval every {_eval_interval} epochs "

@@ -361,11 +361,20 @@ def test_knockout_the_fixture_itself_is_load_bearing(monkeypatch):
 def _routing(call_source):
     """{kwarg -> the source text the call passed for it}, from an unparsed Call.
 
-    `ast.unparse` of each argument rather than a bare Name id: the two SPM sites
-    pass wrapped expressions (`bool(args.pin_pitch)`,
-    `getattr(args, 'aim_log_std_max', None)`) that a Name-only routing map — like
-    `test_env_factory._call_source_routing`, whose call sites pass bare names —
-    would silently drop, leaving those kwargs unchecked.
+    `ast.unparse` of each argument rather than a bare Name id: all THREE captured
+    SPM sites pass a wrapped `pin_pitch` — train()'s passes `bool(args.pin_pitch)`
+    and the two `_build_trainer_for_test` branches (which the migration collapsed
+    into one call) pass `bool(pin_pitch)` — and train()'s wraps its cap on top of
+    that, as `getattr(args, 'aim_log_std_max', None)`, where those two branches
+    pass a bare `aim_log_std_max`. A map keyed on `kw.value.id` would have no
+    entry AT ALL for a wrapped argument, so it would route only the kwargs that
+    happen to be bare names; train()'s site — the only one this function is
+    applied to — is where both wrappings land. The env oracle's AST layer
+    unparses per kwarg for
+    the same reason (`test_env_factory._keywords`); its `_free_names` companion
+    reads bare Name ids, but it unions them across ALL arguments instead of
+    keying by kwarg, so it is a different comparison rather than a cheaper
+    spelling of this one.
     """
     call = ast.parse(call_source, mode="eval").body
     return {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg is not None}

@@ -43,6 +43,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
@@ -192,3 +194,22 @@ def test_symmetrize_is_the_only_row_where_the_two_configs_differ():
     assert fields == {"reward_symmetrize"}, fields
     assert cap["expected_config"]["reward_symmetrize"] is False
     assert cap["input_config"]["reward_symmetrize"] is True
+
+
+def test_the_capture_script_refuses_to_run():
+    """The re-capture guard is code, so it needs a test, or it is a comment.
+
+    tests/capture_env_config_pre_165b.py is not collected by pytest and is
+    imported by nothing, so deleting its refusal would be silent. The refusal
+    is what stops a `--capture` from rewriting this fixture to POST-migration
+    behaviour and turning every red in tests/test_env_factory.py green — the
+    trap this module's docstring is written to warn about.
+
+    Free to run: the raise is the first statement in capture(), above the
+    dirty-src git call and above the function-local c_env import, and the
+    module's own imports are stdlib only.
+    """
+    from tests import capture_env_config_pre_165b
+
+    with pytest.raises(SystemExit, match="FROZEN"):
+        capture_env_config_pre_165b.capture()

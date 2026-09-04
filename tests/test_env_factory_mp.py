@@ -5,32 +5,41 @@ callables was "gated by the existing multiprocessing-backend tests". It is not:
 `tests/test_binding.py`'s MP test builds its own inline factory over
 `c_env.cs2_env.make_env` and never touches `build_env_factory`, and every other
 `build_env_factory` test in the suite is Serial or in-process. So the one path
-where the migrated closure crosses a process boundary — and therefore the one
-place `build_env_for`'s function-local `from train import make_puffer_env`
-executes anywhere other than the main interpreter — had no coverage at all.
+where the migrated closure crosses a process boundary — and therefore the only
+place `build_env_for`'s function-local import of the env constructor executes
+anywhere other than the main interpreter — had no coverage at all.
 
-WHAT COULD GO WRONG THERE, concretely. The function-local import is what makes
-the module cycle work, and it depends on `sys.modules` containing a `train` entry
-that is the ALREADY-EXECUTED module — which in a real run is only true because of
-`sys.modules.setdefault("train", sys.modules["__main__"])` at the top of train.py's
-`__main__` block. In-process tests never exercise that: pytest imports `train`
-normally, so the name is present for a reason production does not rely on. Get it
-wrong and every env in every worker is built by a SECOND copy of train.py, or the
-import raises inside a forked child where the traceback is easy to lose.
+WHAT COULD GO WRONG THERE, concretely. A worker whose env fell back to the field
+defaults still resets and steps happily: the failure is a WORKING env built on
+the wrong config, not a crash. The closure has to cross the fork boundary
+carrying its EnvConfig, and the function-local import has to resolve on the far
+side from whatever `sys.modules` the child happens to have.
 
 TWO TESTS, because fork and cold import are different failures:
 
   1. `test_train_closure_builds_envs_in_forked_workers` drives the real
      `build_env_factory` closure through pufferlib's Multiprocessing backend. On
-     Linux that backend forks, so the child inherits a `sys.modules` that already
-     holds `train` — this proves the CLOSURE survives pickling/inheritance and
-     that envs really are constructed and stepped on the far side, but it does
-     NOT prove the function-local import can stand up on its own.
+     Linux that backend forks, so the child inherits the parent's `sys.modules`
+     wholesale — this proves the CLOSURE survives inheritance and that envs
+     really are constructed, knobbed and stepped on the far side, but it proves
+     nothing about the import, which is a dictionary hit there.
   2. `test_build_env_for_works_from_a_cold_interpreter` closes exactly that gap
-     in a fresh subprocess that has never imported `train`: it imports only
-     `env_factory` and calls `build_env_for`, so the `from train import
-     make_puffer_env` has to do the whole job from nothing. That is the
-     worker-side-import half the fork smoke cannot reach.
+     in a fresh subprocess that has imported NOTHING of the training stack: it
+     puts only `src/` on `sys.path`, imports `env_factory` and calls
+     `build_env_for`, and asserts that `train` is still absent afterwards.
+
+     THAT ASSERTION IS INVERTED FROM WHAT IT USED TO BE, and the inversion is
+     the point. Before #165 PR B2 the child asserted `train` WAS imported,
+     because `build_env_for` reached the env through `train.make_puffer_env`.
+     Since B2 it imports `c_env.cs2_env.make_env` directly, so env construction
+     has NO L3 dependency at all — a strictly stronger property, and this is
+     where it is stated from a cold interpreter rather than inferred.
+
+     ITS LIMIT, stated because a reader will otherwise over-read it: the child
+     exercises the `smoke` role only, so it proves THAT path is `train`-free,
+     not all six. The other five are covered in-process by
+     tests/test_env_factory.py's `_construct`, which patches
+     `c_env.cs2_env.make_env` and asserts exactly one call through it.
 
 Neither is a substitute for the other, and the pair is deliberately cheap: two
 envs, three ticks, a simple 5-room map instead of dust2.
@@ -59,10 +68,10 @@ _RECORD_WIDTH = 1 + len(_RECORDED_KNOBS)               # pid, then one slot per 
 def test_train_closure_builds_envs_in_forked_workers():
     """The migrated train closure constructs, resets and steps across a fork.
 
-    Non-default knobs and reward overrides on purpose. A worker whose env fell
-    back to `make_puffer_env`'s defaults would still reset and step happily —
-    that is the silent-default failure this whole workstream exists to catch — so
-    the assertion has to be about the env's CONFIG, not about "it ran".
+    Non-default knobs and a non-default weight on purpose. A worker whose env
+    fell back to the FIELD defaults would still reset and step happily — that is
+    the silent-default failure this whole workstream exists to catch — so the
+    assertion has to be about the env's CONFIG, not about "it ran".
 
     WHY THE KNOBS ARE READ OUT OF SHARED MEMORY AND NOT OFF `vecenv.driver_env`.
     Measured: the parent process calls the factory ONCE itself, for the driver
@@ -84,20 +93,18 @@ def test_train_closure_builds_envs_in_forked_workers():
     import pufferlib.vector
 
     from map import make_simple_map
-    from train import build_env_factory, env_knobs_from_args, reward_overrides_from_args
+    from train import build_env_factory
+    from train_config import env_config_from_args
 
     args = Namespace(reward_ct_survival=0.0,
                      n_active_per_team=3,
                      pin_pitch=1,
                      crouch_enabled=0,
                      jump_enabled=1,
+                     reward_symmetrize=True,
                      gamma=0.995)
-    knobs = env_knobs_from_args(args)
-    factory = build_env_factory(shared_ts=Value("f", 0.3),
-                                map_data=make_simple_map(),
-                                reward_overrides=reward_overrides_from_args(args),
-                                reward_symmetrize=True,
-                                env_knobs=knobs)
+    cfg = env_config_from_args(args)
+    factory = build_env_factory(shared_ts=Value("f", 0.3), map_data=make_simple_map(), config=cfg)
 
     # Room for the parent's driver env plus one per worker, with slack.
     built = Value("i", 0)
@@ -141,13 +148,13 @@ def test_train_closure_builds_envs_in_forked_workers():
             f"{all_rows}. The vecenv is not running the closure in workers at all, so this test "
             "would prove nothing about the fork boundary.")
 
-        want = [knobs[k] for k in _RECORDED_KNOBS]
+        want = [getattr(cfg, k) for k in _RECORDED_KNOBS]
         for row in worker_rows:
             assert row[1:] == want, (
                 f"a worker (pid {row[0]}) built an env with "
                 f"{dict(zip(_RECORDED_KNOBS, row[1:], strict=True))}, not the "
                 f"{dict(zip(_RECORDED_KNOBS, want, strict=True))} the closure was given — the "
-                "factory fell through to make_puffer_env's defaults on the far side of the fork")
+                "factory fell through to the field defaults on the far side of the fork")
     finally:
         vecenv.close()
         # pufferlib's close() terminates the workers but does not wait on them,
@@ -159,23 +166,31 @@ def test_train_closure_builds_envs_in_forked_workers():
 
 
 def test_build_env_for_works_from_a_cold_interpreter():
-    """A fresh process that has NEVER imported `train` can still build an env.
+    """A fresh process with NOTHING of the training stack imported builds an env.
 
     The half the fork smoke above cannot prove. On Linux pufferlib's
-    Multiprocessing backend forks, so its children inherit a `sys.modules` in
-    which `train` is already present and executed; the function-local
-    `from train import make_puffer_env` is then a dictionary hit and its real
-    behaviour is untested. Here the child imports `env_factory` ALONE and the
-    import has to resolve, execute train.py and hand back a working
-    `make_puffer_env` — with `sys.path` carrying only `src/`, as a worker would
-    have it.
+    Multiprocessing backend forks, so its children inherit the parent's
+    `sys.modules` wholesale and the function-local import is a dictionary hit
+    whose real behaviour is untested. Here the child puts only `src/` on
+    `sys.path`, imports `env_factory` ALONE, and the import inside
+    `build_env_for` has to do the whole job from nothing.
 
-    The `assert "train" not in sys.modules` before the call is what keeps this
-    from silently becoming the same test as the one above: without it, any future
-    import added to `env_factory`'s module scope would pre-load `train` and this
-    would go back to measuring a dictionary hit. (That import would also break
-    the W1 import-lightness invariant, which `test_w1_modules.py` guards
-    separately — this assertion is the local statement of what THIS test needs.)
+    WHAT IT ASSERTS AFTER THE CALL IS THE INVERSE OF WHAT IT USED TO. Since #165
+    PR B2 `build_env_for` imports `c_env.cs2_env.make_env` directly, so env
+    construction has NO L3 dependency: `train` must still be ABSENT once the env
+    is built, and `c_env.cs2_env` must be PRESENT. The old assertion (`train` in
+    sys.modules) would now pass only if the dependency came back.
+
+    The two PRE-call assertions are the anti-vacuity controls, one per module.
+    Without the `train` one, any future module-scope import in `env_factory`
+    would pre-load it and the post-call check would be measuring a dictionary
+    miss it never created. Without the `c_env.cs2_env` one, the post-call
+    positive control could be satisfied by a module-scope import in
+    `env_factory` rather than by `build_env_for` — and that import would break
+    the W1 import-lightness invariant besides, which `test_w1_modules.py` guards
+    separately.
+
+    SCOPE: the `smoke` role only. See the module docstring.
     """
     code = f"""
 import sys
@@ -184,10 +199,17 @@ import env_factory
 assert "train" not in sys.modules, (
     "env_factory pulled `train` at module scope; this test can no longer see the "
     "function-local import it exists to exercise")
+assert "c_env.cs2_env" not in sys.modules, (
+    "env_factory pulled the C env at module scope; the post-call assertion below "
+    "would then be satisfied by the import rather than by build_env_for, and the "
+    "W1 import-lightness invariant is broken besides")
 env = env_factory.build_env_for("smoke")
 try:
-    assert "train" in sys.modules, "build_env_for did not import train"
-    assert sys.modules["train"].make_puffer_env is not None
+    assert "train" not in sys.modules, (
+        "building an env pulled `train`. Since #165 PR B2 env construction has NO L3 "
+        "dependency at all — build_env_for imports c_env.cs2_env.make_env directly — and "
+        "this assertion is what keeps that true from a cold interpreter")
+    assert "c_env.cs2_env" in sys.modules, "build_env_for did not import the C env module"
     obs, _ = env.reset(seed=env_factory.SMOKE_SEED)
     assert obs.shape[0] == 10, obs.shape
     print("COLD-IMPORT-OK", obs.shape)

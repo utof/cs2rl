@@ -205,9 +205,9 @@ def resolve_gammas(args) -> tuple[float, float]:
     ``args.pbrs_gamma`` when given, else ``gamma``.
 
     WHY one helper: its two callers, build_train_config (provenance + the PPO
-    discount) and env_config_from_args (the env's PBRS discount, which
-    env_knobs_from_args then reads back off the EnvConfig), must agree on the
-    SAME resolution rule — PBRS is only policy-invariant (Ng et al.) when
+    discount) and env_config_from_args (the env's PBRS discount, stored on the
+    EnvConfig every env is built from), must agree on the SAME resolution rule
+    — PBRS is only policy-invariant (Ng et al.) when
     γ_pbrs == γ, and before R0-J the two lived as unrelated literals (train.py
     0.999 vs cs2_env.py 0.999, now one field default in env_config.py) held
     together by a single drift test.
@@ -231,9 +231,11 @@ def resolve_gammas(args) -> tuple[float, float]:
     return gamma, pbrs_gamma
 
 
-# (args attr, make_puffer_env kwarg) — single source for env_knobs_from_args
-# AND build_train_config, so a knob added to one cannot be missed by the other
-# (config.json would then silently under-record the experiment).
+# (args attr, EnvConfig field) — single source for env_config_from_args's R0-G
+# pairs AND build_train_config's provenance keys (which record the value under
+# the ARGS attr name), so a knob added to one cannot be missed by the other
+# (config.json would then silently under-record the experiment). Paired with
+# train_config._ARGS_KNOB_FIELDS; see its comment for the coverage rule.
 _R0G_KNOBS = (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
               ("max_turn_speed", "max_turn_speed"))
 

@@ -78,58 +78,24 @@ FIELD_DEFAULTS = {
 
 # The escape hatch for a line whose literal is set by a RULE rather than copied
 # from a field — one that would read the same if the field default flipped.
-# EMPTY TODAY, and that is a measurement: the one candidate the spec named,
-# env_factory._build_eval forcing raw rewards, turns out to force nothing. It
-# OMITS reward_symmetrize entirely and inherits the parameter default, so there
-# is no literal on any of its lines for a probe to see. `git log -S` finds the
-# allowed spelling in no commit of src/ or scripts/, ever.
-# Adding an entry needs a written reason in the spec. Loosening a regex instead
-# is NOT an acceptable fix — `NAME = False` is precisely the shape the probes
-# exist to catch.
-ALLOWLIST = ()
-
-# Sites that are known restatements today and are expected to go with PR B2's
-# rewrite. Where a B1 document assigns a ruling, the row's comment names it; the
-# four src/train_test_harness.py rows carry a description only, because NO B1
-# document assigns the harness signature to B2 or to B3.
-# Keyed by (file, field) and holding the expected HIT COUNT — never line
-# numbers. This file lands last in B1, after five commits
-# have moved code inside src/train.py, so line-keyed rows would report every
-# entry as both extra (new line) and stale (old line) on their first run and the
-# gate would fail on bookkeeping. Counts survive the churn and still bite in both
-# directions: a new restatement raises a count or adds a key, a fixed site lowers
-# one and the row must then be deleted. PR B2 deletes both dicts; PR B3 adds
-# nothing to them.
-# The two tables are yapf-exempt: pyproject's spaces_before_comment stops shove
-# these standalone comments out to column 71 and split every `key:` from its
-# count onto its own line, which is unreadable for the two tables a reader comes
-# here to read. Same waiver as src/map.py:335.
-# Keep the pragma the LAST physical line of this comment block. yapf reads only
-# a block's first and last line (yapf_api._DisableYAPF), so a pragma with prose
-# both above and below it is silently inert — measured 2026-09-04, `yapf --diff`
-# went 0 -> 2834 bytes when an explanatory suffix was all that was left of it.
-# yapf: disable
-PENDING_B2 = {
-    # the shim's own knob defaults (2 sites for reward_symmetrize: make_puffer_env,
-    # deleted by R5, and build_env_factory's parameter, deleted by R4)
-    ("src/train.py", "reward_symmetrize"): 2,
-    ("src/train.py", "pin_pitch"): 1,
-    ("src/train.py", "crouch_enabled"): 1,
-    ("src/train.py", "jump_enabled"): 1,
-    # _build_trainer_for_test's four annotated defaults. PR unassigned as of B1
-    # (B2 or B3); see the B2 plan. The row is correct either way — if B3 owns the
-    # signature the row simply survives B2 instead of being deleted with it.
-    ("src/train_test_harness.py", "n_active_per_team"): 1,
-    ("src/train_test_harness.py", "pin_pitch"): 1,
-    ("src/train_test_harness.py", "crouch_enabled"): 1,
-    ("src/train_test_harness.py", "jump_enabled"): 1,
-}
-PENDING_B2_GETATTR = {
-    # build_train_env_factory's symmetrize fallback, deleted with the function's
-    # rewrite in PR B2
-    ("src/train.py", "reward_symmetrize"): 1,
-}
-# yapf: enable
+# EXACTLY ONE ENTRY, and it is the reason the hatch exists: env_factory's eval
+# role forces raw rewards (spec 2026-09-03 R11 / §3 _build_eval). That line
+# would be spelled identically if the field's default were the other way round,
+# so it states a rule; it does not restate a default. Before #165 the same
+# behaviour came from the caller simply not passing the flag, which is why this
+# list was empty until PR B2.
+# Every entry must SUPPRESS a hit, not merely appear in the tree; a dead one is
+# standing permission for nothing and
+# test_every_allowlist_entry_suppresses_a_real_hit fails on it, in both
+# directions, the way _assert_exactly does for a stale PENDING row.
+# Adding a second entry needs a written reason in the spec. Loosening a regex
+# instead is NOT an acceptable fix — `NAME = False` is precisely the shape the
+# probes exist to catch, and widening it away would blind the gate to every
+# real restatement of a False default.
+# The entry exempts the EXPRESSION, not the LINE: _hits_in strips each match
+# out of the line and scans what is left, so a real restatement that happens to
+# share a line with the allowed spelling is still a hit.
+ALLOWLIST = ("config.replace(reward_symmetrize=False)", )
 
 # The roots every probe reads, and one file that MUST be among the results.
 # ANCHOR is derived from DECLARATION rather than written as a bare "src/..."
@@ -147,16 +113,21 @@ def _scanned_files():
     test_field_defaults_covers_every_declared_default guards the probes' VALUE
     input; this guards the other one. `Path.rglob` on a missing or renamed root
     returns `[]` in silence, so a src/ restructure or a typo in SCAN_ROOTS
-    degrades all three probes to no-ops that still report green. The argparse
-    probe is the one with no backstop at all: it has no PENDING list to go stale,
-    so it PASSES on an empty file list today. The two count probes currently
-    survive such a scan only as a side effect, because their PENDING rows go
-    unmatched and the `stale` assert fires — and PR B2 deletes both PENDING
-    dicts (see the header above), which is the day that accident stops working
-    and all three go blind together.
+    degrades all three probes to no-ops that still report green.
+
+    ALL THREE PROBES NOW DEPEND ON THIS, with nothing behind it. Until PR B2 the
+    two count probes survived a truncated scan by accident — their pending rows
+    went unmatched and `_assert_exactly`'s `stale` assert fired. B2 deleted the
+    pending maps, so a scan that read nothing reports `{}` and reads GREEN, just
+    as the argparse probe always did. The replacement evidence is
+    test_the_probes_find_a_planted_restatement, which runs `_hits()` over a
+    redirected REPO_ROOT and requires a hit under EACH root; it is the only
+    thing in this file that can see a dropped root, because the two asserts
+    below cannot — measured, a src-only scan and a one-file scan both PASS them.
+    Do not delete it, and do not treat these asserts as covering its job.
 
     Per-root, not one total: a `scripts/` rename would otherwise hide behind
-    `src/`'s 25 files and the count probes would keep passing on a half scan.
+    `src/`'s files and the count probes would keep passing on a half scan.
     """
     per_root = {root: sorted((REPO_ROOT / root).rglob("*.py")) for root in SCAN_ROOTS}
     empty = sorted(r for r, found in per_root.items() if not found)
@@ -173,17 +144,24 @@ def _scanned_files():
     return files
 
 
-def _hits(pattern_for):
+def _hits_in(files, pattern_for):
+    """Scan a GIVEN file list. Split out of `_hits` so a test can point the
+    scan at a planted tree — see test_the_probes_find_a_planted_restatement."""
     out = []
-    for path in _scanned_files():
-        rel = path.relative_to(REPO_ROOT).as_posix()
+    for path in files:
+        rel = path.name if not path.is_relative_to(REPO_ROOT) else path.relative_to(
+            REPO_ROOT).as_posix()
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
-            if any(a in line for a in ALLOWLIST):
-                continue
+            for _allowed in ALLOWLIST:
+                line = line.replace(_allowed, "")
             for name, value in FIELD_DEFAULTS.items():
                 if re.search(pattern_for(name, value), line):
                     out.append((rel, lineno, name))
     return out
+
+
+def _hits(pattern_for):
+    return _hits_in(_scanned_files(), pattern_for)
 
 
 def _line_pattern(name, value):
@@ -213,10 +191,21 @@ def _assert_exactly(found, pending, probe):
     """Compare per-(file, field) hit COUNTS against `pending`, both directions.
 
     Two asserts, not one, because the two failures mean opposite things: more
-    hits than allowed is a NEW restatement, fewer is a PENDING row that has been
+    hits than allowed is a NEW restatement, fewer is a pinned row that has been
     fixed and must be deleted so the list cannot rot into standing permission.
-    Line numbers are absent from the pinned data (see PENDING_B2) but present in
-    every failure message — that is what a reader needs to find the site.
+
+    Both callers now pass an EMPTY `pending`, so the `stale` branch has nothing
+    to check and the whole verdict rests on `extra`. That is deliberate — PR B2
+    removed the last pending rows — and it is exactly why
+    test_the_probes_find_a_planted_restatement exists: with no pinned row left
+    to go unmatched, a walk that read nothing would report the same `{}` a clean
+    tree does. The signature keeps the parameter because a future PR that stages
+    a known restatement needs somewhere to pin it, and pinning it in BOTH
+    directions is the property worth keeping.
+
+    Line numbers are absent from the pinned data — counts survive the file churn
+    a refactor causes, line numbers do not — but present in every failure
+    message, which is what a reader needs to find the site.
     """
     counts = Counter((f, n) for f, _, n in found)
     lines = defaultdict(list)
@@ -279,11 +268,11 @@ def _argparse_default_offenders(tree, label):
 
 
 def test_no_restated_default_in_a_line():
-    _assert_exactly(_hits(_line_pattern), PENDING_B2, "line regex")
+    _assert_exactly(_hits(_line_pattern), {}, "line regex")
 
 
 def test_no_restated_default_in_a_getattr_fallback():
-    _assert_exactly(_hits(_getattr_pattern), PENDING_B2_GETATTR, "getattr probe")
+    _assert_exactly(_hits(_getattr_pattern), {}, "getattr probe")
 
 
 def test_no_argparse_default_restates_a_field_default():
@@ -325,13 +314,12 @@ def test_field_defaults_covers_every_declared_default():
     """Vacuity guard: the value table must hold EVERY default env_config declares.
 
     Both count probes above search for the values in FIELD_DEFAULTS and compare
-    what they find against a PENDING list. An emptied or truncated table makes
-    them find nothing — and today that is caught only as a SIDE EFFECT, because
-    the PENDING rows then go unmatched and the `stale` assert fires. PR B2
-    deletes both PENDING dicts (this file's own header schedules it), and on that
-    day "nothing is restated" and "I am looking for nothing" become the same
-    green. This assert is what tells them apart afterwards, which is why it is
-    written now rather than in B2.
+    what they find against an EMPTY pending map. An emptied or truncated table
+    makes them find nothing, and since PR B2 deleted the pending maps there is no
+    side effect left to catch it: "nothing is restated" and "I am looking for
+    nothing" are now the same green. This assert is the only thing that tells
+    them apart, and its counterpart for the FILE input is
+    test_the_probes_find_a_planted_restatement.
 
     Everything here is DERIVED from RewardWeights()/EnvConfig(); not one value is
     written down. Spelling the numbers out would make this file the first
@@ -382,6 +370,153 @@ def test_the_probes_can_actually_fail(probe):
 
     assert re.search(pattern(name, value), plant(value))
     assert not re.search(pattern(name, value), plant(other))
+
+
+@pytest.mark.parametrize("probe", ["line", "getattr"])
+def test_the_probes_find_a_planted_restatement(tmp_path, monkeypatch, probe):
+    """Positive control for the WALK AND ITS SCOPE, not just the pattern.
+
+    Both count probes now compare against an EMPTY pending map, so their
+    "0 hits" is only evidence if reading a file, walking BOTH roots and
+    reporting a hit still work end to end. Until PR B2 that was evidenced by
+    the PENDING_B2 rows — a non-zero count asserted in both directions — and
+    deleting them took the evidence with them.
+
+    WHY IT REDIRECTS REPO_ROOT INSTEAD OF PLANTING A FILE AND CALLING
+    `_hits_in` DIRECTLY: `_scanned_files()`'s asserts are satisfied by any
+    list containing ANCHOR — a src-only scan and a one-file scan both pass
+    them — so the only way to prove the walk's SCOPE is to run `_hits()`
+    itself against a tree whose contents this test controls. One plant under
+    each root is what makes a silently dropped root fail here: with `scripts/`
+    dropped, the scripts plant disappears from the result.
+
+    `test_the_probes_can_actually_fail` does not close this: it exercises the
+    PATTERNS against a scratch string and never touches the file walk.
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "scripts").mkdir()
+    declaration = tmp_path / "src" / "env_config.py"
+    anchor = tmp_path / "src" / "train_config.py"
+    name = "crouch_enabled"
+    value = FIELD_DEFAULTS[name]
+    plant = (f"{name} = {value!r}\n"
+             if probe == "line" else f'x = getattr(args, "{name}", {value!r})\n')
+    # The declaration is excluded by _scanned_files, so a hit from THIS file
+    # would mean the exclusion broke; it must never appear in the result.
+    declaration.write_text(plant)
+    anchor.write_text(f"# a file the probes must be able to read\n{plant}")
+    (tmp_path / "scripts" / "planted.py").write_text(plant)
+
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "DECLARATION", declaration)
+    monkeypatch.setattr(sys.modules[__name__], "ANCHOR", anchor)
+
+    pattern = _line_pattern if probe == "line" else _getattr_pattern
+    found = _hits(pattern)
+    assert sorted((f, n) for f, _, n in found) == [
+        ("scripts/planted.py", name),
+        ("src/train_config.py", name),
+    ], f"the walk did not report one hit under EACH root: {found}"
+    # cross-probe negative: neither planted shape matches the other probe
+    other = _getattr_pattern if probe == "line" else _line_pattern
+    assert _hits(other) == []
+
+
+def test_the_allowlist_exempts_only_its_own_expression(tmp_path):
+    """The allowlisted span is stripped; the rest of the line is still scanned.
+
+    The assertion is an EXACT list, so it bites on an EXTRA hit as well as on a
+    missing one — and the three ways this entry can go wrong split across both.
+    Each was run against exactly the planted text below, alongside the correct
+    entry, which is what produces the asserted list:
+
+      entry DELETED — lines 1 and 2 both report reward_symmetrize. Two extra
+        hits.
+      entry TRUNCATED to a prefix such as "config.replace(" — the strip removes
+        only that prefix and leaves a bare `reward_symmetrize=False)` behind,
+        which the line regex matches, so lines 1 and 2 report it again. The
+        same two extra hits as deletion: a partial entry buys nothing.
+      entry WIDENED into a blanket LINE exemption (the `continue` this
+        replaced) — line 2's real crouch_enabled restatement VANISHES. A
+        MISSING hit, not an extra one, which is why this assertion cannot be
+        written as a subset check.
+
+    Line 3 does not discriminate between those three — it is reported under all
+    of them. It is the anchor for "only its OWN expression": add a second,
+    broader entry covering `config.replace(pin_pitch=0)` and line 3 drops out
+    of the list (measured).
+    """
+    planted = tmp_path / "allow.py"
+    planted.write_text("    return _make(config=config.replace(reward_symmetrize=False))\n"
+                       "    _make(config=config.replace(reward_symmetrize=False), "
+                       "crouch_enabled=1)\n"
+                       "    cfg = config.replace(pin_pitch=0)\n")
+    found = [(lineno, n) for _, lineno, n in _hits_in([planted], _line_pattern)]
+    assert found == [(2, "crouch_enabled"), (3, "pin_pitch")], found
+
+
+def test_every_allowlist_entry_suppresses_a_real_hit(monkeypatch):
+    """Both directions on ALLOWLIST, the property `_assert_exactly` pins on PENDING.
+
+    WHY (review finding, Minor 2). `_assert_exactly` refuses a PENDING row that
+    no longer matches, because "a stale row is standing permission for a
+    restatement nobody is watching". ALLOWLIST is standing permission of exactly
+    that kind and broader: a PENDING row pins a COUNT at one (file, field), while
+    an ALLOWLIST entry strips its span out of every line of every scanned file.
+    Nothing watched it.
+
+    THE TEST IS "SUPPRESSES A HIT", NOT "APPEARS SOMEWHERE", and the difference
+    is the whole test. The review's proposed check was that each entry matches at
+    least one scanned line; measured, that check CANNOT FAIL for the reason it
+    was proposed. The review's own knock-out — removing `_build_eval`'s
+    `config.replace(reward_symmetrize=False)`, described there as "the entry's
+    only subject" — leaves the entry matching two more lines, because the
+    expression is also spelled in `_build_eval`'s docstring and in
+    `train.assert_eval_env_agreement`'s (3 occurrences, measured 2026-09-04, 2 of
+    them prose). Prose is scanned here on purpose, so those two lines genuinely
+    still need the exemption. What makes an entry DEAD is not that the text
+    vanished but that removing the entry changes no probe's verdict: permission
+    that permits nothing.
+
+    HOW: re-run both count probes with the entry taken out of ALLOWLIST and
+    require strictly more hits. `_hits_in` reads the module global on every call,
+    so monkeypatching it is enough — the same redirection
+    test_the_probes_find_a_planted_restatement uses on REPO_ROOT. BOTH probes,
+    because a future entry could be load-bearing for the getattr shape only. The
+    scan is narrowed to the files that CONTAIN an entry, which changes no verdict
+    and is not an optimisation shortcut: `_hits_in` strips entries with
+    `str.replace`, a no-op on a file none of them occurs in, so such a file
+    contributes the same hits to both sides of every comparison below. Measured
+    2026-09-04: narrowed it runs in 4.7 s against the ~12 s the other ten tests
+    here cost; over the full list it is four whole-tree scans and doubled this
+    file's runtime.
+
+    Set equality rather than a bare `not dead`: `live` is a subset of ALLOWLIST
+    by construction, so equality reads as the two-directions statement it is, and
+    a future entry that this loop cannot classify at all fails here rather than
+    being silently excluded.
+    """
+    entries = tuple(ALLOWLIST)         # before any patching
+    files = [p for p in _scanned_files() if any(a in p.read_text() for a in entries)]
+
+    def _total():
+        return len(_hits_in(files, _line_pattern)) + len(_hits_in(files, _getattr_pattern))
+
+    baseline = _total()
+    live = set()
+    for entry in entries:
+        monkeypatch.setattr(sys.modules[__name__], "ALLOWLIST",
+                            tuple(a for a in entries if a != entry))
+        if _total() > baseline:
+            live.add(entry)
+    monkeypatch.undo()
+
+    assert live == set(entries), (
+        f"ALLOWLIST entr(ies) that suppress nothing: {sorted(set(entries) - live)}\n"
+        f"Both count probes report the same {baseline} hit(s) with and without them, so they are "
+        "standing permission for a restatement nobody is watching — delete them. Do NOT repoint "
+        "an entry at a different expression to keep this green: a new exemption needs its own "
+        "written reason in the spec, per the ALLOWLIST comment above.")
 
 
 def test_the_argparse_probe_can_actually_fail():

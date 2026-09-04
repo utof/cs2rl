@@ -8,6 +8,18 @@ the builders are typed — that compares the factory to itself. So the capture i
 a SEPARATE COMMIT that lands before any migration edit, in PR B1, and PR B2's
 `tests/test_env_factory.py` reads it.
 
+FROZEN AS OF PR B2. `capture()` now REFUSES to run — its first statement raises
+SystemExit. B2 deleted the two args helpers whose names the recorded `eval`
+namespace binds below, so a re-capture would either die on that missing
+attribute or — far worse — be "repaired" to bind the migrated resolver instead
+and then SUCCEED, overwriting this file's own output with a measurement of the
+code under test, which is the one thing the oracle must never be. The script is
+kept, not deleted: it is the auditable record of how the fixture was produced,
+and `tests/test_env_config_capture_shape.py` points readers at it.
+tests/test_env_config_capture_shape.py::test_the_capture_script_refuses_to_run
+pins the refusal, because nothing imports this module and pytest collects
+nothing from it — deleting the raise would otherwise be invisible.
+
 WHAT IS RECORDED per scenario: the current `build_env_for(...)` call text; the
 scenario's args/bindings; the kwargs the stub at `c_env.cs2_env.make_env`
 received; the six-name runtime subset; `expected_config`, an `asdict` of the
@@ -36,8 +48,10 @@ SENTINELS. Opaque pass-through objects are distinct JSON-safe strings, so a
 builder that routes `map_data` into the `team_spirit` slot — an identity bug
 that two real objects would hide — shows up as a plain value mismatch.
 
-REGENERATING is legitimate when a construction site changes ON PURPOSE, and at
-no other time.
+REGENERATING was legitimate only while the builders were still pre-migration, and
+is now refused outright (see FROZEN above). The invocation is recorded for the
+audit trail; it produces a valid capture ONLY from a checkout of the commit named
+in `_provenance.captured_at_commit`, never from this branch's tip.
 
     UV_NO_SYNC=1 uv run python tests/capture_env_config_pre_165b.py --capture
 
@@ -361,6 +375,15 @@ def _git(*args):
 
 
 def capture():
+    raise SystemExit(
+        "This capture is FROZEN. It records what make_env received BEFORE #165 Phase B PR B2\n"
+        "retyped the role builders, and PR B2 deleted the two args helpers the recorded eval\n"
+        "call source is evaluated against. Re-running it now would either fail here or — worse —\n"
+        "succeed against the MIGRATED builders and overwrite the oracle with a measurement of\n"
+        "the code under test. The fixture is checked by tests/test_env_config_capture_shape.py\n"
+        "and consumed by tests/test_env_factory.py; to re-capture, check out the commit named in\n"
+        "_provenance.captured_at_commit.")
+
     dirty = _git("status", "--porcelain", "--", "src")
     if dirty:
         raise SystemExit(
