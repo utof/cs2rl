@@ -40,12 +40,22 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
 There is deliberately NO `record` role, and the reason is NOT that `--record`
 reuses one of the roles above — it does not. `train.record_episode` builds its
 own env with a bare `make_c_env(...)`, the LOWER-layer constructor, which W3
-never banned; the `eval_legacy` env `train.load_policy_from_checkpoint` builds on
-the way in exists only to read an obs_dim off, since it then passes `build_policy`
-an explicit `obs_dim_override` and `build_policy` reads nothing off the env on
-that branch. It is closed before that function returns, on both of its exits —
-explicitly ahead of the obs_dim-mismatch raise, and in a `finally` on the normal
-path — so it is not the env anything is recorded from.
+never banned, and THAT is the env every recorded tick comes from: both its
+`log_tick` calls take `env.snapshot_state()`, and the name `policy_env` never
+appears in it. The `eval_legacy` env `train.load_policy_from_checkpoint` builds
+on the way in is a SECOND, separate env, and it is only ever read — never reset,
+never stepped. Read twice, and it is the second read that surprises people: once
+for its obs_dim, which the checkpoint's must match, and once inside
+`build_policy`, which pulls the policy's `max_turn_speed` buffer off
+`driver_env._c_env.sd.contents`. That second read is UNCONDITIONAL — passing
+`obs_dim_override`, as this caller does, skips only the obs_dim read — so do not
+read the override as "the policy is built without touching the env" (measured
+2026-09-04: with the override supplied, `build_policy` reads exactly
+`driver_env._c_env.sd.contents.max_turn_speed` and never
+`single_observation_space`; hand it an env with no `_c_env` and it dies with
+`AttributeError`). It is closed before that function returns, on both of its
+exits — explicitly ahead of the obs_dim-mismatch raise, and in a `finally` on the
+normal path — so it is not the env anything is recorded from.
 
 CITED BY QUALNAME, NOT BY LINE, and that is the rule for the paragraph above: the
 four `train.py:<lineno>` citations it used to carry pointed four lines past their

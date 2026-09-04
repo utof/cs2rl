@@ -143,9 +143,17 @@ from train_update import (
 # __main__ block breaks every real launch — and ONLY a real launch, now that no
 # read is left outside it. Measured by doing it: `import train` still succeeds,
 # while `python src/train.py --help` dies in its own argparse setup with
-# `NameError: name 'DEFAULT_CHECKPOINT_INTERVAL' is not defined`. The whole test
-# suite would stay green through that, which is why the placement needs a comment
-# rather than a test.
+# `NameError: name 'DEFAULT_CHECKPOINT_INTERVAL' is not defined`. The SUITE DOES
+# catch that, so this comment is not standing in for a missing test: 25 tests go
+# red under exactly that move (measured 2026-09-04, whole suite, -p no:randomly),
+# and every one of the 22 functions behind them launches this file in a child
+# interpreter — 14 of the 15 in tests/test_train_cli.py, the rest in
+# tests/test_arena_duel.py, tests/test_resume_state.py, tests/test_run_rung1_sh.py,
+# tests/test_seed_reproducible.py and tests/test_w1_modules.py. The 15th
+# test_train_cli case stays green because it is a source scan — the
+# "an import-only test cannot see this" point in miniature. What the comment adds
+# is not coverage but a NAME: all 25 report a NameError inside argparse, which
+# tells you the symbol and not the rule.
 __all__ = (
     "AIM_DIM",
     "AIM_LOG_STD_CAP_MIN_HEADROOM",
