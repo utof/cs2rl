@@ -1189,11 +1189,19 @@ def build_env_factory(*, shared_ts, map_data, config=None):
     default; the one production caller (build_train_env_factory) always passes a
     config, and test_build_train_env_factory_carries_args_config pins that.
 
-    PITFALL (review finding 1): the run's config reaches ONLY the training env
-    factory — the --smoke/--record/--eval paths build `EnvConfig()` (`--eval`
-    reaches it through the `eval_legacy` ROLE; there is no --eval-legacy flag), so
-    `--smoke --reward-ct-survival 0.0` silently runs default weights. For
-    symmetrization that is deliberate: eval/record must report raw,
+    PITFALL (review finding 1): within a training run the run's config reaches
+    TWO envs, not one — this factory's, and the fixed-baseline eval env behind
+    `--eval-interval`, which train() builds as `build_env_for("eval", ...,
+    config=env_config_from_args(args))` from the same resolver
+    `build_train_env_factory` reads here, with `assert_eval_env_agreement`
+    cross-checking the two right after. What the run's config does NOT reach is
+    the OTHER entry points: `--smoke` and `--eval` get `EnvConfig()` from their
+    role builders (`--eval` reaches `_build_eval_legacy`; there is no
+    --eval-legacy flag), and `--record` builds its env straight off the
+    lower-layer `make_env` naming no config at all, which lands on the same
+    thing. So `--smoke --reward-ct-survival 0.0` silently runs default weights.
+    Symmetrization is the one field even the config-carrying eval env
+    deliberately diverges on — `_build_eval` forces it off so eval reports raw,
     cross-run-comparable rewards. Known limitation, #143's neighbourhood; do not
     fix in this branch.
     PITFALL: `seed or 0` is intentional — pufferlib passes seed=None for some
