@@ -573,9 +573,14 @@ def env_knobs_from_args(args) -> dict:
          accepted and narrowed; a non-integral one raises "must be an integer
          tick count"), laser_range and max_turn_speed come back as floats, and
          each of the three rejects a value <= 0 with "must be > 0" — which for
-         the two float knobs also catches NaN. No fixture arm and no capture
-         scenario sets any of the three flags, so nothing on this branch gates
-         it.
+         the two float knobs also catches NaN. round_time IS set on this
+         branch — dump_config_pre_165.json's non_default arm and four capture
+         scenarios in env_config_pre_165b.json (roles.train[0, 2],
+         roles.eval[1, 2]) all pass --round-time-ticks 900 — but 900 is
+         integral and positive, so it exercises neither the float -> int
+         narrowing nor any domain rejection, and laser_range and max_turn_speed
+         are null in all three B1 fixtures: nothing on this branch gates any of
+         the new behaviour.
       4. pin_pitch / crouch_enabled / jump_enabled are now normalised through
          int(bool(...)) instead of int(...), so a value outside {0, 1} comes
          back as 1 rather than itself. argparse gives all three choices=(0, 1);
