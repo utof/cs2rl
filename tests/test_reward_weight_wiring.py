@@ -35,9 +35,12 @@ def test_env_factory_injects_reward_overrides():
 
     import train
 
-    # PARTIAL dict on purpose (review fix 5): a full REWARD_WEIGHT_DEFAULTS
-    # copy would set reward_kill to its default explicitly, so the "untouched"
+    # PARTIAL dict on purpose (review fix 5): a copy of the WHOLE weight table
+    # would set reward_kill to its default explicitly, so the "untouched"
     # assertion below would pass even with the omitted-key fallback broken.
+    # (This named REWARD_WEIGHT_DEFAULTS until #165 B1 deleted that dict. The
+    # table it named now lives in the RewardWeights dataclass; only the spelling
+    # of "every weight" changed, not what this comment is warning about.)
     overrides = {
         "reward_ct_survival": 0.0,                                     # A1 arm
         "reward_win_ct_timeout": 3.0,                                  # A1b arm

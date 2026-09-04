@@ -154,6 +154,15 @@ def _jsonable(value):
     if isinstance(value, argparse.Namespace):
         return {"__namespace__": {k: v for k, v in sorted(vars(value).items())}}
     if callable(value):
+        # The module-qualified name is a RECORD of where the callable lived at
+        # capture time, never an oracle. The committed fixture still says
+        # `<train_shared.reward_overrides_from_args>` because that is where the
+        # function was when it was frozen; #165 B1 moved it to train_config, so
+        # regenerating today would legitimately write a different string here.
+        # Do not "fix" the fixture to match, and do not read the mismatch as
+        # drift: tests/test_env_factory.py consumes the `bindings` block as
+        # INPUT (`_inputs_for` feeds it to `build_env_for`) and never compares
+        # it to anything. The oracles are `explicit_kwargs` / `effective_kwargs`.
         return f"<{value.__module__}.{value.__qualname__}>"
     return value
 

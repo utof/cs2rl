@@ -26,9 +26,9 @@ default is never a copy of a field default, it is the "resolve this later"
 sentinel — from the map for --pin-pitch, from nav.py for the R0-G trio.
 
 NOT SCANNED: tests/, and widening the roots to reach it would BURY this gate
-rather than strengthen it. The line probe finds 88 hits under tests/ (measured
-2026-09-04), 30 of them in tests/test_env_config.py — the ORACLE for these very
-defaults, which must write the literals down; that is how it can tell EnvConfig()
+rather than strengthen it. The line probe finds 89 hits under tests/**/*.py
+(measured 2026-09-04), 30 of them in tests/test_env_config.py — the ORACLE for
+these very defaults, which must write the literals down; that is how it can tell EnvConfig()
 still returns them. A test asserting a value is the opposite of a source
 restating one, so do not "fix" this exclusion.
 
@@ -131,10 +131,46 @@ PENDING_B2_GETATTR = {
 }
 # yapf: enable
 
+# The roots every probe reads, and one file that MUST be among the results.
+# ANCHOR is derived from DECLARATION rather than written as a bare "src/..."
+# string: a rename that moved the declaration would move the anchor with it,
+# where a hard-coded path would just start pointing at nothing.
+SCAN_ROOTS = ("src", "scripts")
+ANCHOR = DECLARATION.parent / "train_config.py"
+
 
 def _scanned_files():
-    files = [p for root in ("src", "scripts") for p in sorted((REPO_ROOT / root).rglob("*.py"))]
-    return [p for p in files if p != DECLARATION]
+    """The file list all three probes share — guarded so it cannot go empty.
+
+    VACUITY GUARD, and it lives HERE rather than in a test of its own so every
+    probe inherits it and none can opt out by not calling the test.
+    test_field_defaults_covers_every_declared_default guards the probes' VALUE
+    input; this guards the other one. `Path.rglob` on a missing or renamed root
+    returns `[]` in silence, so a src/ restructure or a typo in SCAN_ROOTS
+    degrades all three probes to no-ops that still report green. The argparse
+    probe is the one with no backstop at all: it has no PENDING list to go stale,
+    so it PASSES on an empty file list today. The two count probes currently
+    survive such a scan only as a side effect, because their PENDING rows go
+    unmatched and the `stale` assert fires — and PR B2 deletes both PENDING
+    dicts (see the header above), which is the day that accident stops working
+    and all three go blind together.
+
+    Per-root, not one total: a `scripts/` rename would otherwise hide behind
+    `src/`'s 25 files and the count probes would keep passing on a half scan.
+    """
+    per_root = {root: sorted((REPO_ROOT / root).rglob("*.py")) for root in SCAN_ROOTS}
+    empty = sorted(r for r, found in per_root.items() if not found)
+    assert not empty, (
+        f"{empty} matched no *.py file, so every probe in this file is scanning less than it "
+        f"claims to. rglob returns [] for a root that does not exist, so this is what a rename "
+        f"or a typo in SCAN_ROOTS looks like — repoint SCAN_ROOTS, never delete this assert.")
+    files = [p for found in per_root.values() for p in found if p != DECLARATION]
+    assert ANCHOR in files, (
+        f"{ANCHOR} is missing from the scan of {list(SCAN_ROOTS)} ({len(files)} file(s) found). "
+        f"That file holds the CLI and the R0-G/R0-J prose, so a scan without it is not scanning "
+        f"src/, whatever its length. If the file legitimately moved, repoint ANCHOR — it is "
+        f"derived from DECLARATION so that a rename shows up here instead of silently.")
+    return files
 
 
 def _hits(pattern_for):

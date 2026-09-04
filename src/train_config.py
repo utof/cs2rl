@@ -567,9 +567,15 @@ def env_knobs_from_args(args) -> dict:
       2. This helper now builds a whole EnvConfig, so it also validates the
          WEIGHTS: a NaN weight raises from here, not only from
          reward_overrides_from_args.
-      3. The R0-G values are COERCED, not forwarded verbatim: laser_range and
-         max_turn_speed come back as floats. No fixture arm and no capture
-         scenario sets either flag, so nothing on this branch gates it.
+      3. All three R0-G values are COERCED, not forwarded verbatim, and all
+         three gained a validated domain the old helper did not enforce.
+         round_time comes back an int (a float tick count that is integral is
+         accepted and narrowed; a non-integral one raises "must be an integer
+         tick count"), laser_range and max_turn_speed come back as floats, and
+         each of the three rejects a value <= 0 with "must be > 0" — which for
+         the two float knobs also catches NaN. No fixture arm and no capture
+         scenario sets any of the three flags, so nothing on this branch gates
+         it.
       4. pin_pitch / crouch_enabled / jump_enabled are now normalised through
          int(bool(...)) instead of int(...), so a value outside {0, 1} comes
          back as 1 rather than itself. argparse gives all three choices=(0, 1);

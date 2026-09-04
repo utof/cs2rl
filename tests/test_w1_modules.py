@@ -359,7 +359,14 @@ for (_, hi), (lo, _) in zip(train_shared._MASK_HEAD_SLICES,
 
 
 def test_the_leaf_edge_has_a_direction():
-    """train_shared -> env_config is allowed; env_config -> train_shared is not.
+    """env_config must not import train_shared: the leaves stay independent.
+
+    NO edge runs between the two leaves today. This summary used to read
+    "train_shared -> env_config is allowed", and it was — train_shared imported
+    RewardWeights until #165 B1 deleted that import, leaving train_config ->
+    env_config as the load-bearing edge (see the LEAVES comment above). What
+    still needs pinning is the DIRECTION: env_config is the deepest module here,
+    so if the edge is ever reintroduced it must point that way and never back.
 
     `allowed = {mod} | LEAVES` is symmetric, so nothing above would notice
     env_config importing train_shared — and train_shared is light, so the HEAVY

@@ -204,9 +204,10 @@ def resolve_gammas(args) -> tuple[float, float]:
     dump-config args objects that predate the flag); ``pbrs_gamma`` is
     ``args.pbrs_gamma`` when given, else ``gamma``.
 
-    WHY one helper: build_train_config (provenance + the PPO discount) and
-    env_knobs_from_args (the env's PBRS discount) must agree on the SAME
-    resolution rule — PBRS is only policy-invariant (Ng et al.) when
+    WHY one helper: its two callers, build_train_config (provenance + the PPO
+    discount) and env_config_from_args (the env's PBRS discount, which
+    env_knobs_from_args then reads back off the EnvConfig), must agree on the
+    SAME resolution rule — PBRS is only policy-invariant (Ng et al.) when
     γ_pbrs == γ, and before R0-J the two lived as unrelated literals (train.py
     0.999 vs cs2_env.py 0.999, now one field default in env_config.py) held
     together by a single drift test.
