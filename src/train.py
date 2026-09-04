@@ -69,6 +69,7 @@ from train_config import (
     env_config_from_args,
     env_knobs_from_args,
     resolve_opponent_mode,
+    reward_overrides_from_args,
     validate_aim_log_std_max,
 )
 from train_metrics import (
@@ -93,14 +94,12 @@ from train_shared import (
     LOG_STD_MAX,
     LOG_STD_MIN,
     RESUME_CONFIG_ALLOWLIST,
-    REWARD_WEIGHT_DEFAULTS,
     TEAM_SIZE,
     _apply_action_masks,
     _atomic_save_state_dict,
     pin_pitch_for_map,
     resolve_aim_log_std_init,
     resolve_gammas,
-    reward_overrides_from_args,
 )
 from train_update import (
     _aim_dim_weight,
@@ -131,9 +130,9 @@ from train_update import (
 # resolve through THAT module's globals and never see the patch, so such a test passes
 # while asserting nothing. Patch the defining module (see tests/test_tag_trainer.py).
 # PLACEMENT IS LOAD-BEARING, not an isort accident: train.py's own module body READS
-# moved names while it executes — `REWARD_WEIGHT_KEYS = tuple(REWARD_WEIGHT_DEFAULTS)`,
-# make_puffer_env's `n_active_per_team=TEAM_SIZE` default, and eight more inside
-# `if __name__ == "__main__":` (the argparse defaults/choices and the four main() calls).
+# moved names while it executes — make_puffer_env's `n_active_per_team=TEAM_SIZE`
+# default, and eight more inside `if __name__ == "__main__":` (the argparse
+# defaults/choices and the four main() calls).
 # Every one of those sits BELOW this block and would NameError at import time if the
 # shims were moved down.
 __all__ = (
@@ -147,7 +146,6 @@ __all__ = (
     "LOG_STD_MIN",
     "OPPONENT_MODES",
     "RESUME_CONFIG_ALLOWLIST",
-    "REWARD_WEIGHT_DEFAULTS",
     "ScheduledEval",
     "TEAM_SIZE",
     "_LOG_2PI",
@@ -567,11 +565,6 @@ def resolve_resume_split(resume_path, *, heads_flag, trunk_flag, map_location="c
     heads = bool(heads_flag) or state_dict_is_split(state_dict)
     trunk = bool(trunk_flag) or state_dict_is_trunk_split(state_dict)
     return heads, trunk, state_dict, resume_path
-
-
-# The dict this reads (and its "single wiring source of truth" rationale) now
-# lives in src/train_shared.py; only this derived tuple stays here.
-REWARD_WEIGHT_KEYS = tuple(REWARD_WEIGHT_DEFAULTS)
 
 
 def auto_vec_workers(num_envs: int, physical_cores: int) -> int:

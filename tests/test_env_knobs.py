@@ -148,6 +148,35 @@ def test_env_knobs_from_args_legacy_args_object():
     assert k["crouch_enabled"] == 1 and k["jump_enabled"] == 1
 
 
+def test_reward_overrides_from_args_is_the_whole_weight_dict():
+    """The sibling derived wrapper, against the DECLARATION as its oracle.
+
+    WHY THE RIGHT-HAND SIDE IS `RewardWeights()`: a wrapper that dropped or
+    misspelled a key is invisible to every other check on this branch. The env
+    would simply fall back to that same field default, while config.json —
+    built from EnvConfig — recorded the flagged value, so the run would train
+    on one number and be provenanced with another. Comparing the helper against
+    itself (or feeding a captured override dict back in as an INPUT) cannot see
+    that: both sides move together.
+
+    The second half is the knock-out for the first. An implementation that
+    ignored `args` entirely and returned the field defaults verbatim satisfies
+    the equality above, so a flagged weight must also arrive — off-default on
+    purpose, or the assertion would hold for a resolver that never reads args.
+
+    PR B2 deletes the helper and this test with it.
+    """
+    from argparse import Namespace
+
+    from env_config import RewardWeights
+    from train import reward_overrides_from_args
+    declared = RewardWeights().as_dict()
+    assert reward_overrides_from_args(Namespace()) == declared
+    flagged = reward_overrides_from_args(Namespace(reward_ct_survival=0.0))
+    assert flagged.keys() == declared.keys(), "a flagged run must carry all 23 weights"
+    assert flagged["reward_ct_survival"] == 0.0 != declared["reward_ct_survival"]
+
+
 def test_env_config_from_args_reads_every_channel():
     """args → EnvConfig: weights, flag knobs, the R0-G trio and pbrs_gamma.
 

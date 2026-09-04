@@ -195,8 +195,7 @@ def _record(recorder, path, qualname, scenario, bindings, extra=None):
 
 def _capture():
     import train
-    from train_config import env_knobs_from_args
-    from train_shared import reward_overrides_from_args
+    from train_config import env_knobs_from_args, reward_overrides_from_args
 
     train_py = REPO_ROOT / "src" / "train.py"
     harness_py = REPO_ROOT / "src" / "train_test_harness.py"
