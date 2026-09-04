@@ -67,9 +67,7 @@ from train_config import (
     build_train_config,
     compute_batch_dims,
     env_config_from_args,
-    env_knobs_from_args,
     resolve_opponent_mode,
-    reward_overrides_from_args,
     validate_aim_log_std_max,
 )
 from train_metrics import (
@@ -176,7 +174,6 @@ __all__ = (
     "compute_network_health",
     "compute_trunk_divergence",
     "env_config_from_args",
-    "env_knobs_from_args",
     "load_full_resume",
     "log_aim_log_std",
     "masked_explained_variance",
@@ -189,7 +186,6 @@ __all__ = (
     "resolve_opponent_mode",
     "resolve_resume_run",
     "restore_train_state",
-    "reward_overrides_from_args",
     "seed_everything",
     "tag_grad_cossim",
     "validate_aim_log_std_max",
@@ -2030,10 +2026,11 @@ def resolve_pin_pitch(args, verbose: bool = True) -> int:
     and refused with ValueError (never assert) when it disagrees with the map.
 
     WHY a separate function: train() is too heavy to exercise in a unit test,
-    and this block MUST run before build_train_env_factory — env_knobs_from_
-    args(args) bakes args.pin_pitch into every worker env at vector.make;
-    resolving later would leave the envs unpinned while the policy gets
-    aim_dim_mask=[1,0] and assert_pin_pitch_agreement aborts the run.
+    and this block MUST run before build_train_env_factory — that call reads
+    args.pin_pitch through env_config_from_args and bakes the resulting
+    EnvConfig into every worker env at vector.make; resolving later would leave
+    the envs unpinned while the policy gets aim_dim_mask=[1,0] and
+    assert_pin_pitch_agreement aborts the run.
 
     PITFALL: args.map_data is None for `--map dust2`/`--dust2`; the helper
     LOADS the map (cached). main() calls this ABOVE the --dump-config exit on

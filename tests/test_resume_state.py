@@ -466,7 +466,7 @@ def test_subprocess_resume_run_flat_map_without_pin_pitch_flag(tmp_path):
     """Task 12 (R0-H) binding ruling: a flag-less `--resume-run` of a PINNED run
     must be accepted. The CLI default is pin_pitch=None; the run's config.json
     holds the resolved 1 (flat map). If the config guard ran before
-    resolve_pin_pitch, env_knobs_from_args would yield 0 and every retry of a
+    resolve_pin_pitch, env_config_from_args would yield 0 and every retry of a
     Rung 1 arena run (Task 15's loop) would SystemExit "config.json mismatch".
     16 envs: batch_size floor (see test_subprocess_resume_run)."""
     ckpt = tmp_path / "run"

@@ -104,7 +104,9 @@ def resolve_opponent_mode(args) -> str:
     WHAT: returns "self" or "noop"; raises ValueError on anything else. The
     getattr default keeps harness / ``--dump-config`` / older SimpleNamespace
     callers (which predate the flag) on the historical self-play behaviour —
-    same contract as env_knobs_from_args' stance knobs.
+    same contract as env_config_from_args' flag knobs, which read every one of
+    them as ``getattr(args, name, UNSET)`` and omit the absent ones so the
+    EnvConfig field default applies.
 
     WHY validate here instead of trusting argparse's ``choices=``:
     build_train_config is also reached from hand-built namespaces (the test
@@ -458,9 +460,11 @@ def env_config_from_args(args) -> EnvConfig:
     """The single args → EnvConfig resolver (spec 2026-09-03 §2.3, Phase B R3).
 
     WHAT: reads the 23 reward flags, the five flag knobs, the R0-G trio and
-    pbrs_gamma off `args` and returns one frozen EnvConfig. Replaces
-    env_knobs_from_args + reward_overrides_from_args, whose two dicts had to be
-    kept in step by hand.
+    pbrs_gamma off `args` and returns one frozen EnvConfig — one resolver, one
+    object. Until #165 Phase B the weights and the non-weight knobs were read by
+    two separate helpers into two separate dicts that had to be kept in step by
+    hand, and a knob added to one and missed by the other was silent; there is
+    no second dict left for this one to drift from.
 
     WHY NO DEFAULT IS RESTATED HERE: every absent flag is reached by OMISSION —
     `getattr(args, name, UNSET)` and then simply not passing it — so the field
@@ -503,99 +507,3 @@ def env_config_from_args(args) -> EnvConfig:
     for arg_name, field_name in _R0G_KNOBS:
         knobs[field_name] = getattr(args, arg_name, None)
     return EnvConfig(rewards=RewardWeights(**weights), **knobs)
-
-
-def reward_overrides_from_args(args) -> dict:
-    """DEPRECATED derived wrapper: the 23 weights as a dict, from env_config_from_args.
-
-    WHY IT STILL EXISTS: its last readers (build_train_env_factory, train()'s
-    eval site, tests/test_env_factory_mp.py) move to EnvConfig in PR B2, and
-    deleting the name here would make this commit red for the sake of one PR
-    boundary. It is DERIVED, so it cannot drift from the resolver.
-
-    WHY IT LIVES IN THIS FILE and not in train_shared, where it was born: it now
-    calls env_config_from_args, which is defined here, and train_config already
-    imports train_shared — a wrapper left over there would close a module cycle.
-    Every caller reaches it through `train`, so the move is invisible to them.
-
-    NARROWINGS (disclosed; none is reachable from argv, because every --reward-*
-    flag is type=float — a hand-built Namespace is the only way in):
-      1. String and bool weights are now ValueErrors. The old body was
-         `float(getattr(args, k, d))`, so a sweep file's string weight and a
-         `True` both became floats; RewardWeights requires a non-bool Real.
-      2. This helper now builds a whole EnvConfig, so it also validates the
-         KNOBS: a bad n_active_per_team raises from here, not only from
-         env_knobs_from_args.
-      3. It now runs resolve_gammas, so an out-of-range --gamma or --pbrs-gamma
-         raises on the reward path too, and the "PBRS shaping is no longer
-         policy-invariant" warning can print from one more call site. No test
-         asserts on that line.
-    """
-    return env_config_from_args(args).rewards.as_dict()
-
-
-def env_knobs_from_args(args) -> dict:
-    """DEPRECATED derived wrapper: the non-weight knobs as make_puffer_env kwargs.
-
-    WHY IT STILL EXISTS: same reason as reward_overrides_from_args above — its
-    last readers (build_train_env_factory, train()'s row vector and eval site,
-    tests/) move to EnvConfig in PR B2. Being DERIVED, it cannot drift from
-    env_config_from_args; the KEY SET and the values are what they were.
-
-    PITFALL: this returns make_puffer_env KWARG names, not config keys. It is
-    splatted straight into make_puffer_env(**env_knobs); renaming a key here
-    without renaming the parameter there raises TypeError inside a forked
-    vecenv worker, far from the mistake. The R0-G pairs happen to spell the
-    kwarg and the EnvConfig field the same way, which is why one loop serves
-    both — that is a coincidence of naming, not a rule to rely on.
-
-    R0-G knobs (round_time_ticks -> round_time, laser_range, max_turn_speed):
-    None-valued ones are OMITTED from the dict rather than forwarded as None,
-    so the env's own nav.py default applies and config.json records None
-    instead of a duplicated constant that would silently drift from nav.py.
-
-    R0-J: ``pbrs_gamma`` is ALWAYS present (resolved via resolve_gammas, so it
-    equals the training gamma unless --pbrs-gamma was given). Unlike the R0-G
-    knobs it is never omitted: the env default would silently disagree with a
-    non-default --gamma.
-
-    NARROWINGS (disclosed; none is reachable from argv — the flags are type=int
-    and type=float — so a hand-built Namespace is the only way in):
-      1. A non-integral n_active_per_team now RAISES where today's int(...)
-         truncated it (parent spec 2.3). It arrives one commit before this
-         helper is deleted.
-      2. This helper now builds a whole EnvConfig, so it also validates the
-         WEIGHTS: a NaN weight raises from here, not only from
-         reward_overrides_from_args.
-      3. All three R0-G values are COERCED, not forwarded verbatim, and all
-         three gained a validated domain the old helper did not enforce.
-         round_time comes back an int (a float tick count that is integral is
-         accepted and narrowed; a non-integral one raises "must be an integer
-         tick count"), laser_range and max_turn_speed come back as floats, and
-         each of the three rejects a value <= 0 with "must be > 0" — which for
-         the two float knobs also catches NaN. round_time IS set on this
-         branch — dump_config_pre_165.json's non_default arm and four capture
-         scenarios in env_config_pre_165b.json (roles.train[0, 2],
-         roles.eval[1, 2]) all pass --round-time-ticks 900 — but 900 is
-         integral and positive, so it exercises neither the float -> int
-         narrowing nor any domain rejection, and laser_range and max_turn_speed
-         are null in all three B1 fixtures: nothing on this branch gates any of
-         the new behaviour.
-      4. pin_pitch / crouch_enabled / jump_enabled are now normalised through
-         int(bool(...)) instead of int(...), so a value outside {0, 1} comes
-         back as 1 rather than itself. argparse gives all three choices=(0, 1);
-         gh#175 tracks that normalisation for the dataclass as a whole.
-    """
-    cfg = env_config_from_args(args)
-    knobs = {
-        "n_active_per_team": cfg.n_active_per_team,
-        "pin_pitch": cfg.pin_pitch,
-        "crouch_enabled": cfg.crouch_enabled,
-        "jump_enabled": cfg.jump_enabled,
-        "pbrs_gamma": cfg.pbrs_gamma,
-    }
-    for _, field_name in _R0G_KNOBS:
-        v = getattr(cfg, field_name)
-        if v is not None:
-            knobs[field_name] = v
-    return knobs
