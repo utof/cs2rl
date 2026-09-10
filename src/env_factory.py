@@ -113,8 +113,13 @@ DIFFERENT guards, which is the part that is easy to get wrong.
 symbols in `src/` and `scripts/`: `make_puffer_env` and `SelfPlayManager`.
 `make_env` is not one of them. That scan DOES have a subject here — the
 `SelfPlayManager(...)` below, which is what this file's exemption exists for.
-What #165 PR B2 changed is that this module stops naming `make_puffer_env` at
-all.
+What #165 PR B2 changed is the CODE side, not this scan's: the function-local
+`from train import make_puffer_env` and `builder(make_puffer_env, **kwargs)`
+became `from c_env.cs2_env import make_env` and `builder(make_env, **kwargs)`.
+The scan saw no change — neither spelling is a CALL node, so the pre-B2 file
+(`46e7ed6:src/env_factory.py:272`, `:274`) had no `make_puffer_env(...)` call
+either. `make_puffer_env` does survive in this docstring's prose, so a grep
+here still hits it; the scan reads call nodes, not text.
 
 `make_env` belongs instead to `LOWER_LAYER_SITES`, the per-file DISCLOSURE census
 that `test_the_unbanned_lower_layer_census_is_accurate` asserts by exact
