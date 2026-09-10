@@ -7,8 +7,9 @@ validate in `__post_init__`. `Cs2Env` reads its scalars off an `EnvConfig`;
 `from_legacy_kwargs`; `build_train_config` writes `to_config_dict()`.
 
 WHY (gh#165, ADR 0003): before this module the same 23 defaults were declared in
-`make_env`, `Cs2Env.__init__` and `train_shared.REWARD_WEIGHT_DEFAULTS`, agreeing
-only because a test compared them. One declaration, here, is the fix.
+`make_env`, `Cs2Env.__init__` and a module-level defaults dict in
+`train_shared.py`, agreeing only because a test compared them. One declaration,
+here, is the fix.
 
 IMPORT BUDGET: stdlib ONLY. `c_env.cs2_env` (layer L1) imports this module, and
 `train.py --dump-config` must stay free of torch/nav/c_env, so nothing heavier
@@ -85,8 +86,14 @@ def _check_weight(name, value):
 
 @dataclass(frozen=True)
 class RewardWeights:
-    """The 23 reward/PBRS coefficients. Field order == the historical
-    REWARD_WEIGHT_DEFAULTS order == the CLI flag order (`--reward-*`, `--pbrs-*`).
+    """The 23 reward/PBRS coefficients. Field order is load-bearing twice over:
+    tests/test_env_config.py::test_reward_field_census_is_23_with_6_pbrs pins it
+    name-by-name against that file's `DEFAULTS_AT_139a3a3` literal (the pre-#165
+    declaration order), and train.py's parser loop GENERATES the `--reward-*` /
+    `--pbrs-*` flags from `as_dict()`, so flag and `--help` order FOLLOW this
+    order rather than merely agreeing with it — reordering a field silently
+    reorders the CLI and reddens that pin. (Generated, not hand-listed, pre-#165
+    too: the dict this class replaced was iterated the same way.)
 
     Non-potential terms first (hackable — sweep with care), then the six PBRS
     potential weights (optimum-safe per Ng et al. 1999). Six of the 23 do NOT
