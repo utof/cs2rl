@@ -64,19 +64,27 @@ position (`attr`) rather than the value position is the whole mechanism — a
 naive value-position match flags those two sites, and the tempting fix is to
 loosen the matcher until the real coverage dies, with nothing to notice.
 
-WHY `src/env_factory.py` SHOWS ONE CONSTRUCTION AND NOT TWO, AND HAS TWO PINS
-FOR IT. It builds the manager directly (`SelfPlayManager(...)`), so the scan finds
-that. It contains no CONSTRUCTOR call at all: `build_env_for` imports the
-constructor function-locally and passes it to the role builder as a VALUE
-(`src/env_factory.py:372` reads `return builder(make_env, **kwargs)`; the six role
-builders receive it positional-only as `_make`, `def _build_train(_make, /, ...)`),
-so no call node in that file names it. Both halves are pinned, because they are
-different regressions: the banned `make_puffer_env`, which the enforcement
+WHY `src/env_factory.py` SHOWS ONE OF THE TWO BANNED CONSTRUCTIONS, AND WHY THE
+ABSENT ONE IS NOW PINNED TWICE OVER. Careful with the numbers here: the "two" in
+CONSTRUCTED and the "two" in "two pins" count different things. It builds the
+manager directly (`build_selfplay_manager`'s `return SelfPlayManager(...)`), so the
+scan finds that one, and it is the only call in the file to any of the four symbols
+CONSTRUCTED and LOWER_LAYER name. What is absent is a call node that NAMES an env
+constructor: `build_env_for` imports the constructor function-locally and passes it
+to the role builder as a VALUE (it ends `return builder(make_env, **kwargs)`; the
+six role builders receive it positional-only as `_make`,
+`def _build_train(_make, /, ...)`). The env IS constructed here — the builders call
+it as `_make(...)` — but no matcher keyed on a constructor's SPELLING can see that,
+which is the whole reason the absence has to be pinned rather than assumed.
+That absence carries TWO pins, because it is two different regressions in two
+different vocabularies: `make_puffer_env` from CONSTRUCTED, which the enforcement
 assertion at the bottom of this file excludes the factory from (`if p != FACTORY`),
-and the lower-layer `make_env`/`Cs2Env` that B2 made `build_env_for` import, one
-inlined line away. The absent `make_puffer_env(...)` call is also why guard 2 takes
-its `make_puffer_env` evidence from `tests/`, where ~40 direct constructions
-legitimately live, rather than from the factory.
+and `make_env`/`Cs2Env` from LOWER_LAYER, of which B2 made `build_env_for` import
+`make_env` only — `Cs2Env` is never imported here and is pinned beside it because
+a direct `Cs2Env(...)` is what would bypass `make_env`'s map loading. The missing
+`make_puffer_env(...)` call is also why guard 2 takes its `make_puffer_env`
+evidence from `tests/`, where ~40 direct constructions legitimately live, rather
+than from the factory.
 
 THE UNSCANNED LOWER LAYER — the honest limit of this file (final review I-1).
 `make_puffer_env` is a wrapper: it applies the reward-override validation and the
@@ -158,9 +166,10 @@ LOWER_LAYER_SITES = {
 # reachable only through `from c_env.cs2_env import make_env as make_c_env`.
 # Three UNITS meet here and they differ, which is how a `>= 4` ended up under a
 # docstring claiming six: six CALLS, in three FILES, bound by four import
-# STATEMENTS (`src/profile_step.py:36`, module-level and covering all three of
-# its calls; `src/train.py:756` and `:1021` and `src/train_bc.py:467`, each
-# function-local and covering one).
+# STATEMENTS, named by their owner rather than by line so they cannot rot:
+# `src/profile_step.py` imports it once at MODULE level and covers all three of
+# its calls, while `src/train.py`'s `make_puffer_env` and `record_episode` and
+# `src/train_bc.py`'s `make_bc_env` each import it function-locally for one call.
 #
 # WHY EXACT EQUALITY RATHER THAN A FLOOR, and where the headroom went. This dict
 # is the oracle of the live positive control below, whose entire value IS the
@@ -337,17 +346,21 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
     symbol #165 PR B2 put at risk.
 
     `build_env_for` imports `c_env.cs2_env.make_env` function-locally and hands it
-    to the role builder as a VALUE (`src/env_factory.py:370` and `:372`; the six
-    builders receive it positional-only as `_make`), so no CALL node in that file
-    names it. B2 is what made this the pin worth adding: it swapped the
-    function-local `from train import make_puffer_env` for
-    `from c_env.cs2_env import make_env`, so `make_env` is now the only
-    constructor that file references in CODE at all. Measured 2026-09-10:
-    `make_puffer_env` has ZERO code references there and ten textual ones, all on
-    docstring lines; `make_env` has two, the import and the value pass. So the
-    regression the assertion above guards needs someone to import a name that file
-    no longer mentions in code, while the regression this one guards needs one
-    line inlined into a builder.
+    to the role builder as a VALUE (its own `from c_env.cs2_env import make_env`
+    and the `return builder(make_env, **kwargs)` it ends on; the six role builders
+    receive it positional-only as `_make`), so no CALL node in that file names it.
+    B2 is what made this the pin worth adding: it swapped the function-local
+    `from train import make_puffer_env` for `from c_env.cs2_env import make_env`,
+    so `make_env` is the only ENV constructor that file references in code at all.
+    Measured 2026-09-10: of the three env constructors, `make_puffer_env` and
+    `Cs2Env` have ZERO code references there and ten and four textual ones
+    respectively, every one of them on a docstring line and none in a comment,
+    while `make_env` has two code references, the import and the value pass.
+    (`SelfPlayManager` also has two, plus the one CALL node in the file; it is a
+    manager rather than an env and belongs to the assertion above.)
+    So the regression the assertion above guards needs someone to import a name
+    that file no longer mentions in code, while the regression this one guards
+    needs one line inlined into a builder.
 
     This is an ADDITION, not a replacement. The `make_puffer_env` assertion above
     is a live negative, not a vacuous one: plant a real `make_puffer_env(...)` call
@@ -376,9 +389,27 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
 
 # symbol -> the body inlined into a planted copy of `src/env_factory.py`. One
 # entry per assertion in the pin above; a pin with two negatives needs two
-# knock-outs, not one. STRING LITERALS on purpose: this file is inside
-# tests/test_env_config_migration.py's scan root, and a real `make_env(...)`
-# call node here would raise that census's pinned tests/ count.
+# knock-outs, not one.
+#
+# STRING LITERALS on purpose, and NOT for the reason an earlier draft of this
+# comment gave ("a real call node here would raise that census's pinned count").
+# This file is inside the scan root of tests/test_env_config_migration.py, whose
+# ratchet is a ceiling on LEGACY calls — `legacy_in` keeps a site only
+# `if ... and why` — not on calls. Measured 2026-09-10 by planting each spelling
+# here as a real call node:
+#   * as this file stands, importing no constructor, a real `make_env(...)` call
+#     resolves to NOTHING whatever its spelling — typed, legacy keyword or
+#     positional. That census resolves through `_bindings`, so an unbound name is
+#     invisible to it; all three plants left it at 37 passed.
+#   * add the import as well and the call resolves. A TYPED one lands in `FOUND`
+#     with no legacy reason and the ceiling stays 54; a legacy one — clause 1
+#     (`reward_hp=1.0`) or clause 3 (positional) — takes it to 55 and reddens
+#     `test_the_tests_root_legacy_count_only_ever_falls[make_env-54]`. That is the
+#     only census pin a plant here can move: `len(SCANNED)` counts FILES and a
+#     plant adds none.
+# So a bare real call is safe today only because this file imports no
+# constructor — a property of the imports, not of the plant. A string literal is
+# unconditionally safe, which is why these are strings.
 _INLINED_CONSTRUCTION = {
     "make_env": ("    from c_env.cs2_env import make_env\n"
                  "    return make_env(config=None, map_data=md)\n"),
@@ -443,13 +474,29 @@ def test_alias_resolution_is_exercised_by_real_source_not_only_by_a_plant():
         if spelling.startswith("alias:"):
             aliased.setdefault(str(path.relative_to(REPO_ROOT)), []).append(lineno)
     counts = {rel: len(linenos) for rel, linenos in aliased.items()}
+    # Both directions, named separately. An ADDED site is the growth case and
+    # prints as `[]` on the shrink line, which reads as "nothing changed" unless
+    # the message says which way it moved.
+    gone = sorted(set(ALIASED_LOWER_LAYER_SITES) - set(counts))
+    added = sorted(set(counts) - set(ALIASED_LOWER_LAYER_SITES))
+    recounted = sorted(f for f in set(counts) & set(ALIASED_LOWER_LAYER_SITES)
+                       if counts[f] != ALIASED_LOWER_LAYER_SITES[f])
     assert counts == ALIASED_LOWER_LAYER_SITES, (
         f"the import-aliased lower-layer population has changed. resolved {counts} "
         f"(lines {aliased}), expected {ALIASED_LOWER_LAYER_SITES}\n"
-        f"  no longer resolving at all: {sorted(set(ALIASED_LOWER_LAYER_SITES) - set(counts))}\n"
-        "Either alias resolution stopped working, or the repo stopped writing "
-        "`make_env as make_c_env`. Check WHICH before touching this dict, and update the "
-        "ALIAS RESOLUTION paragraph and import_aliases' docstring with it.")
+        f"  files that no longer resolve at all: {gone}\n"
+        f"  files newly resolving, absent from the dict: {added}\n"
+        f"  files still resolving, at a different count: {recounted}\n"
+        "SHRANK: either alias resolution stopped working or the repo stopped writing "
+        "`make_env as make_c_env` — check WHICH before touching this dict. GREW: a new "
+        "aliased call site appeared, which is allowed; write it down.\n"
+        "Then update EVERY place stating a figure from this population, not only the dict. "
+        "Measured 2026-09-10 there are four in this file and they do not all state the same "
+        "figure: the module docstring's ALIAS RESOLUTION paragraph and `import_aliases`' "
+        "docstring give the files and the statements, this test's docstring gives the calls and "
+        "the files, and this dict's own comment gives all three. Plus one outside this file, "
+        "pinned by nothing: `_bindings`' docstring in tests/test_env_config_migration.py states "
+        "all three figures too.")
 
 
 def test_the_unbanned_lower_layer_census_is_accurate():
