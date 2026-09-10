@@ -1629,7 +1629,7 @@ def make_env(
     DEPRECATED — see the follow-up issue filed at Phase-A branch end
     (gh#173). `**legacy` exists for the test files that still spell kwargs the
     old way. Measured by tests/test_env_config_migration.py on this tree at the
-    tip of PR B3: NINETEEN files under `tests/` hold at least one call that
+    tip of PR B3: NINETEEN files under `tests/` hold at least one call that the
     census calls legacy — 17 for `make_env`, 4 for `make_puffer_env`, two files
     in both — while `src/` and `scripts/` hold none. What that census PINS is
     CALL counts, not file counts: two per-symbol literals
@@ -1643,9 +1643,15 @@ def make_env(
     LEGACY call". The neighbouring count — files holding a call the census
     RESOLVES at all, typed or legacy — is 32 under `tests/`, 41 across all three
     roots, and is not this one. The ~38 this paragraph carried until PR B3 was a
-    third reading again: measured, it matches neither, but does match a
-    text-mention grep at Phase A (`grep -rlE 'make_env|make_puffer_env' tests`
-    = 39 files at ae478f8), where the legacy-call population was already 19.
+    third INSTRUMENT, not a third tree: the census docstring's "pre-migration
+    population" gloss has the tree right and is silent only about how the
+    counting was done. Measured, `git grep -lE 'make_env|make_puffer_env'
+    139a3a3 -- 'tests/*.py'` returns exactly 38 — a TEXT-MENTION count at the
+    pre-#165 baseline, FILTERED to `*.py`; drop the filter and the same command
+    returns 39, the extra file being tests/fixtures/env_kwargs_pre_w3.json. The
+    two shims' legacy-CALL population on that tree, today's census clauses
+    applied to it, was 18 files. The figure was never approximate: it counted
+    mentions where this paragraph needs calls.
     """
     if legacy and config is not None:
         raise TypeError(f"make_env got config= AND legacy kwargs {sorted(legacy)}; pass one")
