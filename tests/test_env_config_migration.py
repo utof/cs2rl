@@ -17,9 +17,22 @@ by the three clauses of spec 2026-09-03 §3:
             none.
 
 WHY IT EXISTS: `make_env` and `make_puffer_env` keep a `**legacy` channel so
-#165 did not have to migrate ~45 files in the branch that moved the seam. This
-census is the ratchet that stops the channel growing. gh#173 drives the `tests`
-literals to zero and then deletes the channel.
+#165 could move the seam without migrating every caller in the same branch. HOW
+MANY callers that is has no single answer, and this census is the instrument
+that answers it, so the number is stated here with the question attached.
+Measured by this module, on this tree, at the tip of PR B3: **19 files under
+`tests/` hold at least one call these three clauses call legacy** — 17 for
+`make_env`, 4 for `make_puffer_env`, two files in both — and `src/` and
+`scripts/` hold none. Two neighbouring counts answer DIFFERENT questions and
+must not be quoted for this one: 32 files under `tests/` (41 across all three
+roots) hold at least one call the census RESOLVES, typed or legacy; and
+`src/c_env/cs2_env.py`'s own `**legacy` docstring carries a third figure, for
+the pre-migration population, repaired elsewhere in this PR (spec §8.9 item 4).
+Anyone re-quoting a number from here states the tree, the commit and the
+reading, because this workstream has already burned a day on three "different
+answers" that were three different questions. This census is the ratchet that
+stops the channel growing. gh#173 drives the `tests` literals to zero and then
+deletes the channel.
 
 WHAT A GREEN HERE DOES *NOT* MEAN. `src`=0 and `scripts`=0 are RATCHETS: they
 are already zero, so on real source they cannot fail today. What makes them
@@ -160,8 +173,8 @@ def _bindings(tree, rel):
     — train.py IS its defining file — and is what catches an in-module
     `make_puffer_env(...)` call there.
 
-    LIMITS, all four measured absent from the tree today, all four silent if they
-    appear:
+    LIMITS, all five measured silent if they appear; no call site for any of them
+    exists in the tree today, but the fifth already has a live ENABLER:
       * a bare `import c_env.cs2_env` (dotted, no `as`) binds the PACKAGE name
         `c_env`; `c_env.cs2_env.make_env(...)` is an Attribute over an Attribute,
         not over a Name, so `_target` does not reach it. Binding `c_env` to the
@@ -170,9 +183,33 @@ def _bindings(tree, rel):
         `cs2_env`, which is not the dotted name in DEFINING_MODULE.
       * an assignment alias (`mk = make_env`), which needs dataflow, not binding.
       * a SUBCLASS (`class Sub(Cs2Env)`), whose constructor call names `Sub`.
-    `tests/test_env_construction_enforcement.py`'s docstring discloses the last
-    two for its own scan; they are repeated here because this census has them
-    too. If any appears, extend `_target`/`_bindings` rather than loosening a pin.
+      * the symbol reached through an import ALIAS in any position but a bare
+        local Name. Both arms of the matcher key on the CANONICAL name —
+        `_target` compares `DEFINING_MODULE.get(func.attr)`, and the ImportFrom
+        arm above compares `alias.name` — so all three of
+        `train.make_c_env(...)`, `profile_step.make_c_env(...)` and
+        `from profile_step import make_c_env` came back SILENT when planted,
+        while the canonical `m.make_env(...)` resolved in the same harness, which
+        is what proves the spelling and not the plant is at fault. This one has a
+        LIVE ENABLER: `src/profile_step.py:36` is a MODULE-LEVEL
+        `from c_env.cs2_env import make_env as make_c_env`, so
+        `profile_step.make_c_env` is a real module attribute today and only the
+        qualified CALL is missing. Nor is `make_c_env` an exotic spelling —
+        `tests/test_env_construction_enforcement.py`'s LOWER_LAYER comment calls
+        it house style "wherever it is imported into a module that also has a
+        `make_*_env` of its own", and six such call sites in four files resolve
+        here today, because a bare `make_c_env(...)` binds through
+        `alias.asname`. That sibling scans the Name position for aliases too, and
+        states why it stops there: resolving an alias in the ATTRIBUTE position
+        would flag any unrelated method sharing the local's name. So this limit
+        is a deliberate boundary in both files, not an oversight in one — but it
+        is a boundary, and a legacy call written on the far side of it is
+        invisible to every pin below.
+    `tests/test_env_construction_enforcement.py`'s docstring discloses the third
+    and fourth for its own scan; they are repeated here because this census has
+    them too. If any appears, extend `_target`/`_bindings` rather than loosening a
+    pin — widening the resolver moves this file's own pinned counts, so it is a
+    change with a measurement attached, not a one-line fix.
     """
     names, modules = {}, {}
     for node in ast.walk(tree):
@@ -274,12 +311,56 @@ def _report(sites):
 ANCHORS = ("src/c_env/cs2_env.py", "scripts/sim_fingerprint.py", FLOOR_FILES["make_env"],
            FLOOR_FILES["make_puffer_env"])
 
+# Asserted as a literal in test_the_anchor_set_is_pinned_and_each_anchor_is_a_
+# resolved_call_site, for the same reason `_PLANT_NAMES` exists further down:
+# ANCHORS is a guard set, and a guard set nothing watches is the failure class
+# this repo keeps hitting. Measured before this pin existed: deleting an entry
+# from ANCHORS left all 34 cases of the pre-fix file green.
+# The two `tests/` entries are spelled out rather than read from FLOOR_FILES ON
+# PURPOSE, even though ANCHORS derives them from it: a floor that legitimately
+# moves has to be re-declared here, which is the whole point of a composition
+# pin. The failure message says so.
+_ANCHOR_NAMES = frozenset({
+    "src/c_env/cs2_env.py",
+    "scripts/sim_fingerprint.py",
+    "tests/test_make_env_shim.py",
+    "tests/test_env_config.py",
+})
+
+# Sanity floor for the "the root is real" guard, and deliberately the SAME value
+# and shape the sibling scanner uses: `tests/test_env_construction_enforcement.py`
+# pins MIN_FILES_PER_ROOT = 8 "deliberately far below the current counts so
+# ordinary churn never touches them". (Its comment cites 24 and 19 files; run
+# today its scan reads 26 and 19 — the same numbers this census reads for `src`
+# and `scripts`, because both walk those two roots the same way.) Measured here
+# at the tip of PR B3: 26 src / 19 scripts / 82 tests, so 8 leaves 11 files of
+# shrinkage in the smallest root and 74 in the largest — a floor no legitimate
+# deletion trips. It is loose ON PURPOSE, because a floor is the wrong instrument
+# for the failure this file actually measured: a skip inside `census` that
+# dropped 12 of the 17 test files holding legacy `make_env` calls still leaves 70
+# files under `tests/`. That case is caught by the set-equality pin below
+# instead, which needs no literal at all. This constant catches only what
+# equality cannot see — both walks agreeing on a root that resolved to the wrong,
+# or a nearly empty, directory.
+MIN_FILES_PER_ROOT = 8
+
 
 def test_the_scan_roots_resolve_to_real_populated_directories():
     """`rglob` on a missing or renamed root returns [] in silence, so every pin
     below would pass on an empty file list. This is the assertion that makes a
-    zero mean something: each root contributed files, and three named files —
-    one per root, each of which really does construct an env — are among them.
+    zero mean something.
+
+    WHAT THE ANCHORS ACTUALLY ARE, measured, because the sentence that used to
+    stand here got all three of its claims wrong. There are FOUR of them, not
+    three, and they are NOT one per root: `src/c_env/cs2_env.py` (1 resolved
+    call), `scripts/sim_fingerprint.py` (1) and BOTH per-symbol floor files under
+    `tests/` (5 and 5). Nor does each of them construct an env — all five
+    resolved calls in `tests/test_env_config.py` sit inside `pytest.raises`, and
+    that file's own section comment says "every one of them raises before any env
+    is built", so it reaches construction on no code path at all. What every
+    anchor really does is hold at least one call this census RESOLVES, which is
+    the property the zeros below need and is asserted in
+    test_the_anchor_set_is_pinned_and_each_anchor_is_a_resolved_call_site.
     """
     for root in ROOTS:
         paths = [p for p in SCANNED if p.relative_to(REPO_ROOT).as_posix().split("/", 1)[0] == root]
@@ -287,9 +368,84 @@ def test_the_scan_roots_resolve_to_real_populated_directories():
             f"root {root!r} contributed no .py files. rglob returns [] for a root that does "
             f"not exist, so this is what a rename or a typo in ROOTS looks like — repoint "
             f"ROOTS, never delete this assert.")
+        assert len(paths) >= MIN_FILES_PER_ROOT, (
+            f"root {root!r} yielded only {len(paths)} .py files (floor {MIN_FILES_PER_ROOT}). "
+            f"The root exists but cannot be the directory this file is about — a repoint to a "
+            f"subdirectory looks exactly like this, and every pin under it would pass over the "
+            f"wrong file list.")
     scanned_rel = {p.relative_to(REPO_ROOT).as_posix() for p in SCANNED}
     missing = [a for a in ANCHORS if a not in scanned_rel]
     assert not missing, f"anchors missing from the scan: {missing} ({len(SCANNED)} files read)"
+
+
+def test_the_scan_reads_every_py_file_under_the_roots():
+    """THE DENOMINATOR PIN. Nothing else in this file asserts how many files the
+    walk read, and every pin here is a property of a file list.
+
+    MEASURED, which is why it exists: a skip added to `census`'s loop that
+    dropped 12 of the 17 `tests/` files holding legacy `make_env` calls took that
+    count from 54 to 12 and left all 34 cases of the pre-fix file GREEN. The
+    ceiling pin only ever objects to a RISE, the floor pin is satisfied by the
+    two sites left in `tests/test_make_env_shim.py`, and a file that is never
+    read contributes no findings — so a census that reads less looks exactly like
+    a migration that finished. Re-measured with this pin in place: the same
+    mutation fails this test and nothing else, and names all 12 files.
+
+    A floor on `len(SCANNED)` cannot see that (82 − 12 = 70), so this asserts SET
+    EQUALITY against an independent re-walk of the same roots: no literal to go
+    stale, no objection to a file being ADDED, and it fires on a skip of any
+    size. What it cannot see is a wrong `ROOTS` or `REPO_ROOT`, because both
+    walks read those — that half belongs to
+    test_the_scan_roots_resolve_to_real_populated_directories above, which is why
+    both tests exist.
+    """
+    expected = {p for root in ROOTS for p in (REPO_ROOT / root).rglob("*.py")}
+    scanned = set(SCANNED)
+    assert scanned == expected, (
+        f"the census did not read every .py file under {ROOTS}.\n"
+        f"  never read: {sorted(str(p.relative_to(REPO_ROOT)) for p in expected - scanned)}\n"
+        f"  read but not re-walked: "
+        f"{sorted(str(p.relative_to(REPO_ROOT)) for p in scanned - expected)}\n"
+        f"A skipped file contributes no findings, and no findings is what every pin here wants "
+        f"to see. Repair `census`; never repair this assertion.")
+    assert len(SCANNED) == len(expected), (
+        f"`census` returned {len(SCANNED)} paths for {len(expected)} distinct files — it read "
+        f"something twice, so any count derived from SCANNED is inflated.")
+
+
+def test_the_anchor_set_is_pinned_and_each_anchor_is_a_resolved_call_site():
+    """`ANCHORS` is what stops the zeros above being zeros over the wrong tree,
+    which makes it a guard set — and the pin above only checks that its members
+    were SCANNED. Two holes follow, and this closes both.
+
+    First, composition: measured, deleting an entry from `ANCHORS` left all 34
+    cases of the pre-fix file green, so the set that underwrites every zero could
+    shrink to nothing unwatched. With this pin, that same deletion fails here and
+    nowhere else. Same remedy and same reason as `_PLANT_NAMES`.
+
+    Second, and the stronger half: being scanned is not the same as being
+    UNDERSTOOD. The two `tests/` anchors are also the floor files, so
+    test_the_named_floor_file_holds_calls_gh173_cannot_migrate already proves the
+    resolver works on them — but nothing proved it still resolves anything in
+    `src/` or `scripts/`, where the pins are ratchets that read zero on a healthy
+    tree. A resolver that silently stopped matching production spellings would
+    leave those pins green. Requiring every anchor to contribute a resolved call
+    (typed or legacy: 1 / 1 / 5 / 5 at the tip of PR B3) makes them a positive
+    control over real source, not just a file-existence check.
+    """
+    assert set(ANCHORS) == set(_ANCHOR_NAMES), (
+        f"ANCHORS composition changed: added {sorted(set(ANCHORS) - _ANCHOR_NAMES)}, "
+        f"removed {sorted(_ANCHOR_NAMES - set(ANCHORS))}. Update _ANCHOR_NAMES deliberately; "
+        f"do not delete this assertion.")
+    assert len(ANCHORS) == len(_ANCHOR_NAMES), f"duplicate entry in ANCHORS: {ANCHORS}"
+    resolved = {rel for _sym, rel, _lineno, _why in FOUND}
+    silent = [a for a in ANCHORS if a not in resolved]
+    assert not silent, (
+        f"anchors the census resolved NO call in: {silent}. Each anchor is named because it "
+        f"holds a call this census must recognise, so this is either a resolver that stopped "
+        f"matching a spelling — the failure the `src`/`scripts` ratchets cannot show you — or "
+        f"an anchor that genuinely lost its call, in which case repoint ANCHORS and "
+        f"_ANCHOR_NAMES together at a file that still has one.")
 
 
 def test_runtime_parameter_sets_match_the_spec_literals():
@@ -341,11 +497,23 @@ def test_cs2env_has_no_legacy_callers_in_tests():
 def test_the_tests_root_legacy_count_only_ever_falls(symbol, pin):
     """gh#173 lowers these; nothing may raise them.
 
-    The `> 0` half is not decoration. While the `**legacy` channel exists these
-    counts CANNOT legitimately be zero — `tests/test_make_env_shim.py` calls it
-    on purpose — so a zero here means the census stopped resolving, not that the
-    migration finished. That is the failure this test is really watching for;
-    the ceiling is the easy half.
+    The `> 0` half is not decoration. While the `**legacy` channel exists neither
+    count can legitimately be zero, because for EACH symbol the file
+    `FLOOR_FILES` names calls that symbol legacy on purpose — so a zero here
+    means the census stopped resolving, not that the migration finished. That is
+    the failure this test is really watching for; the ceiling is the easy half.
+
+    THE FLOOR IS PER SYMBOL, and this docstring says so rather than naming one
+    file, because the measured matrix is anti-diagonal: at the tip of PR B3
+    `tests/test_make_env_shim.py` holds 2 legacy `make_env` calls and ZERO legacy
+    `make_puffer_env` calls, while `tests/test_env_config.py` holds 5 legacy
+    `make_puffer_env` calls and ZERO legacy `make_env` calls. Naming either file
+    as "the" reason the count cannot be zero is therefore false for one of this
+    test's two parametrizations — which is exactly the shared-floor answer that
+    `FLOOR_FILES` was keyed per symbol to refute, and that the next test's
+    docstring argues against. The assertion message interpolates
+    `FLOOR_FILES[symbol]`, so it has always named the right file; only this
+    docstring did not.
     """
     sites = legacy_in("tests", symbol)
     assert len(sites) <= pin, (
@@ -531,6 +699,35 @@ def test_the_public_train_wrapper_is_not_a_census_subject(tmp_path):
     _, found = _plant(tmp_path, "src/public_wrapper.py",
                       "import train\ntrain.make_env(0, '<map>')\n")
     assert found == [], f"train.make_env resolved as a census subject: {found}"
+
+
+def test_a_file_the_census_cannot_parse_is_an_error_and_never_a_skip(tmp_path):
+    """`census`'s docstring states the policy — "Parse errors are NOT caught" —
+    and this is the control that turns the policy into an invariant.
+
+    MEASURED twice. On the 34-case file that shipped without this control,
+    adding `except SyntaxError: continue` to `census`'s loop left every case
+    GREEN; with the control in place the same mutation fails exactly one of the
+    37, this one, with DID NOT RAISE. It has to be silent otherwise, by the shape
+    of the pins: an unreadable file yields no findings, and no findings is what a
+    ratchet, a ceiling and a floor of two all want to see. So the policy holding
+    today is a property of `census`'s current text and of nothing else, and a
+    stated invariant with no control is the failure class this branch keeps
+    closing.
+
+    The `filename` half has teeth of its own: `ast.parse` is called with
+    `filename=`, so the raise names the file that broke. A swallow-and-log
+    rewrite would still satisfy a bare `pytest.raises`; it would not satisfy an
+    assertion that the exception carries the path.
+    """
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src" / "unparseable.py").write_text("def f(:\n")
+    with pytest.raises(SyntaxError) as exc:
+        census(roots=("src", ), repo_root=tmp_path)
+    assert "unparseable.py" in (exc.value.filename or ""), (
+        f"the parse error did not name the file it came from: {exc.value.filename!r}. "
+        f"`ast.parse` is called with filename= precisely so an unreadable file is "
+        f"attributable rather than a bare traceback.")
 
 
 @pytest.mark.parametrize("root", PRODUCTION_ROOTS)
