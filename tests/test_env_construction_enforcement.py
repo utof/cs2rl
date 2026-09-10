@@ -394,19 +394,26 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
 # STRING LITERALS on purpose, and NOT for the reason an earlier draft of this
 # comment gave ("a real call node here would raise that census's pinned count").
 # This file is inside the scan root of tests/test_env_config_migration.py, whose
-# ratchet is a ceiling on LEGACY calls — `legacy_in` keeps a site only
-# `if ... and why` — not on calls. Measured 2026-09-10 by planting each spelling
-# here as a real call node:
-#   * as this file stands, importing no constructor, a real `make_env(...)` call
-#     resolves to NOTHING whatever its spelling — typed, legacy keyword or
+# pins count LEGACY calls — `legacy_in` keeps a site only `if ... and why` — and
+# not calls. Measured 2026-09-11 by planting each spelling here as a real call
+# node:
+#   * as this file stands, importing no constructor, a real call resolves to
+#     NOTHING whatever its symbol or spelling — typed, legacy keyword or
 #     positional. That census resolves through `_bindings`, so an unbound name is
-#     invisible to it; all three plants left it at 37 passed.
+#     invisible to it; all five plants left it at 37 passed.
 #   * add the import as well and the call resolves. A TYPED one lands in `FOUND`
-#     with no legacy reason and the ceiling stays 54; a legacy one — clause 1
-#     (`reward_hp=1.0`) or clause 3 (positional) — takes it to 55 and reddens
-#     `test_the_tests_root_legacy_count_only_ever_falls[make_env-54]`. That is the
-#     only census pin a plant here can move: `len(SCANNED)` counts FILES and a
-#     plant adds none.
+#     with no legacy reason and moves nothing — measured with BOTH of this dict's
+#     bodies verbatim, 37 passed each. A LEGACY one (clause 1 `reward_hp=1.0`, or
+#     clause 3 positional) reddens exactly one census test, and WHICH one depends
+#     on the symbol, so three are reachable from here rather than one:
+#     `make_env` and `make_puffer_env` each hit their own ceiling
+#     (`test_the_tests_root_legacy_count_only_ever_falls[make_env-54]` and
+#     `[make_puffer_env-8]`), while `Cs2Env` hits
+#     `test_cs2env_has_no_legacy_callers_in_tests` — a ZERO pin rather than a
+#     ceiling, because `Cs2Env` never had a `**legacy` channel to ratchet down.
+#     That distinction is close to hand, not academic: this dict's SECOND entry is
+#     `Cs2Env` and its body imports `Cs2Env`. What no plant here can move is
+#     `len(SCANNED)`, which counts FILES.
 # So a bare real call is safe today only because this file imports no
 # constructor — a property of the imports, not of the plant. A string literal is
 # unconditionally safe, which is why these are strings.
@@ -490,13 +497,19 @@ def test_alias_resolution_is_exercised_by_real_source_not_only_by_a_plant():
         "SHRANK: either alias resolution stopped working or the repo stopped writing "
         "`make_env as make_c_env` — check WHICH before touching this dict. GREW: a new "
         "aliased call site appeared, which is allowed; write it down.\n"
-        "Then update EVERY place stating a figure from this population, not only the dict. "
-        "Measured 2026-09-10 there are four in this file and they do not all state the same "
-        "figure: the module docstring's ALIAS RESOLUTION paragraph and `import_aliases`' "
-        "docstring give the files and the statements, this test's docstring gives the calls and "
-        "the files, and this dict's own comment gives all three. Plus one outside this file, "
-        "pinned by nothing: `_bindings`' docstring in tests/test_env_config_migration.py states "
-        "all three figures too.")
+        "Then update EVERY place stating a figure for this population, not only the dict. "
+        "Enumerated 2026-09-11 by what each carrier DESCRIBES rather than by the word or number "
+        "it happens to use: a census scoped to the word 'six' cannot see the two carriers that "
+        "state only the statement count, and 'four' and 'six' each occur here about unrelated "
+        "things too (four SPELLINGS in guard 2, four SYMBOLS across the two vocabularies, six "
+        "ROLE BUILDERS). Five prose carriers besides this dict, stating different figures:\n"
+        "    module docstring, ALIAS RESOLUTION paragraph   files + statements\n"
+        "    `import_aliases`' docstring                    files + statements\n"
+        "    `constructions`' docstring                     statements only\n"
+        "    this test's own docstring                      calls + files + statements\n"
+        "    this dict's own comment                        calls + files + statements\n"
+        "Plus one outside this file, pinned by nothing: `_bindings`' docstring in "
+        "tests/test_env_config_migration.py states all three.")
 
 
 def test_the_unbanned_lower_layer_census_is_accurate():
