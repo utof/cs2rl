@@ -993,6 +993,16 @@ class Cs2Env(pufferlib.PufferEnv):
         # forked Puffer worker silently. round_time is rejected (not truncated)
         # when non-integral — int(2.5) would run a different episode length
         # than the config recorded.
+        # WHICH OF THESE CHECKS IS THE ONLY ONE (#165): a NON-None value
+        # arriving here has already passed the identical check in
+        # EnvConfig.__post_init__ (round_time integral and > 0; laser_range and
+        # max_turn_speed > 0, NaN rejected) and round_time is already an int —
+        # `config` is type-checked as an EnvConfig at the top of __init__, so
+        # that holds for every caller — which makes those repeats a second line
+        # of defence. What this block is the ONLY line of defence for is the
+        # nav.py constant substituted when a knob is None: env_config.py may not
+        # import nav (its stdlib-only import budget), so nothing checks
+        # ROUND_TIME / LASER_RANGE / MAX_TURN_SPEED_RAD until here.
         # PITFALL: laser_range_sq is derived from _laser_range below; never
         # accept it as a separate kwarg or the range check and the damage
         # falloff would disagree.
@@ -1617,10 +1627,25 @@ def make_env(
     misspelled name is a TypeError here, in-process, before binding.init.
 
     DEPRECATED — see the follow-up issue filed at Phase-A branch end
-    (gh#173). `**legacy` exists for the ~38 test
-    files that still spell kwargs the old way; tests/test_env_config_migration.py
-    (Phase B) pins their count and that issue drives it to zero, after which this
-    channel is deleted. New callers must not use it.
+    (gh#173). `**legacy` exists for the test files that still spell kwargs the
+    old way. Measured by tests/test_env_config_migration.py on this tree at the
+    tip of PR B3: NINETEEN files under `tests/` hold at least one call that
+    census calls legacy — 17 for `make_env`, 4 for `make_puffer_env`, two files
+    in both — while `src/` and `scripts/` hold none. What that census PINS is
+    CALL counts, not file counts: two per-symbol literals
+    (`PINNED_TESTS_MAKE_ENV` = 54, `PINNED_TESTS_MAKE_PUFFER_ENV` = 8) as a
+    ceiling that may only fall, each with a non-zero floor in a per-symbol named
+    file whose legacy calls exist by design, plus a zero ratchet per production
+    root. gh#173 drives the ceilings to zero, after which this channel is
+    deleted. New callers must not use it.
+
+    QUOTE A NUMBER ONLY WITH ITS QUESTION. 19 answers "how many files hold a
+    LEGACY call". The neighbouring count — files holding a call the census
+    RESOLVES at all, typed or legacy — is 32 under `tests/`, 41 across all three
+    roots, and is not this one. The ~38 this paragraph carried until PR B3 was a
+    third reading again: measured, it matches neither, but does match a
+    text-mention grep at Phase A (`grep -rlE 'make_env|make_puffer_env' tests`
+    = 39 files at ae478f8), where the legacy-call population was already 19.
     """
     if legacy and config is not None:
         raise TypeError(f"make_env got config= AND legacy kwargs {sorted(legacy)}; pass one")
