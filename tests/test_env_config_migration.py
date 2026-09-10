@@ -197,9 +197,16 @@ def _bindings(tree, rel):
         qualified CALL is missing. Nor is `make_c_env` an exotic spelling —
         `tests/test_env_construction_enforcement.py`'s LOWER_LAYER comment calls
         it house style "wherever it is imported into a module that also has a
-        `make_*_env` of its own", and six such call sites in four files resolve
-        here today, because a bare `make_c_env(...)` binds through
-        `alias.asname`. That sibling scans the Name position for aliases too, and
+        `make_*_env` of its own", and it resolves here today at six CALL SITES in
+        THREE files — `src/profile_step.py` ×3, `src/train.py` ×2,
+        `src/train_bc.py` ×1 — because a bare `make_c_env(...)` binds through
+        `alias.asname`. Say which of the three quantities you mean, always: the
+        aliased IMPORT STATEMENTS number FOUR over those same three files
+        (train.py has two, both function-local), and conflating statements with
+        files is what put a wrong "four files" in this very sentence in the round
+        that was fixing wrong counts. Both instruments agree on the calls: the
+        sibling's own scan reports the same 6 alias-spelled findings in the same
+        3 files. That sibling scans the Name position for aliases too, and
         states why it stops there: resolving an alias in the ATTRIBUTE position
         would flag any unrelated method sharing the local's name. So this limit
         is a deliberate boundary in both files, not an oversight in one — but it
