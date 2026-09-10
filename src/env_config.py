@@ -89,11 +89,15 @@ class RewardWeights:
     """The 23 reward/PBRS coefficients. Field order is load-bearing twice over:
     tests/test_env_config.py::test_reward_field_census_is_23_with_6_pbrs pins it
     name-by-name against that file's `DEFAULTS_AT_139a3a3` literal (the pre-#165
-    declaration order), and train.py's parser loop GENERATES the `--reward-*` /
-    `--pbrs-*` flags from `as_dict()`, so flag and `--help` order FOLLOW this
-    order rather than merely agreeing with it — reordering a field silently
-    reorders the CLI and reddens that pin. (Generated, not hand-listed, pre-#165
-    too: the dict this class replaced was iterated the same way.)
+    declaration order), and train.py's parser loop GENERATES one CLI flag per
+    field here from `as_dict()`, so flag and `--help` order FOLLOW this order
+    rather than merely agreeing with it — reordering a field silently reorders
+    the CLI and reddens that pin. (Generated, not hand-listed, pre-#165 too: the
+    dict this class replaced was iterated the same way.) Measured, 25 flags match
+    `--reward-*` / `--pbrs-*` and only these 23 are generated: `--pbrs-gamma` and
+    `--reward-symmetrize` are hand-listed, being EnvConfig KNOBS whose names
+    happen to carry a weight prefix — the mirror image of the prefix pitfall
+    below, so do not discover the generated set by flag glob either.
 
     Non-potential terms first (hackable — sweep with care), then the six PBRS
     potential weights (optimum-safe per Ng et al. 1999). Six of the 23 do NOT
