@@ -1647,8 +1647,13 @@ def make_env(
     population" gloss has the tree right and is silent only about how the
     counting was done. Measured, `git grep -lE 'make_env|make_puffer_env'
     139a3a3 -- 'tests/*.py'` returns exactly 38 — a TEXT-MENTION count at the
-    pre-#165 baseline, FILTERED to `*.py`; drop the filter and the same command
-    returns 39, the extra file being tests/fixtures/env_kwargs_pre_w3.json. The
+    pre-#165 baseline, FILTERED to `*.py`. Widening only that filter,
+    `git grep -lE 'make_env|make_puffer_env' 139a3a3 -- 'tests/*'` returns 39,
+    the extra path being tests/fixtures/env_kwargs_pre_w3.json. Both forms are
+    written out because "drop the filter" reads two ways and the other way
+    changes the TREE, not the filter: with no pathspec at all,
+    `git grep -lE 'make_env|make_puffer_env' 139a3a3` returns 53 across every
+    root. The
     two shims' legacy-CALL population on that tree, today's census clauses
     applied to it, was 18 files. The figure was never approximate: it counted
     mentions where this paragraph needs calls.
