@@ -138,14 +138,42 @@ ANCHORS = ("src/train.py", "src/train_test_harness.py", "src/env_factory.py")
 
 # ── The lower layer this file deliberately does NOT ban ─────────────────────
 #
-# `make_env` (spelled `make_c_env` at all three files that import it) and the
+# `make_env` (spelled `make_c_env` at the three files that ALIAS it) and the
 # `Cs2Env` class it returns. See the module docstring's LOWER LAYER paragraph
 # for why they are out of the ban.
 #
-# THE RENAME IS NOT A COLLISION RULE, which is what this comment claimed until
-# PR B3: "wherever it is imported into a module that also has a `make_*_env` of
-# its own". That rule fails to explain one of its own three files. Measured
-# 2026-09-11, `grep -nE '^ *def make_.*_env' <file>` over each importer:
+# "IMPORTS IT" AND "ALIASES IT" ARE DIFFERENT POPULATIONS, and the first draft
+# of this fix said "at all three files that import it", which is false twice
+# over: the alias is a MINORITY spelling, and this file's own guard list holds
+# five counterexamples. Measured 2026-09-11 by AST — every `ImportFrom` of
+# `c_env.cs2_env.make_env` — and the instrument matters: over the three roots
+# `git grep -lE 'from c_env\.cs2_env import make_env as '` reports FIVE files
+# while the AST reports THREE, because two of the five are TEST files carrying
+# that line only in prose or inside a plant string — this one (three times: the
+# module docstring's ALIAS RESOLUTION paragraph, ALIASED_LOWER_LAYER_SITES' own
+# comment, and `import_aliases`' docstring) and
+# tests/test_env_config_migration.py (twice: `_bindings`' docstring and a
+# `_PLANTS` source literal). Named by carrier rather than by line on purpose:
+# an earlier draft of this very comment cited the three by line, and the lines
+# this paragraph itself adds moved two of the three citations off their target
+# before the draft was even committed.
+# Over this file's own roots, `src/` + `scripts/`:
+#   9 files import it; 3 ALIAS it (4 STATEMENTS — `src/train.py` writes it twice,
+#   function-locally); 6 import it bare. FIVE of those six bare importers are
+#   keys in LOWER_LAYER_SITES below — `scripts/gen_bc_demos.py`,
+#   `scripts/measure_budget.py`, `scripts/oracle_statue_check.py`,
+#   `scripts/sim_fingerprint.py`, `src/play.py`. The sixth is
+#   `src/env_factory.py`, which imports it to pass as a VALUE and is the subject
+#   of the asymmetry pin below.
+# Widen to `tests/` and it is 35 importers against the same 3 aliasers, so the
+# minority reading holds under both scopes. State the scope with the figure: the
+# module docstring's ALIAS RESOLUTION paragraph and `import_aliases`' docstring
+# both state the ALIASING count and must keep agreeing with this one.
+#
+# THE RENAME IS ALSO NOT A COLLISION RULE, which is what this comment claimed
+# until PR B3: "wherever it is imported into a module that also has a
+# `make_*_env` of its own". That rule fails to explain one of the three
+# aliasers. Measured, `grep -nE '^ *def make_.*_env' <file>` over each of them:
 # `src/train.py` defines `make_puffer_env` (`:705`) and `src/train_bc.py`
 # defines `make_bc_env` (`:459`), so those two fit — but `src/profile_step.py`
 # returns NOTHING for that grep and still writes the alias, at module level, at
@@ -153,8 +181,8 @@ ANCHORS = ("src/train.py", "src/train_test_harness.py", "src/env_factory.py")
 # which no `make_*_env` glob matches. Nor is that line new: `git blame` dates it
 # to `6d36a1e` (2026-03-23), five months before this comment (`46e7ed6`,
 # 2026-09-01), so the rule was written over a population that already refuted
-# it. The alias is house style at all three; at two of them it also happens to
-# avoid a collision.
+# it. The alias avoids a collision at two of the three aliasers and is style at
+# the third.
 LOWER_LAYER = ("make_env", "Cs2Env")
 
 # Every call to one of those, per file, as of the final review of
