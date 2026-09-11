@@ -58,8 +58,12 @@ def _load_play_lib(repo: Path):
         raise SystemExit(2)
     lib.play_host_attach.restype = ctypes.c_void_p
     lib.play_host_attach.argtypes = [
-        ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
-        ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
     ]
     lib.play_host_should_close.restype = ctypes.c_int
     lib.play_host_should_close.argtypes = [ctypes.c_void_p]
@@ -89,22 +93,45 @@ def main(argv=None):
         return 2
 
     from train import (
+        init_policy_state,
         load_policy_from_checkpoint,
         select_policy_actions_native,
-        init_policy_state,
     )
     policy = load_policy_from_checkpoint(str(ckpt), args.device)
     policy_state = init_policy_state(policy, args.device)
 
-    from c_env.cs2_env import make_env
-    from map import make_simple_map
     import numpy as np
+
+    from c_env.cs2_env import make_env
+    from env_config import EnvConfig
+    from map import make_simple_map
 
     repo = find_repo_root(Path(__file__))
     lib = _load_play_lib(repo)
     md = make_simple_map()
-    env = make_env(
-        seed=args.seed, auto_reset=False, recoil=True, map_data=md)
+    # `recoil` is the one non-default this viewer wants; everything else is
+    # EnvConfig's default.
+    #
+    # THERE WERE TWO EARLIER STATES, NOT ONE, and this comment used to fuse
+    # them: it said "pre-#165 this was `recoil=True` as a bare keyword, which
+    # `make_env` translated through `from_legacy_kwargs`". First clause true of
+    # pre-#165, second clause not. Measured 2026-09-11:
+    #   * PRE-#165, at `21f984a` (the Phase-A gate baseline, tree `139a3a3`):
+    #     this line was `recoil=True` as a bare keyword, and `make_env` declared
+    #     `recoil` as an EXPLICIT parameter of its own, so the keyword bound
+    #     directly and nothing translated it. `from_legacy_kwargs` did not exist
+    #     to translate with: `src/env_config.py` was ADDED by `30e36a3`, the
+    #     first #165 Phase A commit, and
+    #     `git show 30e36a3^:src/c_env/cs2_env.py | grep -c from_legacy_kwargs`
+    #     returns 0.
+    #   * MID-#165, at `6b3bf29` (this branch's base, after Phase A, B1 and B2):
+    #     `make_env` takes `config` plus six named runtime keywords and
+    #     `**legacy`, `recoil` is no longer a parameter of its own, and this file
+    #     still wrote the bare keyword — so THERE the routing through
+    #     `EnvConfig.from_legacy_kwargs` is exactly what happened.
+    # PR B3 is what replaced the keyword with the object below: same env, one
+    # frame earlier and type-checked.
+    env = make_env(config=EnvConfig(recoil=True), seed=args.seed, auto_reset=False, map_data=md)
     obs, _ = env.reset(seed=args.seed)
     # First select sees zero obs (env_reset does not compute_observations). Same as record.
 
@@ -134,20 +161,19 @@ def main(argv=None):
             now = lib.play_host_time(h)
             if now >= next_step:
                 lib.play_host_begin_tick(h)
-                pa, pc = select_policy_actions_native(
-                    policy, obs, args.device, policy_state, mode)
+                pa, pc = select_policy_actions_native(policy, obs, args.device, policy_state, mode)
                 play_fill_actions(act_buf, cont_buf, pa, pc)
-                lib.play_host_apply_human(
-                    h, act_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)))
+                lib.play_host_apply_human(h, act_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)))
                 obs, _, terms, truncs, _ = env.step(act_buf, cont_buf)
                 lib.play_host_end_tick(h)
                 play_mark_done(policy_state, terms, truncs)
                 next_step += 1.0 / 16.0
             lib.play_host_render(h)
             if env.terminals[0]:
-                policy_state = play_reset_round(
-                    env, policy, args.device,
-                    on_reset=lambda: lib.play_host_on_reset(h))
+                policy_state = play_reset_round(env,
+                                                policy,
+                                                args.device,
+                                                on_reset=lambda: lib.play_host_on_reset(h))
     finally:
         lib.play_host_detach(h)
         env.close()

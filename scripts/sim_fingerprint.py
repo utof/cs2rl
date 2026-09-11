@@ -96,6 +96,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM # noqa: E402
 from c_env.cs2_env import make_env                                               # noqa: E402
+from env_config import EnvConfig                                                 # noqa: E402
 from map import SIMPLE_ROOMS, make_simple_map                                    # noqa: E402
 from nav import N_AGENTS, TEAM_SIZE                                              # noqa: E402
 
@@ -271,8 +272,13 @@ def main():
                     "hitscan/damage/death path. Different modes => different hashes.")
     a = ap.parse_args()
 
-    kw = {} if a.n_active is None else {"n_active_per_team": a.n_active}
-    env = make_env(seed=a.seed, map_data=build_map(a.aim_mode), **kw)
+    # PITFALL: `--n-active` omitted must build the SAME env as before, so the
+    # None arm is a bare `EnvConfig()`, never `EnvConfig(n_active_per_team=<the
+    # field default>)`. Spelling the default here would also be a restated
+    # default that tests/test_no_restated_env_defaults.py fails on — as the
+    # first draft of this very comment was, by writing the number.
+    config = EnvConfig() if a.n_active is None else EnvConfig(n_active_per_team=a.n_active)
+    env = make_env(config=config, seed=a.seed, map_data=build_map(a.aim_mode))
     rng = np.random.default_rng(a.rng_seed)
     h = hashlib.sha256()
 
