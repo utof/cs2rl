@@ -138,9 +138,23 @@ ANCHORS = ("src/train.py", "src/train_test_harness.py", "src/env_factory.py")
 
 # ── The lower layer this file deliberately does NOT ban ─────────────────────
 #
-# `make_env` (spelled `make_c_env` wherever it is imported into a module that
-# also has a `make_*_env` of its own) and the `Cs2Env` class it returns. See the
-# module docstring's LOWER LAYER paragraph for why they are out of the ban.
+# `make_env` (spelled `make_c_env` at all three files that import it) and the
+# `Cs2Env` class it returns. See the module docstring's LOWER LAYER paragraph
+# for why they are out of the ban.
+#
+# THE RENAME IS NOT A COLLISION RULE, which is what this comment claimed until
+# PR B3: "wherever it is imported into a module that also has a `make_*_env` of
+# its own". That rule fails to explain one of its own three files. Measured
+# 2026-09-11, `grep -nE '^ *def make_.*_env' <file>` over each importer:
+# `src/train.py` defines `make_puffer_env` (`:705`) and `src/train_bc.py`
+# defines `make_bc_env` (`:459`), so those two fit — but `src/profile_step.py`
+# returns NOTHING for that grep and still writes the alias, at module level, at
+# `:36`. Its own step factories are `_make_cs2_env_stepper` and two siblings,
+# which no `make_*_env` glob matches. Nor is that line new: `git blame` dates it
+# to `6d36a1e` (2026-03-23), five months before this comment (`46e7ed6`,
+# 2026-09-01), so the rule was written over a population that already refuted
+# it. The alias is house style at all three; at two of them it also happens to
+# avoid a collision.
 LOWER_LAYER = ("make_env", "Cs2Env")
 
 # Every call to one of those, per file, as of the final review of
@@ -352,12 +366,19 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
     B2 is what made this the pin worth adding: it swapped the function-local
     `from train import make_puffer_env` for `from c_env.cs2_env import make_env`,
     so `make_env` is the only ENV constructor that file references in code at all.
-    Measured 2026-09-10: of the three env constructors, `make_puffer_env` and
-    `Cs2Env` have ZERO code references there and ten and four textual ones
-    respectively, every one of them on a docstring line and none in a comment,
-    while `make_env` has two code references, the import and the value pass.
-    (`SelfPlayManager` also has two, plus the one CALL node in the file; it is a
-    manager rather than an env and belongs to the assertion above.)
+    Measured 2026-09-11 by AST, a CODE reference being an `Import`/`ImportFrom`
+    alias, an `ast.Name` or an `ast.Attribute(attr=...)` that names the symbol —
+    which is why docstring prose is invisible to it: of the three env
+    constructors, `make_puffer_env` and `Cs2Env` have ZERO code references there
+    and ten and four textual OCCURRENCES respectively (on nine and four distinct
+    lines — the units differ because `:117` mentions `make_puffer_env` twice),
+    every one of them on a docstring line and none in a comment, while `make_env`
+    has two code references, the import and the value pass.
+    (`SelfPlayManager` has exactly two as well, and the second one IS the call:
+    the `from train import SelfPlayManager` at `:410` and the `ast.Name` at
+    `:412` that is that `Call` node's own `func`. So there is no third reference
+    to add for the call — it is a manager rather than an env and belongs to the
+    assertion above.)
     So the regression the assertion above guards needs someone to import a name
     that file no longer mentions in code, while the regression this one guards
     needs one line inlined into a builder.
@@ -423,6 +444,57 @@ _INLINED_CONSTRUCTION = {
     "Cs2Env": ("    from c_env.cs2_env import Cs2Env\n"
                "    return Cs2Env(config=None, map_data=md)\n"),
 }
+
+# Asserted as a literal below, for the same reason `_PLANT_NAMES` and
+# `_ANCHOR_NAMES` exist in tests/test_env_config_migration.py: this dict's KEYS
+# ARE the parametrization of the knock-out below, so it is a guard set, and a
+# guard set nothing watches is the failure class this repo keeps hitting. The
+# comment above already states the invariant — "a pin with two negatives needs
+# two knock-outs, not one" — and until PR B3 nothing enforced it. Measured
+# 2026-09-11 before this pin existed: deleting the `"Cs2Env"` entry left
+# `uv run pytest -q -p no:randomly tests/test_env_construction_enforcement.py`
+# at 18 passed and ZERO failures, because a removed key removes a CASE rather
+# than failing one, and emptying the dict left the two-file run at 54 passed +
+# 1 skipped, still with no failure.
+# Spelled out rather than derived from LOWER_LAYER even though the pin below
+# requires the two to agree, and for the same reason ANCHORS' two `tests/`
+# entries are spelled out in the sibling: a LOWER_LAYER that legitimately grows
+# a third symbol has to be re-declared HERE, deliberately, with a body written
+# for it. The failure message says so.
+_INLINED_CONSTRUCTION_NAMES = frozenset({"make_env", "Cs2Env"})
+
+
+def test_the_inlined_construction_set_is_pinned_and_covers_both_of_the_pins_negatives():
+    """`_INLINED_CONSTRUCTION` is the sole oracle of the knock-out below — its
+    keys ARE that test's parametrization — which makes it a guard set whose
+    composition nothing watched until PR B3.
+
+    WHY A MISSING ENTRY CANNOT FAIL THE KNOCK-OUT. `pytest.mark.parametrize`
+    generates one case per key, so deleting a key deletes the case that would
+    have objected. Measured 2026-09-11: with the `"Cs2Env"` entry removed,
+    `uv run pytest -q -p no:randomly tests/test_env_construction_enforcement.py`
+    reported 18 passed and zero failures; emptying the dict left the two-file run
+    (this file plus tests/test_env_config_migration.py) at 54 passed + 1 skipped,
+    also with no failure. Either edit would have left one of the two negatives in
+    test_the_factory_does_not_call_the_lower_layer_constructor_directly unproved
+    with a green suite. Same remedy and same reason as `_PLANT_NAMES`.
+
+    TWO ASSERTIONS, because they catch different edits. The literal catches a
+    DELETION. Equality against `LOWER_LAYER` catches a REPOINT — a key renamed,
+    or swapped for a symbol the pin above does not assert — which keeps the count
+    at two and still leaves one negative unproved. Neither is a reason to shrink
+    a set until it passes: add the body, then add the name.
+    """
+    assert set(_INLINED_CONSTRUCTION) == set(_INLINED_CONSTRUCTION_NAMES), (
+        f"_INLINED_CONSTRUCTION composition changed: added "
+        f"{sorted(set(_INLINED_CONSTRUCTION) - _INLINED_CONSTRUCTION_NAMES)}, removed "
+        f"{sorted(_INLINED_CONSTRUCTION_NAMES - set(_INLINED_CONSTRUCTION))}. Update "
+        f"_INLINED_CONSTRUCTION_NAMES deliberately; do not delete this assertion.")
+    assert set(_INLINED_CONSTRUCTION) == set(LOWER_LAYER), (
+        f"the knock-out is parametrized over {sorted(_INLINED_CONSTRUCTION)} while the pin it "
+        f"knocks out asserts one negative per symbol in LOWER_LAYER ({sorted(LOWER_LAYER)}). "
+        f"Every LOWER_LAYER symbol needs an inlined body here, or its negative is an assertion "
+        f"nothing has ever seen fail.")
 
 
 @pytest.mark.parametrize("symbol", sorted(_INLINED_CONSTRUCTION))
@@ -499,10 +571,18 @@ def test_alias_resolution_is_exercised_by_real_source_not_only_by_a_plant():
         "aliased call site appeared, which is allowed; write it down.\n"
         "Then update EVERY place stating a figure for this population, not only the dict. "
         "Enumerated 2026-09-11 by what each carrier DESCRIBES rather than by the word or number "
-        "it happens to use: a census scoped to the word 'six' cannot see the two carriers that "
-        "state only the statement count, and 'four' and 'six' each occur here about unrelated "
-        "things too (four SPELLINGS in guard 2, four SYMBOLS across the two vocabularies, six "
-        "ROLE BUILDERS). Five prose carriers besides this dict, stating different figures:\n"
+        "it happens to use, because `grep -nw six tests/test_env_construction_enforcement.py` "
+        "gets this population wrong in BOTH directions. Measured on that command: it lands "
+        "inside three of the five carriers below and misses the other two entirely — "
+        "`import_aliases`' docstring and `constructions`' docstring never write the word, "
+        "because they state FILES + STATEMENTS and STATEMENTS respectively, never a call count "
+        "— and one of the three it does land in, the module docstring, it reaches only through "
+        "a decoy: the sole 'six' there is the six ROLE BUILDERS in the factory-asymmetry "
+        "paragraph, while the ALIAS RESOLUTION paragraph that IS the carrier never writes it. "
+        "'four' and 'six' both occur here about unrelated things (four SPELLINGS in guard 2, "
+        "four SYMBOLS across the two vocabularies, and the six ROLE BUILDERS twice — the "
+        "module docstring's paragraph and the repointed-asymmetry pin's own docstring). "
+        "Five prose carriers besides this dict, stating different figures:\n"
         "    module docstring, ALIAS RESOLUTION paragraph   files + statements\n"
         "    `import_aliases`' docstring                    files + statements\n"
         "    `constructions`' docstring                     statements only\n"
