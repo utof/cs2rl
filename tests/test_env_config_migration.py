@@ -200,10 +200,13 @@ def _bindings(tree, rel):
         `profile_step.make_c_env` is a real module attribute today and only the
         qualified CALL is missing. Nor is `make_c_env` an exotic spelling —
         `tests/test_env_construction_enforcement.py`'s LOWER_LAYER comment calls
-        it house style "at all three files that import it" — that comment said
-        "wherever it is imported into a module that also has a `make_*_env` of
-        its own" until PR B3, when `src/profile_step.py` was measured to define
-        none and write the alias anyway — and it resolves here today at six CALL
+        it house style "at the three files that ALIAS it" — a MINORITY spelling,
+        not what every importer writes: that comment's own AST census reads 9
+        importers to 3 aliasers over `src/` + `scripts/`, and 35 to the same 3
+        over all three roots. (It said "wherever it is imported into a module
+        that also has a `make_*_env` of its own" until PR B3, then briefly "at
+        all three files that import it", which was the same conflation this
+        sentence is warning about.) It resolves here today at six CALL
         SITES in THREE files — `src/profile_step.py` ×3, `src/train.py` ×2,
         `src/train_bc.py` ×1 — because a bare `make_c_env(...)` binds through
         `alias.asname`. Say which of the three quantities you mean, always: the
@@ -593,9 +596,12 @@ def test_the_named_floor_file_holds_calls_gh173_cannot_migrate(symbol, pin):
 # Measured 2026-09-11 by disabling `if kw.arg is None` in `_legacy_reasons`:
 # `uv run pytest -q -p no:randomly tests/test_env_config_migration.py
 # tests/test_env_construction_enforcement.py` stayed at 56 passed, with all
-# three splat plants reporting `['clause 1: legacy keyword None']` instead. The
+# three splat plants reporting `['clause 1: legacy keyword None']` instead —
+# 56 being the two-file total AT `60a2e66`, before this fix; re-run at HEAD the
+# same mutation gives 3 failed of 57. The
 # same command with clause 1 disabled gives 12 failed and with clause 3 disabled
-# 4 failed, so clause 2 was the one uncovered arm, not a general weakness. Every
+# 4 failed, both still true at HEAD, so clause 2 was the one uncovered arm, not
+# a general weakness. Every
 # plant below reports exactly one clause (measured), which is why the assertion
 # is set equality against `{clause}` and not a membership test.
 _PLANTS = {
@@ -705,6 +711,13 @@ def test_each_clause_is_found_in_a_planted_tree(tmp_path, name):
     alone, a control that could not tell working from broken. Clauses 1 and 3
     were never in that position: the same command with clause 1 disabled fails 12
     and with clause 3 disabled fails 4.
+
+    THE 56 IS THE PRE-FIX EPOCH, and the 12 and the 4 are not. 56 is the
+    two-file total at `60a2e66`, before this fix and before the sibling's new
+    composition pin took it to 57; re-run the clause-2 mutation at HEAD and it
+    fails 3 of 57 rather than passing all of them, which is the whole point of
+    the fix. The 12 and the 4 were re-measured at HEAD and are unchanged, so
+    only this one figure needed its tree named.
 
     `classdef-inmodule` and `puffer-inmodule` are the controls for `_bindings`'s
     in-module clause, each planted AT its own defining file: the first is the
