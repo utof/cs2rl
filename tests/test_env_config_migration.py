@@ -26,8 +26,12 @@ Measured by this module, on this tree, at the tip of PR B3: **19 files under
 `scripts/` hold none. Two neighbouring counts answer DIFFERENT questions and
 must not be quoted for this one: 32 files under `tests/` (41 across all three
 roots) hold at least one call the census RESOLVES, typed or legacy; and
-`src/c_env/cs2_env.py`'s own `**legacy` docstring carries a third figure, for
-the pre-migration population, repaired elsewhere in this PR (spec §8.9 item 4).
+`src/c_env/cs2_env.py`'s own `**legacy` docstring carries a third figure for the
+pre-migration population — 38, which names the right TREE but a DIFFERENT
+INSTRUMENT, namely `git grep -lE 'make_env|make_puffer_env' 139a3a3 --
+'tests/*.py'`: a count of files that MENTION either name in text at the pre-#165
+baseline, not of calls any clause here calls legacy. Repaired elsewhere in this
+PR (spec §8.9 item 4).
 Anyone re-quoting a number from here states the tree, the commit and the
 reading, because this workstream has already burned a day on three "different
 answers" that were three different questions. This census is the ratchet that
@@ -196,9 +200,11 @@ def _bindings(tree, rel):
         `profile_step.make_c_env` is a real module attribute today and only the
         qualified CALL is missing. Nor is `make_c_env` an exotic spelling —
         `tests/test_env_construction_enforcement.py`'s LOWER_LAYER comment calls
-        it house style "wherever it is imported into a module that also has a
-        `make_*_env` of its own", and it resolves here today at six CALL SITES in
-        THREE files — `src/profile_step.py` ×3, `src/train.py` ×2,
+        it house style "at all three files that import it" — that comment said
+        "wherever it is imported into a module that also has a `make_*_env` of
+        its own" until PR B3, when `src/profile_step.py` was measured to define
+        none and write the alias anyway — and it resolves here today at six CALL
+        SITES in THREE files — `src/profile_step.py` ×3, `src/train.py` ×2,
         `src/train_bc.py` ×1 — because a bare `make_c_env(...)` binds through
         `alias.asname`. Say which of the three quantities you mean, always: the
         aliased IMPORT STATEMENTS number FOUR over those same three files
@@ -491,9 +497,21 @@ def test_production_roots_hold_no_legacy_construction(root, symbol):
 
 def test_cs2env_has_no_legacy_callers_in_tests():
     """`Cs2Env` took no legacy channel at all (parent §3): it is the L1
-    constructor, `config` has no default and there is no `**legacy`. Its 18 test
-    call sites migrated in Phase A. A legacy `Cs2Env(...)` is a TypeError at
-    runtime, so this pin is a static early warning, not a duplicate of one.
+    constructor, `config` has no default and there is no `**legacy`. A legacy
+    `Cs2Env(...)` is a TypeError at runtime, so this pin is a static early
+    warning, not a duplicate of one.
+
+    TWO POPULATIONS, AND THIS DOCSTRING USED TO NAME ONLY THE SMALLER ONE ("its
+    18 test call sites migrated in Phase A"), which is true of what Phase A
+    MIGRATED and is not the population this pin covers. Re-measured 2026-09-11
+    with this module's own `census` over a `git archive` of `tests/` at three
+    trees, so only the tree varies: 18 resolved `Cs2Env` call sites in 3 files at
+    `139a3a3`, the pre-#165 baseline; 19 in 4 files at the Phase-A tip
+    `54d7da0`; 19 in 4 at this branch's base `60a2e66`. The extra file is
+    `tests/test_make_env_shim.py`, which does not exist at `139a3a3` and which
+    `git log --diff-filter=A` attributes to `ae478f8` — Phase A itself — so its
+    one site was born typed rather than migrated. Neither figure is asserted
+    anywhere; the assertion below is a zero.
     """
     sites = legacy_in("tests", "Cs2Env")
     assert not sites, f"legacy Cs2Env call(s) under tests/:\n{_report(sites)}"
@@ -561,30 +579,46 @@ def test_the_named_floor_file_holds_calls_gh173_cannot_migrate(symbol, pin):
 
 # ── positive controls (mandatory, parent §3) ────────────────────────────────
 
+# name -> (path in the scratch tree, source, the ONE clause number it must report).
+#
+# The PATH is part of the control: `_bindings`'s in-module clause is scoped by
+# `DEFINING_FILE`, so the two in-module plants only resolve when planted at the
+# file that really defines the symbol.
+#
+# The CLAUSE is the other half of the control, and PR B3 is where it arrived.
+# Until then the plant test asserted only that a plant came back LEGACY, never
+# which clause said so — and the three clauses are not independent, because
+# clause 1's `elif` sees the splat keyword too: an `ast.keyword` with
+# `arg=None` satisfies `kw.arg != "config" and kw.arg not in RUNTIME[target]`.
+# Measured 2026-09-11 by disabling `if kw.arg is None` in `_legacy_reasons`:
+# `uv run pytest -q -p no:randomly tests/test_env_config_migration.py
+# tests/test_env_construction_enforcement.py` stayed at 56 passed, with all
+# three splat plants reporting `['clause 1: legacy keyword None']` instead. The
+# same command with clause 1 disabled gives 12 failed and with clause 3 disabled
+# 4 failed, so clause 2 was the one uncovered arm, not a general weakness. Every
+# plant below reports exactly one clause (measured), which is why the assertion
+# is set equality against `{clause}` and not a membership test.
 _PLANTS = {
-                                                                                                     # name -> (path in the scratch tree, source). The PATH is part of the
-                                                                                                     # control: `_bindings`'s in-module clause is scoped by `DEFINING_FILE`, so
-                                                                                                     # the two in-module plants only resolve when planted at the file that really
-                                                                                                     # defines the symbol.
-    "clause1-name": ("src/p.py", "from c_env.cs2_env import make_env\nmake_env(reward_kill=2.0)\n"),
+    "clause1-name":
+    ("src/p.py", "from c_env.cs2_env import make_env\nmake_env(reward_kill=2.0)\n", 1),
     "clause1-alias":
-    ("src/p.py", "from c_env.cs2_env import make_env as mk\nmk(reward_kill=2.0)\n"),
-    "clause1-attr": ("src/p.py", "import c_env.cs2_env as m\nm.make_env(reward_kill=2.0)\n"),
+    ("src/p.py", "from c_env.cs2_env import make_env as mk\nmk(reward_kill=2.0)\n", 1),
+    "clause1-attr": ("src/p.py", "import c_env.cs2_env as m\nm.make_env(reward_kill=2.0)\n", 1),
     "clause1-submodule":
-    ("src/p.py", "from c_env import cs2_env\ncs2_env.make_env(reward_kill=2.0)\n"),
-    "clause2-name": ("src/p.py", "from c_env.cs2_env import make_env\nmake_env(**kw)\n"),
-    "clause2-attr": ("src/p.py", "import c_env.cs2_env as m\nm.make_env(**kw)\n"),
-    "clause3-name": ("src/p.py", "from c_env.cs2_env import make_env\nmake_env(0)\n"),
-    "clause3-attr": ("src/p.py", "import c_env.cs2_env as m\nm.make_env(0)\n"),
-    "puffer-name":
-    ("src/p.py", "from train import make_puffer_env\nmake_puffer_env(reward_kill=2.0)\n"),
-    "puffer-alias": ("src/p.py", "from train import make_puffer_env as mpe\nmpe(**kw)\n"),
-    "puffer-attr": ("src/p.py", "import train\ntrain.make_puffer_env(0)\n"),
+    ("src/p.py", "from c_env import cs2_env\ncs2_env.make_env(reward_kill=2.0)\n", 1),
+    "clause2-name": ("src/p.py", "from c_env.cs2_env import make_env\nmake_env(**kw)\n", 2),
+    "clause2-attr": ("src/p.py", "import c_env.cs2_env as m\nm.make_env(**kw)\n", 2),
+    "clause3-name": ("src/p.py", "from c_env.cs2_env import make_env\nmake_env(0)\n", 3),
+    "clause3-attr": ("src/p.py", "import c_env.cs2_env as m\nm.make_env(0)\n", 3),
+    "puffer-name": ("src/p.py",
+                    "from train import make_puffer_env\nmake_puffer_env(reward_kill=2.0)\n", 1),
+    "puffer-alias": ("src/p.py", "from train import make_puffer_env as mpe\nmpe(**kw)\n", 2),
+    "puffer-attr": ("src/p.py", "import train\ntrain.make_puffer_env(0)\n", 3),
     "puffer-inmodule":
-    ("src/train.py",
-     "def make_puffer_env(**kw):\n    pass\n\n\nmake_puffer_env(reward_kill=2.0)\n"),
+    ("src/train.py", "def make_puffer_env(**kw):\n    pass\n\n\nmake_puffer_env(reward_kill=2.0)\n",
+     1),
     "classdef-inmodule": ("src/c_env/cs2_env.py",
-                          "class Cs2Env:\n    pass\n\n\nCs2Env(n_active_per_team=1)\n"),
+                          "class Cs2Env:\n    pass\n\n\nCs2Env(n_active_per_team=1)\n", 1),
 }
 
 # Asserted as a literal below. Without this the set the docstring calls "THE
@@ -637,23 +671,61 @@ def test_the_plant_set_is_pinned_and_covers_every_clause_in_both_spellings():
             assert f"{clause}-{spelling}" in _PLANTS, (
                 f"no {spelling}-spelled control for {clause}. The splat clause in particular is "
                 f"not hypothetical: scripts/sim_fingerprint.py used it until #165 PR B3.")
+    # The declared clause is now data, so it needs the same treatment the names
+    # get. Both directions: every clause must be represented at all, and a name
+    # that STATES a clause must declare that one — the shape of "the census
+    # broke, so the expectation was edited down until it passed again".
+    declared = {clause for _path, _src, clause in _PLANTS.values()}
+    assert declared == {
+        1, 2, 3
+    }, (f"the plants declare clauses {sorted(declared)}; every clause in `_legacy_reasons` needs "
+        f"at least one plant that must report it, or that clause is unwatched again.")
+    for name, (_path, _src, clause) in _PLANTS.items():
+        if name.startswith("clause"):
+            assert clause == int(name[len("clause")]), (
+                f"plant {name!r} declares clause {clause}. The name and the expectation disagree, "
+                f"which is what lowering an expectation to match a broken census looks like.")
 
 
 @pytest.mark.parametrize("name", sorted(_PLANTS))
 def test_each_clause_is_found_in_a_planted_tree(tmp_path, name):
     """THE control for every zero above. One planted file per clause per
-    spelling, each of which MUST come back legacy.
+    spelling, each of which must come back legacy FOR THE CLAUSE IT WAS WRITTEN
+    FOR.
+
+    THAT LAST PART IS THE WHOLE FIX, and PR B3 is where it arrived. "Came back
+    legacy" is not the same claim as "clause 2 works": clause 1's `elif` in
+    `_legacy_reasons` matches a splat keyword too, because `arg=None` is neither
+    `"config"` nor a member of `RUNTIME[target]`. Measured 2026-09-11 with
+    `if kw.arg is None` disabled, the whole splat clause dead: the two-file run
+    `uv run pytest -q -p no:randomly tests/test_env_config_migration.py
+    tests/test_env_construction_enforcement.py` stayed at 56 passed, and the
+    three splat plants came back as `['clause 1: legacy keyword None']` — legacy,
+    for a reason that is a misreport. So this parametrization was, for clause 2
+    alone, a control that could not tell working from broken. Clauses 1 and 3
+    were never in that position: the same command with clause 1 disabled fails 12
+    and with clause 3 disabled fails 4.
 
     `classdef-inmodule` and `puffer-inmodule` are the controls for `_bindings`'s
     in-module clause, each planted AT its own defining file: the first is the
     shape `make_env`'s own `return Cs2Env(...)` has in `src/c_env/cs2_env.py`,
     the second the shape a bare `make_puffer_env(...)` would have in
     `src/train.py`. Without that clause the `Cs2Env` `src`=0 pin has no site it
-    could ever fail on.
+    could ever fail on. Neither name states a clause, so their expectation is
+    only readable in `_PLANTS`: both pass a legacy KEYWORD, so both are clause 1.
     """
-    _, found = _plant(tmp_path, *_PLANTS[name])
+    path, source, clause = _PLANTS[name]
+    _, found = _plant(tmp_path, path, source)
     legacy = [f for f in found if f[3]]
     assert legacy, f"planted {name} was NOT found: census returned {found}"
+    fired = {int(why.split(":")[0].removeprefix("clause ")) for f in legacy for why in f[3]}
+    assert fired == {
+        clause
+    }, (f"planted {name} came back legacy for clause(s) {sorted(fired)}, not for clause {clause}: "
+        f"{[f[3] for f in legacy]}. A plant that fires the WRONG clause is still 'legacy', which "
+        f"is how clause 2 stayed uncovered until PR B3 — clause 1's `elif` reports the splat "
+        f"keyword as `legacy keyword None` the moment `if kw.arg is None` stops matching first. "
+        f"Repair the clause, never this expectation.")
 
 
 def test_an_in_module_def_binds_only_inside_its_own_defining_file(tmp_path):
