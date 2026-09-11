@@ -110,9 +110,27 @@ def main(argv=None):
     lib = _load_play_lib(repo)
     md = make_simple_map()
     # `recoil` is the one non-default this viewer wants; everything else is
-    # EnvConfig's default. Pre-#165 this was `recoil=True` as a bare keyword,
-    # which `make_env` translated through `from_legacy_kwargs` into exactly this
-    # object — same env, one frame earlier and type-checked.
+    # EnvConfig's default.
+    #
+    # THERE WERE TWO EARLIER STATES, NOT ONE, and this comment used to fuse
+    # them: it said "pre-#165 this was `recoil=True` as a bare keyword, which
+    # `make_env` translated through `from_legacy_kwargs`". First clause true of
+    # pre-#165, second clause not. Measured 2026-09-11:
+    #   * PRE-#165, at `21f984a` (the Phase-A gate baseline, tree `139a3a3`):
+    #     this line was `recoil=True` as a bare keyword, and `make_env` declared
+    #     `recoil` as an EXPLICIT parameter of its own, so the keyword bound
+    #     directly and nothing translated it. `from_legacy_kwargs` did not exist
+    #     to translate with: `src/env_config.py` was ADDED by `30e36a3`, the
+    #     first #165 Phase A commit, and
+    #     `git show 30e36a3^:src/c_env/cs2_env.py | grep -c from_legacy_kwargs`
+    #     returns 0.
+    #   * MID-#165, at `6b3bf29` (this branch's base, after Phase A, B1 and B2):
+    #     `make_env` takes `config` plus six named runtime keywords and
+    #     `**legacy`, `recoil` is no longer a parameter of its own, and this file
+    #     still wrote the bare keyword — so THERE the routing through
+    #     `EnvConfig.from_legacy_kwargs` is exactly what happened.
+    # PR B3 is what replaced the keyword with the object below: same env, one
+    # frame earlier and type-checked.
     env = make_env(config=EnvConfig(recoil=True), seed=args.seed, auto_reset=False, map_data=md)
     obs, _ = env.reset(seed=args.seed)
     # First select sees zero obs (env_reset does not compute_observations). Same as record.
