@@ -209,11 +209,13 @@ def _config_from_field_kwargs(kwargs):
 
 def test_config_from_field_kwargs_partitions_flat_reward_and_knob_names():
     from env_config import EnvConfig, RewardWeights
-    cfg = _config_from_field_kwargs({"reward_kill": 1.0, "n_active_per_team": 3})
+    payload = {"reward_kill": 1.0, "n_active_per_team": 3}
+    cfg = _config_from_field_kwargs(payload)
+    assert payload == {"reward_kill": 1.0, "n_active_per_team": 3}
     assert isinstance(cfg, EnvConfig)
     assert cfg.rewards == RewardWeights(reward_kill=1.0)
     assert cfg.n_active_per_team == 3
-    with pytest.raises(TypeError, match="reward_kil"):
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'reward_kil'"):
         _config_from_field_kwargs({"reward_kil": 1.0})
 
 

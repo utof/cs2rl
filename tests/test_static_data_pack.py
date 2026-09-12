@@ -333,10 +333,9 @@ def _capture():
     """
     import subprocess
 
-    from test_struct_sizes import _SENTINEL_CONFIGS
+    from test_struct_sizes import _SENTINEL_CONFIGS, _config_from_field_kwargs
 
     from map import make_simple_map
-    from tests.test_struct_sizes import _config_from_field_kwargs
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     simple_map = make_simple_map()
