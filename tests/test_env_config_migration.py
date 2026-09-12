@@ -130,7 +130,7 @@ RUNTIME = {
 # fails, printing file:line per offender. CALL-site counts, not file counts:
 # the 54 live in 17 files, the 8 in 4.
 PINNED_TESTS_MAKE_ENV = 44
-PINNED_TESTS_MAKE_PUFFER_ENV = 7
+PINNED_TESTS_MAKE_PUFFER_ENV = 6
 
 # The roots the zero-pins run over, DERIVED from ROOTS rather than restated, so a
 # rename or reorder there cannot leave a pin scanning a root that does not exist
