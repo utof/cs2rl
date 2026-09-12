@@ -129,7 +129,7 @@ RUNTIME = {
 # Measured at the end of PR B3. gh#173 LOWERS these as it migrates; a rise
 # fails, printing file:line per offender. CALL-site counts, not file counts:
 # the 54 live in 17 files, the 8 in 4.
-PINNED_TESTS_MAKE_ENV = 49
+PINNED_TESTS_MAKE_ENV = 47
 PINNED_TESTS_MAKE_PUFFER_ENV = 8
 
 # The roots the zero-pins run over, DERIVED from ROOTS rather than restated, so a
