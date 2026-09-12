@@ -117,6 +117,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The two symbols whose construction W3 centralises.
 CONSTRUCTED = ("make_puffer_env", "SelfPlayManager")
+_CONSTRUCTED_NAMES = frozenset({"make_puffer_env", "SelfPlayManager"})
 
 # Explicit roots, per spec §2 W3 — never a walk from the repo root, which would
 # visit `.worktrees/` (checkouts of this same repo, with their own copies of
@@ -338,29 +339,36 @@ def test_the_scan_roots_resolve_to_real_populated_directories():
 
 
 def test_the_matcher_finds_every_spelling_in_this_repos_own_source():
-    """All four (symbol, spelling) combinations are found where they really live.
+    """Both live SelfPlayManager spellings are found where they really live.
 
-    THE POSITIVE CONTROL. `tests/` constructs envs and managers directly by
-    design — it is testing them — so it is a standing, unmigrated population of
-    exactly what this matcher must recognise, and `src/env_factory.py` supplies
-    the fourth combination. A matcher that named `make_env` instead of
-    `make_puffer_env`, or that only looked at bare names, reports zero findings
-    in `src/` either way; here it fails loudly.
+    THE POSITIVE CONTROL. `CONSTRUCTED` still names `make_puffer_env` as a
+    banned symbol (knock-outs plant it; there is no live `make_puffer_env(...)`
+    specimen). The live population this matcher must recognise is the
+    SelfPlayManager pair: name in tests/, attribute in `src/env_factory.py`.
+    A matcher that only looked at bare names reports zero findings in `src/`;
+    here it fails loudly.
 
-    If a future task migrates the test suite onto the factory too, this will
-    fail — correctly, because it will mean the positive control has evaporated
-    and needs a new source, not that the scan is fine.
+    If a future task migrates the SelfPlayManager tests onto the factory too,
+    this will fail — correctly, because it will mean the positive control has
+    evaporated and needs a new source, not that the scan is fine.
     """
     _, found = scan([REPO_ROOT / "tests", FACTORY])
     combos = {(symbol, spelling) for _, symbol, _, spelling in found}
-    expected = {(s, sp) for s in CONSTRUCTED for sp in ("name", "attribute")}
+    expected = {("SelfPlayManager", "name"), ("SelfPlayManager", "attribute")}
     assert combos >= expected, (
         f"the matcher found only {sorted(combos)}; it must recognise all of {sorted(expected)}. "
         "Missing spellings mean the enforcement assertion is blind to them in src/ too.")
 
-    envs = [f for f in found if f[1] == "make_puffer_env"]
-    assert len(envs) >= 20, (f"only {len(envs)} make_puffer_env constructions found across tests/ "
-                             "and the factory; the matcher has stopped matching")
+    mgrs = [f for f in found if f[1] == "SelfPlayManager"]
+    assert len(mgrs) >= 9, (f"only {len(mgrs)} SelfPlayManager constructions found across tests/ "
+                            "and the factory; the matcher has stopped matching")
+
+
+def test_constructed_names_are_the_declared_frozenset():
+    assert set(CONSTRUCTED) == set(_CONSTRUCTED_NAMES), (
+        f"CONSTRUCTED={CONSTRUCTED!r} drifted from _CONSTRUCTED_NAMES="
+        f"{sorted(_CONSTRUCTED_NAMES)!r}; edit the frozen literal in the same "
+        "commit as CONSTRUCTED, never derive one from the other")
 
 
 def test_the_factory_itself_is_where_the_construction_lives():
