@@ -265,7 +265,7 @@ def constructions(source, label="<source>", symbols=CONSTRUCTED):
     `symbols` is a parameter so the same matcher can take the census of the
     LOWER_LAYER constructors it does not ban — which is also the strongest
     available positive control for alias resolution, since it has to resolve the
-    four real `make_env as make_c_env` imports to report those sites at all.
+    three real `make_env as make_c_env` imports to report those sites at all.
     """
     tree = ast.parse(source, filename=label)
     aliases = import_aliases(tree, symbols)
