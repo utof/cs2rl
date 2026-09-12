@@ -98,7 +98,8 @@ def test_static_data_scalars_match_the_pre_w2_capture(simple_map):
     fixture = _load_fixture()
     for i, config in enumerate(fixture["configs"]):
         expected = config["scalars"]
-        env = make_env(map_data=simple_map, **config["kwargs"])
+        from tests.test_struct_sizes import _config_from_field_kwargs
+        env = make_env(map_data=simple_map, config=_config_from_field_kwargs(config["kwargs"]))
         try:
             got = binding.static_data_scalars(env._capsule)
         finally:
@@ -335,12 +336,13 @@ def _capture():
     from test_struct_sizes import _SENTINEL_CONFIGS
 
     from map import make_simple_map
+    from tests.test_struct_sizes import _config_from_field_kwargs
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     simple_map = make_simple_map()
     configs = []
     for kwargs in _SENTINEL_CONFIGS:
-        env = make_env(map_data=simple_map, **kwargs)
+        env = make_env(map_data=simple_map, config=_config_from_field_kwargs(kwargs))
         try:
             scalars = dict(sorted(binding.static_data_scalars(env._capsule).items()))
         finally:
