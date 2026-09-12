@@ -497,9 +497,10 @@ def test_onnx_export_output_order_pinned():
     import onnxruntime as ort
 
     import train
+    from c_env.cs2_env import make_env
     from deploy.export_policy import LSTMPolicyONNXWrapper
 
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         obs_dim, hidden = train.OBS_DIM, 256
         # Mirror the architecture build_model would produce. ACTION_HEAD_SIZES

@@ -215,9 +215,10 @@ def test_symmetrization_holds_on_the_external_buffer_vecenv_path():
         sym.close()
 
 
-def test_make_puffer_env_threads_the_flag():
-    import train
-    env = train.make_puffer_env(seed=5, reward_symmetrize=True)
+def test_make_env_threads_the_flag():
+    from c_env.cs2_env import make_env
+    from env_config import EnvConfig
+    env = make_env(seed=5, config=EnvConfig(reward_symmetrize=True))
     try:
         assert env._reward_symmetrize is True
     finally:

@@ -199,7 +199,8 @@ def _policy_with_cap(cap, **kw):
     keeps the policy-only tests below at ~env-construction cost.
     """
     import train
-    env = train.make_puffer_env(seed=0)
+    from c_env.cs2_env import make_env
+    env = make_env(seed=0)
     try:
         return train.build_policy(env, device="cpu", aim_log_std_max=cap, **kw)
     finally:

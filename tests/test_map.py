@@ -188,9 +188,9 @@ def _make_simple_env(seed=42):
     Using the default make_puffer_env() would give the dust2 map (centroids_z
     all zeros), so verticality tests MUST explicitly pass map_data=simple_map.
     """
-    import train
+    from c_env.cs2_env import make_env
     from map import make_simple_map
-    return train.make_puffer_env(seed=seed, map_data=make_simple_map())
+    return make_env(seed=seed, map_data=make_simple_map())
 
 
 def _zero_actions(n_agents=10):

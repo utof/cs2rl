@@ -21,11 +21,12 @@ import torch.nn.functional as F
 
 import train
 from _action_spec import AIM_DIM
+from c_env.cs2_env import make_env
 
 
 @pytest.fixture(scope="module")
 def env():
-    e = train.make_puffer_env(seed=0)
+    e = make_env(seed=0)
     try:
         yield e
     finally:
