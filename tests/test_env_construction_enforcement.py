@@ -43,8 +43,8 @@ ALIAS RESOLUTION, and why it is not optional. `from train import make_puffer_env
 as _mpe` followed by `_mpe(...)` is one line and defeats a matcher that keys on
 the literal spelling of the call. That is not a hypothetical spelling in this
 repo: `from c_env.cs2_env import make_env as make_c_env` is house style at three
-of the FILES in the LOWER_LAYER_SITES census below — four import STATEMENTS,
-because `src/train.py` writes it twice, function-locally in two functions — so
+of the FILES in the LOWER_LAYER_SITES census below — three import STATEMENTS,
+because `src/train.py` writes it once, function-locally in `record_episode` — so
 the alias form is what this codebase actually writes. `import_aliases` therefore
 binds `asname -> symbol` per FILE and the matcher resolves through it, reporting
 the canonical symbol with the local name in the spelling column so a failure
@@ -159,8 +159,7 @@ ANCHORS = ("src/train.py", "src/train_test_harness.py", "src/env_factory.py")
 # this paragraph itself adds moved two of the three citations off their target
 # before the draft was even committed.
 # Over this file's own roots, `src/` + `scripts/`:
-#   9 files import it; 3 ALIAS it (4 STATEMENTS — `src/train.py` writes it twice,
-#   function-locally); 6 import it bare. FIVE of those six bare importers are
+#   9 files import it; 3 ALIAS it (3 STATEMENTS); 6 import it bare. FIVE of those six bare importers are
 #   keys in LOWER_LAYER_SITES below — `scripts/gen_bc_demos.py`,
 #   `scripts/measure_budget.py`, `scripts/oracle_statue_check.py`,
 #   `scripts/sim_fingerprint.py`, `src/play.py`. The sixth is
@@ -186,18 +185,17 @@ ANCHORS = ("src/train.py", "src/train_test_harness.py", "src/env_factory.py")
 # the third.
 LOWER_LAYER = ("make_env", "Cs2Env")
 
-# Every call to one of those, per file, as of the final review of
-# refactor/post-rung1a. Two of the twelve are the constructors' own definitions
-# (the `return make_c_env(...)` inside `make_puffer_env`, and the
-# `return Cs2Env(...)` inside `make_env`) — i.e. the wrapper chain itself, not
-# extra callers; the other ten are the direct callers named in review finding
-# I-1. This is a DISCLOSURE list, not a ban: a new entry is allowed, it just has
-# to be written down here so the docstring above keeps telling the truth.
+# Every call to one of those, per file. One of the eleven is the constructor's
+# own definition (`return Cs2Env(...)` inside `make_env`) — i.e. the wrapper
+# itself, not an extra caller; the other ten are the direct callers named in
+# review finding I-1. This is a DISCLOSURE list, not a ban: a new entry is
+# allowed, it just has to be written down here so the docstring above keeps
+# telling the truth.
 LOWER_LAYER_SITES = {
     "src/c_env/cs2_env.py": 1,                         # `make_env`'s own `return Cs2Env(...)`
     "src/play.py": 1,                                  # the interactive viewer
     "src/profile_step.py": 3,                          # three step-timing harnesses
-    "src/train.py": 2,                                 # `make_puffer_env`'s own call + `record_episode`
+    "src/train.py": 1,                                 # `record_episode`
     "src/train_bc.py": 1,                              # BC demo replay env
     "scripts/gen_bc_demos.py": 1,
     "scripts/measure_budget.py": 1,
@@ -208,10 +206,10 @@ LOWER_LAYER_SITES = {
 # The alias-spelled SUBSET of LOWER_LAYER_SITES: `{file: calls}` for the calls
 # reachable only through `from c_env.cs2_env import make_env as make_c_env`.
 # Three UNITS meet here and they differ, which is how a `>= 4` ended up under a
-# docstring claiming six: six CALLS, in three FILES, bound by four import
+# docstring claiming six: five CALLS, in three FILES, bound by three import
 # STATEMENTS, named by their owner rather than by line so they cannot rot:
 # `src/profile_step.py` imports it once at MODULE level and covers all three of
-# its calls, while `src/train.py`'s `make_puffer_env` and `record_episode` and
+# its calls, while `src/train.py`'s `record_episode` and
 # `src/train_bc.py`'s `make_bc_env` each import it function-locally for one call.
 #
 # WHY EXACT EQUALITY RATHER THAN A FLOOR, and where the headroom went. This dict
@@ -228,7 +226,7 @@ LOWER_LAYER_SITES = {
 # changes that entry and nothing else.
 ALIASED_LOWER_LAYER_SITES = {
     "src/profile_step.py": 3,
-    "src/train.py": 2,
+    "src/train.py": 1,
     "src/train_bc.py": 1,
 }
 
@@ -240,8 +238,8 @@ def import_aliases(tree, symbols):
     call, so `from train import make_puffer_env as _mpe` + `_mpe(...)` walked
     straight past it — a one-line bypass. And the alias form is not hypothetical
     here: `from c_env.cs2_env import make_env as make_c_env` is house style at
-    three FILES — four import STATEMENTS, since `src/train.py` writes it twice —
-    so it is a spelling this repo genuinely writes.
+    three FILES — three import STATEMENTS — so it is a spelling this repo
+    genuinely writes.
 
     ONLY `ImportFrom`. `import X as Y` can bind a MODULE and nothing else, and
     `Y.make_puffer_env(...)` is already the attribute spelling.
@@ -384,7 +382,7 @@ def test_the_factory_itself_is_where_the_construction_lives():
         "env_factory.py no longer constructs a SelfPlayManager; either build_selfplay_manager "
         "moved out, or it stopped calling the class directly")
     # And the documented asymmetry, pinned so the docstrings above stay true:
-    # build_env_for passes make_puffer_env as a VALUE, so no call node names it.
+    # build_env_for passes make_env as a VALUE, so no call node names make_puffer_env.
     assert "make_puffer_env" not in symbols, (
         "env_factory.py now contains a direct make_puffer_env(...) call. That is allowed by the "
         "exemption, but this file's module docstring and env_factory's both explain that it does "
@@ -560,18 +558,18 @@ def test_knockout_the_repointed_asymmetry_pin_fails_on_a_planted_call(tmp_path, 
 
 
 def test_alias_resolution_is_exercised_by_real_source_not_only_by_a_plant():
-    """The six live `make_env as make_c_env` calls are reachable ONLY through aliases.
+    """The five live `make_env as make_c_env` calls are reachable ONLY through aliases.
 
     THE POSITIVE CONTROL FOR ALIAS RESOLUTION, and the reason it is taken from the
     LOWER_LAYER census rather than from a plant: `train.py`, `train_bc.py` and
     `profile_step.py` all import the lower constructor under a different local
-    name, so a matcher that keys on literal spellings reports those six sites as
+    name, so a matcher that keys on literal spellings reports those five sites as
     zero — the exact I-4 failure, in real source, on every run. If the repo ever
     stops writing the alias form this fails, which is correct: it means the live
     control is gone and the plant below is all that is left.
 
-    IT ASSERTS THE POPULATION, NOT A FLOOR. The sentence above claims six calls in
-    three files, so any threshold under six is an assertion weaker than its own
+    IT ASSERTS THE POPULATION, NOT A FLOOR. The sentence above claims five calls in
+    three files, so any threshold under five is an assertion weaker than its own
     claim — which is what `>= 4` was, a number taken from the four import
     STATEMENTS and applied to a count of CALLS. Under it the two smallest entries
     could vanish with this control green and its message silent.
@@ -803,7 +801,7 @@ def test_no_make_puffer_env_or_selfplaymanager_call_outside_the_factory():
     """Zero `make_puffer_env(...)` / `SelfPlayManager(...)` in src/ or scripts/.
 
     THE TWO BANNED SYMBOLS AND NOTHING ELSE. Passing does not mean no env is
-    built outside the factory: the twelve LOWER_LAYER_SITES calls to `make_env` /
+    built outside the factory: the eleven LOWER_LAYER_SITES calls to `make_env` /
     `Cs2Env` are in these same roots and are out of scope by design. Read the
     module docstring's LOWER LAYER paragraph before citing this test.
 

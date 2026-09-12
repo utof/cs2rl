@@ -866,7 +866,7 @@ class Cs2Env(pufferlib.PufferEnv):
             nav_graph=None,
             map_data=None,
             auto_reset=True,
-            include_step_stats_in_info: bool = False,                                     # Task 6a (utof/cs2rl#7)
+            include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)
     ):
         """Construct the native env from one EnvConfig plus runtime inputs.
 
@@ -879,8 +879,7 @@ class Cs2Env(pufferlib.PufferEnv):
         config.json does not record them (spec §2.2).
         """
         if not isinstance(config, EnvConfig):
-            raise TypeError(f"config must be an EnvConfig, got {type(config).__name__}; "
-                            "legacy keyword arguments go through make_env(**legacy)")
+            raise TypeError(f"config must be an EnvConfig, got {type(config).__name__}")
         self.config = config
         rw = config.rewards
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
@@ -1616,52 +1615,14 @@ def make_env(
     buf=None,
     map_data=None,
     include_step_stats_in_info: bool = False,
-    **legacy,
 ):
     """Load map data and return a ready-to-use Cs2Env.
 
-    Pass the configuration BY KEYWORD as `config=EnvConfig(...)`. The
-    `**legacy` channel accepts the pre-#165 keyword names (the 23 weights, the
-    10 knobs, and `reward_overrides`) and translates them through
-    `EnvConfig.from_legacy_kwargs`, which has an explicit parameter list, so a
-    misspelled name is a TypeError here, in-process, before binding.init.
-
-    DEPRECATED — see the follow-up issue filed at Phase-A branch end
-    (gh#173). `**legacy` exists for the test files that still spell kwargs the
-    old way. Measured by tests/test_env_config_migration.py on this tree at the
-    tip of PR B3: NINETEEN files under `tests/` hold at least one call that the
-    census calls legacy — 17 for `make_env`, 4 for `make_puffer_env`, two files
-    in both — while `src/` and `scripts/` hold none. What that census PINS is
-    CALL counts, not file counts: two per-symbol literals
-    (`PINNED_TESTS_MAKE_ENV` = 54, `PINNED_TESTS_MAKE_PUFFER_ENV` = 8) as a
-    ceiling that may only fall, each with a non-zero floor in a per-symbol named
-    file whose legacy calls exist by design, plus a zero ratchet per production
-    root. gh#173 drives the ceilings to zero, after which this channel is
-    deleted. New callers must not use it.
-
-    QUOTE A NUMBER ONLY WITH ITS QUESTION. 19 answers "how many files hold a
-    LEGACY call". The neighbouring count — files holding a call the census
-    RESOLVES at all, typed or legacy — is 32 under `tests/`, 41 across all three
-    roots, and is not this one. The ~38 this paragraph carried until PR B3 was a
-    third INSTRUMENT, not a third tree: the census docstring's "pre-migration
-    population" gloss has the tree right and is silent only about how the
-    counting was done. Measured, `git grep -lE 'make_env|make_puffer_env'
-    139a3a3 -- 'tests/*.py'` returns exactly 38 — a TEXT-MENTION count at the
-    pre-#165 baseline, FILTERED to `*.py`. Widening only that filter,
-    `git grep -lE 'make_env|make_puffer_env' 139a3a3 -- 'tests/*'` returns 39,
-    the extra path being tests/fixtures/env_kwargs_pre_w3.json. Both forms are
-    written out because "drop the filter" reads two ways and the other way
-    changes the TREE, not the filter: with no pathspec at all,
-    `git grep -lE 'make_env|make_puffer_env' 139a3a3` returns 53 across every
-    root. The
-    two shims' legacy-CALL population on that tree, today's census clauses
-    applied to it, was 18 files. The figure was never approximate: it counted
-    mentions where this paragraph needs calls.
+    Pass the configuration BY KEYWORD as `config=EnvConfig(...)`.
+    `config=None` (the default) builds `EnvConfig()` — all field defaults.
     """
-    if legacy and config is not None:
-        raise TypeError(f"make_env got config= AND legacy kwargs {sorted(legacy)}; pass one")
     if config is None:
-        config = EnvConfig.from_legacy_kwargs(**legacy) if legacy else EnvConfig()
+        config = EnvConfig()
     if map_data is None:
         key = (nav.NAV_PATH, nav.CACHE_PATH)
         md = _ENV_CACHE.get(key)

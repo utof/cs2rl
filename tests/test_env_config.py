@@ -81,25 +81,8 @@ def test_defaults_equal_the_139a3a3_values():
 def test_knob_field_order_is_the_documented_ten():
     """Both sides are spellings of the ten knobs; KNOB_FIELDS is derived from
     EnvConfig's fields, so this pins the ORDER and the names against a literal.
-    It cannot see a field added to EnvConfig with no legacy parameter —
-    test_legacy_signature_covers_exactly_the_field_names below is that check."""
+    """
     assert env_config.KNOB_FIELDS == tuple(KNOB_DEFAULTS)
-
-
-def test_legacy_signature_covers_exactly_the_field_names():
-    """The two-way drift guard between the dataclass and the legacy shim.
-
-    from_legacy_kwargs builds `knobs` by iterating KNOB_FIELDS, so a knob that is
-    a field AND a legacy parameter but missing from KNOB_FIELDS would be accepted
-    and then silently dropped — the env would run on the default. Deriving
-    KNOB_FIELDS from `fields(EnvConfig)` closes that direction; this closes the
-    other two: a field with no legacy parameter, and a legacy parameter with no
-    field. test_struct_sizes.py's sentinel partition inherits both guards."""
-    import inspect
-
-    from env_config import KNOB_FIELDS, REWARD_FIELDS
-    params = set(inspect.signature(EnvConfig.from_legacy_kwargs).parameters)
-    assert params == set(REWARD_FIELDS) | set(KNOB_FIELDS) | {"reward_overrides"}
 
 
 def test_weights_are_coerced_to_float_and_pickle_round_trips():
@@ -215,53 +198,6 @@ def test_replace_revalidates():
         cfg.rewards.replace(nope=1.0)
 
 
-def test_from_legacy_kwargs_round_trips_all_33_names_and_overrides():
-    legacy = {
-        **{
-            k: v * 2
-            for k, v in DEFAULTS_AT_139a3a3.items()
-        }, "pbrs_gamma": 0.99,
-        "reward_symmetrize": True,
-        "recoil": True,
-        "n_active_per_team": 2,
-        "pin_pitch": 1,
-        "crouch_enabled": 0,
-        "jump_enabled": 0,
-        "round_time": 900,
-        "laser_range": 1234.0,
-        "max_turn_speed": 0.05
-    }
-    cfg = EnvConfig.from_legacy_kwargs(**legacy)
-    assert cfg.rewards.as_dict() == pytest.approx({
-        k: v * 2
-        for k, v in DEFAULTS_AT_139a3a3.items()
-    })
-    for k in KNOB_DEFAULTS:
-        assert getattr(cfg, k) == legacy[k], k
-    over = EnvConfig.from_legacy_kwargs(reward_overrides={"reward_ct_survival": 0.0})
-    assert over.rewards.reward_ct_survival == 0.0 and over.rewards.reward_kill == 0.3
-    assert EnvConfig.from_legacy_kwargs() == EnvConfig()
-    assert EnvConfig.from_legacy_kwargs(pbrs_gamma=None, reward_overrides=None) == EnvConfig()
-
-
-def test_from_legacy_kwargs_signature_has_34_keyword_only_params_and_no_var_keyword():
-    import inspect
-    sig = inspect.signature(EnvConfig.from_legacy_kwargs)
-    kinds = {p.kind for p in sig.parameters.values()}
-    assert kinds == {inspect.Parameter.KEYWORD_ONLY}
-    assert len(sig.parameters) == 34
-    assert all(p.default is UNSET for p in sig.parameters.values())
-
-
-def test_from_legacy_kwargs_error_contract():
-    with pytest.raises(TypeError, match="rewrad_kill"):
-        EnvConfig.from_legacy_kwargs(rewrad_kill=1.0)  # type: ignore[call-arg]
-    with pytest.raises(ValueError, match="did you mean --reward-kill"):
-        EnvConfig.from_legacy_kwargs(reward_overrides={"rewrad_kill": 1.0})
-    with pytest.raises(ValueError, match="reward_kill"):
-        EnvConfig.from_legacy_kwargs(reward_overrides={"reward_kill": float("nan")})
-
-
 def test_to_config_dict_key_set_matches_the_pinned_literal():
     """The key set equals CONFIG_DICT_KEYS above — a literal, not today's output.
 
@@ -309,96 +245,3 @@ def test_module_is_stdlib_only():
     r = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True)
     assert r.returncode == 0, (f"env_config must import stdlib only; it pulled in "
                                f"{r.stdout.strip()}\n{r.stderr}")
-
-
-# ── the make_puffer_env shim's validator path (relocated by #165 PR B2) ─────
-#
-# FIVE tests, from two sources. The first three came from
-# tests/test_reward_weight_wiring.py, which PR B2 retired along with the legacy
-# override dict it existed to pin. The last two close a review finding on this
-# branch: BOTH guards the shim itself adds were untested, and defeating either
-# one left the whole suite green — the review measured 1302 passed with the
-# two-channel raise deleted and unknown legacy names silently dropped.
-#
-# They are NOT duplicates of test_from_legacy_kwargs_error_contract above: that
-# one calls the validator DIRECTLY, while all five go through the deprecated
-# `make_puffer_env` shim, so they also prove the shim still routes its legacy
-# channel into `from_legacy_kwargs` rather than swallowing it or forwarding it
-# to the C env. Nor are the last two duplicates of the pair in
-# tests/test_make_env_shim.py: that file owns the LOWER layer,
-# `c_env.cs2_env.make_env`. make_puffer_env carries its OWN copy of both rules,
-# and a copy nothing tests is a copy that can be deleted — which is exactly what
-# the review measured.
-#
-# When gh#173 deletes the shim, delete all five with it — the direct test above
-# and tests/test_make_env_shim.py's lower-layer pair are what survive.
-#
-# They live in THIS file rather than in tests/test_env_factory.py because what
-# they exercise is the config contract's error surface, not env construction:
-# every one of them raises before any env is built.
-
-
-def test_unknown_reward_override_key_is_rejected():
-    """Fail loud, not with a bare TypeError deep in a forked worker."""
-    import train
-
-    with pytest.raises(ValueError, match="reward_ct_surival"):
-        train.make_puffer_env(reward_overrides={"reward_ct_surival": 0.0})
-
-
-def test_unknown_reward_override_error_suggests_the_flag():
-    """Review fix 4: a typo'd key should name the flag the user meant."""
-    import train
-
-    with pytest.raises(ValueError, match=r"--reward-ct-survival"):
-        train.make_puffer_env(reward_overrides={"reward_ct_surival": 0.0})
-
-
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "0.3", None])
-def test_make_puffer_env_validates_override_values(bad):
-    """Review fix 3: validate at the last boundary before the C env too.
-
-    Direct callers (sweep scripts, anything still on the legacy surface) bypass
-    the args-level resolver, so its finiteness check alone is not enough.
-    """
-    import train
-
-    with pytest.raises(ValueError, match="reward_kill"):
-        train.make_puffer_env(reward_overrides={"reward_kill": bad})
-
-
-def test_make_puffer_env_rejects_config_plus_legacy_kwargs():
-    """The shim's TWO CHANNELS ARE EXCLUSIVE — its own docstring states it as a rule.
-
-    A caller passing `config=` AND a legacy name has two different intents, and
-    picking one quietly is the failure this workstream exists to end: the
-    swept weight is ignored for a whole run and the arm trains the baseline.
-
-    The match pins the MESSAGE, not just the exception type: it must name the
-    offending legacy key, because "you passed both" without saying which name
-    collided leaves the caller guessing. `c_env.cs2_env.make_env` has the same
-    rule and its own test (tests/test_make_env_shim.py); this pins the shim's
-    separate copy, which the review deleted with the whole suite still green.
-    """
-    import train
-
-    with pytest.raises(TypeError, match=r"reward_ct_survival.*pass one"):
-        train.make_puffer_env(config=EnvConfig(), reward_ct_survival=0.0)
-
-
-def test_make_puffer_env_misspelled_legacy_name_dies_naming_the_key():
-    """Spec §8.5 gate B2 (f): `make_puffer_env(rewrad_kill=1)` -> TypeError naming the key.
-
-    WHY THE MATCH NAMES `from_legacy_kwargs` TOO, and not only the typo: the
-    guard is not a hand-written check, it is the EXPLICIT PARAMETER LIST on
-    `EnvConfig.from_legacy_kwargs`, and that is the whole design — a `**kwargs`
-    splat onward would carry the typo into a forked vecenv worker, where it dies
-    (if at all) far from the caller. Requiring the validator's name in the
-    message is what distinguishes "the shim routes legacy through the validator"
-    from "the shim filtered the unknown name out and built a default env" — the
-    knock-out the review measured at 135 tests green.
-    """
-    import train
-
-    with pytest.raises(TypeError, match=r"from_legacy_kwargs.*rewrad_kill"):
-        train.make_puffer_env(rewrad_kill=1)
