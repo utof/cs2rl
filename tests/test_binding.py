@@ -126,14 +126,14 @@ def test_make_env_writes_recoil_enabled(make_map):
     from c_env.cs2_env import make_env
     from env_config import EnvConfig
     assert "recoil" in {f.name for f in dataclasses.fields(EnvConfig)}
-    env = make_env(seed=0, map_data=make_map, recoil=False)
+    env = make_env(seed=0, map_data=make_map, config=EnvConfig(recoil=False))
     try:
         assert int(env._c_env.recoil_enabled) == 0
         env.reset()
         assert int(env._c_env.recoil_enabled) == 0, "reset must not clear the flag"
     finally:
         env.close()
-    on = make_env(seed=0, map_data=make_map, recoil=True)
+    on = make_env(seed=0, map_data=make_map, config=EnvConfig(recoil=True))
     try:
         assert int(on._c_env.recoil_enabled) == 1
         on.reset()

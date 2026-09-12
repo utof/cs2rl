@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from c_env.cs2_env import make_env
+from env_config import EnvConfig, RewardWeights
 from nav import ACTION_DIM
 from train import ACTION_HEAD_SIZES
 
@@ -158,13 +159,15 @@ def test_idle_penalty():
     env = make_env(
         seed=0,
         auto_reset=False,
-        reward_ct_survival=0.0,
-        pbrs_alive_weight=0.0,
-        pbrs_hp_weight=0.0,
-        pbrs_site_weight=0.0,
-        pbrs_bomb_progress_weight=0.0,
-        pbrs_nav_weight_t=0.0,
-        pbrs_nav_weight_ct=0.0,
+        config=EnvConfig(rewards=RewardWeights(
+            reward_ct_survival=0.0,
+            pbrs_alive_weight=0.0,
+            pbrs_hp_weight=0.0,
+            pbrs_site_weight=0.0,
+            pbrs_bomb_progress_weight=0.0,
+            pbrs_nav_weight_t=0.0,
+            pbrs_nav_weight_ct=0.0,
+        ), ),
     )
     env.reset()
 
@@ -462,30 +465,32 @@ def test_kill_reward_weight_is_configurable():
     Task 3 so they were not in the original zero-out list.
     """
     env = make_env(
-        reward_kill=0.9,
-        reward_death=0.0,
-        reward_win=0.0,
-        reward_bombsite_entry=0.0,
-        reward_plant_bonus=0.0,
-        reward_plant_base=0.0,
-        reward_plant_progress_scale=0.0,
-        reward_plant_interrupted=0.0,
-        reward_defuse=0.0,
-        reward_shot_penalty=0.0,
-        reward_ct_survival=0.0,
-        reward_inaction=0.0,
-        pbrs_alive_weight=0.0,
-        pbrs_hp_weight=0.0,
-        pbrs_site_weight=0.0,
-        pbrs_bomb_progress_weight=0.0,
-        pbrs_nav_weight_t=0.0,
-        pbrs_nav_weight_ct=0.0,
-        reward_win_t_detonation=0.0,
-        reward_win_t_elimination=0.0,
-        reward_win_ct_defuse=0.0,
-        reward_win_ct_timeout=0.0,
-        reward_win_ct_elimination=0.0,
         auto_reset=False,
+        config=EnvConfig(rewards=RewardWeights(
+            reward_kill=0.9,
+            reward_death=0.0,
+            reward_win=0.0,
+            reward_bombsite_entry=0.0,
+            reward_plant_bonus=0.0,
+            reward_plant_base=0.0,
+            reward_plant_progress_scale=0.0,
+            reward_plant_interrupted=0.0,
+            reward_defuse=0.0,
+            reward_shot_penalty=0.0,
+            reward_ct_survival=0.0,
+            reward_inaction=0.0,
+            pbrs_alive_weight=0.0,
+            pbrs_hp_weight=0.0,
+            pbrs_site_weight=0.0,
+            pbrs_bomb_progress_weight=0.0,
+            pbrs_nav_weight_t=0.0,
+            pbrs_nav_weight_ct=0.0,
+            reward_win_t_detonation=0.0,
+            reward_win_t_elimination=0.0,
+            reward_win_ct_defuse=0.0,
+            reward_win_ct_timeout=0.0,
+            reward_win_ct_elimination=0.0,
+        ), ),
     )
     env.reset()
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
@@ -623,30 +628,33 @@ def _make_zeroed_env():
     return make_env(
         seed=0,
         auto_reset=False,
-        reward_win=0.0,                                # silence old symmetric path (pre-Task-3)
-        reward_kill=0.0,
-        reward_death=0.0,
-        reward_bombsite_entry=0.0,
-        reward_plant_bonus=0.0,
-        reward_plant_base=0.0,
-        reward_plant_progress_scale=0.0,
-        reward_plant_interrupted=0.0,
-        reward_defuse=0.0,
-        reward_shot_penalty=0.0,
-        reward_ct_survival=0.0,
-        reward_inaction=0.0,
-        pbrs_alive_weight=0.0,
-        pbrs_hp_weight=0.0,
-        pbrs_site_weight=0.0,
-        pbrs_bomb_progress_weight=0.0,
-        pbrs_nav_weight_t=0.0,
-        pbrs_nav_weight_ct=0.0,
+        config=EnvConfig(
+            rewards=RewardWeights(
+                reward_win=0.0,                        # silence old symmetric path (pre-Task-3)
+                reward_kill=0.0,
+                reward_death=0.0,
+                reward_bombsite_entry=0.0,
+                reward_plant_bonus=0.0,
+                reward_plant_base=0.0,
+                reward_plant_progress_scale=0.0,
+                reward_plant_interrupted=0.0,
+                reward_defuse=0.0,
+                reward_shot_penalty=0.0,
+                reward_ct_survival=0.0,
+                reward_inaction=0.0,
+                pbrs_alive_weight=0.0,
+                pbrs_hp_weight=0.0,
+                pbrs_site_weight=0.0,
+                pbrs_bomb_progress_weight=0.0,
+                pbrs_nav_weight_t=0.0,
+                pbrs_nav_weight_ct=0.0,
                                                        # New per-mechanism defaults (Task 3):
-        reward_win_t_detonation=5.0,
-        reward_win_t_elimination=3.0,
-        reward_win_ct_defuse=5.0,
-        reward_win_ct_timeout=4.0,
-        reward_win_ct_elimination=3.0,
+                reward_win_t_detonation=5.0,
+                reward_win_t_elimination=3.0,
+                reward_win_ct_defuse=5.0,
+                reward_win_ct_timeout=4.0,
+                reward_win_ct_elimination=3.0,
+            ), ),
     )
 
 

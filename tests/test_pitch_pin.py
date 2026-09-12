@@ -26,7 +26,8 @@ def _zero():
 
 def test_c_ignores_pitch_when_pinned(simple_map):
     from c_env.cs2_env import make_env
-    env = make_env(map_data=simple_map, pin_pitch=1, seed=1)
+    from env_config import EnvConfig
+    env = make_env(map_data=simple_map, config=EnvConfig(pin_pitch=1), seed=1)
     try:
         env.reset()
         act, cont = _zero()
@@ -56,9 +57,10 @@ def test_c_applies_pitch_when_unpinned(simple_map):
 
 def test_crouch_masked_when_disabled(simple_map):
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     moff = np.concatenate([[0], np.cumsum(ACTION_HEAD_SIZES)[:-1]])
     for flag, expect in ((1, 1), (0, 0)):
-        env = make_env(map_data=simple_map, crouch_enabled=flag, seed=1)
+        env = make_env(map_data=simple_map, config=EnvConfig(crouch_enabled=flag), seed=1)
         try:
             env.reset()
             assert int(env._masks_view[0, moff[HEAD_CROUCH] + 1]) == expect
@@ -81,9 +83,10 @@ def test_jump_masked_when_disabled(simple_map):
     per-head no-op invariant the masked softmax depends on.
     """
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     moff = np.concatenate([[0], np.cumsum(ACTION_HEAD_SIZES)[:-1]])
     for flag, expect in ((1, 1), (0, 0)):
-        env = make_env(map_data=simple_map, jump_enabled=flag, seed=1)
+        env = make_env(map_data=simple_map, config=EnvConfig(jump_enabled=flag), seed=1)
         try:
             env.reset()
             assert int(env._masks_view[0, moff[HEAD_JUMP] + 1]) == expect
@@ -126,12 +129,11 @@ def test_arena_stance_parity_hit_and_stance_blocked():
     cs2_combat.h), so a coupled `blocked == 1 - hit` assert would pass if both
     ever flipped together."""
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     from map import make_arena_duel_map
     arena = make_arena_duel_map()
     env = make_env(map_data=arena,
-                   n_active_per_team=1,
-                   pin_pitch=1,
-                   crouch_enabled=0,
+                   config=EnvConfig(n_active_per_team=1, pin_pitch=1, crouch_enabled=0),
                    seed=1,
                    auto_reset=False)
     try:
@@ -149,9 +151,7 @@ def test_arena_stance_parity_hit_and_stance_blocked():
         env.close()
 
     env = make_env(map_data=arena,
-                   n_active_per_team=1,
-                   pin_pitch=1,
-                   crouch_enabled=1,
+                   config=EnvConfig(n_active_per_team=1, pin_pitch=1, crouch_enabled=1),
                    seed=1,
                    auto_reset=False)
     try:
@@ -175,9 +175,7 @@ def test_arena_stance_parity_hit_and_stance_blocked():
     for airborne_idx, z_off, expect_hit, expect_blocked in ((5, 57.0, 0, 1), (5, 20.0, 1, 0),
                                                             (0, 57.0, 0, 1), (0, 20.0, 1, 0)):
         env = make_env(map_data=arena,
-                       n_active_per_team=1,
-                       pin_pitch=1,
-                       crouch_enabled=0,
+                       config=EnvConfig(n_active_per_team=1, pin_pitch=1, crouch_enabled=0),
                        seed=1,
                        auto_reset=False)
         try:

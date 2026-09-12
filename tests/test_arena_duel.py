@@ -82,11 +82,10 @@ def test_dir_facing_3_is_plus_x_and_7_is_minus_x():
 
 def test_env_runs_and_spawns_in_columns():
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     from map import make_arena_duel_map
     env = make_env(map_data=make_arena_duel_map(),
-                   n_active_per_team=1,
-                   pin_pitch=1,
-                   crouch_enabled=0,
+                   config=EnvConfig(n_active_per_team=1, pin_pitch=1, crouch_enabled=0),
                    seed=3,
                    auto_reset=False)
     try:
@@ -121,13 +120,14 @@ def _best_bias_only_score(md, seed, n_rounds=16, ticks=160):
     over 13 constants of min(kills/ep ÷ 0.5, hit/facing ÷ 0.45) — both §5
     bullets normalised by their thresholds, so ≥ 1.0 means "passes both"."""
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     env = make_env(map_data=md,
-                   n_active_per_team=1,
-                   pin_pitch=1,
-                   crouch_enabled=0,
+                   config=EnvConfig(n_active_per_team=1,
+                                    pin_pitch=1,
+                                    crouch_enabled=0,
+                                    round_time=ticks),
                    seed=seed,
-                   auto_reset=False,
-                   round_time=ticks)
+                   auto_reset=False)
     try:
         best = 0.0
         for dyaw in np.linspace(-0.6, 0.6, 13):
@@ -187,9 +187,13 @@ def test_arena_survives_solids_bake():
     import binding
 
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     from map import make_arena_duel_map
     md = make_arena_duel_map()
-    env = make_env(map_data=md, n_active_per_team=1, pin_pitch=1, seed=1, auto_reset=False)
+    env = make_env(map_data=md,
+                   config=EnvConfig(n_active_per_team=1, pin_pitch=1),
+                   seed=1,
+                   auto_reset=False)
     try:
         assert int(env._c_env.sd.contents.wall_list.count) == 0                                      # training path does not bake
         count = binding.bake_solids(env._capsule)

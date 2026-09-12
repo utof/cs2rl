@@ -17,6 +17,7 @@ import numpy as np
 
 from _action_spec import ACTION_HEAD_SIZES
 from c_env.cs2_env import make_env
+from env_config import EnvConfig
 
 N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
 H_SHOOT, H_RELOAD, H_WEAPON = 1, 2, 3
@@ -45,7 +46,7 @@ def _spam_shoot_ticks(env, n):
 
 
 def test_rifle_one_shot_per_two_ticks(simple_map):
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=1)
     try:
         env.reset()
         fired = _spam_shoot_ticks(env, 10)
@@ -55,7 +56,7 @@ def test_rifle_one_shot_per_two_ticks(simple_map):
 
 
 def test_empty_mag_reload_first_shot_at_T_plus_40(simple_map):
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=1)
     try:
         env.reset()
         a = env._c_env.game.agents[0]
@@ -70,7 +71,7 @@ def test_empty_mag_reload_first_shot_at_T_plus_40(simple_map):
 
 
 def test_partial_mag_reload_first_shot_at_T_plus_39(simple_map):
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=1)
     try:
         env.reset()
         a = env._c_env.game.agents[0]
@@ -85,7 +86,7 @@ def test_partial_mag_reload_first_shot_at_T_plus_39(simple_map):
 
 
 def test_weapon_switch_first_shot_at_T_plus_8(simple_map):
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=1)
     try:
         env.reset()
         act = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
@@ -126,7 +127,7 @@ def test_reload_mask_closed_on_refill_tick(simple_map):
     mag_size and takes 1 from reserve before try_start_reload runs, which then
     rejects (clip full). The mask must say 0 there — and pressing reload on
     that tick must be a no-op in the sim."""
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=1)
     try:
         env.reset()
         a = env._c_env.game.agents[0]
@@ -154,7 +155,7 @@ def test_weapon_head_describes_target_slot_on_flip_tick(simple_map):
     """switch_ticks==1 at mask time => env_step flips weapon_slot to the target
     before the weapon head is parsed, so the mask must show the TARGET as the
     already-held option and the shoot head must use the TARGET's clip."""
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=1)
     try:
         env.reset()
         a = env._c_env.game.agents[0]
