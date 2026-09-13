@@ -696,15 +696,23 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
                                     text=True,
                                     timeout=_NESTED_TIMEOUT_S)
         except subprocess.TimeoutExpired as expired:
-            # TimeoutExpired carries whatever was captured before the kill, and
-            # it arrives as bytes-or-None regardless of text=True. Re-raised as
-            # an assertion so the reader gets the partial tail rather than a
-            # bare traceback with no evidence in it.
-            partial = (expired.stdout or b"")[-3000:]
+            # TimeoutExpired carries whatever was captured before the kill.
+            # BOTH streams, and stderr is the one that matters here: a hang
+            # caused by a bad plugin or a collection crash writes to stderr and
+            # nothing to stdout, which is precisely the case this branch exists
+            # to report. An earlier revision printed only `.stdout` and would
+            # have shown an empty tail for it -- the same gap the `tail =` line
+            # below was written to close, reproduced in the handler four lines
+            # above it. Each stream is repr'd separately because `text=True`
+            # does not guarantee str here; `or b""` covers the None case and the
+            # reprs read correctly either way.
+            partial_out = (expired.stdout or b"")[-3000:]
+            partial_err = (expired.stderr or b"")[-2000:]
             raise AssertionError(
                 f"the probe session did not finish within {_NESTED_TIMEOUT_S}s, so it hung "
                 "rather than failed. This is not a module-spelling problem; look at what "
-                f"the nested session was doing.\n{partial!r}") from expired
+                f"the nested session was doing.\n{partial_out!r}\n"
+                f"--- stderr ---\n{partial_err!r}") from expired
         # stderr is in every message below on purpose: when the nested session
         # dies before sessionfinish (bad plugin, collection crash) stdout is
         # empty and the traceback is on stderr, which is the one case where the
