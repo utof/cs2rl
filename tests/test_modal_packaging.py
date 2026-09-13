@@ -606,11 +606,27 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     a headline pointing at the import machinery when the fault is very likely
     somewhere else entirely. The nested session's tail, including its `FAILED`
     line, is embedded in the assertion message: READ THAT LINE before you
-    suspect anything about module objects or spellings. A known instance is
-    gh#211 (`test_interrupt_without_publishable_checkpoint_writes_a_reason_file`,
-    seen once, not reproducible on demand). Trading this away means dropping
-    assertion 1, and control (a) in the Task 2 report shows exactly what that
-    costs: the census reads clean while the bare import sits unreached.
+    suspect anything about module objects or spellings. gh#211 records what is
+    known: 2 spurious failures across ~20 nested sessions, one node id captured
+    (`test_interrupt_without_publishable_checkpoint_writes_a_reason_file`),
+    cause NOT VERIFIED and not reproducible on demand.
+
+    AND YET ASSERTION 1 MUST STAY, so before you delete it, reproduce this. Let
+    an unrelated test in an `_IMPORTERS` file fail while the carrier still
+    passes -- exactly the gh#211 shape -- and neuter assertion 1. Measured, the
+    gate goes GREEN: assertions 2 and 3 both pass, because the carrier DID run
+    and the census IS clean. Assertion 1 is the sole objector to a session that
+    failed for an unrelated reason, and without it this test cannot tell a
+    healthy run from a broken one.
+
+    Do NOT reach for control (a) here, which an earlier revision of this
+    paragraph cited and which does not show this. In control (a) the CARRIER
+    is what fails, so it never reaches `_PASSED` and assertion 2 catches the
+    case on its own -- measured, with assertion 1 neutered, control (a) still
+    fails on assertion 2. A reader following that citation would watch
+    assertion 2 cover for assertion 1 and conclude assertion 1 is redundant,
+    which is the deletion this paragraph exists to prevent. Control (a) shows
+    what a CENSUS-ONLY gate costs, which is a different and also real result.
 
     COST, because this is a planning fact and not a rounding error: this spawns
     a nested pytest session running all four `_IMPORTERS` files end to end.
