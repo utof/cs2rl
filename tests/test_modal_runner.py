@@ -5060,6 +5060,13 @@ def test_artifact_client_never_imports_app_or_creates_objects(fake_modal):
     assert fake_modal.base_remote_calls == []
 
 
+def test_collect_status_missing_run_message(fake_modal):
+    module = _import_artifacts()
+    _named_volume(fake_modal)
+    with pytest.raises(mrl.ValidationError, match="run not found: missing-id"):
+        module.collect_status("missing-id", now=_aware())
+
+
 def test_status_rejects_launch_only_options_via_client(fake_modal):
     module = _import_artifacts()
     with pytest.raises(mrl.ValidationError):
@@ -5317,7 +5324,7 @@ def test_lookup_helpers_chain_unexpected_errors(fake_modal):
                 raise RuntimeError("volume backend exploded")
 
     with pytest.raises(RuntimeError, match="volume backend exploded") as artifact_info:
-        artifacts._lookup_volume(BoomModal)
+        artifacts.lookup_volume(BoomModal)
     assert artifact_info.value.__cause__ is None
 
 

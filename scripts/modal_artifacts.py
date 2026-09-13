@@ -12,7 +12,6 @@ PITFALLS:
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
 import sys
@@ -49,7 +48,7 @@ def _client_path(path: PurePosixPath) -> str:
     return text
 
 
-def _read_volume_file(volume: object, remote: str) -> bytes | None:
+def read_volume_file(volume: object, remote: str) -> bytes | None:
     if remote.startswith("/artifacts"):
         raise mrl.ValidationError(f"refusing mounted path as Volume client API: {remote}")
     try:
@@ -57,6 +56,9 @@ def _read_volume_file(volume: object, remote: str) -> bytes | None:
     except (FileNotFoundError, OSError, KeyError):
         return None
     return b"".join(chunks)
+
+
+_read_volume_file = read_volume_file
 
 
 def _not_found_types(modal_mod: object) -> tuple[type[BaseException], ...]:
@@ -70,7 +72,7 @@ def _not_found_types(modal_mod: object) -> tuple[type[BaseException], ...]:
     return tuple(dict.fromkeys(types))
 
 
-def _lookup_volume(modal_module: object | None = None):
+def lookup_volume(modal_module: object | None = None):
     modal_mod = modal if modal_module is None else modal_module
     try:
         return modal_mod.Volume.from_name(mrl.VOLUME_NAME, create_if_missing=False)
@@ -82,75 +84,27 @@ def _lookup_volume(modal_module: object | None = None):
         raise
 
 
-def _load_volume_json(raw: bytes) -> object:
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as err:
-        raise mrl.ValidationError("corrupt volume json") from err
+_lookup_volume = lookup_volume
+_load_volume_json = mrl._load_volume_json
 
 
-def _parse_iso8601(value: str) -> datetime:
-    try:
-        return datetime.fromisoformat(value)
-    except (TypeError, ValueError) as err:
-        raise mrl.ValidationError("corrupt volume timestamp") from err
+class VolumeIndex:
+    """Committed-object reads over a client Volume. Paths via `_client_path`."""
+
+    def __init__(self, volume: object):
+        self._volume = volume
+
+    def read_file(self, path: PurePosixPath) -> bytes | None:
+        return read_volume_file(self._volume, _client_path(path))
 
 
 def _derive_run_view(volume: object, run_id: str, now: datetime) -> mrl.DerivedStatus:
-    status_remote = _client_path(mrl.RUNS_ROOT / run_id / mrl.STATUS_FILENAME)
-    reservation_remote = _client_path(mrl.RUNS_ROOT / run_id / mrl.RESERVATION_FILENAME)
-    status_bytes = _read_volume_file(volume, status_remote)
-    if status_bytes is not None:
-        try:
-            payload = _load_volume_json(status_bytes)
-            return mrl.derive_status(mrl.RunStatus.from_dict(payload), now=now)
-        except (TypeError, ValueError, KeyError) as err:
-            raise mrl.ValidationError("corrupt volume status json") from err
-    reservation_bytes = _read_volume_file(volume, reservation_remote)
-    if reservation_bytes is None:
+    index = VolumeIndex(volume)
+    status_bytes = index.read_file(mrl.RUNS_ROOT / run_id / mrl.STATUS_FILENAME)
+    reservation_bytes = index.read_file(mrl.RUNS_ROOT / run_id / mrl.RESERVATION_FILENAME)
+    if status_bytes is None and reservation_bytes is None:
         raise mrl.ValidationError(f"run not found: {run_id}")
-    try:
-        payload = _load_volume_json(reservation_bytes)
-        created = _parse_iso8601(str(payload["created_at"]))
-    except (TypeError, ValueError, KeyError) as err:
-        raise mrl.ValidationError("corrupt volume reservation json") from err
-    if now - created >= mrl.STALE_AFTER:
-        return mrl.DerivedStatus(status=mrl.Status.INTERRUPTED, stale=True, reason="no-heartbeat")
-    return mrl.DerivedStatus(status=mrl.Status.PREPARING, stale=False, reason="no-heartbeat")
-
-
-def _checkpoint_loadable(volume: object, run_id: str) -> bool:
-    sidecar_remote = _client_path(mrl.RUNS_ROOT / run_id / "checkpoints" /
-                                  mrl.CHECKPOINT_SIDECAR_NAME)
-    ckpt_remote = _client_path(mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_NAME)
-    sidecar_a_bytes = _read_volume_file(volume, sidecar_remote)
-    if sidecar_a_bytes is None:
-        return False
-    try:
-        sidecar_a = _load_volume_json(sidecar_a_bytes)
-    except mrl.ValidationError:
-        return False
-    if not isinstance(sidecar_a, dict):
-        return False
-    ckpt_bytes = _read_volume_file(volume, ckpt_remote)
-    if ckpt_bytes is None:
-        return False
-    if int(sidecar_a.get("size", -1)) != len(ckpt_bytes):
-        return False
-    if sidecar_a.get("sha256") != mrl.sha256_bytes(ckpt_bytes):
-        return False
-    try:
-        import torch
-        torch.load(io.BytesIO(ckpt_bytes), map_location="cpu", weights_only=True)
-    except Exception:
-        return False
-    sidecar_b_bytes = _read_volume_file(volume, sidecar_remote)
-    if sidecar_b_bytes is None:
-        return False
-    try:
-        return _load_volume_json(sidecar_b_bytes) == sidecar_a
-    except mrl.ValidationError:
-        return False
+    return mrl.derive_run_view_from_bytes(status_bytes, reservation_bytes, now=now)
 
 
 def collect_status(
@@ -161,15 +115,22 @@ def collect_status(
 ) -> dict[str, object]:
     """Read-only status. Missing Volume fails without creating objects."""
     mrl.validate_run_id(run_id)
-    volume = _lookup_volume(modal_module)
+    volume = lookup_volume(modal_module)
     stamp = now if now is not None else datetime.now(UTC)
     view = _derive_run_view(volume, run_id, stamp)
+    index = VolumeIndex(volume)
+    sidecar_path = mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_SIDECAR_NAME
+    ckpt_path = mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_NAME
+    sidecar_bytes = index.read_file(sidecar_path)
+    ckpt_bytes = index.read_file(ckpt_path)
+    reread_bytes = index.read_file(sidecar_path)
+    verdict = mrl.verify_checkpoint(sidecar_bytes, ckpt_bytes, reread_bytes)
     return {
         "run_id": run_id,
         "status": view.status.value,
         "stale": view.stale,
         "reason": view.reason,
-        "checkpoint_loadable": _checkpoint_loadable(volume, run_id),
+        "checkpoint_loadable": verdict.ok,
     }
 
 
