@@ -32,29 +32,37 @@ BARE = "modal_runner_lib"
 
 
 def _repo_python_files():
-    """Every .py file git can see: tracked PLUS untracked-and-not-ignored.
+    """Every TRACKED .py file: `git ls-files --cached "*.py"`, and nothing else.
 
-    `--others --exclude-standard` is load-bearing. A `--cached`-only census is
-    blind to a brand-new file until it is staged -- including this one, which is
-    how a guard ends up unable to see itself. Measured WHILE THIS FILE WAS STILL
-    UNTRACKED (the state the argument is about): 131 cached, 139 with `--others`,
-    and `--cached` alone could not see it. After the commit that landed it: 132
-    cached, 139 with `--others`. Stated as a pair, because the same before-only
-    citation the module docstring warns about is easy to make right here.
-    Do NOT assert on either total: it is tree-dependent -- the 7-file gap here is
-    untracked scratch under `.ua/`, not a property of the repo. The structural
-    point IS tree-independent, and `test_the_census_scans_the_whole_repo` is what
-    pins it.
+    Tracked-only is the scope the spec sets (W1: "Add an AST guard over every
+    tracked `.py`"), and it is the right one. An earlier version added
+    `--others --exclude-standard` to catch untracked files too; measured, that
+    pulled in 7 extra .py living in `.ua/.trash-<n>/tmp/` -- a TRASH directory.
+    A census that reads the trash makes the guard's verdict depend on what
+    somebody happened to delete: drop a file containing a bare import into the
+    trash and the guard reddens over code that is not in the repo. Tracked-only
+    has no such coupling, and `.venv/` and `outputs/` fall out for free because
+    gitignored files are never tracked -- that is what stops this reading
+    thousands of vendored files.
 
-    `.venv/` and `outputs/` are gitignored, so `--exclude-standard` keeps them
-    out; that is what stops the census reading thousands of vendored files.
+    The accepted trade, stated so nobody mistakes it for coverage: a brand-new
+    offender is invisible to this census until it is staged. That is survivable
+    precisely because staging is not optional -- an unstaged file cannot be
+    committed, so by the time a bare import is IN the repo it is tracked and
+    this census sees it.
 
-    `cwd=ROOT` is load-bearing too: `git ls-files "*.py"` is CWD-RELATIVE, so
-    running it from `tests/` returns 83 paths instead of 139 and the guard
-    silently stops watching `scripts/` and `src/`.
+    Counts, with the unit, because a bare number invites the wrong comparison:
+    tracked `.py` at this commit = 132 (the spec's 131 at 6c937ca plus this
+    file). NOTHING asserts on that total and nothing should -- it moves with
+    every added .py. `test_the_census_scans_the_whole_repo` pins the structural
+    property instead, which does not move.
+
+    `cwd=ROOT` is load-bearing: `git ls-files "*.py"` is CWD-RELATIVE, so
+    running it from `tests/` returns 83 tracked paths instead of 132 and the
+    guard silently stops watching `scripts/` and `src/`.
     `test_the_census_scans_the_whole_repo` is the control for exactly that.
     """
-    out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "*.py"],
+    out = subprocess.run(["git", "ls-files", "--cached", "*.py"],
                          cwd=ROOT,
                          capture_output=True,
                          text=True,
@@ -110,10 +118,11 @@ def test_no_file_imports_the_bare_modal_runner_lib_spelling():
             hits = bare_spelling_imports(path.read_text(encoding="utf-8"))
         except SyntaxError:
             # A .py that does not parse cannot import anything either, so
-            # skipping it is sound for THIS guard. Included because the census
-            # now reaches untracked scratch, where an unparseable file is
-            # plausible and would otherwise redden the suite for an unrelated
-            # reason. Measured on this tree: 0 of 139 files hit this branch.
+            # skipping it is sound for THIS guard -- it is a scope statement,
+            # not an excuse. Measured: 0 of the 132 tracked .py hit this branch,
+            # so it is dead today; it is kept because a tracked .py that stops
+            # parsing (a bad merge, a py313-only syntax) would otherwise redden
+            # THIS guard for a reason that has nothing to do with imports.
             continue
         if hits:
             offenders[path.relative_to(ROOT).as_posix()] = hits
@@ -151,19 +160,23 @@ def test_the_census_scans_the_whole_repo():
     never touches `_repo_python_files`, the half that decides WHAT is read.
 
     WHY this exists: narrowing the pattern from `*.py` to `scripts/*.py` -- one
-    token -- leaves every row above green, and at the time this landed both
-    real violations lived in `tests/`. Measured (mutation, re-run after the
-    landing commit): that shrink gives `1 failed, 8 passed` -- this test is the
-    only thing that objects. This repo's named #1 defect class is a guard blind
-    to its own scope, in the file this plan calls its durable deliverable.
+    token -- leaves every row above green, and at the time this landed both real
+    violations lived in `tests/`. This repo's named #1 defect class is a guard
+    blind to its own scope, in the file this plan calls its durable deliverable.
 
-    KNOWN GAP, stated because an unstated one is worse: `--others
-    --exclude-standard` is NOT covered by this test. Measured (mutation): drop
-    both flags and all 9 tests still pass. They could not do otherwise -- the
-    flags only matter for an UNTRACKED .py, and every file this test can name,
-    including its own, is tracked. The flags earned their place while this file
-    was itself untracked; keeping them honest for the NEXT untracked offender
-    needs a check that plants a real untracked file, which this test does not do.
+    The three asserts are not padding. Each is the FIRST objector to a different
+    narrowing, measured by mutation against this exact argv -- so deleting any
+    one of them silently retires a distinct check:
+
+        *.py -> scripts/*.py       -> assert 1 (19 paths scanned)
+        cwd=ROOT -> cwd=ROOT/tests -> assert 1 (83 paths; ls-files is relative)
+        *.py -> tests/*.py         -> assert 3 (asserts 1 and 2 both PASS)
+        census drops this file     -> assert 2 (asserts 1 and 3 both PASS)
+
+    The last two are the reason asserts 2 and 3 exist at all: a narrowing that
+    keeps `tests/` sails past assert 1, and one that drops only this file sails
+    past both 1 and 3. If you add a filter to `_repo_python_files`, expect
+    assert 2 to be what tells you it excluded more than you meant.
     """
     scanned = _repo_python_files()
     rel = {p.relative_to(ROOT).as_posix() for p in scanned}
