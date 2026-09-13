@@ -15,14 +15,21 @@ from pathlib import Path
 
 import pytest
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    # scripts/ is a namespace package; import the runner the same way the CLIs
+    # do. Inserting scripts/ instead would bind the module under a SECOND name.
+    sys.path.insert(0, str(ROOT))
 
-from modal_runner_lib import (                                                        # noqa: E402
-    ALLOWED_MAPS, LIVE_TRAIN_OPTION_ARITY, RUNNER_OWNED_TRAIN_FLAGS, ValidationError,
-    _assemble_train_argv, build_run_request, validate_train_args,
-)
+import scripts.modal_runner_lib as mrl                 # noqa: E402, I001
+
+ALLOWED_MAPS = mrl.ALLOWED_MAPS
+LIVE_TRAIN_OPTION_ARITY = mrl.LIVE_TRAIN_OPTION_ARITY
+RUNNER_OWNED_TRAIN_FLAGS = mrl.RUNNER_OWNED_TRAIN_FLAGS
+ValidationError = mrl.ValidationError
+_assemble_train_argv = mrl._assemble_train_argv
+build_run_request = mrl.build_run_request
+validate_train_args = mrl.validate_train_args
 
 
 def _rung1_train_args():

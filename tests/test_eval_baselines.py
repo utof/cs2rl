@@ -298,7 +298,6 @@ def test_scheduled_eval_interval_gating():
 
 def test_eval_interval_cli_config_and_modal_mirror():
     import re
-    import sys
     import types
     from pathlib import Path
 
@@ -321,8 +320,7 @@ def test_eval_interval_cli_config_and_modal_mirror():
     assert build_train_config(args, batch_size=bs, bptt_horizon=bptt)["eval_interval"] == 0
     from train import RESUME_CONFIG_ALLOWLIST
     assert "eval_interval" not in RESUME_CONFIG_ALLOWLIST
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    import modal_runner_lib as mrl
+    import scripts.modal_runner_lib as mrl
     assert mrl.LIVE_TRAIN_OPTION_ARITY.get("--eval-interval") == 1
 
 
