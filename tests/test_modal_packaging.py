@@ -54,30 +54,39 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BARE = "modal_runner_lib"
+# The one legal spelling. `BARE` is what must never appear; this is what must
+# appear instead, and it is what the runtime probe expects to find alone in
+# `sys.modules`.
+PACKAGED = "scripts." + BARE
 
-# The file set the RUNTIME gate below executes -- the three the spec's W1 gate
-# names. Between them they cover both historic spellings and both depths.
-# Precisely, because "the files W1 converted" would be wrong by one: W1
-# converted TWO of these, `test_modal_argv.py` (bare, module scope) and
-# `test_eval_baselines.py` (bare, inside a test body). `test_modal_runner.py`
-# was ALREADY on the packaged spelling at 6c937ca and is here as the
-# not-converted control and the bulk of the runtime.
+# The file set the RUNTIME gate below executes: every TEST file that imports the
+# runner. Not a hand-picked sample -- `test_the_runtime_probe_runs_every_test_
+# file_that_imports_the_runner` asserts this list EQUALS the set discovered by
+# AST census, in both directions, so it cannot silently drift.
 #
-# NOT the complete set of files that reach the runner, and saying so is the
-# point. Measured by AST census over every tracked .py (`ast.Import` /
-# `ast.ImportFrom` naming `scripts.modal_runner_lib` at any depth), SEVEN
-# tracked files import it: these three, plus `tests/test_modal_protocol.py:15`,
-# plus `scripts/modal_artifacts.py:27`, `scripts/modal_backfill_sidecar.py:43`
-# and `scripts/run_modal.py:33`. The three below are the W1 conversion sites,
-# which is a different set and a deliberately narrower one.
+# Two of these were W1 conversions -- `test_modal_argv.py` (bare, module scope)
+# and `test_eval_baselines.py` (bare, inside a test body), which between them
+# cover both historic spellings and both depths. The other two were already on
+# the packaged spelling at 6c937ca and are here because they import the runner,
+# which is the only membership rule: `test_modal_runner.py` (the bulk of the
+# runtime) and `test_modal_protocol.py`. Saying "the files W1 converted" would
+# be wrong by two.
 #
-# The BOUND that follows, stated rather than left to be discovered: the runtime
-# gate can only see an import that the session it spawns actually EXECUTES, so
-# a dynamic bare import landing in any file outside this list is invisible to
-# it -- and a dynamic import is precisely the shape the static guard above
-# cannot see either. This list is hand-maintained and nothing watches it.
+# Tracked NON-test importers, which are deliberately out of scope here because
+# this list feeds a pytest session: `scripts/modal_artifacts.py:27`,
+# `scripts/modal_backfill_sidecar.py:43`, `scripts/run_modal.py:33`. So SEVEN
+# tracked files import the runner, four of them tests. Recorded for W3, which
+# deletes `modal_runner_lib` and has to find every one of them.
+#
+# The BOUND that survives the scope control, stated rather than left to be
+# discovered: the runtime gate only sees imports the session it spawns actually
+# EXECUTES, and the census that feeds it is static. A dynamic import whose
+# argument is a variable, sitting in a file that imports the runner no other
+# way, is invisible to both halves. Neither guard closes that; together they
+# make it the only remaining hole.
 _IMPORTERS = [
     "tests/test_modal_argv.py",
+    "tests/test_modal_protocol.py",
     "tests/test_modal_runner.py",
     "tests/test_eval_baselines.py",
 ]
@@ -112,13 +121,14 @@ def _repo_python_files():
     this census sees it.
 
     Counts, with the unit, because a bare number invites the wrong comparison:
-    tracked `.py` at this commit = 132 (the spec's 131 at 6c937ca plus this
-    file). NOTHING asserts on that total and nothing should -- it moves with
+    tracked `.py` at this commit = 133 (the spec's 131 at 6c937ca, plus this
+    file, plus Task 2's `tests/_modal_import_probe.py`). NOTHING asserts on
+    that total and nothing should -- it moves with
     every added .py. `test_the_census_scans_the_whole_repo` pins the structural
     property instead, which does not move.
 
     `cwd=ROOT` is load-bearing: `git ls-files "*.py"` is CWD-RELATIVE, so
-    running it from `tests/` returns 83 tracked paths instead of 132 and the
+    running it from `tests/` returns 84 tracked paths instead of 133 and the
     guard silently stops watching `scripts/` and `src/`. Pinning the CWD is what
     makes the scope independent of where pytest was invoked from.
     `test_the_census_scans_the_whole_repo` covers a WRONG cwd, not a MISSING
@@ -138,16 +148,29 @@ def _repo_python_files():
     return [ROOT / line for line in sorted(set(out.stdout.splitlines())) if line]
 
 
-def _bare_name(dotted):
-    """True if `dotted` is the bare module or a submodule of it."""
-    return dotted == BARE or dotted.startswith(BARE + ".")
+def _bare_name(dotted, target=BARE):
+    """True if `dotted` is `target` itself or a submodule of it.
+
+    `target` defaults to `BARE`, so every pre-existing call site means exactly
+    what it meant before this parameter existed.
+    """
+    return dotted == target or dotted.startswith(target + ".")
 
 
-def bare_spelling_imports(source):
-    """Every bare-`modal_runner_lib` import in `source`, at ANY nesting depth.
+def bare_spelling_imports(source, target=BARE):
+    """Every import of `target` in `source`, at ANY nesting depth.
 
     Returns a list of (lineno, kind). `ast.walk`, never `tree.body` -- see the
     module docstring.
+
+    `target` defaults to `BARE`, which is the reason this function is
+    parameterised AT ALL rather than copied: `test_the_runtime_probe_runs_every
+    _test_file_that_imports_the_runner` needs the same three-shape,
+    any-depth walk pointed at `PACKAGED` instead. A second walker is how the two
+    halves drift apart -- one learns a new import shape and the other does not
+    -- and this one already documents three shapes it must keep straight. The
+    default keeps every existing caller and the whole mutation table below
+    byte-identical in meaning.
 
     Covers three shapes, because this repo's Modal tests write all three:
     `import X`, `from X import ...`, and `importlib.import_module("X")` /
@@ -173,11 +196,11 @@ def bare_spelling_imports(source):
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if _bare_name(alias.name):
+                if _bare_name(alias.name, target):
                     hits.append((node.lineno, "import"))
         elif isinstance(node, ast.ImportFrom):
             # level == 0 means absolute; see the relative-import note above.
-            if node.level == 0 and _bare_name(node.module or ""):
+            if node.level == 0 and _bare_name(node.module or "", target):
                 hits.append((node.lineno, "from-import"))
         elif isinstance(node, ast.Call):
             func = node.func
@@ -188,9 +211,42 @@ def bare_spelling_imports(source):
             arg = node.args[0] if node.args else next(
                 (kw.value for kw in node.keywords if kw.arg == "name"), None)
             if (name in ("import_module", "__import__") and isinstance(arg, ast.Constant)
-                    and isinstance(arg.value, str) and _bare_name(arg.value)):
+                    and isinstance(arg.value, str) and _bare_name(arg.value, target)):
                 hits.append((node.lineno, "dynamic-import"))
     return hits
+
+
+def _test_files_importing(target):
+    """Tracked `tests/*.py` that import `target`, as repo-relative posix paths.
+
+    Same census and same walker as the static guard -- `_repo_python_files()`
+    and `bare_spelling_imports`, just pointed at a different module name. That
+    reuse is the point: this function decides WHICH FILES the runtime probe
+    runs, so if it and the guard disagreed about what "imports" means, the probe
+    would be scoped by a rule nobody else in this file enforces.
+
+    Scoped to `tests/` because the result feeds a pytest session. The three
+    tracked non-test importers are listed at `_IMPORTERS`.
+
+    FileNotFoundError is deliberately NOT caught, for the reason spelled out in
+    `test_no_file_imports_the_bare_modal_runner_lib_spelling`: `--cached`
+    enumerates the INDEX, so a tracked .py deleted without `git rm` lands here
+    and raises. Loud and opaque beats a silent narrowing of the census.
+    """
+    found = set()
+    for path in _repo_python_files():
+        rel = path.relative_to(ROOT).as_posix()
+        if not rel.startswith("tests/"):
+            continue
+        try:
+            hits = bare_spelling_imports(path.read_text(encoding="utf-8"), target)
+        except SyntaxError:
+            # A .py that does not parse cannot import anything either; see the
+            # identical branch in the static guard.
+            continue
+        if hits:
+            found.add(rel)
+    return found
 
 
 def test_no_file_imports_the_bare_modal_runner_lib_spelling():
@@ -212,7 +268,7 @@ def test_no_file_imports_the_bare_modal_runner_lib_spelling():
         except SyntaxError:
             # A .py that does not parse cannot import anything either, so
             # skipping it is sound for THIS guard -- it is a scope statement,
-            # not an excuse. Measured: 0 of the 132 tracked .py hit this branch,
+            # not an excuse. Measured: 0 of the 133 tracked .py hit this branch,
             # so it is dead today; it is kept because a tracked .py that stops
             # parsing (a bad merge, a py313-only syntax) would otherwise redden
             # THIS guard for a reason that has nothing to do with imports.
@@ -306,14 +362,34 @@ def test_the_census_scans_the_whole_repo():
     one of them silently retires a distinct check:
 
         *.py -> scripts/*.py       -> assert 1 (19 paths; all 3 names missing)
-        cwd=ROOT -> cwd=ROOT/tests -> assert 1 (83 paths; ls-files is relative)
-        census drops a W1 file     -> assert 1 (names it; nothing else fires)
+        cwd=ROOT -> cwd=ROOT/tests -> assert 1 (84 paths; ls-files is relative)
+        census drops a W1 file     -> assert 1 (names it)
         *.py -> tests/*.py         -> assert 3 (asserts 1 and 2 both PASS)
         census drops THIS file     -> assert 2 (asserts 1 and 3 both PASS)
 
     Asserts 2 and 3 earn their place on the last two rows: a narrowing that
     keeps `tests/` sails past assert 1, and one that drops only this file sails
     past both 1 and 3.
+
+    RE-MEASURED at Task 2, after it parameterised `bare_spelling_imports` --
+    the first change to this file's behaviour since Task 1's final review proved
+    that commit AST-identical. All five rows still map to the same assert, read
+    off the actual `E AssertionError:` line rather than off marker strings
+    (those also appear in pytest's traceback source listing, which makes rows 4
+    and 5 look like they fire three asserts and two; they fire one each, the
+    last one shown).
+
+    What DID change is the objector SET on the first three rows, so the old
+    parenthetical "nothing else fires" on row 3 is gone -- it is now false.
+    `test_the_runtime_probe_runs_every_test_file_that_imports_the_runner` reads
+    the same census, so any narrowing that hides a test file also shrinks the
+    set it discovers and it objects too. Measured objectors: row 1 = this test +
+    the probe-scope test; row 2 = those two plus
+    `test_no_file_imports_the_bare_modal_runner_lib_spelling` (FileNotFoundError,
+    as documented in `_repo_python_files`); row 3 = this test + the probe-scope
+    test; rows 4 and 5 = this test alone. Two guards over one census is
+    redundancy, not a defect -- but a docstring claiming exclusivity it no
+    longer has is.
 
     MEASURED BOUND, in the same register as the `cwd=ROOT` gap documented in
     `_repo_python_files` -- a stated limit, not coverage. A filter that drops
@@ -344,6 +420,51 @@ def test_the_census_scans_the_whole_repo():
     } <= tops, (f"the census must reach scripts/, src/ and tests/; it reached {sorted(tops)}")
 
 
+def test_the_runtime_probe_runs_every_test_file_that_imports_the_runner():
+    """POSITIVE CONTROL for `_IMPORTERS`' OWN SCOPE -- the list that decides
+    what the runtime gate below can see at all.
+
+    WHY this exists, and it is this repo's named #1 defect class: `_IMPORTERS`
+    was a hand-maintained list with nothing watching it. The gate below can only
+    catch an import in a file it RUNS, so a name quietly dropped from this list
+    retires coverage without reddening anything. One narrowing was already
+    caught by accident -- empty the list of real importers and the census reads
+    `[]`, which the gate's last assertion rejects -- but a PARTIAL narrowing was
+    not: drop one of four and the census still reads exactly
+    `["scripts.modal_runner_lib"]` from the survivors, and every assertion in
+    the gate passes.
+
+    Set EQUALITY, not `<=`, because the two directions fail differently and both
+    are real:
+
+    - a name MISSING from `_IMPORTERS` is lost coverage. Measured by dropping
+      `tests/test_modal_protocol.py`: THIS test is the only objector -- the gate
+      below stays green, which is the whole argument for this test existing.
+    - a name in `_IMPORTERS` that imports NOTHING is a session paying for a file
+      with no reason to be there, and usually a typo'd path that has silently
+      stopped matching a real file. Measured by adding `tests/test_demo_format.py`:
+      again THIS test is the only objector.
+
+    CROSS-TASK WARNING, for whoever hits this in Task 4: W2 splits
+    `tests/test_modal_runner.py` into a runner half and a client half. When the
+    `scripts.modal_runner_lib` import travels to the new file, THIS TEST GOES
+    RED, naming the new file as missing from `_IMPORTERS`. That is correct and
+    deliberate -- it is the control doing its job. Add the new file to
+    `_IMPORTERS`. Do NOT "fix" it by loosening this to a subset check or by
+    deleting the moved name; either one hands W2 a silently narrowed probe,
+    which is the exact failure this test was added to prevent.
+    """
+    discovered = _test_files_importing(PACKAGED)
+    listed = set(_IMPORTERS)
+    assert listed == discovered, (
+        "`_IMPORTERS` no longer matches the test files that import "
+        f"{PACKAGED}, so the runtime gate below is scoped to the wrong set. "
+        f"Missing from _IMPORTERS (imports the runner but is never run, so a "
+        f"dynamic bare import there is invisible): {sorted(discovered - listed)}. "
+        f"Listed but imports nothing (dead entry or a path that stopped matching "
+        f"a real file): {sorted(listed - discovered)}.")
+
+
 def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     """RUNTIME gate for the one-spelling rule.
 
@@ -352,7 +473,8 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     in a shape it knows; this proves none HAPPENS -- including through
     `importlib.import_module(<variable>)`, which no static census can see. Read
     `_IMPORTERS` for the matching bound: this covers the files it runs, not the
-    repo.
+    repo, and `test_the_runtime_probe_runs_every_test_file_that_imports_the_runner`
+    is what keeps that set honest.
 
     PITFALL 1: the second module object is created when test_eval_baselines'
     in-body import EXECUTES, so this must run the session, not import it.
@@ -369,17 +491,33 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     `@pytest.mark.skip`) is why the probe filters on `when == "call"`.
 
     COST, because this is a planning fact and not a rounding error: this spawns
-    a nested pytest session over all three files end to end. Measured by
-    `pytest --durations`, this test's `call` phase is **41s**, against **0.69s**
-    for the next slowest test in this file -- so it is ~98% of the file's
-    41.77s. Adding a file to `_IMPORTERS` adds that file's whole runtime here.
+    a nested pytest session running all four `_IMPORTERS` files end to end, 424
+    tests. Measured by `pytest --durations`, this test's `call` phase is **37s**
+    against **0.78s** for the next slowest test in this file, so it is ~96% of
+    the file's 38.06s. Run-to-run spread on this machine is 33-41s, wider than
+    the 0.7s that adding `test_modal_protocol.py` cost -- so treat the figure as
+    "half a minute", not as a number precise enough to regress against.
 
-    Suite-wide, so nobody oversells it: at 40.01s it is the SECOND slowest test
-    in the repo, behind
-    `test_resume_state.py::test_subprocess_resume_run_flat_map_without_pin_pitch_flag`
-    at 43.85s, and it is ~9% of the suite's 442.91s. Measured by
-    `--durations=15` on a full run, not estimated.
+    Suite-wide, so nobody oversells it: it is the SECOND slowest test in the
+    repo, behind
+    `test_resume_state.py::test_subprocess_resume_run_flat_map_without_pin_pitch_flag`,
+    and roughly 9% of the suite's wall clock. Measured by `--durations` on a full
+    run, not estimated. Adding a file to `_IMPORTERS` adds that file's whole
+    runtime here -- which is the price of the coverage, and the scope control
+    above means the list grows only when a file genuinely starts importing the
+    runner.
     """
+    # Fork-bomb guard, and it is not theoretical now that a sibling test
+    # mutates `_IMPORTERS` for its own controls: this file in `_IMPORTERS` makes
+    # the nested session collect THIS test, which spawns another nested session,
+    # forever -- one process per level, no natural bottom. The scope control
+    # above rejects that entry too (this file imports no runner), but it cannot
+    # save you here, because pytest runs tests in definition order within a file
+    # and a `-k` selecting only this one skips it entirely. Cheap, local, first.
+    assert Path(__file__).relative_to(ROOT).as_posix() not in _IMPORTERS, (
+        "this file is in `_IMPORTERS`; the nested session would collect this "
+        "test and recurse without bound")
+
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "probe.json")
         env = {**os.environ, "MODAL_IMPORT_PROBE_OUT": out}
