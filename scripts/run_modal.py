@@ -253,6 +253,9 @@ class ModalVolumeIndex:
                     batch.put_file(io.BytesIO(data), _client_volume_path(path))
             self._staged.clear()
 
+    def read_file(self, path: PurePosixPath) -> bytes | None:
+        return _read_volume_file(self._volume, _client_volume_path(path))
+
 
 class ModalDictRegistry:
     """Registry over a Modal Dict. put_if_absent is skip_if_exists=True."""

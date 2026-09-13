@@ -1493,6 +1493,7 @@ class FakeArtifactIndex:
         self.committed: dict[PurePosixPath, bytes] = {}
         self.staged: dict[PurePosixPath, bytes] = {}
         self.events: list[tuple[object, ...]] = []
+        self.replace_after_read: dict[PurePosixPath, bytes | None] = {}
 
     def exists(self, path: PurePosixPath) -> bool:
         with self._lock:
@@ -1510,6 +1511,18 @@ class FakeArtifactIndex:
             self.committed.update(self.staged)
             self.staged.clear()
             self.events.append(("commit", ))
+
+    def read_file(self, path: PurePosixPath) -> bytes | None:
+        with self._lock:
+            if path in self.replace_after_read:
+                current = self.committed.get(path)
+                replacement = self.replace_after_read.pop(path)
+                if replacement is None:
+                    self.committed.pop(path, None)
+                else:
+                    self.committed[path] = replacement
+                return current
+            return self.committed.get(path)
 
 
 def test_reserve_run_commits_reservation_immediately_after_dict_claim():
@@ -4333,6 +4346,18 @@ def test_volume_adapter_uses_root_relative_client_paths(fake_modal):
     assert mrl.mounted_path(source_client) == Path("/artifacts/sources/deadbeef.tar.gz")
     ckpt_client = mrl.INPUTS_ROOT / "sha256" / "abcd.pt"
     assert mrl.mounted_path(ckpt_client) == Path("/artifacts/inputs/sha256/abcd.pt")
+
+
+def test_modal_volume_index_read_file(fake_modal):
+    module = _import_run_modal()
+    volume = _named_volume(fake_modal)
+    path = mrl.RUNS_ROOT / "ok-id" / mrl.STATUS_FILENAME
+    volume.files[path.as_posix()] = b'{"ok": true}'
+    index = module.ModalVolumeIndex(volume)
+    assert index.read_file(path) == b'{"ok": true}'
+    assert index.read_file(mrl.RUNS_ROOT / "missing-id" / mrl.STATUS_FILENAME) is None
+    with pytest.raises(mrl.ValidationError, match="refusing Volume client path"):
+        index.read_file(PurePosixPath("/artifacts/runs/ok-id/STATUS.json"))
 
 
 def test_volume_adapter_commit_does_not_call_client_volume_commit(fake_modal):

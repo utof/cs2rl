@@ -21,6 +21,7 @@ from __future__ import annotations
 import enum
 import gzip
 import hashlib
+import io
 import json
 import os
 import re
@@ -1125,6 +1126,10 @@ class ArtifactIndex(Protocol):
         """Persist staged uploads via client batch_upload(force=False)."""
         ...
 
+    def read_file(self, path: PurePosixPath) -> bytes | None:
+        """Committed object bytes, or None if missing. Never /artifacts/..."""
+        ...
+
 
 def run_registry_key(run_id: str) -> str:
     """Dict key for the provisional run lease."""
@@ -1312,18 +1317,56 @@ def write_heartbeat(
         return status
 
 
-def _parse_iso(value: str) -> datetime:
-    return datetime.fromisoformat(value)
+def _load_volume_json(raw: bytes) -> object:
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as err:
+        raise ValidationError("corrupt volume json") from err
+
+
+def _parse_iso8601(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError) as err:
+        raise ValidationError("corrupt volume timestamp") from err
 
 
 def derive_status(status: RunStatus, *, now: datetime) -> DerivedStatus:
     """Map a persisted status to the client view. Does not write."""
     if status.status in TERMINAL_STATUSES:
         return DerivedStatus(status=status.status, stale=False)
-    age = now - _parse_iso(status.updated_at)
+    age = now - _parse_iso8601(status.updated_at)
     if age >= STALE_AFTER:
         return DerivedStatus(status=Status.INTERRUPTED, stale=True, reason="stale")
     return DerivedStatus(status=status.status, stale=False)
+
+
+def derive_run_view_from_bytes(
+    status_bytes: bytes | None,
+    reservation_bytes: bytes | None,
+    *,
+    now: datetime,
+) -> DerivedStatus:
+    if status_bytes is not None:
+        try:
+            payload = _load_volume_json(status_bytes)
+            return derive_status(RunStatus.from_dict(payload), now=now)
+        except ValidationError:
+            raise
+        except (TypeError, ValueError, KeyError) as err:
+            raise ValidationError("corrupt volume status json") from err
+    if reservation_bytes is None:
+        raise ValidationError("no STATUS.json or reservation.json")
+    try:
+        payload = _load_volume_json(reservation_bytes)
+        created = _parse_iso8601(str(payload["created_at"]))
+    except ValidationError:
+        raise
+    except (TypeError, ValueError, KeyError) as err:
+        raise ValidationError("corrupt volume reservation json") from err
+    if now - created >= STALE_AFTER:
+        return DerivedStatus(status=Status.INTERRUPTED, stale=True, reason="no-heartbeat")
+    return DerivedStatus(status=Status.PREPARING, stale=False, reason="no-heartbeat")
 
 
 def derive_run_view(run_root: Path, *, now: datetime) -> DerivedStatus:
@@ -1333,17 +1376,72 @@ def derive_run_view(run_root: Path, *, now: datetime) -> DerivedStatus:
     looks like preparing/no-heartbeat for five minutes, then interrupted.
     """
     run_root = Path(run_root)
-    current = _read_status(run_root)
-    if current is not None:
-        return derive_status(current, now=now)
+    status_path = run_root / STATUS_FILENAME
     reservation_path = run_root / RESERVATION_FILENAME
-    if not reservation_path.is_file():
+    status_bytes = status_path.read_bytes() if status_path.is_file() else None
+    reservation_bytes = reservation_path.read_bytes() if reservation_path.is_file() else None
+    if status_bytes is None and reservation_bytes is None:
         raise ValidationError(f"no STATUS.json or reservation.json under {run_root}")
-    payload = json.loads(reservation_path.read_text())
-    created = _parse_iso(str(payload["created_at"]))
-    if now - created >= STALE_AFTER:
-        return DerivedStatus(status=Status.INTERRUPTED, stale=True, reason="no-heartbeat")
-    return DerivedStatus(status=Status.PREPARING, stale=False, reason="no-heartbeat")
+    return derive_run_view_from_bytes(status_bytes, reservation_bytes, now=now)
+
+
+@dataclass(frozen=True)
+class CheckpointVerdict:
+    ok: bool
+    reason: str | None
+    checkpoint_bytes: bytes | None
+    digest: str | None
+
+
+def _load_checkpoint_weights(buf: object, **kwargs: object) -> object:
+    import torch
+    return torch.load(buf, map_location="cpu", weights_only=True)
+
+
+def verify_checkpoint(
+    sidecar_bytes: bytes | None,
+    checkpoint_bytes: bytes | None,
+    sidecar_reread_bytes: bytes | None,
+    *,
+    load: Callable[..., object] = _load_checkpoint_weights,
+) -> CheckpointVerdict:
+
+    def fail(reason: str) -> CheckpointVerdict:
+        return CheckpointVerdict(ok=False, reason=reason, checkpoint_bytes=None, digest=None)
+
+    if sidecar_bytes is None:
+        return fail("missing_sidecar")
+    try:
+        sidecar = _load_volume_json(sidecar_bytes)
+    except ValidationError:
+        return fail("corrupt_sidecar")
+    if not isinstance(sidecar, dict):
+        return fail("corrupt_sidecar")
+    if checkpoint_bytes is None:
+        return fail("missing_checkpoint")
+    if int(sidecar.get("size", -1)) != len(checkpoint_bytes):
+        return fail("stale_size")
+    digest = sha256_bytes(checkpoint_bytes)
+    if sidecar.get("sha256") != digest:
+        return fail("digest_mismatch")
+    try:
+        load(io.BytesIO(checkpoint_bytes), map_location="cpu", weights_only=True)
+    except Exception:
+        return fail("not_loadable")
+    if sidecar_reread_bytes is None:
+        return fail("replaced")
+    try:
+        sidecar_b = _load_volume_json(sidecar_reread_bytes)
+    except ValidationError:
+        return fail("replaced")
+    if sidecar_b != sidecar:
+        return fail("replaced")
+    return CheckpointVerdict(
+        ok=True,
+        reason=None,
+        checkpoint_bytes=checkpoint_bytes,
+        digest=digest,
+    )
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -1907,6 +2005,10 @@ class _UnusedArtifacts:
 
     def commit(self) -> None:
         raise RuntimeError("losing delivery must not commit")
+
+    def read_file(self, path: PurePosixPath) -> bytes | None:
+        del path
+        return None
 
 
 def _tee_stream(src: object, sinks: Sequence[object]) -> None:
