@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 import scripts.modal_runner_lib as mrl                 # noqa: E402, I001
 from tests.test_modal_runner import FakeArtifactIndex  # noqa: E402, I001
 
+NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
 CKPT_OK = b"ckpt-bytes"
 DIGEST_OK = mrl.sha256_bytes(CKPT_OK)
 SIDECAR_OK = {"size": len(CKPT_OK), "sha256": DIGEST_OK}
@@ -149,8 +150,93 @@ def test_path_derive_run_view_corrupt_status_is_validation_error(tmp_path):
     run_root = tmp_path / "run"
     run_root.mkdir()
     (run_root / mrl.STATUS_FILENAME).write_bytes(b"{not-json")
-    with pytest.raises(mrl.ValidationError, match="corrupt volume json"):
-        mrl.derive_run_view(run_root, now=datetime(2026, 8, 13, 12, 0, tzinfo=UTC))
+    with pytest.raises(mrl.ValidationError, match=r"^corrupt volume status json$"):
+        mrl.derive_run_view(run_root, now=NOW)
+
+
+def _status_json(**overrides) -> bytes:
+    payload = {
+        "schema_version": 1,
+        "status": "training",
+        "attempt_id": "attempt-1",
+        "updated_at": NOW.isoformat(),
+    }
+    payload.update(overrides)
+    return json.dumps(payload).encode()
+
+
+# Every operator-facing message derive_run_view_from_bytes can raise, pinned to
+# the input shape that produces it.
+#
+# WHY a table rather than one case: the two branches wrap ValidationError
+# asymmetrically on purpose (see the function's docstring), and that asymmetry
+# is invisible from any single row. Both branch-specific messages regressed to
+# the bare "corrupt volume json" once already, under a green test.
+#
+# PITFALL: pytest.raises(match=...) is re.search, not fullmatch, so
+# match="corrupt volume json" passes against "corrupt volume status json" —
+# which is exactly how the regression stayed green. Every pattern here is
+# anchored; do not relax one to a bare substring.
+MESSAGE_CASES = [
+    pytest.param(b"{not-json", None, r"^corrupt volume status json$", id="corrupt_status_json"),
+    pytest.param(
+        _status_json(updated_at="not-a-timestamp"),
+        None,
+        r"^corrupt volume status json$",
+        id="status_bad_updated_at",
+    ),
+    pytest.param(
+        json.dumps({
+            "status": "training"
+        }).encode(),
+        None,
+        r"^corrupt volume status json$",
+        id="status_missing_field",
+    ),
+    pytest.param(
+        None,
+        b"{not-json",
+        r"^corrupt volume reservation json$",
+        id="corrupt_reservation_json",
+    ),
+    pytest.param(
+        None,
+        json.dumps({}).encode(),
+        r"^corrupt volume reservation json$",
+        id="reservation_missing_created_at",
+    ),
+    pytest.param(
+        None,
+        json.dumps(["not", "a", "mapping"]).encode(),
+        r"^corrupt volume reservation json$",
+        id="reservation_is_a_list",
+    ),
+    pytest.param(
+        None,
+        json.dumps({
+            "created_at": "not-a-timestamp"
+        }).encode(),
+        r"^corrupt volume timestamp$",
+        id="reservation_bad_timestamp",
+    ),
+    pytest.param(None, None, r"^no STATUS\.json or reservation\.json$", id="both_absent"),
+]
+
+
+@pytest.mark.parametrize(("status_bytes", "reservation_bytes", "pattern"), MESSAGE_CASES)
+def test_derive_run_view_from_bytes_messages(status_bytes, reservation_bytes, pattern):
+    with pytest.raises(mrl.ValidationError, match=pattern):
+        mrl.derive_run_view_from_bytes(status_bytes, reservation_bytes, now=NOW)
+
+
+def test_bare_corrupt_volume_json_is_the_unlabelled_default():
+    # No derive_run_view_from_bytes input reaches this message: both branches
+    # pass their own label in. It survives for callers that parse a Volume
+    # object outside the status protocol -- today only the sidecar round-trip
+    # check in modal_backfill_sidecar. Pinned so the default is not "cleaned
+    # up" into one of the branch messages, which would mislabel those callers.
+    with pytest.raises(mrl.ValidationError, match=r"^corrupt volume json$"):
+        mrl._load_volume_json(b"{not-json")
 
 
 def test_fake_artifact_index_read_file_replace_after_read():
