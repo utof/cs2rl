@@ -86,7 +86,7 @@ def _twin_episode_check(n_steps=900, seed=1234, team_spirit=0.0):
     by a fixed TEAM_SIZE — the transform must hold on post-mixing values in
     both regimes, especially terminal ticks with partially-eliminated teams."""
     plain = make_env(seed=seed, team_spirit=team_spirit)
-    sym = make_env(seed=seed, reward_symmetrize=True, team_spirit=team_spirit)
+    sym = make_env(seed=seed, team_spirit=team_spirit, config=EnvConfig(reward_symmetrize=True))
     rng = np.random.default_rng(7)
     saw_terminal_with_win_bonus = False
     try:
@@ -136,7 +136,7 @@ def test_c_side_reward_channels_are_pre_transform():
     so they are identical with and without --reward-symmetrize."""
     seed = 99
     plain = make_env(seed=seed)
-    sym = make_env(seed=seed, reward_symmetrize=True)
+    sym = make_env(seed=seed, config=EnvConfig(reward_symmetrize=True))
     rng = np.random.default_rng(3)
     try:
         plain.reset(seed=seed)
@@ -215,9 +215,10 @@ def test_symmetrization_holds_on_the_external_buffer_vecenv_path():
         sym.close()
 
 
-def test_make_puffer_env_threads_the_flag():
-    import train
-    env = train.make_puffer_env(seed=5, reward_symmetrize=True)
+def test_make_env_threads_the_flag():
+    from c_env.cs2_env import make_env
+    from env_config import EnvConfig
+    env = make_env(seed=5, config=EnvConfig(reward_symmetrize=True))
     try:
         assert env._reward_symmetrize is True
     finally:

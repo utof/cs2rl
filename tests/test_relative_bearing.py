@@ -6,6 +6,7 @@ import pytest
 
 from _obs_spec import OBS_BLOCKS
 from c_env.cs2_env import make_env
+from env_config import EnvConfig
 
 ENEMY_BASE = OBS_BLOCKS["enemy"][0]    # 56; agent 0's enemy slot 0 = agent 5
 TM_BASE = OBS_BLOCKS["teammate"][0]    # 28
@@ -28,7 +29,7 @@ def _place_fixed(env, facing, dx=40.0, dy=0.0):
 
 @pytest.mark.parametrize("facing", [0.0, 1.0, math.pi / 2, -2.5, 3.0])
 def test_enemy_bearing_is_facing_relative(simple_map, facing):
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=1)
     try:
         o = _place_fixed(env, facing)
         rel = math.atan2(0.0, 40.0) - facing           # world bearing 0 minus facing
@@ -48,7 +49,7 @@ def test_memory_fallback_is_rotated(simple_map):
     """n_active=2 so killing ONE CT does not end the round (at n=1 the round would
     reset and the obs row would be all-zeros — a vacuous pass). Expected values are
     computed independently from centroid_xy and inv_x/y_range, never read back."""
-    env = make_env(map_data=simple_map, n_active_per_team=2, seed=1)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=2), seed=1)
     try:
         env.reset()
         ag = env._c_env.game.agents

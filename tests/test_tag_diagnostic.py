@@ -18,11 +18,12 @@ import torch.nn.functional as F
 
 import train
 from _action_spec import AIM_DIM
+from c_env.cs2_env import make_env
 
 
 @pytest.fixture()
 def env_policy():
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         yield env, train.build_policy(env, device="cpu")
     finally:
@@ -262,7 +263,7 @@ def test_tag_param_groups_partition_a_split_policy():
     aim_log_std belong to the existing policy_heads group (the union group is
     what makes the cross cos-sim structurally 0; see spec §3.4).
     """
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device="cpu", tct_split_heads=True)
     finally:
@@ -301,7 +302,7 @@ def test_tag_param_groups_partition_a_both_flags_policy():
     the live prefixes keep the dots; this test pins the mapping, not the
     string form.
     """
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)
     finally:

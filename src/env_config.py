@@ -3,8 +3,7 @@
 WHAT: two frozen dataclasses. `RewardWeights` holds the 23 reward/PBRS
 coefficients; `EnvConfig` holds a `RewardWeights` plus the ten sim knobs. Both
 validate in `__post_init__`. `Cs2Env` reads its scalars off an `EnvConfig`;
-`make_env` / `make_puffer_env` translate legacy keyword names through
-`from_legacy_kwargs`; `build_train_config` writes `to_config_dict()`.
+`build_train_config` writes `to_config_dict()`.
 
 WHY (gh#165, ADR 0003): before this module the same 23 defaults were declared in
 `make_env`, `Cs2Env.__init__` and a module-level defaults dict in
@@ -27,7 +26,6 @@ resolving it here would need `nav`. Only non-None values are validated here.
 from __future__ import annotations
 
 import dataclasses
-import difflib
 import math
 import numbers
 from dataclasses import dataclass, field, fields
@@ -36,7 +34,7 @@ TEAM_SIZE = 5                          # cross-checked against nav.TEAM_SIZE by 
 
 
 class _Unset:
-    """Sentinel for from_legacy_kwargs: "the caller did not pass this name"."""
+    """Sentinel meaning "the caller did not pass this name"."""
     __slots__ = ()
 
     def __repr__(self):
@@ -223,81 +221,10 @@ class EnvConfig:
                  jump_enabled=self.jump_enabled)
         return d
 
-    @classmethod
-    def from_legacy_kwargs(
-        cls,
-        *,
-        reward_win=UNSET,
-        reward_kill=UNSET,
-        reward_death=UNSET,
-        reward_bombsite_entry=UNSET,
-        reward_plant_bonus=UNSET,
-        reward_plant_base=UNSET,
-        reward_plant_progress_scale=UNSET,
-        reward_plant_interrupted=UNSET,
-        reward_defuse=UNSET,
-        reward_shot_penalty=UNSET,
-        reward_ct_survival=UNSET,
-        reward_inaction=UNSET,
-        reward_win_t_detonation=UNSET,
-        reward_win_t_elimination=UNSET,
-        reward_win_ct_defuse=UNSET,
-        reward_win_ct_timeout=UNSET,
-        reward_win_ct_elimination=UNSET,
-        pbrs_alive_weight=UNSET,
-        pbrs_hp_weight=UNSET,
-        pbrs_site_weight=UNSET,
-        pbrs_bomb_progress_weight=UNSET,
-        pbrs_nav_weight_t=UNSET,
-        pbrs_nav_weight_ct=UNSET,
-        pbrs_gamma=UNSET,
-        reward_symmetrize=UNSET,
-        recoil=UNSET,
-        n_active_per_team=UNSET,
-        pin_pitch=UNSET,
-        crouch_enabled=UNSET,
-        jump_enabled=UNSET,
-        round_time=UNSET,
-        laser_range=UNSET,
-        max_turn_speed=UNSET,
-        reward_overrides=UNSET,
-    ) -> EnvConfig:
-        """Translate the pre-#165 make_env / make_puffer_env keyword names.
-
-        34 KEYWORD-ONLY parameters and deliberately NO **kwargs: an unknown
-        name must die against a real parameter list (Python's own TypeError),
-        and tests bind captured kwargs against inspect.signature(this). A
-        parameter left UNSET takes the field default. `pbrs_gamma=None` means
-        the default (make_puffer_env's documented spelling). `reward_overrides`
-        is the make_puffer_env dict channel: unknown key -> ValueError with a
-        did-you-mean hint, bad value -> ValueError (today's rules, moved here).
-        """
-        local = locals()
-        weights = {n: local[n] for n in REWARD_FIELDS if local[n] is not UNSET}
-        if reward_overrides is not UNSET and reward_overrides is not None:
-            unknown = set(reward_overrides) - set(REWARD_FIELDS)
-            if unknown:
-                hints = []
-                for key in sorted(unknown):
-                    near = difflib.get_close_matches(key, REWARD_FIELDS, n=1)
-                    if near:
-                        hints.append(f"{key!r} — did you mean --{near[0].replace('_', '-')}?")
-                raise ValueError(f"unknown reward override keys: {sorted(unknown)}. " +
-                                 (" ".join(hints) + " " if hints else "") +
-                                 f"Valid keys: {sorted(REWARD_FIELDS)}. Non-weight env knobs "
-                                 "(pbrs_gamma, reward_symmetrize) are NOT overrides.")
-            weights.update(reward_overrides)
-        knobs = {n: local[n] for n in KNOB_FIELDS if local[n] is not UNSET}
-        if knobs.get("pbrs_gamma", 0.0) is None:
-            del knobs["pbrs_gamma"]
-        return cls(rewards=RewardWeights(**weights), **knobs)
-
 
 # DERIVED, never hand-listed, and therefore defined below the class: every
 # EnvConfig field except the nested `rewards` object, in declaration order.
-# from_legacy_kwargs (above) reads this at CALL time, so the forward reference is
-# fine. A hand-written tuple would let EnvConfig grow an eleventh knob that
-# from_legacy_kwargs accepts and then silently discards, leaving the env on the
-# default with every test green; tests/test_struct_sizes.py builds its sentinel
-# partition from this tuple and would inherit the same blindness.
+# tests/test_struct_sizes.py builds its sentinel partition from this tuple; a
+# hand-written tuple would let EnvConfig grow an eleventh knob that the
+# partition never sees, leaving the env on the default with every test green.
 KNOB_FIELDS: tuple[str, ...] = tuple(f.name for f in fields(EnvConfig) if f.name != "rewards")

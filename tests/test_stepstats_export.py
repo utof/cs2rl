@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from c_env.cs2_env import make_env
+from env_config import EnvConfig, RewardWeights
 from train import compute_game_metrics
 from train_helpers_batch1 import split_into_channels
 
@@ -32,7 +33,10 @@ def test_scripted_hit_tick(simple_map):
     # = 138 > 100 hp), which ends the round; the auto-reset branch
     # (cs2_env.py step -> binding.reset -> clear_stats) would memset
     # episode_stats before the asserts below read it. ~10 % flake otherwise.
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1, auto_reset=False)
+    env = make_env(map_data=simple_map,
+                   config=EnvConfig(n_active_per_team=1),
+                   seed=1,
+                   auto_reset=False)
     try:
         act, cont = _place_duel(env, facing0=0.0)
         obs, *_ = env.step(act, cont)
@@ -56,7 +60,10 @@ def test_scripted_hit_tick(simple_map):
 
 
 def test_scripted_shot_facing_90_off(simple_map):
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1, auto_reset=False) # see above
+    env = make_env(map_data=simple_map,
+                   config=EnvConfig(n_active_per_team=1),
+                   seed=1,
+                   auto_reset=False)                                   # see above
     try:
         act, cont = _place_duel(env, facing0=math.pi / 2)
         env.step(act, cont)
@@ -71,7 +78,7 @@ def test_scripted_shot_facing_90_off(simple_map):
 
 
 def test_terminal_info_exports_new_keys_and_sentinel(simple_map):
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=1)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=1)
     try:
         env.reset()
         env._c_env.episode_stats.min_enemy_distance = 1e30                                           # clear_stats sentinel
@@ -91,17 +98,23 @@ def test_terminal_info_exports_new_keys_and_sentinel(simple_map):
 
 
 def test_win_t_ct_one_sided_and_equal_to_terminal_rewards(simple_map):
-    env = make_env(map_data=simple_map,
-                   n_active_per_team=1,
-                   seed=1,
-                   team_spirit=0.0,
-                   reward_win_ct_elimination=3.0,
-                   reward_win_t_elimination=3.0,
-                   pbrs_alive_weight=0.0,
-                   pbrs_hp_weight=0.0,
-                   reward_kill=0.0,
-                   reward_death=0.0,
-                   reward_inaction=0.0)
+    env = make_env(
+        map_data=simple_map,
+        seed=1,
+        team_spirit=0.0,
+        config=EnvConfig(
+            n_active_per_team=1,
+            rewards=RewardWeights(
+                reward_win_ct_elimination=3.0,
+                reward_win_t_elimination=3.0,
+                pbrs_alive_weight=0.0,
+                pbrs_hp_weight=0.0,
+                reward_kill=0.0,
+                reward_death=0.0,
+                reward_inaction=0.0,
+            ),
+        ),
+    )
     try:
         act, cont = _place_duel(env, facing0=0.0)
         env._c_env.game.agents[5].hp = 1               # one hit kills

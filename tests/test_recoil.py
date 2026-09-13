@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from c_env.cs2_env import OBS_DIM, make_env
+from env_config import EnvConfig
 
 ALPHA = math.exp(-1.0 / 16.0 / 0.08)
 
@@ -30,7 +31,7 @@ def _prep_rifle(env, i=0):
 
 
 def test_flag_off_three_shots_punch_stays_zero(make_map):
-    env = make_env(seed=0, auto_reset=False, map_data=make_map, recoil=False)
+    env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=False))
     env.reset()
     _prep_rifle(env)
     acts, cont = _zero_actions()
@@ -42,7 +43,7 @@ def test_flag_off_three_shots_punch_stays_zero(make_map):
 
 
 def test_flag_on_rifle_three_steps_punch_table(make_map):
-    env = make_env(seed=0, auto_reset=False, map_data=make_map, recoil=True)
+    env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=True))
     env.reset()
     _prep_rifle(env)
     acts, cont = _zero_actions()
@@ -59,7 +60,7 @@ def test_flag_on_rifle_three_steps_punch_table(make_map):
 
 
 def test_increment_is_after_the_ray(make_map):
-    env = make_env(seed=0, auto_reset=False, map_data=make_map, recoil=True)
+    env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=True))
     env.reset()
     g = env._c_env.game
     g.agents[0].x, g.agents[0].y, g.agents[0].z = 8.0, 1056.0, 0.0
@@ -93,7 +94,7 @@ def test_increment_is_after_the_ray(make_map):
 
 
 def test_ray_uses_existing_punch(make_map):
-    env = make_env(seed=0, auto_reset=False, map_data=make_map, recoil=True)
+    env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=True))
     env.reset()
     g = env._c_env.game
     g.agents[0].x, g.agents[0].y, g.agents[0].z = 8.0, 1056.0, 0.0
@@ -120,7 +121,7 @@ def test_ray_uses_existing_punch(make_map):
 
 
 def test_dry_fire_does_not_kick(make_map):
-    env = make_env(seed=0, auto_reset=False, map_data=make_map, recoil=True)
+    env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=True))
     env.reset()
     a = _prep_rifle(env)
     a.ammo_clip[0] = 0
@@ -131,7 +132,7 @@ def test_dry_fire_does_not_kick(make_map):
 
 
 def test_miss_still_increments(make_map):
-    env = make_env(seed=0, auto_reset=False, map_data=make_map, recoil=True)
+    env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=True))
     env.reset()
     _prep_rifle(env)
     for j in range(5, 10):

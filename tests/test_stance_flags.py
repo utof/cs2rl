@@ -68,9 +68,9 @@ def _forced_step(map_data,
     the obs view after the C arena is freed.
     """
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     env = make_env(map_data=map_data,
-                   crouch_enabled=crouch_enabled,
-                   jump_enabled=jump_enabled,
+                   config=EnvConfig(crouch_enabled=crouch_enabled, jump_enabled=jump_enabled),
                    seed=_SEED)
     try:
         env.reset()

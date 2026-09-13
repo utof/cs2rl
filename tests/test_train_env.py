@@ -9,10 +9,11 @@ _patch_trainer_with_selfplay changes from Task 6c.
 import numpy as np
 
 import train
+from c_env.cs2_env import make_env
 
 
-def test_make_puffer_env_reset_returns_expected_batch():
-    env = train.make_puffer_env(seed=123)
+def test_make_env_reset_returns_expected_batch():
+    env = make_env(seed=123)
     try:
         obs, info = env.reset(seed=123)
         assert obs.shape == (10, train.OBS_DIM)
@@ -88,13 +89,11 @@ def test_compute_game_metrics_surfaces_new_keys_without_backfilling_plant_tick()
     assert out2["game/win_by_defuse"] == 0.1
 
 
-def test_make_puffer_env_default_keeps_step_stats_off():
+def test_make_env_default_keeps_step_stats_off():
     import inspect
-
-    import train
-    sig = inspect.signature(train.make_puffer_env)
+    sig = inspect.signature(make_env)
     assert sig.parameters["include_step_stats_in_info"].default is False
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         assert env._include_step_stats_in_info is False
     finally:
@@ -707,7 +706,7 @@ def test_ret_var_reflects_symlog_scale():
 # ── Batch 2 (utof/cs2rl Batch 2): designated bomb carrier — round-fixed ──
 def test_round_designated_carrier_assigned():
     """At env_reset, all three carrier signals must align."""
-    env = train.make_puffer_env(seed=42)
+    env = make_env(seed=42)
     try:
         env.reset(seed=42)
         g = env._c_env.game
@@ -730,7 +729,7 @@ def test_round_designated_carrier_stable_through_drop():
     sanity-checks that the production drop path actually engaged (would
     catch a regression in cs2_env.h:155-167 silently skipping the drop).
     """
-    env = train.make_puffer_env(seed=7)
+    env = make_env(seed=7)
     try:
         env.reset(seed=7)
         g = env._c_env.game
@@ -763,7 +762,7 @@ def test_round_designated_carrier_property_50_seeds():
     """
     actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
     for seed in range(50):
-        env = train.make_puffer_env(seed=seed)
+        env = make_env(seed=seed)
         try:
             env.reset(seed=seed)
             g = env._c_env.game
@@ -800,7 +799,7 @@ def test_obs_designated_carrier_bit_t_side():
     buffer). The first populated observation arrives after env.step(). We
     therefore take one zero-action step before checking the role bit values.
     """
-    env = train.make_puffer_env(seed=11)
+    env = make_env(seed=11)
     try:
         env.reset(seed=11)
         g = env._c_env.game
@@ -853,7 +852,7 @@ def test_post_pickup_plant_mask_unmasked():
       Step 3 — scan bombsite areas; teleport the new_holder to each and
                step until HEAD_USE+1 is unmasked.
     """
-    env = train.make_puffer_env(seed=21)
+    env = make_env(seed=21)
     try:
         env.reset(seed=21)
         g = env._c_env.game
@@ -967,7 +966,7 @@ def test_obs_dim_constant_consistency():
     assert t.TEAM_SIZE == nav.TEAM_SIZE == cs2_env.TEAM_SIZE, (
         f"train.TEAM_SIZE ({t.TEAM_SIZE}) / nav.TEAM_SIZE ({nav.TEAM_SIZE}) / "
         f"cs2_env.TEAM_SIZE ({cs2_env.TEAM_SIZE}) disagree")
-    env = t.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         assert env.single_observation_space.shape == (nav.OBS_DIM, ), (
             f"env.single_observation_space.shape={env.single_observation_space.shape} "
@@ -1049,7 +1048,7 @@ def test_continuous_aim_action_consumed():
     continuous branch fires.
     """
     import _action_spec as spec
-    env = train.make_puffer_env(seed=42)
+    env = make_env(seed=42)
     try:
         env.reset(seed=42)
         g = env._c_env.game
@@ -1080,7 +1079,7 @@ def test_continuous_aim_clamped_at_max_turn():
     invariants.
     """
     import _action_spec as spec
-    env = train.make_puffer_env(seed=42)
+    env = make_env(seed=42)
     try:
         env.reset(seed=42)
         g = env._c_env.game
@@ -1111,7 +1110,7 @@ def test_continuous_aim_facing_wraps_around_pi():
     normalisation, etc.).
     """
     import _action_spec as spec
-    env = train.make_puffer_env(seed=42)
+    env = make_env(seed=42)
     try:
         env.reset(seed=42)
         g = env._c_env.game
@@ -1137,7 +1136,7 @@ def test_step_stats_aim_delta_tracking():
     other tests in the same env instance may have populated them.
     """
     import _action_spec as spec
-    env = train.make_puffer_env(seed=42)
+    env = make_env(seed=42)
     try:
         env.reset(seed=42)
         actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
@@ -1172,7 +1171,7 @@ def test_policy_forward_emits_mu_and_logstd():
     import torch
 
     import _action_spec as spec
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
         x = torch.zeros((1, train.OBS_DIM))
@@ -1198,7 +1197,7 @@ def test_logstd_clamp_lower():
     be ≥ LOG_STD_MIN after the clamp. Defends σ collapse — without the
     clamp the Normal entropy would diverge to −∞ and pin the SAC-α loop."""
     import torch
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
         with torch.no_grad():
@@ -1216,7 +1215,7 @@ def test_logstd_clamp_upper():
     Defends σ explosion — uncapped σ would dominate the policy and
     negate any μ signal the network learns."""
     import torch
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
         with torch.no_grad():
@@ -1255,7 +1254,7 @@ def test_hybrid_sample_writes_two_buffers():
     import torch
 
     from _action_spec import AIM_DIM
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
         x = torch.zeros((1, train.OBS_DIM))
@@ -1349,7 +1348,7 @@ def test_hybrid_loss_clip_applies_per_factor():
     """
     import torch
 
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
         B = 4
@@ -1408,7 +1407,7 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
 
     import train
 
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
         torch.manual_seed(13)
@@ -1485,11 +1484,12 @@ def test_pbrs_gamma_matches_training_gamma():
     import pytest
 
     import train
+    from env_config import EnvConfig
 
     args = SimpleNamespace(seed=0, timesteps=1_000, checkpoint_dir="/tmp/unused", device="cpu")
     cfg = train.build_train_config(args, batch_size=1024, bptt_horizon=64)
 
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         live_pbrs_gamma = float(env._c_env.sd.contents.pbrs_gamma)
     finally:
@@ -1527,7 +1527,7 @@ def test_pbrs_gamma_matches_training_gamma():
     # N3 fix: make_puffer_env must expose pbrs_gamma for per-experiment
     # overrides (previously the training γ could not be threaded through
     # without a signature change).
-    env = train.make_puffer_env(seed=0, pbrs_gamma=0.5)
+    env = make_env(seed=0, config=EnvConfig(pbrs_gamma=0.5))
     try:
         assert float(env._c_env.sd.contents.pbrs_gamma) == pytest.approx(0.5)
     finally:
@@ -1600,7 +1600,7 @@ def test_hybrid_ppo_loss_normalizes_advantages():
 
     import train
 
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
         torch.manual_seed(7)
@@ -1676,7 +1676,7 @@ def test_policy_forward_bptt_matches_stepwise_rollout():
     and this diverges from t=1 onwards."""
     import torch
 
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
         policy.eval()
@@ -1720,7 +1720,7 @@ def test_policy_forward_bptt_carries_memory():
     the final-tick outputs are bitwise identical and this test fails."""
     import torch
 
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
         policy.eval()
@@ -1752,7 +1752,7 @@ def test_policy_forward_bptt_resets_on_terminal():
     unaffected by the masking path."""
     import torch
 
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
         policy.eval()
@@ -1989,7 +1989,7 @@ def test_env_publishes_masks_after_reset_and_step():
 
     from _action_spec import ACTION_MASK_DIM
 
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         n_agents = 10
         shm = RawArray("b", n_agents * ACTION_MASK_DIM)
@@ -2026,7 +2026,7 @@ def test_action_use_counter_wired():
     W&B metric was permanently 0 and misleading when diagnosing plant
     behaviour. Now counted like every other head: intent of alive agents.
     (action_last was removed outright: no head, no writer, dead legacy.)"""
-    env = train.make_puffer_env(seed=0)
+    env = make_env(seed=0)
     try:
         env.reset()
         use_head = list(train.ACTION_HEAD_NAMES).index("use")

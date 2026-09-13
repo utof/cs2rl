@@ -27,6 +27,7 @@ from c_env.cs2_env import N_AGENTS, TEAM_SIZE
 
 def _arena_env(**kw):
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     from map import make_arena_duel_map
     base = dict(n_active_per_team=1,
                 pin_pitch=1,
@@ -35,7 +36,19 @@ def _arena_env(**kw):
                 auto_reset=False,
                 seed=11)
     base.update(kw)
-    return make_env(map_data=make_arena_duel_map(), **base)
+    typed = {
+        k: base.pop(k)
+        for k in ("auto_reset", "seed", "buf", "include_step_stats_in_info", "team_spirit",
+                  "config") if k in base
+    }
+    config = typed["config"] if "config" in typed else EnvConfig(**base)
+    return make_env(map_data=make_arena_duel_map(),
+                    config=config,
+                    auto_reset=typed["auto_reset"],
+                    seed=typed["seed"],
+                    buf=typed.get("buf", None),
+                    include_step_stats_in_info=typed.get("include_step_stats_in_info", False),
+                    team_spirit=typed.get("team_spirit", 0.0))
 
 
 def test_oracle_beats_random():
@@ -189,7 +202,11 @@ def test_evaluate_emits_all_eval_keys_and_keeps_training_rng(simple_map):
     env = None
     try:
         from c_env.cs2_env import make_env
-        env = make_env(map_data=simple_map, seed=1, auto_reset=False, round_time=64)
+        from env_config import EnvConfig
+        env = make_env(map_data=simple_map,
+                       seed=1,
+                       auto_reset=False,
+                       config=EnvConfig(round_time=64))
         ev = BaselineEvaluator(env, episodes=2, seed=0)
         torch.manual_seed(123)
         before = torch.rand(3)

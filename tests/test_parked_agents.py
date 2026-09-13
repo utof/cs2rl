@@ -17,6 +17,7 @@ import pytest
 
 from _obs_spec import OBS_BLOCKS
 from c_env.cs2_env import make_env, symmetrize_rewards
+from env_config import EnvConfig, RewardWeights
 
 N_AGENTS, TEAM_SIZE, AIM_DIM = 10, 5, 2
 HEAD_SIZES = (9, 2, 2, 3, 2, 2, 2)
@@ -37,7 +38,7 @@ def _random_actions(rng):
 
 
 def test_one_active_per_team_spawns_slots_0_and_5(simple_map):
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=3)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=3)
     try:
         env.reset()
         ag = env._c_env.game.agents
@@ -58,7 +59,7 @@ def test_one_active_per_team_spawns_slots_0_and_5(simple_map):
 
 
 def test_alive_count_obs_normalised_by_n_active(simple_map):
-    env = make_env(map_data=simple_map, n_active_per_team=1, seed=3)
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=3)
     try:
         env.reset()
         rng = np.random.default_rng(0)
@@ -71,11 +72,15 @@ def test_alive_count_obs_normalised_by_n_active(simple_map):
 
 def test_parked_agents_get_zero_reward_every_tick(simple_map):
     env = make_env(map_data=simple_map,
-                   n_active_per_team=2,
                    seed=5,
-                   pbrs_alive_weight=0.3,
-                   pbrs_hp_weight=0.002,
-                   reward_inaction=0.0005)
+                   config=EnvConfig(
+                       n_active_per_team=2,
+                       rewards=RewardWeights(
+                           pbrs_alive_weight=0.3,
+                           pbrs_hp_weight=0.002,
+                           reward_inaction=0.0005,
+                       ),
+                   ))
     try:
         env.reset()
         rng = np.random.default_rng(1)
@@ -209,13 +214,17 @@ def test_symmetrized_env_parked_rows_are_zero_and_ticks_are_zero_sum(simple_map,
     default reward_symmetrize=False and therefore never touched this code.
     """
     env = make_env(map_data=simple_map,
-                   n_active_per_team=n,
                    seed=5,
-                   reward_symmetrize=True,
-                   pbrs_alive_weight=0.3,
-                   pbrs_hp_weight=0.002,
-                   reward_ct_survival=0.001,
-                   reward_inaction=0.0005)
+                   config=EnvConfig(
+                       n_active_per_team=n,
+                       reward_symmetrize=True,
+                       rewards=RewardWeights(
+                           pbrs_alive_weight=0.3,
+                           pbrs_hp_weight=0.002,
+                           reward_ct_survival=0.001,
+                           reward_inaction=0.0005,
+                       ),
+                   ))
     try:
         env.reset()
         rng = np.random.default_rng(1)
@@ -236,7 +245,9 @@ def test_round_rollover_reparks_the_same_slots(simple_map):
     the FRESH state.
     """
     n = 2
-    env = make_env(map_data=simple_map, n_active_per_team=n, seed=5, reward_symmetrize=True)
+    env = make_env(map_data=simple_map,
+                   seed=5,
+                   config=EnvConfig(n_active_per_team=n, reward_symmetrize=True))
     try:
         env.reset()
         rng = np.random.default_rng(11)
@@ -275,13 +286,15 @@ def test_oracle_episode_kills_and_credits_rewards():
     from eval_baselines import BaselineEvaluator, OracleActor, StateReader, vis_from_obs
     from map import make_arena_duel_map
     env = make_env(map_data=make_arena_duel_map(),
-                   n_active_per_team=1,
-                   pin_pitch=1,
-                   crouch_enabled=0,
-                   round_time=320,
                    auto_reset=False,
                    seed=2,
-                   reward_kill=0.3)
+                   config=EnvConfig(
+                       n_active_per_team=1,
+                       pin_pitch=1,
+                       crouch_enabled=0,
+                       round_time=320,
+                       rewards=RewardWeights(reward_kill=0.3),
+                   ))
     try:
         ev = BaselineEvaluator(env, episodes=2,
                                seed=0)                 # even count is required; only constants are read here

@@ -46,9 +46,11 @@ SRC = REPO_ROOT / "src"
 #
 # `env_factory` (W3) is here for a reason beyond bookkeeping: it is the module
 # whose module scope is MOST tempting to make heavy, since its whole job is
-# constructing envs. Its `from train import make_puffer_env` has to stay
-# function-local both to break the cycle (train.py imports it at module level)
-# and to keep `import train` free of torch/nav/c_env.
+# constructing envs. Two function-local imports carry the two reasons: `from
+# c_env.cs2_env import make_env` in `build_env_for` stays function-local so
+# `import train` stays free of torch/nav/c_env, and `from train import
+# SelfPlayManager` in `build_selfplay_manager` stays function-local to break
+# the cycle (train.py imports env_factory at module level).
 #
 # `metrics_schema` (W4) is here for the mirror-image reason: it is a registry of
 # STRINGS whose whole value is being cheap to import, and it took ownership of

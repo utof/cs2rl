@@ -3,11 +3,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from play_actions import (
+    area_bounds_from_simple_rooms,
     play_fill_actions,
     play_mark_done,
     play_reset_round,
-    area_bounds_from_simple_rooms,
     resolve_policy_path,
 )
 
@@ -64,6 +65,7 @@ class _TinyPol:
 
 def test_mark_done_is_torch_float_tensor():
     import torch
+
     from train import init_policy_state
     policy = _TinyPol()
     st = init_policy_state(policy, "cpu")
@@ -78,13 +80,17 @@ def test_mark_done_is_torch_float_tensor():
 
 def test_reset_round_zeros_hidden():
     import torch
+
     from train import init_policy_state
     policy = _TinyPol()
     st = init_policy_state(policy, "cpu")
     st["lstm_h"] += 3
+
     class _Env:
+
         def reset(self, seed=None):
             return None, None
+
     st2 = play_reset_round(_Env(), policy, "cpu")
     assert torch.count_nonzero(st2["lstm_h"]) == 0
 
@@ -104,7 +110,11 @@ def test_cs2_demo_policy_missing_exits_nonzero():
     env = {**os.environ, "DISPLAY": ""}
     r = subprocess.run(
         [str(demo), "--policy", "/no/such/cs2rl-policy.pt"],
-        cwd=str(demo.parent), env=env, capture_output=True, text=True, timeout=20,
+        cwd=str(demo.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
     )
     assert r.returncode != 0
     # either printed the uv/venv hint, or exec'd python which FileNotFound
@@ -114,7 +124,8 @@ def test_cs2_demo_policy_missing_exits_nonzero():
 
 def test_env_scripted_movers_not_statues(make_map):
     from c_env.cs2_env import make_env
-    env = make_env(seed=0, auto_reset=False, recoil=True, map_data=make_map)
+    from env_config import EnvConfig
+    env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=True))
     env.reset()
     acts = np.zeros((10, 7), np.int32)
     cont = np.zeros((10, 2), np.float32)
@@ -126,18 +137,23 @@ def test_env_scripted_movers_not_statues(make_map):
     for i in range(10):
         dx = env._c_env.game.agents[i].x - p0[i][0]
         dy = env._c_env.game.agents[i].y - p0[i][1]
-        moved.append((dx * dx + dy * dy) ** 0.5)
+        moved.append((dx * dx + dy * dy)**0.5)
     assert max(moved[1:]) > 10
     assert moved[0] < 10
     env.close()
 
 
 def test_play_cli_missing_pt_exits_2():
-    import subprocess, sys
+    import subprocess
+    import sys
     root = Path(__file__).resolve().parents[1]
     r = subprocess.run(
-        [sys.executable, str(root / "src/play.py"), "--policy", "/no/such/cs2rl-policy.pt"],
-        cwd=str(root), capture_output=True, text=True, timeout=20,
+        [sys.executable,
+         str(root / "src/play.py"), "--policy", "/no/such/cs2rl-policy.pt"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        timeout=20,
     )
     assert r.returncode == 2
     assert "Checkpoint" in (r.stderr + r.stdout) or "not found" in (r.stderr + r.stdout).lower()
@@ -175,7 +191,11 @@ def test_cs2_demo_relative_venv_is_realpathd(tmp_path):
     env.pop("CS2RL_VENV", None)
     r = subprocess.run(
         [str(demo), "--policy", "/no/such/cs2rl-policy.pt"],
-        cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=20,
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
     )
     assert r.returncode == 2
     blob = (r.stderr or "") + (r.stdout or "")

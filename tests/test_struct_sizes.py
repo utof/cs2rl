@@ -39,7 +39,9 @@ from c_env.cs2_env import (                                                     
     _C_SIZE_KEYS_CHECKED, AgentStateC, Dust2EnvC, GameStateC, StaticDataC, StepStatsC, WallC,
     WallListC, make_env,
 )
-from env_config import KNOB_FIELDS, RewardWeights                                             # noqa: E402
+from env_config import (                                                                      # noqa: E402
+    KNOB_FIELDS, REWARD_FIELDS, EnvConfig, RewardWeights,
+)
 
 
 def _is_scalar_ctype(ctype):
@@ -84,13 +86,14 @@ _STATIC_DATA_SCALARS = tuple(
 # pushes a distinct value through it); anything it does not is map-derived or a
 # nav.py constant and is checked against that source instead.
 #
-# The settable surface is the CONFIG surface, not make_env's signature: after
-# spec 2026-09-03 the weights and knobs sit behind make_env's **legacy, and
-# inspect.signature would see eight names (none a weight), empty these tuples,
-# and let the sweep below pass while iterating nothing. Derive from the
-# dataclass fields instead and pin the census so an emptied partition fails on
-# the count before the values. KNOB_FIELDS is itself derived from
-# fields(EnvConfig), so a knob added to the dataclass arrives here for free.
+# The settable surface is the CONFIG surface, not make_env's signature:
+# make_env has seven parameters and no **legacy, so inspect.signature would
+# see none of the weights, empty these tuples, and let the sweep below pass
+# while iterating nothing. Derive from the dataclass fields instead
+# (`fields(RewardWeights) | KNOB_FIELDS`) and pin the census so an emptied
+# partition fails on the count before the values. KNOB_FIELDS is itself
+# derived from fields(EnvConfig), so a knob added to the dataclass arrives
+# here for free.
 _CONFIG_NAMES = frozenset(f.name
                           for f in dataclasses.fields(RewardWeights)) | frozenset(KNOB_FIELDS)
 _FLOAT_KWARG_SCALARS = tuple(
@@ -198,6 +201,25 @@ _SENTINELS_BASE.update({
 })
 _SENTINEL_CONFIGS = tuple({**_SENTINELS_BASE, **flags} for flags in _BOOL_SENTINEL_CONFIGS)
 
+
+def _config_from_field_kwargs(kwargs):
+    kw = dict(kwargs)
+    weights = {name: kw.pop(name) for name in REWARD_FIELDS if name in kw}
+    return EnvConfig(rewards=RewardWeights(**weights), **kw)
+
+
+def test_config_from_field_kwargs_partitions_flat_reward_and_knob_names():
+    from env_config import EnvConfig, RewardWeights
+    payload = {"reward_kill": 1.0, "n_active_per_team": 3}
+    cfg = _config_from_field_kwargs(payload)
+    assert payload == {"reward_kill": 1.0, "n_active_per_team": 3}
+    assert isinstance(cfg, EnvConfig)
+    assert cfg.rewards == RewardWeights(reward_kill=1.0)
+    assert cfg.n_active_per_team == 3
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'reward_kil'"):
+        _config_from_field_kwargs({"reward_kil": 1.0})
+
+
 # Per-int-field vector of sentinels across the configs — the object whose
 # pairwise distinctness test_int_sentinels_are_usable asserts. Non-flag ints get
 # a constant vector (3, 3) / (101, 101) / ...; flags get the 2-vectors above.
@@ -211,8 +233,9 @@ _INT_SENTINEL_VECTORS = {
 }
 
 # StaticData scalars that are tunables — the ones a training config sweeps.
-# Every one must stay reachable from make_env or it drops out of the sentinel
-# sweep above; test_every_tunable_scalar_is_a_make_env_kwarg enforces that.
+# Every one must stay reachable from RewardWeights / EnvConfig or it drops out
+# of the sentinel sweep above; test_every_tunable_scalar_is_an_envconfig_field
+# enforces that.
 _TUNABLE_PREFIXES = ("reward_", "pbrs_")
 
 
@@ -340,7 +363,7 @@ def test_static_data_scalars_round_trip(simple_map):
     # Sequential, not two live envs at once: nothing here needs them to coexist,
     # and one env at a time keeps a failure attributable to a single config.
     for cfg_i, sentinels in enumerate(_SENTINEL_CONFIGS):
-        env = make_env(map_data=simple_map, **sentinels)
+        env = make_env(map_data=simple_map, config=_config_from_field_kwargs(sentinels))
         try:
             sc = binding.static_data_scalars(env._capsule)
             # ── every settable field, one sentinel each, in this config ──
@@ -508,26 +531,13 @@ def test_every_ctypes_mirror_is_size_guarded():
                            f"mismatched (key, mirror) pairs: {mispaired}")
 
 
-def test_every_tunable_scalar_is_a_make_env_kwarg():
-    """Reward/PBRS scalars must stay reachable from make_env.
-
-    WHY: test_static_data_scalars_round_trip is exhaustive over the fields
-    make_env exposes and silently skips the ones it does not. So a new `reward_*`
-    field added to cs2_types.h, the ctypes mirror, the `static_data` packing
-    mapping and static_data_scalars() — but NOT to make_env — would drop
-    straight into the unchecked-by-value set with every other test still green,
-    re-opening the transposition hole in exactly the same-width-float run where
-    that hole lives. This makes the omission fail instead.
-
-    Scope: tunables only (reward_*, pbrs_*). Map-derived geometry and nav.py
-    constants are deliberately not kwargs; see the round-trip docstring's
-    REMAINING GAP paragraph.
-    """
+def test_every_tunable_scalar_is_an_envconfig_field():
+    """Reward/PBRS scalars must stay reachable from RewardWeights / EnvConfig."""
     unreachable = sorted(name for name in _NON_KWARG_SCALARS if name.startswith(_TUNABLE_PREFIXES))
     assert not unreachable, (
-        f"tunable StaticData scalars not exposed by make_env: {unreachable}; add them as "
-        "keyword arguments to make_env and Cs2Env.__init__ so the sentinel sweep in "
-        "test_static_data_scalars_round_trip covers them")
+        f"tunable StaticData scalars not on RewardWeights / EnvConfig: {unreachable}; "
+        "add the field to RewardWeights / EnvConfig, not to make_env's signature, "
+        "so the sentinel sweep in test_static_data_scalars_round_trip covers them")
 
 
 def test_int_sentinels_are_usable():
@@ -592,10 +602,12 @@ def test_static_data_scalars_round_trip_sim_knobs(simple_map):
     rather than a third copy of a config the sweep already ran.
     """
     env = make_env(map_data=simple_map,
-                   n_active_per_team=3,
-                   pin_pitch=1,
-                   crouch_enabled=0,
-                   jump_enabled=1)
+                   config=_config_from_field_kwargs({
+                       "n_active_per_team": 3,
+                       "pin_pitch": 1,
+                       "crouch_enabled": 0,
+                       "jump_enabled": 1,
+                   }))
     try:
         sc = binding.static_data_scalars(env._capsule)
         assert sc["n_active_per_team"] == 3
@@ -616,6 +628,7 @@ def test_n_active_per_team_out_of_range_rejected(simple_map):
     checked: 0 is the memset-zero value (the failure mode the C assert exists
     for) and 6 is the "someone typed the real team size wrong" case.
     """
-    for bad in (0, 6, 2.9):            # 2.9: non-integers must be rejected, not truncated
+    for bad in (0, 6, 2.9):                            # 2.9: non-integers must be rejected, not truncated
         with pytest.raises(ValueError):
-            make_env(map_data=simple_map, n_active_per_team=bad)
+            make_env(map_data=simple_map,
+                     config=_config_from_field_kwargs({"n_active_per_team": bad}))

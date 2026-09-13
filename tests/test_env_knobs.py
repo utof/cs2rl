@@ -20,7 +20,8 @@ N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
 
 def test_round_time_ticks_sets_episode_length(simple_map):
     from c_env.cs2_env import make_env
-    env = make_env(map_data=simple_map, round_time=160, seed=1, auto_reset=False)
+    from env_config import EnvConfig
+    env = make_env(map_data=simple_map, config=EnvConfig(round_time=160), seed=1, auto_reset=False)
     try:
         assert env.round_time == 160
         env.reset()
@@ -42,7 +43,10 @@ def test_laser_and_turn_speed_reach_static_data(simple_map):
     import binding
 
     from c_env.cs2_env import make_env
-    env = make_env(map_data=simple_map, laser_range=300.0, max_turn_speed=0.5, seed=1)
+    from env_config import EnvConfig
+    env = make_env(map_data=simple_map,
+                   config=EnvConfig(laser_range=300.0, max_turn_speed=0.5),
+                   seed=1)
     try:
         sc = binding.static_data_scalars(env._capsule)
         assert sc["laser_range"] == pytest.approx(300.0)
@@ -85,8 +89,9 @@ def test_invalid_knobs_raise_value_error(simple_map, bad):
     """Validation happens in Python BEFORE binding.init: a C-side assert would
     abort a forked Puffer worker with no traceback."""
     from c_env.cs2_env import make_env
+    from env_config import EnvConfig
     with pytest.raises(ValueError):
-        make_env(map_data=simple_map, seed=1, **bad)
+        make_env(map_data=simple_map, seed=1, config=EnvConfig(**bad))
 
 
 def test_config_json_records_the_effective_knobs():
@@ -261,14 +266,13 @@ def test_args_knob_coverage_is_exhaustive():
     assert routed == set(KNOB_FIELDS)
 
 
-def test_make_puffer_env_forwards_knobs(simple_map):
+def test_make_env_forwards_knobs(simple_map):
     import binding
 
-    from train import make_puffer_env
-    env = make_puffer_env(map_data=simple_map,
-                          round_time=160,
-                          laser_range=300.0,
-                          max_turn_speed=0.5)
+    from c_env.cs2_env import make_env
+    from env_config import EnvConfig
+    env = make_env(map_data=simple_map,
+                   config=EnvConfig(round_time=160, laser_range=300.0, max_turn_speed=0.5))
     try:
         sc = binding.static_data_scalars(env._capsule)
         assert sc["round_time"] == 160
