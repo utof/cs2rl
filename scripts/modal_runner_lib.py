@@ -1323,8 +1323,8 @@ def _load_volume_json(raw: bytes, message: str = "corrupt volume json") -> objec
     WHY the `message` parameter: a caller that re-raises ValidationError
     untouched (the reservation branch of `derive_run_view_from_bytes`, which
     must let "corrupt volume timestamp" escape) has no other way to attach its
-    own operator-facing wording. Callers that *do* wrap can leave it at the
-    default.
+    own operator-facing wording. The STATUS branch wraps and so does not need
+    it, but passes it anyway so the two calls read alike.
 
     PITFALLS:
       * ValidationError subclasses ValueError, so a caller's
@@ -1344,9 +1344,9 @@ def _load_volume_json(raw: bytes, message: str = "corrupt volume json") -> objec
 def _parse_iso8601(value: str) -> datetime:
     """Parse an ISO-8601 stamp written by this module into a datetime.
 
-    The single timestamp parser for the whole protocol: STATUS `updated_at`
-    (via `derive_status`) and reservation `created_at` both come through here,
-    so a naive/aware mismatch or a truncated write fails one way, not three.
+    The only two callers are `derive_status` (STATUS `updated_at`) and the
+    reservation branch of `derive_run_view_from_bytes` (`created_at`), so a
+    truncated or garbled stamp fails one way rather than once per adapter.
 
     PITFALL: the "corrupt volume timestamp" message only reaches an operator
     where the caller re-raises ValidationError unchanged. In the STATUS branch
@@ -1393,14 +1393,19 @@ def derive_run_view_from_bytes(
       * "corrupt volume timestamp"        — reservation `created_at` present
         but not ISO-8601.
       * "no STATUS.json or reservation.json" — both absent. Callers that know
-        the run id re-raise with a better message before calling in.
+        the run id check for that case themselves first, so the message an
+        operator actually sees names the run.
 
     PITFALL — the two branches are deliberately asymmetric. The STATUS branch
     has no `except ValidationError: raise`, so a bad `updated_at` is reported
     as a corrupt STATUS file. The reservation branch has one, so a bad
-    `created_at` keeps the distinct "corrupt volume timestamp". That is not an
-    oversight: it reproduces the three pre-unification adapter copies exactly,
-    and both spellings are pinned by the message table in
+    `created_at` keeps the distinct "corrupt volume timestamp". Neither is an
+    oversight. Against the three pre-unification adapter copies this matches on
+    six of seven inputs; the reservation timestamp is a deliberate divergence
+    (those copies re-wrapped it as "corrupt volume reservation json", because
+    ValidationError is a ValueError and their generic handler swallowed it),
+    made because spec §2.2 asks for corrupt timestamps to surface distinctly.
+    Every spelling is pinned by the message table in
     tests/test_modal_protocol.py. Adding or removing either clause silently
     changes what an operator sees; change the pinned table first.
     """
@@ -1451,8 +1456,9 @@ class CheckpointVerdict:
 
     Invariant: `ok=True` implies `reason is None` and both `checkpoint_bytes`
     and `digest` are set; `ok=False` implies both are `None`. The payload field
-    is the *checkpoint* bytes, never the sidecar's — a caller that uploads it
-    under `{digest}.pt` would otherwise ship the metadata as the weights.
+    is the *checkpoint* bytes, never the sidecar's — launch uploads them under
+    `INPUTS_ROOT/sha256/{digest}.pt`, so carrying the sidecar here would ship
+    the metadata as the weights.
     """
 
     ok: bool
@@ -1467,10 +1473,11 @@ def _load_checkpoint_weights(buf: object, **kwargs: object) -> object:
     torch is imported lazily so that importing this module — which the laptop-
     side status client does — does not pull in torch or touch CUDA.
 
-    PITFALL: `**kwargs` is accepted and ignored. `verify_checkpoint` passes
-    `map_location`/`weights_only` explicitly for the benefit of injected fakes
-    that assert on them; this function hard-codes the same values rather than
-    forwarding, so a caller cannot weaken `weights_only=True` from outside.
+    PITFALL: `**kwargs` is accepted and ignored. `verify_checkpoint` calls its
+    `load` with `map_location`/`weights_only` spelled out, and this function
+    swallows them and hard-codes the same values rather than forwarding — so
+    no caller can weaken `weights_only=True` through the injection seam. Do
+    not "simplify" it to `torch.load(buf, **kwargs)`.
     """
     import torch
     return torch.load(buf, map_location="cpu", weights_only=True)

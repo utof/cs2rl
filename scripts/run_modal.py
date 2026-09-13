@@ -344,8 +344,9 @@ def prior_checkpoint_or_raise(volume: object, parent_id: str, now: datetime) -> 
         reads are handed to the protocol: that pair is what detects a sidecar
         republished mid-validation. Do not "optimise" the second read away.
       * The returned bytes are the checkpoint, not the sidecar. `launch_run`
-        writes them to `{digest}.pt`, so swapping them ships metadata as
-        weights.
+        stages them as `{digest}.pt` and uploads them under
+        `mrl.INPUTS_ROOT / "sha256"`, so swapping the two would ship the
+        sidecar's metadata as the child run's weights.
       * The `verdict.checkpoint_bytes is None` guard after `verdict.ok` is
         unreachable by contract and exists only so a future protocol bug
         surfaces as the usual sentence instead of a TypeError downstream.

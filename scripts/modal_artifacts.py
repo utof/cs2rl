@@ -60,11 +60,13 @@ def read_volume_file(volume: object, remote: str) -> bytes | None:
       * Public on purpose. `modal_backfill_sidecar` imports it; this is the
         supported way to read a Volume object outside this module.
       * Client Volume APIs take root-relative `runs/...`. A `/artifacts/...`
-        path is the *mounted* in-container spelling and would silently miss, so
-        it is refused loudly instead. Callers going through `_client_path`
+        path is the *mounted* in-container spelling, so it is refused here
+        rather than attempted — otherwise a wrong-API call would come back as
+        an indistinguishable `None`. Callers that route through `_client_path`
         are already checked; this guard covers the ones that are not.
-      * `volume.read_file` yields chunks lazily — the `list(...)` is what makes
-        a mid-stream failure raise here rather than at the caller.
+      * The `list(...)` is inside the `try` on purpose: however
+        `volume.read_file` delivers its chunks, a failure part-way through
+        becomes `None` here instead of escaping to the caller.
     """
     if remote.startswith("/artifacts"):
         raise mrl.ValidationError(f"refusing mounted path as Volume client API: {remote}")
@@ -97,11 +99,12 @@ def lookup_volume(modal_module: object | None = None):
     `modal_module` is the seam tests inject a fake through; production passes
     nothing and gets the real `modal`.
 
-    PITFALL: Modal's not-found exception has moved between releases and the
-    injected fake's is a different class entirely, so membership is decided by
-    `_not_found_types` plus a class-name fallback. Anything not recognised is
-    re-raised untouched — do not widen this to a bare `except Exception:
-    raise ValidationError`, which would report an auth or network failure as a
+    PITFALL: there is no single not-found class to catch. `_not_found_types`
+    looks for `NotFoundError` in two places on whichever module was passed
+    (`modal.exception` and `modal` itself), and a class-name fallback covers
+    the test fake's `FakeNotFoundError`. Anything not recognised is re-raised
+    untouched — do not widen this to a bare `except Exception: raise
+    ValidationError`, which would report an auth or network failure as a
     missing Volume.
     """
     modal_mod = modal if modal_module is None else modal_module

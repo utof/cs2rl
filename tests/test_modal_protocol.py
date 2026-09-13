@@ -230,11 +230,15 @@ def test_derive_run_view_from_bytes_messages(status_bytes, reservation_bytes, pa
 
 
 def test_bare_corrupt_volume_json_is_the_unlabelled_default():
-    # No derive_run_view_from_bytes input reaches this message: both branches
-    # pass their own label in. It survives for callers that parse a Volume
-    # object outside the status protocol -- today only the sidecar round-trip
-    # check in modal_backfill_sidecar. Pinned so the default is not "cleaned
-    # up" into one of the branch messages, which would mislabel those callers.
+    # The unlabelled fallback. Three call sites leave it at the default:
+    # verify_checkpoint's two (the first sidecar parse and the reread), which
+    # catch the ValidationError and discard the message in favour of a
+    # corrupt_sidecar / replaced token, and modal_backfill_sidecar's sidecar
+    # round-trip check, which lets it out. That last one is therefore the only
+    # path on which an operator ever reads this string -- no
+    # derive_run_view_from_bytes input reaches it, because both of its branches
+    # pass their own label in. Pinned so the default is not "cleaned up" into a
+    # branch message, which would mislabel backfill.
     with pytest.raises(mrl.ValidationError, match=r"^corrupt volume json$"):
         mrl._load_volume_json(b"{not-json")
 
