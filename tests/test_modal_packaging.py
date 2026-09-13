@@ -33,6 +33,14 @@ converted, so the live demonstration now lives in
 (1, 2 and 3 nodes below `Module`, measured) across two scopes (module and
 function body), in three shapes -- including the `importlib.import_module` shape
 this repo's Modal tests use to reach their `scripts/` siblings.
+
+HOW MEASUREMENTS ARE WRITTEN DOWN HERE, because getting this wrong has cost this
+branch four correction commits: every mutation result below names the TEST THAT
+OBJECTS, never a `1 failed, N passed` pair. The passed half is just this file's
+collection minus the failures -- it says nothing the objector's name does not,
+and it goes stale the moment a test is added, which Task 2 will do. So no
+collection total appears anywhere in this file and nothing asserts on one. If
+you need the number, `pytest --collect-only -q` has it and cannot be wrong.
 """
 import ast
 import subprocess
@@ -75,13 +83,13 @@ def _repo_python_files():
     guard silently stops watching `scripts/` and `src/`. Pinning the CWD is what
     makes the scope independent of where pytest was invoked from.
     `test_the_census_scans_the_whole_repo` covers a WRONG cwd, not a MISSING
-    one, and the difference is measurable: repointing it at `tests/` is
-    `2 failed, 11 passed`, but DELETING `cwd=ROOT` is `13 passed` -- this file's
-    whole collection at the time of writing -- when pytest runs from the repo
-    root, because the subprocess then inherits a CWD that happens to be the
-    right one. That deletion only bites once something runs pytest
-    from elsewhere -- and then the same test does go red. Stated rather than
-    left to read as full coverage.
+    one, and the difference is measurable: repointing it at `tests/` turns that
+    test red on assert 1 (and takes `test_no_file_imports_...` down with it, on
+    FileNotFoundError), but DELETING `cwd=ROOT` leaves EVERY test in this file
+    green when pytest runs from the repo root, because the subprocess then
+    inherits a CWD that happens to be the right one. That deletion only bites
+    once something runs pytest from elsewhere -- and then the same test does go
+    red. Stated rather than left to read as full coverage.
     """
     out = subprocess.run(["git", "ls-files", "--cached", "*.py"],
                          cwd=ROOT,
@@ -153,8 +161,9 @@ def test_no_file_imports_the_bare_modal_runner_lib_spelling():
         # `--cached` enumerates the INDEX, so a tracked .py deleted from the
         # working tree without `git rm` is still handed to us and `read_text`
         # raises FileNotFoundError. Measured (deleting `scripts/exp_lib.py`):
-        # `1 failed, 8 passed`, with a pathlib traceback instead of this test's
-        # own message -- LOUD but opaque. Deliberately not caught: it can never
+        # THIS test is the one that goes red, and it dies on a traceback out of
+        # pathlib rather than on its own assertion message -- LOUD but opaque.
+        # Nothing else in the file notices. Deliberately not caught: it can never
         # produce a false PASS, and a `try` here would let the census silently
         # stop covering a real file, which is the failure that matters. W2 and
         # Tasks 3-5 move files, which is when to expect it; `git mv` / `git rm`
@@ -198,13 +207,13 @@ def test_guard_detects_a_planted_bare_import(planted, shape):
     `importlib` rows, submodule), three in a function body -- in three SHAPES
     (`import`, `from-import`, `dynamic-import`).
 
-    A `tree.body` implementation fails FIVE of the eight, and TWO of those five
-    are at MODULE scope: both `importlib` rows hide their `Call` inside an
-    `Assign`, so `tree.body` never reaches them. Measured -- the failing set is
-    the two function-body imports, the `__import__` row and both module-scope
-    `importlib` rows; the three that survive are exactly the three at depth 1.
-    So `tree.body` is blind to DEPTH, not to scope, which is what the old
-    wording got wrong.
+    A `tree.body` implementation fails every row whose import sits deeper than
+    ONE node below `Module`, and two of those are at MODULE scope: both
+    `importlib` rows hide their `Call` inside an `Assign`, so `tree.body` never
+    reaches them. Measured -- the failing set is the two function-body imports,
+    the `__import__` row and both module-scope `importlib` rows; the survivors
+    are exactly the depth-1 rows. So `tree.body` is blind to DEPTH, not to
+    scope, which is what the old wording got wrong.
 
     A shape-blind implementation instead passes every depth and fails the
     dynamic-import rows -- the shape this repo's Modal tests use to reach their
@@ -248,8 +257,8 @@ def test_the_census_scans_the_whole_repo():
     Assert 1 names FILES, and it names all three W1 files rather than just one,
     because the one-name version was measured blind to the case that matters:
     filter the census to drop `tests/test_eval_baselines.py` -- the in-body
-    violation this entire guard exists for -- and the result was `9 passed`,
-    this file's whole collection at the time, with nothing objecting. A census
+    violation this entire guard exists for -- and NOTHING objected: every test
+    in the file passed, this one included. A census
     that has stopped enumerating the files W1 was written for has stopped doing
     its job, whatever else it still reaches.
 
@@ -270,8 +279,8 @@ def test_the_census_scans_the_whole_repo():
     MEASURED BOUND, in the same register as the `cwd=ROOT` gap documented in
     `_repo_python_files` -- a stated limit, not coverage. A filter that drops
     some OTHER single tracked file is still invisible: measured, dropping
-    `tests/test_oracle_statue.py` is `13 passed` and dropping `src/train.py` is
-    `13 passed`. Nothing closes that without re-deriving the census from the
+    `tests/test_oracle_statue.py` and dropping `src/train.py` each leave the
+    whole file green. Nothing closes that without re-deriving the census from the
     census, which would prove nothing. Per-file coverage stops at the three
     names below; the rest of the tree is covered at DIRECTORY granularity, by
     assert 3.
