@@ -72,9 +72,11 @@ def backfill_sidecar(
     # helper borrowed from the read-only status client: one derivation rule for
     # "is this run finished?" means backfill and `modal_artifacts status` can
     # never disagree about STALE_AFTER or about which statuses are terminal.
-    # PITFALL: both files absent is "no such run", not "terminal" — without this
-    # check a typo'd run id would fall through to a MISSING-status view and get
-    # a sidecar written into a directory nobody asked for.
+    # WHY the both-absent check is here and not left to the protocol:
+    # derive_run_view_from_bytes refuses this case too, but with the generic
+    # "no STATUS.json or reservation.json", which never names the run. Raising
+    # first attaches the run id, so a typo'd --run-id reads as a typo rather
+    # than as a damaged volume. Keep it above every read that follows.
     status_remote = (mrl.RUNS_ROOT / run_id / mrl.STATUS_FILENAME).as_posix()
     reservation_remote = (mrl.RUNS_ROOT / run_id / mrl.RESERVATION_FILENAME).as_posix()
     status_bytes = arts.read_volume_file(volume, status_remote)

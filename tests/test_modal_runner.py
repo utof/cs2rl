@@ -5549,6 +5549,23 @@ def test_backfill_publishes_sidecar_that_satisfies_the_status_client(fake_modal,
     assert written["mtime_ns"] is None
 
 
+def test_backfill_refuses_a_run_id_with_neither_status_nor_reservation(fake_modal):
+    # An empty volume means the run id does not exist. The backfiller keeps its
+    # own copy of this guard (collect_status has the other), so it needs its own
+    # pin: without one, the guard could drift below the upload and this test's
+    # message assertion would still pass on a run that had already been written
+    # to. Assert no upload happened, not just that it raised.
+    module = _import_backfill()
+    volume = _named_volume(fake_modal)
+
+    with pytest.raises(mrl.ValidationError, match="run not found: missing-id"):
+        module.backfill_sidecar("missing-id", now=_aware())
+
+    assert fake_modal.batch_upload_calls == []
+    assert (mrl.RUNS_ROOT / "missing-id" / "checkpoints" /
+            mrl.CHECKPOINT_SIDECAR_NAME).as_posix() not in volume.files
+
+
 def test_backfill_refuses_a_run_that_is_still_active(fake_modal, tmp_path):
     module = _import_backfill()
     volume, _ = _volume_with_orphan_checkpoint(fake_modal, tmp_path, status="training")

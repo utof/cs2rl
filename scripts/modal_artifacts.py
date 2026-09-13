@@ -106,8 +106,10 @@ def collect_status(
 
     PITFALLS:
       * Absent STATUS.json *and* absent reservation.json means the run does not
-        exist; that is a ValidationError, not a MISSING-status view. The exact
-        message is pinned by test_collect_status_missing_run_message.
+        exist. `derive_run_view_from_bytes` refuses that case too, but with the
+        generic "no STATUS.json or reservation.json"; raising here first is what
+        puts the run id in the message. The exact string is pinned by
+        test_collect_status_missing_run_message.
       * The sidecar is read twice on purpose. `verify_checkpoint` compares the
         two reads to catch a sidecar being rewritten underneath us mid-status.
     """
