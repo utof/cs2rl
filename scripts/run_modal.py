@@ -305,6 +305,16 @@ def ensure_blob(volume: object, client_path: PurePosixPath, local_path: Path) ->
         _require_blob_match(existing, expected_size, expected_digest)
 
 
+# Launch's private vocabulary: one `CheckpointVerdict.reason` token -> the
+# sentence an operator sees when a --resume-run-id parent is unusable. The
+# protocol deliberately returns tokens so status reporting can collapse them to
+# a bool while launch says something actionable about *this* parent.
+#
+# This map must stay TOTAL over every non-"ok" token `mrl.verify_checkpoint`
+# can return: `prior_checkpoint_or_raise` indexes it directly, so a token added
+# to the protocol without a row here raises a bare KeyError out of launch
+# instead of a ValidationError. `test_launch_checkpoint_errors_is_total` pins
+# that; keep it passing rather than relying on a reviewer to notice.
 _LAUNCH_CHECKPOINT_ERRORS = {
     "missing_sidecar": "parent checkpoint sidecar missing",
     "corrupt_sidecar": "parent checkpoint sidecar is corrupt",
@@ -317,6 +327,29 @@ _LAUNCH_CHECKPOINT_ERRORS = {
 
 
 def prior_checkpoint_or_raise(volume: object, parent_id: str, now: datetime) -> tuple[bytes, str]:
+    """Validate a --resume-run-id parent and return its (checkpoint bytes, digest).
+
+    The launch-side gate: refuses to start a child run unless the parent has
+    finished (or gone stale) and its checkpoint still verifies. Raises
+    ValidationError with an operator sentence on every rejection; returns only
+    on success, so callers do not have to re-check anything.
+
+    Order matters. The still-active check happens here, *before*
+    `mrl.verify_checkpoint`, because "the parent is still running" is a launch
+    policy and not a statement about the checkpoint — `collect_status` runs the
+    same verification without it and must keep reporting live runs honestly.
+
+    PITFALLS:
+      * The sidecar is read twice (before and after the checkpoint) and both
+        reads are handed to the protocol: that pair is what detects a sidecar
+        republished mid-validation. Do not "optimise" the second read away.
+      * The returned bytes are the checkpoint, not the sidecar. `launch_run`
+        writes them to `{digest}.pt`, so swapping them ships metadata as
+        weights.
+      * The `verdict.checkpoint_bytes is None` guard after `verdict.ok` is
+        unreachable by contract and exists only so a future protocol bug
+        surfaces as the usual sentence instead of a TypeError downstream.
+    """
     index = ModalVolumeIndex(volume)
     status_bytes = index.read_file(mrl.RUNS_ROOT / parent_id / mrl.STATUS_FILENAME)
     reservation_bytes = index.read_file(mrl.RUNS_ROOT / parent_id / mrl.RESERVATION_FILENAME)

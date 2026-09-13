@@ -49,6 +49,23 @@ def _client_path(path: PurePosixPath) -> str:
 
 
 def read_volume_file(volume: object, remote: str) -> bytes | None:
+    """Read a committed Volume object whole, or None if it is not there.
+
+    Absent is a normal outcome for every protocol read here (no STATUS.json
+    yet, no sidecar yet), so it is a return value rather than an exception;
+    `derive_run_view_from_bytes` and `verify_checkpoint` both take `None` as
+    meaningful input.
+
+    PITFALLS:
+      * Public on purpose. `modal_backfill_sidecar` imports it; this is the
+        supported way to read a Volume object outside this module.
+      * Client Volume APIs take root-relative `runs/...`. A `/artifacts/...`
+        path is the *mounted* in-container spelling and would silently miss, so
+        it is refused loudly instead. Callers going through `_client_path`
+        are already checked; this guard covers the ones that are not.
+      * `volume.read_file` yields chunks lazily — the `list(...)` is what makes
+        a mid-stream failure raise here rather than at the caller.
+    """
     if remote.startswith("/artifacts"):
         raise mrl.ValidationError(f"refusing mounted path as Volume client API: {remote}")
     try:
@@ -70,6 +87,23 @@ def _not_found_types(modal_mod: object) -> tuple[type[BaseException], ...]:
 
 
 def lookup_volume(modal_module: object | None = None):
+    """Look up the artifact Volume read-only, or raise if it does not exist.
+
+    `create_if_missing=False` is the whole point: observing a run must never
+    bring the Volume into existence, because a freshly created empty Volume
+    would make every run look merely absent instead of making the mistake
+    obvious. A missing Volume is an operator-facing ValidationError.
+
+    `modal_module` is the seam tests inject a fake through; production passes
+    nothing and gets the real `modal`.
+
+    PITFALL: Modal's not-found exception has moved between releases and the
+    injected fake's is a different class entirely, so membership is decided by
+    `_not_found_types` plus a class-name fallback. Anything not recognised is
+    re-raised untouched — do not widen this to a bare `except Exception:
+    raise ValidationError`, which would report an auth or network failure as a
+    missing Volume.
+    """
     modal_mod = modal if modal_module is None else modal_module
     try:
         return modal_mod.Volume.from_name(mrl.VOLUME_NAME, create_if_missing=False)
