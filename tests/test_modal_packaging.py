@@ -1,6 +1,12 @@
 """Guards on HOW the Modal runner is imported and packaged, not on what it does.
 
-WHY: `scripts/` and the repo root are BOTH on sys.path in every pytest process.
+WHY: `scripts/` and the repo root are BOTH on sys.path in every FULL-SUITE
+pytest process. The unit matters and the spec is careful about it (design doc
+:147, "Every full-suite process therefore keeps both roots on `sys.path`"):
+measured, collecting THIS FILE alone leaves `scripts/` off sys.path entirely --
+only `src/` is there, inserted by `tests/conftest.py` -- while collecting any one
+of the 9 files below puts it back. A guard that only fires in a full-suite
+process is still the right guard; a reader who thinks it fires everywhere is not.
 Measured by AST census over every tracked .py, counting `sys.path.insert/append`
 whose argument names `scripts` directly OR through a variable assigned from such
 a path: **11** test files at 6c937ca, **9** after this commit converts two of
@@ -15,11 +21,16 @@ ValidationError raised through the other spelling -- the exact class #166 spent
 twelve commits routing error handling through.
 
 PITFALL -- the one that decides whether this file works: the scan MUST walk the
-whole tree (`ast.walk`), not `tree.body`. `tests/test_eval_baselines.py` imports
-the bare spelling INSIDE a test body. A `tree.body` scan reports that file clean
-while the defect is live, and still passes a module-scope positive control. That
-is why `test_guard_detects_a_planted_bare_import` plants at four depths and in
-the `importlib.import_module` shape this file's own siblings actually use.
+whole tree (`ast.walk`), not `tree.body`. Until THIS COMMIT converted it,
+`tests/test_eval_baselines.py` imported the bare spelling INSIDE a test body;
+that real in-body violation is the case this guard was built around. A
+`tree.body` scan reported that file clean while the defect was live, and still
+passed a module-scope positive control. Past tense on purpose -- the file is
+converted, so the live demonstration now lives in
+`test_guard_detects_a_planted_bare_import`, which plants at three AST depths
+(1, 2 and 3 statements below `Module`, measured) across two scopes (module and
+function body), in three shapes -- including the `importlib.import_module` shape
+this repo's Modal tests use to reach their `scripts/` siblings.
 """
 import ast
 import subprocess
@@ -63,9 +74,10 @@ def _repo_python_files():
     makes the scope independent of where pytest was invoked from.
     `test_the_census_scans_the_whole_repo` covers a WRONG cwd, not a MISSING
     one, and the difference is measurable: repointing it at `tests/` is
-    `2 failed, 7 passed`, but DELETING `cwd=ROOT` is `9 passed` when pytest runs
-    from the repo root, because the subprocess then inherits a CWD that happens
-    to be the right one. That deletion only bites once something runs pytest
+    `2 failed, 11 passed`, but DELETING `cwd=ROOT` is `13 passed` -- this file's
+    whole collection at the time of writing -- when pytest runs from the repo
+    root, because the subprocess then inherits a CWD that happens to be the
+    right one. That deletion only bites once something runs pytest
     from elsewhere -- and then the same test does go red. Stated rather than
     left to read as full coverage.
     """
@@ -88,9 +100,19 @@ def bare_spelling_imports(source):
     Returns a list of (lineno, kind). `ast.walk`, never `tree.body` -- see the
     module docstring.
 
-    Covers three shapes, because this file's siblings write all three:
+    Covers three shapes, because this repo's Modal tests write all three:
     `import X`, `from X import ...`, and `importlib.import_module("X")` /
-    `__import__("X")` with a STRING LITERAL argument.
+    `__import__("X")` with a STRING LITERAL argument -- positional OR `name=`.
+    The keyword spelling is a real way back into the trap, not a theoretical
+    one: measured on 3.12, `importlib.import_module(name="json")` AND
+    `__import__(name="json")` both import successfully.
+
+    Relative imports are NOT hits (`node.level` must be 0). `from
+    .modal_runner_lib import X` names a DIFFERENT module -- a sibling of the
+    importing package -- and `tests/` is a real package, so treating it as a hit
+    would redden the guard over a legal import. Measured before the level check
+    existed: both `from .modal_runner_lib import ValidationError` and the
+    two-dot form returned `[(1, 'from-import')]`.
 
     PITFALL -- known blind spot, stated rather than hidden: a dynamic import
     whose argument is a variable (`importlib.import_module(M)`) is invisible to
@@ -105,12 +127,17 @@ def bare_spelling_imports(source):
                 if _bare_name(alias.name):
                     hits.append((node.lineno, "import"))
         elif isinstance(node, ast.ImportFrom):
-            if _bare_name(node.module or ""):
+            # level == 0 means absolute; see the relative-import note above.
+            if node.level == 0 and _bare_name(node.module or ""):
                 hits.append((node.lineno, "from-import"))
-        elif isinstance(node, ast.Call) and node.args:
+        elif isinstance(node, ast.Call):
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            arg = node.args[0]
+            # Both callables take the module name first positionally or as
+            # `name=`; `arg` stays None for a no-argument call, and the
+            # isinstance below rejects None without a separate branch.
+            arg = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg == "name"), None)
             if (name in ("import_module", "__import__") and isinstance(arg, ast.Constant)
                     and isinstance(arg.value, str) and _bare_name(arg.value)):
                 hits.append((node.lineno, "dynamic-import"))
@@ -121,6 +148,15 @@ def test_no_file_imports_the_bare_modal_runner_lib_spelling():
     """One spelling repo-wide, so one module object exists at run time."""
     offenders = {}
     for path in _repo_python_files():
+        # `--cached` enumerates the INDEX, so a tracked .py deleted from the
+        # working tree without `git rm` is still handed to us and `read_text`
+        # raises FileNotFoundError. Measured (deleting `scripts/exp_lib.py`):
+        # `1 failed, 8 passed`, with a pathlib traceback instead of this test's
+        # own message -- LOUD but opaque. Deliberately not caught: it can never
+        # produce a false PASS, and a `try` here would let the census silently
+        # stop covering a real file, which is the failure that matters. W2 and
+        # Tasks 3-5 move files, which is when to expect it; `git mv` / `git rm`
+        # keep the index consistent and it does not fire.
         try:
             hits = bare_spelling_imports(path.read_text(encoding="utf-8"))
         except SyntaxError:
@@ -146,19 +182,54 @@ def test_no_file_imports_the_bare_modal_runner_lib_spelling():
     ('import importlib\nm = importlib.import_module("modal_runner_lib")\n',
      "importlib.import_module literal"),
     ('def f():\n    return __import__("modal_runner_lib")\n', "__import__ literal in a body"),
+    ('import importlib\nm = importlib.import_module(name="modal_runner_lib")\n',
+     "importlib.import_module keyword"),
     ("import modal_runner_lib.state\n", "submodule"),
 ])
 def test_guard_detects_a_planted_bare_import(planted, shape):
-    """POSITIVE CONTROL at four depths and in three shapes.
+    """POSITIVE CONTROL at three AST depths, two scopes and three shapes.
 
-    A `tree.body` implementation passes the module-scope rows and fails the
-    function-body rows -- and the function-body shape is the one
-    `test_eval_baselines.py` actually used. A shape-blind implementation passes
-    both and fails the `import_module` rows -- and THAT is the shape
-    `tests/test_modal_runner.py` uses at three sites to reach its siblings. One
-    control is not enough here; that is the whole point.
+    Each number with its unit, because "depth" on its own has two defensible
+    readings and the wrong one oversells the control. Measured over these rows:
+    the planted import sits 1, 2 or 3 nodes below `Module` (three DEPTHS) and in
+    one of two SCOPES -- module scope for the plain, from-import, keyword and
+    submodule rows, a function body for the rest -- in three SHAPES (`import`,
+    `from-import`, `dynamic-import`).
+
+    A `tree.body` implementation fails FOUR rows, and the fourth is why depth is
+    the unit that matters: `importlib.import_module literal` is at MODULE scope
+    but its `Call` hides inside an `Assign`, so `tree.body` never reaches it
+    (measured -- the failing set is both function-body rows, the `__import__`
+    row, and that module-scope one). `tree.body` is blind to DEPTH, not to
+    scope, which is exactly what the old wording got wrong.
+
+    A shape-blind implementation instead passes every depth and fails the
+    dynamic-import rows -- the shape this repo's Modal tests use to reach their
+    `scripts/` siblings (three sites at the time of writing; W2 splits the file
+    that holds them, so the SHAPE is the durable citation and the filename is
+    not). One control is not enough here; that is the whole point.
     """
     assert bare_spelling_imports(planted), f"guard is blind to {shape}"
+
+
+@pytest.mark.parametrize("legal, why", [
+    ("import scripts.modal_runner_lib as mrl\n", "the CORRECT spelling this task converts TO"),
+    ("from .modal_runner_lib import ValidationError\n", "a relative import -- a different module"),
+    ("import modal_runner_lib_extra\n", "a name that merely starts with the bare one"),
+])
+def test_the_guard_does_not_fire_on_legal_lookalikes(legal, why):
+    """NEGATIVE CONTROL. A guard that reddens on legal code gets switched off.
+
+    Each row was a live false positive or a near miss, not a hypothetical:
+
+    - the relative form returned `[(1, 'from-import')]` until `node.level == 0`
+      was added, and `tests/` is a real package where such an import is legal;
+    - the `startswith` in `_bare_name` is `BARE + "."`, not `BARE`; drop the dot
+      and `modal_runner_lib_extra` becomes a hit. This row is what objects;
+    - the correct spelling must stay silent, or the guard fails the whole repo
+      the moment W1's conversions land.
+    """
+    assert bare_spelling_imports(legal) == [], f"false positive on {why}"
 
 
 def test_the_census_scans_the_whole_repo():
@@ -171,25 +242,48 @@ def test_the_census_scans_the_whole_repo():
     violations lived in `tests/`. This repo's named #1 defect class is a guard
     blind to its own scope, in the file this plan calls its durable deliverable.
 
-    The three asserts are not padding. Each is the FIRST objector to a different
+    Assert 1 names FILES, and it names all three W1 files rather than just one,
+    because the one-name version was measured blind to the case that matters:
+    filter the census to drop `tests/test_eval_baselines.py` -- the in-body
+    violation this entire guard exists for -- and the result was `9 passed`,
+    this file's whole collection at the time, with nothing objecting. A census
+    that has stopped enumerating the files W1 was written for has stopped doing
+    its job, whatever else it still reaches.
+
+    The asserts are not padding. Each is the FIRST objector to a different
     narrowing, measured by mutation against this exact argv -- so deleting any
     one of them silently retires a distinct check:
 
-        *.py -> scripts/*.py       -> assert 1 (19 paths scanned)
+        *.py -> scripts/*.py       -> assert 1 (19 paths; all 3 names missing)
         cwd=ROOT -> cwd=ROOT/tests -> assert 1 (83 paths; ls-files is relative)
+        census drops a W1 file     -> assert 1 (names it; nothing else fires)
         *.py -> tests/*.py         -> assert 3 (asserts 1 and 2 both PASS)
-        census drops this file     -> assert 2 (asserts 1 and 3 both PASS)
+        census drops THIS file     -> assert 2 (asserts 1 and 3 both PASS)
 
-    The last two are the reason asserts 2 and 3 exist at all: a narrowing that
+    Asserts 2 and 3 earn their place on the last two rows: a narrowing that
     keeps `tests/` sails past assert 1, and one that drops only this file sails
-    past both 1 and 3. If you add a filter to `_repo_python_files`, expect
-    assert 2 to be what tells you it excluded more than you meant.
+    past both 1 and 3.
+
+    MEASURED BOUND, in the same register as the `cwd=ROOT` gap documented in
+    `_repo_python_files` -- a stated limit, not coverage. A filter that drops
+    some OTHER single tracked file is still invisible: measured, dropping
+    `tests/test_oracle_statue.py` is `13 passed` and dropping `src/train.py` is
+    `13 passed`. Nothing closes that without re-deriving the census from the
+    census, which would prove nothing. Per-file coverage stops at the three
+    names below; the rest of the tree is covered at DIRECTORY granularity, by
+    assert 3.
     """
     scanned = _repo_python_files()
     rel = {p.relative_to(ROOT).as_posix() for p in scanned}
-    assert "tests/test_modal_runner.py" in rel, (
-        "the census does not reach the file this guard was written for; the "
-        f"enumeration has been narrowed. Scanned {len(scanned)} paths.")
+    required = {
+        "tests/test_modal_runner.py",
+        "tests/test_eval_baselines.py",
+        "tests/test_modal_argv.py",
+    }
+    missing = required - rel
+    assert not missing, ("the census no longer reaches the files this guard was written for: "
+                         f"{sorted(missing)}; the enumeration has been narrowed. "
+                         f"Scanned {len(scanned)} paths.")
     assert Path(__file__).resolve() in scanned, (
         "the census cannot see its own file, so it cannot police itself; the "
         "enumeration has been narrowed.")
