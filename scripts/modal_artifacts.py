@@ -65,8 +65,10 @@ def read_volume_file(volume: object, remote: str) -> bytes | None:
         an indistinguishable `None`. Callers that route through `_client_path`
         are already checked; this guard covers the ones that are not.
       * The `list(...)` is inside the `try` on purpose: however
-        `volume.read_file` delivers its chunks, a failure part-way through
-        becomes `None` here instead of escaping to the caller.
+        `volume.read_file` delivers its chunks, a part-way failure of one of
+        the caught types is converted here rather than at the caller. Only
+        those three types become `None`; anything else still propagates, which
+        is intended — an auth or transport error is not "no such object".
     """
     if remote.startswith("/artifacts"):
         raise mrl.ValidationError(f"refusing mounted path as Volume client API: {remote}")

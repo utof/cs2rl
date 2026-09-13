@@ -173,10 +173,16 @@ def _status_json(**overrides) -> bytes:
 # is invisible from any single row. Both branch-specific messages regressed to
 # the bare "corrupt volume json" once already, under a green test.
 #
-# PITFALL: pytest.raises(match=...) is re.search, not fullmatch, so
-# match="corrupt volume json" passes against "corrupt volume status json" —
-# which is exactly how the regression stayed green. Every pattern here is
-# anchored; do not relax one to a bare substring.
+# PITFALL: that regression stayed green because the pin was authored against
+# the regressed value. 4cf68b8, the commit that introduced the unified
+# protocol, wrote match="corrupt volume json" for a corrupt STATUS file -- the
+# message the bug produced, not the one the spec asks for. A pin copied from
+# observed behaviour can never fail. So check this table against what the
+# pre-unification adapters did and what spec 2.2 asks for, not against what
+# the code in front of you currently returns.
+#
+# Patterns are anchored so none can pass against a longer message that merely
+# contains it; do not relax one to a bare substring.
 MESSAGE_CASES = [
     pytest.param(b"{not-json", None, r"^corrupt volume status json$", id="corrupt_status_json"),
     pytest.param(

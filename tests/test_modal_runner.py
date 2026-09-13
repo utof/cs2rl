@@ -4696,6 +4696,11 @@ def test_launch_checkpoint_errors_is_total(fake_modal):
     # directly, so a reason token with no row there escapes launch as a bare
     # KeyError instead of the ValidationError callers handle. Nothing derives
     # that map from the protocol, so pin the two sets against each other.
+    #
+    # Known gap, measured rather than assumed: PROTOCOL_TOKENS is hand-written
+    # too, so adding a real eighth token to verify_checkpoint and touching
+    # neither this tuple nor the map leaves this test green. It guards the
+    # map-vs-tuple pairing only, not the protocol.
     module = _import_run_modal()
     assert set(module._LAUNCH_CHECKPOINT_ERRORS) == set(PROTOCOL_TOKENS) - {"ok"}
 

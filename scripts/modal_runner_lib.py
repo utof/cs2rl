@@ -1392,19 +1392,30 @@ def derive_run_view_from_bytes(
         mapping, or missing `created_at`.
       * "corrupt volume timestamp"        — reservation `created_at` present
         but not ISO-8601.
-      * "no STATUS.json or reservation.json" — both absent. Callers that know
-        the run id check for that case themselves first, so the message an
-        operator actually sees names the run.
+      * "no STATUS.json or reservation.json" — both absent. Every caller
+        checks for that case before calling in, so this generic wording is
+        usually replaced: `collect_status` and backfill name the run id and the
+        Path wrapper names the run root. `prior_checkpoint_or_raise` is the
+        exception — it says a bare "parent run was not found" with no id.
 
     PITFALL — the two branches are deliberately asymmetric. The STATUS branch
     has no `except ValidationError: raise`, so a bad `updated_at` is reported
     as a corrupt STATUS file. The reservation branch has one, so a bad
     `created_at` keeps the distinct "corrupt volume timestamp". Neither is an
-    oversight. Against the three pre-unification adapter copies this matches on
-    six of seven inputs; the reservation timestamp is a deliberate divergence
-    (those copies re-wrapped it as "corrupt volume reservation json", because
-    ValidationError is a ValueError and their generic handler swallowed it),
-    made because spec §2.2 asks for corrupt timestamps to surface distinctly.
+    oversight. Against the two pre-unification *Volume* adapter copies this
+    matches on six of seven inputs; the reservation timestamp is a deliberate
+    divergence (those copies re-wrapped it as "corrupt volume reservation
+    json", because ValidationError is a ValueError and their generic handler
+    swallowed it), made because spec §2.2 asks for corrupt timestamps to
+    surface distinctly.
+
+    The third caller, the local Path wrapper `derive_run_view`, is not a
+    fourth vocabulary but a newcomer to this one: before unification it parsed
+    inline and raised raw JSONDecodeError / KeyError / TypeError, producing
+    none of these labelled messages. Spec §2.2 declares that under "Behaviour
+    change (stated, not wrapped)", and
+    test_path_derive_run_view_corrupt_status_is_validation_error pins it.
+
     Every spelling is pinned by the message table in
     tests/test_modal_protocol.py. Adding or removing either clause silently
     changes what an operator sees; change the pinned table first.
@@ -1474,10 +1485,15 @@ def _load_checkpoint_weights(buf: object, **kwargs: object) -> object:
     side status client does — does not pull in torch or touch CUDA.
 
     PITFALL: `**kwargs` is accepted and ignored. `verify_checkpoint` calls its
-    `load` with `map_location`/`weights_only` spelled out, and this function
-    swallows them and hard-codes the same values rather than forwarding — so
-    no caller can weaken `weights_only=True` through the injection seam. Do
-    not "simplify" it to `torch.load(buf, **kwargs)`.
+    `load` with `map_location`/`weights_only` spelled out; this function
+    swallows them and hard-codes the same values rather than forwarding, so it
+    cannot be talked into loading with weaker settings. Do not "simplify" it to
+    `torch.load(buf, **kwargs)`.
+
+    That is a property of this default only, not a security boundary. The
+    `load=` parameter is a full replacement: an injected callable (the test
+    fakes discard their kwargs outright) skips the weights-only check
+    altogether. Injection is for tests; production must not pass `load=`.
     """
     import torch
     return torch.load(buf, map_location="cpu", weights_only=True)
@@ -1527,8 +1543,12 @@ def verify_checkpoint(
         terminal-or-stale *before* calling; folding that in would make
         `collect_status` lie about a healthy running job's checkpoint.
       * Adding an eighth token means updating `_LAUNCH_CHECKPOINT_ERRORS` in
-        scripts/run_modal.py, which indexes this token directly. The totality
-        test in tests/test_modal_runner.py enforces that pairing.
+        scripts/run_modal.py, which indexes this token directly — an unmapped
+        token escapes launch as a bare KeyError. Nothing checks that for you.
+        test_launch_checkpoint_errors_is_total compares that map against the
+        hand-written PROTOCOL_TOKENS tuple, which keeps those two in step, but
+        the tuple is not derived from this function: a token added here and
+        nowhere else leaves that test green. Update all three by hand.
     """
 
     def fail(reason: str) -> CheckpointVerdict:
