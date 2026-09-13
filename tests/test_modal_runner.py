@@ -4679,6 +4679,160 @@ def test_prior_run_resume_sends_only_immutable_digest_path(fake_modal, tmp_path)
     assert fake_modal.volumes[mrl.VOLUME_NAME].files[f"inputs/sha256/{digest}.pt"] == ckpt_bytes
 
 
+PROTOCOL_TOKENS = (
+    "missing_sidecar",
+    "corrupt_sidecar",
+    "missing_checkpoint",
+    "stale_size",
+    "digest_mismatch",
+    "not_loadable",
+    "replaced",
+    "ok",
+)
+
+
+def _install_protocol_parent(volume, tmp_path, run_id, case):
+    import torch
+
+    sidecar_path = (mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_SIDECAR_NAME).as_posix()
+    ckpt_path = (mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_NAME).as_posix()
+    if case == "not_loadable":
+        ckpt_bytes = b"torn-bytes"
+    else:
+        ckpt = tmp_path / f"{run_id}.pt"
+        torch.save({"weight": torch.tensor([3.0])}, ckpt)
+        ckpt_bytes = ckpt.read_bytes()
+    digest = mrl.sha256_bytes(ckpt_bytes)
+    sidecar = {
+        "sha256": digest,
+        "size": len(ckpt_bytes),
+        "mtime_ns": 1,
+        "validated_at": _aware().isoformat(),
+    }
+    _write_parent_artifacts(
+        volume,
+        run_id,
+        status="completed",
+        updated_at=_aware().isoformat(),
+        ckpt_bytes=ckpt_bytes,
+        sidecar=None if case == "missing_sidecar" else sidecar,
+    )
+    if case == "corrupt_sidecar":
+        volume.files[sidecar_path] = b"{not-json"
+    elif case == "missing_checkpoint":
+        volume.files.pop(ckpt_path, None)
+    elif case == "stale_size":
+        volume.files[sidecar_path] = json.dumps({**sidecar, "size": len(ckpt_bytes) + 8}).encode()
+    elif case == "digest_mismatch":
+        volume.files[sidecar_path] = json.dumps({**sidecar, "sha256": "0" * 64}).encode()
+    elif case == "replaced":
+        volume.replace_after_read = {
+            sidecar_path: json.dumps({
+                **sidecar, "sha256": "1" * 64
+            }).encode()
+        }
+    return ckpt_bytes, digest
+
+
+@pytest.mark.parametrize("case", PROTOCOL_TOKENS)
+def test_protocol_tokens_through_collect_status(fake_modal, tmp_path, case):
+    module = _import_artifacts()
+    volume = _named_volume(fake_modal)
+    _install_protocol_parent(volume, tmp_path, "ok-id", case)
+    report = module.collect_status("ok-id", now=_aware())
+    assert report["run_id"] == "ok-id"
+    assert report["status"] == "completed"
+    assert report["checkpoint_loadable"] is (case == "ok")
+
+
+@pytest.mark.parametrize("case", PROTOCOL_TOKENS)
+def test_protocol_tokens_through_launch_run(fake_modal, tmp_path, case):
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    volume = _named_volume(fake_modal)
+    ckpt_bytes, digest = _install_protocol_parent(volume, tmp_path, "parent-run", case)
+    request = module.resolve_launch_request(
+        **_valid_launch_sentinels(git_sha=sha, run_id="child-run", resume_run_id="parent-run"))
+    if case == "ok":
+        module.launch_run(request,
+                          repo=repo,
+                          app_obj=module.app,
+                          now=_aware(),
+                          stdout=_capture_stdout())
+        payload = fake_modal.configured_spawn_calls[0][1][0]
+        assert payload["resume_sha256"] == digest
+        assert fake_modal.volumes[mrl.VOLUME_NAME].files[f"inputs/sha256/{digest}.pt"] == ckpt_bytes
+        return
+    with pytest.raises(mrl.ValidationError):
+        module.launch_run(request, repo=repo, app_obj=module.app, now=_aware())
+
+
+def test_launch_missing_parent_run_message(fake_modal, tmp_path):
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    _named_volume(fake_modal)
+    request = module.resolve_launch_request(
+        **_valid_launch_sentinels(git_sha=sha, run_id="child-run", resume_run_id="missing-parent"))
+    with pytest.raises(mrl.ValidationError, match="parent run was not found"):
+        module.launch_run(request, repo=repo, app_obj=module.app, now=_aware())
+
+
+def _rearm_replaced(volume, run_id):
+    sidecar_path = (mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_SIDECAR_NAME).as_posix()
+    ckpt_path = (mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_NAME).as_posix()
+    ckpt_bytes = volume.files[ckpt_path]
+    matching = {
+        "sha256": mrl.sha256_bytes(ckpt_bytes),
+        "size": len(ckpt_bytes),
+        "mtime_ns": 1,
+        "validated_at": _aware().isoformat(),
+    }
+    volume.files[sidecar_path] = json.dumps(matching).encode()
+    volume.replace_after_read = {
+        sidecar_path: json.dumps({
+            **matching, "sha256": "1" * 64
+        }).encode()
+    }
+
+
+def test_dual_caller_mutation_pin_replaced(fake_modal, tmp_path, monkeypatch):
+    arts = _import_artifacts()
+    launch = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    volume = _named_volume(fake_modal)
+    real_verify = mrl.verify_checkpoint
+
+    def _ok_skipping_reread(sidecar_bytes, checkpoint_bytes, sidecar_reread_bytes, *, load=None):
+        del sidecar_reread_bytes, load
+        if sidecar_bytes is None or checkpoint_bytes is None:
+            return mrl.CheckpointVerdict(False, "missing_sidecar", None, None)
+        digest = mrl.sha256_bytes(checkpoint_bytes)
+        return mrl.CheckpointVerdict(True, None, checkpoint_bytes, digest)
+
+    _install_protocol_parent(volume, tmp_path, "parent-run", "replaced")
+    monkeypatch.setattr(mrl, "verify_checkpoint", _ok_skipping_reread)
+    assert arts.collect_status("parent-run", now=_aware())["checkpoint_loadable"] is True
+    _rearm_replaced(volume, "parent-run")
+    request = launch.resolve_launch_request(
+        **_valid_launch_sentinels(git_sha=sha, run_id="child-patched", resume_run_id="parent-run"))
+    launch.launch_run(request,
+                      repo=repo,
+                      app_obj=launch.app,
+                      now=_aware(),
+                      stdout=_capture_stdout())
+    monkeypatch.setattr(mrl, "verify_checkpoint", real_verify)
+    _rearm_replaced(volume, "parent-run")
+    assert arts.collect_status("parent-run", now=_aware())["checkpoint_loadable"] is False
+    _rearm_replaced(volume, "parent-run")
+    request2 = launch.resolve_launch_request(**_valid_launch_sentinels(
+        git_sha=sha, run_id="child-unpatched", resume_run_id="parent-run"))
+    with pytest.raises(mrl.ValidationError):
+        launch.launch_run(request2, repo=repo, app_obj=launch.app, now=_aware())
+
+
 def _expected_thread_caps():
     return [f"{key}={value}" for key, value in sorted(mrl._THREAD_CAP_ENV.items())]
 
