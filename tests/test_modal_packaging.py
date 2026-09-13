@@ -36,11 +36,15 @@ def _repo_python_files():
 
     `--others --exclude-standard` is load-bearing. A `--cached`-only census is
     blind to a brand-new file until it is staged -- including this one, which is
-    how a guard ends up unable to see itself. Measured on this tree: 131 cached,
-    139 with `--others`; the extras are this file plus 7 untracked scratch .py
-    under `.ua/`. The TOTAL is tree-dependent -- untracked scratch counts toward
-    it -- so do not assert on it; the structural point is what matters and it is
-    tree-independent: drop `--others` and this file cannot see itself.
+    how a guard ends up unable to see itself. Measured WHILE THIS FILE WAS STILL
+    UNTRACKED (the state the argument is about): 131 cached, 139 with `--others`,
+    and `--cached` alone could not see it. After the commit that landed it: 132
+    cached, 139 with `--others`. Stated as a pair, because the same before-only
+    citation the module docstring warns about is easy to make right here.
+    Do NOT assert on either total: it is tree-dependent -- the 7-file gap here is
+    untracked scratch under `.ua/`, not a property of the repo. The structural
+    point IS tree-independent, and `test_the_census_scans_the_whole_repo` is what
+    pins it.
 
     `.venv/` and `outputs/` are gitignored, so `--exclude-standard` keeps them
     out; that is what stops the census reading thousands of vendored files.
