@@ -59,8 +59,15 @@ def _repo_python_files():
 
     `cwd=ROOT` is load-bearing: `git ls-files "*.py"` is CWD-RELATIVE, so
     running it from `tests/` returns 83 tracked paths instead of 132 and the
-    guard silently stops watching `scripts/` and `src/`.
-    `test_the_census_scans_the_whole_repo` is the control for exactly that.
+    guard silently stops watching `scripts/` and `src/`. Pinning the CWD is what
+    makes the scope independent of where pytest was invoked from.
+    `test_the_census_scans_the_whole_repo` covers a WRONG cwd, not a MISSING
+    one, and the difference is measurable: repointing it at `tests/` is
+    `2 failed, 7 passed`, but DELETING `cwd=ROOT` is `9 passed` when pytest runs
+    from the repo root, because the subprocess then inherits a CWD that happens
+    to be the right one. That deletion only bites once something runs pytest
+    from elsewhere -- and then the same test does go red. Stated rather than
+    left to read as full coverage.
     """
     out = subprocess.run(["git", "ls-files", "--cached", "*.py"],
                          cwd=ROOT,
