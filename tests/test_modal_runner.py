@@ -4691,6 +4691,15 @@ PROTOCOL_TOKENS = (
 )
 
 
+def test_launch_checkpoint_errors_is_total(fake_modal):
+    # prior_checkpoint_or_raise indexes _LAUNCH_CHECKPOINT_ERRORS[verdict.reason]
+    # directly, so a reason token with no row there escapes launch as a bare
+    # KeyError instead of the ValidationError callers handle. Nothing derives
+    # that map from the protocol, so pin the two sets against each other.
+    module = _import_run_modal()
+    assert set(module._LAUNCH_CHECKPOINT_ERRORS) == set(PROTOCOL_TOKENS) - {"ok"}
+
+
 def _install_protocol_parent(volume, tmp_path, run_id, case):
     import torch
 
