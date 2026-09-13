@@ -78,12 +78,25 @@ PACKAGED = "scripts." + BARE
 # tracked files import the runner, four of them tests. Recorded for W3, which
 # deletes `modal_runner_lib` and has to find every one of them.
 #
-# The BOUND that survives the scope control, stated rather than left to be
-# discovered: the runtime gate only sees imports the session it spawns actually
-# EXECUTES, and the census that feeds it is static. A dynamic import whose
-# argument is a variable, sitting in a file that imports the runner no other
-# way, is invisible to both halves. Neither guard closes that; together they
-# make it the only remaining hole.
+# BOUNDS that survive the scope control, stated rather than left to be
+# discovered. The runtime gate only sees imports the session it spawns actually
+# EXECUTES, and the census that feeds it is static, so a file can reach the
+# runner in a way neither half sees. Two such ways are known and NAMED; this is
+# not a claim that the list is complete, and an earlier revision of this comment
+# calling the first one "the only remaining hole" was wrong on its own terms:
+#
+#   1. a dynamic import whose argument is a VARIABLE
+#      (`importlib.import_module(M)`), in a file that imports the runner no
+#      other way. Invisible to the static walker by construction.
+#   2. an import written inside a subprocess CODE STRING. Invisible to the
+#      walker, which sees a string, and to the runtime probe, which reads
+#      `sys.modules` in the parent and never sees a child's. This repo writes
+#      that shape at `tests/test_modal_runner.py:93`. Parsing string literals is
+#      deliberately not attempted -- see `bare_spelling_imports`.
+#
+# A third was closed rather than stated: `from scripts import modal_runner_lib`
+# used to return `[]`, which would have let Task 4's moved import escape the
+# scope control entirely. It is now the `from-parent-import` shape.
 _IMPORTERS = [
     "tests/test_modal_argv.py",
     "tests/test_modal_protocol.py",
@@ -98,6 +111,13 @@ _IMPORTERS = [
 # its end, the module census below is measuring a session that never executed
 # the line the gate exists for.
 _INBODY_CARRIER = ("tests/test_eval_baselines.py::test_eval_interval_cli_config_and_modal_mirror")
+
+# Wall-clock ceiling for the nested session, in seconds. Named rather than
+# inlined so the value and the message that quotes it cannot drift apart -- a
+# literal in both places is one edit away from a message that lies about its own
+# threshold. Chosen from this test's measured spread, not picked round: 10 clean
+# sessions ran 33.30-44.78s, so this is ~13x the slowest observed.
+_NESTED_TIMEOUT_S = 600
 
 
 def _repo_python_files():
@@ -172,12 +192,31 @@ def bare_spelling_imports(source, target=BARE):
     default keeps every existing caller and the whole mutation table below
     byte-identical in meaning.
 
-    Covers three shapes, because this repo's Modal tests write all three:
-    `import X`, `from X import ...`, and `importlib.import_module("X")` /
-    `__import__("X")` with a STRING LITERAL argument -- positional OR `name=`.
+    Covers FOUR shapes, because this repo's Modal tests write the first three
+    and Task 4 is free to write the fourth: `import X`, `from X import ...`,
+    `importlib.import_module("X")` / `__import__("X")` with a STRING LITERAL
+    argument -- positional OR `name=` -- and `from <parent> import <leaf>`.
     The keyword spelling is a real way back into the trap, not a theoretical
     one: measured on 3.12, `importlib.import_module(name="json")` AND
     `__import__(name="json")` both import successfully.
+
+    The FOURTH shape, `from scripts import modal_runner_lib`, only exists when
+    `target` is DOTTED, and it is the one this walker was missing. The
+    `from-import` branch above matches on the module PATH, which is right for a
+    top-level target and incomplete for a dotted one, because the leaf can be
+    imported from its parent. Measured against the walker before this branch
+    existed, `from scripts import modal_runner_lib` returned `[]` under
+    `PACKAGED` -- an ordinary idiom, invisible. That mattered because
+    `test_the_runtime_probe_runs_every_test_file_that_imports_the_runner`
+    promises Task 4 by name that it reddens when the import moves; had Task 4
+    written this spelling, it would have stayed green and the runtime gate would
+    have silently stopped covering the new file. W3 makes the idiom MORE likely
+    by turning `modal_runner_lib` into a package.
+
+    The branch is unreachable for a top-level target: `BARE.rpartition(".")`
+    yields an empty parent, and `if parent` gates it. Proven rather than
+    asserted -- an instrumented copy that raises on entry never fired across the
+    whole tracked census under `BARE`, and did fire under `PACKAGED`.
 
     Relative imports are NOT hits (`node.level` must be 0). `from
     .modal_runner_lib import X` names a DIFFERENT module -- a sibling of the
@@ -186,12 +225,28 @@ def bare_spelling_imports(source, target=BARE):
     existed: both `from .modal_runner_lib import ValidationError` and the
     two-dot form returned `[(1, 'from-import')]`.
 
-    PITFALL -- known blind spot, stated rather than hidden: a dynamic import
-    whose argument is a variable (`importlib.import_module(M)`) is invisible to
-    any static scan. `test_modal_runner_lib_resolves_to_exactly_one_module_object`
-    is the runtime gate that covers it; that is why this repo has both and not
-    just this one.
+    PITFALL -- known blind spots, named rather than hidden, and NOT claimed to
+    be exhaustive:
+
+    1. a dynamic import whose argument is a variable
+       (`importlib.import_module(M)`) is invisible to any static scan.
+       `test_modal_runner_lib_resolves_to_exactly_one_module_object` is the
+       runtime gate that covers it; that is why this repo has both and not just
+       this one.
+    2. an import written inside a subprocess CODE STRING is invisible to this
+       walker -- it reads the string as a string -- and to the runtime probe,
+       which reads `sys.modules` in the parent process and never sees a child's.
+       This repo writes that shape: `tests/test_modal_runner.py:93` holds
+       `import scripts.modal_runner_lib` inside a code string, and the census
+       correctly reports only line 51 for that file. A code string importing
+       BOTH spellings would rebuild the two-module-object trap with neither
+       guard objecting. Parsing string literals is deliberately NOT attempted:
+       it is a false-positive generator, since a string that looks like code is
+       not necessarily executed as code.
     """
+    # Split once, outside the walk. For a top-level target `parent` is "", which
+    # is what makes the `from <parent> import <leaf>` branch unreachable.
+    parent, _, leaf = target.rpartition(".")
     hits = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -202,6 +257,16 @@ def bare_spelling_imports(source, target=BARE):
             # level == 0 means absolute; see the relative-import note above.
             if node.level == 0 and _bare_name(node.module or "", target):
                 hits.append((node.lineno, "from-import"))
+            elif node.level == 0 and parent and node.module == parent:
+                # `from scripts import modal_runner_lib [as mrl]`. The alias is
+                # irrelevant -- `alias.name` is the imported name and
+                # `alias.asname` is only what it is bound to locally, so the
+                # `as` spelling needs no separate case. Exact equality on the
+                # leaf, never startswith: `from scripts import
+                # modal_runner_lib_extra` is a different module.
+                for alias in node.names:
+                    if alias.name == leaf:
+                        hits.append((node.lineno, "from-parent-import"))
         elif isinstance(node, ast.Call):
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
@@ -321,6 +386,7 @@ def test_guard_detects_a_planted_bare_import(planted, shape):
 
 @pytest.mark.parametrize("legal, why", [
     ("import scripts.modal_runner_lib as mrl\n", "the CORRECT spelling this task converts TO"),
+    ("from scripts import modal_runner_lib\n", "the CORRECT spelling, imported from its parent"),
     ("from .modal_runner_lib import ValidationError\n", "a relative import -- a different module"),
     ("import modal_runner_lib_extra\n", "a name that merely starts with the bare one"),
 ])
@@ -334,9 +400,52 @@ def test_the_guard_does_not_fire_on_legal_lookalikes(legal, why):
     - the `startswith` in `_bare_name` is `BARE + "."`, not `BARE`; drop the dot
       and `modal_runner_lib_extra` becomes a hit. This row is what objects;
     - the correct spelling must stay silent, or the guard fails the whole repo
-      the moment W1's conversions land.
+      the moment W1's conversions land -- in BOTH its spellings, which is why
+      `from scripts import modal_runner_lib` is here. That row is the BARE half
+      of the fourth shape: it must be a HIT under `PACKAGED` (the row of the
+      same name in `test_the_walker_finds_the_packaged_spelling_in_every_shape`)
+      and SILENT under `BARE`, and one direction without the other is what let
+      the shape go missing in the first place.
     """
     assert bare_spelling_imports(legal) == [], f"false positive on {why}"
+
+
+@pytest.mark.parametrize("planted, shape", [
+    ("import scripts.modal_runner_lib\n", "module scope"),
+    ("import scripts.modal_runner_lib as mrl\n", "module scope, aliased"),
+    ("from scripts.modal_runner_lib import ValidationError\n", "from-import on the full path"),
+    ("def f():\n    import scripts.modal_runner_lib as mrl\n", "function body"),
+    ('import importlib\nm = importlib.import_module("scripts.modal_runner_lib")\n',
+     "importlib.import_module literal"),
+    ("import scripts.modal_runner_lib.state\n", "submodule"),
+    ("from scripts import modal_runner_lib\n", "from-parent-import -- THE SHAPE THAT WAS MISSING"),
+    ("from scripts import modal_runner_lib as mrl\n", "from-parent-import, aliased"),
+    ("from scripts import modal_artifacts, modal_runner_lib\n",
+     "from-parent-import, one of several names"),
+    ("def f():\n    from scripts import modal_runner_lib\n", "from-parent-import in a body"),
+])
+def test_the_walker_finds_the_packaged_spelling_in_every_shape(planted, shape):
+    """POSITIVE CONTROL for the walker aimed at `PACKAGED` -- the half that
+    decides which files reach `_IMPORTERS`, and which had NO shape-level control
+    before this round.
+
+    Every row above `test_guard_detects_a_planted_bare_import` covers the `BARE`
+    target only. `_test_files_importing(PACKAGED)` calls the same walker with a
+    DOTTED target, where one shape behaves differently: the leaf can be imported
+    from its parent. Review found `from scripts import modal_runner_lib`
+    returning `[]`, so the file that Task 4 is warned about could have moved its
+    import into that idiom and never entered `_IMPORTERS`.
+
+    Each row also asserts SILENCE under `BARE`. That is not padding -- it is the
+    inertness half. A fix that made the new branch fire for a top-level target
+    would redden `test_no_file_imports_the_bare_modal_runner_lib_spelling` over
+    the legal packaged spelling, i.e. over the entire repo after W1.
+    """
+    assert bare_spelling_imports(planted, PACKAGED), f"walker is blind to {shape} under PACKAGED"
+    bare_hits = bare_spelling_imports(planted, BARE)
+    assert bare_hits == [], (
+        f"{shape} matched the BARE target; the packaged spelling is LEGAL and this "
+        "would redden the repo-wide guard over correct code")
 
 
 def test_the_census_scans_the_whole_repo():
@@ -491,9 +600,9 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     `@pytest.mark.skip`) is why the probe filters on `when == "call"`.
 
     IF YOU ARE HERE BECAUSE THIS TEST WENT RED, READ THIS FIRST. Assertion 1
-    demands the nested session exit 0, and that session runs all 424 tests in
-    the four `_IMPORTERS` files. So this test inherits the flakiness of every
-    one of them, and reports it as "the probe session did not finish clean" --
+    demands the nested session exit 0, and that session runs every test in the
+    four `_IMPORTERS` files. So this test inherits the flakiness of every one
+    of them, and reports it as "the probe session did not finish clean" --
     a headline pointing at the import machinery when the fault is very likely
     somewhere else entirely. The nested session's tail, including its `FAILED`
     line, is embedded in the assertion message: READ THAT LINE before you
@@ -504,8 +613,8 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     costs: the census reads clean while the bare import sits unreached.
 
     COST, because this is a planning fact and not a rounding error: this spawns
-    a nested pytest session running all four `_IMPORTERS` files end to end, 424
-    tests. Measured by `pytest --durations`, this test's `call` phase is **37s**
+    a nested pytest session running all four `_IMPORTERS` files end to end.
+    Measured by `pytest --durations`, this test's `call` phase is **37s**
     against **0.78s** for the next slowest test in this file, so it is ~96% of
     the file's 38.06s. Run-to-run spread on this machine is 33-41s, wider than
     the 0.7s that adding `test_modal_protocol.py` cost -- so treat the figure as
@@ -527,9 +636,17 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     # above rejects that entry too (this file imports no runner), but it cannot
     # save you here, because pytest runs tests in definition order within a file
     # and a `-k` selecting only this one skips it entirely. Cheap, local, first.
-    assert Path(__file__).relative_to(ROOT).as_posix() not in _IMPORTERS, (
+    # Entries are resolved before comparing, not string-matched: `./tests/x.py`,
+    # `tests//x.py` and an absolute path all name this file while comparing
+    # unequal as strings, and `ROOT / <absolute>` yields the absolute path
+    # unchanged, so one expression covers relative and absolute alike. The scope
+    # control above would reject any of them anyway; this guard exists for the
+    # `-k`-selects-only-this-test case, where it is the only thing standing
+    # between a typo and an unbounded fork.
+    _self = Path(__file__).resolve()
+    assert not any((ROOT / entry).resolve() == _self for entry in _IMPORTERS), (
         "this file is in `_IMPORTERS`; the nested session would collect this "
-        "test and recurse without bound")
+        f"test and recurse without bound. _IMPORTERS={_IMPORTERS}")
 
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "probe.json")
@@ -551,14 +668,44 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
             "no:randomly", "-p", "tests._modal_import_probe", "--basetemp",
             os.path.join(tmp, "pt")
         ]
-        result = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, text=True)
+        # timeout= so a hung child cannot take the whole outer suite down with no
+        # diagnostic; the value and its rationale live at `_NESTED_TIMEOUT_S`.
+        # In-repo precedent is `tests/test_resume_state.py`, which passes
+        # timeout=1500/600 on its subprocess runs.
+        try:
+            result = subprocess.run(argv,
+                                    cwd=ROOT,
+                                    env=env,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=_NESTED_TIMEOUT_S)
+        except subprocess.TimeoutExpired as expired:
+            # TimeoutExpired carries whatever was captured before the kill, and
+            # it arrives as bytes-or-None regardless of text=True. Re-raised as
+            # an assertion so the reader gets the partial tail rather than a
+            # bare traceback with no evidence in it.
+            partial = (expired.stdout or b"")[-3000:]
+            raise AssertionError(
+                f"the probe session did not finish within {_NESTED_TIMEOUT_S}s, so it hung "
+                "rather than failed. This is not a module-spelling problem; look at what "
+                f"the nested session was doing.\n{partial!r}") from expired
         # stderr is in every message below on purpose: when the nested session
         # dies before sessionfinish (bad plugin, collection crash) stdout is
         # empty and the traceback is on stderr, which is the one case where the
         # failure message is all a reader gets.
         tail = f"{result.stdout[-3000:]}\n--- stderr ---\n{result.stderr[-2000:]}"
         assert os.path.exists(out), (f"probe never ran; pytest exit={result.returncode}\n{tail}")
-        payload = json.loads(Path(out).read_text(encoding="utf-8"))
+        # A session killed mid-write leaves a file that passes the exists check
+        # and then blows up in the decoder. Caught so the tail -- the only thing
+        # that says WHY -- survives; an unguarded JSONDecodeError throws it away.
+        raw = Path(out).read_text(encoding="utf-8")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as bad:
+            raise AssertionError(
+                "the probe wrote its output file but it is not valid JSON, so the session "
+                f"was killed mid-write. exit={result.returncode} bytes={len(raw)} "
+                f"{bad}\nfile starts: {raw[:200]!r}\n{tail}") from bad
 
     assert result.returncode == 0 and payload["exitstatus"] == 0, (
         "the probe session did not finish clean, so its module census describes "
