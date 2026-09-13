@@ -151,10 +151,19 @@ def test_the_census_scans_the_whole_repo():
     never touches `_repo_python_files`, the half that decides WHAT is read.
 
     WHY this exists: narrowing the pattern from `*.py` to `scripts/*.py` -- one
-    token -- leaves every row above green while both real violations live in
-    `tests/`. Measured: that shrink is green on the census plus all seven rows.
-    This repo's named #1 defect class is a guard blind to its own scope, in the
-    file this plan calls its durable deliverable.
+    token -- leaves every row above green, and at the time this landed both
+    real violations lived in `tests/`. Measured (mutation, re-run after the
+    landing commit): that shrink gives `1 failed, 8 passed` -- this test is the
+    only thing that objects. This repo's named #1 defect class is a guard blind
+    to its own scope, in the file this plan calls its durable deliverable.
+
+    KNOWN GAP, stated because an unstated one is worse: `--others
+    --exclude-standard` is NOT covered by this test. Measured (mutation): drop
+    both flags and all 9 tests still pass. They could not do otherwise -- the
+    flags only matter for an UNTRACKED .py, and every file this test can name,
+    including its own, is tracked. The flags earned their place while this file
+    was itself untracked; keeping them honest for the NEXT untracked offender
+    needs a check that plants a real untracked file, which this test does not do.
     """
     scanned = _repo_python_files()
     rel = {p.relative_to(ROOT).as_posix() for p in scanned}
@@ -162,8 +171,8 @@ def test_the_census_scans_the_whole_repo():
         "the census does not reach the file this guard was written for; the "
         f"enumeration has been narrowed. Scanned {len(scanned)} paths.")
     assert Path(__file__).resolve() in scanned, (
-        "the census cannot see its own file, so a new offender is invisible "
-        "until someone stages it. Did `--others --exclude-standard` get dropped?")
+        "the census cannot see its own file, so it cannot police itself; the "
+        "enumeration has been narrowed.")
     tops = {r.split("/")[0] for r in rel}
     assert {
         "scripts", "src", "tests"
