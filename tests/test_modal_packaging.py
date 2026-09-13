@@ -490,6 +490,19 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     see the Task 2 report; the third control (carrier silenced with
     `@pytest.mark.skip`) is why the probe filters on `when == "call"`.
 
+    IF YOU ARE HERE BECAUSE THIS TEST WENT RED, READ THIS FIRST. Assertion 1
+    demands the nested session exit 0, and that session runs all 424 tests in
+    the four `_IMPORTERS` files. So this test inherits the flakiness of every
+    one of them, and reports it as "the probe session did not finish clean" --
+    a headline pointing at the import machinery when the fault is very likely
+    somewhere else entirely. The nested session's tail, including its `FAILED`
+    line, is embedded in the assertion message: READ THAT LINE before you
+    suspect anything about module objects or spellings. A known instance is
+    gh#211 (`test_interrupt_without_publishable_checkpoint_writes_a_reason_file`,
+    seen once, not reproducible on demand). Trading this away means dropping
+    assertion 1, and control (a) in the Task 2 report shows exactly what that
+    costs: the census reads clean while the bare import sits unreached.
+
     COST, because this is a planning fact and not a rounding error: this spawns
     a nested pytest session running all four `_IMPORTERS` files end to end, 424
     tests. Measured by `pytest --durations`, this test's `call` phase is **37s**
