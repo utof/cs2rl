@@ -1875,42 +1875,6 @@ def build_policy(vecenv,
     return Dust2Policy().to(device)
 
 
-# ── SECTION: Timing patch ─────────────────────────────────────────────────
-
-
-def _patch_trainer_with_timing(trainer):
-    """Monkey-patch trainer.evaluate() and trainer.train() to record wall-clock timing.
-
-    After each call, trainer._timing holds:
-        collect_ms  — ms spent in evaluate() (env stepping + rollout collection)
-        update_ms   — ms spent in train() (forward + backward + optimizer step)
-
-    Both values are also written into the logs dict returned by train() as
-    timing/collect_ms and timing/update_ms for W&B / metrics.jsonl logging.
-    """
-    trainer._timing = {"collect_ms": 0.0, "update_ms": 0.0}
-    _orig_evaluate = trainer.evaluate
-    _orig_train = trainer.train
-
-    def _timed_evaluate(*args, **kwargs):
-        t0 = time.perf_counter()
-        result = _orig_evaluate(*args, **kwargs)
-        trainer._timing["collect_ms"] = (time.perf_counter() - t0) * 1000.0
-        return result
-
-    def _timed_train(*args, **kwargs):
-        t0 = time.perf_counter()
-        result = _orig_train(*args, **kwargs)
-        trainer._timing["update_ms"] = (time.perf_counter() - t0) * 1000.0
-        if isinstance(result, dict):
-            result["timing/collect_ms"] = trainer._timing["collect_ms"]
-            result["timing/update_ms"] = trainer._timing["update_ms"]
-        return result
-
-    trainer.evaluate = _timed_evaluate
-    trainer.train = _timed_train
-
-
 # ── SECTION: R0-I fixed-baseline evaluation hooks ─────────────────────────
 
 
@@ -3699,8 +3663,13 @@ def train(args):
               f"{int(_participating_rows.sum()):,} of {_participating_rows.size:,} agent rows "
               f"participate (raw horizon {train_config['total_timesteps']:,} rows = "
               f"{train_config['participating_timesteps']:,} hero steps).")
-    # timing is the outermost wrapper so it sees all evaluate() calls regardless of selfplay
-    _patch_trainer_with_timing(trainer)
+    # Per-epoch wall-clock, measured at the evaluate()/train() call sites in the
+    # loop below (#166 replaced a monkey-patch that wrapped both methods; the
+    # patch had to be installed LAST so selfplay could not shadow it, which made
+    # patch order load-bearing for a measurement). The dict is created here
+    # because the loop assigns INTO it and the [Timing] print reads it, so it
+    # has to exist before the first epoch.
+    trainer._timing = {"collect_ms": 0.0, "update_ms": 0.0}
     # ────────────────────────────────────────────────────────────────────────
 
     # ── R0-C (#134): full-state checkpointing + restore ─────────────────────
@@ -3773,14 +3742,25 @@ def train(args):
     print(f"[Train] Starting PufferLib PPO for {args.timesteps:,} env steps...")
     while trainer.epoch < trainer.total_epochs:
         trainer._tag_metrics = None    # TAG: drop any un-injected measurement
+        t0 = time.perf_counter()
         trainer.evaluate()
+        trainer._timing["collect_ms"] = (time.perf_counter() - t0) * 1000.0
 
         # Rung 0 §2.2: the participating buffer is zero-initialised, so an
         # all-False buffer means evaluate() never ran its scatter — every
         # masked reduction below would then divide by the clamp floor and
         # train on nothing. Fail loudly instead.
         assert trainer.participating.any(), "participating buffer never written this epoch"
+        t0 = time.perf_counter()
         logs = trainer.train()
+        trainer._timing["update_ms"] = (time.perf_counter() - t0) * 1000.0
+        # Injected HERE, not in the isinstance(logs, dict) block further down:
+        # _timed_train used to inject before returning, so _eval_hook.after_train
+        # already sees these keys. Folding this into the later block would change
+        # what the hook is handed.
+        if isinstance(logs, dict):
+            logs["timing/collect_ms"] = trainer._timing["collect_ms"]
+            logs["timing/update_ms"] = trainer._timing["update_ms"]
 
         # Team spirit annealing: 0.3→0.7 over 5M participating-agent steps
         ts_val = min(0.7, 0.3 + trainer.global_step / 5_000_000)

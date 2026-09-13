@@ -21,6 +21,7 @@ from __future__ import annotations
 import enum
 import gzip
 import hashlib
+import io
 import json
 import os
 import re
@@ -1125,6 +1126,10 @@ class ArtifactIndex(Protocol):
         """Persist staged uploads via client batch_upload(force=False)."""
         ...
 
+    def read_file(self, path: PurePosixPath) -> bytes | None:
+        """Committed object bytes, or None if missing. Never /artifacts/..."""
+        ...
+
 
 def run_registry_key(run_id: str) -> str:
     """Dict key for the provisional run lease."""
@@ -1312,18 +1317,127 @@ def write_heartbeat(
         return status
 
 
-def _parse_iso(value: str) -> datetime:
-    return datetime.fromisoformat(value)
+def _load_volume_json(raw: bytes, message: str = "corrupt volume json") -> object:
+    """Parse Volume bytes as JSON, normalising every failure to ValidationError.
+
+    WHY the `message` parameter: a caller that re-raises ValidationError
+    untouched (the reservation branch of `derive_run_view_from_bytes`, which
+    must let "corrupt volume timestamp" escape) has no other way to attach its
+    own operator-facing wording. The STATUS branch wraps and so does not need
+    it, but passes it anyway so the two calls read alike.
+
+    PITFALLS:
+      * ValidationError subclasses ValueError, so a caller's
+        `except (TypeError, ValueError, KeyError)` silently swallows and
+        re-labels whatever this raises. That is fine when the wrap says the
+        same thing, and a regression when it does not — see the asymmetry
+        documented on `derive_run_view_from_bytes`.
+      * `raw` is bytes, not str: UnicodeDecodeError is a real outcome here and
+        is deliberately in the caught tuple.
+    """
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as err:
+        raise ValidationError(message) from err
+
+
+def _parse_iso8601(value: str) -> datetime:
+    """Parse an ISO-8601 stamp written by this module into a datetime.
+
+    The only two callers are `derive_status` (STATUS `updated_at`) and the
+    reservation branch of `derive_run_view_from_bytes` (`created_at`), so a
+    truncated or garbled stamp fails one way rather than once per adapter.
+
+    PITFALL: the "corrupt volume timestamp" message only reaches an operator
+    where the caller re-raises ValidationError unchanged. In the STATUS branch
+    of `derive_run_view_from_bytes` it is deliberately re-labelled
+    "corrupt volume status json" — a bad `updated_at` is a corrupt STATUS file.
+    """
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError) as err:
+        raise ValidationError("corrupt volume timestamp") from err
 
 
 def derive_status(status: RunStatus, *, now: datetime) -> DerivedStatus:
     """Map a persisted status to the client view. Does not write."""
     if status.status in TERMINAL_STATUSES:
         return DerivedStatus(status=status.status, stale=False)
-    age = now - _parse_iso(status.updated_at)
+    age = now - _parse_iso8601(status.updated_at)
     if age >= STALE_AFTER:
         return DerivedStatus(status=Status.INTERRUPTED, stale=True, reason="stale")
     return DerivedStatus(status=status.status, stale=False)
+
+
+def derive_run_view_from_bytes(
+    status_bytes: bytes | None,
+    reservation_bytes: bytes | None,
+    *,
+    now: datetime,
+) -> DerivedStatus:
+    """Derive the client-visible run view from raw STATUS/reservation bytes.
+
+    The one status algorithm. `None` means "no such object on the Volume".
+    STATUS.json wins when present; otherwise a reservation stands in for a run
+    that crashed after reserving but before its first heartbeat.
+
+    WHY bytes and not paths: the status client, the launch validator and the
+    local Path wrapper all reach the same judgement through this function, so
+    staleness cannot drift between them. Each caller only has to produce bytes.
+
+    Operator-facing messages, all ValidationError:
+      * "corrupt volume status json"      — STATUS present but unparsable, not
+        a mapping, missing a field, or carrying a bad `updated_at`.
+      * "corrupt volume reservation json" — reservation unparsable, not a
+        mapping, or missing `created_at`.
+      * "corrupt volume timestamp"        — reservation `created_at` present
+        but not ISO-8601.
+      * "no STATUS.json or reservation.json" — both absent. Every caller
+        checks for that case before calling in, so this generic wording is
+        usually replaced: `collect_status` and backfill name the run id and the
+        Path wrapper names the run root. `prior_checkpoint_or_raise` is the
+        exception — it says a bare "parent run was not found" with no id.
+
+    PITFALL — the two branches are deliberately asymmetric. The STATUS branch
+    has no `except ValidationError: raise`, so a bad `updated_at` is reported
+    as a corrupt STATUS file. The reservation branch has one, so a bad
+    `created_at` keeps the distinct "corrupt volume timestamp". Neither is an
+    oversight. Against the two pre-unification *Volume* adapter copies this
+    matches on six of seven inputs; the reservation timestamp is a deliberate
+    divergence (those copies re-wrapped it as "corrupt volume reservation
+    json", because ValidationError is a ValueError and their generic handler
+    swallowed it), made because spec §2.2 asks for corrupt timestamps to
+    surface distinctly.
+
+    The third caller, the local Path wrapper `derive_run_view`, is not a
+    fourth vocabulary but a newcomer to this one: before unification it parsed
+    inline and raised raw JSONDecodeError / KeyError / TypeError, producing
+    none of these labelled messages. Spec §2.2 declares that under "Behaviour
+    change (stated, not wrapped)", and
+    test_path_derive_run_view_corrupt_status_is_validation_error pins it.
+
+    Every spelling is pinned by the message table in
+    tests/test_modal_protocol.py. Adding or removing either clause silently
+    changes what an operator sees; change the pinned table first.
+    """
+    if status_bytes is not None:
+        try:
+            payload = _load_volume_json(status_bytes, "corrupt volume status json")
+            return derive_status(RunStatus.from_dict(payload), now=now)
+        except (TypeError, ValueError, KeyError) as err:
+            raise ValidationError("corrupt volume status json") from err
+    if reservation_bytes is None:
+        raise ValidationError("no STATUS.json or reservation.json")
+    try:
+        payload = _load_volume_json(reservation_bytes, "corrupt volume reservation json")
+        created = _parse_iso8601(str(payload["created_at"]))
+    except ValidationError:
+        raise
+    except (TypeError, ValueError, KeyError) as err:
+        raise ValidationError("corrupt volume reservation json") from err
+    if now - created >= STALE_AFTER:
+        return DerivedStatus(status=Status.INTERRUPTED, stale=True, reason="no-heartbeat")
+    return DerivedStatus(status=Status.PREPARING, stale=False, reason="no-heartbeat")
 
 
 def derive_run_view(run_root: Path, *, now: datetime) -> DerivedStatus:
@@ -1333,17 +1447,146 @@ def derive_run_view(run_root: Path, *, now: datetime) -> DerivedStatus:
     looks like preparing/no-heartbeat for five minutes, then interrupted.
     """
     run_root = Path(run_root)
-    current = _read_status(run_root)
-    if current is not None:
-        return derive_status(current, now=now)
+    status_path = run_root / STATUS_FILENAME
     reservation_path = run_root / RESERVATION_FILENAME
-    if not reservation_path.is_file():
+    status_bytes = status_path.read_bytes() if status_path.is_file() else None
+    reservation_bytes = reservation_path.read_bytes() if reservation_path.is_file() else None
+    if status_bytes is None and reservation_bytes is None:
         raise ValidationError(f"no STATUS.json or reservation.json under {run_root}")
-    payload = json.loads(reservation_path.read_text())
-    created = _parse_iso(str(payload["created_at"]))
-    if now - created >= STALE_AFTER:
-        return DerivedStatus(status=Status.INTERRUPTED, stale=True, reason="no-heartbeat")
-    return DerivedStatus(status=Status.PREPARING, stale=False, reason="no-heartbeat")
+    return derive_run_view_from_bytes(status_bytes, reservation_bytes, now=now)
+
+
+@dataclass(frozen=True)
+class CheckpointVerdict:
+    """Outcome of `verify_checkpoint`. `reason` is a token, never a sentence.
+
+    Callers own the wording: launch maps the token through
+    `run_modal._LAUNCH_CHECKPOINT_ERRORS` to a parent-checkpoint sentence,
+    status reporting collapses it to a `checkpoint_loadable` bool. Keeping the
+    sentence out of here is what stops a third error vocabulary appearing.
+
+    Invariant: `ok=True` implies `reason is None` and both `checkpoint_bytes`
+    and `digest` are set; `ok=False` implies both are `None`. The payload field
+    is the *checkpoint* bytes, never the sidecar's — launch uploads them under
+    `INPUTS_ROOT/sha256/{digest}.pt`, so carrying the sidecar here would ship
+    the metadata as the weights.
+    """
+
+    ok: bool
+    reason: str | None
+    checkpoint_bytes: bytes | None
+    digest: str | None
+
+
+def _load_checkpoint_weights(buf: object, **kwargs: object) -> object:
+    """Default `load` for `verify_checkpoint`: weights-only torch.load to CPU.
+
+    torch is imported lazily so that importing this module — which the laptop-
+    side status client does — does not pull in torch or touch CUDA.
+
+    PITFALL: `**kwargs` is accepted and ignored. `verify_checkpoint` calls its
+    `load` with `map_location`/`weights_only` spelled out; this function
+    swallows them and hard-codes the same values rather than forwarding, so it
+    cannot be talked into loading with weaker settings. Do not "simplify" it to
+    `torch.load(buf, **kwargs)`.
+
+    That is a property of this default only, not a security boundary. The
+    `load=` parameter is a full replacement: an injected callable (the test
+    fakes discard their kwargs outright) skips the weights-only check
+    altogether. Injection is for tests; production must not pass `load=`.
+    """
+    import torch
+    return torch.load(buf, map_location="cpu", weights_only=True)
+
+
+def verify_checkpoint(
+    sidecar_bytes: bytes | None,
+    checkpoint_bytes: bytes | None,
+    sidecar_reread_bytes: bytes | None,
+    *,
+    load: Callable[..., object] = _load_checkpoint_weights,
+) -> CheckpointVerdict:
+    """Decide whether a run's checkpoint is trustworthy, from raw bytes.
+
+    Seven ordered checks; the first failure short-circuits, so a caller never
+    pays for `torch.load` on bytes already known to be the wrong size. Returns
+    a verdict instead of raising because two callers want two different things
+    from the same judgement (a bool for status, an exception for launch).
+
+    `sidecar_reread_bytes` is a *second* read of the same sidecar path, taken
+    after the checkpoint read. Comparing it to the first read is how a sidecar
+    rewritten underneath an in-flight verification is caught.
+
+    Reason tokens, and only these (`reason is None` on success):
+      * "missing_sidecar"     — the first sidecar read returned None.
+      * "corrupt_sidecar"     — sidecar JSON did not parse, or is not a dict.
+      * "missing_checkpoint"  — the checkpoint read returned None.
+      * "stale_size"          — sidecar `size` != len(checkpoint bytes). Names
+        the usual cause: a sidecar left behind by an earlier, shorter write.
+      * "digest_mismatch"     — sidecar `sha256` != sha256 of the bytes read.
+      * "not_loadable"        — `load(...)` raised, i.e. the bytes are not a
+        weights-only-loadable torch payload.
+      * "replaced"            — the sidecar reread is missing, unparsable, or
+        parses to a different object than the first read: someone published a
+        new sidecar while we were verifying, so neither read can be trusted.
+
+    PITFALLS:
+      * Torn-write detection compares *parsed JSON*, not raw bytes, so a
+        reformatted-but-equal sidecar is not "replaced". Matching pre-
+        unification adapter behaviour; do not tighten it to a byte compare.
+      * A sidecar is mandatory. There is no orphan-checkpoint mode here:
+        `sidecar_bytes is None` is "missing_sidecar", full stop. That is why
+        `modal_backfill_sidecar` — whose whole job is a checkpoint with no
+        sidecar yet — deliberately does not call this and runs its own local
+        `torch.load` instead.
+      * Being a live run is not this function's business. Launch gates on
+        terminal-or-stale *before* calling; folding that in would make
+        `collect_status` lie about a healthy running job's checkpoint.
+      * Adding an eighth token means updating `_LAUNCH_CHECKPOINT_ERRORS` in
+        scripts/run_modal.py, which indexes this token directly — an unmapped
+        token escapes launch as a bare KeyError. Nothing checks that for you.
+        test_launch_checkpoint_errors_is_total compares that map against the
+        hand-written PROTOCOL_TOKENS tuple, which keeps those two in step, but
+        the tuple is not derived from this function: a token added here and
+        nowhere else leaves that test green. Update all three by hand.
+    """
+
+    def fail(reason: str) -> CheckpointVerdict:
+        return CheckpointVerdict(ok=False, reason=reason, checkpoint_bytes=None, digest=None)
+
+    if sidecar_bytes is None:
+        return fail("missing_sidecar")
+    try:
+        sidecar = _load_volume_json(sidecar_bytes)
+    except ValidationError:
+        return fail("corrupt_sidecar")
+    if not isinstance(sidecar, dict):
+        return fail("corrupt_sidecar")
+    if checkpoint_bytes is None:
+        return fail("missing_checkpoint")
+    if int(sidecar.get("size", -1)) != len(checkpoint_bytes):
+        return fail("stale_size")
+    digest = sha256_bytes(checkpoint_bytes)
+    if sidecar.get("sha256") != digest:
+        return fail("digest_mismatch")
+    try:
+        load(io.BytesIO(checkpoint_bytes), map_location="cpu", weights_only=True)
+    except Exception:
+        return fail("not_loadable")
+    if sidecar_reread_bytes is None:
+        return fail("replaced")
+    try:
+        sidecar_b = _load_volume_json(sidecar_reread_bytes)
+    except ValidationError:
+        return fail("replaced")
+    if sidecar_b != sidecar:
+        return fail("replaced")
+    return CheckpointVerdict(
+        ok=True,
+        reason=None,
+        checkpoint_bytes=checkpoint_bytes,
+        digest=digest,
+    )
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -1907,6 +2150,10 @@ class _UnusedArtifacts:
 
     def commit(self) -> None:
         raise RuntimeError("losing delivery must not commit")
+
+    def read_file(self, path: PurePosixPath) -> bytes | None:
+        del path
+        return None
 
 
 def _tee_stream(src: object, sinks: Sequence[object]) -> None:

@@ -116,7 +116,6 @@ EMITTER_SITES = (
         "logs": "",
         "log_entry": ""
     }),
-    EmitterSite("train.py", "_patch_trainer_with_timing._timed_train", {"result": ""}),
     EmitterSite("train.py", "self_play_used_past_metric", {"logs": ""}),
     EmitterSite("c_env/cs2_env.py", "Cs2Env._build_terminal_info", {"summary": "environment/"}),
     EmitterSite("c_env/cs2_env.py", "Cs2Env.step", {"summary": "environment/"}),

@@ -19,7 +19,6 @@ PITFALLS:
 from __future__ import annotations
 
 import io
-import json
 import os
 import sys
 import tempfile
@@ -253,6 +252,9 @@ class ModalVolumeIndex:
                     batch.put_file(io.BytesIO(data), _client_volume_path(path))
             self._staged.clear()
 
+    def read_file(self, path: PurePosixPath) -> bytes | None:
+        return _read_volume_file(self._volume, _client_volume_path(path))
+
 
 class ModalDictRegistry:
     """Registry over a Modal Dict. put_if_absent is skip_if_exists=True."""
@@ -303,81 +305,74 @@ def ensure_blob(volume: object, client_path: PurePosixPath, local_path: Path) ->
         _require_blob_match(existing, expected_size, expected_digest)
 
 
-def _load_volume_json(raw: bytes) -> object:
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as err:
-        raise mrl.ValidationError("corrupt volume json") from err
+# Launch's private vocabulary: one `CheckpointVerdict.reason` token -> the
+# sentence an operator sees when a --resume-run-id parent is unusable. The
+# protocol deliberately returns tokens so status reporting can collapse them to
+# a bool while launch says something actionable about *this* parent.
+#
+# This map must stay TOTAL over every non-"ok" token `mrl.verify_checkpoint`
+# can return: `prior_checkpoint_or_raise` indexes it directly, so a token added
+# to the protocol without a row here raises a bare KeyError out of launch
+# instead of a ValidationError. `test_launch_checkpoint_errors_is_total` checks
+# this map against the hand-written `PROTOCOL_TOKENS` tuple in
+# tests/test_modal_runner.py, which catches a row deleted from here — but not a
+# token added to `verify_checkpoint` alone, since nothing derives that tuple
+# from the protocol. Adding a token is a three-file edit, by hand.
+_LAUNCH_CHECKPOINT_ERRORS = {
+    "missing_sidecar": "parent checkpoint sidecar missing",
+    "corrupt_sidecar": "parent checkpoint sidecar is corrupt",
+    "missing_checkpoint": "parent checkpoint missing",
+    "stale_size": "parent checkpoint metadata is stale",
+    "digest_mismatch": "parent checkpoint metadata is mismatched",
+    "not_loadable": "parent checkpoint is not weights-only loadable",
+    "replaced": "parent checkpoint was replaced during validation",
+}
 
 
-def _parse_iso8601(value: str) -> datetime:
-    try:
-        return datetime.fromisoformat(value)
-    except (TypeError, ValueError) as err:
-        raise mrl.ValidationError("corrupt volume timestamp") from err
+def prior_checkpoint_or_raise(volume: object, parent_id: str, now: datetime) -> tuple[bytes, str]:
+    """Validate a --resume-run-id parent and return its (checkpoint bytes, digest).
 
+    The launch-side gate: refuses to start a child run unless the parent has
+    finished (or gone stale) and its checkpoint still verifies. Raises
+    ValidationError with an operator sentence on every rejection; returns only
+    on success, so callers do not have to re-check anything.
 
-def _derive_parent_view(volume: object, parent_id: str, now: datetime) -> mrl.DerivedStatus:
-    status_remote = _client_volume_path(mrl.RUNS_ROOT / parent_id / mrl.STATUS_FILENAME)
-    reservation_remote = _client_volume_path(mrl.RUNS_ROOT / parent_id / mrl.RESERVATION_FILENAME)
-    status_bytes = _read_volume_file(volume, status_remote)
-    if status_bytes is not None:
-        try:
-            payload = _load_volume_json(status_bytes)
-            return mrl.derive_status(mrl.RunStatus.from_dict(payload), now=now)
-        except (TypeError, ValueError, KeyError) as err:
-            raise mrl.ValidationError("corrupt volume status json") from err
-    reservation_bytes = _read_volume_file(volume, reservation_remote)
-    if reservation_bytes is None:
+    Order matters. The still-active check happens here, *before*
+    `mrl.verify_checkpoint`, because "the parent is still running" is a launch
+    policy and not a statement about the checkpoint — `collect_status` runs the
+    same verification without it and must keep reporting live runs honestly.
+
+    PITFALLS:
+      * The sidecar is read twice (before and after the checkpoint) and both
+        reads are handed to the protocol: that pair is what detects a sidecar
+        republished mid-validation. Do not "optimise" the second read away.
+      * The returned bytes are the checkpoint, not the sidecar. `launch_run`
+        stages them as `{digest}.pt` and uploads them under
+        `mrl.INPUTS_ROOT / "sha256"`, so swapping the two would ship the
+        sidecar's metadata as the child run's weights.
+      * The `verdict.checkpoint_bytes is None` guard after `verdict.ok` is
+        unreachable by contract and exists only so a future protocol bug
+        surfaces as the usual sentence instead of a TypeError downstream.
+    """
+    index = ModalVolumeIndex(volume)
+    status_bytes = index.read_file(mrl.RUNS_ROOT / parent_id / mrl.STATUS_FILENAME)
+    reservation_bytes = index.read_file(mrl.RUNS_ROOT / parent_id / mrl.RESERVATION_FILENAME)
+    if status_bytes is None and reservation_bytes is None:
         raise mrl.ValidationError("parent run was not found")
-    try:
-        payload = _load_volume_json(reservation_bytes)
-        created = _parse_iso8601(str(payload["created_at"]))
-    except (TypeError, ValueError, KeyError) as err:
-        raise mrl.ValidationError("corrupt volume reservation json") from err
-    if now - created >= mrl.STALE_AFTER:
-        return mrl.DerivedStatus(status=mrl.Status.INTERRUPTED, stale=True, reason="no-heartbeat")
-    return mrl.DerivedStatus(status=mrl.Status.PREPARING, stale=False, reason="no-heartbeat")
-
-
-def _validate_prior_checkpoint(volume: object, parent_id: str, now: datetime) -> tuple[bytes, str]:
-    view = _derive_parent_view(volume, parent_id, now)
+    view = mrl.derive_run_view_from_bytes(status_bytes, reservation_bytes, now=now)
     if view.status not in mrl.TERMINAL_STATUSES and not view.stale:
         raise mrl.ValidationError("parent run is still active")
-    sidecar_remote = _client_volume_path(mrl.RUNS_ROOT / parent_id / "checkpoints" /
-                                         mrl.CHECKPOINT_SIDECAR_NAME)
-    ckpt_remote = _client_volume_path(mrl.RUNS_ROOT / parent_id / "checkpoints" /
-                                      mrl.CHECKPOINT_NAME)
-    sidecar_a_bytes = _read_volume_file(volume, sidecar_remote)
-    if sidecar_a_bytes is None:
-        raise mrl.ValidationError("parent checkpoint sidecar missing")
-    try:
-        sidecar_a = _load_volume_json(sidecar_a_bytes)
-    except mrl.ValidationError as err:
-        raise mrl.ValidationError("parent checkpoint sidecar is corrupt") from err
-    if not isinstance(sidecar_a, dict):
-        raise mrl.ValidationError("parent checkpoint sidecar is corrupt")
-    ckpt_bytes = _read_volume_file(volume, ckpt_remote)
-    if ckpt_bytes is None:
-        raise mrl.ValidationError("parent checkpoint missing")
-    if int(sidecar_a.get("size", -1)) != len(ckpt_bytes):
-        raise mrl.ValidationError("parent checkpoint metadata is stale")
-    digest = mrl.sha256_bytes(ckpt_bytes)
-    if sidecar_a.get("sha256") != digest:
-        raise mrl.ValidationError("parent checkpoint metadata is mismatched")
-    try:
-        import torch
-        torch.load(io.BytesIO(ckpt_bytes), map_location="cpu", weights_only=True)
-    except Exception as err:
-        raise mrl.ValidationError("parent checkpoint is not weights-only loadable") from err
-    sidecar_b_bytes = _read_volume_file(volume, sidecar_remote)
-    try:
-        sidecar_b = None if sidecar_b_bytes is None else _load_volume_json(sidecar_b_bytes)
-    except mrl.ValidationError as err:
-        raise mrl.ValidationError("parent checkpoint was replaced during validation") from err
-    if sidecar_b_bytes is None or sidecar_b != sidecar_a:
-        raise mrl.ValidationError("parent checkpoint was replaced during validation")
-    return ckpt_bytes, digest
+    sidecar_path = mrl.RUNS_ROOT / parent_id / "checkpoints" / mrl.CHECKPOINT_SIDECAR_NAME
+    ckpt_path = mrl.RUNS_ROOT / parent_id / "checkpoints" / mrl.CHECKPOINT_NAME
+    sidecar_bytes = index.read_file(sidecar_path)
+    ckpt_bytes = index.read_file(ckpt_path)
+    reread_bytes = index.read_file(sidecar_path)
+    verdict = mrl.verify_checkpoint(sidecar_bytes, ckpt_bytes, reread_bytes)
+    if not verdict.ok:
+        raise mrl.ValidationError(_LAUNCH_CHECKPOINT_ERRORS[verdict.reason])
+    if verdict.checkpoint_bytes is None or verdict.digest is None:
+        raise mrl.ValidationError(_LAUNCH_CHECKPOINT_ERRORS["not_loadable"])
+    return verdict.checkpoint_bytes, verdict.digest
 
 
 def _not_found_types() -> tuple[type[BaseException], ...]:
@@ -621,8 +616,8 @@ def launch_run(
             mrl.VOLUME_NAME,
             missing="artifact volume is missing",
         )
-        prior_bytes, prior_digest = _validate_prior_checkpoint(parent_volume,
-                                                               request.resume.prior_run_id, stamp)
+        prior_bytes, prior_digest = prior_checkpoint_or_raise(parent_volume,
+                                                              request.resume.prior_run_id, stamp)
 
     modal_mod.Volume.objects.create(mrl.VOLUME_NAME, allow_existing=True)
     modal_mod.Dict.objects.create(mrl.REGISTRY_NAME, allow_existing=True)
