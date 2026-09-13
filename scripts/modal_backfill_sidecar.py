@@ -65,21 +65,39 @@ def backfill_sidecar(
     Raises ValidationError and uploads nothing unless every guard passes.
     """
     mrl.validate_run_id(run_id)
-    volume = arts._lookup_volume(modal_module)
+    volume = arts.lookup_volume(modal_module)
     stamp = now if now is not None else datetime.now(UTC)
 
-    view = arts._derive_run_view(volume, run_id, stamp)
+    # The still-active gate is the shared bytes-in protocol, not a private
+    # helper borrowed from the read-only status client: one derivation rule for
+    # "is this run finished?" means backfill and `modal_artifacts status` can
+    # never disagree about STALE_AFTER or about which statuses are terminal.
+    # PITFALL: both files absent is "no such run", not "terminal" — without this
+    # check a typo'd run id would fall through to a MISSING-status view and get
+    # a sidecar written into a directory nobody asked for.
+    status_remote = (mrl.RUNS_ROOT / run_id / mrl.STATUS_FILENAME).as_posix()
+    reservation_remote = (mrl.RUNS_ROOT / run_id / mrl.RESERVATION_FILENAME).as_posix()
+    status_bytes = arts.read_volume_file(volume, status_remote)
+    reservation_bytes = arts.read_volume_file(volume, reservation_remote)
+    if status_bytes is None and reservation_bytes is None:
+        raise mrl.ValidationError(f"run not found: {run_id}")
+    view = mrl.derive_run_view_from_bytes(status_bytes, reservation_bytes, now=stamp)
     if view.status not in mrl.TERMINAL_STATUSES and not view.stale:
         raise mrl.ValidationError(
             f"run {run_id} is still active ({view.status.value}); refusing to backfill")
 
-    sidecar_remote = arts._client_path(mrl.RUNS_ROOT / run_id / "checkpoints" /
-                                       mrl.CHECKPOINT_SIDECAR_NAME)
-    if arts._read_volume_file(volume, sidecar_remote) is not None:
+    # Remote paths are formed here, from mrl.RUNS_ROOT, rather than through
+    # modal_artifacts' path sanitiser: every component is either a module
+    # constant or a run id that validate_run_id already rejected if it could
+    # contain a separator, so nothing here can escape runs/<id>/. read_volume_file
+    # still refuses a mounted /artifacts path, which is the leak that matters.
+    sidecar_remote = (mrl.RUNS_ROOT / run_id / "checkpoints" /
+                      mrl.CHECKPOINT_SIDECAR_NAME).as_posix()
+    if arts.read_volume_file(volume, sidecar_remote) is not None:
         raise mrl.ValidationError(f"run {run_id} already has a checkpoint sidecar")
 
-    ckpt_remote = arts._client_path(mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_NAME)
-    ckpt_bytes = arts._read_volume_file(volume, ckpt_remote)
+    ckpt_remote = (mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_NAME).as_posix()
+    ckpt_bytes = arts.read_volume_file(volume, ckpt_remote)
     if ckpt_bytes is None:
         raise mrl.ValidationError(f"run {run_id} has no {mrl.CHECKPOINT_NAME} to vouch for")
     try:
@@ -98,8 +116,8 @@ def backfill_sidecar(
     except FileExistsError as err:
         raise mrl.ValidationError(f"run {run_id} gained a sidecar during backfill") from err
 
-    written = arts._read_volume_file(volume, sidecar_remote)
-    if written is None or arts._load_volume_json(written) != payload:
+    written = arts.read_volume_file(volume, sidecar_remote)
+    if written is None or mrl._load_volume_json(written) != payload:
         raise mrl.ValidationError(f"run {run_id} sidecar did not round-trip after upload")
     return {
         "run_id": run_id,

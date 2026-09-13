@@ -58,9 +58,6 @@ def read_volume_file(volume: object, remote: str) -> bytes | None:
     return b"".join(chunks)
 
 
-_read_volume_file = read_volume_file
-
-
 def _not_found_types(modal_mod: object) -> tuple[type[BaseException], ...]:
     types: list[type[BaseException]] = [FileNotFoundError, KeyError]
     not_found = getattr(getattr(modal_mod, "exception", None), "NotFoundError", None)
@@ -84,10 +81,6 @@ def lookup_volume(modal_module: object | None = None):
         raise
 
 
-_lookup_volume = lookup_volume
-_load_volume_json = mrl._load_volume_json
-
-
 class VolumeIndex:
     """Committed-object reads over a client Volume. Paths via `_client_path`."""
 
@@ -98,27 +91,35 @@ class VolumeIndex:
         return read_volume_file(self._volume, _client_path(path))
 
 
-def _derive_run_view(volume: object, run_id: str, now: datetime) -> mrl.DerivedStatus:
-    index = VolumeIndex(volume)
-    status_bytes = index.read_file(mrl.RUNS_ROOT / run_id / mrl.STATUS_FILENAME)
-    reservation_bytes = index.read_file(mrl.RUNS_ROOT / run_id / mrl.RESERVATION_FILENAME)
-    if status_bytes is None and reservation_bytes is None:
-        raise mrl.ValidationError(f"run not found: {run_id}")
-    return mrl.derive_run_view_from_bytes(status_bytes, reservation_bytes, now=now)
-
-
 def collect_status(
     run_id: str,
     *,
     modal_module: object | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
-    """Read-only status. Missing Volume fails without creating objects."""
+    """Read-only status. Missing Volume fails without creating objects.
+
+    All judgement lives in modal_runner_lib: this function only fetches bytes
+    and hands them to `derive_run_view_from_bytes` / `verify_checkpoint`, so the
+    status client, the launch validator and the sidecar backfiller cannot drift
+    apart on staleness or on what makes a checkpoint trustworthy.
+
+    PITFALLS:
+      * Absent STATUS.json *and* absent reservation.json means the run does not
+        exist; that is a ValidationError, not a MISSING-status view. The exact
+        message is pinned by test_collect_status_missing_run_message.
+      * The sidecar is read twice on purpose. `verify_checkpoint` compares the
+        two reads to catch a sidecar being rewritten underneath us mid-status.
+    """
     mrl.validate_run_id(run_id)
     volume = lookup_volume(modal_module)
     stamp = now if now is not None else datetime.now(UTC)
-    view = _derive_run_view(volume, run_id, stamp)
     index = VolumeIndex(volume)
+    status_bytes = index.read_file(mrl.RUNS_ROOT / run_id / mrl.STATUS_FILENAME)
+    reservation_bytes = index.read_file(mrl.RUNS_ROOT / run_id / mrl.RESERVATION_FILENAME)
+    if status_bytes is None and reservation_bytes is None:
+        raise mrl.ValidationError(f"run not found: {run_id}")
+    view = mrl.derive_run_view_from_bytes(status_bytes, reservation_bytes, now=stamp)
     sidecar_path = mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_SIDECAR_NAME
     ckpt_path = mrl.RUNS_ROOT / run_id / "checkpoints" / mrl.CHECKPOINT_NAME
     sidecar_bytes = index.read_file(sidecar_path)
@@ -203,7 +204,7 @@ def download_run(
     dest = dest_root / run_id
     if dest.exists():
         raise mrl.ValidationError(f"refusing to overwrite existing download: {dest}")
-    volume = _lookup_volume(modal_module)
+    volume = lookup_volume(modal_module)
     prefix = _client_path(mrl.RUNS_ROOT / run_id)
     try:
         entries = list(volume.iterdir(prefix, recursive=True))
@@ -218,7 +219,7 @@ def download_run(
                 continue
             entry_path = str(getattr(entry, "path", ""))
             relative = _safe_run_relative(entry_path, run_id)
-            data = _read_volume_file(volume, _client_path(PurePosixPath(entry_path)))
+            data = read_volume_file(volume, _client_path(PurePosixPath(entry_path)))
             if data is None:
                 raise mrl.ValidationError(f"missing download object: {entry_path}")
             _write_download_file(staging, relative, data)
