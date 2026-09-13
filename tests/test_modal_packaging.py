@@ -744,3 +744,501 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     ], ("modal_runner_lib resolved under more than one name, so two module "
         "objects exist and their exception classes are not identical: "
         f"{payload['modules']}")
+
+
+# ── The modal test seam: concern, recomputed from source ──────────────────────
+#
+# WHY this section exists at all. `tests/test_modal_runner.py` held two suites.
+# Splitting it needs an answer to "which half does this name belong to?" that a
+# checked-in test can RE-DERIVE, because the alternative -- freeze a manifest,
+# then check the files agree with the manifest -- is green on a maximally wrong
+# split: review shuffled every name by even/odd index, split the file to match
+# its own shuffled manifest, and the consistency check passed. A manifest is a
+# record, not evidence. `classify_seam` is the evidence.
+
+MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
+
+RUNNER_FILE = "tests/test_modal_runner.py"
+CLIENT_FILE = "tests/test_modal_client.py"
+PACKAGING_FILE = "tests/test_modal_packaging.py"
+SHARED_FILE = "tests/modal_test_helpers.py"
+
+# The three module-level guards that lived above line 100 of the monolith. They
+# are about packaging and dependencies, so they belong to neither half of the
+# seam; they are named rather than computed because "is a packaging guard" is a
+# judgement about subject matter that no reference graph encodes. Measured: the
+# monolith's only three top-level `test_` functions defined above line 100 are
+# exactly these, which is the spec's §2.3 "three tests ... belong to neither
+# half" recomputed rather than copied.
+SEAM_GUARDS = frozenset({
+    "test_modal_is_an_explicit_dependency_group",
+    "test_local_entrypoints_do_not_import_modal",
+    "test_modal_runner_lib_does_not_import_modal_or_torch",
+})
+
+# Names the seam does not govern, with the reason.
+#
+# `ROOT` is `Path(__file__).resolve().parents[1]` -- module-header boilerplate
+# that every destination file defines for itself by construction. Measured at
+# this commit, by AST over module-level bindings of every collected
+# `tests/test_*.py`: 5 files define a `ROOT` of their own (`test_modal_argv.py`,
+# `test_modal_packaging.py`, `test_modal_protocol.py`, `test_modal_runner.py`,
+# `test_train_loop_timing.py`), and `ROOT` is the ONLY one of the monolith's 261
+# module-level names that any other collected test file also defines -- so this
+# exemption list is one name long because the collision set is one name long,
+# not because the rest were not looked for. Treating `ROOT` as a shared helper
+# would make the seam's own scan collide with those unrelated files.
+#
+# STATED RATHER THAN HIDDEN: an exemption nothing checks is a hole. Task 4's
+# placement gate is what closes it in both directions, by asserting `ROOT` IS
+# defined in every destination file, so "not governed" cannot quietly become
+# "lost". Until that gate lands, this is an unguarded exemption.
+SEAM_HEADER_NAMES = frozenset({"ROOT"})
+
+# A name whose own body reaches the client modules. These two sets are the
+# spec's own §2.3 instrument, member for member.
+#
+# `module` is here because the monolith's client tests bind
+# `module = _import_run_modal()` and then talk to `module`: measured, 13 of the
+# 54 client tests carry that signal and NO other in their own body. Deleting it
+# still moves 0 names, because the transitive closure covers the same 13 -- see
+# `classify_seam`'s stage-1 note. Every member of both sets has a dedicated case
+# in `_SEAM_CLASSIFIER_PROBE`, because before those cases existed, deleting
+# `"module"` was measured to leave the whole file green.
+_CLIENT_BINDINGS = frozenset({"_import_run_modal", "_run_modal_image_reqs", "module"})
+_CLIENT_MODULES = ("scripts.run_modal", "scripts.modal_artifacts", "scripts.modal_backfill_sidecar")
+
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _module_level_names(tree):
+    """Every module-level binding in `tree`, as {name: defining node}.
+
+    Covers `Assign`/`AnnAssign` targets as well as defs and classes. Dropping
+    constants is not a simplification: measured, the monolith has 6 module-level
+    assignments, and knocking the `Assign` branch out leaves 5 of those names
+    with NO destination at all -- `PINNED_CUDA_CHILD_DIGEST`, `PINNED_CUDA_IMAGE`,
+    `PINNED_PUFFERLIB_SDIST` and `PROTOCOL_TOKENS`, all four of which classify to
+    the client half, plus `_FORBIDDEN_FLAGS`, which classifies to the runner
+    half. (The 6th is `ROOT`, which `SEAM_HEADER_NAMES` excludes on purpose.) A
+    census that walks defs alone leaves those five unassigned, and a pinned CUDA
+    digest copied into both files can then drift apart with every check in this
+    file green.
+    """
+    found = {}
+    for node in tree.body:
+        if isinstance(node, _DEFS):
+            found[node.name] = node
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                for sub in ast.walk(target):
+                    if isinstance(sub, ast.Name):
+                        found[sub.id] = node
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            found[node.target.id] = node
+    return found
+
+
+def _referenced_module_names(node, own, universe):
+    """Module-level names `node` references, decorators included.
+
+    An `ast.Attribute` is resolved to its ROOT name (`FakeModal.spec` ->
+    `FakeModal`), which is what makes attribute-spelled reaches visible. Local
+    shadowing is deliberately NOT modelled: over-reporting an edge can only
+    merge two names into one destination, while missing one strands a helper --
+    the failure that is a NameError at run time.
+    """
+    out = set()
+    for sub in ast.walk(node):
+        target = None
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+            target = sub.id
+        elif isinstance(sub, ast.Attribute):
+            root = sub
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name):
+                target = root.id
+        if target and target != own and target in universe:
+            out.add(target)
+    return out
+
+
+def _reaches_client_directly(node, own):
+    """Seed test: does this node's OWN body name a client module?"""
+    if own in _CLIENT_BINDINGS:
+        return True
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and sub.id in _CLIENT_BINDINGS:
+            return True
+        if isinstance(sub, ast.Attribute):
+            root = sub
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in _CLIENT_BINDINGS:
+                return True
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            if any(m in sub.value for m in _CLIENT_MODULES):
+                return True
+    return False
+
+
+def classify_seam(sources):
+    """Compute each module-level name's destination file from the code alone.
+
+    `sources` is {relative path: source text}. Returns
+    `(destinations, defined_in)`: {name: destination path} and
+    {name: [files that define it]}. Works on the monolith (one entry) and on the
+    split (several), because it treats the union of the files as one namespace
+    -- which is exactly why it can be re-run after the split and still be
+    evidence rather than a tautology.
+
+    TWO STAGES, and the split between them is the whole design:
+
+    1. TESTS are classified by transitive closure. A name is CLIENT if its own
+       body names a client module, or if it references -- transitively -- a name
+       that does. Measured against the seam the spec measured four ways, 0 of
+       194 tests land on the wrong side.
+
+       WHICH PART OF STAGE 1 EARNS THAT ZERO, because a one-at-a-time census
+       gets this backwards. Knocked out singly, on the monolith: the closure
+       moves 0 names, `"module"` moves 0, the `_CLIENT_MODULES` string seed
+       moves 0, and attribute-root resolution moves 0. Knock out the closure
+       AND `"module"` together and 30 names move, 13 of them tests -- the two
+       cover the same 13 client tests, so each looks like dead weight until the
+       other is gone. `_run_modal_image_reqs` is the one seed that is
+       load-bearing alone (5 names). The string seed and attribute-root
+       resolution move 0 even jointly with the closure disabled: they are
+       over-coverage, kept because an extra edge can only merge two names into
+       one destination while a missing one strands a helper.
+
+    2. HELPERS follow the tests that reach them, because a helper has no concern
+       of its own -- it has its consumers'. `FakeModal` names nothing
+       client-specific; it is client because only client tests reach it. This
+       stage is also the only one that can return a THIRD answer, and it does:
+       measured, 7 names are reached from BOTH halves and go to a shared module.
+       A classifier forced to pick a half for those 7 would strand them, which
+       is a NameError at run time in whichever file lost.
+
+    HONESTY NOTE, because the bar was known before stage 2 was written: stage 1
+    alone puts 21 names on the wrong side -- all of them non-test helpers, 0 of
+    them tests -- and stage 2 was added afterwards, with the target already
+    known. Tuning a classifier until it matches a number you already have
+    certifies it against the answer rather than against the source. The reasons
+    to believe stage 2 anyway are that it is a different KIND of rule rather
+    than a longer marker list, and that it produced a finding nobody had -- the
+    7 shared names -- which a second instrument (a cross-seam reference census
+    that uses LINE POSITION, not this closure, as each test's concern)
+    reproduces exactly. Bound on that word "second": it shares
+    `_module_level_names` and `_referenced_module_names` with this function, so
+    it is independent of the seed and the closure but NOT of the reference
+    graph. A bug in edge extraction would be invisible to both.
+
+    KNOWN LIMIT, stated rather than hidden: a name reached by no test at all is
+    unclassifiable by stage 2 and raises. Measured on the monolith: 0 such
+    names. If one appears it is either dead code or a new entry point, and both
+    deserve a human, not a default.
+
+    SECOND KNOWN LIMIT: this reads the AST, so a reference written inside a
+    subprocess `code = \"\"\"...\"\"\"` string is invisible to it, exactly as it is to
+    `bare_spelling_imports` above. Measured, `tests/test_modal_runner.py` has
+    two such blocks (`test_local_entrypoints_do_not_import_modal` and
+    `test_modal_runner_lib_does_not_import_modal_or_torch`), both of them inside
+    `SEAM_GUARDS` tests that are assigned by fiat anyway, and both naming only
+    modules outside this file. Measured the other way too: of the monolith's
+    module-level names, exactly 3 appear as a word inside any multiline string
+    literal in the file -- `ROOT`, which is ungoverned, and two test names cited
+    by a docstring at line 574, which is prose and not a reach. So this limit
+    changes no destination today. A future subprocess block could.
+    """
+    trees = {rel: ast.parse(text) for rel, text in sources.items()}
+    defined_in, nodes = {}, {}
+    for rel, tree in trees.items():
+        for name, node in _module_level_names(tree).items():
+            defined_in.setdefault(name, []).append(rel)
+            nodes[name] = node
+
+    universe = set(nodes)
+    edges = {n: _referenced_module_names(node, n, universe) for n, node in nodes.items()}
+    tests = {
+        n
+        for n, node in nodes.items()
+        if n.startswith("test_") and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    client = {n for n, node in nodes.items() if _reaches_client_directly(node, n)}
+    changed = True
+    while changed:                     # stage 1: reach-a-seed, to a fixed point
+        changed = False
+        for name, targets in edges.items():
+            if name not in client and (targets & client):
+                client.add(name)
+                changed = True
+
+    reached_by = {n: set() for n in nodes}
+    for test in tests:                 # stage 2: which tests reach each helper
+        seen, stack = set(), [test]
+        while stack:
+            for nxt in edges[stack.pop()]:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        for name in seen:
+            reached_by[name].add(test)
+
+    destinations = {name: PACKAGING_FILE for name in SEAM_GUARDS}
+    for name in nodes:
+        if name in SEAM_HEADER_NAMES or name in SEAM_GUARDS:
+            continue
+        if name in tests:
+            destinations[name] = CLIENT_FILE if name in client else RUNNER_FILE
+        else:
+            consumers = reached_by[name]
+            if not consumers:
+                raise ValueError(f"{name!r} is reached by no test, so stage 2 cannot place it; "
+                                 "it is dead code or a new entry point and needs a human")
+            if consumers & client and consumers - client:
+                destinations[name] = SHARED_FILE
+            else:
+                destinations[name] = CLIENT_FILE if consumers & client else RUNNER_FILE
+    return destinations, defined_in
+
+
+def _seam_sources():
+    """The declared destination files that exist right now, as {rel: text}.
+
+    `tests/test_modal_packaging.py` is deliberately NOT in the list even though
+    it is a destination. It holds this classifier, whose own body names the
+    client modules in a string constant, so feeding the file to the graph seeds
+    the classifier itself as a client test. Measured at this commit: fed in, it
+    raises first -- `_names_defined_under_tests` is reached by no test until
+    Task 4 calls it, and the known-limit raise fires on that. Disable the raise
+    and the absurdity underneath is visible: measured, 18 of the 35 names this
+    file contributes -- `classify_seam` and `_reaches_client_directly` among
+    them -- are assigned to `tests/test_modal_client.py`.
+
+    SCOPE OF THE DAMAGE, measured, because it is smaller than it sounds and a
+    reader should not over-trust this exclusion: feeding this file in changes
+    the destination of **0** monolith names. The self-poisoning is confined to
+    this file's own names. The three names this file legitimately receives are
+    declared in `SEAM_GUARDS` and assigned unconditionally, so nothing is lost
+    by leaving it out.
+
+    Existence-tolerant on purpose: `tests/test_modal_client.py` and
+    `tests/modal_test_helpers.py` do not exist until the split lands, and
+    `classify_seam` computes from CONTENT, not from where content lives, so the
+    manifest it produces over the unsplit monolith is the same manifest it
+    produces over the split files. That is what lets the agreement test below be
+    green on both sides of the split instead of shipping red for one task.
+    """
+    rels = [RUNNER_FILE, CLIENT_FILE, SHARED_FILE]
+    return {rel: (ROOT / rel).read_text(encoding="utf-8") for rel in rels if (ROOT / rel).exists()}
+
+
+def _names_defined_under_tests():
+    """{name: [files]} for every module-level name in the files the seam governs
+    plus every OTHER collected modal test file.
+
+    The glob is the point. Review moved one test into a brand-new
+    `tests/test_modal_stray.py` and the first draft of this gate stayed green,
+    because it only ever looked at files the manifest itself names. A
+    destination the manifest does not know about has to be reachable, or the
+    check is asking the suspect for the list of places to search.
+
+    Scope is `tests/test_*.py` plus the shared helper module: a stray file that
+    pytest never collects is not the threat, and measured, widening past
+    `test_*.py` pulls in `tests/capture_dump_config_pre_165.py` and
+    `tests/capture_env_config_pre_165b.py`, which each define a `_git` of their
+    own and would make a gate built on this red for an unrelated reason.
+
+    CONTRACT for the caller: the return value is a SUPERSET of the seam. It
+    covers every `tests/test_*.py` in the repo, not just the four destination
+    files, which is exactly what makes a fourth file visible -- and exactly why
+    a caller comparing it against the manifest must scope the disk-to-manifest
+    direction to names it actually governs rather than flagging every unrelated
+    test file's helpers.
+    """
+    found = {}
+    paths = sorted(set((ROOT / "tests").glob("test_*.py")) | {ROOT / SHARED_FILE})
+    for path in paths:
+        if not path.exists():
+            continue
+        rel = path.relative_to(ROOT).as_posix()
+        for name in _module_level_names(ast.parse(path.read_text(encoding="utf-8"))):
+            found.setdefault(name, []).append(rel)
+    return found
+
+
+# A synthetic module that exercises all four answers `classify_seam` can give,
+# with the answers known by construction rather than measured off the monolith.
+# WHY a synthetic probe and not just the real file: the real file certifies the
+# classifier against a seam we already knew, which is the weakest kind of
+# evidence there is. This certifies the RULE. It is also the only part of this
+# section that survives Task 4 unchanged -- the "0 names on the wrong side of
+# line 3638" check that certified the classifier against the monolith is a
+# one-off by construction, because after the split there is no line 3638 to
+# measure against. That check's successor is Task 4's placement gate, which
+# swaps position for which-file as the ground truth.
+#
+# `_import_run_modal` and `_import_backfill` are deliberately NOT defined here:
+# a seed does not have to be a module-level binding to seed, and leaving them
+# undefined keeps them out of `universe`, so the only signal reaching the
+# classifier is the one each probe test is named for.
+#
+# THERE IS ONE PROBE TEST PER MEMBER of `_CLIENT_BINDINGS` and `_CLIENT_MODULES`,
+# and that is not thoroughness for its own sake. A guard whose own allow-set is
+# unwatched is this repo's most-repeated defect, and it bit here: the first
+# version of this probe named `_import_run_modal` and `scripts.modal_artifacts`
+# and nothing else, and deleting `"module"` from `_CLIENT_BINDINGS` was measured
+# to leave BOTH tests in this section green.
+_SEAM_CLASSIFIER_PROBE = '''
+def _shared_helper():
+    return 1
+
+def _runner_only_helper():
+    return _shared_helper()
+
+def _client_only_helper():
+    module = _import_run_modal()
+    return module
+
+def test_probe_runner_via_helper():
+    return _runner_only_helper()
+
+def test_probe_runner_via_shared():
+    return _shared_helper()
+
+def test_probe_client_direct():
+    return _import_run_modal()
+
+def test_probe_client_by_image_reqs():
+    return _run_modal_image_reqs("lock")
+
+def test_probe_client_by_module_binding():
+    module = _import_backfill()
+    return module.App
+
+def test_probe_client_transitive():
+    return _client_only_helper()
+
+def test_probe_client_via_shared():
+    return _client_only_helper(), _shared_helper()
+
+def test_probe_client_by_artifacts_string():
+    return "scripts.modal_artifacts"
+
+def test_probe_client_by_run_modal_string():
+    return "import scripts.run_modal as rm"
+
+def test_probe_client_by_sidecar_string():
+    return "scripts.modal_backfill_sidecar"
+'''
+
+
+def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
+    """Positive control for `classify_seam`, on a module whose answer is known.
+
+    Each of the four destinations is exercised by a name that can only land
+    there for the stated reason:
+
+    - six SINGLE-SIGNAL cases -- `_direct`, `_by_image_reqs`,
+      `_by_module_binding` and the three `_by_*_string` -- carry exactly one
+      client signal each, one per member of `_CLIENT_BINDINGS` and
+      `_CLIENT_MODULES`. Deleting any member of either set turns one of them red
+      by name; all six deletions were run and each has an objector.
+    - `test_probe_client_transitive` and `test_probe_client_via_shared` carry no
+      signal at all and are client purely because they call something that is.
+      That is the whole reason this is a closure and not a marker list, and the
+      closure is what covers `"module"` on the monolith: measured, deleting
+      `"module"` from `_CLIENT_BINDINGS` moves 0 names and disabling the closure
+      moves 0 names, but doing BOTH moves 30, 13 of them tests. Two mechanisms
+      covering the same 13 tests each score dead in a one-at-a-time census.
+      Neither is.
+    - `_runner_only_helper` carries no marker at all -- no helper does -- and is
+      runner because only runner tests reach it.
+    - `_shared_helper` is reached from BOTH halves, so it goes to the shared
+      module. A classifier forced to pick a half would strand it in whichever
+      file lost, which is a NameError at run time and not a collection error, so
+      neither `--collect-only` nor a name-set comparison would see it.
+
+    PITFALL this control exists for: `classify_seam` assigns `SEAM_GUARDS`
+    unconditionally, from the constant and not from the source. So the three
+    guard names appear in the result for ANY input, including a source that
+    defines none of them -- asserted below, because a reader who assumes those
+    three were computed will misread every other result in this file.
+    """
+    destinations, defined_in = classify_seam({"probe.py": _SEAM_CLASSIFIER_PROBE})
+
+    # One per member of _CLIENT_BINDINGS, then one per member of _CLIENT_MODULES.
+    assert destinations["test_probe_client_direct"] == CLIENT_FILE
+    assert destinations["test_probe_client_by_image_reqs"] == CLIENT_FILE
+    assert destinations["test_probe_client_by_module_binding"] == CLIENT_FILE, (
+        "a test whose only client signal is binding and dereferencing `module` "
+        "was classified as runner. On the monolith 13 client tests carry that "
+        "and no other signal in their own body.")
+    assert destinations["test_probe_client_by_artifacts_string"] == CLIENT_FILE
+    assert destinations["test_probe_client_by_run_modal_string"] == CLIENT_FILE
+    assert destinations["test_probe_client_by_sidecar_string"] == CLIENT_FILE
+
+    assert destinations["test_probe_client_transitive"] == CLIENT_FILE, (
+        "a test that reaches the client only THROUGH a helper was classified as "
+        "runner, so the transitive closure is not running and the classifier has "
+        "degenerated into the marker list it was built to replace")
+    assert destinations["test_probe_client_via_shared"] == CLIENT_FILE
+    assert destinations["_client_only_helper"] == CLIENT_FILE
+
+    assert destinations["test_probe_runner_via_helper"] == RUNNER_FILE
+    assert destinations["test_probe_runner_via_shared"] == RUNNER_FILE
+    assert destinations["_runner_only_helper"] == RUNNER_FILE, (
+        "a helper reached only by runner tests was not sent to the runner half; "
+        "stage 2 follows consumers and this one has only runner consumers")
+
+    assert destinations["_shared_helper"] == SHARED_FILE, (
+        "a helper reached from BOTH halves was forced into one of them. That is "
+        "the stranding this third destination exists to prevent.")
+
+    # Assigned by fiat, not computed: the probe defines none of these three.
+    assert {destinations[name] for name in SEAM_GUARDS} == {PACKAGING_FILE}
+    assert not any(name in defined_in for name in SEAM_GUARDS), (
+        "SEAM_GUARDS appeared in `defined_in`, so the probe source defines them "
+        "after all and this assertion is measuring the wrong thing")
+
+    # A name no test reaches has no consumers to follow, so stage 2 cannot place
+    # it. It raises rather than defaulting, because the two things it can be --
+    # dead code, or a new entry point -- want opposite answers.
+    with pytest.raises(ValueError, match="reached by no test"):
+        classify_seam({"orphan.py": "def _reached_by_nothing():\n    return 1\n"})
+
+
+def test_seam_manifest_agrees_with_the_classifier():
+    """The frozen manifest still says what the code says.
+
+    WHY the manifest is frozen at all, given the classifier can recompute it:
+    the manifest is what makes a reclassification VISIBLE IN A DIFF. A change to
+    `classify_seam` that quietly moves eleven names is a two-line diff with no
+    other trace; the same change with this test in place moves eleven lines of
+    JSON as well, in the same commit, where a reviewer reads them. That is also
+    the answer to "what stops someone narrowing `_CLIENT_BINDINGS`": nothing
+    stops it, but it cannot happen silently.
+
+    This test is green before the split and after it, because `classify_seam`
+    reads content and not location. That is deliberate and it is a fix: the
+    previous draft's Task 3 test was a POST-split assertion committed PRE-split,
+    so this task would have committed a red suite and could not have been
+    reviewed independently of the split that follows it.
+
+    WHAT THIS DOES NOT DO, so nobody reads it as more than it is: it compares
+    the manifest against the classifier, not against where the names actually
+    live on disk. Nothing here would notice a name that the split dropped on the
+    floor or duplicated into two files. That is Task 4's placement gate.
+    """
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    computed, _ = classify_seam(_seam_sources())
+    only_manifest = {n: manifest[n] for n in sorted(set(manifest) - set(computed))}
+    only_computed = {n: computed[n] for n in sorted(set(computed) - set(manifest))}
+    assert not only_manifest and not only_computed, (
+        "the manifest and the classifier disagree about WHICH names exist. "
+        f"manifest-only={only_manifest} classifier-only={only_computed}")
+    disagree = {n: (manifest[n], computed[n]) for n in manifest if manifest[n] != computed[n]}
+    assert not disagree, ("the manifest is stale: (frozen, recomputed) for each name that "
+                          f"moved: {disagree}")
