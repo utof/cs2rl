@@ -43,13 +43,52 @@ collection total appears anywhere in this file and nothing asserts on one. If
 you need the number, `pytest --collect-only -q` has it and cannot be wrong.
 """
 import ast
+import json
+import os
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BARE = "modal_runner_lib"
+
+# The file set the RUNTIME gate below executes -- the three the spec's W1 gate
+# names. Between them they cover both historic spellings and both depths.
+# Precisely, because "the files W1 converted" would be wrong by one: W1
+# converted TWO of these, `test_modal_argv.py` (bare, module scope) and
+# `test_eval_baselines.py` (bare, inside a test body). `test_modal_runner.py`
+# was ALREADY on the packaged spelling at 6c937ca and is here as the
+# not-converted control and the bulk of the runtime.
+#
+# NOT the complete set of files that reach the runner, and saying so is the
+# point. Measured by AST census over every tracked .py (`ast.Import` /
+# `ast.ImportFrom` naming `scripts.modal_runner_lib` at any depth), SEVEN
+# tracked files import it: these three, plus `tests/test_modal_protocol.py:15`,
+# plus `scripts/modal_artifacts.py:27`, `scripts/modal_backfill_sidecar.py:43`
+# and `scripts/run_modal.py:33`. The three below are the W1 conversion sites,
+# which is a different set and a deliberately narrower one.
+#
+# The BOUND that follows, stated rather than left to be discovered: the runtime
+# gate can only see an import that the session it spawns actually EXECUTES, so
+# a dynamic bare import landing in any file outside this list is invisible to
+# it -- and a dynamic import is precisely the shape the static guard above
+# cannot see either. This list is hand-maintained and nothing watches it.
+_IMPORTERS = [
+    "tests/test_modal_argv.py",
+    "tests/test_modal_runner.py",
+    "tests/test_eval_baselines.py",
+]
+
+# The test that carries the HARD case: the bare import used to live inside this
+# body, second-to-last statement, behind four assertions (it is now the
+# converted `import scripts.modal_runner_lib as mrl` at
+# tests/test_eval_baselines.py:323, still in-body). If this test does not reach
+# its end, the module census below is measuring a session that never executed
+# the line the gate exists for.
+_INBODY_CARRIER = ("tests/test_eval_baselines.py::test_eval_interval_cli_config_and_modal_mirror")
 
 
 def _repo_python_files():
@@ -303,3 +342,83 @@ def test_the_census_scans_the_whole_repo():
     assert {
         "scripts", "src", "tests"
     } <= tops, (f"the census must reach scripts/, src/ and tests/; it reached {sorted(tops)}")
+
+
+def test_modal_runner_lib_resolves_to_exactly_one_module_object():
+    """RUNTIME gate for the one-spelling rule.
+
+    Runs a real pytest session over `_IMPORTERS` and reads `sys.modules` at
+    session finish. The static guard above proves no file CONTAINS a bare import
+    in a shape it knows; this proves none HAPPENS -- including through
+    `importlib.import_module(<variable>)`, which no static census can see. Read
+    `_IMPORTERS` for the matching bound: this covers the files it runs, not the
+    repo.
+
+    PITFALL 1: the second module object is created when test_eval_baselines'
+    in-body import EXECUTES, so this must run the session, not import it.
+
+    PITFALL 2 -- the one that made the first draft of this gate decorative:
+    "the probe file was written" is not "the import ran". The in-body import is
+    the second-to-last statement of its test; anything that fails that test
+    earlier leaves the census clean and the defect live. So this asserts the
+    inner session's EXIT CODE and that the carrier test itself reported passed,
+    before it looks at the module names at all. Order matters: a bare module
+    list is the least informative of the three failures. All three orderings
+    were demonstrated red against a tree with the in-body bare import live --
+    see the Task 2 report; the third control (carrier silenced with
+    `@pytest.mark.skip`) is why the probe filters on `when == "call"`.
+
+    COST, because this is a planning fact and not a rounding error: this spawns
+    a nested pytest session over all three files end to end. Measured by
+    `pytest --durations`, this test's `call` phase is **41s**, against **0.69s**
+    for the next slowest test in this file -- so it is ~98% of the file's
+    41.77s. Adding a file to `_IMPORTERS` adds that file's whole runtime here.
+
+    Suite-wide, so nobody oversells it: at 40.01s it is the SECOND slowest test
+    in the repo, behind
+    `test_resume_state.py::test_subprocess_resume_run_flat_map_without_pin_pitch_flag`
+    at 43.85s, and it is ~9% of the suite's 442.91s. Measured by
+    `--durations=15` on a full run, not estimated.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "probe.json")
+        env = {**os.environ, "MODAL_IMPORT_PROBE_OUT": out}
+        # --basetemp is NOT cosmetic. tests/conftest.py redirects basetemp to the
+        # machine-global ~/.pytest_tmp unless --basetemp was passed explicitly,
+        # and pytest rm_rf's the given basetemp before recreating it. Without
+        # this flag the nested session deletes the OUTER session's temp tree
+        # mid-run, and two pytest sessions anywhere on this box collide at
+        # fixture setup with `FileExistsError: /home/<user>/.pytest_tmp`.
+        #
+        # `-o addopts=` and `-p no:randomly` are forward insurance, not load
+        # bearing today: measured at this commit there is no
+        # `[tool.pytest.ini_options]` in pyproject.toml, no pytest.ini / tox.ini
+        # / setup.cfg, and pytest-randomly is not installed. Both are no-ops
+        # now; they keep the nested session deterministic if either arrives.
+        argv = [
+            sys.executable, "-m", "pytest", *_IMPORTERS, "-q", "-o", "addopts=", "-p",
+            "no:randomly", "-p", "tests._modal_import_probe", "--basetemp",
+            os.path.join(tmp, "pt")
+        ]
+        result = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, text=True)
+        # stderr is in every message below on purpose: when the nested session
+        # dies before sessionfinish (bad plugin, collection crash) stdout is
+        # empty and the traceback is on stderr, which is the one case where the
+        # failure message is all a reader gets.
+        tail = f"{result.stdout[-3000:]}\n--- stderr ---\n{result.stderr[-2000:]}"
+        assert os.path.exists(out), (f"probe never ran; pytest exit={result.returncode}\n{tail}")
+        payload = json.loads(Path(out).read_text(encoding="utf-8"))
+
+    assert result.returncode == 0 and payload["exitstatus"] == 0, (
+        "the probe session did not finish clean, so its module census describes "
+        f"a run that may never have reached the import. exit={result.returncode} "
+        f"sessionfinish={payload['exitstatus']}\n{tail}")
+    assert _INBODY_CARRIER in payload["passed"], (
+        f"{_INBODY_CARRIER} did not report passed, so the in-body import -- the "
+        "only shape a static census cannot see -- was not executed. The module "
+        f"census below is vacuous. passed={len(payload['passed'])} node ids")
+    assert payload["modules"] == [
+        "scripts.modal_runner_lib"
+    ], ("modal_runner_lib resolved under more than one name, so two module "
+        "objects exist and their exception classes are not identical: "
+        f"{payload['modules']}")
