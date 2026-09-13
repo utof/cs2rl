@@ -4,9 +4,11 @@ WHY: `scripts/` and the repo root are BOTH on sys.path in every FULL-SUITE
 pytest process. The unit matters and the spec is careful about it (design doc
 :147, "Every full-suite process therefore keeps both roots on `sys.path`"):
 measured, collecting THIS FILE alone leaves `scripts/` off sys.path entirely --
-only `src/` is there, inserted by `tests/conftest.py` -- while collecting any one
-of the 9 files below puts it back. A guard that only fires in a full-suite
-process is still the right guard; a reader who thinks it fires everywhere is not.
+only `src/` is there, inserted by `tests/conftest.py`. Of the 9 files that do put
+it there, 8 insert at MODULE scope, so collecting any one of those is enough; the
+9th (`tests/test_resume_state.py:352`) inserts inside a test body, so it lands
+only when that test RUNS. A guard that only fires in a full-suite process is
+still the right guard; a reader who thinks it fires everywhere is not.
 Measured by AST census over every tracked .py, counting `sys.path.insert/append`
 whose argument names `scripts` directly OR through a variable assigned from such
 a path: **11** test files at 6c937ca, **9** after this commit converts two of
@@ -28,7 +30,7 @@ that real in-body violation is the case this guard was built around. A
 passed a module-scope positive control. Past tense on purpose -- the file is
 converted, so the live demonstration now lives in
 `test_guard_detects_a_planted_bare_import`, which plants at three AST depths
-(1, 2 and 3 statements below `Module`, measured) across two scopes (module and
+(1, 2 and 3 nodes below `Module`, measured) across two scopes (module and
 function body), in three shapes -- including the `importlib.import_module` shape
 this repo's Modal tests use to reach their `scripts/` siblings.
 """
@@ -190,18 +192,19 @@ def test_guard_detects_a_planted_bare_import(planted, shape):
     """POSITIVE CONTROL at three AST depths, two scopes and three shapes.
 
     Each number with its unit, because "depth" on its own has two defensible
-    readings and the wrong one oversells the control. Measured over these rows:
-    the planted import sits 1, 2 or 3 nodes below `Module` (three DEPTHS) and in
-    one of two SCOPES -- module scope for the plain, from-import, keyword and
-    submodule rows, a function body for the rest -- in three SHAPES (`import`,
-    `from-import`, `dynamic-import`).
+    readings and the wrong one oversells the control. Measured over these eight
+    rows: the planted import sits 1, 2 or 3 nodes below `Module` (three DEPTHS)
+    and in one of two SCOPES -- five at module scope (plain, from-import, both
+    `importlib` rows, submodule), three in a function body -- in three SHAPES
+    (`import`, `from-import`, `dynamic-import`).
 
-    A `tree.body` implementation fails FOUR rows, and the fourth is why depth is
-    the unit that matters: `importlib.import_module literal` is at MODULE scope
-    but its `Call` hides inside an `Assign`, so `tree.body` never reaches it
-    (measured -- the failing set is both function-body rows, the `__import__`
-    row, and that module-scope one). `tree.body` is blind to DEPTH, not to
-    scope, which is exactly what the old wording got wrong.
+    A `tree.body` implementation fails FIVE of the eight, and TWO of those five
+    are at MODULE scope: both `importlib` rows hide their `Call` inside an
+    `Assign`, so `tree.body` never reaches them. Measured -- the failing set is
+    the two function-body imports, the `__import__` row and both module-scope
+    `importlib` rows; the three that survive are exactly the three at depth 1.
+    So `tree.body` is blind to DEPTH, not to scope, which is what the old
+    wording got wrong.
 
     A shape-blind implementation instead passes every depth and fails the
     dynamic-import rows -- the shape this repo's Modal tests use to reach their
