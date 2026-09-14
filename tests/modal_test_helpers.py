@@ -2,10 +2,20 @@
 
 NOT a test module: no `test_` prefix, so pytest does not collect it. It exists
 because the split is not a clean bisection. Measured, these 7 module-level names
-are reached by tests on both sides of the seam (`_aware`: 22 runner tests and 57
-client tests). Copying them into both files instead would let two definitions of
-the same fixture drift apart with every check in tests/test_modal_packaging.py
-green -- which is the failure mode this seam exists to stop.
+are reached by tests on both sides of the seam (`_aware`: 79 tests reach it, 57
+in the runner half and 22 in the client half). Copying them into both files
+instead would let two definitions of the same fixture drift apart with every
+check in tests/test_modal_packaging.py green -- which is the failure mode this
+seam exists to stop.
+
+THE 57/22 WAS SHIPPED TRANSPOSED and is corrected here, because the arithmetic
+that catches it is worth leaving behind. The figure arrived verbatim from the
+task brief as "22 runner tests and 57 client tests" and no re-derivation was run
+on it. It is refutable without measuring anything: the client half holds 54
+module-level test functions in total, so no count of client tests can be 57, and
+tests/test_modal_client.py states that 54 three files away. A number that its own
+sibling file contradicts is the cheapest kind of wrong to find and the easiest to
+carry forward untouched.
 
 Membership is computed, not judged: classify_seam() assigns a helper here iff
 the set of tests that transitively reach it spans both halves.
@@ -24,7 +34,7 @@ You do not have to apply this by hand, and you should not: classify_seam()
 computes it. A one-sided helper hand-written into this file gains a name in
 `computed` that the manifest lacks, and the agreement test fires.
 
-The `# --` section headers below travelled with the helper they sit above and
+The `# ──` section headers below travelled with the helper they sit above and
 name a runner-half test cycle that is no longer here. Task 5 renames them.
 """
 import io

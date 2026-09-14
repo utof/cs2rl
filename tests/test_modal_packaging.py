@@ -340,7 +340,8 @@ def bare_spelling_imports(source, target=BARE):
 
 
 def _test_files_importing(target):
-    """Tracked `tests/*.py` that import `target`, as repo-relative posix paths.
+    """Every tracked `.py` under `tests/` that imports `target`, at any depth, as
+    repo-relative posix paths.
 
     Same census and same walker as the static guard -- `_repo_python_files()`
     and `bare_spelling_imports`, just pointed at a different module name. That
@@ -348,22 +349,22 @@ def _test_files_importing(target):
     runs, so if it and the guard disagreed about what "imports" means, the probe
     would be scoped by a rule nobody else in this file enforces.
 
-    Scoped to `tests/` because the result feeds a pytest session. The three
-    tracked importers OUTSIDE that scope -- all under `scripts/` -- are listed
-    in the comment at `_IMPORTERS`, which documents them rather than holding
-    them.
+    Scoped to `tests/` because the result feeds a pytest session, and scoped by
+    `rel.startswith("tests/")` rather than by a top-level glob: a runner-importing
+    test in a future subdirectory belongs in the probe, and narrowing the code to
+    match a `tests/*.py` reading would silently drop it, which is the failure this
+    section exists to prevent. So when the docstring and the code disagreed about
+    the scope, the PROSE is what changed. Measured, all 86 tracked `.py` under
+    `tests/` are top-level today -- the only subdirectory is `tests/fixtures`,
+    which holds no `.py` -- so the two readings agree by layout rather than by
+    rule, which is exactly the kind of agreement that stops holding without
+    warning.
 
-    THE COUNT IS UNCHANGED AND WAS NEVER WRONG. Re-measured at this commit:
-    nine tracked files import the runner, six under `tests/` and three under
-    `scripts/`. Only the wording moved, and each change is here because a real
-    reader tripped on it. "listed at `_IMPORTERS`" was read as "a member of
-    `_IMPORTERS`" and a finding was filed on the count before the re-measurement
-    retracted it -- "documented at that site" versus "a member of that
-    collection" is an ambiguity worth spending four words on. And W2 made
-    `modal_test_helpers.py` a non-test file that imports the runner AND sits in
-    the list, so the old phrase "non-test importers" stopped naming the set it
-    meant; a reader counting them now gets four. Naming the scope beats naming
-    the file kind, which is what survives the next module that is neither.
+    Said as a scope and not as a file kind because W2 made
+    `modal_test_helpers.py` a non-test file that imports the runner AND a member
+    of `_IMPORTERS`, so "non-test importers" stopped naming the `scripts/` three.
+    Those three are listed in the comment at `_IMPORTERS`, which documents them
+    rather than holding them.
 
     FileNotFoundError is deliberately NOT caught, for the reason spelled out in
     `test_no_file_imports_the_bare_modal_runner_lib_spelling`: `--cached`
@@ -830,13 +831,33 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
 
 MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 
+# How many names the seam governs, pinned so that SHRINKING it costs a diff line.
+#
+# THE HOLE THIS FILLS, demonstrated rather than argued. Every assertion in the
+# placement gate iterates the manifest, and the agreement test compares
+# `set(manifest)` against `set(computed)`. A name deleted from the tree AND from
+# the manifest is therefore examined by nothing: review excised
+# `test_allowed_gpus` from both and the seam reported `3 passed`. That is not an
+# exotic mutation -- it is exactly what a real deleting commit looks like, because
+# deleting the test alone reddens the agreement test and whoever did it fixes
+# that before pushing. Regenerating the manifest is the natural fix and it is
+# also what hides the loss.
+#
+# Pinning the size does not stop a deletion; nothing here can, and it should not.
+# It makes one visible, which is the same argument the manifest itself rests on:
+# a reclassification that moves eleven names moves eleven lines of JSON where a
+# reviewer reads them. This moves one number. Change it deliberately, in the
+# commit that changes the seam, and say why.
+GOVERNED_NAME_COUNT = 260
+
 RUNNER_FILE = "tests/test_modal_runner.py"
 CLIENT_FILE = "tests/test_modal_client.py"
 PACKAGING_FILE = "tests/test_modal_packaging.py"
 
-# THE MEMBERSHIP RULE FOR THE SHARED FILE. Task 4 creates
-# `tests/modal_test_helpers.py` and must carry these words into that module's own
-# docstring; until it exists, this is the only place the rule can live.
+# THE MEMBERSHIP RULE FOR THE SHARED FILE. `tests/modal_test_helpers.py` exists
+# as of W2's split and carries these words in its own docstring, which is where a
+# reader opening that file will look for them. This copy is the one the
+# classifier sits next to; they must not drift.
 #
 # A name earns a place in the shared file by being REACHED FROM BOTH SIDES of the
 # seam. Nothing else earns it. A helper only runner tests reach belongs in the
@@ -874,18 +895,33 @@ SEAM_GUARDS = frozenset({
 # `ROOT` is `Path(__file__).resolve().parents[1]` -- module-header boilerplate
 # that every destination file defines for itself by construction. Measured at
 # this commit, by AST over module-level bindings of every collected
-# `tests/test_*.py`: 5 files define a `ROOT` of their own (`test_modal_argv.py`,
-# `test_modal_packaging.py`, `test_modal_protocol.py`, `test_modal_runner.py`,
-# `test_train_loop_timing.py`), and `ROOT` is the ONLY one of the monolith's 261
-# module-level names that any other collected test file also defines -- so this
-# exemption list is one name long because the collision set is one name long,
-# not because the rest were not looked for. Treating `ROOT` as a shared helper
-# would make the seam's own scan collide with those unrelated files.
+# `tests/test_*.py`: 6 files define a `ROOT` of their own (`test_modal_argv.py`,
+# `test_modal_client.py`, `test_modal_packaging.py`, `test_modal_protocol.py`,
+# `test_modal_runner.py`, `test_train_loop_timing.py`). `tests/modal_test_helpers.py`
+# defines one too and is correctly absent from that list: it is outside the
+# `test_*.py` glob this sentence scopes by.
 #
-# STATED RATHER THAN HIDDEN: an exemption nothing checks is a hole. Task 4's
-# placement gate is what closes it in both directions, by asserting `ROOT` IS
+# WAS 5 BEFORE W2, AND THE SIXTH IS THIS SEAM'S OWN CLIENT FILE -- which is why
+# the second half of this paragraph had to be rewritten rather than renumbered.
+# It used to read "`ROOT` is the ONLY one of the monolith's 261 module-level
+# names that any other collected test file also defines". After the split that is
+# false by 86: the client half is itself a collected test file and defines 84 of
+# those names, and the three relocated `SEAM_GUARDS` are defined here. The claim
+# the sentence was making survives once the seam's own four files are excluded
+# from "any other", which is what it always meant -- measured that way, `ROOT` is
+# still the ONLY collision, and the files it collides with are
+# `test_modal_argv.py`, `test_modal_protocol.py` and `test_train_loop_timing.py`,
+# 3 of them. Measured at this commit; 261 is unchanged.
+#
+# So this exemption list is one name long because the collision set is one name
+# long, not because the rest were not looked for. Treating `ROOT` as a shared
+# helper would make the seam's own scan collide with those unrelated files.
+#
+# STATED RATHER THAN HIDDEN: an exemption nothing checks is a hole. It is closed
+# in both directions as of W2 by `test_the_modal_test_split_matches_concern_
+# recomputed_from_source` below, whose last assertion requires `ROOT` to BE
 # defined in every destination file, so "not governed" cannot quietly become
-# "lost". Until that gate lands, this is an unguarded exemption.
+# "lost".
 SEAM_HEADER_NAMES = frozenset({"ROOT"})
 
 # A name whose own body reaches the client modules. These two sets are the
@@ -930,6 +966,47 @@ def _module_level_names(tree):
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             found[node.target.id] = node
     return found
+
+
+def _module_level_binding_counts(tree):
+    """{name: how many module-level statements bind it} -- the LIST-shaped census.
+
+    WHY THIS EXISTS NEXT TO `_module_level_names`, which looks like it already
+    answers the question: that function returns a DICT, so two module-level
+    definitions of one name inside ONE file collapse to a single entry, and
+    everything built on it inherits the blindness. The placement gate's
+    `duplicated` check counts FILES and therefore cannot see the case at all.
+    Measured by review at `84622fc`: appending a second `PINNED_CUDA_IMAGE` to
+    tests/test_modal_client.py, shadowing the real digest with
+    `...@sha256:deadbeef`, left the whole seam at `3 passed`.
+
+    THE PITFALL, and it is the failure the seam was built to stop rather than a
+    new one: two copies of a pinned digest that drift apart. Python does not let
+    you have two LIVE definitions of a name across two files -- one import wins
+    and the other is dead -- but it lets you have them inside one file, where the
+    second silently shadows the first and both are in the source a reader greps.
+    So the intra-file shape is the only one the failure can actually take at run
+    time, and it was the one shape nothing watched.
+
+    Mirrors `_module_level_names`' branches exactly: defs and classes via
+    `_DEFS`, `Assign` targets walked so tuple unpacking counts each name, and
+    `AnnAssign`. It counts where that function assigns, so the two cannot come to
+    disagree about what a module-level binding is -- which matters, because a
+    census that disagreed with the one the gate uses everywhere else would report
+    duplicates nobody else believes in.
+    """
+    counts = {}
+    for node in tree.body:
+        names = []
+        if isinstance(node, _DEFS):
+            names = [node.name]
+        elif isinstance(node, ast.Assign):
+            names = [s.id for t in node.targets for s in ast.walk(t) if isinstance(s, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        for name in names:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def _referenced_module_names(node, own, universe):
@@ -991,7 +1068,12 @@ def classify_seam(sources):
     1. TESTS are classified by transitive closure. A name is CLIENT if its own
        body names a client module, or if it references -- transitively -- a name
        that does. Measured against the seam the spec measured four ways, 0 of
-       194 tests land on the wrong side.
+       194 tests land on the wrong side. That 194 is a MONOLITH figure and is
+       kept as one deliberately, because the measurement it reports was taken
+       against the spec's line-3638 seam, which no longer exists. Do not try to
+       re-derive it from this function's inputs: `_seam_sources()` yields 191
+       tests today (137 runner + 54 client), and the missing 3 are the
+       `SEAM_GUARDS`, which moved into a file `_seam_sources()` excludes.
 
        WHICH PART OF STAGE 1 EARNS THAT ZERO, because a one-at-a-time census
        gets this backwards. Knocked out singly, on the monolith: the closure
@@ -1034,15 +1116,40 @@ def classify_seam(sources):
 
     SECOND KNOWN LIMIT: this reads the AST, so a reference written inside a
     subprocess `code = \"\"\"...\"\"\"` string is invisible to it, exactly as it is to
-    `bare_spelling_imports` above. Measured, `tests/test_modal_runner.py` has
-    two such blocks (`test_local_entrypoints_do_not_import_modal` and
-    `test_modal_runner_lib_does_not_import_modal_or_torch`), both of them inside
-    `SEAM_GUARDS` tests that are assigned by fiat anyway, and both naming only
-    modules outside this file. Measured the other way too: of the monolith's
-    module-level names, exactly 3 appear as a word inside any multiline string
-    literal in the file -- `ROOT`, which is ungoverned, and two test names cited
-    by a docstring at line 574, which is prose and not a reach. So this limit
-    changes no destination today. A future subprocess block could.
+    `bare_spelling_imports` above. Re-measured at this commit over the files
+    `_seam_sources()` actually yields: **zero** such blocks remain in any of
+    them. Both of the two that existed --
+    `test_local_entrypoints_do_not_import_modal` and
+    `test_modal_runner_lib_does_not_import_modal_or_torch` -- moved into THIS
+    file with the `SEAM_GUARDS` in W2, and this file is excluded from
+    `_seam_sources()`. They were assigned by fiat anyway and named only modules
+    outside the seam, so the limit's consequence is unchanged; its location is
+    not. Until this commit the paragraph said `tests/test_modal_runner.py` has
+    two such blocks, which the same commit made false.
+
+    Measured the other way too: 8 of the monolith's 261 module-level names now
+    appear as a word inside a multiline string literal somewhere in the seam, and
+    none of them is a reach. Five are prose in the rewritten runner header
+    (`ROOT`, `_run_cuda_probe`, and the three `SEAM_GUARDS` names it says moved
+    out); `_aware` is prose in the shared module's docstring; and
+    `test_exact_allowed_flags_are_kept` and
+    `test_unknown_spelling_rejected_before_ownership` are cited by
+    `test_tct_split_trunk_is_allowed`'s docstring.
+
+    EXPECT THAT COUNT TO MOVE, and do not read a change in it as a finding by
+    itself. It rises whenever any docstring names any governed test, which is
+    what good docstrings do -- it was 3 before W2 and this commit's own header
+    rewrite took it to 8. What must not move is the CONSEQUENCE, and that is
+    checked directly rather than inferred from the count: feeding this file in
+    changes the destination of 0 monolith names, and every one of these mentions
+    sits in prose rather than in a `code = \"\"\"...\"\"\"` block a subprocess
+    executes.
+
+    Named rather than cited by line number throughout: this paragraph used to end
+    "a docstring at line 574", which was accurate in the monolith and points at
+    argv-list content after the split -- the second bare line number in this file
+    to rot inside the commit that moved the code it named. So this limit changes
+    no destination today. A future subprocess block could.
     """
     trees = {rel: ast.parse(text) for rel, text in sources.items()}
     defined_in, nodes = {}, {}
@@ -1103,12 +1210,29 @@ def _seam_sources():
     `tests/test_modal_packaging.py` is deliberately NOT in the list even though
     it is a destination. It holds this classifier, whose own body names the
     client modules in a string constant, so feeding the file to the graph seeds
-    the classifier itself as a client test. Measured at this commit: fed in,
-    `classify_seam` returns 296 destinations rather than 260, and of the 36
-    names this file contributes, 11 go to `tests/test_modal_client.py` --
-    `classify_seam` and `_reaches_client_directly` among them -- while 18 go to
-    the runner half and 7 to the shared module. Every one of those is nonsense.
-    A census of how test files import the runner has no side of this seam.
+    the classifier itself as a client test. Re-measured at this commit: fed in,
+    `classify_seam` returns 299 destinations rather than 260, and of the 42
+    governed names this file contributes, 14 go to `tests/test_modal_client.py`
+    -- `classify_seam` and `_reaches_client_directly` among them -- while 17 go
+    to the runner half, 8 to the shared module and 3 to this file. Every one of
+    the first three groups is nonsense. A census of how test files import the
+    runner has no side of this seam. (The 3 are the `SEAM_GUARDS`, assigned by
+    fiat and the only ones this file legitimately receives; they are counted here
+    because they are among its module-level names, which is what "contributes"
+    means. 14 + 17 + 8 + 3 = 42, and 299 - 260 = 39 because the guards already
+    have destinations without this file being fed in.)
+
+    THOSE FIVE NUMBERS WERE 296 / 36 / 11 / 18 / 7 BEFORE W2 AND THE SPLIT MOVED
+    ALL FIVE, which is worth more than the numbers are. "Measured at this commit"
+    is what makes this sentence a live re-derivable claim rather than a
+    historical one, and a live claim in a file the same commit edits has to be
+    re-run in that commit. It was not, and the review caught it. Note how cheaply
+    it moves: any module-level name added here shifts every figure. The split
+    added four (the placement gate and the three relocated guards) and the review
+    fixes added two more (`GOVERNED_NAME_COUNT` and
+    `_module_level_binding_counts`), which is why the corrected figures are not
+    the ones the review reported either -- they were correct when it measured
+    them.
 
     SCOPE OF THE DAMAGE, measured, because it is smaller than it sounds and this
     exclusion should not be over-trusted: feeding this file in changes the
@@ -1133,12 +1257,15 @@ def _seam_sources():
     protects the seam here is the `rels` list this function ends with, which omits
     `PACKAGING_FILE` unconditionally and never depended on the raise at all.
 
-    Existence-tolerant on purpose: `tests/test_modal_client.py` and
-    `tests/modal_test_helpers.py` do not exist until the split lands, and
+    Existence-tolerant on purpose, and it stays that way now that the split has
+    landed. `tests/test_modal_client.py` and `tests/modal_test_helpers.py` did
+    not exist until W2 created them; all three files are present today, so the
+    `exists()` filter is a no-op at this commit. It is kept because
     `classify_seam` computes from CONTENT, not from where content lives, so the
-    manifest it produces over the unsplit monolith is the same manifest it
-    produces over the split files. That is what lets the agreement test below be
-    green on both sides of the split instead of shipping red for one task.
+    manifest it produces over the unsplit monolith is the same one it produces
+    over the split files -- which is what let the agreement test below stay green
+    on BOTH sides of the split instead of shipping red for one task, and is what
+    would let the seam be re-derived from a pre-split checkout.
     """
     rels = [RUNNER_FILE, CLIENT_FILE, SHARED_FILE]
     return {rel: (ROOT / rel).read_text(encoding="utf-8") for rel in rels if (ROOT / rel).exists()}
@@ -1487,12 +1614,15 @@ def test_no_governed_name_is_defined_outside_the_seams_own_files():
     brand-new `tests/test_modal_stray.py` left this file green, because nothing
     committed here called the scanner at all. It is called now.
 
-    WHAT IT CATCHES TODAY, pre-split: every governed name lives in
-    `tests/test_modal_runner.py`, so any governed name appearing in a fourth
-    file is either a copy or a migration nothing declared. WHAT IT BECOMES after
-    Task 4: the same sentence, with four legal homes instead of one. The
-    assertion does not change across the split, which is why it is written here
-    rather than left for the task that needs it most.
+    WHAT IT CATCHES: every governed name lives in one of the seam's four legal
+    homes, so a governed name appearing in a FIFTH file is either a copy or a
+    migration nothing declared. Written pre-split, when the sentence read "every
+    governed name lives in `tests/test_modal_runner.py` ... one legal home" and
+    "WHAT IT BECOMES after Task 4" was the four-home version; W2 made the second
+    half the present tense and 93 of the governed names no longer live in the
+    runner file. The ASSERTION itself did not change across the split -- it reads
+    the manifest's own value set -- which is why it was written here rather than
+    left for the task that needed it most, and is why only this prose moved.
 
     WHAT IT DELIBERATELY DOES NOT CATCH: a BRAND-NEW name in a stray file. That
     name is not governed, and an unrelated new test module is legal. Only
@@ -1538,28 +1668,64 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
     THE PITFALL THIS EXISTS FOR, measured: a check that compares the split
     against a frozen manifest is green on a maximally wrong split. Review
     reassigned all 250 non-guard, non-shared names runner/client by even/odd
-    source index, split the
-    file to match its own shuffled manifest, and got `1 passed`. A manifest is a
-    record of a decision; it is not evidence the decision was right. So this
-    test re-runs `classify_seam` over the files ON DISK and compares the answer
-    to where each name actually sits. The reference graph does not change when
-    you shuffle names between two files -- which is exactly why the shuffle
-    cannot hide from it.
+    source index, split the file to match its own shuffled manifest, and got
+    `1 passed`. A manifest is a record of a decision; it is not evidence the
+    decision was right. So this test re-runs `classify_seam` over the files ON
+    DISK and compares the answer to where each name actually sits. The reference
+    graph does not change when you shuffle names between two files -- which is
+    exactly why the shuffle cannot hide from it.
 
     Three more holes the first draft had, all demonstrated, all closed here:
 
-    * DELETION was invisible: iterating disk->manifest never examines a manifest
-      name with no definition anywhere. Deleting `test_allowed_gpus` outright
-      gave `1 passed`. Hence the manifest->disk direction below.
+    * DELETION, in the shape that leaves the manifest naming the deleted test:
+      iterating disk->manifest never examines a manifest name with no definition
+      anywhere. Deleting `test_allowed_gpus` outright gave `1 passed`. Hence the
+      manifest->disk direction below.
     * A FOURTH FILE was invisible: the scan set was the manifest's own value
       set. Moving a test into a new `tests/test_modal_stray.py` gave
       `1 passed`. Hence `_names_defined_under_tests`'s glob.
     * The HEADER EXCLUSION could hide a loss: `ROOT` is ungoverned, so dropping
       it from a destination would be silent. Hence the last assertion.
+
+    TWO MORE SHAPES THIS GATE SHIPPED GREEN ON, found by review at `84622fc` by
+    running them rather than reading them, and closed here. Both are the same
+    defect class as each other and as the reason this file exists: a bullet above
+    claimed a hole was closed when only ONE SHAPE of that hole was.
+
+    * DELETION THAT ALSO EDITS THE MANIFEST -- which is the shape a real deleting
+      commit produces, because leaving the manifest stale reddens
+      `test_seam_manifest_agrees_with_the_classifier` and the author fixes that
+      before pushing. Excising `test_allowed_gpus` from the file AND removing its
+      manifest key gave `3 passed`. Every assertion here iterates `manifest`, and
+      the agreement test compares `set(manifest)` against `set(computed)`, so a
+      name absent from BOTH is examined by nothing at all. Hence
+      `GOVERNED_NAME_COUNT`: the seam's size is pinned, so a deletion can no
+      longer be absorbed by regenerating the manifest -- it has to move a number
+      a reviewer reads in the diff.
+    * AN INTRA-FILE DUPLICATE. `duplicated` counts FILES, and the `on_disk` lists
+      come from `_module_level_names`, which is a DICT -- so two module-level
+      definitions of one name inside ONE file collapse to a single entry and the
+      list length stays 1. Appending a second `PINNED_CUDA_IMAGE` to
+      tests/test_modal_client.py gave `3 passed`. That is precisely the failure
+      `duplicated`'s own message describes, in the only arrangement Python
+      actually permits: you cannot have two live definitions across two files,
+      but you can inside one, where the second silently shadows the first. Step
+      6's control (d) covered only the cross-file shape. Hence
+      `_module_level_binding_counts` and `redefined` below.
     """
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     computed, _ = classify_seam(_seam_sources())
     on_disk = _names_defined_under_tests()
+    trees = {
+        rel: ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+        for rel in sorted(set(manifest.values()))
+    }
+
+    assert len(manifest) == GOVERNED_NAME_COUNT, (
+        f"the seam governs {len(manifest)} names, not {GOVERNED_NAME_COUNT}. If you deleted a test "
+        "and regenerated the manifest to match, every other check in this file stays green and the "
+        "loss is invisible -- that is the shape this pin exists for. If the change is intended, "
+        "move the number and say why in the commit; if it is not, you have lost a test.")
 
     missing = sorted(n for n in manifest if n not in on_disk)
     assert not missing, (
@@ -1576,6 +1742,17 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
         "a governed name is defined in two files. Two copies of a pinned digest "
         f"or a fixture drift apart and every other check here stays green: {duplicated}")
 
+    redefined = {}
+    for rel, tree in trees.items():
+        for name, times in sorted(_module_level_binding_counts(tree).items()):
+            if name in manifest and times > 1:
+                redefined[name] = {"file": rel, "module-level definitions": times}
+    assert not redefined, (
+        "a governed name is defined more than once at module level INSIDE one file, so the second "
+        "definition silently shadows the first. `duplicated` above counts files and cannot see "
+        "this; it is the same drift, in the only arrangement Python permits. Two copies of a "
+        f"pinned digest is the case that motivated the seam: {redefined}")
+
     misplaced = {
         n: {
             "on disk": on_disk[n][0],
@@ -1591,8 +1768,7 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
         f"is why this compares against `concern says`. First 10: "
         f"{dict(list(misplaced.items())[:10])}")
 
-    for rel in sorted(set(manifest.values())):
-        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+    for rel, tree in trees.items():
         defined = set(_module_level_names(tree))
         absent = sorted(SEAM_HEADER_NAMES - defined)
         assert not absent, (

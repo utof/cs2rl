@@ -2,9 +2,20 @@
 scripts/modal_artifacts.py and scripts/modal_backfill_sidecar.py.
 
 Split out of tests/test_modal_runner.py, which held two suites: the runner
-library's tests (which stayed) and these 54. Measured before the split: 0 of the
-137 runner-half tests reach the client modules, 0 of these 54 are pure-runner,
-and 0 test bodies span the boundary.
+library's tests (which stayed) and these 54. The 54 and the runner half's 137 are
+live counts of module-level test functions, re-derivable from either file's AST.
+
+PROVENANCE OF THE OTHER THREE FIGURES, stated because re-running them today
+proves less than it looks like it does. "0 of the 137 runner-half tests reach the
+client modules", "0 of these 54 are pure-runner" and "0 test bodies span the
+boundary" are TASK 3 measurements, taken against the spec's line-3638 seam, which
+no longer exists. Do not read them as live. In particular the first is now
+definitionally true of the instrument rather than evidence about the split: under
+classify_seam a test that reaches a client module IS a client-half test, so the
+count cannot come out non-zero however wrong the seam is. A claim only its own
+instrument can confirm is not a check. What DOES still refute a bad split is the
+placement gate in tests/test_modal_packaging.py, which recomputes each name's
+concern from the reference graph and compares it against where the name sits.
 
 The seam is not a line number. tests/test_modal_packaging.py::classify_seam
 recomputes every name's destination from the reference graph, and

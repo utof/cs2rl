@@ -1,27 +1,53 @@
-"""tests/test_modal_runner.py — optional Modal runner (plan tasks 14.1–14.2).
+"""tests/test_modal_runner.py — unit tests for the runner LIBRARY,
+scripts/modal_runner_lib.py.
 
-The Modal training runner (scripts/run_modal.py + helpers, later plan tasks) is an
-OPTIONAL transport for one training run. Two invariants keep it from leaking into
-the default local/scientific environment:
+WHAT THIS FILE OWNS after the W2 split. Every test here exercises `mrl`; the
+tests for the Modal client CLIs (scripts/run_modal.py, scripts/modal_artifacts.py,
+scripts/modal_backfill_sidecar.py) are in tests/test_modal_client.py. Measured at
+the split: 137 module-level test functions here, 303 collected. The `# ──`
+sections below walk the library's cycles in source order — run-request
+construction and field validation, the live-option argv grammar, runner-owned
+argv injection, resume / W&B coupling, safe archive extraction, deterministic
+source bundles and provenance sidecars, local checkpoint hashing, atomic JSON
+status transitions, registry/artifact protocols and durable reservation,
+concurrent races and attempt redelivery, child environment and command builders,
+the CUDA/PufferLib probe and preflight heartbeat, heartbeat/checkpoint commits,
+SIGINT/SIGTERM cleanup, and exit mapping.
 
-  * `modal` is a NON-DEFAULT dependency group pinned to `modal>=1.4.3,<2`. A plain
-    `uv sync` must not pull it (non-default groups are excluded unless explicitly
-    requested via `--group modal`), so the locked scientific stack stays
-    byte-identical with or without the group present in pyproject.toml.
-  * The local entrypoints (`src.train`, `scripts.exp_lib`, `scripts.run_experiment`)
-    must be importable WITHOUT modal installed — i.e. nothing in the local stack
-    imports modal at module scope. The runner must import modal lazily, inside the
-    code paths that actually talk to Modal.
+WHAT MOVED OUT, and why this header says so instead of simply dropping it. Until
+W2 this file also held three packaging guards, and every word of the header that
+used to be here described THEM rather than the library: the `modal` dependency
+group being NON-DEFAULT, the local entrypoints importing without modal, and a
+fresh-subprocess import check with its `cwd=ROOT` / `from _action_spec import` /
+`uv sync --no-install-project` rationale. All three are now `SEAM_GUARDS` in
+tests/test_modal_packaging.py — `test_modal_is_an_explicit_dependency_group`,
+`test_local_entrypoints_do_not_import_modal`,
+`test_modal_runner_lib_does_not_import_modal_or_torch` — and their rationale
+travelled with them. Rewritten rather than trimmed, because a header describing a
+file's departed contents is worse than no header at all: measured after the
+split, `cwd=ROOT`, `_action_spec` and `--no-install-project` occurred in this
+file ONLY inside that docstring, so it sent the next reader hunting for a
+subprocess import check that is not here. The split's byte-identity partition
+deliberately does not cover module headers, which is exactly why this one had to
+be read rather than verified.
 
-Pitfalls this file is careful about:
-  * The import check runs in a FRESH subprocess: the pytest process itself may
-    legitimately have `modal` in sys.modules once later runner tests exist, so
-    asserting on the parent's sys.modules would give false failures.
-  * `cwd=ROOT` makes the `src` / `scripts` namespace packages resolvable in the
-    child; the child also prepends `src/` to sys.path because train.py imports its
-    generated siblings bare (`from _action_spec import ...`). This keeps the test
-    hermetic: it must not depend on the editable install's .pth, which any
-    `uv sync --no-install-project` removes from the venv.
+Pitfalls THIS file is careful about:
+  * It imports the runner as `scripts.modal_runner_lib`, never the bare
+    `modal_runner_lib`. Both spellings resolve in a full-suite process and yield
+    TWO distinct module objects whose `ValidationError` classes are not
+    identical, so `except mrl.ValidationError` would not catch the other one.
+    tests/test_modal_packaging.py is the guard on that, statically and at run
+    time.
+  * Seven helpers are reached from BOTH halves of the seam and live in
+    tests/modal_test_helpers.py rather than being copied into each half. Writing
+    a local copy of one here is invisible to a def-only census and is the
+    drift this seam exists to stop — see that module's docstring for the
+    membership rule, which is computed rather than judged.
+  * The only subprocess in this file is `_run_cuda_probe`, which runs
+    `mrl.CUDA_PROBE_SOURCE` with `cwd=tmp_path` and a stubbed `PYTHONPATH`. It is
+    hermetic by stubbing rather than by repo layout — the opposite of how the
+    departed import check achieved it, so do not copy that test's `cwd=ROOT`
+    reasoning into this one.
 """
 import ast
 import io
