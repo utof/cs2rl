@@ -1,0 +1,45 @@
+# Type checking: pyrefly (Rust, ~1s whole-project, measured 0.99-1.07s warm over
+# three runs) — see gh issue for rationale.
+#
+# preset="default" NOT "basic": the basic preset skips unannotated function
+# bodies, which is ~74% of this repo, so it reported only 4 errors against
+# default's 752. Note "default" is also pyrefly 1.2.0's own default and deleting
+# this line changes nothing; it is kept so this comment has something to attach
+# to, and so a future version bump cannot silently move us.
+preset = "default"
+
+# The pre-existing errors are frozen in pyrefly-snapshot.json and compared by
+# scripts/pyrefly_gate.py, so the gate is quiet today but fails on NEW errors.
+#
+# pyrefly's own --baseline flag is DELIBERATELY UNUSED. Its suppression key
+# includes the error's start column with unlimited multiplicity, which measured
+# blind to 488 of 752 errors (64.9%) were they new: one frozen entry is an
+# unlimited licence for that (file, kind, column), not a budget. The gate keys on
+# (path, name, concise_description, source_line) instead.
+
+# Every tracked .py must be reachable from this list — tests/test_pyrefly_gate.py
+# asserts set equality against `git ls-files '*.py'`, so adding a top-level
+# directory of Python without adding it here is a test failure, not a silent gap.
+# setup.py is listed explicitly because it is a file, not a directory; it
+# contributes 0 errors, so it is free.
+#
+# NOT ["."], which also yields 752 today and looks equivalent. The only thing
+# keeping docs/ (a nested git repo containing .py) out of scope is
+# .git/info/exclude, which is LOCAL and never cloned — on a fresh clone ["."]
+# would sweep docs/research/eval/grade.py. Scope must not depend on an uncloned
+# file.
+project-includes = ["src", "scripts", "tests", "deploy", "setup.py"]
+
+# Error counts are interpreter-version dependent, and a bare `uv run pyrefly
+# check` picks whatever uv resolves rather than what the hook exports. Pinning
+# here is what makes the frozen count reproducible off the hook path.
+python-version = "3.12"
+
+# Import roots. This repo has no single package root: modules are imported bare
+# from src/ (`import train`), from src/c_env/ (`import binding`), and from
+# scripts/, tests/ and deploy/ by their own basenames.
+search-path = ["src", "src/c_env", "scripts", "tests", "deploy", "."]
+
+# `binding` is a compiled C extension (binding.cpython-312-*.so) with no stub.
+# No static checker can introspect a .so; treat it as Any rather than an error.
+ignore-missing-imports = ["binding"]
