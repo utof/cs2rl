@@ -223,12 +223,17 @@ def collect(project: Path, tmp: Path, interp: Path) -> Counter:
     cache: dict = {}
     counts: Counter = Counter()
     for e in entries:
-        counts[(
-            e["path"],
-            e["name"],
-            e["concise_description"],
-            source_line(tmp, e["path"], e["line"], cache),
-        )] += 1
+        # Build a record and project it with key_of(), the SAME function
+        # load_snapshot() uses. Hardcoding the tuple here instead would let the
+        # two sides drift the moment FIELDS changes -- and the drift would not
+        # look like a key change, it would look like every error in the repo
+        # being simultaneously added and removed.
+        counts[key_of({
+            "path": e["path"],
+            "name": e["name"],
+            "concise_description": e["concise_description"],
+            "source_line": source_line(tmp, e["path"], e["line"], cache),
+        })] += 1
     return counts
 
 
@@ -239,11 +244,14 @@ def report(added: Counter, removed: Counter) -> None:
             continue
         print(f"\n{label} {sum(counts.values())}:")
         for key in sorted(counts):
-            path, name, desc, src = key
+            # Unpack through FIELDS rather than by position: this is the third
+            # place that has to agree with the key's shape, and the other two
+            # (collect, load_snapshot) already project through key_of.
+            rec = dict(zip(FIELDS, key, strict=True))
             for _ in range(counts[key]):
-                print(f"  {path}: {name}: {desc}")
-                if src:
-                    print(f"      {src}")
+                print(f"  {rec['path']}: {rec['name']}: {rec['concise_description']}")
+                if rec.get("source_line"):
+                    print(f"      {rec['source_line']}")
 
 
 def main() -> int:
@@ -282,16 +290,24 @@ def main() -> int:
 
     # --- step 2: probe the interpreter, do not merely test that it exists ----
     interp = project / ".venv" / "bin" / "python"
-    probe = subprocess.run([str(interp), "-c", "import sys; print(sys.prefix)"],
-                           capture_output=True,
-                           text=True)
-    if probe.returncode != 0:
+    try:
+        probe = subprocess.run([str(interp), "-c", "import sys; print(sys.prefix)"],
+                               capture_output=True,
+                               text=True)
+        rc, err = probe.returncode, probe.stderr.strip()
+    except OSError as exc:
+        # Wrapping is not optional: a missing file raises FileNotFoundError and a
+        # non-executable one raises PermissionError, so an unwrapped probe
+        # crashes with a traceback on exactly the two inputs this guard exists to
+        # reject -- and a traceback is not an abort message anyone can act on.
+        rc, err = 1, str(exc)
+    if rc != 0:
         # exists() is not enough. A file that exists but is not executable, and
         # one that is executable with a dead shebang, both return True from
         # exists() and both make pyrefly fall back to the default environment --
         # producing 826 errors (ADDED 328 / REMOVED 254, 270 of them bare
         # missing-import) with the only explanation on stderr.
-        die(f"{interp} is not a working interpreter: {probe.stderr.strip()}")
+        die(f"{interp} is not a working interpreter: {err}")
 
     # --- step 3: refuse an unmerged index -----------------------------------
     # MUST precede the parity check: on an unmerged index `git ls-files` prints
@@ -303,6 +319,18 @@ def main() -> int:
         die("the index has unmerged paths; resolve them first:\n  " + "\n  ".join(unmerged))
 
     tmp = Path(tempfile.mkdtemp(prefix="pyrefly-gate-"))
+    # pyrefly silently skips any project-includes pattern whose absolute path has
+    # a HIDDEN ANCESTOR. Measured on this repo: the same materialised tree yields
+    # 136 covered files under /tmp/x and 26 under /tmp/.x, with only a WARN on
+    # stderr. mkdtemp honours TMPDIR, so this is reachable by configuration.
+    # Exact-equality polarity would red it as ~700 removals, but blaming the
+    # user's code for a tempdir setting is a bad hour; say so instead.
+    hidden = [part for part in tmp.parts if part.startswith(".") and part != "."]
+    if hidden:
+        shutil.rmtree(tmp, ignore_errors=True)
+        die(f"refusing to work under a hidden directory ({'/'.join(hidden)} in {tmp}): "
+            "pyrefly skips include patterns there and would check only part of the "
+            "tree. Set TMPDIR to a path with no dot-component.")
     try:
         # --- step 4: materialise the index ----------------------------------
         git(project, "checkout-index", "-a", f"--prefix={tmp}/")
