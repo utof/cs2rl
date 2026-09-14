@@ -38,6 +38,11 @@ dev = [
     # (no apt / brew / separate tool installs needed).
     "clang-format>=20.1.0",
     "pytest-timeout>=2.4.0",
+    # Pinned EXACTLY, not ">=". The type gate (scripts/pyrefly_gate.py) freezes
+    # the repo's pre-existing errors in pyrefly-snapshot.json under a key made of
+    # exact message strings; a minor-version bump rewrites concise_description
+    # wholesale and turns the next commit into an unreadable wall of diffs.
+    "pyrefly==1.2.0",
 ]
 # NON-DEFAULT group (RL-overhaul task 14, tracker #82): the Modal SDK is needed
 # only for the optional cloud training runner (scripts/run_modal.py). A plain
