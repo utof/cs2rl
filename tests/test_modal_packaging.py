@@ -761,6 +761,27 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 RUNNER_FILE = "tests/test_modal_runner.py"
 CLIENT_FILE = "tests/test_modal_client.py"
 PACKAGING_FILE = "tests/test_modal_packaging.py"
+
+# THE MEMBERSHIP RULE FOR THE SHARED FILE. Task 4 creates
+# `tests/modal_test_helpers.py` and must carry these words into that module's own
+# docstring; until it exists, this is the only place the rule can live.
+#
+# A name earns a place in the shared file by being REACHED FROM BOTH SIDES of the
+# seam. Nothing else earns it. A helper only runner tests reach belongs in the
+# runner file, a helper only client tests reach belongs in the client file --
+# however generic the helper looks, and however well its name would read here.
+# `classify_seam` computes exactly this rule and will not send a one-sided helper
+# to this file, so the rule is enforced rather than merely stated.
+#
+# WHY write down a rule the classifier already computes. Spec §10 criterion 12
+# bans a module named `utils` / `helpers` / `common` / `misc`. Its instrument is
+# the per-module segment sums of §5.1 -- the eight `scripts/modal_runner/`
+# submodules of W3 -- so a test module is outside its scope and there is no
+# conflict here. But the criterion exists because a module named for what it IS
+# rather than for what it OWNS becomes a junk drawer, and that failure mode does
+# not care which directory it happens in. A one-line membership test is what
+# keeps this file a seam artefact instead of a drawer: measured, it holds exactly
+# 7 names, and every one of them is reached from both halves.
 SHARED_FILE = "tests/modal_test_helpers.py"
 
 # The three module-level guards that lived above line 100 of the monolith. They
