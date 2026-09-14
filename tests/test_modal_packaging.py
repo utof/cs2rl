@@ -1031,19 +1031,35 @@ def _seam_sources():
     `tests/test_modal_packaging.py` is deliberately NOT in the list even though
     it is a destination. It holds this classifier, whose own body names the
     client modules in a string constant, so feeding the file to the graph seeds
-    the classifier itself as a client test. Measured at this commit: fed in, it
-    raises first -- `_names_defined_under_tests` is reached by no test until
-    Task 4 calls it, and the known-limit raise fires on that. Disable the raise
-    and the absurdity underneath is visible: measured, 18 of the 35 names this
-    file contributes -- `classify_seam` and `_reaches_client_directly` among
-    them -- are assigned to `tests/test_modal_client.py`.
+    the classifier itself as a client test. Measured at this commit: fed in,
+    `classify_seam` returns 296 destinations rather than 260, and of the 36
+    names this file contributes, 11 go to `tests/test_modal_client.py` --
+    `classify_seam` and `_reaches_client_directly` among them -- while 18 go to
+    the runner half and 7 to the shared module. Every one of those is nonsense.
+    A census of how test files import the runner has no side of this seam.
 
-    SCOPE OF THE DAMAGE, measured, because it is smaller than it sounds and a
-    reader should not over-trust this exclusion: feeding this file in changes
-    the destination of **0** monolith names. The self-poisoning is confined to
-    this file's own names. The three names this file legitimately receives are
+    SCOPE OF THE DAMAGE, measured, because it is smaller than it sounds and this
+    exclusion should not be over-trusted: feeding this file in changes the
+    destination of **0** monolith names. The self-poisoning is confined to this
+    file's own names. The three names this file legitimately receives are
     declared in `SEAM_GUARDS` and assigned unconditionally, so nothing is lost
     by leaving it out.
+
+    A CLAIM RETIRED HERE RATHER THAN REWRITTEN, because matching prose to code is
+    only right when the code is right. A previous revision of this paragraph said
+    that feeding this file in RAISES -- that `_names_defined_under_tests` was
+    reached by no test, so the known-limit raise fired on it. It no longer does,
+    and the reason matters more than the sentence did: that raise was never a
+    property of this exclusion or of the classifier. Measured -- hand `c1f7a7a`'s
+    copy of this file to TODAY's classifier and it still raises, on that same
+    name. The trip-wire was only ever the fact that `_names_defined_under_tests`
+    had no caller, which was itself the defect review filed; giving it one
+    removed the trip-wire as a side effect. Nothing load-bearing went with it.
+    The orphan raise is untouched and still reachable -- see `classify_seam`'s
+    KNOWN LIMIT and the `pytest.raises` closing
+    `test_the_seam_classifier_places_a_planted_name_by_its_reference_graph`. What
+    protects the seam here is the `rels` list this function ends with, which omits
+    `PACKAGING_FILE` unconditionally and never depended on the raise at all.
 
     Existence-tolerant on purpose: `tests/test_modal_client.py` and
     `tests/modal_test_helpers.py` do not exist until the split lands, and
