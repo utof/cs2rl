@@ -199,14 +199,17 @@ def _repo_python_files():
     this census sees it.
 
     Counts, with the unit, because a bare number invites the wrong comparison:
-    tracked `.py` at this commit = 133 (the spec's 131 at 6c937ca, plus this
-    file, plus Task 2's `tests/_modal_import_probe.py`). NOTHING asserts on
-    that total and nothing should -- it moves with
-    every added .py. `test_the_census_scans_the_whole_repo` pins the structural
-    property instead, which does not move.
+    tracked `.py` at this commit = 135 (the spec's 131 at 6c937ca, plus this
+    file, plus Task 2's `tests/_modal_import_probe.py`, plus W2's
+    `tests/test_modal_client.py` and `tests/modal_test_helpers.py`). NOTHING
+    asserts on that total and nothing should -- it moves with every added .py,
+    and this sentence read 133 while W2 added two of them, which is the decay
+    a stated total invites and the reason nothing may depend on one.
+    `test_the_census_scans_the_whole_repo` pins the structural property
+    instead, which does not move.
 
     `cwd=ROOT` is load-bearing: `git ls-files "*.py"` is CWD-RELATIVE, so
-    running it from `tests/` returns 84 tracked paths instead of 133 and the
+    running it from `tests/` returns 86 tracked paths instead of 135 and the
     guard silently stops watching `scripts/` and `src/`. Pinning the CWD is what
     makes the scope independent of where pytest was invoked from.
     `test_the_census_scans_the_whole_repo` covers a WRONG cwd, not a MISSING
@@ -294,9 +297,18 @@ def bare_spelling_imports(source, target=BARE):
     2. an import written inside a subprocess CODE STRING is invisible to this
        walker -- it reads the string as a string -- and to the runtime probe,
        which reads `sys.modules` in the parent process and never sees a child's.
-       This repo writes that shape: `tests/test_modal_runner.py:93` holds
-       `import scripts.modal_runner_lib` inside a code string, and the census
-       correctly reports only line 51 for that file. A code string importing
+       This repo writes that shape in
+       `test_local_entrypoints_do_not_import_modal` and
+       `test_modal_runner_lib_does_not_import_modal_or_torch`, which both hold
+       `import scripts.modal_runner_lib` inside a code string and both live in
+       THIS file -- over which the census reports no hit at all. Named rather
+       than numbered because this cite read `tests/test_modal_runner.py:93`
+       until W2's split moved both tests here, and a line number aimed at the
+       file it lives in rots on the next edit. The `_IMPORTERS` comment fixed
+       that rot at its own copy of this citation and left this one, which is
+       the shape a diff-scoped reader cannot catch: the correction and the
+       staleness are 150 lines apart and only one of them is in the diff. A
+       code string importing
        BOTH spellings would rebuild the two-module-object trap with neither
        guard objecting. Parsing string literals is deliberately NOT attempted:
        it is a false-positive generator, since a string that looks like code is
@@ -406,7 +418,7 @@ def test_no_file_imports_the_bare_modal_runner_lib_spelling():
         except SyntaxError:
             # A .py that does not parse cannot import anything either, so
             # skipping it is sound for THIS guard -- it is a scope statement,
-            # not an excuse. Measured: 0 of the 133 tracked .py hit this branch,
+            # not an excuse. Measured: 0 of the 135 tracked .py hit this branch,
             # so it is dead today; it is kept because a tracked .py that stops
             # parsing (a bad merge, a py313-only syntax) would otherwise redden
             # THIS guard for a reason that has nothing to do with imports.
@@ -544,7 +556,7 @@ def test_the_census_scans_the_whole_repo():
     one of them silently retires a distinct check:
 
         *.py -> scripts/*.py       -> assert 1 (19 paths; all 3 names missing)
-        cwd=ROOT -> cwd=ROOT/tests -> assert 1 (84 paths; ls-files is relative)
+        cwd=ROOT -> cwd=ROOT/tests -> assert 1 (86 paths; ls-files is relative)
         census drops a W1 file     -> assert 1 (names it)
         *.py -> tests/*.py         -> assert 3 (asserts 1 and 2 both PASS)
         census drops THIS file     -> assert 2 (asserts 1 and 3 both PASS)
@@ -674,7 +686,9 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
 
     IF YOU ARE HERE BECAUSE THIS TEST WENT RED, READ THIS FIRST. Assertion 1
     demands the nested session exit 0, and that session runs every test in the
-    four `_IMPORTERS` files. So this test inherits the flakiness of every one
+    six `_IMPORTERS` files -- 421 of them, contributed by five, because
+    `tests/modal_test_helpers.py` defines no tests and is on the argv so the
+    probe can see it imported. So this test inherits the flakiness of every one
     of them, and reports it as "the probe session did not finish clean" --
     a headline pointing at the import machinery when the fault is very likely
     somewhere else entirely. The nested session's tail, including its `FAILED`
@@ -702,7 +716,7 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     what a CENSUS-ONLY gate costs, which is a different and also real result.
 
     COST, because this is a planning fact and not a rounding error: this spawns
-    a nested pytest session running all four `_IMPORTERS` files end to end.
+    a nested pytest session running all six `_IMPORTERS` files end to end.
     Measured by `pytest --durations`, this test's `call` phase is **37s**
     against **0.78s** for the next slowest test in this file, so it is ~96% of
     the file's 38.06s. Run-to-run spread on this machine is 33-41s, wider than
@@ -819,7 +833,7 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
         f"{payload['modules']}")
 
 
-# ── The modal test seam: concern, recomputed from source ──────────────────────
+# ── The modal test seam: concern, recomputed from source ───────────────────
 #
 # WHY this section exists at all. `tests/test_modal_runner.py` held two suites.
 # Splitting it needs an answer to "which half does this name belong to?" that a
@@ -1096,8 +1110,12 @@ def classify_seam(sources):
        is a NameError at run time in whichever file lost.
 
     HONESTY NOTE, because the bar was known before stage 2 was written: stage 1
-    alone puts 21 names on the wrong side -- all of them non-test helpers, 0 of
-    them tests -- and stage 2 was added afterwards, with the target already
+    alone puts 28 names on the wrong side -- all of them non-test helpers, 0 of
+    them tests -- or 21 once the 7 SHARED names are set aside, which stage 1
+    structurally cannot produce and which the next sentences are about. Both
+    numbers are one measurement under two scopes, so the scope is stated rather
+    than left to the reader. Stage 2 was added afterwards, with the target
+    already
     known. Tuning a classifier until it matches a number you already have
     certifies it against the answer rather than against the source. The reasons
     to believe stage 2 anyway are that it is a different KIND of rule rather
@@ -1525,9 +1543,10 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     # ── SEAM_HEADER_NAMES: ungoverned must not mean invisible ────────────────
     assert "ROOT" not in destinations, (
         "`ROOT` was given a destination, so `SEAM_HEADER_NAMES` has stopped "
-        "exempting it. Measured, 5 collected test files define a `ROOT` of "
-        "their own, so governing it makes the seam's scan collide with four "
-        "files that have nothing to do with the seam.")
+        "exempting it. Measured, 6 collected test files define a `ROOT` of "
+        "their own -- the comment above `SEAM_HEADER_NAMES` names them -- so "
+        "governing it makes the seam's scan collide with the 3 of those that "
+        "have nothing to do with the seam.")
     assert defined_in.get("ROOT") == [
         "probe.py"
     ], ("`ROOT` fell out of `defined_in` as well as out of `destinations`. "
@@ -1808,8 +1827,8 @@ assert 'modal' not in sys.modules
 
 
 def test_modal_runner_lib_does_not_import_modal_or_torch():
-    # Fresh subprocess: the parent may already have torch (Task 3 checkpoint
-    # tests) or modal (later runner tests) in sys.modules.
+    # Fresh subprocess: the parent may already have torch (the resume-input
+    # checkpoint tests) or modal (later runner tests) in sys.modules.
     code = """
 import sys
 import scripts.modal_runner_lib
