@@ -1066,6 +1066,13 @@ def _names_defined_under_tests():
     destination the manifest does not know about has to be reachable, or the
     check is asking the suspect for the list of places to search.
 
+    CALLED BY `test_no_governed_name_is_defined_outside_the_seams_own_files`, and
+    the reason that matters is a second review finding: for one round this
+    function shipped with no caller in the committed suite at all, so the same
+    stray-file plant still left the file green and the only certification was a
+    gitignored script. Task 4's placement gate is the other caller. If you are
+    about to remove the last caller, delete the function with it.
+
     Scope is `tests/test_*.py` plus the shared helper module: a stray file that
     pytest never collects is not the threat, and measured, widening past
     `test_*.py` pulls in `tests/capture_dump_config_pre_165.py` and
@@ -1112,22 +1119,47 @@ def _names_defined_under_tests():
 # version of this probe named `_import_run_modal` and `scripts.modal_artifacts`
 # and nothing else, and deleting `"module"` from `_CLIENT_BINDINGS` was measured
 # to leave BOTH tests in this section green.
+#
+# AND ONE PER MODULE-LEVEL NODE KIND, for the same reason one level down. Review
+# measured that this probe parsed to `['FunctionDef']` and nothing else -- no
+# `ClassDef`, no `Assign`/`AnnAssign`, no `SEAM_HEADER_NAMES` name -- and ran
+# four mutations across three of `classify_seam`'s decision surfaces that the
+# probe therefore could not see: dropping `ast.ClassDef` from `_DEFS` (14 classes
+# lose a destination), dropping the `Assign` census (5 names lose one), emptying
+# `SEAM_HEADER_NAMES`, and adding a governed name to it. Each was caught by the
+# MANIFEST AGREEMENT test ALONE -- and that test's own docstring concedes it is
+# green on a coordinated edit that regenerates the manifest in the same commit.
+# So those surfaces were guarded only by the instrument such an edit rides in on.
+# Two more were added here for the same reason review found the first three:
+# `AnnAssign` is a separate branch from `Assign`, and `SEAM_GUARDS` had an
+# assertion that could not fail.
 _SEAM_CLASSIFIER_PROBE = '''
+ROOT = "module-header boilerplate: SEAM_HEADER_NAMES, governed by nobody"
+
+_PROBE_PINNED_DIGEST = "sha256:0000"
+
+_PROBE_TIMEOUT_S: int = 5
+
+
+class _ProbeSharedDouble:
+    """A module-level CLASS, reached from both halves."""
+
+
 def _shared_helper():
     return 1
 
 def _runner_only_helper():
-    return _shared_helper()
+    return _shared_helper(), _PROBE_TIMEOUT_S
 
 def _client_only_helper():
     module = _import_run_modal()
-    return module
+    return module, _PROBE_PINNED_DIGEST
 
 def test_probe_runner_via_helper():
     return _runner_only_helper()
 
 def test_probe_runner_via_shared():
-    return _shared_helper()
+    return _shared_helper(), _ProbeSharedDouble(), ROOT
 
 def test_probe_client_direct():
     return _import_run_modal()
@@ -1143,7 +1175,7 @@ def test_probe_client_transitive():
     return _client_only_helper()
 
 def test_probe_client_via_shared():
-    return _client_only_helper(), _shared_helper()
+    return _client_only_helper(), _shared_helper(), _ProbeSharedDouble()
 
 def test_probe_client_by_artifacts_string():
     return "scripts.modal_artifacts"
@@ -1153,6 +1185,9 @@ def test_probe_client_by_run_modal_string():
 
 def test_probe_client_by_sidecar_string():
     return "scripts.modal_backfill_sidecar"
+
+def test_modal_is_an_explicit_dependency_group():
+    return _import_run_modal()
 '''
 
 
@@ -1182,11 +1217,35 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
       file lost, which is a NameError at run time and not a collection error, so
       neither `--collect-only` nor a name-set comparison would see it.
 
+    AND ONE CASE PER MODULE-LEVEL NODE KIND, which is the second half of this
+    test and the more easily lost one. Review measured that the probe parsed to
+    `['FunctionDef']` and nothing else, so four of `classify_seam`'s decision
+    surfaces had no objector here and were caught by the manifest agreement test
+    ALONE -- the one instrument whose own docstring concedes it is green on a
+    coordinated edit that regenerates the manifest in the same commit. Each of
+    the four now turns THIS test red, measured by running the mutation:
+
+      `_DEFS` drops `ast.ClassDef`          -> `_ProbeSharedDouble` unplaced
+      `_module_level_names` drops `Assign`  -> `_PROBE_PINNED_DIGEST` unplaced
+      ... drops `AnnAssign`                 -> `_PROBE_TIMEOUT_S` unplaced
+      `SEAM_HEADER_NAMES` emptied           -> `ROOT` gains a destination
+      ... gains a governed name             -> the pinned set differs
+
+    `AnnAssign` gets its own case because it is its own branch: removing only it
+    leaves the `Assign` control green, and that mutation is the one where this
+    test is the SOLE objector -- the agreement test does not fire, because the
+    monolith has no module-level `AnnAssign` for it to lose.
+
     PITFALL this control exists for: `classify_seam` assigns `SEAM_GUARDS`
-    unconditionally, from the constant and not from the source. So the three
+    unconditionally, from the constant and before it reads any source. So the
     guard names appear in the result for ANY input, including a source that
-    defines none of them -- asserted below, because a reader who assumes those
-    three were computed will misread every other result in this file.
+    defines none of them. A reader who assumes those were computed will misread
+    every other result in this file -- and an earlier revision of this test
+    enshrined the confusion, asserting `{destinations[n] for n in SEAM_GUARDS} ==
+    {PACKAGING_FILE}`, which iterates the same constant the dict was built from
+    and therefore cannot fail. The replacement plants one guard name in the probe
+    as a test whose own body would classify it CLIENT, so the OVERRIDE is what is
+    measured, and pins the set so that adding or removing a member fires.
     """
     destinations, defined_in = classify_seam({"probe.py": _SEAM_CLASSIFIER_PROBE})
 
@@ -1218,11 +1277,75 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
         "a helper reached from BOTH halves was forced into one of them. That is "
         "the stranding this third destination exists to prevent.")
 
-    # Assigned by fiat, not computed: the probe defines none of these three.
-    assert {destinations[name] for name in SEAM_GUARDS} == {PACKAGING_FILE}
-    assert not any(name in defined_in for name in SEAM_GUARDS), (
-        "SEAM_GUARDS appeared in `defined_in`, so the probe source defines them "
-        "after all and this assertion is measuring the wrong thing")
+    # ── the module-level node kinds the census must cover ────────────────────
+    # `.get` rather than `[...]`: the failure these three exist for is the name
+    # being ABSENT from the census, and a KeyError says that far less clearly
+    # than the message does.
+    assert destinations.get("_ProbeSharedDouble") == SHARED_FILE, (
+        "a module-level CLASS reached from both halves was not placed where its "
+        "consumers say. If it is missing entirely, `_DEFS` has stopped covering "
+        "`ast.ClassDef` and the monolith's 14 classes have no destination at "
+        f"all. got={destinations.get('_ProbeSharedDouble')!r}")
+    assert destinations.get("_PROBE_PINNED_DIGEST") == CLIENT_FILE, (
+        "a module-level ASSIGN reached only by client tests was not placed. If "
+        "it is missing entirely, `_module_level_names` has stopped walking "
+        "`ast.Assign` -- the branch whose whole point is that a pinned CUDA "
+        "digest must not be copied into both files and left to drift. "
+        f"got={destinations.get('_PROBE_PINNED_DIGEST')!r}")
+    assert destinations.get("_PROBE_TIMEOUT_S") == RUNNER_FILE, (
+        "a module-level ANNASSIGN reached only by runner tests was not placed. "
+        "`_module_level_names` handles AnnAssign in a SEPARATE branch from "
+        "Assign, so it needs its own control; the Assign control above stays "
+        f"green when only this branch is removed. got={destinations.get('_PROBE_TIMEOUT_S')!r}")
+
+    # ── SEAM_HEADER_NAMES: ungoverned must not mean invisible ────────────────
+    assert "ROOT" not in destinations, (
+        "`ROOT` was given a destination, so `SEAM_HEADER_NAMES` has stopped "
+        "exempting it. Measured, 5 collected test files define a `ROOT` of "
+        "their own, so governing it makes the seam's scan collide with four "
+        "files that have nothing to do with the seam.")
+    assert defined_in.get("ROOT") == [
+        "probe.py"
+    ], ("`ROOT` fell out of `defined_in` as well as out of `destinations`. "
+        "Ungoverned must not mean invisible -- Task 4's placement gate reads "
+        "this to prove `ROOT` survives into every destination file, so an "
+        f"exemption that also hides it is how `ROOT` gets lost. got={defined_in.get('ROOT')!r}")
+    assert SEAM_HEADER_NAMES == frozenset(
+        {"ROOT"}), ("the exemption set changed. Every name in it is silently ungoverned, so "
+                    "an ADDITION here deletes a name from the seam with nothing else "
+                    f"objecting -- which is why the set is pinned. got={sorted(SEAM_HEADER_NAMES)}")
+
+    # ── SEAM_GUARDS overrides computed concern, and that IS testable ─────────
+    # The previous revision asserted `{destinations[n] for n in SEAM_GUARDS} ==
+    # {PACKAGING_FILE}` and called it a check. It cannot fail: `classify_seam`
+    # writes that dict from the constant before it reads any source, and the set
+    # comprehension iterates the same constant. An assertion that cannot fail is
+    # not an assertion. The probe now DEFINES one guard, as a test whose own body
+    # would classify it CLIENT, so the override is measured instead of restated.
+    planted = "test_modal_is_an_explicit_dependency_group"
+    assert planted in SEAM_GUARDS and defined_in.get(planted) == ["probe.py"], (
+        "the planted guard is not both in SEAM_GUARDS and defined by the probe, "
+        "so the override assertion below is measuring the wrong thing")
+    assert destinations[planted] == PACKAGING_FILE, (
+        f"{planted} names a client binding in its own body, so concern alone "
+        "would send it to the client half. It is PACKAGING only because "
+        "SEAM_GUARDS overrides the computation, and that override is now gone. "
+        f"got={destinations[planted]!r}")
+    assert SEAM_GUARDS == frozenset({
+        "test_modal_is_an_explicit_dependency_group",
+        "test_local_entrypoints_do_not_import_modal",
+        "test_modal_runner_lib_does_not_import_modal_or_torch",
+    }), ("the guard set changed. Removing a member hands that test back to the "
+         "computed seam and adding one takes a test out of it; neither shows up "
+         f"anywhere else in this test. got={sorted(SEAM_GUARDS)}")
+    # The other two are assigned by fiat, from the constant, with nothing in the
+    # source defining them. Asserted so nobody reads the override result above as
+    # evidence about names the probe never planted.
+    unplanted = sorted(SEAM_GUARDS - {planted})
+    assert all(name not in defined_in for name in unplanted), (
+        f"the probe defines {unplanted}, so their destinations are no longer the "
+        "assigned-by-fiat case this asserts")
+    assert {destinations[name] for name in unplanted} == {PACKAGING_FILE}
 
     # A name no test reaches has no consumers to follow, so stage 2 cannot place
     # it. It raises rather than defaulting, because the two things it can be --
@@ -1263,3 +1386,59 @@ def test_seam_manifest_agrees_with_the_classifier():
     disagree = {n: (manifest[n], computed[n]) for n in manifest if manifest[n] != computed[n]}
     assert not disagree, ("the manifest is stale: (frozen, recomputed) for each name that "
                           f"moved: {disagree}")
+
+
+def test_no_governed_name_is_defined_outside_the_seams_own_files():
+    """A name the manifest governs may not be defined under `tests/` elsewhere.
+
+    WHY THIS EXISTS, and it is not the obvious reason. `_names_defined_under_tests`
+    scans by GLOB over the test directory rather than by the manifest's own list
+    of destination files, because a check that asks the manifest where to look
+    cannot see a file the manifest does not know about. Review demonstrated the
+    hole on the previous revision: a governed name (`_git`) moved into a
+    brand-new `tests/test_modal_stray.py` left this file green, because nothing
+    committed here called the scanner at all. It is called now.
+
+    WHAT IT CATCHES TODAY, pre-split: every governed name lives in
+    `tests/test_modal_runner.py`, so any governed name appearing in a fourth
+    file is either a copy or a migration nothing declared. WHAT IT BECOMES after
+    Task 4: the same sentence, with four legal homes instead of one. The
+    assertion does not change across the split, which is why it is written here
+    rather than left for the task that needs it most.
+
+    WHAT IT DELIBERATELY DOES NOT CATCH: a BRAND-NEW name in a stray file. That
+    name is not governed, and an unrelated new test module is legal. Only
+    `governed` is in scope -- which is also why the scan's 1,400-odd-name
+    superset does not turn this red for every helper in the repo.
+
+    PITFALL, and it is the one this repo keeps paying for: a scan that reached
+    nothing would pass this silently. So the scope controls come FIRST and are
+    not decoration. `outside` proves the glob reaches past the seam's own files,
+    without which nothing could ever be found straying; `unseen` proves the scan
+    actually sees the governed names rather than passing on an empty
+    intersection. Both are stated as failures of THIS TEST's instrument, not of
+    the tree, because that is what they would mean.
+    """
+    governed = set(json.loads(MANIFEST.read_text(encoding="utf-8")))
+    seam_files = {RUNNER_FILE, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
+    found = _names_defined_under_tests()
+
+    outside = {f for files in found.values() for f in files} - seam_files
+    assert outside, ("the scan reached no file outside the seam's own four, so it could not "
+                     "report a strayed name even if one existed. `_names_defined_under_tests` "
+                     "globs `tests/test_*.py`; if that returned only seam files the glob is "
+                     "broken, not the tree.")
+    unseen = governed - set(found)
+    assert not unseen, ("names the manifest governs are defined nowhere the scan can see, so the "
+                        "check below would pass by looking at nothing. Either the scan lost a "
+                        "file it should cover, or these names were deleted from the tree without "
+                        f"being deleted from the manifest: {sorted(unseen)}")
+
+    strayed = {
+        name: sorted(set(files) - seam_files)
+        for name, files in found.items() if name in governed and set(files) - seam_files
+    }
+    assert not strayed, ("these names are governed by the seam manifest but are ALSO defined in a "
+                         "file the seam does not own, so a reader has no way to tell which "
+                         "definition the suite runs and Task 4's split would silently pick one. "
+                         f"{strayed}")
