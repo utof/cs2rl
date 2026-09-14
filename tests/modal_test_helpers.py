@@ -34,8 +34,8 @@ You do not have to apply this by hand, and you should not: classify_seam()
 computes it. A one-sided helper hand-written into this file gains a name in
 `computed` that the manifest lacks, and the agreement test fires.
 
-The `# ──` section headers below travelled with the helper they sit above and
-name a runner-half test cycle that is no longer here. Task 5 renames them.
+Each `# ──` section header below names the helpers defined under it. They
+once named runner-half test cycles that travelled here with those helpers.
 """
 import io
 import json

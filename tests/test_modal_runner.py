@@ -5,9 +5,9 @@ WHAT THIS FILE OWNS after the W2 split. Every test here exercises `mrl`; the
 tests for the Modal client CLIs (scripts/run_modal.py, scripts/modal_artifacts.py,
 scripts/modal_backfill_sidecar.py) are in tests/test_modal_client.py. Measured at
 the split: 137 module-level test functions here, 303 collected. The `# ──`
-sections below walk the library's cycles in source order; read them rather than a
-list in this header. A second copy of their names is one more thing to keep in
-step with them, and an enumeration that silently stops short reads exactly like a
+sections below walk the library in source order; read them rather than a list
+in this header. A second copy of their names is one more thing to keep in step
+with them, and an enumeration that silently stops short reads exactly like a
 complete one — an earlier draft of this paragraph listed 15 of the 18 and said
 nothing about being partial.
 
@@ -75,7 +75,7 @@ from tests.modal_test_helpers import (                                          
 
 
 def _valid_run_kwargs(**overrides):
-    """Minimal valid run fields for Task 2 cycle A. Later cycles tighten argv."""
+    """Minimal valid run fields. Sections below tighten argv beyond this."""
     kwargs = {
         "run_id": "140826-b7r-seed2-shared",
         "git_sha": "a" * 40,
@@ -123,7 +123,7 @@ def test_invalid_run_ids_are_rejected(run_id):
 
 @pytest.mark.parametrize("name", ["wandb", "W_and-b.1", "s" * 80])
 def test_valid_secret_names_are_accepted(name):
-    # Coupling (--wandb requires the secret and vice versa) is cycle D.
+    # Coupling (--wandb requires the secret and vice versa) is checked below.
     assert mrl.validate_secret_name(name) == name
 
 
@@ -978,7 +978,7 @@ def test_validate_local_checkpoint_rejects_non_checkpoint(tmp_path):
         mrl.validate_local_checkpoint(missing)
 
 
-# ── Run state: atomic writes, status transitions, heartbeat, completion ────
+# ── Run state: atomic writes, transitions, heartbeat, evidence, artifacts ──
 
 
 def _live_batch_size(num_envs: int = 256) -> int:
@@ -1482,7 +1482,7 @@ def test_reserve_run_commits_reservation_immediately_after_dict_claim():
     assert artifacts.events[0][1] == reservation_path
 
 
-# ── Run reservation: concurrent race + expired-Dict Volume fallback ────────
+# ── Run reservation: race, expired-Dict Volume fallback, upload failure ────
 
 
 def test_concurrent_reserve_run_admits_exactly_one_attempt():
@@ -2105,7 +2105,7 @@ def test_prepare_rejects_non_checkpoint_resume(tmp_path):
         mrl.prepare_remote_source(**kwargs)
 
 
-# ── Preflight to launch: CUDA probe, heartbeat, process group, tee ─────────
+# ── Preflight, spawn: CUDA/PufferLib probe, heartbeat, tee, redelivery ─────
 
 
 def _write_probe_stubs(root: Path, *, advantage_cuda: bool, record_path: Path) -> None:
