@@ -94,3 +94,18 @@ zig-out/
 src/c_env/binding*.so
 src/c_env/binding*.pyd
 CLAUDE.md
+
+# Editor/agent scratch dir.
+.ua
+
+# complexipy's on-disk cache; created by the (currently commented-out)
+# pre-commit step. Untracked and previously unignored, so it showed up in
+# every `git status`.
+.complexipy_cache
+
+# pyrefly's own --baseline artifact (~385 KB). This repo deliberately does NOT
+# use --baseline as its type gate: its suppression key includes the error's
+# start column with unlimited multiplicity, which measured blind to 488 of 752
+# errors (64.9%) were they new. Nothing stops `pyrefly check --update-baseline`
+# from recreating the file, so it is ignored rather than merely deleted.
+pyrefly-baseline.json
