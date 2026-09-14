@@ -2,7 +2,18 @@ CompileFlags:
   Add:
     - -xc
     - -std=c99
-    - -Ic_env
+    # Repo-root-relative. The old value `-Ic_env` pointed at a directory that
+    # does not exist. Note this include dir is not actually load-bearing: every
+    # internal header is pulled in with a same-directory quoted include
+    # (`#include "cs2_env.h"`), which resolves without any -I. It is kept so
+    # headers still resolve when clangd is driven from another working dir.
+    - -Isrc/c_env
+    # `<Python.h>` and `<numpy/arrayobject.h>` (binding.c) are NOT resolved by
+    # this file — their paths are per-machine, so hardcoding them into a tracked
+    # file would break every other checkout. To get a clangd that can actually
+    # parse binding.c, generate a gitignored compile_commands.json instead:
+    #   uv run bear -- python setup.py build_ext --inplace
+    # clangd prefers that over this file's flags when present.
 Diagnostics:
   ClangTidy:
     FastCheckFilter: Strict
