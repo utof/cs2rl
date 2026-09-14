@@ -297,11 +297,12 @@ def bare_spelling_imports(source, target=BARE):
     2. an import written inside a subprocess CODE STRING is invisible to this
        walker -- it reads the string as a string -- and to the runtime probe,
        which reads `sys.modules` in the parent process and never sees a child's.
-       This repo writes that shape in
-       `test_local_entrypoints_do_not_import_modal` and
-       `test_modal_runner_lib_does_not_import_modal_or_torch`, which both hold
-       `import scripts.modal_runner_lib` inside a code string and both live in
-       THIS file -- over which the census reports no hit at all. Named rather
+       This repo writes that shape twice in THIS file, over which the census
+       reports no hit at all: `test_local_entrypoints_do_not_import_modal`,
+       whose code string imports `src.train`, `scripts.exp_lib` and
+       `scripts.run_experiment` but never the runner lib, and
+       `test_modal_runner_lib_does_not_import_modal_or_torch`, whose code
+       string holds `import scripts.modal_runner_lib` itself. Named rather
        than numbered because this cite read `tests/test_modal_runner.py:93`
        until W2's split moved both tests here, and a line number aimed at the
        file it lives in rots on the next edit. The `_IMPORTERS` comment fixed
