@@ -54,7 +54,7 @@ if str(ROOT) not in sys.path:
 
 import scripts.modal_runner_lib as mrl                 # noqa: E402, I001
 
-# ── Task 3 cycle A: clean HEAD / Git object validation ─────────────────────
+# ── _git / _init_source_repo: a real tiny repo for HEAD and diff checks ────
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -81,7 +81,7 @@ def _init_source_repo(tmp_path: Path) -> Path:
     return repo
 
 
-# ── Task 4 cycle B: heartbeat + derived stale ──────────────────────────────
+# ── _aware: fixed-date timezone-aware timestamps ───────────────────────────
 
 
 def _aware(hour=12, minute=0, second=0):
@@ -90,7 +90,7 @@ def _aware(hour=12, minute=0, second=0):
     return datetime(2026, 8, 13, hour, minute, second, tzinfo=UTC)
 
 
-# ── Task 4 cycle C: completion evidence + transport config + download ───────
+# ── _write_metrics / _noop_heartbeat: metrics JSONL, inert heartbeat ───────
 
 
 def _write_metrics(path: Path, steps: list[int]) -> None:
@@ -112,7 +112,7 @@ def _noop_heartbeat(**_kwargs):
     return SimpleNamespace(stop_and_join=lambda: None)
 
 
-# ── Task 6 cycle C: resume validation + cheap config dump/hash ──────────────
+# ── _write_dumped_config: the checkpoints/config.json a dump produces ──────
 
 
 def _write_dumped_config(run_root: Path) -> dict[str, object]:
@@ -123,7 +123,7 @@ def _write_dumped_config(run_root: Path) -> dict[str, object]:
     return config
 
 
-# ── Task 7 cycle A: process-group start and nontruncating tee ──────────────
+# ── FakeChild: Popen stand-in whose BytesIO streams drain like pipes ───────
 
 
 class FakeChild:

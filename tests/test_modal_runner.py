@@ -86,7 +86,7 @@ def _valid_run_kwargs(**overrides):
     return kwargs
 
 
-# ── Task 2 cycle A: structured run / resource / action fields ──────────────
+# ── Run request: structured run / resource / action fields ─────────────────
 
 
 @pytest.mark.parametrize(
@@ -342,7 +342,7 @@ def test_status_enum_splits_terminal_and_nonterminal():
             }
 
 
-# ── Task 2 cycle B: exact live-option grammar, no argparse prefixes ────────
+# ── Train args: exact live-option grammar, no argparse prefixes ────────────
 
 
 def test_parse_train_args_preserves_punctuation_as_data():
@@ -577,7 +577,7 @@ def test_tct_split_trunk_is_allowed():
     assert "--tct-split-heads" in request.train_args
 
 
-# ── Task 2 cycle C: runner-owned argv injection ────────────────────────────
+# ── Argv builders: runner-owned flag injection for train and dump-config ───
 
 
 def test_training_argv_is_exact_for_resume_and_defaults():
@@ -653,7 +653,7 @@ def test_no_resume_omits_resume_flag():
     assert "--resume" not in argv
 
 
-# ── Task 2 cycle D: resume / W&B coupling ──────────────────────────────────
+# ── Run preconditions: resume / W&B coupling, clean-HEAD validation ────────
 
 
 def test_local_and_prior_resume_are_mutually_exclusive():
@@ -805,7 +805,7 @@ def test_validate_clean_head_rejects_staged_tracked_change(tmp_path):
         mrl.validate_clean_head(repo, sha)
 
 
-# ── Task 3 cycle B: safe archive extraction ────────────────────────────────
+# ── Source bundle: safe archive extraction ─────────────────────────────────
 
 
 def _write_tar(path: Path, info: tarfile.TarInfo, data: bytes = b"") -> None:
@@ -857,7 +857,7 @@ def test_safe_extract_rejects_unsafe_members(tmp_path):
             mrl.safe_extract_git_archive(archive, dest)
 
 
-# ── Task 3 cycle C: deterministic archive + provenance sidecar ──────────────
+# ── Source bundle: deterministic archive + provenance sidecar ──────────────
 
 
 def _source_repo_with_noise(tmp_path: Path) -> Path:
@@ -952,7 +952,7 @@ def test_source_bundle_normalizes_modes_and_gzip_header(tmp_path):
     assert payload["tree"] == _git(repo, "rev-parse", f"{sha}^{{tree}}")
 
 
-# ── Task 3 cycle D: local checkpoint hash + weights-only load ───────────────
+# ── Resume input: local checkpoint hash + weights-only load ────────────────
 
 
 def test_validate_local_checkpoint_hashes_and_maps_paths(tmp_path):
@@ -978,7 +978,7 @@ def test_validate_local_checkpoint_rejects_non_checkpoint(tmp_path):
         mrl.validate_local_checkpoint(missing)
 
 
-# ── Task 4 cycle A: atomic JSON + status transition table ──────────────────
+# ── Run state: atomic writes, status transitions, heartbeat, completion ────
 
 
 def _live_batch_size(num_envs: int = 256) -> int:
@@ -1380,7 +1380,7 @@ def test_list_run_artifacts_keeps_unknown_trainer_files(tmp_path):
     assert "checkpoints/dust2_policy.pt" in listed
 
 
-# ── Task 5 cycle A: registry/artifact protocols + durable reservation ──────
+# ── Run reservation: registry / artifact protocols, durable commit ─────────
 
 
 class FakeRegistry:
@@ -1482,7 +1482,7 @@ def test_reserve_run_commits_reservation_immediately_after_dict_claim():
     assert artifacts.events[0][1] == reservation_path
 
 
-# ── Task 5 cycle B: concurrent race + expired-Dict Volume fallback ─────────
+# ── Run reservation: concurrent race + expired-Dict Volume fallback ────────
 
 
 def test_concurrent_reserve_run_admits_exactly_one_attempt():
@@ -1568,7 +1568,7 @@ def test_expired_dict_still_rejects_when_volume_reservation_exists():
     assert registry.get("run:ok-id") is None
 
 
-# ── Task 5 cycle C: attempt redelivery / idempotent terminal behavior ──────
+# ── Attempt delivery: redelivery / idempotent terminal behavior ────────────
 
 
 def test_first_attempt_claim_owns_canonical_state_writes(tmp_path):
@@ -1668,7 +1668,7 @@ def test_different_attempt_cannot_reach_remote_wrapper():
     assert registry.get("attempt:attempt-a") is None
 
 
-# ── Task 6 cycle A: child environment + exact command builders ─────────────
+# ── Child process setup: environment + exact command builders ──────────────
 
 
 def test_child_env_preserves_runtime_keys_and_forces_thread_caps():
@@ -1781,7 +1781,7 @@ def test_install_and_train_commands_are_exact():
     ]
 
 
-# ── Task 6 cycle B: reload / verify / extract / install ────────────────────
+# ── Remote prepare: reload, verify, extract, install, resume, dump ─────────
 
 
 class RecordingVolume:
@@ -2105,7 +2105,7 @@ def test_prepare_rejects_non_checkpoint_resume(tmp_path):
         mrl.prepare_remote_source(**kwargs)
 
 
-# ── Task 6 cycle D: CUDA/PufferLib probe + preflight heartbeat ─────────────
+# ── Preflight to launch: CUDA probe, heartbeat, process group, tee ─────────
 
 
 def _write_probe_stubs(root: Path, *, advantage_cuda: bool, record_path: Path) -> None:
@@ -2570,7 +2570,7 @@ def test_same_attempt_redelivery_invokes_subprocess_once(tmp_path):
     assert commits == commits_after_first
 
 
-# ── Task 7 cycle B: heartbeat / checkpoint commits ─────────────────────────
+# ── Training loop: heartbeat and checkpoint commits ────────────────────────
 
 
 class _FakeClock:
@@ -2999,7 +2999,7 @@ def test_completed_run_validates_without_runner_torch(tmp_path, monkeypatch):
     assert evidence.checkpoint_sha256 == mrl.sha256_file(ckpt)
 
 
-# ── Task 7 cycle C: SIGINT / KeyboardInterrupt / SIGTERM cleanup ───────────
+# ── Attempt supervision: SIGINT / KeyboardInterrupt / SIGTERM cleanup ──────
 
 
 def _signal_hooks(child, *, release_on=signal.SIGKILL):
@@ -3408,7 +3408,7 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
     assert persisted["status"] == "interrupted"
 
 
-# ── Task 7 cycle D: exit mapping and completion evidence ───────────────────
+# ── Attempt outcome: exit mapping and completion evidence ──────────────────
 
 
 def test_exit_zero_fails_when_completion_evidence_invalid(tmp_path):

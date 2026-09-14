@@ -44,7 +44,7 @@ from tests.modal_test_helpers import (                                          
     FakeChild, _aware, _git, _init_source_repo, _noop_heartbeat, _write_dumped_config,
     _write_metrics)
 
-# ── Task 8 cycle A: launch-App import / image / object declarations ────────
+# ── Launch app: import-time purity, image build, object declarations ───────
 
 PINNED_CUDA_CHILD_DIGEST = (
     "sha256:6617a625f4090c76c545a0e7d63f2e441718ef9af7f4efe7dd1242a29e289fd7")
@@ -629,7 +629,7 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
         assert Path(src).is_relative_to(ROOT)
 
 
-# ── Task 8 cycle B: run-only parser / omitted sentinels ────────────────────
+# ── Launch CLI: run-only parser, omitted sentinels, defaults ───────────────
 
 
 def _launch_sentinels(**overrides):
@@ -726,7 +726,7 @@ def test_omitted_resource_sentinels_apply_defaults_and_smoke_values_pass(fake_mo
     assert smoke.timeout_minutes == 15
 
 
-# ── Task 8 cycle C: Volume namespace + reservation/blob adapters ───────────
+# ── Modal adapters: Volume namespace + reservation/blob adapters ───────────
 
 
 def _named_volume(fake_modal, name=mrl.VOLUME_NAME):
@@ -842,7 +842,7 @@ def test_reserve_run_through_modal_adapters_stays_in_client_namespace(fake_modal
     assert fake_modal.dict_lookups == [(mrl.REGISTRY_NAME, False)]
 
 
-# ── Task 8 cycle D: configured run invocation and W&B gating ───────────────
+# ── Launch invocation: configured run, W&B gating, payload, train_remote ───
 
 
 def _capture_stdout():
@@ -1616,7 +1616,7 @@ def test_train_remote_redelivery_claims_before_prepare(fake_modal, tmp_path, mon
     assert volume.commit_count == commits_after_first
 
 
-# ── Task 8 cycle E: client-only status / download ──────────────────────────
+# ── Artifact client: status / download without importing the launch app ────
 
 
 def _import_artifacts():
@@ -1795,7 +1795,7 @@ def test_launch_run_spawns_async_so_client_death_does_not_cancel_training(fake_m
     assert result["function_call_id"] == "fc-test"
 
 
-# ── Task 8 quality-review: FileEntry types, empty prefixes, reservation ────
+# ── FileEntry types, empty prefixes, reservation ───────────────────────────
 
 
 class FileEntryType(IntEnum):
