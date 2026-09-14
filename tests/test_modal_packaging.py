@@ -1211,16 +1211,25 @@ def _seam_sources():
     it is a destination. It holds this classifier, whose own body names the
     client modules in a string constant, so feeding the file to the graph seeds
     the classifier itself as a client test. Re-measured at this commit: fed in,
-    `classify_seam` returns 299 destinations rather than 260, and of the 42
-    governed names this file contributes, 14 go to `tests/test_modal_client.py`
-    -- `classify_seam` and `_reaches_client_directly` among them -- while 17 go
-    to the runner half, 8 to the shared module and 3 to this file. Every one of
-    the first three groups is nonsense. A census of how test files import the
+    `classify_seam` returns 299 destinations rather than 260, and of the 42 names
+    this file contributes to that graph, 14 go to `tests/test_modal_client.py` --
+    `classify_seam` and `_reaches_client_directly` among them -- while 17 go to
+    the runner half, 8 to the shared module and 3 to this file. Every one of the
+    first three groups is nonsense. A census of how test files import the
     runner has no side of this seam. (The 3 are the `SEAM_GUARDS`, assigned by
     fiat and the only ones this file legitimately receives; they are counted here
     because they are among its module-level names, which is what "contributes"
     means. 14 + 17 + 8 + 3 = 42, and 299 - 260 = 39 because the guards already
     have destinations without this file being fed in.)
+
+    "42 NAMES", NOT "42 GOVERNED NAMES", and the distinction is this file's own
+    vocabulary rather than pedantry: `governed` here means `in the manifest` --
+    it is what `GOVERNED_NAME_COUNT` counts and what
+    `test_no_governed_name_is_defined_outside_the_seams_own_files` iterates. Of
+    these 42, exactly 3 are governed, and they are the `SEAM_GUARDS`. The file
+    has 43 module-level names; the 43rd is `ROOT`, which `SEAM_HEADER_NAMES`
+    excludes from classification. Writing "42 governed" tells a reader this file
+    contributes 42 manifest entries, which is wrong by 39.
 
     THOSE FIVE NUMBERS WERE 296 / 36 / 11 / 18 / 7 BEFORE W2 AND THE SPLIT MOVED
     ALL FIVE, which is worth more than the numbers are. "Measured at this commit"

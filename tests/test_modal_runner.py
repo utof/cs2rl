@@ -5,14 +5,11 @@ WHAT THIS FILE OWNS after the W2 split. Every test here exercises `mrl`; the
 tests for the Modal client CLIs (scripts/run_modal.py, scripts/modal_artifacts.py,
 scripts/modal_backfill_sidecar.py) are in tests/test_modal_client.py. Measured at
 the split: 137 module-level test functions here, 303 collected. The `# ──`
-sections below walk the library's cycles in source order — run-request
-construction and field validation, the live-option argv grammar, runner-owned
-argv injection, resume / W&B coupling, safe archive extraction, deterministic
-source bundles and provenance sidecars, local checkpoint hashing, atomic JSON
-status transitions, registry/artifact protocols and durable reservation,
-concurrent races and attempt redelivery, child environment and command builders,
-the CUDA/PufferLib probe and preflight heartbeat, heartbeat/checkpoint commits,
-SIGINT/SIGTERM cleanup, and exit mapping.
+sections below walk the library's cycles in source order; read them rather than a
+list in this header. A second copy of their names is one more thing to keep in
+step with them, and an enumeration that silently stops short reads exactly like a
+complete one — an earlier draft of this paragraph listed 15 of the 18 and said
+nothing about being partial.
 
 WHAT MOVED OUT, and why this header says so instead of simply dropping it. Until
 W2 this file also held three packaging guards, and every word of the header that
