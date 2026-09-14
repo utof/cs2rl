@@ -48,6 +48,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -59,10 +60,14 @@ BARE = "modal_runner_lib"
 # `sys.modules`.
 PACKAGED = "scripts." + BARE
 
-# The file set the RUNTIME gate below executes: every TEST file that imports the
-# runner. Not a hand-picked sample -- `test_the_runtime_probe_runs_every_test_
-# file_that_imports_the_runner` asserts this list EQUALS the set discovered by
-# AST census, in both directions, so it cannot silently drift.
+# The file set the RUNTIME gate below executes: every file UNDER `tests/` that
+# imports the runner. Not a hand-picked sample -- `test_the_runtime_probe_runs_
+# every_test_file_that_imports_the_runner` asserts this list EQUALS the set
+# discovered by AST census, in both directions, so it cannot silently drift.
+#
+# "Under tests/" and not "every TEST file", which is what this sentence used to
+# say: `_test_files_importing` scopes by DIRECTORY (`rel.startswith("tests/")`),
+# and W2's shared-helper module is the case where the two readings diverge.
 #
 # Two of these were W1 conversions -- `test_modal_argv.py` (bare, module scope)
 # and `test_eval_baselines.py` (bare, inside a test body), which between them
@@ -72,11 +77,55 @@ PACKAGED = "scripts." + BARE
 # runtime) and `test_modal_protocol.py`. Saying "the files W1 converted" would
 # be wrong by two.
 #
-# Tracked NON-test importers, which are deliberately out of scope here because
-# this list feeds a pytest session: `scripts/modal_artifacts.py:27`,
-# `scripts/modal_backfill_sidecar.py:43`, `scripts/run_modal.py:33`. So SEVEN
-# tracked files import the runner, four of them tests. Recorded for W3, which
-# deletes `modal_runner_lib` and has to find every one of them.
+# `test_modal_client.py` and `modal_test_helpers.py` arrived with W2's split of
+# `test_modal_runner.py`: the packaged import travelled into BOTH halves plus the
+# shared module, so all three import the runner and the census discovers all
+# three. `test_the_runtime_probe_runs_every_test_file_that_imports_the_runner`
+# pre-registered this in its own docstring and told Task 4 to add the new file
+# rather than loosen the equality to a subset. That is what happened here; the
+# assertion was not touched.
+#
+# `modal_test_helpers.py` is NOT a test module -- no `test_` prefix, so pytest
+# collects nothing from it -- and it belongs here anyway, because membership is
+# "imports the runner AND lives under tests/", not "collects tests".
+#
+# WHAT THE ENTRY ACTUALLY BUYS, measured three ways, because the obvious answer
+# is wrong and this comment asserted it for one draft. Handed that file ALONE, a
+# session leaves `tests.modal_test_helpers` in `sys.modules` and the probe
+# reports `{"modules": ["scripts.modal_runner_lib"], "passed": [],
+# "exitstatus": 5}` -- so pytest does import a .py named explicitly on its
+# command line even when the name does not match `python_files`, and the gate
+# CAN see into this file. But run the real six-file session WITHOUT this entry
+# and the module is in `sys.modules` regardless, because both halves carry
+# `from tests.modal_test_helpers import (...)`. So today the entry extends the
+# probe's reach by NOTHING. The honest reasons to list it are that the
+# set-equality assertion requires it, and that it keeps the coverage if either
+# half ever stops importing the shared module -- a forward guarantee, not a
+# present-day gain. Cost is nil: 421 passed either way, 32.31s with against
+# 33.17s without, inside the run-to-run spread.
+#
+# The `exitstatus: 5` above is NO_TESTS_COLLECTED and an artefact of running the
+# file alone; alongside the five collecting entries the session exits 0. A list
+# that ever consisted only of non-collecting modules would red assertion 1 of
+# the gate for that reason and not for a spelling reason.
+#
+# THE PITFALL THAT LET THIS LIST GO STALE THROUGH A FULLY GREEN TASK, and it
+# recurs for any task that ADDS a tracked file: `_repo_python_files` is
+# `git ls-files --cached`, so the census cannot see a file until it is TRACKED.
+# Every W2 gate -- the split's byte-identity census, its four red controls, the
+# file-alone runs, and two full-suite runs at `1390 passed, 3 skipped` -- ran
+# while both new files were still untracked, and the objecting test passed in
+# every one of them because the files did not exist as far as it could look. It
+# went red on the first run after the split commit, having been green minutes
+# earlier on identical bytes. A green suite BEFORE a commit that adds files is
+# not evidence about any tracked-only guard. Re-run them after.
+#
+# Tracked importers OUTSIDE `tests/`, which the directory scope above excludes
+# because this list feeds a pytest session: `scripts/modal_artifacts.py:27`,
+# `scripts/modal_backfill_sidecar.py:43`, `scripts/run_modal.py:33`. So NINE
+# tracked files import the runner, six of them under `tests/` (was seven and
+# four before W2's split). Recorded for W3, which deletes `modal_runner_lib` and
+# has to find every one of them.
 #
 # BOUNDS that survive the scope control, stated rather than left to be
 # discovered. The runtime gate only sees imports the session it spawns actually
@@ -91,7 +140,14 @@ PACKAGED = "scripts." + BARE
 #   2. an import written inside a subprocess CODE STRING. Invisible to the
 #      walker, which sees a string, and to the runtime probe, which reads
 #      `sys.modules` in the parent and never sees a child's. This repo writes
-#      that shape at `tests/test_modal_runner.py:93`. Parsing string literals is
+#      that shape in `test_local_entrypoints_do_not_import_modal` and
+#      `test_modal_runner_lib_does_not_import_modal_or_torch` -- cited as
+#      `tests/test_modal_runner.py:93` until W2's split moved both into THIS
+#      file, which is a citation that rotted inside the commit that moved it.
+#      Named rather than numbered now, because a line number citing the file it
+#      lives in rots on the next edit. The bound is unchanged and if anything
+#      firmer: this file is barred from `_IMPORTERS` by the fork-bomb guard, so
+#      the probe never runs those two at all. Parsing string literals is
 #      deliberately not attempted -- see `bare_spelling_imports`.
 #
 # A third was closed rather than stated: `from scripts import modal_runner_lib`
@@ -101,6 +157,8 @@ _IMPORTERS = [
     "tests/test_modal_argv.py",
     "tests/test_modal_protocol.py",
     "tests/test_modal_runner.py",
+    "tests/test_modal_client.py",
+    "tests/modal_test_helpers.py",
     "tests/test_eval_baselines.py",
 ]
 
@@ -291,7 +349,21 @@ def _test_files_importing(target):
     would be scoped by a rule nobody else in this file enforces.
 
     Scoped to `tests/` because the result feeds a pytest session. The three
-    tracked non-test importers are listed at `_IMPORTERS`.
+    tracked importers OUTSIDE that scope -- all under `scripts/` -- are listed
+    in the comment at `_IMPORTERS`, which documents them rather than holding
+    them.
+
+    THE COUNT IS UNCHANGED AND WAS NEVER WRONG. Re-measured at this commit:
+    nine tracked files import the runner, six under `tests/` and three under
+    `scripts/`. Only the wording moved, and each change is here because a real
+    reader tripped on it. "listed at `_IMPORTERS`" was read as "a member of
+    `_IMPORTERS`" and a finding was filed on the count before the re-measurement
+    retracted it -- "documented at that site" versus "a member of that
+    collection" is an ambiguity worth spending four words on. And W2 made
+    `modal_test_helpers.py` a non-test file that imports the runner AND sits in
+    the list, so the old phrase "non-test importers" stopped naming the set it
+    meant; a reader counting them now gets four. Naming the scope beats naming
+    the file kind, which is what survives the next module that is neither.
 
     FileNotFoundError is deliberately NOT caught, for the reason spelled out in
     `test_no_file_imports_the_bare_modal_runner_lib_spelling`: `--cached`
@@ -1458,3 +1530,105 @@ def test_no_governed_name_is_defined_outside_the_seams_own_files():
                          "file the seam does not own, so a reader has no way to tell which "
                          "definition the suite runs and Task 4's split would silently pick one. "
                          f"{strayed}")
+
+
+def test_the_modal_test_split_matches_concern_recomputed_from_source():
+    """Every governed name lives in the file its RECOMPUTED concern says.
+
+    THE PITFALL THIS EXISTS FOR, measured: a check that compares the split
+    against a frozen manifest is green on a maximally wrong split. Review
+    reassigned all 250 non-guard, non-shared names runner/client by even/odd
+    source index, split the
+    file to match its own shuffled manifest, and got `1 passed`. A manifest is a
+    record of a decision; it is not evidence the decision was right. So this
+    test re-runs `classify_seam` over the files ON DISK and compares the answer
+    to where each name actually sits. The reference graph does not change when
+    you shuffle names between two files -- which is exactly why the shuffle
+    cannot hide from it.
+
+    Three more holes the first draft had, all demonstrated, all closed here:
+
+    * DELETION was invisible: iterating disk->manifest never examines a manifest
+      name with no definition anywhere. Deleting `test_allowed_gpus` outright
+      gave `1 passed`. Hence the manifest->disk direction below.
+    * A FOURTH FILE was invisible: the scan set was the manifest's own value
+      set. Moving a test into a new `tests/test_modal_stray.py` gave
+      `1 passed`. Hence `_names_defined_under_tests`'s glob.
+    * The HEADER EXCLUSION could hide a loss: `ROOT` is ungoverned, so dropping
+      it from a destination would be silent. Hence the last assertion.
+    """
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    computed, _ = classify_seam(_seam_sources())
+    on_disk = _names_defined_under_tests()
+
+    missing = sorted(n for n in manifest if n not in on_disk)
+    assert not missing, (
+        "the manifest names definitions that exist nowhere under tests/. Either "
+        f"they were deleted or they were moved out of reach of this scan: {missing}")
+
+    strayed = {n: on_disk[n] for n in manifest if n not in computed}
+    assert not strayed, ("a governed name is defined under tests/ but NOT in any file the seam "
+                         "governs, so no concern can be recomputed for it. A new destination is "
+                         f"not a place to put split output: {strayed}")
+
+    duplicated = {n: on_disk[n] for n in manifest if len(on_disk[n]) > 1}
+    assert not duplicated, (
+        "a governed name is defined in two files. Two copies of a pinned digest "
+        f"or a fixture drift apart and every other check here stays green: {duplicated}")
+
+    misplaced = {
+        n: {
+            "on disk": on_disk[n][0],
+            "concern says": computed[n],
+            "manifest says": manifest[n]
+        }
+        for n in manifest if on_disk[n][0] != computed[n]
+    }
+    assert not misplaced, (
+        f"{len(misplaced)} of {len(manifest)} names are not in the file their recomputed "
+        "concern assigns them to. Note that `manifest says` agreeing with `on disk` proves "
+        "nothing -- a wrong split and a manifest written to match it agree perfectly, which "
+        f"is why this compares against `concern says`. First 10: "
+        f"{dict(list(misplaced.items())[:10])}")
+
+    for rel in sorted(set(manifest.values())):
+        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+        defined = set(_module_level_names(tree))
+        absent = sorted(SEAM_HEADER_NAMES - defined)
+        assert not absent, (
+            f"{rel} does not define {absent}, which the seam treats as module-header "
+            "boilerplate rather than governing. Ungoverned must not mean lost.")
+
+
+def test_modal_is_an_explicit_dependency_group():
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert data["dependency-groups"]["modal"] == ["modal>=1.4.3,<2"]
+
+
+def test_local_entrypoints_do_not_import_modal():
+    # sys.path.insert("src"): train.py resolves its generated siblings with bare
+    # imports (`from _action_spec import ...`), so the src dir itself must be on
+    # the child's path. Relying on the editable install's .pth instead would make
+    # this test pass/fail on ambient venv state (any `uv sync --no-install-project`
+    # removes it) and could silently import siblings from a DIFFERENT checkout.
+    code = """
+import sys
+sys.path.insert(0, "src")
+import src.train
+import scripts.exp_lib
+import scripts.run_experiment
+assert 'modal' not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
+
+
+def test_modal_runner_lib_does_not_import_modal_or_torch():
+    # Fresh subprocess: the parent may already have torch (Task 3 checkpoint
+    # tests) or modal (later runner tests) in sys.modules.
+    code = """
+import sys
+import scripts.modal_runner_lib
+assert 'modal' not in sys.modules
+assert 'torch' not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
