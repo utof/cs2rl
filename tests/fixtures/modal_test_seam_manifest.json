@@ -191,6 +191,7 @@
   "test_protocol_tokens_through_launch_run": "tests/test_modal_client.py",
   "test_publish_reason_names_the_missing_interpreter": "tests/test_modal_runner.py",
   "test_publish_validates_via_prebuilt_interpreter_when_runner_lacks_torch": "tests/test_modal_runner.py",
+  "test_real_sigterm_in_tee_window_never_joins_unstarted_thread": "tests/test_modal_runner.py",
   "test_recording_volume_reload_restores_committed_run_root": "tests/test_modal_runner.py",
   "test_required_map_allowlist": "tests/test_modal_runner.py",
   "test_reservation_without_status_is_preparing_then_interrupted": "tests/test_modal_runner.py",

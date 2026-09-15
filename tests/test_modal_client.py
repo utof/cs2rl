@@ -2,7 +2,7 @@
 scripts/modal_artifacts.py and scripts/modal_backfill_sidecar.py.
 
 Split out of tests/test_modal_runner.py, which held two suites: the runner
-library's tests (which stayed) and these 54. The 54 and the runner half's 137 are
+library's tests (which stayed) and these 54. The 54 and the runner half's 138 are
 live counts of module-level test functions, re-derivable from either file's AST.
 
 PROVENANCE OF THE OTHER THREE FIGURES, stated because re-running them today

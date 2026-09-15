@@ -863,7 +863,7 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # a reclassification that moves eleven names moves eleven lines of JSON where a
 # reviewer reads them. This moves one number. Change it deliberately, in the
 # commit that changes the seam, and say why.
-GOVERNED_NAME_COUNT = 260
+GOVERNED_NAME_COUNT = 261
 
 RUNNER_FILE = "tests/test_modal_runner.py"
 CLIENT_FILE = "tests/test_modal_client.py"
@@ -1086,8 +1086,8 @@ def classify_seam(sources):
        194 tests land on the wrong side. That 194 is a MONOLITH figure and is
        kept as one deliberately, because the measurement it reports was taken
        against the spec's line-3638 seam, which no longer exists. Do not try to
-       re-derive it from this function's inputs: `_seam_sources()` yields 191
-       tests today (137 runner + 54 client), and the missing 3 are the
+       re-derive it from this function's inputs: `_seam_sources()` yields 192
+       tests today (138 runner + 54 client), and the missing 3 are the
        `SEAM_GUARDS`, which moved into a file `_seam_sources()` excludes.
 
        WHICH PART OF STAGE 1 EARNS THAT ZERO, because a one-at-a-time census
@@ -1230,7 +1230,7 @@ def _seam_sources():
     it is a destination. It holds this classifier, whose own body names the
     client modules in a string constant, so feeding the file to the graph seeds
     the classifier itself as a client test. Re-measured at this commit: fed in,
-    `classify_seam` returns 299 destinations rather than 260, and of the 42 names
+    `classify_seam` returns 300 destinations rather than 261, and of the 42 names
     this file contributes to that graph, 14 go to `tests/test_modal_client.py` --
     `classify_seam` and `_reaches_client_directly` among them -- while 17 go to
     the runner half, 8 to the shared module and 3 to this file. Every one of the
@@ -1238,7 +1238,7 @@ def _seam_sources():
     runner has no side of this seam. (The 3 are the `SEAM_GUARDS`, assigned by
     fiat and the only ones this file legitimately receives; they are counted here
     because they are among its module-level names, which is what "contributes"
-    means. 14 + 17 + 8 + 3 = 42, and 299 - 260 = 39 because the guards already
+    means. 14 + 17 + 8 + 3 = 42, and 300 - 261 = 39 because the guards already
     have destinations without this file being fed in.)
 
     "42 NAMES", NOT "42 GOVERNED NAMES", and the distinction is this file's own

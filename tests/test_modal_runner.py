@@ -4,7 +4,7 @@ scripts/modal_runner_lib.py.
 WHAT THIS FILE OWNS after the W2 split. Every test here exercises `mrl`; the
 tests for the Modal client CLIs (scripts/run_modal.py, scripts/modal_artifacts.py,
 scripts/modal_backfill_sidecar.py) are in tests/test_modal_client.py. Measured at
-the split: 137 module-level test functions here, 303 collected. The `# ──`
+this commit: 138 module-level test functions here, 304 collected. The `# ──`
 sections below walk the library in source order; read them rather than a list
 in this header. A second copy of their names is one more thing to keep in step
 with them, and an enumeration that silently stops short reads exactly like a
@@ -3406,6 +3406,133 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
     assert at_terminal == [("interrupted", True)]
     persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "interrupted"
+
+
+def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monkeypatch):
+    """A real SIGTERM inside the tee-thread start window must not strand the run.
+
+    gh#217. `finalize` joins `tee_threads` unconditionally (`:2608-2609`), so for
+    as long as that list could hold a not-yet-started thread, a signal arriving
+    there raised `RuntimeError: cannot join thread before it is started` out of
+    `on_signal` and past `transition_status`: STATUS.json stuck on `training`, no
+    result.json, child already dead. This is gh#217's demonstration 3 checked in —
+    `execute_training_attempt` on the MAIN thread with the REAL `signal.signal`, a
+    helper thread firing a REAL `os.kill(os.getpid(), SIGTERM)`, and a
+    `threading.Thread.start` wrapper filtered on `_target is _tee_stream` that puts
+    the signal in the window deterministically rather than relying on machine load.
+
+    Three pitfalls this test is built around, each of which fails silently:
+      * `_target` is captured BEFORE delegating to the real `start()`. CPython's
+        `Thread._bootstrap_inner` does `del self._target` when a thread finishes,
+        and a tee thread over an empty FakeChild stream can finish before `start()`
+        returns — read afterwards it is None and the filter never matches.
+      * `killpg`/`getpgid` are FAKE, and that is a safety requirement rather than a
+        preference. `finalize` signals the child's process group using FakeChild's
+        default `pid=4242`; with the real ones, a machine where pid 4242 happens to
+        exist gets a genuine SIGTERM, and `_signal_process_group`'s
+        `except ProcessLookupError` makes it silent on every machine where it does
+        not.
+      * A no-op SIGTERM handler is installed around the call. The runner's `finally`
+        restores whatever disposition was in force on entry, so without this a
+        signal arriving after that restore reaches pytest's default disposition and
+        kills the session instead of failing the test.
+
+    Disclosed blind spots — this test gates the defect, not one specific repair:
+      * A fix that guards the join site (`if thread.ident is not None`) instead of
+        reordering passes, and so does one that clears `tee_threads` before joining.
+        Nothing in this suite excludes either; both are disclosed deliberately.
+      * Do NOT "correct" the spy's predicate to `is_alive()`. gh#217 measured
+        `ident` to be an unreliable proxy for "join will raise" when used as a
+        PRODUCTION guard, because `_bootstrap_inner` sets `_ident` before
+        `_started` while `join` gates on `_started`. As a SPY it is exactly right: a
+        never-started thread has `ident is None`, and once `start()` has returned
+        `_started` is already set. `is_alive()` silently changes what is detected —
+        a started-and-already-finished thread is not alive.
+      * It drives one deterministic point inside the window. It does not prove the
+        window is shut at every instruction, and it says nothing about the residual
+        pre-first-`append` window, which the fix accepts by design.
+    """
+    child = FakeChild(hold=True)
+    hooks = _signal_hooks(child)
+    entered_finalize = threading.Event()
+    killpg_hook = hooks["killpg"]
+
+    def killpg_marking_finalize(pgid, sig):
+        # finalize kills the child (`:2606-2607`) before it joins tee_threads
+        # (`:2608-2609`), so this is the earliest in-handler observable available.
+        # The handler runs on the main thread, so the spin below cannot observe
+        # this flag until the handler has already returned or raised.
+        killpg_hook(pgid, sig)
+        entered_finalize.set()
+
+    real_start = threading.Thread.start
+    real_join = threading.Thread.join
+    joined_unstarted: list[str] = []
+    fired: list[str] = []
+    killers: list[threading.Thread] = []
+
+    def spy_join(self, timeout=None):
+        # The primary assertion. Outcome assertions alone do NOT carry this test:
+        # measured on unfixed source with join swallowing the RuntimeError, the
+        # window is still wide open yet STATUS reaches `interrupted` and
+        # result.json is written. Only this spy sees the unstarted join.
+        if self.ident is None:
+            joined_unstarted.append(self.name)
+        return real_join(self, timeout)
+
+    def deliver_sigterm() -> None:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def spy_start(self):
+        target = getattr(self, "_target", None)
+        if fired or target is not mrl._tee_stream:
+            return real_start(self)
+        # Fire once. A fire-every-start shim measures the same, because the first
+        # fire aborts the loop before the second start() — this is readability.
+        fired.append(self.name)
+        killer = threading.Thread(target=deliver_sigterm, name="b0-sigterm-source", daemon=True)
+        real_start(killer)
+        killers.append(killer)
+        deadline = time.monotonic() + 5.0
+        while not entered_finalize.is_set():
+            if time.monotonic() > deadline:
+                child.release()
+                raise AssertionError("SIGTERM was never handled inside the start window")
+            time.sleep(0.001)
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", spy_start)
+    monkeypatch.setattr(threading.Thread, "join", spy_join)
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            sleep=hooks["sleep"],
+            killpg=killpg_marking_finalize,
+            getpgid=hooks["getpgid"],
+        ))
+    run_root = kwargs["run_root"]
+    previous_term = signal.signal(signal.SIGTERM, lambda *_args: None)
+    previous_int = signal.getsignal(signal.SIGINT)
+    try:
+        result = mrl.execute_training_attempt(**kwargs)
+    finally:
+        child.release()
+        if previous_term is not None:
+            signal.signal(signal.SIGTERM, previous_term)
+        if previous_int is not None:
+            signal.signal(signal.SIGINT, previous_int)
+        for killer in killers:
+            real_join(killer, 2.0)
+    assert fired, "the _tee_stream start wrapper never fired; the window was never opened"
+    assert joined_unstarted == []
+    assert result != mrl.REDELIVERED
+    persisted = json.loads((run_root / mrl.STATUS_FILENAME).read_text())
+    assert persisted["status"] == "interrupted"
+    assert (run_root / mrl.RESULT_FILENAME).is_file()
+    payload = json.loads((run_root / mrl.RESULT_FILENAME).read_text())
+    assert payload["status"] == persisted["status"]
+    assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
 
 
 # ── Attempt outcome: exit mapping and completion evidence ──────────────────
