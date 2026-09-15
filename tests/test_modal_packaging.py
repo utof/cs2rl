@@ -2457,15 +2457,40 @@ def _module_scope_shape_violations(tree):
     other direction fails CLOSED -- `if TYPE_CHECKING and X:` is a `BoolOp`, is
     not recognised, and reddens here.
 
-    TWO LIMITS, STATED RATHER THAN HIDDEN, because an unstated limit reads as a
+    THREE LIMITS, STATED RATHER THAN HIDDEN, because an unstated limit reads as a
     bug to whoever next meets it:
 
-      1. The `else:` branch of a `TYPE_CHECKING` block is NOT examined. Criterion
-         13's text governs "a `TYPE_CHECKING` block whose body is imports only",
-         and `else:` is not that body; the common `else: modal = None` fallback
-         is a declaration and legal. What running that branch COSTS is criterion
-         5's question, and gate (e) does walk it -- its `typecheckingelse` row is
-         the assertion. Complementary, as everywhere else these two gates meet.
+      1. The `else:` branch of a `TYPE_CHECKING` block is NOT examined, AND
+         NOTHING ELSE EXAMINES IT EITHER. Criterion 13's text governs "a
+         `TYPE_CHECKING` block whose body is imports only", and `else:` is not
+         that body; the common `else: modal = None` fallback is a declaration and
+         legal. Gate (e) walks that branch -- its `typecheckingelse` row is the
+         assertion -- but FOR IMPORTS ONLY, which is the whole of what criterion 5
+         asks. Anything else there is caught by no gate on this branch. MEASURED,
+         on a plant spliced after line 19 of the real module:
+
+             import logging
+             from typing import TYPE_CHECKING
+             if TYPE_CHECKING:
+                 import decimal
+             else:
+                 logging.basicConfig(level=logging.INFO)
+
+             gate (g): examined == len(tree.body), violations == []
+             gate (e): scanned == ['scripts/modal_runner_lib.py'], violations == []
+
+         Gate (e)'s green is not vacuous -- `scanned` names the planted file, so
+         it read it and had nothing to say. And the POSITIVE CONTROL is the same
+         call one level up: as a bare module-scope `Expr` it is
+         `('Expr', 21, ...)` RED here, so what the `else:` buys is the
+         indentation, not an inert gate. That is knock-out 2 row 1's exact defect
+         -- a module-scope call that runs on every import -- surviving one
+         indentation level down. Declining an
+         `else:` clause HERE is still right: the plan's instrument table says
+         "every statement in its body", and an unexercised rule risks false reds
+         on W3b's own headers. So read this as a GAP, not as a delegation. W3b /
+         B12 candidate; a sentence that sends the reader to criterion 5 sends them
+         somewhere that does not have it.
       2. The final `elif`'s declaration tuple rejects every other statement kind,
          but only ONE of them ships an observation: a module-scope `try:`. That is
          the deliberate choice, not an oversight -- `try: import X / except
@@ -2474,6 +2499,31 @@ def _module_scope_shape_violations(tree):
          header. `With` / `For` / `While` / `Match` at module scope have no row,
          so a mutant that adds one of THOSE to that tuple survives this file.
          Named so a later reader adds a row rather than assuming one exists.
+      3. THE GATE NEVER ENTERS AN EXPRESSION POSITION, and this is the largest of
+         the three. It classifies `tree.body` statements by KIND; it does not look
+         inside an `Assign` / `AnnAssign` value, a decorator, or a parameter
+         default. MEASURED, and it is the damning shape rather than a corner case:
+
+             _ON_CONTAINER = importlib.util.find_spec('modal') is not None
+                 gate (g): examined == len(tree.body), violations == []
+                 gate (e): scanned == ['scripts/modal_runner_lib.py'],
+                           violations == []
+
+         That is the one-line ASSIGNMENT form of the very header this docstring
+         names above as the gate's entire reason to exist. As an `Assign` it is a
+         declared symbol, so it is legal here; criterion 5 is measured green above
+         and criterion 3 is green for the reason the `if` form is (it never
+         imports Modal, so a container-equivalent import succeeds), while
+         criterion 4 never reads module source at all. So this is a module-scope
+         failure all four gates on this branch miss TOGETHER.
+         WHY IT IS DEFERRED RATHER THAN MISSED: spec §10 criterion 13 reads "no
+         assignment that is not a declared symbol", with the instrument named as
+         `tree.body` PLUS §5.1's manifest. The manifest half is what would decide
+         whether `_ON_CONTAINER` is DECLARED, and §5.1's manifest does not exist
+         pre-split -- there is no right-hand side to check a name against, the
+         same reason Ruling 6 split criterion 4 and Ruling 8 moved criterion 14.
+         The deferral is correct. Silence about it is not: do not read "criterion
+         13 exists" as "criterion 13 is done". W3b / B12 owes this half.
 
     GC1: the subject is a PARAMETER and the return is evidence. The helper never
     reads `ROOT`, never parses a path of its own and never asserts -- every
