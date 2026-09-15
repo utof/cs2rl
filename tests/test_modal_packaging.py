@@ -1193,6 +1193,18 @@ def classify_seam(sources):
     `test_unknown_spelling_rejected_before_ownership` are cited by
     `test_tct_split_trunk_is_allowed`'s docstring.
 
+    THAT 261 IS THE MONOLITH'S OWN NAME COUNT AND IS HISTORICAL -- the same label
+    the `SEAM_HEADER_NAMES` comment block above puts on its identical phrasing,
+    and this one needs it more, because the live governed count in this file is
+    now 273 (`GOVERNED_NAME_COUNT`). AND THE CANDIDATE SET IS THE 247 NON-CLASS
+    NAMES AMONG THOSE 261, which is the only reading that reproduces the 8.
+    Naming it is not pedantry: over all 261 the same instrument returns 9 at the
+    branch point and 10 here, so a re-deriver who takes the obvious reading finds
+    a number that looks stale and "corrects" one that is right. The two names
+    separating the readings are both CLASSES -- `FakeChild`, pre-existing, and
+    `FakeImage`, added by this branch. Over the 247 it returns 8 at BOTH ends,
+    and that 8 is the paragraph above's enumeration, member for member.
+
     EXPECT THAT COUNT TO MOVE, and do not read a change in it as a finding by
     itself. It rises whenever any docstring names any governed test, which is
     what good docstrings do -- it was 3 before W2 and this commit's own header
@@ -1289,9 +1301,11 @@ def _seam_sources():
     contributes 51 manifest entries, which is wrong by 48.
 
     THOSE FIVE NUMBERS WERE 296 / 36 / 11 / 18 / 7 BEFORE W2 AND 300 / 42 / 14 /
-    17 / 8 AFTER IT, AND BOTH TRANSITIONS MOVED ALL OF THEM, which is worth more
-    than the numbers are. "Measured at this commit" is what makes this sentence a
-    live re-derivable claim rather than a historical one, and a live claim in a
+    17 / 8 AFTER IT, AND THE FIRST TRANSITION MOVED ALL FIVE WHILE THE SECOND
+    MOVED ONLY THREE (300 -> 321, 42 -> 51, 17 -> 26; the 14 and the 8 stayed),
+    which is worth more than the numbers are. "Measured at this commit" is what
+    makes this sentence a live re-derivable claim rather than a historical one,
+    and a live claim in a
     file the same commit edits has to be re-run in that commit. It was not, and
     the review caught it. Note how cheaply it moves: any module-level name added
     here shifts every figure. The split added four (the placement gate and the
@@ -1301,9 +1315,9 @@ def _seam_sources():
     five tests -- which is why the corrected figures are not the ones the review
     reported either; they were correct when it measured them.
 
-    AND ONE OF THEM DID NOT MOVE, WHICH IS THE REASON THESE ARE RE-DERIVED AND
-    NOT ARITHMETIC. The W3a gates branch added 9 names here and ALL NINE landed
-    on the runner half: 17 -> 26, while 14 / 8 / 3 stayed exactly where they
+    AND TWO OF THE FIVE DID NOT MOVE, WHICH IS THE REASON THESE ARE RE-DERIVED
+    AND NOT ARITHMETIC. The W3a gates branch added 9 names here and ALL NINE
+    landed on the runner half: 17 -> 26, while 14 / 8 / 3 stayed exactly where they
     were. A reviewer applying "+9 spread across the partition" -- or applying it
     to the 14 because the 14 is the group the paragraph names first -- writes a
     false figure that sums correctly and is therefore invisible to the
