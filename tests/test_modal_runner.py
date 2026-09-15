@@ -3461,8 +3461,14 @@ def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monke
         `_started` is already set. `is_alive()` silently changes what is detected —
         a started-and-already-finished thread is not alive.
       * It drives one deterministic point inside the window. It does not prove the
-        window is shut at every instruction, and it says nothing about the residual
-        pre-first-`append` window, which the fix accepts by design.
+        window is shut at every instruction.
+      * Under the FIX, the residual pre-first-`append` window is the only state this
+        test ever observes -- measured, `len(tee_threads) == 0` at the join and the
+        spy's log is `[('cs2rl-preflight-heartbeat', False),
+        ('cs2rl-checkpoint-watch', False)]`, i.e. zero tee-thread joins. So the
+        outcome assertions are made from inside the accepted residual, and what goes
+        UNTESTED is the state the fix creates: `tee_threads` non-empty and holding
+        only started threads. An earlier wording had this exactly backwards.
     """
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child)

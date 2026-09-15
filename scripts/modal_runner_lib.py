@@ -2682,13 +2682,16 @@ def _run_training_attempt(
         # run in TRAINING with a dead child and no result.json (gh#217). Append per
         # thread rather than extending after the loop: start() can itself raise
         # ("can't start new thread"), and a failure on the second thread must not
-        # leave the first started but unjoinable.
+        # leave the first started but unpublished -- joinable, but never joined,
+        # because finalize only ever joins what is in tee_threads.
         #
         # The invariant is one-directional -- every thread in tee_threads has been
         # started, but not every started thread is yet in it. A signal in the residual
         # window between building `threads` and the first append finds the list empty,
-        # so the tee threads are never joined and the attempt writes nothing to
-        # train.log. That is the accepted trade: the threads are daemon=True so they
+        # so the tee threads are never joined and the attempt is not guaranteed to
+        # write anything to train.log -- a thread started earlier in that window may
+        # still get some output through before finalize closes the sinks at
+        # :2620-2621. That is the accepted trade: the threads are daemon=True so they
         # never hold the process open, finalize's join is their only consumer, and the
         # child is being killed anyway -- whereas publishing first costs a run with no
         # terminal status at all. Do not "fix" this by moving the append back above
