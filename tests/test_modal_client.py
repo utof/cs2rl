@@ -2,8 +2,11 @@
 scripts/modal_artifacts.py and scripts/modal_backfill_sidecar.py.
 
 Split out of tests/test_modal_runner.py, which held two suites: the runner
-library's tests (which stayed) and these 54. The 54 and the runner half's 138 are
-live counts of module-level test functions, re-derivable from either file's AST.
+library's tests (which stayed) and the client half, 63 tests as of the W3a gates.
+The 63 and the runner half's 138 are live counts of module-level test functions,
+re-derivable from either file's AST. The client half was 54 at the W3a branch
+point and the four gates added on this branch are the whole difference -- which is
+why the paragraph below still says 54, and why correcting THAT 54 would be wrong.
 
 PROVENANCE OF THE OTHER THREE FIGURES, stated because re-running them today
 proves less than it looks like it does. "0 of the 137 runner-half tests reach the
@@ -2670,7 +2673,7 @@ def test_gate_d_criterion_4_reddens_on_an_undeclared_destination_and_on_a_rename
     ]
 
 
-def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(tmp_path):
+def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(fake_modal, tmp_path):
     """Knock-out 3: clause (C) alone on a deleted source, clause (A)'s subset half on a stale pin.
 
     Runs the whole gate against a SCRATCH GIT REPO under `tmp_path`, which is the only reason GC1
@@ -2697,6 +2700,16 @@ def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(tm
     missing `run_modal.py` too; both (A) strings are asserted in order, because asserting only the
     subset one would pass on a helper that had lost the bijection half.
     """
+    # Positive control, and it is load-bearing twice over. It establishes that the gate is not
+    # simply red by default before three reds are asserted against it -- and it is the only line in
+    # this test that touches a _CLIENT_BINDINGS name (`_import_run_modal`, `module`;
+    # tests/test_modal_packaging.py:952). Without it classify_seam computes this test's concern as
+    # the RUNNER half and drags `_mount_bijection_violations` to the shared helpers module with it,
+    # so the placement gate reddens on two names the moment the seam manifest is regenerated. Do
+    # not "simplify" it away: the assertion it would remove is invisible from inside this file.
+    module = _import_run_modal()
+    assert _mount_bijection_violations(module.runner_image.local_files, ROOT) == []
+
     repo = tmp_path / "scratch"
     (repo / "scripts").mkdir(parents=True)
     _git(repo, "init", "-q", "-b", "main")
