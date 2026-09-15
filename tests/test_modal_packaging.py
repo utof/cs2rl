@@ -2680,6 +2680,20 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     close. Neither half is optional: together they establish that criterion 13 is
     the SOLE objector to this header.
 
+    AND THE THIRD BLOCK HOLDS THE AGREEMENT THE TWO HELPERS' DOCSTRINGS DEMAND.
+    Both recognise a `TYPE_CHECKING` block with the SAME rule, written out twice
+    -- once in gate (e)'s descent, once in the `If` branch of gate (g) -- and gate
+    (g)'s docstring says the two "MUST agree", which until now nothing enforced.
+    Measured: narrow gate (e)'s attribute clause to require `typing.*` and the two
+    disagree on `if os.TYPE_CHECKING:` while all 7 tests that call either helper
+    still pass. Extracting one shared predicate would cost a module-level name
+    against GC3's pinned budget -- the trade both helpers already state -- so the
+    agreement is ASSERTED over the shapes that separate the readings instead.
+    `os.TYPE_CHECKING` is the SOLE OBJECTOR and it holds BOTH directions: seeding
+    the narrowing into gate (e) makes that row disagree, seeding the same
+    narrowing into gate (g) makes it disagree the other way, and the other four
+    rows are blind to both. Delete that row and either mutant survives.
+
     CRITERION 4 IS DELIBERATELY NOT IN THE CONTRAST. Gate (d) reads
     `runner_image.local_files` and the git index and never reads module source at
     all, so "criterion 4 is green on this plant" would be green for a reason
@@ -2722,6 +2736,43 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
         "gate (e) was expected to stay GREEN on this plant -- that is the whole contrast. A red "
         "here means the plant acquired an import that executes, which would be a correct gate "
         f"(e) verdict and a plant-design error on this side (Ruling 30). Reported: {impure}")
+
+    # The two gates' `TYPE_CHECKING` predicates must agree, and this is what says
+    # so. Each row plants `if <shape>:` holding a NON-stdlib import, then asks
+    # both helpers the same question: gate (e) EXEMPTS the body iff it recognises
+    # the block, gate (g) reports no conditional violation iff it recognises the
+    # block. The verdicts are read off the helpers, never hardcoded, so the row
+    # objects no matter WHICH gate is the one that moved. `recognised` is asserted
+    # as well as the agreement, because two gates that both stopped recognising
+    # anything would agree vacuously.
+    for shape, recognised, why in [
+        ("TYPE_CHECKING", True, "the bare `Name` spelling"),
+        ("typing.TYPE_CHECKING", True, "the `typing.` attribute spelling"),
+        ("os.TYPE_CHECKING", True, "ANY attribute whose `attr` is `TYPE_CHECKING` -- Ruling 29's "
+         "accepted limit, and the ONLY row here that separates the two readings"),
+        ("_probe()", False, "a `Call` test is not recognised by either gate"),
+        ("TYPE_CHECKING is True", False, "a `Compare` test is not recognised by either gate"),
+    ]:
+        slug = "agree_" + shape.replace(".", "_").replace("(", "").replace(")", "").replace(
+            " ", "_")
+        block = "".join(lines[:19]) + f"if {shape}:\n    import modal\n" + "".join(lines[19:])
+        agree_root = tmp_path / slug / "scripts"
+        agree_root.mkdir(parents=True)
+        (agree_root / "modal_runner_lib.py").write_text(block, encoding="utf-8")
+        agree_scanned, agree_impure = _nonstdlib_module_scope_imports(agree_root.parent)
+        assert agree_scanned == [
+            "scripts/modal_runner_lib.py"
+        ], (f"the {slug} plant was not read, so gate (e)'s verdict on it is vacuous: "
+            f"{agree_scanned}")
+        _, agree_shape = _module_scope_shape_violations(ast.parse(block))
+        e_exempts = agree_impure == []
+        g_recognises = agree_shape == []
+        assert e_exempts == recognised and g_recognises == recognised, (
+            f"the two gates no longer read `if {shape}:` the same way, or no longer read it as "
+            f"{recognised}. This is {why}. Gate (g)'s docstring requires them to agree: a block "
+            "one gate exempts and the other calls illegal leaves whoever meets the red with no "
+            f"way to attribute it. gate (e) exempted: {e_exempts} ({agree_impure}); gate (g) "
+            f"recognised: {g_recognises} ({agree_shape})")
 
 
 def test_gate_g_criterion_13_reddens_on_module_scope_work_the_kind_census_hides():
