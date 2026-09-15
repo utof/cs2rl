@@ -2485,7 +2485,7 @@ def test_gate_a_criterion_3_minus_p_and_the_neutral_cwd_are_load_bearing(fake_mo
 
 def _mount_bijection_violations(
     mount_list: list[tuple[str, str, bool]],
-    tracked_paths: Path,
+    repo_root: Path,
 ) -> list[str]:
     """Check three clauses over recorded `(src, dst, copy)` triples; return the violations found.
 
@@ -2496,7 +2496,7 @@ def _mount_bijection_violations(
 
       (A) BIJECTION. The basenames of destinations whose parent is `/opt/app/scripts` equal the
           DECLARED set below, checked both ways, and the declared set is additionally a subset of
-          `git ls-files -z scripts/` inside `tracked_paths`.
+          `git ls-files -z scripts/` inside `repo_root`.
       (B) NAMING RULE. For every triple landing under `/opt/app/scripts/`,
           `dst == "/opt/app/scripts/" + Path(src).name`. This is a RULE stated here, not a re-read
           of what the image recorded -- see the pitfall below.
@@ -2511,9 +2511,12 @@ def _mount_bijection_violations(
     never asserts; each string is prefixed with its clause letter so a caller can assert that one
     clause bit and the other two did not.
 
-    `tracked_paths` IS A REPO ROOT, despite the plural name, which GC1 fixes verbatim. The tracked
-    set is enumerated here rather than passed in so that the `-z` handling below lives in one place
-    instead of being re-implemented by each of the three call sites.
+    THE TRACKED SET IS ENUMERATED HERE rather than passed in, and that is load-bearing rather than
+    convenient. It keeps the `-z` handling below in one place instead of re-implemented at each of
+    the four call sites -- and, measured, it is the only reason "the helper ignores `repo_root`
+    entirely" is a killable mutant. Move the `git ls-files` call out to the callers and there is no
+    longer a git call to delete, so a gate that never consults the repo at all passes every test in
+    this file.
 
     THE DECLARED SET IS A PIN, AND IS TEMPORARY. Pre-split there is no enumeration source for the
     right-hand side: `git ls-files scripts/` is 22 files against 5 mounts, and 3 of those 5 mount
@@ -2550,7 +2553,7 @@ def _mount_bijection_violations(
 
     listing = subprocess.run(
         ["git", "ls-files", "-z", "scripts/"],
-        cwd=str(tracked_paths),
+        cwd=str(repo_root),
         check=True,
         capture_output=True,
         text=True,
@@ -2671,7 +2674,7 @@ def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(tm
     """Knock-out 3: clause (C) alone on a deleted source, clause (A)'s subset half on a stale pin.
 
     Runs the whole gate against a SCRATCH GIT REPO under `tmp_path`, which is the only reason GC1
-    fixes `tracked_paths` as a parameter: proving that clause (C) fails on a missing source means
+    fixes `repo_root` as a parameter: proving that clause (C) fails on a missing source means
     deleting a mounted source, and no test may delete a file from the developer's real worktree.
     The scratch repo mirrors the two declared paths under `scripts/` and nothing else.
 
@@ -2686,7 +2689,7 @@ def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(tm
     SECOND PLANT -- AN UNDECLARED PIN MEMBER, which is the only thing that watches clause (A)'s
     `git ls-files` half. A second scratch repo tracks `scripts/modal_runner_lib.py` alone, so the
     declared `scripts/run_modal.py` is not in the index. Without this plant the helper could ignore
-    `tracked_paths` entirely -- never shell out to git at all -- and every other assertion in this
+    `repo_root` entirely -- never shell out to git at all -- and every other assertion in this
     file would stay green, which would make GC1's "the repo is a parameter" cosmetic rather than
     tested. Measured: deleting the subset check leaves only this assertion red.
 
