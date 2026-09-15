@@ -3408,6 +3408,16 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
     assert persisted["status"] == "interrupted"
 
 
+# A hard timeout, not belt-and-braces: if `spy_start`'s `_target is _tee_stream`
+# filter ever stops matching, the wrapper never fires, the SIGTERM is never sent,
+# FakeChild(hold=True) is never released, and the attempt's wait loop spins
+# forever -- so the `assert fired` guard below is UNREACHABLE and this becomes an
+# unbounded hang instead of a failure. The repo configures no default timeout.
+# W3b makes this reachable: anything that stops `mrl._tee_stream` being the
+# identical object passed as `target` (a re-export wrapper, functools.partial, a
+# Thread subclass) breaks identity SILENTLY, where a rename would at least raise
+# AttributeError.
+@pytest.mark.timeout(30)
 def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monkeypatch):
     """A real SIGTERM inside the tee-thread start window must not strand the run.
 
@@ -3423,9 +3433,11 @@ def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monke
 
     Three pitfalls this test is built around, each of which fails silently:
       * `_target` is captured BEFORE delegating to the real `start()`. CPython's
-        `Thread._bootstrap_inner` does `del self._target` when a thread finishes,
-        and a tee thread over an empty FakeChild stream can finish before `start()`
-        returns — read afterwards it is None and the filter never matches.
+        `Thread.run()` does `del self._target, self._args, self._kwargs` in its
+        `finally` when a thread finishes (it is run(), not _bootstrap_inner --
+        gh#217's draft said otherwise), and a tee thread over an empty FakeChild
+        stream can finish before `start()` returns — read afterwards it is None and
+        the filter never matches.
       * `killpg`/`getpgid` are FAKE, and that is a safety requirement rather than a
         preference. `finalize` signals the child's process group using FakeChild's
         default `pid=4242`; with the real ones, a machine where pid 4242 happens to
