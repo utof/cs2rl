@@ -863,7 +863,23 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # a reclassification that moves eleven names moves eleven lines of JSON where a
 # reviewer reads them. This moves one number. Change it deliberately, in the
 # commit that changes the seam, and say why.
-GOVERNED_NAME_COUNT = 261
+#
+# RE-DERIVED ONCE FOR THE WHOLE W3a GATES BRANCH, not per task, because every
+# module-level name any task adds to a `_seam_sources()` file moves it and a
+# per-task re-pin would be re-derived three times and wrong twice. 261 -> 273:
+# the twelve new names are the gate (a) and gate (d) helpers and tests added to
+# `tests/test_modal_client.py`. Measured, not inferred -- `len(classify_seam(
+# _seam_sources())[0])`, noting that `classify_seam` returns a PAIR, so the
+# obvious `len(classify_seam(...))` is 2. Destinations: 168 runner, 95 client,
+# 7 shared, 3 packaging guards.
+#
+# A GREEN `assert len(manifest) == GOVERNED_NAME_COUNT` IS NOT EVIDENCE THIS
+# NUMBER IS RIGHT. It compares two frozen artifacts -- a checked-in manifest
+# against a checked-in constant -- so adding names to a governed file changes
+# neither and it stays green with a stale count and N ungoverned names on disk.
+# Its own message says so: it is a DELETION detector. The addition detector is
+# `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
+GOVERNED_NAME_COUNT = 273
 
 RUNNER_FILE = "tests/test_modal_runner.py"
 CLIENT_FILE = "tests/test_modal_client.py"
@@ -926,7 +942,17 @@ SEAM_GUARDS = frozenset({
 # from "any other", which is what it always meant -- measured that way, `ROOT` is
 # still the ONLY collision, and the files it collides with are
 # `test_modal_argv.py`, `test_modal_protocol.py` and `test_train_loop_timing.py`,
-# 3 of them. Measured at this commit; 261 is unchanged.
+# 3 of them. Measured at this commit.
+#
+# THE 261 IN THIS PARAGRAPH IS THE MONOLITH'S OWN NAME COUNT AND IS HISTORICAL.
+# It used to be the live governed count as well, and saying "261 is unchanged"
+# here stopped being true on the W3a gates branch, which took the seam to 273
+# (`GOVERNED_NAME_COUNT`). What this paragraph actually measures did NOT move:
+# re-measured at this commit, the collision set is still `ROOT` alone and the
+# same 3 files, and the client half still defines 83 of the monolith's governed
+# names plus `ROOT` -- which is the 84, and 83 + the 3 relocated `SEAM_GUARDS`
+# is the 86. The branch's twelve new client-half names are not monolith names,
+# so none of them enters any figure in this paragraph.
 #
 # So this exemption list is one name long because the collision set is one name
 # long, not because the rest were not looked for. Treating `ROOT` as a shared
@@ -944,7 +970,15 @@ SEAM_HEADER_NAMES = frozenset({"ROOT"})
 #
 # `module` is here because the monolith's client tests bind
 # `module = _import_run_modal()` and then talk to `module`: measured, 13 of the
-# 54 client tests carry that signal and NO other in their own body. Deleting it
+# 63 client tests carry that signal and NO other in their own body. THE
+# DENOMINATOR MOVED ON THE W3a GATES BRANCH AND THE NUMERATOR DID NOT -- 54 -> 63
+# as the four gates were added, while 13 stayed 13. The mechanism, measured
+# rather than assumed: all 9 new client-half gate tests carry the signal set
+# `{_import_run_modal, module}`, because GC5c's placement fix gives each one a
+# `module = _import_run_modal()` positive control, and this sentence counts
+# tests whose ONLY own-body signal is `module`. Bumping the 13 alongside the 54
+# would have put a false figure into the file that holds the classifier; it is
+# re-derived here, not inferred. Deleting it
 # still moves 0 names, because the transitive closure covers the same 13 -- see
 # `classify_seam`'s stage-1 note. Every member of both sets has a dedicated case
 # in `_SEAM_CLASSIFIER_PROBE`, because before those cases existed, deleting
@@ -1086,9 +1120,13 @@ def classify_seam(sources):
        194 tests land on the wrong side. That 194 is a MONOLITH figure and is
        kept as one deliberately, because the measurement it reports was taken
        against the spec's line-3638 seam, which no longer exists. Do not try to
-       re-derive it from this function's inputs: `_seam_sources()` yields 192
-       tests today (138 runner + 54 client), and the missing 3 are the
-       `SEAM_GUARDS`, which moved into a file `_seam_sources()` excludes.
+       re-derive it from this function's inputs: `_seam_sources()` yields 201
+       tests today (138 runner + 63 client), and the missing 3 are the
+       `SEAM_GUARDS`, which moved into a file `_seam_sources()` excludes. That
+       201 was 192 (138 + 54) at the W3a branch point; the nine gate tests the
+       branch added to the client half are the whole difference, and the runner
+       half did not move. These are LIVE counts of module-level `test_`
+       functions, re-derivable from either file's AST -- unlike the 194 above.
 
        WHICH PART OF STAGE 1 EARNS THAT ZERO, because a one-at-a-time census
        gets this backwards. Knocked out singly, on the monolith: the closure
@@ -1230,37 +1268,47 @@ def _seam_sources():
     it is a destination. It holds this classifier, whose own body names the
     client modules in a string constant, so feeding the file to the graph seeds
     the classifier itself as a client test. Re-measured at this commit: fed in,
-    `classify_seam` returns 300 destinations rather than 261, and of the 42 names
+    `classify_seam` returns 321 destinations rather than 273, and of the 51 names
     this file contributes to that graph, 14 go to `tests/test_modal_client.py` --
-    `classify_seam` and `_reaches_client_directly` among them -- while 17 go to
+    `classify_seam` and `_reaches_client_directly` among them -- while 26 go to
     the runner half, 8 to the shared module and 3 to this file. Every one of the
     first three groups is nonsense. A census of how test files import the
     runner has no side of this seam. (The 3 are the `SEAM_GUARDS`, assigned by
     fiat and the only ones this file legitimately receives; they are counted here
     because they are among its module-level names, which is what "contributes"
-    means. 14 + 17 + 8 + 3 = 42, and 300 - 261 = 39 because the guards already
+    means. 14 + 26 + 8 + 3 = 51, and 321 - 273 = 48 because the guards already
     have destinations without this file being fed in.)
 
-    "42 NAMES", NOT "42 GOVERNED NAMES", and the distinction is this file's own
+    "51 NAMES", NOT "51 GOVERNED NAMES", and the distinction is this file's own
     vocabulary rather than pedantry: `governed` here means `in the manifest` --
     it is what `GOVERNED_NAME_COUNT` counts and what
     `test_no_governed_name_is_defined_outside_the_seams_own_files` iterates. Of
-    these 42, exactly 3 are governed, and they are the `SEAM_GUARDS`. The file
-    has 43 module-level names; the 43rd is `ROOT`, which `SEAM_HEADER_NAMES`
-    excludes from classification. Writing "42 governed" tells a reader this file
-    contributes 42 manifest entries, which is wrong by 39.
+    these 51, exactly 3 are governed, and they are the `SEAM_GUARDS`. The file
+    has 52 module-level names; the 52nd is `ROOT`, which `SEAM_HEADER_NAMES`
+    excludes from classification. Writing "51 governed" tells a reader this file
+    contributes 51 manifest entries, which is wrong by 48.
 
-    THOSE FIVE NUMBERS WERE 296 / 36 / 11 / 18 / 7 BEFORE W2 AND THE SPLIT MOVED
-    ALL FIVE, which is worth more than the numbers are. "Measured at this commit"
-    is what makes this sentence a live re-derivable claim rather than a
-    historical one, and a live claim in a file the same commit edits has to be
-    re-run in that commit. It was not, and the review caught it. Note how cheaply
-    it moves: any module-level name added here shifts every figure. The split
-    added four (the placement gate and the three relocated guards) and the review
-    fixes added two more (`GOVERNED_NAME_COUNT` and
-    `_module_level_binding_counts`), which is why the corrected figures are not
-    the ones the review reported either -- they were correct when it measured
-    them.
+    THOSE FIVE NUMBERS WERE 296 / 36 / 11 / 18 / 7 BEFORE W2 AND 300 / 42 / 14 /
+    17 / 8 AFTER IT, AND BOTH TRANSITIONS MOVED ALL OF THEM, which is worth more
+    than the numbers are. "Measured at this commit" is what makes this sentence a
+    live re-derivable claim rather than a historical one, and a live claim in a
+    file the same commit edits has to be re-run in that commit. It was not, and
+    the review caught it. Note how cheaply it moves: any module-level name added
+    here shifts every figure. The split added four (the placement gate and the
+    three relocated guards), the review fixes added two more
+    (`GOVERNED_NAME_COUNT` and `_module_level_binding_counts`), and the W3a gates
+    branch added nine -- gate (e)'s helper and two tests, gate (g)'s helper and
+    five tests -- which is why the corrected figures are not the ones the review
+    reported either; they were correct when it measured them.
+
+    AND ONE OF THEM DID NOT MOVE, WHICH IS THE REASON THESE ARE RE-DERIVED AND
+    NOT ARITHMETIC. The W3a gates branch added 9 names here and ALL NINE landed
+    on the runner half: 17 -> 26, while 14 / 8 / 3 stayed exactly where they
+    were. A reviewer applying "+9 spread across the partition" -- or applying it
+    to the 14 because the 14 is the group the paragraph names first -- writes a
+    false figure that sums correctly and is therefore invisible to the
+    arithmetic check three lines up. Every number in this paragraph was measured
+    by feeding this file into `classify_seam` at this commit.
 
     SCOPE OF THE DAMAGE, measured, because it is smaller than it sounds and this
     exclusion should not be over-trusted: feeding this file in changes the
@@ -1648,8 +1696,13 @@ def test_no_governed_name_is_defined_outside_the_seams_own_files():
     migration nothing declared. Written pre-split, when the sentence read "every
     governed name lives in `tests/test_modal_runner.py` ... one legal home" and
     "WHAT IT BECOMES after Task 4" was the four-home version; W2 made the second
-    half the present tense and 93 of the governed names no longer live in the
-    runner file. The ASSERTION itself did not change across the split -- it reads
+    half the present tense and 105 of the governed names no longer live in the
+    runner file. That figure was 93 at W2 and moved on the W3a gates branch, which
+    added twelve governed names and put all twelve in the client half; the runner
+    half's 168 did not move. Re-derived here, not carried forward -- it is a
+    present-tense count over the manifest this commit regenerates, and the same
+    commit that regenerates the manifest is the one that has to re-run it. The
+    ASSERTION itself did not change across the split -- it reads
     the manifest's own value set -- which is why it was written here rather than
     left for the task that needed it most, and is why only this prose moved.
 
@@ -2328,3 +2381,469 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
     assert _nonstdlib_module_scope_imports(empty) == ([], []), (
         "gate (e) must report an unreadable target as an empty SCOPE, not as an empty "
         "verdict on a file it never opened.")
+
+
+def _module_scope_shape_violations(tree):
+    """Gate (g), criterion 13. `tree.body` may hold ONLY the module docstring,
+    imports, at most one imports-only `if TYPE_CHECKING:` block, and declared
+    symbols. Returns `(examined, violations)`.
+
+    `examined` is how many `tree.body` statements the gate actually reached a
+    verdict on. `violations` is a list of `(kind, lineno, reason)` triples in
+    source order -- `kind` is the offending node's class name, so a red names the
+    construct and the line rather than saying "the shape is wrong".
+
+    WHY THIS GATE EXISTS AT ALL, and it is not "the module looks tidy today".
+    It is the only criterion that constrains the shape of a module header. §5.1
+    already measured this module as conforming, so building it here makes it a
+    DETECTOR rather than a description: criterion 2's byte-identity constrains
+    only RELOCATED segments, and W3b's eight `scripts/modal_runner/` module
+    headers will be 100% new code. After the split this is the only thing
+    standing between those headers and a module-scope `if
+    importlib.util.find_spec('modal') is not None:` -- a header that is GREEN on
+    criterion 3 (it never imports Modal, so the container-equivalent import
+    succeeds), GREEN on criterion 5 (its body assigns, it does not import), and
+    invisible to criterion 4 (which never reads module source at all).
+
+    THE CENSUS IS THIS ALLOW-LIST'S DERIVATION, NOT THE ALLOW-LIST, and the
+    difference is measurable rather than stylistic. Today's `tree.body` is 195
+    nodes:
+
+        FunctionDef 77 | Assign 69 | ClassDef 23 | Import 17 | ImportFrom 6
+        AnnAssign 2 | Expr 1        module-scope `If` nodes: []
+
+    A gate whose rule is "allow every kind in that table" allows `Expr`, because
+    the docstring is one. Measured: plant `logging.basicConfig(level=logging.INFO)`
+    after line 19 and the census becomes `Import 18 | Expr 2 | ...` with **no `If`
+    at all** -- so a kind-only gate is GREEN on a bare module-scope call, which is
+    a far likelier mistake in a brand-new W3b header than the `find_spec` probe
+    is. Hence the two shape branches:
+
+      * `Expr` is legal at `body[0]` and only if its value is a `Constant`
+        holding a `str` -- i.e. the module docstring, and nothing else, ever. An
+        f-string in that position is a `JoinedStr` and is NOT a docstring, so it
+        reddens, correctly.
+      * `If` is legal only as `if TYPE_CHECKING:`, only with an imports-only
+        body, and only once per module.
+
+    Measured again, and this is why the kind census cannot be the instrument:
+    `if TYPE_CHECKING: import decimal` and `if TYPE_CHECKING: import decimal;
+    _X = 1` produce **byte-identical censuses** (`ImportFrom 7 | If 1 | ...`).
+    One is legal and one is not. Nothing at the kind level can tell them apart.
+
+    HOW A `TYPE_CHECKING` BLOCK IS RECOGNISED, and it is the same rule gate (e)
+    uses on purpose: a bare `Name` spelled `TYPE_CHECKING` or ANY `Attribute`
+    whose `attr` is `TYPE_CHECKING`. Both spellings of the real idiom are live
+    (`from typing import TYPE_CHECKING` and `import typing`), and resolving the
+    binding properly would need an import table. The two gates MUST agree about
+    which construct this is -- if (g) recognised a narrower set, the same block
+    would be "exempt" to (e) and "not a `TYPE_CHECKING` block" to (g), and a
+    reader meeting the red would have no way to attribute it. Ruling 29 records
+    the accepted limit: `if some_module.TYPE_CHECKING:` is recognised too. The
+    other direction fails CLOSED -- `if TYPE_CHECKING and X:` is a `BoolOp`, is
+    not recognised, and reddens here.
+
+    TWO LIMITS, STATED RATHER THAN HIDDEN, because an unstated limit reads as a
+    bug to whoever next meets it:
+
+      1. The `else:` branch of a `TYPE_CHECKING` block is NOT examined. Criterion
+         13's text governs "a `TYPE_CHECKING` block whose body is imports only",
+         and `else:` is not that body; the common `else: modal = None` fallback
+         is a declaration and legal. What running that branch COSTS is criterion
+         5's question, and gate (e) does walk it -- its `typecheckingelse` row is
+         the assertion. Complementary, as everywhere else these two gates meet.
+      2. The final `elif`'s declaration tuple rejects every other statement kind,
+         but only ONE of them ships an observation: a module-scope `try:`. That is
+         the deliberate choice, not an oversight -- `try: import X / except
+         ImportError:` is the shape an optional dependency actually gets written
+         in, and it is the only non-`If`, non-`Expr` block plausible in a module
+         header. `With` / `For` / `While` / `Match` at module scope have no row,
+         so a mutant that adds one of THOSE to that tuple survives this file.
+         Named so a later reader adds a row rather than assuming one exists.
+
+    GC1: the subject is a PARAMETER and the return is evidence. The helper never
+    reads `ROOT`, never parses a path of its own and never asserts -- every
+    knock-out below hands it a tree built from a `tmp_path` splice, and a helper
+    that reached for the real module would be green on all of them no matter what
+    it did.
+
+    WHY `examined` RIDES ALONG (GC1/Ruling 28: evidence may be richer where the
+    extra half is load-bearing). Every clause of this gate is INERT on the
+    unmodified subject -- it has zero module-scope `If`, zero non-docstring
+    `Expr` and zero disallowed kinds -- so the green test on the real module is
+    almost entirely a statement about what the gate did NOT find. `examined`
+    is the one half of that green with teeth: a gate that inspected
+    `tree.body[:20]` and stopped returns `[]` from a 195-node module and is
+    indistinguishable from a correct one, because every plant GC2 permits lands
+    at index 2 (right after the docstring and `from __future__ import
+    annotations`) and would be caught by such a gate anyway. `examined ==
+    len(tree.body)` is what the green test asserts, and it does not rot the way a
+    literal 195 would.
+
+    THE LIMIT OF THAT, said plainly: `examined` is counted INSIDE the loop, so it
+    catches a loop that stops early. It cannot catch a mutant that returns
+    `len(tree.body)` while iterating something else. No evidence shape defends
+    against a helper that lies about its own scope; `scanned` in gate (e) has the
+    identical hole.
+    """
+    examined = 0
+    violations = []
+    type_checking_blocks = 0
+    for index, node in enumerate(tree.body):
+        examined += 1
+        kind = type(node).__name__
+        if isinstance(node, ast.Expr):
+            # The docstring, and only the docstring. `index == 0` is the whole
+            # rule: a string literal anywhere else at module scope is either
+            # dead or a comment somebody wrote wrong, and a non-string `Expr`
+            # is a bare CALL, which is the case the kind census hides.
+            if index == 0 and isinstance(node.value, ast.Constant) and isinstance(
+                    node.value.value, str):
+                continue
+            violations.append(
+                (kind, node.lineno, "only the module docstring may be a bare expression at module "
+                 "scope"))
+        elif isinstance(node, ast.If):
+            test = node.test
+            if not ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or
+                    (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")):
+                violations.append(
+                    (kind, node.lineno, "the only conditional allowed at module scope is "
+                     "`if TYPE_CHECKING:`"))
+                continue
+            type_checking_blocks += 1
+            if type_checking_blocks > 1:
+                violations.append(
+                    (kind, node.lineno, "a module may hold at most one `if TYPE_CHECKING:` block"))
+            # The offending BODY statement is what gets named, not the `If`.
+            # Whoever meets this red has to be told which line to delete, and
+            # "the block is wrong" does not say that.
+            for inner in node.body:
+                if not isinstance(inner, (ast.Import, ast.ImportFrom)):
+                    violations.append((type(inner).__name__, inner.lineno,
+                                       "an `if TYPE_CHECKING:` body may hold imports only"))
+        # Everything else at module scope is an import or a declaration, or it
+        # is a violation. The tuple is INLINED rather than hoisted to a
+        # module-level constant because GC3 pins this task to six module-level
+        # names and a seventh would break the pre-registered budget -- the same
+        # trade gate (e) made with its `TYPE_CHECKING` predicate. `Expr` and
+        # `If` are deliberately absent: both are legal in exactly one shape, so
+        # they are decided by the branches above. Putting either here is the
+        # blind kind-only allow-list this whole gate exists to rule out.
+        elif not isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef,
+                                   ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign)):
+            violations.append(
+                (kind, node.lineno, "only imports and declarations may appear at module scope"))
+    return examined, violations
+
+
+def test_gate_g_criterion_13_the_runner_library_declares_and_does_nothing_else():
+    """GREEN ON THE REAL SUBJECT. Nothing at `scripts/modal_runner_lib.py`'s
+    module scope may do anything except declare.
+
+    §5.1 measured this module as conforming before the gate existed, which is
+    exactly why the four knock-outs below are not optional: on this subject the
+    correct instrument and a blind kind-only allow-list return the identical
+    `(195, [])`. The plants are the ONLY observations that separate them.
+
+    THE SCOPE ASSERTION COMES FIRST and is not decoration. Every clause of this
+    gate is inert here -- 0 module-scope `If`, 0 non-docstring `Expr`, 0
+    disallowed kinds -- so `violations == []` on its own is a statement about
+    absence, and absence is what a gate that looked at nothing also reports.
+    `examined == len(tree.body)` is the half that says the gate read the module.
+
+    THE FLOOR IS A FLOOR, DELIBERATELY NOT A PIN. `examined > 50` catches the
+    vacuous cases (an empty or truncated subject) without pinning today's 195,
+    which would redden every time somebody legitimately adds a function to the
+    runner library -- and a gate that reddens on legal code gets switched off,
+    which is the failure mode this whole file is built around.
+
+    W3B OBLIGATION, the same one gate (e) carries: this test names
+    `scripts/modal_runner_lib.py` as a literal. The split replaces that single
+    module with eight `scripts/modal_runner/` submodules, and this test must
+    become an enumeration over them -- each of whose headers is 100% new code
+    and is constrained by nothing else in the spec. Swapping the literal is a
+    B12 deliverable, not an optional tidy-up.
+    """
+    tree = ast.parse((ROOT / "scripts" / "modal_runner_lib.py").read_text(encoding="utf-8"))
+    examined, violations = _module_scope_shape_violations(tree)
+    assert examined == len(tree.body), (
+        "gate (g) did not reach a verdict on every module-scope statement, so the empty "
+        f"violation list below is a verdict on a prefix. examined={examined}, "
+        f"len(tree.body)={len(tree.body)}")
+    assert examined > 50, (
+        "gate (g) examined a module-scope body far smaller than the runner library's, so it "
+        "is almost certainly looking at the wrong file or a truncated one. This is a FLOOR, "
+        f"not a pin -- do not turn it into today's exact count. examined={examined}")
+    assert violations == [], (
+        "`scripts/modal_runner_lib.py` now does something at module scope other than declare. "
+        "Everything here runs on every import of the module, and criterion 13 is the only "
+        f"criterion that constrains a module header's shape: {violations}")
+
+
+def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
+    """KNOCK-OUT 1, and the criterion-13 half of a two-file pair.
+
+    THE PLANT IS THE HEADER EVERY OTHER GATE IN THIS PLAN IS GREEN ON:
+
+        import importlib.util
+        if importlib.util.find_spec('modal') is not None:
+            _ON_CONTAINER = True
+        else:
+            _ON_CONTAINER = False
+
+    It never imports Modal, so a container-equivalent import of the package
+    succeeds and criterion 3 stays green. Its body assigns rather than imports,
+    so criterion 5 stays green -- and note WHY, because it is not the obvious
+    reason: this is an ORDINARY `If`, so gate (e) DESCENDS THROUGH IT and does
+    read the imports inside. It is green because there are none, not because of
+    the `TYPE_CHECKING` exemption (Ruling 30). Move an `import` inside this
+    header and gate (e) reddens CORRECTLY -- that import runs -- and the red is a
+    plant-design error here, not a gate (e) defect.
+
+    BOTH HALVES OF THE CONTRAST ARE ASSERTED, NOT DESCRIBED. Criterion 5's half
+    is the second block below. Criterion 3's half is a shipped test in the other
+    file:
+
+        tests/test_modal_client.py::test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe
+
+    which names this test by node id in return. It lives there rather than here
+    because `tests/test_modal_packaging.py` imports zero `tests.*` modules and
+    that exclusion is load-bearing -- `_seam_sources()` omits this file because
+    self-feeding the classifier returns a poisoned destination count -- so
+    duplicating that gate's subprocess helper into this file would put two copies
+    of one gate in the tree, which is the defect class this branch exists to
+    close. Neither half is optional: together they establish that criterion 13 is
+    the SOLE objector to this header.
+
+    CRITERION 4 IS DELIBERATELY NOT IN THE CONTRAST. Gate (d) reads
+    `runner_image.local_files` and the git index and never reads module source at
+    all, so "criterion 4 is green on this plant" would be green for a reason
+    unrelated to the plant. A control that cannot see the subject is not evidence
+    about it -- that is precisely the class this branch closes, and asserting it
+    would dress a vacuous green as a contrast.
+    """
+    lines = (ROOT / "scripts" /
+             "modal_runner_lib.py").read_text(encoding="utf-8").splitlines(keepends=True)
+    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
+        "GC2 pins plants to line 19 because a `__future__` import must come first. That line "
+        f"now reads {lines[18]!r}, so the plant below lands somewhere else and every line "
+        "number in this test is about a different statement.")
+    planted = ("".join(lines[:19]) + "import importlib.util\n"
+               "if importlib.util.find_spec('modal') is not None:\n"
+               "    _ON_CONTAINER = True\n"
+               "else:\n"
+               "    _ON_CONTAINER = False\n" + "".join(lines[19:]))
+
+    tree = ast.parse(planted)
+    examined, violations = _module_scope_shape_violations(tree)
+    assert examined == len(tree.body), (
+        f"gate (g) stopped short of the whole module scope: {examined} of {len(tree.body)}")
+    assert violations == [
+        ("If", 21, "the only conditional allowed at module scope is `if TYPE_CHECKING:`")
+    ], ("criterion 13 missed the `find_spec` header -- the one module-scope construct that is "
+        "green on criteria 3, 4 and 5, and which W3b's eight brand-new module headers have "
+        f"nothing else stopping them from acquiring. Reported: {violations}")
+
+    # The criterion-5 half of the contrast, on the SAME planted source. Gate (e)
+    # takes a repo root, so the plant is materialised rather than parsed.
+    target = tmp_path / "scripts" / "modal_runner_lib.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(planted, encoding="utf-8")
+    scanned, impure = _nonstdlib_module_scope_imports(tmp_path)
+    assert scanned == [
+        "scripts/modal_runner_lib.py"
+    ], (f"gate (e) never read the planted copy, so its green below is vacuous: {scanned}")
+    assert impure == [], (
+        "gate (e) was expected to stay GREEN on this plant -- that is the whole contrast. A red "
+        "here means the plant acquired an import that executes, which would be a correct gate "
+        f"(e) verdict and a plant-design error on this side (Ruling 30). Reported: {impure}")
+
+
+def test_gate_g_criterion_13_reddens_on_module_scope_work_the_kind_census_hides():
+    """KNOCK-OUT 2. The two shapes a kind-only allow-list is green on.
+
+    ROW 1 -- A BARE MODULE-SCOPE CALL. `logging.basicConfig(level=logging.INFO)`
+    adds NO `If` node; measured, the census goes to `Import 18 | Expr 2 | ...`
+    and every other kind is unchanged. A gate that allows the kind `Expr` because
+    `body[0]` is one passes this, passes the real module, and passes every other
+    check in this plan. Of the four defect shapes this task covers, it is the
+    likeliest to appear in a real W3b header -- somebody configures logging, or
+    calls `os.environ.setdefault`, at the top of a new module -- and it is the
+    one nothing else in the branch can see.
+
+    ROW 2 -- A MODULE-SCOPE `try:`. This is the only observation holding the
+    helper's final `elif` -- its declaration tuple -- at all: drop that branch, or
+    add `ast.Try` to the tuple, and nothing else in this file objects. `try: import
+    X / except ImportError:` is the shape an optional dependency actually gets
+    written in, which is why this kind and not `With` / `For` / `While` gets the
+    row. The plant's body ASSIGNS rather than imports on purpose -- an `import
+    modal` in there would make it gate (e)'s decoy, and then a red could be
+    either gate's and the row would certify neither.
+
+    Note both rows land at a DIFFERENT line (21 and 20) because row 1 needs a
+    preceding `import logging`. Asserting the line is what makes these knock-outs
+    say "this statement", and a plant whose line number was not re-derived is the
+    common way that stops being true.
+    """
+    lines = (ROOT / "scripts" /
+             "modal_runner_lib.py").read_text(encoding="utf-8").splitlines(keepends=True)
+    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
+        f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
+
+    def plant(text):
+        """Parse the real module with `text` spliced in after line 19. Repeated
+        in each knock-out rather than hoisted to a module-level helper because
+        GC3 pins this task to six module-level names and a seventh would break
+        the pre-registered budget; nothing here is ever executed, only parsed."""
+        return ast.parse("".join(lines[:19]) + text + "".join(lines[19:]))
+
+    for text, expected, clause in [
+        ("import logging\nlogging.basicConfig(level=logging.INFO)\n", [
+            ("Expr", 21, "only the module docstring may be a bare expression at module scope")
+        ], "a bare CALL at module scope adds no `If` and one more `Expr`, so a gate that "
+         "allows the kind `Expr` because the docstring is one is green on it"),
+        ("try:\n    _X = 1\nexcept Exception:\n    _X = 2\n", [
+            ("Try", 20, "only imports and declarations may appear at module scope")
+        ], "a module-scope `try:` is neither an import nor a declaration, and it is the "
+         "only row holding the helper's final `elif` and its declaration tuple"),
+    ]:
+        tree = plant(text)
+        examined, violations = _module_scope_shape_violations(tree)
+        assert examined == len(tree.body), (
+            f"gate (g) stopped short of the whole module scope: {examined} of {len(tree.body)}")
+        assert violations == expected, f"criterion 13 is wrong about: {clause}. Got {violations}"
+
+
+def test_gate_g_criterion_13_reddens_on_a_type_checking_body_that_is_not_imports_only():
+    """KNOCK-OUT 3. A `TYPE_CHECKING` block is exempt from criterion 5, not from
+    criterion 13 -- and the kind census cannot tell a legal one from this.
+
+    MEASURED, and it is the sharpest evidence in this task that a kind-level
+    instrument is the wrong one:
+
+        if TYPE_CHECKING:            ->  ImportFrom 7 | If 1 | Import 17 | ...
+            import decimal
+
+        if TYPE_CHECKING:            ->  ImportFrom 7 | If 1 | Import 17 | ...
+            import decimal
+            _X = 1
+
+    Byte-identical censuses. One is legal and one is not, and the difference is
+    one statement INSIDE the block, which no count of module-scope kinds reaches.
+    The knock-out's counterpart -- the legal block going green -- is
+    `test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_by_name`;
+    without that pair a gate could reject the construct outright and pass this.
+
+    THE VIOLATION NAMES THE INNER STATEMENT (`Assign`, line 23), not the `If` at
+    line 21. Whoever meets this red has to be told which line to move out of the
+    block; "the block is malformed" does not say that.
+
+    WHY THIS SHAPE IS WORTH A GATE: `if TYPE_CHECKING:` bodies never execute, so
+    a non-import in one is dead code that a reader nonetheless takes for a live
+    declaration -- and gate (e) will never object, because its whole rule is that
+    the block costs nothing at import. Criterion 13 polices the construct;
+    criterion 5 declines to look inside it. Complementary, and neither subsumes
+    the other (Ruling 33).
+    """
+    lines = (ROOT / "scripts" /
+             "modal_runner_lib.py").read_text(encoding="utf-8").splitlines(keepends=True)
+    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
+        f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
+    tree = ast.parse("".join(lines[:19]) + "from typing import TYPE_CHECKING\n"
+                     "if TYPE_CHECKING:\n"
+                     "    import decimal\n"
+                     "    _X = 1\n" + "".join(lines[19:]))
+
+    examined, violations = _module_scope_shape_violations(tree)
+    assert examined == len(tree.body), (
+        f"gate (g) stopped short of the whole module scope: {examined} of {len(tree.body)}")
+    assert violations == [
+        ("Assign", 23, "an `if TYPE_CHECKING:` body may hold imports only")
+    ], ("criterion 13 accepted a `TYPE_CHECKING` block carrying a statement that is not an "
+        "import. It must name the OFFENDING BODY STATEMENT -- `Assign` at line 23 -- not the "
+        f"`If` at line 21, or the red does not say which line to move. Reported: {violations}")
+
+
+def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_by_name():
+    """KNOCK-OUT 4 plus the positive control the other three depend on.
+
+    ROW 1 IS THE GREEN HALF THE WHOLE TASK RESTS ON. Today's module has ZERO
+    module-scope `If` nodes, so a gate that simply rejects every one of them is
+    observationally identical to a correct gate on the real subject and on all
+    three red knock-outs -- and would false-redden on exactly the
+    `TYPE_CHECKING` blocks W3b's eight new module headers will want, at which
+    point somebody deletes the gate. This row is the only thing in the suite
+    that says the construct is ALLOWED.
+
+    ROWS 2 AND 3 HOLD THE `at most one` CLAUSE AND THE NAME CLAUSE, which are
+    secondary clauses of the same branch -- and "the headline clause has a
+    knock-out, the secondary clause has none" is this branch's named defect class
+    in its B2 form: the guard's own allow-set going unwatched. Ruling 31 measured
+    it on gate (e), where three mutants that kept the node-class test and dropped
+    the NAME test survived the entire file. The same mutants live here, and
+    knock-out 1's plant cannot see them -- its `If` test is a `Compare`
+    (`find_spec(...) is not None`), which is neither a `Name` nor an `Attribute`,
+    so `isinstance(test, (ast.Name, ast.Attribute))` passes it. Rows 3 and 4 are
+    the bare-`Name` and plain-`Attribute` cases that do object.
+
+    ROW 5 IS THE OTHER HALF OF THE NAME CLAUSE, and it is a GREEN one:
+    `if typing.TYPE_CHECKING:` is the same exemption gate (e) grants, matched on
+    `test.attr` rather than on the node being an `Attribute`. Both gates must
+    agree about which construct this IS -- if criterion 13 recognised a narrower
+    set than criterion 5 exempts, the same block would be "exempt" to one and
+    "not a `TYPE_CHECKING` block" to the other, and whoever met the red could not
+    attribute it. Ruling 29 records the accepted limit that comes with matching
+    by name: `if some_module.TYPE_CHECKING:` is recognised too. It fails CLOSED
+    in the other direction -- `if TYPE_CHECKING and X:` is a `BoolOp` and
+    reddens here, which is row 6.
+
+    WHAT NONE OF THESE ROWS COVERS, said so a later reader adds one rather than
+    assuming: the `else:` branch of a `TYPE_CHECKING` block is not examined by
+    this gate at all. `else: modal = None` is a declaration and legal; what
+    RUNNING that branch costs is criterion 5's question, and gate (e)'s
+    `typecheckingelse` row is the assertion for it.
+    """
+    lines = (ROOT / "scripts" /
+             "modal_runner_lib.py").read_text(encoding="utf-8").splitlines(keepends=True)
+    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
+        f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
+
+    def plant(text):
+        """Parse the real module with `text` spliced in after line 19."""
+        return ast.parse("".join(lines[:19]) + text + "".join(lines[19:]))
+
+    for text, expected, clause in [
+        ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import decimal\n", [],
+         "a single imports-only `if TYPE_CHECKING:` block is LEGAL -- a gate that rejects "
+         "every module-scope `If` passes every other observation in this task and "
+         "false-reddens on the headers W3b is about to write"),
+        ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import decimal\n"
+         "if TYPE_CHECKING:\n    import fractions\n", [
+             ("If", 23, "a module may hold at most one `if TYPE_CHECKING:` block")
+         ], "at most ONE such block per module; the second is what this row holds, and "
+         "nothing else in the file has two"),
+        ("_DEBUG = False\nif _DEBUG:\n    import decimal\n", [
+            ("If", 21, "the only conditional allowed at module scope is `if TYPE_CHECKING:`")
+        ], "the recognition matches the NAME, not merely the node class -- drop "
+         "`test.id == \"TYPE_CHECKING\"` and every flag-guarded module-scope block becomes "
+         "legal shape"),
+        ("import os\nif os.name:\n    import decimal\n", [
+            ("If", 21, "the only conditional allowed at module scope is `if TYPE_CHECKING:`")
+        ], "same clause on the attribute spelling: the rule reads `test.attr`, not "
+         "`isinstance(test, ast.Attribute)`"),
+        ("import typing\nif typing.TYPE_CHECKING:\n    import decimal\n", [],
+         "`typing.TYPE_CHECKING` is the same construct and the same exemption gate (e) "
+         "grants; recognising only the bare `Name` leaves half the real idiom reddening"),
+        ("from typing import TYPE_CHECKING\nif TYPE_CHECKING and os.name:\n"
+         "    import decimal\n", [
+             ("If", 21, "the only conditional allowed at module scope is `if TYPE_CHECKING:`")
+         ], "`if TYPE_CHECKING and X:` is a `BoolOp`, not a recognised `TYPE_CHECKING` test. "
+         "The name-based rule fails CLOSED in this direction, which is the direction it "
+         "should fail in"),
+    ]:
+        tree = plant(text)
+        examined, violations = _module_scope_shape_violations(tree)
+        assert examined == len(tree.body), (
+            f"gate (g) stopped short of the whole module scope: {examined} of {len(tree.body)}")
+        assert violations == expected, f"criterion 13 is wrong about: {clause}. Got {violations}"
