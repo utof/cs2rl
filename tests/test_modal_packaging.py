@@ -1184,35 +1184,51 @@ def classify_seam(sources):
     not. Until this commit the paragraph said `tests/test_modal_runner.py` has
     two such blocks, which the same commit made false.
 
-    Measured the other way too: 8 of the monolith's 261 module-level names now
+    Measured the other way too: 9 of the monolith's 261 module-level names now
     appear as a word inside a multiline string literal somewhere in the seam, and
     none of them is a reach. Five are prose in the rewritten runner header
     (`ROOT`, `_run_cuda_probe`, and the three `SEAM_GUARDS` names it says moved
-    out); `_aware` is prose in the shared module's docstring; and
+    out); `_aware` is prose in the shared module's docstring;
     `test_exact_allowed_flags_are_kept` and
     `test_unknown_spelling_rejected_before_ownership` are cited by
-    `test_tct_split_trunk_is_allowed`'s docstring.
+    `test_tct_split_trunk_is_allowed`'s docstring; and the ninth,
+    `test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist`, is cited
+    three times over in the CLIENT half's gate docstrings -- gate (a) criterion
+    3's, `_mount_bijection_violations`'s, and gate (d) criterion 4's. That ninth
+    member is a third category, neither runner-header prose nor a
+    `test_tct_split_trunk_is_allowed` citation, and it is the whole of the
+    difference between this 9 and the 8 the branch's own history carries.
 
     THAT 261 IS THE MONOLITH'S OWN NAME COUNT AND IS HISTORICAL -- the same label
     the `SEAM_HEADER_NAMES` comment block above puts on its identical phrasing,
     and this one needs it more, because the live governed count in this file is
     now 273 (`GOVERNED_NAME_COUNT`). AND THE CANDIDATE SET IS THE 247 NON-CLASS
-    NAMES AMONG THOSE 261, which is the only reading that reproduces the 8.
+    NAMES AMONG THOSE 261, which is the only reading that reproduces the 9.
     Naming it is not pedantry: over all 261 the same instrument returns 9 at the
-    branch point and 10 here, so a re-deriver who takes the obvious reading finds
-    a number that looks stale and "corrects" one that is right. The two names
-    separating the readings are both CLASSES -- `FakeChild`, pre-existing, and
-    `FakeImage`, added by this branch. Over the 247 it returns 8 at BOTH ends,
-    and that 8 is the paragraph above's enumeration, member for member.
+    branch point and 11 here, so a re-deriver who takes the obvious reading finds
+    a number that looks stale and "corrects" one that is right. The names
+    separating the two readings are CLASSES, and the gap is exactly how many of
+    them the instrument matches: `FakeChild`, pre-existing, at both ends, joined
+    here by `FakeImage`, which this branch added -- so 261-reading minus
+    247-reading is 1 at the branch point and 2 here. Over the 247 it returns 8 at
+    the branch point and 9 here, and that 9 is the paragraph above's enumeration,
+    member for member.
 
     EXPECT THAT COUNT TO MOVE, and do not read a change in it as a finding by
-    itself. It rises whenever any docstring names any governed test, which is
-    what good docstrings do -- it was 3 before W2 and this commit's own header
-    rewrite took it to 8. What must not move is the CONSEQUENCE, and that is
-    checked directly rather than inferred from the count: feeding this file in
-    changes the destination of 0 monolith names, and every one of these mentions
-    sits in prose rather than in a `code = \"\"\"...\"\"\"` block a subprocess
-    executes.
+    itself. It rises whenever any docstring anywhere in the seam names one more
+    of those 247, which is what good docstrings do: over the 247 it was 3 before
+    W2, 8 at the branch point where W2 ends, and 9 here. SO RE-DERIVE IT AT THE
+    TREE THAT SHIPS, NOT AT THE ONE THE WORK STARTED FROM -- any commit touching
+    a docstring in a `_seam_sources()` file moves it, including a commit that
+    changes nothing else. The three figures this paragraph carried before were
+    measured correctly and against the wrong tree: they are this branch's base
+    values, written two commits after a commit in the same wave had already
+    moved them. What must not move is the CONSEQUENCE, and that is checked
+    directly rather than inferred from the count: feeding this file in changes
+    the destination of 0 of the 260 monolith names the classifier places (`ROOT`
+    is the 261st and `SEAM_HEADER_NAMES` excludes it), and every one of these
+    mentions sits in prose rather than in a `code = \"\"\"...\"\"\"` block a
+    subprocess executes.
 
     Named rather than cited by line number throughout: this paragraph used to end
     "a docstring at line 574", which was accurate in the monolith and points at
