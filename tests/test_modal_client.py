@@ -2411,18 +2411,26 @@ def test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe(fake_modal,
     neutral = tmp_path / "cwd"
     neutral.mkdir()
 
-    _materialise_recorded_mounts(prefix,
-                                 runner.local_files,
-                                 plant=("import importlib.util\n"
-                                        "if importlib.util.find_spec('modal') is not None:\n"
-                                        "    _ON_CONTAINER = True\n"
-                                        "else:\n"
-                                        "    _ON_CONTAINER = False\n"))
+    written = _materialise_recorded_mounts(prefix,
+                                           runner.local_files,
+                                           plant=("import importlib.util\n"
+                                                  "if importlib.util.find_spec('modal') is not "
+                                                  "None:\n"
+                                                  "    _ON_CONTAINER = True\n"
+                                                  "else:\n"
+                                                  "    _ON_CONTAINER = False\n"))
     # Pin that the plant LANDED. An unplanted tree also returns (0, ""), so without this the test
     # would pass just as happily on an instrument that never ran -- the defect class this branch
     # exists to close. The knock-outs pin the same helper's plant path from the red side.
-    assert "_ON_CONTAINER" in (prefix /
-                               "opt/app/scripts/modal_runner_lib.py").read_text(encoding="utf-8")
+    #
+    # THE DESTINATION COMES FROM THE HELPER'S RETURNED `written` LIST, not from a second spelling
+    # of the container path here. `_materialise_recorded_mounts` returns its evidence precisely so
+    # a caller need not restate it: spelled again, a changed mount destination surfaces as a
+    # FileNotFoundError in THIS test rather than as a red in gate (d), which is the gate that owns
+    # the destination. The single-element unpack is the assertion that exactly one recorded triple
+    # lands on the planted file.
+    planted, = [path for path in written if path.name == "modal_runner_lib.py"]
+    assert "_ON_CONTAINER" in planted.read_text(encoding="utf-8")
     assert _container_equivalent_import(prefix, runner.env_vars["PYTHONPATH"],
                                         cwd=neutral) == (0, "")
 
