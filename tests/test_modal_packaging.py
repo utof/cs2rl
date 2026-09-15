@@ -1300,29 +1300,30 @@ def _seam_sources():
     excludes from classification. Writing "51 governed" tells a reader this file
     contributes 51 manifest entries, which is wrong by 48.
 
-    THOSE FIVE NUMBERS WERE 296 / 36 / 11 / 18 / 7 BEFORE W2 AND 300 / 42 / 14 /
-    17 / 8 AFTER IT, AND THE FIRST TRANSITION MOVED ALL FIVE WHILE THE SECOND
-    MOVED ONLY THREE (300 -> 321, 42 -> 51, 17 -> 26; the 14 and the 8 stayed),
-    which is worth more than the numbers are. "Measured at this commit" is what
-    makes this sentence a live re-derivable claim rather than a historical one,
-    and a live claim in a
-    file the same commit edits has to be re-run in that commit. It was not, and
-    the review caught it. Note how cheaply it moves: any module-level name added
-    here shifts every figure. The split added four (the placement gate and the
-    three relocated guards), the review fixes added two more
-    (`GOVERNED_NAME_COUNT` and `_module_level_binding_counts`), and the W3a gates
-    branch added nine -- gate (e)'s helper and two tests, gate (g)'s helper and
-    five tests -- which is why the corrected figures are not the ones the review
-    reported either; they were correct when it measured them.
+    THOSE FIVE NUMBERS WERE 296 / 36 / 11 / 18 / 7 BEFORE W2 AND
+    300 / 42 / 14 / 17 / 8 AFTER IT, AND THE FIRST TRANSITION MOVED ALL FIVE
+    WHILE THE SECOND MOVED ONLY THREE (300 -> 321, 42 -> 51, 17 -> 26; the 14
+    and the 8 stayed), which is worth more than the numbers are. "Measured at this
+    commit" is what makes this sentence a live re-derivable claim rather than
+    a historical one, and a live claim in a file the same commit edits has to
+    be re-run in that commit. It was not, and the review caught it. Note how
+    cheaply it moves: any module-level name added here shifts every figure.
+    The split added four (the placement gate and the three relocated guards),
+    the review fixes added two more (`GOVERNED_NAME_COUNT` and
+    `_module_level_binding_counts`), and the W3a gates branch added nine --
+    gate (e)'s helper and two tests, gate (g)'s helper and five tests -- which
+    is why the corrected figures are not the ones the review reported either;
+    they were correct when it measured them.
 
     AND TWO OF THE FIVE DID NOT MOVE, WHICH IS THE REASON THESE ARE RE-DERIVED
     AND NOT ARITHMETIC. The W3a gates branch added 9 names here and ALL NINE
-    landed on the runner half: 17 -> 26, while 14 / 8 / 3 stayed exactly where they
-    were. A reviewer applying "+9 spread across the partition" -- or applying it
-    to the 14 because the 14 is the group the paragraph names first -- writes a
-    false figure that sums correctly and is therefore invisible to the
-    arithmetic check three lines up. Every number in this paragraph was measured
-    by feeding this file into `classify_seam` at this commit.
+    landed on the runner half: 17 -> 26, while 14 / 8 / 3 stayed exactly where
+    they were. A reviewer applying "+9 spread across the partition" -- or
+    applying it to the 14 because the 14 is the group the paragraph names
+    first -- writes a false figure that sums correctly and is therefore
+    invisible to the arithmetic check three lines up. Every number in this
+    paragraph was measured by feeding this file into `classify_seam` at this
+    commit.
 
     SCOPE OF THE DAMAGE, measured, because it is smaller than it sounds and this
     exclusion should not be over-trusted: feeding this file in changes the
@@ -2216,25 +2217,25 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         a `FunctionDef` whose body does not run on import -- this row is what
         says the walk stops there instead of flagging every lazy import in a
         class.
-      * the NESTED-CONTAINER row (`class` > `try` > `class` > `import modal`) is
-        the only row whose offending import sits inside a NESTED container --
-        three containers deep, not one. IN CONTAINERS, NOT DEPTHS, and the
+      * the NESTED-CONTAINER row (`class` > `try` > `class` > `import modal`)
+        is the only row whose offending import sits inside a NESTED container
+        -- three containers deep, not one. IN CONTAINERS, NOT DEPTHS, and the
         distinction is the claim: under this file's own unit (nodes below
-        `Module`, top-level = 1) six other rows put their offending import below
-        depth 1 as well, all of them at depth 2. What makes this row the only one
-        is that every other container in this table -- the decoy's `try`, the
-        `if`-guarded header, the class body -- is TOP-LEVEL, and a top-level node
-        enters the walk from `tree.body` rather than by being descended into, so
-        a mutant that expands depth 1 and then stops passes every one of them
-        while going blind to everything nested inside. The nesting runs
-        `ClassDef` > `Try` > `ClassDef` > `Import` ON PURPOSE. It is one row, but it objects to
-        dropping EITHER container type from the descent as well as to dropping
-        both -- MEASURED: the obvious two-deep shapes each hold only half of
-        that, a `try:` inside a class body is blind to "stop at a nested
-        `ClassDef`" and a class inside a `try:` is blind to "stop at a nested
-        `Try`", while this one kills all three mutants. The instrument is
-        a stack, not a single expansion, and this is the only observation in the
-        file that says so.
+        `Module`, top-level = 1) six other rows put their offending import
+        below depth 1 as well, all of them at depth 2. What makes this row the
+        only one is that every other container in this table -- the decoy's
+        `try`, the `if`-guarded header, the class body -- is TOP-LEVEL, and a
+        top-level node enters the walk from `tree.body` rather than by being
+        descended into, so a mutant that expands depth 1 and then stops passes
+        every one of them while going blind to everything nested inside. The
+        nesting runs `ClassDef` > `Try` > `ClassDef` > `Import` ON PURPOSE. It
+        is one row, but it objects to dropping EITHER container type from the
+        descent as well as to dropping both -- MEASURED: the obvious two-deep
+        shapes each hold only half of that, a `try:` inside a class body is
+        blind to "stop at a nested `ClassDef`" and a class inside a `try:` is
+        blind to "stop at a nested `Try`", while this one kills all three
+        mutants. The instrument is a stack, not a single expansion, and this
+        is the only observation in the file that says so.
       * the two `TYPE_CHECKING` rows are POSITIVE CONTROLS FOR AN EXEMPTION,
         which is the shape that has gone wrong here before: the subject has 0
         such blocks, so an unexercised exemption is indistinguishable from a
