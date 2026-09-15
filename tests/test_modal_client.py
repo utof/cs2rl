@@ -2037,3 +2037,423 @@ def test_backfill_never_imports_the_launch_app(fake_modal, tmp_path):
     assert all(lookup == (mrl.VOLUME_NAME, False) for lookup in fake_modal.volume_lookups)
     assert fake_modal.dict_creates == []
     assert fake_modal.dict_lookups == []
+
+
+# ── Gate (a), criterion 3: the library imports on a container-equivalent run ──
+
+
+def _materialise_recorded_mounts(
+        prefix: Path,
+        mount_list: list[tuple[str, str, bool]],
+        *,
+        omit: frozenset[str] = frozenset(),
+        plant: str | None = None,
+) -> list[Path]:
+    """Copy exactly the recorded `(src, dst, copy)` triples into `prefix`; return what was written.
+
+    WHAT: every `dst` is an absolute container path (`/opt/app/scripts/modal_runner_lib.py`), so it
+    is rebased to `prefix / dst.lstrip("/")` and the bytes of `src` are copied there. Nothing else
+    is created. The result is the image's file set, not the developer's checkout. Per GC1 the
+    return value is evidence -- the list of written paths -- so a caller can pin the file count
+    instead of trusting this helper's word for it.
+
+    WHY a helper and not `shutil.copytree(ROOT / "scripts")`: the mount list IS the subject. A gate
+    that copied the repo would stay green after somebody deleted an `add_local_file` call, which is
+    precisely the regression gate (a) exists to catch.
+
+    PITFALL -- a recorded triple whose `src` does not exist is a FAILURE, never a skip. The two
+    implementations read identically in prose, and the skipping one stays green on a mount list
+    naming a deleted file; a round-2 review built it and measured `GREEN, skipped srcs: [...]`.
+    Missing sources therefore raise `FileNotFoundError` here. They never shrink the set quietly.
+
+    PITFALL -- `plant` is inserted after line 19 of whichever copy lands on `modal_runner_lib.py`,
+    because line 19 of `scripts/modal_runner_lib.py` is `from __future__ import annotations` and a
+    `__future__` import must precede all other code (GC2). A plant above it yields `SyntaxError:
+    from __future__ imports must occur at the beginning of the file` -- red for the wrong reason,
+    which scores as a working knock-out while proving nothing. Line 19 is re-read here so that a
+    future edit to the module header fails loudly rather than mis-planting in silence.
+
+    `omit` drops recorded destinations by container path; that is how knock-out 1 removes a mounted
+    file without touching the repo. `scripts/modal_runner_lib.py` itself is never modified -- not
+    one byte -- and every plant lives under the caller's `tmp_path`.
+    """
+    written: list[Path] = []
+    for src, dst, _copy in mount_list:
+        if dst in omit:
+            continue
+        source = Path(src)
+        if not source.is_file():
+            raise FileNotFoundError(f"recorded mount src does not exist: {src!r} -> {dst!r}")
+        payload = source.read_bytes()
+        if plant is not None and PurePosixPath(dst).name == "modal_runner_lib.py":
+            lines = payload.decode("utf-8").splitlines(keepends=True)
+            if lines[18].rstrip("\n") != "from __future__ import annotations":
+                raise ValueError(f"expected the __future__ import on line 19, found {lines[18]!r}; "
+                                 "plants must land after it or they fail with SyntaxError")
+            lines.insert(19, plant)
+            payload = "".join(lines).encode("utf-8")
+        target = prefix / dst.lstrip("/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        written.append(target)
+    return written
+
+
+def _container_equivalent_import(
+    prefix: Path,
+    pythonpath: str,
+    *,
+    cwd: Path,
+    module: str = "scripts.modal_runner_lib",
+    isolate_cwd: bool = True,
+) -> tuple[int, str]:
+    """Import `module` in a subprocess that can see only `prefix`; return `(exit_code, stderr)`.
+
+    Runs `python -S -B -P -c "import <module>"` with `PYTHONPATH` built by rebasing each
+    colon-separated entry of `pythonpath` onto `prefix`. Per GC1 it returns evidence and never
+    asserts, so the same helper serves the green case, the three knock-outs, and the I3 regression
+    test that deliberately removes `-P`.
+
+    `pythonpath` is a PARAMETER because requirement 1 forbids writing the literal into the gate:
+    callers pass `runner_image.env_vars["PYTHONPATH"]`, so a bad edit to the image reaches the
+    gate. A gate that hardcoded `/opt/app:/opt/app/scripts` would prove nothing about the value it
+    exists to protect.
+
+    `module` defaults to the spelling PRODUCTION uses -- `scripts/run_modal.py:33` is `import
+    scripts.modal_runner_lib as mrl`. That is load-bearing, not stylistic: measured, with only
+    `<prefix>/opt/app/scripts` on the path the bare name `modal_runner_lib` still imports while the
+    packaged name raises `ModuleNotFoundError: No module named 'scripts'`. A gate written on the
+    bare spelling is therefore GREEN in exactly the configuration where production breaks.
+
+    FLAGS, and why each is load-bearing:
+      * `-P` keeps `sys.path[0]` off the caller's cwd. Without it, and with the cwd at the repo
+        root, the subject resolves from the real tree and the gate's own positive control goes
+        green.
+      * `-S` skips `site.py`, which does two jobs. It hides `modal` and `uv`, which the developer's
+        interpreter has and the container's `PYTHONPATH` must not need; and it stops `site.py`
+        processing `.venv/lib/python3.12/site-packages/__editable__.cs2rl-0.1.0.pth`, whose entire
+        content is `<repo>/src`. Measured without `-S`, neutral cwd, `PYTHONPATH=/nonexistent`:
+        `LEAK: <repo>/src/env_config.py`; with `-S`: `ModuleNotFoundError`. `scripts` does not leak
+        this way (the `.pth` names `src`), but any future mounted module importing a top-level
+        `src/` module would silently resolve from the developer's checkout.
+      * `-B` only suppresses `__pycache__` writes, so the "exactly N files" assertions stay true
+        and the I3 test -- which runs with `cwd=ROOT` on purpose -- cannot litter the repo.
+
+    `-I` AND `-E` ARE DISQUALIFYING, not merely unnecessary, and this note exists so they are not
+    re-proposed as "stronger". `-I` implies `-E`, and `-E` drops `PYTHONPATH` entirely; measured,
+    both turn the green case into `ModuleNotFoundError: No module named 'scripts'`. Requirement 1
+    says `PYTHONPATH` comes from the image, so an isolated interpreter tests one that cannot see
+    the subject at all -- a gate that is red no matter what the package looks like.
+
+    The environment is `PYTHONPATH` alone rather than an inherited `os.environ` copy: measured,
+    both give exit 0 on the real subject, and the minimal one cannot import a stray `PYTHONPATH`
+    or `PYTHONHOME` from whoever launched pytest.
+    """
+    entries = [str(prefix / entry.lstrip("/")) for entry in pythonpath.split(":") if entry]
+    flags = ["-S", "-B", "-P"] if isolate_cwd else ["-S", "-B"]
+    completed = subprocess.run(
+        [sys.executable, *flags, "-c", f"import {module}"],
+        cwd=str(cwd),
+        env={"PYTHONPATH": ":".join(entries)},
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode, completed.stderr
+
+
+def test_gate_a_criterion_3_package_imports_on_a_container_equivalent_interpreter(
+        fake_modal, tmp_path):
+    """Gate (a), criterion 3: only the mounted files, on the image's own PYTHONPATH, import.
+
+    The highest-value gate on this branch, because every other gate and every other criterion can
+    pass on a package that cannot be imported on the container. Materialise exactly the triples
+    recorded in `runner_image.local_files` under `tmp_path`, then import the packaged spelling on
+    an interpreter that can see nothing else.
+
+    WHICH ENTRY THIS GATE COVERS. The image sets `PYTHONPATH=/opt/app:/opt/app/scripts` and the two
+    entries carry different spellings: the packaged name `scripts.modal_runner_lib` resolves via
+    `/opt/app`, the bare name `modal_runner_lib` via `/opt/app/scripts`. This gate covers the
+    `/opt/app` entry -- it is green on `/opt/app` alone. The `/opt/app/scripts` entry is pinned
+    only by `tests/test_modal_client.py:626`; nothing here would notice its removal, which is why
+    the assertions below record both single-entry results explicitly rather than describing them.
+
+    `runner_image is dependency_image` (`FakeImage.add_local_file` returns `self`, and
+    `scripts/run_modal.py:113` chains off `dependency_image`), so the recorded list is FIVE triples
+    and all five are materialised. Reading mounts off `dependency_image` and off `runner_image`
+    gives the same object; reading them off a locally rebuilt image would not.
+
+    DO NOT INVENT `scripts/__init__.py`. The repo has none, so `scripts` is a PEP 420 namespace
+    package and `sys.modules['scripts'].__file__ is None` in the subprocess. Creating one "to be
+    safe" changes the failure shape of the unmounted-intra-repo-import knock-out, which is the
+    single control that distinguishes this gate from a smoke test.
+
+    STATED LIMIT -- pre-split this gate exercises 1 of the 5 recorded triples. The three
+    `/opt/cs2rl/*` mounts (`pyproject.toml`, `uv.lock`, `modal_image_reqs.py`) are never on
+    `sys.path`, and `scripts/run_modal.py` imports `modal` at module scope so `-S` puts it out of
+    reach by construction (measured: `ModuleNotFoundError: No module named 'modal'`). The gate
+    therefore covers the library, not the image or the entrypoint. That is a known, unclosed gap,
+    stated rather than implied away; the post-split figure in the spec's 6.1 is a different number
+    and does not transfer backwards to this commit.
+    """
+    module = _import_run_modal()
+    runner = module.runner_image
+    assert runner is module.dependency_image
+    mount_list = runner.local_files
+    assert len(mount_list) == 5
+
+    prefix = tmp_path / "image"
+    neutral = tmp_path / "cwd"
+    neutral.mkdir()
+    written = _materialise_recorded_mounts(prefix, mount_list)
+    assert len(written) == 5
+    # Exactly the recorded files and nothing else: a stray source-adjacent artefact would make a
+    # file the knock-out below has removed look present.
+    assert sorted(path for path in prefix.rglob("*") if path.is_file()) == sorted(written)
+
+    pythonpath = runner.env_vars["PYTHONPATH"]
+    assert _container_equivalent_import(prefix, pythonpath, cwd=neutral) == (0, "")
+
+    # The image's two entries, separately, so the division of labour is measured and not asserted
+    # in prose. `/opt/app` alone: this gate green, Modal's own `import run_modal` red.
+    assert _container_equivalent_import(prefix, "/opt/app", cwd=neutral) == (0, "")
+    run_modal_status, run_modal_stderr = _container_equivalent_import(prefix,
+                                                                      "/opt/app",
+                                                                      cwd=neutral,
+                                                                      module="run_modal")
+    assert run_modal_status != 0
+    assert "No module named 'run_modal'" in run_modal_stderr
+
+    # `/opt/app/scripts` alone: the packaged spelling this gate uses is red, the bare spelling a
+    # weaker gate might have used is green. This is the configuration a bare-spelling gate misses.
+    packaged_status, packaged_stderr = _container_equivalent_import(prefix,
+                                                                    "/opt/app/scripts",
+                                                                    cwd=neutral)
+    assert packaged_status != 0
+    assert "No module named 'scripts'" in packaged_stderr
+    assert _container_equivalent_import(prefix,
+                                        "/opt/app/scripts",
+                                        cwd=neutral,
+                                        module="modal_runner_lib") == (0, "")
+
+
+def test_gate_a_criterion_3_reddens_when_the_mounted_library_is_absent(fake_modal, tmp_path):
+    """Knock-out 1: drop a recorded mount and the gate goes red.
+
+    THIS CONTROL IS DEGENERATE PRE-SPLIT AND IS LABELLED AS SUCH. Only one mounted file is ever on
+    `sys.path` at this commit, so "a mounted file removed" can only mean
+    `/opt/app/scripts/modal_runner_lib.py` -- the import target itself. Removing it proves that the
+    subprocess's exit status is actually checked and that materialisation is driven by the mount
+    list, and little more. It becomes a real instrument after the split, when the package has
+    siblings that can go missing individually. Keep it, do not oversell it.
+
+    The file-count assertion is what defends it: without pinning the prefix to exactly four files,
+    a stray `__pycache__` entry beside the removed source could make the removal invisible.
+
+    The tail of this test gates construction requirement 4 -- a recorded triple whose `src` does
+    not exist must FAIL, never be skipped. An omitted mount and a skipped-because-missing mount
+    produce the SAME red here, so `omit` alone cannot tell the two implementations apart; the
+    `FileNotFoundError` assertion is the only thing that does.
+    """
+    module = _import_run_modal()
+    runner = module.runner_image
+    prefix = tmp_path / "image"
+    neutral = tmp_path / "cwd"
+    neutral.mkdir()
+
+    written = _materialise_recorded_mounts(prefix,
+                                           runner.local_files,
+                                           omit=frozenset({"/opt/app/scripts/modal_runner_lib.py"}))
+    assert len(written) == 4
+    assert sorted(path for path in prefix.rglob("*") if path.is_file()) == sorted(written)
+
+    status, stderr = _container_equivalent_import(prefix,
+                                                  runner.env_vars["PYTHONPATH"],
+                                                  cwd=neutral)
+    assert status != 0
+    assert "No module named 'scripts.modal_runner_lib'" in stderr
+
+    deleted = str(ROOT / "scripts" / "modal_runner_lib_that_was_deleted.py")
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        _materialise_recorded_mounts(tmp_path / "missing-src",
+                                     [(deleted, "/opt/app/scripts/deleted.py", True)])
+
+
+def test_gate_a_criterion_3_reddens_on_an_unmounted_intra_repo_import(fake_modal, tmp_path):
+    """Knock-out 2, THE DISCRIMINATOR: an import of an intra-repo module outside the mounted set.
+
+    `scripts/modal_image_reqs.py` is mounted at `/opt/cs2rl/modal_image_reqs.py`, which is never on
+    `PYTHONPATH`, so a module-scope import of it is unreachable on the container even though the
+    file exists in the repo. This is the failure the split can actually produce -- a new sibling
+    that nobody added to `add_local_file` -- and it is the only control here that a gate with a
+    cwd leak cannot pass. A gate that passes knock-outs 1 and 3 but not this one is leaking and
+    must be fixed, not waived.
+
+    ASSERT ON THE FAILURE AND THE MODULE NAME, NEVER ON THE LITERAL MESSAGE. The error takes two
+    shapes depending on how the import is spelled, and both are measured here rather than picked:
+
+        from scripts import modal_image_reqs   -> ImportError: cannot import name
+                                                  'modal_image_reqs' from 'scripts' (unknown
+                                                  location)
+        import scripts.modal_image_reqs        -> ModuleNotFoundError: No module named
+                                                  'scripts.modal_image_reqs'
+
+    Both are red. A control pinned to the second string mis-scores the first as a gate failure,
+    which is why both plants run through the same shape-agnostic assertion. The first shape is a
+    consequence of `scripts` being a PEP 420 namespace package -- see the green test on why an
+    invented `scripts/__init__.py` would change it.
+    """
+    module = _import_run_modal()
+    runner = module.runner_image
+    neutral = tmp_path / "cwd"
+    neutral.mkdir()
+
+    plants = {
+        "from_import": "from scripts import modal_image_reqs as _unmounted\n",
+        "dotted_import": "import scripts.modal_image_reqs as _unmounted\n",
+    }
+    for label, plant in plants.items():
+        prefix = tmp_path / label
+        _materialise_recorded_mounts(prefix, runner.local_files, plant=plant)
+        status, stderr = _container_equivalent_import(prefix,
+                                                      runner.env_vars["PYTHONPATH"],
+                                                      cwd=neutral)
+        assert status != 0, f"{label}: gate stayed green on an unmounted intra-repo import"
+        assert "modal_image_reqs" in stderr, f"{label}: {stderr}"
+        assert "ImportError" in stderr or "ModuleNotFoundError" in stderr, f"{label}: {stderr}"
+
+
+def test_gate_a_criterion_3_reddens_on_a_module_scope_third_party_import(fake_modal, tmp_path):
+    """Knock-out 3: a module-scope third-party import is red, because the container has no venv.
+
+    `scripts/modal_runner_lib.py` promises in its own docstring to use only the standard library at
+    module scope. The Modal function runs on the image's standalone python, which carries only `uv`
+    and the modal client -- not this venv's site-packages -- so a stray `import numpy` at module
+    scope is an outage, not a lint nit.
+
+    THIS CONTROL IS ALSO THE `-S` WATCHDOG, AND THAT IS FREE COVERAGE WORTH CLAIMING. numpy 2.4.3
+    is installed in this venv, so the same plant was measured `ModuleNotFoundError` with `-S` and
+    EXIT 0 without it. If `-S` is ever dropped from `_container_equivalent_import`, this test goes
+    green and the suite reddens here. Nothing watches `-P` the same way, which is why the I3 test
+    below exists separately.
+
+    STATED LIMIT: for an UNCONDITIONAL module-scope import, `-S` makes this gate stricter than the
+    container, deliberately, matching the module docstring's contract. The strictness does not
+    extend to a header that merely TESTS for a name -- see the conditional-probe test below.
+
+    The `line 20` assertion is the only direct evidence in this file that GC2's plant-placement
+    rule is honoured: line 19 is `from __future__ import annotations`, so a plant that lands on
+    line 20 landed immediately after it. A plant above the `__future__` import raises `SyntaxError`
+    instead, which is red for the wrong reason and would otherwise score as a working knock-out.
+    """
+    module = _import_run_modal()
+    runner = module.runner_image
+    prefix = tmp_path / "image"
+    neutral = tmp_path / "cwd"
+    neutral.mkdir()
+
+    _materialise_recorded_mounts(prefix, runner.local_files, plant="import numpy as _third_party\n")
+    status, stderr = _container_equivalent_import(prefix,
+                                                  runner.env_vars["PYTHONPATH"],
+                                                  cwd=neutral)
+    assert status != 0
+    assert "No module named 'numpy'" in stderr
+    assert 'modal_runner_lib.py", line 20, in <module>' in stderr
+
+
+def test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe(fake_modal, tmp_path):
+    """The green half of criterion 13's pair: this gate does NOT object to a `find_spec` header.
+
+    GC2 asks every knock-out to have a counterpart that pins the green half, and this is criterion
+    13's. The plant is a module-scope header that TESTS for `modal` rather than importing it:
+
+        import importlib.util
+        if importlib.util.find_spec('modal') is not None:
+            _ON_CONTAINER = True
+        else:
+            _ON_CONTAINER = False
+
+    WHY THE STRICTNESS OF `-S` STOPS HERE. Under an unconditional `import modal`, `-S` makes this
+    gate stricter than the container and the plant goes red. Under a header that tests for the
+    name, `-S` does not make the gate strict -- it makes it take the OTHER BRANCH and prove the
+    wrong half of the file. A round-2 review built this plant and measured it green here, green on
+    all three knock-outs, and green on criterion 5. Measured under this gate's own `-S`, the
+    observed value is `_ON_CONTAINER = False`; the container's is `True`, because the container
+    really does have the modal client. The gate certifies an import that resolves a different way
+    on the machine it is certifying for.
+
+    THE OTHER HALF IS NOT OPTIONAL. Criterion 13 -- the module-shape gate -- is the only thing that
+    catches this, and it lives in `tests/test_modal_packaging.py`. Its counterpart asserts the same
+    plant is RED there:
+
+        tests/test_modal_packaging.py::test_criterion_13_reddens_on_the_conditional_modal_probe
+
+    Together the two halves establish that criterion 13 is the SOLE objector. This half lives here,
+    beside the subprocess helper, rather than next to its counterpart because
+    `tests/test_modal_packaging.py` imports zero `tests.*` modules and that exclusion is
+    load-bearing (`_seam_sources()` omits the file because self-feeding the classifier returns 300
+    destinations instead of 261). Duplicating the helper into that file would put two copies of
+    this gate in the tree -- the defect class this branch exists to close.
+    """
+    module = _import_run_modal()
+    runner = module.runner_image
+    prefix = tmp_path / "image"
+    neutral = tmp_path / "cwd"
+    neutral.mkdir()
+
+    _materialise_recorded_mounts(prefix,
+                                 runner.local_files,
+                                 plant=("import importlib.util\n"
+                                        "if importlib.util.find_spec('modal') is not None:\n"
+                                        "    _ON_CONTAINER = True\n"
+                                        "else:\n"
+                                        "    _ON_CONTAINER = False\n"))
+    assert _container_equivalent_import(prefix, runner.env_vars["PYTHONPATH"],
+                                        cwd=neutral) == (0, "")
+
+
+def test_gate_a_criterion_3_minus_p_and_the_neutral_cwd_are_load_bearing(fake_modal, tmp_path):
+    """I3: assert the leak EXISTS once `-P` and the neutral cwd are removed, so nothing else can.
+
+    "A gate that passes knock-outs 1 and 3 but not 2 is leaking" is true only of the JOINT
+    regression. Measured on the knock-out 2 plant, one variable at a time:
+
+        -S -P, neutral cwd : (1, ImportError: cannot import name 'modal_image_reqs' ...)
+        -S   , neutral cwd : (1, ImportError: ...)   <- `-P` dropped, the control is STILL red
+        -S   , cwd=ROOT    : (0, '')                 <- the leak
+        -S -P, cwd=ROOT    : (1, ImportError: ...)
+
+    So dropping `-P` while keeping the neutral cwd leaves all three knock-outs red: the regression
+    is invisible and the gate is then one cwd edit away from blind. Knock-out 3 watches `-S` for
+    free; nothing watched `-P` until this test.
+
+    BOTH ROWS AT `cwd=ROOT` ARE ASSERTED, AND THE PAIR IS THE POINT. The `isolate_cwd=False` row
+    asserts exit 0 -- that the leak is real, GC2's "assert the green half" turned on the gate's own
+    construction, so nobody can later argue `-P` is redundant given the neutral cwd. The
+    `isolate_cwd=True` row asserts the same run is RED, and that is the half with teeth: on its own
+    the exit-0 row does NOT catch `-P` being deleted from the helper's default flags, because the
+    row that omits `-P` would keep passing. Only holding `cwd` fixed and toggling `-P` makes the
+    flag's removal visible. It also catches the opposite edit -- hardcoding `-P` unconditionally
+    and ignoring `isolate_cwd`.
+
+    `cwd=ROOT` is deliberate here and is the one place this file's subprocess runs inside the repo:
+    with `sys.path[0]` back to the cwd, `scripts.modal_image_reqs` resolves from the developer's
+    checkout and the plant's unreachable import succeeds. `-B` keeps the run from leaving
+    `__pycache__` behind in `scripts/`.
+    """
+    module = _import_run_modal()
+    runner = module.runner_image
+    prefix = tmp_path / "image"
+
+    _materialise_recorded_mounts(prefix,
+                                 runner.local_files,
+                                 plant="from scripts import modal_image_reqs as _unmounted\n")
+    assert _container_equivalent_import(prefix,
+                                        runner.env_vars["PYTHONPATH"],
+                                        cwd=ROOT,
+                                        isolate_cwd=False) == (0, "")
+
+    isolated_status, isolated_stderr = _container_equivalent_import(prefix,
+                                                                    runner.env_vars["PYTHONPATH"],
+                                                                    cwd=ROOT)
+    assert isolated_status != 0, "`-P` no longer closes the cwd leak"
+    assert "modal_image_reqs" in isolated_stderr
