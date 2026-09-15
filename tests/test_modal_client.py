@@ -2177,8 +2177,12 @@ def test_gate_a_criterion_3_package_imports_on_a_container_equivalent_interprete
     entries carry different spellings: the packaged name `scripts.modal_runner_lib` resolves via
     `/opt/app`, the bare name `modal_runner_lib` via `/opt/app/scripts`. This gate covers the
     `/opt/app` entry -- it is green on `/opt/app` alone. The `/opt/app/scripts` entry is pinned
-    only by `tests/test_modal_client.py:626`; nothing here would notice its removal, which is why
-    the assertions below record both single-entry results explicitly rather than describing them.
+    only by the `PYTHONPATH` assertion in
+    `test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist`; nothing here would notice
+    its removal, which is why the assertions below record both single-entry results explicitly
+    rather than describing them. CITED BY TEST NAME, NOT BY LINE: the `:626` this used to carry
+    was correct when written and a later commit on this same branch turned that line into a
+    comment. A test name does not move when the file does.
 
     `runner_image is dependency_image` (`FakeImage.add_local_file` returns `self`, and
     `scripts/run_modal.py:113` chains off `dependency_image`), so the recorded list is FIVE triples
@@ -2393,8 +2397,8 @@ def test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe(fake_modal,
     Together the two halves establish that criterion 13 is the SOLE objector. This half lives here,
     beside the subprocess helper, rather than next to its counterpart because
     `tests/test_modal_packaging.py` imports zero `tests.*` modules and that exclusion is
-    load-bearing (`_seam_sources()` omits the file because self-feeding the classifier returns 300
-    destinations instead of 261). Duplicating the helper into that file would put two copies of
+    load-bearing (`_seam_sources()` omits the file because self-feeding the classifier returns a
+    poisoned destination count). Duplicating the helper into that file would put two copies of
     this gate in the tree -- the defect class this branch exists to close.
     """
     module = _import_run_modal()
@@ -2599,17 +2603,19 @@ def test_gate_d_criterion_4_scripts_mounts_are_a_bijection_onto_the_declared_set
 
     READ `runner_image.local_files`, NEVER `image.local_files`. Under `FakeImage` the two names are
     one object carrying one 5-element list, because `FakeImage.add_local_file` ends in `return self`
-    (`:250`) so every chained builder call hands back the same instance. Production is not like
-    that: `dependency_image` genuinely carries 3 of the 5 mounts and `runner_image` adds 2. A gate
+    -- the symbol is the citation; the line number this used to carry moved on this branch -- so
+    every chained builder call hands back the same instance. Production is not like that:
+    `dependency_image` genuinely carries 3 of the 5 mounts and `runner_image` adds 2. A gate
     written against `dependency_image.local_files` therefore enshrines the double's over-reporting
     and would stay green if a runner-only mount were ever moved into the dependency image. The
     identity assert below is the tripwire: the day production stops aliasing them, it reddens here
     -- next to this note -- instead of quietly changing what the gate is measuring.
 
-    THE `:627` LOOP ITERATES 10 ITEMS, NOT 10 MOUNTS. `for src, _dst, _copy in
-    (*image.local_files, *runner.local_files)` visits all 5 twice under the fake. That loop is
-    still correct for what it asserts (every src is absolute and under `ROOT`, which duplication
-    cannot falsify), but the duplication is pinned here so nobody reads "10" as the mount count.
+    `test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist`'s `local_files` LOOP
+    ITERATES 10 ITEMS, NOT 10 MOUNTS. `for src, _dst, _copy in (*image.local_files,
+    *runner.local_files)` visits all 5 twice under the fake. That loop is still correct for what
+    it asserts (every src is absolute and under `ROOT`, which duplication cannot falsify), but the
+    duplication is pinned here so nobody reads "10" as the mount count.
 
     NOT COVERED, on purpose, and not an oversight -- both go to W3b. Criterion 4(b) ("no triple's
     src or dst mentions `modal_runner_lib`") is RED on the correct subject at this commit, because
@@ -2619,7 +2625,7 @@ def test_gate_d_criterion_4_scripts_mounts_are_a_bijection_onto_the_declared_set
     today.
     """
     module = _import_run_modal()
-    # One object, one list, because add_local_file returns self (FakeImage, :250).
+    # One object, one list, because `FakeImage.add_local_file` returns self.
     assert module.dependency_image is module.runner_image
     runner = module.runner_image
     assert len(runner.local_files) == 5
@@ -2702,11 +2708,13 @@ def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(fa
     """
     # Positive control, and it is load-bearing twice over. It establishes that the gate is not
     # simply red by default before three reds are asserted against it -- and it is the only line in
-    # this test that touches a _CLIENT_BINDINGS name (`_import_run_modal`, `module`;
-    # tests/test_modal_packaging.py:952). Without it classify_seam computes this test's concern as
-    # the RUNNER half and drags `_mount_bijection_violations` to the shared helpers module with it,
-    # so the placement gate reddens on two names the moment the seam manifest is regenerated. Do
-    # not "simplify" it away: the assertion it would remove is invisible from inside this file.
+    # this test that touches a _CLIENT_BINDINGS name (`_import_run_modal`, `module`; the
+    # `_CLIENT_BINDINGS` frozenset in tests/test_modal_packaging.py -- by SYMBOL, because the line
+    # number this cited moved 34 lines on this branch). Without it classify_seam computes this
+    # test's concern as the RUNNER half and drags `_mount_bijection_violations` to the shared
+    # helpers module with it, so the placement gate reddens on two names the moment the seam
+    # manifest is regenerated. Do not "simplify" it away: the assertion it would remove is
+    # invisible from inside this file.
     module = _import_run_modal()
     assert _mount_bijection_violations(module.runner_image.local_files, ROOT) == []
 
