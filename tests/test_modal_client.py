@@ -2407,6 +2407,11 @@ def test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe(fake_modal,
                                         "    _ON_CONTAINER = True\n"
                                         "else:\n"
                                         "    _ON_CONTAINER = False\n"))
+    # Pin that the plant LANDED. An unplanted tree also returns (0, ""), so without this the test
+    # would pass just as happily on an instrument that never ran -- the defect class this branch
+    # exists to close. The knock-outs pin the same helper's plant path from the red side.
+    assert "_ON_CONTAINER" in (prefix /
+                               "opt/app/scripts/modal_runner_lib.py").read_text(encoding="utf-8")
     assert _container_equivalent_import(prefix, runner.env_vars["PYTHONPATH"],
                                         cwd=neutral) == (0, "")
 
@@ -2435,10 +2440,26 @@ def test_gate_a_criterion_3_minus_p_and_the_neutral_cwd_are_load_bearing(fake_mo
     flag's removal visible. It also catches the opposite edit -- hardcoding `-P` unconditionally
     and ignoring `isolate_cwd`.
 
-    `cwd=ROOT` is deliberate here and is the one place this file's subprocess runs inside the repo:
-    with `sys.path[0]` back to the cwd, `scripts.modal_image_reqs` resolves from the developer's
-    checkout and the plant's unreachable import succeeds. `-B` keeps the run from leaving
-    `__pycache__` behind in `scripts/`.
+    `cwd=ROOT` is deliberate here and is the one place this file's subprocess runs inside the repo.
+    WHAT THE EXIT 0 ACTUALLY MEANS IS WORSE THAN A RESOLVED IMPORT, and the mechanism is worth
+    stating precisely because the obvious reading is wrong. With `sys.path[0]` back at the repo
+    root, `scripts` becomes a PEP 420 namespace package spanning BOTH trees, repo portion first:
+
+        sys.path[0]      = ''                                   (the cwd, i.e. the repo root)
+        scripts.__path__ = ['<repo>/scripts', '<prefix>/opt/app/scripts']
+        module.__file__  = '<repo>/scripts/modal_runner_lib.py'  <- the real, UNPLANTED file
+
+    So `scripts.modal_runner_lib` ITSELF is served from the checkout, the prefix copy is never
+    loaded, and the plant never runs at all -- measured, `'scripts.modal_image_reqs' in sys.modules`
+    is `False` and the planted `_unmounted` attribute is absent. The exit 0 does not say "the
+    unreachable import resolved"; it says the gate has stopped testing the mounted set entirely and
+    is certifying the developer's tree. Do not read this row as evidence about the prefix -- this
+    row does not load the prefix.
+
+    `-B` keeps that run from writing `<repo>/scripts/__pycache__/modal_runner_lib.cpython-*.pyc`
+    (measured: delete the `.pyc` first and it is rewritten without `-B`, not written with it). No
+    `modal_image_reqs` bytecode appears either way, for the reason above. NOTHING WATCHES `-B` --
+    removing it leaves all six of these tests green. It is hygiene, not a gated property.
     """
     module = _import_run_modal()
     runner = module.runner_image
