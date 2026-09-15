@@ -2044,6 +2044,15 @@ def test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library
     subject the correct instrument and the blind one are INDISTINGUISHABLE.
     Bare `ast.walk` sees 25 and reports `torch` (`:810`, `:1498`) -- it is red on
     the correct module, which is why the spec's `ast.walk` clause is overridden.
+
+    INTERACTION WITH GATE (g), criterion 13. Gate (g)'s `find_spec` header is
+    green under THIS gate through the WALK, not through the `TYPE_CHECKING`
+    exemption -- it is an ordinary `If` and gate (e) does read the imports inside
+    it. The two gates disagree about the `TYPE_CHECKING` BODY on purpose:
+    criterion 13 governs its SHAPE (at most one block, imports only), criterion 5
+    exempts it from purity because it never executes. If a future edit moves an
+    `import` inside the `find_spec` header, gate (e) reddens CORRECTLY -- that
+    import runs, and this gate's whole question is what running the module costs.
     """
     scanned, violations = _nonstdlib_module_scope_imports(ROOT)
     assert scanned == [
@@ -2110,10 +2119,25 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         unread file has to stay OUT of `scanned` for their green to be evidence.
       * the `if`-guarded row objects to adding `If` to the skip set, and it is
         the shape gate (g) plants (`if importlib.util.find_spec(...)`), so the
-        two gates' readings of the same construct stay pinned together. It is
-        ALSO what stops the `TYPE_CHECKING` exemption from widening into "any
-        `If`": a guard that matched every `If` test would pass every other row
-        here and quietly stop reading conditional imports altogether.
+        two gates' readings of the same construct stay pinned together. Its test
+        is a `Call`, so it also stops the `TYPE_CHECKING` exemption from widening
+        into "any `If`" -- but a `Call` is neither a `Name` nor an `Attribute`,
+        which leaves the widenings that keep the node-class test and drop the
+        NAME test invisible to it. THE EXEMPTION HAS TWO CLAUSES AND NEEDS THREE
+        ROWS; this one holds only the outermost. The next two hold the rest, and
+        they exist because "the headline clause has a knock-out, the secondary
+        clause has none" is this branch's named defect class in its B2 form --
+        the guard's own allow-set going unwatched.
+      * the `nametestguard` row (`_DEBUG = False` + `if _DEBUG:`) objects to
+        matching any bare `ast.Name` test. Drop `test.id == "TYPE_CHECKING"` and
+        every flag-guarded module-scope import in the file becomes exempt: that
+        is a SILENT GREEN ON A REAL IMPORT, not a missed edge case. No other row
+        here has a bare-`Name` `If` test, so nothing else can see it.
+      * the `attrtestguard` row (`import os` + `if os.name:`) is the same clause
+        on the attribute spelling. `typing.TYPE_CHECKING` is exempt because of
+        `test.attr`, NOT because it is an `ast.Attribute`; without this row,
+        `isinstance(test, ast.Attribute)` on its own passes every other
+        observation in the file.
       * the CLASS-BODY row objects to putting `ClassDef` back in the skip set.
         A class body executes at import time, so this is a real violation; the
         module's own 23 classes contain no import, so nothing else can see it.
@@ -2122,6 +2146,21 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         a `FunctionDef` whose body does not run on import -- this row is what
         says the walk stops there instead of flagging every lazy import in a
         class.
+      * the NESTED-CONTAINER row (`class` > `try` > `class` > `import modal`) is
+        the only row whose offending import sits BELOW DEPTH 1. Every other
+        container in this table -- the decoy's `try`, the `if`-guarded header,
+        the class body -- is top-level, and top-level nodes enter the walk from
+        `tree.body` rather than by being descended into, so a mutant that expands
+        depth 1 and then stops passes every one of them while going blind to
+        everything nested inside. The nesting runs `ClassDef` > `Try` >
+        `ClassDef` > `Import` ON PURPOSE. It is one row, but it objects to
+        dropping EITHER container type from the descent as well as to dropping
+        both -- MEASURED: the obvious two-deep shapes each hold only half of
+        that, a `try:` inside a class body is blind to "stop at a nested
+        `ClassDef`" and a class inside a `try:` is blind to "stop at a nested
+        `Try`", while this one kills all three mutants. The instrument is
+        a stack, not a single expansion, and this is the only observation in the
+        file that says so.
       * the two `TYPE_CHECKING` rows are POSITIVE CONTROLS FOR AN EXEMPTION,
         which is the shape that has gone wrong here before: the subject has 0
         such blocks, so an unexercised exemption is indistinguishable from a
@@ -2149,9 +2188,25 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
 
     EVERY ROW BELOW IS INERT ON THE UNMODIFIED SUBJECT, by construction: the
     module has no class-body import, no async def, no `TYPE_CHECKING` block, no
-    relative import and no dotted plain `import`. That is the point. Each one is
-    the ONLY observation in the suite that holds its clause, which is why they
-    are rows in a knock-out rather than sentences in a docstring.
+    relative import, no dotted plain `import`, no conditional module-scope import
+    of any spelling and nothing imported below depth 1. That is the point. Each
+    one is the ONLY observation in the suite that holds its clause, which is why
+    they are rows in a knock-out rather than sentences in a docstring.
+
+    INTERACTION WITH GATE (g), criterion 13 -- stated here and in the green test
+    because the two `TYPE_CHECKING` rows and the `if`-guarded row look, from the
+    outside, like the same construct getting two different verdicts. They are not
+    the same construct:
+
+      * gate (g)'s `find_spec` header is green under gate (e) THROUGH THE WALK,
+        not through the exemption. It is an ordinary `If`, and gate (e) does read
+        the imports inside it -- which is exactly what the `ifguard` row asserts.
+      * the two gates disagree about the `TYPE_CHECKING` BODY on purpose.
+        Criterion 13 governs its SHAPE (at most one block, imports only);
+        criterion 5 exempts it from the purity check because it never executes.
+        Complementary, not contradictory, and neither subsumes the other.
+      * so if a future edit moves an `import` INSIDE the `find_spec` header,
+        gate (e) reddens -- CORRECTLY. That import runs.
     """
     source = (ROOT / "scripts" / "modal_runner_lib.py").read_text(encoding="utf-8")
     lines = source.splitlines(keepends=True)
@@ -2214,6 +2269,11 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         ("classmethod", "class _C:\n    def m(self):\n        import torch\n        return torch\n",
          [], "walking class bodies must not reach METHOD bodies -- a method is a `FunctionDef` "
          "and does not run on import"),
+        ("nestedcontainers", "class _C3:\n    try:\n        class _C4:\n            import modal\n"
+         "    except ImportError:\n        pass\n", [("scripts/modal_runner_lib.py", 23, "modal")],
+         "descent is a STACK and not a single expansion -- an import THREE containers "
+         "deep still executes at import time. Every other container in this table is "
+         "top-level, so a walk that expands depth 1 and then stops passes all of them"),
         ("typechecking", "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import modal\n",
          [], "`if TYPE_CHECKING:` NEVER runs, so it costs nothing at import and is exempt. The "
          "import inside is deliberately NON-stdlib: `import decimal` would pass for the wrong "
@@ -2240,6 +2300,16 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         ("relative", "from .paths import RUN_ROOT\n", [],
          "a relative import is intra-package, not a third-party dependency -- "
          "`node.level == 0`"),
+        ("nametestguard", "_DEBUG = False\nif _DEBUG:\n    import modal\n", [
+            ("scripts/modal_runner_lib.py", 22, "modal")
+        ], "the `TYPE_CHECKING` exemption matches the NAME, not merely the node class -- a "
+         "bare `Name` test that is not `TYPE_CHECKING` still runs, so the import under it "
+         "still costs what it costs"),
+        ("attrtestguard", "import os\nif os.name:\n    import modal\n", [
+            ("scripts/modal_runner_lib.py", 22, "modal")
+        ], "same clause on the attribute spelling: `x.TYPE_CHECKING` is exempt, any other "
+         "attribute test is not -- the exemption reads `test.attr`, not `isinstance(test, "
+         "ast.Attribute)`"),
     ]:
         scanned, violations = _nonstdlib_module_scope_imports(plant(text, slug))
         assert scanned == [
