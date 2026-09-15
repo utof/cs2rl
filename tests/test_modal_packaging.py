@@ -1873,20 +1873,49 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False):
     literal with enumeration over the split package's directory, and that swap
     is a B12 obligation, not an optional tidy-up.
 
-    THE INSTRUMENT: walk the tree, but DO NOT DESCEND into `FunctionDef` /
-    `AsyncFunctionDef` / `ClassDef`. Measured on today's unmodified module:
+    THE INSTRUMENT, and the PRINCIPLE that generates it rather than a list to
+    memorise: **the gate checks exactly what EXECUTES at import time.** Every
+    skip and every exemption below is that one question asked of one construct,
+    and nothing is in the walk because it looked like "module scope".
 
-        instrument      | import nodes | non-stdlib roots reported
-        tree.body       |      23      | none
-        no-descend walk |      23      | none
-        bare ast.walk   |      25      | `torch` -- `:810` in `_import_torch`,
-                        |              | `:1498` in `_load_checkpoint_weights`
+      * `FunctionDef` / `AsyncFunctionDef` bodies do NOT run on import -- skipped.
+        That is why `torch` at `:810` and `:1498` is the design rather than a
+        violation, and it is the whole reason bare `ast.walk` cannot be used.
+      * `ClassDef` bodies DO run on import -- WALKED. `class C:` + `import modal`
+        really does import Modal. (Methods inside are `FunctionDef`s, so the walk
+        reaches them and then skips them, which is correct for both reasons at
+        once.)
+      * `if TYPE_CHECKING:` bodies NEVER run -- exempted, and the `else:` branch
+        is still walked because it is exactly the branch that DOES run. Both
+        spellings are recognised, bare `TYPE_CHECKING` and `typing.TYPE_CHECKING`.
+      * every other block -- `try`, `if`, `with`, `for` -- runs on import and is
+        walked, which is what the decoy's `try:`-wrapped `import modal` proves.
 
-    So a bare-`ast.walk` gate is RED ON THE CORRECT, UNMODIFIED MODULE -- the
-    lazy Torch import is the design, not a defect -- and the obvious repair is
-    to fall back to `tree.body`, which is blind to everything below depth 1.
-    This SUPERSEDES the spec's own bold instruction to use `ast.walk`; the
-    override is deliberate and measured.
+    "Do not descend into `FunctionDef` / `AsyncFunctionDef` / `ClassDef`" was the
+    plan's original wording and it got two of those three wrong; the principle
+    above is the correction, applied in fix round 1. The `TYPE_CHECKING`
+    exemption is NOT a hole in the same sense: importing this module does not
+    import what such a block names, so reddening on one would be a false positive
+    over correct code, and a guard that reddens on correct code gets switched off.
+
+    INTERACTION WITH GATE (g), stated because a later reader will otherwise think
+    one of the two is wrong: criterion 13 governs the SHAPE of a `TYPE_CHECKING`
+    block (at most one, imports only); criterion 5 declines to look INSIDE one at
+    all. They are complementary -- (g) polices the construct, (e) polices what
+    running the module costs -- and neither subsumes the other.
+
+    Measured on today's unmodified module:
+
+        instrument         | import nodes | non-stdlib roots reported
+        tree.body          |      23      | none
+        import-time walk   |      23      | none
+        bare ast.walk      |      25      | `torch` -- `:810` in `_import_torch`,
+                           |              | `:1498` in `_load_checkpoint_weights`
+
+    So a bare-`ast.walk` gate is RED ON THE CORRECT, UNMODIFIED MODULE, and the
+    obvious repair is to fall back to `tree.body`, which is blind to everything
+    below depth 1. This SUPERSEDES the spec's own bold instruction to use
+    `ast.walk`; the override is deliberate and measured.
 
     `top_level_only` exists for exactly ONE caller: the knock-out, which must
     ASSERT that the `tree.body` instrument is green on a plant this one catches.
@@ -1894,21 +1923,12 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False):
     (23 == 23, both clean), so the plant is the ONLY observation that separates
     them, and a described difference is not an asserted one.
 
-    THE SKIP SET, stated honestly because two thirds of it is inert ON THIS
-    SUBJECT: `FunctionDef` is the live entry (the two Torch imports).
-    `AsyncFunctionDef` has 0 instances in the module and `ClassDef` has 23, none
-    containing an import, so neither changes a single verdict about the file as
-    it stands. They are in the set because the instrument is "module scope", not
-    "the shapes this file happens to use today", and the knock-out plants an
-    `async def` so that entry is at least held by an assertion.
-
-    KNOWN BLIND SPOT, stated rather than fixed: a class body EXECUTES at
-    module-import time, so `class C:` + `import modal` really does import Modal
-    and this instrument really does miss it. Measured: descending into `ClassDef`
-    leaves every assertion in this file green, so the fix is free -- but the
-    prescribed instrument names `ClassDef`, so it is not taken here. W3b is where
-    to revisit it, and the reason to is that a split package is exactly where a
-    class-scope import is likeliest to appear.
+    EVERY BRANCH ABOVE IS INERT ON THIS SUBJECT and is therefore held by a plant
+    instead: 0 async defs, 0 `TYPE_CHECKING` blocks, and 23 classes none of which
+    contains an import. An exemption the subject never exercises is
+    indistinguishable from a gate that never sees one -- so the knock-out ships a
+    row for each, including a GREEN `TYPE_CHECKING` row importing something
+    NON-stdlib, since a stdlib import there would pass for the wrong reason.
 
     THE RESOLUTION RULE, spelled out because the obvious wrong one is red on the
     correct module: `alias.name.split(".")[0]` for `Import`,
@@ -1967,8 +1987,24 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False):
             while stack:
                 node = stack.pop()
                 nodes.append(node)
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                # A function body does not run on import. A CLASS body does, so
+                # it is walked; the methods inside it are `FunctionDef`s and get
+                # skipped here on the next iteration, which is the right answer
+                # for the same reason.
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
+                # `if TYPE_CHECKING:` never runs, so its body costs nothing at
+                # import and is exempt. `node.orelse` IS still walked -- that is
+                # precisely the branch that does run -- and skipping the whole
+                # `If` node would be a real blind spot rather than an exemption.
+                # Inlined rather than extracted because GC3 pins this file to
+                # three new module-level names and a predicate would be a fourth.
+                if isinstance(node, ast.If):
+                    test = node.test
+                    if ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
+                            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")):
+                        stack.extend(node.orelse)
+                        continue
                 stack.extend(ast.iter_child_nodes(node))
         for node in nodes:
             if isinstance(node, ast.Import):
@@ -2003,7 +2039,7 @@ def test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library
     this by looking at nothing, which is the failure this repo keeps paying for.
 
     MEASURED, and this is why the knock-out below is mandatory rather than
-    optional: the no-descend walk and `tree.body` see the same 23 import nodes
+    optional: the import-time walk and `tree.body` see the same 23 import nodes
     and report the same empty violation set on this file, so on the unmodified
     subject the correct instrument and the blind one are INDISTINGUISHABLE.
     Bare `ast.walk` sees 25 and reports `torch` (`:810`, `:1498`) -- it is red on
@@ -2024,7 +2060,7 @@ def test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library
     assert blind == violations, (
         "the two instruments disagree on the UNMODIFIED module. They are supposed to be "
         "indistinguishable here -- that equality is the reason the knock-out below is the "
-        f"only thing that separates them. no-descend: {violations}, tree.body: {blind}")
+        f"only thing that separates them. import-time: {violations}, tree.body: {blind}")
 
 
 def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tmp_path):
@@ -2072,9 +2108,31 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
       * the missing-target block at the end objects to dropping the `is_file()`
         filter, and it is what makes the `scanned` assertions mean anything: an
         unread file has to stay OUT of `scanned` for their green to be evidence.
-      * the `if`-guarded row objects to adding `If` to the no-descend skip set,
-        and it is the shape gate (g) plants (`if importlib.util.find_spec(...)`),
-        so the two gates' readings of the same construct stay pinned together.
+      * the `if`-guarded row objects to adding `If` to the skip set, and it is
+        the shape gate (g) plants (`if importlib.util.find_spec(...)`), so the
+        two gates' readings of the same construct stay pinned together. It is
+        ALSO what stops the `TYPE_CHECKING` exemption from widening into "any
+        `If`": a guard that matched every `If` test would pass every other row
+        here and quietly stop reading conditional imports altogether.
+      * the CLASS-BODY row objects to putting `ClassDef` back in the skip set.
+        A class body executes at import time, so this is a real violation; the
+        module's own 23 classes contain no import, so nothing else can see it.
+      * the class-METHOD row is the other half of that change. Once the walk
+        enters class bodies it reaches the methods inside them, and a method is
+        a `FunctionDef` whose body does not run on import -- this row is what
+        says the walk stops there instead of flagging every lazy import in a
+        class.
+      * the two `TYPE_CHECKING` rows are POSITIVE CONTROLS FOR AN EXEMPTION,
+        which is the shape that has gone wrong here before: the subject has 0
+        such blocks, so an unexercised exemption is indistinguishable from a
+        gate that never meets one. Both spellings are covered (bare
+        `TYPE_CHECKING`, `typing.TYPE_CHECKING`), and each imports something
+        NON-stdlib on purpose -- `import decimal` inside the block would go green
+        whether or not the exemption existed and would certify nothing.
+      * the `TYPE_CHECKING`-with-`else` row objects to exempting the whole `If`
+        node rather than just its body. The `else:` branch is exactly the branch
+        that DOES execute, so skipping it would be a blind spot wearing an
+        exemption's clothes.
       * the function-body `import torch` row is the NEGATIVE control that
         separates this instrument from bare `ast.walk`. It is the shape the real
         module uses twice, so `test_..._imports_only_the_standard_library`
@@ -2089,14 +2147,11 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         gate would redden over legal intra-package imports on the day of the
         split.
 
-    NOT COVERED, stated so the omission is a decision rather than an oversight:
-    removing `ClassDef` from the skip set. Measured -- that mutant leaves every
-    assertion in this file green, and no row here kills it. It is deliberately
-    left alive because it moves the gate STRICTER (a class body executes at
-    import time, so `class C:\\n    import modal` is a real violation this
-    instrument misses) and pinning it would freeze that blind spot with an
-    assertion telling a future reader not to fix it. The instrument is
-    prescribed; see the helper's docstring and raise it at W3b.
+    EVERY ROW BELOW IS INERT ON THE UNMODIFIED SUBJECT, by construction: the
+    module has no class-body import, no async def, no `TYPE_CHECKING` block, no
+    relative import and no dotted plain `import`. That is the point. Each one is
+    the ONLY observation in the suite that holds its clause, which is why they
+    are rows in a knock-out rather than sentences in a docstring.
     """
     source = (ROOT / "scripts" / "modal_runner_lib.py").read_text(encoding="utf-8")
     lines = source.splitlines(keepends=True)
@@ -2153,6 +2208,26 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         ("ifguard", 'if os.environ.get("CS2RL_MODAL"):\n    import modal\n', [
             ("scripts/modal_runner_lib.py", 21, "modal")
         ], "the walk descends through `If` -- gate (g) plants exactly this header"),
+        ("classbody", "class _C:\n    import modal\n", [
+            ("scripts/modal_runner_lib.py", 21, "modal")
+        ], "a CLASS BODY EXECUTES at import time, so it is walked, not skipped"),
+        ("classmethod", "class _C:\n    def m(self):\n        import torch\n        return torch\n",
+         [], "walking class bodies must not reach METHOD bodies -- a method is a `FunctionDef` "
+         "and does not run on import"),
+        ("typechecking", "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import modal\n",
+         [], "`if TYPE_CHECKING:` NEVER runs, so it costs nothing at import and is exempt. The "
+         "import inside is deliberately NON-stdlib: `import decimal` would pass for the wrong "
+         "reason and certify nothing"),
+        ("typecheckingattr", "import typing\nif typing.TYPE_CHECKING:\n    import modal\n", [],
+         "the `typing.TYPE_CHECKING` spelling is the same exemption; matching only the bare "
+         "`Name` leaves half the idiom reddening"),
+        ("typecheckingelse",
+         "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import modal\n"
+         "else:\n    import numpy\n", [
+             ("scripts/modal_runner_lib.py", 24, "numpy")
+         ], "the `else:` branch of a `TYPE_CHECKING` block is exactly the branch that DOES run, so "
+         "exempting the whole `If` node instead of just its body is a blind spot, not an "
+         "exemption"),
         ("dotted", "import xml.etree.ElementTree\n", [],
          "a DOTTED `Import` resolves to its ROOT -- `sys.stdlib_module_names` holds "
          "top-level names only, so keeping the dotted path reddens the gate over stdlib"),
