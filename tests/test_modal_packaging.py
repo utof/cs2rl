@@ -1837,3 +1837,349 @@ assert 'modal' not in sys.modules
 assert 'torch' not in sys.modules
 """
     subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
+
+
+def _nonstdlib_module_scope_imports(repo_root, top_level_only=False):
+    """Gate (e), criterion 5. Every MODULE-SCOPE import in the optional runner's
+    library must name a STANDARD-LIBRARY module. Returns `(scanned, violations)`.
+
+    `scanned` lists the repo-relative posix path of every file actually READ.
+    `violations` is a sorted list of `(rel, lineno, root_module)` triples, one
+    per offending import NAME (so `import a, b` can contribute two).
+
+    WHY A PAIR AND NOT JUST THE VIOLATION LIST, which is the whole reason the
+    signature looks like this: a guard that enumerates NOTHING returns no
+    violations, and an empty violation list from an empty file set is
+    byte-identical to one from a clean tree. Measured -- point the candidate
+    list at a path that does not exist and this returns `([], [])`, vacuously
+    green forever. GC1 permits evidence to be a pair, and `scanned` is the half
+    that makes the gate's OWN SCOPE assertable;
+    `test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library`
+    asserts it by name, so "the gate stopped reading the file" is a red rather
+    than a silent green. This repo's recurring gate defect is a guard blind to
+    its own scope; a bare violation list has nowhere to put that evidence.
+
+    `repo_root` is a PARAMETER and never module-level `ROOT` (GC1), because the
+    knock-out below runs against a `tmp_path` copy. A helper that reached for
+    `ROOT` would scan the real file no matter what it was handed, which is a
+    mutant nothing could kill.
+
+    THE TARGET SET IS ENUMERATED FROM THE FILESYSTEM (`is_file()`), not asserted
+    to exist. Pre-split that set has exactly one literal member, and that is a
+    stated compromise rather than a hidden one: a `scripts/*.py` glob also picks
+    up `scripts/run_modal.py`, whose module scope imports `modal` (`:31`) and
+    `scripts.modal_runner_lib` (`:33`) -- measured, 2 violations -- and reddens
+    this gate over a file that is SUPPOSED to import Modal. W3b replaces the
+    literal with enumeration over the split package's directory, and that swap
+    is a B12 obligation, not an optional tidy-up.
+
+    THE INSTRUMENT: walk the tree, but DO NOT DESCEND into `FunctionDef` /
+    `AsyncFunctionDef` / `ClassDef`. Measured on today's unmodified module:
+
+        instrument      | import nodes | non-stdlib roots reported
+        tree.body       |      23      | none
+        no-descend walk |      23      | none
+        bare ast.walk   |      25      | `torch` -- `:810` in `_import_torch`,
+                        |              | `:1498` in `_load_checkpoint_weights`
+
+    So a bare-`ast.walk` gate is RED ON THE CORRECT, UNMODIFIED MODULE -- the
+    lazy Torch import is the design, not a defect -- and the obvious repair is
+    to fall back to `tree.body`, which is blind to everything below depth 1.
+    This SUPERSEDES the spec's own bold instruction to use `ast.walk`; the
+    override is deliberate and measured.
+
+    `top_level_only` exists for exactly ONE caller: the knock-out, which must
+    ASSERT that the `tree.body` instrument is green on a plant this one catches.
+    The two instruments return the identical set on the unmodified module
+    (23 == 23, both clean), so the plant is the ONLY observation that separates
+    them, and a described difference is not an asserted one.
+
+    THE SKIP SET, stated honestly because two thirds of it is inert ON THIS
+    SUBJECT: `FunctionDef` is the live entry (the two Torch imports).
+    `AsyncFunctionDef` has 0 instances in the module and `ClassDef` has 23, none
+    containing an import, so neither changes a single verdict about the file as
+    it stands. They are in the set because the instrument is "module scope", not
+    "the shapes this file happens to use today", and the knock-out plants an
+    `async def` so that entry is at least held by an assertion.
+
+    KNOWN BLIND SPOT, stated rather than fixed: a class body EXECUTES at
+    module-import time, so `class C:` + `import modal` really does import Modal
+    and this instrument really does miss it. Measured: descending into `ClassDef`
+    leaves every assertion in this file green, so the fix is free -- but the
+    prescribed instrument names `ClassDef`, so it is not taken here. W3b is where
+    to revisit it, and the reason to is that a split package is exactly where a
+    class-scope import is likeliest to appear.
+
+    THE RESOLUTION RULE, spelled out because the obvious wrong one is red on the
+    correct module: `alias.name.split(".")[0]` for `Import`,
+    `node.module.split(".")[0]` for `ImportFrom` with `node.level == 0`.
+
+      * Treating `ImportFrom` ALIASES as module names -- the natural mistake --
+        reports 13 false non-stdlib names on today's module (`Callable`,
+        `Mapping`, `Path`, `Protocol`, `PurePosixPath`, `Sequence`, `UTC`,
+        `annotations`, `asdict`, `dataclass`, `field`, `replace`, `timedelta`).
+      * Skipping `.split(".")[0]` reports `collections.abc`, which is not a key
+        in `sys.stdlib_module_names` -- that set holds TOP-LEVEL names only. On
+        the `ImportFrom` side today's module objects; on the `Import` side it
+        does NOT, because it has no dotted plain `import` at module scope, and
+        fault seeding is what found that. The knock-out's
+        `import xml.etree.ElementTree` row is the observation that covers it.
+      * `alias.asname` instead of `alias.name` is silent on today's module and
+        on a plain `import modal`; the `import modal as ...` row in the knock-out
+        is what objects.
+      * `node.level == 0` skips relative imports, which are intra-package and
+        not third-party dependencies. Inert today (all 23 imports are level 0)
+        and load-bearing the moment W3b's package modules import each other.
+
+    `node.module` is additionally tested for truth because `from . import x`
+    parses to `module=None`; that can only happen with `level > 0`, so the test
+    is unreachable under the rule above and is kept so the helper stays total if
+    the level check is ever loosened.
+
+    A `SyntaxError` out of `ast.parse` is deliberately NOT caught: an unparsable
+    runner library is a red for a real reason, and a `try` here would let the
+    gate silently stop covering its only target.
+    """
+    root = Path(repo_root)
+    # Enumerated from the filesystem, not asserted into existence -- a missing
+    # target must show up as an empty `scanned`, which the green test reads.
+    candidates = [root / "scripts" / "modal_runner_lib.py"]
+    scanned = []
+    violations = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        scanned.append(rel)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        # Annotated `ast.AST` rather than inferred `ast.stmt`, because
+        # `ast.iter_child_nodes` yields `AST` (expressions and `alias` nodes
+        # included) and the pre-commit pyrefly gate reds on the unannotated
+        # `stack.extend`. Nothing below reads an attribute that only `stmt` has:
+        # `node.lineno` is reached solely inside the `Import` / `ImportFrom`
+        # narrowing.
+        nodes: list[ast.AST]
+        if top_level_only:
+            nodes = list(tree.body)
+        else:
+            nodes = []
+            stack: list[ast.AST] = list(tree.body)
+            while stack:
+                node = stack.pop()
+                nodes.append(node)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                stack.extend(ast.iter_child_nodes(node))
+        for node in nodes:
+            if isinstance(node, ast.Import):
+                roots = [alias.name.split(".")[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                roots = [node.module.split(".")[0]]
+            else:
+                continue
+            for name in roots:
+                if name not in sys.stdlib_module_names:
+                    violations.append((rel, node.lineno, name))
+    return scanned, sorted(violations)
+
+
+def test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library():
+    """GREEN ON THE REAL SUBJECT. `scripts/modal_runner_lib.py` must be importable
+    without pulling in Modal, Torch or anything else off the standard library.
+
+    WHY THIS IS THE POINT OF THE WHOLE FILE: the module's own docstring promises
+    "status/download and all validation must work without importing or hydrating
+    a Modal App", and `test_modal_runner_lib_does_not_import_modal_or_torch`
+    already proves it at RUN TIME in a fresh subprocess. That runtime probe is
+    not a substitute for this one and vice versa. The probe asserts `'modal' not
+    in sys.modules`, so a `try: import modal / except ImportError: pass` at
+    module scope passes it in any environment where Modal is NOT installed --
+    which is every environment that does not opt into the `modal` dependency
+    group -- and then reddens for the first developer who does opt in. This gate
+    reads the SOURCE, so it is independent of what happens to be installed.
+
+    THE SCOPE ASSERTION COMES FIRST and is not decoration. `scanned` proves the
+    gate read its target; without it, a gate that enumerated nothing would pass
+    this by looking at nothing, which is the failure this repo keeps paying for.
+
+    MEASURED, and this is why the knock-out below is mandatory rather than
+    optional: the no-descend walk and `tree.body` see the same 23 import nodes
+    and report the same empty violation set on this file, so on the unmodified
+    subject the correct instrument and the blind one are INDISTINGUISHABLE.
+    Bare `ast.walk` sees 25 and reports `torch` (`:810`, `:1498`) -- it is red on
+    the correct module, which is why the spec's `ast.walk` clause is overridden.
+    """
+    scanned, violations = _nonstdlib_module_scope_imports(ROOT)
+    assert scanned == [
+        "scripts/modal_runner_lib.py"
+    ], ("gate (e) did not read its target, so an empty violation list below would mean "
+        "nothing. Either the file moved (W3b moves it, and the enumeration must move with "
+        f"it) or the enumeration stopped pointing at it. Scanned: {scanned}")
+    assert violations == [], (
+        "these module-scope imports are not in the standard library, so importing "
+        "`scripts.modal_runner_lib` now costs whatever they cost -- a CUDA image, in the "
+        f"case the module was written to avoid. Import them lazily instead: {violations}")
+
+    _, blind = _nonstdlib_module_scope_imports(ROOT, top_level_only=True)
+    assert blind == violations, (
+        "the two instruments disagree on the UNMODIFIED module. They are supposed to be "
+        "indistinguishable here -- that equality is the reason the knock-out below is the "
+        f"only thing that separates them. no-descend: {violations}, tree.body: {blind}")
+
+
+def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tmp_path):
+    """KNOCK-OUT. Plants live in a `tmp_path` copy; `scripts/modal_runner_lib.py`
+    is not edited, not one byte (GC2).
+
+    THE DELIVERABLE IS THE SECOND ASSERTION of the first block. A version of this
+    gate built on `tree.body` PASSES the decoy -- that is the exact blindness the
+    decoy exists to prevent -- so the blind instrument's green is ASSERTED here,
+    not described in prose. Prose cannot fail.
+
+    Every plant goes AFTER LINE 19 (GC2). Line 19 is
+    `from __future__ import annotations`, the first statement after the
+    docstring, and a `__future__` import must precede all other code: a plant
+    above it raises `SyntaxError: from __future__ imports must occur at the
+    beginning of the file`, which is a red for the wrong reason. The plant site
+    is asserted below so that an edit which moves that line is loud.
+
+    THE TABLE IS ONE ROW PER INDEPENDENT CLAUSE of the gate, because a gate whose
+    headline clause has a knock-out and whose secondary clauses have none is the
+    defect this branch has shipped three times. Nothing here is a variation on
+    the decoy for its own sake -- each row is the only observation that kills one
+    mutant:
+
+      * `import modal as ...` is the ONLY row that objects to resolving names
+        through `alias.asname`; that mutant is silent on the real module AND on
+        the decoy, because a plain `import modal` has no `asname`.
+      * `from modal.functions import ...` objects to dropping `ImportFrom`
+        handling entirely (silent on the real module, whose from-imports are all
+        stdlib) and to keeping the full dotted path instead of the root.
+      * `import xml.etree.ElementTree` is the same root-resolution clause for
+        `Import`, and it was MISSING until fault seeding found it: the module has
+        no dotted plain `import` at module scope, and neither did any other row
+        here, so `alias.name` without `.split(".")[0]` survived everything. It is
+        a FALSE-RED mutant rather than a false-green one -- the gate would have
+        reported `os.path` as non-stdlib -- and a gate that reddens on legal code
+        gets switched off, which is the failure mode this file is built around.
+      * `import numpy` objects to a DENY-LIST implementation. A gate that looks
+        for `modal` and `torch` by name passes the decoy and every other row
+        here; `sys.stdlib_module_names` is an ALLOW-LIST, and the polarity is the
+        reason `ruff` TID253 was measured GREEN on the decoy and rejected.
+      * the two-violation row is the only place either "report just the first
+        offender" or "return the walk's own order" is visible; every other row
+        has at most one violation, where both mutants are identity functions.
+      * the missing-target block at the end objects to dropping the `is_file()`
+        filter, and it is what makes the `scanned` assertions mean anything: an
+        unread file has to stay OUT of `scanned` for their green to be evidence.
+      * the `if`-guarded row objects to adding `If` to the no-descend skip set,
+        and it is the shape gate (g) plants (`if importlib.util.find_spec(...)`),
+        so the two gates' readings of the same construct stay pinned together.
+      * the function-body `import torch` row is the NEGATIVE control that
+        separates this instrument from bare `ast.walk`. It is the shape the real
+        module uses twice, so `test_..._imports_only_the_standard_library`
+        already objects to descending -- this row says so where a reader of the
+        instrument is standing.
+      * the `async def` row is the only thing that objects to dropping
+        `AsyncFunctionDef` from the skip set. The module has 0 async defs, so
+        every other observation here is blind to that entry.
+      * the relative-import row is the only thing that objects to dropping
+        `node.level == 0`. Silent on today's module, which has no relative
+        imports; W3b's package modules will have them, and without this row the
+        gate would redden over legal intra-package imports on the day of the
+        split.
+
+    NOT COVERED, stated so the omission is a decision rather than an oversight:
+    removing `ClassDef` from the skip set. Measured -- that mutant leaves every
+    assertion in this file green, and no row here kills it. It is deliberately
+    left alive because it moves the gate STRICTER (a class body executes at
+    import time, so `class C:\\n    import modal` is a real violation this
+    instrument misses) and pinning it would freeze that blind spot with an
+    assertion telling a future reader not to fix it. The instrument is
+    prescribed; see the helper's docstring and raise it at W3b.
+    """
+    source = (ROOT / "scripts" / "modal_runner_lib.py").read_text(encoding="utf-8")
+    lines = source.splitlines(keepends=True)
+    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
+        "GC2 pins plants to line 19 because a `__future__` import must come first. That "
+        f"line now reads {lines[18]!r}, so every plant below would land in the wrong place "
+        "-- re-measure the plant site before trusting anything in this test.")
+
+    def plant(text, slug):
+        """Write a tmp_path repo whose `scripts/modal_runner_lib.py` is the real
+        file with `text` spliced in after line 19, and return its repo root.
+
+        Nothing here is ever EXECUTED -- the gate parses. So a plant may name
+        `os` or `modal` without either being importable.
+        """
+        target = tmp_path / slug / "scripts" / "modal_runner_lib.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("".join(lines[:19]) + text + "".join(lines[19:]), encoding="utf-8")
+        return target.parents[1]
+
+    decoy = plant("try:\n    import modal\nexcept ImportError:\n    modal = None\n", "decoy")
+    scanned, violations = _nonstdlib_module_scope_imports(decoy)
+    assert scanned == [
+        "scripts/modal_runner_lib.py"
+    ], (f"the knock-out did not reach the planted copy, so its red below would be "
+        f"unrelated to the plant. Scanned: {scanned}")
+    assert violations == [
+        ("scripts/modal_runner_lib.py", 21, "modal")
+    ], ("gate (e) missed a try-wrapped module-scope `import modal` -- the exact shape an "
+        "optional dependency gets written in, and the one that makes importing the runner "
+        f"library cost a Modal import. Reported: {violations}")
+
+    _, blind = _nonstdlib_module_scope_imports(decoy, top_level_only=True)
+    assert blind == [], (
+        "`tree.body` was supposed to be BLIND to this plant, and it is the blindness this "
+        "gate exists to rule out. If it now sees the plant, the two instruments no longer "
+        "differ anywhere measurable and this knock-out has stopped certifying that gate "
+        f"(e) walks past depth 1. tree.body reported: {blind}")
+
+    for slug, text, expected, clause in [
+        ("asname", "import modal as _modal_shim\n", [("scripts/modal_runner_lib.py", 20, "modal")],
+         "resolve `Import` through `alias.name`, never `alias.asname`"),
+        ("fromimport", "from modal.functions import FunctionCall\n", [
+            ("scripts/modal_runner_lib.py", 20, "modal")
+        ], "`ImportFrom` counts, and its module resolves to the ROOT, not the dotted path"),
+        ("denylist", "import numpy\n", [("scripts/modal_runner_lib.py", 20, "numpy")],
+         "the check is an allow-list over `sys.stdlib_module_names`, not a deny-list"),
+        ("two", "import numpy\nimport modal\n", [("scripts/modal_runner_lib.py", 20, "numpy"),
+                                                 ("scripts/modal_runner_lib.py", 21, "modal")],
+         "EVERY offending import is reported, sorted. The walk pops its stack from the "
+         "end, so an unsorted return hands these back in reverse source order and a "
+         "report-only-the-first implementation drops the second -- and this is the only "
+         "row with two violations in one file, so nothing else can see either mutant"),
+        ("ifguard", 'if os.environ.get("CS2RL_MODAL"):\n    import modal\n', [
+            ("scripts/modal_runner_lib.py", 21, "modal")
+        ], "the walk descends through `If` -- gate (g) plants exactly this header"),
+        ("dotted", "import xml.etree.ElementTree\n", [],
+         "a DOTTED `Import` resolves to its ROOT -- `sys.stdlib_module_names` holds "
+         "top-level names only, so keeping the dotted path reddens the gate over stdlib"),
+        ("lazy", "def _lazy():\n    import torch\n    return torch\n", [],
+         "a function-body import is LEGAL; descending into it is what makes bare "
+         "`ast.walk` red on the correct module"),
+        ("asynclazy", "async def _lazy_async():\n    import torch\n    return torch\n", [],
+         "`AsyncFunctionDef` is in the skip set for the same reason `FunctionDef` is; "
+         "the module has 0 async defs today, so nothing else objects to dropping it"),
+        ("relative", "from .paths import RUN_ROOT\n", [],
+         "a relative import is intra-package, not a third-party dependency -- "
+         "`node.level == 0`"),
+    ]:
+        scanned, violations = _nonstdlib_module_scope_imports(plant(text, slug))
+        assert scanned == [
+            "scripts/modal_runner_lib.py"
+        ], (f"the {slug} plant was not read at all, so its verdict is vacuous: {scanned}")
+        assert violations == expected, f"gate (e) is wrong about: {clause}. Got {violations}"
+
+    # A root with no target at all. The evidence must say "I read nothing"
+    # rather than raise, because the `scanned` half is the ONLY thing standing
+    # between an empty violation list and a vacuous green -- and the assertion
+    # above, which reads `scanned`, is meaningless unless an unread file really
+    # does stay out of it. Dropping the helper's `is_file()` filter turns this
+    # into a `FileNotFoundError`, which is the mutant this pins.
+    empty = tmp_path / "noscripts"
+    empty.mkdir()
+    assert _nonstdlib_module_scope_imports(empty) == ([], []), (
+        "gate (e) must report an unreadable target as an empty SCOPE, not as an empty "
+        "verdict on a file it never opened.")
