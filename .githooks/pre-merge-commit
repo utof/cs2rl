@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Runs on a CLEAN merge, which `pre-commit` does NOT see.
+#
+# Measured with a logging hook installed under both names:
+#
+#   plain git commit                      pre-commit ran
+#   detached-HEAD git commit              pre-commit ran
+#   clean `git merge --no-ff`             pre-commit did NOT run, this one did
+#   git commit resolving a CONFLICTED merge   pre-commit ran
+#   git revert / cherry-pick / rebase     NEITHER ran
+#
+# So a clean merge was an ungated commit, and every `exp/*` or feature merge in
+# this repo's workflow is a clean merge. This hook closes that case: it fires
+# with the merged result already in the index, which is exactly what the gate's
+# `git checkout-index` needs.
+#
+# Rebase, revert and cherry-pick stay ungated on purpose. A sequencer-stage hook
+# observes commits that already exist, so it could only report, not block -- not
+# worth the machinery for operations this repo does rarely.
+#
+# If this hook fails, the merge is left INCOMPLETE (MERGE_HEAD set, merged
+# content already in the index and working tree). Finish it with
+# `git commit` after fixing -- which runs pre-commit -- or abandon it with
+# `git merge --abort`.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+export UV_PYTHON=python3.12
+
+# No trigger filter: a merge commit is always worth one second.
+echo "[pre-merge-commit] pyrefly type check (merged index, whole project)..."
+uv run python scripts/pyrefly_gate.py
