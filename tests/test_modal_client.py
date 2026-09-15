@@ -2478,3 +2478,268 @@ def test_gate_a_criterion_3_minus_p_and_the_neutral_cwd_are_load_bearing(fake_mo
                                                                     cwd=ROOT)
     assert isolated_status != 0, "`-P` no longer closes the cwd leak"
     assert "modal_image_reqs" in isolated_stderr
+
+
+# ── Gate (d), criterion 4 (partial): the /opt/app/scripts/ mount bijection ──
+
+
+def _mount_bijection_violations(
+    mount_list: list[tuple[str, str, bool]],
+    tracked_paths: Path,
+) -> list[str]:
+    """Check three clauses over recorded `(src, dst, copy)` triples; return the violations found.
+
+    WHAT. Gate (d) answers criterion 4 in part: is the set of files landing in the container's
+    `/opt/app/scripts/` exactly the set that is supposed to land there, spelled the way the rule
+    says, from sources that exist? Three independent clauses, each with a right-hand side derived
+    from somewhere other than the mount list itself:
+
+      (A) BIJECTION. The basenames of destinations whose parent is `/opt/app/scripts` equal the
+          DECLARED set below, checked both ways, and the declared set is additionally a subset of
+          `git ls-files -z scripts/` inside `tracked_paths`.
+      (B) NAMING RULE. For every triple landing under `/opt/app/scripts/`,
+          `dst == "/opt/app/scripts/" + Path(src).name`. This is a RULE stated here, not a re-read
+          of what the image recorded -- see the pitfall below.
+      (C) EXISTENCE. `Path(src).exists()` for EVERY triple in `mount_list`, including the three
+          that land outside `/opt/app/scripts/`. With gate (a)'s materialiser this is the repo's
+          only assertion that a mounted source is a real file.
+
+    WHY GC1's signature. Both parameters are arguments, never module-level `ROOT`, so the clause-(C)
+    knock-out can point the whole gate at a scratch git repo under `tmp_path`. A helper that read
+    `ROOT` internally could only be knocked out by deleting a file from the developer's real
+    worktree, which no test may do. Per GC1 this returns evidence -- the violation strings -- and
+    never asserts; each string is prefixed with its clause letter so a caller can assert that one
+    clause bit and the other two did not.
+
+    `tracked_paths` IS A REPO ROOT, despite the plural name, which GC1 fixes verbatim. The tracked
+    set is enumerated here rather than passed in so that the `-z` handling below lives in one place
+    instead of being re-implemented by each of the three call sites.
+
+    THE DECLARED SET IS A PIN, AND IS TEMPORARY. Pre-split there is no enumeration source for the
+    right-hand side: `git ls-files scripts/` is 22 files against 5 mounts, and 3 of those 5 mount
+    outside `scripts/` entirely, so every enumerated construction would have to derive the right
+    side from the left -- under which the gate cannot see a file that SHOULD be mounted and is not,
+    which is half of what criterion 4(a) asks for. A two-element pin is the only right-hand side
+    that fails in BOTH directions today: a new file appearing under `/opt/app/scripts/` reddens it,
+    and a pinned file that stops being mounted reddens it. W3b replaces the pin with enumeration
+    over the split package's directory (`git ls-files scripts/modal_runner/`), which is a real
+    source. Do not read the pin as a permanent shape, and do not "simplify" it back to a derived
+    set.
+
+    PITFALL -- (B) MUST NOT BE WRITTEN AS "the destinations are what the image records". That form
+    compares the image's `dst` against the image's `dst`, is green on every conceivable input, and
+    is worthless as a control. Stated as a rule it catches the real failure: two different sources
+    landing on one container name, e.g. `scripts/modal_image_reqs.py -> /opt/app/scripts/
+    run_modal.py`, which clause (A) alone cannot see because the destination BASENAME set is still
+    correct.
+
+    PITFALL -- `git ls-files` needs `-z`. Without it git C-quotes any path holding a non-ASCII or
+    special byte (literal double quotes plus octal escapes), and a `splitlines()` census then
+    compares that quoted string against a real path and never matches -- a census that silently
+    under-reports. All 22 paths under `scripts/` are ASCII today, so this is latent rather than
+    live; it is also a one-character fix and the most common way a hand-rolled census goes wrong.
+
+    PITFALL -- `git ls-files` reads the INDEX, not the worktree. A file deleted from disk but not
+    `git rm`-ed is still listed. That is deliberate here: it is exactly what lets clause (C) fail
+    on a missing source while clause (A) stays green, which is how the clause-(C) knock-out shows
+    (C) does work neither of the other two clauses does.
+    """
+    declared = {"scripts/modal_runner_lib.py", "scripts/run_modal.py"}
+    container_dir = PurePosixPath("/opt/app/scripts")
+    violations: list[str] = []
+
+    listing = subprocess.run(
+        ["git", "ls-files", "-z", "scripts/"],
+        cwd=str(tracked_paths),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    tracked = {entry for entry in listing.split("\0") if entry}
+    for untracked in sorted(declared - tracked):
+        violations.append(f"(A) declared mount is not tracked under scripts/: {untracked}")
+
+    mounted = {
+        PurePosixPath(dst).name
+        for _src, dst, _copy in mount_list if PurePosixPath(dst).parent == container_dir
+    }
+    expected = {PurePosixPath(path).name for path in declared}
+    for extra in sorted(mounted - expected):
+        violations.append(f"(A) mounted under {container_dir}/ but not declared: {extra}")
+    for absent in sorted(expected - mounted):
+        violations.append(f"(A) declared but not mounted under {container_dir}/: {absent}")
+
+    for src, dst, _copy in mount_list:
+        if PurePosixPath(dst).parent != container_dir:
+            continue
+        rule = f"{container_dir}/{Path(src).name}"
+        if dst != rule:
+            violations.append(f"(B) dst does not follow {container_dir}/<src basename>: "
+                              f"src={src} dst={dst} expected={rule}")
+
+    for src, dst, _copy in mount_list:
+        if not Path(src).exists():
+            violations.append(f"(C) recorded mount src does not exist: {src} -> {dst}")
+
+    return violations
+
+
+def test_gate_d_criterion_4_scripts_mounts_are_a_bijection_onto_the_declared_set(fake_modal):
+    """Gate (d), criterion 4 (partial): the real mount list satisfies clauses (A), (B) and (C).
+
+    The positive half of the gate, on the subject it will guard after the split. It also pins the
+    two facts that decide WHICH list the gate is allowed to read, because both are invisible in the
+    assertion itself and both would let a wrong reading pass unnoticed.
+
+    READ `runner_image.local_files`, NEVER `image.local_files`. Under `FakeImage` the two names are
+    one object carrying one 5-element list, because `FakeImage.add_local_file` ends in `return self`
+    (`:250`) so every chained builder call hands back the same instance. Production is not like
+    that: `dependency_image` genuinely carries 3 of the 5 mounts and `runner_image` adds 2. A gate
+    written against `dependency_image.local_files` therefore enshrines the double's over-reporting
+    and would stay green if a runner-only mount were ever moved into the dependency image. The
+    identity assert below is the tripwire: the day production stops aliasing them, it reddens here
+    -- next to this note -- instead of quietly changing what the gate is measuring.
+
+    THE `:627` LOOP ITERATES 10 ITEMS, NOT 10 MOUNTS. `for src, _dst, _copy in
+    (*image.local_files, *runner.local_files)` visits all 5 twice under the fake. That loop is
+    still correct for what it asserts (every src is absolute and under `ROOT`, which duplication
+    cannot falsify), but the duplication is pinned here so nobody reads "10" as the mount count.
+
+    NOT COVERED, on purpose, and not an oversight -- both go to W3b. Criterion 4(b) ("no triple's
+    src or dst mentions `modal_runner_lib`") is RED on the correct subject at this commit, because
+    `modal_runner_lib.py` IS the mounted file; it moves out for exactly the reason criterion 14
+    does. And the missing-mount direction of 4(a) has no enumeration source pre-split -- see the
+    helper's docstring on why the declared pin is the only right-hand side that fails both ways
+    today.
+    """
+    module = _import_run_modal()
+    # One object, one list, because add_local_file returns self (FakeImage, :250).
+    assert module.dependency_image is module.runner_image
+    runner = module.runner_image
+    assert len(runner.local_files) == 5
+    assert len(set(runner.local_files)) == 5
+    assert len([*module.dependency_image.local_files, *runner.local_files]) == 10
+
+    assert _mount_bijection_violations(runner.local_files, ROOT) == []
+
+
+def test_gate_d_criterion_4_reddens_on_an_undeclared_destination_and_on_a_renamed_mount(
+        fake_modal, tmp_path):
+    """Knock-outs 1 and 2: clause (A) on a destination nobody declared, clause (B) on a rename.
+
+    Both plants are extra triples appended to a COPY of the recorded list. Nothing in the repo is
+    touched, per GC2; `runner.local_files` itself is never mutated, because the fake's image object
+    is shared with every other test in this module through `sys.modules`.
+
+    PLANT 1 -- UNDECLARED DESTINATION. A triple landing at `/opt/app/scripts/nope.py`, whose
+    `src` is a real file written into `tmp_path` with the same basename, chosen so that clauses
+    (B) and (C) are both green on it: the test can then assert that clause (A) and ONLY clause
+    (A) fired, which is the difference between "the gate went red" and "the gate went red for
+    the stated reason". This is the direction that catches a new file being mounted into the
+    package's container directory without being declared -- the likeliest way the post-split
+    package drifts.
+
+    PLANT 2 -- RENAMED MOUNT, and it is the reason clause (B) exists as a separate clause.
+    `scripts/modal_image_reqs.py` mounted at `/opt/app/scripts/run_modal.py` leaves the destination
+    BASENAME set exactly `{modal_runner_lib.py, run_modal.py}`, so clause (A) is green on it; the
+    container nevertheless receives the wrong bytes under a name the runner imports. Only the
+    naming rule sees this. Measured: deleting clause (B) from the helper leaves every other
+    assertion in this file green and this one red.
+    """
+    module = _import_run_modal()
+    runner = module.runner_image
+    recorded = list(runner.local_files)
+
+    # A real file under tmp_path, basename matching the plant's dst, so clauses (B) and (C) are
+    # green on it and the assertion below can pin clause (A) as the ONLY one that fired.
+    undeclared_src = tmp_path / "nope.py"
+    undeclared_src.write_text("x = 1\n")
+    undeclared = (str(undeclared_src), "/opt/app/scripts/nope.py", True)
+    violations = _mount_bijection_violations([*recorded, undeclared], ROOT)
+    assert violations == ["(A) mounted under /opt/app/scripts/ but not declared: nope.py"]
+
+    renamed = (str(ROOT / "scripts" / "modal_image_reqs.py"), "/opt/app/scripts/run_modal.py", True)
+    violations = _mount_bijection_violations([*recorded, renamed], ROOT)
+    assert violations == [
+        "(B) dst does not follow /opt/app/scripts/<src basename>: "
+        f"src={ROOT / 'scripts' / 'modal_image_reqs.py'} dst=/opt/app/scripts/run_modal.py "
+        "expected=/opt/app/scripts/modal_image_reqs.py"
+    ]
+
+
+def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(tmp_path):
+    """Knock-out 3: clause (C) alone on a deleted source, clause (A)'s subset half on a stale pin.
+
+    Runs the whole gate against a SCRATCH GIT REPO under `tmp_path`, which is the only reason GC1
+    fixes `tracked_paths` as a parameter: proving that clause (C) fails on a missing source means
+    deleting a mounted source, and no test may delete a file from the developer's real worktree.
+    The scratch repo mirrors the two declared paths under `scripts/` and nothing else.
+
+    THE MECHANISM IS THAT `git ls-files` READS THE INDEX. `scripts/run_modal.py` is committed and
+    then removed from the worktree WITHOUT staging the deletion, so git still lists it while
+    `Path(src).exists()` is False. That asymmetry is the whole point: it produces an input on
+    which clause (A) is green (the destination basenames still match the pin, the pin is still
+    tracked) and clause (B) is green (both destinations still follow the naming rule) while clause
+    (C) is red. Both of those greens are asserted, not assumed -- without them the test would score
+    a gate whose (A) clause happened to fail for an unrelated reason as a working knock-out.
+
+    SECOND PLANT -- AN UNDECLARED PIN MEMBER, which is the only thing that watches clause (A)'s
+    `git ls-files` half. A second scratch repo tracks `scripts/modal_runner_lib.py` alone, so the
+    declared `scripts/run_modal.py` is not in the index. Without this plant the helper could ignore
+    `tracked_paths` entirely -- never shell out to git at all -- and every other assertion in this
+    file would stay green, which would make GC1's "the repo is a parameter" cosmetic rather than
+    tested. Measured: deleting the subset check leaves only this assertion red.
+
+    The second repo mounts only the one file it tracks, so clause (A)'s bijection half reports the
+    missing `run_modal.py` too; both (A) strings are asserted in order, because asserting only the
+    subset one would pass on a helper that had lost the bijection half.
+    """
+    repo = tmp_path / "scratch"
+    (repo / "scripts").mkdir(parents=True)
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@test")
+    _git(repo, "config", "user.name", "t")
+    for name in ("modal_runner_lib.py", "run_modal.py"):
+        (repo / "scripts" / name).write_text("x = 1\n")
+    _git(repo, "add", "scripts")
+    _git(repo, "commit", "-qm", "init")
+
+    mount_list = [(str(repo / "scripts" / name), f"/opt/app/scripts/{name}", True)
+                  for name in ("modal_runner_lib.py", "run_modal.py")]
+    assert _mount_bijection_violations(mount_list, repo) == []
+
+    # Clause (C) covers the three triples that land OUTSIDE /opt/app/scripts/ as well. Narrowing it
+    # to the container directory -- an easy and plausible edit, since (A) and (B) are both scoped
+    # that way -- would leave pyproject.toml, uv.lock and modal_image_reqs.py unwatched with every
+    # other assertion in this file still green. Seeded and measured: only this line catches it.
+    outside = [*mount_list, (str(repo / "uv.lock"), "/opt/cs2rl/uv.lock", True)]
+    assert _mount_bijection_violations(outside, repo) == [
+        f"(C) recorded mount src does not exist: {repo / 'uv.lock'} -> /opt/cs2rl/uv.lock"
+    ]
+
+    # Delete from the worktree only. `git rm` would stage the deletion and drop it from the index,
+    # which would redden clause (A) as well and destroy the isolation this test is built on.
+    deleted = repo / "scripts" / "run_modal.py"
+    deleted.unlink()
+    assert "scripts/run_modal.py" in _git(repo, "ls-files", "scripts/").splitlines()
+
+    violations = _mount_bijection_violations(mount_list, repo)
+    assert violations == [
+        f"(C) recorded mount src does not exist: {deleted} -> /opt/app/scripts/run_modal.py"
+    ]
+
+    untracked_pin = tmp_path / "untracked-pin"
+    (untracked_pin / "scripts").mkdir(parents=True)
+    _git(untracked_pin, "init", "-q", "-b", "main")
+    _git(untracked_pin, "config", "user.email", "t@test")
+    _git(untracked_pin, "config", "user.name", "t")
+    (untracked_pin / "scripts" / "modal_runner_lib.py").write_text("x = 1\n")
+    _git(untracked_pin, "add", "scripts/modal_runner_lib.py")
+    _git(untracked_pin, "commit", "-qm", "init")
+
+    only_one = [(str(untracked_pin / "scripts" / "modal_runner_lib.py"),
+                 "/opt/app/scripts/modal_runner_lib.py", True)]
+    assert _mount_bijection_violations(only_one, untracked_pin) == [
+        "(A) declared mount is not tracked under scripts/: scripts/run_modal.py",
+        "(A) declared but not mounted under /opt/app/scripts/: run_modal.py",
+    ]
