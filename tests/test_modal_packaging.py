@@ -2478,8 +2478,10 @@ def _module_scope_shape_violations(tree):
          that body; the common `else: modal = None` fallback is a declaration and
          legal. Gate (e) walks that branch -- its `typecheckingelse` row is the
          assertion -- but FOR IMPORTS ONLY, which is the whole of what criterion 5
-         asks. Anything else there is caught by no gate on this branch. MEASURED,
-         on a plant spliced after line 19 of the real module:
+         asks. Anything else there THAT IMPORTS CLEANLY ON THE CONTAINER is caught
+         by no gate on this branch -- the qualifier is not hedging, gate (a) is a
+         partial backstop and its bound is measured below. MEASURED, on a plant
+         spliced after line 19 of the real module:
 
              import logging
              from typing import TYPE_CHECKING
@@ -2490,6 +2492,19 @@ def _module_scope_shape_violations(tree):
 
              gate (g): examined == len(tree.body), violations == []
              gate (e): scanned == ['scripts/modal_runner_lib.py'], violations == []
+             gate (a): 1 passed -- the plant imports, so it has nothing to say
+
+         WHERE THE UNIVERSAL STOPS, measured rather than reasoned, because "no
+         gate" is the kind of claim that is one counter-example from false.
+         Replace the plant's body with `open('pyproject.toml').read()` -- legal
+         under pytest, whose cwd is the repo -- and gate (a) goes RED, because its
+         subprocess materialises only the recorded mounts and runs from a neutral
+         cwd. Gates (e) and (g) stay green on that same plant: neither runs
+         anything. And an `else:` that RAISES never reaches a gate at all --
+         tests/test_modal_client.py imports the module while pytest is still
+         collecting, so the whole file errors first. What is left uncovered is
+         therefore `else:` work that succeeds on the container, which is exactly
+         the `logging.basicConfig` shape above.
 
          Gate (e)'s green is not vacuous -- `scanned` names the planted file, so
          it read it and had nothing to say. And the POSITIVE CONTROL is the same
@@ -2696,9 +2711,15 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     Both recognise a `TYPE_CHECKING` block with the SAME rule, written out twice
     -- once in gate (e)'s descent, once in the `If` branch of gate (g) -- and gate
     (g)'s docstring says the two "MUST agree", which until now nothing enforced.
-    Measured: narrow gate (e)'s attribute clause to require `typing.*` and the two
-    disagree on `if os.TYPE_CHECKING:` while all 7 tests that call either helper
-    still pass. Extracting one shared predicate would cost a module-level name
+    Measured BEFORE this block existed: narrow gate (e)'s attribute clause to
+    require `typing.*` and the two disagree on `if os.TYPE_CHECKING:` while all 7
+    tests that call either helper still passed -- which is the hole this block
+    closes. RE-MEASURED WITH IT: the same narrowing gives `1 failed, 39 passed`
+    and the sole objector is THIS test, read off the raised `E ` line. So 6 of
+    the 7 pass, not all 7, and the 7th is the one you are reading -- which is what
+    "delete that row and either mutant survives" says below. The tense is the
+    whole difference between the two sentences. Extracting one shared predicate
+    would cost a module-level name
     against GC3's pinned budget -- the trade both helpers already state -- so the
     agreement is ASSERTED over the shapes that separate the readings instead.
     `os.TYPE_CHECKING` is the SOLE OBJECTOR and it holds BOTH directions: seeding

@@ -2185,8 +2185,10 @@ def test_gate_a_criterion_3_package_imports_on_a_container_equivalent_interprete
     `test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist`; nothing here would notice
     its removal, which is why the assertions below record both single-entry results explicitly
     rather than describing them. CITED BY TEST NAME, NOT BY LINE: the `:626` this used to carry
-    was correct when written and a later commit on this same branch turned that line into a
-    comment. A test name does not move when the file does.
+    was correct when written and has since pointed at two different unrelated lines, each time
+    because another commit on this same branch inserted lines above it -- the second of those
+    commits only added four lines to the module docstring. A test name does not move when the
+    file does.
 
     `runner_image is dependency_image` (`FakeImage.add_local_file` returns `self`, and
     `scripts/run_modal.py:113` chains off `dependency_image`), so the recorded list is FIVE triples
@@ -2563,12 +2565,20 @@ def _mount_bijection_violations(
     `declared - tracked` -- and `declared` is the two-element ASCII pin below, which git never
     quotes. So quoting cannot move the result AT ALL, whatever lands in the repo. Measured, in a
     scratch repo holding `café.py`, `q"uote.py` and `a b\tc.py` alongside the two declared
-    files: `declared - tracked` is `[]` with `-z` AND without it. What makes `-z` load-bearing is
-    W3b replacing the pin with enumeration, at which point every tracked path is compared.
+    files: `declared - tracked` is `[]` with `-z` split on NUL, and `[]` again with neither --
+    plain `git ls-files` read by `splitlines()`, which is the variant the sentence above defines.
+    READ THAT AS A PAIR, NOT AS A FLAG TOGGLE. Drop `-z` while leaving the NUL split in place and
+    BOTH declared paths are reported, because the entire listing arrives as one entry. That
+    mismatched pair is nothing this gate can be, but it is what a reader who tests "without it"
+    literally will build, and the red it produces is the reader's, not the gate's. What makes `-z`
+    load-bearing is W3b replacing the pin with enumeration, at which point every tracked path is
+    compared.
 
     TWO THINGS THIS GATE DOES NOT CHECK, named because W3b inherits both. (i) SRC PROVENANCE.
     `declared` holds repo-relative paths, but they are used only for the `git ls-files` subset
-    check: clauses (A) and (B) both reduce the recorded triple to `Path(src).name`. Measured --
+    check: (B) reduces the recorded triple to `Path(src).name`, and (A)'s bijection half is weaker
+    still -- it compares destination basenames and never reads `src` at all. Neither can see which
+    directory a `src` came from. Measured --
     swap `run_modal.py`'s `src` for a same-named file in `/tmp` and this helper returns `[]`. That
     is covered today by `test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist`, whose
     exact-triple membership assertions and "every src absolute and under `ROOT`" loop both pin it
@@ -2735,10 +2745,12 @@ def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(fa
     subset one would pass on a helper that had lost the bijection half.
     """
     # Positive control, and it is load-bearing twice over. It establishes that the gate is not
-    # simply red by default before three reds are asserted against it -- and it is the only line in
-    # this test that touches a _CLIENT_BINDINGS name (`_import_run_modal`, `module`; the
+    # simply red by default before three reds are asserted against it -- and it is a TWO-LINE
+    # unit, the only place in this test that touches a _CLIENT_BINDINGS name: the binding below
+    # spells `_import_run_modal` and `module`, and the assert under it reads `module` again (the
     # `_CLIENT_BINDINGS` frozenset in tests/test_modal_packaging.py -- by SYMBOL, because the line
-    # number this cited moved 34 lines on this branch). Without it classify_seam computes this
+    # number this cited moved 34 lines on this branch). Deleting either line takes the seed with
+    # it, so neither is the control on its own. Without them classify_seam computes this
     # test's concern as the RUNNER half and drags `_mount_bijection_violations` to the shared
     # helpers module with it, so the placement gate reddens on two names the moment the seam
     # manifest is regenerated. Do not "simplify" it away: the assertion it would remove is
