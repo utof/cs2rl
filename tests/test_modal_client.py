@@ -5,8 +5,12 @@ Split out of tests/test_modal_runner.py, which held two suites: the runner
 library's tests (which stayed) and the client half, 63 tests as of the W3a gates.
 The 63 and the runner half's 138 are live counts of module-level test functions,
 re-derivable from either file's AST. The client half was 54 at the W3a branch
-point and the four gates added on this branch are the whole difference -- which is
-why the paragraph below still says 54, and why correcting THAT 54 would be wrong.
+point and the NINE GATE TESTS this branch added to the client half are the whole
+difference -- six from gate (a), three from gate (d). Gates (e) and (g) live in
+tests/test_modal_packaging.py and can never move this count, so "the four gates"
+was never the right unit here. Measured: 54 client tests at 9840efb, 63 now, runner
+half 138 at both ends. That is why the paragraph below still says 54, and why
+correcting THAT 54 would be wrong.
 
 PROVENANCE OF THE OTHER THREE FIGURES, stated because re-running them today
 proves less than it looks like it does. "0 of the 137 runner-half tests reach the
@@ -2546,8 +2550,26 @@ def _mount_bijection_violations(
     PITFALL -- `git ls-files` needs `-z`. Without it git C-quotes any path holding a non-ASCII or
     special byte (literal double quotes plus octal escapes), and a `splitlines()` census then
     compares that quoted string against a real path and never matches -- a census that silently
-    under-reports. All 22 paths under `scripts/` are ASCII today, so this is latent rather than
-    live; it is also a one-character fix and the most common way a hand-rolled census goes wrong.
+    under-reports. WHAT MAKES IT LATENT IS NOT THAT `scripts/` IS ALL ASCII, and getting that
+    wrong sends W3b after it with a fixture file. `tracked` is consumed in exactly one place --
+    `declared - tracked` -- and `declared` is the two-element ASCII pin below, which git never
+    quotes. So quoting cannot move the result AT ALL, whatever lands in the repo. Measured, in a
+    scratch repo holding `café.py`, `q"uote.py` and `a b\tc.py` alongside the two declared
+    files: `declared - tracked` is `[]` with `-z` AND without it. What makes `-z` load-bearing is
+    W3b replacing the pin with enumeration, at which point every tracked path is compared.
+
+    TWO THINGS THIS GATE DOES NOT CHECK, named because W3b inherits both. (i) SRC PROVENANCE.
+    `declared` holds repo-relative paths, but they are used only for the `git ls-files` subset
+    check: clauses (A) and (B) both reduce the recorded triple to `Path(src).name`. Measured --
+    swap `run_modal.py`'s `src` for a same-named file in `/tmp` and this helper returns `[]`. That
+    is covered today by `test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist`, whose
+    exact-triple membership assertions and "every src absolute and under `ROOT`" loop both pin it
+    -- and both of which W3b re-aims or deletes with the module. (ii) THE `copy` FLAG. §10
+    criterion 4(a) requires `copy=True`; all three clauses discard it (`_copy`). Measured --
+    flipping `run_modal.py`'s flag to `False` returns `[]`. Covered today by the same test's
+    exact-triple assertions, which carry the `True` literally. Neither is added here: a clause
+    apiece would change what this gate reddens on, and this branch's brief is that the gate's
+    behaviour is settled. W3b owns both, alongside the pin.
 
     PITFALL -- `git ls-files` reads the INDEX, not the worktree. A file deleted from disk but not
     `git rm`-ed is still listed. That is deliberate here: it is exactly what lets clause (C) fail
@@ -2558,13 +2580,11 @@ def _mount_bijection_violations(
     container_dir = PurePosixPath("/opt/app/scripts")
     violations: list[str] = []
 
-    listing = subprocess.run(
-        ["git", "ls-files", "-z", "scripts/"],
-        cwd=str(repo_root),
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
+    # `_git`, not a second hand-rolled git runner -- it is imported at the top of this file and
+    # takes the same (repo, *args). Its trailing `.strip()` is a no-op on `-z` output: NUL is not
+    # whitespace to `str.strip`, the string ends in NUL, and every entry starts with `scripts/`.
+    # Measured byte-identical to the raw `subprocess.run(...).stdout` it replaces.
+    listing = _git(repo_root, "ls-files", "-z", "scripts/")
     tracked = {entry for entry in listing.split("\0") if entry}
     for untracked in sorted(declared - tracked):
         violations.append(f"(A) declared mount is not tracked under scripts/: {untracked}")

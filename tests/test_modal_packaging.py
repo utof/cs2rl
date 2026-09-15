@@ -2199,7 +2199,10 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         matching any bare `ast.Name` test. Drop `test.id == "TYPE_CHECKING"` and
         every flag-guarded module-scope import in the file becomes exempt: that
         is a SILENT GREEN ON A REAL IMPORT, not a missed edge case. No other row
-        here has a bare-`Name` `If` test, so nothing else can see it.
+        here has a bare-`Name` `If` test THAT IS NOT `TYPE_CHECKING` -- the
+        `typechecking` and `typecheckingelse` rows have one each, and both stay
+        green under that mutant because the exemption is exactly what they
+        exercise -- so nothing else can see it.
       * the `attrtestguard` row (`import os` + `if os.name:`) is the same clause
         on the attribute spelling. `typing.TYPE_CHECKING` is exempt because of
         `test.attr`, NOT because it is an `ast.Attribute`; without this row,
@@ -2214,13 +2217,17 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         says the walk stops there instead of flagging every lazy import in a
         class.
       * the NESTED-CONTAINER row (`class` > `try` > `class` > `import modal`) is
-        the only row whose offending import sits BELOW DEPTH 1. Every other
-        container in this table -- the decoy's `try`, the `if`-guarded header,
-        the class body -- is top-level, and top-level nodes enter the walk from
-        `tree.body` rather than by being descended into, so a mutant that expands
-        depth 1 and then stops passes every one of them while going blind to
-        everything nested inside. The nesting runs `ClassDef` > `Try` >
-        `ClassDef` > `Import` ON PURPOSE. It is one row, but it objects to
+        the only row whose offending import sits inside a NESTED container --
+        three containers deep, not one. IN CONTAINERS, NOT DEPTHS, and the
+        distinction is the claim: under this file's own unit (nodes below
+        `Module`, top-level = 1) six other rows put their offending import below
+        depth 1 as well, all of them at depth 2. What makes this row the only one
+        is that every other container in this table -- the decoy's `try`, the
+        `if`-guarded header, the class body -- is TOP-LEVEL, and a top-level node
+        enters the walk from `tree.body` rather than by being descended into, so
+        a mutant that expands depth 1 and then stops passes every one of them
+        while going blind to everything nested inside. The nesting runs
+        `ClassDef` > `Try` > `ClassDef` > `Import` ON PURPOSE. It is one row, but it objects to
         dropping EITHER container type from the descent as well as to dropping
         both -- MEASURED: the obvious two-deep shapes each hold only half of
         that, a `try:` inside a class body is blind to "stop at a nested
@@ -2256,9 +2263,13 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
     EVERY ROW BELOW IS INERT ON THE UNMODIFIED SUBJECT, by construction: the
     module has no class-body import, no async def, no `TYPE_CHECKING` block, no
     relative import, no dotted plain `import`, no conditional module-scope import
-    of any spelling and nothing imported below depth 1. That is the point. Each
-    one is the ONLY observation in the suite that holds its clause, which is why
-    they are rows in a knock-out rather than sentences in a docstring.
+    of any spelling, and nothing imported inside a container that RUNS at import
+    time. Stated that way rather than as "nothing below depth 1", which is false:
+    the module has two imports below depth 1, both `torch`, in `_import_torch`
+    and `_load_checkpoint_weights` -- function bodies, which is the `lazy` row's
+    subject and does not execute on import. That is the point. Each one is the
+    ONLY observation in the suite that holds its clause, which is why they are
+    rows in a knock-out rather than sentences in a docstring.
 
     INTERACTION WITH GATE (g), criterion 13 -- stated here and in the green test
     because the two `TYPE_CHECKING` rows and the `if`-guarded row look, from the
