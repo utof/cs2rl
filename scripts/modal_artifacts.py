@@ -23,8 +23,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import modal                                           # noqa: E402, I001
-import scripts.modal_runner_lib as mrl                 # noqa: E402, I001
+import modal                           # noqa: E402, I001
+import scripts.modal_runner as mrl     # noqa: E402, I001
 
 REPO_ROOT = _REPO_ROOT
 DEFAULT_DOWNLOAD_ROOT = REPO_ROOT / "outputs" / "modal"
