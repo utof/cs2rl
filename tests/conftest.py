@@ -45,13 +45,31 @@ def pytest_configure(config):
     # scripts/run_experiment.py subprocess, which enforces a >=5 GB free-disk
     # precondition on the repo root it's pointed at. The default pytest
     # tmp_path lives under /tmp on the system root partition, which on small
-    # devices is regularly tight. Redirect basetemp to $HOME/.pytest_tmp
-    # unless the user passed --basetemp explicitly. $HOME is the user's
-    # primary partition and is the obvious place with persistent free space.
+    # devices is regularly tight. So unless the user passed --basetemp or set
+    # PYTEST_DEBUG_TEMPROOT, the temp ROOT moves to $HOME/.pytest_tmp: $HOME
+    # is the user's primary partition, with persistent free space. Keep it on
+    # $HOME, not in the repo: on the main dev machine the repo drive is
+    # fuseblk/NTFS, where chmod is a no-op, and chmod-based tests (e.g.
+    # tests/test_pyrefly_gate.py) break there.
+    #
+    # Move the ROOT, never basetemp itself. Setting config.option.basetemp puts
+    # pytest on its explicit-basetemp path, which rm_rf's that exact directory
+    # at session start, so two concurrent sessions deleted each other's
+    # tmp_path trees mid-run (gh#219). With PYTEST_DEBUG_TEMPROOT pytest keeps
+    # its default layout under the new root instead: each session gets its own
+    # numbered <root>/pytest-of-<user>/pytest-<N>/, lock-protected while the
+    # session runs, and only the oldest beyond the newest 3 are rotated away.
+    # pytest reads the variable lazily, in TempPathFactory.getbasetemp, so
+    # setting it here is early enough. setdefault, so an explicit
+    # PYTEST_DEBUG_TEMPROOT wins. Nested pytest sessions that tests spawn
+    # without --basetemp inherit the variable through the environment, so they
+    # too get their own numbered dir under the same root instead of wiping the
+    # outer session's. tests/test_pytest_tmp_isolation.py pins the per-session
+    # basetemp, the ~/.pytest_tmp default and the setdefault.
     if not config.option.basetemp:
         home_tmp = Path(os.path.expanduser("~/.pytest_tmp"))
         home_tmp.mkdir(parents=True, exist_ok=True)
-        config.option.basetemp = str(home_tmp)
+        os.environ.setdefault("PYTEST_DEBUG_TEMPROOT", str(home_tmp))
 
 
 def pytest_collection_modifyitems(config, items):

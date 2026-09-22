@@ -755,12 +755,13 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "probe.json")
         env = {**os.environ, "MODAL_IMPORT_PROBE_OUT": out}
-        # --basetemp is NOT cosmetic. tests/conftest.py redirects basetemp to the
-        # machine-global ~/.pytest_tmp unless --basetemp was passed explicitly,
-        # and pytest rm_rf's the given basetemp before recreating it. Without
-        # this flag the nested session deletes the OUTER session's temp tree
-        # mid-run, and two pytest sessions anywhere on this box collide at
-        # fixture setup with `FileExistsError: /home/<user>/.pytest_tmp`.
+        # --basetemp keeps the nested session's temp tree inside `tmp`, so the
+        # TemporaryDirectory removes it when this block exits, timeout included.
+        # Isolation from the OUTER session does not depend on it: without the
+        # flag, tests/conftest.py gives the nested session its own numbered
+        # pytest-<N> dir under the temp root (~/.pytest_tmp by default) like any
+        # other session (gh#219), and that dir would outlive this test until
+        # pytest's rotation of old sessions cleared it.
         #
         # `-o addopts=` and `-p no:randomly` are forward insurance, not load
         # bearing today: measured at this commit there is no
