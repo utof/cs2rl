@@ -758,10 +758,11 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
         # --basetemp keeps the nested session's temp tree inside `tmp`, so the
         # TemporaryDirectory removes it when this block exits, timeout included.
         # Isolation from the OUTER session does not depend on it: without the
-        # flag, tests/conftest.py gives the nested session its own numbered
-        # pytest-<N> dir under the temp root (~/.pytest_tmp by default) like any
-        # other session (gh#219), and that dir would outlive this test until
-        # pytest's rotation of old sessions cleared it.
+        # flag, pytest's default layout would give the nested session its own
+        # numbered pytest-<N> dir under the temp root (tests/conftest.py points
+        # that root at ~/.cache/cs2rl-pytest unless PYTEST_DEBUG_TEMPROOT is
+        # set, gh#219), and that dir would outlive this test until pytest's
+        # rotation of old sessions cleared it.
         #
         # `-o addopts=` and `-p no:randomly` are forward insurance, not load
         # bearing today: measured at this commit there is no
