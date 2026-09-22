@@ -170,9 +170,10 @@ def _run_children(tmp_path: Path, temproots: dict[str, Path | None]) -> tuple[li
     `temproots` maps each child id to the PYTEST_DEBUG_TEMPROOT it gets (None:
     unset). Every child waits at the barrier for all the others. Spawning
     happens inside the `try`, so a failed second spawn still reaps the first.
-    All children share one _CHILD_TIMEOUT_S deadline; on timeout every child is
-    killed and the failure carries every child's output, because the child that
-    hung is not necessarily the one whose output explains it.
+    All children share one _CHILD_TIMEOUT_S deadline; on timeout every child
+    still running is killed, and the failure carries every child's output,
+    because the child that hung is not necessarily the one whose output
+    explains it.
     """
     _write_child_test(tmp_path)
     ids = list(temproots)
@@ -218,11 +219,15 @@ def test_concurrent_sessions_do_not_delete_each_others_tmp_path(tmp_path):
 
     The positive control. Both children run without --basetemp, write a marker
     into their tmp_path, and wait at a file barrier until both markers exist
-    before checking their own. With basetemp pinned to ~/.pytest_tmp, the later
-    session's rm_rf of it deletes the earlier one's tree and a child fails here
-    (measured against the pre-fix conftest). The basetemp comparison covers the
-    interleaving in which both markers happen to survive: two sessions sharing
-    one basetemp is the defect even on a run that got lucky.
+    before checking their own. With basetemp pinned to ~/.pytest_tmp, both
+    children share it, and each one's first temp-dir request rm_rf's and
+    recreates it. Against the pre-fix conftest that was measured in two shapes:
+    the later child's rm_rf deleted the earlier one's marker, or the two
+    rm_rf+mkdir sequences interleaved, one child errored at fixture setup with
+    FileExistsError, and the other then failed at the barrier timeout. The
+    basetemp comparison covers the interleaving in which both markers happen to
+    survive: two sessions sharing one basetemp is the defect even on a run that
+    got lucky.
     """
     root = (tmp_path / "root").resolve()
     root.mkdir()
