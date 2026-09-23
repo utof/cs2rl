@@ -44,11 +44,15 @@ def _governed_modules(package_dir):
     reached still shows as missing. `*.py` only, so `__pycache__` and non-Python
     files do not count.
 
+    PITFALL: the glob matches any entry named `*.py`, a directory included,
+    as does `scripts/run_modal.py`'s mount loop. Such a directory is governed
+    like a module no session can import, so clause 1 reports it (red).
+
     PITFALL: a wrong `package_dir` yields an empty set, and every clause of
     `assert_module_identity` then passes over nothing.
     `test_runtime_identity_requires_every_governed_module`
     (tests/test_modal_packaging.py) pins `_EXPECTED` to the modules
-    RUNNER_MODULES declares, so that cannot happen silently.
+    MANIFEST declares, so that cannot happen silently.
     """
     names = set()
     for path in package_dir.glob("*.py"):
@@ -132,11 +136,14 @@ def assert_module_identity(payload):
     """
     assert set(payload["modules"]) == _EXPECTED, (
         "every governed module must be in sys.modules when the census runs: the package and "
-        f"each *.py in {_PACKAGE_DIR}. Never reached: "
+        f"each entry matching *.py in {_PACKAGE_DIR}. Never reached: "
         f"{sorted(_EXPECTED - set(payload['modules']))}. A submodule imported only inside a "
         "function body is reached only if the session runs that function: import it at module "
         "scope in the package module that uses it, or have a test in the session run that "
-        "path. A submodule nothing imports is dead code: delete it.")
+        "path. A submodule imported only under `if TYPE_CHECKING:` is never imported at run "
+        "time: move its names into a module that is imported, or import it at module scope in "
+        "a module that annotates with it (a new DEPENDENCIES edge, legal only if the import "
+        "graph stays acyclic). A submodule nothing imports is dead code: delete it.")
     for name in sorted(_EXPECTED):
         entries = payload["identities"][name]
         ids = {entry["object_id"] for entry in entries}

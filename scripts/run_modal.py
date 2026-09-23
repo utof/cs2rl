@@ -405,7 +405,7 @@ def _lookup_named(factory, name: str, *, missing: str):
 
 
 def _thread_cap_records() -> list[str]:
-    return [f"{key}={value}" for key, value in sorted(mrl._THREAD_CAP_ENV.items())]
+    return [f"{key}={value}" for key, value in sorted(mrl.THREAD_CAP_ENV.items())]
 
 
 def _seed_from_train_args(train_args: tuple[str, ...]) -> int:

@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.modal_runner_tables import RUNNER_MODULES, RUNNER_PATHS, TABLES
+
 ROOT = Path(__file__).resolve().parents[1]
 BARE = "modal_runner"
 # The one legal spelling. `BARE` is what must never appear; this is what must
@@ -36,8 +38,8 @@ _IMPORTERS = [
 ]
 
 # The test that carries the HARD case: the bare import used to live inside this
-# body as its second-to-last statement (W1 converted it; W3b respelled it
-# `from scripts.modal_runner import core`, still in-body and still
+# body as its second-to-last statement (W1 converted it; it is now
+# `from scripts.modal_runner import request`, still in-body and still
 # second-to-last). If this test does not reach its end, the module census below
 # is measuring a session that never executed the line the gate exists for.
 _INBODY_CARRIER = ("tests/test_eval_baselines.py::test_eval_interval_cli_config_and_modal_mirror")
@@ -478,12 +480,12 @@ def test_runtime_identity_requires_every_governed_module(monkeypatch, tmp_path):
     """The probe governs exactly the declared modules, and a missing one fails clause 1.
 
     The probe derives `_EXPECTED` from the package directory
-    (`_governed_modules`), so this pins it to the modules RUNNER_MODULES
+    (`_governed_modules`), so this pins it to the modules MANIFEST
     declares: an empty set, which would pass every identity clause over
     nothing, or a module file the tables do not declare, reddens here. The
     planted directory shows the derivation governs a new module the moment
-    its file exists and ignores anything that is not a `*.py` file directly
-    in the package directory: `sub/nested.py` pins the non-recursive glob,
+    its file exists and ignores anything whose name does not match `*.py`
+    directly in the package directory: `sub/nested.py` pins the non-recursive glob,
     which an `rglob` would break.
     """
     import importlib
@@ -498,13 +500,17 @@ def test_runtime_identity_requires_every_governed_module(monkeypatch, tmp_path):
 
     declared = {PACKAGED} | {f"{PACKAGED}.{name}" for name in RUNNER_MODULES}
     undeclared, missing = sorted(_EXPECTED - declared), sorted(declared - _EXPECTED)
-    assert not undeclared and not missing, (
-        f"tests/_modal_import_probe.py governs every *.py file in {_PACKAGE_DIR}, and that "
-        "must match the modules RUNNER_MODULES declares. On disk but undeclared: "
-        f"{undeclared}; declare each in RUNNER_MODULES and the tables in "
-        "tests/test_modal_runner_package_shape.py, or delete the file. Declared but not on "
-        f"disk: {missing}; restore the file, or remove the module from those tables. If every "
-        "declared module is missing, `_PACKAGE_DIR` no longer points at scripts/modal_runner/.")
+    remedies = []
+    if undeclared:
+        remedies.append(f"On disk but undeclared: {undeclared}; declare each in {TABLES}, or "
+                        "delete it.")
+    if missing:
+        remedies.append(f"Declared but not on disk: {missing}; restore the file, or remove the "
+                        f"module from {TABLES}. If every declared module is missing, "
+                        "`_PACKAGE_DIR` no longer points at scripts/modal_runner/.")
+    assert not remedies, (
+        f"tests/_modal_import_probe.py governs every entry matching *.py in {_PACKAGE_DIR}, "
+        "and that must match the modules MANIFEST declares. " + " ".join(remedies))
     planted = tmp_path / "modal_runner"
     (planted / "__pycache__").mkdir(parents=True)
     (planted / "sub").mkdir()
@@ -1915,10 +1921,6 @@ assert 'torch' not in sys.modules
     subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
 
 
-RUNNER_MODULES = ("core", "request", "source", "checkpoint", "state", "commands", "preflight",
-                  "training")
-
-
 def _runner_module_population(repo_root):
     """The package's submodule files as found ON DISK, checked against RUNNER_MODULES.
 
@@ -1942,11 +1944,15 @@ def _runner_module_population(repo_root):
     relative imports, a literal `__all__`), `_facade_violations` in
     tests/test_modal_runner_package_shape.py; the surface gates in
     tests/test_modal_client.py pin the names it exports.
-    pathlib's `*` also matches dotfiles such as an editor's `.#core.py`; the
-    mount loop would ship those too, so they are read (and may raise) here.
+    pathlib's `*` also matches dotfiles, and `*.py` matches a directory so
+    named. The mount loop globs both too: a regular dotfile ships, while a
+    dangling one (an Emacs `.#core.py` lock is a dangling symlink) and the
+    directory fail the image build (FileNotFoundError / IsADirectoryError;
+    Modal does not check the path when the image is defined). So both are in
+    the population here, and a gate reading either raises.
     """
     root = Path(repo_root)
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    declared = list(RUNNER_PATHS)
     found = sorted(
         path.relative_to(root).as_posix()
         for path in (root / "scripts" / "modal_runner").glob("*.py") if path.name != "__init__.py")
@@ -1954,36 +1960,93 @@ def _runner_module_population(repo_root):
     return declared + undeclared, undeclared
 
 
-def _frozen_runner_source():
-    """The pre-split monolith, `scripts/modal_runner_lib.py` at 2bb32ac, digest-checked.
+def _is_type_checking_test(test):
+    """True iff an `if` statement's test is `TYPE_CHECKING` or `<anything>.TYPE_CHECKING`.
 
-    WHY IT OUTLIVES THE SPLIT: it is synthetic fixture text, not an oracle for
-    the live package. Five knock-outs of gates (e) and (g), written before the
-    split against the then-live monolith, splice their plants in after its line 19
-    (`from __future__ import annotations`), assert violation line numbers
-    derived from that, and argue each row is inert on the unplanted text
-    because it holds no `TYPE_CHECKING` block, relative import, async def or
-    class-body import. The package modules change with every edit, every one
-    but core.py holds relative imports, and core.py's `__future__` import is
-    its line 2, so none can stand in. The digest pin keeps those line numbers
-    and inertness claims about these exact bytes. A missing git object fails
-    naming the pinned commit.
+    The one definition of a `TYPE_CHECKING` block for every gate that reads
+    one: gate (e) exempts its body from the purity check, gate (g) allows one
+    imports-only block at module scope, and the package-shape dependency walk
+    (tests/test_modal_runner_package_shape.py) files its imports under
+    ANNOTATION_DEPENDENCIES. They used to hold three copies of this test, and a
+    copy that drifted would make one gate exempt a block another calls illegal.
+
+    Matching by name has an accepted limit (Ruling 29): `if os.TYPE_CHECKING:`
+    is recognised too. It fails closed the other way: `if TYPE_CHECKING and X:`
+    is a `BoolOp` and is not recognised. A bare `TYPE_CHECKING` is only
+    typing's while nothing rebinds it (`from os import environ as
+    TYPE_CHECKING` makes the block run); inside scripts/modal_runner/ the
+    package-shape `trusted-binding` clause rejects any such binding.
     """
-    import hashlib
+    return ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
+            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"))
 
-    pin = "2bb32ac09db897d3bdaa34660d242f5011524e85"
-    result = subprocess.run(["git", "show", f"{pin}:scripts/modal_runner_lib.py"],
-                            cwd=ROOT,
-                            capture_output=True,
-                            check=False)
-    assert result.returncode == 0, f"Fetch the pinned fixture text at {pin}: {result.stderr!r}"
-    data = result.stdout
-    digest = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
-    assert digest == "f0ca9853101b62cd8edb0c4904050829e7a005c5", (
-        f"the pinned fixture text at {pin} hashes to blob {digest}, not its recorded blob id: "
-        "the git object is corrupt or a filter rewrote it. Repair the object store (re-fetch "
-        "the commit); never edit the digest to match.")
-    return data.decode("utf-8")
+
+# The synthetic module text the gate (e) and gate (g) knock-outs plant into.
+_MONOLITH_STUB = ROOT / "tests" / "fixtures" / "modal_runner_monolith_stub.txt"
+
+
+def _monolith_stub_source():
+    """The knock-outs' fixture text, after checking each property they rely on.
+
+    WHY A CHECKED-IN STUB: five knock-outs of gates (e) and (g) were written
+    against the pre-split monolith and read it with
+    `git show 2bb32ac:scripts/modal_runner_lib.py`, so they failed in a
+    shallow clone or a source tarball (gh#223). None of the live package
+    modules can stand in: they change with every edit, all but core.py hold
+    relative imports, and core.py's `__future__` import is not its line 19.
+
+    The knock-outs splice each plant in after line 19 (`_splice_into_stub`),
+    assert violation line numbers counted from there, and argue that every
+    row is inert on the unplanted text. Each property those arguments rest on
+    is asserted here, so an edit to the stub that breaks one fails naming it.
+    """
+    text = _MONOLITH_STUB.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    tree = ast.parse(text)
+    nodes = list(ast.walk(tree))
+    body_kinds = (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign, ast.FunctionDef,
+                  ast.ClassDef)
+    plain = [
+        alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names
+    ]
+    froms = [node.module for node in tree.body if isinstance(node, ast.ImportFrom)]
+    lazy = [
+        alias.name for function in nodes if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function) if isinstance(node, ast.Import) for alias in node.names
+    ]
+    claims = [
+        ("line 19 is `from __future__ import annotations`", len(lines) > 18
+         and lines[18] == "from __future__ import annotations\n"),
+        ("module scope holds only the docstring, imports and declarations (so no `if`, "
+         "`try` or `TYPE_CHECKING` block)", ast.get_docstring(tree) is not None
+         and all(isinstance(node, body_kinds) for node in tree.body[1:])),
+        ("every module-scope import is stdlib, and no plain import is dotted",
+         all("." not in name and name in sys.stdlib_module_names for name in plain)
+         and all(module and module.split(".")[0] in sys.stdlib_module_names for module in froms)),
+        ("no relative import", not any(isinstance(n, ast.ImportFrom) and n.level for n in nodes)),
+        ("no async def", not any(isinstance(n, ast.AsyncFunctionDef) for n in nodes)),
+        ("no import in a class body", not any(
+            isinstance(child, (ast.Import, ast.ImportFrom))
+            for n in nodes if isinstance(n, ast.ClassDef) for child in n.body)),
+        ("torch is imported in exactly two function bodies", lazy == ["torch", "torch"]),
+    ]
+    broken = [claim for claim, holds in claims if not holds]
+    assert not broken, (
+        f"{_MONOLITH_STUB.relative_to(ROOT)} no longer satisfies: {broken}. The gate (e) and "
+        "gate (g) knock-outs' line numbers and inertness arguments rest on each; restore it.")
+    return text
+
+
+def _splice_into_stub(text):
+    """The stub with `text` inserted after its line 19, the `__future__` import.
+
+    A plant above that line would raise `SyntaxError: from __future__ imports
+    must occur at the beginning of the file`, a red for the wrong reason.
+    Nothing here is executed, only parsed, so a plant may name `os` or `modal`
+    without either being importable.
+    """
+    lines = _monolith_stub_source().splitlines(keepends=True)
+    return "".join(lines[:19]) + text + "".join(lines[19:])
 
 
 def _nonstdlib_module_scope_imports(repo_root, top_level_only=False, *, paths=None):
@@ -2034,18 +2097,9 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False, *, paths=No
                 # import and is exempt. `node.orelse` IS still walked -- that is
                 # precisely the branch that does run -- and skipping the whole
                 # `If` node would be a real blind spot rather than an exemption.
-                # The same rule is written out in `_module_scope_shape_violations`
-                # and in tests/test_modal_runner_package_shape.py's `_dependency_edges`;
-                # `test_criterion_13_reddens_on_the_conditional_modal_probe`
-                # asserts that this copy and gate (g)'s agree. (W3a inlined it to
-                # fit its GC3 module-name budget; W3b has since added names to
-                # this file, so that budget no longer explains the copies.)
-                if isinstance(node, ast.If):
-                    test = node.test
-                    if ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
-                            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")):
-                        stack.extend(node.orelse)
-                        continue
+                if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+                    stack.extend(node.orelse)
+                    continue
                 stack.extend(ast.iter_child_nodes(node))
         for node in nodes:
             if isinstance(node, ast.Import):
@@ -2060,33 +2114,10 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False, *, paths=No
     return scanned, sorted(violations)
 
 
-def test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library():
-    candidates, undeclared = _runner_module_population(ROOT)
-    assert undeclared == [], (
-        f"scripts/modal_runner/ holds modules RUNNER_MODULES does not declare: {undeclared}. "
-        "A new module needs entries in RUNNER_MODULES (tests/test_modal_packaging.py) and in "
-        "MANIFEST and DEPENDENCIES (and ANNOTATION_DEPENDENCIES for an import made only under "
-        "TYPE_CHECKING) in tests/test_modal_runner_package_shape.py, in the same commit; "
-        "otherwise delete the stray file.")
-    scanned, violations = _nonstdlib_module_scope_imports(ROOT)
-    assert scanned == candidates, (
-        f"gate (e) read {scanned} but the package directory holds {candidates}; a module it "
-        "skipped is a module whose imports nobody checked.")
-    assert violations == [], (
-        "these (file, line, module) imports execute when the runner package is imported and are "
-        f"not standard library: {violations}. The package must import without Modal, torch or "
-        "numpy (see scripts/modal_runner/__init__.py). Move the import into the function that "
-        "needs it, or under `if TYPE_CHECKING:` if only annotations use it.")
-    _, blind = _nonstdlib_module_scope_imports(ROOT, top_level_only=True)
-    assert blind == violations, (
-        f"the tree.body-only scan reported {blind} where the recursive scan reported "
-        f"{violations}; on a clean package both must be empty.")
-
-
 def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tmp_path):
     """KNOCK-OUT. Plants live in a `tmp_path` file named
-    `scripts/modal_runner/core.py` whose text is the frozen monolith from
-    `_frozen_runner_source`, not the live package; nothing live is edited (GC2).
+    `scripts/modal_runner/core.py` whose text is the stub from
+    `_monolith_stub_source`, not the live package; nothing live is edited (GC2).
 
     THE DELIVERABLE IS THE SECOND ASSERTION of the first block. A version of this
     gate built on `tree.body` PASSES the decoy -- that is the exact blindness the
@@ -2097,8 +2128,9 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
     `from __future__ import annotations`, the first statement after the
     docstring, and a `__future__` import must precede all other code: a plant
     above it raises `SyntaxError: from __future__ imports must occur at the
-    beginning of the file`, which is a red for the wrong reason. The plant site
-    is asserted below so that an edit which moves that line is loud.
+    beginning of the file`, which is a red for the wrong reason.
+    `_monolith_stub_source` asserts the plant site, so an edit that moves that
+    line is loud.
 
     THE TABLE IS ONE ROW PER INDEPENDENT CLAUSE of the gate, because a gate whose
     headline clause has a knock-out and whose secondary clauses have none is the
@@ -2107,13 +2139,13 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
     mutant:
 
       * `import modal as ...` is the ONLY row that objects to resolving names
-        through `alias.asname`; that mutant is silent on the real module AND on
+        through `alias.asname`; that mutant is silent on the stub AND on
         the decoy, because a plain `import modal` has no `asname`.
       * `from modal.functions import ...` objects to dropping `ImportFrom`
-        handling entirely (silent on the real module, whose from-imports are all
+        handling entirely (silent on the stub, whose from-imports are all
         stdlib) and to keeping the full dotted path instead of the root.
       * `import xml.etree.ElementTree` is the same root-resolution clause for
-        `Import`, and it was MISSING until fault seeding found it: the module has
+        `Import`, and it was MISSING until fault seeding found it: the stub has
         no dotted plain `import` at module scope, and neither did any other row
         here, so `alias.name` without `.split(".")[0]` survived everything. It is
         a FALSE-RED mutant rather than a false-green one -- the gate would have
@@ -2156,7 +2188,7 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         observation in the file.
       * the CLASS-BODY row objects to putting `ClassDef` back in the skip set.
         A class body executes at import time, so this is a real violation; the
-        module's own 23 classes contain no import, so nothing else can see it.
+        stub's class holds no import, so nothing else can see it.
       * the class-METHOD row is the other half of that change. Once the walk
         enters class bodies it reaches the methods inside them, and a method is
         a `FunctionDef` whose body does not run on import -- this row is what
@@ -2193,25 +2225,26 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         that DOES execute, so skipping it would be a blind spot wearing an
         exemption's clothes.
       * the function-body `import torch` row is the NEGATIVE control that
-        separates this instrument from bare `ast.walk`. It is the shape the real
-        module uses twice, so `test_..._imports_only_the_standard_library`
-        already objects to descending -- this row says so where a reader of the
+        separates this instrument from bare `ast.walk`. It is the shape the stub
+        uses twice, so tests/test_modal_runner_package_shape.py's
+        `test_package_import_purity_scans_every_module` already objects to
+        descending -- this row says so where a reader of the
         instrument is standing.
       * the `async def` row is the only thing that objects to dropping
-        `AsyncFunctionDef` from the skip set. The module has 0 async defs, so
+        `AsyncFunctionDef` from the skip set. The stub has no async def, so
         every other observation here is blind to that entry.
       * the relative-import row is the only thing that objects to dropping
-        `node.level == 0`. Silent on today's module, which has no relative
-        imports; W3b's package modules will have them, and without this row the
-        gate would redden over legal intra-package imports on the day of the
-        split.
+        `node.level == 0`. Silent on the stub, which has no relative
+        import; the package modules all have them, and without this row the
+        gate would redden over legal intra-package imports.
 
-    EVERY ROW BELOW IS INERT ON THE UNMODIFIED SUBJECT, by construction: the
-    module has no class-body import, no async def, no `TYPE_CHECKING` block, no
+    EVERY ROW BELOW IS INERT ON THE UNMODIFIED SUBJECT, by construction, and
+    `_monolith_stub_source` asserts each property: the stub has no class-body
+    import, no async def, no `TYPE_CHECKING` block, no
     relative import, no dotted plain `import`, no conditional module-scope import
     of any spelling, and nothing imported inside a container that RUNS at import
     time. Stated that way rather than as "nothing below depth 1", which is false:
-    the module has two imports below depth 1, both `torch`, in `_import_torch`
+    the stub has two imports below depth 1, both `torch`, in `_import_torch`
     and `_load_checkpoint_weights` -- function bodies, which is the `lazy` row's
     subject and does not execute on import. That is the point. Each one is the
     ONLY observation in the suite that holds its clause, which is why they are
@@ -2232,23 +2265,13 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
       * so if a future edit moves an `import` INSIDE the `find_spec` header,
         gate (e) reddens -- CORRECTLY. That import runs.
     """
-    source = _frozen_runner_source()
-    lines = source.splitlines(keepends=True)
-    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
-        "GC2 pins plants to line 19 because a `__future__` import must come first. That "
-        f"line now reads {lines[18]!r}, so every plant below would land in the wrong place "
-        "-- re-measure the plant site before trusting anything in this test.")
 
     def plant(text, slug):
         """Write a tmp_path repo whose `scripts/modal_runner/core.py` is the
-        frozen monolith with `text` spliced in after line 19; return its root.
-
-        Nothing here is ever EXECUTED -- the gate parses. So a plant may name
-        `os` or `modal` without either being importable.
-        """
+        stub with `text` spliced in after line 19; return its root."""
         target = tmp_path / slug / "scripts" / "modal_runner" / "core.py"
         target.parent.mkdir(parents=True)
-        target.write_text("".join(lines[:19]) + text + "".join(lines[19:]), encoding="utf-8")
+        target.write_text(_splice_into_stub(text), encoding="utf-8")
         return target.parents[2]
 
     decoy = plant("try:\n    import modal\nexcept ImportError:\n    modal = None\n", "decoy")
@@ -2358,8 +2381,8 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
 def _module_scope_shape_violations(tree):
     """Classify every module-scope statement; what a declaration contains is not checked.
 
-    Recognition intentionally matches criterion 5: bare TYPE_CHECKING or any
-    attribute with that name. A single imports-only block is legal, without else.
+    A block is recognised by `_is_type_checking_test`, the predicate gate (e)
+    uses. A single imports-only block is legal, without else.
     """
     examined = 0
     violations = []
@@ -2379,9 +2402,7 @@ def _module_scope_shape_violations(tree):
                 (kind, node.lineno, "only the module docstring may be a bare expression at module "
                  "scope"))
         elif isinstance(node, ast.If):
-            test = node.test
-            if not ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or
-                    (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")):
+            if not _is_type_checking_test(node.test):
                 violations.append(
                     (kind, node.lineno, "the only conditional allowed at module scope is "
                      "`if TYPE_CHECKING:`"))
@@ -2401,10 +2422,7 @@ def _module_scope_shape_violations(tree):
                     violations.append((type(inner).__name__, inner.lineno,
                                        "an `if TYPE_CHECKING:` body may hold imports only"))
         # Everything else at module scope is an import or a declaration, or it
-        # is a violation. The tuple is inlined, as gate (e)'s `TYPE_CHECKING`
-        # predicate is; both were inlined to fit W3a's GC3 module-name budget,
-        # which W3b's additions to this file have since overtaken. `Expr` and
-        # `If` are deliberately absent: both are legal in exactly one shape, so
+        # is a violation. `Expr` and `If` are deliberately absent: both are legal in exactly one shape, so
         # they are decided by the branches above. Putting either here is the
         # blind kind-only allow-list this whole gate exists to rule out.
         elif not isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef,
@@ -2412,29 +2430,6 @@ def _module_scope_shape_violations(tree):
             violations.append(
                 (kind, node.lineno, "only imports and declarations may appear at module scope"))
     return examined, violations
-
-
-def test_gate_g_criterion_13_the_runner_library_declares_and_does_nothing_else():
-    candidates, undeclared = _runner_module_population(ROOT)
-    assert undeclared == [], (
-        f"scripts/modal_runner/ holds modules RUNNER_MODULES does not declare: {undeclared}. "
-        "Declare a new module in RUNNER_MODULES (tests/test_modal_packaging.py) and in "
-        "tests/test_modal_runner_package_shape.py's tables in the same commit, or delete the "
-        "stray file.")
-    scanned = []
-    for rel in candidates:
-        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
-        examined, violations = _module_scope_shape_violations(tree)
-        scanned.append(rel)
-        assert examined == len(tree.body), (
-            f"gate (g) examined {examined} of {len(tree.body)} module-scope statements in {rel}")
-        assert violations == [], (
-            f"{rel} does work at module scope, as (kind, line, rule): {violations}. Module scope "
-            "may hold only the docstring, imports, one imports-only `if TYPE_CHECKING:` block "
-            "without else, and declarations; move anything else into a function.")
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
-    assert scanned == declared, (
-        f"gate (g) read {scanned}, not the {len(declared)} modules RUNNER_MODULES declares")
 
 
 def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
@@ -2464,9 +2459,9 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
         tests/test_modal_client.py::test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe
 
     which names this test by node id in return. It lives there rather than here
-    because `tests/test_modal_packaging.py` imports no `tests.*` module at
-    module scope (only the runtime-identity tests import
-    `tests._modal_import_probe`, inside their bodies) and that exclusion is
+    because `tests/test_modal_packaging.py` imports no test module at module
+    scope but the data-only tests/modal_runner_tables.py (the runtime-identity
+    tests import `tests._modal_import_probe` inside their bodies), and that exclusion is
     load-bearing -- `_seam_sources()` omits this file because
     self-feeding the classifier returns a poisoned destination count -- so
     duplicating that gate's subprocess helper into this file would put two copies
@@ -2474,25 +2469,14 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     close. Neither half is optional: together they establish that criterion 13 is
     the SOLE objector to this header.
 
-    AND THE THIRD BLOCK HOLDS THE AGREEMENT THE TWO HELPERS' DOCSTRINGS DEMAND.
-    Both recognise a `TYPE_CHECKING` block with the SAME rule, written out twice
-    -- once in gate (e)'s descent, once in the `If` branch of gate (g) -- and gate
-    (g)'s docstring says the two "MUST agree", which until now nothing enforced.
-    Measured BEFORE this block existed: narrow gate (e)'s attribute clause to
-    require `typing.*` and the two disagree on `if os.TYPE_CHECKING:` while all 7
-    tests that call either helper still passed -- which is the hole this block
-    closes. RE-MEASURED WITH IT: the same narrowing gives `1 failed, 39 passed`
-    and the sole objector is THIS test, read off the raised `E ` line. So 6 of
-    the 7 pass, not all 7, and the 7th is the one you are reading -- which is what
-    "delete that row and either mutant survives" says below. The tense is the
-    whole difference between the two sentences. W3a kept the two copies rather
-    than extract a shared predicate, to fit its GC3 module-name budget (W3b has
-    since added names to this file), so the agreement is ASSERTED over the
-    shapes that separate the readings instead.
-    `os.TYPE_CHECKING` is the SOLE OBJECTOR and it holds BOTH directions: seeding
-    the narrowing into gate (e) makes that row disagree, seeding the same
-    narrowing into gate (g) makes it disagree the other way, and the other four
-    rows are blind to both. Delete that row and either mutant survives.
+    AND THE THIRD BLOCK HOLDS THE TWO GATES TO ONE READING OF `TYPE_CHECKING`.
+    Both call `_is_type_checking_test`, so they agree by construction; the
+    block reads each shape's verdict off both gates, so a gate that stops
+    calling the shared predicate, or a predicate that narrows or widens, turns
+    a row red. Before the predicate was shared, gate (e) and gate (g) held two
+    copies of it, and this block was the only thing that kept them in step: a
+    narrowing seeded into either copy made the `os.TYPE_CHECKING` row, and no
+    other test, go red.
 
     CRITERION 4 IS DELIBERATELY NOT IN THE CONTRAST. Gate (d) reads
     `runner_image.local_files` and the git index and never reads module source at
@@ -2501,16 +2485,11 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     about it -- that is precisely the class this branch closes, and asserting it
     would dress a vacuous green as a contrast.
     """
-    lines = _frozen_runner_source().splitlines(keepends=True)
-    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
-        "GC2 pins plants to line 19 because a `__future__` import must come first. That line "
-        f"now reads {lines[18]!r}, so the plant below lands somewhere else and every line "
-        "number in this test is about a different statement.")
-    planted = ("".join(lines[:19]) + "import importlib.util\n"
-               "if importlib.util.find_spec('modal') is not None:\n"
-               "    _ON_CONTAINER = True\n"
-               "else:\n"
-               "    _ON_CONTAINER = False\n" + "".join(lines[19:]))
+    planted = _splice_into_stub("import importlib.util\n"
+                                "if importlib.util.find_spec('modal') is not None:\n"
+                                "    _ON_CONTAINER = True\n"
+                                "else:\n"
+                                "    _ON_CONTAINER = False\n")
 
     tree = ast.parse(planted)
     examined, violations = _module_scope_shape_violations(tree)
@@ -2537,8 +2516,7 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
         "here means the plant acquired an import that executes, which would be a correct gate "
         f"(e) verdict and a plant-design error on this side (Ruling 30). Reported: {impure}")
 
-    # The two gates' `TYPE_CHECKING` predicates must agree, and this is what says
-    # so. Each row plants `if <shape>:` holding a NON-stdlib import, then asks
+    # The two gates must read `TYPE_CHECKING` the same way. Each row plants `if <shape>:` holding a NON-stdlib import, then asks
     # both helpers the same question: gate (e) EXEMPTS the body iff it recognises
     # the block, gate (g) reports no conditional violation iff it recognises the
     # block. The verdicts are read off the helpers, never hardcoded, so the row
@@ -2549,13 +2527,13 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
         ("TYPE_CHECKING", True, "the bare `Name` spelling"),
         ("typing.TYPE_CHECKING", True, "the `typing.` attribute spelling"),
         ("os.TYPE_CHECKING", True, "ANY attribute whose `attr` is `TYPE_CHECKING` -- Ruling 29's "
-         "accepted limit, and the ONLY row here that separates the two readings"),
+         "accepted limit"),
         ("_probe()", False, "a `Call` test is not recognised by either gate"),
         ("TYPE_CHECKING is True", False, "a `Compare` test is not recognised by either gate"),
     ]:
         slug = "agree_" + shape.replace(".", "_").replace("(", "").replace(")", "").replace(
             " ", "_")
-        block = "".join(lines[:19]) + f"if {shape}:\n    import modal\n" + "".join(lines[19:])
+        block = _splice_into_stub(f"if {shape}:\n    import modal\n")
         agree_root = tmp_path / slug / "scripts"
         (agree_root / "modal_runner").mkdir(parents=True)
         (agree_root / "modal_runner" / "core.py").write_text(block, encoding="utf-8")
@@ -2570,7 +2548,7 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
         g_recognises = agree_shape == []
         assert e_exempts == recognised and g_recognises == recognised, (
             f"the two gates no longer read `if {shape}:` the same way, or no longer read it as "
-            f"{recognised}. This is {why}. Gate (g)'s docstring requires them to agree: a block "
+            f"{recognised}. This is {why}. Both must call `_is_type_checking_test`: a block "
             "one gate exempts and the other calls illegal leaves whoever meets the red with no "
             f"way to attribute it. gate (e) exempted: {e_exempts} ({agree_impure}); gate (g) "
             f"recognised: {g_recognises} ({agree_shape})")
@@ -2580,9 +2558,10 @@ def test_gate_g_criterion_13_reddens_on_module_scope_work_the_kind_census_hides(
     """KNOCK-OUT 2. The two shapes a kind-only allow-list is green on.
 
     ROW 1 -- A BARE MODULE-SCOPE CALL. `logging.basicConfig(level=logging.INFO)`
-    adds NO `If` node; measured, the census goes to `Import 18 | Expr 2 | ...`
-    and every other kind is unchanged. A gate that allows the kind `Expr` because
-    `body[0]` is one passes this, passes the real module, and passes every other
+    adds NO `If` node; measured on the stub, the census goes from
+    `Import 2 | Expr 1` to `Import 3 | Expr 2` and every other kind is
+    unchanged. A gate that allows the kind `Expr` because
+    `body[0]` is one passes this, passes the stub, and passes every other
     check in this plan. Of the four defect shapes this task covers, it is the
     likeliest to appear in a real W3b header -- somebody configures logging, or
     calls `os.environ.setdefault`, at the top of a new module -- and it is the
@@ -2602,16 +2581,6 @@ def test_gate_g_criterion_13_reddens_on_module_scope_work_the_kind_census_hides(
     say "this statement", and a plant whose line number was not re-derived is the
     common way that stops being true.
     """
-    lines = _frozen_runner_source().splitlines(keepends=True)
-    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
-        f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
-
-    def plant(text):
-        """Parse the frozen monolith with `text` spliced in after line 19.
-        Repeated in each knock-out rather than hoisted, a W3a choice made for its
-        GC3 module-name budget; nothing here is ever executed, only parsed."""
-        return ast.parse("".join(lines[:19]) + text + "".join(lines[19:]))
-
     for text, expected, clause in [
         ("import logging\nlogging.basicConfig(level=logging.INFO)\n", [
             ("Expr", 21, "only the module docstring may be a bare expression at module scope")
@@ -2622,7 +2591,7 @@ def test_gate_g_criterion_13_reddens_on_module_scope_work_the_kind_census_hides(
         ], "a module-scope `try:` is neither an import nor a declaration, and it is the "
          "only row holding the helper's final `elif` and its declaration tuple"),
     ]:
-        tree = plant(text)
+        tree = ast.parse(_splice_into_stub(text))
         examined, violations = _module_scope_shape_violations(tree)
         assert examined == len(tree.body), (
             f"gate (g) stopped short of the whole module scope: {examined} of {len(tree.body)}")
@@ -2636,10 +2605,10 @@ def test_gate_g_criterion_13_reddens_on_a_type_checking_body_that_is_not_imports
     MEASURED, and it is the sharpest evidence in this task that a kind-level
     instrument is the wrong one:
 
-        if TYPE_CHECKING:            ->  ImportFrom 7 | If 1 | Import 17 | ...
+        if TYPE_CHECKING:            ->  ImportFrom 4 | If 1 | Import 2 | ...
             import decimal
 
-        if TYPE_CHECKING:            ->  ImportFrom 7 | If 1 | Import 17 | ...
+        if TYPE_CHECKING:            ->  ImportFrom 4 | If 1 | Import 2 | ...
             import decimal
             _X = 1
 
@@ -2660,13 +2629,11 @@ def test_gate_g_criterion_13_reddens_on_a_type_checking_body_that_is_not_imports
     criterion 5 declines to look inside it. Complementary, and neither subsumes
     the other (Ruling 33).
     """
-    lines = _frozen_runner_source().splitlines(keepends=True)
-    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
-        f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
-    tree = ast.parse("".join(lines[:19]) + "from typing import TYPE_CHECKING\n"
-                     "if TYPE_CHECKING:\n"
-                     "    import decimal\n"
-                     "    _X = 1\n" + "".join(lines[19:]))
+    tree = ast.parse(
+        _splice_into_stub("from typing import TYPE_CHECKING\n"
+                          "if TYPE_CHECKING:\n"
+                          "    import decimal\n"
+                          "    _X = 1\n"))
 
     examined, violations = _module_scope_shape_violations(tree)
     assert examined == len(tree.body), (
@@ -2681,13 +2648,13 @@ def test_gate_g_criterion_13_reddens_on_a_type_checking_body_that_is_not_imports
 def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_by_name():
     """KNOCK-OUT 4 plus the positive control the other three depend on.
 
-    ROW 1 IS THE GREEN HALF THE WHOLE TASK RESTS ON. The frozen monolith these
-    plants splice into has ZERO module-scope `If` nodes, so on this substrate a
+    ROW 1 IS THE GREEN HALF THE WHOLE TASK RESTS ON. The stub these plants
+    splice into has no module-scope `If`, so on this substrate a
     gate that simply rejects every one of them is observationally identical to
     a correct gate on all three red knock-outs. Row 1 says the construct is
     ALLOWED. On the live package, commands.py and preflight.py each hold one
-    such block, so `test_gate_g_criterion_13_the_runner_library_declares_and_does_nothing_else`
-    and tests/test_modal_runner_package_shape.py's
+    such block, so tests/test_modal_runner_package_shape.py's
+    `test_package_structure_contract` and
     `test_package_header_accepts_import_only_type_checking` say so as well.
 
     ROWS 2 AND 3 HOLD THE `at most one` CLAUSE AND THE NAME CLAUSE, which are
@@ -2719,14 +2686,6 @@ def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_b
     instrument over it; criterion 5
     independently checks the imports in that branch.
     """
-    lines = _frozen_runner_source().splitlines(keepends=True)
-    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
-        f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
-
-    def plant(text):
-        """Parse the real module with `text` spliced in after line 19."""
-        return ast.parse("".join(lines[:19]) + text + "".join(lines[19:]))
-
     for text, expected, clause in [
         ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import decimal\n", [],
          "a single imports-only `if TYPE_CHECKING:` block is LEGAL -- a gate that rejects "
@@ -2756,7 +2715,7 @@ def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_b
          "The name-based rule fails CLOSED in this direction, which is the direction it "
          "should fail in"),
     ]:
-        tree = plant(text)
+        tree = ast.parse(_splice_into_stub(text))
         examined, violations = _module_scope_shape_violations(tree)
         assert examined == len(tree.body), (
             f"gate (g) stopped short of the whole module scope: {examined} of {len(tree.body)}")

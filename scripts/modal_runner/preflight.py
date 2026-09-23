@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from . import checkpoint, core, state
 from .checkpoint import normalize_config_for_transport
@@ -28,16 +28,25 @@ from .core import (
     LockLike,
     Manifest,
     PreparedSource,
-    ReloadingVolume,
     Status,
     ValidationError,
     sha256_bytes,
 )
 from .source import safe_extract_git_archive
-from .state import _read_status, atomic_write_json, start_heartbeat_worker
+from .state import atomic_write_json, read_status, start_heartbeat_worker, stop_heartbeat
 
 if TYPE_CHECKING:
     from .request import RunRequest
+
+
+class ReloadingVolume(Protocol):
+    """In-container Volume handle. reload before STATUS writes; commit after them."""
+
+    def reload(self) -> None:
+        ...
+
+    def commit(self) -> None:
+        ...
 
 
 def _verify_extracted_provenance(source_dir: Path, expected_commit: str,
@@ -51,14 +60,6 @@ def _verify_extracted_provenance(source_dir: Path, expected_commit: str,
     if commit != expected_commit or tree != expected_tree:
         raise ValidationError(f"provenance sidecar mismatch: commit {commit} tree {tree} "
                               f"!= expected {expected_commit} {expected_tree}")
-
-
-def _stop_heartbeat(heartbeat: object | None) -> None:
-    if heartbeat is None:
-        return
-    stop = getattr(heartbeat, "stop_and_join", None)
-    if stop is not None:
-        stop()
 
 
 def _validate_remote_resume(path: Path, expected_sha256: str | None) -> FileProvenance:
@@ -125,7 +126,7 @@ def prepare_remote_source(
         if digest != expected_archive_sha256:
             raise ValidationError(
                 f"source archive sha256 {digest} != expected {expected_archive_sha256}")
-        if _read_status(run_root) is None:
+        if read_status(run_root) is None:
             state.transition_status(run_root,
                                     Status.PREPARING,
                                     now=now_fn(),
@@ -191,11 +192,11 @@ def prepare_remote_source(
         return prepared
     except Exception:
         try:
-            _stop_heartbeat(heartbeat)
+            stop_heartbeat(heartbeat)
         except Exception:
             # Do not hide the original preflight error.
             pass
-        current = _read_status(run_root)
+        current = read_status(run_root)
         if current is not None and current.attempt_id == attempt_id:
             try:
                 state.transition_status(run_root,

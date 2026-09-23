@@ -6,15 +6,13 @@ import json
 import os
 import subprocess
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import core
 from .core import (
-    _PREBUILT_LOAD_SOURCE,
     CHECKPOINT_NAME,
     INPUTS_ROOT,
-    PREBUILT_LOAD_TIMEOUT_SECONDS,
-    CheckpointVerdict,
     CompletionEvidence,
     FileProvenance,
     Manifest,
@@ -22,7 +20,38 @@ from .core import (
     mounted_path,
     sha256_bytes,
 )
-from .state import _load_volume_json
+from .state import load_volume_json
+
+# Cap on the out-of-process weights-only load. Generous for a ~2.5 MB policy;
+# a hung interpreter must not stall the interrupt path's terminal write.
+PREBUILT_LOAD_TIMEOUT_SECONDS = 120.0
+
+# argv[1] is the checkpoint path. Kept out of the -c source so no filename can
+# ever be interpolated into executed code.
+_PREBUILT_LOAD_SOURCE = (
+    "import sys, torch; torch.load(sys.argv[1], map_location='cpu', weights_only=True)")
+
+
+@dataclass(frozen=True)
+class CheckpointVerdict:
+    """Outcome of `verify_checkpoint`. `reason` is a token, never a sentence.
+
+    Callers own the wording: launch maps the token through
+    `run_modal._LAUNCH_CHECKPOINT_ERRORS` to a parent-checkpoint sentence,
+    status reporting collapses it to a `checkpoint_loadable` bool. Keeping the
+    sentence out of here is what stops a third error vocabulary appearing.
+
+    Invariant: `ok=True` implies `reason is None` and both `checkpoint_bytes`
+    and `digest` are set; `ok=False` implies both are `None`. The payload field
+    is the *checkpoint* bytes, never the sidecar's — launch uploads them under
+    `INPUTS_ROOT/sha256/{digest}.pt`, so carrying the sidecar here would ship
+    the metadata as the weights.
+    """
+
+    ok: bool
+    reason: str | None
+    checkpoint_bytes: bytes | None
+    digest: str | None
 
 
 def _import_torch() -> object:
@@ -180,7 +209,7 @@ def verify_checkpoint(
     if sidecar_bytes is None:
         return fail("missing_sidecar")
     try:
-        sidecar = _load_volume_json(sidecar_bytes)
+        sidecar = load_volume_json(sidecar_bytes)
     except ValidationError:
         return fail("corrupt_sidecar")
     if not isinstance(sidecar, dict):
@@ -199,7 +228,7 @@ def verify_checkpoint(
     if sidecar_reread_bytes is None:
         return fail("replaced")
     try:
-        sidecar_b = _load_volume_json(sidecar_reread_bytes)
+        sidecar_b = load_volume_json(sidecar_reread_bytes)
     except ValidationError:
         return fail("replaced")
     if sidecar_b != sidecar:
@@ -221,7 +250,7 @@ def normalize_config_for_transport(config: Mapping[str, object]) -> dict[str, ob
     return {key: value for key, value in config.items() if key != "data_dir"}
 
 
-def _iter_metrics_steps(metrics_path: Path) -> list[int]:
+def iter_metrics_steps(metrics_path: Path) -> list[int]:
     """Parse every nonblank JSONL row; pin the live `step` key."""
     if not metrics_path.is_file() or metrics_path.stat().st_size == 0:
         raise ValidationError(f"metrics file missing or empty: {metrics_path}")
@@ -278,7 +307,7 @@ def validate_completed_run(run_root: Path, manifest: Manifest) -> CompletionEvid
     if manifest.effective_timesteps != expected:
         raise ValidationError(
             f"effective_timesteps {manifest.effective_timesteps} != floor formula {expected}")
-    steps = _iter_metrics_steps(ckpt_dir / "metrics.jsonl")
+    steps = iter_metrics_steps(ckpt_dir / "metrics.jsonl")
     last_step = steps[-1]
     if last_step < manifest.effective_timesteps:
         raise ValidationError(

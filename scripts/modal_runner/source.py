@@ -3,20 +3,33 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import stat
 import subprocess
 import tarfile
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from . import core
 from .core import (
-    _COMMIT_SHA_RE,
-    _SAFE_TAR_TYPES,
     PROVENANCE_NAME,
-    SourceProvenance,
     ValidationError,
 )
+
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+_SAFE_TAR_TYPES = {tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE}
+
+
+@dataclass(frozen=True)
+class SourceProvenance:
+    """Content-addressed source snapshot: commit, tree, and archive digest."""
+
+    commit: str
+    tree: str
+    archive_sha256: str
+    archive_path: Path
 
 
 def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:

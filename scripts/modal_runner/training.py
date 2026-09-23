@@ -9,44 +9,110 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import checkpoint, core, state
-from .checkpoint import _iter_metrics_steps, validate_completed_run
+from .checkpoint import iter_metrics_steps, validate_completed_run
 from .core import (
     CHECKPOINT_NAME,
     CHECKPOINT_PUBLISH_REASON_NAME,
-    CHECKPOINT_SETTLE_SECONDS,
     CHECKPOINT_SIDECAR_NAME,
     DEAD_CHECKPOINT_NAME,
-    DEAD_RUN_EXIT_CODE,
     HEARTBEAT_INTERVAL,
-    POLL_INTERVAL_SECONDS,
-    REASON_DEAD_RUN,
-    REASON_ERROR,
-    REASON_INVALID_EVIDENCE,
-    REASON_NONZERO_EXIT,
-    REASON_SIGNAL,
-    REASON_TIMEOUT,
     RESULT_FILENAME,
     SCHEMA_VERSION,
-    TERM_GRACE_SECONDS,
     TRAIN_LOG_NAME,
     CompletionEvidence,
     LockLike,
     Manifest,
     PreparedSource,
-    PublishOutcome,
     Registry,
-    RunResult,
     Status,
-    TrainingAttemptResult,
     ValidationError,
-    _UnusedArtifacts,
 )
-from .preflight import _stop_heartbeat
-from .state import atomic_write_json, deliver_attempt, start_heartbeat_worker
+from .state import atomic_write_json, deliver_attempt, start_heartbeat_worker, stop_heartbeat
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """Terminal result.json (design §7). Never written by a losing delivery."""
+
+    schema_version: int
+    status: Status
+    exit_code: int
+    started_at: str
+    finished_at: str
+    artifact_root: str
+    checkpoint_sha256: str | None
+    metrics_row_count: int
+    last_step: int | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status.value,
+            "exit_code": self.exit_code,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "artifact_root": self.artifact_root,
+            "checkpoint_sha256": self.checkpoint_sha256,
+            "metrics_row_count": self.metrics_row_count,
+            "last_step": self.last_step,
+        }
+
+
+CHECKPOINT_SETTLE_SECONDS = 1.0
+TERM_GRACE_SECONDS = 15.0
+DEAD_RUN_EXIT_CODE = 3
+POLL_INTERVAL_SECONDS = 0.05
+REASON_SIGNAL = "signal"
+REASON_TIMEOUT = "timeout"
+REASON_DEAD_RUN = "dead_run"
+REASON_INVALID_EVIDENCE = "invalid_evidence"
+REASON_NONZERO_EXIT = "nonzero_exit"
+REASON_ERROR = "error"
+
+
+@dataclass(frozen=True)
+class TrainingAttemptResult:
+    """Winner-only outcome. Losers return REDELIVERED, not this type."""
+
+    status: Status
+    reason: str | None = None
+    exit_code: int | None = None
+
+
+class _UnusedArtifacts:
+    """deliver_attempt ignores artifacts on every path; refuse accidental writes."""
+
+    def exists(self, path: PurePosixPath) -> bool:
+        del path
+        return False
+
+    def put_file(self, path: PurePosixPath, data: bytes) -> None:
+        raise RuntimeError(f"losing delivery must not write {path}")
+
+    def commit(self) -> None:
+        raise RuntimeError("losing delivery must not commit")
+
+    def read_file(self, path: PurePosixPath) -> bytes | None:
+        del path
+        return None
+
+
+@dataclass(frozen=True)
+class PublishOutcome:
+    """Result of one publish attempt. `reason is None` iff a sidecar was written.
+
+    The reason exists because every call site wraps this in `except Exception:
+    pass`. Returning WHY a generation was skipped is the only way a skip is
+    visible from outside the container.
+    """
+
+    generation: tuple[int, int] | None
+    reason: str | None = None
 
 
 def _tee_stream(src: object, sinks: Sequence[object]) -> None:
@@ -307,7 +373,7 @@ def _map_child_exit(
 
 def _metrics_summary(run_root: Path) -> tuple[int, int | None]:
     try:
-        steps = _iter_metrics_steps(Path(run_root) / "checkpoints" / "metrics.jsonl")
+        steps = iter_metrics_steps(Path(run_root) / "checkpoints" / "metrics.jsonl")
     except (ValidationError, OSError):
         return 0, None
     return len(steps), steps[-1]
@@ -461,7 +527,7 @@ def _run_training_attempt(
         if heartbeat_stopped:
             return
         heartbeat_stopped = True
-        _stop_heartbeat(heartbeat)
+        stop_heartbeat(heartbeat)
 
     def stop_watcher_once() -> None:
         nonlocal watcher_stopped

@@ -6,32 +6,127 @@ import os
 import threading
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from typing import Protocol
 
 from .core import (
-    _ALLOWED_TRANSITIONS,
-    ALLOWED_FAILURE_CODES,
-    FAILURE_UPLOAD,
     HEARTBEAT_INTERVAL,
     MANIFEST_FILENAME,
-    REDELIVERED,
     RESERVATION_FILENAME,
     RUNS_ROOT,
     SCHEMA_VERSION,
-    STALE_AFTER,
     STATUS_FILENAME,
-    TERMINAL_STATUSES,
-    ArtifactIndex,
-    DerivedStatus,
-    HeartbeatWorker,
     LockLike,
     Registry,
-    RunStatus,
     Status,
     ValidationError,
 )
 from .request import validate_run_id
+
+TERMINAL_STATUSES = frozenset({
+    Status.COMPLETED,
+    Status.FAILED,
+    Status.INTERRUPTED,
+    Status.BUILD_FAILED,
+})
+
+# Linear lifecycle. Terminals have no outbound edges except the same-terminal
+# idempotent write handled in transition_status.
+_ALLOWED_TRANSITIONS: dict[Status, frozenset[Status]] = {
+    Status.PREPARING:
+    frozenset({Status.BUILDING, Status.BUILD_FAILED, Status.INTERRUPTED, Status.FAILED}),
+    Status.BUILDING:
+    frozenset({Status.TRAINING, Status.BUILD_FAILED, Status.INTERRUPTED, Status.FAILED}),
+    Status.TRAINING:
+    frozenset({Status.COMPLETED, Status.FAILED, Status.INTERRUPTED}),
+}
+
+
+@dataclass(frozen=True)
+class RunStatus:
+    """Persisted STATUS.json. attempt_id is the sole writer identity."""
+
+    schema_version: int
+    status: Status
+    attempt_id: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status.value,
+            "attempt_id": self.attempt_id,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> RunStatus:
+        return cls(
+            schema_version=int(payload["schema_version"]),
+            status=Status(str(payload["status"])),
+            attempt_id=str(payload["attempt_id"]),
+            updated_at=str(payload["updated_at"]),
+        )
+
+
+STALE_AFTER = timedelta(minutes=5)
+
+
+class ArtifactIndex(Protocol):
+    """Client Volume metadata and reservation writes. Paths are PurePosixPath.
+
+    exists is committed-object metadata (Volume.iterdir). put_file stages;
+    commit flushes via client batch_upload(force=False), which already persists.
+    Volume.commit() is the in-container mounted-volume API only. Never pass
+    /artifacts/... here.
+    """
+
+    def exists(self, path: PurePosixPath) -> bool:
+        """True if a committed Volume object exists at the client path."""
+        ...
+
+    def put_file(self, path: PurePosixPath, data: bytes) -> None:
+        """Stage bytes at a client Volume path. Durable only after commit."""
+        ...
+
+    def commit(self) -> None:
+        """Persist staged uploads via client batch_upload(force=False)."""
+        ...
+
+    def read_file(self, path: PurePosixPath) -> bytes | None:
+        """Committed object bytes, or None if missing. Never /artifacts/..."""
+        ...
+
+
+FAILURE_UPLOAD = "upload_failed"
+ALLOWED_FAILURE_CODES = frozenset({FAILURE_UPLOAD})
+
+REDELIVERED = "redelivered"
+
+
+@dataclass(frozen=True)
+class DerivedStatus:
+    """Client-side view. Never written back to STATUS.json."""
+
+    status: Status
+    stale: bool
+    reason: str | None = None
+
+
+@dataclass
+class HeartbeatWorker:
+    """Independent STATUS.json refresher. stop_and_join before every terminal write."""
+
+    stop: threading.Event
+    thread: threading.Thread
+
+    def stop_and_join(self, timeout: float = 5.0) -> None:
+        self.stop.set()
+        self.thread.join(timeout=timeout)
+        if self.thread.is_alive():
+            raise RuntimeError("heartbeat worker did not stop")
 
 
 def atomic_write_json(
@@ -57,7 +152,7 @@ def atomic_write_json(
         raise
 
 
-def _read_status(run_root: Path) -> RunStatus | None:
+def read_status(run_root: Path) -> RunStatus | None:
     path = run_root / STATUS_FILENAME
     if not path.is_file():
         return None
@@ -92,7 +187,7 @@ def _transition_status_unlocked(
     attempt_id: str,
 ) -> RunStatus | None:
     run_root = Path(run_root)
-    current = _read_status(run_root)
+    current = read_status(run_root)
     if current is not None and current.attempt_id != attempt_id:
         return None
     if current is None:
@@ -261,7 +356,7 @@ def write_heartbeat(
     unchanged — a late beat cannot resurrect `training`.
     """
     with lock:
-        current = _read_status(Path(run_root))
+        current = read_status(Path(run_root))
         if current is None or current.attempt_id != attempt_id:
             return None
         if current.status in TERMINAL_STATUSES:
@@ -276,7 +371,7 @@ def write_heartbeat(
         return status
 
 
-def _load_volume_json(raw: bytes, message: str = "corrupt volume json") -> object:
+def load_volume_json(raw: bytes, message: str = "corrupt volume json") -> object:
     """Parse Volume bytes as JSON, normalising every failure to ValidationError.
 
     WHY the `message` parameter: a caller that re-raises ValidationError
@@ -381,14 +476,14 @@ def derive_run_view_from_bytes(
     """
     if status_bytes is not None:
         try:
-            payload = _load_volume_json(status_bytes, "corrupt volume status json")
+            payload = load_volume_json(status_bytes, "corrupt volume status json")
             return derive_status(RunStatus.from_dict(payload), now=now)
         except (TypeError, ValueError, KeyError) as err:
             raise ValidationError("corrupt volume status json") from err
     if reservation_bytes is None:
         raise ValidationError("no STATUS.json or reservation.json")
     try:
-        payload = _load_volume_json(reservation_bytes, "corrupt volume reservation json")
+        payload = load_volume_json(reservation_bytes, "corrupt volume reservation json")
         created = _parse_iso8601(str(payload["created_at"]))
     except ValidationError:
         raise
@@ -457,3 +552,11 @@ def start_heartbeat_worker(
     thread = threading.Thread(target=loop, name="cs2rl-preflight-heartbeat", daemon=True)
     thread.start()
     return HeartbeatWorker(stop=stop, thread=thread)
+
+
+def stop_heartbeat(heartbeat: object | None) -> None:
+    if heartbeat is None:
+        return
+    stop = getattr(heartbeat, "stop_and_join", None)
+    if stop is not None:
+        stop()

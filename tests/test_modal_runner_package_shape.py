@@ -2,8 +2,8 @@
 
 Every clause here describes the shape the package keeps from now on:
 
-* module population: the submodule files on disk (every `*.py` but
-  `__init__.py`) are exactly the modules MANIFEST and DEPENDENCIES declare
+* module population: the submodule files on disk (every entry matching
+  `*.py` but `__init__.py`) are exactly the modules MANIFEST and DEPENDENCIES declare
   (`files`, `undeclared-module`), and none has a grab-bag name
   (`forbidden-name`);
 * ownership: each module's top-level names equal its MANIFEST entry
@@ -12,25 +12,45 @@ Every clause here describes the shape the package keeps from now on:
   MANIFEST gives no symbol two owners (`manifest-duplicates`);
 * module-scope shape (`header`): the docstring, imports, one imports-only
   `if TYPE_CHECKING:` block without else, and declarations, nothing else;
+* import-time work (`import-time`): what a declaration evaluates on import
+  (its value, decorators, default arguments, class bases and keywords, and
+  class body) may use only literals, names, attribute reads, containers,
+  arithmetic and calls to IMPORT_TIME_CALLS; a class body holds only
+  declarations; and a module with annotations defers them;
+* trusted names (`trusted-binding`): the names those checks trust by spelling
+  (TRUSTED_NAMES) are bound only by their own import;
 * the import graph: intra-package imports equal DEPENDENCIES
-  (`runtime-edges`) and ANNOTATION_DEPENDENCIES (`annotation-edges`);
+  (`runtime-edges`) and ANNOTATION_DEPENDENCIES (`annotation-edges`), and
+  every value in those tables is a declared module (`table-edge`);
 * import purity: no non-stdlib import executes when a module is imported;
+* qualified seams (`seam-from-import`, `seam-import-time`, `seam-readers`,
+  `seam-undeclared`, `seam-entry`): each QUALIFIED_SEAMS entry is a name its
+  owner defines, read as `owner.name` at call time by exactly its listed
+  readers, of which there is at least one; and no other name is read across
+  modules through a module object that a relative import binds;
 * the facade (`facade`): `__init__.py` defines nothing and runs on every
   `import scripts.modal_runner`, so its module scope may hold only its
   docstring, named one-dot relative imports of its submodules and a literal
   `__all__`.
 
 Editing a function body, a docstring or a constant's value trips none of them
-unless the edit adds or removes an import. Adding, removing, renaming or moving
-a top-level symbol, adding a module, or changing which package modules a module
-imports does: update the table the failure message names, in the same commit as
-the change. Runtime imports are compared with DEPENDENCIES and imports under
-`if TYPE_CHECKING:` with ANNOTATION_DEPENDENCIES, separately, and the
-dependency walk reads function bodies too. So a first runtime import of a
-module imported only under `TYPE_CHECKING` is a new edge, and so is the reverse;
-another import of a module already imported in the same way is not; removing
-a module's last runtime import, or its last `TYPE_CHECKING` one, drops that
-edge. No module size budget applies.
+unless the edit adds or removes an import, reads a name through a sibling
+module object or stops reading a seam (the `seam` clauses), or puts work into a value that runs on
+import (`import-time`); the facade docstring's MODULE MAP and QUALIFIED SEAMS
+paragraphs are the exception, since two tests read them. Adding,
+removing, renaming or moving a top-level symbol, adding a module, or changing
+which package modules a module imports does: update the table the failure
+message names, in the same commit as the change. Runtime imports are compared
+with DEPENDENCIES and relative imports under `if TYPE_CHECKING:` with
+ANNOTATION_DEPENDENCIES, separately, and the dependency walk reads function
+bodies too. An absolute import of the package is a runtime edge even under
+`TYPE_CHECKING`, and a `..` import is an edge under its dotted spelling
+(`..modal_runner`); neither is a module, so no table may list it
+(`table-edge`). So a first runtime import of a module imported only under
+`TYPE_CHECKING` is a new edge, and so is the reverse; another import of a
+module already imported in the same way is not; removing a module's last
+runtime import, or its last `TYPE_CHECKING` one, drops that edge. No module
+size budget applies.
 
 History: the split commit, which created scripts/modal_runner/, also proved in
 this file (then tests/test_modal_relocation.py) that every moved declaration
@@ -40,16 +60,31 @@ after it.
 
 Every failure message names the clause, the file or symbol, and the edit that
 resolves it (`_explain`). Controls plant defects into in-memory copies of the
-sources or into a copy of the package under `tmp_path`, never into the live
-package. A control first re-checks the unplanted package; when that check
-fails, its message starts with PRECONDITION and names the contract test whose
-message says what to fix (both, for a control that re-checks two), because the
-control itself did not break.
+sources, the tables or the facade text, or into a copy of the package under
+`tmp_path`, never into the live package. A control first re-checks the
+unplanted package; when that check fails, its message starts with
+PRECONDITION and names the contract test whose message says what to fix, or
+both tests when one check runs two contracts' gates, because the control
+itself did not break.
 """
 import ast
+import re
 from pathlib import Path
 
 import pytest
+
+# The package's declared shape: MANIFEST, the import tables, and the module list
+# derived from them. Every gate here reads it; the file itself is data only.
+from tests.modal_runner_tables import (
+    ANNOTATION_DEPENDENCIES,
+    DEPENDENCIES,
+    MANIFEST,
+    QUALIFIED_SEAMS,
+    RUNNER_MODULES,
+    RUNNER_PATHS,
+    TABLES,
+    TABLES_FILE,
+)
 
 # The packaging gates' own helpers and constants, imported rather than copied so
 # that both files recognise module-level names, module-scope shape, non-stdlib
@@ -64,7 +99,7 @@ import pytest
 # duplicates clauses here as well.
 from tests.test_modal_packaging import (
     PACKAGED,
-    RUNNER_MODULES,
+    _is_type_checking_test,
     _module_level_binding_counts,
     _module_level_names,
     _module_scope_shape_violations,
@@ -74,104 +109,13 @@ from tests.test_modal_packaging import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-# Owner of every top-level symbol, per module. Each module's top-level names
-# must equal its entry, and no name may appear under two modules. Adding,
-# removing, renaming or moving a symbol means editing its entry here in the same
-# commit.
-MANIFEST = {
-    'core.py': [
-        'ValidationError', 'Action', 'Status', 'mounted_path', 'SourceProvenance', 'sha256_file',
-        'FileProvenance', 'RunStatus', 'Manifest', 'RunResult', 'Registry', 'ArtifactIndex',
-        'LockLike', 'DerivedStatus', 'CheckpointVerdict', 'sha256_bytes', 'CompletionEvidence',
-        'HeartbeatWorker', 'ReloadingVolume', 'PreparedSource', 'TrainingAttemptResult',
-        '_UnusedArtifacts', 'PublishOutcome', 'VOLUME_NAME', 'REGISTRY_NAME', 'VOLUME_MOUNT',
-        'SOURCES_ROOT', 'INPUTS_ROOT', 'RUNS_ROOT', 'PREBUILT_PYTHON',
-        'PREBUILT_LOAD_TIMEOUT_SECONDS', 'ALLOWED_MAPS', 'ALLOWED_GPUS', 'ALLOWED_NUM_ENVS',
-        'ALLOWED_CPU_CORES', 'DEFAULT_GPU', 'DEFAULT_NUM_ENVS', 'DEFAULT_CPU_CORES',
-        'DEFAULT_MEMORY_MIB', 'DEFAULT_VEC_WORKERS', 'DEFAULT_TIMEOUT_MINUTES',
-        'DEFAULT_SAVE_EVERY_SECONDS', 'MIN_MEMORY_MIB', 'MAX_MEMORY_MIB', 'MIN_TIMEOUT_MINUTES',
-        'MAX_TIMEOUT_MINUTES', 'MIN_SAVE_EVERY_SECONDS', 'MAX_SAVE_EVERY_SECONDS', 'AGENTS_PER_ENV',
-        'BPTT_HORIZON', 'MIN_BATCH_SIZE', '_RUN_ID_RE', '_SECRET_NAME_RE',
-        'LIVE_TRAIN_OPTION_ARITY', 'LIVE_TRAIN_OPTIONS', 'RUNNER_OWNED_TRAIN_FLAGS',
-        'RUN_ONLY_OPTIONS', 'TERMINAL_STATUSES', '_COMMIT_SHA_RE', '_SAFE_TAR_TYPES',
-        'PROVENANCE_NAME', '_PREBUILT_LOAD_SOURCE', 'STATUS_FILENAME', 'SCHEMA_VERSION',
-        '_ALLOWED_TRANSITIONS', 'HEARTBEAT_INTERVAL', 'STALE_AFTER', 'RESERVATION_FILENAME',
-        'MANIFEST_FILENAME', 'FAILURE_UPLOAD', 'ALLOWED_FAILURE_CODES', 'REDELIVERED', 'UV_BIN',
-        'TRAIN_SCRIPT', '_PRESERVED_CHILD_ENV_KEYS', '_THREAD_CAP_ENV', 'CUDA_PROBE_SOURCE',
-        'TRAIN_LOG_NAME', 'RESULT_FILENAME', 'CHECKPOINT_NAME', 'CHECKPOINT_SIDECAR_NAME',
-        'CHECKPOINT_PUBLISH_REASON_NAME', 'DEAD_CHECKPOINT_NAME', 'CHECKPOINT_SETTLE_SECONDS',
-        'TERM_GRACE_SECONDS', 'DEAD_RUN_EXIT_CODE', 'POLL_INTERVAL_SECONDS', 'REASON_SIGNAL',
-        'REASON_TIMEOUT', 'REASON_DEAD_RUN', 'REASON_INVALID_EVIDENCE', 'REASON_NONZERO_EXIT',
-        'REASON_ERROR'
-    ],
-    'request.py': [
-        'ResumeRequest', 'ArtifactClientRequest', 'RunRequest', 'validate_run_id',
-        'validate_secret_name', 'parse_train_args', '_split_long_option', '_option_value',
-        'validate_train_args', 'build_run_request', 'parse_artifact_client_request'
-    ],
-    'source.py': [
-        '_run_git', 'validate_clean_head', '_reject_unsafe_tar_member', 'safe_extract_git_archive',
-        '_staging_members', '_repack_deterministic', 'create_source_bundle'
-    ],
-    'checkpoint.py': [
-        '_import_torch', '_assert_weights_only_loadable', 'validate_local_checkpoint',
-        '_load_checkpoint_weights', 'verify_checkpoint', 'normalize_config_for_transport',
-        '_iter_metrics_steps', 'validate_completed_run'
-    ],
-    'state.py': [
-        'atomic_write_json', '_read_status', 'transition_status', '_transition_status_unlocked',
-        'run_registry_key', 'attempt_registry_key', '_reservation_path', '_manifest_path',
-        '_volume_has_run', 'record_run_failure', 'finish_reservation', 'reserve_run',
-        'claim_attempt', 'deliver_attempt', 'write_heartbeat', '_load_volume_json',
-        '_parse_iso8601', 'derive_status', 'derive_run_view_from_bytes', 'derive_run_view',
-        'list_run_artifacts', 'start_heartbeat_worker'
-    ],
-    'commands.py': [
-        '_assemble_train_argv', 'build_train_argv', 'build_dump_config_argv',
-        '_is_preserved_child_env_key', 'build_child_env', 'build_install_command',
-        'build_train_command', 'build_dump_config_command', 'build_cuda_probe_command'
-    ],
-    'preflight.py': [
-        '_verify_extracted_provenance', '_stop_heartbeat', '_validate_remote_resume',
-        '_hash_dumped_config', 'prepare_remote_source'
-    ],
-    'training.py': [
-        '_tee_stream', 'execute_training_attempt', '_checkpoint_generation',
-        'publish_stable_checkpoint', '_start_checkpoint_watcher', '_record_publish_reason',
-        '_publish_and_note', '_close_log_sink', '_is_dead_run', '_map_child_exit',
-        '_metrics_summary', '_optional_checkpoint_sha256', '_write_run_result',
-        '_signal_process_group', '_run_training_attempt'
-    ]
-}
-# Runtime import edges between package modules. core stays a leaf. A new edge
-# is legal only if the graph stays acyclic; record it here.
-DEPENDENCIES = {
-    'core': [],
-    'request': ['commands', 'core'],
-    'source': ['core'],
-    'checkpoint': ['core', 'state'],
-    'state': ['core', 'request'],
-    'commands': ['core'],
-    'preflight': ['checkpoint', 'commands', 'core', 'source', 'state'],
-    'training': ['checkpoint', 'core', 'preflight', 'state']
-}
-# Edges that exist only under `if TYPE_CHECKING:` and never execute. commands ->
-# request must stay annotation-only: request imports commands at run time, so a
-# runtime edge back would be an import cycle.
-ANNOTATION_DEPENDENCIES = {'commands': ['request'], 'preflight': ['request']}
 # Module names that say what a module IS rather than what it owns, which is how
 # a module becomes a junk drawer; the `forbidden-name` clause and its message
 # both read this.
 GRAB_BAG_MODULE_NAMES = ("utils", "helpers", "common", "misc")
-# Where a package module is declared. Every message about a module on disk that
-# the tables do not declare, or the reverse, names these, so the remedy reads the
-# same wherever it fires.
-_TABLES = ("RUNNER_MODULES (tests/test_modal_packaging.py) and MANIFEST and DEPENDENCIES (and "
-           "ANNOTATION_DEPENDENCIES for an import made only under TYPE_CHECKING) in "
-           "tests/test_modal_runner_package_shape.py")
 _UNDECLARED_MODULE_REMEDY = (
-    "A path beyond the modules RUNNER_MODULES declares is a module in scripts/modal_runner/ "
-    f"that the tables do not declare: declare it in {_TABLES} in the same commit, or delete it.")
+    "A path beyond the modules MANIFEST declares is a module in scripts/modal_runner/ "
+    f"that the tables do not declare: declare it in {TABLES} in the same commit, or delete it.")
 # How many times each control below plants its defect. Each pass starts by
 # re-checking the unplanted package (or its tmp_path copy), so the second pass's
 # check proves the first pass's plant-and-restore left the sources, or the copied
@@ -179,6 +123,57 @@ _UNDECLARED_MODULE_REMEDY = (
 # about the tree. A control whose restore step broke would otherwise pass once
 # and hide it.
 _CONTROL_PASSES = 2
+# The facade's repo-relative path, as `_facade_source` reads it and messages name it.
+FACADE_FILE = "scripts/modal_runner/__init__.py"
+# Callees a package module may call while it is being imported, decorators
+# included (applying a bare `@property` calls it): pure constructors of values
+# and the class-building decorators. `<str>.strip` is a method of a string
+# literal (commands.CUDA_PROBE_SOURCE). The `import-time` clause and its message
+# both read this. Add a callee only if calling it does nothing but build its
+# value; `importlib.util.find_spec`, `os.environ.get` and `atexit.register` are
+# the kind of call this keeps out of module scope.
+#
+# PITFALL: callees are matched by spelling, so `Path(...)` is only pathlib's
+# Path while nothing else binds that name; the `trusted-binding` clause holds
+# that (TRUSTED_NAMES). Code a class-creation hook runs (a `metaclass=` class,
+# `__init_subclass__`, `__set_name__`) is not followed: it is a function body.
+# Shapes the package does not use yet fail closed, e.g. `@x.setter`,
+# `field(default_factory=lambda: ...)`, a subscript type alias,
+# `tuple(sorted(...))` and `@functools.cached_property`; allow one here, in
+# the same commit that first needs it.
+IMPORT_TIME_CALLS = frozenset({
+    "<str>.strip", "Path", "PurePosixPath", "classmethod", "dataclass", "field", "frozenset",
+    "property", "re.compile", "staticmethod", "timedelta"
+})
+# Where each name trusted by spelling must come from: every bare callee and
+# module prefix in IMPORT_TIME_CALLS, and the `TYPE_CHECKING` that
+# `_is_type_checking_test` (tests/test_modal_packaging.py) matches by name.
+# "builtins" means nothing in the module may bind it.
+TRUSTED_NAMES = {
+    "Path": "pathlib",
+    "PurePosixPath": "pathlib",
+    "TYPE_CHECKING": "typing",
+    "classmethod": "builtins",
+    "dataclass": "dataclasses",
+    "field": "dataclasses",
+    "frozenset": "builtins",
+    "property": "builtins",
+    "re": "re",
+    "staticmethod": "builtins",
+    "timedelta": "datetime",
+}
+# The expression kinds an import-time expression may be built from. Left out on
+# purpose: `NamedExpr` (a walrus binds a name no MANIFEST entry owns), `IfExp`,
+# `BoolOp` and `Compare` (the expression form of the module-scope conditional
+# the header rule bans), `Subscript` (`os.environ["X"]` reads the environment),
+# comprehensions and `Lambda`. Reading a value through the allowed kinds is the
+# accepted limit: `frozenset(os.environ)`, `f"{os.environ}"`, `{**os.environ}`,
+# `[*os.environ]` and `frozenset(os.environ) & ...` all pass, and so does the
+# default `run=subprocess.run` the package uses for injection, which is the
+# same shape.
+_IMPORT_TIME_KINDS = (ast.Attribute, ast.BinOp, ast.Call, ast.Constant, ast.Dict,
+                      ast.FormattedValue, ast.JoinedStr, ast.List, ast.Name, ast.Set, ast.Starred,
+                      ast.Tuple, ast.UnaryOp)
 
 
 def _segments(source):
@@ -210,8 +205,9 @@ def _package_sources(root):
 
     The population is `_runner_module_population`'s: every declared module,
     read even when absent so that a missing or unreadable member raises an
-    OSError naming it, then every undeclared `*.py` in the directory, which the
-    gates below report rather than skip. Read as UTF-8 bytes because the sources
+    OSError naming it, then every undeclared entry matching `*.py` in the
+    directory, which the gates below report rather than skip (a directory so
+    named raises IsADirectoryError). Read as UTF-8 bytes because the sources
     hold non-ASCII prose, and the locale must not decide whether they parse.
     """
     candidates, _ = _runner_module_population(root)
@@ -239,7 +235,8 @@ def _structure_violations(sources, manifest=MANIFEST):
 
     `sources` is a {filename: text} map. Combines the manifest's own clause,
     the file population, grab-bag module names, header shape, membership,
-    duplicate bindings and undeclared assignments. `manifest` defaults to
+    duplicate bindings, undeclared assignments, import-time work and trusted
+    bindings. `manifest` defaults to
     MANIFEST; controls pass an edited copy. Every file in `sources` gets every
     per-file check, including one no manifest entry declares.
     """
@@ -291,7 +288,164 @@ def _structure_violations(sources, manifest=MANIFEST):
         violations.extend(
             ("undeclared-assignment", filename, node.lineno) for node in tree.body
             if isinstance(node, (ast.Assign, ast.AnnAssign)) and id(node) not in owned)
+        violations.extend(
+            ("import-time", filename, line, what) for line, what in _import_time_violations(tree))
+        violations.extend(("trusted-binding", filename, line, what, name)
+                          for line, what, name in _trusted_binding_violations(tree))
     return violations
+
+
+def _is_class_declaration(statement):
+    """Whether a class-body statement only declares.
+
+    A declaration is a string or `...` expression (a docstring, an attribute
+    docstring, a stub body), `pass`, a def or a class, or an assignment whose
+    targets are all plain names. Anything else
+    (a bare call, `if`, `for`, `with`, `try`, `del`, `assert`, an augmented
+    assignment, a subscript or attribute target) runs as the class is built,
+    and the header rule, which reads only module scope, never sees it.
+    """
+    if isinstance(statement, ast.Expr):
+        return (isinstance(statement.value, ast.Constant)
+                and (isinstance(statement.value.value, str) or statement.value.value is Ellipsis))
+    if isinstance(statement, ast.Assign):
+        return all(isinstance(target, ast.Name) for target in statement.targets)
+    if isinstance(statement, ast.AnnAssign):
+        return isinstance(statement.target, ast.Name)
+    return isinstance(statement, (ast.Pass, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+
+
+def _import_time_roots(tree):
+    """(node, role) for each node a module evaluates when imported.
+
+    The header rule leaves only declarations at module scope, and a
+    declaration still runs code on import: an assignment's value, a decorator
+    (role "decorator"), a default argument, a class's bases and keywords, and
+    its body, nested classes included (role "value" for each expression). A
+    class-body statement that is not a declaration (`_is_class_declaration`)
+    comes back whole, with role "statement". A function body does not run, and
+    neither does an `if TYPE_CHECKING:` block, whose body the header rule
+    limits to imports. Annotations are not roots: `_import_time_violations`
+    requires them deferred instead.
+    """
+    stack = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            yield node.value, "value"
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield from ((decorator, "decorator") for decorator in node.decorator_list)
+            if isinstance(node, ast.ClassDef):
+                yield from ((base, "value") for base in node.bases)
+                yield from ((keyword.value, "value") for keyword in node.keywords)
+                for statement in node.body:
+                    if _is_class_declaration(statement):
+                        stack.append(statement)
+                    else:
+                        yield statement, "statement"
+            else:
+                yield from ((default, "value") for default in node.args.defaults)
+                yield from ((default, "value") for default in node.args.kw_defaults if default)
+
+
+def _callee(func):
+    """How IMPORT_TIME_CALLS spells a callee: `name`, `module.name`, or `<str>.method`."""
+    if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Constant)
+            and isinstance(func.value.value, str)):
+        return f"<str>.{func.attr}"
+    return ast.unparse(func)
+
+
+def _import_time_violations(tree):
+    """Sorted `(line, what)` for each import-time expression outside the allowed shape.
+
+    WHY: the header rule stops `if importlib.util.find_spec("modal"):` as a
+    statement, but not the same probe hidden in a declaration, such as
+    `VOLUME_NAME = importlib.util.find_spec("modal") and ...`, a walrus, or a
+    decorator that registers something. The relocation oracle the split
+    retired used to catch that by byte identity (gh#223 item 7).
+
+    A module that has annotations and lacks `from __future__ import
+    annotations` evaluates them on import, so it is reported once, at its
+    first annotation; every package module defers them.
+    """
+    found = set()
+    deferred = any(
+        isinstance(node, ast.ImportFrom) and node.module == "__future__" and any(
+            alias.name == "annotations" for alias in node.names) for node in tree.body)
+    annotated = sorted(
+        node.lineno for node in ast.walk(tree)
+        if (isinstance(node, ast.AnnAssign) or (isinstance(node, ast.arg) and node.annotation) or (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns)))
+    if annotated and not deferred:
+        found.add((annotated[0], "an annotation (no `from __future__ import annotations`)"))
+    for root, role in _import_time_roots(tree):
+        if role == "statement":
+            found.add((root.lineno, f"a class-body `{type(root).__name__}` statement"))
+            continue
+        if (role == "decorator" and not isinstance(root, ast.Call)
+                and _callee(root) not in IMPORT_TIME_CALLS):
+            found.add((root.lineno, f"decorator `{_callee(root)}`"))
+        for node in ast.walk(root):
+            if not isinstance(node, ast.expr):
+                continue
+            if not isinstance(node, _IMPORT_TIME_KINDS):
+                found.add((node.lineno, f"a `{type(node).__name__}` node"))
+            elif isinstance(node, ast.Call) and _callee(node.func) not in IMPORT_TIME_CALLS:
+                found.add((node.lineno, f"a call to `{_callee(node.func)}`"))
+    return sorted(found)
+
+
+def _trusted_binding_violations(tree):
+    """Sorted `(line, what, name)` for each binding of a TRUSTED_NAMES name but its own import.
+
+    Reads module scope, both branches of an `if` (a TYPE_CHECKING body is read
+    too, conservatively, though it never runs) and class bodies. A binding is
+    an import (`import re` and `from pathlib import Path` are the own imports;
+    any other source or `as` name is not), a def or class, or an assignment
+    target, including an attribute target (`builtins.frozenset = print`
+    rebinds the name for every module imported after it). A star import is
+    reported too, with `name` None, because it can bind any of them unseen.
+
+    WHY: the import-time clause trusts `Path(...)` and `frozenset(...)`, and the
+    TYPE_CHECKING predicate trusts `TYPE_CHECKING`, by spelling. Measured
+    before this clause (gh#223 review): `from os import system as Path` made
+    the existing `VOLUME_MOUNT = Path("/artifacts")` shell out on import, and
+    `from os import environ as TYPE_CHECKING` turned an `if TYPE_CHECKING:`
+    import of numpy into a run-time one; every static gate stayed green.
+    """
+    found: list[tuple[int, str, str | None]] = []
+    stack = list(tree.body)
+    while stack:
+        node = stack.pop()
+        bound = []
+        if isinstance(node, ast.If):
+            stack.extend(node.body + node.orelse)
+        elif isinstance(node, ast.ClassDef):
+            stack.extend(node.body)
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.split(".")[0]
+                if alias.name != name or TRUSTED_NAMES.get(name) != name:
+                    bound.append(name)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                if name == "*":
+                    found.append((node.lineno, "a star import", None))
+                elif node.level or node.module != TRUSTED_NAMES.get(name) or alias.name != name:
+                    bound.append(name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound = [node.name]
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            bound = [
+                n.id if isinstance(n, ast.Name) else n.attr for t in targets for n in ast.walk(t)
+                if isinstance(n, (ast.Name, ast.Attribute))
+            ]
+        found.extend((node.lineno, f"a binding of `{name}`", name) for name in bound
+                     if name in TRUSTED_NAMES)
+    return sorted(found)
 
 
 def _dependency_edges(sources):
@@ -309,8 +463,8 @@ def _dependency_edges(sources):
     second, weaker copy that missed the package-level and parent spellings.
 
     PITFALL: that walker is an `ast.walk`, so an absolute spelling is recorded
-    as a runtime edge even under `if TYPE_CHECKING:`. That fails closed: no
-    table allows `PACKAGED` in either column.
+    as a runtime edge even under `if TYPE_CHECKING:`. That fails closed: the
+    `table-edge` clause keeps `PACKAGED` out of both tables.
     """
     runtime, annotations = {}, {}
     for filename, source in sources.items():
@@ -321,13 +475,10 @@ def _dependency_edges(sources):
         stack = [(ast.parse(source), False)]
         while stack:
             node, checking = stack.pop()
-            if isinstance(node, ast.If):
-                test = node.test
-                if ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
-                        or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")):
-                    stack.extend((child, True) for child in node.body)
-                    stack.extend((child, checking) for child in node.orelse)
-                    continue
+            if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+                stack.extend((child, True) for child in node.body)
+                stack.extend((child, checking) for child in node.orelse)
+                continue
             edges = annotations[module] if checking else runtime[module]
             if isinstance(node, ast.ImportFrom) and node.level == 1:
                 if node.module:
@@ -340,23 +491,197 @@ def _dependency_edges(sources):
     return runtime, annotations
 
 
-def _dependency_violations(sources):
+def _import_cycle(dependencies):
+    """One cycle in the `dependencies` graph as `[a, b, ..., a]`, or `[]` if it has none."""
+    finished: set[str] = set()
+
+    def visit(path):
+        for edge in dependencies.get(path[-1], []):
+            if edge in path:
+                return path[path.index(edge):] + [edge]
+            if edge not in finished:
+                found = visit(path + [edge])
+                if found:
+                    return found
+        finished.add(path[-1])
+        return []
+
+    for module in sorted(dependencies):
+        found = [] if module in finished else visit([module])
+        if found:
+            return found
+    return []
+
+
+def _dependency_violations(sources,
+                           dependencies=DEPENDENCIES,
+                           annotation_dependencies=ANNOTATION_DEPENDENCIES):
     """The import-graph clauses: resolved edges must equal DEPENDENCIES / ANNOTATION_DEPENDENCIES.
 
     Compared per module. A module in `sources` that DEPENDENCIES does not
-    declare is reported as `undeclared-module` rather than skipped.
+    declare is reported as `undeclared-module` rather than skipped. The tables
+    default to the declared ones; controls pass edited copies.
+
+    `table-edge`: every value in either table must be a module MANIFEST
+    declares. WHY: the comparison makes legal whatever a table lists, and an
+    edge that is not a module comes from an import the package must never
+    hold: an absolute or `..` spelling (`_dependency_edges` records it as
+    `PACKAGED` or as its dotted spelling), or `from . import <name>` of a name
+    the facade re-exports, which reads the facade from inside the package.
+    Measured before this clause: `from . import validate_local_checkpoint` in
+    training (gh#221 review I-2) and an absolute import of the package under
+    `if TYPE_CHECKING:` in state (gh#222 review F7) each turned every gate
+    green once the edge `runtime-edges` reported was added to DEPENDENCIES,
+    as its message said to.
+
+    `table-cycle`: the DEPENDENCIES graph has no cycle, so core, which every
+    module imports, stays a leaf. WHY: the comparison makes a cycle legal once
+    both edges are listed. Measured before this clause (gh#223 fold
+    re-review): `from . import training` in a core function, with
+    DEPENDENCIES['core'] = ['training'], turned every gate green.
+    ANNOTATION_DEPENDENCIES may hold a cycle: breaking one is what an
+    import under TYPE_CHECKING is for.
     """
+    declared = set(RUNNER_MODULES)
+    failures: list[tuple] = [("table-edge", table, module, sorted(set(edges) - declared))
+                             for table, entries in (("DEPENDENCIES", dependencies),
+                                                    ("ANNOTATION_DEPENDENCIES",
+                                                     annotation_dependencies))
+                             for module, edges in entries.items() if not set(edges) <= declared]
+    cycle = _import_cycle(dependencies)
+    if cycle:
+        failures.append(("table-cycle", cycle))
     runtime, annotations = _dependency_edges(sources)
-    failures: list[tuple] = [("undeclared-module", module)
-                             for module in sorted(set(runtime) - set(DEPENDENCIES))]
+    failures.extend(
+        ("undeclared-module", module) for module in sorted(set(runtime) - set(dependencies)))
     for module in RUNNER_MODULES:
-        expected = set(DEPENDENCIES[module])
+        # A module MANIFEST declares and DEPENDENCIES does not is reported by
+        # `test_package_structure_contract`; indexing it here would raise a
+        # bare KeyError in every test that reaches this gate instead.
+        if module not in dependencies:
+            continue
+        expected = set(dependencies[module])
         if runtime.get(module) != expected:
             failures.append(("runtime-edges", module, runtime.get(module), expected))
-        expected = set(ANNOTATION_DEPENDENCIES.get(module, []))
+        expected = set(annotation_dependencies.get(module, []))
         if annotations.get(module) != expected:
             failures.append(("annotation-edges", module, annotations.get(module), expected))
     return failures
+
+
+def _sibling_bindings(tree, modules):
+    """{bound name: package module} for each name a one-dot relative import binds to a module.
+
+    Follows `from . import <module> [as <name>]` and a module a sibling binds
+    (`from .commands import core`, the same module object). The bindings are
+    file-wide: an import inside one function binds its name for every read in
+    the file.
+    """
+    return {
+        alias.asname or alias.name: alias.name
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.level == 1
+        for alias in node.names if alias.name in modules
+    }
+
+
+def _seam_violations(sources, seams=QUALIFIED_SEAMS):
+    """The `seam` clauses: the qualified seams stay qualified, and nothing else is qualified.
+
+    `sources` is a {filename: text} map of the package submodules; `seams`
+    defaults to QUALIFIED_SEAMS, and controls pass an edited copy. Reports:
+
+    * `seam-from-import`: a module from-imports a seam's name, from its owner
+      or, as `from . import <name>`, from the facade, whose re-export is a
+      copy too; or it star-imports a seam's owner. Each binds a copy that a
+      test patching the owner never reaches.
+    * `seam-import-time`: a seam read where it runs on import
+      (`_import_time_roots`: a module-scope value, a default argument, a
+      decorator, a class body), which binds the object the same way.
+    * `seam-readers`: the modules that read `owner.name` differ from the
+      seam's QUALIFIED_SEAMS entry, so the table no longer describes the code.
+    * `seam-undeclared`: a module reads a name that is not a seam through a
+      sibling module object (`owner.name`). Either it is a seam tests rely
+      on, and belongs in the table, or it should be from-imported like every
+      other name.
+    * `seam-entry`: a QUALIFIED_SEAMS entry lists no reader, or its owner
+      does not define its name. `seam-readers` cannot see an entry with no
+      readers that nothing reads, so it would stand in the table unchecked.
+
+    WHY: the dependency and membership gates cannot see any of these, because
+    the reader-to-owner edge exists either way. Measured before this clause
+    (gh#221): every seam read rewritten as a from-import left both returning
+    [].
+
+    A read is `<name>.<attr>` where `_sibling_bindings` binds `<name>` to
+    another package module. PITFALL: local shadowing is not modelled, as in
+    `_referenced_module_names` (tests/test_modal_packaging.py): a local
+    variable named like a module the file binds is read as that module. That
+    fails closed, as a spurious `seam-undeclared` or reader, and no package
+    module has such a local today (census, gh#221 review).
+    """
+    trees = {filename.removesuffix(".py"): ast.parse(text) for filename, text in sources.items()}
+    violations: list[tuple] = []
+    readers: dict[str, set[str]] = {seam: set() for seam in seams}
+    for module, tree in trees.items():
+        bound = _sibling_bindings(tree, set(trees))
+        import_time = {id(node) for root, _ in _import_time_roots(tree) for node in ast.walk(root)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 1:
+                for alias in node.names:
+                    if node.module is None:
+                        # `from . import <name>` of a name, not a module: the facade's copy.
+                        copied = [seam for seam in seams if seam.split(".")[1] == alias.name]
+                    else:
+                        seam = f"{node.module}.{alias.name}"
+                        star = alias.name == "*" and any(
+                            name.startswith(f"{node.module}.") for name in seams)
+                        copied = [seam] if seam in seams or star else []
+                    violations.extend(
+                        ("seam-from-import", module, node.lineno, seam) for seam in copied)
+            elif (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                  and node.value.id in bound and bound[node.value.id] != module):
+                seam = f"{bound[node.value.id]}.{node.attr}"
+                if seam not in seams:
+                    violations.append(("seam-undeclared", module, node.lineno, seam))
+                    continue
+                readers[seam].add(module)
+                if id(node) in import_time:
+                    violations.append(("seam-import-time", module, node.lineno, seam))
+    for seam, declared in seams.items():
+        owner, _, name = seam.partition(".")
+        if not declared or owner not in trees or name not in _module_level_names(trees[owner]):
+            violations.append(("seam-entry", seam, list(declared)))
+        elif readers[seam] != set(declared):
+            violations.append(("seam-readers", seam, sorted(readers[seam]), sorted(declared)))
+    return violations
+
+
+def _facade_source():
+    """The live facade's text (FACADE_FILE)."""
+    return (ROOT / FACADE_FILE).read_text(encoding="utf-8")
+
+
+def _facade_paragraph(facade, heading):
+    """The facade docstring's paragraph that starts with `heading`, or "" if none does."""
+    docstring = ast.get_docstring(ast.parse(facade)) or ""
+    if heading not in docstring:
+        return ""
+    return docstring.split(heading, 1)[1].split("\n\n", 1)[0]
+
+
+def _facade_module_map(facade):
+    """The module names the facade docstring's MODULE MAP lists, sorted, repeats kept."""
+    paragraph = _facade_paragraph(facade, "MODULE MAP")
+    return sorted(re.findall(r"^  (\w+) ", paragraph, flags=re.MULTILINE))
+
+
+def _facade_seam_list(facade):
+    """The `module.name` spellings the facade docstring's QUALIFIED SEAMS paragraph lists."""
+    paragraph = _facade_paragraph(facade, "QUALIFIED SEAMS.")
+    return {
+        f"{module}.{name}"
+        for module, name in re.findall(r"`(\w+)\.(\w+)`", paragraph) if module in RUNNER_MODULES
+    }
 
 
 def _facade_violations(source):
@@ -367,7 +692,7 @@ def _facade_violations(source):
     module-population clauses skip it because it declares no symbol of its own.
     Its module scope may hold only its docstring, one-dot relative imports of
     its submodules (`from .core import X`, `from . import core`; no star
-    import, which would re-export whatever the submodule binds) and `__all__`
+    import, which would re-export every public name the submodule binds) and `__all__`
     bound to a list or tuple of string literals. That one rule covers, for this
     file, what the header rule covers for the modules (a call, a conditional, a
     loop), what the purity rule covers (an absolute or non-stdlib import) and a
@@ -414,14 +739,14 @@ def _explain(violations):
             parts = []
             if v[1]:
                 parts.append(f"holds modules the tables do not declare, {v[1]}: declare each in "
-                             f"{_TABLES} in the same commit, or delete the stray file")
+                             f"{TABLES} in the same commit, or delete the stray file")
             if v[2]:
                 parts.append(f"lacks modules MANIFEST declares, {v[2]}: restore them, or remove "
-                             f"their entries from {_TABLES}")
+                             f"their entries from {TABLES}")
             text = f"scripts/modal_runner/ {'; and it '.join(parts)}."
         elif kind == "undeclared-module":
             text = (f"scripts/modal_runner/{v[1]}.py is not in DEPENDENCIES. Declare the module in "
-                    f"{_TABLES}, or delete it.")
+                    f"{TABLES}, or delete it.")
         elif kind == "manifest-duplicates":
             text = (
                 f"MANIFEST gives these symbols more than one owner: {v[1]}. Each symbol lives in "
@@ -443,26 +768,100 @@ def _explain(violations):
             if v[3]:
                 parts.append(f"MANIFEST['{v[1]}'] lists {v[3]}, which {v[1]} does not define")
             text = (f"{'; '.join(parts)}. If you meant to add, remove or move a symbol, update "
-                    f"MANIFEST['{v[1]}'] in tests/test_modal_runner_package_shape.py in the same "
+                    f"MANIFEST['{v[1]}'] in {TABLES_FILE} in the same "
                     "commit.")
         elif kind == "duplicates":
             text = (f"{v[1]} binds {v[2]} more than once at module scope; the later binding "
                     "silently shadows the earlier one. Keep one.")
+        elif kind == "table-edge":
+            text = (f"{v[1]}['{v[2]}'] in {TABLES_FILE} lists {v[3]}, which MANIFEST does not "
+                    "declare as modules. An import table lists the package modules a module "
+                    "imports, so no other edge can be made legal there: remove the value, and "
+                    "write the import as a one-dot relative import of a module (`from . import "
+                    f"core`, `from .core import X`), never an absolute (`{PACKAGED}`) or `..` "
+                    "spelling, and never `from . import <name>`, which reads the facade.")
+        elif kind == "table-cycle":
+            text = (f"DEPENDENCIES in {TABLES_FILE} has the import cycle {' -> '.join(v[1])}. "
+                    "Package modules import each other in one direction, and core, which every "
+                    "module imports, imports none of them: move the shared name into the module "
+                    "both sides already import, or import it only under `if TYPE_CHECKING:` if "
+                    "only an annotation needs it.")
         elif kind == "runtime-edges":
-            text = (f"{v[1]}.py imports package modules {v[2]} at run time; DEPENDENCIES['{v[1]}'] "
-                    f"allows {v[3]}. Write intra-package imports as one-dot relative imports; "
-                    f"absolute (`{PACKAGED}`) and `..` spellings are never allowed. If a new edge "
-                    "is intended and keeps the graph acyclic (core stays a leaf), update "
-                    "DEPENDENCIES in the same commit.")
+            text = (f"{v[1]}.py imports {v[2]} from the package at run time (an absolute "
+                    "spelling counts as run time even under `if TYPE_CHECKING:`); "
+                    f"DEPENDENCIES['{v[1]}'] allows {v[3]}. Write intra-package imports as "
+                    "one-dot relative imports of a module (`from . import core`, `from .core "
+                    f"import X`); absolute (`{PACKAGED}`) and `..` spellings, and `from . import "
+                    "<name>` of a name the facade re-exports, are never allowed. If a new edge "
+                    "to a package module is intended and keeps the graph acyclic (core stays a "
+                    f"leaf), update DEPENDENCIES in {TABLES_FILE} in the same commit.")
         elif kind == "annotation-edges":
             text = (f"{v[1]}.py imports {v[2]} under `if TYPE_CHECKING:`; "
-                    f"ANNOTATION_DEPENDENCIES allows {v[3]}. Update ANNOTATION_DEPENDENCIES if the "
-                    "annotation-only import is intended.")
+                    f"ANNOTATION_DEPENDENCIES allows {v[3]}. If an annotation-only import of a "
+                    f"package module is intended, update ANNOTATION_DEPENDENCIES in {TABLES_FILE}; "
+                    "a `..` spelling is never allowed.")
+        elif kind == "import-time":
+            text = (f"{v[1]} line {v[2]}: {v[3]} runs when the module is imported. What a "
+                    "declaration evaluates on import (its value, decorators, default arguments, "
+                    "class bases and keywords, and class body) may use only literals, names, "
+                    "attribute reads, containers, arithmetic and calls to IMPORT_TIME_CALLS "
+                    f"({', '.join(sorted(IMPORT_TIME_CALLS))}), and a class body may hold only "
+                    "its docstring, `pass`, defs, classes and assignments to plain names. Move "
+                    "the work into a function, "
+                    "and keep `from __future__ import annotations` in every module that "
+                    "annotates. A new pure constructor goes in IMPORT_TIME_CALLS "
+                    "(tests/test_modal_runner_package_shape.py) in the same commit.")
+        elif kind == "trusted-binding":
+            name = v[4]
+            source = TRUSTED_NAMES.get(name or "")
+            own = ("the builtin, and nothing may rebind it"
+                   if source == "builtins" else f"bound only by `import {name}`"
+                   if source == name else f"bound only by `from {source} import {name}`")
+            text = (f"{v[1]} line {v[2]}: {v[3]}. The import-time clause and the TYPE_CHECKING "
+                    "predicate match these names by spelling, so each must be what it says: "
+                    f"`{name}` is {own}. Rename the binding." if name else
+                    f"{v[1]} line {v[2]}: {v[3]}, which can rebind any name in TRUSTED_NAMES "
+                    "unseen. Import the names it needs explicitly.")
+        elif kind == "seam-from-import" and v[3].endswith(".*"):
+            owner = v[3].removesuffix(".*")
+            copied = sorted(seam for seam in QUALIFIED_SEAMS if seam.startswith(f"{owner}."))
+            text = (f"{v[1]}.py line {v[2]} star-imports `{owner}`, which binds copies of its "
+                    f"qualified seams {copied} that a test patching `{owner}` never reaches. "
+                    "Import the other names you need by name, and read each seam as "
+                    "`owner.name` at call time (QUALIFIED SEAMS in "
+                    f"{FACADE_FILE}).")
+        elif kind == "seam-from-import":
+            text = (f"{v[1]}.py line {v[2]} imports the qualified seam `{v[3]}` by name, which "
+                    "binds a copy that a test patching the owning module never reaches. Read it "
+                    "as `owner.name` at call time (QUALIFIED SEAMS in "
+                    f"{FACADE_FILE}).")
+        elif kind == "seam-import-time":
+            text = (f"{v[1]}.py line {v[2]} reads the qualified seam `{v[3]}` when the module is "
+                    "imported (a module-scope value, a default argument, a decorator or a class "
+                    "body). That binds the object then, so a later patch on the owning module "
+                    "never reaches it. Read it inside the function that calls it.")
+        elif kind == "seam-readers":
+            text = (f"the modules that read `{v[1]}` are {v[2]}; QUALIFIED_SEAMS in "
+                    f"{TABLES_FILE} lists {v[3]}. If a reader was added or removed "
+                    "on purpose, update that entry in the same commit; if a reader switched to "
+                    f"a from-import, restore `{v[1]}`.")
+        elif kind == "seam-undeclared":
+            owner, name = v[3].split(".")
+            text = (f"{v[1]}.py line {v[2]} reads `{v[3]}` through the module object, but it is "
+                    f"not a qualified seam. From-import it (`from .{owner} import {name}`); or, "
+                    "if tests must patch it on its owner, add it to QUALIFIED_SEAMS in "
+                    f"{TABLES_FILE} and to the QUALIFIED SEAMS paragraph of "
+                    f"{FACADE_FILE}.")
+        elif kind == "seam-entry":
+            text = (f"QUALIFIED_SEAMS in {TABLES_FILE} lists `{v[1]}` with readers {v[2]}, but "
+                    "a seam is a name its owner module defines that at least one other module "
+                    "reads as `owner.name`. Fix the key, or delete the entry and its name in the "
+                    f"QUALIFIED SEAMS paragraph of {FACADE_FILE}.")
         elif kind == "forbidden-name":
             text = (f"{v[1]} is a grab-bag module name ({'/'.join(GRAB_BAG_MODULE_NAMES)}). Name "
                     "the module for the concern it owns.")
         elif kind == "facade":
-            text = (f"scripts/modal_runner/__init__.py line {v[1]} ({v[2]}): the facade runs "
+            text = (f"{FACADE_FILE} line {v[1]} ({v[2]}): the facade runs "
                     "on every `import scripts.modal_runner`, so its module scope may hold only "
                     "its docstring, one-dot relative imports of its submodules (named, never "
                     "`*`) and `__all__` alone bound to a list or tuple of string literals. Move "
@@ -490,13 +889,13 @@ def _hoist_type_checking_imports(source):
     """Move a module's `if TYPE_CHECKING:` imports to module scope, dedented.
 
     The plant for "an annotation-only edge became a runtime edge". Asserts the
-    block holds relative from-imports only, so the plant cannot silently move
-    something else.
+    block holds imports only, so the plant cannot silently move something
+    else; a stdlib import there is legal and moves harmlessly.
     """
     lines = source.splitlines(keepends=True)
     block = next(n for n in ast.parse(source).body if isinstance(n, ast.If))
-    assert all(isinstance(n, ast.ImportFrom) and n.level == 1 for n in block.body), (
-        f"the TYPE_CHECKING block at line {block.lineno} holds more than relative imports")
+    assert all(isinstance(n, (ast.Import, ast.ImportFrom)) for n in block.body), (
+        f"the TYPE_CHECKING block at line {block.lineno} holds more than imports")
     moved = "".join("".join(lines[n.lineno - 1:n.end_lineno]).replace("    ", "", 1)
                     for n in block.body)
     lines[block.lineno - 1:block.end_lineno] = [moved]
@@ -510,21 +909,24 @@ def live_sources():
 
 
 def test_package_structure_contract(live_sources):
-    """The structure clauses on the live package, plus the tables' consistency."""
+    """The structure clauses on the live package, plus the tables' consistency.
+
+    RUNNER_MODULES is derived from MANIFEST, so the only way the tables can
+    disagree about the module list is DEPENDENCIES or ANNOTATION_DEPENDENCIES.
+    """
     declared = set(RUNNER_MODULES)
-    manifest_modules = {name.removesuffix(".py") for name in MANIFEST}
-    keyed = (manifest_modules == declared and set(DEPENDENCIES) == declared
-             and set(ANNOTATION_DEPENDENCIES) <= declared)
+    keyed = set(DEPENDENCIES) == declared and set(ANNOTATION_DEPENDENCIES) <= declared
     assert keyed, (
-        f"MANIFEST {sorted(MANIFEST)}, DEPENDENCIES {sorted(DEPENDENCIES)} and "
-        f"ANNOTATION_DEPENDENCIES {sorted(ANNOTATION_DEPENDENCIES)} must be keyed by the modules "
-        f"RUNNER_MODULES declares ({list(RUNNER_MODULES)}); update them together.")
+        f"DEPENDENCIES {sorted(DEPENDENCIES)} must be keyed by exactly the modules MANIFEST "
+        f"declares ({list(RUNNER_MODULES)}), and ANNOTATION_DEPENDENCIES "
+        f"{sorted(ANNOTATION_DEPENDENCIES)} by some of them; update them together in "
+        f"{TABLES_FILE}.")
     _assert_no_violations(_structure_violations(live_sources), "the live package")
 
 
 def test_package_facade_contract():
     """The facade's module-scope rule (`_facade_violations`) on the live `__init__.py`."""
-    facade = (ROOT / "scripts" / "modal_runner" / "__init__.py").read_text(encoding="utf-8")
+    facade = _facade_source()
     _assert_no_violations(_facade_violations(facade), "the live facade")
 
 
@@ -575,13 +977,13 @@ def test_package_facade_controls(plant, kinds):
     * chained-all and set-all: `__all__` must be the only target and a list or
       tuple, so a second target and a set are rejected. tuple-all is ACCEPTED,
       the tuple half of that shape.
-    * star-import: re-exports whatever the submodule binds. The client surface
+    * star-import: re-exports every public name the submodule binds. The client surface
       gate also objects, but only by running the image.
     * re-export: ACCEPTED. A new one-dot relative import is legal shape here;
       whether the name belongs in the facade is the surface gates' question,
       so a clause that rejected every added line would fail this row.
     """
-    facade = (ROOT / "scripts" / "modal_runner" / "__init__.py").read_text(encoding="utf-8")
+    facade = _facade_source()
     _assert_no_violations(_facade_violations(facade),
                           _precondition("test_package_facade_contract", "the live facade"))
     # The plant's statements start on the line after the facade's last line. A
@@ -697,7 +1099,7 @@ def test_package_manifest_controls(live_sources, plant, expected):
     has nothing to report, and the exact violation list says which clause, if
     any, still objects (each row's test ID ends in the verdict it asserts):
 
-    * dropped-from-both: `REASON_ERROR` leaves MANIFEST['core.py'] and core.py.
+    * dropped-from-both: `REASON_ERROR` leaves MANIFEST['training.py'] and training.py.
       ACCEPTED: deleting a symbol and its entry is the membership message's
       remedy, and no other clause may hold it red.
     * added-to-both: a new constant is declared in MANIFEST['core.py'] and
@@ -711,9 +1113,9 @@ def test_package_manifest_controls(live_sources, plant, expected):
     manifest = {filename: list(names) for filename, names in MANIFEST.items()}
     changed = dict(live_sources)
     if plant == "dropped-from-both":
-        manifest["core.py"].remove("REASON_ERROR")
-        changed["core.py"] = live_sources["core.py"].replace(
-            _segments(live_sources["core.py"])["REASON_ERROR"], "", 1)
+        manifest["training.py"].remove("REASON_ERROR")
+        changed["training.py"] = live_sources["training.py"].replace(
+            _segments(live_sources["training.py"])["REASON_ERROR"], "", 1)
     elif plant == "added-to-both":
         manifest["core.py"].append("POLL_JITTER_SECONDS")
         changed["core.py"] += "\nPOLL_JITTER_SECONDS = 0.5\n"
@@ -736,6 +1138,21 @@ def test_package_manifest_controls(live_sources, plant, expected):
         _assert_no_violations(_structure_violations(live_sources), precondition)
 
 
+def test_trusted_names_cover_every_spelling_the_gates_trust():
+    """TRUSTED_NAMES has a source for each name trusted by spelling, and no other.
+
+    Those names are each bare callee and module prefix in IMPORT_TIME_CALLS,
+    and `TYPE_CHECKING`. A callee added without its source would be trusted
+    unwatched, so `from os import system as <it>` would pass.
+    """
+    spelled = {callee.split(".")[0] for callee in IMPORT_TIME_CALLS if not callee.startswith("<")}
+    expected = spelled | {"TYPE_CHECKING"}
+    assert set(TRUSTED_NAMES) == expected, (
+        "TRUSTED_NAMES (tests/test_modal_runner_package_shape.py) must list exactly the bare "
+        "callees and module prefixes of IMPORT_TIME_CALLS, plus TYPE_CHECKING. Missing: "
+        f"{sorted(expected - set(TRUSTED_NAMES))}; extra: {sorted(set(TRUSTED_NAMES) - expected)}.")
+
+
 @pytest.mark.parametrize("spelling", ["TYPE_CHECKING", "typing.TYPE_CHECKING", "os.TYPE_CHECKING"])
 def test_package_header_accepts_import_only_type_checking(live_sources, spelling):
     _assert_no_violations(_structure_violations(live_sources),
@@ -746,8 +1163,175 @@ def test_package_header_accepts_import_only_type_checking(live_sources, spelling
                           f"a legal imports-only `if {spelling}:` block in core.py")
 
 
+# Each row plants one shape into the live sources, in memory: a `VOLUME_NAME =`
+# row replaces that constant's value in core.py, `drop-future` deletes
+# source.py's `from __future__ import annotations`, and any other row is
+# appended to training.py. `expected` is what the `import-time` and
+# `trusted-binding` clauses alone must report, since a planted name also trips
+# membership. The ID ends in the verdict the row asserts.
+@pytest.mark.parametrize("plant, expected", [
+    pytest.param(plant, expected, id=f"{name}-{'rejected' if expected else 'accepted'}")
+    for name, plant, expected in [
+        ("find-spec-in-value", 'VOLUME_NAME = importlib.util.find_spec("modal")',
+         ["a call to `importlib.util.find_spec`"]),
+        ("walrus-in-value", 'VOLUME_NAME = (_ON_CONTAINER := "cs2rl-training-artifacts")',
+         ["a `NamedExpr` node"]),
+        ("conditional-in-value", 'VOLUME_NAME = "a" if TYPE_CHECKING else "b"', ["a `IfExp` node"]),
+        ("environment-in-value", 'VOLUME_NAME = os.environ["CS2RL_VOLUME"]',
+         ["a `Subscript` node"]),
+        ("comprehension-in-value", 'VOLUME_NAME = [c for c in "ab"]', ["a `ListComp` node"]),
+        ("decorator", "@atexit.register\ndef _plant():\n    pass\n",
+         ["decorator `atexit.register`"]),
+        ("decorator-call", "@functools.lru_cache(maxsize=1)\ndef _plant():\n    pass\n",
+         ["a call to `functools.lru_cache`"]),
+        ("default-argument", 'def _plant(flag=os.environ.get("X")):\n    return flag\n',
+         ["a call to `os.environ.get`"]),
+        ("class-body", 'class _Plant:\n    X = print("work")\n', ["a call to `print`"]),
+        ("class-body-call", 'class _Plant:\n    print("work")\n',
+         ["a class-body `Expr` statement"]),
+        ("class-body-if", 'class _Plant:\n    if os.environ.get("X"):\n        pass\n',
+         ["a class-body `If` statement"]),
+        ("class-body-subscript-target", 'class _Plant:\n    X = os.environ["A"] = "1"\n',
+         ["a class-body `Assign` statement"]),
+        ("class-keyword", "class _Plant(metaclass=print()):\n    pass\n", ["a call to `print`"]),
+        ("keyword-only-default", 'def _plant(*, flag=os.getenv("X")):\n    return flag\n',
+         ["a call to `os.getenv`"]),
+        ("annotated-field-default", 'class _Plant:\n    x: str = field(default=os.getenv("X"))\n',
+         ["a call to `os.getenv`"]),
+        ("boolean-in-value", 'VOLUME_NAME = TYPE_CHECKING or "x"', ["a `BoolOp` node"]),
+        ("compare-in-value", 'VOLUME_NAME = "a" < "b"', ["a `Compare` node"]),
+        ("lambda-in-value", "VOLUME_NAME = lambda: 0", ["a `Lambda` node"]),
+        ("generator-in-value", 'VOLUME_NAME = frozenset(c for c in "ab")',
+         ["a `GeneratorExp` node"]),
+        ("rebound-callee", "from os import system as Path\n", ["a binding of `Path`"]),
+        ("rebound-builtin", "from importlib.util import find_spec as frozenset\n",
+         ["a binding of `frozenset`"]),
+        ("declared-callee", "def field():\n    pass\n", ["a binding of `field`"]),
+        ("rebound-type-checking", "from os import environ as TYPE_CHECKING\n",
+         ["a binding of `TYPE_CHECKING`"]),
+        ("star-import", "from os import *\n", ["a star import"]),
+        ("rebound-module-import", "import os as re\n", ["a binding of `re`"]),
+        ("assigned-callee", "Path = os.system\n", ["a binding of `Path`"]),
+        ("class-body-rebinding", "class _Plant:\n    field = print\n", ["a binding of `field`"]),
+        ("same-module-alias", "from dataclasses import fields as field\n",
+         ["a binding of `field`"]),
+        ("attribute-rebinding", "import builtins\nbuiltins.frozenset = print\n",
+         ["a binding of `frozenset`"]),
+        ("class-body-annotated-target", 'class _Plant:\n    os.environ["A"]: str = "1"\n',
+         ["a class-body `AnnAssign` statement"]),
+        ("class-base", 'class _Plant(type("B", (), {})):\n    pass\n', ["a call to `type`"]),
+        ("method-decorator",
+         "class _Plant:\n    @atexit.register\n    def m(self):\n        pass\n",
+         ["decorator `atexit.register`"]),
+        ("drop-future", None, ["an annotation (no `from __future__ import annotations`)"]),
+        ("function-body", 'def _plant():\n    return importlib.util.find_spec("modal")\n', []),
+        ("attribute-default", "def _plant(run=subprocess.run):\n    return run\n", []),
+        ("allowed-constructors", "_PLANT = frozenset({re.compile('x'), timedelta(seconds=1)})\n",
+         []),
+        ("deferred-annotation", "_PLANT: dict[str, int] = {}\n", []),
+        ("own-imports", "import re\nfrom pathlib import Path\n", []),
+        ("class-declarations",
+         'class _Plant:\n    """Doc."""\n\n    x: int = 1\n    y = z = 2\n    pass\n', []),
+        ("class-stub-body", "class _Plant(Exception):\n    ...\n", []),
+    ]
+])
+def test_package_import_time_controls(live_sources, plant, expected):
+    """One plant per row, judged by the `import-time` and `trusted-binding` clauses alone.
+
+    * The five `-in-value` rows hide work in an existing constant, the case
+      gh#223 item 7 names: before this clause each one passed every gate,
+      while the same probe as a bare statement was caught by the header rule.
+      Each rejected kind is one `_IMPORT_TIME_KINDS` leaves out, or one call
+      IMPORT_TIME_CALLS does not list.
+    * decorator, decorator-call, default-argument, keyword-only-default,
+      class-body, annotated-field-default, class-base, class-keyword and
+      method-decorator are the other places a declaration runs code on import.
+      Each is a root `_import_time_roots` must reach; drop one and its plant
+      passes, so its row goes red. The boolean, compare, lambda and generator rows hold the
+      kinds `_IMPORT_TIME_KINDS` leaves out the same way.
+    * class-body-call, class-body-if, class-body-subscript-target,
+      class-body-annotated-target: a class body statement that is not a
+      declaration, which the header rule (module scope only) never reads.
+    * rebound-callee, rebound-builtin, declared-callee, rebound-type-checking,
+      star-import, rebound-module-import, assigned-callee,
+      class-body-rebinding, same-module-alias, attribute-rebinding: one row
+      per way a binding can make a trusted spelling mean something else
+      (`trusted-binding`): a from-import from another source, a def, a star
+      import, a plain import, an assignment, a class-body assignment, an `as`
+      alias from the right source, and an attribute target.
+    * drop-future: source.py annotates its functions, so without the
+      `__future__` import those annotations would run on import.
+    * The accepted rows are the shapes the package itself uses: a call in a
+      function body, an attribute read as a default argument, allowed
+      constructors, a deferred subscript annotation, the trusted names' own
+      imports, a class body of declarations and a stub class body (`...`). A clause that rejected them
+      would redden the live package.
+    """
+    filename = ("core.py" if plant and plant.startswith("VOLUME_NAME =") else
+                "source.py" if plant is None else "training.py")
+    live = live_sources[filename]
+    if plant is None:
+        changed = live.replace("from __future__ import annotations\n", "", 1)
+        lines = range(1, changed.count("\n") + 1)
+    elif filename == "core.py":
+        original = 'VOLUME_NAME = "cs2rl-training-artifacts"'
+        changed = live.replace(original, plant, 1)
+        line = live[:live.index(original)].count("\n") + 1
+        lines = range(line, line + 1)
+    else:
+        changed = live + "\n" + plant
+        lines = range(live.count("\n") + 2, changed.count("\n") + 1)
+    assert changed != live, f"the plant {plant!r} did not change {filename}"
+    precondition = _precondition("test_package_structure_contract")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_structure_violations(live_sources), precondition)
+        violations = _structure_violations({**live_sources, filename: changed})
+        reported = [v for v in violations if v[0] in ("import-time", "trusted-binding")]
+        verdict = f"rejected by exactly {expected}" if expected else "accepted"
+        assert [v[3] for v in reported] == expected and all(
+            v[1] == filename and v[2] in lines for v in reported), (
+                f"the {plant!r} plant in {filename} must be {verdict}, on lines {lines}; the "
+                f"gates reported:\n{_explain(violations)}")
+        _assert_no_violations(_structure_violations(live_sources), precondition)
+
+
 def test_package_dependency_contract(live_sources):
     _assert_no_violations(_dependency_violations(live_sources), "the live package's import graph")
+
+
+def test_package_dependency_reports_a_module_missing_from_dependencies(live_sources):
+    """A module MANIFEST declares and DEPENDENCIES does not is skipped, not indexed.
+
+    WHY: before the skip (gh#223 review M5), `DEPENDENCIES[module]` raised a
+    bare KeyError in every test that reached the gate. The structure contract
+    names the table fix; here the gate must only not crash, and still report
+    the module's file as undeclared.
+    """
+    _assert_no_violations(_dependency_violations(live_sources),
+                          _precondition("test_package_dependency_contract"))
+    dependencies = {module: edges for module, edges in DEPENDENCIES.items() if module != "source"}
+    violations = _dependency_violations(live_sources, dependencies)
+    assert violations == [("undeclared-module", "source")], _explain(violations)
+
+
+def test_package_dependency_rejects_an_import_cycle(live_sources):
+    """A cycle listed in both code and DEPENDENCIES is rejected by `table-cycle` alone."""
+    _assert_no_violations(_dependency_violations(live_sources),
+                          _precondition("test_package_dependency_contract"))
+    for _ in range(_CONTROL_PASSES):
+        sources = {
+            **live_sources, "core.py":
+            live_sources["core.py"] + "\n\ndef _plant():\n    from . import training\n"
+        }
+        dependencies = {**DEPENDENCIES, "core": ["training"]}
+        violations = _dependency_violations(sources, dependencies)
+        kinds = [v[0] for v in violations]
+        cycle = violations[0][1] if kinds == ["table-cycle"] else []
+        assert kinds == ["table-cycle"] and cycle[0] == cycle[-1] and {"core", "training"} <= set(
+            cycle
+        ), f"the core -> training cycle must be rejected by `table-cycle` alone:\n{_explain(violations)}"
+        _assert_no_violations(_dependency_violations(live_sources),
+                              _precondition("test_package_dependency_contract"))
 
 
 @pytest.mark.parametrize("plant", ["runtime-annotation", "core-edge", "missing-edge", "extra-edge"])
@@ -842,9 +1426,12 @@ def test_package_annotation_edge_controls(live_sources, plant):
             **live_sources, "preflight.py":
             _hoist_type_checking_imports(live_sources["preflight.py"])
         }
+        # Read from the tables, so a new annotation-only import in preflight,
+        # declared as every message says, keeps this row green.
         runtime = set(DEPENDENCIES["preflight"])
-        expected = [("runtime-edges", "preflight", runtime | {"request"}, runtime),
-                    ("annotation-edges", "preflight", set(), {"request"})]
+        annotated = set(ANNOTATION_DEPENDENCIES["preflight"])
+        expected = [("runtime-edges", "preflight", runtime | annotated, runtime),
+                    ("annotation-edges", "preflight", set(), annotated)]
     else:
         guard = "typing.TYPE_CHECKING" if plant == "typing-attribute" else "TYPE_CHECKING"
         changed = {
@@ -863,6 +1450,278 @@ def test_package_annotation_edge_controls(live_sources, plant):
         _assert_no_violations(_dependency_violations(live_sources), precondition)
 
 
+# Each row is (file, appended import, table, the edge it resolves to). The import
+# is one the package must never hold, and the gate first reports its edge; the
+# row then follows that report's remedy, adding the edge to the table, and
+# requires `table-edge` alone.
+@pytest.mark.parametrize("filename, plant, table, edge", [
+    pytest.param("training.py", "def _plant(path):\n    from . import validate_local_checkpoint\n"
+                 "    return validate_local_checkpoint(path)\n",
+                 "DEPENDENCIES",
+                 "validate_local_checkpoint",
+                 id="facade-name"),
+    pytest.param("state.py",
+                 "if TYPE_CHECKING:\n    from scripts.modal_runner.core import Status\n",
+                 "DEPENDENCIES",
+                 PACKAGED,
+                 id="absolute-under-type-checking"),
+    pytest.param("commands.py",
+                 "if TYPE_CHECKING:\n    from ..modal_runner import core\n",
+                 "ANNOTATION_DEPENDENCIES",
+                 "..modal_runner",
+                 id="parent-relative-annotation"),
+])
+def test_package_table_edge_controls(live_sources, filename, plant, table, edge):
+    """An edge that is not a module stays illegal after it is added to its table.
+
+    * facade-name: `from . import validate_local_checkpoint` reads the facade's
+      re-exported copy; `_dependency_edges` records the name as an edge
+      (gh#221 review I-2).
+    * absolute-under-type-checking: an absolute import is a runtime edge even
+      under `if TYPE_CHECKING:` (gh#222 review F7).
+    * parent-relative-annotation: a `..` import under `if TYPE_CHECKING:` is an
+      annotation edge, the ANNOTATION_DEPENDENCIES half.
+
+    Each row checks the gate twice: with the live tables, where the edge
+    clause alone reports the import, and with the edge added to its table,
+    which is what that report's message said to do before this clause. With
+    `table-edge` knocked out, that second check returns [] for every row.
+    """
+    module = filename.removesuffix(".py")
+    tables = {"DEPENDENCIES": DEPENDENCIES, "ANNOTATION_DEPENDENCIES": ANNOTATION_DEPENDENCIES}
+    allowed = set(tables[table].get(module, []))
+    clause = "runtime-edges" if table == "DEPENDENCIES" else "annotation-edges"
+    changed = {**live_sources, filename: live_sources[filename] + "\n" + plant}
+    edited = {**tables, table: {**tables[table], module: sorted(allowed | {edge})}}
+    first = [(clause, module, allowed | {edge}, allowed)]
+    after_remedy = [("table-edge", table, module, [edge])]
+    precondition = _precondition("test_package_dependency_contract",
+                                 "the live package's import graph")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_dependency_violations(live_sources), precondition)
+        reported = _dependency_violations(changed)
+        assert reported == first, (
+            f"the {edge!r} import in {filename} must first be reported by exactly {first}; the "
+            f"gates reported:\n{_explain(reported)}")
+        reported = _dependency_violations(changed, edited["DEPENDENCIES"],
+                                          edited["ANNOTATION_DEPENDENCIES"])
+        assert reported == after_remedy, (
+            f"adding {edge!r} to {table}['{module}'] must leave it rejected by exactly "
+            f"{after_remedy}; the gates reported:\n{_explain(reported)}")
+        _assert_no_violations(_dependency_violations(live_sources), precondition)
+
+
+@pytest.mark.parametrize("plant", ["live", "renamed-line", "dropped-line", "duplicated-line"])
+def test_facade_module_map_lists_every_declared_module(plant):
+    """MODULE MAP in the facade docstring names each declared module, and `__init__`, once.
+
+    The map is the reader's copy of the module list; before this test it was
+    the one copy no gate read. The plant rows show the parser sees a renamed,
+    a dropped and a repeated line, so a parser that returned the table would
+    fail them. They first re-check the live map, so adding a module without
+    its map line reds them as PRECONDITION, naming the `live` row.
+    """
+    declared = sorted([*RUNNER_MODULES, "__init__"])
+    live = _facade_module_map(_facade_source())
+    remedy = (f"the MODULE MAP in {FACADE_FILE} lists {live}; it must list each module MANIFEST "
+              f"in {TABLES_FILE} declares, and `__init__`, once: {declared}. Add or remove the "
+              "module's map line in the same commit as its MANIFEST entry.")
+    if plant == "live":
+        assert live == declared, remedy
+        return
+    assert live == declared, _precondition(
+        "test_facade_module_map_lists_every_declared_module[live]", "the facade's MODULE MAP")
+    facade = _facade_source()
+    start = facade.index("\n  source      ")
+    end = facade.index("\n", start + 1)
+    if plant == "renamed-line":
+        facade = facade[:start] + facade[start:end].replace("source  ", "sourcery",
+                                                            1) + facade[end:]
+        expected = sorted(set(declared) - {"source"} | {"sourcery"})
+    elif plant == "dropped-line":
+        facade = facade[:start] + facade[end:]
+        expected = sorted(set(declared) - {"source"})
+    else:
+        facade = facade[:end] + facade[start:end] + facade[end:]
+        expected = sorted([*declared, "source"])
+    listed = _facade_module_map(facade)
+    assert listed == expected, (
+        f"the {plant} plant must make the map read {expected}; the parser read {listed}")
+
+
+def test_package_seam_contract(live_sources):
+    """The `seam` clauses on the live package, and the facade docstring's seam list."""
+    _assert_no_violations(_seam_violations(live_sources), "the live package's qualified seams")
+    facade = _facade_source()
+    listed = _facade_seam_list(facade)
+    assert listed == set(QUALIFIED_SEAMS), (
+        f"the QUALIFIED SEAMS paragraph of {FACADE_FILE} lists "
+        f"{sorted(listed)}, but QUALIFIED_SEAMS in {TABLES_FILE} declares "
+        f"{sorted(QUALIFIED_SEAMS)}. Update the two together.")
+
+
+@pytest.mark.parametrize("plant", ["dropped-name", "added-name", "renamed-heading"])
+def test_facade_seam_list_controls(plant):
+    """The facade seam-list parser reads the planted paragraph, not the table.
+
+    `test_package_seam_contract` compares what `_facade_seam_list` reads with
+    QUALIFIED_SEAMS. Each row edits the live facade text in memory, and the
+    parser must read exactly the edited list, which differs from the table:
+    one name un-backticked, one extra backticked `core.RUNS_ROOT`, or the
+    heading renamed (no paragraph, so no names). WHY: before these rows a
+    parser that returned the table left every test green (gh#221 review M-2).
+    """
+    facade = _facade_source()
+    live = _facade_seam_list(facade)
+    assert live == set(QUALIFIED_SEAMS), (
+        f"{_precondition('test_package_seam_contract', 'the facade')} lists {sorted(live)}")
+    expected = set(QUALIFIED_SEAMS)
+    if plant == "dropped-name":
+        planted = facade.replace("`state.transition_status`", "transition_status", 1)
+        expected = expected - {"state.transition_status"}
+    elif plant == "added-name":
+        planted = facade.replace("QUALIFIED SEAMS.",
+                                 "QUALIFIED SEAMS. `core.RUNS_ROOT` is not one.", 1)
+        expected = expected | {"core.RUNS_ROOT"}
+    else:
+        planted = facade.replace("QUALIFIED SEAMS.", "QUALIFIED NAMES.", 1)
+        expected = set()
+    assert planted != facade, f"the {plant} plant did not apply"
+    listed = _facade_seam_list(planted)
+    assert listed == expected, (
+        f"the {plant} plant must make the parser read {sorted(expected)}; it read "
+        f"{sorted(listed)}")
+
+
+# One from-import plant per seam, in one of its readers: the reader's `owner.name`
+# reads become bare names, and `from .owner import name` is appended.
+_SEAM_FROM_IMPORT_PLANTS = {
+    "core.PREBUILT_PYTHON": "commands.py",
+    "core.sha256_file": "source.py",
+    "state.transition_status": "preflight.py",
+    "checkpoint.validate_local_checkpoint": "training.py",
+}
+
+
+@pytest.mark.parametrize("plant", [
+    *(f"from-import-{seam}" for seam in _SEAM_FROM_IMPORT_PLANTS), "import-time-alias",
+    "import-time-default", "import-time-class-body", "undeclared", "imported-name",
+    "reader-dropped", "aliased-module", "re-exported-module", "star-import", "facade-copy",
+    "entry-without-readers", "entry-for-undefined-name"
+])
+def test_package_seam_controls(live_sources, plant):
+    """One plant per row, rejected by exactly the `seam` violations it names.
+
+    * from-import-<seam>: the rewrite gh#221 measured green on every gate.
+      Rejected twice: the from-import itself, and the reader leaving the seam's
+      reader set.
+    * import-time-alias, import-time-default, import-time-class-body:
+      `_HASH = core.sha256_file`, `def f(hasher=core.sha256_file)` and a
+      class-body `for _h in (core.sha256_file,)` in training, which already
+      reads the seam at call time. Each binds the object on import; the
+      reader set is unchanged, so only `seam-import-time` fires. The class-body
+      row is the gh#221 review's I-1: a class-body statement that is not a
+      declaration was no import-time root before 4ef3e6d.
+    * undeclared, imported-name: training reads `state.write_heartbeat`, a
+      name state defines, and `state.Status`, a name state only imports,
+      through the module object. Neither is a seam; the second passed before
+      the gh#221 review (M-1), when only names the owner defines were matched.
+    * reader-dropped: commands stops reading `core.PREBUILT_PYTHON`, so its
+      entry lists a reader the code no longer has.
+    * aliased-module: `from . import core as _core` in a function body of
+      state, then `_core.sha256_file`. The clause follows the alias, so state
+      becomes a reader its entry does not list (`seam-readers`).
+    * re-exported-module: `from .commands import core` in a function body of
+      request, then `core.sha256_file`: the same module object, reached
+      through a sibling, so request becomes an unlisted reader too. Before the
+      gh#221 review (M-1) only `from . import <module>` bound a module.
+    * star-import: `from .core import *` in training binds copies of both core
+      seams.
+    * facade-copy: `from . import validate_local_checkpoint` in a function body
+      of training binds the facade's re-exported copy (gh#221 review I-2).
+    * entry-without-readers, entry-for-undefined-name: the table, not the
+      code, is planted: `training.execute_training_attempt` with no readers
+      (only production reads it, through the facade), so `seam-readers` has
+      nothing to compare; and `core.transition_status`, a name core does not
+      define (state does).
+    """
+    changed = dict(live_sources)
+    seams = QUALIFIED_SEAMS
+
+    def append(filename, text):
+        """Append `text` to `filename`; return the line its first line lands on."""
+        changed[filename] = live_sources[filename] + "\n" + text
+        return live_sources[filename].count("\n") + 2
+
+    if plant.startswith("from-import-"):
+        seam = plant.removeprefix("from-import-")
+        filename = _SEAM_FROM_IMPORT_PLANTS[seam]
+        module, (owner, name) = filename.removesuffix(".py"), seam.split(".")
+        assert seam in live_sources[filename], f"{filename} no longer reads {seam}"
+        changed[filename] = live_sources[filename].replace(seam, name)
+        changed[filename] += f"\nfrom .{owner} import {name}\n"
+        declared = sorted(QUALIFIED_SEAMS[seam])
+        expected = [("seam-from-import", module, changed[filename].count("\n"), seam),
+                    ("seam-readers", seam, sorted(set(declared) - {module}), declared)]
+    elif plant == "import-time-alias":
+        line = append("training.py", "_HASH = core.sha256_file\n")
+        expected = [("seam-import-time", "training", line, "core.sha256_file")]
+    elif plant == "import-time-default":
+        line = append("training.py", "def _plant(hasher=core.sha256_file):\n    return hasher\n")
+        expected = [("seam-import-time", "training", line, "core.sha256_file")]
+    elif plant == "import-time-class-body":
+        line = append("training.py",
+                      "class _Plant:\n    for _h in (core.sha256_file,):\n        pass\n")
+        expected = [("seam-import-time", "training", line + 1, "core.sha256_file")]
+    elif plant == "undeclared":
+        line = append("training.py", "def _plant():\n    return state.write_heartbeat\n")
+        expected = [("seam-undeclared", "training", line + 1, "state.write_heartbeat")]
+    elif plant == "imported-name":
+        line = append("training.py", "def _plant():\n    return state.Status\n")
+        expected = [("seam-undeclared", "training", line + 1, "state.Status")]
+    elif plant == "reader-dropped":
+        changed["commands.py"] = live_sources["commands.py"].replace(
+            "core.PREBUILT_PYTHON", repr("/opt/cs2rl/.venv/bin/python"))
+        declared = sorted(QUALIFIED_SEAMS["core.PREBUILT_PYTHON"])
+        expected = [("seam-readers", "core.PREBUILT_PYTHON", ["checkpoint"], declared)]
+    elif plant == "aliased-module":
+        append("state.py", "def _plant():\n    from . import core as _core\n"
+               "    return _core.sha256_file\n")
+        declared = sorted(QUALIFIED_SEAMS["core.sha256_file"])
+        expected = [("seam-readers", "core.sha256_file", sorted({*declared, "state"}), declared)]
+    elif plant == "re-exported-module":
+        append("request.py", "def _plant():\n    from .commands import core\n"
+               "    return core.sha256_file\n")
+        declared = sorted(QUALIFIED_SEAMS["core.sha256_file"])
+        expected = [("seam-readers", "core.sha256_file", sorted({*declared, "request"}), declared)]
+    elif plant == "star-import":
+        line = append("training.py", "from .core import *\n")
+        expected = [("seam-from-import", "training", line, "core.*")]
+    elif plant == "facade-copy":
+        line = append(
+            "training.py", "def _plant(path):\n    from . import validate_local_checkpoint\n"
+            "    return validate_local_checkpoint(path)\n")
+        expected = [("seam-from-import", "training", line + 1,
+                     "checkpoint.validate_local_checkpoint")]
+    elif plant == "entry-without-readers":
+        seams = {**QUALIFIED_SEAMS, "training.execute_training_attempt": ()}
+        expected = [("seam-entry", "training.execute_training_attempt", [])]
+    elif plant == "entry-for-undefined-name":
+        seams = {**QUALIFIED_SEAMS, "core.transition_status": ("preflight", "training")}
+        expected = [("seam-entry", "core.transition_status", ["preflight", "training"])]
+    else:
+        pytest.fail(f"the {plant} row has no plant")
+    assert changed != live_sources or seams != QUALIFIED_SEAMS, f"the {plant} plant changed nothing"
+    precondition = _precondition("test_package_seam_contract", "the live package's seams")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_seam_violations(live_sources), precondition)
+        violations = _seam_violations(changed, seams)
+        assert violations == expected, (
+            f"the {plant} plant must be rejected by exactly {expected}; the gate reported:\n"
+            f"{_explain(violations)}")
+        _assert_no_violations(_seam_violations(live_sources), precondition)
+
+
 @pytest.mark.parametrize("stem", ["utils", "telemetry"])
 def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, stem):
     """A REAL undeclared module, with `import modal` and module-scope work, in a package copy.
@@ -879,7 +1738,7 @@ def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, stem):
     """
     package = _copy_live_package(tmp_path)
     rel = f"scripts/modal_runner/{stem}.py"
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    declared = list(RUNNER_PATHS)
     contracts = "test_package_structure_contract or test_package_dependency_contract"
     purity_contract = "test_package_import_purity_scans_every_module"
 
@@ -915,7 +1774,7 @@ def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, stem):
 
 def test_package_import_purity_scans_every_module():
     scanned, violations = _nonstdlib_module_scope_imports(ROOT)
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    declared = list(RUNNER_PATHS)
     assert scanned == declared, f"gate (e) read {scanned}. {_UNDECLARED_MODULE_REMEDY}"
     assert violations == [], (
         f"these (file, line, module) imports execute on import and are not stdlib: {violations}. "
@@ -933,7 +1792,7 @@ def test_package_import_purity_recursive_controls(tmp_path, live_sources, contai
         "try": "try:\n    import modal\nexcept ImportError:\n    pass\n"
     }
     target = package / "training.py"
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    declared = list(RUNNER_PATHS)
     purity_contract = "test_package_import_purity_scans_every_module"
     for _ in range(_CONTROL_PASSES):
         scanned, failures = _nonstdlib_module_scope_imports(tmp_path)
@@ -943,7 +1802,7 @@ def test_package_import_purity_recursive_controls(tmp_path, live_sources, contai
         target.write_text(live_sources["training.py"] + "\n" + plants[container], encoding="utf-8")
         scanned, failures = _nonstdlib_module_scope_imports(tmp_path)
         assert scanned == declared, (
-            f"gate (e) read {scanned}, not the {len(declared)} modules RUNNER_MODULES declares")
+            f"gate (e) read {scanned}, not the {len(declared)} modules MANIFEST declares")
         assert len(failures) == 1 and failures[0][
             0] == "scripts/modal_runner/training.py" and failures[0][2] == "modal", (
                 f"gate (e) must report the `import modal` inside the {container} container in "
@@ -958,18 +1817,18 @@ def test_package_import_purity_recursive_controls(tmp_path, live_sources, contai
 def test_package_scans_reject_missing_or_unreadable_member(tmp_path, live_sources, defect):
     package = _copy_live_package(tmp_path)
     target = package / "training.py"
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    declared = list(RUNNER_PATHS)
     purity_contract = "test_package_import_purity_scans_every_module"
     for _ in range(_CONTROL_PASSES):
         copied = sorted(_package_sources(tmp_path))
         assert copied == sorted(Path(rel).name for rel in declared), (
             f"{_precondition('test_package_structure_contract', 'the package copy')} holds "
-            f"{copied}, not the {len(declared)} modules RUNNER_MODULES declares, so this control "
+            f"{copied}, not the {len(declared)} modules MANIFEST declares, so this control "
             f"would not start from the live package. {_UNDECLARED_MODULE_REMEDY}")
         scanned = _nonstdlib_module_scope_imports(tmp_path)[0]
         assert scanned == declared, (
             f"{_precondition(purity_contract, 'gate (e)')} read {scanned} from the package copy, "
-            f"not the {len(declared)} modules RUNNER_MODULES declares. {_UNDECLARED_MODULE_REMEDY}")
+            f"not the {len(declared)} modules MANIFEST declares. {_UNDECLARED_MODULE_REMEDY}")
         target.unlink()
         if defect == "unreadable":
             target.mkdir()

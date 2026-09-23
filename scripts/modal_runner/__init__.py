@@ -8,35 +8,35 @@ module scope. Torch is imported lazily, inside `checkpoint._import_torch` and
 `checkpoint._load_checkpoint_weights`, and Modal is never imported here.
 
 MODULE MAP (each module's exact symbols are its MANIFEST entry in
-tests/test_modal_runner_package_shape.py):
-  core        constants, enums, protocols, data records, ValidationError and
-              the path and hash helpers (see WHERE A NEW NAME GOES)
-  request     run and artifact-client requests; train.py argument validation
+tests/modal_runner_tables.py):
+  core        the Volume and run-directory layout, the Status enum,
+              ValidationError, the path and hash helpers, and the protocols
+              and records two or more modules share (see WHERE A NEW NAME GOES)
+  request     run and artifact-client requests with their limits and defaults;
+              train.py argument validation
   source      clean-HEAD check, deterministic source bundles, safe extraction
   checkpoint  checkpoint loading and validation; completed-run evidence
   state       run status and transitions, reservations, claims, heartbeats,
               derived run views
   commands    install/train/dump-config/CUDA-probe argv and child environments
   preflight   preparing the remote source before a training attempt
-  training    one training attempt: child process, checkpoint publication
+  training    one training attempt: child process, checkpoint publication,
+              the attempt's result records and reason tokens
   __init__    this facade: its module scope holds only this docstring,
               `from .<module> import ...` lines and `__all__`
 
 WHERE A NEW NAME GOES: put a new name in the one module that reads it; add to
-core only a name that two or more modules read. A new cross-module import needs
-a DEPENDENCIES entry in tests/test_modal_runner_package_shape.py. Some existing
-names predate this rule: core holds many that only one module reads, and
-preflight holds `_stop_heartbeat`, which preflight and training both read;
-training imports preflight for that helper alone. They are known and tracked in
-gh#223; do not copy their placement.
+core only a name that two or more modules read. The one exception is the
+Volume and run-directory layout (mount, roots and artifact file names), which
+core keeps whole even where one module reads a given name, so the layout reads
+as one contract. A name this facade re-exports goes in the module that reads
+it, like any other: production reads the facade, not the module. A name no
+package module reads goes in the module whose concern it is (a layout name in
+core). A new cross-module import needs a DEPENDENCIES entry in
+tests/modal_runner_tables.py.
 
-ADDING A MODULE, in this order: (1) add it to RUNNER_MODULES in
-tests/test_modal_packaging.py; (2) add its MANIFEST and DEPENDENCIES entries,
-add it to the DEPENDENCIES entry of each module that imports it (and use
-ANNOTATION_DEPENDENCIES for an import made only under TYPE_CHECKING), all in
-tests/test_modal_runner_package_shape.py; (3) `git add` the file. The mount and
-package-population gates in tests/test_modal_client.py read `git ls-files`, so
-until step 3 they report the module missing although it is on disk.
+ADDING A MODULE: follow the checklist in the docstring of
+tests/modal_runner_tables.py, which every gate reads the module list from.
 
 THIS FACADE IS DELIBERATELY NARROW. It re-exports exactly the names that
 production code reads from the package, and nothing more.
@@ -63,15 +63,22 @@ from at call time.
   `test_patch_target_dichotomy` (tests/test_modal_patch_bindings.py) shows both
   cases on `validate_local_checkpoint`.
 
-QUALIFIED SEAMS. Exactly four names are read across modules through the module
-object rather than a from-import: `core.PREBUILT_PYTHON`, `core.sha256_file`,
-`state.transition_status` and `checkpoint.validate_local_checkpoint`. Tests
-patch them on their owning module, and the attribute read at call time is what
-lets that patch reach callers in other modules. Rewriting one as
-`from .core import sha256_file` silently detaches it from the patch. Every
-other cross-module name is from-imported, so patching it on its owning module
-does NOT reach the importing module (training.py and preflight.py hold both
-`state` and from-imported `state` names).
+QUALIFIED SEAMS. These names, and only these, are read across the submodules
+through the module object rather than a from-import: `core.PREBUILT_PYTHON`,
+`core.sha256_file`, `state.transition_status` and
+`checkpoint.validate_local_checkpoint`. Tests patch them on their owning
+module, and the attribute read at call time is what lets that patch reach
+callers in other modules. Rewriting one as `from .core import sha256_file`,
+reading this facade's copy (`from . import validate_local_checkpoint`), or
+binding it at import time (`_HASH = core.sha256_file`, a default argument)
+silently detaches it from the patch. Every other cross-module name is
+from-imported, so patching it on its owning module does NOT reach the
+importing module (training.py and preflight.py hold both `state` and
+from-imported `state` names). This facade's own re-export of
+`validate_local_checkpoint` is such a copy by design (see PATCHING IN TESTS).
+QUALIFIED_SEAMS in tests/modal_runner_tables.py lists them with their readers;
+the package-shape `seam` clause enforces it over the submodules, and
+`test_package_seam_contract` checks that this list matches it.
 
 PITFALLS:
   * Live train.py argparse accepts prefixes (`--devi` → `--device`). The runner
@@ -85,11 +92,26 @@ PITFALLS:
     the runner's source of truth and is never derived from that field.
 """
 from .checkpoint import validate_local_checkpoint, verify_checkpoint
+from .commands import THREAD_CAP_ENV
 from .core import (
-    _THREAD_CAP_ENV,
-    ALLOWED_MAPS,
     CHECKPOINT_NAME,
     CHECKPOINT_SIDECAR_NAME,
+    INPUTS_ROOT,
+    REGISTRY_NAME,
+    RESERVATION_FILENAME,
+    RUNS_ROOT,
+    SCHEMA_VERSION,
+    SOURCES_ROOT,
+    STATUS_FILENAME,
+    VOLUME_NAME,
+    Manifest,
+    ValidationError,
+    mounted_path,
+    sha256_bytes,
+)
+from .preflight import prepare_remote_source
+from .request import (
+    ALLOWED_MAPS,
     DEFAULT_CPU_CORES,
     DEFAULT_GPU,
     DEFAULT_MEMORY_MIB,
@@ -97,30 +119,20 @@ from .core import (
     DEFAULT_SAVE_EVERY_SECONDS,
     DEFAULT_TIMEOUT_MINUTES,
     DEFAULT_VEC_WORKERS,
-    INPUTS_ROOT,
-    REDELIVERED,
-    REGISTRY_NAME,
-    RESERVATION_FILENAME,
-    RUNS_ROOT,
-    SCHEMA_VERSION,
-    SOURCES_ROOT,
-    STATUS_FILENAME,
-    TERMINAL_STATUSES,
-    VOLUME_NAME,
     Action,
-    Manifest,
-    ValidationError,
-    mounted_path,
-    sha256_bytes,
+    RunRequest,
+    build_run_request,
+    parse_artifact_client_request,
+    validate_run_id,
 )
-from .preflight import prepare_remote_source
-from .request import RunRequest, build_run_request, parse_artifact_client_request, validate_run_id
 from .source import create_source_bundle, validate_clean_head
 from .state import (
-    _load_volume_json,
+    REDELIVERED,
+    TERMINAL_STATUSES,
     claim_attempt,
     derive_run_view_from_bytes,
     finish_reservation,
+    load_volume_json,
     reserve_run,
 )
 from .training import execute_training_attempt
@@ -130,10 +142,10 @@ __all__ = [
     'DEFAULT_GPU', 'DEFAULT_MEMORY_MIB', 'DEFAULT_NUM_ENVS', 'DEFAULT_SAVE_EVERY_SECONDS',
     'DEFAULT_TIMEOUT_MINUTES', 'DEFAULT_VEC_WORKERS', 'INPUTS_ROOT', 'Manifest', 'REDELIVERED',
     'REGISTRY_NAME', 'RESERVATION_FILENAME', 'RUNS_ROOT', 'RunRequest', 'SCHEMA_VERSION',
-    'SOURCES_ROOT', 'STATUS_FILENAME', 'TERMINAL_STATUSES', 'VOLUME_NAME', 'ValidationError',
-    '_THREAD_CAP_ENV', '_load_volume_json', 'build_run_request', 'claim_attempt',
-    'create_source_bundle', 'derive_run_view_from_bytes', 'execute_training_attempt',
-    'finish_reservation', 'mounted_path', 'parse_artifact_client_request', 'prepare_remote_source',
+    'SOURCES_ROOT', 'STATUS_FILENAME', 'TERMINAL_STATUSES', 'THREAD_CAP_ENV', 'VOLUME_NAME',
+    'ValidationError', 'build_run_request', 'claim_attempt', 'create_source_bundle',
+    'derive_run_view_from_bytes', 'execute_training_attempt', 'finish_reservation',
+    'load_volume_json', 'mounted_path', 'parse_artifact_client_request', 'prepare_remote_source',
     'reserve_run', 'sha256_bytes', 'validate_clean_head', 'validate_local_checkpoint',
     'validate_run_id', 'verify_checkpoint'
 ]

@@ -21,14 +21,14 @@ if str(ROOT) not in sys.path:
     # do. Inserting scripts/ instead would bind the module under a SECOND name.
     sys.path.insert(0, str(ROOT))
 
-import scripts.modal_runner as mrl                                     # noqa: E402, I001
-from scripts.modal_runner import commands, core, request               # noqa: E402, I001
+import scripts.modal_runner as mrl                     # noqa: E402, I001
+from scripts.modal_runner import commands, request     # noqa: E402, I001
 
 ALLOWED_MAPS = mrl.ALLOWED_MAPS
-LIVE_TRAIN_OPTION_ARITY = core.LIVE_TRAIN_OPTION_ARITY
-RUNNER_OWNED_TRAIN_FLAGS = core.RUNNER_OWNED_TRAIN_FLAGS
+LIVE_TRAIN_OPTION_ARITY = request.LIVE_TRAIN_OPTION_ARITY
+RUNNER_OWNED_TRAIN_FLAGS = request.RUNNER_OWNED_TRAIN_FLAGS
 ValidationError = mrl.ValidationError
-_assemble_train_argv = commands._assemble_train_argv
+assemble_train_argv = commands.assemble_train_argv
 build_run_request = mrl.build_run_request
 validate_train_args = request.validate_train_args
 
@@ -96,14 +96,11 @@ def test_user_map_is_rejected_and_runner_emits_map():
 
 @pytest.mark.parametrize("effective_map", ["arena-duel", "dust2", "simple"])
 def test_assemble_emits_map_name(tmp_path, effective_map):
-    argv = _assemble_train_argv(_req(effective_map=effective_map),
-                                tmp_path,
-                                None,
-                                dump_config=False)
+    argv = assemble_train_argv(_req(effective_map=effective_map), tmp_path, None, dump_config=False)
     assert argv[:3] == ["--train", "--map", effective_map]
     assert "--dust2" not in argv
     assert argv.count("--map") == 1
-    argv = _assemble_train_argv(_req(effective_map=effective_map), tmp_path, None, dump_config=True)
+    argv = assemble_train_argv(_req(effective_map=effective_map), tmp_path, None, dump_config=True)
     assert argv[:3] == ["--dump-config", "--map", effective_map]
 
 
