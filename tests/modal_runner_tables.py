@@ -11,9 +11,11 @@ messages.
 ADDING A MODULE, in this order (the facade docstring points here):
 (1) add its MANIFEST and DEPENDENCIES entries below, and add it to the
 DEPENDENCIES entry of each module that imports it (ANNOTATION_DEPENDENCIES for
-an import made only under TYPE_CHECKING); (2) `git add` the new file. The mount
-and package-population gates in tests/test_modal_client.py read `git ls-files`,
-so until step 2 they report the module missing although it is on disk.
+an import made only under TYPE_CHECKING); (2) add a line for it to MODULE MAP
+in the docstring of scripts/modal_runner/__init__.py; (3) `git add` the new
+file. The mount and package-population gates in tests/test_modal_client.py
+read `git ls-files`, so until step 3 they report the module missing although it
+is on disk.
 
 Data only: no function and no import, of the package or anything else, so
 importing this file from any test module costs nothing and cannot collect a

@@ -36,9 +36,7 @@ core). A new cross-module import needs a DEPENDENCIES entry in
 tests/modal_runner_tables.py.
 
 ADDING A MODULE: follow the checklist in the docstring of
-tests/modal_runner_tables.py, which every gate reads the module list from, and
-add the module to MODULE MAP above (a test checks that the map lists exactly
-the declared modules).
+tests/modal_runner_tables.py, which every gate reads the module list from.
 
 THIS FACADE IS DELIBERATELY NARROW. It re-exports exactly the names that
 production code reads from the package, and nothing more.

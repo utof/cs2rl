@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 # The image venv's interpreter is not declared here: it is core.PREBUILT_PYTHON,
 # read through the module object because it is a qualified seam (see
 # __init__.py).
+
 UV_BIN = "/usr/local/bin/uv"
 TRAIN_SCRIPT = "src/train.py"
 

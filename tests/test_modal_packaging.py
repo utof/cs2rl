@@ -1944,12 +1944,12 @@ def _runner_module_population(repo_root):
     relative imports, a literal `__all__`), `_facade_violations` in
     tests/test_modal_runner_package_shape.py; the surface gates in
     tests/test_modal_client.py pin the names it exports.
-    pathlib's `*` also matches dotfiles such as an editor's `.#core.py`, and
-    `*.py` matches a directory so named. The mount loop globs both too: it
-    ships the dotfile, and the directory fails the image upload
-    (IsADirectoryError; Modal does not check the path when the image is
-    defined). So both are in the population here, and a gate reading the
-    directory raises IsADirectoryError too.
+    pathlib's `*` also matches dotfiles, and `*.py` matches a directory so
+    named. The mount loop globs both too: a regular dotfile ships, while a
+    dangling one (an Emacs `.#core.py` lock is a dangling symlink) and the
+    directory fail the image build (FileNotFoundError / IsADirectoryError;
+    Modal does not check the path when the image is defined). So both are in
+    the population here, and a gate reading either raises.
     """
     root = Path(repo_root)
     declared = list(RUNNER_PATHS)
