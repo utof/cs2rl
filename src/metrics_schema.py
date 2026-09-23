@@ -66,8 +66,9 @@ PITFALL — the readers are FROZEN, so the registry chases them. `scripts/
 rung1_gate.py` and `scripts/rung1a_smoke_read.py` are registered evidence and are
 never migrated to import from here; the completeness test AST-parses their key
 literals instead. Their ROW LOADER (`scripts/analyze_tplant.py`, plus
-`analyze_experiment.py` and `modal_runner_lib.py`) is deliberately OUT of scope —
-recorded in #155 as the future-reader residue.
+`analyze_experiment.py` and `_iter_metrics_steps` in
+`scripts/modal_runner/checkpoint.py`) is deliberately OUT of scope — recorded in
+#155 as the future-reader residue.
 """
 from typing import NamedTuple
 

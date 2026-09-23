@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import scripts.modal_runner_lib as mrl                 # noqa: E402, I001
+import scripts.modal_runner as mrl                     # noqa: E402, I001
+from scripts.modal_runner import core, state           # noqa: E402, I001
 from tests.test_modal_runner import FakeArtifactIndex  # noqa: E402, I001
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
@@ -151,7 +152,7 @@ def test_path_derive_run_view_corrupt_status_is_validation_error(tmp_path):
     run_root.mkdir()
     (run_root / mrl.STATUS_FILENAME).write_bytes(b"{not-json")
     with pytest.raises(mrl.ValidationError, match=r"^corrupt volume status json$"):
-        mrl.derive_run_view(run_root, now=NOW)
+        state.derive_run_view(run_root, now=NOW)
 
 
 def _status_json(**overrides) -> bytes:
@@ -264,5 +265,5 @@ def test_fake_artifact_index_read_file_replace_after_read():
 
 
 def test_unused_artifacts_read_file_returns_none():
-    unused = mrl._UnusedArtifacts()
+    unused = core._UnusedArtifacts()
     assert unused.read_file(PurePosixPath("runs/ok-id/STATUS.json")) is None

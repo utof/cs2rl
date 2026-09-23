@@ -11,11 +11,11 @@ seam exists to stop.
 THE 57/22 WAS SHIPPED TRANSPOSED and is corrected here, because the arithmetic
 that catches it is worth leaving behind. The figure arrived verbatim from the
 task brief as "22 runner tests and 57 client tests" and no re-derivation was run
-on it. It is refutable without measuring anything: the client half holds 54
-module-level test functions in total, so no count of client tests can be 57, and
-tests/test_modal_client.py states that 54 three files away. A number that its own
-sibling file contradicts is the cheapest kind of wrong to find and the easiest to
-carry forward untouched.
+on it. It was refutable without measuring anything: at W2's split (84622fc) the
+client half held 54 module-level test functions in total, so no count of client
+tests could be 57, and the header of tests/test_modal_client.py stated that 54.
+A number that its own sibling file contradicts is the cheapest kind of wrong to
+find and the easiest to carry forward untouched.
 
 Membership is computed, not judged: classify_seam() assigns a helper here iff
 the set of tests that transitively reach it spans both halves.
@@ -48,11 +48,11 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
-    # scripts/ is a namespace package; tests import scripts.modal_runner_lib
+    # scripts/ is a namespace package; tests import scripts.modal_runner
     # the same way the later CLIs will. Do not rely on the editable install.
     sys.path.insert(0, str(ROOT))
 
-import scripts.modal_runner_lib as mrl                 # noqa: E402, I001
+from scripts.modal_runner import core  # noqa: E402, I001
 
 # ── _git / _init_source_repo: a real tiny repo for HEAD and diff checks ────
 
@@ -148,7 +148,7 @@ class FakeChild:
         # Grace waits must not burn wall-clock time in tests. A held child
         # times out immediately; a released child returns at once.
         effective = timeout
-        if timeout is not None and timeout >= mrl.TERM_GRACE_SECONDS:
+        if timeout is not None and timeout >= core.TERM_GRACE_SECONDS:
             effective = 0
         if not self._done.wait(timeout=effective):
             raise subprocess.TimeoutExpired(["fake"], timeout)

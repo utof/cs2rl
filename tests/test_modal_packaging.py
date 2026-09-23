@@ -1,158 +1,30 @@
-"""Guards on HOW the Modal runner is imported and packaged, not on what it does.
+"""Guards for runner import spelling, runtime identity and package structure.
 
-WHY: `scripts/` and the repo root are BOTH on sys.path in every FULL-SUITE
-pytest process. The unit matters and the spec is careful about it (design doc
-:147, "Every full-suite process therefore keeps both roots on `sys.path`"):
-measured, collecting THIS FILE alone leaves `scripts/` off sys.path entirely --
-only `src/` is there, inserted by `tests/conftest.py`. Of the 9 files that do put
-it there, 8 insert at MODULE scope, so collecting any one of those is enough; the
-9th (`tests/test_resume_state.py:352`) inserts inside a test body, so it lands
-only when that test RUNS. A guard that only fires in a full-suite process is
-still the right guard; a reader who thinks it fires everywhere is not.
-Measured by AST census over every tracked .py, counting `sys.path.insert/append`
-whose argument names `scripts` directly OR through a variable assigned from such
-a path: **11** test files at 6c937ca, **9** after this commit converts two of
-them. (Both numbers, because a docstring that states only the before-state is
-wrong from the moment it lands. Two of the 11 -- test_modal_argv.py's
-SCRIPTS_DIR and test_oracle_statue.py's -- are invisible to a census that only
-looks for the literal string in the call.)
-So `modal_runner_lib` and `scripts.modal_runner_lib` both resolve, and Python
-caches them as TWO DISTINCT module objects. Measured: their `ValidationError`
-classes are not identical, so `except mrl.ValidationError` does NOT catch a
-ValidationError raised through the other spelling -- the exact class #166 spent
-twelve commits routing error handling through.
-
-PITFALL -- the one that decides whether this file works: the scan MUST walk the
-whole tree (`ast.walk`), not `tree.body`. Until THIS COMMIT converted it,
-`tests/test_eval_baselines.py` imported the bare spelling INSIDE a test body;
-that real in-body violation is the case this guard was built around. A
-`tree.body` scan reported that file clean while the defect was live, and still
-passed a module-scope positive control. Past tense on purpose -- the file is
-converted, so the live demonstration now lives in
-`test_guard_detects_a_planted_bare_import`, which plants at three AST depths
-(1, 2 and 3 nodes below `Module`, measured) across two scopes (module and
-function body), in three shapes -- including the `importlib.import_module` shape
-this repo's Modal tests use to reach their `scripts/` siblings.
-
-HOW MEASUREMENTS ARE WRITTEN DOWN HERE, because getting this wrong has cost this
-branch four correction commits: every mutation result below names the TEST THAT
-OBJECTS, never a `1 failed, N passed` pair. The passed half is just this file's
-collection minus the failures -- it says nothing the objector's name does not,
-and it goes stale the moment a test is added, which Task 2 will do. So no
-collection total appears anywhere in this file and nothing asserts on one. If
-you need the number, `pytest --collect-only -q` has it and cannot be wrong.
+The static walker descends into function bodies and recognizes literal dynamic
+imports. Runtime evidence observes executed imports, including variable-driven
+ones; it does not observe imports in child processes. The carrier pass check
+prevents an unreached in-body import from producing a vacuous clean census.
 """
 import ast
 import json
 import os
 import subprocess
 import sys
-import tempfile
 import tomllib
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-BARE = "modal_runner_lib"
+BARE = "modal_runner"
 # The one legal spelling. `BARE` is what must never appear; this is what must
-# appear instead, and it is what the runtime probe expects to find alone in
-# `sys.modules`.
+# appear instead. The runtime probe requires the package and every submodule
+# in `sys.modules` under this spelling and no other.
 PACKAGED = "scripts." + BARE
 
-# The file set the RUNTIME gate below executes: every file UNDER `tests/` that
-# imports the runner. Not a hand-picked sample -- `test_the_runtime_probe_runs_
-# every_test_file_that_imports_the_runner` asserts this list EQUALS the set
-# discovered by AST census, in both directions, so it cannot silently drift.
-#
-# "Under tests/" and not "every TEST file", which is what this sentence used to
-# say: `_test_files_importing` scopes by DIRECTORY (`rel.startswith("tests/")`),
-# and W2's shared-helper module is the case where the two readings diverge.
-#
-# Two of these were W1 conversions -- `test_modal_argv.py` (bare, module scope)
-# and `test_eval_baselines.py` (bare, inside a test body), which between them
-# cover both historic spellings and both depths. The other two were already on
-# the packaged spelling at 6c937ca and are here because they import the runner,
-# which is the only membership rule: `test_modal_runner.py` (the bulk of the
-# runtime) and `test_modal_protocol.py`. Saying "the files W1 converted" would
-# be wrong by two.
-#
-# `test_modal_client.py` and `modal_test_helpers.py` arrived with W2's split of
-# `test_modal_runner.py`: the packaged import travelled into BOTH halves plus the
-# shared module, so all three import the runner and the census discovers all
-# three. `test_the_runtime_probe_runs_every_test_file_that_imports_the_runner`
-# pre-registered this in its own docstring and told Task 4 to add the new file
-# rather than loosen the equality to a subset. That is what happened here; the
-# assertion was not touched.
-#
-# `modal_test_helpers.py` is NOT a test module -- no `test_` prefix, so pytest
-# collects nothing from it -- and it belongs here anyway, because membership is
-# "imports the runner AND lives under tests/", not "collects tests".
-#
-# WHAT THE ENTRY ACTUALLY BUYS, measured three ways, because the obvious answer
-# is wrong and this comment asserted it for one draft. Handed that file ALONE, a
-# session leaves `tests.modal_test_helpers` in `sys.modules` and the probe
-# reports `{"modules": ["scripts.modal_runner_lib"], "passed": [],
-# "exitstatus": 5}` -- so pytest does import a .py named explicitly on its
-# command line even when the name does not match `python_files`, and the gate
-# CAN see into this file. But run the real six-file session WITHOUT this entry
-# and the module is in `sys.modules` regardless, because both halves carry
-# `from tests.modal_test_helpers import (...)`. So today the entry extends the
-# probe's reach by NOTHING. The honest reasons to list it are that the
-# set-equality assertion requires it, and that it keeps the coverage if either
-# half ever stops importing the shared module -- a forward guarantee, not a
-# present-day gain. Cost is nil: 421 passed either way, 32.31s with against
-# 33.17s without, inside the run-to-run spread.
-#
-# The `exitstatus: 5` above is NO_TESTS_COLLECTED and an artefact of running the
-# file alone; alongside the five collecting entries the session exits 0. A list
-# that ever consisted only of non-collecting modules would red assertion 1 of
-# the gate for that reason and not for a spelling reason.
-#
-# THE PITFALL THAT LET THIS LIST GO STALE THROUGH A FULLY GREEN TASK, and it
-# recurs for any task that ADDS a tracked file: `_repo_python_files` is
-# `git ls-files --cached`, so the census cannot see a file until it is TRACKED.
-# Every W2 gate -- the split's byte-identity census, its four red controls, the
-# file-alone runs, and two full-suite runs at `1390 passed, 3 skipped` -- ran
-# while both new files were still untracked, and the objecting test passed in
-# every one of them because the files did not exist as far as it could look. It
-# went red on the first run after the split commit, having been green minutes
-# earlier on identical bytes. A green suite BEFORE a commit that adds files is
-# not evidence about any tracked-only guard. Re-run them after.
-#
-# Tracked importers OUTSIDE `tests/`, which the directory scope above excludes
-# because this list feeds a pytest session: `scripts/modal_artifacts.py:27`,
-# `scripts/modal_backfill_sidecar.py:43`, `scripts/run_modal.py:33`. So NINE
-# tracked files import the runner, six of them under `tests/` (was seven and
-# four before W2's split). Recorded for W3, which deletes `modal_runner_lib` and
-# has to find every one of them.
-#
-# BOUNDS that survive the scope control, stated rather than left to be
-# discovered. The runtime gate only sees imports the session it spawns actually
-# EXECUTES, and the census that feeds it is static, so a file can reach the
-# runner in a way neither half sees. Two such ways are known and NAMED; this is
-# not a claim that the list is complete, and an earlier revision of this comment
-# calling the first one "the only remaining hole" was wrong on its own terms:
-#
-#   1. a dynamic import whose argument is a VARIABLE
-#      (`importlib.import_module(M)`), in a file that imports the runner no
-#      other way. Invisible to the static walker by construction.
-#   2. an import written inside a subprocess CODE STRING. Invisible to the
-#      walker, which sees a string, and to the runtime probe, which reads
-#      `sys.modules` in the parent and never sees a child's. This repo writes
-#      that shape in `test_local_entrypoints_do_not_import_modal` and
-#      `test_modal_runner_lib_does_not_import_modal_or_torch` -- cited as
-#      `tests/test_modal_runner.py:93` until W2's split moved both into THIS
-#      file, which is a citation that rotted inside the commit that moved it.
-#      Named rather than numbered now, because a line number citing the file it
-#      lives in rots on the next edit. The bound is unchanged and if anything
-#      firmer: this file is barred from `_IMPORTERS` by the fork-bomb guard, so
-#      the probe never runs those two at all. Parsing string literals is
-#      deliberately not attempted -- see `bare_spelling_imports`.
-#
-# A third was closed rather than stated: `from scripts import modal_runner_lib`
-# used to return `[]`, which would have let Task 4's moved import escape the
-# scope control entirely. It is now the `from-parent-import` shape.
+# Explicit importer population, independently checked against the tracked-file
+# AST census below. Shared helpers belong even when they collect no tests.
+# New files must be staged before the tracked census can observe them.
 _IMPORTERS = [
     "tests/test_modal_argv.py",
     "tests/test_modal_protocol.py",
@@ -160,21 +32,43 @@ _IMPORTERS = [
     "tests/test_modal_client.py",
     "tests/modal_test_helpers.py",
     "tests/test_eval_baselines.py",
+    "tests/test_modal_patch_bindings.py",
 ]
 
 # The test that carries the HARD case: the bare import used to live inside this
-# body, second-to-last statement, behind four assertions (it is now the
-# converted `import scripts.modal_runner_lib as mrl` at
-# tests/test_eval_baselines.py:323, still in-body). If this test does not reach
-# its end, the module census below is measuring a session that never executed
-# the line the gate exists for.
+# body as its second-to-last statement (W1 converted it; W3b respelled it
+# `from scripts.modal_runner import core`, still in-body and still
+# second-to-last). If this test does not reach its end, the module census below
+# is measuring a session that never executed the line the gate exists for.
 _INBODY_CARRIER = ("tests/test_eval_baselines.py::test_eval_interval_cli_config_and_modal_mirror")
+
+# Tests the nested session skips. Each runs its instrument in a CHILD process
+# (the binding campaign's driver runs 70 pytest child sessions; each rejection
+# case runs one Python child), whose `sys.modules` the probe cannot see, so they
+# add wall time and no identity evidence. Their file stays on the argv:
+# collecting it still imports the runner at its module scope, which the probe
+# does see. pytest's `--deselect` is a node-id PREFIX match
+# (`nodeid.startswith`), so the first entry already covers the second and would
+# silently cover any future `test_patch_binding_campaign*` sibling too; and a
+# `--deselect` that matches nothing is ignored. The gate therefore checks, for
+# each entry, that it is still defined AND that every module-level `def` or
+# `async def` it prefix-matches is listed here, so no such function leaves the
+# nested session unnamed. A prefix-matching test bound by assignment or import,
+# or defined under a module-level `if` or `try`, is not seen.
+_NESTED_DESELECT = (
+    "tests/test_modal_patch_bindings.py::test_patch_binding_campaign",
+    "tests/test_modal_patch_bindings.py::test_patch_binding_campaign_rejects_invalid_evidence",
+)
 
 # Wall-clock ceiling for the nested session, in seconds. Named rather than
 # inlined so the value and the message that quotes it cannot drift apart -- a
 # literal in both places is one edit away from a message that lies about its own
-# threshold. Chosen from this test's measured spread, not picked round: 10 clean
-# sessions ran 33.30-44.78s, so this is ~13x the slowest observed.
+# threshold. Chosen from measured spread, not picked round: on 2026-09-23, with
+# the runner split into scripts/modal_runner/ and `_NESTED_DESELECT` applied,
+# three nested sessions reported 49.34-50.17s ("467 passed, 24 deselected") and
+# this test's call phase took 51.06-51.90s, so 600 is ~11.5x the slowest observed.
+# The figures move with every test added to an `_IMPORTERS` file; re-measure
+# before trusting the margin after `_IMPORTERS` or `_NESTED_DESELECT` changes.
 _NESTED_TIMEOUT_S = 600
 
 
@@ -198,19 +92,22 @@ def _repo_python_files():
     committed, so by the time a bare import is IN the repo it is tracked and
     this census sees it.
 
-    Counts, with the unit, because a bare number invites the wrong comparison:
-    tracked `.py` at this commit = 135 (the spec's 131 at 6c937ca, plus this
-    file, plus Task 2's `tests/_modal_import_probe.py`, plus W2's
-    `tests/test_modal_client.py` and `tests/modal_test_helpers.py`). NOTHING
-    asserts on that total and nothing should -- it moves with every added .py,
-    and this sentence read 133 while W2 added two of them, which is the decay
-    a stated total invites and the reason nothing may depend on one.
+    Counts, with the unit, because a bare number invites the wrong comparison
+    (each is `git ls-files --cached "*.py" | wc -l` at the tree named): 131 at
+    6c937ca (the spec's figure); 135 at cc228fa (plus this file, Task 2's
+    `tests/_modal_import_probe.py`, and W2's `tests/test_modal_client.py` and
+    `tests/modal_test_helpers.py`); 138 at 2bb32ac; 149 on the W3b split tree
+    (measured 2026-09-23). NOTHING asserts on that total and nothing should --
+    it moves with every added .py, and this sentence once read 133 while W2
+    added two of them, which is the decay a stated total invites and the
+    reason nothing may depend on one.
     `test_the_census_scans_the_whole_repo` pins the structural property
     instead, which does not move.
 
     `cwd=ROOT` is load-bearing: `git ls-files "*.py"` is CWD-RELATIVE, so
-    running it from `tests/` returns 86 tracked paths instead of 135 and the
-    guard silently stops watching `scripts/` and `src/`. Pinning the CWD is what
+    running it from `tests/` returns only the tests (91 of 149 tracked paths on
+    the W3b split tree, 2026-09-23; 86 of 135 at cc228fa) and the guard
+    silently stops watching `scripts/` and `src/`. Pinning the CWD is what
     makes the scope independent of where pytest was invoked from.
     `test_the_census_scans_the_whole_repo` covers a WRONG cwd, not a MISSING
     one, and the difference is measurable: repointing it at `tests/` turns that
@@ -261,18 +158,19 @@ def bare_spelling_imports(source, target=BARE):
     one: measured on 3.12, `importlib.import_module(name="json")` AND
     `__import__(name="json")` both import successfully.
 
-    The FOURTH shape, `from scripts import modal_runner_lib`, only exists when
+    The FOURTH shape, `from scripts import modal_runner`, only exists when
     `target` is DOTTED, and it is the one this walker was missing. The
     `from-import` branch above matches on the module PATH, which is right for a
     top-level target and incomplete for a dotted one, because the leaf can be
     imported from its parent. Measured against the walker before this branch
-    existed, `from scripts import modal_runner_lib` returned `[]` under
-    `PACKAGED` -- an ordinary idiom, invisible. That mattered because
+    existed, when the runner was still `modal_runner_lib`: `from scripts
+    import modal_runner_lib` returned `[]` under `PACKAGED` -- an ordinary
+    idiom, invisible. That mattered because
     `test_the_runtime_probe_runs_every_test_file_that_imports_the_runner`
-    promises Task 4 by name that it reddens when the import moves; had Task 4
+    promised Task 4 by name that it reddens when the import moves; had Task 4
     written this spelling, it would have stayed green and the runtime gate would
     have silently stopped covering the new file. W3 makes the idiom MORE likely
-    by turning `modal_runner_lib` into a package.
+    by turning `modal_runner` into a package.
 
     The branch is unreachable for a top-level target: `BARE.rpartition(".")`
     yields an empty parent, and `if parent` gates it. Proven rather than
@@ -280,18 +178,18 @@ def bare_spelling_imports(source, target=BARE):
     whole tracked census under `BARE`, and did fire under `PACKAGED`.
 
     Relative imports are NOT hits (`node.level` must be 0). `from
-    .modal_runner_lib import X` names a DIFFERENT module -- a sibling of the
+    .modal_runner import X` names a DIFFERENT module -- a sibling of the
     importing package -- and `tests/` is a real package, so treating it as a hit
     would redden the guard over a legal import. Measured before the level check
-    existed: both `from .modal_runner_lib import ValidationError` and the
-    two-dot form returned `[(1, 'from-import')]`.
+    existed, on the pre-W3b name: both `from .modal_runner_lib import
+    ValidationError` and the two-dot form returned `[(1, 'from-import')]`.
 
     PITFALL -- known blind spots, named rather than hidden, and NOT claimed to
     be exhaustive:
 
     1. a dynamic import whose argument is a variable
        (`importlib.import_module(M)`) is invisible to any static scan.
-       `test_modal_runner_lib_resolves_to_exactly_one_module_object` is the
+       `test_modal_runner_resolves_to_exactly_one_module_object` is the
        runtime gate that covers it; that is why this repo has both and not just
        this one.
     2. an import written inside a subprocess CODE STRING is invisible to this
@@ -301,8 +199,8 @@ def bare_spelling_imports(source, target=BARE):
        reports no hit at all: `test_local_entrypoints_do_not_import_modal`,
        whose code string imports `src.train`, `scripts.exp_lib` and
        `scripts.run_experiment` but never the runner lib, and
-       `test_modal_runner_lib_does_not_import_modal_or_torch`, whose code
-       string holds `import scripts.modal_runner_lib` itself. Named rather
+       `test_modal_runner_does_not_import_modal_or_torch`, whose code
+       string holds `import scripts.modal_runner` itself. Named rather
        than numbered because this cite read `tests/test_modal_runner.py:93`
        until W2's split moved both tests here, and a line number aimed at the
        file it lives in rots on the next edit. The `_IMPORTERS` comment fixed
@@ -329,12 +227,12 @@ def bare_spelling_imports(source, target=BARE):
             if node.level == 0 and _bare_name(node.module or "", target):
                 hits.append((node.lineno, "from-import"))
             elif node.level == 0 and parent and node.module == parent:
-                # `from scripts import modal_runner_lib [as mrl]`. The alias is
+                # `from scripts import modal_runner [as mrl]`. The alias is
                 # irrelevant -- `alias.name` is the imported name and
                 # `alias.asname` is only what it is bound to locally, so the
                 # `as` spelling needs no separate case. Exact equality on the
                 # leaf, never startswith: `from scripts import
-                # modal_runner_lib_extra` is a different module.
+                # modal_runner_extra` is a different module.
                 for alias in node.names:
                     if alias.name == leaf:
                         hits.append((node.lineno, "from-parent-import"))
@@ -367,9 +265,10 @@ def _test_files_importing(target):
     test in a future subdirectory belongs in the probe, and narrowing the code to
     match a `tests/*.py` reading would silently drop it, which is the failure this
     section exists to prevent. So when the docstring and the code disagreed about
-    the scope, the PROSE is what changed. Measured, all 86 tracked `.py` under
-    `tests/` are top-level today -- the only subdirectory is `tests/fixtures`,
-    which holds no `.py` -- so the two readings agree by layout rather than by
+    the scope, the PROSE is what changed. Measured on the W3b split tree
+    (2026-09-23), all 91 tracked `.py` under `tests/` are top-level -- the only
+    subdirectory is `tests/fixtures`, which holds no `.py` -- so the two
+    readings agree by layout rather than by
     rule, which is exactly the kind of agreement that stops holding without
     warning.
 
@@ -380,7 +279,7 @@ def _test_files_importing(target):
     rather than holding them.
 
     FileNotFoundError is deliberately NOT caught, for the reason spelled out in
-    `test_no_file_imports_the_bare_modal_runner_lib_spelling`: `--cached`
+    `test_no_file_imports_the_bare_modal_runner_spelling`: `--cached`
     enumerates the INDEX, so a tracked .py deleted without `git rm` lands here
     and raises. Loud and opaque beats a silent narrowing of the census.
     """
@@ -400,7 +299,7 @@ def _test_files_importing(target):
     return found
 
 
-def test_no_file_imports_the_bare_modal_runner_lib_spelling():
+def test_no_file_imports_the_bare_modal_runner_spelling():
     """One spelling repo-wide, so one module object exists at run time."""
     offenders = {}
     for path in _repo_python_files():
@@ -419,29 +318,30 @@ def test_no_file_imports_the_bare_modal_runner_lib_spelling():
         except SyntaxError:
             # A .py that does not parse cannot import anything either, so
             # skipping it is sound for THIS guard -- it is a scope statement,
-            # not an excuse. Measured: 0 of the 135 tracked .py hit this branch,
-            # so it is dead today; it is kept because a tracked .py that stops
-            # parsing (a bad merge, a py313-only syntax) would otherwise redden
-            # THIS guard for a reason that has nothing to do with imports.
+            # not an excuse. Measured: 0 of the 149 tracked .py on the W3b split
+            # tree (2026-09-23) hit this branch, so it is dead; it is kept
+            # because a tracked .py that stops parsing (a bad merge, a
+            # py313-only syntax) would otherwise redden THIS guard for a reason
+            # that has nothing to do with imports.
             continue
         if hits:
             offenders[path.relative_to(ROOT).as_posix()] = hits
-    assert offenders == {}, ("import `scripts.modal_runner_lib`, not `modal_runner_lib` -- both "
+    assert offenders == {}, ("import `scripts.modal_runner`, not `modal_runner` -- both "
                              "spellings in one process create two module objects whose exception "
                              f"classes are not identical. Offenders: {offenders}")
 
 
 @pytest.mark.parametrize("planted, shape", [
-    ("import modal_runner_lib as mrl\n", "module scope"),
-    ("from modal_runner_lib import ValidationError\n", "module-scope from-import"),
-    ("def f():\n    import modal_runner_lib as mrl\n", "function body"),
-    ("def f():\n    from modal_runner_lib import ValidationError\n", "function-body from-import"),
-    ('import importlib\nm = importlib.import_module("modal_runner_lib")\n',
+    ("import modal_runner as mrl\n", "module scope"),
+    ("from modal_runner import ValidationError\n", "module-scope from-import"),
+    ("def f():\n    import modal_runner as mrl\n", "function body"),
+    ("def f():\n    from modal_runner import ValidationError\n", "function-body from-import"),
+    ('import importlib\nm = importlib.import_module("modal_runner")\n',
      "importlib.import_module literal"),
-    ('def f():\n    return __import__("modal_runner_lib")\n', "__import__ literal in a body"),
-    ('import importlib\nm = importlib.import_module(name="modal_runner_lib")\n',
+    ('def f():\n    return __import__("modal_runner")\n', "__import__ literal in a body"),
+    ('import importlib\nm = importlib.import_module(name="modal_runner")\n',
      "importlib.import_module keyword"),
-    ("import modal_runner_lib.state\n", "submodule"),
+    ("import modal_runner.state\n", "submodule"),
 ])
 def test_guard_detects_a_planted_bare_import(planted, shape):
     """POSITIVE CONTROL at three AST depths, two scopes and three shapes.
@@ -471,10 +371,10 @@ def test_guard_detects_a_planted_bare_import(planted, shape):
 
 
 @pytest.mark.parametrize("legal, why", [
-    ("import scripts.modal_runner_lib as mrl\n", "the CORRECT spelling this task converts TO"),
-    ("from scripts import modal_runner_lib\n", "the CORRECT spelling, imported from its parent"),
-    ("from .modal_runner_lib import ValidationError\n", "a relative import -- a different module"),
-    ("import modal_runner_lib_extra\n", "a name that merely starts with the bare one"),
+    ("import scripts.modal_runner as mrl\n", "the CORRECT spelling this task converts TO"),
+    ("from scripts import modal_runner\n", "the CORRECT spelling, imported from its parent"),
+    ("from .modal_runner import ValidationError\n", "a relative import -- a different module"),
+    ("import modal_runner_extra\n", "a name that merely starts with the bare one"),
 ])
 def test_the_guard_does_not_fire_on_legal_lookalikes(legal, why):
     """NEGATIVE CONTROL. A guard that reddens on legal code gets switched off.
@@ -484,10 +384,10 @@ def test_the_guard_does_not_fire_on_legal_lookalikes(legal, why):
     - the relative form returned `[(1, 'from-import')]` until `node.level == 0`
       was added, and `tests/` is a real package where such an import is legal;
     - the `startswith` in `_bare_name` is `BARE + "."`, not `BARE`; drop the dot
-      and `modal_runner_lib_extra` becomes a hit. This row is what objects;
+      and `modal_runner_extra` becomes a hit. This row is what objects;
     - the correct spelling must stay silent, or the guard fails the whole repo
       the moment W1's conversions land -- in BOTH its spellings, which is why
-      `from scripts import modal_runner_lib` is here. That row is the BARE half
+      `from scripts import modal_runner` is here. That row is the BARE half
       of the fourth shape: it must be a HIT under `PACKAGED` (the row of the
       same name in `test_the_walker_finds_the_packaged_spelling_in_every_shape`)
       and SILENT under `BARE`, and one direction without the other is what let
@@ -497,18 +397,18 @@ def test_the_guard_does_not_fire_on_legal_lookalikes(legal, why):
 
 
 @pytest.mark.parametrize("planted, shape", [
-    ("import scripts.modal_runner_lib\n", "module scope"),
-    ("import scripts.modal_runner_lib as mrl\n", "module scope, aliased"),
-    ("from scripts.modal_runner_lib import ValidationError\n", "from-import on the full path"),
-    ("def f():\n    import scripts.modal_runner_lib as mrl\n", "function body"),
-    ('import importlib\nm = importlib.import_module("scripts.modal_runner_lib")\n',
+    ("import scripts.modal_runner\n", "module scope"),
+    ("import scripts.modal_runner as mrl\n", "module scope, aliased"),
+    ("from scripts.modal_runner import ValidationError\n", "from-import on the full path"),
+    ("def f():\n    import scripts.modal_runner as mrl\n", "function body"),
+    ('import importlib\nm = importlib.import_module("scripts.modal_runner")\n',
      "importlib.import_module literal"),
-    ("import scripts.modal_runner_lib.state\n", "submodule"),
-    ("from scripts import modal_runner_lib\n", "from-parent-import -- THE SHAPE THAT WAS MISSING"),
-    ("from scripts import modal_runner_lib as mrl\n", "from-parent-import, aliased"),
-    ("from scripts import modal_artifacts, modal_runner_lib\n",
+    ("import scripts.modal_runner.state\n", "submodule"),
+    ("from scripts import modal_runner\n", "from-parent-import -- THE SHAPE THAT WAS MISSING"),
+    ("from scripts import modal_runner as mrl\n", "from-parent-import, aliased"),
+    ("from scripts import modal_artifacts, modal_runner\n",
      "from-parent-import, one of several names"),
-    ("def f():\n    from scripts import modal_runner_lib\n", "from-parent-import in a body"),
+    ("def f():\n    from scripts import modal_runner\n", "from-parent-import in a body"),
 ])
 def test_the_walker_finds_the_packaged_spelling_in_every_shape(planted, shape):
     """POSITIVE CONTROL for the walker aimed at `PACKAGED` -- the half that
@@ -518,13 +418,14 @@ def test_the_walker_finds_the_packaged_spelling_in_every_shape(planted, shape):
     Every row above `test_guard_detects_a_planted_bare_import` covers the `BARE`
     target only. `_test_files_importing(PACKAGED)` calls the same walker with a
     DOTTED target, where one shape behaves differently: the leaf can be imported
-    from its parent. Review found `from scripts import modal_runner_lib`
-    returning `[]`, so the file that Task 4 is warned about could have moved its
-    import into that idiom and never entered `_IMPORTERS`.
+    from its parent. Review found `from scripts import modal_runner` (then
+    `modal_runner_lib`) returning `[]`, so the client half W2's split created,
+    tests/test_modal_client.py, could have moved its import into that idiom and
+    never entered `_IMPORTERS`.
 
     Each row also asserts SILENCE under `BARE`. That is not padding -- it is the
     inertness half. A fix that made the new branch fire for a top-level target
-    would redden `test_no_file_imports_the_bare_modal_runner_lib_spelling` over
+    would redden `test_no_file_imports_the_bare_modal_runner_spelling` over
     the legal packaged spelling, i.e. over the entire repo after W1.
     """
     assert bare_spelling_imports(planted, PACKAGED), f"walker is blind to {shape} under PACKAGED"
@@ -532,6 +433,190 @@ def test_the_walker_finds_the_packaged_spelling_in_every_shape(planted, shape):
     assert bare_hits == [], (
         f"{shape} matched the BARE target; the packaged spelling is LEGAL and this "
         "would redden the repo-wide guard over correct code")
+
+
+def test_import_guard_plant_populations_are_complete():
+    populations = {
+        "test_guard_detects_a_planted_bare_import": 8,
+        "test_the_guard_does_not_fire_on_legal_lookalikes": 4,
+        "test_the_walker_finds_the_packaged_spelling_in_every_shape": 10,
+    }
+    for name, expected in populations.items():
+        marks = [mark for mark in globals()[name].pytestmark if mark.name == "parametrize"]
+        assert len(marks) == 1, f"{name} must carry exactly one parametrize mark, not {len(marks)}"
+        rows = len(marks[0].args[1])
+        assert rows == expected, (
+            f"{name} has {rows} rows, expected {expected}; if you added or removed a plant on "
+            f"purpose, update populations[{name!r}] in this test "
+            "(test_import_guard_plant_populations_are_complete)")
+
+
+def test_runtime_identity_rejects_competing_module_objects(monkeypatch):
+    """A second object must fail identity even with the same canonical names."""
+    import importlib
+    import types
+
+    from tests._modal_import_probe import assert_module_identity, module_census
+
+    package = importlib.import_module(PACKAGED)
+    for _ in range(2):
+        baseline = module_census()
+        assert_module_identity(baseline)
+        with monkeypatch.context() as patch:
+            twin = types.ModuleType("modal_runner")
+            twin.__file__ = package.__file__
+            patch.setitem(sys.modules, "modal_runner", twin)
+            planted = module_census()
+            assert planted["modules"] == baseline["modules"]
+            assert len({row["object_id"] for row in planted["identities"][PACKAGED]}) == 2
+            with pytest.raises(AssertionError, match="module object identity"):
+                assert_module_identity(planted)
+        assert_module_identity(module_census())
+
+
+def test_runtime_identity_requires_every_governed_module(monkeypatch, tmp_path):
+    """The probe governs exactly the declared modules, and a missing one fails clause 1.
+
+    The probe derives `_EXPECTED` from the package directory
+    (`_governed_modules`), so this pins it to the modules RUNNER_MODULES
+    declares: an empty set, which would pass every identity clause over
+    nothing, or a module file the tables do not declare, reddens here. The
+    planted directory shows the derivation governs a new module the moment
+    its file exists and ignores anything that is not a `*.py` file directly
+    in the package directory: `sub/nested.py` pins the non-recursive glob,
+    which an `rglob` would break.
+    """
+    import importlib
+
+    from tests._modal_import_probe import (
+        _EXPECTED,
+        _PACKAGE_DIR,
+        _governed_modules,
+        assert_module_identity,
+        module_census,
+    )
+
+    declared = {PACKAGED} | {f"{PACKAGED}.{name}" for name in RUNNER_MODULES}
+    undeclared, missing = sorted(_EXPECTED - declared), sorted(declared - _EXPECTED)
+    assert not undeclared and not missing, (
+        f"tests/_modal_import_probe.py governs every *.py file in {_PACKAGE_DIR}, and that "
+        "must match the modules RUNNER_MODULES declares. On disk but undeclared: "
+        f"{undeclared}; declare each in RUNNER_MODULES and the tables in "
+        "tests/test_modal_runner_package_shape.py, or delete the file. Declared but not on "
+        f"disk: {missing}; restore the file, or remove the module from those tables. If every "
+        "declared module is missing, `_PACKAGE_DIR` no longer points at scripts/modal_runner/.")
+    planted = tmp_path / "modal_runner"
+    (planted / "__pycache__").mkdir(parents=True)
+    (planted / "sub").mkdir()
+    for name in ("__init__.py", "core.py", "ledger.py", "notes.txt", "__pycache__/core.pyc",
+                 "sub/nested.py"):
+        (planted / name).write_text("", encoding="utf-8")
+    assert _governed_modules(planted) == {PACKAGED, f"{PACKAGED}.core", f"{PACKAGED}.ledger"}
+    importlib.import_module(PACKAGED)
+    with monkeypatch.context() as patch:
+        patch.delitem(sys.modules, PACKAGED + ".training")
+        with pytest.raises(AssertionError,
+                           match=r"Never reached: \['scripts\.modal_runner\.training'\]"):
+            assert_module_identity(module_census())
+    assert_module_identity(module_census())
+
+
+def test_runtime_identity_rejects_bare_alias_of_same_object(monkeypatch):
+    """A bare spelling fails even when it aliases the canonical object."""
+    import importlib
+
+    from tests._modal_import_probe import assert_module_identity, module_census
+
+    package = importlib.import_module(PACKAGED)
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "modal_runner", package)
+        with pytest.raises(AssertionError, match="forbidden bare"):
+            assert_module_identity(module_census())
+    assert_module_identity(module_census())
+
+
+# The three controls below plant under NON-bare names, so the forbidden-bare
+# clause cannot be what rejects them; each asserts that before it asserts the
+# clause it pins. Like the controls above, they reach the runner through
+# `importlib.import_module(PACKAGED)`: a variable argument, which the static
+# walker cannot see. That is what keeps this file out of
+# `_test_files_importing(PACKAGED)` -- writing `import scripts.modal_runner`
+# here would make the scope test demand this file in `_IMPORTERS`, and the
+# fork-bomb guard in the runtime gate forbids that entry.
+
+
+def test_runtime_identity_groups_a_second_object_by_its_source_file(monkeypatch):
+    """A second object under an unrelated name is grouped by its `__file__`.
+
+    `core` is not a bare spelling, so only `module_census`'s origin route can
+    file it under `scripts.modal_runner.core`; without that route the census
+    ignores it and the payload passes.
+    """
+    import importlib
+    import types
+
+    from tests._modal_import_probe import assert_module_identity, module_census
+
+    importlib.import_module(PACKAGED)
+    canonical = PACKAGED + ".core"
+    with monkeypatch.context() as patch:
+        twin = types.ModuleType("core")
+        twin.__file__ = sys.modules[canonical].__file__
+        patch.setitem(sys.modules, "core", twin)
+        planted = module_census()
+        assert planted["forbidden_bare"] == []
+        spellings = [row["name"] for row in planted["identities"][canonical]]
+        assert spellings == ["core", canonical]
+        with pytest.raises(AssertionError, match="module object identity"):
+            assert_module_identity(planted)
+    assert_module_identity(module_census())
+
+
+def test_runtime_identity_rejects_one_object_under_two_governed_names(monkeypatch):
+    """Two governed names bound to ONE object fail the distinct-objects clause.
+
+    Each name still holds a single object under its own spelling, so the
+    per-module identity clause and the spelling clauses all pass; only the
+    count of distinct objects across the governed names sees the collapse.
+    """
+    import importlib
+
+    from tests._modal_import_probe import assert_module_identity, module_census
+
+    importlib.import_module(PACKAGED)
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, PACKAGED + ".core", sys.modules[PACKAGED + ".state"])
+        planted = module_census()
+        assert planted["forbidden_bare"] == []
+        assert planted["identities"][PACKAGED + ".core"][0]["object_id"] == id(
+            sys.modules[PACKAGED + ".state"])
+        with pytest.raises(AssertionError, match="distinct governed module object identities"):
+            assert_module_identity(planted)
+    assert_module_identity(module_census())
+
+
+def test_runtime_identity_rejects_a_non_bare_alias_of_the_same_object(monkeypatch):
+    """A second NAME for the canonical object fails the competing-spellings clause.
+
+    One object, so the identity clauses pass; not bare, so the forbidden-bare
+    clause passes. This is the only clause that objects to a second spelling
+    which does not start with `modal_runner`.
+    """
+    import importlib
+
+    from tests._modal_import_probe import assert_module_identity, module_census
+
+    importlib.import_module(PACKAGED)
+    canonical = PACKAGED + ".core"
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "core_alias", sys.modules[canonical])
+        planted = module_census()
+        assert planted["forbidden_bare"] == []
+        spellings = [row["name"] for row in planted["identities"][canonical]]
+        assert spellings == ["core_alias", canonical]
+        with pytest.raises(AssertionError, match="competing import spellings"):
+            assert_module_identity(planted)
+    assert_module_identity(module_census())
 
 
 def test_the_census_scans_the_whole_repo():
@@ -580,7 +665,7 @@ def test_the_census_scans_the_whole_repo():
     the same census, so any narrowing that hides a test file also shrinks the
     set it discovers and it objects too. Measured objectors: row 1 = this test +
     the probe-scope test; row 2 = those two plus
-    `test_no_file_imports_the_bare_modal_runner_lib_spelling` (FileNotFoundError,
+    `test_no_file_imports_the_bare_modal_runner_spelling` (FileNotFoundError,
     as documented in `_repo_python_files`); row 3 = this test + the probe-scope
     test; rows 4 and 5 = this test alone. Two guards over one census is
     redundancy, not a defect -- but a docstring claiming exclusivity it no
@@ -622,12 +707,12 @@ def test_the_runtime_probe_runs_every_test_file_that_imports_the_runner():
     WHY this exists, and it is this repo's named #1 defect class: `_IMPORTERS`
     was a hand-maintained list with nothing watching it. The gate below can only
     catch an import in a file it RUNS, so a name quietly dropped from this list
-    retires coverage without reddening anything. One narrowing was already
-    caught by accident -- empty the list of real importers and the census reads
-    `[]`, which the gate's last assertion rejects -- but a PARTIAL narrowing was
-    not: drop one of four and the census still reads exactly
-    `["scripts.modal_runner_lib"]` from the survivors, and every assertion in
-    the gate passes.
+    retires coverage without reddening anything. Measured at W1, on the
+    single-module census the per-module probe replaced: emptying the list of
+    real importers was caught by accident -- the census read `[]`, which the
+    gate's last assertion rejected -- but a PARTIAL narrowing was not: drop one
+    of four and the census still read exactly `["scripts.modal_runner_lib"]`
+    from the survivors, and every assertion in the gate passed.
 
     Set EQUALITY, not `<=`, because the two directions fail differently and both
     are real:
@@ -639,15 +724,6 @@ def test_the_runtime_probe_runs_every_test_file_that_imports_the_runner():
       with no reason to be there, and usually a typo'd path that has silently
       stopped matching a real file. Measured by adding `tests/test_demo_format.py`:
       again THIS test is the only objector.
-
-    CROSS-TASK WARNING, for whoever hits this in Task 4: W2 splits
-    `tests/test_modal_runner.py` into a runner half and a client half. When the
-    `scripts.modal_runner_lib` import travels to the new file, THIS TEST GOES
-    RED, naming the new file as missing from `_IMPORTERS`. That is correct and
-    deliberate -- it is the control doing its job. Add the new file to
-    `_IMPORTERS`. Do NOT "fix" it by loosening this to a subset check or by
-    deleting the moved name; either one hands W2 a silently narrowed probe,
-    which is the exact failure this test was added to prevent.
     """
     discovered = _test_files_importing(PACKAGED)
     listed = set(_IMPORTERS)
@@ -660,78 +736,62 @@ def test_the_runtime_probe_runs_every_test_file_that_imports_the_runner():
         f"a real file): {sorted(listed - discovered)}.")
 
 
-def test_modal_runner_lib_resolves_to_exactly_one_module_object():
+def test_modal_runner_resolves_to_exactly_one_module_object(tmp_path):
     """RUNTIME gate for the one-spelling rule.
 
-    Runs a real pytest session over `_IMPORTERS` and reads `sys.modules` at
-    session finish. The static guard above proves no file CONTAINS a bare import
-    in a shape it knows; this proves none HAPPENS -- including through
-    `importlib.import_module(<variable>)`, which no static census can see. Read
-    `_IMPORTERS` for the matching bound: this covers the files it runs, not the
-    repo, and `test_the_runtime_probe_runs_every_test_file_that_imports_the_runner`
-    is what keeps that set honest.
+    Runs a real pytest session over `_IMPORTERS` with `tests._modal_import_probe`
+    loaded, and requires the in-body carrier to have passed and every
+    governed module to resolve to one object, under one spelling. The
+    static guard above proves no file CONTAINS a bare import in a shape it
+    knows; this proves none HAPPENS -- including through
+    `importlib.import_module(<variable>)`, which no static census can see. It
+    covers the files it runs, not the repo:
+    `test_the_runtime_probe_runs_every_test_file_that_imports_the_runner` keeps
+    that set honest, and imports made in child processes are invisible to it
+    (hence `_NESTED_DESELECT`).
 
-    PITFALL 1: the second module object is created when test_eval_baselines'
-    in-body import EXECUTES, so this must run the session, not import it.
+    The nested session's whole stdout/stderr is written to a log under this
+    test's `tmp_path`, and every failure message after the run names it.
 
-    PITFALL 2 -- the one that made the first draft of this gate decorative:
-    "the probe file was written" is not "the import ran". The in-body import is
-    the second-to-last statement of its test; anything that fails that test
-    earlier leaves the census clean and the defect live. So this asserts the
-    inner session's EXIT CODE and that the carrier test itself reported passed,
-    before it looks at the module names at all. Order matters: a bare module
-    list is the least informative of the three failures. All three orderings
-    were demonstrated red against a tree with the in-body bare import live --
-    see the Task 2 report; the third control (carrier silenced with
-    `@pytest.mark.skip`) is why the probe filters on `when == "call"`.
+    ORDER OF THE ASSERTIONS AFTER THE RUN, and why each is where it is:
 
-    IF YOU ARE HERE BECAUSE THIS TEST WENT RED, READ THIS FIRST. Assertion 1
-    demands the nested session exit 0, and that session runs every test in the
-    six `_IMPORTERS` files -- 421 of them, contributed by five, because
-    `tests/modal_test_helpers.py` defines no tests and is on the argv so the
-    probe can see it imported. So this test inherits the flakiness of every one
-    of them, and reports it as "the probe session did not finish clean" --
-    a headline pointing at the import machinery when the fault is very likely
-    somewhere else entirely. The nested session's tail, including its `FAILED`
-    line, is embedded in the assertion message: READ THAT LINE before you
-    suspect anything about module objects or spellings. gh#211 records what is
-    known: 2 spurious failures across ~20 nested sessions, one node id captured
+    1. the probe wrote its output file. Without it there is no payload, and
+       the exit status and the output tails are all a reader gets.
+    2. that file is valid JSON. A session killed mid-write leaves a truncated
+       file; the decode error is reported with the tails rather than escaping
+       as a bare JSONDecodeError.
+    3. identity failed in an otherwise clean session -> reported as itself,
+       with the probe's `identity_error`. The probe turns that session's exit 0
+       into 1, so without this clause the 1 surfaces below as "did not finish
+       clean" and points the reader at flaky tests instead of module identity.
+    4. the session exited 0 (EXIT-STATUS assertion).
+    5. the carrier passed its call phase.
+    6. `assert_module_identity` on the payload, re-checked here so the gate
+       does not depend on the probe having checked it.
+
+    IF THIS TEST WENT RED ON THE EXIT-STATUS ASSERTION, READ THIS FIRST. The
+    nested session runs every non-deselected test in the `_IMPORTERS` files, so
+    this test inherits the flakiness of every one of them, and reports it as
+    "the probe session did not finish clean" -- a headline pointing at the
+    import machinery when the fault is very likely elsewhere. Read the nested
+    `FAILED` line (in the message tail, or in the log it names) before you
+    suspect anything about module objects. gh#211 records what is known: 2
+    spurious failures across ~20 nested sessions, one node id captured
     (`test_interrupt_without_publishable_checkpoint_writes_a_reason_file`),
     cause NOT VERIFIED and not reproducible on demand.
 
-    AND YET ASSERTION 1 MUST STAY, so before you delete it, reproduce this. Let
-    an unrelated test in an `_IMPORTERS` file fail while the carrier still
-    passes -- exactly the gh#211 shape -- and neuter assertion 1. Measured, the
-    gate goes GREEN: assertions 2 and 3 both pass, because the carrier DID run
-    and the census IS clean. Assertion 1 is the sole objector to a session that
-    failed for an unrelated reason, and without it this test cannot tell a
-    healthy run from a broken one.
+    AND YET THE EXIT-STATUS ASSERTION MUST STAY. Let an unrelated test in an
+    `_IMPORTERS` file fail while the carrier still passes -- exactly the gh#211
+    shape -- and neuter the exit-status assertion: the gate goes GREEN, because
+    the carrier DID run and the census IS clean. It is the sole objector to a
+    session that failed for an unrelated reason. (Measured on the single-module
+    probe the per-module probe replaced; the argument does not depend on the
+    census's shape.)
 
-    Do NOT reach for control (a) here, which an earlier revision of this
-    paragraph cited and which does not show this. In control (a) the CARRIER
-    is what fails, so it never reaches `_PASSED` and assertion 2 catches the
-    case on its own -- measured, with assertion 1 neutered, control (a) still
-    fails on assertion 2. A reader following that citation would watch
-    assertion 2 cover for assertion 1 and conclude assertion 1 is redundant,
-    which is the deletion this paragraph exists to prevent. Control (a) shows
-    what a CENSUS-ONLY gate costs, which is a different and also real result.
-
-    COST, because this is a planning fact and not a rounding error: this spawns
-    a nested pytest session running all six `_IMPORTERS` files end to end.
-    Measured by `pytest --durations`, this test's `call` phase is **37s**
-    against **0.78s** for the next slowest test in this file, so it is ~96% of
-    the file's 38.06s. Run-to-run spread on this machine is 33-41s, wider than
-    the 0.7s that adding `test_modal_protocol.py` cost -- so treat the figure as
-    "half a minute", not as a number precise enough to regress against.
-
-    Suite-wide, so nobody oversells it: it is the SECOND slowest test in the
-    repo, behind
-    `test_resume_state.py::test_subprocess_resume_run_flat_map_without_pin_pitch_flag`,
-    and roughly 9% of the suite's wall clock. Measured by `--durations` on a full
-    run, not estimated. Adding a file to `_IMPORTERS` adds that file's whole
-    runtime here -- which is the price of the coverage, and the scope control
-    above means the list grows only when a file genuinely starts importing the
-    runner.
+    PITFALL: an in-body import such as test_eval_baselines' only runs when its
+    test EXECUTES, so this must run the session, not import the test modules;
+    and "the probe file was written" is not "the import ran", which is why the
+    carrier assertion exists.
     """
     # Fork-bomb guard, and it is not theoretical now that a sibling test
     # mutates `_IMPORTERS` for its own controls: this file in `_IMPORTERS` makes
@@ -752,88 +812,122 @@ def test_modal_runner_lib_resolves_to_exactly_one_module_object():
         "this file is in `_IMPORTERS`; the nested session would collect this "
         f"test and recurse without bound. _IMPORTERS={_IMPORTERS}")
 
-    with tempfile.TemporaryDirectory() as tmp:
-        out = os.path.join(tmp, "probe.json")
-        env = {**os.environ, "MODAL_IMPORT_PROBE_OUT": out}
-        # --basetemp keeps the nested session's temp tree inside `tmp`, so the
-        # TemporaryDirectory removes it when this block exits, timeout included.
-        # Isolation from the OUTER session does not depend on it: without the
-        # flag, pytest's default layout would give the nested session its own
-        # numbered pytest-<N> dir under the temp root (tests/conftest.py points
-        # that root at ~/.cache/cs2rl-pytest unless PYTEST_DEBUG_TEMPROOT is
-        # set, gh#219), and that dir would outlive this test until pytest's
-        # rotation of old sessions cleared it.
-        #
-        # `-o addopts=` and `-p no:randomly` are forward insurance, not load
-        # bearing today: measured at this commit there is no
-        # `[tool.pytest.ini_options]` in pyproject.toml, no pytest.ini / tox.ini
-        # / setup.cfg, and pytest-randomly is not installed. Both are no-ops
-        # now; they keep the nested session deterministic if either arrives.
-        argv = [
-            sys.executable, "-m", "pytest", *_IMPORTERS, "-q", "-o", "addopts=", "-p",
-            "no:randomly", "-p", "tests._modal_import_probe", "--basetemp",
-            os.path.join(tmp, "pt")
-        ]
-        # timeout= so a hung child cannot take the whole outer suite down with no
-        # diagnostic; the value and its rationale live at `_NESTED_TIMEOUT_S`.
-        # In-repo precedent is `tests/test_resume_state.py`, which passes
-        # timeout=1500/600 on its subprocess runs.
-        try:
-            result = subprocess.run(argv,
-                                    cwd=ROOT,
-                                    env=env,
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=_NESTED_TIMEOUT_S)
-        except subprocess.TimeoutExpired as expired:
-            # TimeoutExpired carries whatever was captured before the kill.
-            # BOTH streams, and stderr is the one that matters here: a hang
-            # caused by a bad plugin or a collection crash writes to stderr and
-            # nothing to stdout, which is precisely the case this branch exists
-            # to report. An earlier revision printed only `.stdout` and would
-            # have shown an empty tail for it -- the same gap the `tail =` line
-            # below was written to close, reproduced in the handler four lines
-            # above it. Each stream is repr'd separately because `text=True`
-            # does not guarantee str here; `or b""` covers the None case and the
-            # reprs read correctly either way.
-            partial_out = (expired.stdout or b"")[-3000:]
-            partial_err = (expired.stderr or b"")[-2000:]
-            raise AssertionError(
-                f"the probe session did not finish within {_NESTED_TIMEOUT_S}s, so it hung "
-                "rather than failed. This is not a module-spelling problem; look at what "
-                f"the nested session was doing.\n{partial_out!r}\n"
-                f"--- stderr ---\n{partial_err!r}") from expired
-        # stderr is in every message below on purpose: when the nested session
-        # dies before sessionfinish (bad plugin, collection crash) stdout is
-        # empty and the traceback is on stderr, which is the one case where the
-        # failure message is all a reader gets.
-        tail = f"{result.stdout[-3000:]}\n--- stderr ---\n{result.stderr[-2000:]}"
-        assert os.path.exists(out), (f"probe never ran; pytest exit={result.returncode}\n{tail}")
-        # A session killed mid-write leaves a file that passes the exists check
-        # and then blows up in the decoder. Caught so the tail -- the only thing
-        # that says WHY -- survives; an unguarded JSONDecodeError throws it away.
-        raw = Path(out).read_text(encoding="utf-8")
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as bad:
-            raise AssertionError(
-                "the probe wrote its output file but it is not valid JSON, so the session "
-                f"was killed mid-write. exit={result.returncode} bytes={len(raw)} "
-                f"{bad}\nfile starts: {raw[:200]!r}\n{tail}") from bad
+    # pytest silently ignores a `--deselect` that matches nothing, so a renamed
+    # campaign test would rejoin the nested session with nothing objecting. And
+    # `--deselect` matches node-id PREFIXES, so an entry also drops every
+    # function whose name starts with its own: each such function must be
+    # listed, or a new sibling test would leave the nested session unnoticed.
+    # The check reads module-level `def` and `async def` statements only (see
+    # `_NESTED_DESELECT`); pytest collects an `async def test_*` as an item too.
+    for node_id in _NESTED_DESELECT:
+        rel, _, name = node_id.partition("::")
+        defined = {
+            node.name
+            for node in ast.parse((ROOT / rel).read_text(encoding="utf-8")).body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert name in defined, (
+            f"`_NESTED_DESELECT` names {node_id}, which {rel} no longer defines, so the "
+            "deselect matches nothing and that test runs inside the nested session again. "
+            "Update `_NESTED_DESELECT` to the test's current name.")
+        listed = {
+            entry.partition("::")[2]
+            for entry in _NESTED_DESELECT if entry.startswith(rel + "::")
+        }
+        swept = {function for function in defined if function.startswith(name)}
+        assert swept <= listed, (
+            f"`_NESTED_DESELECT` entry {node_id} is a prefix, so it also deselects "
+            f"{sorted(swept - listed)} from the nested session without naming them. List "
+            "each one in `_NESTED_DESELECT` if it belongs out of the session, or rename it "
+            "so the prefix stops matching.")
 
+    out = tmp_path / "probe.json"
+    log = tmp_path / "nested-session.log"
+    env = {**os.environ, "MODAL_IMPORT_PROBE_OUT": str(out)}
+    # --basetemp keeps the nested session's temp tree inside this test's own
+    # `tmp_path`, next to its log and probe output. Isolation from the OUTER
+    # session does not depend on it: without the flag pytest would give the
+    # nested session its own numbered pytest-<N> dir under the temp root
+    # (tests/conftest.py points that root at ~/.cache/cs2rl-pytest unless
+    # PYTEST_DEBUG_TEMPROOT is set, gh#219), which would outlive this test
+    # until pytest's rotation of old sessions cleared it.
+    #
+    # `-o addopts=` and `-p no:randomly` are forward insurance, not load
+    # bearing today: checked 2026-09-22 on the W3b tree, there is no
+    # `[tool.pytest.ini_options]` in pyproject.toml, no pytest.ini / tox.ini
+    # / setup.cfg, and pytest-randomly is not installed. Both are no-ops
+    # now; they keep the nested session deterministic if either arrives.
+    argv = [
+        sys.executable, "-m", "pytest", *_IMPORTERS,
+        *(f"--deselect={node_id}" for node_id in _NESTED_DESELECT), "-q", "-o", "addopts=", "-p",
+        "no:randomly", "-p", "tests._modal_import_probe", "--basetemp",
+        str(tmp_path / "pt")
+    ]
+    # timeout= so a hung child cannot take the whole outer suite down with no
+    # diagnostic; the value and its rationale live at `_NESTED_TIMEOUT_S`.
+    # In-repo precedent is `tests/test_resume_state.py`, which passes
+    # timeout=1500/600 on its subprocess runs.
+    try:
+        result = subprocess.run(argv,
+                                cwd=ROOT,
+                                env=env,
+                                capture_output=True,
+                                text=True,
+                                timeout=_NESTED_TIMEOUT_S)
+    except subprocess.TimeoutExpired as expired:
+        # TimeoutExpired carries whatever was captured before the kill.
+        # BOTH streams, and stderr is the one that matters here: a hang
+        # caused by a bad plugin or a collection crash writes to stderr and
+        # nothing to stdout, which is precisely the case this branch exists
+        # to report. `text=True` does not guarantee str here, so each stream
+        # is normalised to bytes for the log and repr'd for the message;
+        # `or b""` covers the None case.
+        stdout = expired.stdout or b""
+        stderr = expired.stderr or b""
+        log.write_bytes((stdout.encode() if isinstance(stdout, str) else stdout) +
+                        b"\n--- stderr ---\n" +
+                        (stderr.encode() if isinstance(stderr, str) else stderr))
+        raise AssertionError(
+            f"the probe session did not finish within {_NESTED_TIMEOUT_S}s, so it hung "
+            "rather than failed. This is not a module-spelling problem; look at what "
+            f"the nested session was doing. log: {log}\n{stdout[-3000:]!r}\n"
+            f"--- stderr ---\n{stderr[-2000:]!r}") from expired
+    log.write_text(result.stdout + "\n--- stderr ---\n" + result.stderr, encoding="utf-8")
+    # stderr is in every message below on purpose: when the nested session
+    # dies before sessionfinish (bad plugin, collection crash) stdout is
+    # empty and the traceback is on stderr, which is the one case where the
+    # failure message is all a reader gets.
+    tail = f"log: {log}\n{result.stdout[-3000:]}\n--- stderr ---\n{result.stderr[-2000:]}"
+    assert out.exists(), f"probe never ran; pytest exit={result.returncode}\n{tail}"
+    # A session killed mid-write leaves a file that passes the exists check
+    # and then blows up in the decoder. Caught so the tail -- the only thing
+    # that says WHY -- survives; an unguarded JSONDecodeError throws it away.
+    raw = out.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as bad:
+        raise AssertionError(
+            "the probe wrote its output file but it is not valid JSON, so the session "
+            f"was killed mid-write. exit={result.returncode} bytes={len(raw)} "
+            f"{bad}\nfile starts: {raw[:200]!r}\n{tail}") from bad
+
+    identity_error = payload["identity_error"]
+    assert not (identity_error and payload["exitstatus"] == 0), (
+        "module identity failed in an otherwise clean nested session: "
+        f"{identity_error}\n{tail}")
     assert result.returncode == 0 and payload["exitstatus"] == 0, (
         "the probe session did not finish clean, so its module census describes "
         f"a run that may never have reached the import. exit={result.returncode} "
-        f"sessionfinish={payload['exitstatus']}\n{tail}")
+        f"sessionfinish={payload['exitstatus']} identity_error={identity_error}\n{tail}")
     assert _INBODY_CARRIER in payload["passed"], (
         f"{_INBODY_CARRIER} did not report passed, so the in-body import -- the "
         "only shape a static census cannot see -- was not executed. The module "
-        f"census below is vacuous. passed={len(payload['passed'])} node ids")
-    assert payload["modules"] == [
-        "scripts.modal_runner_lib"
-    ], ("modal_runner_lib resolved under more than one name, so two module "
-        "objects exist and their exception classes are not identical: "
-        f"{payload['modules']}")
+        f"census below is vacuous. passed={len(payload['passed'])} node ids. log: {log}")
+    from tests._modal_import_probe import assert_module_identity
+    try:
+        assert_module_identity(payload)
+    except AssertionError as error:
+        raise AssertionError(f"{error}\nlog: {log}") from error
 
 
 # ── The modal test seam: concern, recomputed from source ───────────────────
@@ -866,14 +960,11 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # reviewer reads them. This moves one number. Change it deliberately, in the
 # commit that changes the seam, and say why.
 #
-# RE-DERIVED ONCE FOR THE WHOLE W3a GATES BRANCH, not per task, because every
-# module-level name any task adds to a `_seam_sources()` file moves it and a
-# per-task re-pin would be re-derived three times and wrong twice. 261 -> 273:
-# the twelve new names are the gate (a) and gate (d) helpers and tests added to
-# `tests/test_modal_client.py`. Measured, not inferred -- `len(classify_seam(
-# _seam_sources())[0])`, noting that `classify_seam` returns a PAIR, so the
-# obvious `len(classify_seam(...))` is 2. Destinations: 168 runner, 95 client,
-# 7 shared, 3 packaging guards.
+# 278 is `len(classify_seam(_seam_sources())[0])` on the W3b split tree. Against
+# 2bb32ac's 273: five client-side helper/test names added, one `SEAM_GUARDS`
+# name renamed, no destination moves -- the manifest's own diff lists the names.
+# Do not infer this value from additions in the packaging file, which the
+# classifier excludes.
 #
 # A GREEN `assert len(manifest) == GOVERNED_NAME_COUNT` IS NOT EVIDENCE THIS
 # NUMBER IS RIGHT. It compares two frozen artifacts -- a checked-in manifest
@@ -881,7 +972,7 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # neither and it stays green with a stale count and N ungoverned names on disk.
 # Its own message says so: it is a DELETION detector. The addition detector is
 # `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
-GOVERNED_NAME_COUNT = 273
+GOVERNED_NAME_COUNT = 278
 
 RUNNER_FILE = "tests/test_modal_runner.py"
 CLIENT_FILE = "tests/test_modal_client.py"
@@ -900,14 +991,15 @@ PACKAGING_FILE = "tests/test_modal_packaging.py"
 # to this file, so the rule is enforced rather than merely stated.
 #
 # WHY write down a rule the classifier already computes. Spec §10 criterion 12
-# bans a module named `utils` / `helpers` / `common` / `misc`. Its instrument is
-# the per-module segment sums of §5.1 -- the eight `scripts/modal_runner/`
-# submodules of W3 -- so a test module is outside its scope and there is no
-# conflict here. But the criterion exists because a module named for what it IS
-# rather than for what it OWNS becomes a junk drawer, and that failure mode does
-# not care which directory it happens in. A one-line membership test is what
-# keeps this file a seam artefact instead of a drawer: measured, it holds exactly
-# 7 names, and every one of them is reached from both halves.
+# bans a module named `utils` / `helpers` / `common` / `misc`. Its instrument,
+# the `forbidden-name` clause in tests/test_modal_runner_package_shape.py, reads
+# only the `scripts/modal_runner/` submodules, so a test module is outside its
+# scope and there is no conflict here. But the criterion exists because a module
+# named for what it IS rather than for what it OWNS becomes a junk drawer, and
+# that failure mode does not care which directory it happens in. A one-line
+# membership test is what keeps this file a seam artefact instead of a drawer:
+# measured, it holds exactly 7 names, and every one of them is reached from both
+# halves.
 SHARED_FILE = "tests/modal_test_helpers.py"
 
 # The three module-level guards that lived above line 100 of the monolith. They
@@ -920,15 +1012,19 @@ SHARED_FILE = "tests/modal_test_helpers.py"
 SEAM_GUARDS = frozenset({
     "test_modal_is_an_explicit_dependency_group",
     "test_local_entrypoints_do_not_import_modal",
-    "test_modal_runner_lib_does_not_import_modal_or_torch",
+    "test_modal_runner_does_not_import_modal_or_torch",
 })
 
 # Names the seam does not govern, with the reason.
+# Unless a sentence names another tree, the figures in this comment were
+# measured at 2bb32ac, by AST over the module-level bindings of every collected
+# `tests/test_*.py`. They are that tree's values, not current ones: the file
+# counts rise whenever a new test file defines its own `ROOT`, which W3b's
+# `tests/test_modal_runner_package_shape.py` does.
 #
 # `ROOT` is `Path(__file__).resolve().parents[1]` -- module-header boilerplate
-# that every destination file defines for itself by construction. Measured at
-# this commit, by AST over module-level bindings of every collected
-# `tests/test_*.py`: 6 files define a `ROOT` of their own (`test_modal_argv.py`,
+# that every destination file defines for itself by construction. At 2bb32ac,
+# 6 files define a `ROOT` of their own (`test_modal_argv.py`,
 # `test_modal_client.py`, `test_modal_packaging.py`, `test_modal_protocol.py`,
 # `test_modal_runner.py`, `test_train_loop_timing.py`). `tests/modal_test_helpers.py`
 # defines one too and is correctly absent from that list: it is outside the
@@ -944,17 +1040,17 @@ SEAM_GUARDS = frozenset({
 # from "any other", which is what it always meant -- measured that way, `ROOT` is
 # still the ONLY collision, and the files it collides with are
 # `test_modal_argv.py`, `test_modal_protocol.py` and `test_train_loop_timing.py`,
-# 3 of them. Measured at this commit.
+# 3 of them.
 #
 # THE 261 IN THIS PARAGRAPH IS THE MONOLITH'S OWN NAME COUNT AND IS HISTORICAL.
 # It used to be the live governed count as well, and saying "261 is unchanged"
 # here stopped being true on the W3a gates branch, which took the seam to 273
-# (`GOVERNED_NAME_COUNT`). What this paragraph actually measures did NOT move:
-# re-measured at this commit, the collision set is still `ROOT` alone and the
+# (then `GOVERNED_NAME_COUNT`). What this paragraph actually measures did NOT
+# move: re-measured at 2bb32ac, the collision set is still `ROOT` alone and the
 # same 3 files, and the client half still defines 83 of the monolith's governed
 # names plus `ROOT` -- which is the 84, and 83 + the 3 relocated `SEAM_GUARDS`
-# is the 86. The branch's twelve new client-half names are not monolith names,
-# so none of them enters any figure in this paragraph.
+# is the 86. The W3a branch's twelve new client-half names are not monolith
+# names, so none of them enters any figure in this paragraph.
 #
 # So this exemption list is one name long because the collision set is one name
 # long, not because the rest were not looked for. Treating `ROOT` as a shared
@@ -967,6 +1063,10 @@ SEAM_GUARDS = frozenset({
 # "lost".
 SEAM_HEADER_NAMES = frozenset({"ROOT"})
 
+# The seed-count figures below describe 2bb32ac, measured by the own-body signal
+# census this comment describes. They move as client tests are added, so
+# re-derive them with that census rather than advancing the prose.
+#
 # A name whose own body reaches the client modules. These two sets are the
 # spec's own §2.3 instrument, member for member.
 #
@@ -1122,13 +1222,11 @@ def classify_seam(sources):
        194 tests land on the wrong side. That 194 is a MONOLITH figure and is
        kept as one deliberately, because the measurement it reports was taken
        against the spec's line-3638 seam, which no longer exists. Do not try to
-       re-derive it from this function's inputs: `_seam_sources()` yields 201
-       tests today (138 runner + 63 client), and the missing 3 are the
-       `SEAM_GUARDS`, which moved into a file `_seam_sources()` excludes. That
-       201 was 192 (138 + 54) at the W3a branch point; the nine gate tests the
-       branch added to the client half are the whole difference, and the runner
-       half did not move. These are LIVE counts of module-level `test_`
-       functions, re-derivable from either file's AST -- unlike the 194 above.
+       re-derive it from this function's inputs, which have grown since: the
+       live population is the `test_` names `classify_seam(_seam_sources())[0]`
+       sends to `RUNNER_FILE` and `CLIENT_FILE` (the `SEAM_GUARDS` sit in a file
+       `_seam_sources()` excludes). That population moves with every test either
+       half adds, so no live count is written here; derive it when you need it.
 
        WHICH PART OF STAGE 1 EARNS THAT ZERO, because a one-at-a-time census
        gets this backwards. Knocked out singly, on the monolith: the closure
@@ -1174,69 +1272,27 @@ def classify_seam(sources):
     deserve a human, not a default.
 
     SECOND KNOWN LIMIT: this reads the AST, so a reference written inside a
-    subprocess `code = \"\"\"...\"\"\"` string is invisible to it, exactly as it is to
-    `bare_spelling_imports` above. Re-measured at this commit over the files
-    `_seam_sources()` actually yields: **zero** such blocks remain in any of
-    them. Both of the two that existed --
-    `test_local_entrypoints_do_not_import_modal` and
-    `test_modal_runner_lib_does_not_import_modal_or_torch` -- moved into THIS
-    file with the `SEAM_GUARDS` in W2, and this file is excluded from
-    `_seam_sources()`. They were assigned by fiat anyway and named only modules
-    outside the seam, so the limit's consequence is unchanged; its location is
-    not. Until this commit the paragraph said `tests/test_modal_runner.py` has
-    two such blocks, which the same commit made false.
+    string of code that a child process runs is invisible to it, exactly as it
+    is to `bare_spelling_imports` above. The seam's files do hold such strings
+    -- `_container_equivalent_import` in the client half builds one for
+    `python -c`, and `_write_probe_stubs` in the runner half writes stub
+    modules a child imports -- so the limit is live. Checked 2026-09-22 on the
+    W3b tree, by word-matching the string constants of every module-level seam
+    function that passes `-c` or writes multi-line code to a file against the
+    seam's module-level names: no hits, so the limit changes no destination
+    today. A code string that did name one would be a reach this function
+    misses, and nothing in this file would object. The monolith's two
+    `code = \"\"\"...\"\"\"` blocks are not among them: both moved into THIS file
+    with the `SEAM_GUARDS` in W2, and this file is excluded from
+    `_seam_sources()`.
 
-    Measured the other way too: 9 of the monolith's 261 module-level names now
-    appear as a word inside a multiline string literal somewhere in the seam, and
-    none of them is a reach. Five are prose in the rewritten runner header
-    (`ROOT`, `_run_cuda_probe`, and the three `SEAM_GUARDS` names it says moved
-    out); `_aware` is prose in the shared module's docstring;
-    `test_exact_allowed_flags_are_kept` and
-    `test_unknown_spelling_rejected_before_ownership` are cited by
-    `test_tct_split_trunk_is_allowed`'s docstring; and the ninth,
-    `test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist`, is cited
-    three times over in the CLIENT half's gate docstrings -- gate (a) criterion
-    3's, `_mount_bijection_violations`'s, and gate (d) criterion 4's. That ninth
-    member is a third category, neither runner-header prose nor a
-    `test_tct_split_trunk_is_allowed` citation, and it is the whole of the
-    difference between this 9 and the 8 the branch's own history carries.
-
-    THAT 261 IS THE MONOLITH'S OWN NAME COUNT AND IS HISTORICAL -- the same label
-    the `SEAM_HEADER_NAMES` comment block above puts on its identical phrasing,
-    and this one needs it more, because the live governed count in this file is
-    now 273 (`GOVERNED_NAME_COUNT`). AND THE CANDIDATE SET IS THE 247 NON-CLASS
-    NAMES AMONG THOSE 261, which is the only reading that reproduces the 9.
-    Naming it is not pedantry: over all 261 the same instrument returns 9 at the
-    branch point and 11 here, so a re-deriver who takes the obvious reading finds
-    a number that looks stale and "corrects" one that is right. The names
-    separating the two readings are CLASSES, and the gap is exactly how many of
-    them the instrument matches: `FakeChild`, pre-existing, at both ends, joined
-    here by `FakeImage`, which this branch added -- so 261-reading minus
-    247-reading is 1 at the branch point and 2 here. Over the 247 it returns 8 at
-    the branch point and 9 here, and that 9 is the paragraph above's enumeration,
-    member for member.
-
-    EXPECT THAT COUNT TO MOVE, and do not read a change in it as a finding by
-    itself. It rises whenever any docstring anywhere in the seam names one more
-    of those 247, which is what good docstrings do: over the 247 it was 3 before
-    W2, 8 at the branch point where W2 ends, and 9 here. SO RE-DERIVE IT AT THE
-    TREE THAT SHIPS, NOT AT THE ONE THE WORK STARTED FROM -- any commit touching
-    a docstring in a `_seam_sources()` file moves it, including a commit that
-    changes nothing else. The three figures this paragraph carried before were
-    measured correctly and against the wrong tree: they are this branch's base
-    values, written two commits after a commit in the same wave had already
-    moved them. What must not move is the CONSEQUENCE, and that is checked
-    directly rather than inferred from the count: feeding this file in changes
-    the destination of 0 of the 260 monolith names the classifier places (`ROOT`
-    is the 261st and `SEAM_HEADER_NAMES` excludes it), and every one of these
-    mentions sits in prose rather than in a `code = \"\"\"...\"\"\"` block a
-    subprocess executes.
-
-    Named rather than cited by line number throughout: this paragraph used to end
-    "a docstring at line 574", which was accurate in the monolith and points at
-    argv-list content after the split -- the second bare line number in this file
-    to rot inside the commit that moved the code it named. So this limit changes
-    no destination today. A future subprocess block could.
+    Names mentioned in PROSE -- docstrings that cite a test or helper -- are not
+    reaches either: `_referenced_module_names` ignores string constants, and
+    `_reaches_client_directly` reads them only for `_CLIENT_MODULES`
+    substrings. How many monolith names such prose mentions is a count that
+    moves with every docstring that cites one; this docstring used to carry it
+    as a figure and it went stale twice, the second time inside the wave that
+    rewrote the headers it counted, so it is retired rather than advanced.
     """
     trees = {rel: ast.parse(text) for rel, text in sources.items()}
     defined_in, nodes = {}, {}
@@ -1292,89 +1348,24 @@ def classify_seam(sources):
 
 
 def _seam_sources():
-    """The declared destination files that exist right now, as {rel: text}.
+    """Return the runner, client and shared source files that currently exist.
 
-    `tests/test_modal_packaging.py` is deliberately NOT in the list even though
-    it is a destination. It holds this classifier, whose own body names the
-    client modules in a string constant, so feeding the file to the graph seeds
-    the classifier itself as a client test. Re-measured at this commit: fed in,
-    `classify_seam` returns 321 destinations rather than 273, and of the 51 names
-    this file contributes to that graph, 14 go to `tests/test_modal_client.py` --
-    `classify_seam` and `_reaches_client_directly` among them -- while 26 go to
-    the runner half, 8 to the shared module and 3 to this file. Every one of the
-    first three groups is nonsense. A census of how test files import the
-    runner has no side of this seam. (The 3 are the `SEAM_GUARDS`, assigned by
-    fiat and the only ones this file legitimately receives; they are counted here
-    because they are among its module-level names, which is what "contributes"
-    means. 14 + 26 + 8 + 3 = 51, and 321 - 273 = 48 because the guards already
-    have destinations without this file being fed in.)
+    Exclude this classifier's own file: its source mentions client bindings,
+    so self-feeding assigns the instruments to the concerns they inspect. The
+    three legitimate packaging destinations are supplied by SEAM_GUARDS.
 
-    "51 NAMES", NOT "51 GOVERNED NAMES", and the distinction is this file's own
-    vocabulary rather than pedantry: `governed` here means `in the manifest` --
-    it is what `GOVERNED_NAME_COUNT` counts and what
-    `test_no_governed_name_is_defined_outside_the_seams_own_files` iterates. Of
-    these 51, exactly 3 are governed, and they are the `SEAM_GUARDS`. The file
-    has 52 module-level names; the 52nd is `ROOT`, which `SEAM_HEADER_NAMES`
-    excludes from classification. Writing "51 governed" tells a reader this file
-    contributes 51 manifest entries, which is wrong by 48.
+    Derive the current population from ``classify_seam(_seam_sources())[0]``.
+    A self-fed histogram also depends on which client bindings and client-module
+    paths this file happens to mention, docstrings included; it is a diagnostic
+    measurement, not an invariant worth another test or prose pin.
 
-    THOSE FIVE NUMBERS WERE 296 / 36 / 11 / 18 / 7 BEFORE W2 AND
-    300 / 42 / 14 / 17 / 8 AFTER IT, AND THE FIRST TRANSITION MOVED ALL FIVE
-    WHILE THE SECOND MOVED ONLY THREE (300 -> 321, 42 -> 51, 17 -> 26; the 14
-    and the 8 stayed), which is worth more than the numbers are. "Measured at this
-    commit" is what makes this sentence a live re-derivable claim rather than
-    a historical one, and a live claim in a file the same commit edits has to
-    be re-run in that commit. It was not, and the review caught it. Note how
-    cheaply it moves: any module-level name added here shifts every figure.
-    The split added four (the placement gate and the three relocated guards),
-    the review fixes added two more (`GOVERNED_NAME_COUNT` and
-    `_module_level_binding_counts`), and the W3a gates branch added nine --
-    gate (e)'s helper and two tests, gate (g)'s helper and five tests -- which
-    is why the corrected figures are not the ones the review reported either;
-    they were correct when it measured them.
-
-    AND TWO OF THE FIVE DID NOT MOVE, WHICH IS THE REASON THESE ARE RE-DERIVED
-    AND NOT ARITHMETIC. The W3a gates branch added 9 names here and ALL NINE
-    landed on the runner half: 17 -> 26, while 14 / 8 / 3 stayed exactly where
-    they were. A reviewer applying "+9 spread across the partition" -- or
-    applying it to the 14 because the 14 is the group the paragraph names
-    first -- writes a false figure that sums correctly and is therefore
-    invisible to the arithmetic check three lines up. Every number in this
-    paragraph was measured by feeding this file into `classify_seam` at this
-    commit.
-
-    SCOPE OF THE DAMAGE, measured, because it is smaller than it sounds and this
-    exclusion should not be over-trusted: feeding this file in changes the
-    destination of **0** monolith names. The self-poisoning is confined to this
-    file's own names. The three names this file legitimately receives are
-    declared in `SEAM_GUARDS` and assigned unconditionally, so nothing is lost
-    by leaving it out.
-
-    A CLAIM RETIRED HERE RATHER THAN REWRITTEN, because matching prose to code is
-    only right when the code is right. A previous revision of this paragraph said
-    that feeding this file in RAISES -- that `_names_defined_under_tests` was
-    reached by no test, so the known-limit raise fired on it. It no longer does,
-    and the reason matters more than the sentence did: that raise was never a
-    property of this exclusion or of the classifier. Measured -- hand `c1f7a7a`'s
-    copy of this file to TODAY's classifier and it still raises, on that same
-    name. The trip-wire was only ever the fact that `_names_defined_under_tests`
-    had no caller, which was itself the defect review filed; giving it one
-    removed the trip-wire as a side effect. Nothing load-bearing went with it.
-    The orphan raise is untouched and still reachable -- see `classify_seam`'s
-    KNOWN LIMIT and the `pytest.raises` closing
-    `test_the_seam_classifier_places_a_planted_name_by_its_reference_graph`. What
-    protects the seam here is the `rels` list this function ends with, which omits
-    `PACKAGING_FILE` unconditionally and never depended on the raise at all.
-
-    Existence-tolerant on purpose, and it stays that way now that the split has
-    landed. `tests/test_modal_client.py` and `tests/modal_test_helpers.py` did
-    not exist until W2 created them; all three files are present today, so the
-    `exists()` filter is a no-op at this commit. It is kept because
-    `classify_seam` computes from CONTENT, not from where content lives, so the
-    manifest it produces over the unsplit monolith is the same one it produces
-    over the split files -- which is what let the agreement test below stay green
-    on BOTH sides of the split instead of shipping red for one task, and is what
-    would let the seam be re-derived from a pre-split checkout.
+    The existence filter supports measuring the historical unsplit checkout.
+    Live deletion is guarded separately:
+    `test_the_modal_test_split_matches_concern_recomputed_from_source` pins
+    `GOVERNED_NAME_COUNT` and requires every manifest name to be defined on
+    disk, and `test_seam_manifest_agrees_with_the_classifier` compares the
+    manifest with the classifier. This function alone is not a completeness
+    check.
     """
     rels = [RUNNER_FILE, CLIENT_FILE, SHARED_FILE]
     return {rel: (ROOT / rel).read_text(encoding="utf-8") for rel in rels if (ROOT / rel).exists()}
@@ -1623,12 +1614,15 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
         f"green when only this branch is removed. got={destinations.get('_PROBE_TIMEOUT_S')!r}")
 
     # ── SEAM_HEADER_NAMES: ungoverned must not mean invisible ────────────────
+    # The unrelated `ROOT` definers are read off disk inside the message, so it
+    # names today's files instead of a count that grows with every new test file.
+    seam_files = {RUNNER_FILE, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
     assert "ROOT" not in destinations, (
         "`ROOT` was given a destination, so `SEAM_HEADER_NAMES` has stopped "
-        "exempting it. Measured, 6 collected test files define a `ROOT` of "
-        "their own -- the comment above `SEAM_HEADER_NAMES` names them -- so "
-        "governing it makes the seam's scan collide with the 3 of those that "
-        "have nothing to do with the seam.")
+        "exempting it. Governing it makes the seam's scan collide with every "
+        "unrelated test file that defines its own `ROOT`; today those are "
+        f"{sorted(set(_names_defined_under_tests().get('ROOT', [])) - seam_files)}. "
+        "The comment above `SEAM_HEADER_NAMES` has the history.")
     assert defined_in.get("ROOT") == [
         "probe.py"
     ], ("`ROOT` fell out of `defined_in` as well as out of `destinations`. "
@@ -1659,7 +1653,7 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     assert SEAM_GUARDS == frozenset({
         "test_modal_is_an_explicit_dependency_group",
         "test_local_entrypoints_do_not_import_modal",
-        "test_modal_runner_lib_does_not_import_modal_or_torch",
+        "test_modal_runner_does_not_import_modal_or_torch",
     }), ("the guard set changed. Removing a member hands that test back to the "
          "computed seam and adding one takes a test out of it; neither shows up "
          f"anywhere else in this test. got={sorted(SEAM_GUARDS)}")
@@ -1729,20 +1723,16 @@ def test_no_governed_name_is_defined_outside_the_seams_own_files():
     migration nothing declared. Written pre-split, when the sentence read "every
     governed name lives in `tests/test_modal_runner.py` ... one legal home" and
     "WHAT IT BECOMES after Task 4" was the four-home version; W2 made the second
-    half the present tense and 105 of the governed names no longer live in the
-    runner file. That figure was 93 at W2 and moved on the W3a gates branch, which
-    added twelve governed names and put all twelve in the client half; the runner
-    half's 168 did not move. Re-derived here, not carried forward -- it is a
-    present-tense count over the manifest this commit regenerates, and the same
-    commit that regenerates the manifest is the one that has to re-run it. The
-    ASSERTION itself did not change across the split -- it reads
-    the manifest's own value set -- which is why it was written here rather than
-    left for the task that needed it most, and is why only this prose moved.
+    half the live rule. Current destination counts are derived from the manifest,
+    rather than duplicated in prose:
+    `test_seam_manifest_agrees_with_the_classifier` is what verifies that
+    manifest against the source.
 
     WHAT IT DELIBERATELY DOES NOT CATCH: a BRAND-NEW name in a stray file. That
     name is not governed, and an unrelated new test module is legal. Only
-    `governed` is in scope -- which is also why the scan's 1,400-odd-name
-    superset does not turn this red for every helper in the repo.
+    `governed` is in scope -- which is also why the scan's superset (every
+    `tests/test_*.py` plus the shared helper module) does not turn this red for
+    every helper in those files.
 
     PITFALL, and it is the one this repo keeps paying for: a scan that reached
     nothing would pass this silently. So the scope controls come FIRST and are
@@ -1913,151 +1903,112 @@ assert 'modal' not in sys.modules
     subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
 
 
-def test_modal_runner_lib_does_not_import_modal_or_torch():
+def test_modal_runner_does_not_import_modal_or_torch():
     # Fresh subprocess: the parent may already have torch (the resume-input
     # checkpoint tests) or modal (later runner tests) in sys.modules.
     code = """
 import sys
-import scripts.modal_runner_lib
+import scripts.modal_runner
 assert 'modal' not in sys.modules
 assert 'torch' not in sys.modules
 """
     subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
 
 
-def _nonstdlib_module_scope_imports(repo_root, top_level_only=False):
-    """Gate (e), criterion 5. Every MODULE-SCOPE import in the optional runner's
-    library must name a STANDARD-LIBRARY module. Returns `(scanned, violations)`.
+RUNNER_MODULES = ("core", "request", "source", "checkpoint", "state", "commands", "preflight",
+                  "training")
 
-    `scanned` lists the repo-relative posix path of every file actually READ.
-    `violations` is a sorted list of `(rel, lineno, root_module)` triples, one
-    per offending import NAME (so `import a, b` can contribute two).
 
-    WHY A PAIR AND NOT JUST THE VIOLATION LIST, which is the whole reason the
-    signature looks like this: a guard that enumerates NOTHING returns no
-    violations, and an empty violation list from an empty file set is
-    byte-identical to one from a clean tree. Measured -- point the candidate
-    list at a path that does not exist and this returns `([], [])`, vacuously
-    green forever. GC1 permits evidence to be a pair, and `scanned` is the half
-    that makes the gate's OWN SCOPE assertable;
-    `test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library`
-    asserts it by name, so "the gate stopped reading the file" is a red rather
-    than a silent green. This repo's recurring gate defect is a guard blind to
-    its own scope; a bare violation list has nowhere to put that evidence.
+def _runner_module_population(repo_root):
+    """The package's submodule files as found ON DISK, checked against RUNNER_MODULES.
 
-    `repo_root` is a PARAMETER and never module-level `ROOT` (GC1), because the
-    knock-out below runs against a `tmp_path` copy. A helper that reached for
-    `ROOT` would scan the real file no matter what it was handed, which is a
-    mutant nothing could kill.
+    Returns `(candidates, undeclared)` as repo-relative posix paths.
+    `candidates` is every declared module in RUNNER_MODULES order, followed by
+    every undeclared `*.py` in `scripts/modal_runner/`, sorted; `undeclared` is
+    that tail alone.
 
-    THE TARGET SET IS ENUMERATED FROM THE FILESYSTEM (`is_file()`), not asserted
-    to exist. Pre-split that set has exactly one literal member, and that is a
-    stated compromise rather than a hidden one: a `scripts/*.py` glob also picks
-    up `scripts/run_modal.py`, whose module scope imports `modal` (`:31`) and
-    `scripts.modal_runner_lib` (`:33`) -- measured, 2 violations -- and reddens
-    this gate over a file that is SUPPOSED to import Modal. W3b replaces the
-    literal with enumeration over the split package's directory, and that swap
-    is a B12 obligation, not an optional tidy-up.
+    WHY the directory and not the constant: a scan whose population is its own
+    declared list cannot see a file nobody declared. Measured by the W3b
+    structural review (2026-09-22): a real `scripts/modal_runner/utils.py`
+    holding `import modal` and a module-scope call passed every structural gate
+    while the population was RUNNER_MODULES. The glob is the one
+    `scripts/run_modal.py`'s mount loop uses, so every file the image ships
+    other than the facade is a file these gates read.
 
-    THE INSTRUMENT, and the PRINCIPLE that generates it rather than a list to
-    memorise: **the gate checks exactly what EXECUTES at import time.** Every
-    skip and every exemption below is that one question asked of one construct,
-    and nothing is in the walk because it looked like "module scope".
-
-      * `FunctionDef` / `AsyncFunctionDef` bodies do NOT run on import -- skipped.
-        That is why `torch` at `:810` and `:1498` is the design rather than a
-        violation, and it is the whole reason bare `ast.walk` cannot be used.
-      * `ClassDef` bodies DO run on import -- WALKED. `class C:` + `import modal`
-        really does import Modal. (Methods inside are `FunctionDef`s, so the walk
-        reaches them and then skips them, which is correct for both reasons at
-        once.)
-      * `if TYPE_CHECKING:` bodies NEVER run -- exempted, and the `else:` branch
-        is still walked because it is exactly the branch that DOES run. Both
-        spellings are recognised, bare `TYPE_CHECKING` and `typing.TYPE_CHECKING`.
-      * every other block -- `try`, `if`, `with`, `for` -- runs on import and is
-        walked, which is what the decoy's `try:`-wrapped `import modal` proves.
-
-    "Do not descend into `FunctionDef` / `AsyncFunctionDef` / `ClassDef`" was the
-    plan's original wording and it got two of those three wrong; the principle
-    above is the correction, applied in fix round 1. The `TYPE_CHECKING`
-    exemption is NOT a hole in the same sense: importing this module does not
-    import what such a block names, so reddening on one would be a false positive
-    over correct code, and a guard that reddens on correct code gets switched off.
-
-    INTERACTION WITH GATE (g), stated because a later reader will otherwise think
-    one of the two is wrong: criterion 13 governs the SHAPE of a `TYPE_CHECKING`
-    block (at most one, imports only); criterion 5 declines to look INSIDE one at
-    all. They are complementary -- (g) polices the construct, (e) polices what
-    running the module costs -- and neither subsumes the other.
-
-    Measured on today's unmodified module:
-
-        instrument         | import nodes | non-stdlib roots reported
-        tree.body          |      23      | none
-        import-time walk   |      23      | none
-        bare ast.walk      |      25      | `torch` -- `:810` in `_import_torch`,
-                           |              | `:1498` in `_load_checkpoint_weights`
-
-    So a bare-`ast.walk` gate is RED ON THE CORRECT, UNMODIFIED MODULE, and the
-    obvious repair is to fall back to `tree.body`, which is blind to everything
-    below depth 1. This SUPERSEDES the spec's own bold instruction to use
-    `ast.walk`; the override is deliberate and measured.
-
-    `top_level_only` exists for exactly ONE caller: the knock-out, which must
-    ASSERT that the `tree.body` instrument is green on a plant this one catches.
-    The two instruments return the identical set on the unmodified module
-    (23 == 23, both clean), so the plant is the ONLY observation that separates
-    them, and a described difference is not an asserted one.
-
-    EVERY BRANCH ABOVE IS INERT ON THIS SUBJECT and is therefore held by a plant
-    instead: 0 async defs, 0 `TYPE_CHECKING` blocks, and 23 classes none of which
-    contains an import. An exemption the subject never exercises is
-    indistinguishable from a gate that never sees one -- so the knock-out ships a
-    row for each, including a GREEN `TYPE_CHECKING` row importing something
-    NON-stdlib, since a stdlib import there would pass for the wrong reason.
-
-    THE RESOLUTION RULE, spelled out because the obvious wrong one is red on the
-    correct module: `alias.name.split(".")[0]` for `Import`,
-    `node.module.split(".")[0]` for `ImportFrom` with `node.level == 0`.
-
-      * Treating `ImportFrom` ALIASES as module names -- the natural mistake --
-        reports 13 false non-stdlib names on today's module (`Callable`,
-        `Mapping`, `Path`, `Protocol`, `PurePosixPath`, `Sequence`, `UTC`,
-        `annotations`, `asdict`, `dataclass`, `field`, `replace`, `timedelta`).
-      * Skipping `.split(".")[0]` reports `collections.abc`, which is not a key
-        in `sys.stdlib_module_names` -- that set holds TOP-LEVEL names only. On
-        the `ImportFrom` side today's module objects; on the `Import` side it
-        does NOT, because it has no dotted plain `import` at module scope, and
-        fault seeding is what found that. The knock-out's
-        `import xml.etree.ElementTree` row is the observation that covers it.
-      * `alias.asname` instead of `alias.name` is silent on today's module and
-        on a plain `import modal`; the `import modal as ...` row in the knock-out
-        is what objects.
-      * `node.level == 0` skips relative imports, which are intra-package and
-        not third-party dependencies. Inert today (all 23 imports are level 0)
-        and load-bearing the moment W3b's package modules import each other.
-
-    `node.module` is additionally tested for truth because `from . import x`
-    parses to `module=None`; that can only happen with `level > 0`, so the test
-    is unreachable under the rule above and is kept so the helper stays total if
-    the level check is ever loosened.
-
-    A `SyntaxError` out of `ast.parse` is deliberately NOT caught: an unparsable
-    runner library is a red for a real reason, and a `try` here would let the
-    gate silently stop covering its only target.
+    PITFALLS: declared modules stay in `candidates` even when absent, so a
+    reader raises with the missing member's path instead of silently scanning
+    seven. `__init__.py` is excluded: it is the facade and declares nothing.
+    Its module scope has a stricter rule of its own (docstring, one-dot
+    relative imports, a literal `__all__`), `_facade_violations` in
+    tests/test_modal_runner_package_shape.py; the surface gates in
+    tests/test_modal_client.py pin the names it exports.
+    pathlib's `*` also matches dotfiles such as an editor's `.#core.py`; the
+    mount loop would ship those too, so they are read (and may raise) here.
     """
     root = Path(repo_root)
-    # Enumerated from the filesystem, not asserted into existence -- a missing
-    # target must show up as an empty `scanned`, which the green test reads.
-    candidates = [root / "scripts" / "modal_runner_lib.py"]
+    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    found = sorted(
+        path.relative_to(root).as_posix()
+        for path in (root / "scripts" / "modal_runner").glob("*.py") if path.name != "__init__.py")
+    undeclared = [rel for rel in found if rel not in declared]
+    return declared + undeclared, undeclared
+
+
+def _frozen_runner_source():
+    """The pre-split monolith, `scripts/modal_runner_lib.py` at 2bb32ac, digest-checked.
+
+    WHY IT OUTLIVES THE SPLIT: it is synthetic fixture text, not an oracle for
+    the live package. Five knock-outs of gates (e) and (g), written before the
+    split against the then-live monolith, splice their plants in after its line 19
+    (`from __future__ import annotations`), assert violation line numbers
+    derived from that, and argue each row is inert on the unplanted text
+    because it holds no `TYPE_CHECKING` block, relative import, async def or
+    class-body import. The package modules change with every edit, every one
+    but core.py holds relative imports, and core.py's `__future__` import is
+    its line 2, so none can stand in. The digest pin keeps those line numbers
+    and inertness claims about these exact bytes. A missing git object fails
+    naming the pinned commit.
+    """
+    import hashlib
+
+    pin = "2bb32ac09db897d3bdaa34660d242f5011524e85"
+    result = subprocess.run(["git", "show", f"{pin}:scripts/modal_runner_lib.py"],
+                            cwd=ROOT,
+                            capture_output=True,
+                            check=False)
+    assert result.returncode == 0, f"Fetch the pinned fixture text at {pin}: {result.stderr!r}"
+    data = result.stdout
+    digest = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
+    assert digest == "f0ca9853101b62cd8edb0c4904050829e7a005c5", (
+        f"the pinned fixture text at {pin} hashes to blob {digest}, not its recorded blob id: "
+        "the git object is corrupt or a filter rewrote it. Repair the object store (re-fetch "
+        "the commit); never edit the digest to match.")
+    return data.decode("utf-8")
+
+
+def _nonstdlib_module_scope_imports(repo_root, top_level_only=False, *, paths=None):
+    """Criterion 5: non-stdlib imports that execute when a package module is imported.
+
+    Returns `(scanned, violations)`: the repo-relative paths actually read, and
+    sorted `(path, lineno, root module)` tuples. The default population is
+    `_runner_module_population`'s, so an undeclared module on disk is scanned
+    too and shows up in `scanned`; `paths` replaces it for controls that plant
+    into a single file.
+
+    Function bodies and recognized TYPE_CHECKING bodies are exempt; class bodies,
+    other containers, and TYPE_CHECKING else branches execute and are inspected.
+    Missing/unreadable files raise with their path rather than pretending to scan.
+    """
+    root = Path(repo_root)
+    candidates = [
+        root / rel for rel in (paths if paths is not None else _runner_module_population(root)[0])
+    ]
     scanned = []
     violations = []
     for path in candidates:
-        if not path.is_file():
-            continue
         rel = path.relative_to(root).as_posix()
-        scanned.append(rel)
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        scanned.append(rel)
         # Annotated `ast.AST` rather than inferred `ast.stmt`, because
         # `ast.iter_child_nodes` yields `AST` (expressions and `alias` nodes
         # included) and the pre-commit pyrefly gate reds on the unannotated
@@ -2083,8 +2034,12 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False):
                 # import and is exempt. `node.orelse` IS still walked -- that is
                 # precisely the branch that does run -- and skipping the whole
                 # `If` node would be a real blind spot rather than an exemption.
-                # Inlined rather than extracted because GC3 pins this file to
-                # three new module-level names and a predicate would be a fourth.
+                # The same rule is written out in `_module_scope_shape_violations`
+                # and in tests/test_modal_runner_package_shape.py's `_dependency_edges`;
+                # `test_criterion_13_reddens_on_the_conditional_modal_probe`
+                # asserts that this copy and gate (g)'s agree. (W3a inlined it to
+                # fit its GC3 module-name budget; W3b has since added names to
+                # this file, so that budget no longer explains the copies.)
                 if isinstance(node, ast.If):
                     test = node.test
                     if ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
@@ -2106,61 +2061,32 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False):
 
 
 def test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library():
-    """GREEN ON THE REAL SUBJECT. `scripts/modal_runner_lib.py` must be importable
-    without pulling in Modal, Torch or anything else off the standard library.
-
-    WHY THIS IS THE POINT OF THE WHOLE FILE: the module's own docstring promises
-    "status/download and all validation must work without importing or hydrating
-    a Modal App", and `test_modal_runner_lib_does_not_import_modal_or_torch`
-    already proves it at RUN TIME in a fresh subprocess. That runtime probe is
-    not a substitute for this one and vice versa. The probe asserts `'modal' not
-    in sys.modules`, so a `try: import modal / except ImportError: pass` at
-    module scope passes it in any environment where Modal is NOT installed --
-    which is every environment that does not opt into the `modal` dependency
-    group -- and then reddens for the first developer who does opt in. This gate
-    reads the SOURCE, so it is independent of what happens to be installed.
-
-    THE SCOPE ASSERTION COMES FIRST and is not decoration. `scanned` proves the
-    gate read its target; without it, a gate that enumerated nothing would pass
-    this by looking at nothing, which is the failure this repo keeps paying for.
-
-    MEASURED, and this is why the knock-out below is mandatory rather than
-    optional: the import-time walk and `tree.body` see the same 23 import nodes
-    and report the same empty violation set on this file, so on the unmodified
-    subject the correct instrument and the blind one are INDISTINGUISHABLE.
-    Bare `ast.walk` sees 25 and reports `torch` (`:810`, `:1498`) -- it is red on
-    the correct module, which is why the spec's `ast.walk` clause is overridden.
-
-    INTERACTION WITH GATE (g), criterion 13. Gate (g)'s `find_spec` header is
-    green under THIS gate through the WALK, not through the `TYPE_CHECKING`
-    exemption -- it is an ordinary `If` and gate (e) does read the imports inside
-    it. The two gates disagree about the `TYPE_CHECKING` BODY on purpose:
-    criterion 13 governs its SHAPE (at most one block, imports only), criterion 5
-    exempts it from purity because it never executes. If a future edit moves an
-    `import` inside the `find_spec` header, gate (e) reddens CORRECTLY -- that
-    import runs, and this gate's whole question is what running the module costs.
-    """
+    candidates, undeclared = _runner_module_population(ROOT)
+    assert undeclared == [], (
+        f"scripts/modal_runner/ holds modules RUNNER_MODULES does not declare: {undeclared}. "
+        "A new module needs entries in RUNNER_MODULES (tests/test_modal_packaging.py) and in "
+        "MANIFEST and DEPENDENCIES (and ANNOTATION_DEPENDENCIES for an import made only under "
+        "TYPE_CHECKING) in tests/test_modal_runner_package_shape.py, in the same commit; "
+        "otherwise delete the stray file.")
     scanned, violations = _nonstdlib_module_scope_imports(ROOT)
-    assert scanned == [
-        "scripts/modal_runner_lib.py"
-    ], ("gate (e) did not read its target, so an empty violation list below would mean "
-        "nothing. Either the file moved (W3b moves it, and the enumeration must move with "
-        f"it) or the enumeration stopped pointing at it. Scanned: {scanned}")
+    assert scanned == candidates, (
+        f"gate (e) read {scanned} but the package directory holds {candidates}; a module it "
+        "skipped is a module whose imports nobody checked.")
     assert violations == [], (
-        "these module-scope imports are not in the standard library, so importing "
-        "`scripts.modal_runner_lib` now costs whatever they cost -- a CUDA image, in the "
-        f"case the module was written to avoid. Import them lazily instead: {violations}")
-
+        "these (file, line, module) imports execute when the runner package is imported and are "
+        f"not standard library: {violations}. The package must import without Modal, torch or "
+        "numpy (see scripts/modal_runner/__init__.py). Move the import into the function that "
+        "needs it, or under `if TYPE_CHECKING:` if only annotations use it.")
     _, blind = _nonstdlib_module_scope_imports(ROOT, top_level_only=True)
     assert blind == violations, (
-        "the two instruments disagree on the UNMODIFIED module. They are supposed to be "
-        "indistinguishable here -- that equality is the reason the knock-out below is the "
-        f"only thing that separates them. import-time: {violations}, tree.body: {blind}")
+        f"the tree.body-only scan reported {blind} where the recursive scan reported "
+        f"{violations}; on a clean package both must be empty.")
 
 
 def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tmp_path):
-    """KNOCK-OUT. Plants live in a `tmp_path` copy; `scripts/modal_runner_lib.py`
-    is not edited, not one byte (GC2).
+    """KNOCK-OUT. Plants live in a `tmp_path` file named
+    `scripts/modal_runner/core.py` whose text is the frozen monolith from
+    `_frozen_runner_source`, not the live package; nothing live is edited (GC2).
 
     THE DELIVERABLE IS THE SECOND ASSERTION of the first block. A version of this
     gate built on `tree.body` PASSES the decoy -- that is the exact blindness the
@@ -2200,9 +2126,10 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
       * the two-violation row is the only place either "report just the first
         offender" or "return the walk's own order" is visible; every other row
         has at most one violation, where both mutants are identity functions.
-      * the missing-target block at the end objects to dropping the `is_file()`
-        filter, and it is what makes the `scanned` assertions mean anything: an
-        unread file has to stay OUT of `scanned` for their green to be evidence.
+      * the missing-target block at the end objects to skipping an unreadable
+        target, and it is what makes the `scanned` assertions mean anything: a
+        file the gate could not read must raise, never drop out of `scanned`
+        and leave an empty violation list behind.
       * the `if`-guarded row objects to adding `If` to the skip set, and it is
         the shape gate (g) plants (`if importlib.util.find_spec(...)`), so the
         two gates' readings of the same construct stay pinned together. Its test
@@ -2305,7 +2232,7 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
       * so if a future edit moves an `import` INSIDE the `find_spec` header,
         gate (e) reddens -- CORRECTLY. That import runs.
     """
-    source = (ROOT / "scripts" / "modal_runner_lib.py").read_text(encoding="utf-8")
+    source = _frozen_runner_source()
     lines = source.splitlines(keepends=True)
     assert lines[18].rstrip("\n") == "from __future__ import annotations", (
         "GC2 pins plants to line 19 because a `__future__` import must come first. That "
@@ -2313,30 +2240,33 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         "-- re-measure the plant site before trusting anything in this test.")
 
     def plant(text, slug):
-        """Write a tmp_path repo whose `scripts/modal_runner_lib.py` is the real
-        file with `text` spliced in after line 19, and return its repo root.
+        """Write a tmp_path repo whose `scripts/modal_runner/core.py` is the
+        frozen monolith with `text` spliced in after line 19; return its root.
 
         Nothing here is ever EXECUTED -- the gate parses. So a plant may name
         `os` or `modal` without either being importable.
         """
-        target = tmp_path / slug / "scripts" / "modal_runner_lib.py"
+        target = tmp_path / slug / "scripts" / "modal_runner" / "core.py"
         target.parent.mkdir(parents=True)
         target.write_text("".join(lines[:19]) + text + "".join(lines[19:]), encoding="utf-8")
-        return target.parents[1]
+        return target.parents[2]
 
     decoy = plant("try:\n    import modal\nexcept ImportError:\n    modal = None\n", "decoy")
-    scanned, violations = _nonstdlib_module_scope_imports(decoy)
+    scanned, violations = _nonstdlib_module_scope_imports(decoy,
+                                                          paths=["scripts/modal_runner/core.py"])
     assert scanned == [
-        "scripts/modal_runner_lib.py"
+        "scripts/modal_runner/core.py"
     ], (f"the knock-out did not reach the planted copy, so its red below would be "
         f"unrelated to the plant. Scanned: {scanned}")
     assert violations == [
-        ("scripts/modal_runner_lib.py", 21, "modal")
+        ("scripts/modal_runner/core.py", 21, "modal")
     ], ("gate (e) missed a try-wrapped module-scope `import modal` -- the exact shape an "
         "optional dependency gets written in, and the one that makes importing the runner "
         f"library cost a Modal import. Reported: {violations}")
 
-    _, blind = _nonstdlib_module_scope_imports(decoy, top_level_only=True)
+    _, blind = _nonstdlib_module_scope_imports(decoy,
+                                               top_level_only=True,
+                                               paths=["scripts/modal_runner/core.py"])
     assert blind == [], (
         "`tree.body` was supposed to be BLIND to this plant, and it is the blindness this "
         "gate exists to rule out. If it now sees the plant, the two instruments no longer "
@@ -2344,30 +2274,30 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         f"(e) walks past depth 1. tree.body reported: {blind}")
 
     for slug, text, expected, clause in [
-        ("asname", "import modal as _modal_shim\n", [("scripts/modal_runner_lib.py", 20, "modal")],
+        ("asname", "import modal as _modal_shim\n", [("scripts/modal_runner/core.py", 20, "modal")],
          "resolve `Import` through `alias.name`, never `alias.asname`"),
         ("fromimport", "from modal.functions import FunctionCall\n", [
-            ("scripts/modal_runner_lib.py", 20, "modal")
+            ("scripts/modal_runner/core.py", 20, "modal")
         ], "`ImportFrom` counts, and its module resolves to the ROOT, not the dotted path"),
-        ("denylist", "import numpy\n", [("scripts/modal_runner_lib.py", 20, "numpy")],
+        ("denylist", "import numpy\n", [("scripts/modal_runner/core.py", 20, "numpy")],
          "the check is an allow-list over `sys.stdlib_module_names`, not a deny-list"),
-        ("two", "import numpy\nimport modal\n", [("scripts/modal_runner_lib.py", 20, "numpy"),
-                                                 ("scripts/modal_runner_lib.py", 21, "modal")],
+        ("two", "import numpy\nimport modal\n", [("scripts/modal_runner/core.py", 20, "numpy"),
+                                                 ("scripts/modal_runner/core.py", 21, "modal")],
          "EVERY offending import is reported, sorted. The walk pops its stack from the "
          "end, so an unsorted return hands these back in reverse source order and a "
          "report-only-the-first implementation drops the second -- and this is the only "
          "row with two violations in one file, so nothing else can see either mutant"),
         ("ifguard", 'if os.environ.get("CS2RL_MODAL"):\n    import modal\n', [
-            ("scripts/modal_runner_lib.py", 21, "modal")
+            ("scripts/modal_runner/core.py", 21, "modal")
         ], "the walk descends through `If` -- gate (g) plants exactly this header"),
         ("classbody", "class _C:\n    import modal\n", [
-            ("scripts/modal_runner_lib.py", 21, "modal")
+            ("scripts/modal_runner/core.py", 21, "modal")
         ], "a CLASS BODY EXECUTES at import time, so it is walked, not skipped"),
         ("classmethod", "class _C:\n    def m(self):\n        import torch\n        return torch\n",
          [], "walking class bodies must not reach METHOD bodies -- a method is a `FunctionDef` "
          "and does not run on import"),
         ("nestedcontainers", "class _C3:\n    try:\n        class _C4:\n            import modal\n"
-         "    except ImportError:\n        pass\n", [("scripts/modal_runner_lib.py", 23, "modal")],
+         "    except ImportError:\n        pass\n", [("scripts/modal_runner/core.py", 23, "modal")],
          "descent is a STACK and not a single expansion -- an import THREE containers "
          "deep still executes at import time. Every other container in this table is "
          "top-level, so a walk that expands depth 1 and then stops passes all of them"),
@@ -2381,7 +2311,7 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         ("typecheckingelse",
          "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import modal\n"
          "else:\n    import numpy\n", [
-             ("scripts/modal_runner_lib.py", 24, "numpy")
+             ("scripts/modal_runner/core.py", 24, "numpy")
          ], "the `else:` branch of a `TYPE_CHECKING` block is exactly the branch that DOES run, so "
          "exempting the whole `If` node instead of just its body is a blind spot, not an "
          "exemption"),
@@ -2398,202 +2328,38 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
          "a relative import is intra-package, not a third-party dependency -- "
          "`node.level == 0`"),
         ("nametestguard", "_DEBUG = False\nif _DEBUG:\n    import modal\n", [
-            ("scripts/modal_runner_lib.py", 22, "modal")
+            ("scripts/modal_runner/core.py", 22, "modal")
         ], "the `TYPE_CHECKING` exemption matches the NAME, not merely the node class -- a "
          "bare `Name` test that is not `TYPE_CHECKING` still runs, so the import under it "
          "still costs what it costs"),
         ("attrtestguard", "import os\nif os.name:\n    import modal\n", [
-            ("scripts/modal_runner_lib.py", 22, "modal")
+            ("scripts/modal_runner/core.py", 22, "modal")
         ], "same clause on the attribute spelling: `x.TYPE_CHECKING` is exempt, any other "
          "attribute test is not -- the exemption reads `test.attr`, not `isinstance(test, "
          "ast.Attribute)`"),
     ]:
-        scanned, violations = _nonstdlib_module_scope_imports(plant(text, slug))
+        scanned, violations = _nonstdlib_module_scope_imports(
+            plant(text, slug), paths=["scripts/modal_runner/core.py"])
         assert scanned == [
-            "scripts/modal_runner_lib.py"
+            "scripts/modal_runner/core.py"
         ], (f"the {slug} plant was not read at all, so its verdict is vacuous: {scanned}")
         assert violations == expected, f"gate (e) is wrong about: {clause}. Got {violations}"
 
-    # A root with no target at all. The evidence must say "I read nothing"
-    # rather than raise, because the `scanned` half is the ONLY thing standing
-    # between an empty violation list and a vacuous green -- and the assertion
-    # above, which reads `scanned`, is meaningless unless an unread file really
-    # does stay out of it. Dropping the helper's `is_file()` filter turns this
-    # into a `FileNotFoundError`, which is the mutant this pins.
+    # A root with no target at all. The helper must raise, naming the file,
+    # because an unread target that silently dropped out of `scanned` would
+    # leave an empty violation list -- a vacuous green. Filtering candidates
+    # through `is_file()` (the W3a behaviour) is the mutant this pins.
     empty = tmp_path / "noscripts"
     empty.mkdir()
-    assert _nonstdlib_module_scope_imports(empty) == ([], []), (
-        "gate (e) must report an unreadable target as an empty SCOPE, not as an empty "
-        "verdict on a file it never opened.")
+    with pytest.raises(FileNotFoundError, match="core.py"):
+        _nonstdlib_module_scope_imports(empty, paths=["scripts/modal_runner/core.py"])
 
 
 def _module_scope_shape_violations(tree):
-    """Gate (g), criterion 13. `tree.body` may hold ONLY the module docstring,
-    imports, at most one imports-only `if TYPE_CHECKING:` block, and declared
-    symbols. Returns `(examined, violations)`.
+    """Classify every module-scope statement; what a declaration contains is not checked.
 
-    `examined` is how many `tree.body` statements the gate actually reached a
-    verdict on. `violations` is a list of `(kind, lineno, reason)` triples in
-    source order -- `kind` is the offending node's class name, so a red names the
-    construct and the line rather than saying "the shape is wrong".
-
-    WHY THIS GATE EXISTS AT ALL, and it is not "the module looks tidy today".
-    It is the only criterion that constrains the shape of a module header. §5.1
-    already measured this module as conforming, so building it here makes it a
-    DETECTOR rather than a description: criterion 2's byte-identity constrains
-    only RELOCATED segments, and W3b's eight `scripts/modal_runner/` module
-    headers will be 100% new code. After the split this is the only thing
-    standing between those headers and a module-scope `if
-    importlib.util.find_spec('modal') is not None:` -- a header that is GREEN on
-    criterion 3 (it never imports Modal, so the container-equivalent import
-    succeeds), GREEN on criterion 5 (its body assigns, it does not import), and
-    invisible to criterion 4 (which never reads module source at all).
-
-    THE CENSUS IS THIS ALLOW-LIST'S DERIVATION, NOT THE ALLOW-LIST, and the
-    difference is measurable rather than stylistic. Today's `tree.body` is 195
-    nodes:
-
-        FunctionDef 77 | Assign 69 | ClassDef 23 | Import 17 | ImportFrom 6
-        AnnAssign 2 | Expr 1        module-scope `If` nodes: []
-
-    A gate whose rule is "allow every kind in that table" allows `Expr`, because
-    the docstring is one. Measured: plant `logging.basicConfig(level=logging.INFO)`
-    after line 19 and the census becomes `Import 18 | Expr 2 | ...` with **no `If`
-    at all** -- so a kind-only gate is GREEN on a bare module-scope call, which is
-    a far likelier mistake in a brand-new W3b header than the `find_spec` probe
-    is. Hence the two shape branches:
-
-      * `Expr` is legal at `body[0]` and only if its value is a `Constant`
-        holding a `str` -- i.e. the module docstring, and nothing else, ever. An
-        f-string in that position is a `JoinedStr` and is NOT a docstring, so it
-        reddens, correctly.
-      * `If` is legal only as `if TYPE_CHECKING:`, only with an imports-only
-        body, and only once per module.
-
-    Measured again, and this is why the kind census cannot be the instrument:
-    `if TYPE_CHECKING: import decimal` and `if TYPE_CHECKING: import decimal;
-    _X = 1` produce **byte-identical censuses** (`ImportFrom 7 | If 1 | ...`).
-    One is legal and one is not. Nothing at the kind level can tell them apart.
-
-    HOW A `TYPE_CHECKING` BLOCK IS RECOGNISED, and it is the same rule gate (e)
-    uses on purpose: a bare `Name` spelled `TYPE_CHECKING` or ANY `Attribute`
-    whose `attr` is `TYPE_CHECKING`. Both spellings of the real idiom are live
-    (`from typing import TYPE_CHECKING` and `import typing`), and resolving the
-    binding properly would need an import table. The two gates MUST agree about
-    which construct this is -- if (g) recognised a narrower set, the same block
-    would be "exempt" to (e) and "not a `TYPE_CHECKING` block" to (g), and a
-    reader meeting the red would have no way to attribute it. Ruling 29 records
-    the accepted limit: `if some_module.TYPE_CHECKING:` is recognised too. The
-    other direction fails CLOSED -- `if TYPE_CHECKING and X:` is a `BoolOp`, is
-    not recognised, and reddens here.
-
-    THREE LIMITS, STATED RATHER THAN HIDDEN, because an unstated limit reads as a
-    bug to whoever next meets it:
-
-      1. The `else:` branch of a `TYPE_CHECKING` block is NOT examined, AND
-         NOTHING ELSE EXAMINES IT EITHER. Criterion 13's text governs "a
-         `TYPE_CHECKING` block whose body is imports only", and `else:` is not
-         that body; the common `else: modal = None` fallback is a declaration and
-         legal. Gate (e) walks that branch -- its `typecheckingelse` row is the
-         assertion -- but FOR IMPORTS ONLY, which is the whole of what criterion 5
-         asks. Anything else there THAT IMPORTS CLEANLY ON THE CONTAINER is caught
-         by no gate on this branch -- the qualifier is not hedging, gate (a) is a
-         partial backstop and its bound is measured below. MEASURED, on a plant
-         spliced after line 19 of the real module:
-
-             import logging
-             from typing import TYPE_CHECKING
-             if TYPE_CHECKING:
-                 import decimal
-             else:
-                 logging.basicConfig(level=logging.INFO)
-
-             gate (g): examined == len(tree.body), violations == []
-             gate (e): scanned == ['scripts/modal_runner_lib.py'], violations == []
-             gate (a): 1 passed -- the plant imports, so it has nothing to say
-
-         WHERE THE UNIVERSAL STOPS, measured rather than reasoned, because "no
-         gate" is the kind of claim that is one counter-example from false.
-         Replace the plant's body with `open('pyproject.toml').read()` -- legal
-         under pytest, whose cwd is the repo -- and gate (a) goes RED, because its
-         subprocess materialises only the recorded mounts and runs from a neutral
-         cwd. Gates (e) and (g) stay green on that same plant: neither runs
-         anything. And an `else:` that RAISES never reaches a gate at all --
-         tests/test_modal_client.py imports the module while pytest is still
-         collecting, so the whole file errors first. What is left uncovered is
-         therefore `else:` work that succeeds on the container, which is exactly
-         the `logging.basicConfig` shape above.
-
-         Gate (e)'s green is not vacuous -- `scanned` names the planted file, so
-         it read it and had nothing to say. And the POSITIVE CONTROL is the same
-         call one level up: as a bare module-scope `Expr` it is
-         `('Expr', 21, ...)` RED here, so what the `else:` buys is the
-         indentation, not an inert gate. That is knock-out 2 row 1's exact defect
-         -- a module-scope call that runs on every import -- surviving one
-         indentation level down. Declining an
-         `else:` clause HERE is still right: the plan's instrument table says
-         "every statement in its body", and an unexercised rule risks false reds
-         on W3b's own headers. So read this as a GAP, not as a delegation. W3b /
-         B12 candidate; a sentence that sends the reader to criterion 5 sends them
-         somewhere that does not have it.
-      2. The final `elif`'s declaration tuple rejects every other statement kind,
-         but only ONE of them ships an observation: a module-scope `try:`. That is
-         the deliberate choice, not an oversight -- `try: import X / except
-         ImportError:` is the shape an optional dependency actually gets written
-         in, and it is the only non-`If`, non-`Expr` block plausible in a module
-         header. `With` / `For` / `While` / `Match` at module scope have no row,
-         so a mutant that adds one of THOSE to that tuple survives this file.
-         Named so a later reader adds a row rather than assuming one exists.
-      3. THE GATE NEVER ENTERS AN EXPRESSION POSITION, and this is the largest of
-         the three. It classifies `tree.body` statements by KIND; it does not look
-         inside an `Assign` / `AnnAssign` value, a decorator, or a parameter
-         default. MEASURED, and it is the damning shape rather than a corner case:
-
-             _ON_CONTAINER = importlib.util.find_spec('modal') is not None
-                 gate (g): examined == len(tree.body), violations == []
-                 gate (e): scanned == ['scripts/modal_runner_lib.py'],
-                           violations == []
-
-         That is the one-line ASSIGNMENT form of the very header this docstring
-         names above as the gate's entire reason to exist. As an `Assign` it is a
-         declared symbol, so it is legal here; criterion 5 is measured green above
-         and criterion 3 is green for the reason the `if` form is (it never
-         imports Modal, so a container-equivalent import succeeds), while
-         criterion 4 never reads module source at all. So this is a module-scope
-         failure all four gates on this branch miss TOGETHER.
-         WHY IT IS DEFERRED RATHER THAN MISSED: spec §10 criterion 13 reads "no
-         assignment that is not a declared symbol", with the instrument named as
-         `tree.body` PLUS §5.1's manifest. The manifest half is what would decide
-         whether `_ON_CONTAINER` is DECLARED, and §5.1's manifest does not exist
-         pre-split -- there is no right-hand side to check a name against, the
-         same reason Ruling 6 split criterion 4 and Ruling 8 moved criterion 14.
-         The deferral is correct. Silence about it is not: do not read "criterion
-         13 exists" as "criterion 13 is done". W3b / B12 owes this half.
-
-    GC1: the subject is a PARAMETER and the return is evidence. The helper never
-    reads `ROOT`, never parses a path of its own and never asserts -- every
-    knock-out below hands it a tree built from a `tmp_path` splice, and a helper
-    that reached for the real module would be green on all of them no matter what
-    it did.
-
-    WHY `examined` RIDES ALONG (GC1/Ruling 28: evidence may be richer where the
-    extra half is load-bearing). Every clause of this gate is INERT on the
-    unmodified subject -- it has zero module-scope `If`, zero non-docstring
-    `Expr` and zero disallowed kinds -- so the green test on the real module is
-    almost entirely a statement about what the gate did NOT find. `examined`
-    is the one half of that green with teeth: a gate that inspected
-    `tree.body[:20]` and stopped returns `[]` from a 195-node module and is
-    indistinguishable from a correct one, because every plant GC2 permits lands
-    at index 2 (right after the docstring and `from __future__ import
-    annotations`) and would be caught by such a gate anyway. `examined ==
-    len(tree.body)` is what the green test asserts, and it does not rot the way a
-    literal 195 would.
-
-    THE LIMIT OF THAT, said plainly: `examined` is counted INSIDE the loop, so it
-    catches a loop that stops early. It cannot catch a mutant that returns
-    `len(tree.body)` while iterating something else. No evidence shape defends
-    against a helper that lies about its own scope; `scanned` in gate (e) has the
-    identical hole.
+    Recognition intentionally matches criterion 5: bare TYPE_CHECKING or any
+    attribute with that name. A single imports-only block is legal, without else.
     """
     examined = 0
     violations = []
@@ -2621,6 +2387,9 @@ def _module_scope_shape_violations(tree):
                      "`if TYPE_CHECKING:`"))
                 continue
             type_checking_blocks += 1
+            if node.orelse:
+                violations.append(
+                    ("If", node.lineno, "TYPE_CHECKING blocks must have no else branch"))
             if type_checking_blocks > 1:
                 violations.append(
                     (kind, node.lineno, "a module may hold at most one `if TYPE_CHECKING:` block"))
@@ -2632,10 +2401,9 @@ def _module_scope_shape_violations(tree):
                     violations.append((type(inner).__name__, inner.lineno,
                                        "an `if TYPE_CHECKING:` body may hold imports only"))
         # Everything else at module scope is an import or a declaration, or it
-        # is a violation. The tuple is INLINED rather than hoisted to a
-        # module-level constant because GC3 pins this task to six module-level
-        # names and a seventh would break the pre-registered budget -- the same
-        # trade gate (e) made with its `TYPE_CHECKING` predicate. `Expr` and
+        # is a violation. The tuple is inlined, as gate (e)'s `TYPE_CHECKING`
+        # predicate is; both were inlined to fit W3a's GC3 module-name budget,
+        # which W3b's additions to this file have since overtaken. `Expr` and
         # `If` are deliberately absent: both are legal in exactly one shape, so
         # they are decided by the branches above. Putting either here is the
         # blind kind-only allow-list this whole gate exists to rule out.
@@ -2647,47 +2415,26 @@ def _module_scope_shape_violations(tree):
 
 
 def test_gate_g_criterion_13_the_runner_library_declares_and_does_nothing_else():
-    """GREEN ON THE REAL SUBJECT. Nothing at `scripts/modal_runner_lib.py`'s
-    module scope may do anything except declare.
-
-    §5.1 measured this module as conforming before the gate existed, which is
-    exactly why the four knock-outs below are not optional: on this subject the
-    correct instrument and a blind kind-only allow-list return the identical
-    `(195, [])`. The plants are the ONLY observations that separate them.
-
-    THE SCOPE ASSERTION COMES FIRST and is not decoration. Every clause of this
-    gate is inert here -- 0 module-scope `If`, 0 non-docstring `Expr`, 0
-    disallowed kinds -- so `violations == []` on its own is a statement about
-    absence, and absence is what a gate that looked at nothing also reports.
-    `examined == len(tree.body)` is the half that says the gate read the module.
-
-    THE FLOOR IS A FLOOR, DELIBERATELY NOT A PIN. `examined > 50` catches the
-    vacuous cases (an empty or truncated subject) without pinning today's 195,
-    which would redden every time somebody legitimately adds a function to the
-    runner library -- and a gate that reddens on legal code gets switched off,
-    which is the failure mode this whole file is built around.
-
-    W3B OBLIGATION, the same one gate (e) carries: this test names
-    `scripts/modal_runner_lib.py` as a literal. The split replaces that single
-    module with eight `scripts/modal_runner/` submodules, and this test must
-    become an enumeration over them -- each of whose headers is 100% new code
-    and is constrained by nothing else in the spec. Swapping the literal is a
-    B12 deliverable, not an optional tidy-up.
-    """
-    tree = ast.parse((ROOT / "scripts" / "modal_runner_lib.py").read_text(encoding="utf-8"))
-    examined, violations = _module_scope_shape_violations(tree)
-    assert examined == len(tree.body), (
-        "gate (g) did not reach a verdict on every module-scope statement, so the empty "
-        f"violation list below is a verdict on a prefix. examined={examined}, "
-        f"len(tree.body)={len(tree.body)}")
-    assert examined > 50, (
-        "gate (g) examined a module-scope body far smaller than the runner library's, so it "
-        "is almost certainly looking at the wrong file or a truncated one. This is a FLOOR, "
-        f"not a pin -- do not turn it into today's exact count. examined={examined}")
-    assert violations == [], (
-        "`scripts/modal_runner_lib.py` now does something at module scope other than declare. "
-        "Everything here runs on every import of the module, and criterion 13 is the only "
-        f"criterion that constrains a module header's shape: {violations}")
+    candidates, undeclared = _runner_module_population(ROOT)
+    assert undeclared == [], (
+        f"scripts/modal_runner/ holds modules RUNNER_MODULES does not declare: {undeclared}. "
+        "Declare a new module in RUNNER_MODULES (tests/test_modal_packaging.py) and in "
+        "tests/test_modal_runner_package_shape.py's tables in the same commit, or delete the "
+        "stray file.")
+    scanned = []
+    for rel in candidates:
+        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+        examined, violations = _module_scope_shape_violations(tree)
+        scanned.append(rel)
+        assert examined == len(tree.body), (
+            f"gate (g) examined {examined} of {len(tree.body)} module-scope statements in {rel}")
+        assert violations == [], (
+            f"{rel} does work at module scope, as (kind, line, rule): {violations}. Module scope "
+            "may hold only the docstring, imports, one imports-only `if TYPE_CHECKING:` block "
+            "without else, and declarations; move anything else into a function.")
+    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    assert scanned == declared, (
+        f"gate (g) read {scanned}, not the {len(declared)} modules RUNNER_MODULES declares")
 
 
 def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
@@ -2717,8 +2464,10 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
         tests/test_modal_client.py::test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe
 
     which names this test by node id in return. It lives there rather than here
-    because `tests/test_modal_packaging.py` imports zero `tests.*` modules and
-    that exclusion is load-bearing -- `_seam_sources()` omits this file because
+    because `tests/test_modal_packaging.py` imports no `tests.*` module at
+    module scope (only the runtime-identity tests import
+    `tests._modal_import_probe`, inside their bodies) and that exclusion is
+    load-bearing -- `_seam_sources()` omits this file because
     self-feeding the classifier returns a poisoned destination count -- so
     duplicating that gate's subprocess helper into this file would put two copies
     of one gate in the tree, which is the defect class this branch exists to
@@ -2736,10 +2485,10 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     and the sole objector is THIS test, read off the raised `E ` line. So 6 of
     the 7 pass, not all 7, and the 7th is the one you are reading -- which is what
     "delete that row and either mutant survives" says below. The tense is the
-    whole difference between the two sentences. Extracting one shared predicate
-    would cost a module-level name
-    against GC3's pinned budget -- the trade both helpers already state -- so the
-    agreement is ASSERTED over the shapes that separate the readings instead.
+    whole difference between the two sentences. W3a kept the two copies rather
+    than extract a shared predicate, to fit its GC3 module-name budget (W3b has
+    since added names to this file), so the agreement is ASSERTED over the
+    shapes that separate the readings instead.
     `os.TYPE_CHECKING` is the SOLE OBJECTOR and it holds BOTH directions: seeding
     the narrowing into gate (e) makes that row disagree, seeding the same
     narrowing into gate (g) makes it disagree the other way, and the other four
@@ -2752,8 +2501,7 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     about it -- that is precisely the class this branch closes, and asserting it
     would dress a vacuous green as a contrast.
     """
-    lines = (ROOT / "scripts" /
-             "modal_runner_lib.py").read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = _frozen_runner_source().splitlines(keepends=True)
     assert lines[18].rstrip("\n") == "from __future__ import annotations", (
         "GC2 pins plants to line 19 because a `__future__` import must come first. That line "
         f"now reads {lines[18]!r}, so the plant below lands somewhere else and every line "
@@ -2776,12 +2524,13 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
 
     # The criterion-5 half of the contrast, on the SAME planted source. Gate (e)
     # takes a repo root, so the plant is materialised rather than parsed.
-    target = tmp_path / "scripts" / "modal_runner_lib.py"
+    target = tmp_path / "scripts" / "modal_runner" / "core.py"
     target.parent.mkdir(parents=True)
     target.write_text(planted, encoding="utf-8")
-    scanned, impure = _nonstdlib_module_scope_imports(tmp_path)
+    scanned, impure = _nonstdlib_module_scope_imports(tmp_path,
+                                                      paths=["scripts/modal_runner/core.py"])
     assert scanned == [
-        "scripts/modal_runner_lib.py"
+        "scripts/modal_runner/core.py"
     ], (f"gate (e) never read the planted copy, so its green below is vacuous: {scanned}")
     assert impure == [], (
         "gate (e) was expected to stay GREEN on this plant -- that is the whole contrast. A red "
@@ -2808,11 +2557,12 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
             " ", "_")
         block = "".join(lines[:19]) + f"if {shape}:\n    import modal\n" + "".join(lines[19:])
         agree_root = tmp_path / slug / "scripts"
-        agree_root.mkdir(parents=True)
-        (agree_root / "modal_runner_lib.py").write_text(block, encoding="utf-8")
-        agree_scanned, agree_impure = _nonstdlib_module_scope_imports(agree_root.parent)
+        (agree_root / "modal_runner").mkdir(parents=True)
+        (agree_root / "modal_runner" / "core.py").write_text(block, encoding="utf-8")
+        agree_scanned, agree_impure = _nonstdlib_module_scope_imports(
+            agree_root.parent, paths=["scripts/modal_runner/core.py"])
         assert agree_scanned == [
-            "scripts/modal_runner_lib.py"
+            "scripts/modal_runner/core.py"
         ], (f"the {slug} plant was not read, so gate (e)'s verdict on it is vacuous: "
             f"{agree_scanned}")
         _, agree_shape = _module_scope_shape_violations(ast.parse(block))
@@ -2852,16 +2602,14 @@ def test_gate_g_criterion_13_reddens_on_module_scope_work_the_kind_census_hides(
     say "this statement", and a plant whose line number was not re-derived is the
     common way that stops being true.
     """
-    lines = (ROOT / "scripts" /
-             "modal_runner_lib.py").read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = _frozen_runner_source().splitlines(keepends=True)
     assert lines[18].rstrip("\n") == "from __future__ import annotations", (
         f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
 
     def plant(text):
-        """Parse the real module with `text` spliced in after line 19. Repeated
-        in each knock-out rather than hoisted to a module-level helper because
-        GC3 pins this task to six module-level names and a seventh would break
-        the pre-registered budget; nothing here is ever executed, only parsed."""
+        """Parse the frozen monolith with `text` spliced in after line 19.
+        Repeated in each knock-out rather than hoisted, a W3a choice made for its
+        GC3 module-name budget; nothing here is ever executed, only parsed."""
         return ast.parse("".join(lines[:19]) + text + "".join(lines[19:]))
 
     for text, expected, clause in [
@@ -2912,8 +2660,7 @@ def test_gate_g_criterion_13_reddens_on_a_type_checking_body_that_is_not_imports
     criterion 5 declines to look inside it. Complementary, and neither subsumes
     the other (Ruling 33).
     """
-    lines = (ROOT / "scripts" /
-             "modal_runner_lib.py").read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = _frozen_runner_source().splitlines(keepends=True)
     assert lines[18].rstrip("\n") == "from __future__ import annotations", (
         f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
     tree = ast.parse("".join(lines[:19]) + "from typing import TYPE_CHECKING\n"
@@ -2934,13 +2681,14 @@ def test_gate_g_criterion_13_reddens_on_a_type_checking_body_that_is_not_imports
 def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_by_name():
     """KNOCK-OUT 4 plus the positive control the other three depend on.
 
-    ROW 1 IS THE GREEN HALF THE WHOLE TASK RESTS ON. Today's module has ZERO
-    module-scope `If` nodes, so a gate that simply rejects every one of them is
-    observationally identical to a correct gate on the real subject and on all
-    three red knock-outs -- and would false-redden on exactly the
-    `TYPE_CHECKING` blocks W3b's eight new module headers will want, at which
-    point somebody deletes the gate. This row is the only thing in the suite
-    that says the construct is ALLOWED.
+    ROW 1 IS THE GREEN HALF THE WHOLE TASK RESTS ON. The frozen monolith these
+    plants splice into has ZERO module-scope `If` nodes, so on this substrate a
+    gate that simply rejects every one of them is observationally identical to
+    a correct gate on all three red knock-outs. Row 1 says the construct is
+    ALLOWED. On the live package, commands.py and preflight.py each hold one
+    such block, so `test_gate_g_criterion_13_the_runner_library_declares_and_does_nothing_else`
+    and tests/test_modal_runner_package_shape.py's
+    `test_package_header_accepts_import_only_type_checking` say so as well.
 
     ROWS 2 AND 3 HOLD THE `at most one` CLAUSE AND THE NAME CLAUSE, which are
     secondary clauses of the same branch -- and "the headline clause has a
@@ -2964,14 +2712,14 @@ def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_b
     in the other direction -- `if TYPE_CHECKING and X:` is a `BoolOp` and
     reddens here, which is row 6.
 
-    WHAT NONE OF THESE ROWS COVERS, said so a later reader adds one rather than
-    assuming: the `else:` branch of a `TYPE_CHECKING` block is not examined by
-    this gate at all. `else: modal = None` is a declaration and legal; what
-    RUNNING that branch costs is criterion 5's question, and gate (e)'s
-    `typecheckingelse` row is the assertion for it.
+    The helper's no-else clause has no row here. Its control is
+    tests/test_modal_runner_package_shape.py's
+    `test_package_ownership_and_header_controls[else]`, which plants into an
+    in-memory copy of the live package's sources and runs the combined
+    instrument over it; criterion 5
+    independently checks the imports in that branch.
     """
-    lines = (ROOT / "scripts" /
-             "modal_runner_lib.py").read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = _frozen_runner_source().splitlines(keepends=True)
     assert lines[18].rstrip("\n") == "from __future__ import annotations", (
         f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
 

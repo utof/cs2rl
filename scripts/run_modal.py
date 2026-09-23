@@ -3,7 +3,7 @@
 WHY this file exists separately from the artifact client: importing this module
 constructs the CUDA Image and registers the App. Observing a run must never
 pay that cost or create named objects. All request validation lives in
-scripts/modal_runner_lib.py so this module stays an adapter.
+scripts/modal_runner/ so this module stays an adapter.
 
 PITFALLS:
   * The base Function must not declare a named Volume/Dict. First-run App
@@ -30,7 +30,7 @@ from pathlib import Path, PurePosixPath
 
 import modal
 
-import scripts.modal_runner_lib as mrl
+import scripts.modal_runner as mrl
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 CUDA_IMAGE = ("nvidia/cuda:12.8.1-devel-ubuntu22.04@"
@@ -109,18 +109,21 @@ dependency_image = (modal.Image.from_registry(
             "elf=subprocess.check_output(['cuobjdump','--list-elf',so], text=True); "
             "assert all('sm_'+arch in elf for arch in ('75','86','89')), elf\"",
         ))
-runner_image = (
-    dependency_image.add_local_file(str(_REPO_ROOT / "scripts" / "modal_runner_lib.py"),
-                                    "/opt/app/scripts/modal_runner_lib.py",
-                                    copy=True).add_local_file(str(_REPO_ROOT / "scripts" /
-                                                                  "run_modal.py"),
-                                                              "/opt/app/scripts/run_modal.py",
-                                                              copy=True).env({
-                                                                                               # Modal imports "run_modal"; this file
-                                                                                               # imports scripts.modal_runner_lib.
-                                                                  "PYTHONPATH":
-                                                                  "/opt/app:/opt/app/scripts"
-                                                              }))
+runner_image = dependency_image
+for _runner_module in sorted((_REPO_ROOT / "scripts" / "modal_runner").glob("*.py")):
+    runner_image = runner_image.add_local_file(
+        str(_runner_module),
+        f"/opt/app/scripts/modal_runner/{_runner_module.name}",
+        copy=True,
+    )
+# Modal imports "run_modal"; this file imports scripts.modal_runner.
+runner_image = runner_image.add_local_file(
+    str(_REPO_ROOT / "scripts" / "run_modal.py"),
+    "/opt/app/scripts/run_modal.py",
+    copy=True,
+).env({
+    "PYTHONPATH": "/opt/app:/opt/app/scripts",
+})
 
 app = modal.App("cs2rl-training", include_source=False)
 

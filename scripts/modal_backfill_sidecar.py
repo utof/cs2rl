@@ -40,7 +40,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import scripts.modal_artifacts as arts                 # noqa: E402, I001
-import scripts.modal_runner_lib as mrl                 # noqa: E402, I001
+import scripts.modal_runner as mrl                     # noqa: E402, I001
 
 
 def _sidecar_payload(ckpt_bytes: bytes, *, now: datetime) -> dict[str, object]:

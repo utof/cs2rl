@@ -23,8 +23,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import modal                                           # noqa: E402, I001
-import scripts.modal_runner_lib as mrl                 # noqa: E402, I001
+import modal                           # noqa: E402, I001
+import scripts.modal_runner as mrl     # noqa: E402, I001
 
 REPO_ROOT = _REPO_ROOT
 DEFAULT_DOWNLOAD_ROOT = REPO_ROOT / "outputs" / "modal"
@@ -138,10 +138,12 @@ def collect_status(
 ) -> dict[str, object]:
     """Read-only status. Missing Volume fails without creating objects.
 
-    All judgement lives in modal_runner_lib: this function only fetches bytes
-    and hands them to `derive_run_view_from_bytes` / `verify_checkpoint`, so the
-    status client, the launch validator and the sidecar backfiller cannot drift
-    apart on staleness or on what makes a checkpoint trustworthy.
+    All judgement lives in the scripts/modal_runner package: this function only
+    fetches bytes and hands them to `derive_run_view_from_bytes` (defined in
+    scripts/modal_runner/state.py) / `verify_checkpoint` (defined in
+    scripts/modal_runner/checkpoint.py), so the status client, the launch
+    validator and the sidecar backfiller cannot drift apart on staleness or on
+    what makes a checkpoint trustworthy.
 
     PITFALLS:
       * Absent STATUS.json *and* absent reservation.json means the run does not

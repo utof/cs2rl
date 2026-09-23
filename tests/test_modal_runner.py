@@ -1,50 +1,14 @@
-"""tests/test_modal_runner.py — unit tests for the runner LIBRARY,
-scripts/modal_runner_lib.py.
+"""Behavior tests for the scripts.modal_runner library package.
 
-WHAT THIS FILE OWNS after the W2 split. Every test here exercises `mrl`; the
-tests for the Modal client CLIs (scripts/run_modal.py, scripts/modal_artifacts.py,
-scripts/modal_backfill_sidecar.py) are in tests/test_modal_client.py. Measured at
-this commit: 138 module-level test functions here, 304 collected. The `# ──`
-sections below walk the library in source order; read them rather than a list
-in this header. A second copy of their names is one more thing to keep in step
-with them, and an enumeration that silently stops short reads exactly like a
-complete one — an earlier draft of this paragraph listed 15 of the 18 and said
-nothing about being partial.
+The client adapter tests live in test_modal_client.py. Tests reach private
+library names through their owning submodules; the package facade exposes the
+production caller surface. Import spelling and module identity are guarded in
+test_modal_packaging.py.
 
-WHAT MOVED OUT, and why this header says so instead of simply dropping it. Until
-W2 this file also held three packaging guards, and every word of the header that
-used to be here described THEM rather than the library: the `modal` dependency
-group being NON-DEFAULT, the local entrypoints importing without modal, and a
-fresh-subprocess import check with its `cwd=ROOT` / `from _action_spec import` /
-`uv sync --no-install-project` rationale. All three are now `SEAM_GUARDS` in
-tests/test_modal_packaging.py — `test_modal_is_an_explicit_dependency_group`,
-`test_local_entrypoints_do_not_import_modal`,
-`test_modal_runner_lib_does_not_import_modal_or_torch` — and their rationale
-travelled with them. Rewritten rather than trimmed, because a header describing a
-file's departed contents is worse than no header at all: measured after the
-split, `cwd=ROOT`, `_action_spec` and `--no-install-project` occurred in this
-file ONLY inside that docstring, so it sent the next reader hunting for a
-subprocess import check that is not here. The split's byte-identity partition
-deliberately does not cover module headers, which is exactly why this one had to
-be read rather than verified.
-
-Pitfalls THIS file is careful about:
-  * It imports the runner as `scripts.modal_runner_lib`, never the bare
-    `modal_runner_lib`. Both spellings resolve in a full-suite process and yield
-    TWO distinct module objects whose `ValidationError` classes are not
-    identical, so `except mrl.ValidationError` would not catch the other one.
-    tests/test_modal_packaging.py is the guard on that, statically and at run
-    time.
-  * Seven helpers are reached from BOTH halves of the seam and live in
-    tests/modal_test_helpers.py rather than being copied into each half. Writing
-    a local copy of one here is invisible to a def-only census and is the
-    drift this seam exists to stop — see that module's docstring for the
-    membership rule, which is computed rather than judged.
-  * The only subprocess in this file is `_run_cuda_probe`, which runs
-    `mrl.CUDA_PROBE_SOURCE` with `cwd=tmp_path` and a stubbed `PYTHONPATH`. It is
-    hermetic by stubbing rather than by repo layout — the opposite of how the
-    departed import check achieved it, so do not copy that test's `cwd=ROOT`
-    reasoning into this one.
+Helpers used by both halves live in modal_test_helpers.py, with ownership
+recomputed by classify_seam rather than inferred from filenames. Deterministic
+patch-binding controls live in test_modal_patch_bindings.py; interruption tests
+here retain their original negative assertions.
 """
 import ast
 import io
@@ -64,12 +28,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
-    # scripts/ is a namespace package; tests import scripts.modal_runner_lib
+    # scripts/ is a namespace package; tests import scripts.modal_runner
     # the same way the later CLIs will. Do not rely on the editable install.
     sys.path.insert(0, str(ROOT))
 
-import scripts.modal_runner_lib as mrl                                                 # noqa: E402, I001
-from tests.modal_test_helpers import (                                                 # noqa: E402
+import scripts.modal_runner as mrl                                                            # noqa: E402, I001
+from scripts.modal_runner import checkpoint, commands, core, request, source, state, training # noqa: E402, I001
+from tests.modal_patch_binding_campaign import binding_target                                 # noqa: E402, I001
+from tests.modal_test_helpers import (                                                        # noqa: E402
     FakeChild, _aware, _git, _init_source_repo, _noop_heartbeat, _write_dumped_config,
     _write_metrics)
 
@@ -124,13 +90,13 @@ def test_invalid_run_ids_are_rejected(run_id):
 @pytest.mark.parametrize("name", ["wandb", "W_and-b.1", "s" * 80])
 def test_valid_secret_names_are_accepted(name):
     # Coupling (--wandb requires the secret and vice versa) is checked below.
-    assert mrl.validate_secret_name(name) == name
+    assert request.validate_secret_name(name) == name
 
 
 @pytest.mark.parametrize("name", ["", "-bad", "has space", "has/slash", "x" * 81])
 def test_invalid_secret_names_are_rejected(name):
     with pytest.raises(mrl.ValidationError):
-        mrl.validate_secret_name(name)
+        request.validate_secret_name(name)
 
 
 @pytest.mark.parametrize("effective_map", ["simple", "dust2", "arena-duel"])
@@ -306,11 +272,11 @@ def test_status_and_download_accept_only_run_id(action):
 
 def test_mounted_path_translates_client_roots():
     assert mrl.mounted_path(mrl.SOURCES_ROOT /
-                            "abc.tar.gz") == mrl.VOLUME_MOUNT / "sources" / "abc.tar.gz"
-    assert mrl.mounted_path(mrl.INPUTS_ROOT / "sha256" / "d.pt") == (mrl.VOLUME_MOUNT / "inputs" /
+                            "abc.tar.gz") == core.VOLUME_MOUNT / "sources" / "abc.tar.gz"
+    assert mrl.mounted_path(mrl.INPUTS_ROOT / "sha256" / "d.pt") == (core.VOLUME_MOUNT / "inputs" /
                                                                      "sha256" / "d.pt")
-    assert mrl.mounted_path(mrl.RUNS_ROOT / "ok-id" / "STATUS.json") == (mrl.VOLUME_MOUNT / "runs" /
-                                                                         "ok-id" / "STATUS.json")
+    assert mrl.mounted_path(mrl.RUNS_ROOT / "ok-id" /
+                            "STATUS.json") == (core.VOLUME_MOUNT / "runs" / "ok-id" / "STATUS.json")
 
 
 @pytest.mark.parametrize(
@@ -327,11 +293,11 @@ def test_mounted_path_rejects_absolute_and_dotdot(relative):
 
 
 def test_status_enum_splits_terminal_and_nonterminal():
-    assert mrl.Status.PREPARING.value == "preparing"
-    assert mrl.Status.BUILDING.value == "building"
-    assert mrl.Status.TRAINING.value == "training"
+    assert core.Status.PREPARING.value == "preparing"
+    assert core.Status.BUILDING.value == "building"
+    assert core.Status.TRAINING.value == "training"
     assert {s.value
-            for s in mrl.Status} >= {
+            for s in core.Status} >= {
                 "preparing",
                 "building",
                 "training",
@@ -347,7 +313,8 @@ def test_status_enum_splits_terminal_and_nonterminal():
 
 def test_parse_train_args_preserves_punctuation_as_data():
     # shlex.split must keep ';', quotes, and paths as argv DATA. Never a shell.
-    argv = mrl.parse_train_args("--timesteps 30000000 --wandb-entity 'org/name;rm -rf' --seed 2")
+    argv = request.parse_train_args(
+        "--timesteps 30000000 --wandb-entity 'org/name;rm -rf' --seed 2")
     assert argv == (
         "--timesteps",
         "30000000",
@@ -356,12 +323,12 @@ def test_parse_train_args_preserves_punctuation_as_data():
         "--seed",
         "2",
     )
-    assert mrl.validate_train_args(argv) == 30_000_000
+    assert request.validate_train_args(argv) == 30_000_000
 
 
 def test_parse_train_args_unclosed_quote_is_validation_error():
     with pytest.raises(mrl.ValidationError):
-        mrl.parse_train_args('--timesteps 1 --wandb-entity "unclosed')
+        request.parse_train_args('--timesteps 1 --wandb-entity "unclosed')
     with pytest.raises(mrl.ValidationError):
         mrl.build_run_request(**_valid_run_kwargs(train_args="--timesteps 1 --name 'oops"))
 
@@ -374,13 +341,13 @@ def test_omitted_train_args_fail_closed():
 
 
 def test_live_option_mirror_contains_exact_long_names_only():
-    assert "--timesteps" in mrl.LIVE_TRAIN_OPTIONS
-    assert "--num_envs" in mrl.LIVE_TRAIN_OPTIONS
-    assert "--dust2" in mrl.LIVE_TRAIN_OPTIONS
-    assert "--checkpoint-dir" in mrl.LIVE_TRAIN_OPTIONS
-    assert "--checkpoint_dir" in mrl.LIVE_TRAIN_OPTIONS
-    assert "--devi" not in mrl.LIVE_TRAIN_OPTIONS
-    assert "--num-envs" not in mrl.LIVE_TRAIN_OPTIONS  # runner spelling, not live
+    assert "--timesteps" in core.LIVE_TRAIN_OPTIONS
+    assert "--num_envs" in core.LIVE_TRAIN_OPTIONS
+    assert "--dust2" in core.LIVE_TRAIN_OPTIONS
+    assert "--checkpoint-dir" in core.LIVE_TRAIN_OPTIONS
+    assert "--checkpoint_dir" in core.LIVE_TRAIN_OPTIONS
+    assert "--devi" not in core.LIVE_TRAIN_OPTIONS
+    assert "--num-envs" not in core.LIVE_TRAIN_OPTIONS                 # runner spelling, not live
 
 
 def _live_train_long_options_from_source() -> set[str]:
@@ -425,7 +392,7 @@ def _live_train_long_options_from_source() -> set[str]:
 
 
 def test_live_train_option_mirror_matches_train_py():
-    assert _live_train_long_options_from_source() == set(mrl.LIVE_TRAIN_OPTION_ARITY)
+    assert _live_train_long_options_from_source() == set(core.LIVE_TRAIN_OPTION_ARITY)
 
 
 @pytest.mark.parametrize(
@@ -439,7 +406,7 @@ def test_live_train_option_mirror_matches_train_py():
 )
 def test_unconsumed_positional_tokens_rejected(raw):
     with pytest.raises(mrl.ValidationError):
-        mrl.validate_train_args(mrl.parse_train_args(raw))
+        request.validate_train_args(request.parse_train_args(raw))
     with pytest.raises(mrl.ValidationError):
         mrl.build_run_request(**_valid_run_kwargs(train_args=raw))
 
@@ -586,7 +553,7 @@ def test_training_argv_is_exact_for_resume_and_defaults():
     remote_resume = "/artifacts/inputs/sha256/abc.pt"
     assert request.training_argv(run_root, remote_resume=remote_resume) == [
         "--train",
-        "--map",                                                                  # R0-J: runner always emits the map, even the old implicit "simple"
+        "--map",                                                                       # R0-J: runner always emits the map, even the old implicit "simple"
         "simple",
         "--timesteps",
         "30000000",
@@ -607,9 +574,8 @@ def test_training_argv_is_exact_for_resume_and_defaults():
         "--resume",
         remote_resume,
     ]
-    assert mrl.build_train_argv(request,
-                                remote_resume) == request.training_argv(run_root,
-                                                                        remote_resume=remote_resume)
+    assert commands.build_train_argv(request, remote_resume) == request.training_argv(
+        run_root, remote_resume=remote_resume)
 
 
 def test_runner_emits_map_once_never_dust2():
@@ -637,7 +603,7 @@ def test_num_envs_injected_exactly_once_with_live_spelling():
 def test_dump_config_argv_uses_same_owned_flags_without_train():
     request = mrl.build_run_request(
         **_valid_run_kwargs(effective_map="dust2", num_envs=64, vec_workers=4))
-    argv = mrl.build_dump_config_argv(request, None)
+    argv = commands.build_dump_config_argv(request, None)
     assert argv[0] == "--dump-config"
     assert "--train" not in argv
     assert "--dust2" not in argv
@@ -731,7 +697,7 @@ def test_run_request_constructor_enforces_allowlists():
 
 def test_resume_request_constructor_enforces_mutual_exclusion():
     with pytest.raises(mrl.ValidationError):
-        mrl.ResumeRequest(
+        request.ResumeRequest(
             local_checkpoint=Path("outputs/checkpoints/bc_warmstart.pt"),
             prior_run_id="parent-run",
         )
@@ -825,7 +791,7 @@ def test_safe_extract_accepts_git_archive(tmp_path):
     _git(repo, "archive", "--format=tar", f"--output={archive}", sha)
     dest = tmp_path / "out"
     dest.mkdir()
-    mrl.safe_extract_git_archive(archive, dest)
+    source.safe_extract_git_archive(archive, dest)
     assert (dest / "readme.txt").read_text() == "hello\n"
 
 
@@ -854,7 +820,7 @@ def test_safe_extract_rejects_unsafe_members(tmp_path):
         archive = tmp_path / f"bad-{index}.tar"
         _write_tar(archive, info, data=b"x")
         with pytest.raises(mrl.ValidationError):
-            mrl.safe_extract_git_archive(archive, dest)
+            source.safe_extract_git_archive(archive, dest)
 
 
 # ── Source bundle: deterministic archive + provenance sidecar ──────────────
@@ -895,7 +861,7 @@ def test_source_bundle_excludes_untracked_and_is_deterministic(tmp_path):
     prov_a = mrl.create_source_bundle(repo, sha, first)
     prov_b = mrl.create_source_bundle(repo, sha, second)
     assert first.read_bytes() == second.read_bytes()
-    assert prov_a.archive_sha256 == prov_b.archive_sha256 == mrl.sha256_file(first)
+    assert prov_a.archive_sha256 == prov_b.archive_sha256 == core.sha256_file(first)
     assert prov_a.commit == sha
     assert prov_a.tree == tree
     with _open_bundle_tar(first) as tar:
@@ -921,7 +887,7 @@ def test_source_bundle_hash_changes_for_new_commit(tmp_path):
     sha2 = _git(repo, "rev-parse", "HEAD")
     second = tmp_path / "new.tar.gz"
     mrl.create_source_bundle(repo, sha2, second)
-    assert mrl.sha256_file(first) != mrl.sha256_file(second)
+    assert core.sha256_file(first) != core.sha256_file(second)
 
 
 def test_source_bundle_normalizes_modes_and_gzip_header(tmp_path):
@@ -961,7 +927,7 @@ def test_validate_local_checkpoint_hashes_and_maps_paths(tmp_path):
     ckpt = tmp_path / "warm.pt"
     torch.save({"weight": torch.tensor([1.0, 2.0])}, ckpt)
     provenance = mrl.validate_local_checkpoint(ckpt)
-    digest = mrl.sha256_file(ckpt)
+    digest = core.sha256_file(ckpt)
     assert provenance.sha256 == digest
     assert provenance.size == ckpt.stat().st_size
     assert provenance.client_path == mrl.INPUTS_ROOT / "sha256" / f"{digest}.pt"
@@ -983,7 +949,7 @@ def test_validate_local_checkpoint_rejects_non_checkpoint(tmp_path):
 
 def _live_batch_size(num_envs: int = 256) -> int:
     """Live compute_batch_dims: num_envs * 10 agents * 64 BPTT horizon."""
-    return num_envs * mrl.AGENTS_PER_ENV * mrl.BPTT_HORIZON
+    return num_envs * core.AGENTS_PER_ENV * core.BPTT_HORIZON
 
 
 def _make_manifest(**overrides) -> mrl.Manifest:
@@ -1026,14 +992,14 @@ def _make_manifest(**overrides) -> mrl.Manifest:
 
 def test_atomic_write_json_replaces_and_cleans_temp_on_failure(tmp_path):
     path = tmp_path / "STATUS.json"
-    mrl.atomic_write_json(path, {"ok": True})
+    state.atomic_write_json(path, {"ok": True})
     assert json.loads(path.read_text()) == {"ok": True}
 
     def boom(src, dst):
         raise OSError("injected replace failure")
 
     with pytest.raises(OSError, match="injected"):
-        mrl.atomic_write_json(path, {"ok": False}, replace=boom)
+        state.atomic_write_json(path, {"ok": False}, replace=boom)
     assert json.loads(path.read_text()) == {"ok": True}
     leftovers = [p.name for p in tmp_path.iterdir() if p.name != "STATUS.json"]
     assert leftovers == []
@@ -1046,41 +1012,49 @@ def test_status_transitions_are_monotonic_and_attempt_owned(tmp_path):
     run_root.mkdir()
     lock = threading.Lock()
     now = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
-    first = mrl.transition_status(run_root,
-                                  mrl.Status.PREPARING,
-                                  now=now,
-                                  attempt_id="attempt-a",
-                                  lock=lock)
-    assert first.status is mrl.Status.PREPARING
+    first = state.transition_status(run_root,
+                                    core.Status.PREPARING,
+                                    now=now,
+                                    attempt_id="attempt-a",
+                                    lock=lock)
+    assert first.status is core.Status.PREPARING
     assert first.attempt_id == "attempt-a"
-    mrl.transition_status(run_root, mrl.Status.BUILDING, now=now, attempt_id="attempt-a", lock=lock)
-    mrl.transition_status(run_root, mrl.Status.TRAINING, now=now, attempt_id="attempt-a", lock=lock)
-    done = mrl.transition_status(run_root,
-                                 mrl.Status.COMPLETED,
-                                 now=now,
-                                 attempt_id="attempt-a",
-                                 lock=lock)
-    assert done.status is mrl.Status.COMPLETED
+    state.transition_status(run_root,
+                            core.Status.BUILDING,
+                            now=now,
+                            attempt_id="attempt-a",
+                            lock=lock)
+    state.transition_status(run_root,
+                            core.Status.TRAINING,
+                            now=now,
+                            attempt_id="attempt-a",
+                            lock=lock)
+    done = state.transition_status(run_root,
+                                   core.Status.COMPLETED,
+                                   now=now,
+                                   attempt_id="attempt-a",
+                                   lock=lock)
+    assert done.status is core.Status.COMPLETED
     # Idempotent same-terminal write by the original delivery.
-    again = mrl.transition_status(run_root,
-                                  mrl.Status.COMPLETED,
-                                  now=now,
-                                  attempt_id="attempt-a",
-                                  lock=lock)
-    assert again.status is mrl.Status.COMPLETED
+    again = state.transition_status(run_root,
+                                    core.Status.COMPLETED,
+                                    now=now,
+                                    attempt_id="attempt-a",
+                                    lock=lock)
+    assert again.status is core.Status.COMPLETED
     with pytest.raises(mrl.ValidationError):
-        mrl.transition_status(run_root,
-                              mrl.Status.TRAINING,
-                              now=now,
-                              attempt_id="attempt-a",
-                              lock=lock)
+        state.transition_status(run_root,
+                                core.Status.TRAINING,
+                                now=now,
+                                attempt_id="attempt-a",
+                                lock=lock)
     before = (run_root / "STATUS.json").read_bytes()
     # Redelivered delivery has no authority and must not touch the file.
-    denied = mrl.transition_status(run_root,
-                                   mrl.Status.FAILED,
-                                   now=now,
-                                   attempt_id="attempt-b",
-                                   lock=lock)
+    denied = state.transition_status(run_root,
+                                     core.Status.FAILED,
+                                     now=now,
+                                     attempt_id="attempt-b",
+                                     lock=lock)
     assert denied is None
     assert (run_root / "STATUS.json").read_bytes() == before
 
@@ -1109,9 +1083,9 @@ def test_manifest_records_authoritative_simple_map_not_legacy_env():
 
 
 def test_run_result_schema_is_explicit():
-    result = mrl.RunResult(
+    result = core.RunResult(
         schema_version=1,
-        status=mrl.Status.COMPLETED,
+        status=core.Status.COMPLETED,
         exit_code=0,
         started_at="2026-08-13T12:00:00+00:00",
         finished_at="2026-08-13T12:01:00+00:00",
@@ -1129,21 +1103,21 @@ def test_run_result_schema_is_explicit():
 
 
 def _advance_to_training(run_root, attempt_id="a1", *, lock):
-    mrl.transition_status(run_root,
-                          mrl.Status.PREPARING,
-                          now=_aware(),
-                          attempt_id=attempt_id,
-                          lock=lock)
-    mrl.transition_status(run_root,
-                          mrl.Status.BUILDING,
-                          now=_aware(),
-                          attempt_id=attempt_id,
-                          lock=lock)
-    return mrl.transition_status(run_root,
-                                 mrl.Status.TRAINING,
-                                 now=_aware(),
-                                 attempt_id=attempt_id,
-                                 lock=lock)
+    state.transition_status(run_root,
+                            core.Status.PREPARING,
+                            now=_aware(),
+                            attempt_id=attempt_id,
+                            lock=lock)
+    state.transition_status(run_root,
+                            core.Status.BUILDING,
+                            now=_aware(),
+                            attempt_id=attempt_id,
+                            lock=lock)
+    return state.transition_status(run_root,
+                                   core.Status.TRAINING,
+                                   now=_aware(),
+                                   attempt_id=attempt_id,
+                                   lock=lock)
 
 
 def test_heartbeat_refreshes_updated_at_under_lock(tmp_path):
@@ -1155,9 +1129,9 @@ def test_heartbeat_refreshes_updated_at_under_lock(tmp_path):
     last = None
     for minute in (1, 2):
         now = _aware(minute=minute)
-        last = mrl.write_heartbeat(run_root, now=now, attempt_id="a1", lock=lock)
+        last = state.write_heartbeat(run_root, now=now, attempt_id="a1", lock=lock)
         assert last is not None
-        assert last.status is mrl.Status.TRAINING
+        assert last.status is core.Status.TRAINING
         assert last.updated_at == now.isoformat()
         persisted = json.loads((run_root / "STATUS.json").read_text())
         assert persisted["updated_at"] == now.isoformat()
@@ -1184,7 +1158,7 @@ def test_blocked_heartbeat_cannot_clobber_completed(tmp_path):
     def beat():
         started.set()
         beat_status.append(
-            mrl.write_heartbeat(run_root, now=_aware(minute=3), attempt_id="a1", lock=lock))
+            state.write_heartbeat(run_root, now=_aware(minute=3), attempt_id="a1", lock=lock))
 
     worker = threading.Thread(target=beat)
     worker.start()
@@ -1195,18 +1169,18 @@ def test_blocked_heartbeat_cannot_clobber_completed(tmp_path):
         assert worker.is_alive()
 
         # Critical section is already held; do not re-enter the same Lock.
-        written = mrl._transition_status_unlocked(run_root,
-                                                  mrl.Status.COMPLETED,
-                                                  now=_aware(minute=2),
-                                                  attempt_id="a1")
+        written = state._transition_status_unlocked(run_root,
+                                                    core.Status.COMPLETED,
+                                                    now=_aware(minute=2),
+                                                    attempt_id="a1")
         assert written is not None
-        assert written.status is mrl.Status.COMPLETED
+        assert written.status is core.Status.COMPLETED
     finally:
         lock.release()
     worker.join(timeout=2.0)
     assert not worker.is_alive()
     assert json.loads((run_root / "STATUS.json").read_text())["status"] == "completed"
-    assert beat_status and beat_status[0].status is mrl.Status.COMPLETED
+    assert beat_status and beat_status[0].status is core.Status.COMPLETED
 
 
 def test_late_heartbeat_cannot_replace_terminal(tmp_path):
@@ -1218,7 +1192,7 @@ def test_late_heartbeat_cannot_replace_terminal(tmp_path):
 
     def heartbeat_loop():
         while not stop.is_set():
-            mrl.write_heartbeat(run_root, now=_aware(minute=1), attempt_id="a1", lock=lock)
+            state.write_heartbeat(run_root, now=_aware(minute=1), attempt_id="a1", lock=lock)
             stop.wait(0.01)
 
     worker = threading.Thread(target=heartbeat_loop)
@@ -1228,14 +1202,14 @@ def test_late_heartbeat_cannot_replace_terminal(tmp_path):
     stop.set()
     worker.join(timeout=2.0)
     assert not worker.is_alive()
-    mrl.transition_status(run_root,
-                          mrl.Status.COMPLETED,
-                          now=_aware(minute=2),
-                          attempt_id="a1",
-                          lock=lock)
-    beat = mrl.write_heartbeat(run_root, now=_aware(minute=3), attempt_id="a1", lock=lock)
+    state.transition_status(run_root,
+                            core.Status.COMPLETED,
+                            now=_aware(minute=2),
+                            attempt_id="a1",
+                            lock=lock)
+    beat = state.write_heartbeat(run_root, now=_aware(minute=3), attempt_id="a1", lock=lock)
     assert beat is not None
-    assert beat.status is mrl.Status.COMPLETED
+    assert beat.status is core.Status.COMPLETED
     assert json.loads((run_root / "STATUS.json").read_text())["status"] == "completed"
 
 
@@ -1244,13 +1218,13 @@ def test_derive_status_stale_after_five_minutes_does_not_mutate(tmp_path):
     run_root.mkdir()
     written = _advance_to_training(run_root, lock=threading.Lock())
     before = (run_root / "STATUS.json").read_bytes()
-    derived = mrl.derive_status(written, now=_aware(hour=12, minute=5))
+    derived = state.derive_status(written, now=_aware(hour=12, minute=5))
     assert derived.stale is True
-    assert derived.status is mrl.Status.INTERRUPTED
+    assert derived.status is core.Status.INTERRUPTED
     assert (run_root / "STATUS.json").read_bytes() == before
-    fresh = mrl.derive_status(written, now=_aware(minute=4, second=59))
+    fresh = state.derive_status(written, now=_aware(minute=4, second=59))
     assert fresh.stale is False
-    assert fresh.status is mrl.Status.TRAINING
+    assert fresh.status is core.Status.TRAINING
 
 
 def test_reservation_without_status_is_preparing_then_interrupted(tmp_path):
@@ -1262,12 +1236,12 @@ def test_reservation_without_status_is_preparing_then_interrupted(tmp_path):
             "attempt_id": "a1",
             "created_at": reserved_at.isoformat()
         }))
-    early = mrl.derive_run_view(run_root, now=_aware(minute=4))
-    assert early.status is mrl.Status.PREPARING
+    early = state.derive_run_view(run_root, now=_aware(minute=4))
+    assert early.status is core.Status.PREPARING
     assert early.reason == "no-heartbeat"
     assert early.stale is False
-    late = mrl.derive_run_view(run_root, now=_aware(minute=5))
-    assert late.status is mrl.Status.INTERRUPTED
+    late = state.derive_run_view(run_root, now=_aware(minute=5))
+    assert late.status is core.Status.INTERRUPTED
     assert late.reason == "no-heartbeat"
     assert late.stale is True
     assert not (run_root / "STATUS.json").exists()
@@ -1293,7 +1267,7 @@ def _minimal_completed_tree(tmp_path: Path, *, steps: list[int] | None = None):
         "data_dir": str(ckpt_dir),
         "timesteps": requested,
     }
-    normalized = mrl.normalize_config_for_transport(config)
+    normalized = checkpoint.normalize_config_for_transport(config)
     config_hash = mrl.sha256_bytes(
         json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode())
     (ckpt_dir / "config.json").write_text(json.dumps(config))
@@ -1311,10 +1285,10 @@ def _minimal_completed_tree(tmp_path: Path, *, steps: list[int] | None = None):
 
 def test_normalize_config_strips_only_checkpoint_data_dir():
     raw = {"env": "cs2-dust2", "data_dir": "/artifacts/runs/x/checkpoints", "seed": 2}
-    normalized = mrl.normalize_config_for_transport(raw)
+    normalized = checkpoint.normalize_config_for_transport(raw)
     assert "data_dir" not in normalized
     assert normalized == {"env": "cs2-dust2", "seed": 2}
-    assert mrl.normalize_config_for_transport(normalized) == normalized
+    assert checkpoint.normalize_config_for_transport(normalized) == normalized
 
 
 def test_validate_completed_run_accepts_representative_metrics(tmp_path):
@@ -1333,12 +1307,12 @@ def test_validate_completed_run_accepts_representative_metrics(tmp_path):
             break
     else:
         raise AssertionError("live compute_batch_dims not found in src/train_config.py")
-    assert mrl.AGENTS_PER_ENV == 10
-    assert mrl.BPTT_HORIZON == 64
+    assert core.AGENTS_PER_ENV == 10
+    assert core.BPTT_HORIZON == 64
     run_root, manifest, effective, ckpt = _minimal_completed_tree(tmp_path)
-    evidence = mrl.validate_completed_run(run_root, manifest)
+    evidence = checkpoint.validate_completed_run(run_root, manifest)
     assert evidence.last_step == effective
-    assert evidence.checkpoint_sha256 == mrl.sha256_file(ckpt)
+    assert evidence.checkpoint_sha256 == core.sha256_file(ckpt)
     assert evidence.config_hash == manifest.config_hash
     assert manifest.batch_size == _live_batch_size(256)
     assert manifest.effective_timesteps == (30_000_000 // manifest.batch_size) * manifest.batch_size
@@ -1364,7 +1338,7 @@ def test_validate_completed_run_rejects_bad_evidence(tmp_path, defect):
     elif defect == "short_step":
         _write_metrics(run_root / "checkpoints" / "metrics.jsonl", [effective - 1])
     with pytest.raises(mrl.ValidationError):
-        mrl.validate_completed_run(run_root, manifest)
+        checkpoint.validate_completed_run(run_root, manifest)
 
 
 def test_list_run_artifacts_keeps_unknown_trainer_files(tmp_path):
@@ -1374,7 +1348,7 @@ def test_list_run_artifacts_keeps_unknown_trainer_files(tmp_path):
     nested = run_root / "checkpoints" / "extra" / "weird.bin"
     nested.parent.mkdir()
     nested.write_bytes(b"\x00\x01")
-    listed = {path.relative_to(run_root).as_posix() for path in mrl.list_run_artifacts(run_root)}
+    listed = {path.relative_to(run_root).as_posix() for path in state.list_run_artifacts(run_root)}
     assert "checkpoints/notes.txt" in listed
     assert "checkpoints/extra/weird.bin" in listed
     assert "checkpoints/dust2_policy.pt" in listed
@@ -1522,7 +1496,7 @@ def test_concurrent_reserve_run_admits_exactly_one_attempt():
 def test_dict_miss_with_existing_volume_manifest_rejects_run():
     registry = FakeRegistry()
     artifacts = FakeArtifactIndex()
-    artifacts.committed[mrl.RUNS_ROOT / "ok-id" / mrl.MANIFEST_FILENAME] = b"{}\n"
+    artifacts.committed[mrl.RUNS_ROOT / "ok-id" / core.MANIFEST_FILENAME] = b"{}\n"
     with pytest.raises(mrl.ValidationError):
         mrl.reserve_run(registry, artifacts, "ok-id", "attempt-b", now=_aware())
     assert registry.get("run:ok-id") is None
@@ -1580,9 +1554,9 @@ def test_first_attempt_claim_owns_canonical_state_writes(tmp_path):
     lock = threading.Lock()
 
     def train() -> str:
-        status = mrl.transition_status(
+        status = state.transition_status(
             run_root,
-            mrl.Status.PREPARING,
+            core.Status.PREPARING,
             now=_aware(),
             attempt_id="attempt-a",
             lock=lock,
@@ -1596,7 +1570,7 @@ def test_first_attempt_claim_owns_canonical_state_writes(tmp_path):
         artifacts.commit()
         return "trained"
 
-    result = mrl.deliver_attempt(registry, artifacts, attempt_id="attempt-a", train=train)
+    result = state.deliver_attempt(registry, artifacts, attempt_id="attempt-a", train=train)
     assert result == "trained"
     assert mrl.claim_attempt(registry, "attempt-a") is False
     persisted = json.loads((run_root / "STATUS.json").read_text())
@@ -1619,9 +1593,9 @@ def test_same_input_redelivery_returns_without_train_or_writes(tmp_path):
     lock = threading.Lock()
 
     def train() -> str:
-        mrl.transition_status(
+        state.transition_status(
             run_root,
-            mrl.Status.PREPARING,
+            core.Status.PREPARING,
             now=_aware(),
             attempt_id="attempt-a",
             lock=lock,
@@ -1634,8 +1608,8 @@ def test_same_input_redelivery_returns_without_train_or_writes(tmp_path):
         artifacts.commit()
         return "trained"
 
-    assert mrl.deliver_attempt(registry, artifacts, attempt_id="attempt-a",
-                               train=train) == "trained"
+    assert state.deliver_attempt(registry, artifacts, attempt_id="attempt-a",
+                                 train=train) == "trained"
     before_status = (run_root / "STATUS.json").read_bytes()
     before_result = (run_root / "result.json").read_bytes()
     before_log = (run_root / "train.log").read_bytes()
@@ -1646,8 +1620,8 @@ def test_same_input_redelivery_returns_without_train_or_writes(tmp_path):
     def should_not_run() -> str:
         raise AssertionError("training callback must not run on redelivery")
 
-    assert mrl.deliver_attempt(registry, artifacts, attempt_id="attempt-a",
-                               train=should_not_run) == "redelivered"
+    assert state.deliver_attempt(registry, artifacts, attempt_id="attempt-a",
+                                 train=should_not_run) == "redelivered"
     assert (run_root / "STATUS.json").read_bytes() == before_status
     assert (run_root / "result.json").read_bytes() == before_result
     assert (run_root / "train.log").read_bytes() == before_log
@@ -1698,7 +1672,7 @@ def test_child_env_preserves_runtime_keys_and_forces_thread_caps():
         "OPENBLAS_NUM_THREADS": "32",
         "NUMEXPR_NUM_THREADS": "4",
     }
-    env = mrl.build_child_env(parent, wandb_enabled=False)
+    env = commands.build_child_env(parent, wandb_enabled=False)
     for key in (
             "PATH",
             "PYTHONPATH",
@@ -1728,7 +1702,7 @@ def test_child_env_preserves_runtime_keys_and_forces_thread_caps():
 
 
 def test_child_env_wandb_disabled_strips_every_wandb_credential():
-    env = mrl.build_child_env(
+    env = commands.build_child_env(
         {
             "PATH": "/bin",
             "WANDB_API_KEY": "parent-secret",
@@ -1742,7 +1716,7 @@ def test_child_env_wandb_disabled_strips_every_wandb_credential():
 
 def test_child_env_wandb_enabled_passes_secret_without_serializing():
     secret = "secret-from-modal"
-    env = mrl.build_child_env(
+    env = commands.build_child_env(
         {
             "PATH": "/bin",
             "WANDB_API_KEY": "parent-should-not-win",
@@ -1758,12 +1732,12 @@ def test_child_env_wandb_enabled_passes_secret_without_serializing():
     redacted = json.dumps({key: value for key, value in env.items() if key != "WANDB_API_KEY"})
     assert secret not in redacted
     with pytest.raises(mrl.ValidationError):
-        mrl.build_child_env({"PATH": "/bin"}, wandb_enabled=True, wandb_api_key=None)
+        commands.build_child_env({"PATH": "/bin"}, wandb_enabled=True, wandb_api_key=None)
 
 
 def test_install_and_train_commands_are_exact():
     source_dir = "/tmp/extracted-src"
-    assert mrl.build_install_command(source_dir) == [
+    assert commands.build_install_command(source_dir) == [
         "/usr/local/bin/uv",
         "pip",
         "install",
@@ -1774,7 +1748,7 @@ def test_install_and_train_commands_are_exact():
         source_dir,
     ]
     argv = ["--train", "--timesteps", "1"]
-    assert mrl.build_train_command(argv) == [
+    assert commands.build_train_command(argv) == [
         "/opt/cs2rl/.venv/bin/python",
         "src/train.py",
         *argv,
@@ -1951,14 +1925,14 @@ def test_prepare_reloads_verifies_extracts_then_installs(tmp_path):
     assert volume.events[0] == "reload"
     assert recorded, "install command was never invoked"
     install_cmd, install_kwargs = recorded[0]
-    assert install_cmd == mrl.build_install_command(prepared.source_dir)
+    assert install_cmd == commands.build_install_command(prepared.source_dir)
     assert install_kwargs["cwd"] == os.fspath(prepared.source_dir)
     assert install_kwargs["shell"] is False
     assert install_kwargs["env"]["PATH"] == "/usr/bin"
     assert install_kwargs["env"]["OMP_NUM_THREADS"] == "1"
     assert "WANDB_API_KEY" not in install_kwargs["env"]
     assert (prepared.source_dir / "readme.txt").read_text() == "hello\n"
-    sidecar = json.loads((prepared.source_dir / mrl.PROVENANCE_NAME).read_text())
+    sidecar = json.loads((prepared.source_dir / core.PROVENANCE_NAME).read_text())
     assert sidecar["commit"] == kwargs["expected_commit"]
     assert sidecar["tree"] == kwargs["expected_tree"]
     assert prepared.source_dir.is_relative_to(tmp_path / "ephemeral")
@@ -2005,10 +1979,10 @@ def test_prepare_reads_archive_only_after_volume_reload(tmp_path):
 def test_dump_config_command_is_exact():
     request = mrl.build_run_request(**_valid_run_kwargs(run_id="ok-id"))
     resume = "/artifacts/inputs/sha256/abc.pt"
-    assert mrl.build_dump_config_command(request, resume) == [
+    assert commands.build_dump_config_command(request, resume) == [
         "/opt/cs2rl/.venv/bin/python",
         "src/train.py",
-        *mrl.build_dump_config_argv(request, resume),
+        *commands.build_dump_config_argv(request, resume),
     ]
 
 
@@ -2018,7 +1992,7 @@ def test_prepare_validates_resume_then_dumps_and_hashes_config(tmp_path):
     ckpt = tmp_path / "artifacts" / "inputs" / "sha256" / "warm.pt"
     ckpt.parent.mkdir(parents=True)
     torch.save({"weight": torch.tensor([1.0, 2.0])}, ckpt)
-    digest = mrl.sha256_file(ckpt)
+    digest = core.sha256_file(ckpt)
     recorded: list[tuple[list[str], dict]] = []
     validated: list[Path] = []
 
@@ -2031,7 +2005,8 @@ def test_prepare_validates_resume_then_dumps_and_hashes_config(tmp_path):
             _write_dumped_config(kwargs_run_root)
         return subprocess.CompletedProcess(cmd, 0)
 
-    orig_validate = mrl.validate_local_checkpoint
+    validate_target, validate_name = binding_target("prepare-validator")
+    orig_validate = getattr(validate_target, validate_name)
 
     def tracking_validate(path):
         validated.append(Path(path))
@@ -2049,28 +2024,28 @@ def test_prepare_validates_resume_then_dumps_and_hashes_config(tmp_path):
     )
     kwargs_run_root = kwargs["run_root"]
     monkey_validate = tracking_validate
-    mrl.validate_local_checkpoint = monkey_validate
+    setattr(validate_target, validate_name, monkey_validate)
     try:
         prepared = mrl.prepare_remote_source(**kwargs)
     finally:
-        mrl.validate_local_checkpoint = orig_validate
+        setattr(validate_target, validate_name, orig_validate)
     assert validated == [ckpt]
     assert len(recorded) >= 2
     dump_cmd, dump_kwargs = recorded[1]
     request = kwargs["request"]
-    assert dump_cmd == mrl.build_dump_config_command(request, str(ckpt))
+    assert dump_cmd == commands.build_dump_config_command(request, str(ckpt))
     assert dump_kwargs["cwd"] == os.fspath(prepared.source_dir)
     assert dump_kwargs["shell"] is False
     assert dump_kwargs["env"]["OMP_NUM_THREADS"] == "1"
     dumped = json.loads((kwargs["run_root"] / "checkpoints" / "config.json").read_text())
     expected_hash = mrl.sha256_bytes(
-        json.dumps(mrl.normalize_config_for_transport(dumped),
+        json.dumps(checkpoint.normalize_config_for_transport(dumped),
                    sort_keys=True,
                    separators=(",", ":")).encode())
-    payload = json.loads((kwargs["run_root"] / mrl.MANIFEST_FILENAME).read_text())
+    payload = json.loads((kwargs["run_root"] / core.MANIFEST_FILENAME).read_text())
     assert payload["config_hash"] == expected_hash
     assert prepared.config_hash == expected_hash
-    assert "data_dir" not in mrl.normalize_config_for_transport(dumped)
+    assert "data_dir" not in checkpoint.normalize_config_for_transport(dumped)
 
 
 def test_prepare_rejects_resume_hash_mismatch(tmp_path):
@@ -2098,7 +2073,7 @@ def test_prepare_rejects_non_checkpoint_resume(tmp_path):
         run=lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0),
         start_heartbeat=_noop_heartbeat,
         remote_resume=str(ckpt),
-        expected_resume_sha256=mrl.sha256_file(ckpt),
+        expected_resume_sha256=core.sha256_file(ckpt),
         manifest=_make_manifest(),
     )
     with pytest.raises(mrl.ValidationError):
@@ -2152,7 +2127,7 @@ def _run_cuda_probe(tmp_path: Path, *, advantage_cuda: bool):
     _write_probe_stubs(stubs, advantage_cuda=advantage_cuda, record_path=record_path)
     env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(stubs)}
     result = subprocess.run(
-        [sys.executable, "-c", mrl.CUDA_PROBE_SOURCE],
+        [sys.executable, "-c", core.CUDA_PROBE_SOURCE],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -2163,11 +2138,11 @@ def _run_cuda_probe(tmp_path: Path, *, advantage_cuda: bool):
 
 
 def test_cuda_probe_command_is_exact_python_string():
-    command = mrl.build_cuda_probe_command()
+    command = commands.build_cuda_probe_command()
     assert command[0] == "/opt/cs2rl/.venv/bin/python"
     assert command[1] == "-c"
     source = command[2]
-    assert source == mrl.CUDA_PROBE_SOURCE
+    assert source == core.CUDA_PROBE_SOURCE
     assert "torch.cuda.is_available()" in source
     assert "pufferlib.pufferl" in source
     assert "ADVANTAGE_CUDA" in source
@@ -2218,12 +2193,12 @@ def test_prepare_records_install_dump_probe_then_launch(tmp_path):
     kwargs_run_root = kwargs["run_root"]
     prepared = mrl.prepare_remote_source(**kwargs)
     assert launched and launched[0] is prepared
-    assert recorded[0] == mrl.build_install_command(prepared.source_dir)
-    assert recorded[1] == mrl.build_dump_config_command(kwargs["request"], None)
-    assert recorded[2] == mrl.build_cuda_probe_command()
+    assert recorded[0] == commands.build_install_command(prepared.source_dir)
+    assert recorded[1] == commands.build_dump_config_command(kwargs["request"], None)
+    assert recorded[2] == commands.build_cuda_probe_command()
     assert recorded[3] == prepared.train_command
-    assert prepared.train_command == mrl.build_train_command(
-        mrl.build_train_argv(kwargs["request"], None))
+    assert prepared.train_command == commands.build_train_command(
+        commands.build_train_argv(kwargs["request"], None))
     assert prepared.heartbeat is not None
 
 
@@ -2337,7 +2312,7 @@ def test_heartbeat_commits_throughout_blocked_preflight(tmp_path):
         return event.wait(0.01)
 
     def start_heartbeat(**kwargs):
-        return mrl.start_heartbeat_worker(
+        return state.start_heartbeat_worker(
             run_root=kwargs["run_root"],
             attempt_id=kwargs["attempt_id"],
             lock=kwargs["lock"],
@@ -2385,9 +2360,9 @@ def test_heartbeat_commits_throughout_blocked_preflight(tmp_path):
     assert len(beat_times) >= 6
     for earlier, later in zip(beat_times, beat_times[1:], strict=False):
         assert later - earlier <= timedelta(seconds=60)
-    status = mrl.RunStatus.from_dict(
+    status = core.RunStatus.from_dict(
         json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text()))
-    derived = mrl.derive_status(status, now=clock.now())
+    derived = state.derive_status(status, now=clock.now())
     assert derived.stale is False
 
 
@@ -2395,7 +2370,11 @@ def test_heartbeat_loop_survives_transient_commit_error(tmp_path):
     run_root = tmp_path / "run"
     run_root.mkdir()
     lock = threading.Lock()
-    mrl.transition_status(run_root, mrl.Status.PREPARING, now=_aware(), attempt_id="a1", lock=lock)
+    state.transition_status(run_root,
+                            core.Status.PREPARING,
+                            now=_aware(),
+                            attempt_id="a1",
+                            lock=lock)
     recovered = threading.Event()
     commits = {"n": 0}
 
@@ -2408,7 +2387,7 @@ def test_heartbeat_loop_survives_transient_commit_error(tmp_path):
     def wait(event: threading.Event, _seconds: float) -> bool:
         return event.wait(0.01)
 
-    worker = mrl.start_heartbeat_worker(
+    worker = state.start_heartbeat_worker(
         run_root=run_root,
         attempt_id="a1",
         lock=lock,
@@ -2426,10 +2405,10 @@ def test_heartbeat_loop_survives_transient_commit_error(tmp_path):
     assert not worker.thread.is_alive()
 
 
-def _prepared_source(tmp_path: Path, **overrides) -> mrl.PreparedSource:
+def _prepared_source(tmp_path: Path, **overrides) -> core.PreparedSource:
     source_dir = tmp_path / "src"
     source_dir.mkdir(exist_ok=True)
-    prepared = mrl.PreparedSource(
+    prepared = core.PreparedSource(
         source_dir=source_dir,
         child_env={
             "PATH": "/usr/bin",
@@ -2445,16 +2424,16 @@ def _prepared_source(tmp_path: Path, **overrides) -> mrl.PreparedSource:
 
 
 def _advance_to_building(run_root, attempt_id="attempt-a", *, lock):
-    mrl.transition_status(run_root,
-                          mrl.Status.PREPARING,
-                          now=_aware(),
-                          attempt_id=attempt_id,
-                          lock=lock)
-    return mrl.transition_status(run_root,
-                                 mrl.Status.BUILDING,
-                                 now=_aware(),
-                                 attempt_id=attempt_id,
-                                 lock=lock)
+    state.transition_status(run_root,
+                            core.Status.PREPARING,
+                            now=_aware(),
+                            attempt_id=attempt_id,
+                            lock=lock)
+    return state.transition_status(run_root,
+                                   core.Status.BUILDING,
+                                   now=_aware(),
+                                   attempt_id=attempt_id,
+                                   lock=lock)
 
 
 def _training_kwargs(tmp_path: Path, **overrides):
@@ -2675,7 +2654,7 @@ def test_stable_checkpoint_gets_sidecar_and_joint_commit(tmp_path):
     kwargs = _consume_training_kwargs(
         _training_kwargs(tmp_path, child=child, commit=commit, sleep=fake_sleep))
     ckpt = _write_policy_checkpoint(kwargs["run_root"], 1.0)
-    first_digest = mrl.sha256_file(ckpt)
+    first_digest = core.sha256_file(ckpt)
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
     sidecar = kwargs["run_root"] / "checkpoints" / "dust2_policy.pt.meta.json"
     try:
@@ -2684,7 +2663,7 @@ def test_stable_checkpoint_gets_sidecar_and_joint_commit(tmp_path):
             time.sleep(0.01)
         assert sidecar.is_file()
         meta = json.loads(sidecar.read_text())
-        stable_digest = mrl.sha256_file(ckpt)
+        stable_digest = core.sha256_file(ckpt)
         assert stable_digest != first_digest
         assert meta["sha256"] == stable_digest
         assert meta["size"] == ckpt.stat().st_size
@@ -2770,7 +2749,7 @@ def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
         time.sleep(0.01)
     assert sidecar.is_file()
     meta = json.loads(sidecar.read_text())
-    assert meta["sha256"] == mrl.sha256_file(ckpt)
+    assert meta["sha256"] == core.sha256_file(ckpt)
     assert meta["size"] == ckpt.stat().st_size
 
 
@@ -2791,13 +2770,13 @@ def _no_torch(monkeypatch, *, prebuilt: str) -> None:
     def raise_import_error():
         raise ImportError("No module named 'torch'")
 
-    monkeypatch.setattr(mrl, "_import_torch", raise_import_error)
-    monkeypatch.setattr(mrl, "PREBUILT_PYTHON", prebuilt)
+    monkeypatch.setattr(*binding_target("fallback-loader"), raise_import_error)
+    monkeypatch.setattr(*binding_target("fallback-python"), prebuilt)
 
 
 def _publish(run_root: Path):
     commits: list[int] = []
-    outcome = mrl.publish_stable_checkpoint(
+    outcome = training.publish_stable_checkpoint(
         run_root,
         now=_aware,
         commit=lambda: commits.append(1),
@@ -2821,7 +2800,7 @@ def test_publish_validates_via_prebuilt_interpreter_when_runner_lacks_torch(tmp_
     assert outcome.reason is None
     assert outcome.generation == (ckpt.stat().st_mtime_ns, ckpt.stat().st_size)
     assert len(commits) == 1
-    assert json.loads(sidecar.read_text())["sha256"] == mrl.sha256_file(ckpt)
+    assert json.loads(sidecar.read_text())["sha256"] == core.sha256_file(ckpt)
 
 
 def test_prebuilt_validation_still_rejects_a_torn_checkpoint(tmp_path, monkeypatch):
@@ -2863,7 +2842,7 @@ def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path,
 
     def commit() -> None:
         commits.append(
-            (kwargs["run_root"] / "checkpoints" / mrl.CHECKPOINT_PUBLISH_REASON_NAME).is_file())
+            (kwargs["run_root"] / "checkpoints" / core.CHECKPOINT_PUBLISH_REASON_NAME).is_file())
 
     kwargs = _consume_training_kwargs(
         _training_kwargs(
@@ -2884,7 +2863,7 @@ def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path,
         child.release()
         thread.join(timeout=2.0)
 
-    reason_path = kwargs["run_root"] / "checkpoints" / mrl.CHECKPOINT_PUBLISH_REASON_NAME
+    reason_path = kwargs["run_root"] / "checkpoints" / core.CHECKPOINT_PUBLISH_REASON_NAME
     assert reason_path.is_file()
     payload = json.loads(reason_path.read_text())
     assert "nonexistent" in payload["reason"]
@@ -2908,7 +2887,7 @@ def test_interrupt_commits_status_even_if_prebuilt_load_hangs(tmp_path, monkeypa
         if not release.wait(timeout=10.0):
             raise mrl.ValidationError("test timed out waiting to release the hung load")
 
-    monkeypatch.setattr(mrl, "_assert_weights_only_loadable", hanging_load)
+    monkeypatch.setattr(*binding_target("interrupt-loader"), hanging_load)
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child)
     commits: list[str | None] = []
@@ -2966,10 +2945,10 @@ def test_checkpoint_watcher_threads_generation_into_last_published(tmp_path, mon
 
     def fake_publish(*_args, last_published=None, **_kwargs):
         seen.append(last_published)
-        return mrl.PublishOutcome(generation)
+        return core.PublishOutcome(generation)
 
-    monkeypatch.setattr(mrl, "publish_stable_checkpoint", fake_publish)
-    stop, watcher = mrl._start_checkpoint_watcher(
+    monkeypatch.setattr(*binding_target("watcher-publisher"), fake_publish)
+    stop, watcher = training._start_checkpoint_watcher(
         run_root=tmp_path,
         now=_aware,
         commit=lambda: None,
@@ -2993,10 +2972,10 @@ def test_completed_run_validates_without_runner_torch(tmp_path, monkeypatch):
     run_root, manifest, effective, ckpt = _minimal_completed_tree(tmp_path)
     _no_torch(monkeypatch, prebuilt=sys.executable)
 
-    evidence = mrl.validate_completed_run(run_root, manifest)
+    evidence = checkpoint.validate_completed_run(run_root, manifest)
 
     assert evidence.last_step == effective
-    assert evidence.checkpoint_sha256 == mrl.sha256_file(ckpt)
+    assert evidence.checkpoint_sha256 == core.sha256_file(ckpt)
 
 
 # ── Attempt supervision: SIGINT / KeyboardInterrupt / SIGTERM cleanup ──────
@@ -3135,7 +3114,7 @@ def test_child_receives_term_then_kill_after_grace(tmp_path):
         child.release()
         thread.join(timeout=2.0)
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
-    assert mrl.TERM_GRACE_SECONDS in child.wait_timeouts
+    assert core.TERM_GRACE_SECONDS in child.wait_timeouts
 
 
 def test_cleanup_closes_log_before_final_commit(tmp_path):
@@ -3207,10 +3186,10 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
         thread.join(timeout=2.0)
     assert committed
     assert committed[-1]["status"] == "training"
-    last = mrl.RunStatus.from_dict(committed[-1])
-    derived = mrl.derive_status(last, now=_aware(minute=5))
+    last = core.RunStatus.from_dict(committed[-1])
+    derived = state.derive_status(last, now=_aware(minute=5))
     assert derived.stale is True
-    assert derived.status is mrl.Status.INTERRUPTED
+    assert derived.status is core.Status.INTERRUPTED
     before = (kwargs["run_root"] / mrl.STATUS_FILENAME).read_bytes()
     commits_before = list(committed)
 
@@ -3235,7 +3214,7 @@ def test_post_spawn_failure_kills_child_and_writes_terminal_status(tmp_path):
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    (kwargs["run_root"] / mrl.TRAIN_LOG_NAME).mkdir()
+    (kwargs["run_root"] / core.TRAIN_LOG_NAME).mkdir()
     with pytest.raises(OSError):
         mrl.execute_training_attempt(**kwargs)
     persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
@@ -3290,8 +3269,8 @@ def _record_hash_after_terminal(monkeypatch, run_root: Path) -> list[str]:
             hashed.append("hash")
         return "00" * 32
 
-    monkeypatch.setattr(mrl, "validate_local_checkpoint", wrapped_validate)
-    monkeypatch.setattr(mrl, "sha256_file", wrapped_hash)
+    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)
+    monkeypatch.setattr(*binding_target("terminal-hasher"), wrapped_hash)
     return hashed
 
 
@@ -3328,7 +3307,7 @@ def test_interrupt_uses_sidecar_digest_and_skips_torch_hash(tmp_path, monkeypatc
         child.release()
         thread.join(timeout=2.0)
     assert hashed == []
-    payload = json.loads((run_root / mrl.RESULT_FILENAME).read_text())
+    payload = json.loads((run_root / core.RESULT_FILENAME).read_text())
     assert payload["status"] == "interrupted"
     assert payload["checkpoint_sha256"] == sidecar_digest
 
@@ -3359,7 +3338,7 @@ def test_interrupt_without_sidecar_leaves_checkpoint_hash_null(tmp_path, monkeyp
         child.release()
         thread.join(timeout=2.0)
     assert hashed == []
-    payload = json.loads((run_root / mrl.RESULT_FILENAME).read_text())
+    payload = json.loads((run_root / core.RESULT_FILENAME).read_text())
     assert payload["status"] == "interrupted"
     assert payload["checkpoint_sha256"] is None
 
@@ -3369,8 +3348,8 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
     hooks = _signal_hooks(child, release_on=None)
     watcher_stop: dict[str, threading.Event | None] = {"event": None}
     at_terminal: list[tuple[str, bool]] = []
-    real_start = mrl._start_checkpoint_watcher
-    real_transition = mrl.transition_status
+    real_start = training._start_checkpoint_watcher
+    real_transition = state.transition_status
 
     def wrapped_start(**kwargs):
         stop, thread = real_start(**kwargs)
@@ -3383,8 +3362,8 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
             at_terminal.append((next_status.value, event is not None and event.is_set()))
         return real_transition(run_root, next_status, **kwargs)
 
-    monkeypatch.setattr(mrl, "_start_checkpoint_watcher", wrapped_start)
-    monkeypatch.setattr(mrl, "transition_status", wrapped_transition)
+    monkeypatch.setattr(*binding_target("attempt-watcher"), wrapped_start)
+    monkeypatch.setattr(*binding_target("attempt-transition"), wrapped_transition)
     kwargs = _consume_training_kwargs(
         _training_kwargs(
             tmp_path,
@@ -3413,7 +3392,7 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
 # FakeChild(hold=True) is never released, and the attempt's wait loop spins
 # forever -- so the `assert fired` guard below is UNREACHABLE and this becomes an
 # unbounded hang instead of a failure. The repo configures no default timeout.
-# W3b makes this reachable: anything that stops `mrl._tee_stream` being the
+# W3b makes this reachable: anything that stops `training._tee_stream` being the
 # identical object passed as `target` (a re-export wrapper, functools.partial, a
 # Thread subclass) breaks identity SILENTLY, where a rename would at least raise
 # AttributeError.
@@ -3421,7 +3400,8 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
 def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monkeypatch):
     """A real SIGTERM inside the tee-thread start window must not strand the run.
 
-    gh#217. `finalize` joins `tee_threads` unconditionally (`:2608-2609`), so for
+    gh#217. `finalize` (nested in `training._run_training_attempt`) joins
+    `tee_threads` unconditionally, so for
     as long as that list could hold a not-yet-started thread, a signal arriving
     there raised `RuntimeError: cannot join thread before it is started` out of
     `on_signal` and past `transition_status`: STATUS.json stuck on `training`, no
@@ -3476,8 +3456,8 @@ def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monke
     killpg_hook = hooks["killpg"]
 
     def killpg_marking_finalize(pgid, sig):
-        # finalize kills the child (`:2606-2607`) before it joins tee_threads
-        # (`:2608-2609`), so this is the earliest in-handler observable available.
+        # finalize kills the child (its `_signal_process_group` call) before it
+        # joins tee_threads, so this is the earliest in-handler observable available.
         # The handler runs on the main thread, so the spin below cannot observe
         # this flag until the handler has already returned or raised.
         killpg_hook(pgid, sig)
@@ -3503,7 +3483,7 @@ def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monke
 
     def spy_start(self):
         target = getattr(self, "_target", None)
-        if fired or target is not mrl._tee_stream:
+        if fired or target is not training._tee_stream:
             return real_start(self)
         # Fire once. A fire-every-start shim measures the same, because the first
         # fire aborts the loop before the second start() — this is readability.
@@ -3547,8 +3527,8 @@ def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monke
     assert result != mrl.REDELIVERED
     persisted = json.loads((run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "interrupted"
-    assert (run_root / mrl.RESULT_FILENAME).is_file()
-    payload = json.loads((run_root / mrl.RESULT_FILENAME).read_text())
+    assert (run_root / core.RESULT_FILENAME).is_file()
+    payload = json.loads((run_root / core.RESULT_FILENAME).read_text())
     assert payload["status"] == persisted["status"]
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
 
@@ -3578,8 +3558,8 @@ def test_exit_zero_fails_when_completion_evidence_invalid(tmp_path):
         ))
     result = mrl.execute_training_attempt(**kwargs)
     assert result != mrl.REDELIVERED
-    assert result.status is mrl.Status.FAILED
-    assert result.reason == mrl.REASON_INVALID_EVIDENCE
+    assert result.status is core.Status.FAILED
+    assert result.reason == core.REASON_INVALID_EVIDENCE
     assert result.exit_code == 0
     persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "failed"
@@ -3596,7 +3576,7 @@ def test_exit_zero_with_valid_evidence_completes(tmp_path):
             manifest=manifest,
         ))
     result = mrl.execute_training_attempt(**kwargs)
-    assert result.status is mrl.Status.COMPLETED
+    assert result.status is core.Status.COMPLETED
     assert result.reason is None
     assert result.exit_code == 0
     persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
@@ -3605,7 +3585,7 @@ def test_exit_zero_with_valid_evidence_completes(tmp_path):
     assert payload["status"] == "completed"
     assert payload["exit_code"] == 0
     assert payload["last_step"] == effective
-    assert payload["checkpoint_sha256"] == mrl.sha256_file(ckpt)
+    assert payload["checkpoint_sha256"] == core.sha256_file(ckpt)
 
 
 def test_dead_run_and_timeout_have_distinct_reasons(tmp_path):
@@ -3620,8 +3600,8 @@ def test_dead_run_and_timeout_have_distinct_reasons(tmp_path):
     (kwargs["run_root"] / "checkpoints").mkdir(exist_ok=True)
     (kwargs["run_root"] / "checkpoints" / "dust2_policy_dead.pt").write_bytes(b"autopsy")
     dead = mrl.execute_training_attempt(**kwargs)
-    assert dead.status is mrl.Status.FAILED
-    assert dead.reason == mrl.REASON_DEAD_RUN
+    assert dead.status is core.Status.FAILED
+    assert dead.reason == core.REASON_DEAD_RUN
     assert dead.exit_code == 3
     assert json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "failed"
 
@@ -3652,8 +3632,8 @@ def test_dead_run_and_timeout_have_distinct_reasons(tmp_path):
         thread.join(timeout=2.0)
     timed_out = boxed[0]
     assert not isinstance(timed_out, Exception), timed_out
-    assert timed_out.status is mrl.Status.INTERRUPTED
-    assert timed_out.reason == mrl.REASON_TIMEOUT
+    assert timed_out.status is core.Status.INTERRUPTED
+    assert timed_out.reason == core.REASON_TIMEOUT
     assert timed_out.reason != dead.reason
     assert json.loads(
         (kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"
