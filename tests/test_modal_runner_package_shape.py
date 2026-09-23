@@ -1,25 +1,38 @@
-"""AST gates for the split of scripts/modal_runner_lib.py into scripts/modal_runner/.
+"""AST gates for the shape of the scripts/modal_runner/ package.
 
-Two kinds of clause live here, and a red means something different for each.
+Every clause here describes the shape the package keeps from now on:
 
-RELOCATION-ORACLE clauses prove the W3b split was a pure move. They compare
-every top-level segment of the package with its bytes in the frozen monolith
-(`scripts/modal_runner_lib.py` at 2bb32ac, loaded and digest-checked by
-`_frozen_runner_source`) and pin the per-module segment line sums:
-`segment-bytes`, `qualified-count`, `no-oracle-segment`, `manifest-union` and
-the recorded sums in `test_relocation_size_contract`. Any later edit to a
-relocated symbol turns them red BY DESIGN. They are scheduled for retirement
-from the permanent suite in a follow-up commit once the split has landed. Until
-then, change relocated code only after that retirement, and never by editing
-MANIFEST, REWRITES or the recorded sums to match an edit.
+* module population: the submodule files on disk (every `*.py` but
+  `__init__.py`) are exactly the modules MANIFEST and DEPENDENCIES declare
+  (`files`, `undeclared-module`), and none has a grab-bag name
+  (`forbidden-name`);
+* ownership: each module's top-level names equal its MANIFEST entry
+  (`membership`), no module binds a name twice (`duplicates`) or assigns at
+  module scope to a target MANIFEST cannot own (`undeclared-assignment`), and
+  MANIFEST gives no symbol two owners (`manifest-duplicates`);
+* module-scope shape (`header`): the docstring, imports, one imports-only
+  `if TYPE_CHECKING:` block without else, and declarations, nothing else;
+* the import graph: intra-package imports equal DEPENDENCIES
+  (`runtime-edges`) and ANNOTATION_DEPENDENCIES (`annotation-edges`);
+* import purity: no non-stdlib import executes when a module is imported.
 
-PACKAGE-STRUCTURE clauses stay true after that retirement: the on-disk module
-population (`files`, `undeclared-module`), one owner per symbol
-(`manifest-duplicates`, `membership`, `duplicates`), module-scope shape
-(`header`), the import graph (`runtime-edges`, `annotation-edges`), module names
-(`forbidden-name`), the 35% segment budget and import purity. When one of these
-reddens on an intended change, update the table its failure message names, in
-the same commit as the change.
+Editing a function body, a docstring or a constant's value trips none of them
+unless the edit adds or removes an import. Adding, removing, renaming or moving
+a top-level symbol, adding a module, or changing which package modules a module
+imports does: update the table the failure message names, in the same commit as
+the change. Runtime imports are compared with DEPENDENCIES and imports under
+`if TYPE_CHECKING:` with ANNOTATION_DEPENDENCIES, separately, and the
+dependency walk reads function bodies too. So a first runtime import of a
+module imported only under `TYPE_CHECKING` is a new edge, and so is the reverse;
+another import of a module already imported in the same way is not; removing
+a module's last runtime import, or its last `TYPE_CHECKING` one, drops that
+edge. No module size budget applies.
+
+History: the split commit, which created scripts/modal_runner/, also proved in
+this file (then tests/test_modal_relocation.py) that every moved declaration
+was byte-identical to `scripts/modal_runner_lib.py` at 2bb32ac apart from 20
+declared `module.name` qualifiers; those relocation-oracle checks were retired
+after it.
 
 Every failure message names the clause, the file or symbol, and the edit that
 resolves it (`_explain`). Controls plant defects into in-memory copies of the
@@ -40,12 +53,11 @@ import pytest
 # file admits only names both halves of the runner/client test seam reach, and
 # `classify_seam` enforces it. PITFALL: `_module_level_names` also drives
 # `classify_seam`, and `_module_level_binding_counts` the seam's placement gate,
-# so a change made to either for the seam's sake changes the segment and
-# membership gates here as well.
+# so a change made to either for the seam's sake changes the membership and
+# duplicates clauses here as well.
 from tests.test_modal_packaging import (
     PACKAGED,
     RUNNER_MODULES,
-    _frozen_runner_source,
     _module_level_binding_counts,
     _module_level_names,
     _module_scope_shape_violations,
@@ -55,8 +67,10 @@ from tests.test_modal_packaging import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-# Owner of every top-level symbol, per module (spec section 5.1). Adding,
-# removing or moving a symbol means editing its entry here in the same commit.
+# Owner of every top-level symbol, per module (spec section 5.1). Each module's
+# top-level names must equal its entry, and no name may appear under two
+# modules. Adding, removing, renaming or moving a symbol means editing its entry
+# here in the same commit.
 MANIFEST = {
     'core.py': [
         'ValidationError', 'Action', 'Status', 'mounted_path', 'SourceProvenance', 'sha256_file',
@@ -122,46 +136,6 @@ MANIFEST = {
         '_signal_process_group', '_run_training_attempt'
     ]
 }
-# The only byte differences the relocation allows: {segment: {name: (module,
-# exact occurrence count)}}, each a cross-module read rewritten as `module.name`
-# so that tests patching the owning module reach it. A relocation-oracle table.
-REWRITES = {
-    '_assert_weights_only_loadable': {
-        'PREBUILT_PYTHON': ('core', 5)
-    },
-    'validate_local_checkpoint': {
-        'sha256_file': ('core', 1)
-    },
-    'validate_completed_run': {
-        'sha256_file': ('core', 1)
-    },
-    'build_install_command': {
-        'PREBUILT_PYTHON': ('core', 1)
-    },
-    'build_train_command': {
-        'PREBUILT_PYTHON': ('core', 1)
-    },
-    'build_cuda_probe_command': {
-        'PREBUILT_PYTHON': ('core', 1)
-    },
-    '_validate_remote_resume': {
-        'validate_local_checkpoint': ('checkpoint', 1)
-    },
-    'prepare_remote_source': {
-        'sha256_file': ('core', 1),
-        'transition_status': ('state', 3)
-    },
-    'create_source_bundle': {
-        'sha256_file': ('core', 1)
-    },
-    'publish_stable_checkpoint': {
-        'sha256_file': ('core', 1),
-        'validate_local_checkpoint': ('checkpoint', 1)
-    },
-    '_run_training_attempt': {
-        'transition_status': ('state', 2)
-    }
-}
 # Runtime import edges between package modules (spec section 5.1). core stays a
 # leaf. A new edge is legal only if the graph stays acyclic; record it here.
 DEPENDENCIES = {
@@ -178,17 +152,32 @@ DEPENDENCIES = {
 # request must stay annotation-only: request imports commands at run time, so a
 # runtime edge back would be an import cycle.
 ANNOTATION_DEPENDENCIES = {'commands': ['request'], 'preflight': ['request']}
+# Module names that say what a module IS rather than what it owns (spec section
+# 10, criterion 12); the `forbidden-name` clause and its message both read this.
+GRAB_BAG_MODULE_NAMES = ("utils", "helpers", "common", "misc")
 
 
 def _segments(source):
-    """Exact declaration bytes, including decorators and complete class bodies."""
+    """{top-level name: its exact declaration text} for one module's source.
+
+    A segment includes the decorators, the complete class body and the comment
+    lines directly above the declaration. Controls use it to cut one
+    declaration out of a module, or copy it into another, without hand-writing
+    its text.
+
+    PITFALL: the lines are split as bytes, not with `str.splitlines`, which
+    also breaks at `\\x0b`, `\\x0c`, `\\x1c`-`\\x1e`, `\\x85` and
+    U+2028/U+2029 (measured over every code point). `ast` line numbers count
+    only `\\n`, `\\r\\n` and `\\r`, which is all `bytes.splitlines` splits
+    on, so a segment cannot drift off its node.
+    """
     lines = source.encode().splitlines(keepends=True)
     found = {}
     for name, node in _module_level_names(ast.parse(source)).items():
         first = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
         while first > 1 and lines[first - 2].lstrip().startswith(b"#"):
             first -= 1
-        found[name] = b"".join(lines[first - 1:node.end_lineno])
+        found[name] = b"".join(lines[first - 1:node.end_lineno]).decode()
     return found
 
 
@@ -221,89 +210,63 @@ def _copy_live_package(tmp_path):
     return package
 
 
-def _manifest_violations(manifest, oracle):
-    """Criterion 1's manifest-level clauses: one owner per symbol, and exactly the oracle's names.
+def _structure_violations(sources, manifest=MANIFEST):
+    """Criteria 1, 12 (module names) and 13 over `sources`, a {filename: text} map.
 
-    Per-module membership compares each file with its OWN manifest entry, so it
-    cannot see a symbol dropped from both the manifest and its module, or one
-    declared in, and defined in, two modules. Measured by the W3b structural
-    review before these clauses existed: both plants left every gate green.
-    `manifest-duplicates` is a package-structure clause; `manifest-union` ties
-    the manifest to the relocation oracle's 171 names.
+    Combines the manifest's own clause, the file population, grab-bag module
+    names, header shape, membership, duplicate bindings and undeclared
+    assignments. `manifest` defaults to MANIFEST; controls pass an edited copy.
+    Every file in `sources` gets every per-file check, including one no manifest
+    entry declares.
     """
+    # Annotated because the gates' tuples differ in shape per clause; pyrefly
+    # would otherwise infer the first append's shape and reject the others.
+    violations: list[tuple] = []
+    # MANIFEST gives every symbol one owner. Per-module membership compares each
+    # file with its OWN manifest entry, so it cannot see a symbol declared in,
+    # and defined in, two modules; before this clause existed, that plant left
+    # every gate green.
     owners = {}
     for filename, names in manifest.items():
         for name in names:
             owners.setdefault(name, []).append(filename)
-    # Annotated because the tuples differ in shape per clause; pyrefly would
-    # otherwise infer the first append's shape and reject every other clause.
-    violations: list[tuple] = []
     shared = {name: files for name, files in owners.items() if len(files) > 1}
     if shared:
         violations.append(("manifest-duplicates", shared))
-    if set(owners) != set(oracle):
-        violations.append(("manifest-union", sorted(set(oracle) - set(owners)),
-                           sorted(set(owners) - set(oracle))))
-    return violations
-
-
-def _relocation_violations(sources, oracle, manifest=MANIFEST):
-    """Combine the manifest, file population, header shape, membership and segment bytes.
-
-    `manifest` defaults to MANIFEST; controls pass an edited copy. Every file in
-    `sources` gets the header check, including one no manifest entry declares,
-    and every top-level segment is compared with the oracle: a name the oracle
-    lacks is a `no-oracle-segment` violation, never a skip.
-    """
-    violations = _manifest_violations(manifest, oracle)
     if set(sources) != set(manifest):
         violations.append(
             ("files", sorted(set(sources) - set(manifest)), sorted(set(manifest) - set(sources))))
     for filename, source in sources.items():
-        declared = manifest.get(filename, [])
+        if filename.removesuffix(".py") in GRAB_BAG_MODULE_NAMES:
+            violations.append(("forbidden-name", filename))
+        declared = set(manifest.get(filename, []))
         tree = ast.parse(source)
         examined, shape = _module_scope_shape_violations(tree)
         assert examined == len(tree.body), (
             f"the header instrument examined {examined} of {len(tree.body)} module-scope "
-            f"statements in {filename}, so its verdict does not cover the file")
+            f"statements in {filename}, so its verdict does not cover the file. This is a "
+            "defect in `_module_scope_shape_violations` (tests/test_modal_packaging.py), not in "
+            "the package: make it examine every statement in `tree.body` exactly once.")
         violations.extend(("header", filename, item) for item in shape)
         names = _module_level_names(tree)
-        if set(names) != set(declared):
-            violations.append(("membership", filename, sorted(set(names) ^ set(declared))))
+        if set(names) != declared:
+            violations.append(("membership", filename, sorted(set(names) - declared),
+                               sorted(declared - set(names))))
         duplicates = {
             n: count
             for n, count in _module_level_binding_counts(tree).items() if count != 1
         }
         if duplicates:
             violations.append(("duplicates", filename, duplicates))
-        for node in tree.body:
-            if isinstance(
-                    node,
-                (ast.Assign, ast.AnnAssign)) and id(node) not in {id(n)
-                                                                  for n in names.values()}:
-                violations.append(("membership", filename, "undeclared assignment"))
-        for name, segment in _segments(source).items():
-            if name not in oracle:
-                violations.append(("no-oracle-segment", filename, name))
-                continue
-            edits = []
-            rules = REWRITES.get(name, {})
-            counts = dict.fromkeys(rules, 0)
-            for node in ast.walk(ast.parse(segment)):
-                if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                        and node.attr in rules and node.value.id == rules[node.attr][0]
-                        and isinstance(node.ctx, ast.Load)):
-                    counts[node.attr] += 1
-                    edits.append(
-                        (node.lineno - 1, node.col_offset, node.end_col_offset, node.attr.encode()))
-            expected = {key: rule[1] for key, rule in rules.items()}
-            if counts != expected:
-                violations.append(("qualified-count", filename, name, counts, expected))
-            lines = segment.splitlines(keepends=True)
-            for line, start, end, replacement in sorted(edits, reverse=True):
-                lines[line] = lines[line][:start] + replacement + lines[line][end:]
-            if b"".join(lines) != oracle[name]:
-                violations.append(("segment-bytes", filename, name))
+        # `_module_level_names` keeps one node per name: the LAST plain-name
+        # binding. Any other module-scope assignment is invisible to membership:
+        # an earlier binding of a rebound name, or an annotated attribute target
+        # (`VOLUME_MOUNT.name: str = ...`), which the header rule allows because
+        # it is an AnnAssign.
+        owned = {id(node) for node in names.values()}
+        violations.extend(
+            ("undeclared-assignment", filename, node.lineno) for node in tree.body
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and id(node) not in owned)
     return violations
 
 
@@ -372,38 +335,27 @@ def _dependency_violations(sources):
     return failures
 
 
-def _size_violations(sources):
-    """Criterion 12: no grab-bag module names, and no module over 35% of the oracle's segment lines."""
-    failures: list[tuple] = []
-    for filename, source in sources.items():
-        if filename.removesuffix(".py") in {"utils", "helpers", "common", "misc"}:
-            failures.append(("forbidden-name", filename))
-        lines = sum(len(segment.splitlines()) for segment in _segments(source).values())
-        if lines > 2483 * .35:
-            failures.append(("segment-budget", filename, lines))
-    return failures
-
-
 def _explain(violations):
     """One line per violation: the clause, where it fired, and the edit that resolves it.
 
     WHY: the gates return tuples, and a red that prints only a tuple list tells
     whoever meets it neither which clause objected nor whether the fix is to
-    revert their edit or to update a table in this file. See the module
-    docstring for which clauses are relocation-oracle clauses.
+    revert their edit or to update a table in this file.
     """
-    retire = ("This is a relocation-oracle clause: the split must move code without editing it "
-              "(no reformatting, re-wrapping or comment edits). Revert the edit, or make it after "
-              "the oracle clauses are retired (module docstring).")
     tables = ("RUNNER_MODULES (tests/test_modal_packaging.py) and MANIFEST, DEPENDENCIES and "
-              "ANNOTATION_DEPENDENCIES (tests/test_modal_relocation.py)")
+              "ANNOTATION_DEPENDENCIES (tests/test_modal_runner_package_shape.py)")
     lines = []
     for v in violations:
         kind = v[0]
         if kind == "files":
-            text = (f"scripts/modal_runner/ holds undeclared modules {v[1]} and lacks declared "
-                    f"modules {v[2]}. A new module needs entries in {tables} in the same commit; "
-                    "otherwise delete the stray file.")
+            parts = []
+            if v[1]:
+                parts.append(f"holds modules the tables do not declare, {v[1]}: declare each in "
+                             f"{tables} in the same commit, or delete the stray file")
+            if v[2]:
+                parts.append(f"lacks modules MANIFEST declares, {v[2]}: restore them, or remove "
+                             f"their entries from {tables}")
+            text = f"scripts/modal_runner/ {'; and it '.join(parts)}."
         elif kind == "undeclared-module":
             text = (f"scripts/modal_runner/{v[1]}.py is not in DEPENDENCIES. Declare the module in "
                     f"{tables}, or delete it.")
@@ -411,32 +363,28 @@ def _explain(violations):
             text = (
                 f"MANIFEST gives these symbols more than one owner: {v[1]}. Each symbol lives in "
                 "exactly one module; delete the extra MANIFEST entries and definitions.")
-        elif kind == "manifest-union":
-            text = (f"MANIFEST does not declare exactly the oracle's top-level names: missing "
-                    f"{v[1]}, not in the oracle {v[2]}. Every relocated symbol must be declared in "
-                    f"exactly one module. {retire}")
         elif kind == "header":
             text = (f"{v[1]} line {v[2][1]} ({v[2][0]}): {v[2][2]}. Module scope may hold only the "
                     "docstring, imports, one imports-only `if TYPE_CHECKING:` block without else, "
                     "and declarations; move the statement into a function.")
+        elif kind == "undeclared-assignment":
+            text = (
+                f"{v[1]} line {v[2]} is a module-level assignment MANIFEST cannot own: its name "
+                "is bound again later in the file, or it annotates a target that is not a "
+                "plain name. Bind each module-level name once, to a plain name listed in "
+                f"MANIFEST['{v[1]}'], and move any other assignment into a function.")
         elif kind == "membership":
-            text = (f"{v[1]}'s top-level names differ from MANIFEST['{v[1]}'] by {v[2]}. If you "
-                    f"meant to add, remove or move a symbol, update MANIFEST['{v[1]}'] in "
-                    "tests/test_modal_relocation.py in the same commit.")
+            parts = []
+            if v[2]:
+                parts.append(f"{v[1]} defines {v[2]}, which MANIFEST['{v[1]}'] lacks")
+            if v[3]:
+                parts.append(f"MANIFEST['{v[1]}'] lists {v[3]}, which {v[1]} does not define")
+            text = (f"{'; '.join(parts)}. If you meant to add, remove or move a symbol, update "
+                    f"MANIFEST['{v[1]}'] in tests/test_modal_runner_package_shape.py in the same "
+                    "commit.")
         elif kind == "duplicates":
             text = (f"{v[1]} binds {v[2]} more than once at module scope; the later binding "
                     "silently shadows the earlier one. Keep one.")
-        elif kind == "no-oracle-segment":
-            text = (f"{v[1]} defines {v[2]}, which is not one of the symbols moved from "
-                    f"scripts/modal_runner_lib.py at 2bb32ac, so its bytes cannot be checked. "
-                    f"{retire}")
-        elif kind == "qualified-count":
-            text = (f"{v[1]}: {v[2]} has qualified references {v[3]} where REWRITES requires "
-                    f"{v[4]}. Keep every declared `module.name` read: tests patch these names "
-                    f"on the owning module, and an unqualified read never sees the patch. {retire}")
-        elif kind == "segment-bytes":
-            text = (f"{v[1]}: {v[2]} differs from its bytes in the relocation oracle beyond the "
-                    f"qualifiers REWRITES declares. {retire}")
         elif kind == "runtime-edges":
             text = (f"{v[1]}.py imports package modules {v[2]} at run time; DEPENDENCIES['{v[1]}'] "
                     f"allows {v[3]}. Write intra-package imports as one-dot relative imports; "
@@ -448,14 +396,8 @@ def _explain(violations):
                     f"ANNOTATION_DEPENDENCIES allows {v[3]}. Update ANNOTATION_DEPENDENCIES if the "
                     "annotation-only import is intended.")
         elif kind == "forbidden-name":
-            text = (
-                f"{v[1]} is a grab-bag module name (utils/helpers/common/misc). Name the module "
-                "for the concern it owns.")
-        elif kind == "segment-budget":
-            text = (f"{v[1]} holds {v[2]} lines of top-level segments (every module-level def, "
-                    "class and assignment, with its decorators and the comments directly above "
-                    "it), over 35% of the oracle's 2483. Split the concern rather than growing "
-                    "one module.")
+            text = (f"{v[1]} is a grab-bag module name ({'/'.join(GRAB_BAG_MODULE_NAMES)}). Name "
+                    "the module for the concern it owns.")
         else:
             text = f"unrecognised violation {v!r}"
         lines.append(f"[{kind}] {text}")
@@ -492,23 +434,13 @@ def _hoist_type_checking_imports(source):
 
 
 @pytest.fixture
-def relocation_subject():
-    return _package_sources(ROOT), _segments(_frozen_runner_source())
+def live_sources():
+    """{filename: text} for the live package's submodules, read fresh for each test."""
+    return _package_sources(ROOT)
 
 
-def test_relocation_combined_contract(relocation_subject):
-    """Criteria 1, 2 and 13 on the live package, plus the tables' own consistency."""
-    sources, oracle = relocation_subject
-    assert len(oracle) == 171, (
-        f"the frozen oracle parsed to {len(oracle)} top-level segments, not the recorded 171: "
-        "`_segments` or the pinned blob changed. Never edit this number to match.")
-    assert sum(len(segment.splitlines()) for segment in oracle.values()) == 2483, (
-        "the frozen oracle's segment line total is no longer the recorded 2483, the 35% budget's "
-        "denominator; `_segments` changed.")
-    assert len(REWRITES) == 11 and sum(
-        count for rules in REWRITES.values() for _, count in rules.values()) == 20, (
-            "REWRITES must declare the 11 segments and 20 qualified occurrences the relocation "
-            "was reviewed with; it is a relocation-oracle table, not one to extend.")
+def test_package_structure_contract(live_sources):
+    """Criteria 1, 12 (module names) and 13 on the live package, plus the tables' consistency."""
     declared = set(RUNNER_MODULES)
     manifest_modules = {name.removesuffix(".py") for name in MANIFEST}
     keyed = (manifest_modules == declared and set(DEPENDENCIES) == declared
@@ -517,73 +449,14 @@ def test_relocation_combined_contract(relocation_subject):
         f"MANIFEST {sorted(MANIFEST)}, DEPENDENCIES {sorted(DEPENDENCIES)} and "
         f"ANNOTATION_DEPENDENCIES {sorted(ANNOTATION_DEPENDENCIES)} must be keyed by the modules "
         f"RUNNER_MODULES declares ({list(RUNNER_MODULES)}); update them together.")
-    _assert_no_violations(_relocation_violations(sources, oracle), "the live package")
+    _assert_no_violations(_structure_violations(live_sources), "the live package")
 
 
-@pytest.mark.parametrize(
-    "plant",
-    ["rhs", "walrus", "default", "decorator", "class-body", "signature", "comment", "unqualified"])
-def test_relocation_preserves_exact_segments(relocation_subject, plant):
-    sources, oracle = relocation_subject
-    filename, name = ("core.py", "VOLUME_NAME")
-    if plant in {"default", "decorator", "signature", "comment"}:
-        filename, name = "request.py", "validate_run_id"
-    elif plant == "class-body":
-        filename, name = "request.py", "RunRequest"
-    elif plant == "unqualified":
-        filename, name = "training.py", "_run_training_attempt"
-    segment = _segments(sources[filename])[name].decode()
-    if plant == "rhs":
-        changed = "VOLUME_NAME = __import__('os').getcwd()\n"
-    elif plant == "walrus":
-        changed = "VOLUME_NAME = (_hidden := 'cs2rl')\n"
-    elif plant == "default":
-        changed = segment.replace("value: str", "value: str = __import__('os').getcwd()", 1)
-    elif plant == "decorator":
-        changed = "@lru_cache()\n" + segment
-    elif plant == "class-body":
-        lines = segment.splitlines(keepends=True)
-        index = next(i for i, line in enumerate(lines) if line.startswith("class RunRequest"))
-        lines.insert(index + 1, "    _work = __import__('os').getcwd()\n")
-        changed = "".join(lines)
-    elif plant == "signature":
-        changed = segment.replace("def validate_run_id(", "def validate_run_id(\n    ", 1)
-    elif plant == "comment":
-        lines = segment.splitlines(keepends=True)
-        lines.insert(1, "    # Changed preserved declaration text.\n")
-        changed = "".join(lines)
-    else:
-        assert segment.count("state.transition_status") == 2, (
-            "the unqualified plant expects two `state.transition_status` reads in "
-            f"{name}; found {segment.count('state.transition_status')}")
-        changed = segment.replace("state.transition_status", "transition_status", 1)
-    assert changed != segment, f"the {plant} plant did not change {filename}: {name}"
+def test_package_membership_rejects_wrong_owner_with_correct_union(live_sources):
     for _ in range(2):
-        _assert_no_violations(_relocation_violations(sources, oracle), "the live package")
-        mutated = {**sources, filename: sources[filename].replace(segment, changed, 1)}
-        assert set(_module_level_names(ast.parse(mutated[filename]))) == set(MANIFEST[filename]), (
-            f"the {plant} plant changed {filename}'s top-level names, so membership rather than "
-            "the segment clause could take credit for rejecting it")
-        violations = _relocation_violations(mutated, oracle)
-        clause = "qualified-count" if plant == "unqualified" else "segment-bytes"
-        _assert_rejected(violations, (clause, filename, name), plant)
-        if plant == "unqualified":
-            count = next(v for v in violations if v[0] == clause)
-            reported = (count[3]["transition_status"], count[4]["transition_status"])
-            assert reported == (1, 2), (
-                f"qualified-count must report 1 of 2 required reads: {_explain([count])}")
-            assert not any(v[0] == "segment-bytes" for v in violations), (
-                "the un-qualified segment normalises to the oracle bytes, so `qualified-count` "
-                f"must be the only objector, not `segment-bytes`:\n{_explain(violations)}")
-        _assert_no_violations(_relocation_violations(sources, oracle), "the live package")
-
-
-def test_relocation_rejects_wrong_owner_with_correct_union(relocation_subject):
-    sources, oracle = relocation_subject
-    for _ in range(2):
-        _assert_no_violations(_relocation_violations(sources, oracle), "the live package")
-        segment = _segments(sources["core.py"])["VOLUME_NAME"].decode()
-        wrong = dict(sources)
+        _assert_no_violations(_structure_violations(live_sources), "the live package")
+        segment = _segments(live_sources["core.py"])["VOLUME_NAME"]
+        wrong = dict(live_sources)
         wrong["core.py"] = wrong["core.py"].replace(segment, "", 1)
         wrong["request.py"] += "\n" + segment
 
@@ -591,28 +464,39 @@ def test_relocation_rejects_wrong_owner_with_correct_union(relocation_subject):
             """Ignore module ownership to demonstrate the weaker union-only check."""
             return set().union(*(_module_level_names(ast.parse(s)) for s in modules.values()))
 
-        assert union(wrong) == union(sources), (
+        assert union(wrong) == union(live_sources), (
             "the wrong-owner plant changed the union of names, so it no longer shows that a "
             "union-only check would pass it")
-        failures = _relocation_violations(wrong, oracle)
+        failures = _structure_violations(wrong)
         objecting = sorted({v[1] for v in failures if v[0] == "membership"})
         assert objecting == [
             "core.py", "request.py"
         ], ("moving VOLUME_NAME from core.py to request.py must fail membership in BOTH files:\n"
             f"{_explain(failures)}")
-        _assert_no_violations(_relocation_violations(sources, oracle), "the live package")
+        _assert_no_violations(_structure_violations(live_sources), "the live package")
 
 
-@pytest.mark.parametrize(
-    "plant", ["unknown", "duplicate", "missing", "else", "later-expression", "later-find-spec"])
-def test_relocation_rejects_membership_and_headers(relocation_subject, plant):
-    sources, oracle = relocation_subject
+@pytest.mark.parametrize("plant", [
+    "unknown", "duplicate", "missing", "annotated-attribute", "else", "later-expression",
+    "later-find-spec"
+])
+def test_package_ownership_and_header_controls(live_sources, plant):
+    """One planted edit per row, rejected by the ownership or header clause it names.
+
+    `annotated-attribute` plants an import-time mutation written as an
+    annotated assignment (`VOLUME_MOUNT.name: str = ...`). It must be rejected
+    by `undeclared-assignment` ALONE: membership reads plain-name bindings
+    only, and the header rule allows an AnnAssign, so deleting that clause
+    would leave this row green.
+    """
     filename = "training.py" if plant.startswith("later-") else "core.py"
     additions = {
         "unknown":
         "\n_ON_CONTAINER = 1\n",
         "duplicate":
         "\nVOLUME_NAME = 'duplicate'\n",
+        "annotated-attribute":
+        "\nVOLUME_MOUNT.name: str = 'volume'\n",
         "else":
         "\nif TYPE_CHECKING:\n    import decimal\nelse:\n    print('work')\n",
         "later-expression":
@@ -620,86 +504,109 @@ def test_relocation_rejects_membership_and_headers(relocation_subject, plant):
         "later-find-spec":
         "\nif importlib.util.find_spec('modal') is not None:\n    _ON_CONTAINER = True\n",
     }
+    clause = {
+        "unknown": "membership",
+        "missing": "membership",
+        "duplicate": "duplicates",
+        "annotated-attribute": "undeclared-assignment",
+    }.get(plant, "header")
     for _ in range(2):
-        _assert_no_violations(_relocation_violations(sources, oracle), "the live package")
-        changed = sources[filename] + additions.get(plant, "")
+        _assert_no_violations(_structure_violations(live_sources), "the live package")
+        changed = live_sources[filename] + additions.get(plant, "")
         if plant == "missing":
-            changed = changed.replace(_segments(changed)["VOLUME_NAME"].decode(), "", 1)
-        failures = _relocation_violations({**sources, filename: changed}, oracle)
-        clause = "duplicates" if plant == "duplicate" else "membership" if plant in {
-            "missing", "unknown"
-        } else "header"
+            changed = changed.replace(_segments(changed)["VOLUME_NAME"], "", 1)
+        failures = _structure_violations({**live_sources, filename: changed})
         _assert_rejected(failures, (clause, filename), plant)
+        if plant == "annotated-attribute":
+            # The plant is the last line of `changed`, which ends in a newline.
+            expected = [(clause, filename, changed.count("\n"))]
+            assert failures == expected, (
+                f"the {plant} plant must be rejected by exactly {expected}; the gates "
+                f"reported:\n{_explain(failures)}")
         if plant == "else":
             assert any("no else branch" in str(v) for v in failures), (
                 f"the else plant must be named by the no-else rule:\n{_explain(failures)}")
-        _assert_no_violations(_relocation_violations(sources, oracle), "the live package")
+        _assert_no_violations(_structure_violations(live_sources), "the live package")
 
 
-@pytest.mark.parametrize("plant", ["dropped-from-both", "declared-without-oracle", "two-owners"])
-def test_relocation_manifest_controls(relocation_subject, plant):
-    """Criterion 1's manifest clauses, which per-module membership cannot see.
+# Each row pairs a plant with the exact violation list it must produce. Its ID is
+# the plant plus the verdict DERIVED from that list ("-accepted" when it is
+# empty), so a collected ID reads as the claim ("...[dropped-from-both-accepted]")
+# and no edit or reordering of the rows can make an ID misstate its assertion.
+@pytest.mark.parametrize("plant, expected", [
+    pytest.param(plant, expected, id=f"{plant}-{'rejected' if expected else 'accepted'}")
+    for plant, expected in [
+        ("dropped-from-both", []),
+        ("added-to-both", []),
+        ("two-owners", [("manifest-duplicates", {
+            "VOLUME_NAME": ["core.py", "request.py"]
+        })]),
+        ("declared-grab-bag", [("forbidden-name", "utils.py")]),
+    ]
+])
+def test_package_manifest_controls(live_sources, plant, expected):
+    """MANIFEST edited TOGETHER with the modules: the membership remedy, and the clauses it leaves.
 
-    Each plant edits MANIFEST and the module TOGETHER, so every file still
-    matches its own manifest entry, and the exact violation list shows the
-    manifest-level clause is the sole objector:
+    Every plant keeps each file equal to its own manifest entry, so membership
+    has nothing to report, and the exact violation list says which clause, if
+    any, still objects (each row's test ID ends in the verdict it asserts):
 
-    * dropped-from-both: `REASON_ERROR` leaves MANIFEST['core.py'] and core.py
-      -> `manifest-union`, because the oracle still has it.
-    * declared-without-oracle: a `find_spec` probe is declared in
-      MANIFEST['core.py'] and appended to core.py -> `no-oracle-segment`,
-      because the byte gate used to skip a name the oracle lacks, and
-      `manifest-union`.
+    * dropped-from-both: `REASON_ERROR` leaves MANIFEST['core.py'] and core.py.
+      ACCEPTED: deleting a symbol and its entry is the membership message's
+      remedy, and no other clause may hold it red.
+    * added-to-both: a new constant is declared in MANIFEST['core.py'] and
+      defined in core.py. ACCEPTED, for the same reason.
     * two-owners: `VOLUME_NAME` is declared and defined in both core.py and
-      request.py, byte-identical in each -> `manifest-duplicates`.
+      request.py, byte-identical in each -> `manifest-duplicates` alone.
+    * declared-grab-bag: an empty `utils.py` is declared in MANIFEST and added
+      to the sources -> `forbidden-name` alone. The population clause (`files`)
+      is satisfied, so this is the case the name ban exists for.
     """
-    sources, oracle = relocation_subject
     manifest = {filename: list(names) for filename, names in MANIFEST.items()}
-    changed = dict(sources)
+    changed = dict(live_sources)
     if plant == "dropped-from-both":
         manifest["core.py"].remove("REASON_ERROR")
-        changed["core.py"] = sources["core.py"].replace(
-            _segments(sources["core.py"])["REASON_ERROR"].decode(), "", 1)
-        expected = [("manifest-union", ["REASON_ERROR"], [])]
-    elif plant == "declared-without-oracle":
-        manifest["core.py"].append("_ON_CONTAINER")
-        changed["core.py"] += ("\n_ON_CONTAINER = "
-                               "__import__('importlib').util.find_spec('modal') is not None\n")
-        expected = [("manifest-union", [], ["_ON_CONTAINER"]),
-                    ("no-oracle-segment", "core.py", "_ON_CONTAINER")]
-    else:
+        changed["core.py"] = live_sources["core.py"].replace(
+            _segments(live_sources["core.py"])["REASON_ERROR"], "", 1)
+    elif plant == "added-to-both":
+        manifest["core.py"].append("POLL_JITTER_SECONDS")
+        changed["core.py"] += "\nPOLL_JITTER_SECONDS = 0.5\n"
+    elif plant == "two-owners":
         manifest["request.py"].append("VOLUME_NAME")
-        changed["request.py"] += "\n" + _segments(sources["core.py"])["VOLUME_NAME"].decode()
-        expected = [("manifest-duplicates", {"VOLUME_NAME": ["core.py", "request.py"]})]
+        changed["request.py"] += "\n" + _segments(live_sources["core.py"])["VOLUME_NAME"]
+    elif plant == "declared-grab-bag":
+        manifest["utils.py"] = []
+        changed["utils.py"] = ""
+    else:
+        pytest.fail(f"the {plant} row has no plant")
+    assert changed != live_sources, f"the {plant} plant did not change the sources"
     for _ in range(2):
-        _assert_no_violations(_relocation_violations(sources, oracle), "the live package")
-        violations = _relocation_violations(changed, oracle, manifest)
+        _assert_no_violations(_structure_violations(live_sources), "the live package")
+        violations = _structure_violations(changed, manifest)
+        verdict = f"rejected by exactly {[v[0] for v in expected]}" if expected else "accepted"
         assert violations == expected, (
-            f"the {plant} plant must be rejected by exactly {[v[0] for v in expected]}; the gates "
-            f"reported:\n{_explain(violations)}")
-        _assert_no_violations(_relocation_violations(sources, oracle), "the live package")
+            f"the {plant} plant must be {verdict}; the gates reported:\n{_explain(violations)}")
+        _assert_no_violations(_structure_violations(live_sources), "the live package")
 
 
 @pytest.mark.parametrize("spelling", ["TYPE_CHECKING", "typing.TYPE_CHECKING", "os.TYPE_CHECKING"])
-def test_relocation_accepts_import_only_type_checking(relocation_subject, spelling):
-    sources, oracle = relocation_subject
-    sources = dict(sources)
+def test_package_header_accepts_import_only_type_checking(live_sources, spelling):
+    sources = dict(live_sources)
     sources["core.py"] += f"\nif {spelling}:\n    import decimal\n"
-    _assert_no_violations(_relocation_violations(sources, oracle),
+    _assert_no_violations(_structure_violations(sources),
                           f"a legal imports-only `if {spelling}:` block in core.py")
 
 
-def test_relocation_dependency_contract(relocation_subject):
-    sources, _ = relocation_subject
-    _assert_no_violations(_dependency_violations(sources), "the live package's import graph")
+def test_package_dependency_contract(live_sources):
+    _assert_no_violations(_dependency_violations(live_sources), "the live package's import graph")
 
 
 @pytest.mark.parametrize("plant", ["runtime-annotation", "core-edge", "missing-edge", "extra-edge"])
-def test_relocation_dependency_controls(relocation_subject, plant):
-    sources, _ = relocation_subject
+def test_package_dependency_controls(live_sources, plant):
     for _ in range(2):
-        _assert_no_violations(_dependency_violations(sources), "the live package's import graph")
-        changed = dict(sources)
+        _assert_no_violations(_dependency_violations(live_sources),
+                              "the live package's import graph")
+        changed = dict(live_sources)
         module = "commands" if plant == "runtime-annotation" else "core" if plant == "core-edge" else "source"
         if plant == "runtime-annotation":
             changed["commands.py"] = _hoist_type_checking_imports(changed["commands.py"])
@@ -716,7 +623,8 @@ def test_relocation_dependency_controls(relocation_subject, plant):
             edge = "request" if plant == "runtime-annotation" else "training"
             changed[module + ".py"] += f"\nfrom . import {edge}\n"
         _assert_rejected(_dependency_violations(changed), ("runtime-edges", module), plant)
-        _assert_no_violations(_dependency_violations(sources), "the live package's import graph")
+        _assert_no_violations(_dependency_violations(live_sources),
+                              "the live package's import graph")
 
 
 @pytest.mark.parametrize("statement, edge", [
@@ -739,8 +647,8 @@ def test_relocation_dependency_controls(relocation_subject, plant):
     pytest.param(
         "from ..modal_runner import training\n", "..modal_runner", id="parent-relative-submodule"),
 ])
-def test_relocation_dependency_rejects_every_self_import_spelling_in_core(
-        relocation_subject, statement, edge):
+def test_package_dependency_rejects_every_self_import_spelling_in_core(
+        live_sources, statement, edge):
     """Criterion 6's leaf clause against every spelling that reaches the package.
 
     core.py must import no package module. Each row appends one spelling to
@@ -750,20 +658,21 @@ def test_relocation_dependency_rejects_every_self_import_spelling_in_core(
     package-level, parent and `..` spellings and the literal `import_module`
     all left core looking like a leaf.
     """
-    sources, _ = relocation_subject
     for _ in range(2):
-        _assert_no_violations(_dependency_violations(sources), "the live package's import graph")
-        changed = {**sources, "core.py": sources["core.py"] + "\n" + statement}
+        _assert_no_violations(_dependency_violations(live_sources),
+                              "the live package's import graph")
+        changed = {**live_sources, "core.py": live_sources["core.py"] + "\n" + statement}
         failures = _dependency_violations(changed)
         expected = [("runtime-edges", "core", {edge}, set())]
         assert failures == expected, (
             f"core.py importing the package as {statement!r} must be reported as the single "
             f"runtime edge {edge!r}; the gates reported:\n{_explain(failures)}")
-        _assert_no_violations(_dependency_violations(sources), "the live package's import graph")
+        _assert_no_violations(_dependency_violations(live_sources),
+                              "the live package's import graph")
 
 
 @pytest.mark.parametrize("plant", ["preflight-to-runtime", "extra-annotation"])
-def test_relocation_annotation_edge_controls(relocation_subject, plant):
+def test_package_annotation_edge_controls(live_sources, plant):
     """The `annotation-edges` clause, which no runtime-edge plant can hold on its own.
 
     * preflight-to-runtime: preflight's `TYPE_CHECKING` import of request moves
@@ -773,78 +682,46 @@ def test_relocation_annotation_edge_controls(relocation_subject, plant):
       Its runtime edges are unchanged, so `annotation-edges` is the sole
       objector, and deleting that clause would leave this row green.
     """
-    sources, _ = relocation_subject
     if plant == "preflight-to-runtime":
-        changed = {**sources, "preflight.py": _hoist_type_checking_imports(sources["preflight.py"])}
+        changed = {
+            **live_sources, "preflight.py":
+            _hoist_type_checking_imports(live_sources["preflight.py"])
+        }
         runtime = set(DEPENDENCIES["preflight"])
         expected = [("runtime-edges", "preflight", runtime | {"request"}, runtime),
                     ("annotation-edges", "preflight", set(), {"request"})]
     else:
         changed = {
-            **sources, "source.py":
-            sources["source.py"] + "\nif TYPE_CHECKING:\n    from .training import _tee_stream\n"
+            **live_sources, "source.py":
+            live_sources["source.py"] +
+            "\nif TYPE_CHECKING:\n    from .training import _tee_stream\n"
         }
         expected = [("annotation-edges", "source", {"training"}, set())]
     for _ in range(2):
-        _assert_no_violations(_dependency_violations(sources), "the live package's import graph")
+        _assert_no_violations(_dependency_violations(live_sources),
+                              "the live package's import graph")
         failures = _dependency_violations(changed)
         assert failures == expected, (
             f"the {plant} plant must be rejected by exactly {[v[:2] for v in expected]}; the "
             f"gates reported:\n{_explain(failures)}")
-        _assert_no_violations(_dependency_violations(sources), "the live package's import graph")
-
-
-def test_relocation_size_contract(relocation_subject):
-    sources, _ = relocation_subject
-    sums = [
-        sum(len(s.splitlines()) for s in _segments(sources[name + ".py"]).values())
-        for name in RUNNER_MODULES
-    ]
-    recorded = [591, 318, 133, 248, 381, 95, 158, 559]
-    assert sums == recorded, (
-        f"per-module top-level segment line sums are {sums} for {list(RUNNER_MODULES)}, not the "
-        "recorded 591/318/133/248/381/95/158/559. They can change whenever any module-level def, "
-        "class or assignment is added, removed or edited, not only a relocated one; "
-        "test_relocation_combined_contract names changes to relocated segments. This pin is "
-        "a relocation-oracle clause (module docstring).")
-    _assert_no_violations(_size_violations(sources), "the live package's module sizes and names")
-
-
-@pytest.mark.parametrize("plant", ["forbidden-name", "segment-budget"])
-def test_relocation_size_controls(tmp_path, relocation_subject, plant):
-    """The forbidden-name row plants a REAL `utils.py` into a copy of the package.
-
-    Injecting a dict entry, as this row used to, planted inside the population
-    the gate is handed, so it could not show the gate ever sees a file on disk.
-    """
-    sources, _ = relocation_subject
-    package = _copy_live_package(tmp_path)
-    for _ in range(2):
-        _assert_no_violations(_size_violations(_package_sources(tmp_path)), "the package copy")
-        if plant == "forbidden-name":
-            (package / "utils.py").write_text("", encoding="utf-8")
-            changed = _package_sources(tmp_path)
-            (package / "utils.py").unlink()
-        else:
-            changed = {
-                **sources, "core.py": sources["core.py"] + "\ndef _huge():\n" + "    pass\n" * 900
-            }
-        _assert_rejected(_size_violations(changed), (plant, ), plant)
-        _assert_no_violations(_size_violations(_package_sources(tmp_path)), "the restored copy")
+        _assert_no_violations(_dependency_violations(live_sources),
+                              "the live package's import graph")
 
 
 @pytest.mark.parametrize("stem", ["utils", "telemetry"])
-def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, relocation_subject, stem):
+def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, stem):
     """A REAL undeclared module, with `import modal` and module-scope work, in a package copy.
 
     Before the gates enumerated the directory, this file passed every one of
-    them (W3b structural review, 2026-09-22). Each gate that should object must:
+    them (structural review, 2026-09-22). Each gate that should object must:
     the file population (`files`), the header shape, the dependency table
     (`undeclared-module`) and import purity. `utils` is also a forbidden name;
     `telemetry` is not, so its row shows the population clauses fire on any
-    undeclared file, not only on a grab-bag name.
+    undeclared file, not only on a grab-bag name. The `utils` row is also the
+    `forbidden-name` clause's control for a file read from disk; the
+    declared-grab-bag-rejected row of `test_package_manifest_controls` shows that
+    clause objecting alone.
     """
-    _, oracle = relocation_subject
     package = _copy_live_package(tmp_path)
     rel = f"scripts/modal_runner/{stem}.py"
     declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
@@ -852,23 +729,24 @@ def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, relocation_sub
     def gates():
         """Every gate's verdict on the copy, read back from disk."""
         sources = _package_sources(tmp_path)
-        return (sources, _relocation_violations(sources, oracle), _dependency_violations(sources),
-                _size_violations(sources), _nonstdlib_module_scope_imports(tmp_path))
+        return (sources, _structure_violations(sources), _dependency_violations(sources),
+                _nonstdlib_module_scope_imports(tmp_path))
 
     for _ in range(2):
-        sources, relocation, dependency, size, purity = gates()
-        _assert_no_violations(relocation + dependency + size, "the package copy")
+        sources, structure, dependency, purity = gates()
+        _assert_no_violations(structure + dependency, "the package copy")
         assert purity == (declared, []), f"gate (e) on the package copy reported {purity}"
         (package / f"{stem}.py").write_text("import modal\nprint('work')\n", encoding="utf-8")
         undeclared = _runner_module_population(tmp_path)[1]
         assert undeclared == [rel], f"the population found {undeclared}, not the planted {rel}"
-        sources, relocation, dependency, size, purity = gates()
+        sources, structure, dependency, purity = gates()
         assert list(sources)[-1] == f"{stem}.py", f"the gates were not handed {rel}"
-        _assert_rejected(relocation, ("files", [f"{stem}.py"], []), rel)
-        _assert_rejected(relocation, ("header", f"{stem}.py"), rel)
+        _assert_rejected(structure, ("files", [f"{stem}.py"], []), rel)
+        _assert_rejected(structure, ("header", f"{stem}.py"), rel)
         _assert_rejected(dependency, ("undeclared-module", stem), rel)
-        assert (("forbidden-name", f"{stem}.py") in size) == (stem == "utils"), (
-            f"the forbidden-name clause must fire for utils.py and only for it:\n{_explain(size)}")
+        assert (("forbidden-name", f"{stem}.py") in structure) == (stem == "utils"), (
+            "the forbidden-name clause must fire for utils.py and only for it:\n"
+            f"{_explain(structure)}")
         expected = (declared + [rel], [(rel, 1, "modal")])
         assert purity == expected, (
             f"gate (e) must scan {rel} and report its `import modal`; it reported {purity}")
@@ -880,8 +758,8 @@ def test_package_import_purity_scans_every_module():
     scanned, violations = _nonstdlib_module_scope_imports(ROOT)
     declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
     assert scanned == declared, (
-        f"gate (e) read {scanned}. Any path beyond the eight declared modules is an undeclared "
-        "module in scripts/modal_runner/: declare it in RUNNER_MODULES "
+        f"gate (e) read {scanned}. Any path beyond the {len(declared)} modules RUNNER_MODULES "
+        "declares is an undeclared module in scripts/modal_runner/: declare it in RUNNER_MODULES "
         "(tests/test_modal_packaging.py) and this file's tables, or delete it.")
     assert violations == [], (
         f"these (file, line, module) imports execute on import and are not stdlib: {violations}. "
@@ -889,8 +767,7 @@ def test_package_import_purity_scans_every_module():
 
 
 @pytest.mark.parametrize("container", ["if", "with", "except", "class", "try"])
-def test_package_import_purity_recursive_controls(tmp_path, relocation_subject, container):
-    sources, _ = relocation_subject
+def test_package_import_purity_recursive_controls(tmp_path, live_sources, container):
     package = _copy_live_package(tmp_path)
     plants = {
         "if": "if True:\n    import modal\n",
@@ -905,28 +782,34 @@ def test_package_import_purity_recursive_controls(tmp_path, relocation_subject, 
         scanned, failures = _nonstdlib_module_scope_imports(tmp_path)
         assert scanned == declared and failures == [], (
             f"gate (e) on the package copy read {scanned} and reported {failures}")
-        target.write_text(sources["training.py"] + "\n" + plants[container], encoding="utf-8")
+        target.write_text(live_sources["training.py"] + "\n" + plants[container], encoding="utf-8")
         scanned, failures = _nonstdlib_module_scope_imports(tmp_path)
-        assert scanned == declared, f"gate (e) read {scanned}, not the eight declared modules"
+        assert scanned == declared, (
+            f"gate (e) read {scanned}, not the {len(declared)} modules RUNNER_MODULES declares")
         assert len(failures) == 1 and failures[0][
             0] == "scripts/modal_runner/training.py" and failures[0][2] == "modal", (
                 f"gate (e) must report the `import modal` inside the {container} container in "
                 f"training.py, and only it; it reported {failures}")
         assert _nonstdlib_module_scope_imports(tmp_path, top_level_only=True)[1] == [], (
             f"the tree.body-only instrument was expected to be blind to the {container} plant")
-        target.write_text(sources["training.py"], encoding="utf-8")
+        target.write_text(live_sources["training.py"], encoding="utf-8")
         assert _nonstdlib_module_scope_imports(tmp_path)[1] == [], "the copy was not restored"
 
 
 @pytest.mark.parametrize("defect", ["missing", "unreadable"])
-def test_package_scans_reject_missing_or_unreadable_member(tmp_path, relocation_subject, defect):
-    sources, _ = relocation_subject
+def test_package_scans_reject_missing_or_unreadable_member(tmp_path, live_sources, defect):
     package = _copy_live_package(tmp_path)
     target = package / "training.py"
+    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
     for _ in range(2):
-        assert len(_package_sources(tmp_path)) == 8, "the package copy lost a module"
-        assert len(_nonstdlib_module_scope_imports(tmp_path)[0]) == 8, (
-            "gate (e) did not read the copy's eight modules")
+        copied = sorted(_package_sources(tmp_path))
+        assert copied == sorted(Path(rel).name for rel in declared), (
+            f"the package copy holds {copied}, not the {len(declared)} modules RUNNER_MODULES "
+            "declares, so this control would not start from the live package")
+        scanned = _nonstdlib_module_scope_imports(tmp_path)[0]
+        assert scanned == declared, (
+            f"gate (e) read {scanned} from the package copy, not the {len(declared)} modules "
+            "RUNNER_MODULES declares")
         target.unlink()
         if defect == "unreadable":
             target.mkdir()
@@ -935,6 +818,6 @@ def test_package_scans_reject_missing_or_unreadable_member(tmp_path, relocation_
                 scanner(tmp_path)
         if defect == "unreadable":
             target.rmdir()
-        target.write_text(sources["training.py"], encoding="utf-8")
-        assert _package_sources(tmp_path) == sources, "the copy was not restored"
+        target.write_text(live_sources["training.py"], encoding="utf-8")
+        assert _package_sources(tmp_path) == live_sources, "the copy was not restored"
         assert _nonstdlib_module_scope_imports(tmp_path)[1] == [], "the copy was not restored"

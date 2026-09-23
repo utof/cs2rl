@@ -78,18 +78,6 @@ def _hash_dumped_config(run_root: Path) -> str:
     return sha256_bytes(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode())
 
 
-# Formatter exemption for `prepare_remote_source` only. Its bytes are pinned to
-# the relocation oracle (`scripts/modal_runner_lib.py` at 2bb32ac) by
-# `test_relocation_combined_contract` in tests/test_modal_relocation.py, which
-# allows no edit beyond the declared `core.sha256_file` and
-# `state.transition_status` qualifiers. The `state.` prefix moved the open paren
-# of all three `transition_status` calls six columns right: two calls keep their
-# pre-move continuation indent, and the third now exceeds the column limit. yapf
-# would re-indent and re-wrap them. Delete this pragma pair once that byte pin is
-# retired, then let yapf format the body. The blank line after `disable` keeps
-# this comment out of the pinned segment.
-# yapf: disable
-
 def prepare_remote_source(
     *,
     volume: ReloadingVolume,
@@ -139,10 +127,10 @@ def prepare_remote_source(
                 f"source archive sha256 {digest} != expected {expected_archive_sha256}")
         if _read_status(run_root) is None:
             state.transition_status(run_root,
-                              Status.PREPARING,
-                              now=now_fn(),
-                              attempt_id=attempt_id,
-                              lock=lock)
+                                    Status.PREPARING,
+                                    now=now_fn(),
+                                    attempt_id=attempt_id,
+                                    lock=lock)
             volume.commit()
         heartbeat = start_heartbeat(
             run_root=run_root,
@@ -160,7 +148,11 @@ def prepare_remote_source(
         if manifest is not None:
             atomic_write_json(run_root / MANIFEST_FILENAME, manifest.to_dict())
             volume.commit()
-        state.transition_status(run_root, Status.BUILDING, now=now_fn(), attempt_id=attempt_id, lock=lock)
+        state.transition_status(run_root,
+                                Status.BUILDING,
+                                now=now_fn(),
+                                attempt_id=attempt_id,
+                                lock=lock)
         child_env = build_child_env(
             parent_env if parent_env is not None else os.environ,
             wandb_enabled=request.wandb_secret_name is not None,
@@ -207,10 +199,10 @@ def prepare_remote_source(
         if current is not None and current.attempt_id == attempt_id:
             try:
                 state.transition_status(run_root,
-                                  Status.BUILD_FAILED,
-                                  now=now_fn(),
-                                  attempt_id=attempt_id,
-                                  lock=lock)
+                                        Status.BUILD_FAILED,
+                                        now=now_fn(),
+                                        attempt_id=attempt_id,
+                                        lock=lock)
                 volume.commit()
             except Exception:
                 # Do not hide the original preflight error.
@@ -218,5 +210,3 @@ def prepare_remote_source(
         if staging is not None:
             staging.cleanup()
         raise
-
-# yapf: enable

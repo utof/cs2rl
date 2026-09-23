@@ -138,10 +138,12 @@ def collect_status(
 ) -> dict[str, object]:
     """Read-only status. Missing Volume fails without creating objects.
 
-    All judgement lives in modal_runner_lib: this function only fetches bytes
-    and hands them to `derive_run_view_from_bytes` / `verify_checkpoint`, so the
-    status client, the launch validator and the sidecar backfiller cannot drift
-    apart on staleness or on what makes a checkpoint trustworthy.
+    All judgement lives in the scripts/modal_runner package: this function only
+    fetches bytes and hands them to `derive_run_view_from_bytes` (defined in
+    scripts/modal_runner/state.py) / `verify_checkpoint` (defined in
+    scripts/modal_runner/checkpoint.py), so the status client, the launch
+    validator and the sidecar backfiller cannot drift apart on staleness or on
+    what makes a checkpoint trustworthy.
 
     PITFALLS:
       * Absent STATUS.json *and* absent reservation.json means the run does not

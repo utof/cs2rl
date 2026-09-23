@@ -13,7 +13,9 @@ keeps it out. A path named on the command line bypasses that pattern, but this
 module defines no tests, so such a run collects none (measured 2026-09-23).
 
 No runner imports occur here: a module the session never reached must remain
-visible as missing, so the probe cannot satisfy its own nine-name clause.
+visible as missing, so the probe cannot satisfy its own every-name clause. The
+governed names come from the package directory's LISTING (`_governed_modules`),
+which imports nothing and needs only the standard library.
 
 WHY a plugin and not an import: `tests/test_eval_baselines.py` imports the
 runner INSIDE a test body, so a module object that import creates only comes
@@ -32,19 +34,31 @@ import os
 import sys
 from pathlib import Path
 
-# The package plus its eight submodules. Written out rather than derived from
-# the package directory so that this file never touches the runner.
-_EXPECTED = frozenset({
-    "scripts.modal_runner",
-    "scripts.modal_runner.core",
-    "scripts.modal_runner.request",
-    "scripts.modal_runner.source",
-    "scripts.modal_runner.checkpoint",
-    "scripts.modal_runner.state",
-    "scripts.modal_runner.commands",
-    "scripts.modal_runner.preflight",
-    "scripts.modal_runner.training",
-})
+
+def _governed_modules(package_dir):
+    """The dotted names of the package and of every `*.py` submodule in `package_dir`.
+
+    Derived from the directory rather than written out, so a new module is
+    governed the moment its file exists, with no list here to update. Only the
+    listing is read: nothing is imported, so a module the session never
+    reached still shows as missing. `*.py` only, so `__pycache__` and non-Python
+    files do not count.
+
+    PITFALL: a wrong `package_dir` yields an empty set, and every clause of
+    `assert_module_identity` then passes over nothing.
+    `test_runtime_identity_requires_every_governed_module`
+    (tests/test_modal_packaging.py) pins `_EXPECTED` to the modules
+    RUNNER_MODULES declares, so that cannot happen silently.
+    """
+    names = set()
+    for path in package_dir.glob("*.py"):
+        stem = "" if path.name == "__init__.py" else f".{path.stem}"
+        names.add(f"scripts.modal_runner{stem}")
+    return frozenset(names)
+
+
+_PACKAGE_DIR = Path(__file__).resolve().parents[1] / "scripts" / "modal_runner"
+_EXPECTED = _governed_modules(_PACKAGE_DIR)
 # Module-level accumulator rather than a class: the plugin is loaded once per
 # session by name, so there is exactly one instance of this list per process.
 _PASSED = []
@@ -98,16 +112,16 @@ def module_census():
 
 
 def assert_module_identity(payload):
-    """Fail unless `payload` (a `module_census()` result) shows each of the nine
-    governed modules reached, as one object, under one spelling.
+    """Fail unless `payload` (a `module_census()` result) shows every governed
+    module reached, as one object, under one spelling.
 
     The clauses, in the order they report. Each is pinned by a
     `test_runtime_identity_*` control in tests/test_modal_packaging.py whose
     `match=` stops matching if that clause is deleted:
 
-    1. all nine governed names are present (a module the session never reached);
+    1. every governed name is present (a module the session never reached);
     2. one object id per governed module (a second object under any spelling);
-    3. nine distinct objects (one object bound under two governed names);
+    3. one distinct object per governed name (one object bound under two);
     4. no bare spelling (even one that aliases the canonical object);
     5. no second spelling at all (a non-bare alias of the canonical object).
 
@@ -117,7 +131,12 @@ def assert_module_identity(payload):
     output, and clause 1 covers both.
     """
     assert set(payload["modules"]) == _EXPECTED, (
-        f"nine governed module names required: {payload['modules']}")
+        "every governed module must be in sys.modules when the census runs: the package and "
+        f"each *.py in {_PACKAGE_DIR}. Never reached: "
+        f"{sorted(_EXPECTED - set(payload['modules']))}. A submodule imported only inside a "
+        "function body is reached only if the session runs that function: import it at module "
+        "scope in the package module that uses it, or have a test in the session run that "
+        "path. A submodule nothing imports is dead code: delete it.")
     for name in sorted(_EXPECTED):
         entries = payload["identities"][name]
         ids = {entry["object_id"] for entry in entries}

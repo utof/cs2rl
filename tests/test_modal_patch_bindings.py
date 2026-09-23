@@ -648,36 +648,60 @@ campaign.main()
 
 
 def _facade_patches(function, facade):
-    """Names `function` patches on the package facade, in any of four spellings.
+    """Names `function` patches on the package facade: one entry per match below, nothing else.
 
-    `setattr(<facade>, "<name>", ...)` and `<anything>.setattr(<facade>,
-    "<name>", ...)` (monkeypatch and its contexts), pytest's dotted-string form
-    `<anything>.setattr("scripts.modal_runner.<name>", ...)`, and a store
-    `<facade>.<name> = ...`. `facade` is the set of names bound to the package.
+    Matching is syntactic and deliberately broad, so it errs toward reporting.
+    A call's callee is identified by its bare name or its last attribute, so
+    `setattr` means `setattr`, `monkeypatch.setattr`, `mp.setattr` and so on:
 
-    A positional `setattr` on the facade whose name argument is not a literal
-    (`setattr(mrl, validate_name, ...)`) is returned as `None`: it patches the
-    facade, but which symbol cannot be read from source.
+    * a callee named `setattr` whose first positional argument is `<facade>`
+      and which has a second positional argument: that argument (the name);
+    * a callee named `multiple` (`mock.patch.multiple`,
+      `mocker.patch.multiple`, ...) whose first positional argument is
+      `<facade>`: each keyword's name;
+    * a callee named `setattr` or `patch` (pytest's dotted form, `mock.patch`,
+      `unittest.mock.patch`, `mocker.patch`, a bare `patch`) whose first
+      positional argument is a string literal starting `scripts.modal_runner.`:
+      the rest of the string, so a submodule target such as
+      `scripts.modal_runner.checkpoint.<name>` comes back as
+      `checkpoint.<name>`, which equals no site symbol;
+    * an assignment, plain, augmented or annotated, whose target contains
+      `<facade>.<attr>` at any depth: `<attr>`. That covers tuple and starred
+      targets, and an attribute or item OF a facade attribute:
+      `mrl.validate_local_checkpoint.__doc__ = ...` is reported as patching
+      `validate_local_checkpoint` although it does not replace it (a known
+      false positive, which fails closed), and `mrl.__dict__[...] = ...` is
+      reported as `__dict__`, which equals no site symbol.
+
+    `facade` is the set of spellings bound to the package: an alias such as
+    `mrl` or `modal_runner`, and always the dotted `scripts.modal_runner`.
+    `<facade>` is matched on `ast.unparse` of the expression, so the dotted
+    spelling is seen as well as a bare name.
+
+    A `setattr` name argument that is not a literal (`setattr(mrl,
+    validate_name, ...)`) and a `**` keyword to `multiple` are returned as
+    `None`: they patch the facade, but which symbol cannot be read from source.
     """
     found = []
     for node in ast.walk(function):
         if isinstance(node, ast.Call):
             called = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(
                 node.func, 'id', None)
-            if called != 'setattr' or not node.args:
-                continue
-            target = node.args[0]
-            if isinstance(target, ast.Name) and target.id in facade and len(node.args) > 1:
+            target = node.args[0] if node.args else None
+            on_facade = target is not None and ast.unparse(target) in facade
+            if called == 'setattr' and on_facade and len(node.args) > 1:
                 name = node.args[1]
                 found.append(name.value if isinstance(name, ast.Constant) else None)
-            elif (isinstance(target, ast.Constant) and isinstance(target.value, str)
+            elif called == 'multiple' and on_facade:
+                found.extend(keyword.arg for keyword in node.keywords)
+            elif (called in ('setattr', 'patch') and isinstance(target, ast.Constant)
+                  and isinstance(target.value, str)
                   and target.value.startswith('scripts.modal_runner.')):
                 found.append(target.value.removeprefix('scripts.modal_runner.'))
         elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             found.extend(sub.attr for target in targets for sub in ast.walk(target)
-                         if isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name)
-                         and sub.value.id in facade)
+                         if isinstance(sub, ast.Attribute) and ast.unparse(sub.value) in facade)
     return found
 
 
@@ -690,10 +714,10 @@ def _binding_site_violations(sources):
     not also patch the site's OWN symbol on the package facade
     (`_facade_patches`). Other facade patches are allowed: the client-mount
     installer patches `prepare_remote_source` and `execute_training_attempt`
-    there. No statement in those files may `setattr` the facade with a
-    POSITIONAL name argument that is not a literal, because the census cannot
-    tell which symbol that patches. Returns the sorted violation strings; `[]`
-    is green.
+    there. No statement in those files may patch the facade through a name the
+    census cannot read (a positional non-literal `setattr` name, or `**` names
+    to `mock.patch.multiple`), because it cannot tell which symbol that
+    patches. Returns the sorted violation strings; `[]` is green.
 
     WHY: `test_patch_binding_campaign` proves that `binding_target(site)` reaches
     each consumer, and nothing more. Review of the W3b tree found that
@@ -704,34 +728,57 @@ def _binding_site_violations(sources):
     trivially.
 
     PITFALLS:
-      * The facade alias is read from each file's own imports (`import
-        scripts.modal_runner as mrl`, `from scripts import modal_runner`), so a
-        renamed alias is still seen.
+      * The facade spellings are the dotted `scripts.modal_runner`, always,
+        plus the aliases each file's own imports bind (`import
+        scripts.modal_runner as mrl`, `from scripts import modal_runner`), so
+        a renamed alias is still seen. The dotted spelling needs no import of
+        its own: any `import scripts.<x>` binds `scripts`, through which it
+        reaches the package, and it can name nothing else.
       * A non-literal key (`binding_target(site)`) is reported, not skipped: the
         census cannot tell which site such a call installs.
       * Only the files `_ORIGINAL_SITES` names are read. The companion in this
         file calls `binding_target` too, by design, and is not an original site.
       * This reads source. It proves that each installer calls
-        `binding_target(site)` and does not patch its own site's symbol on the
-        facade in any of the four spellings `_facade_patches` recognises, and
-        that no statement in those files `setattr`s the facade through a
-        positional non-literal name. It does not prove the patch USES that
-        call's result: a dead `binding_target(site)` call kept beside a facade
-        patch whose name is passed by keyword
-        (`monkeypatch.setattr(mrl, name=..., value=...)`, which
-        `_facade_patches` skips), through `mock.patch.object`, or onto a wrong
-        non-facade owner stays green here. Nor does it prove a patch bites; the
-        campaign is the bite evidence, and this is only the tie between the two.
+        `binding_target(site)`, that the installer's own body does not patch
+        its site's symbol on the facade in any spelling `_facade_patches`
+        lists, and that no statement in those files patches the facade
+        through a name the census cannot read. It does not prove the patch
+        USES that call's result: a dead `binding_target(site)` call stays
+        green beside a real patch that `_facade_patches` does not report under
+        the site's symbol, whether it matches none of its shapes or reports
+        another name. Among them, each measured green:
+          - the name passed by keyword
+            (`monkeypatch.setattr(mrl, name=..., value=...)`);
+          - `mock.patch.object(<facade>, ...)`, and `mock.patch.multiple`
+            given the package as a string
+            (`mock.patch.multiple("scripts.modal_runner", ...)`);
+          - a write through the module's `__dict__`
+            (`mrl.__dict__[...] = ...`, reported as `__dict__`;
+            `vars(mrl)[...] = ...`,
+            `monkeypatch.setitem(vars(mrl), ...)`,
+            `mock.patch.dict(mrl.__dict__, ...)`);
+          - a wrong non-facade owner;
+          - a facade patch made anywhere outside the installer's own body,
+            such as in a helper it calls or a fixture it requests, because
+            only that body is read;
+          - a non-literal dotted string
+            (`monkeypatch.setattr(f"scripts.modal_runner.{name}", ...)`);
+          - the facade reached through a name no import binds
+            (`importlib.import_module(...)`, `sys.modules[...]`, or a
+            re-binding such as `pkg = mrl`).
+        Nor does it prove a patch bites; the campaign is the bite evidence,
+        and this is only the tie between the two.
     """
     violations, calls, functions = [], {}, {}
     for rel, source in sorted(sources.items()):
         tree = ast.parse(source)
-        # `_production_package_surface` (tests/test_modal_client.py) reads the
-        # first half of this set the same way. Deliberately not shared: that
-        # function does not accept `from scripts import modal_runner`, and one
-        # helper for both would be a new seam-governed name, so it is not a
-        # pure move.
-        facade = {
+        # The dotted `scripts.modal_runner` is always a facade spelling (see
+        # PITFALLS). `_production_package_surface` (tests/test_modal_client.py)
+        # reads the `import` half of the alias set the same way. Deliberately
+        # not shared: that function does not accept `from scripts import
+        # modal_runner`, and one helper for both would be a new seam-governed
+        # name, so it is not a pure move.
+        facade = {'scripts.modal_runner'} | {
             alias.asname or alias.name
             for node in ast.walk(tree) if isinstance(node, ast.Import)
             for alias in node.names if alias.name == 'scripts.modal_runner'
@@ -745,7 +792,7 @@ def _binding_site_violations(sources):
             owner = getattr(statement, 'name', '<module>')
             functions[(rel, owner)] = (statement, facade)
             if None in _facade_patches(statement, facade):
-                violations.append(f'non-literal facade setattr name in {rel}::{owner}')
+                violations.append(f'non-literal facade patch name in {rel}::{owner}')
             for node in ast.walk(statement):
                 if not (isinstance(node, ast.Call)
                         and getattr(node.func, 'id', None) == 'binding_target'):
@@ -783,8 +830,10 @@ def test_patch_binding_sites_route_through_binding_target():
     """Each original installer calls `binding_target(site)` where the table says.
 
     None of them patches its own site's symbol on the facade in a spelling the
-    census recognises; patching other facade symbols is allowed. The census
-    docstring lists the respellings it cannot see.
+    census recognises; patching other facade symbols is allowed.
+    `_facade_patches` lists every shape the census matches, including one
+    known false positive; a patch it does not report under the site's symbol
+    is invisible, and `_binding_site_violations` names the ones measured so.
 
     The campaign certifies `binding_target(site)`; this is what makes that
     certificate about the original tests. See `_binding_site_violations`.
@@ -795,7 +844,10 @@ def test_patch_binding_sites_route_through_binding_target():
 
 # Each plant rewrites exactly one original site in memory. `old` must occur
 # exactly once in the named file, so a plant that stops matching fails loudly
-# instead of passing on unchanged source.
+# instead of passing on unchanged source. The `unaliased-import-*`,
+# `dotted-via-other-import`, `mock-patch-*` rows keep the site's
+# `binding_target` call beside the facade patch, so the patch spelling under
+# test is the only thing that can object.
 _RUNNER_FILE = 'tests/test_modal_runner.py'
 _SITE_CENSUS_PLANTS = {
     'package-revert':
@@ -821,6 +873,52 @@ _SITE_CENSUS_PLANTS = {
          "test_prepare_validates_resume_then_dumps_and_hashes_config patches the package "
          "facade's validate_local_checkpoint",
      ]),
+    'unaliased-import-setattr':
+    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+     '    binding_target("terminal-validator")\n'
+     '    import scripts.modal_runner\n'
+     '    monkeypatch.setattr(scripts.modal_runner, "validate_local_checkpoint",\n'
+     '                        wrapped_validate)\n', [
+         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         "package facade's validate_local_checkpoint",
+     ]),
+    'unaliased-import-store':
+    ('    setattr(validate_target, validate_name, monkey_validate)\n',
+     '    import scripts.modal_runner\n'
+     '    scripts.modal_runner.validate_local_checkpoint = monkey_validate\n', [
+         f"prepare-validator: {_RUNNER_FILE}::"
+         "test_prepare_validates_resume_then_dumps_and_hashes_config patches the package "
+         "facade's validate_local_checkpoint",
+     ]),
+    'dotted-via-other-import':
+    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+     '    binding_target("terminal-validator")\n'
+     '    import scripts.modal_artifacts\n'
+     '    monkeypatch.setattr(scripts.modal_runner, "validate_local_checkpoint",\n'
+     '                        wrapped_validate)\n', [
+         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         "package facade's validate_local_checkpoint",
+     ]),
+    'mock-patch-dotted-string':
+    ('    monkeypatch.setattr(*binding_target("terminal-hasher"), wrapped_hash)\n',
+     '    binding_target("terminal-hasher")\n'
+     '    mock.patch("scripts.modal_runner.sha256_file", wrapped_hash).start()\n', [
+         f"terminal-hasher: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         "package facade's sha256_file",
+     ]),
+    'mock-patch-multiple':
+    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+     '    binding_target("terminal-validator")\n'
+     '    mock.patch.multiple(mrl, validate_local_checkpoint=wrapped_validate).start()\n', [
+         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         "package facade's validate_local_checkpoint",
+     ]),
+    'mock-patch-multiple-non-literal':
+    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+     '    binding_target("terminal-validator")\n'
+     '    mock.patch.multiple(mrl, **{"validate_local_checkpoint": wrapped_validate}).start()\n', [
+         f"non-literal facade patch name in {_RUNNER_FILE}::_record_hash_after_terminal",
+     ]),
     'misspelled': ('binding_target("terminal-hasher")', 'binding_target("terminal-hashr")', [
         "terminal-hasher: expected exactly one binding_target('terminal-hasher') call, "
         f"in {_RUNNER_FILE}::_record_hash_after_terminal; found []",
@@ -836,7 +934,7 @@ _SITE_CENSUS_PLANTS = {
     'facade-restore-non-literal':
     ('        setattr(validate_target, validate_name, orig_validate)\n',
      '        setattr(mrl, validate_name, orig_validate)\n', [
-         "non-literal facade setattr name in "
+         "non-literal facade patch name in "
          f"{_RUNNER_FILE}::test_prepare_validates_resume_then_dumps_and_hashes_config",
      ]),
     'non-literal': ('binding_target("interrupt-loader")', 'binding_target(site)', [

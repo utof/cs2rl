@@ -23,8 +23,10 @@ RUNS_ROOT = PurePosixPath("runs")
 # The image venv that holds torch/numpy/PufferLib and runs train.py. It is NOT
 # the interpreter this module runs under on the container: a Modal function runs
 # on the image's standalone python (/usr/local/bin/python from add_python=), which
-# has only uv + the modal client. Defined here, above validate_local_checkpoint,
-# because that validator shells out to it when in-process torch is unavailable.
+# has only uv + the modal client. checkpoint.py's `_assert_weights_only_loadable`
+# shells out to it when in-process torch is unavailable, and commands.py builds
+# the install, train and CUDA-probe commands on it; both read it as
+# `core.PREBUILT_PYTHON`, one of the package's qualified seams (see __init__.py).
 PREBUILT_PYTHON = "/opt/cs2rl/.venv/bin/python"
 # Cap on the out-of-process weights-only load. Generous for a ~2.5 MB policy;
 # a hung interpreter must not stall the interrupt path's terminal write.
@@ -334,8 +336,10 @@ class RunStatus:
 class Manifest:
     """Minimum manifest.json contract from design §5.
 
-    effective_map is authoritative. Do not store live config's `env` field —
-    that currently says cs2-dust2 even for the simple map.
+    effective_map is authoritative. Do not store live config's `env` field: it
+    is only a label, which src/train_config.py derives as `cs2-<map>` from
+    train.py's resolved `--map` (`cs2-dust2` when the `map` attribute is
+    missing or empty). The map the runner validated is effective_map.
     """
 
     schema_version: int
@@ -516,8 +520,8 @@ class CompletionEvidence:
 
 
 UV_BIN = "/usr/local/bin/uv"
-# PREBUILT_PYTHON is defined with the path constants at the top of this module —
-# validate_local_checkpoint needs it and is defined long before this point.
+# PREBUILT_PYTHON, the image venv's interpreter, is defined with the path
+# constants at the top of this module rather than here.
 TRAIN_SCRIPT = "src/train.py"
 
 # Child env is an allowlist, not a denylist: Modal/image leftovers (tokens,

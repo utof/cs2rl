@@ -18,8 +18,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 BARE = "modal_runner"
 # The one legal spelling. `BARE` is what must never appear; this is what must
-# appear instead. The runtime probe requires the package and its eight
-# submodules in `sys.modules` under this spelling and no other.
+# appear instead. The runtime probe requires the package and every submodule
+# in `sys.modules` under this spelling and no other.
 PACKAGED = "scripts." + BARE
 
 # Explicit importer population, independently checked against the tracked-file
@@ -51,9 +51,10 @@ _INBODY_CARRIER = ("tests/test_eval_baselines.py::test_eval_interval_cli_config_
 # (`nodeid.startswith`), so the first entry already covers the second and would
 # silently cover any future `test_patch_binding_campaign*` sibling too; and a
 # `--deselect` that matches nothing is ignored. The gate therefore checks, for
-# each entry, that it is still defined AND that every module-level `def` it
-# prefix-matches is listed here, so no such `def` leaves the nested session
-# unnamed. A prefix-matching test bound by assignment or import is not seen.
+# each entry, that it is still defined AND that every module-level `def` or
+# `async def` it prefix-matches is listed here, so no such function leaves the
+# nested session unnamed. A prefix-matching test bound by assignment or import,
+# or defined under a module-level `if` or `try`, is not seen.
 _NESTED_DESELECT = (
     "tests/test_modal_patch_bindings.py::test_patch_binding_campaign",
     "tests/test_modal_patch_bindings.py::test_patch_binding_campaign_rejects_invalid_evidence",
@@ -62,12 +63,12 @@ _NESTED_DESELECT = (
 # Wall-clock ceiling for the nested session, in seconds. Named rather than
 # inlined so the value and the message that quotes it cannot drift apart -- a
 # literal in both places is one edit away from a message that lies about its own
-# threshold. Chosen from measured spread, not picked round: on 2026-09-23, on the
-# W3b split tree with fix wave F4's round-2 edits and `_NESTED_DESELECT` applied,
-# three nested sessions reported 39.84-41.56s ("461 passed, 24 deselected") and
-# this test's call phase took 41.67-43.45s, so 600 is ~14x the slowest observed. The
-# figures move with every test added to an `_IMPORTERS` file; re-measure before
-# trusting the margin after `_IMPORTERS` or `_NESTED_DESELECT` changes.
+# threshold. Chosen from measured spread, not picked round: on 2026-09-23, with
+# the runner split into scripts/modal_runner/ and `_NESTED_DESELECT` applied,
+# three nested sessions reported 49.34-50.17s ("467 passed, 24 deselected") and
+# this test's call phase took 51.06-51.90s, so 600 is ~11.5x the slowest observed.
+# The figures move with every test added to an `_IMPORTERS` file; re-measure
+# before trusting the margin after `_IMPORTERS` or `_NESTED_DESELECT` changes.
 _NESTED_TIMEOUT_S = 600
 
 
@@ -446,7 +447,7 @@ def test_import_guard_plant_populations_are_complete():
 
 
 def test_runtime_identity_rejects_competing_module_objects(monkeypatch):
-    """A second object must fail identity even with the same nine canonical names."""
+    """A second object must fail identity even with the same canonical names."""
     import importlib
     import types
 
@@ -468,16 +469,49 @@ def test_runtime_identity_rejects_competing_module_objects(monkeypatch):
         assert_module_identity(module_census())
 
 
-def test_runtime_identity_requires_all_nine_modules(monkeypatch):
-    """A governed module missing from `sys.modules` fails the nine-name clause."""
+def test_runtime_identity_requires_every_governed_module(monkeypatch, tmp_path):
+    """The probe governs exactly the declared modules, and a missing one fails clause 1.
+
+    The probe derives `_EXPECTED` from the package directory
+    (`_governed_modules`), so this pins it to the modules RUNNER_MODULES
+    declares: an empty set, which would pass every identity clause over
+    nothing, or a module file the tables do not declare, reddens here. The
+    planted directory shows the derivation governs a new module the moment
+    its file exists and ignores anything that is not a `*.py` file directly
+    in the package directory: `sub/nested.py` pins the non-recursive glob,
+    which an `rglob` would break.
+    """
     import importlib
 
-    from tests._modal_import_probe import assert_module_identity, module_census
+    from tests._modal_import_probe import (
+        _EXPECTED,
+        _PACKAGE_DIR,
+        _governed_modules,
+        assert_module_identity,
+        module_census,
+    )
 
+    declared = {PACKAGED} | {f"{PACKAGED}.{name}" for name in RUNNER_MODULES}
+    undeclared, missing = sorted(_EXPECTED - declared), sorted(declared - _EXPECTED)
+    assert not undeclared and not missing, (
+        f"tests/_modal_import_probe.py governs every *.py file in {_PACKAGE_DIR}, and that "
+        "must match the modules RUNNER_MODULES declares. On disk but undeclared: "
+        f"{undeclared}; declare each in RUNNER_MODULES and the tables in "
+        "tests/test_modal_runner_package_shape.py, or delete the file. Declared but not on "
+        f"disk: {missing}; restore the file, or remove the module from those tables. If every "
+        "declared module is missing, `_PACKAGE_DIR` no longer points at scripts/modal_runner/.")
+    planted = tmp_path / "modal_runner"
+    (planted / "__pycache__").mkdir(parents=True)
+    (planted / "sub").mkdir()
+    for name in ("__init__.py", "core.py", "ledger.py", "notes.txt", "__pycache__/core.pyc",
+                 "sub/nested.py"):
+        (planted / name).write_text("", encoding="utf-8")
+    assert _governed_modules(planted) == {PACKAGED, f"{PACKAGED}.core", f"{PACKAGED}.ledger"}
     importlib.import_module(PACKAGED)
     with monkeypatch.context() as patch:
         patch.delitem(sys.modules, PACKAGED + ".training")
-        with pytest.raises(AssertionError, match="nine governed module names"):
+        with pytest.raises(AssertionError,
+                           match=r"Never reached: \['scripts\.modal_runner\.training'\]"):
             assert_module_identity(module_census())
     assert_module_identity(module_census())
 
@@ -538,7 +572,7 @@ def test_runtime_identity_rejects_one_object_under_two_governed_names(monkeypatc
 
     Each name still holds a single object under its own spelling, so the
     per-module identity clause and the spelling clauses all pass; only the
-    count of distinct objects across the nine sees the collapse.
+    count of distinct objects across the governed names sees the collapse.
     """
     import importlib
 
@@ -669,7 +703,7 @@ def test_the_runtime_probe_runs_every_test_file_that_imports_the_runner():
     was a hand-maintained list with nothing watching it. The gate below can only
     catch an import in a file it RUNS, so a name quietly dropped from this list
     retires coverage without reddening anything. Measured at W1, on the
-    single-module census the nine-module probe replaced: emptying the list of
+    single-module census the per-module probe replaced: emptying the list of
     real importers was caught by accident -- the census read `[]`, which the
     gate's last assertion rejected -- but a PARTIAL narrowing was not: drop one
     of four and the census still read exactly `["scripts.modal_runner_lib"]`
@@ -710,8 +744,8 @@ def test_modal_runner_resolves_to_exactly_one_module_object(tmp_path):
     """RUNTIME gate for the one-spelling rule.
 
     Runs a real pytest session over `_IMPORTERS` with `tests._modal_import_probe`
-    loaded, and requires the in-body carrier to have passed and the nine
-    governed modules to resolve to one object each, under one spelling. The
+    loaded, and requires the in-body carrier to have passed and every
+    governed module to resolve to one object, under one spelling. The
     static guard above proves no file CONTAINS a bare import in a shape it
     knows; this proves none HAPPENS -- including through
     `importlib.import_module(<variable>)`, which no static census can see. It
@@ -755,7 +789,7 @@ def test_modal_runner_resolves_to_exactly_one_module_object(tmp_path):
     shape -- and neuter the exit-status assertion: the gate goes GREEN, because
     the carrier DID run and the census IS clean. It is the sole objector to a
     session that failed for an unrelated reason. (Measured on the single-module
-    probe this nine-module probe replaced; the argument does not depend on the
+    probe the per-module probe replaced; the argument does not depend on the
     census's shape.)
 
     PITFALL: an in-body import such as test_eval_baselines' only runs when its
@@ -787,13 +821,14 @@ def test_modal_runner_resolves_to_exactly_one_module_object(tmp_path):
     # `--deselect` matches node-id PREFIXES, so an entry also drops every
     # function whose name starts with its own: each such function must be
     # listed, or a new sibling test would leave the nested session unnoticed.
-    # The check reads module-level `def`s only (see `_NESTED_DESELECT`).
+    # The check reads module-level `def` and `async def` statements only (see
+    # `_NESTED_DESELECT`); pytest collects an `async def test_*` as an item too.
     for node_id in _NESTED_DESELECT:
         rel, _, name = node_id.partition("::")
         defined = {
             node.name
             for node in ast.parse((ROOT / rel).read_text(encoding="utf-8")).body
-            if isinstance(node, ast.FunctionDef)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         assert name in defined, (
             f"`_NESTED_DESELECT` names {node_id}, which {rel} no longer defines, so the "
@@ -955,14 +990,15 @@ PACKAGING_FILE = "tests/test_modal_packaging.py"
 # to this file, so the rule is enforced rather than merely stated.
 #
 # WHY write down a rule the classifier already computes. Spec §10 criterion 12
-# bans a module named `utils` / `helpers` / `common` / `misc`. Its instrument is
-# the per-module segment sums of §5.1 -- the eight `scripts/modal_runner/`
-# submodules of W3 -- so a test module is outside its scope and there is no
-# conflict here. But the criterion exists because a module named for what it IS
-# rather than for what it OWNS becomes a junk drawer, and that failure mode does
-# not care which directory it happens in. A one-line membership test is what
-# keeps this file a seam artefact instead of a drawer: measured, it holds exactly
-# 7 names, and every one of them is reached from both halves.
+# bans a module named `utils` / `helpers` / `common` / `misc`. Its instrument,
+# the `forbidden-name` clause in tests/test_modal_runner_package_shape.py, reads
+# only the `scripts/modal_runner/` submodules, so a test module is outside its
+# scope and there is no conflict here. But the criterion exists because a module
+# named for what it IS rather than for what it OWNS becomes a junk drawer, and
+# that failure mode does not care which directory it happens in. A one-line
+# membership test is what keeps this file a seam artefact instead of a drawer:
+# measured, it holds exactly 7 names, and every one of them is reached from both
+# halves.
 SHARED_FILE = "tests/modal_test_helpers.py"
 
 # The three module-level guards that lived above line 100 of the monolith. They
@@ -983,7 +1019,7 @@ SEAM_GUARDS = frozenset({
 # measured at 2bb32ac, by AST over the module-level bindings of every collected
 # `tests/test_*.py`. They are that tree's values, not current ones: the file
 # counts rise whenever a new test file defines its own `ROOT`, which W3b's
-# `tests/test_modal_relocation.py` does.
+# `tests/test_modal_runner_package_shape.py` does.
 #
 # `ROOT` is `Path(__file__).resolve().parents[1]` -- module-header boilerplate
 # that every destination file defines for itself by construction. At 2bb32ac,
@@ -1915,7 +1951,20 @@ def _runner_module_population(repo_root):
 
 
 def _frozen_runner_source():
-    """Load and verify the immutable relocation oracle; missing objects fail clearly."""
+    """The pre-split monolith, `scripts/modal_runner_lib.py` at 2bb32ac, digest-checked.
+
+    WHY IT OUTLIVES THE SPLIT: it is synthetic fixture text, not an oracle for
+    the live package. Five knock-outs of gates (e) and (g), written before the
+    split against the then-live monolith, splice their plants in after its line 19
+    (`from __future__ import annotations`), assert violation line numbers
+    derived from that, and argue each row is inert on the unplanted text
+    because it holds no `TYPE_CHECKING` block, relative import, async def or
+    class-body import. The package modules change with every edit, every one
+    but core.py holds relative imports, and core.py's `__future__` import is
+    its line 2, so none can stand in. The digest pin keeps those line numbers
+    and inertness claims about these exact bytes. A missing git object fails
+    naming the pinned commit.
+    """
     import hashlib
 
     pin = "2bb32ac09db897d3bdaa34660d242f5011524e85"
@@ -1923,10 +1972,13 @@ def _frozen_runner_source():
                             cwd=ROOT,
                             capture_output=True,
                             check=False)
-    assert result.returncode == 0, f"Fetch required relocation oracle {pin}: {result.stderr!r}"
+    assert result.returncode == 0, f"Fetch the pinned fixture text at {pin}: {result.stderr!r}"
     data = result.stdout
     digest = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
-    assert digest == "f0ca9853101b62cd8edb0c4904050829e7a005c5", digest
+    assert digest == "f0ca9853101b62cd8edb0c4904050829e7a005c5", (
+        f"the pinned fixture text at {pin} hashes to blob {digest}, not its recorded blob id: "
+        "the git object is corrupt or a filter rewrote it. Repair the object store (re-fetch "
+        "the commit); never edit the digest to match.")
     return data.decode("utf-8")
 
 
@@ -1979,7 +2031,7 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False, *, paths=No
                 # precisely the branch that does run -- and skipping the whole
                 # `If` node would be a real blind spot rather than an exemption.
                 # The same rule is written out in `_module_scope_shape_violations`
-                # and in tests/test_modal_relocation.py's `_dependency_edges`;
+                # and in tests/test_modal_runner_package_shape.py's `_dependency_edges`;
                 # `test_criterion_13_reddens_on_the_conditional_modal_probe`
                 # asserts that this copy and gate (g)'s agree. (W3a inlined it to
                 # fit its GC3 module-name budget; W3b has since added names to
@@ -2009,8 +2061,9 @@ def test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library
     assert undeclared == [], (
         f"scripts/modal_runner/ holds modules RUNNER_MODULES does not declare: {undeclared}. "
         "A new module needs entries in RUNNER_MODULES (tests/test_modal_packaging.py) and in "
-        "MANIFEST, DEPENDENCIES and ANNOTATION_DEPENDENCIES (tests/test_modal_relocation.py) in "
-        "the same commit; otherwise delete the stray file.")
+        "MANIFEST, DEPENDENCIES and ANNOTATION_DEPENDENCIES "
+        "(tests/test_modal_runner_package_shape.py) in the same commit; otherwise delete the "
+        "stray file.")
     scanned, violations = _nonstdlib_module_scope_imports(ROOT)
     assert scanned == candidates, (
         f"gate (e) read {scanned} but the package directory holds {candidates}; a module it "
@@ -2299,7 +2352,7 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
 
 
 def _module_scope_shape_violations(tree):
-    """Classify every header statement; declaration bytes are checked separately.
+    """Classify every module-scope statement; what a declaration contains is not checked.
 
     Recognition intentionally matches criterion 5: bare TYPE_CHECKING or any
     attribute with that name. A single imports-only block is legal, without else.
@@ -2362,7 +2415,8 @@ def test_gate_g_criterion_13_the_runner_library_declares_and_does_nothing_else()
     assert undeclared == [], (
         f"scripts/modal_runner/ holds modules RUNNER_MODULES does not declare: {undeclared}. "
         "Declare a new module in RUNNER_MODULES (tests/test_modal_packaging.py) and in "
-        "tests/test_modal_relocation.py's tables in the same commit, or delete the stray file.")
+        "tests/test_modal_runner_package_shape.py's tables in the same commit, or delete the "
+        "stray file.")
     scanned = []
     for rel in candidates:
         tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
@@ -2375,7 +2429,8 @@ def test_gate_g_criterion_13_the_runner_library_declares_and_does_nothing_else()
             "may hold only the docstring, imports, one imports-only `if TYPE_CHECKING:` block "
             "without else, and declarations; move anything else into a function.")
     declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
-    assert scanned == declared, f"gate (g) read {scanned}, not the eight declared modules"
+    assert scanned == declared, (
+        f"gate (g) read {scanned}, not the {len(declared)} modules RUNNER_MODULES declares")
 
 
 def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
@@ -2628,8 +2683,8 @@ def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_b
     a correct gate on all three red knock-outs. Row 1 says the construct is
     ALLOWED. On the live package, commands.py and preflight.py each hold one
     such block, so `test_gate_g_criterion_13_the_runner_library_declares_and_does_nothing_else`
-    and tests/test_modal_relocation.py's
-    `test_relocation_accepts_import_only_type_checking` say so as well.
+    and tests/test_modal_runner_package_shape.py's
+    `test_package_header_accepts_import_only_type_checking` say so as well.
 
     ROWS 2 AND 3 HOLD THE `at most one` CLAUSE AND THE NAME CLAUSE, which are
     secondary clauses of the same branch -- and "the headline clause has a
@@ -2654,8 +2709,8 @@ def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_b
     reddens here, which is row 6.
 
     The helper's no-else clause has no row here. Its control is
-    tests/test_modal_relocation.py's
-    `test_relocation_rejects_membership_and_headers[else]`, which plants into an
+    tests/test_modal_runner_package_shape.py's
+    `test_package_ownership_and_header_controls[else]`, which plants into an
     in-memory copy of the live package's sources and runs the combined
     instrument over it; criterion 5
     independently checks the imports in that branch.

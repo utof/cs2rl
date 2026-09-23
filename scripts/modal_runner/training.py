@@ -570,18 +570,18 @@ def _run_training_attempt(
         # window between building `threads` and the first append finds the list empty,
         # so the tee threads are never joined and the attempt is not guaranteed to
         # write anything to train.log -- a thread started earlier in that window may
-        # still get some output through before finalize closes the sinks at
-        # :2620-2621. That is the accepted trade: the threads are daemon=True so they
-        # never hold the process open, finalize's join is their only consumer, and the
-        # child is being killed anyway -- whereas publishing first costs a run with no
-        # terminal status at all. Do not "fix" this by moving the append back above
+        # still get some output through before finalize closes the sinks with
+        # `_close_log_sink`. That is the accepted trade: the threads are daemon=True so
+        # they never hold the process open, finalize's join is their only consumer, and
+        # the child is being killed anyway -- whereas publishing first costs a run with
+        # no terminal status at all. Do not "fix" this by moving the append back above
         # start().
         #
         # It is only survivable because _tee_stream guards each sink's write/flush with
-        # `except ValueError: continue` (`:2175-2181` at this commit). Threads that
-        # start inside the residual window run against sinks finalize has already
-        # closed; that handler is what keeps this a no-op instead of an
-        # unraised-in-thread exception. Do not delete it as dead defensive code.
+        # `except ValueError: continue`. Threads that start inside the residual window
+        # run against sinks finalize has already closed; that handler is what keeps
+        # this a no-op instead of an unraised-in-thread exception. Do not delete it as
+        # dead defensive code.
         for thread in threads:
             thread.start()
             tee_threads.append(thread)

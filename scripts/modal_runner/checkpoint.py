@@ -35,15 +35,6 @@ def _import_torch() -> object:
     return torch
 
 
-# Formatter exemption for `_assert_weights_only_loadable` only. Its bytes are
-# pinned to the relocation oracle (`scripts/modal_runner_lib.py` at 2bb32ac) by
-# `test_relocation_combined_contract` in tests/test_modal_relocation.py, which
-# allows no edit beyond the declared `core.PREBUILT_PYTHON` qualifiers. One
-# qualified line now exceeds the column limit and yapf would re-wrap it. Delete
-# this pragma pair once that byte pin is retired, then let yapf format the body.
-# The blank line after `disable` keeps this comment out of the pinned segment.
-# yapf: disable
-
 def _assert_weights_only_loadable(path: Path) -> None:
     """Prove `path` is a weights-only-loadable torch checkpoint.
 
@@ -78,16 +69,15 @@ def _assert_weights_only_loadable(path: Path) -> None:
             timeout=PREBUILT_LOAD_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as err:
-        raise ValidationError(f"cannot validate {path}: {core.PREBUILT_PYTHON} did not finish within "
-                              f"{PREBUILT_LOAD_TIMEOUT_SECONDS}s") from err
+        raise ValidationError(
+            f"cannot validate {path}: {core.PREBUILT_PYTHON} did not finish within "
+            f"{PREBUILT_LOAD_TIMEOUT_SECONDS}s") from err
     except OSError as err:
         raise ValidationError(f"cannot validate {path}: {core.PREBUILT_PYTHON} failed to run: "
                               f"{err}") from err
     if completed.returncode != 0:
         raise ValidationError(f"checkpoint is not weights-only loadable: {path}: "
                               f"{completed.stderr.strip()[-400:]}")
-
-# yapf: enable
 
 
 def validate_local_checkpoint(path: Path) -> FileProvenance:
