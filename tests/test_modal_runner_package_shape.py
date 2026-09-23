@@ -74,6 +74,7 @@ from tests.modal_runner_tables import (
 # duplicates clauses here as well.
 from tests.test_modal_packaging import (
     PACKAGED,
+    _is_type_checking_test,
     _module_level_binding_counts,
     _module_level_names,
     _module_scope_shape_violations,
@@ -239,13 +240,10 @@ def _dependency_edges(sources):
         stack = [(ast.parse(source), False)]
         while stack:
             node, checking = stack.pop()
-            if isinstance(node, ast.If):
-                test = node.test
-                if ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
-                        or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")):
-                    stack.extend((child, True) for child in node.body)
-                    stack.extend((child, checking) for child in node.orelse)
-                    continue
+            if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+                stack.extend((child, True) for child in node.body)
+                stack.extend((child, checking) for child in node.orelse)
+                continue
             edges = annotations[module] if checking else runtime[module]
             if isinstance(node, ast.ImportFrom) and node.level == 1:
                 if node.module:

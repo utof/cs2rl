@@ -1951,6 +1951,24 @@ def _runner_module_population(repo_root):
     return declared + undeclared, undeclared
 
 
+def _is_type_checking_test(test):
+    """True iff an `if` statement's test is `TYPE_CHECKING` or `<anything>.TYPE_CHECKING`.
+
+    The one definition of a `TYPE_CHECKING` block for every gate that reads
+    one: gate (e) exempts its body from the purity check, gate (g) allows one
+    imports-only block at module scope, and the package-shape dependency walk
+    (tests/test_modal_runner_package_shape.py) files its imports under
+    ANNOTATION_DEPENDENCIES. They used to hold three copies of this test, and a
+    copy that drifted would make one gate exempt a block another calls illegal.
+
+    Matching by name has an accepted limit (Ruling 29): `if os.TYPE_CHECKING:`
+    is recognised too. It fails closed the other way: `if TYPE_CHECKING and X:`
+    is a `BoolOp` and is not recognised.
+    """
+    return ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
+            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"))
+
+
 def _frozen_runner_source():
     """The pre-split monolith, `scripts/modal_runner_lib.py` at 2bb32ac, digest-checked.
 
@@ -2031,18 +2049,9 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False, *, paths=No
                 # import and is exempt. `node.orelse` IS still walked -- that is
                 # precisely the branch that does run -- and skipping the whole
                 # `If` node would be a real blind spot rather than an exemption.
-                # The same rule is written out in `_module_scope_shape_violations`
-                # and in tests/test_modal_runner_package_shape.py's `_dependency_edges`;
-                # `test_criterion_13_reddens_on_the_conditional_modal_probe`
-                # asserts that this copy and gate (g)'s agree. (W3a inlined it to
-                # fit its GC3 module-name budget; W3b has since added names to
-                # this file, so that budget no longer explains the copies.)
-                if isinstance(node, ast.If):
-                    test = node.test
-                    if ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
-                            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")):
-                        stack.extend(node.orelse)
-                        continue
+                if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+                    stack.extend(node.orelse)
+                    continue
                 stack.extend(ast.iter_child_nodes(node))
         for node in nodes:
             if isinstance(node, ast.Import):
@@ -2333,8 +2342,8 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
 def _module_scope_shape_violations(tree):
     """Classify every module-scope statement; what a declaration contains is not checked.
 
-    Recognition intentionally matches criterion 5: bare TYPE_CHECKING or any
-    attribute with that name. A single imports-only block is legal, without else.
+    A block is recognised by `_is_type_checking_test`, the predicate gate (e)
+    uses. A single imports-only block is legal, without else.
     """
     examined = 0
     violations = []
@@ -2354,9 +2363,7 @@ def _module_scope_shape_violations(tree):
                 (kind, node.lineno, "only the module docstring may be a bare expression at module "
                  "scope"))
         elif isinstance(node, ast.If):
-            test = node.test
-            if not ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or
-                    (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")):
+            if not _is_type_checking_test(node.test):
                 violations.append(
                     (kind, node.lineno, "the only conditional allowed at module scope is "
                      "`if TYPE_CHECKING:`"))
@@ -2376,10 +2383,7 @@ def _module_scope_shape_violations(tree):
                     violations.append((type(inner).__name__, inner.lineno,
                                        "an `if TYPE_CHECKING:` body may hold imports only"))
         # Everything else at module scope is an import or a declaration, or it
-        # is a violation. The tuple is inlined, as gate (e)'s `TYPE_CHECKING`
-        # predicate is; both were inlined to fit W3a's GC3 module-name budget,
-        # which W3b's additions to this file have since overtaken. `Expr` and
-        # `If` are deliberately absent: both are legal in exactly one shape, so
+        # is a violation. `Expr` and `If` are deliberately absent: both are legal in exactly one shape, so
         # they are decided by the branches above. Putting either here is the
         # blind kind-only allow-list this whole gate exists to rule out.
         elif not isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef,
@@ -2426,25 +2430,14 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     close. Neither half is optional: together they establish that criterion 13 is
     the SOLE objector to this header.
 
-    AND THE THIRD BLOCK HOLDS THE AGREEMENT THE TWO HELPERS' DOCSTRINGS DEMAND.
-    Both recognise a `TYPE_CHECKING` block with the SAME rule, written out twice
-    -- once in gate (e)'s descent, once in the `If` branch of gate (g) -- and gate
-    (g)'s docstring says the two "MUST agree", which until now nothing enforced.
-    Measured BEFORE this block existed: narrow gate (e)'s attribute clause to
-    require `typing.*` and the two disagree on `if os.TYPE_CHECKING:` while all 7
-    tests that call either helper still passed -- which is the hole this block
-    closes. RE-MEASURED WITH IT: the same narrowing gives `1 failed, 39 passed`
-    and the sole objector is THIS test, read off the raised `E ` line. So 6 of
-    the 7 pass, not all 7, and the 7th is the one you are reading -- which is what
-    "delete that row and either mutant survives" says below. The tense is the
-    whole difference between the two sentences. W3a kept the two copies rather
-    than extract a shared predicate, to fit its GC3 module-name budget (W3b has
-    since added names to this file), so the agreement is ASSERTED over the
-    shapes that separate the readings instead.
-    `os.TYPE_CHECKING` is the SOLE OBJECTOR and it holds BOTH directions: seeding
-    the narrowing into gate (e) makes that row disagree, seeding the same
-    narrowing into gate (g) makes it disagree the other way, and the other four
-    rows are blind to both. Delete that row and either mutant survives.
+    AND THE THIRD BLOCK HOLDS THE TWO GATES TO ONE READING OF `TYPE_CHECKING`.
+    Both call `_is_type_checking_test`, so they agree by construction; the
+    block reads each shape's verdict off both gates, so a gate that stops
+    calling the shared predicate, or a predicate that narrows or widens, turns
+    a row red. Before the predicate was shared, gate (e) and gate (g) held two
+    copies of it, and this block was the only thing that kept them in step: a
+    narrowing seeded into either copy made the `os.TYPE_CHECKING` row, and no
+    other test, go red.
 
     CRITERION 4 IS DELIBERATELY NOT IN THE CONTRAST. Gate (d) reads
     `runner_image.local_files` and the git index and never reads module source at
@@ -2489,8 +2482,7 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
         "here means the plant acquired an import that executes, which would be a correct gate "
         f"(e) verdict and a plant-design error on this side (Ruling 30). Reported: {impure}")
 
-    # The two gates' `TYPE_CHECKING` predicates must agree, and this is what says
-    # so. Each row plants `if <shape>:` holding a NON-stdlib import, then asks
+    # The two gates must read `TYPE_CHECKING` the same way. Each row plants `if <shape>:` holding a NON-stdlib import, then asks
     # both helpers the same question: gate (e) EXEMPTS the body iff it recognises
     # the block, gate (g) reports no conditional violation iff it recognises the
     # block. The verdicts are read off the helpers, never hardcoded, so the row
@@ -2501,7 +2493,7 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
         ("TYPE_CHECKING", True, "the bare `Name` spelling"),
         ("typing.TYPE_CHECKING", True, "the `typing.` attribute spelling"),
         ("os.TYPE_CHECKING", True, "ANY attribute whose `attr` is `TYPE_CHECKING` -- Ruling 29's "
-         "accepted limit, and the ONLY row here that separates the two readings"),
+         "accepted limit"),
         ("_probe()", False, "a `Call` test is not recognised by either gate"),
         ("TYPE_CHECKING is True", False, "a `Compare` test is not recognised by either gate"),
     ]:
@@ -2522,7 +2514,7 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
         g_recognises = agree_shape == []
         assert e_exempts == recognised and g_recognises == recognised, (
             f"the two gates no longer read `if {shape}:` the same way, or no longer read it as "
-            f"{recognised}. This is {why}. Gate (g)'s docstring requires them to agree: a block "
+            f"{recognised}. This is {why}. Both must call `_is_type_checking_test`: a block "
             "one gate exempts and the other calls illegal leaves whoever meets the red with no "
             f"way to attribute it. gate (e) exempted: {e_exempts} ({agree_impure}); gate (g) "
             f"recognised: {g_recognises} ({agree_shape})")
