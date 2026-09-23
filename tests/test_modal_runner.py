@@ -3579,10 +3579,21 @@ def test_signal_process_group_refuses_groups_a_live_child_cannot_have(case, caps
     would pass a "contains my token" check. Only the exclusion pins WHICH clause
     refused.
 
+    WHY the three refusal children are held (`hold=True`) and the control's is
+    not. A guard that prints the line and skips the SIGTERM but forgets to
+    `return` falls through to the escalation. With an exited child, the first
+    `poll()` returns and all three cases stay green. On a live child the same
+    guard reaches `killpg(pgid, SIGKILL)` with the refused pgid: in the
+    `pgid-le-1` case that is `kill(-1, SIGKILL)`. A held FakeChild is that live
+    child: `poll()` is None and the grace `wait` times out at once (no
+    wall-clock wait), so the missing `return` records a SIGKILL and
+    `kills == []` goes red. The control keeps an exited child, so it records
+    the SIGTERM alone.
+
     SAFETY: every case passes a recording `killpg` and a fake `sleep`, so
-    nothing here signals even with a clause removed. The per-clause knock-outs
-    (delete one clause, run only its own case, see red) are recorded in the
-    ledger, not committed.
+    nothing here signals even with a clause removed. The knock-outs (delete one
+    clause, or drop the refusal's `return`; run only the affected case nodes;
+    see red) are run by hand and are not committed.
     """
     assert os.getpgrp() > 1, (
         f"the runner's own process group is {os.getpgrp()}, not above 1, so the `pgid-le-1` and "
@@ -3593,9 +3604,9 @@ def test_signal_process_group_refuses_groups_a_live_child_cannot_have(case, caps
         return pid
 
     child, getpgid, token = {
-        "pgid-le-1": (FakeChild(pid=1), identity, "pgid<=1"),
-        "own-group": (FakeChild(pid=os.getpgrp()), identity, "own-group"),
-        "pgid-ne-pid": (FakeChild(pid=P), lambda pid: pid + 1, "pgid!=pid"),
+        "pgid-le-1": (FakeChild(pid=1, hold=True), identity, "pgid<=1"),
+        "own-group": (FakeChild(pid=os.getpgrp(), hold=True), identity, "own-group"),
+        "pgid-ne-pid": (FakeChild(pid=P, hold=True), lambda pid: pid + 1, "pgid!=pid"),
         "control": (FakeChild(pid=P), identity, None),
     }[case]
     kills: list[tuple[int, int]] = []
