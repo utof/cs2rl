@@ -12,6 +12,10 @@ Every clause here describes the shape the package keeps from now on:
   MANIFEST gives no symbol two owners (`manifest-duplicates`);
 * module-scope shape (`header`): the docstring, imports, one imports-only
   `if TYPE_CHECKING:` block without else, and declarations, nothing else;
+* import-time work (`import-time`): what a declaration evaluates on import
+  (its value, decorators, default arguments, class bases and class body) may
+  use only literals, names, attribute reads, containers, arithmetic and calls
+  to IMPORT_TIME_CALLS, and a module with annotations defers them;
 * the import graph: intra-package imports equal DEPENDENCIES
   (`runtime-edges`) and ANNOTATION_DEPENDENCIES (`annotation-edges`);
 * import purity: no non-stdlib import executes when a module is imported;
@@ -21,7 +25,8 @@ Every clause here describes the shape the package keeps from now on:
   `__all__`.
 
 Editing a function body, a docstring or a constant's value trips none of them
-unless the edit adds or removes an import. Adding, removing, renaming or moving
+unless the edit adds or removes an import, or puts work into a value that runs
+on import (`import-time`). Adding, removing, renaming or moving
 a top-level symbol, adding a module, or changing which package modules a module
 imports does: update the table the failure message names, in the same commit as
 the change. Runtime imports are compared with DEPENDENCIES and imports under
@@ -98,6 +103,27 @@ _UNDECLARED_MODULE_REMEDY = (
 # about the tree. A control whose restore step broke would otherwise pass once
 # and hide it.
 _CONTROL_PASSES = 2
+# Callees a package module may call while it is being imported, decorators
+# included (applying a bare `@property` calls it): pure constructors of values
+# and the class-building decorators. `<str>.strip` is a method of a string
+# literal (commands.CUDA_PROBE_SOURCE). The `import-time` clause and its message
+# both read this. Add a callee only if calling it does nothing but build its
+# value; `importlib.util.find_spec`, `os.environ.get` and `atexit.register` are
+# the kind of call this keeps out of module scope.
+IMPORT_TIME_CALLS = frozenset({
+    "<str>.strip", "Path", "PurePosixPath", "classmethod", "dataclass", "field", "frozenset",
+    "property", "re.compile", "staticmethod", "timedelta"
+})
+# The expression kinds an import-time expression may be built from. Left out on
+# purpose: `NamedExpr` (a walrus binds a name no MANIFEST entry owns), `IfExp`,
+# `BoolOp` and `Compare` (the expression form of the module-scope conditional
+# the header rule bans), `Subscript` (`os.environ["X"]` reads the environment),
+# comprehensions and `Lambda`. Allowed attribute reads are the accepted limit:
+# `frozenset(os.environ)` passes, and so does the default `run=subprocess.run`
+# the package uses for injection, which is the same shape.
+_IMPORT_TIME_KINDS = (ast.Attribute, ast.BinOp, ast.Call, ast.Constant, ast.Dict,
+                      ast.FormattedValue, ast.JoinedStr, ast.List, ast.Name, ast.Set, ast.Starred,
+                      ast.Tuple, ast.UnaryOp)
 
 
 def _segments(source):
@@ -210,7 +236,81 @@ def _structure_violations(sources, manifest=MANIFEST):
         violations.extend(
             ("undeclared-assignment", filename, node.lineno) for node in tree.body
             if isinstance(node, (ast.Assign, ast.AnnAssign)) and id(node) not in owned)
+        violations.extend(
+            ("import-time", filename, line, what) for line, what in _import_time_violations(tree))
     return violations
+
+
+def _import_time_roots(tree):
+    """(expression, is_decorator) for each expression a module evaluates when imported.
+
+    The header rule leaves only declarations at module scope, and a
+    declaration still runs code on import: an assignment's value, a decorator,
+    a default argument, a class's bases and keywords, and everything in a class
+    body, nested classes included. A function body does not run, and neither
+    does an `if TYPE_CHECKING:` block, whose body the header rule limits to
+    imports. Annotations are not roots: `_import_time_violations` requires them
+    deferred instead.
+    """
+    stack = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            yield node.value, False
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield from ((decorator, True) for decorator in node.decorator_list)
+            if isinstance(node, ast.ClassDef):
+                yield from ((base, False) for base in node.bases)
+                yield from ((keyword.value, False) for keyword in node.keywords)
+                stack.extend(node.body)
+            else:
+                yield from ((default, False) for default in node.args.defaults)
+                yield from ((default, False) for default in node.args.kw_defaults if default)
+
+
+def _callee(func):
+    """How IMPORT_TIME_CALLS spells a callee: `name`, `module.name`, or `<str>.method`."""
+    if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Constant)
+            and isinstance(func.value.value, str)):
+        return f"<str>.{func.attr}"
+    return ast.unparse(func)
+
+
+def _import_time_violations(tree):
+    """Sorted `(line, what)` for each import-time expression outside the allowed shape.
+
+    WHY: the header rule stops `if importlib.util.find_spec("modal"):` as a
+    statement, but not the same probe hidden in a declaration, such as
+    `VOLUME_NAME = importlib.util.find_spec("modal") and ...`, a walrus, or a
+    decorator that registers something. The relocation oracle the split
+    retired used to catch that by byte identity (gh#223 item 7).
+
+    A module that has annotations and lacks `from __future__ import
+    annotations` evaluates them on import, so it is reported once, at its
+    first annotation; every package module defers them.
+    """
+    found = set()
+    deferred = any(
+        isinstance(node, ast.ImportFrom) and node.module == "__future__" and any(
+            alias.name == "annotations" for alias in node.names) for node in tree.body)
+    annotated = sorted(
+        node.lineno for node in ast.walk(tree)
+        if (isinstance(node, ast.AnnAssign) or (isinstance(node, ast.arg) and node.annotation) or (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns)))
+    if annotated and not deferred:
+        found.add((annotated[0], "an annotation (no `from __future__ import annotations`)"))
+    for root, is_decorator in _import_time_roots(tree):
+        if (is_decorator and not isinstance(root, ast.Call)
+                and _callee(root) not in IMPORT_TIME_CALLS):
+            found.add((root.lineno, f"decorator `{_callee(root)}`"))
+        for node in ast.walk(root):
+            if not isinstance(node, ast.expr):
+                continue
+            if not isinstance(node, _IMPORT_TIME_KINDS):
+                found.add((node.lineno, f"a `{type(node).__name__}` node"))
+            elif isinstance(node, ast.Call) and _callee(node.func) not in IMPORT_TIME_CALLS:
+                found.add((node.lineno, f"a call to `{_callee(node.func)}`"))
+    return sorted(found)
 
 
 def _dependency_edges(sources):
@@ -374,6 +474,15 @@ def _explain(violations):
             text = (f"{v[1]}.py imports {v[2]} under `if TYPE_CHECKING:`; "
                     f"ANNOTATION_DEPENDENCIES allows {v[3]}. Update ANNOTATION_DEPENDENCIES in "
                     "tests/modal_runner_tables.py if the annotation-only import is intended.")
+        elif kind == "import-time":
+            text = (f"{v[1]} line {v[2]}: {v[3]} runs when the module is imported. What a "
+                    "declaration evaluates on import (its value, decorators, default arguments, "
+                    "class bases and class body) may use only literals, names, attribute reads, "
+                    "containers, arithmetic and calls to IMPORT_TIME_CALLS "
+                    f"({', '.join(sorted(IMPORT_TIME_CALLS))}). Move the work into a function, "
+                    "and keep `from __future__ import annotations` in every module that "
+                    "annotates. A new pure constructor goes in IMPORT_TIME_CALLS "
+                    "(tests/test_modal_runner_package_shape.py) in the same commit.")
         elif kind == "forbidden-name":
             text = (f"{v[1]} is a grab-bag module name ({'/'.join(GRAB_BAG_MODULE_NAMES)}). Name "
                     "the module for the concern it owns.")
@@ -663,6 +772,89 @@ def test_package_header_accepts_import_only_type_checking(live_sources, spelling
     sources["core.py"] += f"\nif {spelling}:\n    import decimal\n"
     _assert_no_violations(_structure_violations(sources),
                           f"a legal imports-only `if {spelling}:` block in core.py")
+
+
+# Each row plants one shape into the live sources, in memory: a `VOLUME_NAME =`
+# row replaces that constant's value in core.py, `drop-future` deletes
+# source.py's `from __future__ import annotations`, and any other row is
+# appended to training.py. `expected` is what the `import-time` clause alone must
+# report, since a planted name also trips membership. The ID ends in the verdict
+# the row asserts.
+@pytest.mark.parametrize("plant, expected", [
+    pytest.param(plant, expected, id=f"{name}-{'rejected' if expected else 'accepted'}")
+    for name, plant, expected in [
+        ("find-spec-in-value", 'VOLUME_NAME = importlib.util.find_spec("modal")',
+         ["a call to `importlib.util.find_spec`"]),
+        ("walrus-in-value", 'VOLUME_NAME = (_ON_CONTAINER := "cs2rl-training-artifacts")',
+         ["a `NamedExpr` node"]),
+        ("conditional-in-value", 'VOLUME_NAME = "a" if TYPE_CHECKING else "b"', ["a `IfExp` node"]),
+        ("environment-in-value", 'VOLUME_NAME = os.environ["CS2RL_VOLUME"]',
+         ["a `Subscript` node"]),
+        ("comprehension-in-value", 'VOLUME_NAME = [c for c in "ab"]', ["a `ListComp` node"]),
+        ("decorator", "@atexit.register\ndef _plant():\n    pass\n",
+         ["decorator `atexit.register`"]),
+        ("decorator-call", "@functools.lru_cache(maxsize=1)\ndef _plant():\n    pass\n",
+         ["a call to `functools.lru_cache`"]),
+        ("default-argument", 'def _plant(flag=os.environ.get("X")):\n    return flag\n',
+         ["a call to `os.environ.get`"]),
+        ("class-body", 'class _Plant:\n    X = print("work")\n', ["a call to `print`"]),
+        ("class-base", 'class _Plant(type("B", (), {})):\n    pass\n', ["a call to `type`"]),
+        ("method-decorator",
+         "class _Plant:\n    @atexit.register\n    def m(self):\n        pass\n",
+         ["decorator `atexit.register`"]),
+        ("drop-future", None, ["an annotation (no `from __future__ import annotations`)"]),
+        ("function-body", 'def _plant():\n    return importlib.util.find_spec("modal")\n', []),
+        ("attribute-default", "def _plant(run=subprocess.run):\n    return run\n", []),
+        ("allowed-constructors", "_PLANT = frozenset({re.compile('x'), timedelta(seconds=1)})\n",
+         []),
+        ("deferred-annotation", "_PLANT: dict[str, int] = {}\n", []),
+    ]
+])
+def test_package_import_time_controls(live_sources, plant, expected):
+    """One plant per row, judged by the `import-time` clause alone.
+
+    * The five `-in-value` rows hide work in an existing constant, the case
+      gh#223 item 7 names: before this clause each one passed every gate,
+      while the same probe as a bare statement was caught by the header rule.
+      Each rejected kind is one `_IMPORT_TIME_KINDS` leaves out, or one call
+      IMPORT_TIME_CALLS does not list.
+    * decorator, decorator-call, default-argument, class-body, class-base and
+      method-decorator are the other places a declaration runs code on import.
+      Each is a root `_import_time_roots` must reach; drop one and its row
+      goes green.
+    * drop-future: source.py annotates its functions, so without the
+      `__future__` import those annotations would run on import.
+    * The accepted rows are the shapes the package itself uses: a call in a
+      function body, an attribute read as a default argument, allowed
+      constructors, and a deferred subscript annotation. A clause that
+      rejected them would redden the live package.
+    """
+    filename = ("core.py" if plant and plant.startswith("VOLUME_NAME =") else
+                "source.py" if plant is None else "training.py")
+    live = live_sources[filename]
+    if plant is None:
+        changed = live.replace("from __future__ import annotations\n", "", 1)
+        lines = range(1, changed.count("\n") + 1)
+    elif filename == "core.py":
+        original = 'VOLUME_NAME = "cs2rl-training-artifacts"'
+        changed = live.replace(original, plant, 1)
+        line = live[:live.index(original)].count("\n") + 1
+        lines = range(line, line + 1)
+    else:
+        changed = live + "\n" + plant
+        lines = range(live.count("\n") + 2, changed.count("\n") + 1)
+    assert changed != live, f"the plant {plant!r} did not change {filename}"
+    precondition = _precondition("test_package_structure_contract")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_structure_violations(live_sources), precondition)
+        violations = _structure_violations({**live_sources, filename: changed})
+        reported = [v for v in violations if v[0] == "import-time"]
+        verdict = f"rejected by exactly {expected}" if expected else "accepted"
+        assert [v[3] for v in reported] == expected and all(
+            v[1] == filename and v[2] in lines for v in reported), (
+                f"the {plant!r} plant in {filename} must be {verdict}, on lines {lines}; the "
+                f"gates reported:\n{_explain(violations)}")
+        _assert_no_violations(_structure_violations(live_sources), precondition)
 
 
 def test_package_dependency_contract(live_sources):
