@@ -52,7 +52,7 @@ _PRESERVED_CHILD_ENV_KEYS = frozenset({
     "LC_MEASUREMENT",
     "LC_IDENTIFICATION",
 })
-_THREAD_CAP_ENV = {
+THREAD_CAP_ENV = {
     "OMP_NUM_THREADS": "1",
     "MKL_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
@@ -77,7 +77,7 @@ torch.cuda.synchronize()
 """.strip()
 
 
-def _assemble_train_argv(
+def assemble_train_argv(
     request: RunRequest,
     run_root: Path,
     remote_resume: str | None,
@@ -124,7 +124,7 @@ def _assemble_train_argv(
 def build_train_argv(request: RunRequest, remote_resume: str | None) -> list[str]:
     """Live training argv with checkpoint-dir under the mounted run root."""
     run_root = mounted_path(RUNS_ROOT / request.run_id)
-    return _assemble_train_argv(request, run_root, remote_resume, dump_config=False)
+    return assemble_train_argv(request, run_root, remote_resume, dump_config=False)
 
 
 def build_dump_config_argv(request: RunRequest, remote_resume: str | None) -> list[str]:
@@ -134,7 +134,7 @@ def build_dump_config_argv(request: RunRequest, remote_resume: str | None) -> li
     so a resumed run fingerprints the same --resume path training will load.
     """
     run_root = mounted_path(RUNS_ROOT / request.run_id)
-    return _assemble_train_argv(request, run_root, remote_resume, dump_config=True)
+    return assemble_train_argv(request, run_root, remote_resume, dump_config=True)
 
 
 def _is_preserved_child_env_key(key: str) -> bool:
@@ -153,7 +153,7 @@ def build_child_env(
     from the attached Secret is added — callers must not log or persist it.
     """
     env = {key: value for key, value in parent.items() if _is_preserved_child_env_key(key)}
-    env.update(_THREAD_CAP_ENV)
+    env.update(THREAD_CAP_ENV)
     if wandb_enabled:
         if not wandb_api_key:
             raise ValidationError("WANDB_API_KEY is required when W&B is enabled")

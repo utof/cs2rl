@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 from . import checkpoint, core, state
-from .checkpoint import _iter_metrics_steps, validate_completed_run
+from .checkpoint import iter_metrics_steps, validate_completed_run
 from .core import (
     CHECKPOINT_NAME,
     CHECKPOINT_PUBLISH_REASON_NAME,
@@ -32,7 +32,7 @@ from .core import (
     Status,
     ValidationError,
 )
-from .state import _stop_heartbeat, atomic_write_json, deliver_attempt, start_heartbeat_worker
+from .state import atomic_write_json, deliver_attempt, start_heartbeat_worker, stop_heartbeat
 
 
 @dataclass(frozen=True)
@@ -373,7 +373,7 @@ def _map_child_exit(
 
 def _metrics_summary(run_root: Path) -> tuple[int, int | None]:
     try:
-        steps = _iter_metrics_steps(Path(run_root) / "checkpoints" / "metrics.jsonl")
+        steps = iter_metrics_steps(Path(run_root) / "checkpoints" / "metrics.jsonl")
     except (ValidationError, OSError):
         return 0, None
     return len(steps), steps[-1]
@@ -527,7 +527,7 @@ def _run_training_attempt(
         if heartbeat_stopped:
             return
         heartbeat_stopped = True
-        _stop_heartbeat(heartbeat)
+        stop_heartbeat(heartbeat)
 
     def stop_watcher_once() -> None:
         nonlocal watcher_stopped

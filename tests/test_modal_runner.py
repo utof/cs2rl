@@ -983,7 +983,7 @@ def _make_manifest(**overrides) -> mrl.Manifest:
         "resume_source_path": None,
         "runner_commit": "a" * 40,
         "config_hash": "d" * 64,
-        "thread_caps": [f"{key}={value}" for key, value in sorted(mrl._THREAD_CAP_ENV.items())],
+        "thread_caps": [f"{key}={value}" for key, value in sorted(mrl.THREAD_CAP_ENV.items())],
         "resumed_from_run_id": None,
     }
     payload.update(overrides)

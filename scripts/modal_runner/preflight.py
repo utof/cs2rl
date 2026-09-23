@@ -33,7 +33,7 @@ from .core import (
     sha256_bytes,
 )
 from .source import safe_extract_git_archive
-from .state import _read_status, _stop_heartbeat, atomic_write_json, start_heartbeat_worker
+from .state import atomic_write_json, read_status, start_heartbeat_worker, stop_heartbeat
 
 if TYPE_CHECKING:
     from .request import RunRequest
@@ -126,7 +126,7 @@ def prepare_remote_source(
         if digest != expected_archive_sha256:
             raise ValidationError(
                 f"source archive sha256 {digest} != expected {expected_archive_sha256}")
-        if _read_status(run_root) is None:
+        if read_status(run_root) is None:
             state.transition_status(run_root,
                                     Status.PREPARING,
                                     now=now_fn(),
@@ -192,11 +192,11 @@ def prepare_remote_source(
         return prepared
     except Exception:
         try:
-            _stop_heartbeat(heartbeat)
+            stop_heartbeat(heartbeat)
         except Exception:
             # Do not hide the original preflight error.
             pass
-        current = _read_status(run_root)
+        current = read_status(run_root)
         if current is not None and current.attempt_id == attempt_id:
             try:
                 state.transition_status(run_root,

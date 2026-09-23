@@ -109,21 +109,21 @@ MANIFEST = {
         'PREBUILT_LOAD_TIMEOUT_SECONDS', '_PREBUILT_LOAD_SOURCE', 'CheckpointVerdict',
         '_import_torch', '_assert_weights_only_loadable', 'validate_local_checkpoint',
         '_load_checkpoint_weights', 'verify_checkpoint', 'normalize_config_for_transport',
-        '_iter_metrics_steps', 'validate_completed_run'
+        'iter_metrics_steps', 'validate_completed_run'
     ],
     'state.py': [
         'TERMINAL_STATUSES', '_ALLOWED_TRANSITIONS', 'RunStatus', 'STALE_AFTER', 'ArtifactIndex',
         'FAILURE_UPLOAD', 'ALLOWED_FAILURE_CODES', 'REDELIVERED', 'DerivedStatus',
-        'HeartbeatWorker', 'atomic_write_json', '_read_status', 'transition_status',
+        'HeartbeatWorker', 'atomic_write_json', 'read_status', 'transition_status',
         '_transition_status_unlocked', 'run_registry_key', 'attempt_registry_key',
         '_reservation_path', '_manifest_path', '_volume_has_run', 'record_run_failure',
         'finish_reservation', 'reserve_run', 'claim_attempt', 'deliver_attempt', 'write_heartbeat',
-        '_load_volume_json', '_parse_iso8601', 'derive_status', 'derive_run_view_from_bytes',
-        'derive_run_view', 'list_run_artifacts', 'start_heartbeat_worker', '_stop_heartbeat'
+        'load_volume_json', '_parse_iso8601', 'derive_status', 'derive_run_view_from_bytes',
+        'derive_run_view', 'list_run_artifacts', 'start_heartbeat_worker', 'stop_heartbeat'
     ],
     'commands.py': [
-        'UV_BIN', 'TRAIN_SCRIPT', '_PRESERVED_CHILD_ENV_KEYS', '_THREAD_CAP_ENV',
-        'CUDA_PROBE_SOURCE', '_assemble_train_argv', 'build_train_argv', 'build_dump_config_argv',
+        'UV_BIN', 'TRAIN_SCRIPT', '_PRESERVED_CHILD_ENV_KEYS', 'THREAD_CAP_ENV',
+        'CUDA_PROBE_SOURCE', 'assemble_train_argv', 'build_train_argv', 'build_dump_config_argv',
         '_is_preserved_child_env_key', 'build_child_env', 'build_install_command',
         'build_train_command', 'build_dump_config_command', 'build_cuda_probe_command'
     ],

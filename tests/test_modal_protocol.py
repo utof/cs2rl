@@ -247,7 +247,7 @@ def test_bare_corrupt_volume_json_is_the_unlabelled_default():
     # pass their own label in. Pinned so the default is not "cleaned up" into a
     # branch message, which would mislabel backfill.
     with pytest.raises(mrl.ValidationError, match=r"^corrupt volume json$"):
-        mrl._load_volume_json(b"{not-json")
+        mrl.load_volume_json(b"{not-json")
 
 
 def test_fake_artifact_index_read_file_replace_after_read():

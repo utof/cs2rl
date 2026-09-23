@@ -20,7 +20,7 @@ from .core import (
     mounted_path,
     sha256_bytes,
 )
-from .state import _load_volume_json
+from .state import load_volume_json
 
 # Cap on the out-of-process weights-only load. Generous for a ~2.5 MB policy;
 # a hung interpreter must not stall the interrupt path's terminal write.
@@ -209,7 +209,7 @@ def verify_checkpoint(
     if sidecar_bytes is None:
         return fail("missing_sidecar")
     try:
-        sidecar = _load_volume_json(sidecar_bytes)
+        sidecar = load_volume_json(sidecar_bytes)
     except ValidationError:
         return fail("corrupt_sidecar")
     if not isinstance(sidecar, dict):
@@ -228,7 +228,7 @@ def verify_checkpoint(
     if sidecar_reread_bytes is None:
         return fail("replaced")
     try:
-        sidecar_b = _load_volume_json(sidecar_reread_bytes)
+        sidecar_b = load_volume_json(sidecar_reread_bytes)
     except ValidationError:
         return fail("replaced")
     if sidecar_b != sidecar:
@@ -250,7 +250,7 @@ def normalize_config_for_transport(config: Mapping[str, object]) -> dict[str, ob
     return {key: value for key, value in config.items() if key != "data_dir"}
 
 
-def _iter_metrics_steps(metrics_path: Path) -> list[int]:
+def iter_metrics_steps(metrics_path: Path) -> list[int]:
     """Parse every nonblank JSONL row; pin the live `step` key."""
     if not metrics_path.is_file() or metrics_path.stat().st_size == 0:
         raise ValidationError(f"metrics file missing or empty: {metrics_path}")
@@ -307,7 +307,7 @@ def validate_completed_run(run_root: Path, manifest: Manifest) -> CompletionEvid
     if manifest.effective_timesteps != expected:
         raise ValidationError(
             f"effective_timesteps {manifest.effective_timesteps} != floor formula {expected}")
-    steps = _iter_metrics_steps(ckpt_dir / "metrics.jsonl")
+    steps = iter_metrics_steps(ckpt_dir / "metrics.jsonl")
     last_step = steps[-1]
     if last_step < manifest.effective_timesteps:
         raise ValidationError(

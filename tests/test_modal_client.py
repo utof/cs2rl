@@ -1253,7 +1253,7 @@ def test_dual_caller_mutation_pin_replaced(fake_modal, tmp_path, monkeypatch):
 
 
 def _expected_thread_caps():
-    return [f"{key}={value}" for key, value in sorted(mrl._THREAD_CAP_ENV.items())]
+    return [f"{key}={value}" for key, value in sorted(mrl.THREAD_CAP_ENV.items())]
 
 
 def test_launch_payload_includes_design_contract_fields(fake_modal, tmp_path):

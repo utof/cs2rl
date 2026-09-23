@@ -119,7 +119,7 @@ def backfill_sidecar(
         raise mrl.ValidationError(f"run {run_id} gained a sidecar during backfill") from err
 
     written = arts.read_volume_file(volume, sidecar_remote)
-    if written is None or mrl._load_volume_json(written) != payload:
+    if written is None or mrl.load_volume_json(written) != payload:
         raise mrl.ValidationError(f"run {run_id} sidecar did not round-trip after upload")
     return {
         "run_id": run_id,

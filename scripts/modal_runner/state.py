@@ -152,7 +152,7 @@ def atomic_write_json(
         raise
 
 
-def _read_status(run_root: Path) -> RunStatus | None:
+def read_status(run_root: Path) -> RunStatus | None:
     path = run_root / STATUS_FILENAME
     if not path.is_file():
         return None
@@ -187,7 +187,7 @@ def _transition_status_unlocked(
     attempt_id: str,
 ) -> RunStatus | None:
     run_root = Path(run_root)
-    current = _read_status(run_root)
+    current = read_status(run_root)
     if current is not None and current.attempt_id != attempt_id:
         return None
     if current is None:
@@ -356,7 +356,7 @@ def write_heartbeat(
     unchanged — a late beat cannot resurrect `training`.
     """
     with lock:
-        current = _read_status(Path(run_root))
+        current = read_status(Path(run_root))
         if current is None or current.attempt_id != attempt_id:
             return None
         if current.status in TERMINAL_STATUSES:
@@ -371,7 +371,7 @@ def write_heartbeat(
         return status
 
 
-def _load_volume_json(raw: bytes, message: str = "corrupt volume json") -> object:
+def load_volume_json(raw: bytes, message: str = "corrupt volume json") -> object:
     """Parse Volume bytes as JSON, normalising every failure to ValidationError.
 
     WHY the `message` parameter: a caller that re-raises ValidationError
@@ -476,14 +476,14 @@ def derive_run_view_from_bytes(
     """
     if status_bytes is not None:
         try:
-            payload = _load_volume_json(status_bytes, "corrupt volume status json")
+            payload = load_volume_json(status_bytes, "corrupt volume status json")
             return derive_status(RunStatus.from_dict(payload), now=now)
         except (TypeError, ValueError, KeyError) as err:
             raise ValidationError("corrupt volume status json") from err
     if reservation_bytes is None:
         raise ValidationError("no STATUS.json or reservation.json")
     try:
-        payload = _load_volume_json(reservation_bytes, "corrupt volume reservation json")
+        payload = load_volume_json(reservation_bytes, "corrupt volume reservation json")
         created = _parse_iso8601(str(payload["created_at"]))
     except ValidationError:
         raise
@@ -554,7 +554,7 @@ def start_heartbeat_worker(
     return HeartbeatWorker(stop=stop, thread=thread)
 
 
-def _stop_heartbeat(heartbeat: object | None) -> None:
+def stop_heartbeat(heartbeat: object | None) -> None:
     if heartbeat is None:
         return
     stop = getattr(heartbeat, "stop_and_join", None)

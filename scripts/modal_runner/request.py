@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .commands import _assemble_train_argv
+from .commands import assemble_train_argv
 from .core import ValidationError
 
 ALLOWED_MAPS = frozenset({"simple", "dust2", "arena-duel"})            # R0-J: arena-duel (Task 12 map)
@@ -238,7 +238,7 @@ class RunRequest:
 
     def training_argv(self, run_root: Path, remote_resume: str | None = None) -> list[str]:
         """Assemble the exact live argv for this request under run_root."""
-        return _assemble_train_argv(self, run_root, remote_resume, dump_config=False)
+        return assemble_train_argv(self, run_root, remote_resume, dump_config=False)
 
     def __post_init__(self):
         validate_run_id(self.run_id)
