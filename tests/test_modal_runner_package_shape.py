@@ -19,6 +19,10 @@ Every clause here describes the shape the package keeps from now on:
 * the import graph: intra-package imports equal DEPENDENCIES
   (`runtime-edges`) and ANNOTATION_DEPENDENCIES (`annotation-edges`);
 * import purity: no non-stdlib import executes when a module is imported;
+* qualified seams (`seam-from-import`, `seam-import-time`, `seam-readers`,
+  `seam-undeclared`): each QUALIFIED_SEAMS name is read as `owner.name` at
+  call time by exactly its listed readers, and no other name is read across
+  modules through the module object;
 * the facade (`facade`): `__init__.py` defines nothing and runs on every
   `import scripts.modal_runner`, so its module scope may hold only its
   docstring, named one-dot relative imports of its submodules and a literal
@@ -52,6 +56,7 @@ message says what to fix (both, for a control that re-checks two), because the
 control itself did not break.
 """
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -62,6 +67,7 @@ from tests.modal_runner_tables import (
     ANNOTATION_DEPENDENCIES,
     DEPENDENCIES,
     MANIFEST,
+    QUALIFIED_SEAMS,
     RUNNER_MODULES,
     TABLES,
 )
@@ -375,6 +381,86 @@ def _dependency_violations(sources):
     return failures
 
 
+def _sibling_bindings(tree, modules):
+    """{bound name: package module} for each `from . import <module> [as <name>]` in `tree`."""
+    return {
+        alias.asname or alias.name: alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module is None
+        for alias in node.names if alias.name in modules
+    }
+
+
+def _seam_violations(sources, seams=QUALIFIED_SEAMS):
+    """The `seam` clauses: the qualified seams stay qualified, and nothing else is qualified.
+
+    `sources` is a {filename: text} map of the package submodules. Reports:
+
+    * `seam-from-import`: a module other than the owner from-imports a seam's
+      name, or star-imports a seam's owner. Either binds a copy that a test
+      patching the owner never reaches.
+    * `seam-import-time`: a seam read where it runs on import
+      (`_import_time_roots`: a module-scope value, a default argument, a
+      decorator, a class body), which binds the object the same way.
+    * `seam-readers`: the modules that read `owner.name` differ from the
+      seam's QUALIFIED_SEAMS entry, so the table no longer describes the code.
+    * `seam-undeclared`: a module reads another name its owner defines as
+      `owner.name`. Either it is a seam tests rely on, and belongs in the
+      table, or it should be from-imported like every other name.
+
+    WHY: the dependency and membership gates cannot see any of these, because
+    the reader-to-owner edge exists either way. Measured before this clause
+    (gh#221): every seam read rewritten as a from-import left both returning
+    []. A name is matched to its owner through `from . import <module>`
+    bindings only, so a local variable named like a module, with an attribute
+    the module does not define, is not a read of it.
+    """
+    modules = {filename.removesuffix(".py") for filename in sources}
+    owned = {
+        filename.removesuffix(".py"): set(_module_level_names(ast.parse(text)))
+        for filename, text in sources.items()
+    }
+    violations: list[tuple] = []
+    readers: dict[str, set[str]] = {seam: set() for seam in seams}
+    for filename, text in sources.items():
+        module = filename.removesuffix(".py")
+        tree = ast.parse(text)
+        bound = _sibling_bindings(tree, modules)
+        import_time = {id(node) for root, _ in _import_time_roots(tree) for node in ast.walk(root)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module in modules:
+                for alias in node.names:
+                    seam = f"{node.module}.{alias.name}"
+                    star = alias.name == "*" and any(
+                        name.startswith(f"{node.module}.") for name in seams)
+                    if seam in seams or star:
+                        violations.append(("seam-from-import", module, node.lineno, seam))
+            elif (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                  and bound.get(node.value.id, module) != module
+                  and node.attr in owned.get(bound[node.value.id], set())):
+                seam = f"{bound[node.value.id]}.{node.attr}"
+                if seam not in seams:
+                    violations.append(("seam-undeclared", module, node.lineno, seam))
+                    continue
+                readers[seam].add(module)
+                if id(node) in import_time:
+                    violations.append(("seam-import-time", module, node.lineno, seam))
+    for seam, declared in seams.items():
+        if readers[seam] != set(declared):
+            violations.append(("seam-readers", seam, sorted(readers[seam]), sorted(declared)))
+    return violations
+
+
+def _facade_seam_list(facade):
+    """The `module.name` spellings the facade docstring's QUALIFIED SEAMS paragraph lists."""
+    docstring = ast.get_docstring(ast.parse(facade)) or ""
+    paragraph = docstring.split("QUALIFIED SEAMS.", 1)[-1].split("\n\n", 1)[0]
+    return {
+        f"{module}.{name}"
+        for module, name in re.findall(r"`(\w+)\.(\w+)`", paragraph) if module in RUNNER_MODULES
+    }
+
+
 def _facade_violations(source):
     """`("facade", line, statement kind)` for each module-scope statement the facade may not hold.
 
@@ -483,6 +569,28 @@ def _explain(violations):
                     "and keep `from __future__ import annotations` in every module that "
                     "annotates. A new pure constructor goes in IMPORT_TIME_CALLS "
                     "(tests/test_modal_runner_package_shape.py) in the same commit.")
+        elif kind == "seam-from-import":
+            text = (f"{v[1]}.py line {v[2]} imports the qualified seam `{v[3]}` by name, which "
+                    "binds a copy that a test patching the owning module never reaches. Read it "
+                    "as `owner.name` at call time (QUALIFIED SEAMS in "
+                    "scripts/modal_runner/__init__.py).")
+        elif kind == "seam-import-time":
+            text = (f"{v[1]}.py line {v[2]} reads the qualified seam `{v[3]}` when the module is "
+                    "imported (a module-scope value, a default argument, a decorator or a class "
+                    "body). That binds the object then, so a later patch on the owning module "
+                    "never reaches it. Read it inside the function that calls it.")
+        elif kind == "seam-readers":
+            text = (f"the modules that read `{v[1]}` are {v[2]}; QUALIFIED_SEAMS in "
+                    f"tests/modal_runner_tables.py lists {v[3]}. If a reader was added or removed "
+                    "on purpose, update that entry in the same commit; if a reader switched to "
+                    f"a from-import, restore `{v[1]}`.")
+        elif kind == "seam-undeclared":
+            owner, name = v[3].split(".")
+            text = (f"{v[1]}.py line {v[2]} reads `{v[3]}` through the module object, but it is "
+                    f"not a qualified seam. From-import it (`from .{owner} import {name}`); or, "
+                    "if tests must patch it on its owner, add it to QUALIFIED_SEAMS in "
+                    "tests/modal_runner_tables.py and to the QUALIFIED SEAMS paragraph of "
+                    "scripts/modal_runner/__init__.py.")
         elif kind == "forbidden-name":
             text = (f"{v[1]} is a grab-bag module name ({'/'.join(GRAB_BAG_MODULE_NAMES)}). Name "
                     "the module for the concern it owns.")
@@ -975,6 +1083,103 @@ def test_package_annotation_edge_controls(live_sources, plant):
             f"the {plant} plant must be rejected by exactly {[v[:2] for v in expected]}; the "
             f"gates reported:\n{_explain(failures)}")
         _assert_no_violations(_dependency_violations(live_sources), precondition)
+
+
+def test_package_seam_contract(live_sources):
+    """The `seam` clauses on the live package, and the facade docstring's seam list."""
+    _assert_no_violations(_seam_violations(live_sources), "the live package's qualified seams")
+    facade = (ROOT / "scripts" / "modal_runner" / "__init__.py").read_text(encoding="utf-8")
+    listed = _facade_seam_list(facade)
+    assert listed == set(QUALIFIED_SEAMS), (
+        f"the QUALIFIED SEAMS paragraph of scripts/modal_runner/__init__.py lists "
+        f"{sorted(listed)}, but QUALIFIED_SEAMS in tests/modal_runner_tables.py declares "
+        f"{sorted(QUALIFIED_SEAMS)}. Update the two together.")
+
+
+# One from-import plant per seam, in one of its readers: the reader's `owner.name`
+# reads become bare names, and `from .owner import name` is appended.
+_SEAM_FROM_IMPORT_PLANTS = {
+    "core.PREBUILT_PYTHON": "commands.py",
+    "core.sha256_file": "source.py",
+    "state.transition_status": "preflight.py",
+    "checkpoint.validate_local_checkpoint": "training.py",
+}
+
+
+@pytest.mark.parametrize("plant", [
+    *(f"from-import-{seam}" for seam in _SEAM_FROM_IMPORT_PLANTS), "import-time-alias",
+    "import-time-default", "undeclared", "reader-dropped", "aliased-module", "star-import"
+])
+def test_package_seam_controls(live_sources, plant):
+    """One plant per row, rejected by exactly the `seam` violations it names.
+
+    * from-import-<seam>: the rewrite gh#221 measured green on every gate.
+      Rejected twice: the from-import itself, and the reader leaving the seam's
+      reader set.
+    * import-time-alias, import-time-default: `_HASH = core.sha256_file` and
+      `def f(hasher=core.sha256_file)` in training, which already reads the
+      seam at call time. Both bind the object on import; the reader set is
+      unchanged, so only `seam-import-time` fires.
+    * undeclared: training reads `state.write_heartbeat` through the module
+      object, a name that is not a seam.
+    * reader-dropped: commands stops reading `core.PREBUILT_PYTHON`, so its
+      entry lists a reader the code no longer has.
+    * aliased-module: `from . import core as _core` in a function body of
+      state, then `_core.sha256_file`. The clause follows the alias, so state
+      becomes an undeclared reader.
+    * star-import: `from .core import *` in training binds copies of both core
+      seams.
+    """
+    changed = dict(live_sources)
+
+    def append(filename, text):
+        """Append `text` to `filename`; return the line its first line lands on."""
+        changed[filename] = live_sources[filename] + "\n" + text
+        return live_sources[filename].count("\n") + 2
+
+    if plant.startswith("from-import-"):
+        seam = plant.removeprefix("from-import-")
+        filename = _SEAM_FROM_IMPORT_PLANTS[seam]
+        module, (owner, name) = filename.removesuffix(".py"), seam.split(".")
+        assert seam in live_sources[filename], f"{filename} no longer reads {seam}"
+        changed[filename] = live_sources[filename].replace(seam, name)
+        changed[filename] += f"\nfrom .{owner} import {name}\n"
+        declared = sorted(QUALIFIED_SEAMS[seam])
+        expected = [("seam-from-import", module, changed[filename].count("\n"), seam),
+                    ("seam-readers", seam, sorted(set(declared) - {module}), declared)]
+    elif plant == "import-time-alias":
+        line = append("training.py", "_HASH = core.sha256_file\n")
+        expected = [("seam-import-time", "training", line, "core.sha256_file")]
+    elif plant == "import-time-default":
+        line = append("training.py", "def _plant(hasher=core.sha256_file):\n    return hasher\n")
+        expected = [("seam-import-time", "training", line, "core.sha256_file")]
+    elif plant == "undeclared":
+        line = append("training.py", "def _plant():\n    return state.write_heartbeat\n")
+        expected = [("seam-undeclared", "training", line + 1, "state.write_heartbeat")]
+    elif plant == "reader-dropped":
+        changed["commands.py"] = live_sources["commands.py"].replace(
+            "core.PREBUILT_PYTHON", repr("/opt/cs2rl/.venv/bin/python"))
+        declared = sorted(QUALIFIED_SEAMS["core.PREBUILT_PYTHON"])
+        expected = [("seam-readers", "core.PREBUILT_PYTHON", ["checkpoint"], declared)]
+    elif plant == "aliased-module":
+        append("state.py", "def _plant():\n    from . import core as _core\n"
+               "    return _core.sha256_file\n")
+        declared = sorted(QUALIFIED_SEAMS["core.sha256_file"])
+        expected = [("seam-readers", "core.sha256_file", sorted({*declared, "state"}), declared)]
+    elif plant == "star-import":
+        line = append("training.py", "from .core import *\n")
+        expected = [("seam-from-import", "training", line, "core.*")]
+    else:
+        pytest.fail(f"the {plant} row has no plant")
+    assert changed != live_sources, f"the {plant} plant did not change the sources"
+    precondition = _precondition("test_package_seam_contract", "the live package's seams")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_seam_violations(live_sources), precondition)
+        violations = _seam_violations(changed)
+        assert violations == expected, (
+            f"the {plant} plant must be rejected by exactly {expected}; the gate reported:\n"
+            f"{_explain(violations)}")
+        _assert_no_violations(_seam_violations(live_sources), precondition)
 
 
 @pytest.mark.parametrize("stem", ["utils", "telemetry"])

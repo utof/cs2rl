@@ -99,6 +99,19 @@ DEPENDENCIES = {
 # request must stay annotation-only: request imports commands at run time, so a
 # runtime edge back would be an import cycle.
 ANNOTATION_DEPENDENCIES = {'commands': ['request'], 'preflight': ['request']}
+# The qualified seams, {"owner.name": readers}: the only cross-module names read
+# as `owner.name` through the module object, at call time, instead of being
+# from-imported. A test that patches the owning module therefore reaches every
+# reader (QUALIFIED SEAMS in scripts/modal_runner/__init__.py, whose list must
+# match these keys). The `seam` clause in tests/test_modal_runner_package_shape.py
+# reports a from-import or an import-time read of a seam, a reader set that
+# differs from its entry here, and any other `module.name` read across modules.
+QUALIFIED_SEAMS = {
+    "core.PREBUILT_PYTHON": ("checkpoint", "commands"),
+    "core.sha256_file": ("checkpoint", "preflight", "source", "training"),
+    "state.transition_status": ("preflight", "training"),
+    "checkpoint.validate_local_checkpoint": ("preflight", "training"),
+}
 # Where a package module is declared, as every gate's failure message names it,
 # so the remedy reads the same wherever it fires.
 TABLES = ("MANIFEST and DEPENDENCIES (and ANNOTATION_DEPENDENCIES for an import made only under "

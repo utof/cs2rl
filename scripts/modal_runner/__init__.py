@@ -66,15 +66,19 @@ from at call time.
   `test_patch_target_dichotomy` (tests/test_modal_patch_bindings.py) shows both
   cases on `validate_local_checkpoint`.
 
-QUALIFIED SEAMS. Exactly four names are read across modules through the module
-object rather than a from-import: `core.PREBUILT_PYTHON`, `core.sha256_file`,
-`state.transition_status` and `checkpoint.validate_local_checkpoint`. Tests
-patch them on their owning module, and the attribute read at call time is what
-lets that patch reach callers in other modules. Rewriting one as
-`from .core import sha256_file` silently detaches it from the patch. Every
-other cross-module name is from-imported, so patching it on its owning module
-does NOT reach the importing module (training.py and preflight.py hold both
-`state` and from-imported `state` names).
+QUALIFIED SEAMS. These names, and only these, are read across modules through
+the module object rather than a from-import: `core.PREBUILT_PYTHON`,
+`core.sha256_file`, `state.transition_status` and
+`checkpoint.validate_local_checkpoint`. Tests patch them on their owning
+module, and the attribute read at call time is what lets that patch reach
+callers in other modules. Rewriting one as `from .core import sha256_file`, or
+binding it at import time (`_HASH = core.sha256_file`, a default argument),
+silently detaches it from the patch. Every other cross-module name is
+from-imported, so patching it on its owning module does NOT reach the
+importing module (training.py and preflight.py hold both `state` and
+from-imported `state` names). QUALIFIED_SEAMS in tests/modal_runner_tables.py
+lists them with their readers; the package-shape `seam` clause enforces it,
+and checks that this list matches it.
 
 PITFALLS:
   * Live train.py argparse accepts prefixes (`--devi` → `--device`). The runner
