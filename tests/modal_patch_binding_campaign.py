@@ -7,7 +7,8 @@ WHAT this module owns:
     through `binding_target(site)`, and so does the per-site companion
     `test_patch_binding_observation` in tests/test_modal_patch_bindings.py, so the
     companion observes exactly the target the original site patches.
-    `test_patch_binding_sites_route_through_binding_target` there is the census
+    `test_patch_binding_sites_route_through_binding_target`
+    (tests/test_modal_patch_binding_census.py) is the census
     that ties each key to the original function that installs it.
   * the campaign driver (`run_campaign`, `main`): for every site it runs the
     companion in fresh pytest children -- baseline, a single-binding defect
@@ -44,16 +45,16 @@ import importlib
 from typing import Any
 
 BINDING_SITES = {
-    'prepare-validator': ('checkpoint', 'validate_local_checkpoint'),
-    'fallback-loader': ('checkpoint', '_import_torch'),
-    'fallback-python': ('core', 'PREBUILT_PYTHON'),
-    'interrupt-loader': ('checkpoint', '_assert_weights_only_loadable'),
-    'watcher-publisher': ('training', 'publish_stable_checkpoint'),
-    'terminal-validator': ('checkpoint', 'validate_local_checkpoint'),
-    'terminal-hasher': ('core', 'sha256_file'),
-    'attempt-watcher': ('training', '_start_checkpoint_watcher'),
-    'attempt-transition': ('state', 'transition_status'),
-    'client-mount': ('core', 'VOLUME_MOUNT'),
+    "prepare-validator": ("checkpoint", "validate_local_checkpoint"),
+    "fallback-loader": ("checkpoint", "_import_torch"),
+    "fallback-python": ("core", "PREBUILT_PYTHON"),
+    "interrupt-loader": ("checkpoint", "_assert_weights_only_loadable"),
+    "watcher-publisher": ("training", "publish_stable_checkpoint"),
+    "terminal-validator": ("checkpoint", "validate_local_checkpoint"),
+    "terminal-hasher": ("core", "sha256_file"),
+    "attempt-watcher": ("training", "_start_checkpoint_watcher"),
+    "attempt-transition": ("state", "transition_status"),
+    "client-mount": ("core", "VOLUME_MOUNT"),
 }
 
 # Seconds one child pytest session may run before the campaign fails. Measured
@@ -67,7 +68,7 @@ _PROBE_TIMEOUT_S = 60
 def binding_target(site):
     """One installation target for the original patch and its observation."""
     owner, symbol = BINDING_SITES[site]
-    return importlib.import_module(f'scripts.modal_runner.{owner}'), symbol
+    return importlib.import_module(f"scripts.modal_runner.{owner}"), symbol
 
 
 # RENAME HAZARD: `test_patch_binding_campaign_rejects_invalid_evidence`
@@ -105,22 +106,22 @@ def _run_probe(repo_root, evidence_root, site, mode, label):
 
     directory = evidence_root / label
     directory.mkdir()
-    report = directory / 'junit.xml'
-    log = directory / 'pytest.log'
+    report = directory / "junit.xml"
+    log = directory / "pytest.log"
     env = dict(os.environ)
-    env.pop('MODAL_BINDING_DEFECT', None)
-    env.pop('MODAL_BINDING_PACKAGE_REVERT', None)
-    if mode == 'captured':
-        env['MODAL_BINDING_DEFECT'] = site
-    elif mode == 'package':
-        env['MODAL_BINDING_PACKAGE_REVERT'] = site
+    env.pop("MODAL_BINDING_DEFECT", None)
+    env.pop("MODAL_BINDING_PACKAGE_REVERT", None)
+    if mode == "captured":
+        env["MODAL_BINDING_DEFECT"] = site
+    elif mode == "package":
+        env["MODAL_BINDING_PACKAGE_REVERT"] = site
     try:
         result = subprocess.run(
             [
-                sys.executable, '-m', 'pytest',
-                f'tests/test_modal_patch_bindings.py::test_patch_binding_observation[{site}]', '-q',
-                '--tb=short', '-p', 'no:cacheprovider', '-o', 'junit_family=legacy',
-                f'--basetemp={directory / "pytest"}', f'--junitxml={report}'
+                sys.executable, "-m", "pytest",
+                f"tests/test_modal_patch_bindings.py::test_patch_binding_observation[{site}]", "-q",
+                "--tb=short", "-p", "no:cacheprovider", "-o", "junit_family=legacy",
+                f'--basetemp={directory / "pytest"}', f"--junitxml={report}"
             ],
             cwd=repo_root,
             env=env,
@@ -131,107 +132,107 @@ def _run_probe(repo_root, evidence_root, site, mode, label):
     except subprocess.TimeoutExpired as expired:
         # The partial output is bytes even under text=True (subprocess docs).
         partial = [
-            part.decode('utf-8', 'replace') if isinstance(part, bytes) else part or ''
+            part.decode("utf-8", "replace") if isinstance(part, bytes) else part or ""
             for part in (expired.stdout, expired.stderr)
         ]
-        log.write_text(''.join(partial), encoding='utf-8')
-        raise RuntimeError(f'{site}: {mode} probe {label} timed out after {_PROBE_TIMEOUT_S} s; '
-                           f'partial output in {log}') from None
-    log.write_text(result.stdout + result.stderr, encoding='utf-8')
-    probe = f'{site}: {mode} probe {label}'
+        log.write_text("".join(partial), encoding="utf-8")
+        raise RuntimeError(f"{site}: {mode} probe {label} timed out after {_PROBE_TIMEOUT_S} s; "
+                           f"partial output in {log}") from None
+    log.write_text(result.stdout + result.stderr, encoding="utf-8")
+    probe = f"{site}: {mode} probe {label}"
     # Annotated: the three None placeholders are replaced by str/int values below.
     record: dict[str, Any] = {
-        'exit_code': result.returncode,
-        'log': str(log),
-        'exception_type': None,
-        'source_line': None,
-        'rejecting_assertion': None
+        "exit_code": result.returncode,
+        "log": str(log),
+        "exception_type": None,
+        "source_line": None,
+        "rejecting_assertion": None
     }
     try:
         tree = ET.parse(report)
     except (FileNotFoundError, ET.ParseError) as error:
-        raise RuntimeError(f'{probe} wrote no readable JUnit report (exit {result.returncode}, '
-                           f'{type(error).__name__}: {error}); output in {log}') from None
-    cases = tree.findall('.//testcase')
+        raise RuntimeError(f"{probe} wrote no readable JUnit report (exit {result.returncode}, "
+                           f"{type(error).__name__}: {error}); output in {log}") from None
+    cases = tree.findall(".//testcase")
     if len(cases) != 1:
         raise RuntimeError(
-            f'{probe} reported {len(cases)} test cases, expected exactly one; output in {log}')
-    for prop in cases[0].findall('./properties/property'):
-        if prop.get('name') == 'binding_observation':
-            value = prop.get('value')
+            f"{probe} reported {len(cases)} test cases, expected exactly one; output in {log}")
+    for prop in cases[0].findall("./properties/property"):
+        if prop.get("name") == "binding_observation":
+            value = prop.get("value")
             if value is None:
-                raise RuntimeError(f'{probe} recorded binding_observation without a value; '
-                                   f'output in {log}')
+                raise RuntimeError(f"{probe} recorded binding_observation without a value; "
+                                   f"output in {log}")
             record.update(json.loads(value))
-    failure = cases[0].find('failure')
+    failure = cases[0].find("failure")
     if failure is None:
-        failure = cases[0].find('error')
+        failure = cases[0].find("error")
     if failure is not None:
-        message = failure.get('message', '')
-        head = message.split(':', 1)[0].splitlines()
+        message = failure.get("message", "")
+        head = message.split(":", 1)[0].splitlines()
         if not head:
-            raise RuntimeError(f'{probe} reported a failure with an empty message; output in {log}')
-        record['exception_type'] = head[0]
-        record['rejecting_assertion'] = message
-        locations = re.findall(r'tests/test_modal_patch_bindings\.py:(\d+)', failure.text or '')
+            raise RuntimeError(f"{probe} reported a failure with an empty message; output in {log}")
+        record["exception_type"] = head[0]
+        record["rejecting_assertion"] = message
+        locations = re.findall(r"tests/test_modal_patch_bindings\.py:(\d+)", failure.text or "")
         if locations:
-            record['source_line'] = int(locations[-1])
+            record["source_line"] = int(locations[-1])
     return record
 
 
 def run_campaign(repo_root, evidence_root, sites):
     """Require two own-observation bites and restorations for all declared sites."""
     if sites != list(BINDING_SITES):
-        raise ValueError('declared matrix must equal BINDING_SITES, in order '
-                         f'(tests/modal_patch_binding_campaign.py): got {sites}, '
-                         f'expected {list(BINDING_SITES)}')
+        raise ValueError("declared matrix must equal BINDING_SITES, in order "
+                         f"(tests/modal_patch_binding_campaign.py): got {sites}, "
+                         f"expected {list(BINDING_SITES)}")
     records = []
     for site in sites:
         repetitions = []
         for repeat in range(2):
             results = {
-                mode: _run_probe(repo_root, evidence_root, site, mode, f'{site}-{repeat}-{mode}')
-                for mode in ('baseline', 'captured', 'restored')
+                mode: _run_probe(repo_root, evidence_root, site, mode, f"{site}-{repeat}-{mode}")
+                for mode in ("baseline", "captured", "restored")
             }
-            for mode in ('baseline', 'restored'):
+            for mode in ("baseline", "restored"):
                 observed = results[mode]
-                if (observed['exit_code'] != 0 or 'expected_observation' not in observed
-                        or observed['expected_observation'] != observed['observed_observation']):
-                    raise RuntimeError(f'{site}: {mode} observation failed: {observed}')
-            broken = results['captured']
-            if (broken['exit_code'] != 1 or broken['exception_type'] != 'AssertionError'
-                    or site + ':' not in (broken['rejecting_assertion'] or '')
-                    or not broken['source_line'] or 'expected_observation' not in broken
-                    or broken['expected_observation'] == broken['observed_observation']):
+                if (observed["exit_code"] != 0 or "expected_observation" not in observed
+                        or observed["expected_observation"] != observed["observed_observation"]):
+                    raise RuntimeError(f"{site}: {mode} observation failed: {observed}")
+            broken = results["captured"]
+            if (broken["exit_code"] != 1 or broken["exception_type"] != "AssertionError"
+                    or site + ":" not in (broken["rejecting_assertion"] or "")
+                    or not broken["source_line"] or "expected_observation" not in broken
+                    or broken["expected_observation"] == broken["observed_observation"]):
                 raise RuntimeError(
-                    f'{site}: single-binding defect did not lose its own observation: {broken}')
+                    f"{site}: single-binding defect did not lose its own observation: {broken}")
             repetitions.append({
-                'repointed_outcome': results['baseline'],
-                'broken_binding_outcome': broken,
-                'restored_outcome': results['restored']
+                "repointed_outcome": results["baseline"],
+                "broken_binding_outcome": broken,
+                "restored_outcome": results["restored"]
             })
-        package = _run_probe(repo_root, evidence_root, site, 'package', f'{site}-package')
-        expected_exception = ('AssertionError' if BINDING_SITES[site][1]
-                              == 'validate_local_checkpoint' else 'AttributeError')
-        if package['exit_code'] != 1 or package['exception_type'] != expected_exception:
-            raise RuntimeError(f'{site}: unexpected package-reversion diagnostic: {package}')
-        baseline = repetitions[0]['repointed_outcome']
+        package = _run_probe(repo_root, evidence_root, site, "package", f"{site}-package")
+        expected_exception = ("AssertionError" if BINDING_SITES[site][1]
+                              == "validate_local_checkpoint" else "AttributeError")
+        if package["exit_code"] != 1 or package["exception_type"] != expected_exception:
+            raise RuntimeError(f"{site}: unexpected package-reversion diagnostic: {package}")
+        baseline = repetitions[0]["repointed_outcome"]
         records.append({
             **{
                 key: baseline[key]
-                for key in ('site', 'probe_kind', 'consumer', 'stimulus', 'expected_observation', 'observed_observation')
+                for key in ("site", "probe_kind", "consumer", "stimulus", "expected_observation", "observed_observation")
             },
-            'repointed_outcome':
+            "repointed_outcome":
             baseline,
-            'broken_binding_outcome':
-            repetitions[0]['broken_binding_outcome'],
-            'rejecting_assertion':
-            repetitions[0]['broken_binding_outcome']['rejecting_assertion'],
-            'package_revert_outcome':
+            "broken_binding_outcome":
+            repetitions[0]["broken_binding_outcome"],
+            "rejecting_assertion":
+            repetitions[0]["broken_binding_outcome"]["rejecting_assertion"],
+            "package_revert_outcome":
             package,
-            'package_revert_exception':
-            package['exception_type'],
-            'repetitions':
+            "package_revert_exception":
+            package["exception_type"],
+            "repetitions":
             repetitions,
         })
     return records
@@ -249,19 +250,19 @@ def main():
     from pathlib import Path
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--repo-root', type=Path, required=True)
-    parser.add_argument('--evidence-root', type=Path, required=True)
-    parser.add_argument('--matrix', type=Path, required=True)
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--evidence-root", type=Path, required=True)
+    parser.add_argument("--matrix", type=Path, required=True)
     args = parser.parse_args()
     if args.evidence_root.exists():
-        parser.error(f'evidence-root must be a fresh directory: {args.evidence_root} exists')
+        parser.error(f"evidence-root must be a fresh directory: {args.evidence_root} exists")
     args.evidence_root.mkdir(parents=True, exist_ok=False)
     records = run_campaign(args.repo_root.resolve(), args.evidence_root.resolve(),
-                           json.loads(args.matrix.read_text(encoding='utf-8')))
-    result = json.dumps(records, indent=2) + '\n'
-    (args.evidence_root / 'records.json').write_text(result, encoding='utf-8')
-    print(result, end='')
+                           json.loads(args.matrix.read_text(encoding="utf-8")))
+    result = json.dumps(records, indent=2) + "\n"
+    (args.evidence_root / "records.json").write_text(result, encoding="utf-8")
+    print(result, end="")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
