@@ -16,9 +16,10 @@ from .core import (
 if TYPE_CHECKING:
     from .request import RunRequest
 
+# The image venv's interpreter is not declared here: it is core.PREBUILT_PYTHON,
+# read through the module object because it is a qualified seam (see
+# __init__.py).
 UV_BIN = "/usr/local/bin/uv"
-# The image venv's interpreter is core.PREBUILT_PYTHON, read here through the
-# module object because it is a qualified seam (see __init__.py).
 TRAIN_SCRIPT = "src/train.py"
 
 # Child env is an allowlist, not a denylist: Modal/image leftovers (tokens,

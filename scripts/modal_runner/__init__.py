@@ -30,16 +30,15 @@ core only a name that two or more modules read. The one exception is the
 Volume and run-directory layout (mount, roots and artifact file names), which
 core keeps whole even where one module reads a given name, so the layout reads
 as one contract. A name this facade re-exports goes in the module that reads
-it, like any other: production reads the facade, not the module. A new
-cross-module import needs a DEPENDENCIES entry in tests/modal_runner_tables.py.
+it, like any other: production reads the facade, not the module. A name no
+package module reads goes in the module whose concern it is (a layout name in
+core). A new cross-module import needs a DEPENDENCIES entry in
+tests/modal_runner_tables.py.
 
-ADDING A MODULE, in this order: (1) in tests/modal_runner_tables.py, add its
-MANIFEST and DEPENDENCIES entries and add it to the DEPENDENCIES entry of each
-module that imports it (ANNOTATION_DEPENDENCIES for an import made only under
-TYPE_CHECKING); every gate reads the module list from there; (2) `git add` the
-file. The mount and package-population gates in tests/test_modal_client.py read
-`git ls-files`, so until step 2 they report the module missing although it is
-on disk.
+ADDING A MODULE: follow the checklist in the docstring of
+tests/modal_runner_tables.py, which every gate reads the module list from, and
+add the module to MODULE MAP above (a test checks that the map lists exactly
+the declared modules).
 
 THIS FACADE IS DELIBERATELY NARROW. It re-exports exactly the names that
 production code reads from the package, and nothing more.

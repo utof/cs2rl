@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.modal_runner_tables import RUNNER_MODULES, TABLES
+from tests.modal_runner_tables import RUNNER_MODULES, RUNNER_PATHS, TABLES
 
 ROOT = Path(__file__).resolve().parents[1]
 BARE = "modal_runner"
@@ -480,7 +480,7 @@ def test_runtime_identity_requires_every_governed_module(monkeypatch, tmp_path):
     """The probe governs exactly the declared modules, and a missing one fails clause 1.
 
     The probe derives `_EXPECTED` from the package directory
-    (`_governed_modules`), so this pins it to the modules RUNNER_MODULES
+    (`_governed_modules`), so this pins it to the modules MANIFEST
     declares: an empty set, which would pass every identity clause over
     nothing, or a module file the tables do not declare, reddens here. The
     planted directory shows the derivation governs a new module the moment
@@ -510,7 +510,7 @@ def test_runtime_identity_requires_every_governed_module(monkeypatch, tmp_path):
                         "`_PACKAGE_DIR` no longer points at scripts/modal_runner/.")
     assert not remedies, (
         f"tests/_modal_import_probe.py governs every entry matching *.py in {_PACKAGE_DIR}, "
-        "and that must match the modules RUNNER_MODULES declares. " + " ".join(remedies))
+        "and that must match the modules MANIFEST declares. " + " ".join(remedies))
     planted = tmp_path / "modal_runner"
     (planted / "__pycache__").mkdir(parents=True)
     (planted / "sub").mkdir()
@@ -1949,7 +1949,7 @@ def _runner_module_population(repo_root):
     so they are read (and may raise, as a directory does) here.
     """
     root = Path(repo_root)
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    declared = list(RUNNER_PATHS)
     found = sorted(
         path.relative_to(root).as_posix()
         for path in (root / "scripts" / "modal_runner").glob("*.py") if path.name != "__init__.py")
@@ -2015,8 +2015,8 @@ def _monolith_stub_source():
         ("line 19 is `from __future__ import annotations`", len(lines) > 18
          and lines[18] == "from __future__ import annotations\n"),
         ("module scope holds only the docstring, imports and declarations (so no `if`, "
-         "`try` or `TYPE_CHECKING` block)",
-         all(isinstance(node, body_kinds) or index == 0 for index, node in enumerate(tree.body))),
+         "`try` or `TYPE_CHECKING` block)", ast.get_docstring(tree) is not None
+         and all(isinstance(node, body_kinds) for node in tree.body[1:])),
         ("every module-scope import is stdlib, and no plain import is dotted",
          all("." not in name and name in sys.stdlib_module_names for name in plain)
          and all(module and module.split(".")[0] in sys.stdlib_module_names for module in froms)),

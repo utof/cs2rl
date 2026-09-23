@@ -74,7 +74,9 @@ from tests.modal_runner_tables import (
     MANIFEST,
     QUALIFIED_SEAMS,
     RUNNER_MODULES,
+    RUNNER_PATHS,
     TABLES,
+    TABLES_FILE,
 )
 
 # The packaging gates' own helpers and constants, imported rather than copied so
@@ -105,7 +107,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # both read this.
 GRAB_BAG_MODULE_NAMES = ("utils", "helpers", "common", "misc")
 _UNDECLARED_MODULE_REMEDY = (
-    "A path beyond the modules RUNNER_MODULES declares is a module in scripts/modal_runner/ "
+    "A path beyond the modules MANIFEST declares is a module in scripts/modal_runner/ "
     f"that the tables do not declare: declare it in {TABLES} in the same commit, or delete it.")
 # How many times each control below plants its defect. Each pass starts by
 # re-checking the unplanted package (or its tmp_path copy), so the second pass's
@@ -481,6 +483,11 @@ def _dependency_violations(sources):
     failures: list[tuple] = [("undeclared-module", module)
                              for module in sorted(set(runtime) - set(DEPENDENCIES))]
     for module in RUNNER_MODULES:
+        # A module MANIFEST declares and DEPENDENCIES does not is reported by
+        # `test_package_structure_contract`; indexing it here would raise a
+        # bare KeyError in every test that reaches this gate instead.
+        if module not in DEPENDENCIES:
+            continue
         expected = set(DEPENDENCIES[module])
         if runtime.get(module) != expected:
             failures.append(("runtime-edges", module, runtime.get(module), expected))
@@ -560,10 +567,28 @@ def _seam_violations(sources, seams=QUALIFIED_SEAMS):
     return violations
 
 
+def _facade_source():
+    """The live facade's text, scripts/modal_runner/__init__.py."""
+    return (ROOT / "scripts" / "modal_runner" / "__init__.py").read_text(encoding="utf-8")
+
+
+def _facade_paragraph(facade, heading):
+    """The facade docstring's paragraph that starts with `heading`, or "" if none does."""
+    docstring = ast.get_docstring(ast.parse(facade)) or ""
+    if heading not in docstring:
+        return ""
+    return docstring.split(heading, 1)[1].split("\n\n", 1)[0]
+
+
+def _facade_module_map(facade):
+    """The module names the facade docstring's MODULE MAP lists, `__init__` excluded."""
+    paragraph = _facade_paragraph(facade, "MODULE MAP")
+    return set(re.findall(r"^  (\w+) ", paragraph, flags=re.MULTILINE)) - {"__init__"}
+
+
 def _facade_seam_list(facade):
     """The `module.name` spellings the facade docstring's QUALIFIED SEAMS paragraph lists."""
-    docstring = ast.get_docstring(ast.parse(facade)) or ""
-    paragraph = docstring.split("QUALIFIED SEAMS.", 1)[-1].split("\n\n", 1)[0]
+    paragraph = _facade_paragraph(facade, "QUALIFIED SEAMS.")
     return {
         f"{module}.{name}"
         for module, name in re.findall(r"`(\w+)\.(\w+)`", paragraph) if module in RUNNER_MODULES
@@ -654,7 +679,7 @@ def _explain(violations):
             if v[3]:
                 parts.append(f"MANIFEST['{v[1]}'] lists {v[3]}, which {v[1]} does not define")
             text = (f"{'; '.join(parts)}. If you meant to add, remove or move a symbol, update "
-                    f"MANIFEST['{v[1]}'] in tests/modal_runner_tables.py in the same "
+                    f"MANIFEST['{v[1]}'] in {TABLES_FILE} in the same "
                     "commit.")
         elif kind == "duplicates":
             text = (f"{v[1]} binds {v[2]} more than once at module scope; the later binding "
@@ -664,11 +689,11 @@ def _explain(violations):
                     f"allows {v[3]}. Write intra-package imports as one-dot relative imports; "
                     f"absolute (`{PACKAGED}`) and `..` spellings are never allowed. If a new edge "
                     "is intended and keeps the graph acyclic (core stays a leaf), update "
-                    "DEPENDENCIES in tests/modal_runner_tables.py in the same commit.")
+                    f"DEPENDENCIES in {TABLES_FILE} in the same commit.")
         elif kind == "annotation-edges":
             text = (f"{v[1]}.py imports {v[2]} under `if TYPE_CHECKING:`; "
                     f"ANNOTATION_DEPENDENCIES allows {v[3]}. Update ANNOTATION_DEPENDENCIES in "
-                    "tests/modal_runner_tables.py if the annotation-only import is intended.")
+                    f"{TABLES_FILE} if the annotation-only import is intended.")
         elif kind == "import-time":
             text = (f"{v[1]} line {v[2]}: {v[3]} runs when the module is imported. What a "
                     "declaration evaluates on import (its value, decorators, default arguments, "
@@ -703,7 +728,7 @@ def _explain(violations):
                     "never reaches it. Read it inside the function that calls it.")
         elif kind == "seam-readers":
             text = (f"the modules that read `{v[1]}` are {v[2]}; QUALIFIED_SEAMS in "
-                    f"tests/modal_runner_tables.py lists {v[3]}. If a reader was added or removed "
+                    f"{TABLES_FILE} lists {v[3]}. If a reader was added or removed "
                     "on purpose, update that entry in the same commit; if a reader switched to "
                     f"a from-import, restore `{v[1]}`.")
         elif kind == "seam-undeclared":
@@ -711,7 +736,7 @@ def _explain(violations):
             text = (f"{v[1]}.py line {v[2]} reads `{v[3]}` through the module object, but it is "
                     f"not a qualified seam. From-import it (`from .{owner} import {name}`); or, "
                     "if tests must patch it on its owner, add it to QUALIFIED_SEAMS in "
-                    "tests/modal_runner_tables.py and to the QUALIFIED SEAMS paragraph of "
+                    f"{TABLES_FILE} and to the QUALIFIED SEAMS paragraph of "
                     "scripts/modal_runner/__init__.py.")
         elif kind == "forbidden-name":
             text = (f"{v[1]} is a grab-bag module name ({'/'.join(GRAB_BAG_MODULE_NAMES)}). Name "
@@ -745,13 +770,13 @@ def _hoist_type_checking_imports(source):
     """Move a module's `if TYPE_CHECKING:` imports to module scope, dedented.
 
     The plant for "an annotation-only edge became a runtime edge". Asserts the
-    block holds relative from-imports only, so the plant cannot silently move
-    something else.
+    block holds imports only, so the plant cannot silently move something
+    else; a stdlib import there is legal and moves harmlessly.
     """
     lines = source.splitlines(keepends=True)
     block = next(n for n in ast.parse(source).body if isinstance(n, ast.If))
-    assert all(isinstance(n, ast.ImportFrom) and n.level == 1 for n in block.body), (
-        f"the TYPE_CHECKING block at line {block.lineno} holds more than relative imports")
+    assert all(isinstance(n, (ast.Import, ast.ImportFrom)) for n in block.body), (
+        f"the TYPE_CHECKING block at line {block.lineno} holds more than imports")
     moved = "".join("".join(lines[n.lineno - 1:n.end_lineno]).replace("    ", "", 1)
                     for n in block.body)
     lines[block.lineno - 1:block.end_lineno] = [moved]
@@ -776,13 +801,13 @@ def test_package_structure_contract(live_sources):
         f"DEPENDENCIES {sorted(DEPENDENCIES)} must be keyed by exactly the modules MANIFEST "
         f"declares ({list(RUNNER_MODULES)}), and ANNOTATION_DEPENDENCIES "
         f"{sorted(ANNOTATION_DEPENDENCIES)} by some of them; update them together in "
-        "tests/modal_runner_tables.py.")
+        f"{TABLES_FILE}.")
     _assert_no_violations(_structure_violations(live_sources), "the live package")
 
 
 def test_package_facade_contract():
     """The facade's module-scope rule (`_facade_violations`) on the live `__init__.py`."""
-    facade = (ROOT / "scripts" / "modal_runner" / "__init__.py").read_text(encoding="utf-8")
+    facade = _facade_source()
     _assert_no_violations(_facade_violations(facade), "the live facade")
 
 
@@ -839,7 +864,7 @@ def test_package_facade_controls(plant, kinds):
       whether the name belongs in the facade is the surface gates' question,
       so a clause that rejected every added line would fail this row.
     """
-    facade = (ROOT / "scripts" / "modal_runner" / "__init__.py").read_text(encoding="utf-8")
+    facade = _facade_source()
     _assert_no_violations(_facade_violations(facade),
                           _precondition("test_package_facade_contract", "the live facade"))
     # The plant's statements start on the line after the facade's last line. A
@@ -1257,14 +1282,41 @@ def test_package_annotation_edge_controls(live_sources, plant):
         _assert_no_violations(_dependency_violations(live_sources), precondition)
 
 
+@pytest.mark.parametrize("plant", ["live", "renamed-line", "dropped-line"])
+def test_facade_module_map_lists_every_declared_module(plant):
+    """MODULE MAP in the facade docstring names exactly the modules MANIFEST declares.
+
+    The map is the reader's copy of the module list; before this test it was
+    the one copy no gate read. The plant rows show the parser sees a renamed
+    and a dropped line, so a parser that returned the table would fail them.
+    """
+    facade = _facade_source()
+    expected = set(RUNNER_MODULES)
+    if plant == "renamed-line":
+        facade = facade.replace("\n  source      ", "\n  sourcery    ", 1)
+        expected = expected - {"source"} | {"sourcery"}
+    elif plant == "dropped-line":
+        start = facade.index("\n  source      ")
+        facade = facade[:start] + facade[facade.index("\n", start + 1):]
+        expected = expected - {"source"}
+    assert (plant == "live") == (facade == _facade_source()), f"the {plant} plant did not apply"
+    listed = _facade_module_map(facade)
+    assert listed == expected, (
+        f"the MODULE MAP in scripts/modal_runner/__init__.py lists {sorted(listed)}; "
+        f"MANIFEST in {TABLES_FILE} declares {sorted(RUNNER_MODULES)}. Update the map "
+        "with the module, in the same commit." if plant == "live" else
+        f"the {plant} plant must make the map read {sorted(expected)}; the parser read "
+        f"{sorted(listed)}")
+
+
 def test_package_seam_contract(live_sources):
     """The `seam` clauses on the live package, and the facade docstring's seam list."""
     _assert_no_violations(_seam_violations(live_sources), "the live package's qualified seams")
-    facade = (ROOT / "scripts" / "modal_runner" / "__init__.py").read_text(encoding="utf-8")
+    facade = _facade_source()
     listed = _facade_seam_list(facade)
     assert listed == set(QUALIFIED_SEAMS), (
         f"the QUALIFIED SEAMS paragraph of scripts/modal_runner/__init__.py lists "
-        f"{sorted(listed)}, but QUALIFIED_SEAMS in tests/modal_runner_tables.py declares "
+        f"{sorted(listed)}, but QUALIFIED_SEAMS in {TABLES_FILE} declares "
         f"{sorted(QUALIFIED_SEAMS)}. Update the two together.")
 
 
@@ -1370,7 +1422,7 @@ def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, stem):
     """
     package = _copy_live_package(tmp_path)
     rel = f"scripts/modal_runner/{stem}.py"
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    declared = list(RUNNER_PATHS)
     contracts = "test_package_structure_contract or test_package_dependency_contract"
     purity_contract = "test_package_import_purity_scans_every_module"
 
@@ -1406,7 +1458,7 @@ def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, stem):
 
 def test_package_import_purity_scans_every_module():
     scanned, violations = _nonstdlib_module_scope_imports(ROOT)
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    declared = list(RUNNER_PATHS)
     assert scanned == declared, f"gate (e) read {scanned}. {_UNDECLARED_MODULE_REMEDY}"
     assert violations == [], (
         f"these (file, line, module) imports execute on import and are not stdlib: {violations}. "
@@ -1424,7 +1476,7 @@ def test_package_import_purity_recursive_controls(tmp_path, live_sources, contai
         "try": "try:\n    import modal\nexcept ImportError:\n    pass\n"
     }
     target = package / "training.py"
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    declared = list(RUNNER_PATHS)
     purity_contract = "test_package_import_purity_scans_every_module"
     for _ in range(_CONTROL_PASSES):
         scanned, failures = _nonstdlib_module_scope_imports(tmp_path)
@@ -1434,7 +1486,7 @@ def test_package_import_purity_recursive_controls(tmp_path, live_sources, contai
         target.write_text(live_sources["training.py"] + "\n" + plants[container], encoding="utf-8")
         scanned, failures = _nonstdlib_module_scope_imports(tmp_path)
         assert scanned == declared, (
-            f"gate (e) read {scanned}, not the {len(declared)} modules RUNNER_MODULES declares")
+            f"gate (e) read {scanned}, not the {len(declared)} modules MANIFEST declares")
         assert len(failures) == 1 and failures[0][
             0] == "scripts/modal_runner/training.py" and failures[0][2] == "modal", (
                 f"gate (e) must report the `import modal` inside the {container} container in "
@@ -1449,18 +1501,18 @@ def test_package_import_purity_recursive_controls(tmp_path, live_sources, contai
 def test_package_scans_reject_missing_or_unreadable_member(tmp_path, live_sources, defect):
     package = _copy_live_package(tmp_path)
     target = package / "training.py"
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    declared = list(RUNNER_PATHS)
     purity_contract = "test_package_import_purity_scans_every_module"
     for _ in range(_CONTROL_PASSES):
         copied = sorted(_package_sources(tmp_path))
         assert copied == sorted(Path(rel).name for rel in declared), (
             f"{_precondition('test_package_structure_contract', 'the package copy')} holds "
-            f"{copied}, not the {len(declared)} modules RUNNER_MODULES declares, so this control "
+            f"{copied}, not the {len(declared)} modules MANIFEST declares, so this control "
             f"would not start from the live package. {_UNDECLARED_MODULE_REMEDY}")
         scanned = _nonstdlib_module_scope_imports(tmp_path)[0]
         assert scanned == declared, (
             f"{_precondition(purity_contract, 'gate (e)')} read {scanned} from the package copy, "
-            f"not the {len(declared)} modules RUNNER_MODULES declares. {_UNDECLARED_MODULE_REMEDY}")
+            f"not the {len(declared)} modules MANIFEST declares. {_UNDECLARED_MODULE_REMEDY}")
         target.unlink()
         if defect == "unreadable":
             target.mkdir()

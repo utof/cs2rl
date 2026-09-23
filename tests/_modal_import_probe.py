@@ -52,7 +52,7 @@ def _governed_modules(package_dir):
     `assert_module_identity` then passes over nothing.
     `test_runtime_identity_requires_every_governed_module`
     (tests/test_modal_packaging.py) pins `_EXPECTED` to the modules
-    RUNNER_MODULES declares, so that cannot happen silently.
+    MANIFEST declares, so that cannot happen silently.
     """
     names = set()
     for path in package_dir.glob("*.py"):
