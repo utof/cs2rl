@@ -13,9 +13,12 @@ Every clause here describes the shape the package keeps from now on:
 * module-scope shape (`header`): the docstring, imports, one imports-only
   `if TYPE_CHECKING:` block without else, and declarations, nothing else;
 * import-time work (`import-time`): what a declaration evaluates on import
-  (its value, decorators, default arguments, class bases and class body) may
-  use only literals, names, attribute reads, containers, arithmetic and calls
-  to IMPORT_TIME_CALLS, and a module with annotations defers them;
+  (its value, decorators, default arguments, class bases and keywords, and
+  class body) may use only literals, names, attribute reads, containers,
+  arithmetic and calls to IMPORT_TIME_CALLS; a class body holds only
+  declarations; and a module with annotations defers them;
+* trusted names (`trusted-binding`): the names those checks trust by spelling
+  (TRUSTED_NAMES) are bound only by their own import;
 * the import graph: intra-package imports equal DEPENDENCIES
   (`runtime-edges`) and ANNOTATION_DEPENDENCIES (`annotation-edges`);
 * import purity: no non-stdlib import executes when a module is imported;
@@ -118,17 +121,45 @@ _CONTROL_PASSES = 2
 # both read this. Add a callee only if calling it does nothing but build its
 # value; `importlib.util.find_spec`, `os.environ.get` and `atexit.register` are
 # the kind of call this keeps out of module scope.
+#
+# PITFALL: callees are matched by spelling, so `Path(...)` is only pathlib's
+# Path while nothing else binds that name; the `trusted-binding` clause holds
+# that (TRUSTED_NAMES). Code a class-creation hook runs (a `metaclass=` class,
+# `__init_subclass__`, `__set_name__`) is not followed: it is a function body.
+# Shapes the package does not use yet fail closed, e.g. `@x.setter`,
+# `field(default_factory=lambda: ...)`, a subscript type alias,
+# `tuple(sorted(...))` and `@functools.cached_property`; allow one here, in
+# the same commit that first needs it.
 IMPORT_TIME_CALLS = frozenset({
     "<str>.strip", "Path", "PurePosixPath", "classmethod", "dataclass", "field", "frozenset",
     "property", "re.compile", "staticmethod", "timedelta"
 })
+# Where each name trusted by spelling must come from: every bare callee and
+# module prefix in IMPORT_TIME_CALLS, and the `TYPE_CHECKING` that
+# `_is_type_checking_test` (tests/test_modal_packaging.py) matches by name.
+# "builtins" means nothing in the module may bind it.
+TRUSTED_NAMES = {
+    "Path": "pathlib",
+    "PurePosixPath": "pathlib",
+    "TYPE_CHECKING": "typing",
+    "classmethod": "builtins",
+    "dataclass": "dataclasses",
+    "field": "dataclasses",
+    "frozenset": "builtins",
+    "property": "builtins",
+    "re": "re",
+    "staticmethod": "builtins",
+    "timedelta": "datetime",
+}
 # The expression kinds an import-time expression may be built from. Left out on
 # purpose: `NamedExpr` (a walrus binds a name no MANIFEST entry owns), `IfExp`,
 # `BoolOp` and `Compare` (the expression form of the module-scope conditional
 # the header rule bans), `Subscript` (`os.environ["X"]` reads the environment),
-# comprehensions and `Lambda`. Allowed attribute reads are the accepted limit:
-# `frozenset(os.environ)` passes, and so does the default `run=subprocess.run`
-# the package uses for injection, which is the same shape.
+# comprehensions and `Lambda`. Reading a value through the allowed kinds is the
+# accepted limit: `frozenset(os.environ)`, `f"{os.environ}"`, `{**os.environ}`,
+# `[*os.environ]` and `frozenset(os.environ) & ...` all pass, and so does the
+# default `run=subprocess.run` the package uses for injection, which is the
+# same shape.
 _IMPORT_TIME_KINDS = (ast.Attribute, ast.BinOp, ast.Call, ast.Constant, ast.Dict,
                       ast.FormattedValue, ast.JoinedStr, ast.List, ast.Name, ast.Set, ast.Starred,
                       ast.Tuple, ast.UnaryOp)
@@ -247,34 +278,61 @@ def _structure_violations(sources, manifest=MANIFEST):
             if isinstance(node, (ast.Assign, ast.AnnAssign)) and id(node) not in owned)
         violations.extend(
             ("import-time", filename, line, what) for line, what in _import_time_violations(tree))
+        violations.extend(("trusted-binding", filename, line, what)
+                          for line, what in _trusted_binding_violations(tree))
     return violations
 
 
+def _is_class_declaration(statement, index):
+    """Whether a class-body statement only declares.
+
+    A declaration is the docstring (a string at index 0), `pass`, a def or a
+    class, or an assignment whose targets are all plain names. Anything else
+    (a bare call, `if`, `for`, `with`, `try`, `del`, `assert`, an augmented
+    assignment, a subscript or attribute target) runs as the class is built,
+    and the header rule, which reads only module scope, never sees it.
+    """
+    if isinstance(statement, ast.Expr):
+        return (index == 0 and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str))
+    if isinstance(statement, ast.Assign):
+        return all(isinstance(target, ast.Name) for target in statement.targets)
+    if isinstance(statement, ast.AnnAssign):
+        return isinstance(statement.target, ast.Name)
+    return isinstance(statement, (ast.Pass, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+
+
 def _import_time_roots(tree):
-    """(expression, is_decorator) for each expression a module evaluates when imported.
+    """(node, role) for each node a module evaluates when imported.
 
     The header rule leaves only declarations at module scope, and a
-    declaration still runs code on import: an assignment's value, a decorator,
-    a default argument, a class's bases and keywords, and everything in a class
-    body, nested classes included. A function body does not run, and neither
-    does an `if TYPE_CHECKING:` block, whose body the header rule limits to
-    imports. Annotations are not roots: `_import_time_violations` requires them
-    deferred instead.
+    declaration still runs code on import: an assignment's value, a decorator
+    (role "decorator"), a default argument, a class's bases and keywords, and
+    its body, nested classes included (role "value" for each expression). A
+    class-body statement that is not a declaration (`_is_class_declaration`)
+    comes back whole, with role "statement". A function body does not run, and
+    neither does an `if TYPE_CHECKING:` block, whose body the header rule
+    limits to imports. Annotations are not roots: `_import_time_violations`
+    requires them deferred instead.
     """
     stack = list(tree.body)
     while stack:
         node = stack.pop()
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-            yield node.value, False
+            yield node.value, "value"
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            yield from ((decorator, True) for decorator in node.decorator_list)
+            yield from ((decorator, "decorator") for decorator in node.decorator_list)
             if isinstance(node, ast.ClassDef):
-                yield from ((base, False) for base in node.bases)
-                yield from ((keyword.value, False) for keyword in node.keywords)
-                stack.extend(node.body)
+                yield from ((base, "value") for base in node.bases)
+                yield from ((keyword.value, "value") for keyword in node.keywords)
+                for index, statement in enumerate(node.body):
+                    if _is_class_declaration(statement, index):
+                        stack.append(statement)
+                    else:
+                        yield statement, "statement"
             else:
-                yield from ((default, False) for default in node.args.defaults)
-                yield from ((default, False) for default in node.args.kw_defaults if default)
+                yield from ((default, "value") for default in node.args.defaults)
+                yield from ((default, "value") for default in node.args.kw_defaults if default)
 
 
 def _callee(func):
@@ -308,8 +366,11 @@ def _import_time_violations(tree):
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns)))
     if annotated and not deferred:
         found.add((annotated[0], "an annotation (no `from __future__ import annotations`)"))
-    for root, is_decorator in _import_time_roots(tree):
-        if (is_decorator and not isinstance(root, ast.Call)
+    for root, role in _import_time_roots(tree):
+        if role == "statement":
+            found.add((root.lineno, f"a class-body `{type(root).__name__}` statement"))
+            continue
+        if (role == "decorator" and not isinstance(root, ast.Call)
                 and _callee(root) not in IMPORT_TIME_CALLS):
             found.add((root.lineno, f"decorator `{_callee(root)}`"))
         for node in ast.walk(root):
@@ -319,6 +380,51 @@ def _import_time_violations(tree):
                 found.add((node.lineno, f"a `{type(node).__name__}` node"))
             elif isinstance(node, ast.Call) and _callee(node.func) not in IMPORT_TIME_CALLS:
                 found.add((node.lineno, f"a call to `{_callee(node.func)}`"))
+    return sorted(found)
+
+
+def _trusted_binding_violations(tree):
+    """Sorted `(line, what)` for each binding of a TRUSTED_NAMES name other than its own import.
+
+    Reads what runs on import: module scope, `if` blocks and class bodies. A
+    binding is an import (`import re` and `from pathlib import Path` are the
+    own imports; any other source or `as` name is not), a def or class, or an
+    assignment target. A star import is reported too, because it can bind any
+    of them unseen.
+
+    WHY: the import-time clause trusts `Path(...)` and `frozenset(...)`, and the
+    TYPE_CHECKING predicate trusts `TYPE_CHECKING`, by spelling. Measured
+    before this clause (gh#223 review): `from os import system as Path` made
+    the existing `VOLUME_MOUNT = Path("/artifacts")` shell out on import, and
+    `from os import environ as TYPE_CHECKING` turned an `if TYPE_CHECKING:`
+    import of numpy into a run-time one; every static gate stayed green.
+    """
+    found = []
+    stack = list(tree.body)
+    while stack:
+        node = stack.pop()
+        bound = []
+        if isinstance(node, (ast.If, ast.ClassDef)):
+            stack.extend(node.body)
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.split(".")[0]
+                if alias.name != name or TRUSTED_NAMES.get(name) != name:
+                    bound.append(name)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                if name == "*":
+                    found.append((node.lineno, "a star import"))
+                elif node.level or node.module != TRUSTED_NAMES.get(name) or alias.name != name:
+                    bound.append(name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound = [node.name]
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            bound = [n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+        found.extend(
+            (node.lineno, f"a binding of `{name}`") for name in bound if name in TRUSTED_NAMES)
     return sorted(found)
 
 
@@ -566,12 +672,25 @@ def _explain(violations):
         elif kind == "import-time":
             text = (f"{v[1]} line {v[2]}: {v[3]} runs when the module is imported. What a "
                     "declaration evaluates on import (its value, decorators, default arguments, "
-                    "class bases and class body) may use only literals, names, attribute reads, "
-                    "containers, arithmetic and calls to IMPORT_TIME_CALLS "
-                    f"({', '.join(sorted(IMPORT_TIME_CALLS))}). Move the work into a function, "
+                    "class bases and keywords, and class body) may use only literals, names, "
+                    "attribute reads, containers, arithmetic and calls to IMPORT_TIME_CALLS "
+                    f"({', '.join(sorted(IMPORT_TIME_CALLS))}), and a class body may hold only "
+                    "its docstring, `pass`, defs, classes and assignments to plain names. Move "
+                    "the work into a function, "
                     "and keep `from __future__ import annotations` in every module that "
                     "annotates. A new pure constructor goes in IMPORT_TIME_CALLS "
                     "(tests/test_modal_runner_package_shape.py) in the same commit.")
+        elif kind == "trusted-binding":
+            name = v[3].split("`")[1] if "`" in v[3] else None
+            source = TRUSTED_NAMES.get(name or "")
+            own = ("the builtin, and nothing may rebind it"
+                   if source == "builtins" else f"bound only by `import {name}`"
+                   if source == name else f"bound only by `from {source} import {name}`")
+            text = (f"{v[1]} line {v[2]}: {v[3]}. The import-time clause and the TYPE_CHECKING "
+                    "predicate match these names by spelling, so each must be what it says: "
+                    f"`{name}` is {own}. Rename the binding." if name else
+                    f"{v[1]} line {v[2]}: {v[3]}, which can rebind any name in TRUSTED_NAMES "
+                    "unseen. Import the names it needs explicitly.")
         elif kind == "seam-from-import":
             text = (f"{v[1]}.py line {v[2]} imports the qualified seam `{v[3]}` by name, which "
                     "binds a copy that a test patching the owning module never reaches. Read it "
@@ -875,6 +994,21 @@ def test_package_manifest_controls(live_sources, plant, expected):
         _assert_no_violations(_structure_violations(live_sources), precondition)
 
 
+def test_trusted_names_cover_every_spelling_the_gates_trust():
+    """TRUSTED_NAMES has a source for each name trusted by spelling, and no other.
+
+    Those names are each bare callee and module prefix in IMPORT_TIME_CALLS,
+    and `TYPE_CHECKING`. A callee added without its source would be trusted
+    unwatched, so `from os import system as <it>` would pass.
+    """
+    spelled = {callee.split(".")[0] for callee in IMPORT_TIME_CALLS if not callee.startswith("<")}
+    expected = spelled | {"TYPE_CHECKING"}
+    assert set(TRUSTED_NAMES) == expected, (
+        "TRUSTED_NAMES (tests/test_modal_runner_package_shape.py) must list exactly the bare "
+        "callees and module prefixes of IMPORT_TIME_CALLS, plus TYPE_CHECKING. Missing: "
+        f"{sorted(expected - set(TRUSTED_NAMES))}; extra: {sorted(set(TRUSTED_NAMES) - expected)}.")
+
+
 @pytest.mark.parametrize("spelling", ["TYPE_CHECKING", "typing.TYPE_CHECKING", "os.TYPE_CHECKING"])
 def test_package_header_accepts_import_only_type_checking(live_sources, spelling):
     _assert_no_violations(_structure_violations(live_sources),
@@ -888,9 +1022,9 @@ def test_package_header_accepts_import_only_type_checking(live_sources, spelling
 # Each row plants one shape into the live sources, in memory: a `VOLUME_NAME =`
 # row replaces that constant's value in core.py, `drop-future` deletes
 # source.py's `from __future__ import annotations`, and any other row is
-# appended to training.py. `expected` is what the `import-time` clause alone must
-# report, since a planted name also trips membership. The ID ends in the verdict
-# the row asserts.
+# appended to training.py. `expected` is what the `import-time` and
+# `trusted-binding` clauses alone must report, since a planted name also trips
+# membership. The ID ends in the verdict the row asserts.
 @pytest.mark.parametrize("plant, expected", [
     pytest.param(plant, expected, id=f"{name}-{'rejected' if expected else 'accepted'}")
     for name, plant, expected in [
@@ -909,6 +1043,29 @@ def test_package_header_accepts_import_only_type_checking(live_sources, spelling
         ("default-argument", 'def _plant(flag=os.environ.get("X")):\n    return flag\n',
          ["a call to `os.environ.get`"]),
         ("class-body", 'class _Plant:\n    X = print("work")\n', ["a call to `print`"]),
+        ("class-body-call", 'class _Plant:\n    print("work")\n',
+         ["a class-body `Expr` statement"]),
+        ("class-body-if", 'class _Plant:\n    if os.environ.get("X"):\n        pass\n',
+         ["a class-body `If` statement"]),
+        ("class-body-subscript-target", 'class _Plant:\n    X = os.environ["A"] = "1"\n',
+         ["a class-body `Assign` statement"]),
+        ("class-keyword", "class _Plant(metaclass=print()):\n    pass\n", ["a call to `print`"]),
+        ("keyword-only-default", 'def _plant(*, flag=os.getenv("X")):\n    return flag\n',
+         ["a call to `os.getenv`"]),
+        ("annotated-field-default", 'class _Plant:\n    x: str = field(default=os.getenv("X"))\n',
+         ["a call to `os.getenv`"]),
+        ("boolean-in-value", 'VOLUME_NAME = TYPE_CHECKING or "x"', ["a `BoolOp` node"]),
+        ("compare-in-value", 'VOLUME_NAME = "a" < "b"', ["a `Compare` node"]),
+        ("lambda-in-value", "VOLUME_NAME = lambda: 0", ["a `Lambda` node"]),
+        ("generator-in-value", 'VOLUME_NAME = frozenset(c for c in "ab")',
+         ["a `GeneratorExp` node"]),
+        ("rebound-callee", "from os import system as Path\n", ["a binding of `Path`"]),
+        ("rebound-builtin", "from importlib.util import find_spec as frozenset\n",
+         ["a binding of `frozenset`"]),
+        ("declared-callee", "def field():\n    pass\n", ["a binding of `field`"]),
+        ("rebound-type-checking", "from os import environ as TYPE_CHECKING\n",
+         ["a binding of `TYPE_CHECKING`"]),
+        ("star-import", "from os import *\n", ["a star import"]),
         ("class-base", 'class _Plant(type("B", (), {})):\n    pass\n', ["a call to `type`"]),
         ("method-decorator",
          "class _Plant:\n    @atexit.register\n    def m(self):\n        pass\n",
@@ -919,26 +1076,38 @@ def test_package_header_accepts_import_only_type_checking(live_sources, spelling
         ("allowed-constructors", "_PLANT = frozenset({re.compile('x'), timedelta(seconds=1)})\n",
          []),
         ("deferred-annotation", "_PLANT: dict[str, int] = {}\n", []),
+        ("own-imports", "import re\nfrom pathlib import Path\n", []),
+        ("class-declarations",
+         'class _Plant:\n    """Doc."""\n\n    x: int = 1\n    y = z = 2\n    pass\n', []),
     ]
 ])
 def test_package_import_time_controls(live_sources, plant, expected):
-    """One plant per row, judged by the `import-time` clause alone.
+    """One plant per row, judged by the `import-time` and `trusted-binding` clauses alone.
 
     * The five `-in-value` rows hide work in an existing constant, the case
       gh#223 item 7 names: before this clause each one passed every gate,
       while the same probe as a bare statement was caught by the header rule.
       Each rejected kind is one `_IMPORT_TIME_KINDS` leaves out, or one call
       IMPORT_TIME_CALLS does not list.
-    * decorator, decorator-call, default-argument, class-body, class-base and
+    * decorator, decorator-call, default-argument, keyword-only-default,
+      class-body, annotated-field-default, class-base, class-keyword and
       method-decorator are the other places a declaration runs code on import.
       Each is a root `_import_time_roots` must reach; drop one and its row
-      goes green.
+      goes green. The boolean, compare, lambda and generator rows hold the
+      kinds `_IMPORT_TIME_KINDS` leaves out the same way.
+    * class-body-call, class-body-if, class-body-subscript-target: a class
+      body statement that is not a declaration, which the header rule (module
+      scope only) never reads.
+    * rebound-callee, rebound-builtin, declared-callee, rebound-type-checking,
+      star-import: a binding that makes a trusted spelling mean something else
+      (`trusted-binding`).
     * drop-future: source.py annotates its functions, so without the
       `__future__` import those annotations would run on import.
     * The accepted rows are the shapes the package itself uses: a call in a
       function body, an attribute read as a default argument, allowed
-      constructors, and a deferred subscript annotation. A clause that
-      rejected them would redden the live package.
+      constructors, a deferred subscript annotation, the trusted names' own
+      imports, and a class body of declarations. A clause that rejected them
+      would redden the live package.
     """
     filename = ("core.py" if plant and plant.startswith("VOLUME_NAME =") else
                 "source.py" if plant is None else "training.py")
@@ -959,7 +1128,7 @@ def test_package_import_time_controls(live_sources, plant, expected):
     for _ in range(_CONTROL_PASSES):
         _assert_no_violations(_structure_violations(live_sources), precondition)
         violations = _structure_violations({**live_sources, filename: changed})
-        reported = [v for v in violations if v[0] == "import-time"]
+        reported = [v for v in violations if v[0] in ("import-time", "trusted-binding")]
         verdict = f"rejected by exactly {expected}" if expected else "accepted"
         assert [v[3] for v in reported] == expected and all(
             v[1] == filename and v[2] in lines for v in reported), (

@@ -1969,7 +1969,10 @@ def _is_type_checking_test(test):
 
     Matching by name has an accepted limit (Ruling 29): `if os.TYPE_CHECKING:`
     is recognised too. It fails closed the other way: `if TYPE_CHECKING and X:`
-    is a `BoolOp` and is not recognised.
+    is a `BoolOp` and is not recognised. A bare `TYPE_CHECKING` is only
+    typing's while nothing rebinds it (`from os import environ as
+    TYPE_CHECKING` makes the block run); inside scripts/modal_runner/ the
+    package-shape `trusted-binding` clause rejects any such binding.
     """
     return ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
             or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"))
