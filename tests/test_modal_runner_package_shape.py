@@ -51,6 +51,16 @@ from pathlib import Path
 
 import pytest
 
+# The package's declared shape: MANIFEST, the import tables, and the module list
+# derived from them. Every gate here reads it; the file itself is data only.
+from tests.modal_runner_tables import (
+    ANNOTATION_DEPENDENCIES,
+    DEPENDENCIES,
+    MANIFEST,
+    RUNNER_MODULES,
+    TABLES,
+)
+
 # The packaging gates' own helpers and constants, imported rather than copied so
 # that both files recognise module-level names, module-scope shape, non-stdlib
 # imports and the package population by ONE definition; two copies could let the
@@ -64,7 +74,6 @@ import pytest
 # duplicates clauses here as well.
 from tests.test_modal_packaging import (
     PACKAGED,
-    RUNNER_MODULES,
     _module_level_binding_counts,
     _module_level_names,
     _module_scope_shape_violations,
@@ -74,103 +83,13 @@ from tests.test_modal_packaging import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-# Owner of every top-level symbol, per module. Each module's top-level names
-# must equal its entry, and no name may appear under two modules. Adding,
-# removing, renaming or moving a symbol means editing its entry here in the same
-# commit.
-MANIFEST = {
-    'core.py': [
-        'VOLUME_NAME', 'REGISTRY_NAME', 'VOLUME_MOUNT', 'SOURCES_ROOT', 'INPUTS_ROOT', 'RUNS_ROOT',
-        'PROVENANCE_NAME', 'STATUS_FILENAME', 'RESERVATION_FILENAME', 'MANIFEST_FILENAME',
-        'TRAIN_LOG_NAME', 'RESULT_FILENAME', 'CHECKPOINT_NAME', 'CHECKPOINT_SIDECAR_NAME',
-        'CHECKPOINT_PUBLISH_REASON_NAME', 'DEAD_CHECKPOINT_NAME', 'PREBUILT_PYTHON',
-        'ValidationError', 'Status', 'mounted_path', 'sha256_file', 'FileProvenance',
-        'SCHEMA_VERSION', 'Manifest', 'HEARTBEAT_INTERVAL', 'Registry', 'LockLike', 'sha256_bytes',
-        'CompletionEvidence', 'PreparedSource'
-    ],
-    'request.py': [
-        'ALLOWED_MAPS', 'ALLOWED_GPUS', 'ALLOWED_NUM_ENVS', 'ALLOWED_CPU_CORES', 'DEFAULT_GPU',
-        'DEFAULT_NUM_ENVS', 'DEFAULT_CPU_CORES', 'DEFAULT_MEMORY_MIB', 'DEFAULT_VEC_WORKERS',
-        'DEFAULT_TIMEOUT_MINUTES', 'DEFAULT_SAVE_EVERY_SECONDS', 'MIN_MEMORY_MIB', 'MAX_MEMORY_MIB',
-        'MIN_TIMEOUT_MINUTES', 'MAX_TIMEOUT_MINUTES', 'MIN_SAVE_EVERY_SECONDS',
-        'MAX_SAVE_EVERY_SECONDS', 'AGENTS_PER_ENV', 'BPTT_HORIZON', 'MIN_BATCH_SIZE', '_RUN_ID_RE',
-        '_SECRET_NAME_RE', 'LIVE_TRAIN_OPTION_ARITY', 'LIVE_TRAIN_OPTIONS',
-        'RUNNER_OWNED_TRAIN_FLAGS', 'RUN_ONLY_OPTIONS', 'Action', 'ResumeRequest',
-        'ArtifactClientRequest', 'RunRequest', 'validate_run_id', 'validate_secret_name',
-        'parse_train_args', '_split_long_option', '_option_value', 'validate_train_args',
-        'build_run_request', 'parse_artifact_client_request'
-    ],
-    'source.py': [
-        '_COMMIT_SHA_RE', '_SAFE_TAR_TYPES', 'SourceProvenance', '_run_git', 'validate_clean_head',
-        '_reject_unsafe_tar_member', 'safe_extract_git_archive', '_staging_members',
-        '_repack_deterministic', 'create_source_bundle'
-    ],
-    'checkpoint.py': [
-        'PREBUILT_LOAD_TIMEOUT_SECONDS', '_PREBUILT_LOAD_SOURCE', 'CheckpointVerdict',
-        '_import_torch', '_assert_weights_only_loadable', 'validate_local_checkpoint',
-        '_load_checkpoint_weights', 'verify_checkpoint', 'normalize_config_for_transport',
-        'iter_metrics_steps', 'validate_completed_run'
-    ],
-    'state.py': [
-        'TERMINAL_STATUSES', '_ALLOWED_TRANSITIONS', 'RunStatus', 'STALE_AFTER', 'ArtifactIndex',
-        'FAILURE_UPLOAD', 'ALLOWED_FAILURE_CODES', 'REDELIVERED', 'DerivedStatus',
-        'HeartbeatWorker', 'atomic_write_json', 'read_status', 'transition_status',
-        '_transition_status_unlocked', 'run_registry_key', 'attempt_registry_key',
-        '_reservation_path', '_manifest_path', '_volume_has_run', 'record_run_failure',
-        'finish_reservation', 'reserve_run', 'claim_attempt', 'deliver_attempt', 'write_heartbeat',
-        'load_volume_json', '_parse_iso8601', 'derive_status', 'derive_run_view_from_bytes',
-        'derive_run_view', 'list_run_artifacts', 'start_heartbeat_worker', 'stop_heartbeat'
-    ],
-    'commands.py': [
-        'UV_BIN', 'TRAIN_SCRIPT', '_PRESERVED_CHILD_ENV_KEYS', 'THREAD_CAP_ENV',
-        'CUDA_PROBE_SOURCE', 'assemble_train_argv', 'build_train_argv', 'build_dump_config_argv',
-        '_is_preserved_child_env_key', 'build_child_env', 'build_install_command',
-        'build_train_command', 'build_dump_config_command', 'build_cuda_probe_command'
-    ],
-    'preflight.py': [
-        'ReloadingVolume', '_verify_extracted_provenance', '_validate_remote_resume',
-        '_hash_dumped_config', 'prepare_remote_source'
-    ],
-    'training.py': [
-        'RunResult', 'CHECKPOINT_SETTLE_SECONDS', 'TERM_GRACE_SECONDS', 'DEAD_RUN_EXIT_CODE',
-        'POLL_INTERVAL_SECONDS', 'REASON_SIGNAL', 'REASON_TIMEOUT', 'REASON_DEAD_RUN',
-        'REASON_INVALID_EVIDENCE', 'REASON_NONZERO_EXIT', 'REASON_ERROR', 'TrainingAttemptResult',
-        '_UnusedArtifacts', 'PublishOutcome', '_tee_stream', 'execute_training_attempt',
-        '_checkpoint_generation', 'publish_stable_checkpoint', '_start_checkpoint_watcher',
-        '_record_publish_reason', '_publish_and_note', '_close_log_sink', '_is_dead_run',
-        '_map_child_exit', '_metrics_summary', '_optional_checkpoint_sha256', '_write_run_result',
-        '_signal_process_group', '_run_training_attempt'
-    ],
-}
-# Runtime import edges between package modules. core stays a leaf. A new edge
-# is legal only if the graph stays acyclic; record it here.
-DEPENDENCIES = {
-    'core': [],
-    'request': ['commands', 'core'],
-    'source': ['core'],
-    'checkpoint': ['core', 'state'],
-    'state': ['core', 'request'],
-    'commands': ['core'],
-    'preflight': ['checkpoint', 'commands', 'core', 'source', 'state'],
-    'training': ['checkpoint', 'core', 'state']
-}
-# Edges that exist only under `if TYPE_CHECKING:` and never execute. commands ->
-# request must stay annotation-only: request imports commands at run time, so a
-# runtime edge back would be an import cycle.
-ANNOTATION_DEPENDENCIES = {'commands': ['request'], 'preflight': ['request']}
 # Module names that say what a module IS rather than what it owns, which is how
 # a module becomes a junk drawer; the `forbidden-name` clause and its message
 # both read this.
 GRAB_BAG_MODULE_NAMES = ("utils", "helpers", "common", "misc")
-# Where a package module is declared. Every message about a module on disk that
-# the tables do not declare, or the reverse, names these, so the remedy reads the
-# same wherever it fires.
-_TABLES = ("RUNNER_MODULES (tests/test_modal_packaging.py) and MANIFEST and DEPENDENCIES (and "
-           "ANNOTATION_DEPENDENCIES for an import made only under TYPE_CHECKING) in "
-           "tests/test_modal_runner_package_shape.py")
 _UNDECLARED_MODULE_REMEDY = (
     "A path beyond the modules RUNNER_MODULES declares is a module in scripts/modal_runner/ "
-    f"that the tables do not declare: declare it in {_TABLES} in the same commit, or delete it.")
+    f"that the tables do not declare: declare it in {TABLES} in the same commit, or delete it.")
 # How many times each control below plants its defect. Each pass starts by
 # re-checking the unplanted package (or its tmp_path copy), so the second pass's
 # check proves the first pass's plant-and-restore left the sources, or the copied
@@ -413,14 +332,14 @@ def _explain(violations):
             parts = []
             if v[1]:
                 parts.append(f"holds modules the tables do not declare, {v[1]}: declare each in "
-                             f"{_TABLES} in the same commit, or delete the stray file")
+                             f"{TABLES} in the same commit, or delete the stray file")
             if v[2]:
                 parts.append(f"lacks modules MANIFEST declares, {v[2]}: restore them, or remove "
-                             f"their entries from {_TABLES}")
+                             f"their entries from {TABLES}")
             text = f"scripts/modal_runner/ {'; and it '.join(parts)}."
         elif kind == "undeclared-module":
             text = (f"scripts/modal_runner/{v[1]}.py is not in DEPENDENCIES. Declare the module in "
-                    f"{_TABLES}, or delete it.")
+                    f"{TABLES}, or delete it.")
         elif kind == "manifest-duplicates":
             text = (
                 f"MANIFEST gives these symbols more than one owner: {v[1]}. Each symbol lives in "
@@ -442,7 +361,7 @@ def _explain(violations):
             if v[3]:
                 parts.append(f"MANIFEST['{v[1]}'] lists {v[3]}, which {v[1]} does not define")
             text = (f"{'; '.join(parts)}. If you meant to add, remove or move a symbol, update "
-                    f"MANIFEST['{v[1]}'] in tests/test_modal_runner_package_shape.py in the same "
+                    f"MANIFEST['{v[1]}'] in tests/modal_runner_tables.py in the same "
                     "commit.")
         elif kind == "duplicates":
             text = (f"{v[1]} binds {v[2]} more than once at module scope; the later binding "
@@ -452,11 +371,11 @@ def _explain(violations):
                     f"allows {v[3]}. Write intra-package imports as one-dot relative imports; "
                     f"absolute (`{PACKAGED}`) and `..` spellings are never allowed. If a new edge "
                     "is intended and keeps the graph acyclic (core stays a leaf), update "
-                    "DEPENDENCIES in the same commit.")
+                    "DEPENDENCIES in tests/modal_runner_tables.py in the same commit.")
         elif kind == "annotation-edges":
             text = (f"{v[1]}.py imports {v[2]} under `if TYPE_CHECKING:`; "
-                    f"ANNOTATION_DEPENDENCIES allows {v[3]}. Update ANNOTATION_DEPENDENCIES if the "
-                    "annotation-only import is intended.")
+                    f"ANNOTATION_DEPENDENCIES allows {v[3]}. Update ANNOTATION_DEPENDENCIES in "
+                    "tests/modal_runner_tables.py if the annotation-only import is intended.")
         elif kind == "forbidden-name":
             text = (f"{v[1]} is a grab-bag module name ({'/'.join(GRAB_BAG_MODULE_NAMES)}). Name "
                     "the module for the concern it owns.")
@@ -509,15 +428,18 @@ def live_sources():
 
 
 def test_package_structure_contract(live_sources):
-    """The structure clauses on the live package, plus the tables' consistency."""
+    """The structure clauses on the live package, plus the tables' consistency.
+
+    RUNNER_MODULES is derived from MANIFEST, so the only way the tables can
+    disagree about the module list is DEPENDENCIES or ANNOTATION_DEPENDENCIES.
+    """
     declared = set(RUNNER_MODULES)
-    manifest_modules = {name.removesuffix(".py") for name in MANIFEST}
-    keyed = (manifest_modules == declared and set(DEPENDENCIES) == declared
-             and set(ANNOTATION_DEPENDENCIES) <= declared)
+    keyed = set(DEPENDENCIES) == declared and set(ANNOTATION_DEPENDENCIES) <= declared
     assert keyed, (
-        f"MANIFEST {sorted(MANIFEST)}, DEPENDENCIES {sorted(DEPENDENCIES)} and "
-        f"ANNOTATION_DEPENDENCIES {sorted(ANNOTATION_DEPENDENCIES)} must be keyed by the modules "
-        f"RUNNER_MODULES declares ({list(RUNNER_MODULES)}); update them together.")
+        f"DEPENDENCIES {sorted(DEPENDENCIES)} must be keyed by exactly the modules MANIFEST "
+        f"declares ({list(RUNNER_MODULES)}), and ANNOTATION_DEPENDENCIES "
+        f"{sorted(ANNOTATION_DEPENDENCIES)} by some of them; update them together in "
+        "tests/modal_runner_tables.py.")
     _assert_no_violations(_structure_violations(live_sources), "the live package")
 
 

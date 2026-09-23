@@ -35,7 +35,7 @@ from tests.modal_patch_binding_campaign import binding_target                   
 from tests.modal_test_helpers import (                                                 # noqa: E402
     FakeChild, _aware, _git, _init_source_repo, _noop_heartbeat, _write_dumped_config,
     _write_metrics)
-from tests.test_modal_packaging import RUNNER_MODULES                                  # noqa: E402
+from tests.modal_runner_tables import RUNNER_MODULES, TABLES                           # noqa: E402
 
 # ── Launch app: import-time purity, image build, object declarations ───────
 
@@ -2148,7 +2148,8 @@ def _container_equivalent_import(prefix: Path,
     flags = ['-S', '-B', '-P'] if isolate_cwd else ['-S', '-B']
     code = f'import {module}\n'
     if required_surface is not None:
-        code += f'modules = {list(RUNNER_MODULES)!r}\nrequired = {sorted(required_surface)!r}\n'
+        code += (f'modules = {list(RUNNER_MODULES)!r}\nrequired = {sorted(required_surface)!r}\n'
+                 f'tables = {TABLES!r}\n')
         code += textwrap.dedent('''\
             import importlib, sys, types
             import scripts.modal_runner as package
@@ -2160,9 +2161,7 @@ def _container_equivalent_import(prefix: Path,
             assert actual == expected, (
                 'module population',
                 {'undeclared': sorted(actual - expected), 'missing': sorted(expected - actual)},
-                'declare a new module in RUNNER_MODULES (tests/test_modal_packaging.py) and in '
-                'MANIFEST and DEPENDENCIES (and ANNOTATION_DEPENDENCIES for an import made only '
-                'under TYPE_CHECKING) in tests/test_modal_runner_package_shape.py')
+                'declare a new module in ' + tables)
             heavy = {name for name in sys.modules
                      if name.split('.')[0] in {'modal', 'torch', 'numpy'}}
             assert not heavy, ('heavy imports', heavy)
@@ -2428,18 +2427,15 @@ def _mount_bijection_violations(mount_list, repo_root, *, dependency_mounts=()):
     violations = []
     if declared - tracked:
         violations.append(
-            '(A) package tracked population: declared (__init__.py and RUNNER_MODULES in '
-            'tests/test_modal_packaging.py) but not in the git index; stage it with git add: '
+            '(A) package tracked population: declared (__init__.py, and the modules of '
+            f'{TABLES}) but not in the git index; stage it with git add: '
             f'{sorted(declared - tracked)}. This clause reads `git ls-files`, not the disk, so a '
             'new module is missing here until it is staged. If you deleted the module on purpose, '
-            'remove it from RUNNER_MODULES and tests/test_modal_runner_package_shape.py instead.')
+            'remove its entries from those tables instead.')
     if tracked - declared:
         violations.append(
-            '(A) package tracked population: tracked but not declared in RUNNER_MODULES '
-            f'(tests/test_modal_packaging.py): {sorted(tracked - declared)}. Declare a new module '
-            'there and in MANIFEST and DEPENDENCIES (and ANNOTATION_DEPENDENCIES for an import '
-            'made only under TYPE_CHECKING) in tests/test_modal_runner_package_shape.py, or '
-            '`git rm` the file.')
+            f'(A) package tracked population: tracked but not declared: {sorted(tracked - declared)}. '
+            f'Declare a new module in {TABLES}, or `git rm` the file.')
     expected = Counter((str(repo_root / relative), '/opt/app/' + relative, True)
                        for relative in tracked | {'scripts/run_modal.py'})
     actual = Counter((src, dst, copy) for src, dst, copy in mount_list
@@ -2453,10 +2449,8 @@ def _mount_bijection_violations(mount_list, repo_root, *, dependency_mounts=()):
         # come from `git ls-files`. So the message carries every remedy.
         violations.append(
             f'(B) unexpected exact mount x{count}: {triple!r}. `git ls-files` implies no such '
-            'mount, or fewer copies of it. An unstaged new module: declare it in RUNNER_MODULES '
-            '(tests/test_modal_packaging.py) and in MANIFEST and DEPENDENCIES (and '
-            'ANNOTATION_DEPENDENCIES for an import made only under TYPE_CHECKING) in '
-            'tests/test_modal_runner_package_shape.py, then `git add` it. An untracked stray '
+            f'mount, or fewer copies of it. An unstaged new module: declare it in {TABLES}, '
+            'then `git add` it. An untracked stray '
             'file: delete it. A duplicate, a changed copy flag, or a source that is not the '
             'tracked file: fix the mount in scripts/run_modal.py.')
     for label, mounts in (('runner', mount_list), ('dependency', dependency_mounts)):
@@ -2537,10 +2531,9 @@ def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(fa
         v.startswith('(A)') and 'core.py' in v and 'stage it with git add' in v
         for v in violations), violations
     assert any(
-        v.startswith('(B) unexpected') and 'core.py' in v and 'then `git add` it' in v and
-        'An untracked stray file: delete it.' in v and '`git rm`' not in v and 'RUNNER_MODULES' in v
-        and 'MANIFEST and DEPENDENCIES' in v and 'scripts/run_modal.py' in v
-        for v in violations), violations
+        v.startswith('(B) unexpected') and 'core.py' in v and 'then `git add` it' in v
+        and 'An untracked stray file: delete it.' in v and '`git rm`' not in v and TABLES in v
+        and 'scripts/run_modal.py' in v for v in violations), violations
     assert not any(v.startswith('(C)') for v in violations)
 
 
@@ -2748,6 +2741,6 @@ def test_mount_bijection_rejects_unexpected_tracked_python_file(fake_modal, tmp_
     # Tracked and undeclared: (A) must say declare it or `git rm` it, not "stage it".
     assert any(
         v.startswith('(A)') and 'café.py' in v and 'tracked but not declared' in v
-        and '`git rm` the file' in v and 'RUNNER_MODULES' in v and 'MANIFEST and DEPENDENCIES' in v
-        and 'stage it' not in v for v in violations), violations
+        and '`git rm` the file' in v and TABLES in v and 'stage it' not in v
+        for v in violations), violations
     assert any(v.startswith('(B) missing') and 'café.py' in v for v in violations), violations

@@ -8,7 +8,7 @@ module scope. Torch is imported lazily, inside `checkpoint._import_torch` and
 `checkpoint._load_checkpoint_weights`, and Modal is never imported here.
 
 MODULE MAP (each module's exact symbols are its MANIFEST entry in
-tests/test_modal_runner_package_shape.py):
+tests/modal_runner_tables.py):
   core        the Volume and run-directory layout, the Status enum,
               ValidationError, the path and hash helpers, and the protocols
               and records two or more modules share (see WHERE A NEW NAME GOES)
@@ -31,16 +31,15 @@ Volume and run-directory layout (mount, roots and artifact file names), which
 core keeps whole even where one module reads a given name, so the layout reads
 as one contract. A name this facade re-exports goes in the module that reads
 it, like any other: production reads the facade, not the module. A new
-cross-module import needs a DEPENDENCIES entry in
-tests/test_modal_runner_package_shape.py.
+cross-module import needs a DEPENDENCIES entry in tests/modal_runner_tables.py.
 
-ADDING A MODULE, in this order: (1) add it to RUNNER_MODULES in
-tests/test_modal_packaging.py; (2) add its MANIFEST and DEPENDENCIES entries,
-add it to the DEPENDENCIES entry of each module that imports it (and use
-ANNOTATION_DEPENDENCIES for an import made only under TYPE_CHECKING), all in
-tests/test_modal_runner_package_shape.py; (3) `git add` the file. The mount and
-package-population gates in tests/test_modal_client.py read `git ls-files`, so
-until step 3 they report the module missing although it is on disk.
+ADDING A MODULE, in this order: (1) in tests/modal_runner_tables.py, add its
+MANIFEST and DEPENDENCIES entries and add it to the DEPENDENCIES entry of each
+module that imports it (ANNOTATION_DEPENDENCIES for an import made only under
+TYPE_CHECKING); every gate reads the module list from there; (2) `git add` the
+file. The mount and package-population gates in tests/test_modal_client.py read
+`git ls-files`, so until step 2 they report the module missing although it is
+on disk.
 
 THIS FACADE IS DELIBERATELY NARROW. It re-exports exactly the names that
 production code reads from the package, and nothing more.

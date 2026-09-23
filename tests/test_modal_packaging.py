@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.modal_runner_tables import RUNNER_MODULES, TABLES
+
 ROOT = Path(__file__).resolve().parents[1]
 BARE = "modal_runner"
 # The one legal spelling. `BARE` is what must never appear; this is what must
@@ -501,8 +503,7 @@ def test_runtime_identity_requires_every_governed_module(monkeypatch, tmp_path):
     assert not undeclared and not missing, (
         f"tests/_modal_import_probe.py governs every *.py file in {_PACKAGE_DIR}, and that "
         "must match the modules RUNNER_MODULES declares. On disk but undeclared: "
-        f"{undeclared}; declare each in RUNNER_MODULES and the tables in "
-        "tests/test_modal_runner_package_shape.py, or delete the file. Declared but not on "
+        f"{undeclared}; declare each in {TABLES}, or delete the file. Declared but not on "
         f"disk: {missing}; restore the file, or remove the module from those tables. If every "
         "declared module is missing, `_PACKAGE_DIR` no longer points at scripts/modal_runner/.")
     planted = tmp_path / "modal_runner"
@@ -1915,10 +1916,6 @@ assert 'torch' not in sys.modules
     subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
 
 
-RUNNER_MODULES = ("core", "request", "source", "checkpoint", "state", "commands", "preflight",
-                  "training")
-
-
 def _runner_module_population(repo_root):
     """The package's submodule files as found ON DISK, checked against RUNNER_MODULES.
 
@@ -2060,29 +2057,6 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False, *, paths=No
     return scanned, sorted(violations)
 
 
-def test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library():
-    candidates, undeclared = _runner_module_population(ROOT)
-    assert undeclared == [], (
-        f"scripts/modal_runner/ holds modules RUNNER_MODULES does not declare: {undeclared}. "
-        "A new module needs entries in RUNNER_MODULES (tests/test_modal_packaging.py) and in "
-        "MANIFEST and DEPENDENCIES (and ANNOTATION_DEPENDENCIES for an import made only under "
-        "TYPE_CHECKING) in tests/test_modal_runner_package_shape.py, in the same commit; "
-        "otherwise delete the stray file.")
-    scanned, violations = _nonstdlib_module_scope_imports(ROOT)
-    assert scanned == candidates, (
-        f"gate (e) read {scanned} but the package directory holds {candidates}; a module it "
-        "skipped is a module whose imports nobody checked.")
-    assert violations == [], (
-        "these (file, line, module) imports execute when the runner package is imported and are "
-        f"not standard library: {violations}. The package must import without Modal, torch or "
-        "numpy (see scripts/modal_runner/__init__.py). Move the import into the function that "
-        "needs it, or under `if TYPE_CHECKING:` if only annotations use it.")
-    _, blind = _nonstdlib_module_scope_imports(ROOT, top_level_only=True)
-    assert blind == violations, (
-        f"the tree.body-only scan reported {blind} where the recursive scan reported "
-        f"{violations}; on a clean package both must be empty.")
-
-
 def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tmp_path):
     """KNOCK-OUT. Plants live in a `tmp_path` file named
     `scripts/modal_runner/core.py` whose text is the frozen monolith from
@@ -2194,8 +2168,9 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         exemption's clothes.
       * the function-body `import torch` row is the NEGATIVE control that
         separates this instrument from bare `ast.walk`. It is the shape the real
-        module uses twice, so `test_..._imports_only_the_standard_library`
-        already objects to descending -- this row says so where a reader of the
+        module uses twice, so tests/test_modal_runner_package_shape.py's
+        `test_package_import_purity_scans_every_module` already objects to
+        descending -- this row says so where a reader of the
         instrument is standing.
       * the `async def` row is the only thing that objects to dropping
         `AsyncFunctionDef` from the skip set. The module has 0 async defs, so
@@ -2414,29 +2389,6 @@ def _module_scope_shape_violations(tree):
     return examined, violations
 
 
-def test_gate_g_criterion_13_the_runner_library_declares_and_does_nothing_else():
-    candidates, undeclared = _runner_module_population(ROOT)
-    assert undeclared == [], (
-        f"scripts/modal_runner/ holds modules RUNNER_MODULES does not declare: {undeclared}. "
-        "Declare a new module in RUNNER_MODULES (tests/test_modal_packaging.py) and in "
-        "tests/test_modal_runner_package_shape.py's tables in the same commit, or delete the "
-        "stray file.")
-    scanned = []
-    for rel in candidates:
-        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
-        examined, violations = _module_scope_shape_violations(tree)
-        scanned.append(rel)
-        assert examined == len(tree.body), (
-            f"gate (g) examined {examined} of {len(tree.body)} module-scope statements in {rel}")
-        assert violations == [], (
-            f"{rel} does work at module scope, as (kind, line, rule): {violations}. Module scope "
-            "may hold only the docstring, imports, one imports-only `if TYPE_CHECKING:` block "
-            "without else, and declarations; move anything else into a function.")
-    declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
-    assert scanned == declared, (
-        f"gate (g) read {scanned}, not the {len(declared)} modules RUNNER_MODULES declares")
-
-
 def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     """KNOCK-OUT 1, and the criterion-13 half of a two-file pair.
 
@@ -2464,9 +2416,9 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
         tests/test_modal_client.py::test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe
 
     which names this test by node id in return. It lives there rather than here
-    because `tests/test_modal_packaging.py` imports no `tests.*` module at
-    module scope (only the runtime-identity tests import
-    `tests._modal_import_probe`, inside their bodies) and that exclusion is
+    because `tests/test_modal_packaging.py` imports no test module at module
+    scope but the data-only tests/modal_runner_tables.py (the runtime-identity
+    tests import `tests._modal_import_probe` inside their bodies), and that exclusion is
     load-bearing -- `_seam_sources()` omits this file because
     self-feeding the classifier returns a poisoned destination count -- so
     duplicating that gate's subprocess helper into this file would put two copies
@@ -2686,8 +2638,8 @@ def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_b
     gate that simply rejects every one of them is observationally identical to
     a correct gate on all three red knock-outs. Row 1 says the construct is
     ALLOWED. On the live package, commands.py and preflight.py each hold one
-    such block, so `test_gate_g_criterion_13_the_runner_library_declares_and_does_nothing_else`
-    and tests/test_modal_runner_package_shape.py's
+    such block, so tests/test_modal_runner_package_shape.py's
+    `test_package_structure_contract` and
     `test_package_header_accepts_import_only_type_checking` say so as well.
 
     ROWS 2 AND 3 HOLD THE `at most one` CLAUSE AND THE NAME CLAUSE, which are
