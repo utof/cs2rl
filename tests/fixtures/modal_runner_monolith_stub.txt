@@ -1,0 +1,56 @@
+"""Synthetic module text for the gate (e) and gate (g) knock-outs. Never imported.
+
+tests/test_modal_packaging.py splices each plant in after line 19, the
+`from __future__ import annotations` below, and asserts violation line numbers
+counted from there. The knock-outs argue that a row is inert on the unplanted
+text because this module has none of the shapes their rows plant.
+`_monolith_stub_source` checks each of those properties when it reads this
+file, so an edit that breaks one fails there, naming it:
+  * line 19 is the `__future__` import;
+  * every module-scope import is stdlib and undotted;
+  * module scope holds no `if` or `try`, so no `TYPE_CHECKING` block;
+  * no relative import, no async def, and no import in a class body;
+  * torch is imported only inside the two function bodies at the end.
+
+It stands in for scripts/modal_runner_lib.py at 2bb32ac, the monolith the
+knock-outs were written against. Reading that text needed git history, which
+a shallow clone or a source tarball does not have (gh#223).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+VOLUME_NAME = "stub-training-artifacts"
+CHECKPOINT_NAME = "policy.pt"
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A class body that holds no import."""
+
+    ok: bool
+    reason: str | None = None
+
+    def describe(self) -> str:
+        return "ok" if self.ok else str(self.reason)
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def read_json(path: Path) -> object:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _import_torch() -> object:
+    import torch
+    return torch
+
+
+def _load_checkpoint_weights(path: Path) -> object:
+    import torch
+    return torch.load(path, map_location="cpu", weights_only=True)

@@ -1969,36 +1969,72 @@ def _is_type_checking_test(test):
             or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"))
 
 
-def _frozen_runner_source():
-    """The pre-split monolith, `scripts/modal_runner_lib.py` at 2bb32ac, digest-checked.
+# The synthetic module text the gate (e) and gate (g) knock-outs plant into.
+_MONOLITH_STUB = ROOT / "tests" / "fixtures" / "modal_runner_monolith_stub.txt"
 
-    WHY IT OUTLIVES THE SPLIT: it is synthetic fixture text, not an oracle for
-    the live package. Five knock-outs of gates (e) and (g), written before the
-    split against the then-live monolith, splice their plants in after its line 19
-    (`from __future__ import annotations`), assert violation line numbers
-    derived from that, and argue each row is inert on the unplanted text
-    because it holds no `TYPE_CHECKING` block, relative import, async def or
-    class-body import. The package modules change with every edit, every one
-    but core.py holds relative imports, and core.py's `__future__` import is
-    its line 2, so none can stand in. The digest pin keeps those line numbers
-    and inertness claims about these exact bytes. A missing git object fails
-    naming the pinned commit.
+
+def _monolith_stub_source():
+    """The knock-outs' fixture text, after checking each property they rely on.
+
+    WHY A CHECKED-IN STUB: five knock-outs of gates (e) and (g) were written
+    against the pre-split monolith and read it with
+    `git show 2bb32ac:scripts/modal_runner_lib.py`, so they failed in a
+    shallow clone or a source tarball (gh#223). None of the live package
+    modules can stand in: they change with every edit, all but core.py hold
+    relative imports, and core.py's `__future__` import is not its line 19.
+
+    The knock-outs splice each plant in after line 19 (`_splice_into_stub`),
+    assert violation line numbers counted from there, and argue that every
+    row is inert on the unplanted text. Each property those arguments rest on
+    is asserted here, so an edit to the stub that breaks one fails naming it.
     """
-    import hashlib
+    text = _MONOLITH_STUB.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    tree = ast.parse(text)
+    nodes = list(ast.walk(tree))
+    body_kinds = (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign, ast.FunctionDef,
+                  ast.ClassDef)
+    plain = [
+        alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names
+    ]
+    froms = [node.module for node in tree.body if isinstance(node, ast.ImportFrom)]
+    lazy = [
+        alias.name for function in nodes if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function) if isinstance(node, ast.Import) for alias in node.names
+    ]
+    claims = [
+        ("line 19 is `from __future__ import annotations`", len(lines) > 18
+         and lines[18] == "from __future__ import annotations\n"),
+        ("module scope holds only the docstring, imports and declarations (so no `if`, "
+         "`try` or `TYPE_CHECKING` block)",
+         all(isinstance(node, body_kinds) or index == 0 for index, node in enumerate(tree.body))),
+        ("every module-scope import is stdlib, and no plain import is dotted",
+         all("." not in name and name in sys.stdlib_module_names for name in plain)
+         and all(module and module.split(".")[0] in sys.stdlib_module_names for module in froms)),
+        ("no relative import", not any(isinstance(n, ast.ImportFrom) and n.level for n in nodes)),
+        ("no async def", not any(isinstance(n, ast.AsyncFunctionDef) for n in nodes)),
+        ("no import in a class body", not any(
+            isinstance(child, (ast.Import, ast.ImportFrom))
+            for n in nodes if isinstance(n, ast.ClassDef) for child in n.body)),
+        ("torch is imported in exactly two function bodies", lazy == ["torch", "torch"]),
+    ]
+    broken = [claim for claim, holds in claims if not holds]
+    assert not broken, (
+        f"{_MONOLITH_STUB.relative_to(ROOT)} no longer satisfies: {broken}. The gate (e) and "
+        "gate (g) knock-outs' line numbers and inertness arguments rest on each; restore it.")
+    return text
 
-    pin = "2bb32ac09db897d3bdaa34660d242f5011524e85"
-    result = subprocess.run(["git", "show", f"{pin}:scripts/modal_runner_lib.py"],
-                            cwd=ROOT,
-                            capture_output=True,
-                            check=False)
-    assert result.returncode == 0, f"Fetch the pinned fixture text at {pin}: {result.stderr!r}"
-    data = result.stdout
-    digest = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
-    assert digest == "f0ca9853101b62cd8edb0c4904050829e7a005c5", (
-        f"the pinned fixture text at {pin} hashes to blob {digest}, not its recorded blob id: "
-        "the git object is corrupt or a filter rewrote it. Repair the object store (re-fetch "
-        "the commit); never edit the digest to match.")
-    return data.decode("utf-8")
+
+def _splice_into_stub(text):
+    """The stub with `text` inserted after its line 19, the `__future__` import.
+
+    A plant above that line would raise `SyntaxError: from __future__ imports
+    must occur at the beginning of the file`, a red for the wrong reason.
+    Nothing here is executed, only parsed, so a plant may name `os` or `modal`
+    without either being importable.
+    """
+    lines = _monolith_stub_source().splitlines(keepends=True)
+    return "".join(lines[:19]) + text + "".join(lines[19:])
 
 
 def _nonstdlib_module_scope_imports(repo_root, top_level_only=False, *, paths=None):
@@ -2068,8 +2104,8 @@ def _nonstdlib_module_scope_imports(repo_root, top_level_only=False, *, paths=No
 
 def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tmp_path):
     """KNOCK-OUT. Plants live in a `tmp_path` file named
-    `scripts/modal_runner/core.py` whose text is the frozen monolith from
-    `_frozen_runner_source`, not the live package; nothing live is edited (GC2).
+    `scripts/modal_runner/core.py` whose text is the stub from
+    `_monolith_stub_source`, not the live package; nothing live is edited (GC2).
 
     THE DELIVERABLE IS THE SECOND ASSERTION of the first block. A version of this
     gate built on `tree.body` PASSES the decoy -- that is the exact blindness the
@@ -2080,8 +2116,9 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
     `from __future__ import annotations`, the first statement after the
     docstring, and a `__future__` import must precede all other code: a plant
     above it raises `SyntaxError: from __future__ imports must occur at the
-    beginning of the file`, which is a red for the wrong reason. The plant site
-    is asserted below so that an edit which moves that line is loud.
+    beginning of the file`, which is a red for the wrong reason.
+    `_monolith_stub_source` asserts the plant site, so an edit that moves that
+    line is loud.
 
     THE TABLE IS ONE ROW PER INDEPENDENT CLAUSE of the gate, because a gate whose
     headline clause has a knock-out and whose secondary clauses have none is the
@@ -2090,13 +2127,13 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
     mutant:
 
       * `import modal as ...` is the ONLY row that objects to resolving names
-        through `alias.asname`; that mutant is silent on the real module AND on
+        through `alias.asname`; that mutant is silent on the stub AND on
         the decoy, because a plain `import modal` has no `asname`.
       * `from modal.functions import ...` objects to dropping `ImportFrom`
-        handling entirely (silent on the real module, whose from-imports are all
+        handling entirely (silent on the stub, whose from-imports are all
         stdlib) and to keeping the full dotted path instead of the root.
       * `import xml.etree.ElementTree` is the same root-resolution clause for
-        `Import`, and it was MISSING until fault seeding found it: the module has
+        `Import`, and it was MISSING until fault seeding found it: the stub has
         no dotted plain `import` at module scope, and neither did any other row
         here, so `alias.name` without `.split(".")[0]` survived everything. It is
         a FALSE-RED mutant rather than a false-green one -- the gate would have
@@ -2139,7 +2176,7 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         observation in the file.
       * the CLASS-BODY row objects to putting `ClassDef` back in the skip set.
         A class body executes at import time, so this is a real violation; the
-        module's own 23 classes contain no import, so nothing else can see it.
+        stub's class holds no import, so nothing else can see it.
       * the class-METHOD row is the other half of that change. Once the walk
         enters class bodies it reaches the methods inside them, and a method is
         a `FunctionDef` whose body does not run on import -- this row is what
@@ -2176,26 +2213,26 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         that DOES execute, so skipping it would be a blind spot wearing an
         exemption's clothes.
       * the function-body `import torch` row is the NEGATIVE control that
-        separates this instrument from bare `ast.walk`. It is the shape the real
-        module uses twice, so tests/test_modal_runner_package_shape.py's
+        separates this instrument from bare `ast.walk`. It is the shape the stub
+        uses twice, so tests/test_modal_runner_package_shape.py's
         `test_package_import_purity_scans_every_module` already objects to
         descending -- this row says so where a reader of the
         instrument is standing.
       * the `async def` row is the only thing that objects to dropping
-        `AsyncFunctionDef` from the skip set. The module has 0 async defs, so
+        `AsyncFunctionDef` from the skip set. The stub has no async def, so
         every other observation here is blind to that entry.
       * the relative-import row is the only thing that objects to dropping
-        `node.level == 0`. Silent on today's module, which has no relative
-        imports; W3b's package modules will have them, and without this row the
-        gate would redden over legal intra-package imports on the day of the
-        split.
+        `node.level == 0`. Silent on the stub, which has no relative
+        import; the package modules all have them, and without this row the
+        gate would redden over legal intra-package imports.
 
-    EVERY ROW BELOW IS INERT ON THE UNMODIFIED SUBJECT, by construction: the
-    module has no class-body import, no async def, no `TYPE_CHECKING` block, no
+    EVERY ROW BELOW IS INERT ON THE UNMODIFIED SUBJECT, by construction, and
+    `_monolith_stub_source` asserts each property: the stub has no class-body
+    import, no async def, no `TYPE_CHECKING` block, no
     relative import, no dotted plain `import`, no conditional module-scope import
     of any spelling, and nothing imported inside a container that RUNS at import
     time. Stated that way rather than as "nothing below depth 1", which is false:
-    the module has two imports below depth 1, both `torch`, in `_import_torch`
+    the stub has two imports below depth 1, both `torch`, in `_import_torch`
     and `_load_checkpoint_weights` -- function bodies, which is the `lazy` row's
     subject and does not execute on import. That is the point. Each one is the
     ONLY observation in the suite that holds its clause, which is why they are
@@ -2216,23 +2253,13 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
       * so if a future edit moves an `import` INSIDE the `find_spec` header,
         gate (e) reddens -- CORRECTLY. That import runs.
     """
-    source = _frozen_runner_source()
-    lines = source.splitlines(keepends=True)
-    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
-        "GC2 pins plants to line 19 because a `__future__` import must come first. That "
-        f"line now reads {lines[18]!r}, so every plant below would land in the wrong place "
-        "-- re-measure the plant site before trusting anything in this test.")
 
     def plant(text, slug):
         """Write a tmp_path repo whose `scripts/modal_runner/core.py` is the
-        frozen monolith with `text` spliced in after line 19; return its root.
-
-        Nothing here is ever EXECUTED -- the gate parses. So a plant may name
-        `os` or `modal` without either being importable.
-        """
+        stub with `text` spliced in after line 19; return its root."""
         target = tmp_path / slug / "scripts" / "modal_runner" / "core.py"
         target.parent.mkdir(parents=True)
-        target.write_text("".join(lines[:19]) + text + "".join(lines[19:]), encoding="utf-8")
+        target.write_text(_splice_into_stub(text), encoding="utf-8")
         return target.parents[2]
 
     decoy = plant("try:\n    import modal\nexcept ImportError:\n    modal = None\n", "decoy")
@@ -2446,16 +2473,11 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     about it -- that is precisely the class this branch closes, and asserting it
     would dress a vacuous green as a contrast.
     """
-    lines = _frozen_runner_source().splitlines(keepends=True)
-    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
-        "GC2 pins plants to line 19 because a `__future__` import must come first. That line "
-        f"now reads {lines[18]!r}, so the plant below lands somewhere else and every line "
-        "number in this test is about a different statement.")
-    planted = ("".join(lines[:19]) + "import importlib.util\n"
-               "if importlib.util.find_spec('modal') is not None:\n"
-               "    _ON_CONTAINER = True\n"
-               "else:\n"
-               "    _ON_CONTAINER = False\n" + "".join(lines[19:]))
+    planted = _splice_into_stub("import importlib.util\n"
+                                "if importlib.util.find_spec('modal') is not None:\n"
+                                "    _ON_CONTAINER = True\n"
+                                "else:\n"
+                                "    _ON_CONTAINER = False\n")
 
     tree = ast.parse(planted)
     examined, violations = _module_scope_shape_violations(tree)
@@ -2499,7 +2521,7 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     ]:
         slug = "agree_" + shape.replace(".", "_").replace("(", "").replace(")", "").replace(
             " ", "_")
-        block = "".join(lines[:19]) + f"if {shape}:\n    import modal\n" + "".join(lines[19:])
+        block = _splice_into_stub(f"if {shape}:\n    import modal\n")
         agree_root = tmp_path / slug / "scripts"
         (agree_root / "modal_runner").mkdir(parents=True)
         (agree_root / "modal_runner" / "core.py").write_text(block, encoding="utf-8")
@@ -2524,9 +2546,10 @@ def test_gate_g_criterion_13_reddens_on_module_scope_work_the_kind_census_hides(
     """KNOCK-OUT 2. The two shapes a kind-only allow-list is green on.
 
     ROW 1 -- A BARE MODULE-SCOPE CALL. `logging.basicConfig(level=logging.INFO)`
-    adds NO `If` node; measured, the census goes to `Import 18 | Expr 2 | ...`
-    and every other kind is unchanged. A gate that allows the kind `Expr` because
-    `body[0]` is one passes this, passes the real module, and passes every other
+    adds NO `If` node; measured on the stub, the census goes from
+    `Import 2 | Expr 1` to `Import 3 | Expr 2` and every other kind is
+    unchanged. A gate that allows the kind `Expr` because
+    `body[0]` is one passes this, passes the stub, and passes every other
     check in this plan. Of the four defect shapes this task covers, it is the
     likeliest to appear in a real W3b header -- somebody configures logging, or
     calls `os.environ.setdefault`, at the top of a new module -- and it is the
@@ -2546,16 +2569,6 @@ def test_gate_g_criterion_13_reddens_on_module_scope_work_the_kind_census_hides(
     say "this statement", and a plant whose line number was not re-derived is the
     common way that stops being true.
     """
-    lines = _frozen_runner_source().splitlines(keepends=True)
-    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
-        f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
-
-    def plant(text):
-        """Parse the frozen monolith with `text` spliced in after line 19.
-        Repeated in each knock-out rather than hoisted, a W3a choice made for its
-        GC3 module-name budget; nothing here is ever executed, only parsed."""
-        return ast.parse("".join(lines[:19]) + text + "".join(lines[19:]))
-
     for text, expected, clause in [
         ("import logging\nlogging.basicConfig(level=logging.INFO)\n", [
             ("Expr", 21, "only the module docstring may be a bare expression at module scope")
@@ -2566,7 +2579,7 @@ def test_gate_g_criterion_13_reddens_on_module_scope_work_the_kind_census_hides(
         ], "a module-scope `try:` is neither an import nor a declaration, and it is the "
          "only row holding the helper's final `elif` and its declaration tuple"),
     ]:
-        tree = plant(text)
+        tree = ast.parse(_splice_into_stub(text))
         examined, violations = _module_scope_shape_violations(tree)
         assert examined == len(tree.body), (
             f"gate (g) stopped short of the whole module scope: {examined} of {len(tree.body)}")
@@ -2580,10 +2593,10 @@ def test_gate_g_criterion_13_reddens_on_a_type_checking_body_that_is_not_imports
     MEASURED, and it is the sharpest evidence in this task that a kind-level
     instrument is the wrong one:
 
-        if TYPE_CHECKING:            ->  ImportFrom 7 | If 1 | Import 17 | ...
+        if TYPE_CHECKING:            ->  ImportFrom 4 | If 1 | Import 2 | ...
             import decimal
 
-        if TYPE_CHECKING:            ->  ImportFrom 7 | If 1 | Import 17 | ...
+        if TYPE_CHECKING:            ->  ImportFrom 4 | If 1 | Import 2 | ...
             import decimal
             _X = 1
 
@@ -2604,13 +2617,11 @@ def test_gate_g_criterion_13_reddens_on_a_type_checking_body_that_is_not_imports
     criterion 5 declines to look inside it. Complementary, and neither subsumes
     the other (Ruling 33).
     """
-    lines = _frozen_runner_source().splitlines(keepends=True)
-    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
-        f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
-    tree = ast.parse("".join(lines[:19]) + "from typing import TYPE_CHECKING\n"
-                     "if TYPE_CHECKING:\n"
-                     "    import decimal\n"
-                     "    _X = 1\n" + "".join(lines[19:]))
+    tree = ast.parse(
+        _splice_into_stub("from typing import TYPE_CHECKING\n"
+                          "if TYPE_CHECKING:\n"
+                          "    import decimal\n"
+                          "    _X = 1\n"))
 
     examined, violations = _module_scope_shape_violations(tree)
     assert examined == len(tree.body), (
@@ -2625,8 +2636,8 @@ def test_gate_g_criterion_13_reddens_on_a_type_checking_body_that_is_not_imports
 def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_by_name():
     """KNOCK-OUT 4 plus the positive control the other three depend on.
 
-    ROW 1 IS THE GREEN HALF THE WHOLE TASK RESTS ON. The frozen monolith these
-    plants splice into has ZERO module-scope `If` nodes, so on this substrate a
+    ROW 1 IS THE GREEN HALF THE WHOLE TASK RESTS ON. The stub these plants
+    splice into has no module-scope `If`, so on this substrate a
     gate that simply rejects every one of them is observationally identical to
     a correct gate on all three red knock-outs. Row 1 says the construct is
     ALLOWED. On the live package, commands.py and preflight.py each hold one
@@ -2663,14 +2674,6 @@ def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_b
     instrument over it; criterion 5
     independently checks the imports in that branch.
     """
-    lines = _frozen_runner_source().splitlines(keepends=True)
-    assert lines[18].rstrip("\n") == "from __future__ import annotations", (
-        f"GC2 pins plants to line 19; that line now reads {lines[18]!r}.")
-
-    def plant(text):
-        """Parse the real module with `text` spliced in after line 19."""
-        return ast.parse("".join(lines[:19]) + text + "".join(lines[19:]))
-
     for text, expected, clause in [
         ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import decimal\n", [],
          "a single imports-only `if TYPE_CHECKING:` block is LEGAL -- a gate that rejects "
@@ -2700,7 +2703,7 @@ def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_b
          "The name-based rule fails CLOSED in this direction, which is the direction it "
          "should fail in"),
     ]:
-        tree = plant(text)
+        tree = ast.parse(_splice_into_stub(text))
         examined, violations = _module_scope_shape_violations(tree)
         assert examined == len(tree.body), (
             f"gate (g) stopped short of the whole module scope: {examined} of {len(tree.body)}")
