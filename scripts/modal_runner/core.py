@@ -226,11 +226,6 @@ TERMINAL_STATUSES = frozenset({
     Status.INTERRUPTED,
     Status.BUILD_FAILED,
 })
-NONTERMINAL_STATUSES = frozenset({
-    Status.PREPARING,
-    Status.BUILDING,
-    Status.TRAINING,
-})
 
 
 def mounted_path(relative: PurePosixPath) -> Path:

@@ -17,9 +17,9 @@ from tests.modal_patch_binding_campaign import BINDING_SITES, binding_target
 # repo-relative path.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# What each site's companion observation drives, recorded as the R1 `stimulus`
-# field of the campaign's per-site record. Taken from the B7 site matrix and
-# kept true of `test_patch_binding_observation`'s branch for that site.
+# What each site's companion observation drives, recorded as the `stimulus`
+# field of the campaign's per-site record (`_record_observation`), and kept true
+# of `test_patch_binding_observation`'s branch for that site.
 _STIMULUS = {
     'prepare-validator':
     'preflight._validate_remote_resume(checkpoint, None) on stable local bytes, weights-only '
@@ -55,7 +55,7 @@ _STIMULUS = {
 # The ORIGINAL installer of each BINDING_SITES key: the test file, and the
 # module-level function whose body calls `binding_target(site)`. The campaign
 # certifies `binding_target(site)` through the companion; this table ties that
-# certificate to the ten original sites. `_binding_site_violations` checks it.
+# certificate to the original sites. `_binding_site_violations` checks it.
 _ORIGINAL_SITES = {
     'prepare-validator':
     ('tests/test_modal_runner.py', 'test_prepare_validates_resume_then_dumps_and_hashes_config'),
@@ -389,7 +389,7 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
         pytest.fail(f'unknown binding site: {site}')
 
 
-@pytest.mark.slow                      # 70 pytest child sessions (~1 min)
+@pytest.mark.slow                      # 7 pytest child sessions per binding site (~1 min)
 def test_patch_binding_campaign(tmp_path):
     """The executable instrument must report every original site and own bite.
 
@@ -407,12 +407,7 @@ def test_patch_binding_campaign(tmp_path):
     ]
     assert_spans = [(node.lineno, node.end_lineno) for node in ast.walk(observation)
                     if isinstance(node, ast.Assert)]
-    sites = [
-        'prepare-validator', 'fallback-loader', 'fallback-python', 'interrupt-loader',
-        'watcher-publisher', 'terminal-validator', 'terminal-hasher', 'attempt-watcher',
-        'attempt-transition', 'client-mount'
-    ]
-    assert list(BINDING_SITES) == sites
+    sites = list(BINDING_SITES)
     matrix = tmp_path / 'sites.json'
     matrix.write_text(json.dumps(sites))
     evidence = tmp_path / 'campaign'
@@ -494,7 +489,7 @@ _DEFECT_CLAUSE = 'prepare-validator: single-binding defect did not lose its own 
 _FIRST_PROBE = 'prepare-validator: baseline probe prepare-validator-0-baseline'
 _REJECTION_CLAUSES = {
     'well-formed': None,
-    'missing-site': 'declared matrix must equal all ten binding sites',
+    'missing-site': 'declared matrix must equal BINDING_SITES, in order',
     'missing-observation': 'prepare-validator: baseline observation failed',
     'baseline-exit': 'prepare-validator: baseline observation failed',
     'baseline-mismatch': 'prepare-validator: baseline observation failed',
@@ -720,7 +715,7 @@ def _binding_site_violations(sources):
     patches. Returns the sorted violation strings; `[]` is green.
 
     WHY: `test_patch_binding_campaign` proves that `binding_target(site)` reaches
-    each consumer, and nothing more. Review of the W3b tree found that
+    each consumer, and nothing more. A review of the package split found that
     respelling `_record_hash_after_terminal`'s validator patch as a package patch
     stayed green everywhere: the facade exports `validate_local_checkpoint`, so
     there is no AttributeError, and that helper's callers assert
@@ -774,10 +769,9 @@ def _binding_site_violations(sources):
         tree = ast.parse(source)
         # The dotted `scripts.modal_runner` is always a facade spelling (see
         # PITFALLS). `_production_package_surface` (tests/test_modal_client.py)
-        # reads the `import` half of the alias set the same way. Deliberately
-        # not shared: that function does not accept `from scripts import
-        # modal_runner`, and one helper for both would be a new seam-governed
-        # name, so it is not a pure move.
+        # builds the same alias set its own way. Deliberately not shared: one
+        # helper for both would be a new seam-governed name in a governed file,
+        # so it is not a pure move.
         facade = {'scripts.modal_runner'} | {
             alias.asname or alias.name
             for node in ast.walk(tree) if isinstance(node, ast.Import)

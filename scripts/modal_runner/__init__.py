@@ -7,16 +7,61 @@ therefore imports only the standard library and its own sibling modules at
 module scope. Torch is imported lazily, inside `checkpoint._import_torch` and
 `checkpoint._load_checkpoint_weights`, and Modal is never imported here.
 
-THIS FACADE IS DELIBERATELY NARROW. It re-exports exactly the 41 names that
-production code reads from the package (scripts/run_modal.py,
-scripts/modal_artifacts.py and scripts/modal_backfill_sidecar.py), and nothing
-more. `_production_package_surface` in tests/test_modal_client.py derives that
-set from those three callers and the surface gates pin `__all__` and the
-module's attributes to it. Tests read and patch the OWNING submodule
-(`scripts.modal_runner.state`, not `scripts.modal_runner`). The names here are
-from-imported copies, so patching one replaces only the facade's binding and
-never reaches the submodule code that calls it. Never widen the facade to
-satisfy a test; import the owning submodule instead.
+MODULE MAP (each module's exact symbols are its MANIFEST entry in
+tests/test_modal_runner_package_shape.py):
+  core        constants, enums, protocols, data records, ValidationError and
+              the path and hash helpers (see WHERE A NEW NAME GOES)
+  request     run and artifact-client requests; train.py argument validation
+  source      clean-HEAD check, deterministic source bundles, safe extraction
+  checkpoint  checkpoint loading and validation; completed-run evidence
+  state       run status and transitions, reservations, claims, heartbeats,
+              derived run views
+  commands    install/train/dump-config/CUDA-probe argv and child environments
+  preflight   preparing the remote source before a training attempt
+  training    one training attempt: child process, checkpoint publication
+  __init__    this facade: its module scope holds only this docstring,
+              `from .<module> import ...` lines and `__all__`
+
+WHERE A NEW NAME GOES: put a new name in the one module that reads it; add to
+core only a name that two or more modules read. A new cross-module import needs
+a DEPENDENCIES entry in tests/test_modal_runner_package_shape.py. Some existing
+names predate this rule: core holds many that only one module reads, and
+preflight holds `_stop_heartbeat`, which preflight and training both read;
+training imports preflight for that helper alone. They are known and tracked in
+gh#223; do not copy their placement.
+
+ADDING A MODULE, in this order: (1) add it to RUNNER_MODULES in
+tests/test_modal_packaging.py; (2) add its MANIFEST and DEPENDENCIES entries,
+add it to the DEPENDENCIES entry of each module that imports it (and use
+ANNOTATION_DEPENDENCIES for an import made only under TYPE_CHECKING), all in
+tests/test_modal_runner_package_shape.py; (3) `git add` the file. The mount and
+package-population gates in tests/test_modal_client.py read `git ls-files`, so
+until step 3 they report the module missing although it is on disk.
+
+THIS FACADE IS DELIBERATELY NARROW. It re-exports exactly the names that
+production code reads from the package, and nothing more.
+`_production_package_surface` in tests/test_modal_client.py derives that set
+from every tracked scripts/*.py outside this package, and the surface gates pin
+`__all__` and the module's attributes to it. Never widen the facade to satisfy
+a test; import the owning submodule instead.
+
+PATCHING IN TESTS: patch a name in the namespace the code under test reads it
+from at call time.
+  * scripts/run_modal.py, scripts/modal_artifacts.py and
+    scripts/modal_backfill_sidecar.py import this facade as `mrl` and read
+    `mrl.X` at call time, so a test of them patches the facade attribute
+    (`scripts.modal_runner.X`). Patching the owning submodule does not change
+    what `mrl.X` returns.
+  * Code inside the package never reads the facade: its names are
+    from-imported copies, so a facade patch never reaches a package caller. A
+    caller in the module that defines the name, or one reading a QUALIFIED
+    SEAM below, sees a patch on the owning submodule
+    (`scripts.modal_runner.state.X`). A caller that from-imports the name from
+    a sibling reads its own copy, so patch the importing module instead. For a
+    site in BINDING_SITES (tests/modal_patch_binding_campaign.py), install the
+    patch through `binding_target(site)`, which names the module to patch.
+  `test_patch_target_dichotomy` (tests/test_modal_patch_bindings.py) shows both
+  cases on `validate_local_checkpoint`.
 
 QUALIFIED SEAMS. Exactly four names are read across modules through the module
 object rather than a from-import: `core.PREBUILT_PYTHON`, `core.sha256_file`,

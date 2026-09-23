@@ -11,6 +11,7 @@ from pathlib import Path
 from . import core
 from .core import (
     _PREBUILT_LOAD_SOURCE,
+    CHECKPOINT_NAME,
     INPUTS_ROOT,
     PREBUILT_LOAD_TIMEOUT_SECONDS,
     CheckpointVerdict,
@@ -260,7 +261,7 @@ def validate_completed_run(run_root: Path, manifest: Manifest) -> CompletionEvid
     """
     run_root = Path(run_root)
     ckpt_dir = run_root / "checkpoints"
-    ckpt = ckpt_dir / "dust2_policy.pt"
+    ckpt = ckpt_dir / CHECKPOINT_NAME
     validate_local_checkpoint(ckpt)
     config_path = ckpt_dir / "config.json"
     if not config_path.is_file():

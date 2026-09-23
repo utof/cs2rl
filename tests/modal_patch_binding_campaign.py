@@ -1,4 +1,4 @@
-"""The ten at-risk Modal runner patch sites, and the campaign that proves each one bites.
+"""The at-risk Modal runner patch sites (`BINDING_SITES`) and the campaign proving each bites.
 
 WHAT this module owns:
   * `BINDING_SITES` / `binding_target`: the one table that says which owning
@@ -24,7 +24,7 @@ scripts/modal_runner/*.py and the /opt/cs2rl build inputs.
 
 Run from the repository root (`test_patch_binding_campaign` is the checked-in
 caller): python -m tests.modal_patch_binding_campaign --repo-root .
---evidence-root <new directory> --matrix <JSON list of the ten site keys>
+--evidence-root <new directory> --matrix <JSON list of BINDING_SITES' keys, in order>
 
 PITFALLS:
   * `binding_target` imports the owner from a formatted string. The tracked
@@ -57,10 +57,10 @@ BINDING_SITES = {
 }
 
 # Seconds one child pytest session may run before the campaign fails. Measured
-# on 2026-09-22 on the W3b split tree (fix wave F3 working tree), by pytest
-# `--durations`: the call phase of `test_patch_binding_campaign`, which runs all
-# 70 children, took 64.4 s while a full suite ran concurrently, so about 1 s per
-# child. The margin is for a loaded machine, not for a slow test.
+# on 2026-09-22, by pytest `--durations`: the call phase of
+# `test_patch_binding_campaign`, which then ran all 70 children, took 64.4 s
+# while a full suite ran concurrently, so about 1 s per child. The margin is for
+# a loaded machine, not for a slow test.
 _PROBE_TIMEOUT_S = 60
 
 
@@ -70,6 +70,12 @@ def binding_target(site):
     return importlib.import_module(f'scripts.modal_runner.{owner}'), symbol
 
 
+# RENAME HAZARD: `test_patch_binding_campaign_rejects_invalid_evidence`
+# (tests/test_modal_patch_bindings.py) replaces this function BY NAME inside a
+# `python -c` program string (`campaign._run_probe = supplied_probe`). No call
+# graph, grep for a call, or rename tool sees that reach. Rename both together:
+# a renamed function leaves that assignment inert, and its supplied-evidence
+# rows then run real pytest children instead of the planted evidence.
 def _run_probe(repo_root, evidence_root, site, mode, label):
     """Run one isolated pytest and retain its own observation and failure clause.
 
@@ -176,7 +182,9 @@ def _run_probe(repo_root, evidence_root, site, mode, label):
 def run_campaign(repo_root, evidence_root, sites):
     """Require two own-observation bites and restorations for all declared sites."""
     if sites != list(BINDING_SITES):
-        raise ValueError('declared matrix must equal all ten binding sites in order')
+        raise ValueError('declared matrix must equal BINDING_SITES, in order '
+                         f'(tests/modal_patch_binding_campaign.py): got {sites}, '
+                         f'expected {list(BINDING_SITES)}')
     records = []
     for site in sites:
         repetitions = []
@@ -230,7 +238,7 @@ def run_campaign(repo_root, evidence_root, sites):
 
 
 def main():
-    """Validate the declared matrix and emit the complete ten-site JSON evidence.
+    """Validate the declared matrix and emit one JSON evidence record per binding site.
 
     The evidence root must be a directory that does not exist yet; it is created
     here, wherever it is. Refusing an existing one keeps two campaigns from

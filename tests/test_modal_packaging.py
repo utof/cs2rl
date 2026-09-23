@@ -167,7 +167,7 @@ def bare_spelling_imports(source, target=BARE):
     import modal_runner_lib` returned `[]` under `PACKAGED` -- an ordinary
     idiom, invisible. That mattered because
     `test_the_runtime_probe_runs_every_test_file_that_imports_the_runner`
-    promises Task 4 by name that it reddens when the import moves; had Task 4
+    promised Task 4 by name that it reddens when the import moves; had Task 4
     written this spelling, it would have stayed green and the runtime gate would
     have silently stopped covering the new file. W3 makes the idiom MORE likely
     by turning `modal_runner` into a package.
@@ -418,9 +418,10 @@ def test_the_walker_finds_the_packaged_spelling_in_every_shape(planted, shape):
     Every row above `test_guard_detects_a_planted_bare_import` covers the `BARE`
     target only. `_test_files_importing(PACKAGED)` calls the same walker with a
     DOTTED target, where one shape behaves differently: the leaf can be imported
-    from its parent. Review found `from scripts import modal_runner`
-    returning `[]`, so the file that Task 4 is warned about could have moved its
-    import into that idiom and never entered `_IMPORTERS`.
+    from its parent. Review found `from scripts import modal_runner` (then
+    `modal_runner_lib`) returning `[]`, so the client half W2's split created,
+    tests/test_modal_client.py, could have moved its import into that idiom and
+    never entered `_IMPORTERS`.
 
     Each row also asserts SILENCE under `BARE`. That is not padding -- it is the
     inertness half. A fix that made the new branch fire for a top-level target
@@ -442,8 +443,12 @@ def test_import_guard_plant_populations_are_complete():
     }
     for name, expected in populations.items():
         marks = [mark for mark in globals()[name].pytestmark if mark.name == "parametrize"]
-        assert len(marks) == 1
-        assert len(marks[0].args[1]) == expected, name
+        assert len(marks) == 1, f"{name} must carry exactly one parametrize mark, not {len(marks)}"
+        rows = len(marks[0].args[1])
+        assert rows == expected, (
+            f"{name} has {rows} rows, expected {expected}; if you added or removed a plant on "
+            f"purpose, update populations[{name!r}] in this test "
+            "(test_import_guard_plant_populations_are_complete)")
 
 
 def test_runtime_identity_rejects_competing_module_objects(monkeypatch):
@@ -719,15 +724,6 @@ def test_the_runtime_probe_runs_every_test_file_that_imports_the_runner():
       with no reason to be there, and usually a typo'd path that has silently
       stopped matching a real file. Measured by adding `tests/test_demo_format.py`:
       again THIS test is the only objector.
-
-    CROSS-TASK WARNING, for whoever hits this in Task 4: W2 splits
-    `tests/test_modal_runner.py` into a runner half and a client half. When the
-    `scripts.modal_runner` import travels to the new file, THIS TEST GOES
-    RED, naming the new file as missing from `_IMPORTERS`. That is correct and
-    deliberate -- it is the control doing its job. Add the new file to
-    `_IMPORTERS`. Do NOT "fix" it by loosening this to a subset check or by
-    deleting the moved name; either one hands W2 a silently narrowed probe,
-    which is the exact failure this test was added to prevent.
     """
     discovered = _test_files_importing(PACKAGED)
     listed = set(_IMPORTERS)
@@ -1941,8 +1937,11 @@ def _runner_module_population(repo_root):
 
     PITFALLS: declared modules stay in `candidates` even when absent, so a
     reader raises with the missing member's path instead of silently scanning
-    seven. `__init__.py` is excluded: it is the facade, pinned by the surface
-    gates in tests/test_modal_client.py, not by these module-scope gates.
+    seven. `__init__.py` is excluded: it is the facade and declares nothing.
+    Its module scope has a stricter rule of its own (docstring, one-dot
+    relative imports, a literal `__all__`), `_facade_violations` in
+    tests/test_modal_runner_package_shape.py; the surface gates in
+    tests/test_modal_client.py pin the names it exports.
     pathlib's `*` also matches dotfiles such as an editor's `.#core.py`; the
     mount loop would ship those too, so they are read (and may raise) here.
     """
@@ -2066,9 +2065,9 @@ def test_gate_e_criterion_5_the_runner_library_imports_only_the_standard_library
     assert undeclared == [], (
         f"scripts/modal_runner/ holds modules RUNNER_MODULES does not declare: {undeclared}. "
         "A new module needs entries in RUNNER_MODULES (tests/test_modal_packaging.py) and in "
-        "MANIFEST, DEPENDENCIES and ANNOTATION_DEPENDENCIES "
-        "(tests/test_modal_runner_package_shape.py) in the same commit; otherwise delete the "
-        "stray file.")
+        "MANIFEST and DEPENDENCIES (and ANNOTATION_DEPENDENCIES for an import made only under "
+        "TYPE_CHECKING) in tests/test_modal_runner_package_shape.py, in the same commit; "
+        "otherwise delete the stray file.")
     scanned, violations = _nonstdlib_module_scope_imports(ROOT)
     assert scanned == candidates, (
         f"gate (e) read {scanned} but the package directory holds {candidates}; a module it "

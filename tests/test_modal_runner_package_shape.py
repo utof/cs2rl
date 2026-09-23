@@ -14,7 +14,11 @@ Every clause here describes the shape the package keeps from now on:
   `if TYPE_CHECKING:` block without else, and declarations, nothing else;
 * the import graph: intra-package imports equal DEPENDENCIES
   (`runtime-edges`) and ANNOTATION_DEPENDENCIES (`annotation-edges`);
-* import purity: no non-stdlib import executes when a module is imported.
+* import purity: no non-stdlib import executes when a module is imported;
+* the facade (`facade`): `__init__.py` defines nothing and runs on every
+  `import scripts.modal_runner`, so its module scope may hold only its
+  docstring, named one-dot relative imports of its submodules and a literal
+  `__all__`.
 
 Editing a function body, a docstring or a constant's value trips none of them
 unless the edit adds or removes an import. Adding, removing, renaming or moving
@@ -37,7 +41,10 @@ after it.
 Every failure message names the clause, the file or symbol, and the edit that
 resolves it (`_explain`). Controls plant defects into in-memory copies of the
 sources or into a copy of the package under `tmp_path`, never into the live
-package.
+package. A control first re-checks the unplanted package; when that check
+fails, its message starts with PRECONDITION and names the contract test whose
+message says what to fix (both, for a control that re-checks two), because the
+control itself did not break.
 """
 import ast
 from pathlib import Path
@@ -67,10 +74,10 @@ from tests.test_modal_packaging import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-# Owner of every top-level symbol, per module (spec section 5.1). Each module's
-# top-level names must equal its entry, and no name may appear under two
-# modules. Adding, removing, renaming or moving a symbol means editing its entry
-# here in the same commit.
+# Owner of every top-level symbol, per module. Each module's top-level names
+# must equal its entry, and no name may appear under two modules. Adding,
+# removing, renaming or moving a symbol means editing its entry here in the same
+# commit.
 MANIFEST = {
     'core.py': [
         'ValidationError', 'Action', 'Status', 'mounted_path', 'SourceProvenance', 'sha256_file',
@@ -86,16 +93,16 @@ MANIFEST = {
         'MAX_TIMEOUT_MINUTES', 'MIN_SAVE_EVERY_SECONDS', 'MAX_SAVE_EVERY_SECONDS', 'AGENTS_PER_ENV',
         'BPTT_HORIZON', 'MIN_BATCH_SIZE', '_RUN_ID_RE', '_SECRET_NAME_RE',
         'LIVE_TRAIN_OPTION_ARITY', 'LIVE_TRAIN_OPTIONS', 'RUNNER_OWNED_TRAIN_FLAGS',
-        'RUN_ONLY_OPTIONS', 'TERMINAL_STATUSES', 'NONTERMINAL_STATUSES', '_COMMIT_SHA_RE',
-        '_SAFE_TAR_TYPES', 'PROVENANCE_NAME', '_PREBUILT_LOAD_SOURCE', 'STATUS_FILENAME',
-        'SCHEMA_VERSION', '_ALLOWED_TRANSITIONS', 'HEARTBEAT_INTERVAL', 'STALE_AFTER',
-        'RESERVATION_FILENAME', 'MANIFEST_FILENAME', 'FAILURE_UPLOAD', 'ALLOWED_FAILURE_CODES',
-        'REDELIVERED', 'UV_BIN', 'TRAIN_SCRIPT', '_PRESERVED_CHILD_ENV_KEYS', '_THREAD_CAP_ENV',
-        'CUDA_PROBE_SOURCE', 'TRAIN_LOG_NAME', 'RESULT_FILENAME', 'CHECKPOINT_NAME',
-        'CHECKPOINT_SIDECAR_NAME', 'CHECKPOINT_PUBLISH_REASON_NAME', 'DEAD_CHECKPOINT_NAME',
-        'CHECKPOINT_SETTLE_SECONDS', 'TERM_GRACE_SECONDS', 'DEAD_RUN_EXIT_CODE',
-        'POLL_INTERVAL_SECONDS', 'REASON_SIGNAL', 'REASON_TIMEOUT', 'REASON_DEAD_RUN',
-        'REASON_INVALID_EVIDENCE', 'REASON_NONZERO_EXIT', 'REASON_ERROR'
+        'RUN_ONLY_OPTIONS', 'TERMINAL_STATUSES', '_COMMIT_SHA_RE', '_SAFE_TAR_TYPES',
+        'PROVENANCE_NAME', '_PREBUILT_LOAD_SOURCE', 'STATUS_FILENAME', 'SCHEMA_VERSION',
+        '_ALLOWED_TRANSITIONS', 'HEARTBEAT_INTERVAL', 'STALE_AFTER', 'RESERVATION_FILENAME',
+        'MANIFEST_FILENAME', 'FAILURE_UPLOAD', 'ALLOWED_FAILURE_CODES', 'REDELIVERED', 'UV_BIN',
+        'TRAIN_SCRIPT', '_PRESERVED_CHILD_ENV_KEYS', '_THREAD_CAP_ENV', 'CUDA_PROBE_SOURCE',
+        'TRAIN_LOG_NAME', 'RESULT_FILENAME', 'CHECKPOINT_NAME', 'CHECKPOINT_SIDECAR_NAME',
+        'CHECKPOINT_PUBLISH_REASON_NAME', 'DEAD_CHECKPOINT_NAME', 'CHECKPOINT_SETTLE_SECONDS',
+        'TERM_GRACE_SECONDS', 'DEAD_RUN_EXIT_CODE', 'POLL_INTERVAL_SECONDS', 'REASON_SIGNAL',
+        'REASON_TIMEOUT', 'REASON_DEAD_RUN', 'REASON_INVALID_EVIDENCE', 'REASON_NONZERO_EXIT',
+        'REASON_ERROR'
     ],
     'request.py': [
         'ResumeRequest', 'ArtifactClientRequest', 'RunRequest', 'validate_run_id',
@@ -136,8 +143,8 @@ MANIFEST = {
         '_signal_process_group', '_run_training_attempt'
     ]
 }
-# Runtime import edges between package modules (spec section 5.1). core stays a
-# leaf. A new edge is legal only if the graph stays acyclic; record it here.
+# Runtime import edges between package modules. core stays a leaf. A new edge
+# is legal only if the graph stays acyclic; record it here.
 DEPENDENCIES = {
     'core': [],
     'request': ['commands', 'core'],
@@ -152,9 +159,26 @@ DEPENDENCIES = {
 # request must stay annotation-only: request imports commands at run time, so a
 # runtime edge back would be an import cycle.
 ANNOTATION_DEPENDENCIES = {'commands': ['request'], 'preflight': ['request']}
-# Module names that say what a module IS rather than what it owns (spec section
-# 10, criterion 12); the `forbidden-name` clause and its message both read this.
+# Module names that say what a module IS rather than what it owns, which is how
+# a module becomes a junk drawer; the `forbidden-name` clause and its message
+# both read this.
 GRAB_BAG_MODULE_NAMES = ("utils", "helpers", "common", "misc")
+# Where a package module is declared. Every message about a module on disk that
+# the tables do not declare, or the reverse, names these, so the remedy reads the
+# same wherever it fires.
+_TABLES = ("RUNNER_MODULES (tests/test_modal_packaging.py) and MANIFEST and DEPENDENCIES (and "
+           "ANNOTATION_DEPENDENCIES for an import made only under TYPE_CHECKING) in "
+           "tests/test_modal_runner_package_shape.py")
+_UNDECLARED_MODULE_REMEDY = (
+    "A path beyond the modules RUNNER_MODULES declares is a module in scripts/modal_runner/ "
+    f"that the tables do not declare: declare it in {_TABLES} in the same commit, or delete it.")
+# How many times each control below plants its defect. Each pass starts by
+# re-checking the unplanted package (or its tmp_path copy), so the second pass's
+# check proves the first pass's plant-and-restore left the sources, or the copied
+# files, as it found them. The gates hold no state between calls, so this is only
+# about the tree. A control whose restore step broke would otherwise pass once
+# and hide it.
+_CONTROL_PASSES = 2
 
 
 def _segments(source):
@@ -211,13 +235,13 @@ def _copy_live_package(tmp_path):
 
 
 def _structure_violations(sources, manifest=MANIFEST):
-    """Criteria 1, 12 (module names) and 13 over `sources`, a {filename: text} map.
+    """The ownership, module-population and module-scope-shape clauses over `sources`.
 
-    Combines the manifest's own clause, the file population, grab-bag module
-    names, header shape, membership, duplicate bindings and undeclared
-    assignments. `manifest` defaults to MANIFEST; controls pass an edited copy.
-    Every file in `sources` gets every per-file check, including one no manifest
-    entry declares.
+    `sources` is a {filename: text} map. Combines the manifest's own clause,
+    the file population, grab-bag module names, header shape, membership,
+    duplicate bindings and undeclared assignments. `manifest` defaults to
+    MANIFEST; controls pass an edited copy. Every file in `sources` gets every
+    per-file check, including one no manifest entry declares.
     """
     # Annotated because the gates' tuples differ in shape per clause; pyrefly
     # would otherwise infer the first append's shape and reject the others.
@@ -317,10 +341,10 @@ def _dependency_edges(sources):
 
 
 def _dependency_violations(sources):
-    """Criterion 6: resolved edges must equal DEPENDENCIES / ANNOTATION_DEPENDENCIES per module.
+    """The import-graph clauses: resolved edges must equal DEPENDENCIES / ANNOTATION_DEPENDENCIES.
 
-    A module in `sources` that DEPENDENCIES does not declare is reported as
-    `undeclared-module` rather than skipped.
+    Compared per module. A module in `sources` that DEPENDENCIES does not
+    declare is reported as `undeclared-module` rather than skipped.
     """
     runtime, annotations = _dependency_edges(sources)
     failures: list[tuple] = [("undeclared-module", module)
@@ -335,6 +359,47 @@ def _dependency_violations(sources):
     return failures
 
 
+def _facade_violations(source):
+    """`("facade", line, statement kind)` for each module-scope statement the facade may not hold.
+
+    `source` is the text of scripts/modal_runner/__init__.py. The facade runs
+    on every `import scripts.modal_runner`, production's included, yet the
+    module-population clauses skip it because it declares no symbol of its own.
+    Its module scope may hold only its docstring, one-dot relative imports of
+    its submodules (`from .core import X`, `from . import core`; no star
+    import, which would re-export whatever the submodule binds) and `__all__`
+    bound to a list or tuple of string literals. That one rule covers, for this
+    file, what the header rule covers for the modules (a call, a conditional, a
+    loop), what the purity rule covers (an absolute or non-stdlib import) and a
+    definition, which belongs in the module that owns it.
+    """
+    violations: list[tuple] = []
+    for index, node in enumerate(ast.parse(source).body):
+        docstring = (index == 0 and isinstance(node, ast.Expr)
+                     and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str))
+        relative = (isinstance(node, ast.ImportFrom) and node.level == 1
+                    and all(alias.name != "*" for alias in node.names))
+        exported = (isinstance(node, ast.Assign)
+                    and [ast.unparse(target) for target in node.targets] == ["__all__"]
+                    and isinstance(node.value, (ast.List, ast.Tuple)) and all(
+                        isinstance(item, ast.Constant) and isinstance(item.value, str)
+                        for item in node.value.elts))
+        if not (docstring or relative or exported):
+            violations.append(("facade", node.lineno, type(node).__name__))
+    return violations
+
+
+def _precondition(contract, subject="the live package"):
+    """The subject of a control's precondition: the unplanted package, or its copy, is clean.
+
+    WHY: every control re-checks the unplanted package, so one real defect in
+    the package turns every control red with the same message. The prefix says
+    the control is not what broke and names `contract`: the test, or the two
+    tests, whose own message says what to fix.
+    """
+    return f"PRECONDITION (the live package already fails; fix {contract} first): {subject}"
+
+
 def _explain(violations):
     """One line per violation: the clause, where it fired, and the edit that resolves it.
 
@@ -342,8 +407,6 @@ def _explain(violations):
     whoever meets it neither which clause objected nor whether the fix is to
     revert their edit or to update a table in this file.
     """
-    tables = ("RUNNER_MODULES (tests/test_modal_packaging.py) and MANIFEST, DEPENDENCIES and "
-              "ANNOTATION_DEPENDENCIES (tests/test_modal_runner_package_shape.py)")
     lines = []
     for v in violations:
         kind = v[0]
@@ -351,14 +414,14 @@ def _explain(violations):
             parts = []
             if v[1]:
                 parts.append(f"holds modules the tables do not declare, {v[1]}: declare each in "
-                             f"{tables} in the same commit, or delete the stray file")
+                             f"{_TABLES} in the same commit, or delete the stray file")
             if v[2]:
                 parts.append(f"lacks modules MANIFEST declares, {v[2]}: restore them, or remove "
-                             f"their entries from {tables}")
+                             f"their entries from {_TABLES}")
             text = f"scripts/modal_runner/ {'; and it '.join(parts)}."
         elif kind == "undeclared-module":
             text = (f"scripts/modal_runner/{v[1]}.py is not in DEPENDENCIES. Declare the module in "
-                    f"{tables}, or delete it.")
+                    f"{_TABLES}, or delete it.")
         elif kind == "manifest-duplicates":
             text = (
                 f"MANIFEST gives these symbols more than one owner: {v[1]}. Each symbol lives in "
@@ -398,6 +461,13 @@ def _explain(violations):
         elif kind == "forbidden-name":
             text = (f"{v[1]} is a grab-bag module name ({'/'.join(GRAB_BAG_MODULE_NAMES)}). Name "
                     "the module for the concern it owns.")
+        elif kind == "facade":
+            text = (f"scripts/modal_runner/__init__.py line {v[1]} ({v[2]}): the facade runs "
+                    "on every `import scripts.modal_runner`, so its module scope may hold only "
+                    "its docstring, one-dot relative imports of its submodules (named, never "
+                    "`*`) and `__all__` alone bound to a list or tuple of string literals. Move "
+                    "the statement into the module that owns it, and re-export a name with "
+                    "`from .<module> import <name>`.")
         else:
             text = f"unrecognised violation {v!r}"
         lines.append(f"[{kind}] {text}")
@@ -440,7 +510,7 @@ def live_sources():
 
 
 def test_package_structure_contract(live_sources):
-    """Criteria 1, 12 (module names) and 13 on the live package, plus the tables' consistency."""
+    """The structure clauses on the live package, plus the tables' consistency."""
     declared = set(RUNNER_MODULES)
     manifest_modules = {name.removesuffix(".py") for name in MANIFEST}
     keyed = (manifest_modules == declared and set(DEPENDENCIES) == declared
@@ -452,9 +522,84 @@ def test_package_structure_contract(live_sources):
     _assert_no_violations(_structure_violations(live_sources), "the live package")
 
 
+def test_package_facade_contract():
+    """The facade's module-scope rule (`_facade_violations`) on the live `__init__.py`."""
+    facade = (ROOT / "scripts" / "modal_runner" / "__init__.py").read_text(encoding="utf-8")
+    _assert_no_violations(_facade_violations(facade), "the live facade")
+
+
+# Each row appends one plant to the live facade, in memory, and pairs it with the
+# statement kinds, in order, that the `facade` clause must report for the
+# appended lines. The ID ends in the verdict the row asserts.
+@pytest.mark.parametrize("plant, kinds", [
+    pytest.param(plant, kinds, id=f"{name}-{'rejected' if kinds else 'accepted'}")
+    for name, plant, kinds in [
+        ("env-mutation", "import os\nos.environ.setdefault('CS2RL_FACADE_PLANT', '1')\n",
+         ["Import", "Expr"]),
+        ("print", "print('facade side effect')\n", ["Expr"]),
+        ("non-stdlib-import", "import numpy\n", ["Import"]),
+        ("conditional-import", "if True:\n    from .core import VOLUME_MOUNT\n", ["If"]),
+        ("definition", "def _helper():\n    return 1\n", ["FunctionDef"]),
+        ("computed-all", "__all__ = sorted(__all__)\n", ["Assign"]),
+        ("absolute-import", "from os import environ\n", ["ImportFrom"]),
+        ("parent-relative-import", "from .. import run_modal\n", ["ImportFrom"]),
+        ("stray-string", "'a string after the docstring'\n", ["Expr"]),
+        ("other-assign", "HELPER = ['a']\n", ["Assign"]),
+        ("computed-all-element", "__all__ = [print('x')]\n", ["Assign"]),
+        ("non-string-all-element", "__all__ = [1]\n", ["Assign"]),
+        ("chained-all", "__all__ = HELPER = ['a']\n", ["Assign"]),
+        ("set-all", "__all__ = {'a'}\n", ["Assign"]),
+        ("star-import", "from .core import *\n", ["ImportFrom"]),
+        ("tuple-all", "__all__ = ('a',)\n", []),
+        ("re-export", "from .core import VOLUME_MOUNT\n", []),
+    ]
+])
+def test_package_facade_controls(plant, kinds):
+    """One plant per row, rejected by the `facade` clause alone, or accepted.
+
+    * env-mutation: `os.environ.setdefault(...)` at the facade's module scope.
+      Before this clause existed it, and the bare `print`, turned no gate red:
+      the population gates skip `__init__.py`, and the surface gates read names.
+    * non-stdlib-import: the purity half. The container-equivalent import in
+      tests/test_modal_client.py also objects, but only by running the image.
+    * conditional-import, definition, computed-all: the header half, a helper
+      that belongs in its owning module, and an `__all__` that runs code.
+    * absolute-import, parent-relative-import, stray-string, other-assign,
+      computed-all-element, non-string-all-element: one sub-condition of the
+      allowed shape each, and weakening it turns that row red. The two import
+      rows hold `level == 1` from below (the stdlib `from os import environ`,
+      which the purity rule would pass) and from above; stray-string holds
+      the docstring to index 0; other-assign holds the `__all__` target;
+      computed-all-element holds the element check, non-string-all-element
+      its string half.
+    * chained-all and set-all: `__all__` must be the only target and a list or
+      tuple, so a second target and a set are rejected. tuple-all is ACCEPTED,
+      the tuple half of that shape.
+    * star-import: re-exports whatever the submodule binds. The client surface
+      gate also objects, but only by running the image.
+    * re-export: ACCEPTED. A new one-dot relative import is legal shape here;
+      whether the name belongs in the facade is the surface gates' question,
+      so a clause that rejected every added line would fail this row.
+    """
+    facade = (ROOT / "scripts" / "modal_runner" / "__init__.py").read_text(encoding="utf-8")
+    _assert_no_violations(_facade_violations(facade),
+                          _precondition("test_package_facade_contract", "the live facade"))
+    # The plant's statements start on the line after the facade's last line. A
+    # rejected row names one kind per planted statement, so `strict` also checks
+    # that the plant parses into as many statements as the row names.
+    lines = [facade.count("\n") + node.lineno for node in ast.parse(plant).body]
+    expected = [("facade", line, kind)
+                for line, kind in zip(lines, kinds, strict=True)] if kinds else []
+    violations = _facade_violations(facade + plant)
+    verdict = f"rejected by exactly {expected}" if expected else "accepted"
+    assert violations == expected, (
+        f"the facade plant {plant!r} must be {verdict}; the gate reported:\n{_explain(violations)}")
+
+
 def test_package_membership_rejects_wrong_owner_with_correct_union(live_sources):
-    for _ in range(2):
-        _assert_no_violations(_structure_violations(live_sources), "the live package")
+    precondition = _precondition("test_package_structure_contract")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_structure_violations(live_sources), precondition)
         segment = _segments(live_sources["core.py"])["VOLUME_NAME"]
         wrong = dict(live_sources)
         wrong["core.py"] = wrong["core.py"].replace(segment, "", 1)
@@ -473,7 +618,7 @@ def test_package_membership_rejects_wrong_owner_with_correct_union(live_sources)
             "core.py", "request.py"
         ], ("moving VOLUME_NAME from core.py to request.py must fail membership in BOTH files:\n"
             f"{_explain(failures)}")
-        _assert_no_violations(_structure_violations(live_sources), "the live package")
+        _assert_no_violations(_structure_violations(live_sources), precondition)
 
 
 @pytest.mark.parametrize("plant", [
@@ -510,8 +655,9 @@ def test_package_ownership_and_header_controls(live_sources, plant):
         "duplicate": "duplicates",
         "annotated-attribute": "undeclared-assignment",
     }.get(plant, "header")
-    for _ in range(2):
-        _assert_no_violations(_structure_violations(live_sources), "the live package")
+    precondition = _precondition("test_package_structure_contract")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_structure_violations(live_sources), precondition)
         changed = live_sources[filename] + additions.get(plant, "")
         if plant == "missing":
             changed = changed.replace(_segments(changed)["VOLUME_NAME"], "", 1)
@@ -526,7 +672,7 @@ def test_package_ownership_and_header_controls(live_sources, plant):
         if plant == "else":
             assert any("no else branch" in str(v) for v in failures), (
                 f"the else plant must be named by the no-else rule:\n{_explain(failures)}")
-        _assert_no_violations(_structure_violations(live_sources), "the live package")
+        _assert_no_violations(_structure_violations(live_sources), precondition)
 
 
 # Each row pairs a plant with the exact violation list it must produce. Its ID is
@@ -580,17 +726,20 @@ def test_package_manifest_controls(live_sources, plant, expected):
     else:
         pytest.fail(f"the {plant} row has no plant")
     assert changed != live_sources, f"the {plant} plant did not change the sources"
-    for _ in range(2):
-        _assert_no_violations(_structure_violations(live_sources), "the live package")
+    precondition = _precondition("test_package_structure_contract")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_structure_violations(live_sources), precondition)
         violations = _structure_violations(changed, manifest)
         verdict = f"rejected by exactly {[v[0] for v in expected]}" if expected else "accepted"
         assert violations == expected, (
             f"the {plant} plant must be {verdict}; the gates reported:\n{_explain(violations)}")
-        _assert_no_violations(_structure_violations(live_sources), "the live package")
+        _assert_no_violations(_structure_violations(live_sources), precondition)
 
 
 @pytest.mark.parametrize("spelling", ["TYPE_CHECKING", "typing.TYPE_CHECKING", "os.TYPE_CHECKING"])
 def test_package_header_accepts_import_only_type_checking(live_sources, spelling):
+    _assert_no_violations(_structure_violations(live_sources),
+                          _precondition("test_package_structure_contract"))
     sources = dict(live_sources)
     sources["core.py"] += f"\nif {spelling}:\n    import decimal\n"
     _assert_no_violations(_structure_violations(sources),
@@ -603,9 +752,10 @@ def test_package_dependency_contract(live_sources):
 
 @pytest.mark.parametrize("plant", ["runtime-annotation", "core-edge", "missing-edge", "extra-edge"])
 def test_package_dependency_controls(live_sources, plant):
-    for _ in range(2):
-        _assert_no_violations(_dependency_violations(live_sources),
-                              "the live package's import graph")
+    precondition = _precondition("test_package_dependency_contract",
+                                 "the live package's import graph")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_dependency_violations(live_sources), precondition)
         changed = dict(live_sources)
         module = "commands" if plant == "runtime-annotation" else "core" if plant == "core-edge" else "source"
         if plant == "runtime-annotation":
@@ -623,8 +773,7 @@ def test_package_dependency_controls(live_sources, plant):
             edge = "request" if plant == "runtime-annotation" else "training"
             changed[module + ".py"] += f"\nfrom . import {edge}\n"
         _assert_rejected(_dependency_violations(changed), ("runtime-edges", module), plant)
-        _assert_no_violations(_dependency_violations(live_sources),
-                              "the live package's import graph")
+        _assert_no_violations(_dependency_violations(live_sources), precondition)
 
 
 @pytest.mark.parametrize("statement, edge", [
@@ -649,7 +798,7 @@ def test_package_dependency_controls(live_sources, plant):
 ])
 def test_package_dependency_rejects_every_self_import_spelling_in_core(
         live_sources, statement, edge):
-    """Criterion 6's leaf clause against every spelling that reaches the package.
+    """The leaf clause (core imports no package module) against every spelling of the package.
 
     core.py must import no package module. Each row appends one spelling to
     core.py and requires the exact edge it resolves to, with no other clause
@@ -658,20 +807,20 @@ def test_package_dependency_rejects_every_self_import_spelling_in_core(
     package-level, parent and `..` spellings and the literal `import_module`
     all left core looking like a leaf.
     """
-    for _ in range(2):
-        _assert_no_violations(_dependency_violations(live_sources),
-                              "the live package's import graph")
+    precondition = _precondition("test_package_dependency_contract",
+                                 "the live package's import graph")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_dependency_violations(live_sources), precondition)
         changed = {**live_sources, "core.py": live_sources["core.py"] + "\n" + statement}
         failures = _dependency_violations(changed)
         expected = [("runtime-edges", "core", {edge}, set())]
         assert failures == expected, (
             f"core.py importing the package as {statement!r} must be reported as the single "
             f"runtime edge {edge!r}; the gates reported:\n{_explain(failures)}")
-        _assert_no_violations(_dependency_violations(live_sources),
-                              "the live package's import graph")
+        _assert_no_violations(_dependency_violations(live_sources), precondition)
 
 
-@pytest.mark.parametrize("plant", ["preflight-to-runtime", "extra-annotation"])
+@pytest.mark.parametrize("plant", ["preflight-to-runtime", "extra-annotation", "typing-attribute"])
 def test_package_annotation_edge_controls(live_sources, plant):
     """The `annotation-edges` clause, which no runtime-edge plant can hold on its own.
 
@@ -681,6 +830,12 @@ def test_package_annotation_edge_controls(live_sources, plant):
     * extra-annotation: source.py gains an annotation-only import of training.
       Its runtime edges are unchanged, so `annotation-edges` is the sole
       objector, and deleting that clause would leave this row green.
+    * typing-attribute: the same plant under `if typing.TYPE_CHECKING:`.
+      `_dependency_edges` recognises the block by its attribute spelling as
+      well as by the bare name; drop the attribute half and the import becomes
+      a runtime edge, which this row rejects. Nothing else in this file uses
+      that spelling on a plant whose edges are compared, so before this row
+      that knock-out left every test here green.
     """
     if plant == "preflight-to-runtime":
         changed = {
@@ -691,21 +846,21 @@ def test_package_annotation_edge_controls(live_sources, plant):
         expected = [("runtime-edges", "preflight", runtime | {"request"}, runtime),
                     ("annotation-edges", "preflight", set(), {"request"})]
     else:
+        guard = "typing.TYPE_CHECKING" if plant == "typing-attribute" else "TYPE_CHECKING"
         changed = {
             **live_sources, "source.py":
-            live_sources["source.py"] +
-            "\nif TYPE_CHECKING:\n    from .training import _tee_stream\n"
+            live_sources["source.py"] + f"\nif {guard}:\n    from .training import _tee_stream\n"
         }
         expected = [("annotation-edges", "source", {"training"}, set())]
-    for _ in range(2):
-        _assert_no_violations(_dependency_violations(live_sources),
-                              "the live package's import graph")
+    precondition = _precondition("test_package_dependency_contract",
+                                 "the live package's import graph")
+    for _ in range(_CONTROL_PASSES):
+        _assert_no_violations(_dependency_violations(live_sources), precondition)
         failures = _dependency_violations(changed)
         assert failures == expected, (
             f"the {plant} plant must be rejected by exactly {[v[:2] for v in expected]}; the "
             f"gates reported:\n{_explain(failures)}")
-        _assert_no_violations(_dependency_violations(live_sources),
-                              "the live package's import graph")
+        _assert_no_violations(_dependency_violations(live_sources), precondition)
 
 
 @pytest.mark.parametrize("stem", ["utils", "telemetry"])
@@ -725,6 +880,8 @@ def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, stem):
     package = _copy_live_package(tmp_path)
     rel = f"scripts/modal_runner/{stem}.py"
     declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
+    contracts = "test_package_structure_contract or test_package_dependency_contract"
+    purity_contract = "test_package_import_purity_scans_every_module"
 
     def gates():
         """Every gate's verdict on the copy, read back from disk."""
@@ -732,10 +889,12 @@ def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, stem):
         return (sources, _structure_violations(sources), _dependency_violations(sources),
                 _nonstdlib_module_scope_imports(tmp_path))
 
-    for _ in range(2):
+    for _ in range(_CONTROL_PASSES):
         sources, structure, dependency, purity = gates()
-        _assert_no_violations(structure + dependency, "the package copy")
-        assert purity == (declared, []), f"gate (e) on the package copy reported {purity}"
+        _assert_no_violations(structure + dependency, _precondition(contracts, "the package copy"))
+        assert purity == (declared, []), (
+            f"{_precondition(purity_contract, 'gate (e) on the package copy')} reported {purity}. "
+            f"{_UNDECLARED_MODULE_REMEDY}")
         (package / f"{stem}.py").write_text("import modal\nprint('work')\n", encoding="utf-8")
         undeclared = _runner_module_population(tmp_path)[1]
         assert undeclared == [rel], f"the population found {undeclared}, not the planted {rel}"
@@ -757,10 +916,7 @@ def test_package_gates_see_an_undeclared_module_on_disk(tmp_path, stem):
 def test_package_import_purity_scans_every_module():
     scanned, violations = _nonstdlib_module_scope_imports(ROOT)
     declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
-    assert scanned == declared, (
-        f"gate (e) read {scanned}. Any path beyond the {len(declared)} modules RUNNER_MODULES "
-        "declares is an undeclared module in scripts/modal_runner/: declare it in RUNNER_MODULES "
-        "(tests/test_modal_packaging.py) and this file's tables, or delete it.")
+    assert scanned == declared, f"gate (e) read {scanned}. {_UNDECLARED_MODULE_REMEDY}"
     assert violations == [], (
         f"these (file, line, module) imports execute on import and are not stdlib: {violations}. "
         "Move them into the function that needs them, or under `if TYPE_CHECKING:`.")
@@ -778,10 +934,12 @@ def test_package_import_purity_recursive_controls(tmp_path, live_sources, contai
     }
     target = package / "training.py"
     declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
-    for _ in range(2):
+    purity_contract = "test_package_import_purity_scans_every_module"
+    for _ in range(_CONTROL_PASSES):
         scanned, failures = _nonstdlib_module_scope_imports(tmp_path)
         assert scanned == declared and failures == [], (
-            f"gate (e) on the package copy read {scanned} and reported {failures}")
+            f"{_precondition(purity_contract, 'gate (e) on the package copy')} read {scanned} and "
+            f"reported {failures}. {_UNDECLARED_MODULE_REMEDY}")
         target.write_text(live_sources["training.py"] + "\n" + plants[container], encoding="utf-8")
         scanned, failures = _nonstdlib_module_scope_imports(tmp_path)
         assert scanned == declared, (
@@ -801,15 +959,17 @@ def test_package_scans_reject_missing_or_unreadable_member(tmp_path, live_source
     package = _copy_live_package(tmp_path)
     target = package / "training.py"
     declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
-    for _ in range(2):
+    purity_contract = "test_package_import_purity_scans_every_module"
+    for _ in range(_CONTROL_PASSES):
         copied = sorted(_package_sources(tmp_path))
         assert copied == sorted(Path(rel).name for rel in declared), (
-            f"the package copy holds {copied}, not the {len(declared)} modules RUNNER_MODULES "
-            "declares, so this control would not start from the live package")
+            f"{_precondition('test_package_structure_contract', 'the package copy')} holds "
+            f"{copied}, not the {len(declared)} modules RUNNER_MODULES declares, so this control "
+            f"would not start from the live package. {_UNDECLARED_MODULE_REMEDY}")
         scanned = _nonstdlib_module_scope_imports(tmp_path)[0]
         assert scanned == declared, (
-            f"gate (e) read {scanned} from the package copy, not the {len(declared)} modules "
-            "RUNNER_MODULES declares")
+            f"{_precondition(purity_contract, 'gate (e)')} read {scanned} from the package copy, "
+            f"not the {len(declared)} modules RUNNER_MODULES declares. {_UNDECLARED_MODULE_REMEDY}")
         target.unlink()
         if defect == "unreadable":
             target.mkdir()

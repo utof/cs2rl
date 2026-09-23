@@ -2041,7 +2041,11 @@ def test_backfill_never_imports_the_launch_app(fake_modal, tmp_path):
 # ── Gate (a), criterion 3: the library imports on a container-equivalent run ──
 
 
-def _materialise_recorded_mounts(prefix, mount_list, *, omit=frozenset(), plant=None):
+def _materialise_recorded_mounts(prefix: Path,
+                                 mount_list: list[tuple[str, str, bool]],
+                                 *,
+                                 omit: frozenset[str] = frozenset(),
+                                 plant: str | None = None) -> list[Path]:
     """Copy exactly the recorded `(src, dst, copy)` triples under `prefix`; return what was written.
 
     WHAT: each absolute container `dst` is rebased to `prefix / dst.lstrip('/')`
@@ -2089,13 +2093,13 @@ def _materialise_recorded_mounts(prefix, mount_list, *, omit=frozenset(), plant=
     return written
 
 
-def _container_equivalent_import(prefix,
-                                 pythonpath,
+def _container_equivalent_import(prefix: Path,
+                                 pythonpath: str,
                                  *,
-                                 cwd,
-                                 module='scripts.modal_runner',
-                                 isolate_cwd=True,
-                                 required_surface=None):
+                                 cwd: Path,
+                                 module: str = 'scripts.modal_runner',
+                                 isolate_cwd: bool = True,
+                                 required_surface: set[str] | None = None) -> tuple[int, str]:
     """Import `module` in a subprocess that can see only `prefix`; return `(exit_code, stderr)`.
 
     WHAT: runs `python -S -B -P -c "import <module>"` from `cwd`, with PYTHONPATH
@@ -2153,7 +2157,12 @@ def _container_equivalent_import(prefix,
                 importlib.import_module(name)
             actual = {name for name in sys.modules
                       if name == 'scripts.modal_runner' or name.startswith('scripts.modal_runner.')}
-            assert actual == expected, ('module population', actual)
+            assert actual == expected, (
+                'module population',
+                {'undeclared': sorted(actual - expected), 'missing': sorted(expected - actual)},
+                'declare a new module in RUNNER_MODULES (tests/test_modal_packaging.py) and in '
+                'MANIFEST and DEPENDENCIES (and ANNOTATION_DEPENDENCIES for an import made only '
+                'under TYPE_CHECKING) in tests/test_modal_runner_package_shape.py')
             heavy = {name for name in sys.modules
                      if name.split('.')[0] in {'modal', 'torch', 'numpy'}}
             assert not heavy, ('heavy imports', heavy)
@@ -2417,9 +2426,20 @@ def _mount_bijection_violations(mount_list, repo_root, *, dependency_mounts=()):
     tracked = {entry for entry in listing.split('\0') if entry and entry.endswith('.py')}
     declared = {'scripts/modal_runner/' + name for name in declared_names}
     violations = []
-    if tracked != declared:
-        violations.append(f'(A) package tracked population: missing={sorted(declared - tracked)} '
-                          f'extra={sorted(tracked - declared)}')
+    if declared - tracked:
+        violations.append(
+            '(A) package tracked population: declared (__init__.py and RUNNER_MODULES in '
+            'tests/test_modal_packaging.py) but not in the git index; stage it with git add: '
+            f'{sorted(declared - tracked)}. This clause reads `git ls-files`, not the disk, so a '
+            'new module is missing here until it is staged. If you deleted the module on purpose, '
+            'remove it from RUNNER_MODULES and tests/test_modal_runner_package_shape.py instead.')
+    if tracked - declared:
+        violations.append(
+            '(A) package tracked population: tracked but not declared in RUNNER_MODULES '
+            f'(tests/test_modal_packaging.py): {sorted(tracked - declared)}. Declare a new module '
+            'there and in MANIFEST and DEPENDENCIES (and ANNOTATION_DEPENDENCIES for an import '
+            'made only under TYPE_CHECKING) in tests/test_modal_runner_package_shape.py, or '
+            '`git rm` the file.')
     expected = Counter((str(repo_root / relative), '/opt/app/' + relative, True)
                        for relative in tracked | {'scripts/run_modal.py'})
     actual = Counter((src, dst, copy) for src, dst, copy in mount_list
@@ -2427,7 +2447,18 @@ def _mount_bijection_violations(mount_list, repo_root, *, dependency_mounts=()):
     for triple, count in sorted((expected - actual).items()):
         violations.append(f'(B) missing exact mount x{count}: {triple!r}')
     for triple, count in sorted((actual - expected).items()):
-        violations.append(f'(B) unexpected exact mount x{count}: {triple!r}')
+        # For an undeclared, unstaged new module or an untracked stray file this
+        # is the only violation here: the image mounts every package file on disk
+        # (scripts/run_modal.py globs the directory), but the expected triples
+        # come from `git ls-files`. So the message carries every remedy.
+        violations.append(
+            f'(B) unexpected exact mount x{count}: {triple!r}. `git ls-files` implies no such '
+            'mount, or fewer copies of it. An unstaged new module: declare it in RUNNER_MODULES '
+            '(tests/test_modal_packaging.py) and in MANIFEST and DEPENDENCIES (and '
+            'ANNOTATION_DEPENDENCIES for an import made only under TYPE_CHECKING) in '
+            'tests/test_modal_runner_package_shape.py, then `git add` it. An untracked stray '
+            'file: delete it. A duplicate, a changed copy flag, or a source that is not the '
+            'tracked file: fix the mount in scripts/run_modal.py.')
     for label, mounts in (('runner', mount_list), ('dependency', dependency_mounts)):
         for src, dst, _copy in mounts:
             source = Path(src)
@@ -2501,26 +2532,56 @@ def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(fa
     deleted.write_text('fixture = 1\n', encoding='utf-8')
     _git(repo, 'rm', '--cached', 'scripts/modal_runner/core.py')
     violations = _mount_bijection_violations(mounts, repo)
-    assert any(v.startswith('(A)') and 'core.py' in v for v in violations)
-    assert any(v.startswith('(B) unexpected') and 'core.py' in v for v in violations)
+    # On disk, declared and not staged: each clause must name its own remedy.
+    assert any(
+        v.startswith('(A)') and 'core.py' in v and 'stage it with git add' in v
+        for v in violations), violations
+    assert any(
+        v.startswith('(B) unexpected') and 'core.py' in v and 'then `git add` it' in v and
+        'An untracked stray file: delete it.' in v and '`git rm`' not in v and 'RUNNER_MODULES' in v
+        and 'MANIFEST and DEPENDENCIES' in v and 'scripts/run_modal.py' in v
+        for v in violations), violations
     assert not any(v.startswith('(C)') for v in violations)
 
 
-def _production_package_surface():
-    """Derive the facade contract from runtime callers, independently of __all__."""
+def _production_package_surface(root=ROOT):
+    """The facade contract: every name production code reads from `scripts.modal_runner`.
+
+    Derived from the callers, independently of `__all__`. The callers are every
+    tracked `.py` under `root`/scripts/, at any depth, outside the package
+    itself (`git ls-files`, so a new caller counts once it is staged); controls
+    pass a scratch repository as `root`. Three spellings are read: `alias.NAME` after
+    `import scripts.modal_runner as alias` or `from scripts import modal_runner
+    [as alias]`; the dotted `scripts.modal_runner.NAME`; and
+    `from scripts.modal_runner import NAME`.
+
+    PITFALL: a caller that reaches the package any other way (a from-import of
+    a submodule, a variable passed to `importlib.import_module`, the module
+    object rebound to another name) contributes nothing here. Production code
+    uses only `import scripts.modal_runner as mrl` (checked 2026-09-23); keep it
+    to the spellings above, or teach this function the new one in the same
+    commit.
+    """
+    listing = _git(root, 'ls-files', '-z', 'scripts/*.py')
     names = set()
-    for relative in ('scripts/run_modal.py', 'scripts/modal_artifacts.py',
-                     'scripts/modal_backfill_sidecar.py'):
-        tree = ast.parse((ROOT / relative).read_text(encoding='utf-8'))
-        aliases = {
-            alias.asname or alias.name
-            for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
-            if alias.name == 'scripts.modal_runner'
-        }
-        assert aliases, f'package import missing from {relative}'
-        names.update(node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
-                     and isinstance(node.value, ast.Name) and node.value.id in aliases)
-    assert len(names) == 41, f'production facade contract changed: {sorted(names)}'
+    for relative in listing.split('\0'):
+        if not relative or relative.startswith('scripts/modal_runner/'):
+            continue
+        tree = ast.parse((root / relative).read_text(encoding='utf-8'))
+        aliases = {'scripts.modal_runner'}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                aliases.update(alias.asname for alias in node.names
+                               if alias.name == 'scripts.modal_runner' and alias.asname)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                if node.module == 'scripts.modal_runner':
+                    names.update(alias.name for alias in node.names)
+                elif node.module == 'scripts':
+                    aliases.update(alias.asname or alias.name for alias in node.names
+                                   if alias.name == 'modal_runner')
+        names.update(node.attr for node in ast.walk(tree)
+                     if isinstance(node, ast.Attribute) and ast.unparse(node.value) in aliases)
+    assert names, 'no tracked scripts/*.py reads scripts.modal_runner, so there is no contract'
     return names
 
 
@@ -2546,6 +2607,13 @@ def test_package_surface_rejects_missing_and_extra_exports(fake_modal, tmp_path)
     rejected by that clause and not the other. Every plant is written into the
     materialised copy under `tmp_path` and restored, and the restored copy must
     be green again.
+
+    It also holds the control for `_production_package_surface`, which decides
+    what these clauses require. In a scratch repository, one staged caller per
+    spelling the derivation reads each reads one name the facade does not
+    export, and an unstaged caller reads another: the derived set must be
+    exactly the staged callers' names. Narrowing the derivation to a fixed
+    list of files, or dropping a spelling, loses a name here.
     """
     module = _import_run_modal()
     required = _production_package_surface()
@@ -2563,6 +2631,33 @@ def test_package_surface_rejects_missing_and_extra_exports(fake_modal, tmp_path)
                                             required_surface=required)
 
     assert result() == (0, '')
+    # The derivation's own control. Every name read here is one the facade does
+    # not export, so a derivation blind to a spelling, or reading a fixed file
+    # list, would let that caller ship an unexported name. `new.py` is on disk but
+    # not staged, and a new caller counts only once it is staged.
+    callers = tmp_path / 'callers'
+    (callers / 'scripts').mkdir(parents=True)
+    _git(callers, 'init', '-q', '-b', 'main')
+    for name, caller in (
+        ('from_import', 'from scripts.modal_runner import ALLOWED_GPUS\n'),
+        ('dotted', 'import scripts.modal_runner\nscripts.modal_runner.ALLOWED_NUM_ENVS\n'),
+        ('from_parent', 'from scripts import modal_runner as runner\nrunner.ALLOWED_CPU_CORES\n'),
+        ('as_alias', 'import scripts.modal_runner as facade\nfacade.MAX_MEMORY_MIB\n'),
+        ('new', 'import scripts.modal_runner as mrl\nmrl.MIN_MEMORY_MIB\n'),
+    ):
+        (callers / 'scripts' / f'{name}.py').write_text(caller, encoding='utf-8')
+    _git(callers, 'add', 'scripts/from_import.py', 'scripts/dotted.py', 'scripts/from_parent.py',
+         'scripts/as_alias.py')
+    derived = _production_package_surface(callers)
+    assert derived == {'ALLOWED_GPUS', 'ALLOWED_NUM_ENVS', 'ALLOWED_CPU_CORES',
+                       'MAX_MEMORY_MIB'}, sorted(derived)
+    # A caller reading an unexported name makes the surface clause ask the facade
+    # to ADD it.
+    status, stderr = _container_equivalent_import(prefix,
+                                                  module.runner_image.env_vars['PYTHONPATH'],
+                                                  cwd=neutral,
+                                                  required_surface=required | {'ALLOWED_GPUS'})
+    assert status != 0 and "AssertionError: ('public surface', ['ALLOWED_GPUS'])" in stderr, stderr
     plants = (
         ('\ndel validate_local_checkpoint\n', 'validate_local_checkpoint', 'public surface'),
         ('\nfrom .core import VOLUME_MOUNT\n', 'VOLUME_MOUNT', 'public surface'),
@@ -2650,5 +2745,9 @@ def test_mount_bijection_rejects_unexpected_tracked_python_file(fake_modal, tmp_
     extra.write_text('fixture = 1\n', encoding='utf-8')
     _git(repo, 'add', 'scripts/modal_runner/café.py')
     violations = _mount_bijection_violations(mounts, repo)
-    assert any(v.startswith('(A)') and 'café.py' in v for v in violations), violations
+    # Tracked and undeclared: (A) must say declare it or `git rm` it, not "stage it".
+    assert any(
+        v.startswith('(A)') and 'café.py' in v and 'tracked but not declared' in v
+        and '`git rm` the file' in v and 'RUNNER_MODULES' in v and 'MANIFEST and DEPENDENCIES' in v
+        and 'stage it' not in v for v in violations), violations
     assert any(v.startswith('(B) missing') and 'café.py' in v for v in violations), violations

@@ -6,8 +6,8 @@ Loaded only with `-p tests._modal_import_probe`, by the nested session of
 `test_modal_runner_resolves_to_exactly_one_module_object` and by any full-suite
 run that wants whole-session evidence; never by the normal suite. Test
 discovery does not collect it: `python_files` defaults to `test_*.py` and
-`*_test.py`, and this repo sets no override (checked 2026-09-23 on the W3b tree:
-no `[tool.pytest.ini_options]` in pyproject.toml, no pytest.ini / tox.ini /
+`*_test.py`, and this repo sets no override (checked 2026-09-23: no
+`[tool.pytest.ini_options]` in pyproject.toml, no pytest.ini / tox.ini /
 setup.cfg). The leading underscore only marks it private; the pattern is what
 keeps it out. A path named on the command line bypasses that pattern, but this
 module defines no tests, so such a run collects none (measured 2026-09-23).
