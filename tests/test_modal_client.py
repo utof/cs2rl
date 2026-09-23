@@ -2603,8 +2603,9 @@ def test_package_surface_rejects_missing_and_extra_exports(fake_modal, tmp_path)
 
     It also holds the control for `_production_package_surface`, which decides
     what these clauses require. In a scratch repository, one staged caller per
-    spelling the derivation reads each reads one name the facade does not
-    export, and an unstaged caller reads another: the derived set must be
+    import form the derivation reads (`import ... as`, `from scripts import
+    modal_runner` with and without `as`, the dotted import and the
+    from-import) each reads one name the facade does not export, and an unstaged caller reads another: the derived set must be
     exactly the staged callers' names. Narrowing the derivation to a fixed
     list of files, or dropping a spelling, loses a name here.
     """
@@ -2635,15 +2636,17 @@ def test_package_surface_rejects_missing_and_extra_exports(fake_modal, tmp_path)
         ('from_import', 'from scripts.modal_runner import ALLOWED_GPUS\n'),
         ('dotted', 'import scripts.modal_runner\nscripts.modal_runner.ALLOWED_NUM_ENVS\n'),
         ('from_parent', 'from scripts import modal_runner as runner\nrunner.ALLOWED_CPU_CORES\n'),
+        ('from_parent_bare', 'from scripts import modal_runner\nmodal_runner.STALE_AFTER\n'),
         ('as_alias', 'import scripts.modal_runner as facade\nfacade.MAX_MEMORY_MIB\n'),
         ('new', 'import scripts.modal_runner as mrl\nmrl.MIN_MEMORY_MIB\n'),
     ):
         (callers / 'scripts' / f'{name}.py').write_text(caller, encoding='utf-8')
     _git(callers, 'add', 'scripts/from_import.py', 'scripts/dotted.py', 'scripts/from_parent.py',
-         'scripts/as_alias.py')
+         'scripts/from_parent_bare.py', 'scripts/as_alias.py')
     derived = _production_package_surface(callers)
-    assert derived == {'ALLOWED_GPUS', 'ALLOWED_NUM_ENVS', 'ALLOWED_CPU_CORES',
-                       'MAX_MEMORY_MIB'}, sorted(derived)
+    assert derived == {
+        'ALLOWED_GPUS', 'ALLOWED_NUM_ENVS', 'ALLOWED_CPU_CORES', 'STALE_AFTER', 'MAX_MEMORY_MIB'
+    }, sorted(derived)
     # A caller reading an unexported name makes the surface clause ask the facade
     # to ADD it.
     status, stderr = _container_equivalent_import(prefix,

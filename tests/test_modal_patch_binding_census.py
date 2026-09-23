@@ -64,9 +64,12 @@ def _facade_patches(function, facade):
       `<facade>.<attr>` at any depth: `<attr>`. That covers tuple and starred
       targets, and an attribute or item OF a facade attribute:
       `mrl.validate_local_checkpoint.__doc__ = ...` is reported as patching
-      `validate_local_checkpoint` although it does not replace it (a known
-      false positive, which fails closed), and `mrl.__dict__[...] = ...` is
-      reported as `__dict__`, which equals no site symbol.
+      `validate_local_checkpoint` although it does not replace it, and
+      `mrl.__dict__[...] = ...` is reported as `__dict__`, which equals no
+      site symbol. Three known false positives, each failing closed: that
+      attribute-of-an-attribute write, a facade attribute used as a subscript
+      key (`d[mrl.<attr>] = ...`), and a bare annotation (`mrl.<attr>: T`),
+      which assigns nothing. Each is reported as patching `<attr>`.
 
     `facade` is the set of spellings bound to the package: an alias such as
     `mrl` or `modal_runner`, and always the dotted `scripts.modal_runner`.
@@ -225,9 +228,11 @@ def test_patch_binding_sites_route_through_binding_target():
 
     None of them patches its own site's symbol on the facade in a spelling the
     census recognises; patching other facade symbols is allowed.
-    `_facade_patches` lists every shape the census matches, including one
-    known false positive; a patch it does not report under the site's symbol
-    is invisible, and `_binding_site_violations` names the ones measured so.
+    `_facade_patches` lists every shape the census matches, including three
+    known false positives. A facade patch whose name it cannot read (a
+    positional non-literal `setattr` name, `**` names) is rejected. A patch it
+    matches under another name, or does not match at all, passes unseen;
+    `_binding_site_violations` lists the ones measured so.
 
     The campaign certifies `binding_target(site)`; this is what makes that
     certificate about the original tests. See `_binding_site_violations`.

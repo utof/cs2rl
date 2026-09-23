@@ -2,8 +2,8 @@
 
 Every clause here describes the shape the package keeps from now on:
 
-* module population: the submodule files on disk (every `*.py` but
-  `__init__.py`) are exactly the modules MANIFEST and DEPENDENCIES declare
+* module population: the submodule files on disk (every entry matching
+  `*.py` but `__init__.py`) are exactly the modules MANIFEST and DEPENDENCIES declare
   (`files`, `undeclared-module`), and none has a grab-bag name
   (`forbidden-name`);
 * ownership: each module's top-level names equal its MANIFEST entry
@@ -33,9 +33,10 @@ unless the edit adds or removes an import, or puts work into a value that runs
 on import (`import-time`). Adding, removing, renaming or moving
 a top-level symbol, adding a module, or changing which package modules a module
 imports does: update the table the failure message names, in the same commit as
-the change. Runtime imports are compared with DEPENDENCIES and imports under
-`if TYPE_CHECKING:` with ANNOTATION_DEPENDENCIES, separately, and the
-dependency walk reads function bodies too. So a first runtime import of a
+the change. Runtime imports are compared with DEPENDENCIES and one-dot relative
+imports under `if TYPE_CHECKING:` with ANNOTATION_DEPENDENCIES, separately (an
+absolute import of the package counts as runtime even there, and no table
+allows it), and the dependency walk reads function bodies too. So a first runtime import of a
 module imported only under `TYPE_CHECKING` is a new edge, and so is the reverse;
 another import of a module already imported in the same way is not; removing
 a module's last runtime import, or its last `TYPE_CHECKING` one, drops that
@@ -52,7 +53,8 @@ resolves it (`_explain`). Controls plant defects into in-memory copies of the
 sources or into a copy of the package under `tmp_path`, never into the live
 package. A control first re-checks the unplanted package; when that check
 fails, its message starts with PRECONDITION and names the contract test whose
-message says what to fix (both, for a control that re-checks two), because the
+message says what to fix, or both tests when one check runs two contracts'
+gates, because the
 control itself did not break.
 """
 import ast
@@ -161,8 +163,9 @@ def _package_sources(root):
 
     The population is `_runner_module_population`'s: every declared module,
     read even when absent so that a missing or unreadable member raises an
-    OSError naming it, then every undeclared `*.py` in the directory, which the
-    gates below report rather than skip. Read as UTF-8 bytes because the sources
+    OSError naming it, then every undeclared entry matching `*.py` in the
+    directory, which the gates below report rather than skip (a directory so
+    named raises IsADirectoryError). Read as UTF-8 bytes because the sources
     hold non-ASCII prose, and the locale must not decide whether they parse.
     """
     candidates, _ = _runner_module_population(root)
@@ -469,7 +472,7 @@ def _facade_violations(source):
     module-population clauses skip it because it declares no symbol of its own.
     Its module scope may hold only its docstring, one-dot relative imports of
     its submodules (`from .core import X`, `from . import core`; no star
-    import, which would re-export whatever the submodule binds) and `__all__`
+    import, which would re-export every public name the submodule binds) and `__all__`
     bound to a list or tuple of string literals. That one rule covers, for this
     file, what the header rule covers for the modules (a call, a conditional, a
     loop), what the purity rule covers (an absolute or non-stdlib import) and a
@@ -711,7 +714,7 @@ def test_package_facade_controls(plant, kinds):
     * chained-all and set-all: `__all__` must be the only target and a list or
       tuple, so a second target and a set are rejected. tuple-all is ACCEPTED,
       the tuple half of that shape.
-    * star-import: re-exports whatever the submodule binds. The client surface
+    * star-import: re-exports every public name the submodule binds. The client surface
       gate also objects, but only by running the image.
     * re-export: ACCEPTED. A new one-dot relative import is legal shape here;
       whether the name belongs in the facade is the surface gates' question,

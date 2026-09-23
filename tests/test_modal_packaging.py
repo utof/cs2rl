@@ -484,8 +484,8 @@ def test_runtime_identity_requires_every_governed_module(monkeypatch, tmp_path):
     declares: an empty set, which would pass every identity clause over
     nothing, or a module file the tables do not declare, reddens here. The
     planted directory shows the derivation governs a new module the moment
-    its file exists and ignores anything that is not a `*.py` file directly
-    in the package directory: `sub/nested.py` pins the non-recursive glob,
+    its file exists and ignores anything whose name does not match `*.py`
+    directly in the package directory: `sub/nested.py` pins the non-recursive glob,
     which an `rglob` would break.
     """
     import importlib
@@ -500,12 +500,17 @@ def test_runtime_identity_requires_every_governed_module(monkeypatch, tmp_path):
 
     declared = {PACKAGED} | {f"{PACKAGED}.{name}" for name in RUNNER_MODULES}
     undeclared, missing = sorted(_EXPECTED - declared), sorted(declared - _EXPECTED)
-    assert not undeclared and not missing, (
-        f"tests/_modal_import_probe.py governs every *.py file in {_PACKAGE_DIR}, and that "
-        "must match the modules RUNNER_MODULES declares. On disk but undeclared: "
-        f"{undeclared}; declare each in {TABLES}, or delete the file. Declared but not on "
-        f"disk: {missing}; restore the file, or remove the module from those tables. If every "
-        "declared module is missing, `_PACKAGE_DIR` no longer points at scripts/modal_runner/.")
+    remedies = []
+    if undeclared:
+        remedies.append(f"On disk but undeclared: {undeclared}; declare each in {TABLES}, or "
+                        "delete the file.")
+    if missing:
+        remedies.append(f"Declared but not on disk: {missing}; restore the file, or remove the "
+                        "module from those tables. If every declared module is missing, "
+                        "`_PACKAGE_DIR` no longer points at scripts/modal_runner/.")
+    assert not remedies, (
+        f"tests/_modal_import_probe.py governs every entry matching *.py in {_PACKAGE_DIR}, "
+        "and that must match the modules RUNNER_MODULES declares. " + " ".join(remedies))
     planted = tmp_path / "modal_runner"
     (planted / "__pycache__").mkdir(parents=True)
     (planted / "sub").mkdir()
@@ -1939,8 +1944,9 @@ def _runner_module_population(repo_root):
     relative imports, a literal `__all__`), `_facade_violations` in
     tests/test_modal_runner_package_shape.py; the surface gates in
     tests/test_modal_client.py pin the names it exports.
-    pathlib's `*` also matches dotfiles such as an editor's `.#core.py`; the
-    mount loop would ship those too, so they are read (and may raise) here.
+    pathlib's `*` also matches dotfiles such as an editor's `.#core.py`, and
+    `*.py` matches a directory so named; the mount loop would ship those too,
+    so they are read (and may raise, as a directory does) here.
     """
     root = Path(repo_root)
     declared = [f"scripts/modal_runner/{name}.py" for name in RUNNER_MODULES]
