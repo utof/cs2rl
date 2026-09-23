@@ -216,8 +216,11 @@ def test_in_process_env_determinism(simple_map):
 @pytest.mark.timeout(1800)
 def test_two_runs_same_seed_identical(tmp_path_factory, seed):
     """Two 1-epoch CPU trainings with the same --seed write identical
-    metrics.jsonl rows. Uses a per-call mktemp dir (not the shared basetemp
-    numbering) so concurrent pytest invocations cannot collide on --checkpoint-dir."""
+    metrics.jsonl rows. The checkpoint dirs live under this session's basetemp.
+    A session run without --basetemp gets a numbered pytest-<N> basetemp of its
+    own (pytest's default layout, which tests/conftest.py only relocates,
+    gh#219), so such sessions cannot collide on --checkpoint-dir; sessions
+    handed the same explicit --basetemp still can."""
     tmp = tmp_path_factory.mktemp(f"seed{seed}_", numbered=True)
     a = _run(tmp / "a", seed)
     b = _run(tmp / "b", seed)

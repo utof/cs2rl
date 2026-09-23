@@ -849,7 +849,12 @@ def test_modal_runner_resolves_to_exactly_one_module_object(tmp_path):
     log = tmp_path / "nested-session.log"
     env = {**os.environ, "MODAL_IMPORT_PROBE_OUT": str(out)}
     # --basetemp keeps the nested session's temp tree inside this test's own
-    # `tmp_path`, next to its log and probe output.
+    # `tmp_path`, next to its log and probe output. Isolation from the OUTER
+    # session does not depend on it: without the flag pytest would give the
+    # nested session its own numbered pytest-<N> dir under the temp root
+    # (tests/conftest.py points that root at ~/.cache/cs2rl-pytest unless
+    # PYTEST_DEBUG_TEMPROOT is set, gh#219), which would outlive this test
+    # until pytest's rotation of old sessions cleared it.
     #
     # `-o addopts=` and `-p no:randomly` are forward insurance, not load
     # bearing today: checked 2026-09-22 on the W3b tree, there is no
