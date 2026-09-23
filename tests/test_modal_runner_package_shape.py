@@ -953,9 +953,12 @@ def test_package_annotation_edge_controls(live_sources, plant):
             **live_sources, "preflight.py":
             _hoist_type_checking_imports(live_sources["preflight.py"])
         }
+        # Read from the tables, so a new annotation-only import in preflight,
+        # declared as every message says, keeps this row green.
         runtime = set(DEPENDENCIES["preflight"])
-        expected = [("runtime-edges", "preflight", runtime | {"request"}, runtime),
-                    ("annotation-edges", "preflight", set(), {"request"})]
+        annotated = set(ANNOTATION_DEPENDENCIES["preflight"])
+        expected = [("runtime-edges", "preflight", runtime | annotated, runtime),
+                    ("annotation-edges", "preflight", set(), annotated)]
     else:
         guard = "typing.TYPE_CHECKING" if plant == "typing-attribute" else "TYPE_CHECKING"
         changed = {
