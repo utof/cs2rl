@@ -431,6 +431,45 @@ def _signal_process_group(
     getpgid: Callable[[int], int],
     sleep: Callable[[float], None],
 ) -> None:
+    """SIGTERM the child's process group; SIGKILL it if the child outlives the grace period.
+
+    The group, not the pid: the child is spawned with `start_new_session=True`, so
+    everything it forks shares its group and dies with it.
+
+    THE GUARD. This is the only function in the runner that sends a signal, so
+    it refuses, with one stderr line naming the condition, to signal a group
+    that a live or unreaped child cannot have. The conditions are checked in
+    this order, and the first that holds is the one reported:
+      * `pgid!=pid` -- a `start_new_session` child leads its own group until it
+        is reaped, so its pgid IS its pid. Anything else is a fake, or a pid
+        reused after reaping by a process that does not lead its own group.
+      * `pgid<=1` -- `killpg(1, sig)` is `kill(-1, sig)`: every process the
+        user owns. `killpg(0, sig)` is the caller's own group.
+      * `own-group` -- `pgid == os.getpgrp()`, the runner's own group.
+    None of these can hold for the real child, so production behaviour does
+    not change.
+
+    WHY it exists (2026-09-23). An agent's throwaway script faked the child but
+    not `killpg`/`getpgid`, so `killpg(getpgid(1), SIGTERM)` ran for real and
+    ended the user's desktop session. `execute_training_attempt` still falls
+    back to `os.killpg`/`os.getpgid` when a caller passes None, and FakeChild's
+    default pid 4242 may be a real process, so the kill seam is safe only by
+    the convention that every test fakes both. The guard does not rely on it.
+
+    RESIDUAL, accepted. A reaped pid reused by a process that leads its own
+    group (any `start_new_session` child, a login shell, a daemon) has
+    `pgid == pid` and is signalled. In production that needs the wait loop's
+    `child_poll()` to reap the child and its pid to be reused before
+    `finalize(kill_child=True)` runs, which is negligible.
+
+    PITFALL: do NOT close that residual by polling before `getpgid`. Today a
+    zombie's `getpgid` succeeds, so the SIGTERM still reaches grandchildren left
+    in its group. Polling first reaps the zombie, `getpgid` then raises
+    ProcessLookupError, and the grandchildren escape. That is a behaviour change.
+
+    The lookup and the SIGTERM are separate `try`s so that a refusal can never
+    be mistaken for, or swallowed as, a lookup failure.
+    """
     if child is None:
         return
     pid = getattr(child, "pid", None)
@@ -438,6 +477,22 @@ def _signal_process_group(
         return
     try:
         pgid = getpgid(pid)
+    except ProcessLookupError:
+        return
+    if pgid != pid:
+        refused = "pgid!=pid"
+    elif pgid <= 1:
+        refused = "pgid<=1"
+    elif pgid == os.getpgrp():
+        refused = "own-group"
+    else:
+        refused = None
+    if refused is not None:
+        print(f"cs2rl: refusing to signal process group {pgid} of pid {pid}: {refused}",
+              file=sys.stderr,
+              flush=True)
+        return
+    try:
         killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
         return

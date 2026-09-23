@@ -227,6 +227,7 @@
   "test_save_cadence_rejected": "tests/test_modal_runner.py",
   "test_secret_without_wandb_rejected": "tests/test_modal_runner.py",
   "test_sigint_and_sigterm_share_cleanup_and_restore_handlers": "tests/test_modal_runner.py",
+  "test_signal_process_group_refuses_groups_a_live_child_cannot_have": "tests/test_modal_runner.py",
   "test_smoke_resource_tuples_and_cpu_memory_semantics": "tests/test_modal_client.py",
   "test_source_bundle_excludes_untracked_and_is_deterministic": "tests/test_modal_runner.py",
   "test_source_bundle_hash_changes_for_new_commit": "tests/test_modal_runner.py",

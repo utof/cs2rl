@@ -2982,6 +2982,23 @@ def test_completed_run_validates_without_runner_torch(tmp_path, monkeypatch):
 
 
 def _signal_hooks(child, *, release_on=signal.SIGKILL):
+    """Recording fakes for the attempt's signal seam: handlers, killpg, getpgid, sleep.
+
+    `fake_getpgid` is the identity, so the child passes the `_signal_process_group`
+    guard's `pgid!=pid` clause, and `fake_killpg` records instead of signalling.
+
+    The precondition sits here because every test that drives an attempt into
+    its kill path takes its fakes from this helper, so one assertion covers
+    them all. (The §2a guard test calls `_signal_process_group` directly and
+    builds its own.) The guard also refuses the runner's OWN group: if this
+    session's process group happened to equal the fake child's pid (4242 by
+    default), each of those tests would see its kills refused and fail for a
+    reason unrelated to its subject, so this stops at the cause instead.
+    """
+    assert os.getpgrp() != child.pid, (
+        f"the runner's own process group ({os.getpgrp()}) equals the fake child's pid "
+        f"({child.pid}), so the §2a guard in `_signal_process_group` refuses to signal it by "
+        "design and this kill-path test cannot run in this session")
     originals = {signal.SIGINT: object(), signal.SIGTERM: object()}
     installed: dict[int, object] = dict(originals)
     kills: list[int] = []
@@ -3531,6 +3548,77 @@ def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monke
     payload = json.loads((run_root / core.RESULT_FILENAME).read_text())
     assert payload["status"] == persisted["status"]
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
+
+
+@pytest.mark.parametrize("case", ["pgid-le-1", "own-group", "pgid-ne-pid", "control"])
+def test_signal_process_group_refuses_groups_a_live_child_cannot_have(case, capsys):
+    """`_signal_process_group` refuses the three groups a live child cannot lead.
+
+    Spec §2a. The guard exists because an agent's script once ran
+    `killpg(getpgid(1), SIGTERM)` for real, which is `kill(-1, SIGTERM)`, and
+    ended the user's desktop session. Each refusal case sets up exactly ONE of
+    the three conditions:
+      * `pgid-le-1`   -- pid 1, identity getpgid: the incident's exact shape;
+      * `own-group`   -- pid = the runner's own group, identity getpgid;
+      * `pgid-ne-pid` -- pid P, getpgid returning P + 1 (a fake, or a reused pid);
+      * `control`     -- pid P, identity getpgid: must SIGTERM P and print nothing.
+    The case ids are shell-safe spellings; the stderr tokens are `pgid<=1`,
+    `own-group` and `pgid!=pid`.
+
+    WHY one condition per case. A case where two conditions hold stays green
+    when one of their clauses is deleted, because the other still refuses: the
+    shadowed clause would ship untested. So `pid == pgid` everywhere except the
+    `pgid-ne-pid` case, and `P = os.getpgrp() + 4242` differs from the runner's
+    group by construction. If the runner's group were 1, `pgid-le-1` would also
+    be `own-group` (and below 1, `own-group` would also be `pgid<=1`), hence
+    the first assertion, which names that condition instead of letting a
+    knock-out stay green for a reason nobody can see.
+
+    WHY each case checks its own token AND the absence of the other two. A
+    guard printing one line that names all three conditions for every refusal
+    would pass a "contains my token" check. Only the exclusion pins WHICH clause
+    refused.
+
+    SAFETY: every case passes a recording `killpg` and a fake `sleep`, so
+    nothing here signals even with a clause removed. The per-clause knock-outs
+    (delete one clause, run only its own case, see red) are recorded in the
+    ledger, not committed.
+    """
+    assert os.getpgrp() > 1, (
+        f"the runner's own process group is {os.getpgrp()}, not above 1, so the `pgid-le-1` and "
+        "`own-group` cases would both hold two conditions and could not tell the clauses apart")
+    P = os.getpgrp() + 4242
+
+    def identity(pid):
+        return pid
+
+    child, getpgid, token = {
+        "pgid-le-1": (FakeChild(pid=1), identity, "pgid<=1"),
+        "own-group": (FakeChild(pid=os.getpgrp()), identity, "own-group"),
+        "pgid-ne-pid": (FakeChild(pid=P), lambda pid: pid + 1, "pgid!=pid"),
+        "control": (FakeChild(pid=P), identity, None),
+    }[case]
+    kills: list[tuple[int, int]] = []
+    slept: list[float] = []
+
+    training._signal_process_group(child,
+                                   killpg=lambda pgid, sig: kills.append((pgid, sig)),
+                                   getpgid=getpgid,
+                                   sleep=slept.append)
+
+    refusals = [
+        line for line in capsys.readouterr().err.splitlines()
+        if line.startswith("cs2rl: refusing to signal process group")
+    ]
+    if token is None:
+        assert kills == [(P, signal.SIGTERM)]
+        assert refusals == []
+        return
+    assert kills == []
+    assert len(refusals) == 1, refusals
+    assert token in refusals[0]
+    others = {"pgid<=1", "own-group", "pgid!=pid"} - {token}
+    assert not [other for other in others if other in refusals[0]], refusals[0]
 
 
 # ── Attempt outcome: exit mapping and completion evidence ──────────────────

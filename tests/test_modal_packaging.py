@@ -966,11 +966,14 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # reviewer reads them. This moves one number. Change it deliberately, in the
 # commit that changes the seam, and say why.
 #
-# 278 is `len(classify_seam(_seam_sources())[0])` on the W3b split tree. Against
-# 2bb32ac's 273: five client-side helper/test names added, one `SEAM_GUARDS`
-# name renamed, no destination moves -- the manifest's own diff lists the names.
-# Do not infer this value from additions in the packaging file, which the
-# classifier excludes.
+# 279 is `len(classify_seam(_seam_sources())[0])` after the §2a safety commit of
+# gh#163's close-out. Against the W3b split tree's 278: one runner-side test
+# added (`test_signal_process_group_refuses_groups_a_live_child_cannot_have`),
+# nothing removed, no destination moves. W3b's own move, against 2bb32ac's 273:
+# five client-side helper/test names added, one `SEAM_GUARDS` name renamed, no
+# destination moves -- the manifest's own diff lists the names. Do not infer
+# this value from additions in the packaging file, which the classifier
+# excludes.
 #
 # A GREEN `assert len(manifest) == GOVERNED_NAME_COUNT` IS NOT EVIDENCE THIS
 # NUMBER IS RIGHT. It compares two frozen artifacts -- a checked-in manifest
@@ -978,7 +981,7 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # neither and it stays green with a stale count and N ungoverned names on disk.
 # Its own message says so: it is a DELETION detector. The addition detector is
 # `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
-GOVERNED_NAME_COUNT = 278
+GOVERNED_NAME_COUNT = 279
 
 RUNNER_FILE = "tests/test_modal_runner.py"
 CLIENT_FILE = "tests/test_modal_client.py"
