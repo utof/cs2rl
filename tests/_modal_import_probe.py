@@ -141,9 +141,9 @@ def assert_module_identity(payload):
         "function body is reached only if the session runs that function: import it at module "
         "scope in the package module that uses it, or have a test in the session run that "
         "path. A submodule imported only under `if TYPE_CHECKING:` is never imported at run "
-        "time: import it at module scope in a module that reads it at run time, or move its "
-        "names into a module that is imported. A submodule nothing imports is dead code: "
-        "delete it.")
+        "time: move its names into a module that is imported, or import it at module scope in "
+        "a module that annotates with it (a new DEPENDENCIES edge, legal only if the import "
+        "graph stays acyclic). A submodule nothing imports is dead code: delete it.")
     for name in sorted(_EXPECTED):
         entries = payload["identities"][name]
         ids = {entry["object_id"] for entry in entries}

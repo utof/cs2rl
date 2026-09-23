@@ -2546,7 +2546,8 @@ def _production_package_surface(root=ROOT):
     pass a scratch repository as `root`. Three spellings are read: `alias.NAME` after
     `import scripts.modal_runner as alias` or `from scripts import modal_runner
     [as alias]`; the dotted `scripts.modal_runner.NAME`; and
-    `from scripts.modal_runner import NAME`.
+    `from scripts.modal_runner import NAME`. An import is read wherever it
+    sits, function bodies included, and its alias counts for the whole file.
 
     PITFALL: a caller that reaches the package any other way (a from-import of
     a submodule, a variable passed to `importlib.import_module`, the module
@@ -2605,9 +2606,12 @@ def test_package_surface_rejects_missing_and_extra_exports(fake_modal, tmp_path)
     what these clauses require. In a scratch repository, one staged caller per
     import form the derivation reads (`import ... as`, `from scripts import
     modal_runner` with and without `as`, the dotted import and the
-    from-import) each reads one name the facade does not export, and an unstaged caller reads another: the derived set must be
-    exactly the staged callers' names. Narrowing the derivation to a fixed
-    list of files, or dropping a spelling, loses a name here.
+    from-import), one importing inside a function body and one below
+    scripts/ (`scripts/sub/`) each read one name the facade does not export,
+    and an unstaged caller reads another: the derived set must be exactly the
+    staged callers' names. Narrowing the derivation to a fixed list of files
+    or to the top level of scripts/, reading imports at module scope only, or
+    dropping a spelling, loses a name here.
     """
     module = _import_run_modal()
     required = _production_package_surface()
@@ -2626,27 +2630,37 @@ def test_package_surface_rejects_missing_and_extra_exports(fake_modal, tmp_path)
 
     assert result() == (0, '')
     # The derivation's own control. Every name read here is one the facade does
-    # not export, so a derivation blind to a spelling, or reading a fixed file
-    # list, would let that caller ship an unexported name. `new.py` is on disk but
-    # not staged, and a new caller counts only once it is staged.
+    # not export, so a derivation blind to a spelling, reading a fixed file list,
+    # reading imports at module scope only, or listing only the top level of
+    # scripts/, would let that caller ship an unexported name. Each row is
+    # (path under scripts/ without `.py`, source, the name it reads, staged).
+    # `new.py` is on disk but not staged, and a new caller counts only once it is
+    # staged.
     callers = tmp_path / 'callers'
-    (callers / 'scripts').mkdir(parents=True)
+    (callers / 'scripts' / 'sub').mkdir(parents=True)
     _git(callers, 'init', '-q', '-b', 'main')
-    for name, caller in (
-        ('from_import', 'from scripts.modal_runner import ALLOWED_GPUS\n'),
-        ('dotted', 'import scripts.modal_runner\nscripts.modal_runner.ALLOWED_NUM_ENVS\n'),
-        ('from_parent', 'from scripts import modal_runner as runner\nrunner.ALLOWED_CPU_CORES\n'),
-        ('from_parent_bare', 'from scripts import modal_runner\nmodal_runner.STALE_AFTER\n'),
-        ('as_alias', 'import scripts.modal_runner as facade\nfacade.MAX_MEMORY_MIB\n'),
-        ('new', 'import scripts.modal_runner as mrl\nmrl.MIN_MEMORY_MIB\n'),
-    ):
+    rows = (
+        ('from_import', 'from scripts.modal_runner import ALLOWED_GPUS\n', 'ALLOWED_GPUS', True),
+        ('dotted', 'import scripts.modal_runner\nscripts.modal_runner.ALLOWED_NUM_ENVS\n',
+         'ALLOWED_NUM_ENVS', True),
+        ('from_parent', 'from scripts import modal_runner as runner\nrunner.ALLOWED_CPU_CORES\n',
+         'ALLOWED_CPU_CORES', True),
+        ('from_parent_bare', 'from scripts import modal_runner\nmodal_runner.STALE_AFTER\n',
+         'STALE_AFTER', True),
+        ('as_alias', 'import scripts.modal_runner as facade\nfacade.MAX_MEMORY_MIB\n',
+         'MAX_MEMORY_MIB', True),
+        ('local_import', 'def f():\n    import scripts.modal_runner as local\n'
+         '    return local.HEARTBEAT_INTERVAL\n', 'HEARTBEAT_INTERVAL', True),
+        ('sub/nested', 'import scripts.modal_runner as nested\nnested.VOLUME_MOUNT\n',
+         'VOLUME_MOUNT', True),
+        ('new', 'import scripts.modal_runner as mrl\nmrl.MIN_MEMORY_MIB\n', 'MIN_MEMORY_MIB',
+         False),
+    )
+    for name, caller, _, _ in rows:
         (callers / 'scripts' / f'{name}.py').write_text(caller, encoding='utf-8')
-    _git(callers, 'add', 'scripts/from_import.py', 'scripts/dotted.py', 'scripts/from_parent.py',
-         'scripts/from_parent_bare.py', 'scripts/as_alias.py')
+    _git(callers, 'add', *(f'scripts/{name}.py' for name, _, _, staged in rows if staged))
     derived = _production_package_surface(callers)
-    assert derived == {
-        'ALLOWED_GPUS', 'ALLOWED_NUM_ENVS', 'ALLOWED_CPU_CORES', 'STALE_AFTER', 'MAX_MEMORY_MIB'
-    }, sorted(derived)
+    assert derived == {read for _, _, read, staged in rows if staged}, sorted(derived)
     # A caller reading an unexported name makes the surface clause ask the facade
     # to ADD it.
     status, stderr = _container_equivalent_import(prefix,

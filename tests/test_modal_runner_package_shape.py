@@ -34,18 +34,23 @@ Every clause here describes the shape the package keeps from now on:
   `__all__`.
 
 Editing a function body, a docstring or a constant's value trips none of them
-unless the edit adds or removes an import, or puts work into a value that runs
-on import (`import-time`). Adding, removing, renaming or moving
-a top-level symbol, adding a module, or changing which package modules a module
-imports does: update the table the failure message names, in the same commit as
-the change. Runtime imports are compared with DEPENDENCIES and one-dot relative
-imports under `if TYPE_CHECKING:` with ANNOTATION_DEPENDENCIES, separately (an
-absolute import of the package counts as runtime even there, and no table
-allows it), and the dependency walk reads function bodies too. So a first runtime import of a
-module imported only under `TYPE_CHECKING` is a new edge, and so is the reverse;
-another import of a module already imported in the same way is not; removing
-a module's last runtime import, or its last `TYPE_CHECKING` one, drops that
-edge. No module size budget applies.
+unless the edit adds or removes an import, reads a name through a sibling
+module object (the `seam` clauses), or puts work into a value that runs on
+import (`import-time`); the facade docstring's MODULE MAP and QUALIFIED SEAMS
+paragraphs are the exception, since two tests read them. Adding,
+removing, renaming or moving a top-level symbol, adding a module, or changing
+which package modules a module imports does: update the table the failure
+message names, in the same commit as the change. Runtime imports are compared
+with DEPENDENCIES and relative imports under `if TYPE_CHECKING:` with
+ANNOTATION_DEPENDENCIES, separately, and the dependency walk reads function
+bodies too. An absolute import of the package is a runtime edge even under
+`TYPE_CHECKING`, and a `..` import is an edge under its dotted spelling
+(`..modal_runner`); neither is a module, so no table may list it
+(`table-edge`). So a first runtime import of a module imported only under
+`TYPE_CHECKING` is a new edge, and so is the reverse; another import of a
+module already imported in the same way is not; removing a module's last
+runtime import, or its last `TYPE_CHECKING` one, drops that edge. No module
+size budget applies.
 
 History: the split commit, which created scripts/modal_runner/, also proved in
 this file (then tests/test_modal_relocation.py) that every moved declaration
@@ -55,12 +60,12 @@ after it.
 
 Every failure message names the clause, the file or symbol, and the edit that
 resolves it (`_explain`). Controls plant defects into in-memory copies of the
-sources or into a copy of the package under `tmp_path`, never into the live
-package. A control first re-checks the unplanted package; when that check
-fails, its message starts with PRECONDITION and names the contract test whose
-message says what to fix, or both tests when one check runs two contracts'
-gates, because the
-control itself did not break.
+sources, the tables or the facade text, or into a copy of the package under
+`tmp_path`, never into the live package. A control first re-checks the
+unplanted package; when that check fails, its message starts with
+PRECONDITION and names the contract test whose message says what to fix, or
+both tests when one check runs two contracts' gates, because the control
+itself did not break.
 """
 import ast
 import re
@@ -447,8 +452,8 @@ def _dependency_edges(sources):
     second, weaker copy that missed the package-level and parent spellings.
 
     PITFALL: that walker is an `ast.walk`, so an absolute spelling is recorded
-    as a runtime edge even under `if TYPE_CHECKING:`. That fails closed: no
-    table allows `PACKAGED` in either column.
+    as a runtime edge even under `if TYPE_CHECKING:`. That fails closed: the
+    `table-edge` clause keeps `PACKAGED` out of both tables.
     """
     runtime, annotations = {}, {}
     for filename, source in sources.items():
@@ -732,7 +737,8 @@ def _explain(violations):
                     f"core`, `from .core import X`), never an absolute (`{PACKAGED}`) or `..` "
                     "spelling, and never `from . import <name>`, which reads the facade.")
         elif kind == "runtime-edges":
-            text = (f"{v[1]}.py imports {v[2]} from the package at run time; "
+            text = (f"{v[1]}.py imports {v[2]} from the package at run time (an absolute "
+                    "spelling counts as run time even under `if TYPE_CHECKING:`); "
                     f"DEPENDENCIES['{v[1]}'] allows {v[3]}. Write intra-package imports as "
                     "one-dot relative imports of a module (`from . import core`, `from .core "
                     f"import X`); absolute (`{PACKAGED}`) and `..` spellings, and `from . import "

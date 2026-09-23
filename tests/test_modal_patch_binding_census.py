@@ -66,10 +66,17 @@ def _facade_patches(function, facade):
       `mrl.validate_local_checkpoint.__doc__ = ...` is reported as patching
       `validate_local_checkpoint` although it does not replace it, and
       `mrl.__dict__[...] = ...` is reported as `__dict__`, which equals no
-      site symbol. Three known false positives, each failing closed: that
-      attribute-of-an-attribute write, a facade attribute used as a subscript
-      key (`d[mrl.<attr>] = ...`), and a bare annotation (`mrl.<attr>: T`),
-      which assigns nothing. Each is reported as patching `<attr>`.
+      site symbol.
+
+    Known false positives, each reported as patching `<attr>` and so failing
+    closed, include: a `<facade>.<attr>` anywhere inside a target without
+    being the target itself (an attribute or item of it,
+    `mrl.<attr>.__doc__ = ...` or `mrl.<attr>[k] = ...`; a subscript key,
+    `d[mrl.<attr>] = ...`; a callee, `mrl.<attr>().x = ...`); a bare
+    annotation (`mrl.<attr>: T`), which assigns nothing; a write in a nested
+    function the installer never calls, because the whole body is walked; and
+    a write through a name the function rebinds locally, because the alias
+    set is file-wide.
 
     `facade` is the set of spellings bound to the package: an alias such as
     `mrl` or `modal_runner`, and always the dotted `scripts.modal_runner`.
@@ -112,10 +119,11 @@ def _binding_site_violations(sources):
     not also patch the site's OWN symbol on the package facade
     (`_facade_patches`). Other facade patches are allowed: the client-mount
     installer patches `prepare_remote_source` and `execute_training_attempt`
-    there. No statement in those files may patch the facade through a name the
-    census cannot read (a positional non-literal `setattr` name, or `**` names
-    to `mock.patch.multiple`), because it cannot tell which symbol that
-    patches. Returns the sorted violation strings; `[]` is green.
+    there. No statement in those files may patch the facade through a
+    positional non-literal `setattr` name or `**` names to
+    `mock.patch.multiple`, because the census cannot tell which symbol that
+    patches (a non-literal dotted string is not matched at all; see
+    PITFALLS). Returns the sorted violation strings; `[]` is green.
 
     WHY: `test_patch_binding_campaign` proves that `binding_target(site)` reaches
     each consumer, and nothing more. A review of the package split found that
@@ -140,11 +148,12 @@ def _binding_site_violations(sources):
         `binding_target(site)`, that the installer's own body does not patch
         its site's symbol on the facade in any spelling `_facade_patches`
         lists, and that no statement in those files patches the facade
-        through a name the census cannot read. It does not prove the patch
-        USES that call's result: a dead `binding_target(site)` call stays
-        green beside a real patch that `_facade_patches` does not report under
-        the site's symbol, whether it matches none of its shapes or reports
-        another name. Among them, each measured green:
+        through a positional non-literal `setattr` name or `**` names to
+        `multiple`. It does not prove the patch USES that call's result: a
+        dead `binding_target(site)` call stays green beside a real patch that
+        `_facade_patches` does not report under the site's symbol, whether it
+        matches none of its shapes or reports another name. Among them, each
+        measured green:
           - the name passed by keyword
             (`monkeypatch.setattr(mrl, name=..., value=...)`);
           - `mock.patch.object(<facade>, ...)`, and `mock.patch.multiple`
@@ -228,11 +237,12 @@ def test_patch_binding_sites_route_through_binding_target():
 
     None of them patches its own site's symbol on the facade in a spelling the
     census recognises; patching other facade symbols is allowed.
-    `_facade_patches` lists every shape the census matches, including three
-    known false positives. A facade patch whose name it cannot read (a
-    positional non-literal `setattr` name, `**` names) is rejected. A patch it
-    matches under another name, or does not match at all, passes unseen;
-    `_binding_site_violations` lists the ones measured so.
+    `_facade_patches` lists every shape the census matches, and the known
+    false positives, which fail closed. A facade patch through a positional
+    non-literal `setattr` name, or `**` names to `multiple`, is rejected:
+    which symbol it patches cannot be read. A patch it matches under another
+    name, or does not match at all (a non-literal dotted string among them),
+    passes unseen; `_binding_site_violations` lists the ones measured so.
 
     The campaign certifies `binding_target(site)`; this is what makes that
     certificate about the original tests. See `_binding_site_violations`.
@@ -244,9 +254,12 @@ def test_patch_binding_sites_route_through_binding_target():
 # Each plant rewrites exactly one original site in memory. `old` must occur
 # exactly once in the named file, so a plant that stops matching fails loudly
 # instead of passing on unchanged source. The `unaliased-import-*`,
-# `dotted-via-other-import`, `mock-patch-*` rows keep the site's
-# `binding_target` call beside the facade patch, so the patch spelling under
-# test is the only thing that can object.
+# `dotted-via-other-import`, `from-parent-*` and `mock-patch-*` rows keep the
+# site's `binding_target` call beside the facade patch, so the patch spelling
+# under test is the only thing that can object. The two `from-parent-*` rows
+# pin the census's `from scripts import modal_runner [as x]` aliases: before
+# them, binding only the `as` form, or neither, left every row green (gh#222
+# review F1).
 _RUNNER_FILE = "tests/test_modal_runner.py"
 _SITE_CENSUS_PLANTS = {
     "package-revert":
@@ -288,6 +301,23 @@ _SITE_CENSUS_PLANTS = {
          f"prepare-validator: {_RUNNER_FILE}::"
          "test_prepare_validates_resume_then_dumps_and_hashes_config patches the package "
          "facade's validate_local_checkpoint",
+     ]),
+    "from-parent-bare":
+    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+     '    binding_target("terminal-validator")\n'
+     '    from scripts import modal_runner\n'
+     '    monkeypatch.setattr(modal_runner, "validate_local_checkpoint",\n'
+     '                        wrapped_validate)\n', [
+         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         "package facade's validate_local_checkpoint",
+     ]),
+    "from-parent-as":
+    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+     '    binding_target("terminal-validator")\n'
+     '    from scripts import modal_runner as runner\n'
+     '    monkeypatch.setattr(runner, "validate_local_checkpoint", wrapped_validate)\n', [
+         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         "package facade's validate_local_checkpoint",
      ]),
     "dotted-via-other-import":
     ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',

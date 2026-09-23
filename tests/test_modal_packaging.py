@@ -503,10 +503,10 @@ def test_runtime_identity_requires_every_governed_module(monkeypatch, tmp_path):
     remedies = []
     if undeclared:
         remedies.append(f"On disk but undeclared: {undeclared}; declare each in {TABLES}, or "
-                        "delete the file.")
+                        "delete it.")
     if missing:
         remedies.append(f"Declared but not on disk: {missing}; restore the file, or remove the "
-                        "module from those tables. If every declared module is missing, "
+                        f"module from {TABLES}. If every declared module is missing, "
                         "`_PACKAGE_DIR` no longer points at scripts/modal_runner/.")
     assert not remedies, (
         f"tests/_modal_import_probe.py governs every entry matching *.py in {_PACKAGE_DIR}, "
@@ -1945,8 +1945,11 @@ def _runner_module_population(repo_root):
     tests/test_modal_runner_package_shape.py; the surface gates in
     tests/test_modal_client.py pin the names it exports.
     pathlib's `*` also matches dotfiles such as an editor's `.#core.py`, and
-    `*.py` matches a directory so named; the mount loop would ship those too,
-    so they are read (and may raise, as a directory does) here.
+    `*.py` matches a directory so named. The mount loop globs both too: it
+    ships the dotfile, and the directory fails the image upload
+    (IsADirectoryError; Modal does not check the path when the image is
+    defined). So both are in the population here, and a gate reading the
+    directory raises IsADirectoryError too.
     """
     root = Path(repo_root)
     declared = list(RUNNER_PATHS)
