@@ -15,7 +15,11 @@ an import made only under TYPE_CHECKING); (2) add a line for it to MODULE MAP
 in the docstring of scripts/modal_runner/__init__.py; (3) `git add` the new
 file. The mount and package-population gates in tests/test_modal_client.py
 read `git ls-files`, so until step 3 they report the module missing although it
-is on disk.
+is on disk. (4) Its tests go in tests/test_modal_<module>.py, the path
+RUNNER_TEST_FILES derives from this list. The seam gate in
+tests/test_modal_packaging.py reads its declared runner test files from
+RUNNER_FILES there, so check that constant to see whether the gate already
+reads the new file.
 
 Data only: no function and no import, of the package or anything else, so
 importing this file from any test module costs nothing and cannot collect a
@@ -137,3 +141,15 @@ RUNNER_MODULES = tuple(filename.removesuffix(".py") for filename in MANIFEST)
 # Each module's repo-relative path, in the same order: the population the
 # module-scope gates must read.
 RUNNER_PATHS = tuple(f"scripts/modal_runner/{module}.py" for module in RUNNER_MODULES)
+# Each module's test file, in the same order: tests/test_modal_<module>.py. This
+# is the one list the seam gate (tests/test_modal_packaging.py) and the binding
+# census (tests/test_modal_patch_binding_census.py) are to share, so that neither
+# holds a retyped copy. It is data only until the runner tests are relocated
+# into these files: until then the seam gate's declared runner set
+# (RUNNER_FILES) still names the one unsplit file, and only the seam
+# classifier's and the reach floor's synthetic probes read this tuple. The
+# relocation switches the gate and the census to it in the same commit.
+# PITFALL: derive a module from a test file name through this tuple and
+# RUNNER_MODULES, never through a `tests/test_modal_*.py` glob, which also
+# matches test files that belong to no module.
+RUNNER_TEST_FILES = tuple(f"tests/test_modal_{module}.py" for module in RUNNER_MODULES)

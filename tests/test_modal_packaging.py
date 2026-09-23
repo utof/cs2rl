@@ -15,7 +15,22 @@ from pathlib import Path
 
 import pytest
 
-from tests.modal_runner_tables import RUNNER_MODULES, RUNNER_PATHS, TABLES
+# BINDING_SITES is a data dict, and the campaign module imports only importlib
+# and typing at module scope (it reaches the runner package only inside
+# `binding_target`, from a formatted string). So this import pulls in no runner
+# module and keeps this file out of `_IMPORTERS`. The reach floor reads it to
+# resolve `binding_target("key")` to the key's owning module.
+from tests.modal_patch_binding_campaign import BINDING_SITES
+
+# `MANIFEST` is renamed on import because this file's own `MANIFEST` is the seam
+# manifest's path; the tables' one is {"<module>.py": [the names it owns]}.
+from tests.modal_runner_tables import MANIFEST as RUNNER_OWNERS
+from tests.modal_runner_tables import (
+    RUNNER_MODULES,
+    RUNNER_PATHS,
+    RUNNER_TEST_FILES,
+    TABLES,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 BARE = "modal_runner"
@@ -966,9 +981,9 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # reviewer reads them. This moves one number. Change it deliberately, in the
 # commit that changes the seam, and say why.
 #
-# 279 is `len(classify_seam(_seam_sources())[0])` after the §2a safety commit of
-# gh#163's close-out. Against the W3b split tree's 278: one runner-side test
-# added (`test_signal_process_group_refuses_groups_a_live_child_cannot_have`),
+# 279 is `len(classify_seam(_seam_sources(), RUNNER_FILES)[0])` after the §2a
+# safety commit of gh#163's close-out. Against the W3b split tree's 278: one
+# runner-side test added (`test_signal_process_group_refuses_groups_a_live_child_cannot_have`),
 # nothing removed, no destination moves. W3b's own move, against 2bb32ac's 273:
 # five client-side helper/test names added, one `SEAM_GUARDS` name renamed, no
 # destination moves -- the manifest's own diff lists the names. Do not infer
@@ -983,7 +998,16 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
 GOVERNED_NAME_COUNT = 279
 
-RUNNER_FILE = "tests/test_modal_runner.py"
+# THE DECLARED RUNNER SET: the runner-half test files the seam reads, as a set,
+# so the classifier and the placement gate are written for the eight per-module
+# files before those files exist. It still holds the single unsplit runner test
+# file, and that entry is the one transitional literal the seam keeps. The
+# relocation commit that splits the runner tests by module replaces this whole
+# tuple with `RUNNER_TEST_FILES` from tests/modal_runner_tables.py; a surviving
+# copy of the literal is a hit for that commit's repo-wide grep. PITFALL: every
+# gate in this section takes the runner files from here (or as a parameter);
+# a second, retyped list anywhere is how the gate and the tree drift apart.
+RUNNER_FILES = ("tests/test_modal_runner.py", )
 CLIENT_FILE = "tests/test_modal_client.py"
 PACKAGING_FILE = "tests/test_modal_packaging.py"
 
@@ -992,12 +1016,15 @@ PACKAGING_FILE = "tests/test_modal_packaging.py"
 # reader opening that file will look for them. This copy is the one the
 # classifier sits next to; they must not drift.
 #
-# A name earns a place in the shared file by being REACHED FROM BOTH SIDES of the
-# seam. Nothing else earns it. A helper only runner tests reach belongs in the
-# runner file, a helper only client tests reach belongs in the client file --
+# A name earns a place in the shared file by being REACHED BY TESTS IN TWO OR
+# MORE SEAM FILES (the declared runner files and the client file). Nothing else
+# earns it. A helper that only one file's tests reach belongs in that file --
 # however generic the helper looks, and however well its name would read here.
-# `classify_seam` computes exactly this rule and will not send a one-sided helper
-# to this file, so the rule is enforced rather than merely stated.
+# The rule this replaced, "reached from both halves of the runner/client seam",
+# is its special case with one runner file. A consumer outside the seam files
+# does not count: the classifier never reads one. `classify_seam` computes
+# exactly this rule and will not send a single-file helper to this file, so the
+# rule is enforced rather than merely stated.
 #
 # WHY write down a rule the classifier already computes. Spec §10 criterion 12
 # bans a module named `utils` / `helpers` / `common` / `misc`. Its instrument,
@@ -1213,15 +1240,36 @@ def _reaches_client_directly(node, own):
     return False
 
 
-def classify_seam(sources):
+def _closure(start, edges):
+    """Every name reachable from the names in `start` along `edges` ({name: names it references}).
+
+    Shared by `classify_seam`'s stage 2 (which tests reach each helper) and the
+    reach floor (which helpers a test reaches), so the two cannot come to
+    disagree about what "reaches" means. `start` is a name's own out-edges, not
+    the name itself: the name is in the result only if a cycle leads back to it.
+    """
+    seen, stack = set(start), list(start)
+    while stack:
+        for nxt in edges[stack.pop()]:
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return seen
+
+
+def classify_seam(sources, runner_files):
     """Compute each module-level name's destination file from the code alone.
 
-    `sources` is {relative path: source text}. Returns
-    `(destinations, defined_in)`: {name: destination path} and
-    {name: [files that define it]}. Works on the monolith (one entry) and on the
-    split (several), because it treats the union of the files as one namespace
-    -- which is exactly why it can be re-run after the split and still be
-    evidence rather than a tautology.
+    `sources` is {relative path: source text}; `runner_files` is the declared
+    runner set, the files a runner-half TEST may live in. It is a required
+    parameter, not a default, so every caller states the set it classifies
+    against: the seam gate passes `RUNNER_FILES`, and the synthetic probes (and
+    the relocation's helper map) pass `RUNNER_TEST_FILES`, whose files need not
+    exist for a pure-data call. Returns `(destinations, defined_in)`:
+    {name: destination path} and {name: [files that define it]}. Works on the
+    unsplit file (one entry) and on the split (several), because it treats the
+    union of the files as one namespace -- which is exactly why it can be re-run
+    after the split and still be evidence rather than a tautology.
 
     TWO STAGES, and the split between them is the whole design:
 
@@ -1232,10 +1280,22 @@ def classify_seam(sources):
        kept as one deliberately, because the measurement it reports was taken
        against the spec's line-3638 seam, which no longer exists. Do not try to
        re-derive it from this function's inputs, which have grown since: the
-       live population is the `test_` names `classify_seam(_seam_sources())[0]`
-       sends to `RUNNER_FILE` and `CLIENT_FILE` (the `SEAM_GUARDS` sit in a file
-       `_seam_sources()` excludes). That population moves with every test either
-       half adds, so no live count is written here; derive it when you need it.
+       live population is the `test_` names
+       `classify_seam(_seam_sources(), RUNNER_FILES)[0]` sends to a runner file
+       or to `CLIENT_FILE` (the `SEAM_GUARDS` sit in a file `_seam_sources()`
+       excludes). That population moves with every test either half adds, so
+       no live count is written here; derive it when you need it.
+
+       A RUNNER-HALF TEST'S DESTINATION IS THE FILE OF `runner_files` THAT
+       DEFINES IT. Which runner file a test belongs in is the placement
+       judgement the seam manifest records, and the reach floor
+       (`reach_floor_violations`) and the core rule check it from below; this
+       function does not re-derive it. So for tests the placement gate's
+       `misplaced` check compares on-disk against on-disk, and only the
+       relocation's one-shot declared-placement check sees a test in the wrong
+       runner file. A runner-half test defined OUTSIDE `runner_files` (the
+       client file, the shared file, an undeclared file) has no legal
+       destination and raises `ValueError`, naming every such test at once.
 
        WHICH PART OF STAGE 1 EARNS THAT ZERO, because a one-at-a-time census
        gets this backwards. Knocked out singly, on the monolith: the closure
@@ -1251,11 +1311,14 @@ def classify_seam(sources):
 
     2. HELPERS follow the tests that reach them, because a helper has no concern
        of its own -- it has its consumers'. `FakeModal` names nothing
-       client-specific; it is client because only client tests reach it. This
-       stage is also the only one that can return a THIRD answer, and it does:
-       measured, 7 names are reached from BOTH halves and go to a shared module.
-       A classifier forced to pick a half for those 7 would strand them, which
-       is a NameError at run time in whichever file lost.
+       client-specific; it is client because only client tests reach it. A
+       helper whose consumers all sit in ONE seam file goes to that file (the
+       client file, or the one runner file its runner consumers share); a helper
+       whose consumers span TWO OR MORE seam files goes to `SHARED_FILE`. With
+       one runner file that is the old "reached from both halves" rule, and
+       measured on that tree, 7 names take the shared answer. A classifier
+       forced to pick one file for those would strand them, which is a
+       NameError at run time in whichever file lost.
 
     HONESTY NOTE, because the bar was known before stage 2 was written: stage 1
     alone puts 28 names on the wrong side -- all of them non-test helpers, 0 of
@@ -1329,55 +1392,109 @@ def classify_seam(sources):
 
     reached_by = {n: set() for n in nodes}
     for test in tests:                 # stage 2: which tests reach each helper
-        seen, stack = set(), [test]
-        while stack:
-            for nxt in edges[stack.pop()]:
-                if nxt not in seen:
-                    seen.add(nxt)
-                    stack.append(nxt)
-        for name in seen:
+        for name in _closure(edges[test], edges):
             reached_by[name].add(test)
 
+    governed = [n for n in nodes if n not in SEAM_HEADER_NAMES and n not in SEAM_GUARDS]
     destinations = {name: PACKAGING_FILE for name in SEAM_GUARDS}
-    for name in nodes:
-        if name in SEAM_HEADER_NAMES or name in SEAM_GUARDS:
-            continue
-        if name in tests:
-            destinations[name] = CLIENT_FILE if name in client else RUNNER_FILE
-        else:
-            consumers = reached_by[name]
-            if not consumers:
-                raise ValueError(f"{name!r} is reached by no test, so stage 2 cannot place it; "
-                                 "it is dead code or a new entry point and needs a human")
-            if consumers & client and consumers - client:
-                destinations[name] = SHARED_FILE
-            else:
-                destinations[name] = CLIENT_FILE if consumers & client else RUNNER_FILE
+    destinations.update(
+        _test_destinations([n for n in governed if n in tests], client, defined_in, runner_files))
+    for name in governed:
+        if name not in tests:
+            destinations[name] = _helper_destination(name, reached_by[name], destinations)
     return destinations, defined_in
 
 
-def _seam_sources():
-    """Return the runner, client and shared source files that currently exist.
+def _test_destinations(tests, client, defined_in, runner_files):
+    """{test: destination} for `classify_seam`'s governed tests; raises on a stray runner test.
+
+    A client test goes to `CLIENT_FILE` wherever it sits (the placement gate
+    then compares that with disk). A runner-half test goes to the file of
+    `runner_files` that defines it. PITFALL, and the reason this raises rather
+    than returning some destination: a runner-half test defined anywhere else
+    has no right answer here. Sending it to "the" runner file stopped meaning
+    anything once the runner set can hold eight files, and sending it to the
+    file it sits in would make an undeclared file a legal home. Every such test
+    is collected first and named in one error, so one run lists them all.
+    """
+    out, stray = {}, {}
+    for name in tests:
+        if name in client:
+            out[name] = CLIENT_FILE
+            continue
+        outside = [rel for rel in defined_in[name] if rel not in runner_files]
+        if outside:
+            stray[name] = outside
+        else:
+            out[name] = defined_in[name][0]
+    if stray:
+        raise ValueError(
+            f"runner-half tests defined outside the declared runner files {sorted(runner_files)}: "
+            f"{stray}. A runner-half test (one whose reference graph reaches no client signal) "
+            "must live in the runner test file of the module it tests. Move it there and set its "
+            "value in the seam manifest to that file; a move changes no key, so "
+            "GOVERNED_NAME_COUNT stays.")
+    return out
+
+
+def _helper_destination(name, consumers, destinations):
+    """Stage 2 for one helper: the single seam file its consumers sit in, else `SHARED_FILE`.
+
+    `consumers` are the tests that reach `name` transitively; each one's file is
+    its destination from stage 1 and `_test_destinations`. A consumer whose
+    destination is not a seam file (a `SEAM_GUARDS` name, sent to the packaging
+    file by fiat) does not count, because the rule is about the seam's own
+    files. PITFALL: a helper reached by no counting consumer raises instead of
+    defaulting, because the two things it can be -- dead code, or a new entry
+    point -- want opposite answers.
+    """
+    files = {destinations[test] for test in consumers} - {PACKAGING_FILE}
+    if not files:
+        raise ValueError(f"{name!r} is reached by no test, so stage 2 cannot place it; "
+                         "it is dead code or a new entry point and needs a human")
+    if len(files) > 1:
+        return SHARED_FILE
+    return files.pop()
+
+
+def _seam_sources(root=ROOT, runner_files=RUNNER_FILES):
+    """Return {path: source} for every declared runner file, the client file and the shared file.
 
     Exclude this classifier's own file: its source mentions client bindings,
     so self-feeding assigns the instruments to the concerns they inspect. The
     three legitimate packaging destinations are supplied by SEAM_GUARDS.
 
-    Derive the current population from ``classify_seam(_seam_sources())[0]``.
-    A self-fed histogram also depends on which client bindings and client-module
-    paths this file happens to mention, docstrings included; it is a diagnostic
-    measurement, not an invariant worth another test or prose pin.
+    Derive the current population from
+    ``classify_seam(_seam_sources(), RUNNER_FILES)[0]``. A self-fed histogram
+    also depends on which client bindings and client-module paths this file
+    happens to mention, docstrings included; it is a diagnostic measurement,
+    not an invariant worth another test or prose pin.
 
-    The existence filter supports measuring the historical unsplit checkout.
-    Live deletion is guarded separately:
+    A DECLARED FILE THAT DOES NOT EXIST RAISES `FileNotFoundError`; it is never
+    skipped. The error names every missing path and no other declared path. An
+    existence filter here is the hole this closes: a declared runner file that
+    drops out of the classifier's input silently shrinks every gate built on
+    it, and a repo-wide grep for the file's name cannot find a filter that
+    holds no file name. `test_the_seam_source_reader_fails_on_a_missing_declared_file`
+    pins it. `root` and `runner_files` are parameters (with the live values as
+    defaults) so that check can hand this reader a declared set with one bogus
+    path while every other declared file really exists; with an empty `root`,
+    every file is missing and a reader that raises only when NOTHING is left
+    would pass it.
+
+    Live deletion of a NAME is guarded separately:
     `test_the_modal_test_split_matches_concern_recomputed_from_source` pins
     `GOVERNED_NAME_COUNT` and requires every manifest name to be defined on
     disk, and `test_seam_manifest_agrees_with_the_classifier` compares the
-    manifest with the classifier. This function alone is not a completeness
-    check.
+    manifest with the classifier.
     """
-    rels = [RUNNER_FILE, CLIENT_FILE, SHARED_FILE]
-    return {rel: (ROOT / rel).read_text(encoding="utf-8") for rel in rels if (ROOT / rel).exists()}
+    rels = [*runner_files, CLIENT_FILE, SHARED_FILE]
+    missing = [rel for rel in rels if not (root / rel).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"declared seam file(s) missing: {missing}. The seam never skips a declared file: "
+            "restore it, or remove it from the declaration in the same commit that removes it.")
+    return {rel: (root / rel).read_text(encoding="utf-8") for rel in rels}
 
 
 def _names_defined_under_tests():
@@ -1419,6 +1536,332 @@ def _names_defined_under_tests():
         for name in _module_level_names(ast.parse(path.read_text(encoding="utf-8"))):
             found.setdefault(name, []).append(rel)
     return found
+
+
+# ── The reach floor: a test in tests/test_modal_<m>.py reaches module m ─────
+#
+# `classify_seam` decides runner versus client versus shared. It cannot decide
+# WHICH runner file a runner test belongs in: that is a judgement about what
+# the test tests, and the seam manifest records it. The reach floor and the
+# core rule (`reach_floor_violations`) are a floor under that judgement, not a
+# proof of it; the function's docstring states the measured residual.
+
+# Declared exemptions from the reach floor: {(file, test): reason}. Keyed by
+# FILE as well as test, so a test moved to another file loses its exemption
+# there, and its old entry, which now names a file that does not define it,
+# fails. An entry must also still be needed: an exempt test that does reach its
+# file's module fails (minimality), so this set cannot go stale unnoticed.
+#
+# EMPTY UNTIL THE RELOCATION COMMIT. Its one entry,
+# ("tests/test_modal_preflight.py",
+#  "test_recording_volume_reload_restores_committed_run_root"),
+# lands with the eight per-module files, with its reason: that test tests the
+# `RecordingVolume` test double, which lives with its only consumers, the
+# preflight tests, and it reaches `core` only through `mrl.STATUS_FILENAME`.
+# PITFALL: landing it before that file exists reds the floor, because an entry
+# whose file does not define its test fails minimality; and the natural
+# "repair", skipping entries whose file is not among the sources, is an
+# existence filter over this set -- the class of hole `_seam_sources` refuses.
+# Until then, minimality and the (file, test) keying are exercised only by the
+# `test_reach_floor_*` synthetic probes, which pass their own exemptions.
+_REACH_EXEMPTIONS: dict[tuple[str, str], str] = {}
+
+# What to do about each kind of floor violation, keyed like the violations'
+# first field. The manifest edit and the `GOVERNED_NAME_COUNT` rule are named
+# because they are the part a first-time reader cannot guess.
+_FLOOR_REMEDIES = {
+    "reach-floor":
+    ("move the test to the runner test file of a module it reaches (RUNNER_TEST_FILES) "
+     "and set its value in the seam manifest to that file -- a move changes no key, so "
+     "GOVERNED_NAME_COUNT stays; or, if it tests a test double rather than a module, add a "
+     "(file, test) entry with its reason to _REACH_EXEMPTIONS"),
+    "core-rule":
+    ("a test in the core file may name only `core` in its own body: move it to the file of "
+     "the module it names and set its seam manifest value to that file (GOVERNED_NAME_COUNT "
+     "stays); the core rule has no exemptions"),
+    "exemption-not-needed":
+    "the test reaches its file's module now: delete its _REACH_EXEMPTIONS entry",
+    "exemption-names-no-such-test":
+    ("an exemption does not follow its test: re-key the entry to the (file, test) that "
+     "exists, or delete it"),
+    "exemption-without-reason":
+    "an exemption is legal only with a reason: write it as the entry's value",
+}
+
+
+def _bind_runner_alias(dotted, local, facade, subs):
+    """Record `local` as a facade alias or a submodule alias if `dotted` names one.
+
+    `dotted` is the full module path the import binds `local` to, so
+    `import scripts.modal_runner as mrl`, `from scripts import modal_runner as
+    mrl`, `from scripts.modal_runner import core` and `import
+    scripts.modal_runner.core as core` all come through one rule. A name
+    imported FROM a submodule (`from scripts.modal_runner.core import X`) is
+    not a module alias and is not recorded.
+    """
+    prefix = PACKAGED + "."
+    if dotted == PACKAGED:
+        facade.add(local)
+    elif dotted.startswith(prefix) and dotted.removeprefix(prefix) in RUNNER_MODULES:
+        subs[local] = dotted.removeprefix(prefix)
+
+
+def _runner_aliases(tree):
+    """(facade names, {alias: module}) bound by one file's MODULE-LEVEL runner imports.
+
+    Aliases are per file: a helper in the shared file resolves `training.X`
+    through the shared file's own imports, not through the importing test's.
+    PITFALL: only `tree.body` is read, so an import inside a function body, or
+    under a module-level `if`/`try`, binds no alias here, and a reference
+    through it resolves to nothing, which makes the floor stricter and the
+    core rule looser (see `_own_module_refs`). A bare `import
+    scripts.modal_runner` binds `scripts`, and `scripts.modal_runner.X` is
+    likewise not resolved.
+    """
+    facade, subs = set(), {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    _bind_runner_alias(alias.name, alias.asname, facade, subs)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                _bind_runner_alias(f"{node.module}.{alias.name}", alias.asname or alias.name,
+                                   facade, subs)
+    return facade, subs
+
+
+def _locally_bound(node):
+    """Names `node` binds itself: its parameters, and every name stored anywhere inside it.
+
+    A module alias rebound locally is not the module. The case is live: a
+    runner test binds `request = mrl.build_run_request(...)` over the `request`
+    submodule alias and then reads `request.run_id`, and a test that takes
+    pytest's `request` fixture shadows it the same way. PITFALL: this is
+    deliberately coarse -- a store ANYWHERE in the body (a nested def's, a
+    comprehension's) shadows the alias for the whole body. That can only drop a
+    reference, which makes the floor stricter and the core rule looser; the
+    census this floor was specified against measured with the same rule.
+    """
+    bound = set()
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        args = node.args
+        params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+        bound |= {param.arg for param in params if param is not None}
+    bound |= {
+        s.id
+        for s in ast.walk(node) if isinstance(s, ast.Name) and isinstance(s.ctx, ast.Store)
+    }
+    return bound
+
+
+def _binding_target_key(call):
+    """The literal site key of a `binding_target("key")` call, else None.
+
+    Only the bare-name spelling counts, as in the binding census
+    (tests/test_modal_patch_binding_census.py matches `func.id` the same way),
+    so the two instruments agree on what a `binding_target` call is.
+    """
+    if getattr(call.func, "id", None) != "binding_target" or not call.args:
+        return None
+    first = call.args[0]
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        return first.value
+    return None
+
+
+def _own_module_refs(node, aliases, owners):
+    """[(module, spelling)] for each reference in `node`'s OWN body that resolves to a runner module.
+
+    The three resolution rules, and nothing else:
+      * `<facade>.X` (`mrl.X`) resolves to X's owner in the tables' MANIFEST;
+      * `<sub>.X` resolves to `sub`, where `<sub>` is a module-level alias of
+        `scripts.modal_runner.<sub>` in the file that defines `node`;
+      * `binding_target("key")` resolves to `BINDING_SITES[key]`'s owner.
+    Decorators are part of the body (`ast.walk` visits them), so a
+    parametrize list that names `mrl.X` counts. A locally rebound alias does
+    not (`_locally_bound`).
+
+    PITFALL: these rules are narrower than "anything that touches the module".
+    A bare alias passed as a value (`monkeypatch.setattr(training, "x", f)`),
+    `mrl.<submodule>.X`, a facade name the tables do not own, and a
+    non-literal or unknown site key all resolve to nothing. That makes the
+    floor stricter but the core rule LOOSER: a core-file test whose only
+    non-core reference takes one of these shapes passes the core rule.
+    """
+    facade, subs = aliases
+    shadowed = _locally_bound(node)
+    refs = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name):
+            root = sub.value.id
+            if root in shadowed:
+                continue
+            module = owners.get(sub.attr) if root in facade else subs.get(root)
+            if module:
+                refs.append((module, f"{root}.{sub.attr}"))
+        elif isinstance(sub, ast.Call):
+            key = _binding_target_key(sub)
+            if key in BINDING_SITES:
+                refs.append((BINDING_SITES[key][0], f'binding_target("{key}")'))
+    return refs
+
+
+def _floor_reach(sources, manifest):
+    """{(file, test): (own refs, modules reached)} for every test defined in `sources`.
+
+    THE CLOSURE'S NAMESPACE IS THE UNION of every file in `sources` -- the
+    same one `classify_seam` builds -- so a helper that sits in the shared file
+    still carries its reach to a test in any runner file. A per-file closure
+    fails tests whose only route to their module is a shared helper (measured
+    on the declared placement: the core test that reaches `core` only through
+    `_make_manifest`, once that helper moves to the shared file), and the
+    natural "fix" for that, a second exemption, would pass minimality.
+
+    A test's reach is its own references plus the own references of every
+    module-level name it reaches transitively along `_referenced_module_names`
+    edges. Each name's references resolve through the aliases of the file that
+    defines it. `manifest` is the tables' {"<module>.py": [names it owns]},
+    passed in so the probes and measurement scripts can supply their own.
+    """
+    owners = {name: f.removesuffix(".py") for f, names in manifest.items() for name in names}
+    trees = {rel: ast.parse(text) for rel, text in sources.items()}
+    aliases = {rel: _runner_aliases(tree) for rel, tree in trees.items()}
+    nodes, own = {}, {}
+    for rel, tree in trees.items():
+        for name, node in _module_level_names(tree).items():
+            nodes[name] = node
+            own[name] = _own_module_refs(node, aliases[rel], owners)
+    universe = set(nodes)
+    edges = {n: _referenced_module_names(node, n, universe) for n, node in nodes.items()}
+    reach = {}
+    for rel, tree in trees.items():
+        for name, node in _module_level_names(tree).items():
+            if not (name.startswith("test_")
+                    and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                continue
+            refs = _own_module_refs(node, aliases[rel], owners)
+            reached = {module for module, _ in refs}
+            for helper in _closure(_referenced_module_names(node, name, universe), edges):
+                reached |= {module for module, _ in own[helper]}
+            reach[(rel, name)] = (refs, reached)
+    return reach
+
+
+def _exemption_violations(pair, reason, reach, file_module):
+    """The minimality violations of one `_REACH_EXEMPTIONS`-shaped entry, as a list."""
+    rel, test = pair
+    if not str(reason).strip():
+        return [("exemption-without-reason", rel, test, "its reason is empty")]
+    if pair not in reach or rel not in file_module:
+        return [("exemption-names-no-such-test", rel, test,
+                 f"no runner test file {rel} that defines {test} is among the sources")]
+    if file_module[rel] in reach[pair][1]:
+        return [("exemption-not-needed", rel, test, f"it reaches {file_module[rel]!r}")]
+    return []
+
+
+def reach_floor_violations(sources, manifest, exemptions):
+    """Check the reach floor and the core rule; return `(violations, examined)`.
+
+    `sources` is {path: source text} -- the union namespace, so pass every seam
+    file, not just the runner files. `manifest` is the tables' owner map
+    (`RUNNER_OWNERS`); `exemptions` is {(file, test): reason}. Pure: it reads
+    no file, so the probes can call it on synthetic maps whose paths need not
+    exist.
+
+    WHAT IS EXAMINED: every module-level `test_` function in a file of
+    `RUNNER_TEST_FILES` (tests/test_modal_<m>.py for m in RUNNER_MODULES). No
+    other file is: not the client file, not the shared file, and not the
+    unsplit runner test file, which names no module. `examined` is that set of
+    (file, test) pairs, returned so the gate can assert its scope -- a floor
+    that iterates a partial file list otherwise passes every other check.
+
+    THE RULES. Violations are (rule, file, test, detail) tuples, sorted within
+    each pass, and `_FLOOR_REMEDIES` says what to do about each rule:
+      * "reach-floor": the test does not reach its file's module through its
+        own body or any helper it reaches, and is not exempt;
+      * "core-rule": in the core file only, the test's OWN body names a module
+        other than `core`. `core` is reached by most runner tests, so the floor
+        alone does not police that file. The core rule has no exemptions.
+      * minimality, per exemption entry (the dict is iterated, not the examined
+        pairs): "exemption-not-needed" if the test reaches its file's module;
+        "exemption-names-no-such-test" if that file is not a runner test file
+        among the sources or does not define that test; "exemption-without-
+        reason" if the reason is blank.
+
+    RESIDUAL: A FLOOR, NOT A PLACEMENT CHECK. A test that reaches two modules
+    can sit in either file with both rules green; choosing between them is the
+    judgement the manifest diff records. These are UNSPLIT-FILE figures: the
+    review's AST reach instrument measured them on the unsplit file's reference
+    graph (138 tests, before the process-group guard test was added), and this
+    module's `_floor_reach` reproduced every one on that tree and on the tree
+    with the guard test (139; it adds no alternative home). They are to be
+    re-measured with this function once the eight per-module files exist:
+      * 48 of the 138 tests have at least one other file where the floor and
+        the core rule both stay green;
+      * 13 training tests name no non-core module in their own body, so they
+        could sit in the core file green (`test_heartbeat_commits_every_60s_
+        while_training` is one), and so could the one exempt preflight test;
+      * 23 training tests reach `state`, so they could sit in the state file
+        green (`test_failed_cleanup_commit_does_not_let_redelivery_write` is
+        one);
+      * the core rule rejects most, not all, of the maximally wrong split:
+        moving every core-reaching test into the core file (95 moves) fails 81
+        of them, where the floor alone fails none;
+      * the placement the replaced rule produces (each test in the file of the
+        non-core module it references most) fails only 3 tests;
+      * 0 of the 49 request tests reach training, so a request test placed in
+        the training file is rejected.
+    So after the relocation, a misplaced new test is caught only if it breaks
+    the floor or the core rule.
+    """
+    file_module = dict(zip(RUNNER_TEST_FILES, RUNNER_MODULES, strict=True))
+    reach = _floor_reach(sources, manifest)
+    examined = {pair for pair in reach if pair[0] in file_module}
+    violations = []
+    for rel, test in sorted(examined):
+        refs, reached = reach[(rel, test)]
+        module = file_module[rel]
+        if module not in reached and (rel, test) not in exemptions:
+            violations.append(
+                ("reach-floor", rel, test, f"reaches {sorted(reached)}, not {module!r}"))
+        foreign = sorted({spelling for owner, spelling in refs if owner != "core"})
+        if module == "core" and foreign:
+            violations.append(("core-rule", rel, test, f"its own body names {foreign}"))
+    for pair, reason in sorted(exemptions.items()):
+        violations.extend(_exemption_violations(pair, reason, reach, file_module))
+    return violations, examined
+
+
+def _manifest_edits(*, add=None, delete=None, move=None):
+    """The exact seam-manifest edits a gate failure calls for, with the `GOVERNED_NAME_COUNT` rule.
+
+    `add` and `move` are {name: file}; `delete` is an iterable of names. The
+    count rule is spelled out because it is the step people miss: adding or
+    deleting a key moves `GOVERNED_NAME_COUNT` by the same amount, in the same
+    commit, with the reason in the commit message; a move changes no key and
+    leaves it alone. The file is written with
+    `json.dumps(d, indent=2, sort_keys=True) + "\\n"`.
+    """
+    add, delete, move = add or {}, sorted(delete or ()), move or {}
+    rel = MANIFEST.relative_to(ROOT).as_posix()
+    lines = [f'add "{name}": "{dest}"' for name, dest in sorted(add.items())]
+    lines += [f'delete "{name}"' for name in delete]
+    lines += [f'set "{name}": "{dest}"' for name, dest in sorted(move.items())]
+    if not lines:
+        return f"{rel} needs no edit and GOVERNED_NAME_COUNT stays."
+    delta = len(add) - len(delete)
+    count = ("GOVERNED_NAME_COUNT stays: these edits add as many keys as they delete (a move "
+             "changes no key)" if delta == 0 else
+             f"change GOVERNED_NAME_COUNT by {delta:+d} in the same commit and say why")
+    return f"in {rel}: {'; '.join(lines)}. Then {count}."
+
+
+def _describe_floor_violations(violations):
+    """One line per violation, with its rule's remedy from `_FLOOR_REMEDIES`."""
+    return "\n".join(f"  [{rule}] {rel}::{test}: {detail}. Remedy: {_FLOOR_REMEDIES[rule]}"
+                     for rule, rel, test, detail in violations)
 
 
 # A synthetic module that exercises all four answers `classify_seam` can give,
@@ -1571,7 +2014,12 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     as a test whose own body would classify it CLIENT, so the OVERRIDE is what is
     measured, and pins the set so that adding or removing a member fires.
     """
-    destinations, defined_in = classify_seam({"probe.py": _SEAM_CLASSIFIER_PROBE})
+    # The probe is keyed as a declared runner file: under `classify_seam`'s
+    # rejection rule a runner-half test in an undeclared file raises, so a
+    # made-up key would reject the probe's own runner tests.
+    probe_file = RUNNER_TEST_FILES[0]
+    destinations, defined_in = classify_seam({probe_file: _SEAM_CLASSIFIER_PROBE},
+                                             runner_files=RUNNER_TEST_FILES)
 
     # One per member of _CLIENT_BINDINGS, then one per member of _CLIENT_MODULES.
     assert destinations["test_probe_client_direct"] == CLIENT_FILE
@@ -1591,9 +2039,9 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     assert destinations["test_probe_client_via_shared"] == CLIENT_FILE
     assert destinations["_client_only_helper"] == CLIENT_FILE
 
-    assert destinations["test_probe_runner_via_helper"] == RUNNER_FILE
-    assert destinations["test_probe_runner_via_shared"] == RUNNER_FILE
-    assert destinations["_runner_only_helper"] == RUNNER_FILE, (
+    assert destinations["test_probe_runner_via_helper"] == probe_file
+    assert destinations["test_probe_runner_via_shared"] == probe_file
+    assert destinations["_runner_only_helper"] == probe_file, (
         "a helper reached only by runner tests was not sent to the runner half; "
         "stage 2 follows consumers and this one has only runner consumers")
 
@@ -1616,7 +2064,7 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
         "`ast.Assign` -- the branch whose whole point is that a pinned CUDA "
         "digest must not be copied into both files and left to drift. "
         f"got={destinations.get('_PROBE_PINNED_DIGEST')!r}")
-    assert destinations.get("_PROBE_TIMEOUT_S") == RUNNER_FILE, (
+    assert destinations.get("_PROBE_TIMEOUT_S") == probe_file, (
         "a module-level ANNASSIGN reached only by runner tests was not placed. "
         "`_module_level_names` handles AnnAssign in a SEPARATE branch from "
         "Assign, so it needs its own control; the Assign control above stays "
@@ -1625,7 +2073,7 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     # ── SEAM_HEADER_NAMES: ungoverned must not mean invisible ────────────────
     # The unrelated `ROOT` definers are read off disk inside the message, so it
     # names today's files instead of a count that grows with every new test file.
-    seam_files = {RUNNER_FILE, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
+    seam_files = {*RUNNER_FILES, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
     assert "ROOT" not in destinations, (
         "`ROOT` was given a destination, so `SEAM_HEADER_NAMES` has stopped "
         "exempting it. Governing it makes the seam's scan collide with every "
@@ -1633,7 +2081,7 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
         f"{sorted(set(_names_defined_under_tests().get('ROOT', [])) - seam_files)}. "
         "The comment above `SEAM_HEADER_NAMES` has the history.")
     assert defined_in.get("ROOT") == [
-        "probe.py"
+        probe_file
     ], ("`ROOT` fell out of `defined_in` as well as out of `destinations`. "
         "Ungoverned must not mean invisible -- Task 4's placement gate reads "
         "this to prove `ROOT` survives into every destination file, so an "
@@ -1651,7 +2099,7 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     # not an assertion. The probe now DEFINES one guard, as a test whose own body
     # would classify it CLIENT, so the override is measured instead of restated.
     planted = "test_modal_is_an_explicit_dependency_group"
-    assert planted in SEAM_GUARDS and defined_in.get(planted) == ["probe.py"], (
+    assert planted in SEAM_GUARDS and defined_in.get(planted) == [probe_file], (
         "the planted guard is not both in SEAM_GUARDS and defined by the probe, "
         "so the override assertion below is measuring the wrong thing")
     assert destinations[planted] == PACKAGING_FILE, (
@@ -1679,7 +2127,121 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     # it. It raises rather than defaulting, because the two things it can be --
     # dead code, or a new entry point -- want opposite answers.
     with pytest.raises(ValueError, match="reached by no test"):
-        classify_seam({"orphan.py": "def _reached_by_nothing():\n    return 1\n"})
+        classify_seam({"orphan.py": "def _reached_by_nothing():\n    return 1\n"},
+                      runner_files=RUNNER_TEST_FILES)
+
+
+def _probe_test_names(sources):
+    """The module-level `test_` function names defined in a {path: source} map, in order."""
+    return [
+        name for text in sources.values()
+        for name, node in _module_level_names(ast.parse(text)).items()
+        if name.startswith("test_") and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def test_the_seam_classifier_places_runner_tests_by_their_declared_file():
+    """Positive control for `classify_seam` over a declared set of SEVERAL runner files.
+
+    The single-file probe above cannot tell "the runner file" from "the runner
+    file that defines this test", nor "reached from both halves" from "reached
+    from two seam files", because with one runner file they coincide. This
+    source set has three runner files and the client file, all
+    `RUNNER_TEST_FILES` paths or seam constants (they need not exist on disk):
+
+    - each runner test's destination is the declared file that defines it;
+    - a helper reached from TWO RUNNER FILES, and no client test, goes to the
+      shared file -- the generalised rule, which the old two-halves rule would
+      have sent to "the" runner file;
+    - a helper reached from one runner file only goes to that file;
+    - a runner-half test in a file outside the declared set -- here the shared
+      file, and an undeclared per-module-looking path -- is REJECTED, with every
+      such test named in one error.
+
+    The last pair has its positive half: the same undeclared file, once
+    declared, is accepted. So the rejection is about the declared set the
+    caller passes, not about the file's name, which is what lets the gate pass
+    its transitional declared set and the relocation pass `RUNNER_TEST_FILES`.
+    """
+    first, second, third = RUNNER_TEST_FILES[:3]
+    sources = {
+        first: ("def _two_runner_files_helper():\n    return 1\n\n"
+                "def _first_file_only_helper():\n    return 2\n\n"
+                "def test_in_the_first_file():\n"
+                "    return _two_runner_files_helper(), _first_file_only_helper()\n"),
+        second: ("def test_in_the_second_file():\n    return _two_runner_files_helper()\n"),
+        third: ("def test_in_the_third_file():\n    return 3\n"),
+        CLIENT_FILE: ("def test_on_the_client_side():\n    return _import_run_modal()\n"),
+    }
+    destinations, _ = classify_seam(sources, runner_files=RUNNER_TEST_FILES)
+    placed = {name: destinations[name] for name in _probe_test_names(sources)}
+    assert placed == {
+        "test_in_the_first_file": first,
+        "test_in_the_second_file": second,
+        "test_in_the_third_file": third,
+        "test_on_the_client_side": CLIENT_FILE,
+    }, f"a test was not sent to the declared file that defines it: {placed}"
+    assert destinations["_two_runner_files_helper"] == SHARED_FILE, (
+        "a helper reached from two runner files was not sent to the shared file, so the shared "
+        "rule is still 'both halves of the runner/client seam', which after the split strands "
+        f"it in one runner file. got={destinations['_two_runner_files_helper']!r}")
+    assert destinations["_first_file_only_helper"] == first, (
+        "a helper reached from one runner file only did not follow its tests to that file. "
+        f"got={destinations['_first_file_only_helper']!r}")
+
+    undeclared = "tests/test_modal_undeclared_probe.py"
+    stray = {
+        **sources,
+        SHARED_FILE: "def test_runner_side_in_the_shared_file():\n    return 4\n",
+        undeclared: "def test_runner_side_in_an_undeclared_file():\n    return 5\n",
+    }
+    with pytest.raises(ValueError, match="outside the declared runner files") as rejected:
+        classify_seam(stray, runner_files=RUNNER_TEST_FILES)
+    for name in ("test_runner_side_in_the_shared_file", "test_runner_side_in_an_undeclared_file"):
+        assert name in str(rejected.value), (
+            f"the rejection did not name {name}, so one run no longer lists every stray: "
+            f"{rejected.value}")
+    del stray[SHARED_FILE]
+    accepted, _ = classify_seam(stray, runner_files=(*RUNNER_TEST_FILES, undeclared))
+    assert accepted["test_runner_side_in_an_undeclared_file"] == undeclared, (
+        "the undeclared file's test was not accepted once its file was declared, so the "
+        "rejection keys on something other than the declared set")
+
+
+def test_the_seam_source_reader_fails_on_a_missing_declared_file():
+    """`_seam_sources` raises on a missing declared file; it never skips one.
+
+    THE HOLE THIS PINS. An existence filter over the declared seam files drops
+    a declared runner file from the classifier's input without a word, and
+    every gate built on that input then passes over a smaller seam. A
+    repo-wide grep for the old file's name cannot find such a filter, because
+    the filter holds no file name. So this is checked by behaviour.
+
+    WHY THE REAL ROOT PLUS ONE BOGUS PATH, and not an empty `tmp_path` root:
+    with an empty root every declared file is missing, so a reader that
+    filters by existence and raises only when NOTHING is left also raises, and
+    this check would be green on exactly the reader it exists to reject. Here
+    every other declared file exists, so only a reader that refuses the one
+    missing file raises. The message must name that path and no other
+    declared path, so a reader that raises for some other reason, or blames
+    the wrong file, is red too. The last assertion is the positive half: the
+    real declared set is read whole.
+    """
+    bogus = "tests/test_modal_no_such_declared_file.py"
+    declared = [*RUNNER_FILES, CLIENT_FILE, SHARED_FILE]
+    assert not (ROOT / bogus).exists(), f"{bogus} exists, so it cannot stand for a missing file"
+    assert all((ROOT / rel).is_file() for rel in declared), (
+        "a declared seam file is missing from the tree, so this check cannot isolate the bogus "
+        f"path: {[rel for rel in declared if not (ROOT / rel).is_file()]}")
+    with pytest.raises(FileNotFoundError) as missing:
+        _seam_sources(root=ROOT, runner_files=(*RUNNER_FILES, bogus))
+    message = str(missing.value)
+    assert bogus in message, f"the error does not name the missing file: {message}"
+    assert [rel for rel in declared if rel in message] == [], (
+        f"the error names declared files that exist, so it does not say which one is missing: "
+        f"{message}")
+    assert sorted(_seam_sources()) == sorted(declared), (
+        "the source reader did not return every declared seam file for the real tree")
 
 
 def test_seam_manifest_agrees_with_the_classifier():
@@ -1705,15 +2267,20 @@ def test_seam_manifest_agrees_with_the_classifier():
     floor or duplicated into two files. That is Task 4's placement gate.
     """
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    computed, _ = classify_seam(_seam_sources())
+    computed, _ = classify_seam(_seam_sources(), RUNNER_FILES)
     only_manifest = {n: manifest[n] for n in sorted(set(manifest) - set(computed))}
     only_computed = {n: computed[n] for n in sorted(set(computed) - set(manifest))}
     assert not only_manifest and not only_computed, (
         "the manifest and the classifier disagree about WHICH names exist. "
-        f"manifest-only={only_manifest} classifier-only={only_computed}")
+        f"manifest-only={only_manifest} classifier-only={only_computed}. "
+        "If the tree is right: " + _manifest_edits(add=only_computed, delete=only_manifest))
     disagree = {n: (manifest[n], computed[n]) for n in manifest if manifest[n] != computed[n]}
-    assert not disagree, ("the manifest is stale: (frozen, recomputed) for each name that "
-                          f"moved: {disagree}")
+    assert not disagree, (
+        f"the manifest is stale: (frozen, recomputed) for each name that moved: {disagree}. "
+        "If the recomputed file is right: " + _manifest_edits(move={
+            n: new
+            for n, (_, new) in disagree.items()
+        }))
 
 
 def test_no_governed_name_is_defined_outside_the_seams_own_files():
@@ -1752,7 +2319,7 @@ def test_no_governed_name_is_defined_outside_the_seams_own_files():
     the tree, because that is what they would mean.
     """
     governed = set(json.loads(MANIFEST.read_text(encoding="utf-8")))
-    seam_files = {RUNNER_FILE, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
+    seam_files = {*RUNNER_FILES, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
     found = _names_defined_under_tests()
 
     outside = {f for files in found.values() for f in files} - seam_files
@@ -1826,9 +2393,19 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
       but you can inside one, where the second silently shadows the first. Step
       6's control (d) covered only the cross-file shape. Hence
       `_module_level_binding_counts` and `redefined` below.
+
+    AND THE REACH FLOOR, over the same union namespace (`reach_floor_violations`,
+    whose docstring states what it cannot catch, with figures). For a runner
+    test, `concern says` is simply the runner file that defines it, so the
+    `misplaced` check below compares on-disk with on-disk for tests and cannot
+    see a test in the wrong runner file; the floor and the core rule are what
+    object to one. While the declared runner set is the one unsplit file, which
+    names no module, the floor examines nothing, and that is asserted rather
+    than left to look like a pass.
     """
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    computed, _ = classify_seam(_seam_sources())
+    sources = _seam_sources()
+    computed, _ = classify_seam(sources, RUNNER_FILES)
     on_disk = _names_defined_under_tests()
     trees = {
         rel: ast.parse((ROOT / rel).read_text(encoding="utf-8"))
@@ -1844,7 +2421,8 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
     missing = sorted(n for n in manifest if n not in on_disk)
     assert not missing, (
         "the manifest names definitions that exist nowhere under tests/. Either "
-        f"they were deleted or they were moved out of reach of this scan: {missing}")
+        f"they were deleted or they were moved out of reach of this scan: {missing}. "
+        "Restore them, or, if the deletion is intended: " + _manifest_edits(delete=missing))
 
     strayed = {n: on_disk[n] for n in manifest if n not in computed}
     assert not strayed, ("a governed name is defined under tests/ but NOT in any file the seam "
@@ -1880,7 +2458,12 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
         "concern assigns them to. Note that `manifest says` agreeing with `on disk` proves "
         "nothing -- a wrong split and a manifest written to match it agree perfectly, which "
         f"is why this compares against `concern says`. First 10: "
-        f"{dict(list(misplaced.items())[:10])}")
+        f"{dict(list(misplaced.items())[:10])}. Move each definition to `concern says`, then " +
+        _manifest_edits(
+            move={
+                n: where["concern says"]
+                for n, where in misplaced.items() if where["manifest says"] != where["concern says"]
+            }))
 
     for rel, tree in trees.items():
         defined = set(_module_level_names(tree))
@@ -1888,6 +2471,266 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
         assert not absent, (
             f"{rel} does not define {absent}, which the seam treats as module-header "
             "boilerplate rather than governing. Ungoverned must not mean lost.")
+
+    violations, examined = reach_floor_violations(sources, RUNNER_OWNERS, _REACH_EXEMPTIONS)
+    assert not violations, (f"{len(violations)} reach-floor / core-rule / exemption violation(s):\n"
+                            f"{_describe_floor_violations(violations)}")
+    # While the declared runner set is the one unsplit file, no source is a
+    # per-module test file, so the floor examines nothing. The relocation commit
+    # replaces this with the floor's scope assertion: `examined` equals the
+    # manifest's `test_` entries valued at a file of RUNNER_TEST_FILES, and each
+    # of those files contributes at least one.
+    assert examined == set(), (
+        "the reach floor examined tests although the declared runner set holds no per-module "
+        f"test file: {sorted(examined)[:10]}. If RUNNER_FILES now names the per-module files, "
+        "replace this assertion with the floor's scope assertion in the same commit.")
+
+
+# ── The reach floor's synthetic probes: one per rule, each with both halves ──
+#
+# WHY THEY EXIST. On the real tree the floor has, by design, no failing case
+# except its one exempt test, so a change that makes it more permissive -- every
+# reference resolving to every module, a closure that over-reaches, a
+# minimality check that does nothing, exemptions keyed by test name alone -- is
+# green on the tree and invisible after merge. Each probe below is a pure-data
+# call of `reach_floor_violations` on a synthetic {path: source} map, parsed and
+# never executed; the paths are `RUNNER_TEST_FILES` entries and need not exist.
+# Names that `mrl.X` resolves through are read from the tables rather than
+# typed here (`_owned`), so moving a production symbol never breaks a probe.
+
+
+def _floor_file(module):
+    """The per-module test file path for `module`, from `RUNNER_TEST_FILES`."""
+    return RUNNER_TEST_FILES[RUNNER_MODULES.index(module)]
+
+
+def _owned(module):
+    """One top-level name the tables say `module` owns, for a probe's `mrl.<name>` reference."""
+    return RUNNER_OWNERS[f"{module}.py"][0]
+
+
+def _floor_rules(sources, exemptions=None):
+    """`reach_floor_violations` on a probe map with the real owner table; (rule, file, test) only."""
+    violations, _ = reach_floor_violations(sources, RUNNER_OWNERS, exemptions or {})
+    return [violation[:3] for violation in violations]
+
+
+def test_reach_floor_resolves_mrl_names_to_owner():
+    """`<facade>.X` resolves to X's owner in the tables' MANIFEST, and only there.
+
+    Positive: a request-file test naming a request-owned name through the
+    facade passes, under `mrl` and under a second facade spelling (`from
+    scripts import modal_runner as facade`), because the facade alias is read
+    from the file's imports, not assumed. Negative: a request-file test naming
+    only a core-owned name fails the floor. It also pins what is EXAMINED: the
+    client file's test is not, because the client file names no module.
+    """
+    req = _floor_file("request")
+    header = "import scripts.modal_runner as mrl\nfrom scripts import modal_runner as facade\n\n"
+    tests = (f"def test_names_its_module():\n    return mrl.{_owned('request')}\n\n"
+             f"def test_names_it_via_another_spelling():\n    return facade.{_owned('request')}\n\n"
+             f"def test_names_another_module():\n    return mrl.{_owned('core')}\n")
+    sources = {req: header + tests, CLIENT_FILE: "def test_on_the_client_side():\n    return 1\n"}
+    violations, examined = reach_floor_violations(sources, RUNNER_OWNERS, {})
+    names = ("test_names_its_module", "test_names_it_via_another_spelling",
+             "test_names_another_module")
+    pairs = {(req, name) for name in names}
+    assert examined == pairs, f"the floor examined the wrong (file, test) pairs: {sorted(examined)}"
+    got = [violation[:3] for violation in violations]
+    expected = [("reach-floor", req, "test_names_another_module")]
+    assert got == expected, (
+        "`mrl.X` did not resolve to X's owner alone: a test naming its own module's name must "
+        f"pass and one naming only another module's name must fail. got={violations}")
+
+
+def test_reach_floor_resolves_submodule_aliases():
+    """`<sub>.X` resolves to `sub` through the file's module-level alias, unless rebound locally.
+
+    Positive: `training.X` (bound by `from scripts.modal_runner import
+    training`) passes in the training file; `st.X` (bound by `import
+    scripts.modal_runner.state as st`) passes in the state file. Negative: the
+    same `training.X` placed in the state file fails, and a training-file test
+    that rebinds `training` locally before `training.X` fails too -- the local
+    rebinding is not the module (the unsplit file has a live case of this
+    shape: `request = mrl.build_run_request(...)`, then `request.run_id`).
+    """
+    header = ("from scripts.modal_runner import training\n"
+              "import scripts.modal_runner.state as st\n\n")
+    training_file, state_file = _floor_file("training"), _floor_file("state")
+    sources = {
+        training_file:
+        header + ("def test_training_alias():\n    return training.anything\n\n"
+                  "def test_training_alias_rebound():\n"
+                  "    training = object()\n    return training.anything\n"),
+        state_file:
+        header + ("def test_state_alias():\n    return st.anything\n\n"
+                  "def test_training_alias_in_state():\n"
+                  "    return training.anything\n"),
+    }
+    assert _floor_rules(sources) == [
+        ("reach-floor", state_file, "test_training_alias_in_state"),
+        ("reach-floor", training_file, "test_training_alias_rebound"),
+    ], f"submodule aliases resolved wrongly: {_floor_rules(sources)}"
+
+
+def test_reach_floor_resolves_binding_target_through_binding_sites():
+    """`binding_target("key")` resolves to `BINDING_SITES[key]`'s owner.
+
+    Positive: the call passes in its owner's file. Negative: the same call in
+    another (non-core) module's file fails, and an unknown key resolves to
+    nothing, so a test whose only reach is a misspelt key fails even in the
+    owner's file. The key's owner is read from `BINDING_SITES`, not typed here.
+    """
+    key = "attempt-watcher"
+    owner = BINDING_SITES[key][0]
+    other = next(module for module in RUNNER_MODULES if module not in (owner, "core"))
+    header = "from tests.modal_patch_binding_campaign import binding_target\n\n"
+    sources = {
+        _floor_file(owner):
+        header + (f'def test_installs_the_site():\n    return binding_target("{key}")\n\n'
+                  'def test_installs_an_unknown_site():\n'
+                  '    return binding_target("no-such-site")\n'),
+        _floor_file(other):
+        header + f'def test_installs_it_elsewhere():\n    return binding_target("{key}")\n',
+    }
+    expected = sorted([("reach-floor", _floor_file(owner), "test_installs_an_unknown_site"),
+                       ("reach-floor", _floor_file(other), "test_installs_it_elsewhere")])
+    assert _floor_rules(sources) == expected, (
+        f"binding_target resolved wrongly: {_floor_rules(sources)}")
+
+
+def test_reach_floor_follows_module_level_helpers():
+    """A test that reaches its module only through helpers passes; without the helper it fails.
+
+    The reach is two hops deep (`test -> _outer -> _inner -> mrl.X`), so the
+    closure is transitive, not one level. Removing `_inner` leaves the test's
+    call to `_outer` intact and the floor red, which is the negative half.
+    """
+    req = _floor_file("request")
+    inner = f"def _inner():\n    return mrl.{_owned('request')}\n\n"
+    rest = ("def _outer():\n    return _inner()\n\n"
+            "def test_through_two_helpers():\n    return _outer()\n")
+    header = "import scripts.modal_runner as mrl\n\n"
+    assert _floor_rules({req: header + inner + rest}) == [], (
+        "a test that reaches its module through two helpers failed the floor, so the closure "
+        "is not transitive")
+    without = _floor_rules({req: header + rest})
+    expected = [("reach-floor", req, "test_through_two_helpers")]
+    assert without == expected, (
+        "a test whose helper chain no longer reaches its module still passed the floor, so the "
+        f"floor is crediting reach it cannot see. got={without}")
+
+
+def test_reach_floor_follows_helpers_in_the_shared_file():
+    """The closure's namespace is the union: a shared-file helper carries its reach to a runner file.
+
+    Positive: a state-file test whose only reach is a helper defined in the
+    SHARED file passes. The helper's `state.X` resolves through the shared
+    file's own import; the test's file imports nothing, so a floor that
+    resolved every name through the test's file, or that closed over the
+    test's file alone, is red here. Negative: remove the helper from the
+    shared file and the same test fails.
+    """
+    state_file = _floor_file("state")
+    test_source = "def test_through_the_shared_file():\n    return _shared_state_helper()\n"
+    shared_header = "from scripts.modal_runner import state\n\n"
+    helper = "def _shared_state_helper():\n    return state.anything\n"
+    with_helper = _floor_rules({state_file: test_source, SHARED_FILE: shared_header + helper})
+    assert with_helper == [], (
+        "a test that reaches its module only through a shared-file helper failed the floor, so "
+        "the closure is per-file, or the helper's reference was resolved through the wrong "
+        f"file's imports. got={with_helper}")
+    without = _floor_rules({state_file: test_source, SHARED_FILE: shared_header})
+    expected = [("reach-floor", state_file, "test_through_the_shared_file")]
+    assert without == expected, f"the test still passed with the shared helper gone. got={without}"
+
+
+def test_reach_floor_applies_the_core_rule_to_the_core_file():
+    """In the core file, a test's OWN body may name only `core`; elsewhere the rule does not apply.
+
+    Negative: a core-file test naming a request-owned name in its own body
+    fails the core rule (it reaches core, so the floor alone passes it).
+    Positive: a core-file test naming only core passes; so does one that
+    reaches request only through a helper, because the rule is about the own
+    body; and a request-file test naming core and request in its own body is
+    not subject to it.
+    """
+    core_file, req = _floor_file("core"), _floor_file("request")
+    header = "import scripts.modal_runner as mrl\n\n"
+    core_name, request_name = _owned("core"), _owned("request")
+    sources = {
+        core_file:
+        header + (f"def _request_helper():\n    return mrl.{request_name}\n\n"
+                  f"def test_core_only():\n    return mrl.{core_name}\n\n"
+                  f"def test_core_and_request_in_own_body():\n"
+                  f"    return mrl.{core_name}, mrl.{request_name}\n\n"
+                  f"def test_request_only_through_a_helper():\n"
+                  f"    return mrl.{core_name}, _request_helper()\n"),
+        req:
+        header + (f"def test_request_file_names_core_too():\n"
+                  f"    return mrl.{request_name}, mrl.{core_name}\n"),
+    }
+    got = _floor_rules(sources)
+    expected = [("core-rule", core_file, "test_core_and_request_in_own_body")]
+    assert got == expected, f"the core rule fired on the wrong tests: {got}"
+
+
+def test_reach_floor_exemption_must_still_be_needed():
+    """Minimality: an exemption for a test that reaches its file's module fails; a needed one holds.
+
+    Positive: a request-file test that reaches only core fails the floor with
+    no exemption, and passes -- with no minimality objection -- once exempt
+    with a reason. Negative: an exemption for a test that DOES reach request
+    fails as not needed, and an exemption with a blank reason fails.
+    """
+    req = _floor_file("request")
+    sources = {
+        req: ("import scripts.modal_runner as mrl\n\n"
+              f"def test_reaches_its_module():\n    return mrl.{_owned('request')}\n\n"
+              f"def test_reaches_only_core():\n    return mrl.{_owned('core')}\n"),
+    }
+    needed = {(req, "test_reaches_only_core"): "tests a test double, not a module"}
+    assert _floor_rules(sources) == [("reach-floor", req, "test_reaches_only_core")]
+    assert _floor_rules(sources, needed) == [], "a needed, reasoned exemption was not honoured"
+    stale = {**needed, (req, "test_reaches_its_module"): "no longer true"}
+    got = _floor_rules(sources, stale)
+    expected = [("exemption-not-needed", req, "test_reaches_its_module")]
+    assert got == expected, (
+        "an exemption for a test that reaches its file's module passed minimality, so the "
+        f"allow-set can go stale unnoticed. got={got}")
+    got = _floor_rules(sources, {(req, "test_reaches_only_core"): "  "})
+    expected = [("exemption-without-reason", req, "test_reaches_only_core")]
+    assert got == expected, f"an exemption with a blank reason was accepted. got={got}"
+
+
+def test_reach_floor_exemptions_are_keyed_by_file():
+    """An exemption keyed to another file does not exempt the test, and fails itself.
+
+    Positive: keyed to the (file, test) that defines the failing test, the
+    exemption holds. Negative, three shapes: keyed to a runner file that is
+    among the sources but does not define the test; keyed to a runner file not
+    among the sources at all (the shape a relocated exemption takes before its
+    file exists, which must fail rather than be skipped); and keyed to a
+    non-runner file that does define a test of that name. Each leaves the
+    test's own floor violation standing, and each entry fails.
+    """
+    req, state_file = _floor_file("request"), _floor_file("state")
+    absent = _floor_file("preflight")
+    header = "import scripts.modal_runner as mrl\n\n"
+    sources = {
+        req: header + f"def test_moved_here():\n    return mrl.{_owned('core')}\n",
+        state_file: header + f"def test_stays():\n    return mrl.{_owned('state')}\n",
+        CLIENT_FILE: "def test_moved_here():\n    return 1\n",
+    }
+    reason = "tests a test double, not a module"
+    assert _floor_rules(sources, {(req, "test_moved_here"): reason}) == []
+    for wrong_file in (state_file, absent, CLIENT_FILE):
+        got = _floor_rules(sources, {(wrong_file, "test_moved_here"): reason})
+        expected = [("reach-floor", req, "test_moved_here"),
+                    ("exemption-names-no-such-test", wrong_file, "test_moved_here")]
+        assert got == expected, (
+            f"an exemption keyed to {wrong_file} was honoured for the test in {req}, or was not "
+            f"itself reported: {got}")
 
 
 def test_modal_is_an_explicit_dependency_group():
