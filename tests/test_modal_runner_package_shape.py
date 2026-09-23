@@ -80,68 +80,67 @@ ROOT = Path(__file__).resolve().parents[1]
 # commit.
 MANIFEST = {
     'core.py': [
-        'ValidationError', 'Action', 'Status', 'mounted_path', 'SourceProvenance', 'sha256_file',
-        'FileProvenance', 'RunStatus', 'Manifest', 'RunResult', 'Registry', 'ArtifactIndex',
-        'LockLike', 'DerivedStatus', 'CheckpointVerdict', 'sha256_bytes', 'CompletionEvidence',
-        'HeartbeatWorker', 'ReloadingVolume', 'PreparedSource', 'TrainingAttemptResult',
-        '_UnusedArtifacts', 'PublishOutcome', 'VOLUME_NAME', 'REGISTRY_NAME', 'VOLUME_MOUNT',
-        'SOURCES_ROOT', 'INPUTS_ROOT', 'RUNS_ROOT', 'PREBUILT_PYTHON',
-        'PREBUILT_LOAD_TIMEOUT_SECONDS', 'ALLOWED_MAPS', 'ALLOWED_GPUS', 'ALLOWED_NUM_ENVS',
-        'ALLOWED_CPU_CORES', 'DEFAULT_GPU', 'DEFAULT_NUM_ENVS', 'DEFAULT_CPU_CORES',
-        'DEFAULT_MEMORY_MIB', 'DEFAULT_VEC_WORKERS', 'DEFAULT_TIMEOUT_MINUTES',
-        'DEFAULT_SAVE_EVERY_SECONDS', 'MIN_MEMORY_MIB', 'MAX_MEMORY_MIB', 'MIN_TIMEOUT_MINUTES',
-        'MAX_TIMEOUT_MINUTES', 'MIN_SAVE_EVERY_SECONDS', 'MAX_SAVE_EVERY_SECONDS', 'AGENTS_PER_ENV',
-        'BPTT_HORIZON', 'MIN_BATCH_SIZE', '_RUN_ID_RE', '_SECRET_NAME_RE',
-        'LIVE_TRAIN_OPTION_ARITY', 'LIVE_TRAIN_OPTIONS', 'RUNNER_OWNED_TRAIN_FLAGS',
-        'RUN_ONLY_OPTIONS', 'TERMINAL_STATUSES', '_COMMIT_SHA_RE', '_SAFE_TAR_TYPES',
-        'PROVENANCE_NAME', '_PREBUILT_LOAD_SOURCE', 'STATUS_FILENAME', 'SCHEMA_VERSION',
-        '_ALLOWED_TRANSITIONS', 'HEARTBEAT_INTERVAL', 'STALE_AFTER', 'RESERVATION_FILENAME',
-        'MANIFEST_FILENAME', 'FAILURE_UPLOAD', 'ALLOWED_FAILURE_CODES', 'REDELIVERED', 'UV_BIN',
-        'TRAIN_SCRIPT', '_PRESERVED_CHILD_ENV_KEYS', '_THREAD_CAP_ENV', 'CUDA_PROBE_SOURCE',
+        'VOLUME_NAME', 'REGISTRY_NAME', 'VOLUME_MOUNT', 'SOURCES_ROOT', 'INPUTS_ROOT', 'RUNS_ROOT',
+        'PROVENANCE_NAME', 'STATUS_FILENAME', 'RESERVATION_FILENAME', 'MANIFEST_FILENAME',
         'TRAIN_LOG_NAME', 'RESULT_FILENAME', 'CHECKPOINT_NAME', 'CHECKPOINT_SIDECAR_NAME',
-        'CHECKPOINT_PUBLISH_REASON_NAME', 'DEAD_CHECKPOINT_NAME', 'CHECKPOINT_SETTLE_SECONDS',
-        'TERM_GRACE_SECONDS', 'DEAD_RUN_EXIT_CODE', 'POLL_INTERVAL_SECONDS', 'REASON_SIGNAL',
-        'REASON_TIMEOUT', 'REASON_DEAD_RUN', 'REASON_INVALID_EVIDENCE', 'REASON_NONZERO_EXIT',
-        'REASON_ERROR'
+        'CHECKPOINT_PUBLISH_REASON_NAME', 'DEAD_CHECKPOINT_NAME', 'PREBUILT_PYTHON',
+        'ValidationError', 'Status', 'mounted_path', 'sha256_file', 'FileProvenance',
+        'SCHEMA_VERSION', 'Manifest', 'HEARTBEAT_INTERVAL', 'Registry', 'LockLike', 'sha256_bytes',
+        'CompletionEvidence', 'PreparedSource'
     ],
     'request.py': [
-        'ResumeRequest', 'ArtifactClientRequest', 'RunRequest', 'validate_run_id',
-        'validate_secret_name', 'parse_train_args', '_split_long_option', '_option_value',
-        'validate_train_args', 'build_run_request', 'parse_artifact_client_request'
+        'ALLOWED_MAPS', 'ALLOWED_GPUS', 'ALLOWED_NUM_ENVS', 'ALLOWED_CPU_CORES', 'DEFAULT_GPU',
+        'DEFAULT_NUM_ENVS', 'DEFAULT_CPU_CORES', 'DEFAULT_MEMORY_MIB', 'DEFAULT_VEC_WORKERS',
+        'DEFAULT_TIMEOUT_MINUTES', 'DEFAULT_SAVE_EVERY_SECONDS', 'MIN_MEMORY_MIB', 'MAX_MEMORY_MIB',
+        'MIN_TIMEOUT_MINUTES', 'MAX_TIMEOUT_MINUTES', 'MIN_SAVE_EVERY_SECONDS',
+        'MAX_SAVE_EVERY_SECONDS', 'AGENTS_PER_ENV', 'BPTT_HORIZON', 'MIN_BATCH_SIZE', '_RUN_ID_RE',
+        '_SECRET_NAME_RE', 'LIVE_TRAIN_OPTION_ARITY', 'LIVE_TRAIN_OPTIONS',
+        'RUNNER_OWNED_TRAIN_FLAGS', 'RUN_ONLY_OPTIONS', 'Action', 'ResumeRequest',
+        'ArtifactClientRequest', 'RunRequest', 'validate_run_id', 'validate_secret_name',
+        'parse_train_args', '_split_long_option', '_option_value', 'validate_train_args',
+        'build_run_request', 'parse_artifact_client_request'
     ],
     'source.py': [
-        '_run_git', 'validate_clean_head', '_reject_unsafe_tar_member', 'safe_extract_git_archive',
-        '_staging_members', '_repack_deterministic', 'create_source_bundle'
+        '_COMMIT_SHA_RE', '_SAFE_TAR_TYPES', 'SourceProvenance', '_run_git', 'validate_clean_head',
+        '_reject_unsafe_tar_member', 'safe_extract_git_archive', '_staging_members',
+        '_repack_deterministic', 'create_source_bundle'
     ],
     'checkpoint.py': [
+        'PREBUILT_LOAD_TIMEOUT_SECONDS', '_PREBUILT_LOAD_SOURCE', 'CheckpointVerdict',
         '_import_torch', '_assert_weights_only_loadable', 'validate_local_checkpoint',
         '_load_checkpoint_weights', 'verify_checkpoint', 'normalize_config_for_transport',
         '_iter_metrics_steps', 'validate_completed_run'
     ],
     'state.py': [
-        'atomic_write_json', '_read_status', 'transition_status', '_transition_status_unlocked',
-        'run_registry_key', 'attempt_registry_key', '_reservation_path', '_manifest_path',
-        '_volume_has_run', 'record_run_failure', 'finish_reservation', 'reserve_run',
-        'claim_attempt', 'deliver_attempt', 'write_heartbeat', '_load_volume_json',
-        '_parse_iso8601', 'derive_status', 'derive_run_view_from_bytes', 'derive_run_view',
-        'list_run_artifacts', 'start_heartbeat_worker'
+        'TERMINAL_STATUSES', '_ALLOWED_TRANSITIONS', 'RunStatus', 'STALE_AFTER', 'ArtifactIndex',
+        'FAILURE_UPLOAD', 'ALLOWED_FAILURE_CODES', 'REDELIVERED', 'DerivedStatus',
+        'HeartbeatWorker', 'atomic_write_json', '_read_status', 'transition_status',
+        '_transition_status_unlocked', 'run_registry_key', 'attempt_registry_key',
+        '_reservation_path', '_manifest_path', '_volume_has_run', 'record_run_failure',
+        'finish_reservation', 'reserve_run', 'claim_attempt', 'deliver_attempt', 'write_heartbeat',
+        '_load_volume_json', '_parse_iso8601', 'derive_status', 'derive_run_view_from_bytes',
+        'derive_run_view', 'list_run_artifacts', 'start_heartbeat_worker', '_stop_heartbeat'
     ],
     'commands.py': [
-        '_assemble_train_argv', 'build_train_argv', 'build_dump_config_argv',
+        'UV_BIN', 'TRAIN_SCRIPT', '_PRESERVED_CHILD_ENV_KEYS', '_THREAD_CAP_ENV',
+        'CUDA_PROBE_SOURCE', '_assemble_train_argv', 'build_train_argv', 'build_dump_config_argv',
         '_is_preserved_child_env_key', 'build_child_env', 'build_install_command',
         'build_train_command', 'build_dump_config_command', 'build_cuda_probe_command'
     ],
     'preflight.py': [
-        '_verify_extracted_provenance', '_stop_heartbeat', '_validate_remote_resume',
+        'ReloadingVolume', '_verify_extracted_provenance', '_validate_remote_resume',
         '_hash_dumped_config', 'prepare_remote_source'
     ],
     'training.py': [
-        '_tee_stream', 'execute_training_attempt', '_checkpoint_generation',
-        'publish_stable_checkpoint', '_start_checkpoint_watcher', '_record_publish_reason',
-        '_publish_and_note', '_close_log_sink', '_is_dead_run', '_map_child_exit',
-        '_metrics_summary', '_optional_checkpoint_sha256', '_write_run_result',
+        'RunResult', 'CHECKPOINT_SETTLE_SECONDS', 'TERM_GRACE_SECONDS', 'DEAD_RUN_EXIT_CODE',
+        'POLL_INTERVAL_SECONDS', 'REASON_SIGNAL', 'REASON_TIMEOUT', 'REASON_DEAD_RUN',
+        'REASON_INVALID_EVIDENCE', 'REASON_NONZERO_EXIT', 'REASON_ERROR', 'TrainingAttemptResult',
+        '_UnusedArtifacts', 'PublishOutcome', '_tee_stream', 'execute_training_attempt',
+        '_checkpoint_generation', 'publish_stable_checkpoint', '_start_checkpoint_watcher',
+        '_record_publish_reason', '_publish_and_note', '_close_log_sink', '_is_dead_run',
+        '_map_child_exit', '_metrics_summary', '_optional_checkpoint_sha256', '_write_run_result',
         '_signal_process_group', '_run_training_attempt'
-    ]
+    ],
 }
 # Runtime import edges between package modules. core stays a leaf. A new edge
 # is legal only if the graph stays acyclic; record it here.
@@ -153,7 +152,7 @@ DEPENDENCIES = {
     'state': ['core', 'request'],
     'commands': ['core'],
     'preflight': ['checkpoint', 'commands', 'core', 'source', 'state'],
-    'training': ['checkpoint', 'core', 'preflight', 'state']
+    'training': ['checkpoint', 'core', 'state']
 }
 # Edges that exist only under `if TYPE_CHECKING:` and never execute. commands ->
 # request must stay annotation-only: request imports commands at run time, so a
@@ -697,7 +696,7 @@ def test_package_manifest_controls(live_sources, plant, expected):
     has nothing to report, and the exact violation list says which clause, if
     any, still objects (each row's test ID ends in the verdict it asserts):
 
-    * dropped-from-both: `REASON_ERROR` leaves MANIFEST['core.py'] and core.py.
+    * dropped-from-both: `REASON_ERROR` leaves MANIFEST['training.py'] and training.py.
       ACCEPTED: deleting a symbol and its entry is the membership message's
       remedy, and no other clause may hold it red.
     * added-to-both: a new constant is declared in MANIFEST['core.py'] and
@@ -711,9 +710,9 @@ def test_package_manifest_controls(live_sources, plant, expected):
     manifest = {filename: list(names) for filename, names in MANIFEST.items()}
     changed = dict(live_sources)
     if plant == "dropped-from-both":
-        manifest["core.py"].remove("REASON_ERROR")
-        changed["core.py"] = live_sources["core.py"].replace(
-            _segments(live_sources["core.py"])["REASON_ERROR"], "", 1)
+        manifest["training.py"].remove("REASON_ERROR")
+        changed["training.py"] = live_sources["training.py"].replace(
+            _segments(live_sources["training.py"])["REASON_ERROR"], "", 1)
     elif plant == "added-to-both":
         manifest["core.py"].append("POLL_JITTER_SECONDS")
         changed["core.py"] += "\nPOLL_JITTER_SECONDS = 0.5\n"

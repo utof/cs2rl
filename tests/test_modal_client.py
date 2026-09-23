@@ -1225,9 +1225,9 @@ def test_dual_caller_mutation_pin_replaced(fake_modal, tmp_path, monkeypatch):
     def _ok_skipping_reread(sidecar_bytes, checkpoint_bytes, sidecar_reread_bytes, *, load=None):
         del sidecar_reread_bytes, load
         if sidecar_bytes is None or checkpoint_bytes is None:
-            return core.CheckpointVerdict(False, "missing_sidecar", None, None)
+            return checkpoint.CheckpointVerdict(False, "missing_sidecar", None, None)
         digest = mrl.sha256_bytes(checkpoint_bytes)
-        return core.CheckpointVerdict(True, None, checkpoint_bytes, digest)
+        return checkpoint.CheckpointVerdict(True, None, checkpoint_bytes, digest)
 
     _install_protocol_parent(volume, tmp_path, "parent-run", "replaced")
     # Client reads this package export at call time.
@@ -1866,7 +1866,7 @@ def test_launch_upload_failure_records_failure_code_without_freeing_id(fake_moda
     with pytest.raises(OSError, match="could not upload"):
         module.launch_run(request, repo=repo, app_obj=module.app, stdout=_capture_stdout())
     claim = fake_modal.dicts[mrl.REGISTRY_NAME].get(state.run_registry_key(request.run_id))
-    assert claim["failure_code"] == core.FAILURE_UPLOAD
+    assert claim["failure_code"] == state.FAILURE_UPLOAD
     assert claim["attempt_id"]
     assert "secret" not in json.dumps(claim)
     assert (mrl.RUNS_ROOT / request.run_id / mrl.RESERVATION_FILENAME).as_posix() in volume.files

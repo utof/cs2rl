@@ -252,7 +252,7 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
 
         def publish(path, **kwargs):
             seen.append((path, kwargs))
-            return core.PublishOutcome((111, 222))
+            return training.PublishOutcome((111, 222))
 
         consume = _install(monkeypatch, site, training._start_checkpoint_watcher, publish)
         now, commit, sleep = runner._aware, lambda: None, lambda seconds: None
@@ -345,7 +345,7 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
         result = training.execute_training_attempt(**kwargs)
         # The attempt is typed `object` (a losing delivery returns REDELIVERED);
         # this row wins, so it must be the winner's result type.
-        assert isinstance(result, core.TrainingAttemptResult)
+        assert isinstance(result, training.TrainingAttemptResult)
         assert result.status is core.Status.FAILED
         if site == 'attempt-watcher':
             _record_observation(record_property, site, training._run_training_attempt,

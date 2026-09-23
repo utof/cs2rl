@@ -8,18 +8,73 @@ from typing import TYPE_CHECKING
 
 from . import core
 from .core import (
-    _PRESERVED_CHILD_ENV_KEYS,
-    _THREAD_CAP_ENV,
-    CUDA_PROBE_SOURCE,
     RUNS_ROOT,
-    TRAIN_SCRIPT,
-    UV_BIN,
     ValidationError,
     mounted_path,
 )
 
 if TYPE_CHECKING:
     from .request import RunRequest
+
+UV_BIN = "/usr/local/bin/uv"
+# The image venv's interpreter is core.PREBUILT_PYTHON, read here through the
+# module object because it is a qualified seam (see __init__.py).
+TRAIN_SCRIPT = "src/train.py"
+
+# Child env is an allowlist, not a denylist: Modal/image leftovers (tokens,
+# extra WANDB_* creds, host thread caps) must not leak into uv/train.
+_PRESERVED_CHILD_ENV_KEYS = frozenset({
+    "PATH",
+    "PYTHONPATH",
+    "LD_LIBRARY_PATH",
+    "LIBRARY_PATH",
+    "CPATH",
+    "CPLUS_INCLUDE_PATH",
+    "CUDA_HOME",
+    "CUDA_PATH",
+    "NVIDIA_VISIBLE_DEVICES",
+    "NVIDIA_DRIVER_CAPABILITIES",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_NUMERIC",
+    "LC_TIME",
+    "LC_COLLATE",
+    "LC_MONETARY",
+    "LC_MESSAGES",
+    "LC_PAPER",
+    "LC_NAME",
+    "LC_ADDRESS",
+    "LC_TELEPHONE",
+    "LC_MEASUREMENT",
+    "LC_IDENTIFICATION",
+})
+_THREAD_CAP_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+
+# Minimum CUDA tensors: 2-step x 1-agent, enough for compute_puff_advantage
+# to dispatch without training-sized allocations.
+CUDA_PROBE_SOURCE = """
+import torch
+import pufferlib.pufferl as pufferl
+assert torch.cuda.is_available(), "cuda is not available"
+assert pufferl.ADVANTAGE_CUDA, "ADVANTAGE_CUDA is false"
+values = torch.zeros((2, 1), device="cuda")
+rewards = torch.zeros((2, 1), device="cuda")
+terminals = torch.zeros((2, 1), device="cuda")
+ratio = torch.ones((2, 1), device="cuda")
+advantages = torch.zeros((2, 1), device="cuda")
+pufferl.compute_puff_advantage(
+    values, rewards, terminals, ratio, advantages, 0.99, 0.95, 1.0, 1.0)
+torch.cuda.synchronize()
+""".strip()
 
 
 def _assemble_train_argv(

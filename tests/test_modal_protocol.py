@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import scripts.modal_runner as mrl                     # noqa: E402, I001
-from scripts.modal_runner import core, state           # noqa: E402, I001
+from scripts.modal_runner import state, training       # noqa: E402, I001
 from tests.test_modal_runner import FakeArtifactIndex  # noqa: E402, I001
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
@@ -265,5 +265,5 @@ def test_fake_artifact_index_read_file_replace_after_read():
 
 
 def test_unused_artifacts_read_file_returns_none():
-    unused = core._UnusedArtifacts()
+    unused = training._UnusedArtifacts()
     assert unused.read_file(PurePosixPath("runs/ok-id/STATUS.json")) is None

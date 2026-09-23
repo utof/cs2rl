@@ -52,7 +52,7 @@ if str(ROOT) not in sys.path:
     # the same way the later CLIs will. Do not rely on the editable install.
     sys.path.insert(0, str(ROOT))
 
-from scripts.modal_runner import core  # noqa: E402, I001
+from scripts.modal_runner import training              # noqa: E402, I001
 
 # ── _git / _init_source_repo: a real tiny repo for HEAD and diff checks ────
 
@@ -148,7 +148,7 @@ class FakeChild:
         # Grace waits must not burn wall-clock time in tests. A held child
         # times out immediately; a released child returns at once.
         effective = timeout
-        if timeout is not None and timeout >= core.TERM_GRACE_SECONDS:
+        if timeout is not None and timeout >= training.TERM_GRACE_SECONDS:
             effective = 0
         if not self._done.wait(timeout=effective):
             raise subprocess.TimeoutExpired(["fake"], timeout)

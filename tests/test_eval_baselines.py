@@ -320,8 +320,8 @@ def test_eval_interval_cli_config_and_modal_mirror():
     assert build_train_config(args, batch_size=bs, bptt_horizon=bptt)["eval_interval"] == 0
     from train import RESUME_CONFIG_ALLOWLIST
     assert "eval_interval" not in RESUME_CONFIG_ALLOWLIST
-    from scripts.modal_runner import core
-    assert core.LIVE_TRAIN_OPTION_ARITY.get("--eval-interval") == 1
+    from scripts.modal_runner import request
+    assert request.LIVE_TRAIN_OPTION_ARITY.get("--eval-interval") == 1
 
 
 def test_hit_geometry_constants_match_cs2_combat_h():

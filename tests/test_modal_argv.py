@@ -21,12 +21,12 @@ if str(ROOT) not in sys.path:
     # do. Inserting scripts/ instead would bind the module under a SECOND name.
     sys.path.insert(0, str(ROOT))
 
-import scripts.modal_runner as mrl                                     # noqa: E402, I001
-from scripts.modal_runner import commands, core, request               # noqa: E402, I001
+import scripts.modal_runner as mrl                     # noqa: E402, I001
+from scripts.modal_runner import commands, request     # noqa: E402, I001
 
 ALLOWED_MAPS = mrl.ALLOWED_MAPS
-LIVE_TRAIN_OPTION_ARITY = core.LIVE_TRAIN_OPTION_ARITY
-RUNNER_OWNED_TRAIN_FLAGS = core.RUNNER_OWNED_TRAIN_FLAGS
+LIVE_TRAIN_OPTION_ARITY = request.LIVE_TRAIN_OPTION_ARITY
+RUNNER_OWNED_TRAIN_FLAGS = request.RUNNER_OWNED_TRAIN_FLAGS
 ValidationError = mrl.ValidationError
 _assemble_train_argv = commands._assemble_train_argv
 build_run_request = mrl.build_run_request

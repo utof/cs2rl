@@ -1,41 +1,182 @@
 """Runner request parsing and validation."""
 from __future__ import annotations
 
+import enum
+import re
 import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .commands import _assemble_train_argv
-from .core import (
-    _RUN_ID_RE,
-    _SECRET_NAME_RE,
-    AGENTS_PER_ENV,
-    ALLOWED_CPU_CORES,
-    ALLOWED_GPUS,
-    ALLOWED_MAPS,
-    ALLOWED_NUM_ENVS,
-    BPTT_HORIZON,
-    DEFAULT_CPU_CORES,
-    DEFAULT_GPU,
-    DEFAULT_MEMORY_MIB,
-    DEFAULT_NUM_ENVS,
-    DEFAULT_SAVE_EVERY_SECONDS,
-    DEFAULT_TIMEOUT_MINUTES,
-    DEFAULT_VEC_WORKERS,
-    LIVE_TRAIN_OPTION_ARITY,
-    MAX_MEMORY_MIB,
-    MAX_SAVE_EVERY_SECONDS,
-    MAX_TIMEOUT_MINUTES,
-    MIN_BATCH_SIZE,
-    MIN_MEMORY_MIB,
-    MIN_SAVE_EVERY_SECONDS,
-    MIN_TIMEOUT_MINUTES,
-    RUN_ONLY_OPTIONS,
-    RUNNER_OWNED_TRAIN_FLAGS,
-    Action,
-    ValidationError,
-)
+from .core import ValidationError
+
+ALLOWED_MAPS = frozenset({"simple", "dust2", "arena-duel"})            # R0-J: arena-duel (Task 12 map)
+ALLOWED_GPUS = frozenset({"T4", "L4", "A10"})
+ALLOWED_NUM_ENVS = frozenset({16, 32, 64, 128, 256})
+ALLOWED_CPU_CORES = frozenset({4, 8, 16})
+DEFAULT_GPU = "T4"
+DEFAULT_NUM_ENVS = 256
+DEFAULT_CPU_CORES = 8
+DEFAULT_MEMORY_MIB = 16384
+DEFAULT_VEC_WORKERS = 8
+DEFAULT_TIMEOUT_MINUTES = 120
+DEFAULT_SAVE_EVERY_SECONDS = 300
+MIN_MEMORY_MIB = 8192
+MAX_MEMORY_MIB = 32768
+MIN_TIMEOUT_MINUTES = 1
+MAX_TIMEOUT_MINUTES = 360
+MIN_SAVE_EVERY_SECONDS = 60
+MAX_SAVE_EVERY_SECONDS = 300
+AGENTS_PER_ENV = 10
+BPTT_HORIZON = 64
+MIN_BATCH_SIZE = 8192
+
+# Run IDs name Volume paths. The regex is the entire contract: start with an
+# alnum so `.hidden` / `-flag-like` IDs cannot be confused with options, then
+# at most 79 more alnum/dot/underscore/hyphen (80 total). Slash, `..`,
+# whitespace, and shell metacharacters are all excluded by construction.
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+# Modal Secret names are operator-supplied identifiers, not secret values.
+# Reuse the run-id grammar so a value cannot smuggle path/shell syntax.
+_SECRET_NAME_RE = _RUN_ID_RE
+
+# Exact live train.py long-option names and their arities. Prefixes are NOT
+# listed: argparse would resolve `--devi` → `--device`, which is exactly the
+# footgun this table exists to close. `--num-envs` is the runner spelling and
+# is intentionally absent so train-args using it fail as unknown.
+LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
+    "--dust2": 0,
+    "--map": 1,                                        # R0-H (Task 12): live --map {simple,dust2,arena-duel}
+    "--smoke": 0,
+    "--train": 0,
+    "--record": 0,
+    "--eval": 0,
+    "--checkpoint": 1,
+    "--resume": 1,
+    "--resume-run": 1,                                 # R0-C (#134) full-state resume
+    "--run-id": 1,
+    "--checkpoint-interval": 1,
+    "--timesteps": 1,
+    "--num_envs": 1,
+    "--seed": 1,
+    "--device": 1,
+    "--save_every_sec": 1,
+    "--checkpoint_dir": 1,
+    "--checkpoint-dir": 1,
+    "--dump-config": 0,
+    "--vec-backend": 1,
+    "--vec-num-workers": 1,
+    "--vec-overwork": 0,
+    "--record-out": 1,
+    "--record-policy": 1,
+    "--eval-episodes": 1,
+    "--eval-interval": 1,                              # R0-I (Task 13): in-training fixed-baseline eval cadence
+    "--eval-policy": 1,
+    "--name": 1,
+    "--wandb": 0,
+    "--wandb-project": 1,
+    "--wandb-entity": 1,
+    "--no-self-play": 0,
+    "--no-dead-run-abort": 0,
+    "--n-active-per-team": 1,
+    "--pin-pitch": 1,                                  # R0-E.2 (#131)
+    "--crouch-enabled": 1,                             # R0-E.2 (#131)
+    "--jump-enabled": 1,                               # Rung 1a T2b
+    "--opponent": 1,                                   # Rung 1a T3: {self,noop} statue opponent
+    "--round-time-ticks": 1,                           # R0-G
+    "--laser-range": 1,                                # R0-G
+    "--max-turn-speed": 1,                             # R0-G
+    "--aim-entropy-bonus": 1,                          # R0-E.4 (#131)
+    "--aim-log-std-max": 1,                            # R0-E.3 (#131)
+    "--gamma": 1,                                      # R0-J (Task 14)
+    "--pbrs-gamma": 1,                                 # R0-J (Task 14)
+    "--warmstart-entropy": 0,
+    "--warmstart-grace-steps": 1,
+    "--warmstart-ramp-steps": 1,
+    "--warmstart-alpha-ceiling": 1,
+    "--reward-symmetrize": 0,
+    "--tag-diagnostic": 0,
+    "--tag-every": 1,
+    "--tct-split-heads": 0,
+    "--tct-split-trunk": 0,
+                                                       # Reward weights: dest is underscore, CLI is hyphen. Mirror the generator
+                                                       # in src/train.py (`--{_rw_name.replace('_', '-')}`) so a new weight is a
+                                                       # one-line add here, not a silent "unknown option" after a train.py bump.
+    "--reward-win": 1,
+    "--reward-kill": 1,
+    "--reward-death": 1,
+    "--reward-bombsite-entry": 1,
+    "--reward-plant-bonus": 1,
+    "--reward-plant-base": 1,
+    "--reward-plant-progress-scale": 1,
+    "--reward-plant-interrupted": 1,
+    "--reward-defuse": 1,
+    "--reward-shot-penalty": 1,
+    "--reward-ct-survival": 1,
+    "--reward-inaction": 1,
+    "--reward-win-t-detonation": 1,
+    "--reward-win-t-elimination": 1,
+    "--reward-win-ct-defuse": 1,
+    "--reward-win-ct-timeout": 1,
+    "--reward-win-ct-elimination": 1,
+    "--pbrs-alive-weight": 1,
+    "--pbrs-hp-weight": 1,
+    "--pbrs-site-weight": 1,
+    "--pbrs-bomb-progress-weight": 1,
+    "--pbrs-nav-weight-t": 1,
+    "--pbrs-nav-weight-ct": 1,
+}
+LIVE_TRAIN_OPTIONS = frozenset(LIVE_TRAIN_OPTION_ARITY)
+
+# Flags the runner injects (or whose mode it owns). Presence in --train-args
+# is always a hard error, even when the live name is spelled exactly.
+RUNNER_OWNED_TRAIN_FLAGS = frozenset({
+    "--train",
+    "--resume",
+    "--resume-run",                                    # R0-C: local run-dir resume — the runner owns paths/ids
+    "--run-id",
+    "--name",
+    "--checkpoint-dir",
+    "--checkpoint_dir",
+    "--device",
+    "--save_every_sec",
+    "--vec-backend",
+    "--vec-num-workers",
+    "--vec-overwork",
+    "--dump-config",
+    "--smoke",
+    "--record",
+    "--eval",
+    "--dust2",
+    "--map",                                           # R0-H: the runner owns map choice (effective_map); Task 14 emits it
+    "--num_envs",
+})
+
+# Launch-only flags. status/download must reject these rather than ignore them
+# — ignoring would hide an operator mistake and look like a successful observe.
+RUN_ONLY_OPTIONS = frozenset({
+    "--git-sha",
+    "--map",
+    "--gpu",
+    "--cpu-cores",
+    "--memory-mib",
+    "--num-envs",
+    "--vec-workers",
+    "--timeout-minutes",
+    "--save-every-seconds",
+    "--train-args",
+    "--resume-local-checkpoint",
+    "--resume-run-id",
+    "--wandb-secret-name",
+    "--action",
+})
+
+
+class Action(enum.StrEnum):
+    RUN = "run"
+    STATUS = "status"
+    DOWNLOAD = "download"
 
 
 @dataclass(frozen=True)

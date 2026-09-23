@@ -341,13 +341,13 @@ def test_omitted_train_args_fail_closed():
 
 
 def test_live_option_mirror_contains_exact_long_names_only():
-    assert "--timesteps" in core.LIVE_TRAIN_OPTIONS
-    assert "--num_envs" in core.LIVE_TRAIN_OPTIONS
-    assert "--dust2" in core.LIVE_TRAIN_OPTIONS
-    assert "--checkpoint-dir" in core.LIVE_TRAIN_OPTIONS
-    assert "--checkpoint_dir" in core.LIVE_TRAIN_OPTIONS
-    assert "--devi" not in core.LIVE_TRAIN_OPTIONS
-    assert "--num-envs" not in core.LIVE_TRAIN_OPTIONS                 # runner spelling, not live
+    assert "--timesteps" in request.LIVE_TRAIN_OPTIONS
+    assert "--num_envs" in request.LIVE_TRAIN_OPTIONS
+    assert "--dust2" in request.LIVE_TRAIN_OPTIONS
+    assert "--checkpoint-dir" in request.LIVE_TRAIN_OPTIONS
+    assert "--checkpoint_dir" in request.LIVE_TRAIN_OPTIONS
+    assert "--devi" not in request.LIVE_TRAIN_OPTIONS
+    assert "--num-envs" not in request.LIVE_TRAIN_OPTIONS              # runner spelling, not live
 
 
 def _live_train_long_options_from_source() -> set[str]:
@@ -392,7 +392,7 @@ def _live_train_long_options_from_source() -> set[str]:
 
 
 def test_live_train_option_mirror_matches_train_py():
-    assert _live_train_long_options_from_source() == set(core.LIVE_TRAIN_OPTION_ARITY)
+    assert _live_train_long_options_from_source() == set(request.LIVE_TRAIN_OPTION_ARITY)
 
 
 @pytest.mark.parametrize(
@@ -949,7 +949,7 @@ def test_validate_local_checkpoint_rejects_non_checkpoint(tmp_path):
 
 def _live_batch_size(num_envs: int = 256) -> int:
     """Live compute_batch_dims: num_envs * 10 agents * 64 BPTT horizon."""
-    return num_envs * core.AGENTS_PER_ENV * core.BPTT_HORIZON
+    return num_envs * request.AGENTS_PER_ENV * request.BPTT_HORIZON
 
 
 def _make_manifest(**overrides) -> mrl.Manifest:
@@ -1083,7 +1083,7 @@ def test_manifest_records_authoritative_simple_map_not_legacy_env():
 
 
 def test_run_result_schema_is_explicit():
-    result = core.RunResult(
+    result = training.RunResult(
         schema_version=1,
         status=core.Status.COMPLETED,
         exit_code=0,
@@ -1307,8 +1307,8 @@ def test_validate_completed_run_accepts_representative_metrics(tmp_path):
             break
     else:
         raise AssertionError("live compute_batch_dims not found in src/train_config.py")
-    assert core.AGENTS_PER_ENV == 10
-    assert core.BPTT_HORIZON == 64
+    assert request.AGENTS_PER_ENV == 10
+    assert request.BPTT_HORIZON == 64
     run_root, manifest, effective, ckpt = _minimal_completed_tree(tmp_path)
     evidence = checkpoint.validate_completed_run(run_root, manifest)
     assert evidence.last_step == effective
@@ -2127,7 +2127,7 @@ def _run_cuda_probe(tmp_path: Path, *, advantage_cuda: bool):
     _write_probe_stubs(stubs, advantage_cuda=advantage_cuda, record_path=record_path)
     env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(stubs)}
     result = subprocess.run(
-        [sys.executable, "-c", core.CUDA_PROBE_SOURCE],
+        [sys.executable, "-c", commands.CUDA_PROBE_SOURCE],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -2142,7 +2142,7 @@ def test_cuda_probe_command_is_exact_python_string():
     assert command[0] == "/opt/cs2rl/.venv/bin/python"
     assert command[1] == "-c"
     source = command[2]
-    assert source == core.CUDA_PROBE_SOURCE
+    assert source == commands.CUDA_PROBE_SOURCE
     assert "torch.cuda.is_available()" in source
     assert "pufferlib.pufferl" in source
     assert "ADVANTAGE_CUDA" in source
@@ -2360,7 +2360,7 @@ def test_heartbeat_commits_throughout_blocked_preflight(tmp_path):
     assert len(beat_times) >= 6
     for earlier, later in zip(beat_times, beat_times[1:], strict=False):
         assert later - earlier <= timedelta(seconds=60)
-    status = core.RunStatus.from_dict(
+    status = state.RunStatus.from_dict(
         json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text()))
     derived = state.derive_status(status, now=clock.now())
     assert derived.stale is False
@@ -2945,7 +2945,7 @@ def test_checkpoint_watcher_threads_generation_into_last_published(tmp_path, mon
 
     def fake_publish(*_args, last_published=None, **_kwargs):
         seen.append(last_published)
-        return core.PublishOutcome(generation)
+        return training.PublishOutcome(generation)
 
     monkeypatch.setattr(*binding_target("watcher-publisher"), fake_publish)
     stop, watcher = training._start_checkpoint_watcher(
@@ -3114,7 +3114,7 @@ def test_child_receives_term_then_kill_after_grace(tmp_path):
         child.release()
         thread.join(timeout=2.0)
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
-    assert core.TERM_GRACE_SECONDS in child.wait_timeouts
+    assert training.TERM_GRACE_SECONDS in child.wait_timeouts
 
 
 def test_cleanup_closes_log_before_final_commit(tmp_path):
@@ -3186,7 +3186,7 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
         thread.join(timeout=2.0)
     assert committed
     assert committed[-1]["status"] == "training"
-    last = core.RunStatus.from_dict(committed[-1])
+    last = state.RunStatus.from_dict(committed[-1])
     derived = state.derive_status(last, now=_aware(minute=5))
     assert derived.stale is True
     assert derived.status is core.Status.INTERRUPTED
@@ -3559,7 +3559,7 @@ def test_exit_zero_fails_when_completion_evidence_invalid(tmp_path):
     result = mrl.execute_training_attempt(**kwargs)
     assert result != mrl.REDELIVERED
     assert result.status is core.Status.FAILED
-    assert result.reason == core.REASON_INVALID_EVIDENCE
+    assert result.reason == training.REASON_INVALID_EVIDENCE
     assert result.exit_code == 0
     persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "failed"
@@ -3601,7 +3601,7 @@ def test_dead_run_and_timeout_have_distinct_reasons(tmp_path):
     (kwargs["run_root"] / "checkpoints" / "dust2_policy_dead.pt").write_bytes(b"autopsy")
     dead = mrl.execute_training_attempt(**kwargs)
     assert dead.status is core.Status.FAILED
-    assert dead.reason == core.REASON_DEAD_RUN
+    assert dead.reason == training.REASON_DEAD_RUN
     assert dead.exit_code == 3
     assert json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "failed"
 
@@ -3633,7 +3633,7 @@ def test_dead_run_and_timeout_have_distinct_reasons(tmp_path):
     timed_out = boxed[0]
     assert not isinstance(timed_out, Exception), timed_out
     assert timed_out.status is core.Status.INTERRUPTED
-    assert timed_out.reason == core.REASON_TIMEOUT
+    assert timed_out.reason == training.REASON_TIMEOUT
     assert timed_out.reason != dead.reason
     assert json.loads(
         (kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"

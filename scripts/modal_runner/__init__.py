@@ -9,26 +9,30 @@ module scope. Torch is imported lazily, inside `checkpoint._import_torch` and
 
 MODULE MAP (each module's exact symbols are its MANIFEST entry in
 tests/test_modal_runner_package_shape.py):
-  core        constants, enums, protocols, data records, ValidationError and
-              the path and hash helpers (see WHERE A NEW NAME GOES)
-  request     run and artifact-client requests; train.py argument validation
+  core        the Volume and run-directory layout, the Status enum,
+              ValidationError, the path and hash helpers, and the protocols
+              and records two or more modules share (see WHERE A NEW NAME GOES)
+  request     run and artifact-client requests with their limits and defaults;
+              train.py argument validation
   source      clean-HEAD check, deterministic source bundles, safe extraction
   checkpoint  checkpoint loading and validation; completed-run evidence
   state       run status and transitions, reservations, claims, heartbeats,
               derived run views
   commands    install/train/dump-config/CUDA-probe argv and child environments
   preflight   preparing the remote source before a training attempt
-  training    one training attempt: child process, checkpoint publication
+  training    one training attempt: child process, checkpoint publication,
+              the attempt's result records and reason tokens
   __init__    this facade: its module scope holds only this docstring,
               `from .<module> import ...` lines and `__all__`
 
 WHERE A NEW NAME GOES: put a new name in the one module that reads it; add to
-core only a name that two or more modules read. A new cross-module import needs
-a DEPENDENCIES entry in tests/test_modal_runner_package_shape.py. Some existing
-names predate this rule: core holds many that only one module reads, and
-preflight holds `_stop_heartbeat`, which preflight and training both read;
-training imports preflight for that helper alone. They are known and tracked in
-gh#223; do not copy their placement.
+core only a name that two or more modules read. The one exception is the
+Volume and run-directory layout (mount, roots and artifact file names), which
+core keeps whole even where one module reads a given name, so the layout reads
+as one contract. A name this facade re-exports goes in the module that reads
+it, like any other: production reads the facade, not the module. A new
+cross-module import needs a DEPENDENCIES entry in
+tests/test_modal_runner_package_shape.py.
 
 ADDING A MODULE, in this order: (1) add it to RUNNER_MODULES in
 tests/test_modal_packaging.py; (2) add its MANIFEST and DEPENDENCIES entries,
@@ -85,11 +89,26 @@ PITFALLS:
     the runner's source of truth and is never derived from that field.
 """
 from .checkpoint import validate_local_checkpoint, verify_checkpoint
+from .commands import _THREAD_CAP_ENV
 from .core import (
-    _THREAD_CAP_ENV,
-    ALLOWED_MAPS,
     CHECKPOINT_NAME,
     CHECKPOINT_SIDECAR_NAME,
+    INPUTS_ROOT,
+    REGISTRY_NAME,
+    RESERVATION_FILENAME,
+    RUNS_ROOT,
+    SCHEMA_VERSION,
+    SOURCES_ROOT,
+    STATUS_FILENAME,
+    VOLUME_NAME,
+    Manifest,
+    ValidationError,
+    mounted_path,
+    sha256_bytes,
+)
+from .preflight import prepare_remote_source
+from .request import (
+    ALLOWED_MAPS,
     DEFAULT_CPU_CORES,
     DEFAULT_GPU,
     DEFAULT_MEMORY_MIB,
@@ -97,26 +116,16 @@ from .core import (
     DEFAULT_SAVE_EVERY_SECONDS,
     DEFAULT_TIMEOUT_MINUTES,
     DEFAULT_VEC_WORKERS,
-    INPUTS_ROOT,
-    REDELIVERED,
-    REGISTRY_NAME,
-    RESERVATION_FILENAME,
-    RUNS_ROOT,
-    SCHEMA_VERSION,
-    SOURCES_ROOT,
-    STATUS_FILENAME,
-    TERMINAL_STATUSES,
-    VOLUME_NAME,
     Action,
-    Manifest,
-    ValidationError,
-    mounted_path,
-    sha256_bytes,
+    RunRequest,
+    build_run_request,
+    parse_artifact_client_request,
+    validate_run_id,
 )
-from .preflight import prepare_remote_source
-from .request import RunRequest, build_run_request, parse_artifact_client_request, validate_run_id
 from .source import create_source_bundle, validate_clean_head
 from .state import (
+    REDELIVERED,
+    TERMINAL_STATUSES,
     _load_volume_json,
     claim_attempt,
     derive_run_view_from_bytes,

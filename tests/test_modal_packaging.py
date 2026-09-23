@@ -36,8 +36,8 @@ _IMPORTERS = [
 ]
 
 # The test that carries the HARD case: the bare import used to live inside this
-# body as its second-to-last statement (W1 converted it; W3b respelled it
-# `from scripts.modal_runner import core`, still in-body and still
+# body as its second-to-last statement (W1 converted it; it is now
+# `from scripts.modal_runner import request`, still in-body and still
 # second-to-last). If this test does not reach its end, the module census below
 # is measuring a session that never executed the line the gate exists for.
 _INBODY_CARRIER = ("tests/test_eval_baselines.py::test_eval_interval_cli_config_and_modal_mirror")
