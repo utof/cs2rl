@@ -1005,8 +1005,13 @@ GOVERNED_NAME_COUNT = 279
 # relocation commit that splits the runner tests by module replaces this whole
 # tuple with `RUNNER_TEST_FILES` from tests/modal_runner_tables.py; a surviving
 # copy of the literal is a hit for that commit's repo-wide grep. PITFALL: every
-# gate in this section takes the runner files from here (or as a parameter);
-# a second, retyped list anywhere is how the gate and the tree drift apart.
+# gate in this section takes the runner files it READS from here (or as a
+# parameter); a second, retyped list anywhere is how the gate and the tree drift
+# apart. The one exception is deliberate: the reach floor
+# (`reach_floor_violations`) decides which of those files it EXAMINES, and which
+# module each one tests, from `RUNNER_TEST_FILES`, because only a per-module file
+# names a module. So while this tuple holds the unsplit file, the floor reads it
+# as a source and examines none of its tests.
 RUNNER_FILES = ("tests/test_modal_runner.py", )
 CLIENT_FILE = "tests/test_modal_client.py"
 PACKAGING_FILE = "tests/test_modal_packaging.py"
@@ -1240,6 +1245,21 @@ def _reaches_client_directly(node, own):
     return False
 
 
+def _is_test_def(name, node):
+    """Is the module-level binding `name` -> `node` a pytest test: a `test_` name bound by a def?
+
+    The one definition of "a test" in the seam section. `classify_seam` (which
+    names are tests), `_floor_reach` (which pairs the floor examines) and
+    `_probe_test_names` all call it. PITFALL: the relocation's floor scope
+    assertion equates the floor's examined pairs with the seam manifest's
+    `test_` entries, so a second, hand-written copy of this predicate that
+    drifts (say, one that forgets `async def`) moves one side of that equation
+    and not the other. A `test_` name bound by an assignment or a class is not
+    a test here.
+    """
+    return name.startswith("test_") and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+
+
 def _closure(start, edges):
     """Every name reachable from the names in `start` along `edges` ({name: names it references}).
 
@@ -1291,11 +1311,13 @@ def classify_seam(sources, runner_files):
        judgement the seam manifest records, and the reach floor
        (`reach_floor_violations`) and the core rule check it from below; this
        function does not re-derive it. So for tests the placement gate's
-       `misplaced` check compares on-disk against on-disk, and only the
-       relocation's one-shot declared-placement check sees a test in the wrong
-       runner file. A runner-half test defined OUTSIDE `runner_files` (the
-       client file, the shared file, an undeclared file) has no legal
-       destination and raises `ValueError`, naming every such test at once.
+       `misplaced` check compares on-disk against on-disk. The floor and the
+       core rule see SOME tests in the wrong runner file (a request test in the
+       training file reaches no training code); only the relocation's one-shot
+       declared-placement check sees EVERY one. A runner-half test defined
+       OUTSIDE `runner_files` (the client file, the shared file, an undeclared
+       file) has no legal destination and raises `ValueError`, naming every
+       such test at once.
 
        WHICH PART OF STAGE 1 EARNS THAT ZERO, because a one-at-a-time census
        gets this backwards. Knocked out singly, on the monolith: the closure
@@ -1375,11 +1397,7 @@ def classify_seam(sources, runner_files):
 
     universe = set(nodes)
     edges = {n: _referenced_module_names(node, n, universe) for n, node in nodes.items()}
-    tests = {
-        n
-        for n, node in nodes.items()
-        if n.startswith("test_") and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    tests = {n for n, node in nodes.items() if _is_test_def(n, node)}
 
     client = {n for n, node in nodes.items() if _reaches_client_directly(node, n)}
     changed = True
@@ -1430,10 +1448,14 @@ def _test_destinations(tests, client, defined_in, runner_files):
     if stray:
         raise ValueError(
             f"runner-half tests defined outside the declared runner files {sorted(runner_files)}: "
-            f"{stray}. A runner-half test (one whose reference graph reaches no client signal) "
-            "must live in the runner test file of the module it tests. Move it there and set its "
-            "value in the seam manifest to that file; a move changes no key, so "
-            "GOVERNED_NAME_COUNT stays.")
+            f"{stray}. A test is runner-half when nothing it reaches, directly or through "
+            "helpers, names a client signal (_CLIENT_BINDINGS, _CLIENT_MODULES). If it IS a "
+            "runner test, move it into a declared runner file -- the tests/test_modal_<m>.py of "
+            "the module it tests once RUNNER_FILES is RUNNER_TEST_FILES, the one declared file "
+            "until then -- and set its value in the seam manifest to that file; a move changes "
+            "no key, so GOVERNED_NAME_COUNT stays. If it is meant to be a CLIENT test, it lacks "
+            "a client signal: make it reach one (or a helper that does), and it classifies to "
+            "the client file where it stands.")
     return out
 
 
@@ -1444,14 +1466,19 @@ def _helper_destination(name, consumers, destinations):
     its destination from stage 1 and `_test_destinations`. A consumer whose
     destination is not a seam file (a `SEAM_GUARDS` name, sent to the packaging
     file by fiat) does not count, because the rule is about the seam's own
-    files. PITFALL: a helper reached by no counting consumer raises instead of
-    defaulting, because the two things it can be -- dead code, or a new entry
-    point -- want opposite answers.
+    files. So a helper reached by a guard and by client tests goes to the
+    client file, not to the shared file (the probe's `_guard_and_client_helper`
+    pins that). PITFALL: a helper reached by no counting consumer raises
+    instead of defaulting, because the two things it can be -- dead code, or a
+    new entry point -- want opposite answers. That includes a helper only a
+    guard reaches: it has consumers, but none in the seam.
     """
     files = {destinations[test] for test in consumers} - {PACKAGING_FILE}
     if not files:
-        raise ValueError(f"{name!r} is reached by no test, so stage 2 cannot place it; "
-                         "it is dead code or a new entry point and needs a human")
+        raise ValueError(
+            f"{name!r} is reached by no seam test (a SEAM_GUARDS test does not count), so stage 2 "
+            "cannot place it; it is dead code, a guard-only helper that belongs beside the guards "
+            "in the packaging file, or a new entry point, and needs a human")
     if len(files) > 1:
         return SHARED_FILE
     return files.pop()
@@ -1478,9 +1505,9 @@ def _seam_sources(root=ROOT, runner_files=RUNNER_FILES):
     holds no file name. `test_the_seam_source_reader_fails_on_a_missing_declared_file`
     pins it. `root` and `runner_files` are parameters (with the live values as
     defaults) so that check can hand this reader a declared set with one bogus
-    path while every other declared file really exists; with an empty `root`,
-    every file is missing and a reader that raises only when NOTHING is left
-    would pass it.
+    path, or a root holding copies of every declared file but one, while every
+    other declared file really exists; with an empty `root`, every file is
+    missing and a reader that raises only when NOTHING is left would pass it.
 
     Live deletion of a NAME is guarded separately:
     `test_the_modal_test_split_matches_concern_recomputed_from_source` pins
@@ -1493,7 +1520,9 @@ def _seam_sources(root=ROOT, runner_files=RUNNER_FILES):
     if missing:
         raise FileNotFoundError(
             f"declared seam file(s) missing: {missing}. The seam never skips a declared file: "
-            "restore it, or remove it from the declaration in the same commit that removes it.")
+            "restore it; or, if you are ADDING A MODULE (its tests/test_modal_<m>.py is declared "
+            "through RUNNER_TEST_FILES before it exists), create the file with its first test; "
+            "or remove it from the declaration in the same commit that removes the file.")
     return {rel: (root / rel).read_text(encoding="utf-8") for rel in rels}
 
 
@@ -1526,12 +1555,15 @@ def _names_defined_under_tests():
     a caller comparing it against the manifest must scope the disk-to-manifest
     direction to names it actually governs rather than flagging every unrelated
     test file's helpers.
+
+    NO EXISTENCE FILTER. The glob's entries exist by construction, so a filter
+    here could only ever skip `SHARED_FILE`, a declared seam file, and spec
+    §3.6 (f) allows no existence filter over one. A missing shared file fails
+    at `read_text`, naming the path.
     """
     found = {}
     paths = sorted(set((ROOT / "tests").glob("test_*.py")) | {ROOT / SHARED_FILE})
     for path in paths:
-        if not path.exists():
-            continue
         rel = path.relative_to(ROOT).as_posix()
         for name in _module_level_names(ast.parse(path.read_text(encoding="utf-8"))):
             found.setdefault(name, []).append(rel)
@@ -1585,7 +1617,8 @@ _FLOOR_REMEDIES = {
     ("an exemption does not follow its test: re-key the entry to the (file, test) that "
      "exists, or delete it"),
     "exemption-without-reason":
-    "an exemption is legal only with a reason: write it as the entry's value",
+    ("an exemption is legal only with a reason: write it, as a non-empty string, as the "
+     "entry's value"),
 }
 
 
@@ -1606,20 +1639,228 @@ def _bind_runner_alias(dotted, local, facade, subs):
         subs[local] = dotted.removeprefix(prefix)
 
 
+# ── Scope resolution: does a name, where it is read, mean the module-level alias? ──
+#
+# A module alias rebound locally is not the module, and the floor must not
+# credit reach through it. Every binder Python has can do the rebinding, so the
+# resolver below models Python's own scoping rules rather than a list of the
+# shapes seen so far. The census the floor was specified against used a lexical
+# scope resolver cross-checked against `symtable`; this one is written to the
+# same rules, not copied from it, and it reproduces the residual figures in
+# `reach_floor_violations`' docstring. The previous rule here, "a store anywhere
+# in the node shadows the name everywhere in it", was neither: it missed every
+# binder that is not a `Name` store (a nested def's or a lambda's parameter, an
+# `except ... as`, a nested import), which credits reach the test does not
+# have, and it shadowed names Python does not (a class body's, a
+# comprehension's target outside the comprehension).
+#
+# WHY NOT `symtable` DIRECTLY: under Python 3.12's inlined comprehensions
+# (PEP 709) `symtable` reports no child table for a list/set/dict comprehension
+# and reports the enclosing function's `request` as global in
+# `[request.x for request in items]`, so the floor would credit reach through a
+# comprehension target. The walk below keeps every comprehension its own
+# scope, as the language does on every supported version.
+_FUNCTION_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_SCOPE_NODES = (*_FUNCTION_SCOPES, ast.ClassDef, *_COMPREHENSIONS)
+
+
+def _scope_parts(node):
+    """(parts evaluated in the ENCLOSING scope, parts evaluated in `node`'s own scope).
+
+    For a scope-opening node. A def's decorators, argument defaults and
+    annotations run where the `def` statement runs, and so do a class's
+    decorators, bases and keywords: only the body is inside. A comprehension's
+    FIRST iterable is evaluated outside it; its targets, conditions, later
+    iterables and element are inside. PITFALL: getting this split wrong
+    mis-resolves exactly the spellings the floor most needs, such as a
+    parametrize list naming `request.X` above a test that takes pytest's
+    `request` fixture -- the list is evaluated at module scope, where `request`
+    is the module.
+    """
+    if isinstance(node, _COMPREHENSIONS):
+        first, *rest = node.generators
+        inner = [first.target, *first.ifs]
+        for generator in rest:
+            inner += [generator.target, generator.iter, *generator.ifs]
+        inner += [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+        return [first.iter], inner
+    if isinstance(node, ast.ClassDef):
+        outer = [*node.decorator_list, *node.bases, *(k.value for k in node.keywords)]
+        return outer + list(node.type_params), node.body
+    args = node.args
+    outer = [*args.defaults, *(d for d in args.kw_defaults if d is not None)]
+    if isinstance(node, ast.Lambda):
+        return outer, [node.body]
+    params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+    outer += [p.annotation for p in params if p is not None and p.annotation is not None]
+    outer += [*node.decorator_list, *([node.returns] if node.returns else []), *node.type_params]
+    return outer, node.body
+
+
+def _comprehension_walrus_targets(comprehension):
+    """Names `:=` binds inside `comprehension`, nested comprehensions included.
+
+    PEP 572: a walrus inside a comprehension binds in the nearest enclosing
+    scope that is NOT a comprehension, so these are bindings of the function
+    (or module) around it, not of the comprehension.
+    """
+    found, stack = set(), list(_scope_parts(comprehension)[1])
+    while stack:
+        sub = stack.pop()
+        if isinstance(sub, ast.NamedExpr):
+            found.add(sub.target.id)
+        if isinstance(sub, _SCOPE_NODES) and not isinstance(sub, _COMPREHENSIONS):
+            stack.extend(_scope_parts(sub)[0])
+        else:
+            stack.extend(ast.iter_child_nodes(sub))
+    return found
+
+
+def _scope_binders(parts, *, comprehension=False):
+    """(names bound, names declared `global`, names declared `nonlocal`) by one scope's own parts.
+
+    `parts` are the nodes evaluated in the scope (a body, or one module-level
+    statement). Every binder counts: assignment, augmented and annotated
+    targets, `for`/`with`/`del` targets (all `Name` stores and deletes),
+    `except ... as`, `import` and `from ... import` (the local name), a nested
+    def's or class's own name, `:=` (including one inside a comprehension,
+    which binds HERE unless this scope is itself a comprehension), and `match`
+    captures. It does not descend into a nested scope's body, only into the
+    parts of it that are evaluated here (`_scope_parts`). Parameters are the
+    caller's job, because they are not in `parts`.
+    """
+    bound, declared_global, declared_nonlocal = set(), set(), set()
+    stack = list(parts)
+    while stack:
+        sub = stack.pop()
+        if isinstance(sub, ast.Global):
+            declared_global.update(sub.names)
+        elif isinstance(sub, ast.Nonlocal):
+            declared_nonlocal.update(sub.names)
+        elif isinstance(sub, ast.NamedExpr):
+            if not comprehension:
+                bound.add(sub.target.id)
+            stack.append(sub.value)
+            continue
+        elif isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+            bound.add(sub.id)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
+            bound.add(sub.name)
+        elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+            bound.update(a.asname or a.name.split(".")[0] for a in sub.names if a.name != "*")
+        elif isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
+            bound.add(sub.name)
+        elif isinstance(sub, ast.MatchMapping) and sub.rest:
+            bound.add(sub.rest)
+        if isinstance(sub, _SCOPE_NODES):
+            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.add(sub.name)
+            if isinstance(sub, _COMPREHENSIONS) and not comprehension:
+                bound |= _comprehension_walrus_targets(sub)
+            stack.extend(_scope_parts(sub)[0])
+            continue
+        stack.extend(ast.iter_child_nodes(sub))
+    return bound, declared_global, declared_nonlocal
+
+
+def _scope_frame(node):
+    """(is a class body, names local to the scope `node` opens, names it declares `global`).
+
+    Local means bound in the scope and not declared `global` or `nonlocal`
+    there: a `nonlocal` name is found in an enclosing function, and a `global`
+    one is the module's.
+    """
+    is_comprehension = isinstance(node, _COMPREHENSIONS)
+    bound, declared_global, declared_nonlocal = _scope_binders(_scope_parts(node)[1],
+                                                               comprehension=is_comprehension)
+    if isinstance(node, _FUNCTION_SCOPES):
+        args = node.args
+        params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+        bound |= {param.arg for param in params if param is not None}
+    local = bound - declared_global - declared_nonlocal
+    return isinstance(node, ast.ClassDef), local, declared_global
+
+
+def _scoped_walk(node):
+    """Yield `(sub, chain)` for `node` and every node under it.
+
+    `chain` is the tuple of `_scope_frame`s `sub` is evaluated in, innermost
+    last; it is empty at module scope, which is where a module-level def's
+    decorators and defaults are evaluated. A generic def or class (PEP 695)
+    gets one more frame, outside its own, holding its type parameters, which
+    are visible inside it and, unlike a class body's names, inside its methods.
+    """
+    # Annotated because the seed's empty chain `()` would otherwise be inferred
+    # as the only chain type, and pyrefly then rejects every longer one.
+    stack: list[tuple[ast.AST, tuple]] = [(node, ())]
+    while stack:
+        sub, chain = stack.pop()
+        yield sub, chain
+        if not isinstance(sub, _SCOPE_NODES):
+            stack.extend((child, chain) for child in ast.iter_child_nodes(sub))
+            continue
+        outer, inner = _scope_parts(sub)
+        inner_chain = chain
+        if getattr(sub, "type_params", None):
+            inner_chain += ((False, {param.name for param in sub.type_params}, set()), )
+        inner_chain += (_scope_frame(sub), )
+        stack.extend((part, chain) for part in outer)
+        stack.extend((part, inner_chain) for part in inner)
+
+
+def _resolves_to_module_scope(name, chain):
+    """Does a load of `name`, evaluated in `chain` (innermost last), read the module-level binding?
+
+    Python's rule: the innermost scope that binds the name owns it, except that
+    a class body's names are invisible to the scopes nested inside it (a method
+    reading `request` skips the class body's `request = ...`), and a `global`
+    declaration sends the name straight to the module. `nonlocal` names are not
+    local (`_scope_frame`), so the search moves outward to the function that
+    binds them.
+
+    ONE APPROXIMATION, in the direction that makes the floor stricter: a class
+    body reads a name it also binds through the class namespace first and the
+    module second, so a read that runs BEFORE the class body's own binding still
+    sees the module. That is treated as local.
+    """
+    for depth, (is_class, local, declared_global) in enumerate(reversed(chain)):
+        if is_class and depth:
+            continue
+        if name in declared_global:
+            return True
+        if name in local:
+            return False
+    return True
+
+
 def _runner_aliases(tree):
-    """(facade names, {alias: module}) bound by one file's MODULE-LEVEL runner imports.
+    """(facade names, {alias: module}): the runner aliases one file's module scope ends up with.
 
     Aliases are per file: a helper in the shared file resolves `training.X`
     through the shared file's own imports, not through the importing test's.
-    PITFALL: only `tree.body` is read, so an import inside a function body, or
-    under a module-level `if`/`try`, binds no alias here, and a reference
-    through it resolves to nothing, which makes the floor stricter and the
-    core rule looser (see `_own_module_refs`). A bare `import
-    scripts.modal_runner` binds `scripts`, and `scripts.modal_runner.X` is
-    likewise not resolved.
+
+    A name is an alias only if the LAST module-level statement binding it is an
+    unconditional runner import: a test runs after its module has finished
+    importing, so it sees the last binding in statement order. So `from tests
+    import helpers as state` after `from scripts.modal_runner import state`
+    unbinds `state`, and so does any other module-scope binding of the name
+    that comes later: an assignment, a def, or anything under a module-level
+    `if`/`try`/`for`/`with`. A function or class body that declares the name
+    `global` and binds it rebinds it at run time, so that unbinds it too,
+    wherever it sits.
+
+    PITFALL: an import inside a function body, or under a module-level
+    `if`/`try`, binds no alias here, so a reference through it resolves to
+    nothing, which makes the floor stricter and the core rule looser (see
+    `_own_module_refs`). A bare `import scripts.modal_runner` binds `scripts`,
+    and `scripts.modal_runner.X` is likewise not resolved.
     """
     facade, subs = set(), {}
     for node in tree.body:
+        for local in _scope_binders([node])[0]:
+            facade.discard(local)
+            subs.pop(local, None)
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.asname:
@@ -1628,31 +1869,13 @@ def _runner_aliases(tree):
             for alias in node.names:
                 _bind_runner_alias(f"{node.module}.{alias.name}", alias.asname or alias.name,
                                    facade, subs)
+    for scope in ast.walk(tree):
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound, declared_global, _ = _scope_binders(_scope_parts(scope)[1])
+            for local in bound & declared_global:
+                facade.discard(local)
+                subs.pop(local, None)
     return facade, subs
-
-
-def _locally_bound(node):
-    """Names `node` binds itself: its parameters, and every name stored anywhere inside it.
-
-    A module alias rebound locally is not the module. The case is live: a
-    runner test binds `request = mrl.build_run_request(...)` over the `request`
-    submodule alias and then reads `request.run_id`, and a test that takes
-    pytest's `request` fixture shadows it the same way. PITFALL: this is
-    deliberately coarse -- a store ANYWHERE in the body (a nested def's, a
-    comprehension's) shadows the alias for the whole body. That can only drop a
-    reference, which makes the floor stricter and the core rule looser; the
-    census this floor was specified against measured with the same rule.
-    """
-    bound = set()
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        args = node.args
-        params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
-        bound |= {param.arg for param in params if param is not None}
-    bound |= {
-        s.id
-        for s in ast.walk(node) if isinstance(s, ast.Name) and isinstance(s.ctx, ast.Store)
-    }
-    return bound
 
 
 def _binding_target_key(call):
@@ -1678,9 +1901,16 @@ def _own_module_refs(node, aliases, owners):
       * `<sub>.X` resolves to `sub`, where `<sub>` is a module-level alias of
         `scripts.modal_runner.<sub>` in the file that defines `node`;
       * `binding_target("key")` resolves to `BINDING_SITES[key]`'s owner.
-    Decorators are part of the body (`ast.walk` visits them), so a
-    parametrize list that names `mrl.X` counts. A locally rebound alias does
-    not (`_locally_bound`).
+    Decorators, argument defaults and annotations count, resolved at the scope
+    that evaluates them (`_scope_parts`), so a parametrize list that names
+    `mrl.X` counts. An alias counts only where the name READS the module-level
+    binding (`_resolves_to_module_scope`): a parameter, an `except ... as`, a
+    comprehension or `for`/`with` target, a walrus, a nested import or def, or
+    any other local binding of the same name at any depth is not the module.
+    The case is live in the unsplit file, where a runner test binds `request =
+    mrl.build_run_request(...)` over the `request` submodule alias and reads
+    `request.run_id`; a test that takes pytest's `request` fixture shadows it
+    the same way.
 
     PITFALL: these rules are narrower than "anything that touches the module".
     A bare alias passed as a value (`monkeypatch.setattr(training, "x", f)`),
@@ -1688,17 +1918,16 @@ def _own_module_refs(node, aliases, owners):
     non-literal or unknown site key all resolve to nothing. That makes the
     floor stricter but the core rule LOOSER: a core-file test whose only
     non-core reference takes one of these shapes passes the core rule.
+    `binding_target` is matched by its bare name wherever it appears, as the
+    binding census matches it, without resolving that name's scope.
     """
     facade, subs = aliases
-    shadowed = _locally_bound(node)
     refs = []
-    for sub in ast.walk(node):
+    for sub, chain in _scoped_walk(node):
         if isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name):
             root = sub.value.id
-            if root in shadowed:
-                continue
             module = owners.get(sub.attr) if root in facade else subs.get(root)
-            if module:
+            if module and _resolves_to_module_scope(root, chain):
                 refs.append((module, f"{root}.{sub.attr}"))
         elif isinstance(sub, ast.Call):
             key = _binding_target_key(sub)
@@ -1723,39 +1952,67 @@ def _floor_reach(sources, manifest):
     edges. Each name's references resolve through the aliases of the file that
     defines it. `manifest` is the tables' {"<module>.py": [names it owns]},
     passed in so the probes and measurement scripts can supply their own.
+
+    THE EDGES ARE NOT SCOPE-RESOLVED, and that cuts both ways. Own references
+    are (`_own_module_refs`), but the helper edges come from
+    `_referenced_module_names`, which reads every load of a module-level name
+    as that name. So a local variable that shares a helper's name credits the
+    helper's reach (a test binding `_make_manifest = 1` and reading it is
+    credited with `_make_manifest`'s `core`), which is the looser direction:
+    it can pass a misplaced test. The same property is what makes
+    pytest fixtures count: a test that takes the module-level fixture
+    `fake_modal` as a parameter and uses it reaches the fixture's body, which
+    is right, because pytest injects that fixture there. A side-effect fixture,
+    one a test takes as a parameter but never reads in its body, gives no edge,
+    because a parameter is not a load.
     """
     owners = {name: f.removesuffix(".py") for f, names in manifest.items() for name in names}
     trees = {rel: ast.parse(text) for rel, text in sources.items()}
     aliases = {rel: _runner_aliases(tree) for rel, tree in trees.items()}
-    nodes, own = {}, {}
+    nodes, own, tests = {}, {}, {}
     for rel, tree in trees.items():
         for name, node in _module_level_names(tree).items():
             nodes[name] = node
             own[name] = _own_module_refs(node, aliases[rel], owners)
+            if _is_test_def(name, node):
+                # Kept per (file, test), not read back from `nodes`/`own`: two
+                # files that define one test name (a probe's keying case) must
+                # each keep their own node and references.
+                tests[(rel, name)] = (node, own[name])
     universe = set(nodes)
     edges = {n: _referenced_module_names(node, n, universe) for n, node in nodes.items()}
     reach = {}
-    for rel, tree in trees.items():
-        for name, node in _module_level_names(tree).items():
-            if not (name.startswith("test_")
-                    and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
-                continue
-            refs = _own_module_refs(node, aliases[rel], owners)
-            reached = {module for module, _ in refs}
-            for helper in _closure(_referenced_module_names(node, name, universe), edges):
-                reached |= {module for module, _ in own[helper]}
-            reach[(rel, name)] = (refs, reached)
+    for (rel, name), (node, refs) in tests.items():
+        reached = {module for module, _ in refs}
+        for helper in _closure(_referenced_module_names(node, name, universe), edges):
+            reached |= {module for module, _ in own[helper]}
+        reach[(rel, name)] = (refs, reached)
     return reach
 
 
-def _exemption_violations(pair, reason, reach, file_module):
-    """The minimality violations of one `_REACH_EXEMPTIONS`-shaped entry, as a list."""
+def _exemption_violations(pair, reason, reach, file_module, source_files):
+    """The minimality violations of one `_REACH_EXEMPTIONS`-shaped entry, as a list.
+
+    An entry that names no examined test fails for one of three reasons, and
+    the detail says which, because each wants a different edit: the file is not
+    a per-module runner test file at all; it is one, but it is not among the
+    sources (an entry that landed before its file); or it is among them and does
+    not define the test (an entry left behind by a move). The reason must be a
+    non-empty string: `None` or `0` is not a reason, although `str()` of each is.
+    """
     rel, test = pair
-    if not str(reason).strip():
-        return [("exemption-without-reason", rel, test, "its reason is empty")]
-    if pair not in reach or rel not in file_module:
+    if not isinstance(reason, str) or not reason.strip():
+        return [("exemption-without-reason", rel, test,
+                 f"its reason is {reason!r}, not a non-empty string")]
+    if rel not in file_module:
         return [("exemption-names-no-such-test", rel, test,
-                 f"no runner test file {rel} that defines {test} is among the sources")]
+                 f"{rel} is not a per-module runner test file (RUNNER_TEST_FILES), so no test "
+                 "there is examined or exempt")]
+    if rel not in source_files:
+        return [("exemption-names-no-such-test", rel, test,
+                 f"{rel} is not among the seam sources; an entry lands with its file")]
+    if pair not in reach:
+        return [("exemption-names-no-such-test", rel, test, f"{rel} does not define {test}")]
     if file_module[rel] in reach[pair][1]:
         return [("exemption-not-needed", rel, test, f"it reaches {file_module[rel]!r}")]
     return []
@@ -1788,7 +2045,7 @@ def reach_floor_violations(sources, manifest, exemptions):
         pairs): "exemption-not-needed" if the test reaches its file's module;
         "exemption-names-no-such-test" if that file is not a runner test file
         among the sources or does not define that test; "exemption-without-
-        reason" if the reason is blank.
+        reason" if the reason is not a non-empty string.
 
     RESIDUAL: A FLOOR, NOT A PLACEMENT CHECK. A test that reaches two modules
     can sit in either file with both rules green; choosing between them is the
@@ -1830,7 +2087,7 @@ def reach_floor_violations(sources, manifest, exemptions):
         if module == "core" and foreign:
             violations.append(("core-rule", rel, test, f"its own body names {foreign}"))
     for pair, reason in sorted(exemptions.items()):
-        violations.extend(_exemption_violations(pair, reason, reach, file_module))
+        violations.extend(_exemption_violations(pair, reason, reach, file_module, set(sources)))
     return violations, examined
 
 
@@ -1922,6 +2179,9 @@ def _client_only_helper():
     module = _import_run_modal()
     return module, _PROBE_PINNED_DIGEST
 
+def _guard_and_client_helper():
+    return 6
+
 def test_probe_runner_via_helper():
     return _runner_only_helper()
 
@@ -1939,7 +2199,7 @@ def test_probe_client_by_module_binding():
     return module.App
 
 def test_probe_client_transitive():
-    return _client_only_helper()
+    return _client_only_helper(), _guard_and_client_helper()
 
 def test_probe_client_via_shared():
     return _client_only_helper(), _shared_helper(), _ProbeSharedDouble()
@@ -1954,7 +2214,7 @@ def test_probe_client_by_sidecar_string():
     return "scripts.modal_backfill_sidecar"
 
 def test_modal_is_an_explicit_dependency_group():
-    return _import_run_modal()
+    return _import_run_modal(), _guard_and_client_helper()
 '''
 
 
@@ -1983,6 +2243,12 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
       module. A classifier forced to pick a half would strand it in whichever
       file lost, which is a NameError at run time and not a collection error, so
       neither `--collect-only` nor a name-set comparison would see it.
+    - `_guard_and_client_helper` is reached by a client test and by the planted
+      guard. A guard is not a seam consumer (`_helper_destination` drops the
+      packaging file), so it goes to the client file; a classifier that counted
+      the guard would send it to the shared file. A helper that ONLY a guard
+      reaches has no seam consumer at all and raises, with a message that says
+      so (the last case below).
 
     AND ONE CASE PER MODULE-LEVEL NODE KIND, which is the second half of this
     test and the more easily lost one. Review measured that the probe parsed to
@@ -2048,6 +2314,10 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     assert destinations["_shared_helper"] == SHARED_FILE, (
         "a helper reached from BOTH halves was forced into one of them. That is "
         "the stranding this third destination exists to prevent.")
+    assert destinations["_guard_and_client_helper"] == CLIENT_FILE, (
+        "a helper reached by a client test and by a SEAM_GUARDS test was not sent to the client "
+        "file, so the guard was counted as a seam consumer: `_helper_destination` must drop "
+        f"the packaging file. got={destinations['_guard_and_client_helper']!r}")
 
     # ── the module-level node kinds the census must cover ────────────────────
     # `.get` rather than `[...]`: the failure these three exist for is the name
@@ -2126,17 +2396,25 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     # A name no test reaches has no consumers to follow, so stage 2 cannot place
     # it. It raises rather than defaulting, because the two things it can be --
     # dead code, or a new entry point -- want opposite answers.
-    with pytest.raises(ValueError, match="reached by no test"):
+    with pytest.raises(ValueError, match="reached by no seam test"):
         classify_seam({"orphan.py": "def _reached_by_nothing():\n    return 1\n"},
                       runner_files=RUNNER_TEST_FILES)
+    # A helper only a guard reaches has a consumer, but no SEAM consumer, so it
+    # raises too, and the message must not claim that nothing reaches it.
+    guard_only = ("def _reached_by_a_guard_only():\n    return 1\n\n"
+                  f"def {planted}():\n    return _reached_by_a_guard_only()\n")
+    with pytest.raises(ValueError, match="reached by no seam test") as rejected:
+        classify_seam({probe_file: guard_only}, runner_files=RUNNER_TEST_FILES)
+    assert "SEAM_GUARDS test does not count" in str(rejected.value), (
+        f"the guard-only helper's error does not say why a guard's reach is ignored: "
+        f"{rejected.value}")
 
 
 def _probe_test_names(sources):
     """The module-level `test_` function names defined in a {path: source} map, in order."""
     return [
         name for text in sources.values()
-        for name, node in _module_level_names(ast.parse(text)).items()
-        if name.startswith("test_") and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for name, node in _module_level_names(ast.parse(text)).items() if _is_test_def(name, node)
     ]
 
 
@@ -2156,7 +2434,8 @@ def test_the_seam_classifier_places_runner_tests_by_their_declared_file():
     - a helper reached from one runner file only goes to that file;
     - a runner-half test in a file outside the declared set -- here the shared
       file, and an undeclared per-module-looking path -- is REJECTED, with every
-      such test named in one error.
+      such test named in one error, including one that a declared file ALSO
+      defines (every defining file is checked, not the first).
 
     The last pair has its positive half: the same undeclared file, once
     declared, is accepted. So the rejection is about the declared set the
@@ -2189,15 +2468,21 @@ def test_the_seam_classifier_places_runner_tests_by_their_declared_file():
         "a helper reached from one runner file only did not follow its tests to that file. "
         f"got={destinations['_first_file_only_helper']!r}")
 
+    # `test_defined_in_two_files` is defined in a declared file FIRST and in the
+    # undeclared file second: a stray check that read only a test's first
+    # defining file would miss it.
     undeclared = "tests/test_modal_undeclared_probe.py"
+    twice = "def test_defined_in_two_files():\n    return 6\n"
     stray = {
         **sources,
+        first: sources[first] + "\n" + twice,
         SHARED_FILE: "def test_runner_side_in_the_shared_file():\n    return 4\n",
-        undeclared: "def test_runner_side_in_an_undeclared_file():\n    return 5\n",
+        undeclared: "def test_runner_side_in_an_undeclared_file():\n    return 5\n\n" + twice,
     }
     with pytest.raises(ValueError, match="outside the declared runner files") as rejected:
         classify_seam(stray, runner_files=RUNNER_TEST_FILES)
-    for name in ("test_runner_side_in_the_shared_file", "test_runner_side_in_an_undeclared_file"):
+    for name in ("test_runner_side_in_the_shared_file", "test_runner_side_in_an_undeclared_file",
+                 "test_defined_in_two_files"):
         assert name in str(rejected.value), (
             f"the rejection did not name {name}, so one run no longer lists every stray: "
             f"{rejected.value}")
@@ -2208,24 +2493,30 @@ def test_the_seam_classifier_places_runner_tests_by_their_declared_file():
         "rejection keys on something other than the declared set")
 
 
-def test_the_seam_source_reader_fails_on_a_missing_declared_file():
+def test_the_seam_source_reader_fails_on_a_missing_declared_file(tmp_path):
     """`_seam_sources` raises on a missing declared file; it never skips one.
 
     THE HOLE THIS PINS. An existence filter over the declared seam files drops
-    a declared runner file from the classifier's input without a word, and
-    every gate built on that input then passes over a smaller seam. A
-    repo-wide grep for the old file's name cannot find such a filter, because
-    the filter holds no file name. So this is checked by behaviour.
+    a declared file from the classifier's input without a word, and every gate
+    built on that input then passes over a smaller seam. A repo-wide grep for
+    the old file's name cannot find such a filter, because the filter holds no
+    file name. So this is checked by behaviour.
 
-    WHY THE REAL ROOT PLUS ONE BOGUS PATH, and not an empty `tmp_path` root:
-    with an empty root every declared file is missing, so a reader that
-    filters by existence and raises only when NOTHING is left also raises, and
-    this check would be green on exactly the reader it exists to reject. Here
-    every other declared file exists, so only a reader that refuses the one
-    missing file raises. The message must name that path and no other
-    declared path, so a reader that raises for some other reason, or blames
-    the wrong file, is red too. The last assertion is the positive half: the
-    real declared set is read whole.
+    TWO SHAPES, and each is needed. (1) The real root plus one bogus declared
+    runner path: the shape of a module whose test file is declared before it
+    exists. (2) Every declared file removed in turn -- each runner file, the
+    client file and the shared file -- from a copy of the declared files: a
+    filter over only the client and shared files (the runner files still
+    refused) passes shape (1), because shape (1) removes a runner file only.
+
+    WHY EVERY OTHER DECLARED FILE MUST EXIST in both shapes, and not an empty
+    `tmp_path` root: with an empty root every declared file is missing, so a
+    reader that filters by existence and raises only when NOTHING is left also
+    raises, and this check would be green on exactly the reader it exists to
+    reject. Here only a reader that refuses the one missing file raises. The
+    message must name that path and no other declared path, so a reader that
+    raises for some other reason, or blames the wrong file, is red too. The last
+    assertion is the positive half: the real declared set is read whole.
     """
     bogus = "tests/test_modal_no_such_declared_file.py"
     declared = [*RUNNER_FILES, CLIENT_FILE, SHARED_FILE]
@@ -2240,6 +2531,21 @@ def test_the_seam_source_reader_fails_on_a_missing_declared_file():
     assert [rel for rel in declared if rel in message] == [], (
         f"the error names declared files that exist, so it does not say which one is missing: "
         f"{message}")
+
+    for index, removed in enumerate(declared):
+        copy_root = tmp_path / f"without-{index}"
+        for rel in declared:
+            if rel != removed:
+                (copy_root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (copy_root / rel).write_bytes((ROOT / rel).read_bytes())
+        with pytest.raises(FileNotFoundError) as missing:
+            _seam_sources(root=copy_root)
+        named = [rel for rel in declared if rel in str(missing.value)]
+        assert named == [
+            removed
+        ], (f"with only {removed} missing, the reader did not raise naming exactly that file: "
+            f"{missing.value}")
+
     assert sorted(_seam_sources()) == sorted(declared), (
         "the source reader did not return every declared seam file for the real tree")
 
@@ -2340,7 +2646,8 @@ def test_no_governed_name_is_defined_outside_the_seams_own_files():
     assert not strayed, ("these names are governed by the seam manifest but are ALSO defined in a "
                          "file the seam does not own, so a reader has no way to tell which "
                          "definition the suite runs and Task 4's split would silently pick one. "
-                         f"{strayed}")
+                         f"{strayed}. Delete (or rename) the copy outside the seam; the governed "
+                         "definition stays where its manifest value says, so " + _manifest_edits())
 
 
 def test_the_modal_test_split_matches_concern_recomputed_from_source():
@@ -2425,9 +2732,12 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
         "Restore them, or, if the deletion is intended: " + _manifest_edits(delete=missing))
 
     strayed = {n: on_disk[n] for n in manifest if n not in computed}
-    assert not strayed, ("a governed name is defined under tests/ but NOT in any file the seam "
-                         "governs, so no concern can be recomputed for it. A new destination is "
-                         f"not a place to put split output: {strayed}")
+    assert not strayed, (
+        "a governed name is defined under tests/ but NOT in any file the seam governs, so no "
+        f"concern can be recomputed for it. A new destination is not a place to put split output: "
+        f"{strayed}. Move each definition back into the seam file its manifest value names; the "
+        "value stays and only the definition moves, so " + _manifest_edits() + " If the name is "
+        "instead leaving the seam for good: " + _manifest_edits(delete=strayed))
 
     duplicated = {n: on_disk[n] for n in manifest if len(on_disk[n]) > 1}
     assert not duplicated, (
@@ -2522,25 +2832,53 @@ def test_reach_floor_resolves_mrl_names_to_owner():
     facade passes, under `mrl` and under a second facade spelling (`from
     scripts import modal_runner as facade`), because the facade alias is read
     from the file's imports, not assumed. Negative: a request-file test naming
-    only a core-owned name fails the floor. It also pins what is EXAMINED: the
-    client file's test is not, because the client file names no module.
+    only a core-owned name fails the floor, and so does a core-file test naming
+    a facade name the tables do not own (it resolves to nothing, not to a
+    default module such as `core`). It also pins what is EXAMINED: the client
+    file's test is not, because the client file names no module.
+
+    AND ONLY THROUGH A BOUND FACADE. In a file that binds no facade alias,
+    `mrl.<request name>` resolves to nothing, and so does `<name>.<request
+    name>` through a module-level name that is not the facade. A rule that
+    recognised the literal `mrl`, or that looked any attribute up in the owner
+    table whatever its root, passes both.
     """
-    req = _floor_file("request")
+    req, core_file = _floor_file("request"), _floor_file("core")
     header = "import scripts.modal_runner as mrl\nfrom scripts import modal_runner as facade\n\n"
     tests = (f"def test_names_its_module():\n    return mrl.{_owned('request')}\n\n"
              f"def test_names_it_via_another_spelling():\n    return facade.{_owned('request')}\n\n"
              f"def test_names_another_module():\n    return mrl.{_owned('core')}\n")
-    sources = {req: header + tests, CLIENT_FILE: "def test_on_the_client_side():\n    return 1\n"}
+    unowned = "no_name_the_tables_give_any_module"
+    assert all(unowned not in names for names in RUNNER_OWNERS.values())
+    sources = {
+        req: header + tests,
+        core_file: header + f"def test_names_an_unowned_name():\n    return mrl.{unowned}\n",
+        CLIENT_FILE: "def test_on_the_client_side():\n    return 1\n",
+    }
     violations, examined = reach_floor_violations(sources, RUNNER_OWNERS, {})
     names = ("test_names_its_module", "test_names_it_via_another_spelling",
              "test_names_another_module")
-    pairs = {(req, name) for name in names}
+    pairs = {(req, name) for name in names} | {(core_file, "test_names_an_unowned_name")}
     assert examined == pairs, f"the floor examined the wrong (file, test) pairs: {sorted(examined)}"
     got = [violation[:3] for violation in violations]
-    expected = [("reach-floor", req, "test_names_another_module")]
+    expected = [("reach-floor", core_file, "test_names_an_unowned_name"),
+                ("reach-floor", req, "test_names_another_module")]
     assert got == expected, (
         "`mrl.X` did not resolve to X's owner alone: a test naming its own module's name must "
-        f"pass and one naming only another module's name must fail. got={violations}")
+        "pass, and one naming only another module's name, or a name no module owns, must fail. "
+        f"got={violations}")
+
+    unbound = {
+        req: ("not_the_facade = object()\n\n"
+              f"def test_through_an_unbound_facade():\n    return mrl.{_owned('request')}\n\n"
+              f"def test_through_a_non_alias():\n    return not_the_facade.{_owned('request')}\n"),
+    }
+    got = _floor_rules(unbound)
+    expected = [("reach-floor", req, "test_through_a_non_alias"),
+                ("reach-floor", req, "test_through_an_unbound_facade")]
+    assert got == expected, (
+        "a request-owned name read through a root that is not a bound facade alias resolved to "
+        f"its owner, so the facade check is gone or assumes the literal `mrl`. got={got}")
 
 
 def test_reach_floor_resolves_submodule_aliases():
@@ -2553,6 +2891,16 @@ def test_reach_floor_resolves_submodule_aliases():
     that rebinds `training` locally before `training.X` fails too -- the local
     rebinding is not the module (the unsplit file has a live case of this
     shape: `request = mrl.build_run_request(...)`, then `request.run_id`).
+    Every other kind of local binding has its own case in
+    `test_reach_floor_sees_every_local_binding_of_a_module_alias`.
+
+    AND ONLY THROUGH A MODULE-LEVEL ALIAS. In a request file that binds no
+    `request` at module level, a bare `request.X` resolves to nothing: a name
+    is not the module because it is spelled like one. A function-local `from
+    scripts.modal_runner import request` is a local binding, not an alias, so
+    it credits neither its own test nor another test in the same file that
+    reads `request.X` unbound. A rule that read aliases from the whole tree,
+    not the module's own statements, passes the second test.
     """
     header = ("from scripts.modal_runner import training\n"
               "import scripts.modal_runner.state as st\n\n")
@@ -2571,6 +2919,151 @@ def test_reach_floor_resolves_submodule_aliases():
         ("reach-floor", state_file, "test_training_alias_in_state"),
         ("reach-floor", training_file, "test_training_alias_rebound"),
     ], f"submodule aliases resolved wrongly: {_floor_rules(sources)}"
+
+    req = _floor_file("request")
+    unbound = {
+        req: ("def test_imports_it_in_its_body():\n"
+              "    from scripts.modal_runner import request\n"
+              "    return request.anything\n\n"
+              "def test_reads_it_unbound():\n    return request.anything\n"),
+    }
+    got = _floor_rules(unbound)
+    expected = [("reach-floor", req, "test_imports_it_in_its_body"),
+                ("reach-floor", req, "test_reads_it_unbound")]
+    assert got == expected, (
+        "`request.X` resolved to `request` in a file with no module-level `request` alias: "
+        "either a bare name spelled like a module resolves as that module, or a function-local "
+        f"import is being read as a module alias. got={got}")
+
+
+# One request-file source per way Python can make `request` mean something
+# other than the module at the point it is read. Each defines `test_shadowed`,
+# whose only candidate reach is `request.anything`, so each must fail the floor.
+# The header binds `request` to the module first; the case then rebinds it.
+_SHADOWING_CASES = {
+    "the test's own parameter (pytest's `request` fixture)":
+    "def test_shadowed(request):\n    return request.anything\n",
+    "a positional-only parameter":
+    "def test_shadowed(request, /):\n    return request.anything\n",
+    "a keyword-only parameter":
+    "def test_shadowed(*, request=None):\n    return request.anything\n",
+    "a *args parameter":
+    "def test_shadowed(*request):\n    return request.anything\n",
+    "a **kwargs parameter":
+    "def test_shadowed(**request):\n    return request.anything\n",
+    "a lambda's parameter":
+    "def test_shadowed():\n    return lambda request: request.anything\n",
+    "a nested def's parameter":
+    ("def test_shadowed():\n    def inner(request):\n        return request.anything\n"
+     "    return inner\n"),
+    "a method's parameter, in a helper class the test reaches":
+    ("class _Double:\n    def read(self, request):\n        return request.anything\n\n"
+     "def test_shadowed():\n    return _Double\n"),
+    "an except-as name":
+    ("def test_shadowed():\n    try:\n        pass\n    except Exception as request:\n"
+     "        return request.anything\n"),
+    "a comprehension target":
+    "def test_shadowed(items):\n    return [request.anything for request in items]\n",
+    "a for target":
+    "def test_shadowed(items):\n    for request in items:\n        return request.anything\n",
+    "a with target":
+    "def test_shadowed(opened):\n    with opened as request:\n        return request.anything\n",
+    "a walrus target":
+    "def test_shadowed(value):\n    if (request := value):\n        return request.anything\n",
+    "a walrus inside a comprehension (it binds the enclosing function)":
+    ("def test_shadowed(items):\n    last = [(request := item) for item in items]\n"
+     "    return last, request.anything\n"),
+    "a nested import":
+    ("def test_shadowed():\n    from tests import modal_test_helpers as request\n"
+     "    return request.anything\n"),
+    "a nested def's name": ("def test_shadowed():\n    def request():\n        pass\n\n"
+                            "    return request.anything\n"),
+    "a nested class's name": ("def test_shadowed():\n    class request:\n        pass\n\n"
+                              "    return request.anything\n"),
+    "a match capture": ("def test_shadowed(value):\n    match value:\n        case request:\n"
+                        "            return request.anything\n"),
+    "a del":
+    "def test_shadowed():\n    request.anything\n    del request\n",
+    "a type parameter":
+    "def test_shadowed[request]():\n    return request.anything\n",
+    "a later module-level import of the same name":
+    ("from tests import modal_test_helpers as request\n\n"
+     "def test_shadowed():\n    return request.anything\n"),
+    "a later module-level binding under an if":
+    ("if True:\n    request = None\n\n"
+     "def test_shadowed():\n    return request.anything\n"),
+    "a `global` rebinding in another function":
+    ("def _rebind():\n    global request\n    request = None\n\n"
+     "def test_shadowed():\n    return request.anything\n"),
+}
+
+# The same shapes with the alias NOT rebound where it is read, so each must
+# pass. They are what make the resolver exact rather than merely strict: a rule
+# that shadowed the name wherever any binder of it appears in the node would
+# fail every case above, as it should, and would also fail the class-body,
+# comprehension and parametrize cases here, as it should not.
+_UNSHADOWED_CASES = {
+    "a closure that reads the alias":
+    ("def test_unshadowed():\n    def inner():\n        return request.anything\n"
+     "    return inner\n"),
+    "a method that reads the alias past a class-body binding of the same name":
+    ("class _Double:\n    request = None\n\n    def read(self):\n"
+     "        return request.anything\n\n"
+     "def test_unshadowed():\n    return _Double\n"),
+    "a read after a comprehension whose own target is spelled like the alias":
+    ("def test_unshadowed(items):\n    firsts = [request for request in items]\n"
+     "    return firsts, request.anything\n"),
+    "a comprehension's first iterable, evaluated outside the comprehension":
+    "def test_unshadowed():\n    return [request for request in request.anything]\n",
+    "a parametrize list, evaluated at module scope, above a `request` parameter":
+    ('@pytest.mark.parametrize("value", [request.anything])\n'
+     "def test_unshadowed(request, value):\n    return value\n"),
+    "a `global` declaration that only reads":
+    "def test_unshadowed():\n    global request\n    return request.anything\n",
+    "a `global` declaration in a closure, past the enclosing function's local":
+    ("def test_unshadowed():\n    request = None\n\n    def inner():\n        global request\n"
+     "        return request.anything\n\n    return request, inner\n"),
+    "a module-level rebinding that the runner import then undoes":
+    ("request = None\nfrom scripts.modal_runner import request\n\n"
+     "def test_unshadowed():\n    return request.anything\n"),
+}
+
+
+def test_reach_floor_sees_every_local_binding_of_a_module_alias():
+    """A module alias rebound where it is read is not the module: every binder, at every depth.
+
+    THE FAILURE THIS PINS is the looser direction. A floor that credits reach
+    through a parameter, a lambda's parameter, an `except ... as`, a
+    comprehension target or any other local binding named like a module alias
+    passes a test that reaches nothing of that module, and on the real tree
+    nothing else objects. Each of `_SHADOWING_CASES` is a request-file test
+    whose only candidate reach is `request.anything` through such a binding,
+    and each must fail the floor ALONE, so a failure names its binder.
+
+    The positive half is `_UNSHADOWED_CASES`: the neighbouring shapes where the
+    name really is the module when it is read -- a closure, a method past a
+    class-body name (class scopes are invisible to the scopes inside them), a
+    read after a comprehension (whose target is its own) and in its first
+    iterable (evaluated outside it), a parametrize list (evaluated at module
+    scope, not inside the test), a `global` that only reads, including one in a
+    closure whose enclosing function binds the name, and a module-level
+    rebinding followed by the runner import. Each must pass, so a resolver
+    cannot pass this test by shadowing everything.
+    """
+    req = _floor_file("request")
+    header = "from scripts.modal_runner import request\n\n"
+    wrong = {}
+    for binder, case in _SHADOWING_CASES.items():
+        got = _floor_rules({req: header + case})
+        if got != [("reach-floor", req, "test_shadowed")]:
+            wrong[f"credited through {binder}"] = got
+    for shape, case in _UNSHADOWED_CASES.items():
+        got = _floor_rules({req: header + case})
+        if got:
+            wrong[f"not credited through {shape}"] = got
+    assert not wrong, (
+        "the floor's scope resolution is wrong for these shapes (a shadowing case must fail the "
+        f"floor, an unshadowed one must pass): {wrong}")
 
 
 def test_reach_floor_resolves_binding_target_through_binding_sites():
@@ -2630,16 +3123,23 @@ def test_reach_floor_follows_helpers_in_the_shared_file():
     resolved every name through the test's file, or that closed over the
     test's file alone, is red here. Negative: remove the helper from the
     shared file and the same test fails.
+
+    The union is `classify_seam`'s, so it holds the client file's names as well
+    (spec §3.2): the same helper defined in the CLIENT file carries its reach
+    too. A union that dropped the client file is pinned here, not left to the
+    classifier, which would call such a helper shared and the placement gate
+    would then call it misplaced -- a different failure, reported elsewhere.
     """
     state_file = _floor_file("state")
     test_source = "def test_through_the_shared_file():\n    return _shared_state_helper()\n"
     shared_header = "from scripts.modal_runner import state\n\n"
     helper = "def _shared_state_helper():\n    return state.anything\n"
-    with_helper = _floor_rules({state_file: test_source, SHARED_FILE: shared_header + helper})
-    assert with_helper == [], (
-        "a test that reaches its module only through a shared-file helper failed the floor, so "
-        "the closure is per-file, or the helper's reference was resolved through the wrong "
-        f"file's imports. got={with_helper}")
+    for home in (SHARED_FILE, CLIENT_FILE):
+        with_helper = _floor_rules({state_file: test_source, home: shared_header + helper})
+        assert with_helper == [], (
+            f"a test that reaches its module only through a helper in {home} failed the floor, "
+            "so the closure is per-file or its namespace is not the union, or the helper's "
+            f"reference was resolved through the wrong file's imports. got={with_helper}")
     without = _floor_rules({state_file: test_source, SHARED_FILE: shared_header})
     expected = [("reach-floor", state_file, "test_through_the_shared_file")]
     assert without == expected, f"the test still passed with the shared helper gone. got={without}"
@@ -2648,15 +3148,28 @@ def test_reach_floor_follows_helpers_in_the_shared_file():
 def test_reach_floor_applies_the_core_rule_to_the_core_file():
     """In the core file, a test's OWN body may name only `core`; elsewhere the rule does not apply.
 
-    Negative: a core-file test naming a request-owned name in its own body
-    fails the core rule (it reaches core, so the floor alone passes it).
+    Negative, one case per resolution rule and per place a reference can sit,
+    because the core rule alone polices the core file and nothing on the real
+    tree objects once the declared placement passes it: a core-file test whose
+    own body names a module other than core through the facade
+    (`mrl.<request name>`), a submodule alias (`training.X`) or a binding site
+    (`binding_target("interrupt-loader")`, the spec's own motivating case: it
+    resolves to `checkpoint`), or whose parametrize list names one, fails the
+    core rule, although each also names core and so passes the floor. An
+    EXEMPT core-file test fails it too: the core rule has no exemptions.
+
     Positive: a core-file test naming only core passes; so does one that
     reaches request only through a helper, because the rule is about the own
-    body; and a request-file test naming core and request in its own body is
-    not subject to it.
+    body; so does one whose nested function takes a parameter spelled like a
+    module (a local, not the module); and a request-file test naming core and
+    request in its own body is not subject to it.
     """
     core_file, req = _floor_file("core"), _floor_file("request")
-    header = "import scripts.modal_runner as mrl\n\n"
+    site = "interrupt-loader"
+    assert BINDING_SITES[site][0] != "core", f"{site} no longer names a non-core module"
+    header = ("import scripts.modal_runner as mrl\n"
+              "from scripts.modal_runner import training\n"
+              "from tests.modal_patch_binding_campaign import binding_target\n\n")
     core_name, request_name = _owned("core"), _owned("request")
     sources = {
         core_file:
@@ -2664,15 +3177,35 @@ def test_reach_floor_applies_the_core_rule_to_the_core_file():
                   f"def test_core_only():\n    return mrl.{core_name}\n\n"
                   f"def test_core_and_request_in_own_body():\n"
                   f"    return mrl.{core_name}, mrl.{request_name}\n\n"
+                  f"def test_core_and_a_submodule_alias():\n"
+                  f"    return mrl.{core_name}, training.anything\n\n"
+                  f"def test_core_and_a_binding_site():\n"
+                  f"    return mrl.{core_name}, binding_target(\"{site}\")\n\n"
+                  f"@pytest.mark.parametrize(\"value\", [mrl.{request_name}])\n"
+                  f"def test_core_with_a_foreign_parametrize_list(value):\n"
+                  f"    return mrl.{core_name}, value\n\n"
+                  f"def test_core_with_a_local_named_like_a_module():\n"
+                  f"    def callback(training):\n        return training.anything\n"
+                  f"    return mrl.{core_name}, callback\n\n"
+                  f"def test_exempt_but_names_request():\n    return mrl.{request_name}\n\n"
                   f"def test_request_only_through_a_helper():\n"
                   f"    return mrl.{core_name}, _request_helper()\n"),
         req:
         header + (f"def test_request_file_names_core_too():\n"
                   f"    return mrl.{request_name}, mrl.{core_name}\n"),
     }
-    got = _floor_rules(sources)
-    expected = [("core-rule", core_file, "test_core_and_request_in_own_body")]
-    assert got == expected, f"the core rule fired on the wrong tests: {got}"
+    exempt = {(core_file, "test_exempt_but_names_request"): "reaches no core, and is exempt"}
+    got = _floor_rules(sources, exempt)
+    expected = sorted(("core-rule", core_file, test) for test in (
+        "test_core_and_request_in_own_body",
+        "test_core_and_a_submodule_alias",
+        "test_core_and_a_binding_site",
+        "test_core_with_a_foreign_parametrize_list",
+        "test_exempt_but_names_request",
+    ))
+    assert got == expected, (
+        "the core rule fired on the wrong tests: "
+        f"missed={sorted(set(expected) - set(got))} extra={sorted(set(got) - set(expected))}")
 
 
 def test_reach_floor_exemption_must_still_be_needed():
@@ -2681,26 +3214,31 @@ def test_reach_floor_exemption_must_still_be_needed():
     Positive: a request-file test that reaches only core fails the floor with
     no exemption, and passes -- with no minimality objection -- once exempt
     with a reason. Negative: an exemption for a test that DOES reach request
-    fails as not needed, and an exemption with a blank reason fails.
+    fails as not needed, whether it reaches request in its own body or only
+    through a helper (minimality reads the whole reach, as the floor does); and
+    an exemption whose reason is blank, empty, `None` or not a string fails.
     """
     req = _floor_file("request")
     sources = {
         req: ("import scripts.modal_runner as mrl\n\n"
+              f"def _request_helper():\n    return mrl.{_owned('request')}\n\n"
               f"def test_reaches_its_module():\n    return mrl.{_owned('request')}\n\n"
+              "def test_reaches_it_through_a_helper():\n    return _request_helper()\n\n"
               f"def test_reaches_only_core():\n    return mrl.{_owned('core')}\n"),
     }
     needed = {(req, "test_reaches_only_core"): "tests a test double, not a module"}
     assert _floor_rules(sources) == [("reach-floor", req, "test_reaches_only_core")]
     assert _floor_rules(sources, needed) == [], "a needed, reasoned exemption was not honoured"
-    stale = {**needed, (req, "test_reaches_its_module"): "no longer true"}
-    got = _floor_rules(sources, stale)
-    expected = [("exemption-not-needed", req, "test_reaches_its_module")]
-    assert got == expected, (
-        "an exemption for a test that reaches its file's module passed minimality, so the "
-        f"allow-set can go stale unnoticed. got={got}")
-    got = _floor_rules(sources, {(req, "test_reaches_only_core"): "  "})
-    expected = [("exemption-without-reason", req, "test_reaches_only_core")]
-    assert got == expected, f"an exemption with a blank reason was accepted. got={got}"
+    for stale_test in ("test_reaches_its_module", "test_reaches_it_through_a_helper"):
+        got = _floor_rules(sources, {**needed, (req, stale_test): "no longer true"})
+        expected = [("exemption-not-needed", req, stale_test)]
+        assert got == expected, (
+            f"an exemption for {stale_test}, which reaches its file's module, passed minimality, "
+            f"so the allow-set can go stale unnoticed. got={got}")
+    for reason in ("  ", "", None, 0):
+        got = _floor_rules(sources, {(req, "test_reaches_only_core"): reason})
+        expected = [("exemption-without-reason", req, "test_reaches_only_core")]
+        assert got == expected, f"an exemption with the reason {reason!r} was accepted. got={got}"
 
 
 def test_reach_floor_exemptions_are_keyed_by_file():
@@ -2712,7 +3250,8 @@ def test_reach_floor_exemptions_are_keyed_by_file():
     among the sources at all (the shape a relocated exemption takes before its
     file exists, which must fail rather than be skipped); and keyed to a
     non-runner file that does define a test of that name. Each leaves the
-    test's own floor violation standing, and each entry fails.
+    test's own floor violation standing, and each entry fails, with a detail
+    that names its own cause, because each wants a different edit.
     """
     req, state_file = _floor_file("request"), _floor_file("state")
     absent = _floor_file("preflight")
@@ -2724,13 +3263,23 @@ def test_reach_floor_exemptions_are_keyed_by_file():
     }
     reason = "tests a test double, not a module"
     assert _floor_rules(sources, {(req, "test_moved_here"): reason}) == []
-    for wrong_file in (state_file, absent, CLIENT_FILE):
-        got = _floor_rules(sources, {(wrong_file, "test_moved_here"): reason})
+    causes = {
+        state_file: "does not define test_moved_here",
+        absent: "not among the seam sources",
+        CLIENT_FILE: "not a per-module runner test file",
+    }
+    for wrong_file, cause in causes.items():
+        violations, _ = reach_floor_violations(sources, RUNNER_OWNERS,
+                                               {(wrong_file, "test_moved_here"): reason})
+        got = [violation[:3] for violation in violations]
         expected = [("reach-floor", req, "test_moved_here"),
                     ("exemption-names-no-such-test", wrong_file, "test_moved_here")]
         assert got == expected, (
             f"an exemption keyed to {wrong_file} was honoured for the test in {req}, or was not "
             f"itself reported: {got}")
+        assert cause in violations[-1][3], (
+            f"the exemption keyed to {wrong_file} was reported without its cause ({cause!r}): "
+            f"{violations[-1][3]!r}")
 
 
 def test_modal_is_an_explicit_dependency_group():

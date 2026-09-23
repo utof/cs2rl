@@ -144,11 +144,13 @@ RUNNER_PATHS = tuple(f"scripts/modal_runner/{module}.py" for module in RUNNER_MO
 # Each module's test file, in the same order: tests/test_modal_<module>.py. This
 # is the one list the seam gate (tests/test_modal_packaging.py) and the binding
 # census (tests/test_modal_patch_binding_census.py) are to share, so that neither
-# holds a retyped copy. It is data only until the runner tests are relocated
-# into these files: until then the seam gate's declared runner set
-# (RUNNER_FILES) still names the one unsplit file, and only the seam
-# classifier's and the reach floor's synthetic probes read this tuple. The
-# relocation switches the gate and the census to it in the same commit.
+# holds a retyped copy. Until the runner tests are relocated into these files,
+# the seam gate's declared runner set (RUNNER_FILES) still names the one
+# unsplit file, so no gate reads these files. Two things use the tuple before
+# then: the synthetic probes pass it as their declared set, and the live reach
+# floor maps each file to its module through it -- which is why the floor
+# examines nothing while RUNNER_FILES is the unsplit file. The relocation
+# switches the gate and the census to it in the same commit.
 # PITFALL: derive a module from a test file name through this tuple and
 # RUNNER_MODULES, never through a `tests/test_modal_*.py` glob, which also
 # matches test files that belong to no module.
