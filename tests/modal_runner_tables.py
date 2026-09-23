@@ -89,7 +89,10 @@ MANIFEST = {
     ],
 }
 # Runtime import edges between package modules. core stays a leaf. A new edge
-# is legal only if the graph stays acyclic; record it here.
+# is legal only if the graph stays acyclic; record it here. Values here and in
+# ANNOTATION_DEPENDENCIES are declared modules only (the `table-edge` clause):
+# an absolute or `..` import, or `from . import <name>`, is never an edge to
+# record.
 DEPENDENCIES = {
     "core": [],
     "request": ["commands", "core"],
@@ -110,7 +113,9 @@ ANNOTATION_DEPENDENCIES = {"commands": ["request"], "preflight": ["request"]}
 # reader (QUALIFIED SEAMS in scripts/modal_runner/__init__.py, whose list must
 # match these keys). The `seam` clause in tests/test_modal_runner_package_shape.py
 # reports a from-import or an import-time read of a seam, a reader set that
-# differs from its entry here, and any other `module.name` read across modules.
+# differs from its entry here, an entry with no reader or whose owner does not
+# define its name, and any other `module.name` read across modules through a
+# module that a relative import binds.
 QUALIFIED_SEAMS = {
     "core.PREBUILT_PYTHON": ("checkpoint", "commands"),
     "core.sha256_file": ("checkpoint", "preflight", "source", "training"),
