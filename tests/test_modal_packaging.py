@@ -1465,8 +1465,8 @@ def _test_destinations(tests, client, defined_in, runner_files):
             "the module it tests (RUNNER_TEST_FILES) -- and set its value in the seam manifest "
             "to that file; a move changes "
             "no key, so GOVERNED_NAME_COUNT stays. If it is meant to be a CLIENT test, it lacks "
-            "a client signal: make it reach one (or a helper that does), and it classifies to "
-            "the client file where it stands.")
+            "a client signal: make it reach one (or a helper that does); it then classifies to "
+            "the client file, so move it there (the placement check names the manifest edit).")
     return out
 
 
@@ -1636,18 +1636,44 @@ _FLOOR_REMEDIES = {
 def _bind_runner_alias(dotted, local, facade, subs):
     """Record `local` as a facade alias or a submodule alias if `dotted` names one.
 
-    `dotted` is the full module path the import binds `local` to, so
-    `import scripts.modal_runner as mrl`, `from scripts import modal_runner as
-    mrl`, `from scripts.modal_runner import core` and `import
+    `dotted` is the full path the import binds `local` to (`_import_bindings`),
+    so `import scripts.modal_runner as mrl`, `from scripts import modal_runner
+    as mrl`, `from scripts.modal_runner import core` and `import
     scripts.modal_runner.core as core` all come through one rule. A name
     imported FROM a submodule (`from scripts.modal_runner.core import X`) is
-    not a module alias and is not recorded.
+    not a module alias and is not recorded. It only records: unbinding `local`
+    first is the caller's job.
     """
     prefix = PACKAGED + "."
     if dotted == PACKAGED:
         facade.add(local)
     elif dotted.startswith(prefix) and dotted.removeprefix(prefix) in RUNNER_MODULES:
         subs[local] = dotted.removeprefix(prefix)
+
+
+def _import_bindings(node):
+    """[(local name, dotted path bound to it)] for one `import` or `from ... import`, in order.
+
+    `import a.b as x` binds `x` to `a.b`, but `import a.b` binds `a` to `a`;
+    `from a import b as x` binds `x` to `a.b`, a submodule or a plain name
+    (`_bind_runner_alias` tells them apart). A relative import keeps its
+    leading dots, so it never spells the runner. A star import is skipped:
+    what it binds is not in the source (an approximation
+    `_resolves_to_module_scope` lists). The binder walk and the module-level
+    alias table both take an import's local names from here, so the two
+    cannot disagree about what an import binds.
+    """
+    out = []
+    for alias in node.names:
+        if alias.name == "*":
+            continue
+        if isinstance(node, ast.Import):
+            dotted = alias.name if alias.asname else alias.name.split(".")[0]
+            out.append((alias.asname or dotted, dotted))
+        else:
+            dotted = "." * node.level + (f"{node.module}." if node.module else "") + alias.name
+            out.append((alias.asname or alias.name, dotted))
+    return out
 
 
 # ── Scope resolution: does a name, where it is read, mean the module-level alias? ──
@@ -1666,10 +1692,15 @@ def _bind_runner_alias(dotted, local, facade, subs):
 # comprehension's target outside the comprehension).
 #
 # WHY NOT `symtable` DIRECTLY: under Python 3.12's inlined comprehensions
-# (PEP 709) `symtable` reports no child table for a list/set/dict comprehension
-# and reports the enclosing function's `request` as global in
-# `[request.x for request in items]`, so the floor would credit reach through a
-# comprehension target. The walk below keeps every comprehension its own
+# (PEP 709) a list, set or dict comprehension gets no child table (a generator
+# expression still does), so its target and a same-named read in the enclosing
+# function become ONE symbol. Measured on 3.12.3, in a function whose body is
+# `ys = [request.x for request in items]` then `return request.y`, `symtable`
+# reports that one `request` as global, so the floor would credit
+# `request.x`, a read of the comprehension target, as the module. PITFALL for
+# whoever re-checks this: asked about `[request.x for request in items]` ALONE,
+# `symtable` answers local, which is right; the failure needs the second read
+# outside the comprehension. The walk below keeps every comprehension its own
 # scope, as the language does on every supported version.
 _FUNCTION_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
@@ -1681,9 +1712,15 @@ def _scope_parts(node):
 
     For a scope-opening node. A def's decorators, argument defaults and
     annotations run where the `def` statement runs, and so do a class's
-    decorators, bases and keywords: only the body is inside. A comprehension's
-    FIRST iterable is evaluated outside it; its targets, conditions, later
-    iterables and element are inside. PITFALL: getting this split wrong
+    decorators, bases and keywords: only the body is inside. (For a GENERIC
+    def or class, PEP 695 runs the annotations, bases and keywords in a scope
+    that also sees the type parameters; the walk does not model that, and
+    `_resolves_to_module_scope` lists it among its approximations.) A
+    comprehension's FIRST iterable is evaluated outside it; its targets,
+    conditions, later iterables and element are inside. The fields are
+    listed by hand, so a field left out here is one no reference rule sees:
+    `test_the_scope_walk_visits_every_expression_ast_walk_visits` pins that
+    the lists are complete. PITFALL: getting this split wrong
     mis-resolves exactly the spellings the floor most needs, such as a
     parametrize list naming `request.X` above a test that takes pytest's
     `request` fixture -- the list is evaluated at module scope, where `request`
@@ -1759,7 +1796,7 @@ def _scope_binders(parts, *, comprehension=False):
         elif isinstance(sub, ast.ExceptHandler) and sub.name:
             bound.add(sub.name)
         elif isinstance(sub, (ast.Import, ast.ImportFrom)):
-            bound.update(a.asname or a.name.split(".")[0] for a in sub.names if a.name != "*")
+            bound.update(local for local, _ in _import_bindings(sub))
         elif isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
             bound.add(sub.name)
         elif isinstance(sub, ast.MatchMapping) and sub.rest:
@@ -1800,7 +1837,10 @@ def _scoped_walk(node):
     last; it is empty at module scope, which is where a module-level def's
     decorators and defaults are evaluated. A generic def or class (PEP 695)
     gets one more frame, outside its own, holding its type parameters, which
-    are visible inside it and, unlike a class body's names, inside its methods.
+    are visible in its body and, unlike a class body's names, in its methods.
+    Python also lets a generic def's annotations and a generic class's bases
+    and keywords see them; this walk evaluates those in the enclosing chain,
+    outside that frame (an approximation `_resolves_to_module_scope` lists).
     """
     # Annotated because the seed's empty chain `()` would otherwise be inferred
     # as the only chain type, and pyrefly then rejects every longer one.
@@ -1830,10 +1870,44 @@ def _resolves_to_module_scope(name, chain):
     local (`_scope_frame`), so the search moves outward to the function that
     binds them.
 
-    ONE APPROXIMATION, in the direction that makes the floor stricter: a class
-    body reads a name it also binds through the class namespace first and the
-    module second, so a read that runs BEFORE the class body's own binding still
-    sees the module. That is treated as local.
+    THE APPROXIMATIONS, of this function and of the alias table it answers
+    for (`_runner_aliases`), each with its direction. STRICTER means the floor
+    credits less reach than the test has: a false red, which someone sees.
+    LOOSER means it credits reach the test does not have: a false green, which
+    nobody sees on the real tree, so each looser one names what else guards it.
+    Measured at W4b, none of these shapes occurs in the ten seam files.
+      * A class body reads a name it also binds through the class namespace
+        first and the module second, so a read that runs BEFORE the class
+        body's own binding still sees the module. Treated as local: stricter.
+      * Every module-scope read is resolved against the aliases the module
+        ENDS with. That is right for bodies, which run after the import has
+        finished, but a module-level def's decorators, defaults and
+        annotations (and a class's bases) run when the def runs. So a
+        parametrize list naming `request.X` that sits after a non-runner
+        binding of `request` and before a later runner import is credited
+        (looser; ruff E402 rejects the late import), and one after the runner
+        import, with `request` rebound further down, is not (stricter).
+      * PEP 695 annotation scopes: a generic def's annotations and return
+        annotation, a generic class's bases and keywords, and a `type X[T] =
+        ...` value see the type parameters, but `_scoped_walk` evaluates them
+        outside the type-parameter frame. A type parameter spelled like an
+        alias and read there is credited as the module: looser, and nothing
+        but this note guards it.
+      * A module-level annotation with no value (`request: object`) binds
+        nothing at run time, but it is a `Name` store, so it unbinds the
+        alias: stricter.
+      * A star import (`from x import *`) binds names the source does not
+        show. It is skipped, so an alias it may overwrite stays: looser, and
+        not knowable from the source; ruff F403 rejects it.
+      * An import under a module-level `if`/`try`/`for`/`with` binds no alias
+        (`_runner_aliases`), and neither does a function-local runner import,
+        which instead hides a same-named module alias from that function.
+        Both make the floor stricter and the core rule looser (a core-file
+        test that imports `training` in its body and reads `training.X`
+        escapes it).
+      * A `global` rebinding of the name in any function or class body
+        unbinds the alias for the whole module, even for reads that run
+        before that function is ever called: stricter.
     """
     for depth, (is_class, local, declared_global) in enumerate(reversed(chain)):
         if is_class and depth:
@@ -1857,29 +1931,35 @@ def _runner_aliases(tree):
     import helpers as state` after `from scripts.modal_runner import state`
     unbinds `state`, and so does any other module-scope binding of the name
     that comes later: an assignment, a def, or anything under a module-level
-    `if`/`try`/`for`/`with`. A function or class body that declares the name
+    `if`/`try`/`for`/`with`. One import statement can bind a name twice
+    (`from scripts.modal_runner import request, build_run_request as
+    request`), so an import is read binding by binding, in order, and the
+    name keeps its last one. A function or class body that declares the name
     `global` and binds it rebinds it at run time, so that unbinds it too,
     wherever it sits.
 
     PITFALL: an import inside a function body, or under a module-level
     `if`/`try`, binds no alias here, so a reference through it resolves to
     nothing, which makes the floor stricter and the core rule looser (see
-    `_own_module_refs`). A bare `import scripts.modal_runner` binds `scripts`,
-    and `scripts.modal_runner.X` is likewise not resolved.
+    `_own_module_refs`). A function-local runner import is NOT MODELLED, by
+    choice: modelling it exactly needs a per-function alias table that
+    follows the last binding in flow order, and no seam file has one
+    (measured at W4b: 0). A bare `import scripts.modal_runner` binds
+    `scripts`, and `scripts.modal_runner.X` is likewise not resolved. Every
+    approximation of the resolution, with its direction, is listed in
+    `_resolves_to_module_scope`.
     """
     facade, subs = set(), {}
     for node in tree.body:
-        for local in _scope_binders([node])[0]:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            bindings = _import_bindings(node)
+        else:
+            bindings = [(local, None) for local in _scope_binders([node])[0]]
+        for local, dotted in bindings:
             facade.discard(local)
             subs.pop(local, None)
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname:
-                    _bind_runner_alias(alias.name, alias.asname, facade, subs)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            for alias in node.names:
-                _bind_runner_alias(f"{node.module}.{alias.name}", alias.asname or alias.name,
-                                   facade, subs)
+            if dotted:
+                _bind_runner_alias(dotted, local, facade, subs)
     for scope in ast.walk(tree):
         if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             bound, declared_global, _ = _scope_binders(_scope_parts(scope)[1])
@@ -2854,8 +2934,10 @@ def test_reach_floor_resolves_mrl_names_to_owner():
     from the file's imports, not assumed. Negative: a request-file test naming
     only a core-owned name fails the floor, and so does a core-file test naming
     a facade name the tables do not own (it resolves to nothing, not to a
-    default module such as `core`). It also pins what is EXAMINED: the client
-    file's test is not, because the client file names no module.
+    default module such as `core`). It also pins what is EXAMINED: an `async
+    def` test is, because pytest collects one (`_is_test_def`, whose async arm
+    nothing else on the real tree exercises), and the client file's test is
+    not, because the client file names no module.
 
     AND ONLY THROUGH A BOUND FACADE. In a file that binds no facade alias,
     `mrl.<request name>` resolves to nothing, and so does `<name>.<request
@@ -2867,6 +2949,7 @@ def test_reach_floor_resolves_mrl_names_to_owner():
     header = "import scripts.modal_runner as mrl\nfrom scripts import modal_runner as facade\n\n"
     tests = (f"def test_names_its_module():\n    return mrl.{_owned('request')}\n\n"
              f"def test_names_it_via_another_spelling():\n    return facade.{_owned('request')}\n\n"
+             f"async def test_names_it_asynchronously():\n    return mrl.{_owned('request')}\n\n"
              f"def test_names_another_module():\n    return mrl.{_owned('core')}\n")
     unowned = "no_name_the_tables_give_any_module"
     assert all(unowned not in names for names in RUNNER_OWNERS.values())
@@ -2877,7 +2960,7 @@ def test_reach_floor_resolves_mrl_names_to_owner():
     }
     violations, examined = reach_floor_violations(sources, RUNNER_OWNERS, {})
     names = ("test_names_its_module", "test_names_it_via_another_spelling",
-             "test_names_another_module")
+             "test_names_it_asynchronously", "test_names_another_module")
     pairs = {(req, name) for name in names} | {(core_file, "test_names_an_unowned_name")}
     assert examined == pairs, f"the floor examined the wrong (file, test) pairs: {sorted(examined)}"
     got = [violation[:3] for violation in violations]
@@ -2917,10 +3000,14 @@ def test_reach_floor_resolves_submodule_aliases():
     AND ONLY THROUGH A MODULE-LEVEL ALIAS. In a request file that binds no
     `request` at module level, a bare `request.X` resolves to nothing: a name
     is not the module because it is spelled like one. A function-local `from
-    scripts.modal_runner import request` is a local binding, not an alias, so
-    it credits neither its own test nor another test in the same file that
-    reads `request.X` unbound. A rule that read aliases from the whole tree,
-    not the module's own statements, passes the second test.
+    scripts.modal_runner import request` is NOT MODELLED as an alias, by
+    choice (`_runner_aliases` says why): it credits neither another test in
+    the same file that reads `request.X` unbound, which is right, nor its own
+    test, which at run time DOES read the module. That first case pins the
+    choice, not the language: it is the stricter direction for the floor (and
+    the looser one for the core rule), and a change that models local runner
+    imports must flip it in the same commit. A rule that read aliases from the
+    whole tree, not the module's own statements, passes the second test.
     """
     header = ("from scripts.modal_runner import training\n"
               "import scripts.modal_runner.state as st\n\n")
@@ -2960,9 +3047,16 @@ def test_reach_floor_resolves_submodule_aliases():
 # other than the module at the point it is read. Each defines `test_shadowed`,
 # whose only candidate reach is `request.anything`, so each must fail the floor.
 # The header binds `request` to the module first; the case then rebinds it.
+# ONE CASE PER ALTERNATIVE: where one condition of the resolver accepts several
+# node kinds (`Import` or `ImportFrom`, `MatchAs` or `MatchStar`, a `def`, an
+# `async def` or a class), each kind has its own case here, because a case per
+# condition dies on whichever kind it happens to use and leaves the others
+# unpinned.
 _SHADOWING_CASES = {
     "the test's own parameter (pytest's `request` fixture)":
     "def test_shadowed(request):\n    return request.anything\n",
+    "an async test's own parameter":
+    "async def test_shadowed(request):\n    return request.anything\n",
     "a positional-only parameter":
     "def test_shadowed(request, /):\n    return request.anything\n",
     "a keyword-only parameter":
@@ -2993,27 +3087,66 @@ _SHADOWING_CASES = {
     "a walrus inside a comprehension (it binds the enclosing function)":
     ("def test_shadowed(items):\n    last = [(request := item) for item in items]\n"
      "    return last, request.anything\n"),
-    "a nested import":
+    "a walrus inside a nested comprehension (it binds the enclosing function too)":
+    ("def test_shadowed(rows):\n    [[(request := item) for item in row] for row in rows]\n"
+     "    return request.anything\n"),
+    "a walrus inside another walrus's value":
+    ("def test_shadowed(value):\n    if (found := (request := value)):\n"
+     "        return found, request.anything\n"),
+    "a nested `from ... import ... as`":
     ("def test_shadowed():\n    from tests import modal_test_helpers as request\n"
      "    return request.anything\n"),
+    "a nested `import ... as`":
+    ("def test_shadowed():\n    import tests.modal_test_helpers as request\n"
+     "    return request.anything\n"),
+    "a nested `import` of a dotted name, which binds its first component":
+    "def test_shadowed():\n    import request.helpers\n    return request.anything\n",
     "a nested def's name": ("def test_shadowed():\n    def request():\n        pass\n\n"
                             "    return request.anything\n"),
+    "a nested async def's name": ("def test_shadowed():\n    async def request():\n        pass\n\n"
+                                  "    return request.anything\n"),
     "a nested class's name": ("def test_shadowed():\n    class request:\n        pass\n\n"
                               "    return request.anything\n"),
+    "a class body's own binding, read later in the same class body":
+    ("class _Double:\n    request = None\n    held = request.anything\n\n"
+     "def test_shadowed():\n    return _Double\n"),
     "a match capture": ("def test_shadowed(value):\n    match value:\n        case request:\n"
                         "            return request.anything\n"),
+    "a match star capture": ("def test_shadowed(value):\n    match value:\n"
+                             "        case [*request]:\n            return request.anything\n"),
+    "a match mapping's `**rest`":
+    ("def test_shadowed(value):\n    match value:\n"
+     "        case {**request}:\n            return request.anything\n"),
     "a del":
     "def test_shadowed():\n    request.anything\n    del request\n",
     "a type parameter":
     "def test_shadowed[request]():\n    return request.anything\n",
-    "a later module-level import of the same name":
+    "a later module-level `from ... import ... as` of the same name":
     ("from tests import modal_test_helpers as request\n\n"
+     "def test_shadowed():\n    return request.anything\n"),
+    "a later module-level `import ... as` of the same name":
+    ("import tests.modal_test_helpers as request\n\n"
+     "def test_shadowed():\n    return request.anything\n"),
+    "a later module-level relative import spelled like the runner":
+    ("from .scripts.modal_runner import request\n\n"
+     "def test_shadowed():\n    return request.anything\n"),
+    "one `from ... import` binding the name twice, the last not a runner module":
+    ("from scripts.modal_runner import request, build_run_request as request\n\n"
+     "def test_shadowed():\n    return request.anything\n"),
+    "one `import` binding the name twice, the last not a runner module":
+    ("import scripts.modal_runner.request as request, tests.modal_test_helpers as request\n\n"
      "def test_shadowed():\n    return request.anything\n"),
     "a later module-level binding under an if":
     ("if True:\n    request = None\n\n"
      "def test_shadowed():\n    return request.anything\n"),
     "a `global` rebinding in another function":
     ("def _rebind():\n    global request\n    request = None\n\n"
+     "def test_shadowed():\n    return request.anything\n"),
+    "a `global` rebinding in an async function":
+    ("async def _rebind():\n    global request\n    request = None\n\n"
+     "def test_shadowed():\n    return request.anything\n"),
+    "a `global` rebinding in a class body":
+    ("class _Rebind:\n    global request\n    request = None\n\n"
      "def test_shadowed():\n    return request.anything\n"),
 }
 
@@ -3033,6 +3166,18 @@ _UNSHADOWED_CASES = {
     "a read after a comprehension whose own target is spelled like the alias":
     ("def test_unshadowed(items):\n    firsts = [request for request in items]\n"
      "    return firsts, request.anything\n"),
+    "a read after a set comprehension whose own target is spelled like the alias":
+    ("def test_unshadowed(items):\n    firsts = {request for request in items}\n"
+     "    return firsts, request.anything\n"),
+    "a read after a dict comprehension whose own target is spelled like the alias":
+    ("def test_unshadowed(items):\n    firsts = {request: 1 for request in items}\n"
+     "    return firsts, request.anything\n"),
+    "a read after a generator expression whose own target is spelled like the alias":
+    ("def test_unshadowed(items):\n    firsts = list(request for request in items)\n"
+     "    return firsts, request.anything\n"),
+    "a read after a walrus that binds a lambda inside a comprehension, not the test":
+    ("def test_unshadowed(items):\n    readers = [lambda: (request := item) for item in items]\n"
+     "    return readers, request.anything\n"),
     "a comprehension's first iterable, evaluated outside the comprehension":
     "def test_unshadowed():\n    return [request for request in request.anything]\n",
     "a parametrize list, evaluated at module scope, above a `request` parameter":
@@ -3045,6 +3190,9 @@ _UNSHADOWED_CASES = {
      "        return request.anything\n\n    return request, inner\n"),
     "a module-level rebinding that the runner import then undoes":
     ("request = None\nfrom scripts.modal_runner import request\n\n"
+     "def test_unshadowed():\n    return request.anything\n"),
+    "one import binding the name twice, the last the runner module":
+    ("from scripts.modal_runner import state as request, request\n\n"
      "def test_unshadowed():\n    return request.anything\n"),
 }
 
@@ -3063,12 +3211,21 @@ def test_reach_floor_sees_every_local_binding_of_a_module_alias():
     The positive half is `_UNSHADOWED_CASES`: the neighbouring shapes where the
     name really is the module when it is read -- a closure, a method past a
     class-body name (class scopes are invisible to the scopes inside them), a
-    read after a comprehension (whose target is its own) and in its first
-    iterable (evaluated outside it), a parametrize list (evaluated at module
+    read after each kind of comprehension (whose target is its own) and in its
+    first iterable (evaluated outside it), a read after a walrus that binds a
+    lambda rather than the test, a parametrize list (evaluated at module
     scope, not inside the test), a `global` that only reads, including one in a
-    closure whose enclosing function binds the name, and a module-level
-    rebinding followed by the runner import. Each must pass, so a resolver
-    cannot pass this test by shadowing everything.
+    closure whose enclosing function binds the name, a module-level rebinding
+    followed by the runner import, and one import that binds the name twice
+    with the runner module last. Each must pass, so a resolver cannot pass
+    this test by shadowing everything.
+
+    Every element of the resolver's binder and scope lists whose removal
+    changes an answer has a case of its own, on one side or the other; the
+    `nonlocal` branch changes none, because a `nonlocal` name is always an
+    enclosing function's, never the module. What these cases cannot pin is a
+    FIELD the resolver forgets to walk:
+    `test_the_scope_walk_visits_every_expression_ast_walk_visits` does that.
     """
     req = _floor_file("request")
     header = "from scripts.modal_runner import request\n\n"
@@ -3084,6 +3241,130 @@ def test_reach_floor_sees_every_local_binding_of_a_module_alias():
     assert not wrong, (
         "the floor's scope resolution is wrong for these shapes (a shadowing case must fail the "
         f"floor, an unshadowed one must pass): {wrong}")
+
+
+# Every field `_scope_parts` hands out by hand, populated at least once: a def's
+# and an async def's decorators, type parameters, return annotation, and each
+# parameter kind's annotation, default and keyword-only default; a class's
+# decorators, type parameters, bases and keywords; a lambda's defaults,
+# keyword-only defaults and body; and each comprehension kind's element (or key
+# and value), targets, first and later iterables and conditions. Every read is
+# a distinct dotted name, so a failure names the field it lost. Parsed, never
+# executed.
+_EVERY_FIELD_SOURCE = '''
+@deco.a
+def f[T: bound.b](p: ann.c = dflt.d, /, q: ann.e = dflt.f, *a: star.g, k: kw.h = kwd.i,
+                  **kw: kk.j) -> ret.k:
+    @inner_deco.l
+    class C[U: cbound.m](base.n, metaclass=meta.o):
+        x = lambda z=ldef.p, *, y=lkw.q: lbody.r
+    xs = [e.s for t in first.t if cond.u for u in second.v if cond2.w]
+    d = {key.x: val.y for t in it.z if dcond.aa}
+    g = (ge.bb for t in git.cc if gcond.dd)
+    st = {se.ee for t in sit.ff if scond.gg}
+    return C, xs, d, g, st
+
+
+@adeco.hh
+async def h[V](r: aann.ii = adflt.jj, *, s: akw.kk = akwd.ll) -> aret.mm:
+    return r, s
+'''
+
+# The node kinds whose every field `_EVERY_FIELD_SOURCE` must populate: each
+# kind the resolver opens a scope for, and the three that carry a def's, a
+# lambda's and a comprehension's parts. Listed, not read from `_SCOPE_NODES`,
+# so that a kind dropped from the resolver is not also dropped from the check.
+_EVERY_FIELD_KINDS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda, ast.ListComp,
+                      ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.arguments, ast.arg,
+                      ast.comprehension)
+
+
+def _expressions_the_scope_walk_skips(source):
+    """Every expression under `source`'s statements that `ast.walk` visits and `_scoped_walk` misses.
+
+    Unparsed, so a failure reads as the code it lost. Each module-level
+    statement is walked on its own, as `_own_module_refs` walks each
+    module-level name's node.
+    """
+    skipped = []
+    for statement in ast.parse(source).body:
+        visited = {id(sub) for sub, _ in _scoped_walk(statement)}
+        skipped += [
+            ast.unparse(sub) for sub in ast.walk(statement)
+            if isinstance(sub, ast.expr) and id(sub) not in visited
+        ]
+    return skipped
+
+
+def test_the_scope_walk_visits_every_expression_ast_walk_visits():
+    """`_scoped_walk` reaches every expression `ast.walk` reaches, so no field escapes the rules.
+
+    THE FAILURE THIS PINS is a rule that narrows with everything green.
+    `_own_module_refs` reads references off `_scoped_walk`, which reaches a
+    def's, class's, lambda's or comprehension's fields only through the lists
+    `_scope_parts` writes out by hand; `ast.walk`, which it replaced, visits
+    every field by construction. A field dropped from those lists -- argument
+    defaults, an annotation, a class base, a later iterable, a condition, a
+    dict key, a lambda default -- is a field whose `mrl.X` no rule sees, and
+    the core rule, which alone polices the core file, loosens silently. One
+    case per field would pin one field each; this invariant pins them all,
+    and any field a later Python adds, once a source populates it.
+
+    It is checked first on `_EVERY_FIELD_SOURCE`, so a dropped field is red
+    whatever the real tree holds. That source must populate every field of
+    `_EVERY_FIELD_KINDS`, and those kinds must cover `_SCOPE_NODES`; both are
+    asserted, so trimming the source or adding a scope kind cannot quietly
+    shrink what the check covers. It is then checked on the other probe
+    sources and on every seam file, for a shape the tree has and the synthetic
+    source lacks.
+    """
+    uncovered = [kind.__name__ for kind in _SCOPE_NODES if kind not in _EVERY_FIELD_KINDS]
+    assert not uncovered, (
+        f"the resolver opens a scope for {uncovered}, which _EVERY_FIELD_KINDS does not list, so "
+        "no field of theirs is checked: list them there and populate them in _EVERY_FIELD_SOURCE")
+    # Annotated because pyrefly otherwise infers the keys as the union of the
+    # eleven kinds, and then rejects indexing with `type(sub)`, a `type[AST]`.
+    populated: dict[type[ast.AST], set[str]] = {kind: set() for kind in _EVERY_FIELD_KINDS}
+    for sub in ast.walk(ast.parse(_EVERY_FIELD_SOURCE)):
+        if type(sub) in populated:
+            filled = {field for field, value in ast.iter_fields(sub) if value not in (None, [])}
+            populated[type(sub)] |= filled
+    empty = {}
+    for kind, filled in populated.items():
+        unfilled = sorted(set(kind._fields) - {"type_comment"} - filled)
+        if unfilled:
+            empty[kind.__name__] = unfilled
+    assert not empty, (
+        f"_EVERY_FIELD_SOURCE leaves these fields empty everywhere: {empty}, so a scope walk "
+        "that dropped them would pass the check below. Populate each with a distinct read.")
+
+    missing = _expressions_the_scope_walk_skips(_EVERY_FIELD_SOURCE)
+    assert not missing, (
+        f"_scoped_walk never visits these expressions of _EVERY_FIELD_SOURCE: {missing}. Each "
+        "is spelled after the field it sits in; `_scope_parts` has dropped that field, so an "
+        "`mrl.X` placed there is invisible to the floor and the core rule.")
+
+    header = "from scripts.modal_runner import request\n\n"
+    corpus = {
+        "_SEAM_CLASSIFIER_PROBE": _SEAM_CLASSIFIER_PROBE,
+        **{
+            f"_SHADOWING_CASES[{name!r}]": header + case
+            for name, case in _SHADOWING_CASES.items()
+        },
+        **{
+            f"_UNSHADOWED_CASES[{name!r}]": header + case
+            for name, case in _UNSHADOWED_CASES.items()
+        },
+        **_seam_sources(),
+    }
+    skipped = {}
+    for label, source in corpus.items():
+        missing = _expressions_the_scope_walk_skips(source)
+        if missing:
+            skipped[label] = missing[:5]
+    assert not skipped, (
+        "_scoped_walk never visits these expressions (first five per source), so `_scope_parts` "
+        f"leaves out a field that _EVERY_FIELD_SOURCE does not populate: {skipped}")
 
 
 def test_reach_floor_resolves_binding_target_through_binding_sites():
