@@ -1046,7 +1046,17 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # neither and it stays green with a stale count and N ungoverned names on disk.
 # Its own message says so: it is a DELETION detector. The addition detector is
 # `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
-GOVERNED_NAME_COUNT = 291
+#
+# 295, after gh#238 on top of main's 291 (gh#197's census follow-up added
+# `_verify_checkpoint_census` and `test_verify_checkpoint_census_rejects_bypass_mutants`
+# in tests/test_modal_checkpoint.py to the earlier 289): four names in
+# tests/test_modal_training.py, the finalize kill-path pins:
+# `test_a_hung_heartbeat_does_not_strand_the_run_in_training` (P3),
+# `test_a_signal_while_taking_the_once_gate_returns_at_once` (P2),
+# `test_finalize_kills_the_child_before_joining_the_tees` (P1) and its stream
+# helper `_BlockingStream`. (The P2 lock double is a class nested in its test,
+# so it is not a governed name.)
+GOVERNED_NAME_COUNT = 295
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.

@@ -530,7 +530,15 @@ def _consume_training_kwargs(kwargs):
     return kwargs
 
 
-def _run_attempt_in_thread(kwargs):
+def _run_attempt_in_thread(kwargs, *, daemon: bool = False):
+    """Run `execute_training_attempt(**kwargs)` on a thread; returns (thread, finished, boxed).
+
+    `boxed` receives the result, or the Exception the attempt raised. `daemon`
+    is for a test whose knock-out DEADLOCKS the attempt (gh#238 P2: a signal
+    inside the once-gate): a stranded non-daemon thread would hold the pytest
+    process open at exit, a daemon one is abandoned, and the test goes red at
+    its `finished.wait(...)` instead of hanging the session.
+    """
     finished = threading.Event()
     boxed: list[object] = []
 
@@ -542,7 +550,7 @@ def _run_attempt_in_thread(kwargs):
         finally:
             finished.set()
 
-    thread = threading.Thread(target=runner)
+    thread = threading.Thread(target=runner, daemon=daemon)
     thread.start()
     return thread, finished, boxed
 
@@ -976,6 +984,7 @@ def _signal_hooks(child, *, release_on=signal.SIGKILL):
         until the test's `finally`). Where `finalize` runs on the attempt's
         own thread, `release_on` is inert, because the tail follows `finalize`
         whatever `killpg` does: `test_keyboard_interrupt_uses_same_cleanup`,
+        `test_a_signal_while_taking_the_once_gate_returns_at_once`,
         `test_post_spawn_failure_kills_child_and_writes_terminal_status`,
         `test_real_sigterm_in_tee_window_never_joins_unstarted_thread`, the
         timeout half of `test_dead_run_and_timeout_have_distinct_reasons`, and
@@ -1185,6 +1194,12 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
 
     Production order (see `_signal_hooks`, ORDER): the retry's commit then
     always runs after the terminal STATUS, so it fails too and records nothing.
+
+    The result assertion is what mutant T21 targets (gh#238): `finalize`
+    records `final_result` OUTSIDE the terminal `try`, so the attempt still
+    returns the INTERRUPTED result when the Volume commit fails. Moved inside
+    that `try`, after the commit, the raise skips it and the attempt returns
+    the FAILED / `REASON_NONZERO_EXIT` fallback instead.
     """
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child, release_on=None)
@@ -1207,7 +1222,7 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
+    thread, finished, boxed = _run_attempt_in_thread(kwargs)
     try:
         int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
         int_handler(signal.SIGINT, None)
@@ -1216,6 +1231,10 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
     finally:
         child.release()
         thread.join(timeout=2.0)
+    assert len(boxed) == 1
+    assert boxed[0] == training.TrainingAttemptResult(status=core.Status.INTERRUPTED,
+                                                      reason=training.REASON_SIGNAL,
+                                                      exit_code=None)
     assert committed
     assert committed[-1]["status"] == "training"
     last = state.RunStatus.from_dict(committed[-1])
@@ -1540,17 +1559,19 @@ def test_a_signal_inside_finalize_does_not_finalize_again(tmp_path):
     gh#211. In production every handler runs on the main thread, between
     bytecodes, so a SIGTERM that arrives while the SIGINT handler is
     signalling the child's group runs the handler again, nested, on the same
-    thread. That nested `finalize` must find `cleaned` set and return; the
-    outer one then does the only terminal write. The fake `killpg` delivers
-    the nested signal on the first SIGTERM, from inside
-    `_signal_process_group`, which runs after `cleanup_lock` is released. (A
-    signal inside that `with` block would deadlock on the non-reentrant lock:
-    gh#238 P2, not tested here.)
+    thread. That nested `finalize` must fail the gate's acquire and return;
+    the outer one then does the only terminal write. The fake `killpg`
+    delivers the nested signal on the first SIGTERM, from inside
+    `_signal_process_group`, which runs after the gate is taken. (A signal
+    landing INSIDE the gate is
+    `test_a_signal_while_taking_the_once_gate_returns_at_once`, gh#238 P2.)
 
-    A `finalize` that set `cleaned` at its END would run the nested call in
-    full: two SIGTERMs and two SIGKILLs, and a second terminal commit (a
-    same-terminal STATUS write is idempotent, so the second one returns
-    without an error). This test therefore requires `kills` to be one pair
+    A gate released after use (mutant `GATE_RELEASED`: the lock released
+    right after `cleaned = True`) would run the nested call in full: the
+    nested `finalize` takes the released lock, so two SIGTERMs and two
+    SIGKILLs, and a second terminal commit (a same-terminal STATUS write is
+    idempotent, so the second one returns without an error). This test
+    therefore requires `kills` to be one pair
     and, once STATUS is terminal, exactly two commits: the terminal one,
     without the note, then the retry's, with it (as in
     `test_publish_note_reaches_the_volume_in_the_right_commit`). The terminal
@@ -1562,8 +1583,8 @@ def test_a_signal_inside_finalize_does_not_finalize_again(tmp_path):
     only a racy assertion in the interrupt tests could see a late `cleaned`.)
 
     Production order (see `_signal_hooks`, ORDER). The timeout is a hard
-    bound, not a margin: a `finalize` that held `cleanup_lock` across the
-    kill would deadlock on the nested call instead of failing.
+    bound, not a margin: a `finalize` whose once-gate were a BLOCKING acquire
+    would deadlock on the nested call instead of failing it.
     """
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child, release_on=None)
@@ -1608,6 +1629,308 @@ def test_a_signal_inside_finalize_does_not_finalize_again(tmp_path):
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
     after_terminal = [record for record in commits if record[0] != "training"]
     assert after_terminal == [("interrupted", False), ("interrupted", True)]
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("ending", ["signal", "exit"])
+def test_a_hung_heartbeat_does_not_strand_the_run_in_training(tmp_path, capsys, ending):
+    """A heartbeat worker that will not stop costs one stderr line, never the terminal write.
+
+    gh#238 P3. `finalize` stops the heartbeat (`HeartbeatWorker.stop_and_join`,
+    which RAISES `RuntimeError("heartbeat worker did not stop")` after its 5 s
+    join) before the terminal STATUS and result.json. Before the fix that step
+    ran outside any `try`: the raise left the run in TRAINING with `cleaned`
+    already set, so the `except` arms' second `finalize` returned at once and
+    the run was stranded until Modal's kill. `stop_heartbeat_once` now swallows
+    the failure and prints one stderr line (the worker is a daemon whose only
+    shared write refuses terminal statuses, so abandoning it is safe: see its
+    docstring for the one hang it does not cover).
+
+    Two endings, because two paths reach `stop_heartbeat_once` first:
+      * `signal`: the handler, called from the test thread in production order
+        (see `_signal_hooks`, ORDER), reaches `finalize` → INTERRUPTED /
+        `REASON_SIGNAL`. The handler call is wrapped so a RuntimeError escaping
+        it is RECORDED, not raised out of the test: `raised == []` is the first
+        assertion, and the knock-out (`try` deleted, bare `stop_heartbeat`) goes
+        red there.
+      * `exit`: the child exits 0 at once with no manifest, on the test thread
+        (as `test_keyboard_interrupt_uses_same_cleanup`), so `finish` reaches
+        `finalize` → FAILED / `REASON_INVALID_EVIDENCE` (`_map_child_exit`).
+        The same knock-out makes `execute_training_attempt` itself raise (the
+        `except Exception` arm re-raises), red at the call line.
+    The heartbeat is a `SimpleNamespace(stop_and_join=...)`, so no real worker
+    starts; its fake raises on the FIRST call only and records every call:
+    `release()` must not retry it (`heartbeat_stopped` is set before the call).
+    The stderr assertion pins the PRODUCTION prefix, not only the worker's
+    message: a swallow with no line (knock-out `HEARTBEAT_SILENT`) is red here.
+    """
+    calls: list[float | None] = []
+
+    def stop_and_join(timeout=5.0):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise RuntimeError("heartbeat worker did not stop")
+
+    # `hooks` is bound ONCE, outside the if: bound in both arms, pyrefly joins
+    # the two flows into a union of the dict's value types and flags every
+    # `hooks["installed"][...]` read below as not subscriptable.
+    child = FakeChild(hold=True) if ending == "signal" else FakeChild()
+    hooks = _signal_hooks(child, release_on=None if ending == "signal" else signal.SIGKILL)
+    if ending == "signal":
+        expected = training.TrainingAttemptResult(status=core.Status.INTERRUPTED,
+                                                  reason=training.REASON_SIGNAL,
+                                                  exit_code=None)
+    else:
+        expected = training.TrainingAttemptResult(status=core.Status.FAILED,
+                                                  reason=training.REASON_INVALID_EVIDENCE,
+                                                  exit_code=0)
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            sleep=hooks["sleep"],
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    kwargs["prepared"] = _prepared_source(tmp_path,
+                                          heartbeat=SimpleNamespace(stop_and_join=stop_and_join))
+    run_root = kwargs["attempt"].run_root
+    raised: list[BaseException] = []
+    if ending == "signal":
+        thread, finished, boxed = _run_attempt_in_thread(kwargs)
+        try:
+            _int, term_handler = _wait_until_handlers(hooks["installed"], hooks["originals"])
+            try:
+                term_handler(signal.SIGTERM, None)
+            except BaseException as err:               # noqa: BLE001 - recorded, asserted below
+                raised.append(err)
+            child.release()
+            assert finished.wait(timeout=2.0)
+        finally:
+            child.release()
+            thread.join(timeout=2.0)
+        assert raised == []
+    else:
+        boxed = [mrl.execute_training_attempt(**kwargs)]
+    persisted = json.loads((run_root / mrl.STATUS_FILENAME).read_text())
+    assert persisted["status"] == expected.status.value
+    assert (run_root / core.RESULT_FILENAME).is_file()
+    assert json.loads(
+        (run_root / core.RESULT_FILENAME).read_text())["status"] == expected.status.value
+    assert len(boxed) == 1
+    assert boxed[0] == expected
+    assert hooks["installed"][signal.SIGINT] is hooks["originals"][signal.SIGINT]
+    assert hooks["installed"][signal.SIGTERM] is hooks["originals"][signal.SIGTERM]
+    assert len(calls) == 1
+    err = capsys.readouterr().err
+    assert "cs2rl: heartbeat did not stop before the terminal write" in err
+    assert "heartbeat worker did not stop" in err
+
+
+@pytest.mark.timeout(30)
+def test_a_signal_while_taking_the_once_gate_returns_at_once(tmp_path, monkeypatch):
+    """A signal handled at the instant the once-gate is taken returns; it does not deadlock.
+
+    gh#238 P2. CPython runs a signal handler between any two bytecodes of the
+    thread that owns it, including between `finalize`'s first two statements.
+    With the old `with self.cleanup_lock:` gate a nested `finalize` on the same
+    thread blocked on the held non-reentrant lock forever: the run stayed in
+    TRAINING with the child killed. The gate is now one NON-BLOCKING
+    `acquire`, and the lock is never released afterwards, so a nested
+    `finalize` fails the acquire and returns instead of waiting on a lock
+    nobody will ever give back. (Mutant `GATE_BLOCKING`, a blocking
+    `acquire()`, deadlocks here for exactly that reason: it waits forever on
+    the lock the outer finalize still holds.)
+
+    The double replaces `training.threading.Lock` (the sanctioned shape:
+    tests/test_modal_patch_bindings.py's attempt rows), which training.py
+    builds once, for `cleanup_lock`. On the FIRST acquire that returns True,
+    reached through `acquire(...)` or `__enter__` (the same instant on the old
+    and the new code), it calls the attempt's SIGTERM handler nested, before
+    returning to its caller. `finalize` runs on the attempt's own thread (the
+    child's `wait` raises KeyboardInterrupt, as in
+    `test_keyboard_interrupt_uses_same_cleanup`), so `release_on` is inert and
+    the nested handler is on the thread that holds the lock: exactly the
+    production case. The attempt thread is a DAEMON, so a deadlock strands only
+    it and `finished.wait(...)` goes red after 2 s instead of hanging the
+    session. Run the knock-outs of this test as this single node: the stranded
+    thread never reaches `release()`, so its watcher and heartbeat stay alive,
+    idle, until the process exits.
+    """
+    child = FakeChild(hold=True)
+
+    def exploding_wait(timeout=None):
+        raise KeyboardInterrupt
+
+    child.wait = exploding_wait
+    hooks = _signal_hooks(child)
+    fired: list[str] = []
+    nested: list[str] = []
+    commits: list[tuple[str, bool]] = []
+
+    class _GateDouble:
+        """A real Lock whose first successful acquire runs the SIGTERM handler, nested."""
+
+        def __init__(self):
+            self._lock = threading.Lock()
+
+        def acquire(self, *args, **kwargs):
+            taken = self._lock.acquire(*args, **kwargs)
+            if taken and not fired:
+                fired.append("fired")
+                handler = hooks["installed"][signal.SIGTERM]
+                assert callable(handler), "the attempt's SIGTERM handler is not installed"
+                nested.append("entered")
+                handler(signal.SIGTERM, None)
+                nested.append("returned")
+            return taken
+
+        def release(self):
+            self._lock.release()
+
+        def __enter__(self):
+            return self.acquire()
+
+        def __exit__(self, *_exc):
+            self.release()
+
+    def commit() -> None:
+        run_root = kwargs["attempt"].run_root
+        status = json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"]
+        note = run_root / "checkpoints" / core.CHECKPOINT_PUBLISH_REASON_NAME
+        commits.append((status, note.is_file()))
+
+    monkeypatch.setattr(
+        training, "threading",
+        SimpleNamespace(Thread=threading.Thread, Event=threading.Event, Lock=_GateDouble))
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            commit=commit,
+            sleep=hooks["sleep"],
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    thread, finished, boxed = _run_attempt_in_thread(kwargs, daemon=True)
+    try:
+        assert finished.wait(timeout=2.0), "the nested finalize deadlocked on the once-gate"
+    finally:
+        child.release()
+        thread.join(timeout=2.0)
+    assert fired == ["fired"]
+    assert nested == ["entered", "returned"]
+    assert len(boxed) == 1
+    assert boxed[0] == training.TrainingAttemptResult(status=core.Status.INTERRUPTED,
+                                                      reason=training.REASON_SIGNAL,
+                                                      exit_code=None)
+    assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
+    after_terminal = [record for record in commits if record[0] != "training"]
+    assert after_terminal == [("interrupted", False), ("interrupted", True)]
+
+
+class _BlockingStream:
+    """A child stream whose `read` blocks until `release()`, then returns EOF.
+
+    For `test_finalize_kills_the_child_before_joining_the_tees`: a tee thread
+    over a `BytesIO` finishes before `finalize` runs, so whether the kill or
+    the join comes first would depend on scheduling. Over this stream the tee
+    thread stays alive until the test lets it go, at its own join. `release`
+    is idempotent.
+    """
+
+    def __init__(self):
+        self._released = threading.Event()
+
+    def read(self, _size: int = -1) -> bytes:
+        self._released.wait()
+        return b""
+
+    def release(self) -> None:
+        self._released.set()
+
+
+@pytest.mark.timeout(30)
+def test_finalize_kills_the_child_before_joining_the_tees(tmp_path, monkeypatch):
+    """`finalize` signals the child's group BEFORE it joins the tee threads.
+
+    gh#238 P1 (no production change: this pins the order). A tee join waits
+    up to 5 s per stream for a child that is still writing; with the kill
+    first, the child is dying while the tees drain. Reversed, an INTERRUPTED
+    run would spend its ~30 s preemption window waiting on a live child's
+    output before it is even signalled.
+
+    Both child streams are `_BlockingStream`s, so BOTH tee threads are alive
+    at their join and the two-entry count is a property of the code, not of
+    scheduling. Tee threads are identified at START, by object (`_target is
+    training._tee_stream`, read before delegating: `Thread.run` deletes
+    `_target` when the target returns, so a join-time read misses a finished
+    tee, the gh#217 pitfall). At each tee join the spy records the kills so
+    far, THEN releases both streams so no join waits out its timeout. The
+    handler is called from the test thread in production order (see
+    `_signal_hooks`, ORDER), once the attempt is in its wait loop: handlers
+    are installed BEFORE `start_tees`, so a handler fired as soon as they
+    appear could finalize with `tee_threads` still empty and see no join at
+    all. Mutant `JOIN_BEFORE_KILL` (the join loop above the kill) records `[]`
+    at both joins.
+    """
+    child = FakeChild(hold=True)
+    out, err = _BlockingStream(), _BlockingStream()
+    # FakeChild types its streams as BytesIO; a duck-typed stream is the point here.
+    child.stdout = out                 # pyrefly: ignore[bad-assignment]
+    child.stderr = err                 # pyrefly: ignore[bad-assignment]
+    hooks = _signal_hooks(child, release_on=None)
+    real_start = threading.Thread.start
+    real_join = threading.Thread.join
+    tee_threads_seen: set[threading.Thread] = set()
+    joins: list[list[int]] = []
+
+    def spy_start(self):
+        if getattr(self, "_target", None) is training._tee_stream:
+            tee_threads_seen.add(self)
+        return real_start(self)
+
+    def spy_join(self, timeout=None):
+        if self in tee_threads_seen:
+            joins.append(list(hooks["kills"]))
+            out.release()
+            err.release()
+        return real_join(self, timeout)
+
+    monkeypatch.setattr(threading.Thread, "start", spy_start)
+    monkeypatch.setattr(threading.Thread, "join", spy_join)
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            sleep=hooks["sleep"],
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    run_root = kwargs["attempt"].run_root
+    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
+    try:
+        _int, term_handler = _wait_until_handlers(hooks["installed"], hooks["originals"])
+        deadline = time.monotonic() + 2.0
+        while not child.wait_timeouts:                 # the attempt is in its wait loop: start_tees is done
+            assert time.monotonic() < deadline, "the attempt never reached its wait loop"
+            time.sleep(0.001)
+        term_handler(signal.SIGTERM, None)
+        child.release()
+        assert finished.wait(timeout=2.0)
+    finally:
+        out.release()
+        err.release()
+        child.release()
+        thread.join(timeout=2.0)
+    assert len(joins) == 2
+    for kills_at_join in joins:
+        assert kills_at_join == [signal.SIGTERM, signal.SIGKILL]
+    persisted = json.loads((run_root / mrl.STATUS_FILENAME).read_text())
+    assert persisted["status"] == "interrupted"
 
 
 def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
