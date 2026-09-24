@@ -1,41 +1,54 @@
-"""Helpers used by BOTH halves of the modal test seam.
+"""Helpers reached by tests in two or more files of the modal test seam.
 
-NOT a test module: no `test_` prefix, so pytest does not collect it. It exists
-because the split is not a clean bisection. Measured, these 7 module-level names
-are reached by tests on both sides of the seam (`_aware`: 79 tests reach it, 57
-in the runner half and 22 in the client half). Copying them into both files
-instead would let two definitions of the same fixture drift apart with every
-check in tests/test_modal_packaging.py green -- which is the failure mode this
-seam exists to stop.
+NOT a test module: no `test_` prefix, so pytest does not collect it. The seam
+files are the per-module runner test files (tests/test_modal_<module>.py, listed
+by `RUNNER_TEST_FILES` in tests/modal_runner_tables.py) and
+tests/test_modal_client.py. This file exists because tests in different seam
+files share fixtures. Measured at W4's split by module (fdd5ec9), it holds 13
+module-level names besides `ROOT`, and tests in two or more seam files reach
+each one. The 7 from `_git` to `FakeChild` are reached from both the client
+file and runner files (`_aware`: 80 tests, 58 in four runner files and 22 in
+the client file); the 6 under the last section header are reached from two or
+more runner files only. Copying a helper into each file that uses it instead
+would let two definitions of the same fixture drift apart with every check in
+tests/test_modal_packaging.py green -- which is the failure mode this seam
+exists to stop.
 
 THE 57/22 WAS SHIPPED TRANSPOSED and is corrected here, because the arithmetic
-that catches it is worth leaving behind. The figure arrived verbatim from the
-task brief as "22 runner tests and 57 client tests" and no re-derivation was run
-on it. It was refutable without measuring anything: at W2's split (84622fc) the
-client half held 54 module-level test functions in total, so no count of client
-tests could be 57, and the header of tests/test_modal_client.py stated that 54.
-A number that its own sibling file contradicts is the cheapest kind of wrong to
-find and the easiest to carry forward untouched.
+that catches it is worth leaving behind. At W2's split (84622fc), which cut the
+runner half from the client half, 79 tests reached `_aware`: 57 in the runner
+half and 22 in the client half. The figure arrived verbatim from the task brief
+as "22 runner tests and 57 client tests" and no re-derivation was run on it. It
+was refutable without measuring anything: the client half then held 54
+module-level test functions in total, so no count of client tests could be 57,
+and the header of tests/test_modal_client.py stated that 54. A number that its
+own sibling file contradicts is the cheapest kind of wrong to find and the
+easiest to carry forward untouched.
 
-Membership is computed, not judged: classify_seam() assigns a helper here iff
-the set of tests that transitively reach it spans both halves.
-
-WHAT EARNS A NAME A PLACE HERE, and nothing else does: being reached from BOTH
-sides of the seam. A one-sided helper belongs in its own half -- however generic
-it looks, and however well its name would read in this file. The rule is written
-down because a module named for what it IS rather than for what it OWNS becomes
-a junk drawer: every future helper looks a little bit shared, and the file
-accretes until it is a second monolith. Spec §10 criterion 12 bans a module
-named `helpers`; its instrument is §5.1's eight W3 submodules, so this file is
-formally out of its scope -- the rule is honoured here anyway, because the
-criterion's reason applies and its instrument is what does not reach.
+WHAT EARNS A NAME A PLACE HERE, and nothing else does: being REACHED BY TESTS
+IN TWO OR MORE SEAM FILES. A helper that only one file's tests reach belongs in
+that file -- however generic it looks, and however well its name would read
+here. The rule this replaced at W4, "reached from both halves of the
+runner/client seam", is its special case with one runner file. A consumer
+outside the seam files (tests/test_modal_patch_bindings.py, say) does not count.
+The same rule is written beside the classifier, as THE MEMBERSHIP RULE FOR THE
+SHARED FILE in tests/test_modal_packaging.py; the two copies must not drift. It
+is written down because a module named for what it IS rather than for what it
+OWNS becomes a junk drawer: every future helper looks a little bit shared, and
+the file accretes until it is a second monolith. Spec §10 criterion 12 bans a
+module named `helpers`; its instrument is §5.1's eight W3 submodules, so this
+file is formally out of its scope -- the rule is honoured here anyway, because
+the criterion's reason applies and its instrument is what does not reach.
 
 You do not have to apply this by hand, and you should not: classify_seam()
-computes it. A one-sided helper hand-written into this file gains a name in
-`computed` that the manifest lacks, and the agreement test fires.
+computes it. A single-file helper hand-written into this file is classified to
+its one file, not here, so the manifest and `computed` disagree and the
+agreement test fires.
 
-Each `# ──` section header below names the helpers defined under it. They
-once named runner-half test cycles that travelled here with those helpers.
+Each `# ──` section header but the last names the helpers defined under it;
+they once named runner-half test cycles that travelled here with those helpers.
+The last, "Shared since W4", holds the 6 names W4's split made shared, which do
+not fit one header line, so it states the rule they meet instead.
 """
 import io
 import json

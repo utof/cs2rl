@@ -2,9 +2,12 @@
 
 WHAT this module owns:
   * `BINDING_SITES` / `binding_target`: the one table that says which owning
-    submodule attribute each at-risk patch site replaces. The original sites in
-    tests/test_modal_runner.py and tests/test_modal_client.py install their patch
-    through `binding_target(site)`, and so does the per-site companion
+    submodule attribute each at-risk patch site replaces. The original sites
+    install their patch through `binding_target(site)`; `_ORIGINAL_SITES` in
+    tests/test_modal_patch_binding_census.py names each one's file and
+    installing function (since W4: tests/test_modal_training.py,
+    tests/test_modal_preflight.py, tests/modal_test_helpers.py and
+    tests/test_modal_client.py). So does the per-site companion
     `test_patch_binding_observation` in tests/test_modal_patch_bindings.py, so the
     companion observes exactly the target the original site patches.
     `test_patch_binding_sites_route_through_binding_target`

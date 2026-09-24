@@ -660,20 +660,22 @@ def test_the_census_scans_the_whole_repo():
     violations lived in `tests/`. This repo's named #1 defect class is a guard
     blind to its own scope, in the file this plan calls its durable deliverable.
 
-    Assert 1 names FILES, and it names all three W1 files rather than just one,
-    because the one-name version was measured blind to the case that matters:
-    filter the census to drop `tests/test_eval_baselines.py` -- the in-body
-    violation this entire guard exists for -- and NOTHING objected: every test
-    in the file passed, this one included. A census
-    that has stopped enumerating the files W1 was written for has stopped doing
-    its job, whatever else it still reaches.
+    Assert 1 names FILES, and it names every file W1 was written for rather
+    than just one: `tests/test_eval_baselines.py`, `tests/test_modal_argv.py`
+    and, in place of the W1 runner test file that W4 split by module, the eight
+    `RUNNER_TEST_FILES` -- ten names. The one-name version was measured blind
+    to the case that matters: filter the census to drop
+    `tests/test_eval_baselines.py` -- the in-body violation this entire guard
+    exists for -- and NOTHING objected: every test in the file passed, this one
+    included. A census that has stopped enumerating the files W1 was written
+    for has stopped doing its job, whatever else it still reaches.
 
     The asserts are not padding. Each is the FIRST objector to a different
     narrowing, measured by mutation against this exact argv -- so deleting any
     one of them silently retires a distinct check:
 
-        *.py -> scripts/*.py       -> assert 1 (19 paths; all 3 names missing)
-        cwd=ROOT -> cwd=ROOT/tests -> assert 1 (86 paths; ls-files is relative)
+        *.py -> scripts/*.py       -> assert 1 (28 paths; all 10 names missing)
+        cwd=ROOT -> cwd=ROOT/tests -> assert 1 (101 paths; ls-files is relative)
         census drops a W1 file     -> assert 1 (names it)
         *.py -> tests/*.py         -> assert 3 (asserts 1 and 2 both PASS)
         census drops THIS file     -> assert 2 (asserts 1 and 3 both PASS)
@@ -702,12 +704,17 @@ def test_the_census_scans_the_whole_repo():
     redundancy, not a defect -- but a docstring claiming exclusivity it no
     longer has is.
 
+    RE-MEASURED after W4 split the runner test file by module (2026-09-24,
+    on fdd5ec9; the path counts in the table are from then): every row maps to
+    the same assert with the same objectors, and dropping one of the eight
+    `RUNNER_TEST_FILES` behaves as row 3, named by both objectors.
+
     MEASURED BOUND, in the same register as the `cwd=ROOT` gap documented in
     `_repo_python_files` -- a stated limit, not coverage. A filter that drops
     some OTHER single tracked file is still invisible: measured, dropping
     `tests/test_oracle_statue.py` and dropping `src/train.py` each leave the
     whole file green. Nothing closes that without re-deriving the census from the
-    census, which would prove nothing. Per-file coverage stops at the three
+    census, which would prove nothing. Per-file coverage stops at the ten
     names below; the rest of the tree is covered at DIRECTORY granularity, by
     assert 3.
     """

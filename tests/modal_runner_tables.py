@@ -2,8 +2,9 @@
 
 Every gate that needs the module list reads it from here: the package-shape
 gates (tests/test_modal_runner_package_shape.py), the packaging gates
-(tests/test_modal_packaging.py) and the mount and surface gates
-(tests/test_modal_client.py). Before this file, RUNNER_MODULES, the MANIFEST
+(tests/test_modal_packaging.py), the mount and surface gates
+(tests/test_modal_client.py) and the binding census
+(tests/test_modal_patch_binding_census.py). Before this file, RUNNER_MODULES, the MANIFEST
 keys and the DEPENDENCIES keys stated the list three times across two test
 files, and a new module turned most of those gates red with differently worded
 messages.
@@ -15,11 +16,16 @@ an import made only under TYPE_CHECKING); (2) add a line for it to MODULE MAP
 in the docstring of scripts/modal_runner/__init__.py; (3) `git add` the new
 file. The mount and package-population gates in tests/test_modal_client.py
 read `git ls-files`, so until step 3 they report the module missing although it
-is on disk. (4) Its tests go in tests/test_modal_<module>.py, the path
-RUNNER_TEST_FILES derives from this list. The seam gate in
-tests/test_modal_packaging.py reads its declared runner test files from
-RUNNER_FILES there, so check that constant to see whether the gate already
-reads the new file.
+is on disk. (4) Create its test file, tests/test_modal_<module>.py (the path
+RUNNER_TEST_FILES derives from this list), holding at least one test of the
+module with its seam-manifest line, and `git add` it too: the importer census
+in tests/test_modal_packaging.py reads `git ls-files` as well. The seam gate,
+the reach floor and the binding census read RUNNER_TEST_FILES, so they expect
+the file from step (1) on: a missing one fails the seam gate's source reader,
+which names it, and one with no test in the seam manifest fails the floor's
+scope check. THE PLACEMENT RULE FOR RUNNER TESTS in
+tests/test_modal_packaging.py says what a test there must reach and what
+adding one costs.
 
 Data only: no function and no import, of the package or anything else, so
 importing this file from any test module costs nothing and cannot collect a
@@ -142,15 +148,13 @@ RUNNER_MODULES = tuple(filename.removesuffix(".py") for filename in MANIFEST)
 # module-scope gates must read.
 RUNNER_PATHS = tuple(f"scripts/modal_runner/{module}.py" for module in RUNNER_MODULES)
 # Each module's test file, in the same order: tests/test_modal_<module>.py. This
-# is the one list the seam gate (tests/test_modal_packaging.py) and the binding
-# census (tests/test_modal_patch_binding_census.py) are to share, so that neither
-# holds a retyped copy. Until the runner tests are relocated into these files,
-# the seam gate's declared runner set (RUNNER_FILES) still names the one
-# unsplit file, so no gate reads these files. Two things use the tuple before
-# then: the synthetic probes pass it as their declared set, and the live reach
-# floor maps each file to its module through it -- which is why the floor
-# examines nothing while RUNNER_FILES is the unsplit file. The relocation
-# switches the gate and the census to it in the same commit.
+# is the one list of runner test files. The seam gate, its reach floor and the
+# importer list `_IMPORTERS` (all in tests/test_modal_packaging.py) and the
+# binding census (tests/test_modal_patch_binding_census.py) read it under this
+# name, so none of them holds a retyped copy, and a module added above brings
+# its test file into every one of them (ADDING A MODULE, step 4). A runner test
+# in a tests/test_modal_<x>.py that is not derived here is invisible to the
+# seam gate, the floor and the binding census (gh#233).
 # PITFALL: derive a module from a test file name through this tuple and
 # RUNNER_MODULES, never through a `tests/test_modal_*.py` glob, which also
 # matches test files that belong to no module.

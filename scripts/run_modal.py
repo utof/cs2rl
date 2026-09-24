@@ -317,8 +317,8 @@ def ensure_blob(volume: object, client_path: PurePosixPath, local_path: Path) ->
 # can return: `prior_checkpoint_or_raise` indexes it directly, so a token added
 # to the protocol without a row here raises a bare KeyError out of launch
 # instead of a ValidationError. `test_launch_checkpoint_errors_is_total` checks
-# this map against the hand-written `PROTOCOL_TOKENS` tuple in
-# tests/test_modal_runner.py, which catches a row deleted from here — but not a
+# this map against the hand-written `PROTOCOL_TOKENS` tuple; both live in
+# tests/test_modal_client.py. That catches a row deleted from here — but not a
 # token added to `verify_checkpoint` alone, since nothing derives that tuple
 # from the protocol. Adding a token is a three-file edit, by hand.
 _LAUNCH_CHECKPOINT_ERRORS = {
