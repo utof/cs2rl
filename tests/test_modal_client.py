@@ -1084,30 +1084,52 @@ def test_prior_run_resume_sends_only_immutable_digest_path(fake_modal, tmp_path)
     assert fake_modal.volumes[mrl.VOLUME_NAME].files[f"inputs/sha256/{digest}.pt"] == ckpt_bytes
 
 
-PROTOCOL_TOKENS = (
-    "missing_sidecar",
-    "corrupt_sidecar",
-    "missing_checkpoint",
-    "stale_size",
-    "digest_mismatch",
-    "not_loadable",
-    "replaced",
-    "ok",
-)
+# The protocol's failure tokens, from their one source, plus the tests' own
+# "ok" pseudo-case (success is `reason is None`; "ok" is never a token). gh#197:
+# this used to be a hand-written copy that nothing derived from
+# `verify_checkpoint`, so a token added there alone left every test here green.
+# Now the census in tests/test_modal_checkpoint.py
+# (`test_verify_checkpoint_fail_literals_are_exactly_the_reason_tokens`) ties the
+# function to the tuple, and the two parametrizes below grow with it.
+PROTOCOL_TOKENS = (*checkpoint.CHECKPOINT_REASON_TOKENS, "ok")
 
 
 def test_launch_checkpoint_errors_is_total(fake_modal):
-    # prior_checkpoint_or_raise indexes _LAUNCH_CHECKPOINT_ERRORS[verdict.reason]
-    # directly, so a reason token with no row there escapes launch as a bare
-    # KeyError instead of the ValidationError callers handle. Nothing derives
-    # that map from the protocol, so pin the two sets against each other.
-    #
-    # Known gap, measured rather than assumed: PROTOCOL_TOKENS is hand-written
-    # too, so adding a real eighth token to verify_checkpoint and touching
-    # neither this tuple nor the map leaves this test green. It guards the
-    # map-vs-tuple pairing only, not the protocol.
+    """`_LAUNCH_CHECKPOINT_ERRORS` has one sentence per `CHECKPOINT_REASON_TOKENS` entry.
+
+    `prior_checkpoint_or_raise` maps the verdict's reason through this dict.
+    Since gh#197 an unmapped token falls back to a generic sentence
+    (`test_launch_reports_an_unmapped_reason_token_as_validation_error`), so
+    a missing row no longer escapes as a KeyError; this test is what makes it
+    an operator-worded sentence instead of the generic one. A row for a token
+    the protocol cannot return is dead, so the sets must be equal.
+    """
     module = _import_run_modal()
-    assert set(module._LAUNCH_CHECKPOINT_ERRORS) == set(PROTOCOL_TOKENS) - {"ok"}
+    assert set(module._LAUNCH_CHECKPOINT_ERRORS) == set(checkpoint.CHECKPOINT_REASON_TOKENS)
+
+
+def test_launch_reports_an_unmapped_reason_token_as_validation_error(fake_modal, tmp_path,
+                                                                     monkeypatch):
+    """A verdict whose reason has no launch sentence raises ValidationError naming the token.
+
+    gh#197. Before, `_LAUNCH_CHECKPOINT_ERRORS[verdict.reason]` raised a bare
+    KeyError out of launch, past the ValidationError handling every operator
+    path relies on. The totality test keeps the map complete; this pins the
+    failure mode when it is not. run_modal reads `mrl.verify_checkpoint` at
+    call time, so the facade attribute is the patch target (see PATCHING IN
+    TESTS in the package docstring).
+    """
+    module = _import_run_modal()
+    volume = _named_volume(fake_modal)
+    _install_protocol_parent(volume, tmp_path, "parent-run", "ok")
+    foreign = checkpoint.CheckpointVerdict(ok=False,
+                                           reason="eighth_token",
+                                           checkpoint_bytes=None,
+                                           digest=None)
+    assert foreign.reason not in module._LAUNCH_CHECKPOINT_ERRORS
+    monkeypatch.setattr(mrl, "verify_checkpoint", lambda *args, **kwargs: foreign)
+    with pytest.raises(mrl.ValidationError, match=r"eighth_token"):
+        module.prior_checkpoint_or_raise(volume, "parent-run", _aware())
 
 
 def _install_protocol_parent(volume, tmp_path, run_id, case):

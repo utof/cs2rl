@@ -76,10 +76,10 @@ MANIFEST = {
         "_repack_deterministic", "create_source_bundle"
     ],
     "checkpoint.py": [
-        "PREBUILT_LOAD_TIMEOUT_SECONDS", "_PREBUILT_LOAD_SOURCE", "CheckpointVerdict",
-        "_import_torch", "_assert_weights_only_loadable", "validate_local_checkpoint",
-        "_load_checkpoint_weights", "verify_checkpoint", "normalize_config_for_transport",
-        "iter_metrics_steps", "validate_completed_run"
+        "PREBUILT_LOAD_TIMEOUT_SECONDS", "_PREBUILT_LOAD_SOURCE", "CHECKPOINT_REASON_TOKENS",
+        "CheckpointVerdict", "_import_torch", "_assert_weights_only_loadable",
+        "validate_local_checkpoint", "_load_checkpoint_weights", "verify_checkpoint",
+        "normalize_config_for_transport", "iter_metrics_steps", "validate_completed_run"
     ],
     "state.py": [
         "TERMINAL_STATUSES", "_ALLOWED_TRANSITIONS", "RunStatus", "STALE_AFTER", "ArtifactIndex",

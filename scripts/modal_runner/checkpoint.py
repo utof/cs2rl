@@ -31,6 +31,25 @@ PREBUILT_LOAD_TIMEOUT_SECONDS = 120.0
 _PREBUILT_LOAD_SOURCE = (
     "import sys, torch; torch.load(sys.argv[1], map_location='cpu', weights_only=True)")
 
+# The failure tokens `verify_checkpoint` can return, in check order. THE ONE
+# SOURCE (gh#197): `run_modal._LAUNCH_CHECKPOINT_ERRORS` must have a sentence
+# for each, and the protocol parametrizes in tests derive their cases from it.
+# Nothing at run time ties `verify_checkpoint`'s `fail("...")` literals to this
+# tuple, so `test_verify_checkpoint_fail_literals_are_exactly_the_reason_tokens`
+# (tests/test_modal_checkpoint.py) reads the function's AST and requires the two
+# sets to be equal. Adding a token: add it here AND as a `fail("...")` literal,
+# then the launch sentence and a test case; every other pairing goes red on
+# its own. Success is `reason is None`, not a token: never add "ok".
+CHECKPOINT_REASON_TOKENS: tuple[str, ...] = (
+    "missing_sidecar",
+    "corrupt_sidecar",
+    "missing_checkpoint",
+    "stale_size",
+    "digest_mismatch",
+    "not_loadable",
+    "replaced",
+)
+
 
 @dataclass(frozen=True)
 class CheckpointVerdict:
@@ -169,7 +188,8 @@ def verify_checkpoint(
     after the checkpoint read. Comparing it to the first read is how a sidecar
     rewritten underneath an in-flight verification is caught.
 
-    Reason tokens, and only these (`reason is None` on success):
+    Reason tokens, exactly `CHECKPOINT_REASON_TOKENS` (`reason is None` on
+    success):
       * "missing_sidecar"     — the first sidecar read returned None.
       * "corrupt_sidecar"     — sidecar JSON did not parse, or is not a dict.
       * "missing_checkpoint"  — the checkpoint read returned None.
@@ -194,13 +214,11 @@ def verify_checkpoint(
       * Being a live run is not this function's business. Launch gates on
         terminal-or-stale *before* calling; folding that in would make
         `collect_status` lie about a healthy running job's checkpoint.
-      * Adding an eighth token means updating `_LAUNCH_CHECKPOINT_ERRORS` in
-        scripts/run_modal.py, which indexes this token directly — an unmapped
-        token escapes launch as a bare KeyError. Nothing checks that for you.
-        test_launch_checkpoint_errors_is_total compares that map against the
-        hand-written PROTOCOL_TOKENS tuple, which keeps those two in step, but
-        the tuple is not derived from this function: a token added here and
-        nowhere else leaves that test green. Update all three by hand.
+      * Adding an eighth token (gh#197): add the `fail("...")` literal here
+        AND the token to `CHECKPOINT_REASON_TOKENS`, whose comment lists what
+        goes red until the launch sentence and the test cases follow. Each
+        `fail` argument must stay a string literal: the census that ties this
+        function to the tuple reads the AST and cannot see a variable.
     """
 
     def fail(reason: str) -> CheckpointVerdict:
