@@ -14,8 +14,9 @@ What's stripped vs. production ``src.train.train()``:
       shared-memory handshake, deterministic teardown).
     - checkpoint_dir: a ``tempfile.mkdtemp()`` scratch dir, wiped by cleanup().
     - wandb / metrics.jsonl / dead-run detection / save loop: omitted.
-    - return-norm & timing patches: skipped. Tests can apply them explicitly
-      if they need to exercise those patches.
+    - return-norm patch and full checkpointing: skipped. Tests can apply
+      them explicitly if they need to exercise them. (The timing patch no
+      longer exists: 2cffc35 moved timing to train()'s call sites.)
 
 Design contract:
     - Public API is a single ``_build_trainer_for_test(...)`` function that
@@ -86,7 +87,7 @@ def _build_trainer_for_test(
         If True, apply ``_patch_trainer_with_selfplay`` so ``trainer.evaluate``
         is the self-play variant. The SelfPlayManager is constructed with an
         EMPTY pool, so ``should_use_past()`` always returns False — the past-
-        policy branch is NOT exercised, but the patched evaluate() wrapper is.
+        policy branch is NOT exercised, but the replacement evaluate() is.
         Required by Task 6c (reward-clamp removal test).
     device : str
         Torch device. Default "cpu" keeps tests deterministic and CI-friendly.
@@ -368,7 +369,7 @@ def _build_trainer_for_test(
     # so the harness shape matches production. _patch_trainer_with_return_norm
     # is intentionally NOT applied here — harness tests that need it apply
     # it explicitly (matches the pre-Batch-3 contract documented at module
-    # docstring "return-norm & timing patches: skipped").
+    # docstring "return-norm patch and full checkpointing: skipped").
     # F8: mask_view_main plumbed so harness rollouts run MASKED, same as
     # production. Pin the RawArray on the trainer against GC (prod pattern).
     trainer._action_mask_shm = mask_shm

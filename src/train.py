@@ -2913,13 +2913,18 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 #
 #   _patch_trainer_with_hybrid_aim — extends the rollout buffer with
 #                            cont_actions / logprobs_d / logprobs_c parallel
-#                            to the existing actions / logprobs, and patches
-#                            vecenv.send to forward the float buffer to the
-#                            env. Applied AFTER _patch_trainer_with_return_norm
-#                            (which wraps train()) and BEFORE
-#                            _patch_trainer_with_selfplay (which wraps
-#                            evaluate()). Order matters: train() reads the
-#                            cont buffer that this patcher allocates.
+#                            to the existing actions / logprobs, and wraps
+#                            vecenv.send (the wrapper calls the original) to
+#                            forward the float buffer to the env. train()
+#                            applies it AFTER _patch_trainer_with_return_norm
+#                            (which REPLACES train() via types.MethodType and
+#                            never calls the stock body) and BEFORE
+#                            _patch_trainer_with_selfplay (which REPLACES
+#                            evaluate() the same way). The dependency is at
+#                            CALL time, not patch time: the replacement
+#                            train()/evaluate() bodies read the buffers this
+#                            patcher allocates, so all three must be applied
+#                            before the first evaluate()/train() call.
 
 
 def _hybrid_sample_logits(policy_out,
@@ -3064,11 +3069,15 @@ def _patch_trainer_with_hybrid_aim(trainer,
                                    participating_rows=None):
     """Extend trainer with continuous-action rollout storage + vecenv plumbing.
 
-    Apply AFTER _patch_trainer_with_return_norm (so train() is wrapped) and
-    BEFORE the rollout begins. The PPO-update-side rewrites (callsite at
-    src/train.py:~1050) are inlined directly inside _train_with_return_norm
-    via the helpers above; this patcher only handles the rollout/storage
-    side.
+    train() applies this AFTER _patch_trainer_with_return_norm (which
+    REPLACES train() via types.MethodType; it does not wrap the stock body)
+    and BEFORE the first evaluate()/train() call. The ordering is a
+    CALL-time dependency, not a patch-time one: the replacement train()
+    body reads self.cont_actions / self.logprobs_{d,c}, which this patcher
+    allocates, and nothing at patch time checks they exist. The
+    PPO-update-side rewrites live in src/train_update.py (_hybrid_ppo_loss,
+    called from _train_with_return_norm); this patcher only handles the
+    rollout/storage side.
 
     Multiprocessing vecenv path (Batch 3 T5b)
     ─────────────────────────────────────────
@@ -3571,12 +3580,14 @@ def train(args):
           f"(fresh init {train_config['aim_log_std_init']:.4f}, "
           f"cap {train_config['aim_log_std_max']:.4f})")
     _patch_trainer_with_return_norm(trainer)
-    # Batch 3 (T5): hybrid-aim patch ALWAYS runs after return_norm because the
-    # train() wrapper installed by return_norm reads self.cont_actions /
-    # self.logprobs_{d,c} which this patcher allocates. Order also matters
-    # vs. selfplay: selfplay only wraps evaluate(), not train(), so the
-    # rollout-side cont_action plumbing must be in place before evaluate()
-    # is first called.
+    # Batch 3 (T5): the hybrid-aim patch follows return_norm here, but the
+    # dependency is at CALL time, not patch time: the replacement train()
+    # body that return_norm installs (types.MethodType, train_update.py; it
+    # never calls the stock train()) reads self.cont_actions /
+    # self.logprobs_{d,c} on its first call, and nothing at patch time checks
+    # they exist. Likewise selfplay's replacement evaluate() writes those
+    # buffers every rollout. The only load-bearing order is "all patches
+    # applied before the first evaluate()/train() call".
     # Pin the shm + view on the trainer so neither is GC'd mid-run. Without
     # holding _cont_action_shm here, Python could free the RawArray once
     # this function returns (Python doesn't know workers/numpy views are
@@ -3605,8 +3616,8 @@ def train(args):
                                    participating_rows=_participating_rows)
 
     # ── Self-play setup ──────────────────────────────────────────────────────
-    # F11 (2026-07-06 adversarial review): the selfplay evaluate() wrapper is
-    # the ONLY rollout path that understands the hybrid 4-tuple policy
+    # F11 (2026-07-06 adversarial review): the selfplay replacement evaluate()
+    # is the ONLY rollout path that understands the hybrid 4-tuple policy
     # contract — stock PuffeRL.evaluate crashes on the forward_eval tuple
     # unpack at its first call, so --no-self-play was broken in production.
     # The patch is now applied UNCONDITIONALLY (mirroring train_test_harness,

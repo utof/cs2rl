@@ -2,13 +2,14 @@
 #
 # Canary tests for the PufferLib dependency surface (gh #85).
 #
-# WHY: src/train.py replaces PuffeRL's evaluate()/train() bodies via instance
-# monkey-patches — a de-facto fork of the hot loops pinned to a frozen upstream
-# (3.0.0, PyPI-latest since 2025-06). Upstream 4.0 deletes pufferlib.vector and
-# pufferlib.pytorch and rewrites the trainer, so an accidental version bump
-# would produce dozens of confusing failures. These tests turn that into ONE
-# clear failure pointing at the upgrade playbook, and pin the single silent-
-# wrongness invariant the 4-patcher stack relies on.
+# WHY: src/train.py replaces PuffeRL's evaluate()/train()/save_checkpoint()
+# bodies via instance monkey-patches (types.MethodType) — a de-facto fork of
+# the hot loops pinned to a frozen upstream (3.0.0, PyPI-latest since 2025-06).
+# Upstream 4.0 deletes pufferlib.vector and pufferlib.pytorch and rewrites the
+# trainer, so an accidental version bump would produce dozens of confusing
+# failures. These tests turn that into ONE clear failure pointing at the
+# upgrade playbook, and pin the single silent-wrongness invariant that the
+# three _patch_trainer_with_* patches plus _install_full_checkpointing rely on.
 
 import pufferlib
 
