@@ -1055,8 +1055,12 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # `test_a_signal_while_taking_the_once_gate_returns_at_once` (P2),
 # `test_finalize_kills_the_child_before_joining_the_tees` (P1) and its stream
 # helper `_BlockingStream`. (The P2 lock double is a class nested in its test,
-# so it is not a governed name.)
-GOVERNED_NAME_COUNT = 295
+# so it is not a governed name.) 299, after gh#243: four more names in
+# tests/test_modal_training.py, the production-order default for the signal
+# tests: `_interrupt_in_production_order`, `_SIGNAL_HOOKS_RELEASE_ALLOWLIST`,
+# `_SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST` and the static census
+# `test_signal_tests_fire_handlers_in_production_order`.
+GOVERNED_NAME_COUNT = 299
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.
@@ -1815,6 +1819,11 @@ _REACH_EXEMPTIONS: dict[tuple[str, str], tuple[frozenset[str], str]] = {
     (frozenset({"core"}),
      "it tests the RecordingVolume test double, which lives with its only consumers, the "
      "preflight tests; it reaches only core (at exemption time, through mrl.STATUS_FILENAME)"),
+    ("tests/test_modal_training.py", "test_signal_tests_fire_handlers_in_production_order"):
+    (frozenset(), "gh#243: it is a static census of the training tests' own signal-seam doubles "
+     "(`_signal_hooks`, `_interrupt_in_production_order` and the two allow-lists), read from "
+     "its own file by AST; it never imports or reaches a runner module, and it lives here "
+     "because the doubles it governs are defined here"),
 }
 
 # What to do about each kind of floor violation, keyed like the violations'
