@@ -29,5 +29,7 @@ cd "$repo_root"
 export UV_PYTHON=python3.12
 
 # No trigger filter: a merge commit is always worth one second.
+# --no-sync: a syncing `uv run` from a worktree that borrows main's .venv
+# re-points the shared editable install at the worktree (#220).
 echo "[pre-merge-commit] pyrefly type check (merged index, whole project)..."
-uv run python scripts/pyrefly_gate.py
+uv run --no-sync python scripts/pyrefly_gate.py

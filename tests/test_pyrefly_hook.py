@@ -13,10 +13,14 @@ moves the blind spot one line later instead of closing it.
 
 Each rejection test is paired with a clean-commit negative control, for the same
 reason: a hook that rejects everything passes a rejection test.
+
+The one exception is the static test at the end, which reads the hooks' source
+for their uv spelling (#220) -- there is no gate output to assert on there.
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -28,9 +32,27 @@ MERGE_HOOK = REPO / ".githooks" / "pre-merge-commit"
 
 CONFIG = 'preset = "default"\nproject-includes = ["src"]\nsearch-path = ["src", "."]\n'
 
+# The only uv spelling the hooks may use (#220), and the prefix install() rewrites.
+NO_SYNC = "uv run --no-sync "
+# `uv` as a command word. `\s` after it keeps the `uv.lock` trigger pattern and
+# UV_PYTHON out; any subcommand (`uv sync`, a bare `uv run`) is in.
+UV_CALL = re.compile(r"\buv\s")
+
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+
+
+def uv_call_lines(hook_text: str) -> list[str]:
+    """The hook's executed (non-comment) lines that invoke uv.
+
+    Comment lines are skipped: the hooks' prose names `uv run` freely, and a
+    commented-out command is inert until someone uncomments it -- then it counts.
+    """
+    return [
+        line for line in hook_text.splitlines()
+        if not line.lstrip().startswith("#") and UV_CALL.search(line)
+    ]
 
 
 def install(root: Path, src: Path, name: str) -> None:
@@ -38,9 +60,12 @@ def install(root: Path, src: Path, name: str) -> None:
 
     Two rewrites, and the second one is the part that is easy to miss:
 
-      1. `uv run ` -> `<REPO>/.venv/bin/`, so no `uv` invocation ever happens from
-         /tmp. uv would try to build the throwaway as a project and download
-         gigabytes. This also removes any need for UV_OFFLINE/UV_NO_SYNC.
+      1. `uv run --no-sync ` -> `<REPO>/.venv/bin/`, so no `uv` invocation ever
+         happens from /tmp. uv would try to build the throwaway as a project and
+         download gigabytes. This also removes any need for UV_OFFLINE/UV_NO_SYNC.
+         Asserted, not assumed: a spelling the replace does not match (a bare
+         `uv run`, say) would otherwise run real uv from /tmp and the tests below
+         would fail for a reason that has nothing to do with the gate.
       2. the RELATIVE `scripts/pyrefly_gate.py` -> an absolute path into the real
          repo, plus `--project .`. The hook cd's to the throwaway first, so
          rewriting only the interpreter leaves it looking for a gate script that
@@ -49,7 +74,9 @@ def install(root: Path, src: Path, name: str) -> None:
          are written to prevent.
     """
     text = src.read_text()
-    text = text.replace("uv run ", f"{REPO}/.venv/bin/")
+    text = text.replace(NO_SYNC, f"{REPO}/.venv/bin/")
+    leftover = uv_call_lines(text)
+    assert not leftover, f"{src.name}: uv calls the {NO_SYNC!r} rewrite missed: {leftover}"
     text = text.replace("python scripts/pyrefly_gate.py",
                         f"python {REPO}/scripts/pyrefly_gate.py --project .")
     dest = root / ".git" / "hooks" / name
@@ -230,3 +257,25 @@ def test_pre_merge_commit_gates_a_clean_merge(tmp_path):
     assert head_count(root) == before, "the merge commit was created despite the error"
     assert (root / ".git" / "MERGE_HEAD").exists(), \
         "a failed pre-merge-commit should leave the merge incomplete"
+
+
+def test_every_hook_uv_call_is_no_sync():
+    """Every uv call the hooks execute is `uv run --no-sync`, and there are
+    exactly as many as the hooks are known to make.
+
+    Why --no-sync: a git worktree here borrows main's .venv, and a syncing
+    `uv run` from it re-points the shared editable install at the worktree and
+    can rebuild main's binding .so in place (#220). The hooks run on every
+    commit, so one bare `uv run` turns every worktree commit into that trigger.
+
+    Why the exact count: without it this test passes vacuously if uv_call_lines
+    stops matching anything -- and install()'s leftover check, which uses the
+    same matcher, would go blind with it. The count is that matcher's positive
+    control, and it also makes a new or dropped uv call a deliberate edit here.
+    """
+    expected = {HOOK: 4, MERGE_HOOK: 1}
+    for hook, n in expected.items():
+        calls = uv_call_lines(hook.read_text())
+        bare = [line for line in calls if NO_SYNC not in line]
+        assert not bare, f"{hook.name}: uv call without --no-sync: {bare}"
+        assert len(calls) == n, f"{hook.name}: expected {n} uv calls, found {len(calls)}: {calls}"

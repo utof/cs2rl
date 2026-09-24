@@ -43,19 +43,22 @@ for file in "${staged_files[@]}"; do
 done
 
 if [ "${#python_files[@]}" -gt 0 ]; then
+    # Every uv call in both hooks is `uv run --no-sync`: from a worktree that borrows
+    # main's .venv, a syncing `uv run` re-points the shared editable install at the
+    # worktree and can rebuild main's binding .so in place (#220).
     echo "[pre-commit] Ruff lint on staged Python files..."
-    uv run ruff check --fix "${python_files[@]}"
+    uv run --no-sync ruff check --fix "${python_files[@]}"
     echo "[pre-commit] YAPF format on staged Python files..."
-    uv run yapf --in-place "${python_files[@]}"
+    uv run --no-sync yapf --in-place "${python_files[@]}"
     git add -- "${python_files[@]}"
 
     # Deferred complexity gates (threshold 40): uncomment once the existing
     # maintainability backlog is small enough for these checks to block commits.
     # echo "[pre-commit] Ruff McCabe complexity on staged Python files..."
-    # uv run ruff check --select C901 \
+    # uv run --no-sync ruff check --select C901 \
     #     --config 'lint.mccabe.max-complexity=40' "${python_files[@]}"
     # echo "[pre-commit] Cognitive complexity on staged Python files..."
-    # uv run complexipy "${python_files[@]}" --failed --plain
+    # uv run --no-sync complexipy "${python_files[@]}" --failed --plain
 fi
 
 if [ "${#c_files[@]}" -gt 0 ]; then
@@ -63,7 +66,7 @@ if [ "${#c_files[@]}" -gt 0 ]; then
     # Use `uv run` to match ruff/yapf above — clang-format is pinned in
     # pyproject.toml's dev group, so `uv sync` gives every contributor the
     # same version without requiring apt/brew/uv-tool installs.
-    uv run clang-format -i "${c_files[@]}"
+    uv run --no-sync clang-format -i "${c_files[@]}"
     git add -- "${c_files[@]}"
 fi
 
@@ -81,7 +84,8 @@ fi
 #   pyrefly-snapshot.json  rewriting the freeze must be checked against the freeze
 #   pyproject.toml/uv.lock the frozen count depends on installed site-packages,
 #                          so the person who bumps the lock gets the red, rather
-#                          than whoever next commits a .py
+#                          than whoever next commits a .py -- provided they have
+#                          run `uv sync`: the hook's --no-sync never syncs for them
 #   scripts/pyrefly_gate.py, .githooks/pre-commit
 #                          editing the gate or its wiring should run the gate
 #
@@ -107,5 +111,5 @@ done
 
 if [ "$pyrefly_trigger" -eq 1 ]; then
     echo "[pre-commit] pyrefly type check (index, whole project)..."
-    uv run python scripts/pyrefly_gate.py
+    uv run --no-sync python scripts/pyrefly_gate.py
 fi
