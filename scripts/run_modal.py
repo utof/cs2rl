@@ -750,15 +750,11 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
     if prepared.config_hash is not None:
         manifest = replace(manifest, config_hash=prepared.config_hash)
     result = mrl.execute_training_attempt(
-        registry=registry,
-        attempt_id=attempt.attempt_id,
-        run_root=attempt.run_root,
+        attempt=attempt,
         prepared=prepared,
-        commit=attempt.volume.commit,
-        lock=attempt.lock,
-        now=attempt.clock.now,
-        timeout=timedelta(minutes=request.timeout_minutes),
+        registry=registry,
         manifest=manifest,
+        timeout=timedelta(minutes=request.timeout_minutes),
         already_claimed=True,
     )
     if result == mrl.REDELIVERED:

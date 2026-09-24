@@ -21,6 +21,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -30,11 +31,12 @@ if str(ROOT) not in sys.path:
     # the same way the later CLIs will. Do not rely on the editable install.
     sys.path.insert(0, str(ROOT))
 
-import scripts.modal_runner as mrl                                     # noqa: E402, I001
-from scripts.modal_runner import core, state, training                 # noqa: E402, I001
-from tests.modal_patch_binding_campaign import binding_target          # noqa: E402, I001
-from tests.modal_test_helpers import (                                 # noqa: E402
-    FakeChild, FakeRegistry, _aware, _make_manifest, _minimal_completed_tree, _no_torch)
+import scripts.modal_runner as mrl                                                       # noqa: E402, I001
+from scripts.modal_runner import core, state, training                                   # noqa: E402, I001
+from tests.modal_patch_binding_campaign import binding_target                            # noqa: E402, I001
+from tests.modal_test_helpers import (                                                   # noqa: E402
+    FakeChild, FakeRegistry, _aware, _make_manifest, _minimal_completed_tree, _no_torch,
+    _noop_heartbeat)
 
 # ── Run result: the explicit result schema ─────────────────────────────────
 
@@ -93,40 +95,274 @@ def _advance_to_building(run_root, attempt_id="attempt-a", *, lock):
                                    lock=lock)
 
 
-def _training_kwargs(tmp_path: Path, **overrides):
+def _training_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
+    """execute_training_attempt's keyword arguments, from flat overrides, run_root in BUILDING.
+
+    Call sites pass flat keys (`child=`, `now=`, `killpg=`, ...); this
+    assembles them into the collaborators the attempt takes (gh#163 W5, plan
+    D5): `attempt` (an AttemptContext over a commit-only Volume and a Clock),
+    `prepared`, `registry`, `process` (a ProcessControl) and `log_sink`, plus
+    `manifest` and `timeout` only when overridden, so an absent one keeps the
+    attempt's own default. The private keys `_launches` (the default spawn's
+    record), `_child` and `_kills` (the default killpg's record, `(pgid, sig)`
+    pairs) must be popped before the call: `_consume_training_kwargs` pops all
+    three, and a test that pops by hand pops each.
+
+    SAFETY: `process` is ALWAYS an all-fake ProcessControl. `spawn` records and
+    returns `child`; `getpgid` is the identity; `killpg` only records, into
+    `_kills`; `install_signal` is the override `signal_signal` or the real
+    `signal.signal`, which the real-SIGTERM test needs. So nothing built here
+    reaches a real process group, and a test that drops `process` from the
+    result meets the tests/conftest.py tripwire instead of the real functions
+    (only `test_process_control_tripwire_guards_the_resolution_path` does so,
+    on purpose).
+
+    Every known key is taken with `overrides.pop`, and a leftover raises
+    TypeError: a misspelt or retired key (`start_heartbeat`) stays loud, as it
+    was when the flat dict went straight to the attempt. The mapping from key
+    to field is hand-written, so `test_training_kwargs_routes_every_override`
+    checks that every key a call site passes reaches its field; a key popped
+    here and then dropped fails there instead of quietly testing the default.
+    The result is typed `dict[str, Any]` because tests reach test-double
+    members through it and store D11's replacements into it.
+    """
+    known = ("child", "commit", "getpgid", "killpg", "log_sink", "manifest", "now", "prepared",
+             "signal_signal", "sleep", "timeout", "wait")
+    given = {key: overrides.pop(key) for key in known if key in overrides}
+    if overrides:
+        raise TypeError(f"unknown override(s): {sorted(overrides)}")
     run_root = tmp_path / "run"
     run_root.mkdir(exist_ok=True)
     lock = threading.Lock()
     _advance_to_building(run_root, lock=lock)
-    child = overrides.pop("child", FakeChild(stdout=b"ok\n"))
+    child = given.get("child", FakeChild(stdout=b"ok\n"))
     launches: list[tuple[tuple, dict]] = []
+    kills: list[tuple[int, int]] = []
 
     def default_factory(*args, **kwargs):
         launches.append((args, kwargs))
         return child
 
-    kwargs = {
+    class Volume:
+        """Commit-only: the attempt commits the Volume and never reloads it."""
+
+        def __init__(self, commit):
+            self.commit = commit
+
+        def reload(self):
+            raise RuntimeError("training must not reload the Volume")
+
+    process = training.ProcessControl(
+        spawn=default_factory,
+        getpgid=given.get("getpgid", lambda pid: pid),
+        killpg=given.get("killpg", lambda pgid, sig: kills.append((pgid, sig))),
+        install_signal=given.get("signal_signal", signal.signal),
+    )
+    clock = core.Clock(
+        now=given.get("now", lambda: _aware()),
+        sleep=given.get("sleep", lambda _seconds: None),
+        wait=given.get("wait", core._event_wait),
+    )
+    attempt = core.AttemptContext(
+        attempt_id="attempt-a",
+        run_root=run_root,
+        lock=lock,
+        volume=Volume(given.get("commit", lambda: None)),
+        clock=clock,
+    )
+    kwargs: dict[str, Any] = {
+        "attempt": attempt,
+        "prepared": given.get("prepared", _prepared_source(tmp_path)),
         "registry": FakeRegistry(),
-        "attempt_id": "attempt-a",
-        "run_root": run_root,
-        "prepared": _prepared_source(tmp_path),
-        "commit": lambda: None,
-        "lock": lock,
-        "now": lambda: _aware(),
-        "process_factory": default_factory,
-        "sleep": lambda _seconds: None,
-        "log_sink": io.StringIO(),
+        "process": process,
+        "log_sink": given.get("log_sink", io.StringIO()),
     }
-    kwargs.update(overrides)
+    kwargs.update({key: given[key] for key in ("manifest", "timeout") if key in given})
     kwargs["_launches"] = launches
     kwargs["_child"] = child
+    kwargs["_kills"] = kills
     return kwargs
+
+
+def test_training_kwargs_routes_every_override(tmp_path):
+    """Every flat key a call site passes to `_training_kwargs` reaches the field the attempt reads.
+
+    gh#163 spec §4.7, plan D5/D7. The builder assembles flat overrides into
+    collaborators by hand-written code, and several tests assert that something
+    is ABSENT from a recorder they injected (`kills == []`, `sleeps == []`);
+    such an assertion goes vacuous, still green, if the builder stops routing
+    its key. So, both ways:
+      * the keys call sites pass, enumerated by AST over the modal test files,
+        must equal the keys of `routes`. A call is read through the bare name,
+        an attribute `x._training_kwargs`, or an `import ... as` or plain
+        `name = ...` alias. A key a call site passes that `routes` lacks fails,
+        and so does a `routes` entry that no call site passes;
+      * each key, passed as a sentinel, must come back by identity at the
+        field `routes` names (the spec §4.7 substitution map, restricted to
+        this builder's keys). No key is converted.
+    A call site whose keys cannot be read statically (a `**` splat, a second
+    positional argument) fails too, and so does any other reference to the
+    builder: its name loaded anywhere but as a callee or a plain alias's value
+    (`functools.partial(_training_kwargs, ...)`, a tuple assignment), or the
+    name as a string (`getattr(module, "_training_kwargs")`). RESIDUAL: a name
+    computed at run time (a concatenated string, `vars()` with a variable key)
+    is not seen. This test's own calls and strings are not call sites.
+
+    SAFETY: the sentinels land in a ProcessControl and a Clock that are built
+    and read back, never called; the builder's own recording fakes are never
+    called here either. Knock-out (i) (the builder drops its `sleep` mapping)
+    is caught here, not by the grace-period test (spec §4.7).
+
+    THE PLANTS are synthetic call sites, parsed and never run, each passing an
+    unmapped key through one spelling: each must fail the key equality or be
+    reported as a problem, or the enumeration would not be evidence. Keep
+    `routes` and the plants INSIDE this function: a module-level name in this
+    file is a governed seam name and moves GOVERNED_NAME_COUNT
+    (tests/test_modal_packaging.py). The enumerator mirrors the one in
+    `test_preflight_kwargs_routes_every_override` (tests/test_modal_preflight.py)
+    for the same reason; change both together.
+    """
+    routes = {
+        "child": lambda built: built["_child"],
+        "commit": lambda built: built["attempt"].volume.commit,
+        "getpgid": lambda built: built["process"].getpgid,
+        "killpg": lambda built: built["process"].killpg,
+        "log_sink": lambda built: built["log_sink"],
+        "manifest": lambda built: built["manifest"],
+        "now": lambda built: built["attempt"].clock.now,
+        "prepared": lambda built: built["prepared"],
+        "signal_signal": lambda built: built["process"].install_signal,
+        "sleep": lambda built: built["attempt"].clock.sleep,
+        "timeout": lambda built: built["timeout"],
+        "wait": lambda built: built["attempt"].clock.wait,
+    }
+    builder = "_training_kwargs"
+    this_test = "test_training_kwargs_routes_every_override"
+
+    def last_name(expr):
+        """The callee spelling a call site is matched on: a bare name, or the last attribute."""
+        if isinstance(expr, ast.Name):
+            return expr.id
+        if isinstance(expr, ast.Attribute):
+            return expr.attr
+        return None
+
+    def call_site_keys(sources):
+        """({key: [file:line, ...]}, problems) over every builder call outside this test.
+
+        A reference to the builder that is not read as a call (see the
+        docstring above) is a problem, so a spelling this cannot read fails
+        rather than hiding its keys.
+        """
+        keys, problems = {}, []
+        for rel, text in sources.items():
+            tree = ast.parse(text)
+            spellings = {builder}
+            # ids of the loads a spelling may occupy: callees and plain alias values
+            read = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    spellings |= {
+                        alias.asname
+                        for alias in node.names if alias.name == builder and alias.asname
+                    }
+                elif isinstance(node, ast.Assign) and last_name(node.value) == builder:
+                    spellings |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+                    read.add(id(node.value))
+            own = {
+                id(node)
+                for top in tree.body if isinstance(top, ast.FunctionDef) and top.name == this_test
+                for node in ast.walk(top)
+            }
+            for node in ast.walk(tree):
+                if (not isinstance(node, ast.Call) or last_name(node.func) not in spellings
+                        or id(node) in own):
+                    continue
+                read.add(id(node.func))
+                where = f"{rel}:{node.lineno}"
+                if len(node.args) != 1 or any(k.arg is None for k in node.keywords):
+                    problems.append(f"{where} {ast.unparse(node)[:100]}")
+                for keyword in node.keywords:
+                    if keyword.arg is not None:
+                        keys.setdefault(keyword.arg, []).append(where)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Name, ast.Attribute)):
+                    stray = last_name(node) in spellings and isinstance(node.ctx, ast.Load)
+                elif isinstance(node, ast.Constant):
+                    stray = node.value == builder
+                else:
+                    continue
+                if stray and id(node) not in read and id(node) not in own:
+                    problems.append(f"{rel}:{node.lineno} not a call: {ast.unparse(node)[:100]}")
+        return keys, problems
+
+    sources = {
+        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+        for pattern in ("test_modal_*.py", "modal_test_helpers.py",
+                        "modal_patch_binding_campaign.py")
+        for path in sorted((ROOT / "tests").glob(pattern))
+    }
+    assert {"tests/test_modal_training.py",
+            "tests/test_modal_patch_bindings.py"} <= set(sources), sorted(sources)[:5]
+    keys, problems = call_site_keys(sources)
+    assert problems == [], (
+        f"call sites whose override keys cannot be read statically: {problems}. Call the "
+        "builder by its name, an attribute or a plain alias, and pass every override as a "
+        "keyword, so this test can check that it is routed")
+    unrouted = sorted(set(keys) - set(routes))
+    unused = sorted(set(routes) - set(keys))
+    assert not unrouted and not unused, (
+        f"call sites pass {unrouted} ({ {key: keys[key] for key in unrouted} }), which "
+        f"`routes` does not map, and `routes` maps {unused}, which no call site passes. A new "
+        "key needs a field in `_training_kwargs` and an entry here; a key nobody passes any "
+        "more comes out of both")
+
+    plants = {
+        "the bare name":
+        "_training_kwargs(tmp_path, start_heartbeat=f)\n",
+        "an attribute":
+        "training_tests._training_kwargs(tmp_path, start_heartbeat=f)\n",
+        "an import alias": ("from tests.test_modal_training import _training_kwargs as build\n"
+                            "build(tmp_path, start_heartbeat=f)\n"),
+        "an assignment alias":
+        "build = _training_kwargs\nbuild(tmp_path, start_heartbeat=f)\n",
+        "functools.partial":
+        "build = functools.partial(_training_kwargs, start_heartbeat=f)\nbuild(tmp_path)\n",
+        "getattr by name":
+        "getattr(training_tests, '_training_kwargs')(tmp_path, start_heartbeat=f)\n",
+        "a tuple-assignment alias":
+        "build, _ = _training_kwargs, None\nbuild(tmp_path, start_heartbeat=f)\n",
+    }
+    for plant, source in plants.items():
+        planted, planted_problems = call_site_keys({**sources, "tests/test_modal_plant.py": source})
+        assert planted_problems or set(planted) != set(routes), (
+            f"a call site passing an unmapped key through {plant} left the key sets equal and "
+            "reported no problem, so the enumeration cannot see that spelling and its green is "
+            "not evidence")
+    _, splat = call_site_keys({"tests/test_modal_plant.py": "_training_kwargs(tmp_path, **k)\n"})
+    assert splat, "a `**` splat call site was not reported, so its keys would go unchecked"
+
+    sentinels: dict[str, object] = {key: object() for key in routes}
+    built = _training_kwargs(tmp_path, **sentinels)
+    assert set(built) == {
+        "attempt", "prepared", "registry", "process", "log_sink", "manifest", "timeout",
+        "_launches", "_child", "_kills"
+    }, sorted(built)
+    for key, route in routes.items():
+        assert route(built) is sentinels[key], f"{key} does not reach its field"
+    # A directory of its own, so a builder that stopped raising would build there and fail on
+    # DID NOT RAISE, rather than on colliding with the build above.
+    leftover = tmp_path / "leftover"
+    leftover.mkdir()
+    with pytest.raises(TypeError, match=r"unknown override\(s\): \['start_heartbeat'\]"):
+        _training_kwargs(leftover, start_heartbeat=_noop_heartbeat)
 
 
 def test_training_child_starts_in_new_session_without_shell(tmp_path):
     kwargs = _training_kwargs(tmp_path)
     launches = kwargs.pop("_launches")
     kwargs.pop("_child")
+    kills = kwargs.pop("_kills")
     prepared = kwargs["prepared"]
     mrl.execute_training_attempt(**kwargs)
     assert len(launches) == 1
@@ -137,6 +373,8 @@ def test_training_child_starts_in_new_session_without_shell(tmp_path):
     assert kw["shell"] is False
     assert kw["cwd"] == os.fspath(prepared.source_dir)
     assert kw["env"] == prepared.child_env
+    # A normal exit must signal nothing: the child has already exited (knock-out (c2)).
+    assert kills == []
 
 
 def test_stdout_stderr_are_teed_to_log_sink_without_truncation(tmp_path):
@@ -165,14 +403,15 @@ def test_stdout_stderr_are_teed_to_log_sink_without_truncation(tmp_path):
     kwargs = _training_kwargs(tmp_path, child=child, log_sink=sink)
     kwargs.pop("_launches")
     kwargs.pop("_child")
-    (kwargs["run_root"] / "train.log").write_text("already here\n")
+    kwargs.pop("_kills")
+    (kwargs["attempt"].run_root / "train.log").write_text("already here\n")
     mrl.execute_training_attempt(**kwargs)
     text = sink.getvalue()
     assert "OUT" in text and "END" in text
     assert "ERR" in text and "FIN" in text
     assert text.count("x") == 200_000
     assert text.count("y") == 200_000
-    leftover = (kwargs["run_root"] / "train.log").read_text()
+    leftover = (kwargs["attempt"].run_root / "train.log").read_text()
     assert leftover.startswith("already here\n")
     assert leftover.count("x") == 200_000
     assert leftover.endswith("FIN\n") or "FIN\n" in leftover
@@ -189,20 +428,21 @@ def test_same_attempt_redelivery_invokes_subprocess_once(tmp_path):
     )
     launches = kwargs.pop("_launches")
     kwargs.pop("_child")
+    kwargs.pop("_kills")
     first = mrl.execute_training_attempt(**kwargs)
     assert first != mrl.REDELIVERED
     assert len(launches) == 1
-    status_after_first = (kwargs["run_root"] / mrl.STATUS_FILENAME).read_bytes()
+    status_after_first = (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_bytes()
     commits_after_first = list(commits)
 
     def must_not_launch(*_args, **_kwargs):
         raise AssertionError("redelivered container must not start training")
 
-    kwargs["process_factory"] = must_not_launch
+    kwargs["process"] = dataclasses.replace(kwargs["process"], spawn=must_not_launch)
     second = mrl.execute_training_attempt(**kwargs)
     assert second == mrl.REDELIVERED
     assert len(launches) == 1
-    assert (kwargs["run_root"] / mrl.STATUS_FILENAME).read_bytes() == status_after_first
+    assert (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_bytes() == status_after_first
     assert commits == commits_after_first
 
 
@@ -228,6 +468,7 @@ class _FakeClock:
 def _consume_training_kwargs(kwargs):
     kwargs.pop("_launches", None)
     kwargs.pop("_child", None)
+    kwargs.pop("_kills", None)
     return kwargs
 
 
@@ -299,21 +540,21 @@ def test_stable_checkpoint_gets_sidecar_and_joint_commit(tmp_path):
     settle_seen = threading.Event()
 
     def commit():
-        sidecar = kwargs["run_root"] / "checkpoints" / "dust2_policy.pt.meta.json"
-        ckpt = kwargs["run_root"] / "checkpoints" / "dust2_policy.pt"
+        sidecar = kwargs["attempt"].run_root / "checkpoints" / "dust2_policy.pt.meta.json"
+        ckpt = kwargs["attempt"].run_root / "checkpoints" / "dust2_policy.pt"
         events.append(("commit", sidecar.is_file(), ckpt.is_file()))
 
     def fake_sleep(seconds: float) -> None:
         if seconds >= 1.0 and ckpt.is_file() and not settle_seen.is_set():
             settle_seen.set()
-            _write_policy_checkpoint(kwargs["run_root"], 2.0)
+            _write_policy_checkpoint(kwargs["attempt"].run_root, 2.0)
 
     kwargs = _consume_training_kwargs(
         _training_kwargs(tmp_path, child=child, commit=commit, sleep=fake_sleep))
-    ckpt = _write_policy_checkpoint(kwargs["run_root"], 1.0)
+    ckpt = _write_policy_checkpoint(kwargs["attempt"].run_root, 1.0)
     first_digest = core.sha256_file(ckpt)
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
-    sidecar = kwargs["run_root"] / "checkpoints" / "dust2_policy.pt.meta.json"
+    sidecar = kwargs["attempt"].run_root / "checkpoints" / "dust2_policy.pt.meta.json"
     try:
         deadline = time.monotonic() + 5.0
         while not sidecar.is_file() and time.monotonic() < deadline:
@@ -343,7 +584,7 @@ def test_torn_checkpoint_does_not_publish_sidecar(tmp_path):
             settle_calls.set()
 
     kwargs = _consume_training_kwargs(_training_kwargs(tmp_path, child=child, sleep=fake_sleep))
-    ckpt_dir = kwargs["run_root"] / "checkpoints"
+    ckpt_dir = kwargs["attempt"].run_root / "checkpoints"
     ckpt_dir.mkdir(parents=True)
     (ckpt_dir / "dust2_policy.pt").write_bytes(b"torn-not-a-checkpoint")
     sidecar = ckpt_dir / "dust2_policy.pt.meta.json"
@@ -373,7 +614,7 @@ def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
         hooks["sleep"](seconds)
         if seconds >= 1.0 and child.poll() is None:
             rewrites["n"] += 1
-            _write_policy_checkpoint(kwargs["run_root"], float(rewrites["n"]))
+            _write_policy_checkpoint(kwargs["attempt"].run_root, float(rewrites["n"]))
 
     kwargs = _consume_training_kwargs(
         _training_kwargs(
@@ -384,8 +625,8 @@ def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    ckpt = _write_policy_checkpoint(kwargs["run_root"], 0.0)
-    sidecar = kwargs["run_root"] / "checkpoints" / "dust2_policy.pt.meta.json"
+    ckpt = _write_policy_checkpoint(kwargs["attempt"].run_root, 0.0)
+    sidecar = kwargs["attempt"].run_root / "checkpoints" / "dust2_policy.pt.meta.json"
     thread, finished, boxed = _run_attempt_in_thread(kwargs)
     try:
         int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
@@ -400,7 +641,7 @@ def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
         child.release()
         thread.join(timeout=2.0)
     assert json.loads(
-        (kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"
+        (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"
     deadline = time.monotonic() + 2.0
     while not sidecar.is_file() and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -488,8 +729,8 @@ def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path,
     commits: list[bool] = []
 
     def commit() -> None:
-        commits.append(
-            (kwargs["run_root"] / "checkpoints" / core.CHECKPOINT_PUBLISH_REASON_NAME).is_file())
+        commits.append((kwargs["attempt"].run_root / "checkpoints" /
+                        core.CHECKPOINT_PUBLISH_REASON_NAME).is_file())
 
     kwargs = _consume_training_kwargs(
         _training_kwargs(
@@ -500,7 +741,7 @@ def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path,
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    _write_policy_checkpoint(kwargs["run_root"], 1.0)
+    _write_policy_checkpoint(kwargs["attempt"].run_root, 1.0)
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
     try:
         int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
@@ -510,7 +751,7 @@ def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path,
         child.release()
         thread.join(timeout=2.0)
 
-    reason_path = kwargs["run_root"] / "checkpoints" / core.CHECKPOINT_PUBLISH_REASON_NAME
+    reason_path = kwargs["attempt"].run_root / "checkpoints" / core.CHECKPOINT_PUBLISH_REASON_NAME
     assert reason_path.is_file()
     payload = json.loads(reason_path.read_text())
     assert "nonexistent" in payload["reason"]
@@ -540,7 +781,7 @@ def test_interrupt_commits_status_even_if_prebuilt_load_hangs(tmp_path, monkeypa
     commits: list[str | None] = []
 
     def commit() -> None:
-        status_path = kwargs["run_root"] / mrl.STATUS_FILENAME
+        status_path = kwargs["attempt"].run_root / mrl.STATUS_FILENAME
         if not status_path.is_file():
             commits.append(None)
             return
@@ -555,7 +796,7 @@ def test_interrupt_commits_status_even_if_prebuilt_load_hangs(tmp_path, monkeypa
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    _write_policy_checkpoint(kwargs["run_root"], 1.0)
+    _write_policy_checkpoint(kwargs["attempt"].run_root, 1.0)
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
     try:
         int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
@@ -566,7 +807,7 @@ def test_interrupt_commits_status_even_if_prebuilt_load_hangs(tmp_path, monkeypa
         deadline = time.monotonic() + 2.0
         interrupted = False
         while time.monotonic() < deadline:
-            status_path = kwargs["run_root"] / mrl.STATUS_FILENAME
+            status_path = kwargs["attempt"].run_root / mrl.STATUS_FILENAME
             if (status_path.is_file()
                     and json.loads(status_path.read_text())["status"] == "interrupted"):
                 interrupted = True
@@ -686,7 +927,8 @@ def test_sigint_and_sigterm_share_cleanup_and_restore_handlers(tmp_path):
 
     def stop_and_join():
         order.append("heartbeat_stopped")
-        order.append(json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"])
+        order.append(
+            json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())["status"])
 
     kwargs = _consume_training_kwargs(
         _training_kwargs(
@@ -711,7 +953,7 @@ def test_sigint_and_sigterm_share_cleanup_and_restore_handlers(tmp_path):
         thread.join(timeout=2.0)
     assert hooks["installed"][signal.SIGINT] is hooks["originals"][signal.SIGINT]
     assert hooks["installed"][signal.SIGTERM] is hooks["originals"][signal.SIGTERM]
-    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "interrupted"
     assert persisted["attempt_id"] == "attempt-a"
     assert order[0] == "heartbeat_stopped"
@@ -740,7 +982,7 @@ def test_keyboard_interrupt_uses_same_cleanup(tmp_path):
     assert result != mrl.REDELIVERED
     assert hooks["installed"][signal.SIGINT] is hooks["originals"][signal.SIGINT]
     assert hooks["installed"][signal.SIGTERM] is hooks["originals"][signal.SIGTERM]
-    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "interrupted"
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
 
@@ -812,7 +1054,7 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
     committed: list[dict] = []
 
     def commit():
-        payload = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+        payload = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
         if payload["status"] == "interrupted":
             raise RuntimeError("volume commit failed")
         committed.append(payload)
@@ -842,15 +1084,15 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
     derived = state.derive_status(last, now=_aware(minute=5))
     assert derived.stale is True
     assert derived.status is core.Status.INTERRUPTED
-    before = (kwargs["run_root"] / mrl.STATUS_FILENAME).read_bytes()
+    before = (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_bytes()
     commits_before = list(committed)
 
     def must_not_launch(*_args, **_kwargs):
         raise AssertionError("redelivered container must not start training")
 
-    kwargs["process_factory"] = must_not_launch
+    kwargs["process"] = dataclasses.replace(kwargs["process"], spawn=must_not_launch)
     assert mrl.execute_training_attempt(**kwargs) == mrl.REDELIVERED
-    assert (kwargs["run_root"] / mrl.STATUS_FILENAME).read_bytes() == before
+    assert (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_bytes() == before
     assert committed == commits_before
 
 
@@ -866,10 +1108,10 @@ def test_post_spawn_failure_kills_child_and_writes_terminal_status(tmp_path):
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    (kwargs["run_root"] / core.TRAIN_LOG_NAME).mkdir()
+    (kwargs["attempt"].run_root / core.TRAIN_LOG_NAME).mkdir()
     with pytest.raises(OSError):
         mrl.execute_training_attempt(**kwargs)
-    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] in {"failed", "interrupted"}
     assert persisted["attempt_id"] == "attempt-a"
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
@@ -900,7 +1142,7 @@ def test_term_grace_is_deadline_not_mandatory_sleep(tmp_path):
     assert time.monotonic() - started < 5.0
     assert hooks["kills"] == [signal.SIGTERM]
     assert 15.0 not in hooks["slept"]
-    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "interrupted"
 
 
@@ -938,7 +1180,7 @@ def test_interrupt_uses_sidecar_digest_and_skips_torch_hash(tmp_path, monkeypatc
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    run_root = kwargs["run_root"]
+    run_root = kwargs["attempt"].run_root
     ckpt_dir = run_root / "checkpoints"
     ckpt_dir.mkdir()
     sidecar_digest = "ab" * 32
@@ -976,7 +1218,7 @@ def test_interrupt_without_sidecar_leaves_checkpoint_hash_null(tmp_path, monkeyp
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    run_root = kwargs["run_root"]
+    run_root = kwargs["attempt"].run_root
     ckpt_dir = run_root / "checkpoints"
     ckpt_dir.mkdir()
     (ckpt_dir / "dust2_policy.pt").write_bytes(b"do-not-load-me")
@@ -1035,7 +1277,7 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
         child.release()
         thread.join(timeout=2.0)
     assert at_terminal == [("interrupted", True)]
-    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "interrupted"
 
 
@@ -1052,7 +1294,7 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
 def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monkeypatch):
     """A real SIGTERM inside the tee-thread start window must not strand the run.
 
-    gh#217. `finalize` (nested in `training._run_training_attempt`) joins
+    gh#217. `finalize` (`training._LiveAttempt.finalize`) joins
     `tee_threads` unconditionally, so for
     as long as that list could hold a not-yet-started thread, a signal arriving
     there raised `RuntimeError: cannot join thread before it is started` out of
@@ -1161,7 +1403,7 @@ def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monke
             killpg=killpg_marking_finalize,
             getpgid=hooks["getpgid"],
         ))
-    run_root = kwargs["run_root"]
+    run_root = kwargs["attempt"].run_root
     previous_term = signal.signal(signal.SIGTERM, lambda *_args: None)
     previous_int = signal.getsignal(signal.SIGINT)
     try:
@@ -1289,11 +1531,11 @@ class _KillSeamClauses:
     functions or plant tables would each be another, so keep every checker,
     table and plant inside it.
 
-    ADDING A CLAUSE (the W5 execute commit adds (iii) and (vi)): write its
-    checker as a method here, plus a `clause_<n>` method that returns
-    `_clause(...)` with its plants; list it in `clauses()`; and add its label to
-    the test's pinned list. Each plant carries its own path, so a clause that
-    reads both training.py and tests/ (as (iii) will) plants into either.
+    ADDING A CLAUSE: write its checker as a method here, plus a `clause_<n>`
+    method that returns `_clause(...)` with its plants; list it in `clauses()`;
+    and add its label to the test's pinned list. Each plant carries its own
+    path, so a clause that reads both training.py and tests/ (as (iii) does)
+    plants into either.
     """
 
     TRAINING = "scripts/modal_runner/training.py"
@@ -1306,14 +1548,34 @@ class _KillSeamClauses:
         "install_signal": "signal.signal",
     }
     OS_MODULES = ("os", "posix")
+    SIGNAL_MODULES = ("signal", )
     IMPORT_CALLS = ("__import__", "import_module")
     BANNED = frozenset({"killpg", "getpgid", "kill"})
+    BANNED_SIGNAL = frozenset({"signal"})
     GUARDED_CALLS = ("killpg", "getpgid")
+    # The callees a `killpg=`/`getpgid=` keyword may hand those functions to, in (vii):
+    # the guard itself, and ProcessControl's construction (by name, or `cls` in system()).
+    GUARD_HANDOFFS = ("_signal_process_group", "cls", "ProcessControl")
+    EXECUTE = "execute_training_attempt"
+    RESOLUTION_CONTROL = "test_process_control_tripwire_guards_the_resolution_path"
+    # (iii)'s exemptions, keyed (file, test): the only tests that may read `.system`.
+    SYSTEM_READERS = (
+        ("tests/test_modal_training.py", "test_process_control_tripwire_poisons_system"),
+        ("tests/test_modal_training.py", RESOLUTION_CONTROL),
+    )
 
     @classmethod
     def clauses(cls):
         """Every clause, in label order. The test pins the labels: dropping one here is red."""
-        return [cls.clause_i(), cls.clause_ii(), cls.clause_iv(), cls.clause_v(), cls.clause_vii()]
+        return [
+            cls.clause_i(),
+            cls.clause_ii(),
+            cls.clause_iii(),
+            cls.clause_iv(),
+            cls.clause_v(),
+            cls.clause_vi(),
+            cls.clause_vii()
+        ]
 
     @staticmethod
     def _clause(label, name, *, reads, check, population, populated, plants):
@@ -1485,6 +1747,169 @@ class _KillSeamClauses:
                     problems.append(f"{rel}:{call.lineno} {ast.unparse(call)[:120]}")
         return problems, examined
 
+    # ── (iii) the real functions only in system(); `.system` read under tests/ only by the tripwire
+
+    @classmethod
+    def clause_iii(cls):
+        pc = "class ProcessControl:\n"
+        live = "class _LiveAttempt:\n    def kill(self):\n"
+        return cls._clause(
+            "(iii)",
+            "os.killpg/os.getpgid/signal.signal only inside ProcessControl.system(); `.system` "
+            "read under tests/ only by the two tripwire tests",
+            reads=("training", "tests"),
+            check=cls.real_functions_only_in_system,
+            population=("system()'s os.getpgid, os.killpg and signal.signal, and both exempt "
+                        "tests' calls"),
+            populated=lambda seen: set(seen) == {"os.getpgid", "os.killpg", "signal.signal"} |
+            {f"{file}::{test}"
+             for file, test in cls.SYSTEM_READERS},
+            plants={
+                **cls._at(
+                    cls.TRAINING, {
+                        "the pre-W5 fallback in execute": ("def execute_training_attempt(*, killpg=None):\n"
+                                                           "    def train():\n"
+                                                           "        return _run(killpg=os.killpg if killpg is None else killpg)\n"),
+                        "a custom __init__ with real defaults": (pc + "    def __init__(self, spawn, getpgid=os.getpgid, killpg=os.killpg,\n"
+                                                                 "                 install_signal=signal.signal):\n"
+                                                                 "        pass\n"),
+                        "a second factory": (pc + "    @classmethod\n"
+                                             "    def with_spawn(cls, spawn):\n"
+                                             "        return cls(spawn=spawn, getpgid=os.getpgid, killpg=os.killpg,\n"
+                                             "                   install_signal=signal.signal)\n"),
+                        "a __post_init__ swap": (pc + "    def __post_init__(self):\n"
+                                                 '        object.__setattr__(self, "killpg", os.killpg)\n'),
+                        "a default on system() itself": (pc + "    @classmethod\n"
+                                                         "    def system(cls, killpg=os.killpg):\n"
+                                                         "        return cls(spawn=subprocess.Popen, getpgid=os.getpgid,\n"
+                                                         "                   killpg=killpg, install_signal=signal.signal)\n"),
+                        "getattr":
+                        live + '        getattr(os, "killpg")(self.child.pid, 15)\n',
+                        "a kill by another name":
+                        live + "        os.kill(-self.child.pid, signal.SIGTERM)\n",
+                        "posix":
+                        "import posix\nposix.killpg(4242, 15)\n",
+                        "a direct signal.signal": ("class _LiveAttempt:\n    def install_handlers(self):\n"
+                                                   "        signal.signal(signal.SIGTERM, self.on_signal)\n"),
+                        "a module attribute's signal":
+                        "install = core.signal.signal\n",
+                        "a from-import":
+                        "from os import killpg\n",
+                        "a from-import of signal":
+                        "from signal import signal as install\n",
+                    }),
+                **cls._at(
+                    cls.PLANT_TEST, {
+                        "the incident's half-fake":
+                        "control = dataclasses.replace(training.ProcessControl.system(), spawn=fake)\n",
+                        "an instance read":
+                        'kwargs["process"].system()\n',
+                        "a read through type()":
+                        "type(control).system()\n",
+                        "getattr":
+                        'getattr(training.ProcessControl, "system")()\n',
+                        "an unbound read":
+                        "factory = training.ProcessControl.system\n",
+                        "an exempt test's name in another file": ("def test_process_control_tripwire_poisons_system():\n"
+                                                                  "    training.ProcessControl.system()\n"),
+                    }),
+                "an exempt test that no longer calls it": {
+                    "tests/test_modal_training.py":
+                    ("def test_process_control_tripwire_poisons_system():\n"
+                     "    pass\n\n\n"
+                     f"def {cls.RESOLUTION_CONTROL}():\n"
+                     "    training.ProcessControl.system()\n"),
+                },
+            })
+
+    @classmethod
+    def real_functions_only_in_system(cls, sources):
+        """(iii). In training.py the real os/posix `killpg`, `getpgid`, `kill` and
+        `signal.signal` are loaded only inside `ProcessControl.system()`'s body, in the
+        spellings (iv) reads (`_banned_load`, `_banned_from_imports`). Under tests/, any read
+        of an attribute named `system` on any receiver counts, because a
+        ProcessControl instance or `type(control)` reaches the same classmethod: it is
+        allowed only inside the `(file, test)` pairs of `SYSTEM_READERS`, and each pair
+        whose file is read must still call it. `examined` is system()'s loads, unparsed,
+        and `file::test` for each exempt test that calls it.
+        """
+        problems, examined = [], []
+        for rel, text in sources.items():
+            tree = ast.parse(text)
+            if rel == cls.TRAINING:
+                found, seen = cls._real_function_loads(rel, tree)
+            else:
+                found, seen = cls._system_reads_in_tests(rel, tree)
+            problems.extend(found)
+            examined.extend(seen)
+        return problems, examined
+
+    @classmethod
+    def _real_function_loads(cls, rel, tree):
+        """(iii), training.py: `(problems, examined)` for the real functions' loads."""
+        inside = cls._system_body(tree)
+        problems, examined = [], []
+        for modules, banned in ((cls.OS_MODULES, cls.BANNED), (cls.SIGNAL_MODULES,
+                                                               cls.BANNED_SIGNAL)):
+            problems.extend(cls._banned_from_imports(rel, tree, modules, banned))
+            names = cls._module_names(tree, modules)
+            for node in ast.walk(tree):
+                loaded = cls._banned_load(node, names, {}, modules, banned)
+                if loaded is None:
+                    continue
+                if id(loaded) in inside:
+                    examined.append(ast.unparse(loaded))
+                else:
+                    problems.append(f"{rel}:{loaded.lineno} {ast.unparse(loaded)[:120]}")
+        return problems, examined
+
+    @classmethod
+    def _system_body(cls, tree):
+        """The ids of every node in the body of each module-level ProcessControl's `system`:
+        not its decorators or parameter defaults, which run where the class is defined."""
+        return {
+            id(node)
+            for process_control in cls._process_control_classes(tree)
+            for method in process_control.body
+            if isinstance(method, ast.FunctionDef) and method.name == "system"
+            for statement in method.body for node in ast.walk(statement)
+        }
+
+    @classmethod
+    def _system_reads(cls, tree):
+        """Every read in `tree` of an attribute named `system`, on any receiver: `<x>.system`
+        loaded, and `getattr(<x>, "system")`."""
+        reads: list[ast.Attribute | ast.Call] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                if node.attr == "system" and isinstance(node.ctx, ast.Load):
+                    reads.append(node)
+            elif (isinstance(node, ast.Call) and cls._last_name(node.func) == "getattr"
+                  and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)
+                  and node.args[1].value == "system"):
+                reads.append(node)
+        return reads
+
+    @classmethod
+    def _system_reads_in_tests(cls, rel, tree):
+        """(iii), one tests/ file: `(problems, examined)` for its `.system` reads."""
+        exempt = {test for file, test in cls.SYSTEM_READERS if file == rel}
+        owner = {
+            id(node): top.name
+            for top in tree.body if isinstance(top, ast.FunctionDef) and top.name in exempt
+            for node in ast.walk(top)
+        }
+        callees = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+        problems, calling = [], set()
+        for read in cls._system_reads(tree):
+            if id(read) not in owner:
+                problems.append(f"{rel}:{read.lineno} {ast.unparse(read)[:120]}")
+            elif id(read) in callees:
+                calling.add(owner[id(read)])
+        problems.extend(f"{rel}: {test} is exempt from (iii) but no longer calls `.system`; "
+                        "drop its SYSTEM_READERS entry" for test in sorted(exempt - calling))
+        return problems, [f"{rel}::{test}" for test in sorted(calling)]
+
     # ── (iv) no load of the kill seam's OS functions under tests/
 
     @classmethod
@@ -1550,7 +1975,7 @@ class _KillSeamClauses:
         ...)`) satisfies (i), (ii) and the tripwire: only this clause stops it.
 
         `killpg` and `getpgid` may not be loaded from os or posix in any spelling
-        `_is_os` recognises, as `<os>.X`, `getattr(<os>, "X")` or `getattr(<os>,
+        `_is_module` recognises, as `<os>.X`, `getattr(<os>, "X")` or `getattr(<os>,
         <a computed name>)`, nor from-imported (`from os import X` or `*`). `kill`
         likewise, except the one allowed call, `os.kill(os.getpid(), ...)`: any
         other target could be `-pgid`, which is `killpg` by another name.
@@ -1559,54 +1984,57 @@ class _KillSeamClauses:
         problems, examined = [], []
         for rel, text in sources.items():
             tree = ast.parse(text)
-            names = cls._os_names(tree)
+            names = cls._module_names(tree, cls.OS_MODULES)
             allowed = cls._allowed_kills(tree)
             examined.extend(f"{rel}:{line}" for line in allowed.values())
-            problems.extend(cls._banned_from_imports(rel, tree))
+            problems.extend(cls._banned_from_imports(rel, tree, cls.OS_MODULES, cls.BANNED))
             for node in ast.walk(tree):
-                loaded = cls._banned_load(node, names, allowed)
+                loaded = cls._banned_load(node, names, allowed, cls.OS_MODULES, cls.BANNED)
                 if loaded is not None:
                     problems.append(f"{rel}:{loaded.lineno} {ast.unparse(loaded)}")
         return problems, examined
 
     @classmethod
-    def _is_os(cls, expr, names):
-        """Whether `expr` spells the os or posix module.
+    def _is_module(cls, expr, names, modules):
+        """Whether `expr` spells one of `modules` (os and posix, or signal).
 
-        A name in `names` (`_os_names`); any attribute named `os` or `posix`,
-        which is how a test reaches a module's own import (`training.os`,
-        `mrl.training.os`, `subprocess.os`, `os.path.os`); `__import__("os")`
-        or `importlib.import_module("os")`; or a constant subscript such as
-        `sys.modules["posix"]`.
+        A name in `names` (`_module_names`); any attribute named after one of
+        them, which is how a test reaches a module's own import (`training.os`,
+        `mrl.training.os`, `subprocess.os`, `os.path.os`, `training.signal`);
+        `__import__("os")` or `importlib.import_module("os")`; or a constant
+        subscript such as `sys.modules["posix"]`.
         """
         if isinstance(expr, ast.Name):
             return expr.id in names
         if isinstance(expr, ast.Attribute):
-            return expr.attr in cls.OS_MODULES
+            return expr.attr in modules
         named = None
         if isinstance(expr, ast.Call) and cls._last_name(expr.func) in cls.IMPORT_CALLS:
             named = expr.args[0] if expr.args else None
         elif isinstance(expr, ast.Subscript):
             named = expr.slice
-        return isinstance(named, ast.Constant) and named.value in cls.OS_MODULES
+        return isinstance(named, ast.Constant) and named.value in modules
 
     @classmethod
-    def _os_names(cls, tree):
-        """Every name `tree` binds to os or posix, anywhere in the file.
+    def _module_names(cls, tree, modules):
+        """Every name `tree` binds to one of `modules`, anywhere in the file.
 
-        The two module names; `import os as o`; `from <any module> import os
-        [as o]`; and an assignment `o = <anything _is_os accepts>`, plain or
-        annotated. The assignments are read in `ast.walk` order, so a chain
-        (`o = os; p = o`) is followed when each link comes first in that order.
+        The module names themselves; `import os as o`; `from <any module>
+        import os [as o]`; and an assignment `o = <anything _is_module
+        accepts>`, plain or annotated. The assignments are read in `ast.walk`
+        order, so a chain (`o = os; p = o`) is followed when each link comes
+        first in that order. `from signal import signal as s` binds a function,
+        not the module, but over-reading it only widens what the clauses
+        reject.
         """
-        names = set(cls.OS_MODULES) | {
+        names = set(modules) | {
             alias.asname or alias.name
             for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
-            for alias in node.names if alias.name in cls.OS_MODULES
+            for alias in node.names if alias.name in modules
         }
         for node in ast.walk(tree):
             targets, value = cls._assignment(node)
-            if value is not None and cls._is_os(value, names):
+            if value is not None and cls._is_module(value, names, modules):
                 names |= {target.id for target in targets if isinstance(target, ast.Name)}
         return names
 
@@ -1646,31 +2074,31 @@ class _KillSeamClauses:
                 allowed[id(kill.func)] = kill.lineno
         return allowed
 
-    @classmethod
-    def _banned_from_imports(cls, rel, tree):
-        """`from os|posix import killpg|getpgid|kill|*`, each alias one problem."""
+    @staticmethod
+    def _banned_from_imports(rel, tree, modules, banned):
+        """`from <one of modules> import <a banned name>|*`, each alias one problem."""
         return [
             f"{rel}:{node.lineno} from {node.module} import {alias.name}" for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module in cls.OS_MODULES
-            for alias in node.names if alias.name in cls.BANNED | {"*"}
+            if isinstance(node, ast.ImportFrom) and node.module in modules for alias in node.names
+            if alias.name in banned | {"*"}
         ]
 
     @classmethod
-    def _banned_load(cls, node, names, allowed):
-        """`node` if it loads a banned function from os or posix, else None.
+    def _banned_load(cls, node, names, allowed, modules, banned):
+        """`node` if it loads a `banned` function from one of `modules`, else None.
 
-        `<os>.X`, unless it is the callee of an allowed kill; `getattr(<os>,
-        "X")`; and `getattr(<os>, <anything but a constant>)`, whose name cannot
-        be read (`{n: getattr(os, n) for n in ("getpgid", "killpg")}`).
+        `<m>.X`, unless its id is in `allowed` (the callee of an allowed kill);
+        `getattr(<m>, "X")`; and `getattr(<m>, <anything but a constant>)`, whose
+        name cannot be read (`{n: getattr(os, n) for n in ("getpgid", "killpg")}`).
         """
         if isinstance(node, ast.Attribute):
-            loads = (isinstance(node.ctx, ast.Load) and node.attr in cls.BANNED
-                     and cls._is_os(node.value, names) and id(node) not in allowed)
+            loads = (isinstance(node.ctx, ast.Load) and node.attr in banned
+                     and cls._is_module(node.value, names, modules) and id(node) not in allowed)
             return node if loads else None
         if (isinstance(node, ast.Call) and cls._last_name(node.func) == "getattr"
-                and len(node.args) >= 2 and cls._is_os(node.args[0], names)):
+                and len(node.args) >= 2 and cls._is_module(node.args[0], names, modules)):
             attr = node.args[1]
-            harmless = isinstance(attr, ast.Constant) and attr.value not in cls.BANNED
+            harmless = isinstance(attr, ast.Constant) and attr.value not in banned
             return None if harmless else node
         return None
 
@@ -1727,10 +2155,118 @@ class _KillSeamClauses:
         returned = only.value if isinstance(only, ast.Return) else None
         return returned if isinstance(returned, ast.Call) else None
 
+    # ── (vi) ProcessControl.system called exactly once, in execute_training_attempt's body
+
+    @classmethod
+    def clause_vi(cls):
+        execute = "def execute_training_attempt(*, process=None"
+        resolve = "        control = {} if process is None else process\n"
+        return cls._clause(
+            "(vi)", "ProcessControl.system is read once in training.py, called in "
+            "execute_training_attempt's body",
+            reads=("training", ),
+            check=cls.system_read_once_in_execute,
+            population="the one `ProcessControl.system()` call in execute_training_attempt",
+            populated=lambda seen: len(seen) == 1,
+            plants=cls._at(
+                cls.TRAINING, {
+                    "a module-scope binding called in the body":
+                    ("_SYSTEM = ProcessControl.system\n\n\n" + execute + "):\n"
+                     "    def train():\n" + resolve.format("_SYSTEM()") + "    return train()\n"),
+                    "a default value": (execute + ", fallback=ProcessControl.system()):\n"
+                                        "    return fallback if process is None else process\n"),
+                    "a nested def's default":
+                    (execute + "):\n"
+                     "    def train(control=ProcessControl.system()):\n"
+                     "        return control if process is None else process\n"
+                     "    return train()\n"),
+                    "a decorator": (execute + "):\n"
+                                    "    @uses(ProcessControl.system())\n"
+                                    "    def train():\n"
+                                    "        return process\n"
+                                    "    return train()\n"),
+                    "the read in another top-level function":
+                    ("def _resolve(process):\n"
+                     "    return ProcessControl.system() if process is None else process\n\n\n" +
+                     execute + "):\n    return _resolve(process)\n"),
+                    "the attribute bound to a name":
+                    (execute + "):\n"
+                     "    factory = ProcessControl.system\n" +
+                     resolve.format("factory()").removeprefix("    ")),
+                    "getattr":
+                    (execute + "):\n" +
+                     resolve.format('getattr(ProcessControl, "system")()').removeprefix("    ")),
+                    "an instance read":
+                    "def execute_training_attempt(*, process):\n    return process.system()\n",
+                    "a class alias": ("PC = ProcessControl\n\n\n" + execute + "):\n" +
+                                      resolve.format("PC.system()").removeprefix("    ")),
+                    "a second read":
+                    (execute + "):\n" +
+                     resolve.format("ProcessControl.system()").removeprefix("    ") +
+                     "    spare = ProcessControl.system()\n"),
+                    "no read":
+                    execute + "):\n    return process\n",
+                }))
+
+    @classmethod
+    def system_read_once_in_execute(cls, sources):
+        """(vi). Without it the tripwire can be bypassed silently: a real factory captured
+        at import (`_SYSTEM = ProcessControl.system`, or a default value) passes (i)-(v), the
+        tripwire test and knock-out (k), and a forgotten `process` then gets the real Popen
+        and handlers. Every read of an attribute named `system` counts (`_system_reads`);
+        the one allowed is a call `ProcessControl.system()`, on that bare name, inside the
+        body of the module-level `execute_training_attempt` (`_body_nodes`), and there must
+        be exactly one. `examined` is where it is.
+        """
+        problems, examined = [], []
+        for rel, text in sources.items():
+            tree = ast.parse(text)
+            body = set()
+            for top in tree.body:
+                if isinstance(top, ast.FunctionDef) and top.name == cls.EXECUTE:
+                    body |= cls._body_nodes(top)
+            callees = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+            allowed = []
+            for read in cls._system_reads(tree):
+                if (isinstance(read, ast.Attribute) and id(read) in body and id(read) in callees
+                        and isinstance(read.value, ast.Name) and read.value.id == "ProcessControl"):
+                    allowed.append(f"{rel}:{read.lineno}")
+                else:
+                    problems.append(f"{rel}:{read.lineno} {ast.unparse(read)[:120]}")
+            if len(allowed) != 1:
+                problems.append(f"{rel}: {len(allowed)} `ProcessControl.system()` calls in "
+                                f"{cls.EXECUTE}'s body, not exactly one")
+            examined.extend(allowed)
+        return problems, examined
+
+    @staticmethod
+    def _body_nodes(function):
+        """The ids of every node in `function`'s body, nested defs, lambdas and classes
+        followed into their bodies only.
+
+        Plan Task 7 step 1: the resolution sits in the nested `train()`, so the
+        whole body subtree counts. A default value, a decorator, an annotation or
+        a base class does not: the function's own run at import, and a nested
+        def's are evaluated where that def statement runs, which the rule keeps
+        out on purpose.
+        """
+        found, pending = set(), list(function.body)
+        while pending:
+            node = pending.pop()
+            found.add(id(node))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                pending.extend(node.body)
+            elif isinstance(node, ast.Lambda):
+                pending.append(node.body)
+            else:
+                pending.extend(ast.iter_child_nodes(node))
+        return found
+
     # ── (vii) killpg/getpgid called only inside the §2a guard
 
     @classmethod
     def clause_vii(cls):
+        live = "class _LiveAttempt:\n    def kill(self):\n"
         return cls._clause(
             "(vii)",
             "killpg/getpgid are called only inside _signal_process_group",
@@ -1741,30 +2277,78 @@ class _KillSeamClauses:
             plants=cls._at(
                 cls.TRAINING, {
                     "a direct kill in a new method":
-                    ("class _LiveAttempt:\n"
-                     "    def kill(self):\n"
-                     "        os.killpg(os.getpgid(self.child.pid), signal.SIGTERM)\n"),
+                    live + "        os.killpg(os.getpgid(self.child.pid), signal.SIGTERM)\n",
+                    "a kill by another name":
+                    live + "        os.kill(-self.child.pid, signal.SIGTERM)\n",
+                    "a kill by another name through posix":
+                    live + "        posix.kill(-self.child.pid, 15)\n",
+                    "an aliased callee":
+                    live + "        kp = self.process.killpg\n        kp(self.child.pid, 15)\n",
+                    "getattr":
+                    live + '        getattr(self.process, "killpg")(self.child.pid, 15)\n',
+                    "handed to a helper that is not the guard":
+                    (live + "        _terminate(self.child, killpg=self.process.killpg,\n"
+                     "                   getpgid=self.process.getpgid)\n"),
                 }))
 
     @classmethod
     def kill_calls_only_in_the_guard(cls, sources):
         """(vii). A direct call anywhere else bypasses the guard, and the runtime layers
-        govern ProcessControl, not a direct call. `examined` is the callee names found
-        inside the guard.
+        govern ProcessControl, not a direct call.
+
+        Outside `_signal_process_group`, a load of anything named `killpg` or
+        `getpgid` (a bare name, the last attribute on any receiver, or
+        `getattr(<x>, "killpg")`) is a problem, so an aliased callee (`kp =
+        self.process.killpg`) fails with the direct call. The one exception is
+        handing it on as the same-named keyword to the guard or to ProcessControl's
+        construction (`GUARD_HANDOFFS`): `_signal_process_group(child,
+        killpg=self.process.killpg, ...)`, and system()'s `cls(killpg=os.killpg,
+        ...)`, which (iii) governs. An os/posix `kill` is a problem too, since
+        `kill(-pgid, s)` is `killpg` by another name. `examined` is the callee
+        names of the calls found inside the guard.
         """
         problems, examined = [], []
         for rel, text in sources.items():
             tree = ast.parse(text)
             inside = cls._inside_the_guard(tree)
+            handed = cls._handed_to_the_guard(tree)
+            os_names = cls._module_names(tree, cls.OS_MODULES)
             for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call)
-                        and cls._last_name(node.func) in cls.GUARDED_CALLS):
-                    continue
                 if id(node) in inside:
-                    examined.append(cls._last_name(node.func))
-                else:
-                    problems.append(f"{rel}:{node.lineno} {ast.unparse(node)}")
+                    if isinstance(node, ast.Call) and cls._last_name(
+                            node.func) in cls.GUARDED_CALLS:
+                        examined.append(cls._last_name(node.func))
+                    continue
+                loaded = cls._kill_load(node, os_names)
+                if loaded is not None and id(loaded) not in handed:
+                    problems.append(f"{rel}:{loaded.lineno} {ast.unparse(loaded)}")
         return problems, examined
+
+    @classmethod
+    def _kill_load(cls, node, os_names):
+        """`node` if (vii) reads it as a load of a kill function, else None."""
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            named = cls._last_name(node) in cls.GUARDED_CALLS
+            os_kill = (isinstance(node, ast.Attribute) and node.attr == "kill"
+                       and cls._is_module(node.value, os_names, cls.OS_MODULES))
+            return node if isinstance(node.ctx, ast.Load) and (named or os_kill) else None
+        if (isinstance(node, ast.Call) and cls._last_name(node.func) == "getattr"
+                and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in cls.GUARDED_CALLS):
+            return node
+        return None
+
+    @classmethod
+    def _handed_to_the_guard(cls, tree):
+        """The ids of the values handed on as `killpg=`/`getpgid=` to a `GUARD_HANDOFFS`
+        callee, when the value's own last name is the keyword's (`killpg=<x>.killpg`)."""
+        return {
+            id(keyword.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and cls._last_name(node.func) in cls.GUARD_HANDOFFS
+            for keyword in node.keywords
+            if keyword.arg in cls.GUARDED_CALLS and cls._last_name(keyword.value) == keyword.arg
+        }
 
     @staticmethod
     def _inside_the_guard(tree):
@@ -1797,6 +2381,12 @@ def test_kill_seam_static_safety():
       (ii)  Every ProcessControl(...) construction under tests/, through the
             name or an import or assignment alias of it, passes the four fields
             as four keywords: no positional argument and no `*`/`**` splat.
+      (iii) In training.py the real os/posix `killpg`, `getpgid` and `kill`, and
+            `signal.signal`, are loaded only inside ProcessControl.system(), in
+            the spellings (iv) reads. Under tests/, an attribute named `system`
+            is read (on any receiver: an instance or `type(control)` reaches the
+            same classmethod) only inside the two tripwire tests, each exempt by
+            (file, test), and each exempt test must still call it.
       (iv)  No load of os/posix `killpg` or `getpgid` under tests/, in any
             spelling the clause reads: through `os`, `posix`, an alias of
             either, a module attribute's `os` (`training.os`), `__import__`,
@@ -1805,21 +2395,27 @@ def test_kill_seam_static_safety():
             except a call spelled exactly `os.kill(os.getpid(), ...)`.
       (v)   ProcessControl.system() builds exactly spawn=subprocess.Popen,
             getpgid=os.getpgid, killpg=os.killpg, install_signal=signal.signal.
-      (vii) In training.py a call whose callee is named `killpg` or `getpgid`
-            (a bare name, or the last attribute on any receiver) occurs only
-            inside `_signal_process_group`, which holds the §2a guard.
-    Each clause also asserts a non-empty population on the real tree, so a
-    checker that silently examines nothing cannot pass: the four fields (i), the
-    tripwire's own construction in tests/conftest.py (ii), the real-SIGTERM
-    test's `os.kill(os.getpid(), SIGTERM)` (iv), the system() construction (v),
-    and the guard's own getpgid and killpg calls (vii). The list of clause
-    labels is pinned below, so a clause dropped from `_KillSeamClauses.clauses()`
-    is red, not silently unchecked.
+      (vi)  In training.py an attribute named `system` is read exactly once: as
+            the callee of a call `ProcessControl.system()` inside the body of
+            `execute_training_attempt` (its nested `train()` included; its
+            defaults and decorators are not body). That is the `process=None`
+            resolution; a module-level alias or a default would capture the real
+            factory at import, out of the tripwire's reach.
+      (vii) In training.py, outside `_signal_process_group` (which holds the §2a
+            guard), nothing named `killpg` or `getpgid` is loaded, as a bare
+            name, the last attribute on any receiver or through `getattr`,
+            except handed on as the same-named keyword to that guard or to
+            ProcessControl's construction; and no os/posix `kill` is loaded.
+    Each clause also asserts its population on the real tree, so a checker that
+    silently examines nothing cannot pass: the four fields (i), the tripwire's
+    own construction in tests/conftest.py (ii), system()'s three real-function
+    loads and both exempt tests' `.system` calls (iii), the real-SIGTERM test's
+    `os.kill(os.getpid(), SIGTERM)` (iv), the system() construction (v), the one
+    `ProcessControl.system()` call (vi), and the guard's own getpgid and killpg
+    calls (vii). The list of clause labels is pinned below, so a clause dropped
+    from `_KillSeamClauses.clauses()` is red, not silently unchecked.
 
-    ADDING A CLAUSE: see `_KillSeamClauses`. Clauses (iii) and (vi) join in the
-    W5 execute commit: (iii) cannot hold until execute_training_attempt stops
-    loading os.killpg/os.getpgid/signal.signal itself, and (vi) pins the
-    `process=None` resolution that commit writes.
+    ADDING A CLAUSE: see `_KillSeamClauses`.
 
     RESIDUAL. The clauses read spellings, not values. Measured against (iv),
     these still pass: `vars(os)["killpg"]`, `os.__dict__["killpg"]`,
@@ -1848,7 +2444,7 @@ def test_kill_seam_static_safety():
     assert {"tests/conftest.py",
             "tests/test_modal_training.py"} <= set(sources["tests"]), sorted(sources["tests"])[:5]
     clauses = _KillSeamClauses.clauses()
-    pinned = ["(i)", "(ii)", "(iv)", "(v)", "(vii)"]
+    pinned = ["(i)", "(ii)", "(iii)", "(iv)", "(v)", "(vi)", "(vii)"]
     assert [clause.label for clause in clauses] == pinned, (
         "_KillSeamClauses.clauses() lost or gained a clause; a new one also adds its label here")
     for clause in clauses:
@@ -1868,8 +2464,8 @@ def test_process_control_tripwire_poisons_system(_process_control_tripwire,
                                                  process_control_tripwire_error, monkeypatch):
     """Under pytest, ProcessControl.system() returns a control whose every field raises.
 
-    gh#163 spec §2a layer 3, §4.8 criterion 6. `execute_training_attempt` is to
-    resolve `process=None` to `ProcessControl.system()`, and the autouse fixture
+    gh#163 spec §2a layer 3, §4.8 criterion 6. `execute_training_attempt`
+    resolves `process=None` to `ProcessControl.system()`, and the autouse fixture
     in tests/conftest.py patches `system` to return its poisoned control. So a
     test or client wrapper that forgets `process` fails loudly on a
     ProcessControlTripwire instead of spawning a real child or signalling a real
@@ -1895,8 +2491,8 @@ def test_process_control_tripwire_poisons_system(_process_control_tripwire,
     because one call would pass a poison whose `spawn` is inert, and spawn is
     the first field an attempt calls; and the field set is compared with the
     dataclass's, so a fifth field cannot go unpoisoned. The resolution path
-    itself (execute_training_attempt with `process` omitted) gets its own
-    control when that path lands (W5 execute).
+    itself (execute_training_attempt with `process` omitted) has its own
+    control, `test_process_control_tripwire_guards_the_resolution_path` below.
     """
     assert training.ProcessControl.system() is _process_control_tripwire, (
         "ProcessControl.system() is not the tests/conftest.py tripwire's poisoned control, so a "
@@ -1922,6 +2518,50 @@ def test_process_control_tripwire_poisons_system(_process_control_tripwire,
     for field, call in calls.items():
         with pytest.raises(process_control_tripwire_error, match=f"ProcessControl.{field} was"):
             call()
+
+
+def test_process_control_tripwire_guards_the_resolution_path(_process_control_tripwire,
+                                                             process_control_tripwire_error,
+                                                             tmp_path):
+    """execute_training_attempt with `process` omitted meets the tripwire, not the real OS.
+
+    gh#163 spec §4.8 criterion 6, the tripwire's resolution-path control (plan
+    D9). The tripwire test above shows only that the fixture patched what it
+    patched. This drives the path that matters: `process=None` resolves to
+    `ProcessControl.system()` inside `train()`, which under pytest returns the
+    fixture's poisoned control, so the attempt's first ProcessControl call,
+    `spawn`, raises the dedicated type.
+
+    SAFETY, two belts. Never weaken either.
+      1. The FIRST statement asserts that `system()` IS the fixture's poison.
+         That builds a dataclass and calls no field, so under knock-out 4(k)
+         (the fixture's one setattr deleted) this test fails before anything
+         is called.
+      2. The train command is `/nonexistent/cs2rl-tripwire-must-not-run`, so
+         even a real spawn (an implementation that captured the real factory
+         at import, which clause (vi) of the static test bans) fails to exec
+         and runs nothing.
+    Read statically: spawn is the first field the attempt calls
+    (`_LiveAttempt.spawn`, before `install_handlers`). When it raises, the
+    `except Exception` arm runs `finalize(kill_child=True)`, whose
+    `_signal_process_group` returns at `child is None` before any getpgid or
+    killpg; `release` restores no handler, since none was installed; and
+    `deliver_attempt` re-raises the error unchanged. The prepared heartbeat is
+    `_noop_heartbeat()`, so no fallback heartbeat thread starts. Every other
+    collaborator is the builder's fake: only `process` is popped.
+    """
+    assert training.ProcessControl.system() is _process_control_tripwire, (
+        "ProcessControl.system() is not the tests/conftest.py tripwire's poisoned control, so "
+        "the attempt below would reach the REAL spawn and killpg. Nothing was called.")
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(tmp_path,
+                         prepared=_prepared_source(
+                             tmp_path,
+                             train_command=["/nonexistent/cs2rl-tripwire-must-not-run"],
+                             heartbeat=_noop_heartbeat())))
+    kwargs.pop("process")
+    with pytest.raises(process_control_tripwire_error, match="ProcessControl.spawn was"):
+        mrl.execute_training_attempt(**kwargs)
 
 
 # ── Attempt outcome: exit mapping and completion evidence ──────────────────
@@ -1952,7 +2592,7 @@ def test_exit_zero_fails_when_completion_evidence_invalid(tmp_path):
     assert result.status is core.Status.FAILED
     assert result.reason == training.REASON_INVALID_EVIDENCE
     assert result.exit_code == 0
-    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "failed"
     assert "log_closed" in events
     assert "commit" in events[events.index("log_closed") + 1:]
@@ -1970,9 +2610,9 @@ def test_exit_zero_with_valid_evidence_completes(tmp_path):
     assert result.status is core.Status.COMPLETED
     assert result.reason is None
     assert result.exit_code == 0
-    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "completed"
-    payload = json.loads((kwargs["run_root"] / "result.json").read_text())
+    payload = json.loads((kwargs["attempt"].run_root / "result.json").read_text())
     assert payload["status"] == "completed"
     assert payload["exit_code"] == 0
     assert payload["last_step"] == effective
@@ -1988,13 +2628,14 @@ def test_dead_run_and_timeout_have_distinct_reasons(tmp_path):
             child=FakeChild(returncode=3, stdout=b"dead\n"),
             manifest=_make_manifest(),
         ))
-    (kwargs["run_root"] / "checkpoints").mkdir(exist_ok=True)
-    (kwargs["run_root"] / "checkpoints" / "dust2_policy_dead.pt").write_bytes(b"autopsy")
+    (kwargs["attempt"].run_root / "checkpoints").mkdir(exist_ok=True)
+    (kwargs["attempt"].run_root / "checkpoints" / "dust2_policy_dead.pt").write_bytes(b"autopsy")
     dead = mrl.execute_training_attempt(**kwargs)
     assert dead.status is core.Status.FAILED
     assert dead.reason == training.REASON_DEAD_RUN
     assert dead.exit_code == 3
-    assert json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "failed"
+    assert json.loads(
+        (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())["status"] == "failed"
 
     clock = _FakeClock()
     child = FakeChild(hold=True)
@@ -2027,5 +2668,5 @@ def test_dead_run_and_timeout_have_distinct_reasons(tmp_path):
     assert timed_out.reason == training.REASON_TIMEOUT
     assert timed_out.reason != dead.reason
     assert json.loads(
-        (kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"
+        (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]

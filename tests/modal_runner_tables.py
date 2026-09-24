@@ -100,7 +100,7 @@ MANIFEST = {
         "execute_training_attempt", "_checkpoint_generation", "publish_stable_checkpoint",
         "_start_checkpoint_watcher", "_record_publish_reason", "_publish_and_note",
         "_close_log_sink", "_is_dead_run", "_map_child_exit", "_metrics_summary",
-        "_optional_checkpoint_sha256", "_write_run_result", "_signal_process_group",
+        "_optional_checkpoint_sha256", "_write_run_result", "_signal_process_group", "_LiveAttempt",
         "_run_training_attempt"
     ],
 }

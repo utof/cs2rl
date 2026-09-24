@@ -1000,8 +1000,13 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # reviewer reads them. This moves one number. Change it deliberately, in the
 # commit that changes the seam, and say why.
 #
-# 283 is `len(classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0])`, the count
-# after the fold of gh#163's W5 types reviews. Against the W5 prepare commit's
+# 285 is `len(classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0])`, the count
+# after gh#163's W5 execute commit. Against the W5 types fold's 283: two
+# runner-side tests added in tests/test_modal_training.py
+# (`test_training_kwargs_routes_every_override`, the training builder's
+# self-test, and `test_process_control_tripwire_guards_the_resolution_path`, the
+# tripwire's resolution-path control), nothing removed, no destination moves.
+# 283, after the fold of the W5 types reviews, against the W5 prepare commit's
 # 282: one runner-side helper added in tests/test_modal_training.py
 # (`_KillSeamClauses`, the static kill-seam clauses moved out of
 # `test_kill_seam_static_safety` so that each checker is measured on its own),
@@ -1031,7 +1036,7 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # neither and it stays green with a stale count and N ungoverned names on disk.
 # Its own message says so: it is a DELETION detector. The addition detector is
 # `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
-GOVERNED_NAME_COUNT = 283
+GOVERNED_NAME_COUNT = 285
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.

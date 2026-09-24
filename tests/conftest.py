@@ -39,8 +39,9 @@ def simple_map(make_map):
 # `killpg(getpgid(1), SIGTERM)` (= `kill(-1, SIGTERM)`) ended the user's
 # desktop session. Under pytest this fixture makes `system()` return a control
 # whose every field raises, so that mistake fails loudly instead of spawning or
-# signalling. `test_process_control_tripwire_poisons_system`
-# (tests/test_modal_training.py) pins it.
+# signalling. `test_process_control_tripwire_poisons_system` and
+# `test_process_control_tripwire_guards_the_resolution_path`
+# (tests/test_modal_training.py) pin it.
 #
 # PITFALLS.
 #   * The module is LOOKED UP in sys.modules, never imported: any import of the
@@ -64,11 +65,10 @@ def simple_map(make_map):
 #       2. Code that runs at collection: module level, parametrize arguments.
 #       3. Module-, class- and session-scoped fixtures, setup and teardown.
 #     The only cover for all three is static, and partial: clause (iii) of
-#     test_kill_seam_static_safety (from the W5 execute commit) bans any read of
-#     `ProcessControl.system` under tests/ outside the two tripwire tests. It
-#     does not see an attempt driven with `process` forgotten from one of these
-#     windows; today no modal test file has a higher-scoped fixture or drives
-#     the attempt at collection.
+#     test_kill_seam_static_safety bans any `.system` read (on any receiver)
+#     under tests/ outside the two tripwire tests. It does not see an attempt
+#     driven with `process` forgotten from one of these windows; today no modal
+#     test file has a higher-scoped fixture or drives the attempt at collection.
 #   * The poison raises a RuntimeError subclass on purpose. The attempt swallows
 #     a ValueError from the handler install and a ProcessLookupError from
 #     getpgid/killpg, so a poison of either type would be silent exactly there.
