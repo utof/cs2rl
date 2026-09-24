@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 import scripts.modal_runner as mrl                     # noqa: E402, I001
 from scripts.modal_runner import state, training       # noqa: E402, I001
-from tests.test_modal_runner import FakeArtifactIndex  # noqa: E402, I001
+from tests.test_modal_state import FakeArtifactIndex   # noqa: E402, I001
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
 CKPT_OK = b"ckpt-bytes"

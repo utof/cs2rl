@@ -361,8 +361,10 @@ def test_policy_max_turn_speed_assert(simple_map):
 def test_cli_flags_declared_default_none():
     """The parser is built inline under ``if __name__ == "__main__"`` (not
     importable), so check the source: each flag is declared, defaults to None
-    (⇒ env default) and has the matching dest. The modal arity mirror is
-    covered by tests/test_modal_runner.py."""
+    (⇒ env default) and has the matching dest. The modal arity mirror's flag
+    names are checked against train.py by
+    `test_live_train_option_mirror_matches_train_py` in
+    tests/test_modal_request.py."""
     import re
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()

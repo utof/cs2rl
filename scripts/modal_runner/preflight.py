@@ -6,10 +6,9 @@ import os
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import replace
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from . import checkpoint, core, state
 from .checkpoint import normalize_config_for_transport
@@ -24,8 +23,8 @@ from .commands import (
 from .core import (
     MANIFEST_FILENAME,
     PROVENANCE_NAME,
+    AttemptContext,
     FileProvenance,
-    LockLike,
     Manifest,
     PreparedSource,
     Status,
@@ -39,14 +38,62 @@ if TYPE_CHECKING:
     from .request import RunRequest
 
 
-class ReloadingVolume(Protocol):
-    """In-container Volume handle. reload before STATUS writes; commit after them."""
+@dataclass(frozen=True)
+class ExpectedSource:
+    """The source bundle prepare must find on the Volume, and the provenance it must carry.
 
-    def reload(self) -> None:
-        ...
+    `archive_sha256` is checked after `Volume.reload()`; `commit` and `tree`
+    are checked against the extracted bundle's provenance sidecar. One value
+    because they are one fact, the client's bundle, and are checked together.
+    """
 
-    def commit(self) -> None:
-        ...
+    archive_path: Path
+    archive_sha256: str
+    commit: str
+    tree: str
+
+
+@dataclass(frozen=True)
+class RemoteResume:
+    """The checkpoint an attempt resumes from, on the Volume mount, and its pinned hash.
+
+    One value because `sha256` means nothing without `path`; no resume is
+    `None`, not a RemoteResume with an empty path. PITFALL:
+    `_validate_remote_resume(path, expected_sha256)` keeps its positional
+    signature (the binding campaign's prepare-validator consumer and
+    `test_patch_target_dichotomy` call it that way), so the caller unpacks
+    this; never pass the object in.
+    """
+
+    path: Path
+    sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class PreflightHost:
+    """What prepare takes from the container. Production uses the defaults.
+
+    `run` runs the install, dump-config and CUDA-probe commands. `parent_env`
+    is what the child environment is built from (None: `os.environ`, read
+    when prepare runs). `ephemeral_parent` is where the source is extracted
+    (None: the system temp dir). `start_heartbeat` starts the preflight
+    heartbeat (None: this module's own `start_heartbeat_worker`, the name it
+    from-imports from state, looked up when prepare runs). Tests replace these;
+    production never passes a PreflightHost.
+
+    PITFALL, when defaults are resolved (gh#163): `run` is bound to
+    `subprocess.run` at import, as prepare's own `run=subprocess.run` default
+    was before W5, so a monkeypatch of the global `subprocess.run` does not
+    reach it; inject `run` instead. The three None defaults are resolved at
+    call time, `start_heartbeat`'s through preflight's from-imported copy: a
+    patch of `state.start_heartbeat_worker` does not reach it, so inject
+    `start_heartbeat` (or patch `preflight.start_heartbeat_worker`).
+    """
+
+    run: Callable[..., subprocess.CompletedProcess[object]] = subprocess.run
+    parent_env: Mapping[str, str] | None = None
+    ephemeral_parent: Path | None = None
+    start_heartbeat: Callable[..., object] | None = None
 
 
 def _verify_extracted_provenance(source_dir: Path, expected_commit: str,
@@ -79,27 +126,164 @@ def _hash_dumped_config(run_root: Path) -> str:
     return sha256_bytes(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode())
 
 
+def _verify_archive_then_enter_preparing(attempt: AttemptContext, *,
+                                         source: ExpectedSource) -> None:
+    """Phase 1: reload the Volume, verify the uploaded archive, and enter PREPARING.
+
+    Reload FIRST: Volume.reload() replaces the mount, so a STATUS written
+    before it could be dropped, and the archive appears on the mount only
+    after it. The archive is then trusted by its hash alone. PREPARING is
+    written only when no STATUS exists yet, and committed before this returns,
+    so it is durable before the orchestrator starts the heartbeat.
+    """
+    attempt.volume.reload()
+    archive_path = source.archive_path
+    if not archive_path.is_file():
+        raise ValidationError(f"source archive missing after Volume.reload(): {archive_path}")
+    digest = core.sha256_file(archive_path)
+    if digest != source.archive_sha256:
+        raise ValidationError(f"source archive sha256 {digest} != expected {source.archive_sha256}")
+    if read_status(attempt.run_root) is None:
+        state.transition_status(attempt.run_root,
+                                Status.PREPARING,
+                                now=attempt.clock.now(),
+                                attempt_id=attempt.attempt_id,
+                                lock=attempt.lock)
+        attempt.volume.commit()
+
+
+def _extract_verified_source(attempt: AttemptContext, *, source: ExpectedSource, source_dir: Path,
+                             manifest: Manifest | None) -> None:
+    """Phase 3: extract the archive into `source_dir`, check its provenance, write the manifest.
+
+    PITFALL: `source_dir` is the orchestrator's staging directory, and the
+    orchestrator creates it, not this phase. If this phase created it and then
+    raised (a provenance mismatch), the orchestrator would never receive it,
+    the failure arm could not remove it, and the extracted tree would survive
+    until a finalizer ran (the resource-acquisition rule: `prepare_remote_source`'s
+    PITFALL).
+    """
+    safe_extract_git_archive(source.archive_path, source_dir)
+    _verify_extracted_provenance(source_dir, source.commit, source.tree)
+    if manifest is not None:
+        atomic_write_json(attempt.run_root / MANIFEST_FILENAME, manifest.to_dict())
+        attempt.volume.commit()
+
+
+@dataclass(frozen=True)
+class _BuiltSource:
+    """What phase 4 hands phase 5 for the PreparedSource and the train command.
+
+    A named value rather than a tuple: `resume_str` and `config_hash` are both
+    strings (one optional), so two swapped tuple positions would type-check
+    and fail only at run time. `resume_str` is the resume path exactly as the
+    dump-config command received it; the train command must receive the same.
+    """
+
+    child_env: dict[str, str]
+    resume_str: str | None
+    config_hash: str
+
+
+def _build_in_source(
+    attempt: AttemptContext,
+    *,
+    request: RunRequest,
+    source_dir: Path,
+    resume: RemoteResume | None,
+    manifest: Manifest | None,
+    wandb_api_key: str | None,
+    host: PreflightHost,
+) -> _BuiltSource:
+    """Phase 4, BUILDING: install, validate the resume, dump and hash the config, then probe.
+
+    The order is the contract: the install runs before the resume is
+    validated, the resume is validated before the cheap dump-config run, the
+    dumped config is hashed and the manifest rewritten with that hash, and the
+    CUDA probe runs last. BUILDING gets no commit of its own: the next Volume
+    commit (the manifest rewrite's, or a heartbeat's) carries it, and adding
+    one changes the effect order, which the gh#163 refactor keeps identical to
+    the runner's before it (no test pins it: gh#236).
+    `host.parent_env=None` reads `os.environ` here, at call time. `resume` is
+    unpacked into `_validate_remote_resume`'s positional arguments, never
+    passed whole (its PITFALL, on RemoteResume).
+    """
+    state.transition_status(attempt.run_root,
+                            Status.BUILDING,
+                            now=attempt.clock.now(),
+                            attempt_id=attempt.attempt_id,
+                            lock=attempt.lock)
+    child_env = build_child_env(
+        host.parent_env if host.parent_env is not None else os.environ,
+        wandb_enabled=request.wandb_secret_name is not None,
+        wandb_api_key=wandb_api_key,
+    )
+    cwd = os.fspath(source_dir)
+    host.run(build_install_command(source_dir), cwd=cwd, shell=False, env=child_env, check=True)
+    resume_str: str | None = None
+    if resume is not None:
+        resume_str = os.fspath(resume.path)
+        _validate_remote_resume(resume.path, resume.sha256)
+    host.run(
+        build_dump_config_command(request, resume_str),
+        cwd=cwd,
+        shell=False,
+        env=child_env,
+        check=True,
+    )
+    config_hash = _hash_dumped_config(attempt.run_root)
+    if manifest is not None:
+        atomic_write_json(
+            attempt.run_root / MANIFEST_FILENAME,
+            replace(manifest, config_hash=config_hash).to_dict(),
+        )
+        attempt.volume.commit()
+    host.run(build_cuda_probe_command(), cwd=cwd, shell=False, env=child_env, check=True)
+    return _BuiltSource(child_env=child_env, resume_str=resume_str, config_hash=config_hash)
+
+
+def _fail_preflight(attempt: AttemptContext, *, heartbeat: object | None,
+                    staging: tempfile.TemporaryDirectory[str] | None) -> None:
+    """The failure arm: stop the heartbeat, write BUILD_FAILED, remove the extracted source.
+
+    In this order, which is the pre-W5 arm's: the heartbeat is stopped and
+    joined first, then BUILD_FAILED is written under the attempt's lock and
+    committed, but only while this attempt still owns STATUS, then the staging
+    directory is cleaned up. `heartbeat` and `staging` are None when the
+    failure came before the orchestrator acquired them. The caller re-raises
+    the original error afterwards, so the heartbeat stop and the BUILD_FAILED
+    write each swallow their own exception rather than replace it.
+    """
+    try:
+        stop_heartbeat(heartbeat)
+    except Exception:
+        # Do not hide the original preflight error.
+        pass
+    current = read_status(attempt.run_root)
+    if current is not None and current.attempt_id == attempt.attempt_id:
+        try:
+            state.transition_status(attempt.run_root,
+                                    Status.BUILD_FAILED,
+                                    now=attempt.clock.now(),
+                                    attempt_id=attempt.attempt_id,
+                                    lock=attempt.lock)
+            attempt.volume.commit()
+        except Exception:
+            # Do not hide the original preflight error.
+            pass
+    if staging is not None:
+        staging.cleanup()
+
+
 def prepare_remote_source(
     *,
-    volume: ReloadingVolume,
-    archive_path: Path,
-    expected_archive_sha256: str,
-    expected_commit: str,
-    expected_tree: str,
+    attempt: AttemptContext,
     request: RunRequest,
-    run_root: Path,
-    attempt_id: str,
-    lock: LockLike,
-    run: Callable[..., subprocess.CompletedProcess[object]] = subprocess.run,
-    start_heartbeat: Callable[..., object] | None = None,
-    ephemeral_parent: Path | None = None,
-    parent_env: Mapping[str, str] | None = None,
-    wandb_api_key: str | None = None,
-    now: Callable[[], datetime] | None = None,
-    remote_resume: str | Path | None = None,
-    expected_resume_sha256: str | None = None,
+    source: ExpectedSource,
+    resume: RemoteResume | None = None,
     manifest: Manifest | None = None,
-    on_ready: Callable[[PreparedSource], object] | None = None,
+    wandb_api_key: str | None = None,
+    host: PreflightHost | None = None,
 ) -> PreparedSource:
     """Reload, verify, extract, install, dump, probe; hand off a live heartbeat.
 
@@ -110,104 +294,62 @@ def prepare_remote_source(
     never reach this function. Success transfers heartbeat ownership to the
     caller; every exception path stops/joins first, then writes the terminal
     state under the same lock.
+
+    The body is the phase sequence and nothing more: phase 1 verifies the
+    archive and enters PREPARING; phase 2, here, starts the heartbeat; phase 3
+    extracts and verifies the source and writes the manifest; phase 4 is
+    BUILDING; phase 5, here, builds the PreparedSource. `_fail_preflight` is
+    the failure arm. Each phase and the arm take `attempt` positionally and
+    everything else by keyword. `attempt` is the one AttemptContext production
+    also hands to training (same lock, run_root and Volume); `host=None` is
+    production's `PreflightHost()`.
+
+    PITFALL, the resource-acquisition rule (gh#163): every
+    statement that acquires something the failure arm must release,
+    `start_heartbeat(...)` and `tempfile.TemporaryDirectory(...)`, is assigned
+    HERE, in this function's own scope, before any phase that can fail uses
+    it. Moving either into a phase function makes a failure in that phase
+    leak it: the arm sees only what this scope holds.
+    `test_prepare_rejects_provenance_sidecar_mismatch` pins the staging half:
+    with the staging created inside a phase, its extracted tree survives the
+    failure and that test's ephemeral-directory assertion goes red.
+
+    `on_ready` was removed in W5: nothing in production passed it.
     """
-    now_fn = now if now is not None else (lambda: datetime.now(UTC))
-    run_root = Path(run_root)
+    host = PreflightHost() if host is None else host
+    start_heartbeat = (start_heartbeat_worker
+                       if host.start_heartbeat is None else host.start_heartbeat)
     heartbeat: object | None = None
     staging: tempfile.TemporaryDirectory[str] | None = None
-    if start_heartbeat is None:
-        start_heartbeat = start_heartbeat_worker
     try:
-        volume.reload()
-        archive_path = Path(archive_path)
-        if not archive_path.is_file():
-            raise ValidationError(f"source archive missing after Volume.reload(): {archive_path}")
-        digest = core.sha256_file(archive_path)
-        if digest != expected_archive_sha256:
-            raise ValidationError(
-                f"source archive sha256 {digest} != expected {expected_archive_sha256}")
-        if read_status(run_root) is None:
-            state.transition_status(run_root,
-                                    Status.PREPARING,
-                                    now=now_fn(),
-                                    attempt_id=attempt_id,
-                                    lock=lock)
-            volume.commit()
+        _verify_archive_then_enter_preparing(attempt, source=source)
         heartbeat = start_heartbeat(
-            run_root=run_root,
-            attempt_id=attempt_id,
-            lock=lock,
-            now=now_fn,
-            commit=volume.commit,
+            run_root=attempt.run_root,
+            attempt_id=attempt.attempt_id,
+            lock=attempt.lock,
+            now=attempt.clock.now,
+            commit=attempt.volume.commit,
         )
-        if ephemeral_parent is not None:
-            Path(ephemeral_parent).mkdir(parents=True, exist_ok=True)
-        staging = tempfile.TemporaryDirectory(prefix="cs2rl-src-", dir=ephemeral_parent)
+        if host.ephemeral_parent is not None:
+            host.ephemeral_parent.mkdir(parents=True, exist_ok=True)
+        staging = tempfile.TemporaryDirectory(prefix="cs2rl-src-", dir=host.ephemeral_parent)
         source_dir = Path(staging.name)
-        safe_extract_git_archive(archive_path, source_dir)
-        _verify_extracted_provenance(source_dir, expected_commit, expected_tree)
-        if manifest is not None:
-            atomic_write_json(run_root / MANIFEST_FILENAME, manifest.to_dict())
-            volume.commit()
-        state.transition_status(run_root,
-                                Status.BUILDING,
-                                now=now_fn(),
-                                attempt_id=attempt_id,
-                                lock=lock)
-        child_env = build_child_env(
-            parent_env if parent_env is not None else os.environ,
-            wandb_enabled=request.wandb_secret_name is not None,
-            wandb_api_key=wandb_api_key,
-        )
-        cwd = os.fspath(source_dir)
-        run(build_install_command(source_dir), cwd=cwd, shell=False, env=child_env, check=True)
-        resume_str = os.fspath(remote_resume) if remote_resume is not None else None
-        if resume_str is not None:
-            _validate_remote_resume(Path(resume_str), expected_resume_sha256)
-        run(
-            build_dump_config_command(request, resume_str),
-            cwd=cwd,
-            shell=False,
-            env=child_env,
-            check=True,
-        )
-        config_hash = _hash_dumped_config(run_root)
-        if manifest is not None:
-            atomic_write_json(
-                run_root / MANIFEST_FILENAME,
-                replace(manifest, config_hash=config_hash).to_dict(),
-            )
-            volume.commit()
-        run(build_cuda_probe_command(), cwd=cwd, shell=False, env=child_env, check=True)
-        prepared = PreparedSource(
+        _extract_verified_source(attempt, source=source, source_dir=source_dir, manifest=manifest)
+        built = _build_in_source(attempt,
+                                 request=request,
+                                 source_dir=source_dir,
+                                 resume=resume,
+                                 manifest=manifest,
+                                 wandb_api_key=wandb_api_key,
+                                 host=host)
+        return PreparedSource(
             source_dir=source_dir,
-            child_env=child_env,
-            train_command=build_train_command(build_train_argv(request, resume_str)),
+            child_env=built.child_env,
+            train_command=build_train_command(build_train_argv(request, built.resume_str)),
             heartbeat=heartbeat,
-            config_hash=config_hash,
+            config_hash=built.config_hash,
             _staging=staging,
         )
-        if on_ready is not None:
-            on_ready(prepared)
-        return prepared
     except Exception:
-        try:
-            stop_heartbeat(heartbeat)
-        except Exception:
-            # Do not hide the original preflight error.
-            pass
-        current = read_status(run_root)
-        if current is not None and current.attempt_id == attempt_id:
-            try:
-                state.transition_status(run_root,
-                                        Status.BUILD_FAILED,
-                                        now=now_fn(),
-                                        attempt_id=attempt_id,
-                                        lock=lock)
-                volume.commit()
-            except Exception:
-                # Do not hide the original preflight error.
-                pass
-        if staging is not None:
-            staging.cleanup()
+        _fail_preflight(attempt, heartbeat=heartbeat, staging=staging)
         raise

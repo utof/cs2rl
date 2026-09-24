@@ -317,8 +317,8 @@ def ensure_blob(volume: object, client_path: PurePosixPath, local_path: Path) ->
 # can return: `prior_checkpoint_or_raise` indexes it directly, so a token added
 # to the protocol without a row here raises a bare KeyError out of launch
 # instead of a ValidationError. `test_launch_checkpoint_errors_is_total` checks
-# this map against the hand-written `PROTOCOL_TOKENS` tuple in
-# tests/test_modal_runner.py, which catches a row deleted from here — but not a
+# this map against the hand-written `PROTOCOL_TOKENS` tuple; both live in
+# tests/test_modal_client.py. That catches a row deleted from here — but not a
 # token added to `verify_checkpoint` alone, since nothing derives that tuple
 # from the protocol. Adding a token is a three-file edit, by hand.
 _LAUNCH_CHECKPOINT_ERRORS = {
@@ -724,37 +724,37 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
         return {"status": mrl.REDELIVERED, "run_id": run_id}
     request = _request_from_payload(payload)
     run_root = _remote_run_root(request.run_id)
-    lock = threading.Lock()
+    # One attempt for both phases: the same lock, run_root and Volume, on the
+    # default (real) clock.
+    attempt = mrl.AttemptContext(attempt_id=attempt_id,
+                                 run_root=run_root,
+                                 lock=threading.Lock(),
+                                 volume=volume)
     resume = payload.get("resume_mount_path")
     resume_sha = payload.get("resume_sha256")
     manifest = build_remote_manifest(payload)
     prepared = mrl.prepare_remote_source(
-        volume=volume,
-        archive_path=Path(str(payload["source_mount_path"])),
-        expected_archive_sha256=str(payload["source_archive_sha256"]),
-        expected_commit=str(payload["git_sha"]),
-        expected_tree=str(payload["tree"]),
+        attempt=attempt,
         request=request,
-        run_root=run_root,
-        attempt_id=attempt_id,
-        lock=lock,
-        remote_resume=None if resume is None else str(resume),
-        expected_resume_sha256=None if resume_sha is None else str(resume_sha),
+        source=mrl.ExpectedSource(
+            archive_path=Path(str(payload["source_mount_path"])),
+            archive_sha256=str(payload["source_archive_sha256"]),
+            commit=str(payload["git_sha"]),
+            tree=str(payload["tree"]),
+        ),
+        resume=None if resume is None else mrl.RemoteResume(
+            path=Path(str(resume)), sha256=None if resume_sha is None else str(resume_sha)),
         wandb_api_key=os.environ.get("WANDB_API_KEY") if payload.get("wandb_enabled") else None,
         manifest=manifest,
     )
     if prepared.config_hash is not None:
         manifest = replace(manifest, config_hash=prepared.config_hash)
     result = mrl.execute_training_attempt(
-        registry=registry,
-        attempt_id=attempt_id,
-        run_root=run_root,
+        attempt=attempt,
         prepared=prepared,
-        commit=volume.commit,
-        lock=lock,
-        now=lambda: datetime.now(UTC),
-        timeout=timedelta(minutes=request.timeout_minutes),
+        registry=registry,
         manifest=manifest,
+        timeout=timedelta(minutes=request.timeout_minutes),
         already_claimed=True,
     )
     if result == mrl.REDELIVERED:

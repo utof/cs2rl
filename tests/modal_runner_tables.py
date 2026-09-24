@@ -2,8 +2,9 @@
 
 Every gate that needs the module list reads it from here: the package-shape
 gates (tests/test_modal_runner_package_shape.py), the packaging gates
-(tests/test_modal_packaging.py) and the mount and surface gates
-(tests/test_modal_client.py). Before this file, RUNNER_MODULES, the MANIFEST
+(tests/test_modal_packaging.py), the mount and surface gates
+(tests/test_modal_client.py) and the binding census
+(tests/test_modal_patch_binding_census.py). Before this file, RUNNER_MODULES, the MANIFEST
 keys and the DEPENDENCIES keys stated the list three times across two test
 files, and a new module turned most of those gates red with differently worded
 messages.
@@ -15,7 +16,27 @@ an import made only under TYPE_CHECKING); (2) add a line for it to MODULE MAP
 in the docstring of scripts/modal_runner/__init__.py; (3) `git add` the new
 file. The mount and package-population gates in tests/test_modal_client.py
 read `git ls-files`, so until step 3 they report the module missing although it
-is on disk.
+is on disk. (4) Create its test file, tests/test_modal_<module>.py (the path
+RUNNER_TEST_FILES derives from this list), holding at least one test of the
+module with its seam-manifest line, and `git add` it too: the importer census
+in tests/test_modal_packaging.py reads `git ls-files` as well. The seam gate,
+the reach floor and the binding census read RUNNER_TEST_FILES, so they expect
+the file from step (1) on: a missing one fails the seam gate's source reader,
+which names it, and one with no test in the seam manifest fails the floor's
+scope check. THE PLACEMENT RULE FOR RUNNER TESTS in
+tests/test_modal_packaging.py says what a test there must reach and what
+adding one costs.
+
+A MODULE THAT SPAWNS OR SIGNALS PROCESSES goes through
+`training.ProcessControl`, the kill seam: `test_kill_seam_static_safety` in
+tests/test_modal_training.py reads every module of the package (it too
+expects the new file from step (1) on) and fails on a real `os.killpg`,
+`os.getpgid`, `os.kill`, `signal.signal` or `subprocess.Popen` outside
+`ProcessControl.system()`, and on any `killpg`/`getpgid` outside the
+process-group guard in `training._signal_process_group`. Its tests hand the
+module a ProcessControl whose `spawn`, `getpgid` and `killpg` are fakes (the
+tests/conftest.py tripwire makes the real `system()` raise under pytest).
+Read that test's clauses before adding either.
 
 Data only: no function and no import, of the package or anything else, so
 importing this file from any test module costs nothing and cannot collect a
@@ -34,7 +55,8 @@ MANIFEST = {
         "CHECKPOINT_PUBLISH_REASON_NAME", "DEAD_CHECKPOINT_NAME", "PREBUILT_PYTHON",
         "ValidationError", "Status", "mounted_path", "sha256_file", "FileProvenance",
         "SCHEMA_VERSION", "Manifest", "HEARTBEAT_INTERVAL", "Registry", "LockLike", "sha256_bytes",
-        "CompletionEvidence", "PreparedSource"
+        "CompletionEvidence", "PreparedSource", "_utc_now", "_event_wait", "Clock",
+        "ReloadingVolume", "AttemptContext"
     ],
     "request.py": [
         "ALLOWED_MAPS", "ALLOWED_GPUS", "ALLOWED_NUM_ENVS", "ALLOWED_CPU_CORES", "DEFAULT_GPU",
@@ -76,18 +98,21 @@ MANIFEST = {
         "build_train_command", "build_dump_config_command", "build_cuda_probe_command"
     ],
     "preflight.py": [
-        "ReloadingVolume", "_verify_extracted_provenance", "_validate_remote_resume",
-        "_hash_dumped_config", "prepare_remote_source"
+        "ExpectedSource", "RemoteResume", "PreflightHost", "_verify_extracted_provenance",
+        "_validate_remote_resume", "_hash_dumped_config", "_verify_archive_then_enter_preparing",
+        "_extract_verified_source", "_BuiltSource", "_build_in_source", "_fail_preflight",
+        "prepare_remote_source"
     ],
     "training.py": [
         "RunResult", "CHECKPOINT_SETTLE_SECONDS", "TERM_GRACE_SECONDS", "DEAD_RUN_EXIT_CODE",
         "POLL_INTERVAL_SECONDS", "REASON_SIGNAL", "REASON_TIMEOUT", "REASON_DEAD_RUN",
         "REASON_INVALID_EVIDENCE", "REASON_NONZERO_EXIT", "REASON_ERROR", "TrainingAttemptResult",
-        "_UnusedArtifacts", "PublishOutcome", "_tee_stream", "execute_training_attempt",
-        "_checkpoint_generation", "publish_stable_checkpoint", "_start_checkpoint_watcher",
-        "_record_publish_reason", "_publish_and_note", "_close_log_sink", "_is_dead_run",
-        "_map_child_exit", "_metrics_summary", "_optional_checkpoint_sha256", "_write_run_result",
-        "_signal_process_group", "_run_training_attempt"
+        "_UnusedArtifacts", "PublishOutcome", "_tee_stream", "ProcessControl",
+        "execute_training_attempt", "_checkpoint_generation", "publish_stable_checkpoint",
+        "_start_checkpoint_watcher", "_record_publish_reason", "_publish_and_note",
+        "_close_log_sink", "_is_dead_run", "_map_child_exit", "_metrics_summary",
+        "_optional_checkpoint_sha256", "_write_run_result", "_signal_process_group", "_LiveAttempt",
+        "_run_training_attempt"
     ],
 }
 # Runtime import edges between package modules. core stays a leaf. A new edge
@@ -137,3 +162,15 @@ RUNNER_MODULES = tuple(filename.removesuffix(".py") for filename in MANIFEST)
 # Each module's repo-relative path, in the same order: the population the
 # module-scope gates must read.
 RUNNER_PATHS = tuple(f"scripts/modal_runner/{module}.py" for module in RUNNER_MODULES)
+# Each module's test file, in the same order: tests/test_modal_<module>.py. This
+# is the one list of runner test files. The seam gate, its reach floor and the
+# importer list `_IMPORTERS` (all in tests/test_modal_packaging.py) and the
+# binding census (tests/test_modal_patch_binding_census.py) read it under this
+# name, so none of them holds a retyped copy, and a module added above brings
+# its test file into every one of them (ADDING A MODULE, step 4). A runner test
+# in a tests/test_modal_<x>.py that is not derived here is invisible to the
+# seam gate, the floor and the binding census (gh#233).
+# PITFALL: derive a module from a test file name through this tuple and
+# RUNNER_MODULES, never through a `tests/test_modal_*.py` glob, which also
+# matches test files that belong to no module.
+RUNNER_TEST_FILES = tuple(f"tests/test_modal_{module}.py" for module in RUNNER_MODULES)

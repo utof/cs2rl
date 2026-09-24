@@ -11,9 +11,11 @@ from __future__ import annotations
 import enum
 import hashlib
 import tempfile
-from collections.abc import Mapping
+import threading
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
@@ -215,3 +217,87 @@ class PreparedSource:
                 f"child_env_keys={sorted(self.child_env)!r}, "
                 f"train_command={self.train_command!r}, "
                 f"config_hash={self.config_hash!r})")
+
+
+def _utc_now() -> datetime:
+    """The real wall clock, timezone-aware: `Clock.now`'s default.
+
+    A module function, not a lambda default, for two reasons: the package-shape
+    `import-time` clause rejects a lambda in a dataclass default, and one named
+    object lets preflight and training default to the same clock.
+    """
+    return datetime.now(UTC)
+
+
+def _event_wait(event: threading.Event, seconds: float) -> bool:
+    """`event.wait(seconds)`: `Clock.wait`'s default, the fallback heartbeat's interruptible wait.
+
+    Returns True iff the event was set (the heartbeat was told to stop) before
+    the timeout. A module function for the same reasons as `_utc_now`.
+    """
+    return event.wait(seconds)
+
+
+@dataclass(frozen=True)
+class Clock:
+    """Every time-dependent effect of an attempt goes through here.
+
+    `now` stamps STATUS writes, heartbeats and checkpoint sidecars. `sleep` is
+    BOTH the checkpoint settle window and the SIGTERM grace poll: one callable
+    on purpose, because tests rely on a single recording `sleep` seeing both.
+    `wait` is the fallback heartbeat's interruptible wait. A test swaps one
+    field with `dataclasses.replace(clock, sleep=...)` and keeps the others.
+
+    PITFALL, when defaults are resolved (gh#163): all three are bound
+    when this module is imported. A test that monkeypatches the global
+    `time.sleep` therefore does NOT reach `Clock().sleep`; inject a Clock. The
+    W5 census found no test that patches `time.sleep` in any spelling.
+    """
+
+    now: Callable[[], datetime] = _utc_now
+    sleep: Callable[[float], None] = time.sleep
+    wait: Callable[[threading.Event, float], bool] = _event_wait
+
+
+# Moved here from preflight.py in W5 (gh#163): `AttemptContext` holds one, and
+# both preflight and training read that, so it is shared vocabulary now.
+class ReloadingVolume(Protocol):
+    """In-container Volume handle. reload before STATUS writes; commit after them."""
+
+    def reload(self) -> None:
+        ...
+
+    def commit(self) -> None:
+        ...
+
+
+@dataclass(frozen=True)
+class AttemptContext:
+    """One delivery of one run: who writes its state, where, under which lock, on which clock.
+
+    Both phases take the same one. Production builds it once and hands it to
+    prepare and then to training, so "the same lock, the same run_root, the
+    same Volume" is one object instead of three pairs of arguments that must
+    agree. Prepare's status transitions are `transition_status(run_root,
+    status, now=clock.now(), attempt_id=..., lock=...)`. PREPARING and
+    BUILD_FAILED are each followed by `volume.commit()`, and so are training's
+    TRAINING and terminal transitions. BUILDING is NOT: no commit of its own
+    follows it, and the next commit of the Volume carries it (a heartbeat
+    beat, the manifest rewrite's, or the next transition's). Keep it so when
+    prepare's phases change: a commit added after BUILDING changes prepare's
+    effect order, which the gh#163 refactor keeps identical to the runner's
+    before it (no test pins that order yet: gh#236).
+
+    PITFALL: it holds the Volume, not a bare `commit`. Prepare must reload and
+    commit the SAME Volume, and a separate `commit` argument could name a
+    different one; the tests' RecordingVolume.reload() discards uncommitted
+    writes, so that split is a real hazard. In a test, change one field with
+    `dataclasses.replace(ctx, volume=...)`: it keeps the lock, and a fresh
+    AttemptContext with a new lock passes most tests while testing less.
+    """
+
+    attempt_id: str
+    run_root: Path
+    lock: LockLike
+    volume: ReloadingVolume
+    clock: Clock = field(default_factory=Clock)

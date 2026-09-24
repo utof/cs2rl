@@ -10,8 +10,9 @@ import pytest
 
 from scripts.modal_runner import checkpoint as checkpoints
 from scripts.modal_runner import core, preflight, state, training
-from tests import test_modal_runner as runner
 from tests.modal_patch_binding_campaign import BINDING_SITES, binding_target
+from tests.modal_test_helpers import FakeChild, _aware, _noop_heartbeat
+from tests.test_modal_training import _consume_training_kwargs, _prepared_source, _training_kwargs
 
 # Repository root: the campaign's children read files by repo-relative path.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -231,7 +232,7 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
             return training.PublishOutcome((111, 222))
 
         consume = _install(monkeypatch, site, training._start_checkpoint_watcher, publish)
-        now, commit, sleep = runner._aware, lambda: None, lambda seconds: None
+        now, commit, sleep = _aware, lambda: None, lambda seconds: None
         consume(run_root=tmp_path, now=now, commit=commit, sleep=sleep)
         _record_observation(record_property, site, consume, [(tmp_path, None),
                                                              (tmp_path, (111, 222))],
@@ -257,10 +258,7 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
                 return "ab" * 32
 
         consume = _install(monkeypatch, site, training.publish_stable_checkpoint, replacement)
-        outcome = consume(tmp_path,
-                          now=runner._aware,
-                          commit=lambda: None,
-                          sleep=lambda seconds: None)
+        outcome = consume(tmp_path, now=_aware, commit=lambda: None, sleep=lambda seconds: None)
         assert outcome.reason is None
         # Annotated: the terminal-hasher row adds a str digest to each.
         expected: dict[str, object] = {"calls": [checkpoint]}
@@ -288,14 +286,16 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
                 pass
 
         # Create fixtures before replacing thread construction.
-        child = runner.FakeChild(returncode=2)
+        child = FakeChild(returncode=2)
         sleeps = []
-        kwargs = runner._consume_training_kwargs(
-            runner._training_kwargs(tmp_path,
-                                    child=child,
-                                    start_heartbeat=runner._noop_heartbeat,
-                                    signal_signal=lambda *args: None,
-                                    sleep=sleeps.append))
+        waits = []
+        kwargs = _consume_training_kwargs(
+            _training_kwargs(tmp_path,
+                             child=child,
+                             signal_signal=lambda *args: None,
+                             sleep=sleeps.append,
+                             prepared=_prepared_source(tmp_path, heartbeat=_noop_heartbeat()),
+                             wait=lambda *call: waits.append(call)))
         threading = training.threading
         monkeypatch.setattr(
             training, "threading",
@@ -326,35 +326,43 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
         if site == "attempt-watcher":
             _record_observation(record_property, site, training._run_training_attempt,
                                 [{
-                                    key: kwargs[key]
-                                    for key in ("run_root", "now", "commit", "sleep")
+                                    "run_root": kwargs["attempt"].run_root,
+                                    "now": kwargs["attempt"].clock.now,
+                                    "commit": kwargs["attempt"].volume.commit,
+                                    "sleep": kwargs["attempt"].clock.sleep
                                 }], seen)
             assert seen == [{
-                key: kwargs[key]
-                for key in ("run_root", "now", "commit", "sleep")
+                "run_root": kwargs["attempt"].run_root,
+                "now": kwargs["attempt"].clock.now,
+                "commit": kwargs["attempt"].volume.commit,
+                "sleep": kwargs["attempt"].clock.sleep
             }], "attempt-watcher: exact start arguments"
         else:
             common = {
-                "now": kwargs["now"](),
-                "attempt_id": kwargs["attempt_id"],
-                "lock": kwargs["lock"]
+                "now": kwargs["attempt"].clock.now(),
+                "attempt_id": kwargs["attempt"].attempt_id,
+                "lock": kwargs["attempt"].lock
             }
             _record_observation(record_property, site, training._run_training_attempt,
-                                [(kwargs["run_root"], core.Status.TRAINING, common),
-                                 (kwargs["run_root"], core.Status.FAILED, common)], seen)
-            assert seen == [(kwargs["run_root"], core.Status.TRAINING, common),
-                            (kwargs["run_root"], core.Status.FAILED, common)
+                                [(kwargs["attempt"].run_root, core.Status.TRAINING, common),
+                                 (kwargs["attempt"].run_root, core.Status.FAILED, common)], seen)
+            assert seen == [(kwargs["attempt"].run_root, core.Status.TRAINING, common),
+                            (kwargs["attempt"].run_root, core.Status.FAILED, common)
                             ], "attempt-transition: exact status sequence"
         assert json.loads(
-            (kwargs["run_root"] / core.STATUS_FILENAME).read_text())["status"] == "failed"
+            (kwargs["attempt"].run_root / core.STATUS_FILENAME).read_text())["status"] == "failed"
         # No polling dependency: the child has exited before the attempt's first
         # poll() check, so the loop breaks there and never waits or sleeps.
         # `child.wait_timeouts` watches the loop's `child.wait(timeout=...)`;
-        # `sleeps` watches its sleep fallback for a child without `wait`. The
-        # heartbeat `wait` is not watched: this row injects none, and the default
-        # reaches only the heartbeat starter, which `_noop_heartbeat` ignores. A
-        # row that polled would depend on timing.
+        # `sleeps` watches its sleep fallback for a child without `wait`. A row
+        # that polled would depend on timing. `waits` watches the attempt's
+        # `Clock.wait`, which only the fallback heartbeat reads: the row hands
+        # the attempt a prepared `_noop_heartbeat()`, so no fallback starts and
+        # the record stays empty. That absence is evidence only because
+        # `test_training_kwargs_routes_every_override` pins that the `wait=`
+        # override reaches `attempt.clock.wait`.
         assert (sleeps, child.wait_timeouts) == ([], []), "attempt rows must not poll"
+        assert waits == [], "attempt rows must not start the fallback heartbeat"
     elif site == "client-mount":
         marker = tmp_path / "binding-mount"
         consume = _install(monkeypatch, site, core.mounted_path, marker)

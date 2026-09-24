@@ -10,9 +10,11 @@ stdlib-only interpreter. The entrypoint's module-scope Modal import remains
 outside that library import probe's coverage.
 """
 import ast
+import dataclasses
 import importlib
 import io
 import json
+import signal
 import subprocess
 import sys
 import textwrap
@@ -30,7 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import scripts.modal_runner as mrl                                                     # noqa: E402, I001
-from scripts.modal_runner import checkpoint, core, state                               # noqa: E402, I001
+from scripts.modal_runner import checkpoint, core, preflight, state, training          # noqa: E402, I001
 from tests.modal_patch_binding_campaign import binding_target                          # noqa: E402, I001
 from tests.modal_test_helpers import (                                                 # noqa: E402
     FakeChild, _aware, _git, _init_source_repo, _noop_heartbeat, _write_dumped_config,
@@ -1363,10 +1365,10 @@ def test_train_remote_writes_manifest_and_rejects_completed_without_evidence(
         manifest = kwargs["manifest"]
         assert isinstance(manifest, mrl.Manifest)
         captured["prepare_manifest"] = manifest
-        run_root = Path(kwargs["run_root"])
+        run_root = Path(kwargs["attempt"].run_root)
         run_root.mkdir(parents=True, exist_ok=True)
-        lock = kwargs["lock"]
-        attempt_id = kwargs["attempt_id"]
+        lock = kwargs["attempt"].lock
+        attempt_id = kwargs["attempt"].attempt_id
         state.transition_status(run_root,
                                 core.Status.PREPARING,
                                 now=_aware(),
@@ -1392,10 +1394,20 @@ def test_train_remote_writes_manifest_and_rejects_completed_without_evidence(
         )
 
     def fake_execute(**kwargs):
+        # Never read, on purpose: this test is about the client, and its child exits 0, so a
+        # normal exit signals nothing. Recording here keeps a stray kill inert instead of
+        # reaching a real process group.
+        kills: list[tuple[int, int]] = []
         captured["execute_manifest"] = kwargs["manifest"]
-        kwargs["process_factory"] = lambda *a, **k: FakeChild(returncode=0, stdout=b"done\n")
-        kwargs["sleep"] = lambda _seconds: None
-        kwargs["now"] = lambda: _aware()
+        kwargs["process"] = training.ProcessControl(
+            spawn=lambda *a, **k: FakeChild(returncode=0, stdout=b"done\n"),
+            getpgid=lambda pid: pid,
+            killpg=lambda pgid, sig: kills.append((pgid, sig)),
+            install_signal=signal.signal,
+        )
+        kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                                clock=core.Clock(now=lambda: _aware(),
+                                                                 sleep=lambda _seconds: None))
         return real_execute(**kwargs)
 
     # Client reads these package exports at call time.
@@ -1465,16 +1477,19 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
 
     def prepare_with_real_hash_rewrite(**kwargs):
         captured["prepare_in_manifest"] = kwargs["manifest"]
-        captured["run_root"] = Path(kwargs["run_root"])
-        kwargs["run"] = fake_run
-        kwargs["start_heartbeat"] = _noop_heartbeat
+        captured["run_root"] = Path(kwargs["attempt"].run_root)
+        kwargs["host"] = preflight.PreflightHost(run=fake_run, start_heartbeat=_noop_heartbeat)
         prepared = real_prepare(**kwargs)
         captured["prepared"] = prepared
         return prepared
 
     def execute_with_valid_evidence(**kwargs):
+        # Never read, on purpose: this test is about the client, and its child exits 0, so a
+        # normal exit signals nothing. Recording here keeps a stray kill inert instead of
+        # reaching a real process group.
+        kills: list[tuple[int, int]] = []
         captured["execute_manifest"] = kwargs["manifest"]
-        run_root = Path(kwargs["run_root"])
+        run_root = Path(kwargs["attempt"].run_root)
 
         def factory(*_args, **_kwargs):
             ckpt_dir = run_root / "checkpoints"
@@ -1483,9 +1498,15 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
             _write_metrics(ckpt_dir / "metrics.jsonl", [request.batch_size, effective])
             return FakeChild(returncode=0, stdout=b"done\n")
 
-        kwargs["process_factory"] = factory
-        kwargs["sleep"] = lambda _seconds: None
-        kwargs["now"] = lambda: _aware()
+        kwargs["process"] = training.ProcessControl(
+            spawn=factory,
+            getpgid=lambda pid: pid,
+            killpg=lambda pgid, sig: kills.append((pgid, sig)),
+            install_signal=signal.signal,
+        )
+        kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                                clock=core.Clock(now=lambda: _aware(),
+                                                                 sleep=lambda _seconds: None))
         return real_execute(**kwargs)
 
     # Client reads these package exports at call time.
@@ -1538,12 +1559,12 @@ def test_train_remote_redelivery_claims_before_prepare(fake_modal, tmp_path, mon
 
     def fake_prepare(**kwargs):
         prepare_calls.append(1)
-        kwargs["volume"].commit()
+        kwargs["attempt"].volume.commit()
         manifest = kwargs["manifest"]
-        run_root = Path(kwargs["run_root"])
+        run_root = Path(kwargs["attempt"].run_root)
         run_root.mkdir(parents=True, exist_ok=True)
-        lock = kwargs["lock"]
-        attempt_id = kwargs["attempt_id"]
+        lock = kwargs["attempt"].lock
+        attempt_id = kwargs["attempt"].attempt_id
         now = _aware(minute=len(prepare_calls))
         state.transition_status(run_root,
                                 core.Status.PREPARING,
@@ -1570,14 +1591,24 @@ def test_train_remote_redelivery_claims_before_prepare(fake_modal, tmp_path, mon
         )
 
     def fake_execute(**kwargs):
+        # Never read, on purpose: this test is about the client, and its child exits 0, so a
+        # normal exit signals nothing. Recording here keeps a stray kill inert instead of
+        # reaching a real process group.
+        kills: list[tuple[int, int]] = []
 
         def factory(*args, **factory_kwargs):
             factory_calls.append((args, factory_kwargs))
             return FakeChild(returncode=0, stdout=b"done\n")
 
-        kwargs["process_factory"] = factory
-        kwargs["sleep"] = lambda _seconds: None
-        kwargs["now"] = lambda: _aware()
+        kwargs["process"] = training.ProcessControl(
+            spawn=factory,
+            getpgid=lambda pid: pid,
+            killpg=lambda pgid, sig: kills.append((pgid, sig)),
+            install_signal=signal.signal,
+        )
+        kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                                clock=core.Clock(now=lambda: _aware(),
+                                                                 sleep=lambda _seconds: None))
         return real_execute(**kwargs)
 
     # Client reads these package exports at call time.

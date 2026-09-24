@@ -29,6 +29,161 @@ def simple_map(make_map):
     return make_map
 
 
+# ── The ProcessControl tripwire (gh#163; the kill seam's third safety layer) ──
+#
+# `execute_training_attempt(process=None)` resolves None to
+# `ProcessControl.system()`, the REAL spawn/getpgid/killpg/signal functions.
+# Production never passes `process`, and the client tests' wrappers forward
+# production's keywords, so a test that forgets its own control would get the
+# real ones without ever naming `system`. On 2026-09-23 a real
+# `killpg(getpgid(1), SIGTERM)` (= `kill(-1, SIGTERM)`) ended the user's
+# desktop session. Under pytest this fixture makes `system()` return a control
+# whose every field raises, so that mistake fails loudly instead of spawning or
+# signalling. `test_process_control_tripwire_poisons_system` and
+# `test_process_control_tripwire_guards_the_resolution_path`
+# (tests/test_modal_training.py) pin it.
+#
+# It covers every OTHER test only because it is `autouse`: dropped, or moved
+# into a narrower conftest or a test file, the fixture still reaches a test
+# that names it, and nothing else. So `autouse=True` is pinned twice: the
+# resolution-path control does NOT name the fixture, and its first statement
+# asserts the fixture is active in it anyway; and clause (viii) of
+# test_kill_seam_static_safety requires, by AST, exactly one definition, here,
+# decorated exactly `@pytest.fixture(autouse=True)` (no wider scope), that
+# builds the poison itself.
+#
+# PITFALLS.
+#   * The module is LOOKED UP in sys.modules, never imported: any import of the
+#     runner here, even inside the fixture, makes this file an importer that
+#     tests/test_modal_packaging.py's runtime identity probe must then run (its
+#     `bare_spelling_imports` census counts imports at any depth), and an
+#     `importlib.import_module(<variable>)` would dodge that census through its
+#     documented blind spot.
+#   * The patch goes through the fixture's OWN `pytest.MonkeyPatch.context()`,
+#     never the test's `monkeypatch`: a test body that calls
+#     `monkeypatch.undo()` would otherwise restore the real `system` for the rest
+#     of that test (tests/test_no_restated_env_defaults.py calls it).
+#   * RESIDUAL: three windows are not poisoned, because the fixture is
+#     function-scoped and needs the module already loaded.
+#       1. A test whose own body is the first thing in the process to import the
+#          package: the fixture found nothing to patch. Every test file that
+#          drives the attempt imports the package at module scope, so collection
+#          has loaded it before any fixture runs. Not every modal test file
+#          does: three tests/test_modal_*.py files import it only inside test
+#          bodies or not at all, and none of those reaches the attempt.
+#       2. Code that runs at collection: module level, parametrize arguments.
+#       3. Module-, class- and session-scoped fixtures, setup and teardown.
+#     The only cover for all three is static, and partial: clause (iii) of
+#     test_kill_seam_static_safety bans any `.system` read (on any receiver)
+#     under tests/ outside the two tripwire tests. It does not see an attempt
+#     driven with `process` forgotten from one of these windows; today no modal
+#     test file has a higher-scoped fixture or drives the attempt at collection.
+#   * The poison raises a RuntimeError subclass on purpose. The attempt swallows
+#     a ValueError from the handler install and a ProcessLookupError from
+#     getpgid/killpg, so a poison of either type would be silent exactly there.
+#   * Build the poisoned control with all four fields as keywords: the static
+#     safety test rejects a `*`/`**` splat in any ProcessControl(...) under tests/.
+
+# The runner module both fixtures below look up. The tripwire's two tests fail
+# if this name stops resolving (the tripwire then patches nothing), so the
+# precondition fixture, which reads the same name, cannot go quietly blind.
+_TRAINING_MODULE = "scripts.modal_runner.training"
+
+
+class ProcessControlTripwire(RuntimeError):
+    """Raised by every field of the poisoned ProcessControl the tripwire installs."""
+
+
+def _process_control_poison(field):
+    """A stand-in for ProcessControl.<field>: raises ProcessControlTripwire on any call."""
+
+    def poisoned(*_args, **_kwargs):
+        raise ProcessControlTripwire(
+            f"ProcessControl.{field} was called under pytest: execute_training_attempt was "
+            "called without process=... (or something else reached ProcessControl.system()). "
+            "Pass a ProcessControl whose spawn, getpgid and killpg are fakes; the training test "
+            "builder does.")
+
+    return poisoned
+
+
+@pytest.fixture(autouse=True)
+def _process_control_tripwire():
+    """Make `ProcessControl.system()` return a poisoned control; yield that control.
+
+    Yields None, and patches nothing, when the training module is not loaded.
+    The patch is undone when the test ends, by the fixture's own MonkeyPatch,
+    which nothing the test does to its `monkeypatch` reaches. A knock-out that
+    deletes the one `setattr` line (to see the two tripwire tests go red) may be
+    run only on those two test nodes, because it switches the backstop off for
+    the whole session.
+    """
+    training = sys.modules.get(_TRAINING_MODULE)
+    if training is None:
+        yield None
+        return
+    poisoned = training.ProcessControl(spawn=_process_control_poison("spawn"),
+                                       getpgid=_process_control_poison("getpgid"),
+                                       killpg=_process_control_poison("killpg"),
+                                       install_signal=_process_control_poison("install_signal"))
+    with pytest.MonkeyPatch.context() as tripwire_patch:
+        tripwire_patch.setattr(training.ProcessControl, "system", staticmethod(lambda: poisoned))
+        yield poisoned
+
+
+@pytest.fixture
+def process_control_tripwire_error():
+    """The tripwire's exception type, so a test names it without importing conftest."""
+    return ProcessControlTripwire
+
+
+# ── The kill-path tests' own-group precondition ──
+#
+# The process-group guard in `_signal_process_group` refuses to signal the
+# runner's OWN process group. Every modal test that hands the attempt a
+# recording killpg -- the training test builder's default, `_signal_hooks`
+# (tests/test_modal_training.py), the client tests' execute wrappers, the
+# binding campaign -- pairs it with an identity getpgid and a FakeChild whose
+# pid is FakeChild's default. In a session whose process group is that pid,
+# the guard would refuse every one of their kills: a test asserting a kill
+# would fail for a reason unrelated to its subject, and a test asserting that
+# nothing was killed (`kills == []`) would pass without testing anything. So
+# the session stops here, at the cause, before any test runs. The
+# process-group guard test builds its own pids, apart from the session's group
+# by construction, and `_signal_hooks` repeats the check for its own child.
+#
+# PITFALLS.
+#   * FakeChild's default pid is stated here AND read from FakeChild whenever
+#     tests/modal_test_helpers.py is loaded: a changed default fails the
+#     comparison instead of leaving this check stale. The helpers are LOOKED
+#     UP in sys.modules, like the runner above: importing them would import the
+#     runner.
+#   * It runs once per session, at the first test, and checks only if the
+#     runner is loaded by then, keyed on `_TRAINING_MODULE` like the tripwire.
+#     Collection has finished by then, and every test file that drives the
+#     attempt imports the runner at module scope (the tripwire's RESIDUAL 1), so
+#     a session that can reach a recording killpg is always checked.
+_FAKE_CHILD_PID = 4242
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _kill_path_own_group_precondition():
+    """Fail every test of a session whose process group is FakeChild's default pid."""
+    if _TRAINING_MODULE not in sys.modules:
+        return
+    helpers = sys.modules.get("tests.modal_test_helpers")
+    if helpers is not None:
+        default = helpers.FakeChild.__init__.__kwdefaults__["pid"]
+        assert default == _FAKE_CHILD_PID, (
+            f"FakeChild's default pid is {default}, but tests/conftest.py checks the session's "
+            f"process group against {_FAKE_CHILD_PID}: update `_FAKE_CHILD_PID`")
+    assert os.getpgrp() != _FAKE_CHILD_PID, (
+        f"this session's process group is {os.getpgrp()}, FakeChild's default pid, so the "
+        "process-group guard in `_signal_process_group` refuses every kill the modal kill-path "
+        "tests record (their `kills == []` assertions would pass without testing anything). "
+        "Run pytest from another process group, e.g. from a new shell.")
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
