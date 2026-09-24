@@ -425,7 +425,7 @@ ENEMY_MEMORY_TICKS = 32
 MAP_X_MIN, MAP_X_MAX = -2476.0, 2000.0
 MAP_Y_MIN, MAP_Y_MAX = -1050.0, 3420.0
 
-# Precomputed reciprocals for _norm_xy — avoids repeated division inside step()
+# Precomputed reciprocals once used by _norm_xy (deleted in e3cb78b); nothing reads them now
 _INV_MAP_X_RANGE = 2.0 / (MAP_X_MAX - MAP_X_MIN)
 _INV_MAP_Y_RANGE = 2.0 / (MAP_Y_MAX - MAP_Y_MIN)
 _MAP_X_OFFSET = (MAP_X_MAX + MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN)

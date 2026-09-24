@@ -50,7 +50,7 @@ PITFALLS
     came alive at epoch 3 must invalidate the smoke even if it was inert at the
     end. Pre-flight 5 is window-only, as written. Pre-flight 1 skips the run's
     first row on purpose — `mean_and_log()` runs before `self.losses` is set
-    (src/train.py:3748-3749) so row 0 carries no `losses/*` at all; the rule is
+    (`_train_with_return_norm`, src/train_update.py) so row 0 carries no `losses/*` at all; the rule is
     "every row CARRYING the key".
   - A key missing from EVERY row is a harness/key-drift finding, not a passing
     assertion: those paths report SMOKE INVALID rather than vacuously ok.

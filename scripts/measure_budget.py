@@ -10,8 +10,8 @@ Measures spawn->plant tick budgets for the scripted bomber on the SIMPLE map
      on feasibility.
   B. action-interface — the real BC-expert interface (spec D-5/F2): facing is
      steered via the continuous [dyaw, pitch] head, dyaw clamped by the env to
-     +/-max_turn_speed (pi/4 rad/tick) and applied AFTER movement (cs2_env.h:107
-     movement, :133 dyaw). So each tick we command the facing we want for the
+     +/-max_turn_speed (pi/4 rad/tick) and applied AFTER movement (env_step in
+     cs2_env.h runs movement, then dyaw). So each tick we command the facing we want for the
      NEXT tick's movement — "one tick ahead". Strictly slower than A; this is
      what demo generation (Task 3) will actually run.
 
@@ -32,7 +32,7 @@ Pitfalls encoded here (so later tasks don't rediscover them):
     ticks and those ticks count against the same 640 budget.
   * Direct facing pokes survive env.step only because the default continuous
     buffer is all-zero (dyaw=0 keeps the poked value). Poking pitch does NOT
-    survive (absolute-pitch overwrite, cs2_env.h:170) — irrelevant here.
+    survive (absolute-pitch overwrite, env_step in cs2_env.h) — irrelevant here.
 """
 
 import math
@@ -119,7 +119,7 @@ def run_episode(map_data, seed: int, bomber_idx: int, variant: str):
         env.step(disc, cont)
         ticks += 1
 
-    # --- walk the area path (adapted from _drive_agent_through_area_path,
+    # --- walk the area path (adapted from scripted_expert.drive_agent_through_area_path,
     #     instrumented with a global ROUND_TIME budget instead of per-hop only)
     reached = True
     for target_area in path[1:]:

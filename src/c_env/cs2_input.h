@@ -56,7 +56,7 @@ void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
      * Batch 3.5 (gh #36 follow-up): pitch is now plumbed straight from the
      * camera so the human can shoot ground enemies from the catwalk and
      * vice-versa. cl->pitch is already clamped to ±1.5533 rad (≈±89°) by
-     * update_camera (cs2_render.h:371-374), well within the agent's ±π/2
+     * update_camera (cs2_render.h), well within the agent's ±π/2
      * bounded clamp in env_step. */
     agent->aim_rad          = cl->yaw;
     agent->pitch            = cl->pitch;
@@ -79,7 +79,7 @@ void human_input(Client* cl, Dust2Env* env, int32_t* actions) {
         _wasd_to_local_bin(IsKeyDown(KEY_W), IsKeyDown(KEY_D), IsKeyDown(KEY_S), IsKeyDown(KEY_A));
 
     /* Batch 3: HEAD_AIM removed from action enum; human aim is set
-     * directly via agent->aim_rad (line 55 above) and consumed by
+     * directly via agent->aim_rad (continuous-aim block above) and consumed by
      * cs2_env.h env_step's `if (a->human_controlled)` branch. The
      * continuous_actions float buffer is irrelevant for human agents —
      * the env_step path takes the human branch before reading it. */

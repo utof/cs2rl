@@ -47,7 +47,7 @@ def validate_aim_log_std_max(aim_log_std_max) -> float:
     Returns the float cap (LOG_STD_MAX when None). Raises ValueError unless
     LOG_STD_MIN + 0.4 < cap <= LOG_STD_MAX, i.e. σ in (0.0149, 0.5].
 
-    WHY a separate torch-free helper: make_policy() only runs after the env
+    WHY a separate torch-free helper: build_policy() only runs after the env
     and torch are up, so a bad --aim-log-std-max used to surface ~30 s into a
     launch AND slip past `--dump-config` (the Modal/run_rung1 fingerprint
     step). main() now calls this right after parse_args(), above the
@@ -342,7 +342,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "participating_timesteps": args.timesteps,
                                                                        # Rung 1a T3: "self" (both teams learn) or "noop" (statue opponent —
                                                                        # hero-team-only participation AND budget, see raw_timesteps above).
-                                                                       # NOT a make_puffer_env knob: the statue is enforced trainer-side, in
+                                                                       # NOT an EnvConfig knob: the statue is enforced trainer-side, in
                                                                        # the patched evaluate(), so the env is identical either way. Not
                                                                        # allowlisted for --resume-run — a different opponent is a different
                                                                        # experiment.

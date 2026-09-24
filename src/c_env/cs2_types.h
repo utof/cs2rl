@@ -575,7 +575,7 @@ typedef struct {
     int32_t    bomb_defuse_ticks;
     /* Batch 2: round-fixed designated bomb carrier (T-side index 0..4).
      * Distinct from bomb_carrier_id, which is the *dynamic* possession
-     * tracker (reassigned on drop+auto-pickup in cs2_bomb.h:111). This
+     * tracker (reassigned on drop+auto-pickup; pickup is in process_bomb, cs2_bomb.h). This
      * field is set ONLY in env_reset and is the round's stable identity
      * signal. Consumed by compute_observations to emit the role bit at
      * obs[OBS_GLOBAL_BASE+13] (=109 since the Batch 6 bearing slots; was 106,

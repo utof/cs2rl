@@ -765,7 +765,7 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
     WHAT: for agent i on team A facing team B,
         r_i' = 0.5 * ( r_i - mean_{j in ACTIVE(B)}(r_j) )
     Agents 0..TEAM_SIZE-1 are T, TEAM_SIZE..N_AGENTS-1 are CT (same split the
-    C CT-survival loop uses, src/c_env/cs2_rewards.h:225). Only the first
+    C CT-survival loop uses, compute_rewards in src/c_env/cs2_rewards.h). Only the first
     n_active_per_team slots of each team are read or written; the parked
     remainder (Rung 0, spec 2026-08-29 §2.1) is left untouched at exactly 0.0.
 
@@ -788,7 +788,7 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
        0.5*(S_A - n*mean_B) + 0.5*(S_B - n*mean_A), and the two half-terms
        cancel ONLY because both means are scaled by the same constant n. The
        C team_spirit loop right below the PBRS block IS alive-gated
-       (src/c_env/cs2_rewards.h:247), so mirroring it here looks like the
+       (compute_rewards in src/c_env/cs2_rewards.h), so mirroring it here looks like the
        obvious consistency fix; it would silently destroy zero-sum.
        Consequence to carry into analysis, not a wart to repair: late-round
        with n-1 dead CTs, the lone survivor's stall drip is attenuated to 1/n
@@ -801,7 +801,7 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
        this array is the PufferLib shared reward buffer the trainer reads,
        and the returned tuple is ignored by the Multiprocessing backend.
     4. Safe to mutate the zero-copy C view: env_step memsets env->rewards
-       (src/c_env/cs2_env.h:339) before accumulating this tick's terms, and
+       (src/c_env/cs2_env.h) before accumulating this tick's terms, and
        nothing reads the reward array ahead of that memset — the calls that
        precede it (update_enemy_memory, compute_observations) touch obs and
        memory, not rewards. The C episode / step stat channels are separate

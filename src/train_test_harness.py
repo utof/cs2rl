@@ -208,7 +208,7 @@ def _build_trainer_for_test(
     # ── Shared team-spirit value (production pattern) ───────────────────────
     # Production uses mp.Value so multiprocess workers can read a scalar that
     # the main trainer anneals each epoch. Serial backend doesn't actually
-    # need shared memory, but make_puffer_env expects this interface.
+    # need shared memory, but the harness role builder requires a shared_ts.
     shared_ts = mp.Value("f", 0.3)
 
     # Simple 5-room map — the production default for non-dust2 runs. Avoids

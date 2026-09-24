@@ -253,7 +253,7 @@ static PyObject* py_step(PyObject* self, PyObject* args) {
      * Without this, a stale caller passing (N_AGENTS, 1) after the AIM_DIM 1→2
      * bump silently reads OOB at [i*AIM_DIM+1]. PyErr_Format gives a clear deploy-
      * time error instead of a NaN-flooded training run or a segfault.
-     * Defense-in-depth: cs2_env.py::_prepare_continuous_actions:779 already raises
+     * Defense-in-depth: cs2_env.py::_prepare_continuous_actions already raises
      * ValueError on shape mismatch; this check catches callers that bypass the
      * Python wrapper (direct binding consumers, regression tests with raw shapes,
      * future C-only consumers). */
