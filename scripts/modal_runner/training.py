@@ -140,6 +140,51 @@ def _tee_stream(src: object, sinks: Sequence[object]) -> None:
                 continue
 
 
+@dataclass(frozen=True)
+class ProcessControl:
+    """The training child's OS: start it, find and signal its group, install signal handlers.
+
+    NO FIELD DEFAULTS, DELIBERATELY (gh#163 spec §2a, layer 2). On 2026-09-23 a
+    throwaway script built a draft of this class whose fields defaulted to the
+    real OS functions, faked only `spawn`, and called `killpg(getpgid(1),
+    SIGTERM)`: that is `kill(-1, SIGTERM)`, and it ended the user's desktop
+    session. Without defaults a half-faked ProcessControl is a TypeError when it
+    is built, never a live `killpg`. The real functions come only from
+    `system()`.
+
+    Tests build all four fields as keywords, never through a `*`/`**` splat,
+    which a static check cannot read. `test_kill_seam_static_safety`
+    (tests/test_modal_training.py) enforces that and the rest of the kill-seam
+    rules by AST; under pytest the tests/conftest.py tripwire makes `system()`
+    return a control whose every field raises, so a test that forgets its own
+    control fails loudly instead of spawning or signalling.
+
+    PITFALLS. Never give a field a default. Read `system` only as a call
+    inside `execute_training_attempt`'s body: a module-level alias or a default
+    argument captures the real factory at import and bypasses the tripwire's
+    patch of the class attribute. `killpg` and `getpgid` are called only by
+    `_signal_process_group`, which holds the §2a guard; a direct call anywhere
+    else in this module bypasses it.
+    """
+
+    spawn: Callable[..., object]
+    getpgid: Callable[[int], int]
+    killpg: Callable[[int, int], None]
+    install_signal: Callable[..., object]
+
+    @classmethod
+    def system(cls) -> ProcessControl:
+        """The real OS functions, read when this is called, not at import.
+
+        SAFETY: never call a field of what this returns outside the production
+        attempt. Outside pytest, `killpg` here is the real `os.killpg`.
+        """
+        return cls(spawn=subprocess.Popen,
+                   getpgid=os.getpgid,
+                   killpg=os.killpg,
+                   install_signal=signal.signal)
+
+
 def execute_training_attempt(
     *,
     registry: Registry,

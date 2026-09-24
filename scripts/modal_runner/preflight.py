@@ -6,10 +6,10 @@ import os
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from . import checkpoint, core, state
 from .checkpoint import normalize_config_for_transport
@@ -28,6 +28,7 @@ from .core import (
     LockLike,
     Manifest,
     PreparedSource,
+    ReloadingVolume,
     Status,
     ValidationError,
     sha256_bytes,
@@ -39,14 +40,58 @@ if TYPE_CHECKING:
     from .request import RunRequest
 
 
-class ReloadingVolume(Protocol):
-    """In-container Volume handle. reload before STATUS writes; commit after them."""
+@dataclass(frozen=True)
+class ExpectedSource:
+    """The source bundle prepare must find on the Volume, and the provenance it must carry.
 
-    def reload(self) -> None:
-        ...
+    `archive_sha256` is checked after `Volume.reload()`; `commit` and `tree`
+    are checked against the extracted bundle's provenance sidecar. One value
+    because they are one fact, the client's bundle, and are checked together.
+    """
 
-    def commit(self) -> None:
-        ...
+    archive_path: Path
+    archive_sha256: str
+    commit: str
+    tree: str
+
+
+@dataclass(frozen=True)
+class RemoteResume:
+    """The checkpoint an attempt resumes from, on the Volume mount, and its pinned hash.
+
+    One value because `sha256` means nothing without `path`; no resume is
+    `None`, not a RemoteResume with an empty path. PITFALL:
+    `_validate_remote_resume(path, expected_sha256)` keeps its positional
+    signature (the binding campaign's prepare-validator consumer and
+    `test_patch_target_dichotomy` call it that way), so the caller unpacks
+    this; never pass the object in.
+    """
+
+    path: Path
+    sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class PreflightHost:
+    """What prepare takes from the container. Production uses the defaults.
+
+    `run` runs the install, dump-config and CUDA-probe commands. `parent_env`
+    is what the child environment is built from (None: `os.environ`, read
+    when prepare runs). `ephemeral_parent` is where the source is extracted
+    (None: the system temp dir). `start_heartbeat` starts the preflight
+    heartbeat (None: `state.start_heartbeat_worker`, resolved when prepare
+    runs). Tests replace these; production never passes a PreflightHost.
+
+    PITFALL, when defaults are resolved (gh#163 spec §4.2): `run` is bound to
+    `subprocess.run` at import, exactly as prepare's own `run` default is, so
+    a monkeypatch of the global `subprocess.run` does not reach it; inject
+    `run` instead. The three None defaults are resolved at call time.
+    """
+
+    run: Callable[..., subprocess.CompletedProcess[object]] = subprocess.run
+    parent_env: Mapping[str, str] | None = None
+    ephemeral_parent: Path | None = None
+    start_heartbeat: Callable[..., object] | None = None
 
 
 def _verify_extracted_provenance(source_dir: Path, expected_commit: str,

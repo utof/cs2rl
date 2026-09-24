@@ -1000,10 +1000,13 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # reviewer reads them. This moves one number. Change it deliberately, in the
 # commit that changes the seam, and say why.
 #
-# 279 is `len(classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0])`, the count
-# after the §2a safety commit of gh#163's close-out, when the declared runner set
-# was still the one unsplit file (W4's split moved names; a move changes no key).
-# Against the W3b split tree's 278: one
+# 281 is `len(classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0])`, the count
+# after gh#163's W5 types commit. Against the W4 per-module tree's 279: two
+# runner-side tests added in tests/test_modal_training.py
+# (`test_kill_seam_static_safety`, `test_process_control_tripwire_poisons_system`),
+# nothing removed, no destination moves. 279 was the count after the §2a safety
+# commit, when the declared runner set was still the one unsplit file (W4's
+# split moved names; a move changes no key). Against the W3b split tree's 278: one
 # runner-side test added (`test_signal_process_group_refuses_groups_a_live_child_cannot_have`),
 # nothing removed, no destination moves. W3b's own move, against 2bb32ac's 273:
 # five client-side helper/test names added, one `SEAM_GUARDS` name renamed, no
@@ -1017,7 +1020,7 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # neither and it stays green with a stale count and N ungoverned names on disk.
 # Its own message says so: it is a DELETION detector. The addition detector is
 # `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
-GOVERNED_NAME_COUNT = 279
+GOVERNED_NAME_COUNT = 281
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.

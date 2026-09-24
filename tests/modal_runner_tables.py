@@ -44,7 +44,8 @@ MANIFEST = {
         "CHECKPOINT_PUBLISH_REASON_NAME", "DEAD_CHECKPOINT_NAME", "PREBUILT_PYTHON",
         "ValidationError", "Status", "mounted_path", "sha256_file", "FileProvenance",
         "SCHEMA_VERSION", "Manifest", "HEARTBEAT_INTERVAL", "Registry", "LockLike", "sha256_bytes",
-        "CompletionEvidence", "PreparedSource"
+        "CompletionEvidence", "PreparedSource", "_utc_now", "_event_wait", "Clock",
+        "ReloadingVolume", "AttemptContext"
     ],
     "request.py": [
         "ALLOWED_MAPS", "ALLOWED_GPUS", "ALLOWED_NUM_ENVS", "ALLOWED_CPU_CORES", "DEFAULT_GPU",
@@ -86,18 +87,19 @@ MANIFEST = {
         "build_train_command", "build_dump_config_command", "build_cuda_probe_command"
     ],
     "preflight.py": [
-        "ReloadingVolume", "_verify_extracted_provenance", "_validate_remote_resume",
-        "_hash_dumped_config", "prepare_remote_source"
+        "ExpectedSource", "RemoteResume", "PreflightHost", "_verify_extracted_provenance",
+        "_validate_remote_resume", "_hash_dumped_config", "prepare_remote_source"
     ],
     "training.py": [
         "RunResult", "CHECKPOINT_SETTLE_SECONDS", "TERM_GRACE_SECONDS", "DEAD_RUN_EXIT_CODE",
         "POLL_INTERVAL_SECONDS", "REASON_SIGNAL", "REASON_TIMEOUT", "REASON_DEAD_RUN",
         "REASON_INVALID_EVIDENCE", "REASON_NONZERO_EXIT", "REASON_ERROR", "TrainingAttemptResult",
-        "_UnusedArtifacts", "PublishOutcome", "_tee_stream", "execute_training_attempt",
-        "_checkpoint_generation", "publish_stable_checkpoint", "_start_checkpoint_watcher",
-        "_record_publish_reason", "_publish_and_note", "_close_log_sink", "_is_dead_run",
-        "_map_child_exit", "_metrics_summary", "_optional_checkpoint_sha256", "_write_run_result",
-        "_signal_process_group", "_run_training_attempt"
+        "_UnusedArtifacts", "PublishOutcome", "_tee_stream", "ProcessControl",
+        "execute_training_attempt", "_checkpoint_generation", "publish_stable_checkpoint",
+        "_start_checkpoint_watcher", "_record_publish_reason", "_publish_and_note",
+        "_close_log_sink", "_is_dead_run", "_map_child_exit", "_metrics_summary",
+        "_optional_checkpoint_sha256", "_write_run_result", "_signal_process_group",
+        "_run_training_attempt"
     ],
 }
 # Runtime import edges between package modules. core stays a leaf. A new edge

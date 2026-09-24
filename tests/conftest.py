@@ -29,6 +29,78 @@ def simple_map(make_map):
     return make_map
 
 
+# ── The ProcessControl tripwire (gh#163 spec §2a, layer 3) ────────────────
+#
+# `execute_training_attempt(process=None)` resolves None to
+# `ProcessControl.system()`, the REAL spawn/getpgid/killpg/signal functions.
+# Production never passes `process`, and the client tests' wrappers forward
+# production's keywords, so a test that forgets its own control would get the
+# real ones without ever naming `system`. On 2026-09-23 a real
+# `killpg(getpgid(1), SIGTERM)` (= `kill(-1, SIGTERM)`) ended the user's
+# desktop session. Under pytest this fixture makes `system()` return a control
+# whose every field raises, so that mistake fails loudly instead of spawning or
+# signalling. `test_process_control_tripwire_poisons_system`
+# (tests/test_modal_training.py) pins it.
+#
+# PITFALLS.
+#   * The module is LOOKED UP in sys.modules, never imported: any import of the
+#     runner here, even inside the fixture, makes this file an importer that
+#     tests/test_modal_packaging.py's runtime identity probe must then run (its
+#     `bare_spelling_imports` census counts imports at any depth), and an
+#     `importlib.import_module(<variable>)` would dodge that census through its
+#     documented blind spot. RESIDUAL: a test whose own body is the first thing
+#     in the process to import the package is not covered; every modal test file
+#     imports it at module scope, so collection has loaded it before any fixture
+#     runs.
+#   * The poison raises a RuntimeError subclass on purpose. The attempt swallows
+#     a ValueError from the handler install and a ProcessLookupError from
+#     getpgid/killpg, so a poison of either type would be silent exactly there.
+#   * Build the poisoned control with all four fields as keywords: the static
+#     safety test rejects a `*`/`**` splat in any ProcessControl(...) under tests/.
+
+
+class ProcessControlTripwire(RuntimeError):
+    """Raised by every field of the poisoned ProcessControl the tripwire installs."""
+
+
+def _process_control_poison(field):
+    """A stand-in for ProcessControl.<field>: raises ProcessControlTripwire on any call."""
+
+    def poisoned(*_args, **_kwargs):
+        raise ProcessControlTripwire(
+            f"ProcessControl.{field} was called under pytest: execute_training_attempt was "
+            "called without process=... (or something else reached ProcessControl.system()). "
+            "Pass an all-fake ProcessControl; the training test builder does.")
+
+    return poisoned
+
+
+@pytest.fixture(autouse=True)
+def _process_control_tripwire(monkeypatch):
+    """Make `ProcessControl.system()` return a poisoned control; return that control.
+
+    Returns None, and patches nothing, when the training module is not loaded.
+    Knock-out 4(k) of the spec deletes the `monkeypatch.setattr` line: it may be
+    run only on the two tripwire test nodes, because it switches the backstop
+    off for the whole session.
+    """
+    training = sys.modules.get("scripts.modal_runner.training")
+    if training is None:
+        return None
+    poisoned = training.ProcessControl(spawn=_process_control_poison("spawn"),
+                                       getpgid=_process_control_poison("getpgid"),
+                                       killpg=_process_control_poison("killpg"),
+                                       install_signal=_process_control_poison("install_signal"))
+    monkeypatch.setattr(training.ProcessControl, "system", staticmethod(lambda: poisoned))
+    return poisoned
+
+
+@pytest.fixture
+def process_control_tripwire_error():
+    """The tripwire's exception type, so a test names it without importing conftest."""
+    return ProcessControlTripwire
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

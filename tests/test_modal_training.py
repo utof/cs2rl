@@ -9,6 +9,8 @@ costs in the seam manifest, and where helpers go.
 Deterministic patch-binding controls live in test_modal_patch_bindings.py;
 interruption tests here retain their original negative assertions.
 """
+import ast
+import dataclasses
 import io
 import json
 import os
@@ -1263,6 +1265,394 @@ def test_signal_process_group_refuses_groups_a_live_child_cannot_have(case, caps
     assert token in refusals[0]
     others = {"pgid<=1", "own-group", "pgid!=pid"} - {token}
     assert not [other for other in others if other in refusals[0]], refusals[0]
+
+
+# ── Kill seam: the static safety clauses and the ProcessControl tripwire ──
+
+
+def test_kill_seam_static_safety():
+    """No test, and no training code outside the §2a guard, can reach the real kill seam.
+
+    gh#163 spec §4.8 criterion 6. On 2026-09-23 an agent's throwaway script ran
+    the real `killpg(getpgid(1), SIGTERM)`, which is `kill(-1, SIGTERM)`, and
+    ended the user's desktop session. The runtime layers (a ProcessControl
+    without field defaults; the tests/conftest.py tripwire) each have a way
+    round them that only a static check sees, so this test reads source by AST.
+    It NEVER imports or calls what it checks: training.py is read through
+    `training.__file__` (which is also how the reach floor credits this test to
+    `training`), and every tests/*.py from disk.
+
+    THE CLAUSES. Each has synthetic plants, source text that is parsed and never
+    run, that must fail it: a clause no plant can fail is not evidence.
+      (i)   ProcessControl's dataclass fields have no defaults, and are exactly
+            the four below. A default is how the incident's draft handed out the
+            real functions.
+      (ii)  Every ProcessControl(...) construction under tests/, through the
+            name or an import or assignment alias of it, passes the four fields
+            as four keywords: no positional argument and no `*`/`**` splat,
+            whose fields cannot be read statically (a builder is the likely
+            place for one).
+      (iv)  No load of os/posix `killpg` or `getpgid` under tests/, in any
+            spelling: `<m>.X` through `os`, `posix` or an alias of either,
+            `from <m> import X [as Y]` or `*`, `getattr(<m>, "X")`, and an
+            `__import__`, `importlib.import_module` or `sys.modules[...]`
+            receiver. `kill` likewise, except a call `os.kill(os.getpid(), ...)`:
+            any other target could be `-pgid`, which is `killpg` by another
+            name. Passing the real functions explicitly
+            (`ProcessControl(..., killpg=os.killpg, ...)`) satisfies (i), (ii)
+            and the tripwire; only this clause stops it.
+      (v)   ProcessControl.system() builds exactly spawn=subprocess.Popen,
+            getpgid=os.getpgid, killpg=os.killpg, install_signal=signal.signal.
+            The values are compared as `ast.unparse` strings, so this test loads
+            none of them and passes (iv) itself.
+      (vii) In training.py a call whose callee is named `killpg` or `getpgid`
+            (a bare name, or the last attribute on any receiver) occurs only
+            inside `_signal_process_group`, which holds the §2a guard. A direct
+            call anywhere else bypasses the guard, and the runtime layers govern
+            ProcessControl, not a direct call.
+    Each clause also asserts a non-empty population on the real tree, so a
+    checker that silently examines nothing cannot pass: the four fields (i), the
+    tripwire's own construction in tests/conftest.py (ii), the real-SIGTERM
+    test's `os.kill(os.getpid(), SIGTERM)` (iv), the system() construction (v),
+    and the guard's own getpgid and killpg calls (vii).
+
+    ADDING A CLAUSE. Clauses (iii) and (vi) join in the W5 execute commit as
+    further `clauses` entries below: (iii) cannot hold until
+    execute_training_attempt stops loading os.killpg/os.getpgid/signal.signal
+    itself, and (vi) pins the `process=None` resolution that commit writes. Keep
+    every checker, table and plant INSIDE this function: a module-level name in
+    this file is a governed seam name (tests/test_modal_packaging.py) and moves
+    GOVERNED_NAME_COUNT.
+
+    RESIDUAL. The clauses read spellings, not values: a callable that reaches
+    `os.killpg` through an object built at run time (a `functools.partial`, an
+    attribute of some other object, `vars(os)["killpg"]`) passes. They are a
+    backstop for the mistakes this branch has seen, not a sandbox.
+    """
+    fields = ("spawn", "getpgid", "killpg", "install_signal")
+    real_system = {
+        "spawn": "subprocess.Popen",
+        "getpgid": "os.getpgid",
+        "killpg": "os.killpg",
+        "install_signal": "signal.signal",
+    }
+    training_file = Path(training.__file__).resolve()
+    assert training_file.is_relative_to(ROOT), (
+        f"scripts.modal_runner.training was imported from {training_file}, outside this checkout "
+        f"({ROOT}), so these clauses would read another tree's training.py")
+    under_training = {"scripts/modal_runner/training.py": training_file.read_text(encoding="utf-8")}
+    under_tests = {
+        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "tests").rglob("*.py"))
+    }
+    assert {"tests/conftest.py",
+            "tests/test_modal_training.py"} <= set(under_tests), sorted(under_tests)[:5]
+
+    def last_name(expr):
+        """The callee spelling a clause keys on: a bare name, or the last attribute."""
+        if isinstance(expr, ast.Name):
+            return expr.id
+        if isinstance(expr, ast.Attribute):
+            return expr.attr
+        return None
+
+    def is_docstring(statement):
+        return (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str))
+
+    def process_control_classes(tree):
+        return [
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "ProcessControl"
+        ]
+
+    def no_field_defaults(sources):
+        """(i)."""
+        problems, examined = [], []
+        for rel, text in sources.items():
+            for cls in process_control_classes(ast.parse(text)):
+                annotated = []
+                for statement in cls.body:
+                    if isinstance(statement, ast.AnnAssign) and isinstance(
+                            statement.target, ast.Name):
+                        annotated.append(statement.target.id)
+                        examined.append(statement.target.id)
+                        if statement.value is not None:
+                            problems.append(f"{rel}:{statement.lineno} field "
+                                            f"{statement.target.id} has a default")
+                    elif not (is_docstring(statement)
+                              or isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                        problems.append(f"{rel}:{statement.lineno} a class-body "
+                                        f"{type(statement).__name__}, not a field or a method")
+                if tuple(annotated) != fields:
+                    problems.append(f"{rel}: the fields are {annotated}, not {list(fields)}; if "
+                                    "that is deliberate, update every clause here and the "
+                                    "tripwire's calls in the test below")
+        return problems, examined
+
+    def four_keyword_constructions(sources):
+        """(ii)."""
+        problems, examined = [], []
+        for rel, text in sources.items():
+            tree = ast.parse(text)
+            spellings = {"ProcessControl"}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    spellings |= {
+                        alias.asname
+                        for alias in node.names if alias.name == "ProcessControl" and alias.asname
+                    }
+                elif isinstance(node, ast.Assign) and last_name(node.value) == "ProcessControl":
+                    spellings |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and last_name(node.func) in spellings:
+                    examined.append(f"{rel}:{node.lineno}")
+                    names = sorted(k.arg for k in node.keywords if k.arg is not None)
+                    splat = any(k.arg is None for k in node.keywords)
+                    if node.args or splat or names != sorted(fields):
+                        problems.append(f"{rel}:{node.lineno} {ast.unparse(node)[:120]}")
+        return problems, examined
+
+    def is_os(expr, modules):
+        """Whether `expr` is the os or posix module: a name bound to one in `modules`,
+        `__import__("os")`, `importlib.import_module("os")` or `sys.modules["os"]`."""
+        if isinstance(expr, ast.Name):
+            return expr.id in modules
+        named = None
+        if isinstance(expr, ast.Call) and last_name(expr.func) in ("__import__", "import_module"):
+            named = expr.args[0] if expr.args else None
+        elif isinstance(expr, ast.Subscript):
+            named = expr.slice
+        return isinstance(named, ast.Constant) and named.value in ("os", "posix")
+
+    def kill_seam_loads(sources):
+        """(iv). `examined` is the allowed `os.kill(os.getpid(), ...)` calls."""
+        banned = {"killpg", "getpgid", "kill"}
+        problems, examined = [], []
+        for rel, text in sources.items():
+            tree = ast.parse(text)
+            modules = {"os", "posix"}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    modules |= {
+                        alias.asname
+                        for alias in node.names if alias.name in ("os", "posix") and alias.asname
+                    }
+                elif isinstance(node, ast.ImportFrom) and node.module in ("os", "posix"):
+                    problems.extend(f"{rel}:{node.lineno} from {node.module} import {alias.name}"
+                                    for alias in node.names if alias.name in banned | {"*"})
+            allowed = set()
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "kill" and is_os(node.func.value, modules)
+                        and node.args):
+                    target = node.args[0]
+                    if (isinstance(target, ast.Call) and isinstance(target.func, ast.Attribute)
+                            and target.func.attr == "getpid" and is_os(target.func.value, modules)
+                            and not target.args and not target.keywords):
+                        allowed.add(id(node.func))
+                        examined.append(f"{rel}:{node.lineno}")
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)
+                        and node.attr in banned and is_os(node.value, modules)
+                        and id(node) not in allowed):
+                    problems.append(f"{rel}:{node.lineno} {ast.unparse(node)}")
+                elif (isinstance(node, ast.Call) and last_name(node.func) == "getattr"
+                      and len(node.args) >= 2 and is_os(node.args[0], modules)):
+                    attr = node.args[1]
+                    if isinstance(attr, ast.Constant) and attr.value in banned:
+                        problems.append(f"{rel}:{node.lineno} {ast.unparse(node)}")
+        return problems, examined
+
+    def system_builds_the_real_functions(sources):
+        """(v)."""
+        problems, examined = [], []
+        for rel, text in sources.items():
+            for cls in process_control_classes(ast.parse(text)):
+                systems = [
+                    node for node in cls.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "system"
+                ]
+                body = [s for s in systems[0].body if not is_docstring(s)] if systems else []
+                only = body[0] if len(body) == 1 else None
+                returned = only.value if isinstance(only, ast.Return) else None
+                if len(systems) != 1 or not isinstance(returned, ast.Call):
+                    problems.append(f"{rel}: ProcessControl.system is not one `return cls(...)`")
+                    continue
+                call = returned
+                examined.append(f"{rel}:{call.lineno}")
+                built = {k.arg: ast.unparse(k.value) for k in call.keywords}
+                if (last_name(call.func) not in ("cls", "ProcessControl") or call.args
+                        or built != real_system):
+                    problems.append(f"{rel}:{call.lineno} system() builds {ast.unparse(call)}")
+        return problems, examined
+
+    def kill_calls_only_in_the_guard(sources):
+        """(vii). `examined` is the callee names found inside the guard."""
+        problems, examined = [], []
+        for rel, text in sources.items():
+            tree = ast.parse(text)
+            inside = {
+                id(node)
+                for guard in tree.body
+                if isinstance(guard, ast.FunctionDef) and guard.name == "_signal_process_group"
+                for node in ast.walk(guard)
+            }
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and last_name(node.func) in ("killpg", "getpgid"):
+                    if id(node) in inside:
+                        examined.append(last_name(node.func))
+                    else:
+                        problems.append(f"{rel}:{node.lineno} {ast.unparse(node)}")
+        return problems, examined
+
+    fields_block = ("    spawn: Callable[..., object]\n"
+                    "    getpgid: Callable[[int], int]\n"
+                    "    killpg: Callable[[int, int], None]\n")
+    clauses = [
+        SimpleNamespace(
+            name="(i) ProcessControl's fields have no defaults",
+            check=no_field_defaults,
+            real=under_training,
+            population="the four ProcessControl fields",
+            populated=lambda seen: tuple(seen) == fields,
+            plants={
+                "a default on one field":
+                ("class ProcessControl:\n" + fields_block +
+                 "    install_signal: Callable[..., object] = signal.signal\n"),
+                "a field(default=...)":
+                ("class ProcessControl:\n" + fields_block +
+                 "    install_signal: Callable[..., object] = field(default=signal.signal)\n"),
+            }),
+        SimpleNamespace(
+            name="(ii) every ProcessControl(...) under tests/ passes four keywords",
+            check=four_keyword_constructions,
+            real=under_tests,
+            population="the tripwire's construction in tests/conftest.py",
+            populated=lambda seen: any(where.startswith("tests/conftest.py:") for where in seen),
+            plants={
+                "a ** splat":
+                "control = training.ProcessControl(**fields)\n",
+                "a missing field":
+                "ProcessControl(spawn=f, getpgid=g, killpg=k)\n",
+                "positional fields":
+                "ProcessControl(f, g, k, s)\n",
+                "a splat through an import alias":
+                ("from scripts.modal_runner.training import ProcessControl as PC\n"
+                 "PC(spawn=f, **rest)\n"),
+                "a splat through an assignment alias":
+                "PC = training.ProcessControl\nPC(*parts)\n",
+            }),
+        SimpleNamespace(
+            name="(iv) no load of os/posix killpg, getpgid or kill under tests/",
+            check=kill_seam_loads,
+            real=under_tests,
+            population="the real-SIGTERM test's os.kill(os.getpid(), SIGTERM)",
+            populated=lambda seen: any(
+                where.startswith("tests/test_modal_training.py:") for where in seen),
+            plants={
+                "the real functions passed explicitly":
+                ("training.ProcessControl(spawn=fake, getpgid=os.getpgid, killpg=os.killpg,\n"
+                 "                         install_signal=signal.signal)\n"),
+                "a module alias":
+                "import os as o\no.killpg(4242, 15)\n",
+                "a from-import":
+                "from posix import getpgid\n",
+                "a from-import of kill":
+                "from os import kill as k\n",
+                "getattr":
+                'getattr(os, "killpg")(4242, 15)\n',
+                "kill of a group":
+                "os.kill(-4242, 15)\n",
+                "an __import__ receiver":
+                '__import__("os").getpgid(1)\n',
+                "a sys.modules receiver":
+                'sys.modules["posix"].killpg(1, 15)\n',
+            }),
+        SimpleNamespace(
+            name="(v) ProcessControl.system() builds exactly the real functions",
+            check=system_builds_the_real_functions,
+            real=under_training,
+            population="one system() construction",
+            populated=lambda seen: len(seen) == 1,
+            plants={
+                "a wrong function":
+                ("class ProcessControl:\n"
+                 "    @classmethod\n"
+                 "    def system(cls):\n"
+                 "        return cls(spawn=subprocess.Popen, getpgid=os.getpgid,\n"
+                 "                   killpg=os.killpg, install_signal=signal.getsignal)\n"),
+            }),
+        SimpleNamespace(name="(vii) killpg/getpgid are called only inside _signal_process_group",
+                        check=kill_calls_only_in_the_guard,
+                        real=under_training,
+                        population="the guard's own getpgid and killpg calls",
+                        populated=lambda seen: {"killpg", "getpgid"} <= set(seen),
+                        plants={
+                            "a direct kill in a new method":
+                            ("class _LiveAttempt:\n"
+                             "    def kill(self):\n"
+                             "        os.killpg(os.getpgid(self.child.pid), signal.SIGTERM)\n"),
+                        }),
+    ]
+    for clause in clauses:
+        problems, examined = clause.check(clause.real)
+        assert clause.populated(examined), (
+            f"{clause.name}: examined {examined!r}, not {clause.population}. The checker read "
+            "nothing it exists to check, so its green would not be evidence")
+        assert problems == [], f"{clause.name}: {problems}"
+        plant_path = (next(iter(clause.real))
+                      if len(clause.real) == 1 else "tests/test_kill_seam_plant.py")
+        for plant, source in clause.plants.items():
+            planted, _ = clause.check({plant_path: source})
+            assert planted, (f"{clause.name}: the plant {plant!r} passed it, so the clause "
+                             "cannot fail and is not evidence")
+
+
+def test_process_control_tripwire_poisons_system(_process_control_tripwire,
+                                                 process_control_tripwire_error):
+    """Under pytest, ProcessControl.system() returns a control whose every field raises.
+
+    gh#163 spec §2a layer 3, §4.8 criterion 6. `execute_training_attempt` is to
+    resolve `process=None` to `ProcessControl.system()`, and the autouse fixture
+    in tests/conftest.py patches `system` to return its poisoned control. So a
+    test or client wrapper that forgets `process` fails loudly on a
+    ProcessControlTripwire instead of spawning a real child or signalling a real
+    process group.
+
+    SAFETY, in order:
+      * The FIRST statement calls `system()`, which only builds a dataclass, and
+        asserts that it IS the fixture's poison. Under the spec's knock-out 4(k)
+        (the fixture's `monkeypatch.setattr` line deleted) `system()` returns
+        the real control: this assertion fails and nothing below runs.
+      * The fields called are the FIXTURE'S OWN object's, never those of
+        anything `system()` returned. Never change that.
+      * The arguments are inert on the real functions too: `killpg(0, 0)` sends
+        signal 0, which sends nothing; `getpgid(0)` reads the caller's group;
+        `Popen([])` raises IndexError before it forks; `signal.signal(0, None)`
+        rejects signal 0. So a real function slipped into the poison fails the
+        type check below having done nothing.
+    All four fields are called, because one call would pass a poison whose
+    `spawn` is inert, and spawn is the first field an attempt calls; and the
+    field set is compared with the dataclass's, so a fifth field cannot go
+    unpoisoned. The resolution path itself (execute_training_attempt with
+    `process` omitted) gets its own control when that path lands (W5 execute).
+    """
+    assert training.ProcessControl.system() is _process_control_tripwire, (
+        "ProcessControl.system() is not the tests/conftest.py tripwire's poisoned control, so a "
+        "forgotten `process` in this session would reach the REAL spawn and killpg. Nothing "
+        "was called.")
+    poisoned = _process_control_tripwire
+    calls = {
+        "killpg": lambda: poisoned.killpg(0, 0),
+        "getpgid": lambda: poisoned.getpgid(0),
+        "spawn": lambda: poisoned.spawn([]),
+        "install_signal": lambda: poisoned.install_signal(0, None),
+    }
+    assert {field.name for field in dataclasses.fields(poisoned)} == set(calls)
+    for field, call in calls.items():
+        with pytest.raises(process_control_tripwire_error, match=f"ProcessControl.{field} was"):
+            call()
 
 
 # ── Attempt outcome: exit mapping and completion evidence ──────────────────
