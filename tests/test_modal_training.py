@@ -658,8 +658,9 @@ def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
     """Live PufferLib rewrites dust2_policy.pt every epoch (~0.5s).
 
     The 1s settle window never elapses while the child is alive. After SIGINT
-    the file is stable and finalize must still publish the sidecar, or resume
-    cannot validate the parent.
+    the file is stable and the attempt must still publish the sidecar, or
+    resume cannot validate the parent. On INTERRUPTED it is the post-finalize
+    retry that publishes: `finalize` itself does not.
     """
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child)
@@ -776,11 +777,19 @@ def test_publish_reason_names_the_missing_interpreter(tmp_path, monkeypatch):
 
 
 def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path, monkeypatch):
-    """finalize must leave evidence on the Volume, before its commit, of WHY there
-    is no sidecar. Three T4 runs were burned on a silently swallowed skip."""
+    """The attempt must leave evidence on the Volume, before a commit, of WHY there
+    is no sidecar. Three T4 runs were burned on a silently swallowed skip.
+
+    On INTERRUPTED, `finalize` does not publish, so the note is written by the
+    post-finalize retry, and only the retry's own commit (`commit_note=True`)
+    carries it to the Volume. Production order (see `_signal_hooks`): with the
+    child released inside the handler, the retry could write the note before
+    the terminal commit, and that commit would carry it even if the retry's
+    own commit were gone. `test_publish_note_reaches_the_volume_in_the_right_commit`
+    pins which commit carries the note on every exit path."""
     _no_torch(monkeypatch, prebuilt=str(tmp_path / "nonexistent" / "python"))
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child)
+    hooks = _signal_hooks(child, release_on=None)
     commits: list[bool] = []
 
     def commit() -> None:
@@ -801,6 +810,7 @@ def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path,
     try:
         int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
         int_handler(signal.SIGINT, None)
+        child.release()
         assert finished.wait(timeout=2.0)
     finally:
         child.release()
@@ -931,6 +941,19 @@ def _signal_hooks(child, *, release_on=signal.SIGKILL):
     `test_signal_process_group_refuses_groups_a_live_child_cannot_have`, calls
     `_signal_process_group` directly and builds its own pids, apart from the
     session's group by construction.)
+
+    ORDER (gh#211). In production the handler runs on the attempt's own (main)
+    thread, so the wait loop is suspended until `finalize` returns, and the
+    post-finalize publish retry always runs after the terminal STATUS,
+    result.json and commit. A test that calls the handler from the test thread
+    while the attempt waits on another thread loses that order if `killpg`
+    releases the child: the default `release_on=SIGKILL` wakes the attempt
+    thread in the middle of `finalize`, and its retry then races the rest of
+    `finalize`. A test that asserts on anything the retry does (a checkpoint
+    read, the publish note, a commit) must pass `release_on=None` and call
+    `child.release()` after the handler returns, before waiting for the
+    attempt to finish. That is production order; the default suits tests
+    whose assertions the retry cannot touch.
     """
     assert os.getpgrp() != child.pid, (
         f"the runner's own process group ({os.getpgrp()}) equals the fake child's pid "
@@ -1207,31 +1230,69 @@ def test_term_grace_is_deadline_not_mandatory_sleep(tmp_path):
     assert persisted["status"] == "interrupted"
 
 
-def _record_hash_after_terminal(monkeypatch, run_root: Path) -> list[str]:
-    hashed: list[str] = []
+def _record_checkpoint_reads(monkeypatch, run_root: Path) -> list[tuple[str, str]]:
+    """Record every checkpoint validation and hash an attempt makes, and when it made it.
+
+    Returns a live list of `(kind, phase)` pairs. `kind` is "validate"
+    (`validate_local_checkpoint`, stubbed to reject, so no publish gets as far
+    as a sidecar) or "hash" (`core.sha256_file`, stubbed to a fixed digest).
+    `phase` is one of:
+      * "watcher": the checkpoint watcher's own thread (`cs2rl-checkpoint-watch`),
+        which validates every 50 ms while training;
+      * "before-result": any other thread, before result.json exists. On the
+        interrupt path that is `finalize`, which must not load or hash the
+        checkpoint: the prebuilt load can take 120 s, and Modal's kill window
+        is about 30 s;
+      * "after-result": any other thread once result.json exists, which is the
+        attempt's post-finalize publish retry.
+
+    WHY phases by thread and result.json, not by STATUS (gh#211). The first
+    form of this helper, `_record_hash_after_terminal`, recorded any call made
+    once STATUS was no longer `training`, and its callers asserted it recorded
+    nothing. But the retry runs after the terminal STATUS by design, so that
+    assertion held only when the tests' own thread order let the retry win a
+    race with `finalize`; under CPU load it failed. And `finalize` publishes
+    BEFORE its STATUS write, so a `finalize` that published on INTERRUPTED was
+    invisible to it.
+
+    Callers must run in production order (`_signal_hooks`, ORDER). If the
+    child is released inside the handler, the retry can run while `finalize`
+    is still going, and its read is recorded as "before-result".
+    """
+    reads: list[tuple[str, str]] = []
+
+    def phase() -> str:
+        if threading.current_thread().name == "cs2rl-checkpoint-watch":
+            return "watcher"
+        if (run_root / core.RESULT_FILENAME).is_file():
+            return "after-result"
+        return "before-result"
 
     def wrapped_validate(path):
         del path
-        status = json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"]
-        if status != "training":
-            hashed.append("validate")
+        reads.append(("validate", phase()))
         raise mrl.ValidationError("test stub: skip torch")
 
     def wrapped_hash(path):
         del path
-        status = json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"]
-        if status != "training":
-            hashed.append("hash")
+        reads.append(("hash", phase()))
         return "00" * 32
 
     monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)
     monkeypatch.setattr(*binding_target("terminal-hasher"), wrapped_hash)
-    return hashed
+    return reads
 
 
 def test_interrupt_uses_sidecar_digest_and_skips_torch_hash(tmp_path, monkeypatch):
+    """result.json takes the sidecar's digest; nothing loads or hashes the checkpoint.
+
+    There is no checkpoint file, only its sidecar, so no publish (the
+    watcher's or the retry's) gets as far as reading one, and any read at
+    all is `finalize` hashing for result.json. Production order (see
+    `_signal_hooks`).
+    """
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child)
+    hooks = _signal_hooks(child, release_on=None)
     kwargs = _consume_training_kwargs(
         _training_kwargs(
             tmp_path,
@@ -1252,24 +1313,34 @@ def test_interrupt_uses_sidecar_digest_and_skips_torch_hash(tmp_path, monkeypatc
             "mtime_ns": 1,
             "validated_at": "2026-08-13T00:00:00+00:00",
         }) + "\n")
-    hashed = _record_hash_after_terminal(monkeypatch, run_root)
+    reads = _record_checkpoint_reads(monkeypatch, run_root)
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
     try:
         int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
         int_handler(signal.SIGINT, None)
+        child.release()
         assert finished.wait(timeout=2.0)
     finally:
         child.release()
         thread.join(timeout=2.0)
-    assert hashed == []
+    assert reads == []
     payload = json.loads((run_root / core.RESULT_FILENAME).read_text())
     assert payload["status"] == "interrupted"
     assert payload["checkpoint_sha256"] == sidecar_digest
 
 
 def test_interrupt_without_sidecar_leaves_checkpoint_hash_null(tmp_path, monkeypatch):
+    """No sidecar: result.json's digest is null, and only the retry validates the checkpoint.
+
+    Outside the watcher, the one read is the post-finalize retry's
+    validation, after result.json exists. That read is also this test's
+    positive control: a stub that stopped reaching the consumer (see
+    `_record_checkpoint_reads`) records nothing and fails here. A read before
+    result.json means `finalize` loaded or hashed the checkpoint, or the retry
+    ran before `finalize` finished. Production order (see `_signal_hooks`).
+    """
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child)
+    hooks = _signal_hooks(child, release_on=None)
     kwargs = _consume_training_kwargs(
         _training_kwargs(
             tmp_path,
@@ -1283,19 +1354,175 @@ def test_interrupt_without_sidecar_leaves_checkpoint_hash_null(tmp_path, monkeyp
     ckpt_dir = run_root / "checkpoints"
     ckpt_dir.mkdir()
     (ckpt_dir / "dust2_policy.pt").write_bytes(b"do-not-load-me")
-    hashed = _record_hash_after_terminal(monkeypatch, run_root)
+    reads = _record_checkpoint_reads(monkeypatch, run_root)
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
     try:
         int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
         int_handler(signal.SIGINT, None)
+        child.release()
         assert finished.wait(timeout=2.0)
     finally:
         child.release()
         thread.join(timeout=2.0)
-    assert hashed == []
+    outside_watcher = [read for read in reads if read != ("validate", "watcher")]
+    assert outside_watcher == [("validate", "after-result")]
     payload = json.loads((run_root / core.RESULT_FILENAME).read_text())
     assert payload["status"] == "interrupted"
     assert payload["checkpoint_sha256"] is None
+
+
+@pytest.mark.parametrize(("path", "after_terminal"), [
+    ("exit", [("failed", True), ("failed", True)]),
+    ("error", [("failed", True), ("failed", True)]),
+    ("signal", [("interrupted", False), ("interrupted", True)]),
+    ("timeout", [("interrupted", False), ("interrupted", True)]),
+    ("keyboard_interrupt", [("interrupted", False), ("interrupted", True)]),
+])
+def test_publish_note_reaches_the_volume_in_the_right_commit(tmp_path, path, after_terminal):
+    """Which commit carries the publish note to the Volume, on each way an attempt ends.
+
+    gh#211, gh#238 (mutants F11-F13). There is no checkpoint, so every publish
+    writes the note ("no checkpoint at ..."). The attempt publishes twice:
+    `finalize`, with `commit_note=False` and not at all on INTERRUPTED (a
+    120 s prebuilt load must not sit before the terminal STATUS), then the
+    retry after it, with `commit_note=True`. The commit fake records
+    `(STATUS, note on disk?)` at every commit. `after_terminal` is the record
+    of the commits made once STATUS is terminal:
+      * FAILED (`exit`: the child exits 1; `error`: the attempt raises after
+        the spawn): the note written by `finalize` goes out with the terminal
+        commit, and the retry commits its rewrite;
+      * INTERRUPTED (`signal`, `timeout`, `keyboard_interrupt`): the terminal
+        commit has no note, and only the retry's commit carries it.
+    No commit made while STATUS is `training` may carry the note.
+
+    What fails where: F11 (every publish `commit_note=False`) loses the last
+    `True` everywhere; F12 (every publish `commit_note=True`) commits the note
+    while STATUS is still `training` on the FAILED paths; F13 (`finalize`'s
+    publish deleted) turns the FAILED terminal commit `False`; a `finalize`
+    that publishes on INTERRUPTED turns that terminal commit `True`.
+
+    Only `signal` runs the attempt on a thread, with the handler called from
+    the test in production order (see `_signal_hooks`, ORDER). The other
+    cases run the attempt on the test thread, where the order is production's
+    already.
+    """
+    commits: list[tuple[str, bool]] = []
+
+    def commit() -> None:
+        run_root = kwargs["attempt"].run_root
+        status = json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"]
+        note = run_root / "checkpoints" / core.CHECKPOINT_PUBLISH_REASON_NAME
+        commits.append((status, note.is_file()))
+
+    child = FakeChild(returncode=1) if path == "exit" else FakeChild(hold=True)
+    if path == "keyboard_interrupt":
+
+        def exploding_wait(timeout=None):
+            raise KeyboardInterrupt
+
+        child.wait = exploding_wait
+    hooks = _signal_hooks(child, release_on=None)
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            commit=commit,
+            timeout=timedelta(0) if path == "timeout" else None,
+            sleep=hooks["sleep"],
+            killpg=hooks["killpg"],
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    if path == "signal":
+        thread, finished, _boxed = _run_attempt_in_thread(kwargs)
+        try:
+            int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
+            int_handler(signal.SIGINT, None)
+            child.release()
+            assert finished.wait(timeout=2.0)
+        finally:
+            child.release()
+            thread.join(timeout=2.0)
+    elif path == "error":
+        (kwargs["attempt"].run_root / core.TRAIN_LOG_NAME).mkdir()
+        with pytest.raises(OSError):
+            mrl.execute_training_attempt(**kwargs)
+    else:
+        mrl.execute_training_attempt(**kwargs)
+    assert not any(note for status, note in commits if status == "training")
+    assert [record for record in commits if record[0] != "training"] == after_terminal
+
+
+@pytest.mark.timeout(30)
+def test_a_signal_inside_finalize_does_not_finalize_again(tmp_path):
+    """A second signal, handled while the first handler is inside `finalize`, returns at once.
+
+    gh#211. In production every handler runs on the main thread, between
+    bytecodes, so a SIGTERM that arrives while the SIGINT handler is
+    signalling the child's group runs the handler again, nested, on the same
+    thread. That nested `finalize` must find `cleaned` set and return; the
+    outer one then does the only terminal write. The fake `killpg` delivers
+    the nested signal on the first SIGTERM, from inside
+    `_signal_process_group`, which runs after `cleanup_lock` is released. (A
+    signal inside that `with` block would deadlock on the non-reentrant lock:
+    gh#238 P2, not tested here.)
+
+    A `finalize` that set `cleaned` at its END would run the nested call in
+    full: two SIGTERMs and two SIGKILLs, and a second terminal commit (a
+    same-terminal STATUS write is idempotent, so the second one returns
+    without an error). Before gh#211 only the racy `hashed == []` assertions
+    of the interrupt tests could see that. So once STATUS is terminal there
+    are exactly two commits: the terminal one, without the note, then the
+    retry's, with it (as in
+    `test_publish_note_reaches_the_volume_in_the_right_commit`).
+
+    Production order (see `_signal_hooks`, ORDER). The timeout is a hard
+    bound, not a margin: a `finalize` that held `cleanup_lock` across the
+    kill would deadlock on the nested call instead of failing.
+    """
+    child = FakeChild(hold=True)
+    hooks = _signal_hooks(child, release_on=None)
+    nested: list[str] = []
+    commits: list[tuple[str, bool]] = []
+
+    def reentrant_killpg(pgid, sig):
+        hooks["killpg"](pgid, sig)
+        if sig == signal.SIGTERM and not nested:
+            nested.append("entered")
+            handler = hooks["installed"][signal.SIGTERM]
+            assert callable(handler), "the attempt's SIGTERM handler is not installed"
+            handler(signal.SIGTERM, None)
+            nested.append("returned")
+
+    def commit() -> None:
+        run_root = kwargs["attempt"].run_root
+        status = json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"]
+        note = run_root / "checkpoints" / core.CHECKPOINT_PUBLISH_REASON_NAME
+        commits.append((status, note.is_file()))
+
+    kwargs = _consume_training_kwargs(
+        _training_kwargs(
+            tmp_path,
+            child=child,
+            commit=commit,
+            sleep=hooks["sleep"],
+            killpg=reentrant_killpg,
+            getpgid=hooks["getpgid"],
+            signal_signal=hooks["signal_signal"],
+        ))
+    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
+    try:
+        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
+        int_handler(signal.SIGINT, None)
+        child.release()
+        assert finished.wait(timeout=2.0)
+    finally:
+        child.release()
+        thread.join(timeout=2.0)
+    assert nested == ["entered", "returned"]
+    assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
+    after_terminal = [record for record in commits if record[0] != "training"]
+    assert after_terminal == [("interrupted", False), ("interrupted", True)]
 
 
 def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
