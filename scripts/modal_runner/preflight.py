@@ -81,7 +81,7 @@ class PreflightHost:
     from-imports from state, looked up when prepare runs). Tests replace these;
     production never passes a PreflightHost.
 
-    PITFALL, when defaults are resolved (gh#163 spec §4.2): `run` is bound to
+    PITFALL, when defaults are resolved (gh#163): `run` is bound to
     `subprocess.run` at import, as prepare's own `run=subprocess.run` default
     was before W5, so a monkeypatch of the global `subprocess.run` does not
     reach it; inject `run` instead. The three None defaults are resolved at
@@ -160,7 +160,8 @@ def _extract_verified_source(attempt: AttemptContext, *, source: ExpectedSource,
     orchestrator creates it, not this phase. If this phase created it and then
     raised (a provenance mismatch), the orchestrator would never receive it,
     the failure arm could not remove it, and the extracted tree would survive
-    until a finalizer ran (gh#163 spec §4.5, the resource-acquisition rule).
+    until a finalizer ran (the resource-acquisition rule: `prepare_remote_source`'s
+    PITFALL).
     """
     safe_extract_git_archive(source.archive_path, source_dir)
     _verify_extracted_provenance(source_dir, source.commit, source.tree)
@@ -201,7 +202,8 @@ def _build_in_source(
     dumped config is hashed and the manifest rewritten with that hash, and the
     CUDA probe runs last. BUILDING gets no commit of its own: the next Volume
     commit (the manifest rewrite's, or a heartbeat's) carries it, and adding
-    one changes the effect order (gh#163 spec §4.5; no test pins it, gh#236).
+    one changes the effect order, which the gh#163 refactor keeps identical to
+    the runner's before it (no test pins it: gh#236).
     `host.parent_env=None` reads `os.environ` here, at call time. `resume` is
     unpacked into `_validate_remote_resume`'s positional arguments, never
     passed whole (its PITFALL, on RemoteResume).
@@ -302,13 +304,15 @@ def prepare_remote_source(
     also hands to training (same lock, run_root and Volume); `host=None` is
     production's `PreflightHost()`.
 
-    PITFALL, the resource-acquisition rule (gh#163 spec §4.5): every
+    PITFALL, the resource-acquisition rule (gh#163): every
     statement that acquires something the failure arm must release,
     `start_heartbeat(...)` and `tempfile.TemporaryDirectory(...)`, is assigned
     HERE, in this function's own scope, before any phase that can fail uses
     it. Moving either into a phase function makes a failure in that phase
-    leak it: the arm sees only what this scope holds. Knock-out (j) of the
-    spec pins the staging half.
+    leak it: the arm sees only what this scope holds.
+    `test_prepare_rejects_provenance_sidecar_mismatch` pins the staging half:
+    with the staging created inside a phase, its extracted tree survives the
+    failure and that test's ephemeral-directory assertion goes red.
 
     `on_ready` was removed in W5: nothing in production passed it.
     """

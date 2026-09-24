@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 
@@ -144,13 +144,15 @@ def _tee_stream(src: object, sinks: Sequence[object]) -> None:
 class ProcessControl:
     """The training child's OS: start it, find and signal its group, install signal handlers.
 
-    NO FIELD DEFAULTS, DELIBERATELY (gh#163 spec §2a, layer 2). On 2026-09-23 a
-    throwaway script built a draft of this class whose fields defaulted to the
-    real OS functions, faked only `spawn`, and called `killpg(getpgid(1),
-    SIGTERM)`: that is `kill(-1, SIGTERM)`, and it ended the user's desktop
-    session. Without defaults a half-faked ProcessControl is a TypeError when it
-    is built, never a live `killpg`. The real functions come only from
-    `system()`.
+    NO FIELD DEFAULTS, DELIBERATELY (gh#163). This is the second of the kill
+    seam's three safety layers: the process-group guard in
+    `_signal_process_group`, no real-OS defaults here, and the tests/conftest.py
+    tripwire. On 2026-09-23 a throwaway script built a draft of this class whose
+    fields defaulted to the real OS functions, faked only `spawn`, and called
+    `killpg(getpgid(1), SIGTERM)`: that is `kill(-1, SIGTERM)`, and it ended the
+    user's desktop session. Without defaults a half-faked ProcessControl is a
+    TypeError when it is built, never a live `killpg`. The real functions come
+    only from `system()`.
 
     Tests build all four fields as keywords, never through a `*`/`**` splat,
     which a static check cannot read. `test_kill_seam_static_safety`
@@ -163,8 +165,8 @@ class ProcessControl:
     inside `execute_training_attempt`'s body: a module-level alias or a default
     argument captures the real factory at import and bypasses the tripwire's
     patch of the class attribute. `killpg` and `getpgid` are called only by
-    `_signal_process_group`, which holds the §2a guard; a direct call anywhere
-    else in this module bypasses it.
+    `_signal_process_group`, which holds the process-group guard; a direct call
+    anywhere else in this module bypasses it.
     """
 
     spawn: Callable[..., object]
@@ -207,8 +209,10 @@ def execute_training_attempt(
     and clock; gh#163 W5). `process` is the child's OS: spawn, the
     process-group signals, the handler install. Production passes none, and
     None resolves to `ProcessControl.system()`, the real functions, inside
-    `train()`: after the claim, at call time. Tests pass an all-fake control
-    (`_training_kwargs` in tests/test_modal_training.py does).
+    `train()`: after the claim, at call time. Tests pass a control whose
+    `spawn`, `getpgid` and `killpg` are fakes (`_training_kwargs` in
+    tests/test_modal_training.py builds one); its `install_signal` may be the
+    real `signal.signal`, which only installs this attempt's own handlers.
 
     PITFALL: that `ProcessControl.system()` call is the module's one read of
     `system`, and it must stay a call in this function's body. A module-level
@@ -495,12 +499,12 @@ def _signal_process_group(
     production can see is that a reaped pid reused by a non-leader is now
     refused, where before the guard its group was signalled.
 
-    WHY it exists (2026-09-23). An agent's throwaway script built the draft
-    `ProcessControl` (spec §2a) with only `spawn` faked and called its
+    WHY it exists (2026-09-23). An agent's throwaway script built a draft
+    `ProcessControl` with only `spawn` faked and called its
     `killpg(getpgid(1), SIGTERM)` directly, on the real OS functions. That is
     `kill(-1, SIGTERM)`, and it ended the user's desktop session. The call never
-    went through this function, so this guard would not have stopped it; W5's
-    layer 2 (a `ProcessControl` with no real-OS defaults) answers the direct
+    went through this function, so this guard would not have stopped it; a
+    `ProcessControl` with no real-OS defaults (gh#163 W5) answers the direct
     call. This guard closes the same shape on the one real path: the real
     `killpg`/`getpgid` that `ProcessControl.system()` supplies when
     `execute_training_attempt` is given no `process`.
@@ -511,8 +515,9 @@ def _signal_process_group(
     other) that happens to be a live process leading its own group: that
     passes all three conditions and receives the real signal. So no test may
     hand it the real functions. Since W5 none does: the training test builder
-    always passes an all-fake ProcessControl, and the `tests/conftest.py`
-    tripwire (spec §2a layer 3) makes the real one fail loudly under pytest.
+    always passes a ProcessControl whose `getpgid` and `killpg` are fakes, and
+    the `tests/conftest.py` tripwire makes the real one fail loudly under
+    pytest.
 
     RESIDUAL.
       * Accepted: a reaped pid reused by a process that leads its own group
@@ -521,9 +526,13 @@ def _signal_process_group(
         (`child_poll()`, or `child_wait()`, which is `Popen.wait` and reaps
         too) to reap the child and its pid to be reused before
         `finalize(kill_child=True)` runs, which is negligible.
-      * Closed by W5, not by this guard: a test that forgot the fakes while
-        its fake pid was a live process leading its own group sent a real
-        signal (above). The builder's fakes and the conftest tripwire close it.
+      * Closed by W5 (not by this guard) except in the tripwire's declared
+        windows: a test that forgot the fakes while its fake pid was a live
+        process leading its own group would have sent a real signal (above).
+        The builder's fakes and the conftest tripwire close it. The three
+        windows tests/conftest.py declares unpoisoned stay open: a test body
+        that is the first import of the package, code that runs at
+        collection, and module-, class- or session-scoped fixtures.
 
     PITFALL: do NOT close the accepted residual by polling before `getpgid`. Today
     a zombie's `getpgid` succeeds, so the SIGTERM still reaches grandchildren
@@ -598,17 +607,32 @@ def _signal_process_group(
 class _LiveAttempt:
     """What the cleanup paths of one running attempt share: the child, handlers, tees and log.
 
-    gh#163 W5 (plan D1). These were locals of `_run_training_attempt`, shared
-    through `nonlocal` by four closures (`finalize`, `on_signal` and the two
-    once-guards); as fields and methods each part can be read, and measured,
-    on its own. State, not a collaborator: mutable, compared by identity, and
-    never handed out of the attempt.
+    gh#210 (gh#163 W5). These were locals of `_run_training_attempt`, shared
+    through `nonlocal` by three closures (`finalize` and the two once-guards;
+    the fourth, `on_signal`, only called `finalize`); as fields and methods
+    each part can be read, and measured, on its own. State, not a
+    collaborator: mutable, compared by identity, and never handed out of the
+    attempt.
 
     Three paths reach `finalize`: the normal exit (`finish`), the SIGINT/SIGTERM
     handler (`on_signal`, installed by `install_handlers`), and the `except` arms
     of `_run_training_attempt`. The first to take `cleanup_lock` does the work;
     the others return at `if self.cleaned`. `release` is the `finally` arm and
     runs on every path.
+
+    CALL ORDER (`_run_training_attempt`): `spawn`, `install_handlers`,
+    `start_tees`, `wait_for_exit`, `finish`, then `publish(commit_note=True)`;
+    `release` last, always. Each step assumes the ones before it ran:
+      * `spawn` comes BEFORE `install_handlers`. Reversed, a signal during the
+        spawn would finalize with `child` still None (nothing to kill), and the
+        child spawned afterwards would run unsupervised while STATUS says
+        interrupted.
+      * `start_tees` and `wait_for_exit` read `child`: with it None,
+        `start_tees` tees nothing, and `wait_for_exit` without a timeout polls
+        forever.
+      * `finish` is the wait loop's end: it maps the exit and calls
+        `finalize`, unless a handler already has. `finalize` is the once-only
+        terminal write that every path shares. Similar names, different jobs.
 
     PITFALLS.
       * `finalize` can run INSIDE a signal handler, on the main thread, between
@@ -618,13 +642,15 @@ class _LiveAttempt:
         publish into such a field only a value that is ready (`start_tees`
         appends a thread only once it is started).
       * `killpg`/`getpgid` are reached only through `_signal_process_group`, the
-        §2a guard. Never call `self.process.killpg` or `getpgid` here, nor hand
-        them to anything but that guard (`test_kill_seam_static_safety` clause
-        (vii)).
+        process-group guard. Never call `self.process.killpg` or `getpgid` here,
+        nor hand them to anything but that guard (`test_kill_seam_static_safety`
+        clause (vii)).
       * Every clock read is `self.attempt.clock.<now|sleep>` and every commit
         `self.attempt.volume.commit`: in a test's fake-clock run a stray
         `_utc_now()` stamps the real time and a stray `time.sleep` really
-        sleeps (knock-out (g-train)).
+        sleeps. (`test_failed_cleanup_commit_does_not_let_redelivery_write` and
+        the timeout half of `test_dead_run_and_timeout_have_distinct_reasons`
+        go red when these reads become `core._utc_now`.)
       * `threading` is read through this module at call time (`threading.Thread`
         in `start_tees`; `_run_training_attempt` builds `cleanup_lock`): the
         binding campaign's attempt rows replace `training.threading`.
@@ -639,7 +665,7 @@ class _LiveAttempt:
     ckpt_thread: threading.Thread
     started_at: datetime
     cleanup_lock: threading.Lock
-    tee_threads: list[threading.Thread]
+    tee_threads: list[threading.Thread] = field(default_factory=list)
     child: object | None = None
     prev_int: object | None = None
     prev_term: object | None = None
@@ -673,9 +699,22 @@ class _LiveAttempt:
         """End the attempt once: stop the child, then persist the terminal STATUS and result.json.
 
         Whichever path takes `cleanup_lock` first does this; the later ones
-        return. The terminal transition, result.json and the final commit share
-        one `try`: a failed Volume commit must not become a cross-container
-        rewrite, so it is swallowed and the in-memory result still records it.
+        return. In order:
+          1. with `kill_child`, signal the child's group through the guard;
+          2. join the tee threads (5 s each);
+          3. stop the heartbeat, then the checkpoint watcher (each once);
+          4. unless `status` is INTERRUPTED, publish a stable checkpoint's
+             sidecar (the comment below says why not on INTERRUPTED);
+          5. close train.log and the caller's `log_sink`;
+          6. for COMPLETED with a manifest, re-validate the completion
+             evidence: a failure downgrades the run to FAILED with
+             `REASON_INVALID_EVIDENCE`;
+          7. write the terminal STATUS and result.json, and commit the Volume;
+          8. record `final_result`.
+        Step 7 shares one `try`: a failed write or Volume commit is swallowed,
+        because it must not become a cross-container rewrite. Step 8 runs
+        either way, so the attempt still returns the terminal status even when
+        the Volume does not hold it (unpinned by any test: gh#238).
         """
         with self.cleanup_lock:
             if self.cleaned:
@@ -697,11 +736,7 @@ class _LiveAttempt:
         # publishes after STATUS is durable (live T4: sidecar validated_at was
         # ~7s after result.json finished_at).
         if status is not Status.INTERRUPTED:
-            _publish_and_note(self.attempt.run_root,
-                              now=self.attempt.clock.now,
-                              commit=self.attempt.volume.commit,
-                              sleep=self.attempt.clock.sleep,
-                              commit_note=False)
+            self.publish(commit_note=False)
         _close_log_sink(self.owned_log)
         _close_log_sink(self.log_sink)
         evidence: CompletionEvidence | None = None
@@ -730,6 +765,19 @@ class _LiveAttempt:
             # A failed Volume commit must not become a cross-container rewrite.
             pass
         self.final_result = TrainingAttemptResult(status=status, reason=reason, exit_code=exit_code)
+
+    def publish(self, *, commit_note: bool) -> None:
+        """One `_publish_and_note` over this attempt's run_root, clock and Volume; never raises.
+
+        `commit_note=False` only inside `finalize`, whose terminal commit
+        carries the note; True for the retries after it (see
+        `_publish_and_note`).
+        """
+        _publish_and_note(self.attempt.run_root,
+                          now=self.attempt.clock.now,
+                          commit=self.attempt.volume.commit,
+                          sleep=self.attempt.clock.sleep,
+                          commit_note=commit_note)
 
     def on_signal(self, _signum: int, _frame: object) -> None:
         self.finalize(Status.INTERRUPTED, REASON_SIGNAL, None, kill_child=True)
@@ -863,11 +911,18 @@ def _run_training_attempt(
 ) -> object:
     """The attempt, in order: TRAINING, heartbeat, watcher, then the supervised child.
 
-    gh#163 spec §4.4. Enter TRAINING and commit; take the prepared heartbeat
-    or start the fallback; start the checkpoint watcher; build the live state;
-    spawn, install the handlers, start the tees, wait (with the timeout), map
-    the exit and finalize; retry the publish; return the result. The `except`
-    and `finally` arms keep their effects and order.
+    gh#210. Enter TRAINING and commit; take the prepared heartbeat or start
+    the fallback; start the checkpoint watcher; build the live state; spawn,
+    install the handlers, start the tees, wait (with the timeout), map the
+    exit and finalize; retry the publish; return the result (`_LiveAttempt`'s
+    CALL ORDER says why in that order). The arms:
+      * KeyboardInterrupt: finalize INTERRUPTED (the child is killed), retry
+        the publish, and RETURN the INTERRUPTED result; it re-raises only if
+        no result was recorded.
+      * Any other exception: finalize FAILED (the child is killed), retry the
+        publish, and re-raise.
+      * `finally`: `release` restores the handlers, stops the watcher and the
+        heartbeat, and closes train.log, on every path.
 
     PITFALLS.
       * Keep the TRAINING `state.transition_status(...)` and the
@@ -912,20 +967,16 @@ def _run_training_attempt(
         ckpt_thread=ckpt_thread,
         started_at=attempt.clock.now(),
         cleanup_lock=threading.Lock(),
-        tee_threads=[],
     )
     try:
         live.spawn(prepared)
         live.install_handlers()
         live.start_tees()
-        live.finish(live.wait_for_exit(timeout))
+        timed_out = live.wait_for_exit(timeout)
+        live.finish(timed_out)
         # Signal-handler finalize cannot reliably torch.load/sleep. Retry on
         # the main thread now that the child wait loop has returned.
-        _publish_and_note(attempt.run_root,
-                          now=attempt.clock.now,
-                          commit=attempt.volume.commit,
-                          sleep=attempt.clock.sleep,
-                          commit_note=True)
+        live.publish(commit_note=True)
         if live.final_result is not None:
             return live.final_result
         return TrainingAttemptResult(
@@ -935,21 +986,13 @@ def _run_training_attempt(
         )
     except KeyboardInterrupt:
         live.finalize(Status.INTERRUPTED, REASON_SIGNAL, None, kill_child=True)
-        _publish_and_note(attempt.run_root,
-                          now=attempt.clock.now,
-                          commit=attempt.volume.commit,
-                          sleep=attempt.clock.sleep,
-                          commit_note=True)
+        live.publish(commit_note=True)
         if live.final_result is not None:
             return live.final_result
         raise
     except Exception:
         live.finalize(Status.FAILED, REASON_ERROR, None, kill_child=True)
-        _publish_and_note(attempt.run_root,
-                          now=attempt.clock.now,
-                          commit=attempt.volume.commit,
-                          sleep=attempt.clock.sleep,
-                          commit_note=True)
+        live.publish(commit_note=True)
         raise
     finally:
         live.release()

@@ -1020,9 +1020,10 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # commit, against the W4 per-module tree's 279: two
 # runner-side tests added in tests/test_modal_training.py
 # (`test_kill_seam_static_safety`, `test_process_control_tripwire_poisons_system`),
-# nothing removed, no destination moves. 279 was the count after the §2a safety
-# commit, when the declared runner set was still the one unsplit file (W4's
-# split moved names; a move changes no key). Against the W3b split tree's 278: one
+# nothing removed, no destination moves. 279 was the count after the
+# process-group guard commit (gh#163), when the declared runner set was still
+# the one unsplit file (W4's split moved names; a move changes no key).
+# Against the W3b split tree's 278: one
 # runner-side test added (`test_signal_process_group_refuses_groups_a_live_child_cannot_have`),
 # nothing removed, no destination moves. W3b's own move, against 2bb32ac's 273:
 # five client-side helper/test names added, one `SEAM_GUARDS` name renamed, no
@@ -1724,9 +1725,9 @@ def _names_defined_under_tests():
     test file's helpers.
 
     NO EXISTENCE FILTER. The glob's entries exist by construction, so a filter
-    here could only ever skip `SHARED_FILE`, a declared seam file, and spec
-    §3.6 (f) allows no existence filter over one. A missing shared file fails
-    at `read_text`, naming the path.
+    here could only ever skip `SHARED_FILE`, a declared seam file, and a
+    declared seam file must fail when it is missing, never be skipped. A
+    missing shared file fails at `read_text`, naming the path.
     """
     found = {}
     paths = sorted(set((ROOT / "tests").glob("test_*.py")) | {ROOT / SHARED_FILE})
@@ -1892,8 +1893,8 @@ def _runner_imports_the_floor_cannot_resolve(sources):
     floor, whose remedy then points at a move or an exemption; and a core-file
     test that calls it passes the core rule with every gate green. Rejecting
     the import makes both impossible, and it keeps the three resolution rules
-    the spec lists (§3.2) the only ones. The split test asserts this is empty
-    over the seam files, before it runs the floor.
+    (`mrl.X`, `<sub>.X` and `binding_target(...)`) the only ones. The split
+    test asserts this is empty over the seam files, before it runs the floor.
 
     Rejected, at any depth (a function-local import included): a name
     imported from the facade or from a submodule (`from scripts.modal_runner
@@ -3989,11 +3990,11 @@ def test_reach_floor_follows_helpers_in_the_shared_file():
     test's file alone, is red here. Negative: remove the helper from the
     shared file and the same test fails.
 
-    The union is `classify_seam`'s, so it holds the client file's names as well
-    (spec §3.2): the same helper defined in the CLIENT file carries its reach
-    too. A union that dropped the client file is pinned here, not left to the
-    classifier, which would call such a helper shared and the placement gate
-    would then call it misplaced -- a different failure, reported elsewhere.
+    The union is `classify_seam`'s, so it holds the client file's names as well:
+    the same helper defined in the CLIENT file carries its reach too. A union
+    that dropped the client file is pinned here, not left to the classifier,
+    which would call such a helper shared and the placement gate would then
+    call it misplaced -- a different failure, reported elsewhere.
     """
     state_file = _floor_file("state")
     test_source = "def test_through_the_shared_file():\n    return _shared_state_helper()\n"

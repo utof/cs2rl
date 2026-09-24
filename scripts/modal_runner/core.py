@@ -248,7 +248,7 @@ class Clock:
     `wait` is the fallback heartbeat's interruptible wait. A test swaps one
     field with `dataclasses.replace(clock, sleep=...)` and keeps the others.
 
-    PITFALL, when defaults are resolved (gh#163 spec §4.2): all three are bound
+    PITFALL, when defaults are resolved (gh#163): all three are bound
     when this module is imported. A test that monkeypatches the global
     `time.sleep` therefore does NOT reach `Clock().sleep`; inject a Clock. The
     W5 census found no test that patches `time.sleep` in any spelling.
@@ -284,8 +284,9 @@ class AttemptContext:
     TRAINING and terminal transitions. BUILDING is NOT: no commit of its own
     follows it, and the next commit of the Volume carries it (a heartbeat
     beat, the manifest rewrite's, or the next transition's). Keep it so when
-    prepare's phases change: a commit added after BUILDING changes the effect
-    order that gh#163 spec §4.5 requires to stay identical.
+    prepare's phases change: a commit added after BUILDING changes prepare's
+    effect order, which the gh#163 refactor keeps identical to the runner's
+    before it (no test pins that order yet: gh#236).
 
     PITFALL: it holds the Volume, not a bare `commit`. Prepare must reload and
     commit the SAME Volume, and a separate `commit` argument could name a

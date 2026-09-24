@@ -29,7 +29,7 @@ def simple_map(make_map):
     return make_map
 
 
-# ── The ProcessControl tripwire (gh#163 spec §2a, layer 3) ────────────────
+# ── The ProcessControl tripwire (gh#163; the kill seam's third safety layer) ──
 #
 # `execute_training_attempt(process=None)` resolves None to
 # `ProcessControl.system()`, the REAL spawn/getpgid/killpg/signal functions.
@@ -87,7 +87,8 @@ def _process_control_poison(field):
         raise ProcessControlTripwire(
             f"ProcessControl.{field} was called under pytest: execute_training_attempt was "
             "called without process=... (or something else reached ProcessControl.system()). "
-            "Pass an all-fake ProcessControl; the training test builder does.")
+            "Pass a ProcessControl whose spawn, getpgid and killpg are fakes; the training test "
+            "builder does.")
 
     return poisoned
 
@@ -98,10 +99,10 @@ def _process_control_tripwire():
 
     Yields None, and patches nothing, when the training module is not loaded.
     The patch is undone when the test ends, by the fixture's own MonkeyPatch,
-    which nothing the test does to its `monkeypatch` reaches. Knock-out 4(k) of
-    the spec deletes the one `setattr` line: it may be run only on the two
-    tripwire test nodes, because it switches the backstop off for the whole
-    session.
+    which nothing the test does to its `monkeypatch` reaches. A knock-out that
+    deletes the one `setattr` line (to see the two tripwire tests go red) may be
+    run only on those two test nodes, because it switches the backstop off for
+    the whole session.
     """
     training = sys.modules.get("scripts.modal_runner.training")
     if training is None:

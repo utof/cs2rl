@@ -182,7 +182,7 @@ def _preflight_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
 def test_preflight_kwargs_routes_every_override(tmp_path):
     """Every flat key a call site passes to `_preflight_kwargs` reaches the field prepare reads.
 
-    gh#163 spec §4.7. The builder assembles flat overrides into collaborators
+    gh#163 W5. The builder assembles flat overrides into collaborators
     by hand-written code, and several tests assert that something is ABSENT
     from a recorder they injected; such an assertion goes vacuous, still
     green, if the builder stops routing its key. So, both ways:
@@ -192,8 +192,8 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
         `name = ...` alias. A key a call site passes that `routes` lacks fails,
         and so does a `routes` entry that no call site passes;
       * each key, passed as a sentinel, must come back by identity at the
-        field `routes` names (the spec §4.7 substitution map, restricted to
-        this builder's keys). `remote_resume` alone compares by equality: the
+        field `routes` names (the collaborator field that replaced the flat
+        key). `remote_resume` alone compares by equality: the
         builder converts it, because RemoteResume.path is a Path and call
         sites pass `str(ckpt)`.
     A call site whose keys cannot be read statically (a `**` splat, a second
@@ -214,7 +214,10 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
     (tests/test_modal_packaging.py). The keys that are only READ back from the
     built kwargs and passed at no call site (`run_root`, `volume`,
     `archive_path`, `expected_tree`) are not here, by the same two-way rule:
-    each would be an entry no call site passes.
+    each would be an entry no call site passes. The enumerator (`last_name`,
+    `call_site_keys`) is duplicated in `test_training_kwargs_routes_every_override`
+    (tests/test_modal_training.py), which asserts the two copies are AST-equal:
+    change both together.
     """
     routes = {
         "expected_archive_sha256": lambda built: built["source"].archive_sha256,
@@ -477,9 +480,10 @@ def test_prepare_rejects_archive_hash_mismatch(tmp_path):
 
 def test_prepare_rejects_provenance_sidecar_mismatch(tmp_path):
     kwargs = _preflight_kwargs(tmp_path, expected_commit="f" * 40, run=lambda *a, **k: None)
-    # Bound on purpose (spec §4.5): the live traceback keeps the failing frame, and with it
-    # the TemporaryDirectory whose finalizer would otherwise erase the extracted tree when the
-    # block exits, so the cleanup assertion below could not see a skipped cleanup.
+    # Bound on purpose (the resource-acquisition rule in prepare_remote_source's PITFALL): the
+    # live traceback keeps the failing frame, and with it the TemporaryDirectory whose finalizer
+    # would otherwise erase the extracted tree when the block exits, so the cleanup assertion
+    # below could not see a skipped cleanup.
     with pytest.raises(mrl.ValidationError, match="provenance sidecar") as excinfo: # noqa: F841
         mrl.prepare_remote_source(**kwargs)
     ephemeral = kwargs["host"].ephemeral_parent
@@ -671,9 +675,10 @@ def test_preflight_failure_keeps_build_failed_when_heartbeat_stop_raises(tmp_pat
         return subprocess.CompletedProcess(cmd, 0)
 
     kwargs = _preflight_kwargs(tmp_path, run=fake_run, start_heartbeat=start_heartbeat)
-    # Bound on purpose (spec §4.5): the live traceback keeps the failing frame, and with it
-    # the TemporaryDirectory whose finalizer would otherwise erase the extracted tree when the
-    # block exits, so the cleanup assertion below could not see a skipped cleanup.
+    # Bound on purpose (the resource-acquisition rule in prepare_remote_source's PITFALL): the
+    # live traceback keeps the failing frame, and with it the TemporaryDirectory whose finalizer
+    # would otherwise erase the extracted tree when the block exits, so the cleanup assertion
+    # below could not see a skipped cleanup.
     with pytest.raises(subprocess.CalledProcessError) as excinfo:      # noqa: F841
         mrl.prepare_remote_source(**kwargs)
     persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())

@@ -1394,13 +1394,17 @@ def test_train_remote_writes_manifest_and_rejects_completed_without_evidence(
         )
 
     def fake_execute(**kwargs):
+        # Never read, on purpose: this test is about the client, and its child exits 0, so a
+        # normal exit signals nothing. Recording here keeps a stray kill inert instead of
+        # reaching a real process group.
         kills: list[tuple[int, int]] = []
         captured["execute_manifest"] = kwargs["manifest"]
         kwargs["process"] = training.ProcessControl(
             spawn=lambda *a, **k: FakeChild(returncode=0, stdout=b"done\n"),
             getpgid=lambda pid: pid,
             killpg=lambda pgid, sig: kills.append((pgid, sig)),
-            install_signal=signal.signal)
+            install_signal=signal.signal,
+        )
         kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
                                                 clock=core.Clock(now=lambda: _aware(),
                                                                  sleep=lambda _seconds: None))
@@ -1480,6 +1484,9 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
         return prepared
 
     def execute_with_valid_evidence(**kwargs):
+        # Never read, on purpose: this test is about the client, and its child exits 0, so a
+        # normal exit signals nothing. Recording here keeps a stray kill inert instead of
+        # reaching a real process group.
         kills: list[tuple[int, int]] = []
         captured["execute_manifest"] = kwargs["manifest"]
         run_root = Path(kwargs["attempt"].run_root)
@@ -1491,11 +1498,12 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
             _write_metrics(ckpt_dir / "metrics.jsonl", [request.batch_size, effective])
             return FakeChild(returncode=0, stdout=b"done\n")
 
-        kwargs["process"] = training.ProcessControl(spawn=factory,
-                                                    getpgid=lambda pid: pid,
-                                                    killpg=lambda pgid, sig: kills.append(
-                                                        (pgid, sig)),
-                                                    install_signal=signal.signal)
+        kwargs["process"] = training.ProcessControl(
+            spawn=factory,
+            getpgid=lambda pid: pid,
+            killpg=lambda pgid, sig: kills.append((pgid, sig)),
+            install_signal=signal.signal,
+        )
         kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
                                                 clock=core.Clock(now=lambda: _aware(),
                                                                  sleep=lambda _seconds: None))
@@ -1583,17 +1591,21 @@ def test_train_remote_redelivery_claims_before_prepare(fake_modal, tmp_path, mon
         )
 
     def fake_execute(**kwargs):
+        # Never read, on purpose: this test is about the client, and its child exits 0, so a
+        # normal exit signals nothing. Recording here keeps a stray kill inert instead of
+        # reaching a real process group.
         kills: list[tuple[int, int]] = []
 
         def factory(*args, **factory_kwargs):
             factory_calls.append((args, factory_kwargs))
             return FakeChild(returncode=0, stdout=b"done\n")
 
-        kwargs["process"] = training.ProcessControl(spawn=factory,
-                                                    getpgid=lambda pid: pid,
-                                                    killpg=lambda pgid, sig: kills.append(
-                                                        (pgid, sig)),
-                                                    install_signal=signal.signal)
+        kwargs["process"] = training.ProcessControl(
+            spawn=factory,
+            getpgid=lambda pid: pid,
+            killpg=lambda pgid, sig: kills.append((pgid, sig)),
+            install_signal=signal.signal,
+        )
         kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
                                                 clock=core.Clock(now=lambda: _aware(),
                                                                  sleep=lambda _seconds: None))

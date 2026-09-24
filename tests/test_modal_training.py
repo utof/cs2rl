@@ -99,8 +99,8 @@ def _training_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
     """execute_training_attempt's keyword arguments, from flat overrides, run_root in BUILDING.
 
     Call sites pass flat keys (`child=`, `now=`, `killpg=`, ...); this
-    assembles them into the collaborators the attempt takes (gh#163 W5, plan
-    D5): `attempt` (an AttemptContext over a commit-only Volume and a Clock),
+    assembles them into the collaborators the attempt takes (gh#163 W5):
+    `attempt` (an AttemptContext over a commit-only Volume and a Clock),
     `prepared`, `registry`, `process` (a ProcessControl) and `log_sink`, plus
     `manifest` and `timeout` only when overridden, so an absent one keeps the
     attempt's own default. The private keys `_launches` (the default spawn's
@@ -108,14 +108,16 @@ def _training_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
     pairs) must be popped before the call: `_consume_training_kwargs` pops all
     three, and a test that pops by hand pops each.
 
-    SAFETY: `process` is ALWAYS an all-fake ProcessControl. `spawn` records and
-    returns `child`; `getpgid` is the identity; `killpg` only records, into
-    `_kills`; `install_signal` is the override `signal_signal` or the real
-    `signal.signal`, which the real-SIGTERM test needs. So nothing built here
-    reaches a real process group, and a test that drops `process` from the
-    result meets the tests/conftest.py tripwire instead of the real functions
-    (only `test_process_control_tripwire_guards_the_resolution_path` does so,
-    on purpose).
+    SAFETY: `process` ALWAYS has fake `spawn`, `getpgid` and `killpg`. `spawn`
+    records and returns `child`; `getpgid` is the identity; `killpg` only
+    records, into `_kills`. `install_signal` is NOT always a fake: it is the
+    override `signal_signal` or the real `signal.signal`, which the real-SIGTERM
+    test needs; it installs only the attempt's own handlers, and `release`
+    restores the previous ones. So nothing built here reaches a real process
+    group, and a test that drops `process` from the result meets the
+    tests/conftest.py tripwire instead of the real functions (only
+    `test_process_control_tripwire_guards_the_resolution_path` does so, on
+    purpose).
 
     Every known key is taken with `overrides.pop`, and a leftover raises
     TypeError: a misspelt or retired key (`start_heartbeat`) stays loud, as it
@@ -123,8 +125,11 @@ def _training_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
     to field is hand-written, so `test_training_kwargs_routes_every_override`
     checks that every key a call site passes reaches its field; a key popped
     here and then dropped fails there instead of quietly testing the default.
-    The result is typed `dict[str, Any]` because tests reach test-double
-    members through it and store D11's replacements into it.
+    The `child` and `prepared` defaults are built only when not overridden, so
+    an override makes the builder build no unused FakeChild or `src/`. The
+    result is typed `dict[str, Any]` because tests reach test-double members
+    through it and store replacements into it (`kwargs["process"] =
+    dataclasses.replace(kwargs["process"], spawn=...)`).
     """
     known = ("child", "commit", "getpgid", "killpg", "log_sink", "manifest", "now", "prepared",
              "signal_signal", "sleep", "timeout", "wait")
@@ -135,7 +140,7 @@ def _training_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
     run_root.mkdir(exist_ok=True)
     lock = threading.Lock()
     _advance_to_building(run_root, lock=lock)
-    child = given.get("child", FakeChild(stdout=b"ok\n"))
+    child = given["child"] if "child" in given else FakeChild(stdout=b"ok\n")
     launches: list[tuple[tuple, dict]] = []
     kills: list[tuple[int, int]] = []
 
@@ -172,7 +177,7 @@ def _training_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
     )
     kwargs: dict[str, Any] = {
         "attempt": attempt,
-        "prepared": given.get("prepared", _prepared_source(tmp_path)),
+        "prepared": given["prepared"] if "prepared" in given else _prepared_source(tmp_path),
         "registry": FakeRegistry(),
         "process": process,
         "log_sink": given.get("log_sink", io.StringIO()),
@@ -187,19 +192,24 @@ def _training_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
 def test_training_kwargs_routes_every_override(tmp_path):
     """Every flat key a call site passes to `_training_kwargs` reaches the field the attempt reads.
 
-    gh#163 spec §4.7, plan D5/D7. The builder assembles flat overrides into
-    collaborators by hand-written code, and several tests assert that something
-    is ABSENT from a recorder they injected (`kills == []`, `sleeps == []`);
-    such an assertion goes vacuous, still green, if the builder stops routing
-    its key. So, both ways:
+    gh#163 W5. The builder assembles flat overrides into collaborators by
+    hand-written code, and several tests assert that something is ABSENT from
+    a recorder they injected (`kills == []`, `sleeps == []`); such an
+    assertion goes vacuous, still green, if the builder stops routing its key.
+    So, both ways:
       * the keys call sites pass, enumerated by AST over the modal test files,
         must equal the keys of `routes`. A call is read through the bare name,
         an attribute `x._training_kwargs`, or an `import ... as` or plain
         `name = ...` alias. A key a call site passes that `routes` lacks fails,
         and so does a `routes` entry that no call site passes;
       * each key, passed as a sentinel, must come back by identity at the
-        field `routes` names (the spec §4.7 substitution map, restricted to
-        this builder's keys). No key is converted.
+        field `routes` names (the collaborator field that replaced the flat
+        key). No key is converted. One route is weaker than the rest:
+        `child` is read back from the builder's own echo `_child`, not from
+        what `process.spawn` returns, because calling the spawn factory here
+        would run a builder fake (see SAFETY). A builder whose spawn returned
+        some other child would pass this test; the attempt tests that assert
+        on their own child fail instead.
     A call site whose keys cannot be read statically (a `**` splat, a second
     positional argument) fails too, and so does any other reference to the
     builder: its name loaded anywhere but as a callee or a plain alias's value
@@ -210,17 +220,22 @@ def test_training_kwargs_routes_every_override(tmp_path):
 
     SAFETY: the sentinels land in a ProcessControl and a Clock that are built
     and read back, never called; the builder's own recording fakes are never
-    called here either. Knock-out (i) (the builder drops its `sleep` mapping)
-    is caught here, not by the grace-period test (spec §4.7).
+    called here either. A builder that pops `sleep` and then drops it is
+    caught here (and by the watcher tests that pass `sleep=`), not by the
+    grace-period test, whose `15.0 not in hooks["slept"]` holds either way: a
+    FakeChild has `wait`, so the grace period never reaches `sleep`.
 
     THE PLANTS are synthetic call sites, parsed and never run, each passing an
     unmapped key through one spelling: each must fail the key equality or be
     reported as a problem, or the enumeration would not be evidence. Keep
     `routes` and the plants INSIDE this function: a module-level name in this
     file is a governed seam name and moves GOVERNED_NAME_COUNT
-    (tests/test_modal_packaging.py). The enumerator mirrors the one in
-    `test_preflight_kwargs_routes_every_override` (tests/test_modal_preflight.py)
-    for the same reason; change both together.
+    (tests/test_modal_packaging.py). The enumerator (`last_name`,
+    `call_site_keys`) is duplicated in `test_preflight_kwargs_routes_every_override`
+    (tests/test_modal_preflight.py) for the same reason, so this test asserts
+    the two copies are AST-equal (`ast.dump`, docstrings included): change
+    both together, or this goes red. A planted one-token edit of the other
+    copy must make them differ, or the comparison would not be evidence.
     """
     routes = {
         "child": lambda built: built["_child"],
@@ -304,6 +319,32 @@ def test_training_kwargs_routes_every_override(tmp_path):
     }
     assert {"tests/test_modal_training.py",
             "tests/test_modal_patch_bindings.py"} <= set(sources), sorted(sources)[:5]
+
+    mirror_file = "tests/test_modal_preflight.py"
+    mirror_test = "test_preflight_kwargs_routes_every_override"
+
+    def enumerator_dumps(text, test_name):
+        """{name: ast.dump} of the enumerator's two functions nested in `test_name`."""
+        test = next(top for top in ast.parse(text).body
+                    if isinstance(top, ast.FunctionDef) and top.name == test_name)
+        return {
+            node.name: ast.dump(node)
+            for node in test.body
+            if isinstance(node, ast.FunctionDef) and node.name in ("last_name", "call_site_keys")
+        }
+
+    ours = enumerator_dumps(sources["tests/test_modal_training.py"], this_test)
+    assert set(ours) == {"last_name", "call_site_keys"}, sorted(ours)
+    assert enumerator_dumps(sources[mirror_file], mirror_test) == ours, (
+        f"the enumerator in {mirror_file}::{mirror_test} is no longer AST-equal to this test's "
+        "`last_name`/`call_site_keys`: change both copies together")
+    anchor = "if len(node.args) != 1 or"
+    assert sources[mirror_file].count(anchor) == 1, f"plant anchor {anchor!r} is not unique"
+    planted_mirror = sources[mirror_file].replace(anchor, "if len(node.args) != 2 or")
+    assert enumerator_dumps(planted_mirror, mirror_test) != ours, (
+        "a one-token edit of the other copy left the two enumerators equal, so the comparison "
+        "above is not evidence")
+
     keys, problems = call_site_keys(sources)
     assert problems == [], (
         f"call sites whose override keys cannot be read statically: {problems}. Call the "
@@ -373,7 +414,8 @@ def test_training_child_starts_in_new_session_without_shell(tmp_path):
     assert kw["shell"] is False
     assert kw["cwd"] == os.fspath(prepared.source_dir)
     assert kw["env"] == prepared.child_env
-    # A normal exit must signal nothing: the child has already exited (knock-out (c2)).
+    # A normal exit must signal nothing: the child has already exited. A finalize that killed
+    # on every path would record a SIGTERM to the fake pid here.
     assert kills == []
 
 
@@ -865,16 +907,18 @@ def _signal_hooks(child, *, release_on=signal.SIGKILL):
 
     The precondition sits here because every test that drives an attempt into
     its kill path takes its fakes from this helper, so one assertion covers
-    them all. (The §2a guard test calls `_signal_process_group` directly and
-    builds its own.) The guard also refuses the runner's OWN group: if this
-    session's process group happened to equal the fake child's pid (4242 by
-    default), each of those tests would see its kills refused and fail for a
-    reason unrelated to its subject, so this stops at the cause instead.
+    them all. (The process-group guard test,
+    `test_signal_process_group_refuses_groups_a_live_child_cannot_have`, calls
+    `_signal_process_group` directly and builds its own.) The guard also
+    refuses the runner's OWN group: if this session's process group happened
+    to equal the fake child's pid (4242 by default), each of those tests would
+    see its kills refused and fail for a reason unrelated to its subject, so
+    this stops at the cause instead.
     """
     assert os.getpgrp() != child.pid, (
         f"the runner's own process group ({os.getpgrp()}) equals the fake child's pid "
-        f"({child.pid}), so the §2a guard in `_signal_process_group` refuses to signal it by "
-        "design and this kill-path test cannot run in this session")
+        f"({child.pid}), so the process-group guard in `_signal_process_group` refuses to "
+        "signal it by design and this kill-path test cannot run in this session")
     originals = {signal.SIGINT: object(), signal.SIGTERM: object()}
     installed: dict[int, object] = dict(originals)
     kills: list[int] = []
@@ -1431,7 +1475,7 @@ def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monke
 def test_signal_process_group_refuses_groups_a_live_child_cannot_have(case, capsys):
     """`_signal_process_group` refuses the three groups a live child cannot lead.
 
-    Spec §2a. The guard exists because an agent's script once ran
+    gh#163. The guard exists because an agent's script once ran
     `killpg(getpgid(1), SIGTERM)` for real, which is `kill(-1, SIGTERM)`, and
     ended the user's desktop session. Each refusal case sets up exactly ONE of
     the three conditions:
@@ -1515,7 +1559,7 @@ def test_signal_process_group_refuses_groups_a_live_child_cannot_have(case, caps
 class _KillSeamClauses:
     """The clauses `test_kill_seam_static_safety` enforces: one checker and one plant table each.
 
-    gh#163 spec §4.8 criterion 6. A checker takes `{relative path: source text}`
+    gh#163 W5. A checker takes `{relative path: source text}`
     and returns `(problems, examined)`: what fails the clause, and what it looked
     at, which the test requires to hold the clause's population on the real tree.
     A plant has the same shape as the real sources, `{path: source text}`; it is
@@ -1549,13 +1593,26 @@ class _KillSeamClauses:
     }
     OS_MODULES = ("os", "posix")
     SIGNAL_MODULES = ("signal", )
+    SUBPROCESS_MODULES = ("subprocess", )
     IMPORT_CALLS = ("__import__", "import_module")
     BANNED = frozenset({"killpg", "getpgid", "kill"})
     BANNED_SIGNAL = frozenset({"signal"})
+    BANNED_SUBPROCESS = frozenset({"Popen"})
+    # (iii)'s real functions in training.py, as (modules, names): each is loaded only inside
+    # ProcessControl.system()'s body.
+    REAL_FUNCTIONS = (
+        (OS_MODULES, BANNED),
+        (SIGNAL_MODULES, BANNED_SIGNAL),
+        (SUBPROCESS_MODULES, BANNED_SUBPROCESS),
+    )
     GUARDED_CALLS = ("killpg", "getpgid")
-    # The callees a `killpg=`/`getpgid=` keyword may hand those functions to, in (vii):
-    # the guard itself, and ProcessControl's construction (by name, or `cls` in system()).
-    GUARD_HANDOFFS = ("_signal_process_group", "cls", "ProcessControl")
+    # The callees a `killpg=`/`getpgid=` keyword may hand those functions to, in (vii): the
+    # guard itself, and system()'s own construction, `cls(...)`. PINNED: (vii)'s population
+    # must find exactly one handoff to each name here, so a name added without a handoff, or
+    # a second handoff to one of them, is red. Not `ProcessControl`: a re-wrap
+    # `ProcessControl(killpg=self.process.killpg, ...)` would hand the real function to a
+    # control that can then be called anywhere.
+    GUARD_HANDOFFS = ("_signal_process_group", "cls")
     EXECUTE = "execute_training_attempt"
     RESOLUTION_CONTROL = "test_process_control_tripwire_guards_the_resolution_path"
     # (iii)'s exemptions, keyed (file, test): the only tests that may read `.system`.
@@ -1578,15 +1635,21 @@ class _KillSeamClauses:
         ]
 
     @staticmethod
-    def _clause(label, name, *, reads, check, population, populated, plants):
-        """One clause. `reads` names the source sets it checks: "training", "tests" or both."""
+    def _clause(label, name, *, reads, check, population, populated, plants, unpopulated=None):
+        """One clause. `reads` names the source sets it checks: "training", "tests" or both.
+
+        `unpopulated` (optional) is `{sample: examined}`, lists `populated` must reject: the
+        plants of a population that pins something (an allow-set), which `check`'s plants
+        cannot reach because they test problems, not the population.
+        """
         return SimpleNamespace(label=label,
                                name=f"{label} {name}",
                                reads=reads,
                                check=check,
                                population=population,
                                populated=populated,
-                               plants=plants)
+                               plants=plants,
+                               unpopulated=unpopulated or {})
 
     @staticmethod
     def _at(path, sources):
@@ -1754,16 +1817,16 @@ class _KillSeamClauses:
         pc = "class ProcessControl:\n"
         live = "class _LiveAttempt:\n    def kill(self):\n"
         return cls._clause(
-            "(iii)",
-            "os.killpg/os.getpgid/signal.signal only inside ProcessControl.system(); `.system` "
-            "read under tests/ only by the two tripwire tests",
+            "(iii)", "os.killpg/os.getpgid/signal.signal/subprocess.Popen only inside "
+            "ProcessControl.system(); `.system` read under tests/ only by the two tripwire tests",
             reads=("training", "tests"),
             check=cls.real_functions_only_in_system,
-            population=("system()'s os.getpgid, os.killpg and signal.signal, and both exempt "
-                        "tests' calls"),
-            populated=lambda seen: set(seen) == {"os.getpgid", "os.killpg", "signal.signal"} |
-            {f"{file}::{test}"
-             for file, test in cls.SYSTEM_READERS},
+            population=("system()'s os.getpgid, os.killpg, signal.signal and subprocess.Popen, "
+                        "and both exempt tests' calls"),
+            populated=lambda seen: set(seen) == {
+                "os.getpgid", "os.killpg", "signal.signal", "subprocess.Popen"
+            } | {f"{file}::{test}"
+                 for file, test in cls.SYSTEM_READERS},
             plants={
                 **cls._at(
                     cls.TRAINING, {
@@ -1797,6 +1860,12 @@ class _KillSeamClauses:
                         "from os import killpg\n",
                         "a from-import of signal":
                         "from signal import signal as install\n",
+                        "a direct Popen": ("class _LiveAttempt:\n    def spawn(self, prepared):\n"
+                                           "        self.child = subprocess.Popen(\n"
+                                           "            prepared.train_command,\n"
+                                           "            start_new_session=True)\n"),
+                        "a from-import of Popen":
+                        "from subprocess import Popen\n",
                     }),
                 **cls._at(
                     cls.PLANT_TEST, {
@@ -1824,9 +1893,11 @@ class _KillSeamClauses:
 
     @classmethod
     def real_functions_only_in_system(cls, sources):
-        """(iii). In training.py the real os/posix `killpg`, `getpgid`, `kill` and
-        `signal.signal` are loaded only inside `ProcessControl.system()`'s body, in the
-        spellings (iv) reads (`_banned_load`, `_banned_from_imports`). Under tests/, any read
+        """(iii). In training.py the real os/posix `killpg`, `getpgid`, `kill`,
+        `signal.signal` and `subprocess.Popen` (`REAL_FUNCTIONS`) are loaded only inside
+        `ProcessControl.system()`'s body, in the spellings (iv) reads (`_banned_load`,
+        `_banned_from_imports`): a direct Popen would spawn the real train command past the
+        tripwire, which poisons only what `system()` returns. Under tests/, any read
         of an attribute named `system` on any receiver counts, because a
         ProcessControl instance or `type(control)` reaches the same classmethod: it is
         allowed only inside the `(file, test)` pairs of `SYSTEM_READERS`, and each pair
@@ -1849,8 +1920,7 @@ class _KillSeamClauses:
         """(iii), training.py: `(problems, examined)` for the real functions' loads."""
         inside = cls._system_body(tree)
         problems, examined = [], []
-        for modules, banned in ((cls.OS_MODULES, cls.BANNED), (cls.SIGNAL_MODULES,
-                                                               cls.BANNED_SIGNAL)):
+        for modules, banned in cls.REAL_FUNCTIONS:
             problems.extend(cls._banned_from_imports(rel, tree, modules, banned))
             names = cls._module_names(tree, modules)
             for node in ast.walk(tree):
@@ -2062,7 +2132,7 @@ class _KillSeamClauses:
 
         Spelled exactly so, with the bare name `os` on both calls and no argument
         to `getpid`: an alias, `posix` or a module attribute's `os` is not the
-        allowed shape (spec §4.8 criterion 6 (iv)), even with the same target.
+        allowed shape (clause (iv)), even with the same target.
         """
         allowed = {}
         for node in ast.walk(tree):
@@ -2211,12 +2281,12 @@ class _KillSeamClauses:
     @classmethod
     def system_read_once_in_execute(cls, sources):
         """(vi). Without it the tripwire can be bypassed silently: a real factory captured
-        at import (`_SYSTEM = ProcessControl.system`, or a default value) passes (i)-(v), the
-        tripwire test and knock-out (k), and a forgotten `process` then gets the real Popen
-        and handlers. Every read of an attribute named `system` counts (`_system_reads`);
-        the one allowed is a call `ProcessControl.system()`, on that bare name, inside the
-        body of the module-level `execute_training_attempt` (`_body_nodes`), and there must
-        be exactly one. `examined` is where it is.
+        at import (`_SYSTEM = ProcessControl.system`, or a default value) passes (i)-(v) and
+        the tripwire test (whose patch it never sees), and a forgotten `process` then gets
+        the real Popen and handlers. Every read of an attribute named `system` counts
+        (`_system_reads`); the one allowed is a call `ProcessControl.system()`, on that bare
+        name, inside the body of the module-level `execute_training_attempt`
+        (`_body_nodes`), and there must be exactly one. `examined` is where it is.
         """
         problems, examined = [], []
         for rel, text in sources.items():
@@ -2244,11 +2314,10 @@ class _KillSeamClauses:
         """The ids of every node in `function`'s body, nested defs, lambdas and classes
         followed into their bodies only.
 
-        Plan Task 7 step 1: the resolution sits in the nested `train()`, so the
-        whole body subtree counts. A default value, a decorator, an annotation or
-        a base class does not: the function's own run at import, and a nested
-        def's are evaluated where that def statement runs, which the rule keeps
-        out on purpose.
+        The resolution sits in the nested `train()`, so the whole body subtree
+        counts. A default value, a decorator, an annotation or a base class does
+        not: the function's own run at import, and a nested def's are evaluated
+        where that def statement runs, which the rule keeps out on purpose.
         """
         found, pending = set(), list(function.body)
         while pending:
@@ -2262,7 +2331,7 @@ class _KillSeamClauses:
                 pending.extend(ast.iter_child_nodes(node))
         return found
 
-    # ── (vii) killpg/getpgid called only inside the §2a guard
+    # ── (vii) killpg/getpgid called only inside the process-group guard
 
     @classmethod
     def clause_vii(cls):
@@ -2272,8 +2341,16 @@ class _KillSeamClauses:
             "killpg/getpgid are called only inside _signal_process_group",
             reads=("training", ),
             check=cls.kill_calls_only_in_the_guard,
-            population="the guard's own getpgid and killpg calls",
-            populated=lambda seen: {"killpg", "getpgid"} <= set(seen),
+            population=("the guard's own getpgid and killpg calls, and exactly one handoff to "
+                        f"each of GUARD_HANDOFFS {cls.GUARD_HANDOFFS}"),
+            populated=cls.guard_calls_and_pinned_handoffs,
+            unpopulated={
+                "a second handoff to one callee": ["getpgid", "killpg", "killpg"] +
+                [f"handed to {callee}" for callee in cls.GUARD_HANDOFFS * 2],
+                "an allowed callee with no handoff": ["getpgid", "killpg", "killpg"] +
+                [f"handed to {callee}" for callee in cls.GUARD_HANDOFFS[1:]],
+                "no guard calls": [f"handed to {callee}" for callee in cls.GUARD_HANDOFFS],
+            },
             plants=cls._at(
                 cls.TRAINING, {
                     "a direct kill in a new method":
@@ -2289,6 +2366,11 @@ class _KillSeamClauses:
                     "handed to a helper that is not the guard":
                     (live + "        _terminate(self.child, killpg=self.process.killpg,\n"
                      "                   getpgid=self.process.getpgid)\n"),
+                    "handed to a ProcessControl re-wrap":
+                    (live + "        return ProcessControl(spawn=self.process.spawn,\n"
+                     "                              getpgid=self.process.getpgid,\n"
+                     "                              killpg=self.process.killpg,\n"
+                     "                              install_signal=self.process.install_signal)\n"),
                 }))
 
     @classmethod
@@ -2300,18 +2382,22 @@ class _KillSeamClauses:
         `getpgid` (a bare name, the last attribute on any receiver, or
         `getattr(<x>, "killpg")`) is a problem, so an aliased callee (`kp =
         self.process.killpg`) fails with the direct call. The one exception is
-        handing it on as the same-named keyword to the guard or to ProcessControl's
-        construction (`GUARD_HANDOFFS`): `_signal_process_group(child,
-        killpg=self.process.killpg, ...)`, and system()'s `cls(killpg=os.killpg,
-        ...)`, which (iii) governs. An os/posix `kill` is a problem too, since
-        `kill(-pgid, s)` is `killpg` by another name. `examined` is the callee
-        names of the calls found inside the guard.
+        handing it on as the same-named keyword to a `GUARD_HANDOFFS` callee:
+        `_signal_process_group(child, killpg=self.process.killpg, ...)`, and
+        system()'s own `cls(killpg=os.killpg, ...)`, which (iii) governs. A
+        `ProcessControl(...)` re-wrap is not one. An os/posix `kill` is a problem
+        too, since `kill(-pgid, s)` is `killpg` by another name. `examined` is the
+        callee names of the calls found inside the guard, plus `handed to <callee>`
+        once per call that hands one on, which the population pins to exactly one
+        per `GUARD_HANDOFFS` entry. Only training.py is read (see the test's
+        RESIDUAL).
         """
         problems, examined = [], []
         for rel, text in sources.items():
             tree = ast.parse(text)
             inside = cls._inside_the_guard(tree)
-            handed = cls._handed_to_the_guard(tree)
+            handed, callees = cls._handed_to_the_guard(tree)
+            examined.extend(f"handed to {callee}" for callee in callees)
             os_names = cls._module_names(tree, cls.OS_MODULES)
             for node in ast.walk(tree):
                 if id(node) in inside:
@@ -2323,6 +2409,17 @@ class _KillSeamClauses:
                 if loaded is not None and id(loaded) not in handed:
                     problems.append(f"{rel}:{loaded.lineno} {ast.unparse(loaded)}")
         return problems, examined
+
+    @classmethod
+    def guard_calls_and_pinned_handoffs(cls, seen):
+        """(vii)'s population: the guard's own getpgid and killpg calls, and exactly one
+        handoff to each `GUARD_HANDOFFS` callee (`examined` holds `handed to <callee>` once per
+        handing call). This is what watches the allow-set: a name added to it with no handoff,
+        or a second handoff to a name in it, fails here."""
+        handoffs = [
+            entry.removeprefix("handed to ") for entry in seen if entry.startswith("handed to ")
+        ]
+        return {"killpg", "getpgid"} <= set(seen) and sorted(handoffs) == sorted(cls.GUARD_HANDOFFS)
 
     @classmethod
     def _kill_load(cls, node, os_names):
@@ -2340,15 +2437,22 @@ class _KillSeamClauses:
 
     @classmethod
     def _handed_to_the_guard(cls, tree):
-        """The ids of the values handed on as `killpg=`/`getpgid=` to a `GUARD_HANDOFFS`
-        callee, when the value's own last name is the keyword's (`killpg=<x>.killpg`)."""
-        return {
-            id(keyword.value)
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and cls._last_name(node.func) in cls.GUARD_HANDOFFS
-            for keyword in node.keywords
-            if keyword.arg in cls.GUARDED_CALLS and cls._last_name(keyword.value) == keyword.arg
-        }
+        """`(ids, callees)`: the ids of the values handed on as `killpg=`/`getpgid=` to a
+        `GUARD_HANDOFFS` callee, when the value's own last name is the keyword's
+        (`killpg=<x>.killpg`); and that callee's name, once per call that hands one on."""
+        ids, callees = set(), []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and cls._last_name(node.func) in cls.GUARD_HANDOFFS):
+                continue
+            handed = {
+                id(keyword.value)
+                for keyword in node.keywords
+                if keyword.arg in cls.GUARDED_CALLS and cls._last_name(keyword.value) == keyword.arg
+            }
+            if handed:
+                ids |= handed
+                callees.append(cls._last_name(node.func))
+        return ids, callees
 
     @staticmethod
     def _inside_the_guard(tree):
@@ -2362,9 +2466,9 @@ class _KillSeamClauses:
 
 
 def test_kill_seam_static_safety():
-    """No test, and no training code outside the §2a guard, can reach the real kill seam.
+    """No test, and no training code outside the process-group guard, can reach the real kill seam.
 
-    gh#163 spec §4.8 criterion 6. On 2026-09-23 an agent's throwaway script ran
+    gh#163 W5. On 2026-09-23 an agent's throwaway script ran
     the real `killpg(getpgid(1), SIGTERM)`, which is `kill(-1, SIGTERM)`, and
     ended the user's desktop session. The runtime layers (a ProcessControl
     without field defaults; the tests/conftest.py tripwire) each have a way
@@ -2381,9 +2485,10 @@ def test_kill_seam_static_safety():
       (ii)  Every ProcessControl(...) construction under tests/, through the
             name or an import or assignment alias of it, passes the four fields
             as four keywords: no positional argument and no `*`/`**` splat.
-      (iii) In training.py the real os/posix `killpg`, `getpgid` and `kill`, and
-            `signal.signal`, are loaded only inside ProcessControl.system(), in
-            the spellings (iv) reads. Under tests/, an attribute named `system`
+      (iii) In training.py the real os/posix `killpg`, `getpgid` and `kill`,
+            `signal.signal` and `subprocess.Popen` are loaded only inside
+            ProcessControl.system(), in the spellings (iv) reads. Under tests/,
+            an attribute named `system`
             is read (on any receiver: an instance or `type(control)` reaches the
             same classmethod) only inside the two tripwire tests, each exempt by
             (file, test), and each exempt test must still call it.
@@ -2401,19 +2506,23 @@ def test_kill_seam_static_safety():
             defaults and decorators are not body). That is the `process=None`
             resolution; a module-level alias or a default would capture the real
             factory at import, out of the tripwire's reach.
-      (vii) In training.py, outside `_signal_process_group` (which holds the §2a
-            guard), nothing named `killpg` or `getpgid` is loaded, as a bare
-            name, the last attribute on any receiver or through `getattr`,
-            except handed on as the same-named keyword to that guard or to
-            ProcessControl's construction; and no os/posix `kill` is loaded.
+      (vii) In training.py, outside `_signal_process_group` (which holds the
+            process-group guard), nothing named `killpg` or `getpgid` is
+            loaded, as a bare name, the last attribute on any receiver or
+            through `getattr`, except handed on as the same-named keyword to
+            that guard or to system()'s own `cls(...)` construction, once
+            each (`GUARD_HANDOFFS`, pinned); and no os/posix `kill` is loaded.
     Each clause also asserts its population on the real tree, so a checker that
     silently examines nothing cannot pass: the four fields (i), the tripwire's
-    own construction in tests/conftest.py (ii), system()'s three real-function
+    own construction in tests/conftest.py (ii), system()'s four real-function
     loads and both exempt tests' `.system` calls (iii), the real-SIGTERM test's
     `os.kill(os.getpid(), SIGTERM)` (iv), the system() construction (v), the one
     `ProcessControl.system()` call (vi), and the guard's own getpgid and killpg
-    calls (vii). The list of clause labels is pinned below, so a clause dropped
-    from `_KillSeamClauses.clauses()` is red, not silently unchecked.
+    calls plus exactly one handoff to each `GUARD_HANDOFFS` callee (vii). A
+    population that pins an allow-set, as (vii)'s does, also carries
+    `unpopulated` samples it must reject, so the pin itself can be seen to
+    fail. The list of clause labels is pinned below, so a clause dropped from
+    `_KillSeamClauses.clauses()` is red, not silently unchecked.
 
     ADDING A CLAUSE: see `_KillSeamClauses`.
 
@@ -2426,7 +2535,10 @@ def test_kill_seam_static_safety():
     `killpg`, a shell `kill` in a subprocess, and code inside a string a child
     interpreter runs. A wrapper passes only when what it wraps does:
     `functools.partial(os.killpg, 0)` is caught, because it loads `os.killpg`.
-    They are a backstop for the mistakes this branch has seen, not a sandbox.
+    (vii), like (v) and (vi), reads training.py only: the whole control handed
+    to a function in another runner module (`state.stop_heartbeat(self.process)`),
+    which could then call its `killpg`, passes it. They are a backstop for the
+    mistakes this branch has seen, not a sandbox.
     """
     training_file = Path(training.__file__).resolve()
     assert training_file.is_relative_to(ROOT), (
@@ -2454,6 +2566,10 @@ def test_kill_seam_static_safety():
             f"{clause.name}: examined {examined!r}, not {clause.population}. The checker read "
             "nothing it exists to check, so its green would not be evidence")
         assert problems == [], f"{clause.name}: {problems}"
+        for sample, seen in clause.unpopulated.items():
+            assert not clause.populated(seen), (
+                f"{clause.name}: its population check accepts {sample} ({seen!r}), so what it "
+                "pins is not watched")
         assert clause.plants, f"{clause.name} has no plant, so nothing shows it can fail"
         for plant, planted in clause.plants.items():
             assert clause.check(planted)[0], (f"{clause.name}: the plant {plant!r} passed it, so "
@@ -2464,18 +2580,19 @@ def test_process_control_tripwire_poisons_system(_process_control_tripwire,
                                                  process_control_tripwire_error, monkeypatch):
     """Under pytest, ProcessControl.system() returns a control whose every field raises.
 
-    gh#163 spec §2a layer 3, §4.8 criterion 6. `execute_training_attempt`
-    resolves `process=None` to `ProcessControl.system()`, and the autouse fixture
-    in tests/conftest.py patches `system` to return its poisoned control. So a
+    gh#163 W5: the tripwire is the kill seam's third safety layer (see
+    ProcessControl). `execute_training_attempt` resolves `process=None` to
+    `ProcessControl.system()`, and the autouse fixture in tests/conftest.py
+    patches `system` to return its poisoned control. So a
     test or client wrapper that forgets `process` fails loudly on a
     ProcessControlTripwire instead of spawning a real child or signalling a real
     process group.
 
     SAFETY, in order:
       * The FIRST statement calls `system()`, which only builds a dataclass, and
-        asserts that it IS the fixture's poison. Under the spec's knock-out 4(k)
-        (the fixture's one `setattr` line deleted) `system()` returns the real
-        control: this assertion fails and nothing below runs.
+        asserts that it IS the fixture's poison. With the fixture's one
+        `setattr` line deleted, `system()` returns the real control: this
+        assertion fails and nothing below runs.
       * The fields called are the FIXTURE'S OWN object's, never those of
         anything `system()` returned. Never change that.
       * The arguments are inert on the real functions too: `killpg(0, 0)` sends
@@ -2499,7 +2616,7 @@ def test_process_control_tripwire_poisons_system(_process_control_tripwire,
         "forgotten `process` in this session would reach the REAL spawn and killpg. Nothing "
         "was called.")
     assert issubclass(process_control_tripwire_error, RuntimeError), (
-        "the tripwire's poison is not a RuntimeError subclass (spec §4.8 criterion 6)")
+        "the tripwire's poison is not a RuntimeError subclass, as tests/conftest.py declares it")
     assert not issubclass(process_control_tripwire_error, (ValueError, ProcessLookupError)), (
         "the attempt swallows a ValueError from the handler install and a ProcessLookupError "
         "from getpgid/killpg, so a poison of either type would be silent exactly there")
@@ -2525,8 +2642,8 @@ def test_process_control_tripwire_guards_the_resolution_path(_process_control_tr
                                                              tmp_path):
     """execute_training_attempt with `process` omitted meets the tripwire, not the real OS.
 
-    gh#163 spec §4.8 criterion 6, the tripwire's resolution-path control (plan
-    D9). The tripwire test above shows only that the fixture patched what it
+    gh#163 W5: the tripwire's resolution-path control. The tripwire test
+    above shows only that the fixture patched what it
     patched. This drives the path that matters: `process=None` resolves to
     `ProcessControl.system()` inside `train()`, which under pytest returns the
     fixture's poisoned control, so the attempt's first ProcessControl call,
@@ -2534,9 +2651,8 @@ def test_process_control_tripwire_guards_the_resolution_path(_process_control_tr
 
     SAFETY, two belts. Never weaken either.
       1. The FIRST statement asserts that `system()` IS the fixture's poison.
-         That builds a dataclass and calls no field, so under knock-out 4(k)
-         (the fixture's one setattr deleted) this test fails before anything
-         is called.
+         That builds a dataclass and calls no field, so with the fixture's
+         one setattr deleted this test fails before anything is called.
       2. The train command is `/nonexistent/cs2rl-tripwire-must-not-run`, so
          even a real spawn (an implementation that captured the real factory
          at import, which clause (vi) of the static test bans) fails to exec
