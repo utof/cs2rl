@@ -622,8 +622,8 @@ class _LiveAttempt:
     Three paths reach `finalize`: the normal exit (`finish`), the SIGINT/SIGTERM
     handler (`on_signal`, installed by `install_handlers`), and the `except` arms
     of `_run_training_attempt`. The first to take `cleanup_lock` does the work;
-    the others return at `if self.cleaned`. `release` is the `finally` arm and
-    runs on every path.
+    the others fail the non-blocking acquire and return. `release` is the
+    `finally` arm and runs on every path.
 
     CALL ORDER (`_run_training_attempt`): `spawn`, `install_handlers`,
     `start_tees`, `wait_for_exit`, `finish`, then `publish(commit_note=True)`;
@@ -642,10 +642,14 @@ class _LiveAttempt:
     PITFALLS.
       * `finalize` can run INSIDE a signal handler, on the main thread, between
         any two statements after `install_handlers`: inside `start_tees`
-        (gh#217), inside the wait loop. Every field it reads must be usable from
+        (gh#217), inside the wait loop, and between `finalize`'s own first two
+        statements (gh#238 P2). Every field it reads must be usable from
         construction on (`child` None, `tee_threads` empty), and a method may
         publish into such a field only a value that is ready (`start_tees`
-        appends a thread only once it is started).
+        appends a thread only once it is started). The once-gate is a
+        NON-BLOCKING `acquire`, which no handler can split; a blocking acquire
+        or a `with` could (CPython runs pending calls while a blocking acquire
+        waits), and the nested `finalize` would then deadlock on the lock.
       * `killpg`/`getpgid` are reached only through `_signal_process_group`, the
         process-group guard. Never call `self.process.killpg` or `getpgid` here,
         nor hand them to anything but that guard (`test_kill_seam_static_safety`
@@ -681,10 +685,46 @@ class _LiveAttempt:
     final_result: TrainingAttemptResult | None = None
 
     def stop_heartbeat_once(self) -> None:
+        """Stop the heartbeat worker once; a worker that will not stop costs a stderr line, never a raise.
+
+        gh#238 P3. `HeartbeatWorker.stop_and_join` RAISES after its 5 s join
+        when the worker thread is still alive. `finalize` calls this BEFORE
+        the terminal STATUS write, outside the terminal `try`, so before this
+        guard that raise left the run in TRAINING with `cleaned` already set:
+        the `except` arms' second `finalize` returned at once, `release`
+        skipped the heartbeat (`heartbeat_stopped` was set), and the run was
+        stranded until Modal's kill. Now the failure is swallowed and reported
+        on stderr, with the never-raises shape of `_signal_process_group`'s
+        refusal line, and `finalize` goes on to the terminal write.
+
+        Why abandoning the worker is safe: it is a daemon thread
+        (state.py `start_heartbeat_worker`), and its only shared-state write,
+        `write_heartbeat`, runs under `attempt.lock` and refuses terminal
+        statuses, so a late beat cannot resurrect TRAINING. That covers a
+        worker hung in its `commit()` or its `wait_fn` (both outside the
+        lock), the realistic hang (`Volume.commit`). NOT covered: a worker
+        hung INSIDE `write_heartbeat` while holding `attempt.lock` (a disk
+        stall in `atomic_write_json`); the terminal `transition_status` then
+        waits on that lock and the run stays TRAINING until Modal's kill. No
+        regression (it stayed TRAINING before too), but not closed here.
+
+        `heartbeat_stopped` is set BEFORE the call so `release()` does not
+        retry a worker that just failed to stop: the retry would cost another
+        5 s of the preemption window for the same answer.
+        """
         if self.heartbeat_stopped:
             return
         self.heartbeat_stopped = True
-        stop_heartbeat(self.heartbeat)
+        try:
+            stop_heartbeat(self.heartbeat)
+        except Exception as err:
+            try:
+                print(
+                    f"cs2rl: heartbeat did not stop before the terminal write: "
+                    f"{type(err).__name__}: {err}",
+                    file=sys.stderr)
+            except Exception:
+                pass
 
     def stop_watcher_once(self) -> None:
         if self.watcher_stopped:
@@ -704,10 +744,25 @@ class _LiveAttempt:
         """End the attempt once: stop the child, then persist the terminal STATUS and result.json.
 
         Whichever path takes `cleanup_lock` first does this; the later ones
-        return. In order:
-          1. with `kill_child`, signal the child's group through the guard;
+        fail the non-blocking acquire and return. The lock is taken once and
+        never released: it IS the once-flag (`cleaned` is the readable
+        fast-path copy `finish` checks). Never make the gate a blocking
+        `acquire()` or a `with`, even for clarity: a signal handler runs on
+        this thread between any two bytecodes, and CPython runs pending calls
+        (handlers included) while a BLOCKING acquire waits, so a nested
+        `finalize` from a handler that lands inside the gate deadlocks on the
+        non-reentrant lock and the run stays TRAINING. A NON-BLOCKING acquire
+        is one C call with no pending-call check: the handler lands before or
+        after it, never inside, and the nested call fails the acquire
+        (gh#238 P2; `test_a_signal_while_taking_the_once_gate_returns_at_once`,
+        mutant `GATE_BLOCKING`). In order:
+          1. with `kill_child`, signal the child's group through the guard,
+             BEFORE the tee joins: a join waits up to 5 s per stream on a live
+             child's output (`test_finalize_kills_the_child_before_joining_the_tees`);
           2. join the tee threads (5 s each);
-          3. stop the heartbeat, then the checkpoint watcher (each once);
+          3. stop the heartbeat, then the checkpoint watcher (each once); a
+             heartbeat that will not stop costs a stderr line, not the
+             terminal write (`stop_heartbeat_once`, gh#238 P3);
           4. unless `status` is INTERRUPTED, publish a stable checkpoint's
              sidecar (the comment below says why not on INTERRUPTED);
           5. close train.log and the caller's `log_sink`;
@@ -718,13 +773,15 @@ class _LiveAttempt:
           8. record `final_result`.
         Step 7 shares one `try`: a failed write or Volume commit is swallowed,
         because it must not become a cross-container rewrite. Step 8 runs
-        either way, so the attempt still returns the terminal status even when
-        the Volume does not hold it (unpinned by any test: gh#238).
+        either way, OUTSIDE that `try`, so the attempt still returns the
+        terminal status even when the Volume does not hold it
+        (`test_failed_cleanup_commit_does_not_let_redelivery_write`, mutant T21).
         """
-        with self.cleanup_lock:
-            if self.cleaned:
-                return
-            self.cleaned = True
+        # The once-gate. NON-BLOCKING on purpose; the docstring says why a
+        # blocking acquire or a `with` deadlocks under a nested signal handler.
+        if not self.cleanup_lock.acquire(blocking=False):
+            return
+        self.cleaned = True
         if kill_child:
             _signal_process_group(self.child,
                                   killpg=self.process.killpg,
