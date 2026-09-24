@@ -13,10 +13,15 @@ moves the blind spot one line later instead of closing it.
 
 Each rejection test is paired with a clean-commit negative control, for the same
 reason: a hook that rejects everything passes a rejection test.
+
+The exceptions are the #220 tests at the end: two read the hooks' source for
+their uv spelling, where there is no gate output to assert on, and one asserts
+the `uv sync` NOTE a dependency commit prints, alongside the gate's own line.
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -28,9 +33,45 @@ MERGE_HOOK = REPO / ".githooks" / "pre-merge-commit"
 
 CONFIG = 'preset = "default"\nproject-includes = ["src"]\nsearch-path = ["src", "."]\n'
 
+# The only uv spelling the hooks may use (#220), and the prefix install() rewrites.
+NO_SYNC = "uv run --no-sync "
+# `uv` as a word, quoted (`"uv" run`) or not. `(?!\.)` keeps the `uv.lock` trigger
+# pattern out; `\b` keeps `uvx` (which never touches the project env) and UV_PYTHON
+# out. BLIND SPOT: a call through a variable (`"$UV" run`) has no `uv` word on its
+# line. It is caught only by an assignment that spells one (`UV=uv` is flagged); a
+# variable taken from the environment is invisible to every line matcher here, and
+# the exact count in test_every_hook_uv_call_is_no_sync notices it only when it
+# replaces a counted call.
+UV_CALL = re.compile(r"\buv\b(?!\.)")
+# A uv word NOT followed by the NO_SYNC spelling. Per occurrence, not per line, so
+# a bare call cannot hide behind a no-sync one on the same line: chained after it
+# (`... && uv run yapf`) or behind a trailing `# was: uv run --no-sync ...`.
+BARE_UV = re.compile(r"\buv\b(?!\.)(?! run --no-sync )")
+# An echo whose one argument is a double-quoted literal with no `$`, backtick or
+# backslash runs nothing but echo, so a uv it names is a message, not a call.
+PURE_ECHO = re.compile(r'^\s*echo\s+"[^"$`\\]*"\s*$')
+
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+
+
+def uv_call_lines(hook_text: str) -> list[str]:
+    """The hook's lines that can run uv: every line naming it, less comments and pure echoes.
+
+    Comment lines are skipped: the hooks' prose names `uv run` freely, and a
+    commented-out command is inert until someone uncomments it -- then it counts.
+    A PURE_ECHO line prints uv and cannot run it (the pre-commit `uv sync` NOTE).
+    """
+    return [
+        line for line in hook_text.splitlines()
+        if not line.lstrip().startswith("#") and not PURE_ECHO.match(line) and UV_CALL.search(line)
+    ]
+
+
+def bare_uv_lines(hook_text: str) -> list[str]:
+    """uv_call_lines that hold at least one uv call not spelled NO_SYNC."""
+    return [line for line in uv_call_lines(hook_text) if BARE_UV.search(line)]
 
 
 def install(root: Path, src: Path, name: str) -> None:
@@ -38,9 +79,12 @@ def install(root: Path, src: Path, name: str) -> None:
 
     Two rewrites, and the second one is the part that is easy to miss:
 
-      1. `uv run ` -> `<REPO>/.venv/bin/`, so no `uv` invocation ever happens from
-         /tmp. uv would try to build the throwaway as a project and download
-         gigabytes. This also removes any need for UV_OFFLINE/UV_NO_SYNC.
+      1. `uv run --no-sync ` -> `<REPO>/.venv/bin/`, so no `uv` invocation ever
+         happens from /tmp. uv would try to build the throwaway as a project and
+         download gigabytes. This also removes any need for UV_OFFLINE/UV_NO_SYNC.
+         Asserted, not assumed: a spelling the replace does not match (a bare
+         `uv run`, say) would otherwise run real uv from /tmp and the tests below
+         would fail for a reason that has nothing to do with the gate.
       2. the RELATIVE `scripts/pyrefly_gate.py` -> an absolute path into the real
          repo, plus `--project .`. The hook cd's to the throwaway first, so
          rewriting only the interpreter leaves it looking for a gate script that
@@ -48,8 +92,12 @@ def install(root: Path, src: Path, name: str) -> None:
          printed and the gate never run, i.e. exactly the false pass these tests
          are written to prevent.
     """
-    text = src.read_text()
-    text = text.replace("uv run ", f"{REPO}/.venv/bin/")
+    tools = f"{REPO}/.venv/bin/"
+    text = src.read_text().replace(NO_SYNC, tools)
+    # The tool prefix is blanked before looking: REPO is this checkout's path, and a
+    # worktree directory named, say, `uv-fix` would read as a uv call.
+    leftover = uv_call_lines(text.replace(tools, ""))
+    assert not leftover, f"{src.name}: uv calls the {NO_SYNC!r} rewrite missed: {leftover}"
     text = text.replace("python scripts/pyrefly_gate.py",
                         f"python {REPO}/scripts/pyrefly_gate.py --project .")
     dest = root / ".git" / "hooks" / name
@@ -230,3 +278,98 @@ def test_pre_merge_commit_gates_a_clean_merge(tmp_path):
     assert head_count(root) == before, "the merge commit was created despite the error"
     assert (root / ".git" / "MERGE_HEAD").exists(), \
         "a failed pre-merge-commit should leave the merge incomplete"
+
+
+SYNC_NOTE = "run 'uv sync' in the main checkout first"
+
+
+def test_a_dependency_commit_prints_the_sync_note(tmp_path):
+    """Staging pyproject.toml or uv.lock prints the `uv sync` NOTE; a .py commit does not.
+
+    #220: the hooks run uv with --no-sync, so after a dependency change the gate
+    checks the .venv as it is, and this NOTE is the lock-bumper's only reminder.
+    Both names are staged, one per commit, so dropping either from the hook's
+    pattern is red. The NOTE must not block: every commit lands, and the gate
+    still runs for each dependency commit.
+    """
+    root = make_repo(tmp_path, {"src/m.py": "def f() -> int:\n    return 1\n"})
+    before = head_count(root)
+
+    commits = [
+        ("src/ok.py", "def g() -> int:\n    return 2\n"),
+        ("uv.lock", "version = 1\n"),
+        ("pyproject.toml", '[project]\nname = "t"\nversion = "0"\n'),
+    ]
+    outs = {}
+    for rel, text in commits:
+        (root / rel).write_text(text)
+        git(root, "add", rel)
+        res = commit(root, f"stage {rel}")
+        outs[rel] = res.stdout + res.stderr
+
+    assert head_count(root) == before + 3, f"a commit was rejected: {outs}"
+    assert SYNC_NOTE not in outs["src/ok.py"], outs["src/ok.py"]
+    for rel in ("uv.lock", "pyproject.toml"):
+        assert SYNC_NOTE in outs[rel], f"no NOTE for {rel}:\n{outs[rel]}"
+        assert "materialised" in outs[rel], f"the gate did not run for {rel}:\n{outs[rel]}"
+
+
+def test_every_hook_uv_call_is_no_sync():
+    """Every uv call the hooks execute is `uv run --no-sync`, and there are
+    exactly as many as the hooks are known to make.
+
+    Why --no-sync: a git worktree here borrows main's .venv, and a syncing
+    `uv run` from it re-points the shared editable install at the worktree and
+    can rebuild main's binding .so in place (#220). The hooks run on every
+    commit, so one bare `uv run` turns every worktree commit into that trigger.
+
+    Why the exact count: without it this test passes vacuously if uv_call_lines
+    stops matching anything -- and install()'s leftover check, which uses the
+    same matcher, would go blind with it. The count is that matcher's positive
+    control, and it also makes a new or dropped uv call a deliberate edit here.
+
+    BLIND SPOT: a call through a variable (`"$UV" run ...`) names no `uv` word on
+    its line. `UV=uv` in the hook is itself flagged, but a variable the hook takes
+    from the environment is not: a NEW call through it passes this test and
+    install()'s check, and one that REPLACES a counted call fails only the count.
+    """
+    expected = {HOOK: 4, MERGE_HOOK: 1}
+    for hook, n in expected.items():
+        text = hook.read_text()
+        bare = bare_uv_lines(text)
+        assert not bare, f"{hook.name}: uv call not spelled {NO_SYNC!r}: {bare}"
+        calls = uv_call_lines(text)
+        assert len(calls) == n, (
+            f"{hook.name}: expected {n} uv calls, found {len(calls)}: {calls}. If intended, "
+            "update `expected` in test_every_hook_uv_call_is_no_sync")
+
+
+def test_the_uv_line_matchers_see_each_spelling():
+    """One line per matcher clause: each shape must be flagged, or must not be.
+
+    The real hooks hold none of these shapes, so without this test a clause
+    dropped from UV_CALL, BARE_UV or PURE_ECHO would leave
+    test_every_hook_uv_call_is_no_sync green and blind.
+    """
+    flagged = {
+        "the #220 spelling": 'uv run clang-format -i "${c_files[@]}"',
+        "--no-sync only in a trailing comment":
+        'uv run clang-format -i x  # was: uv run --no-sync clang-format',
+        "a bare call chained after a no-sync one": 'uv run --no-sync ruff check x && uv run yapf x',
+        "a quoted command word": '"uv" run python -c pass',
+        "another syncing subcommand": 'uv sync --quiet',
+        "an off-spelling install() would not rewrite": 'uv  run --no-sync ruff',
+        "safe, but not the one spelling": 'UV_NO_SYNC=1 uv run ruff',
+        "an echo, but not only an echo": 'echo "note" && uv run yapf x',
+        "command substitution runs uv": 'echo "$(uv run python -V)"',
+    }
+    ignored = {
+        "the one spelling": 'uv run --no-sync ruff check x',
+        "a file name": '        *.py|pyproject.toml|uv.lock|\\',
+        "an env var": 'export UV_PYTHON=python3.12',
+        "uvx never touches the project env": 'uvx ruff --version',
+        "a comment": '    # uv run clang-format -i x',
+        "a message": '    echo "[pre-commit] NOTE: run \'uv sync\' first."',
+    }
+    assert [why for why, line in flagged.items() if not bare_uv_lines(line)] == []
+    assert [why for why, line in ignored.items() if bare_uv_lines(line)] == []

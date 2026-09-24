@@ -86,32 +86,21 @@ def test_dump_config_without_checkpoint_dir_uses_default(tmp_path):
 def test_dump_config_writes_json(tmp_path):
     """--dump-config writes <checkpoint_dir>/config.json and exits without training.
 
-    Runs through `uv run python` so the project venv (and its deps) is active.
-    Bumped timeout to 60s because uv's cold warm-up can be slow on first call.
+    Runs on sys.executable via run_train_command, never `uv run`: a syncing
+    `uv run` from a worktree that borrows main's .venv re-pointed the shared
+    editable install at the worktree and rebuilt main's binding .so under this
+    very pytest process, which then segfaulted (#220).
     The whole point of --dump-config is zero side-effects: no torch import,
     no env spin-up — so it must return quickly (the MapData is built above the
     exit since Task 12: config.json carries the geometry-resolved pin_pitch).
+    120s is headroom for gh#95 contention (see _dump_config), not an expected runtime.
     """
     import json
 
     ckpt_dir = tmp_path / "ckpt"
     ckpt_dir.mkdir()
 
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(TRAIN_SCRIPT),
-            "--dump-config",
-            "--checkpoint-dir",
-            str(ckpt_dir),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=REPO_ROOT,
-    )
+    result = run_train_command("--dump-config", "--checkpoint-dir", str(ckpt_dir), timeout=120)
     assert result.returncode == 0, f"stderr: {result.stderr}"
 
     config_path = ckpt_dir / "config.json"
@@ -125,11 +114,12 @@ def test_dump_config_writes_json(tmp_path):
 
 
 def _dump_config(tmp_path, *extra_args):
-    """Run --dump-config through `uv run` (project venv) and return the parsed
+    """Run --dump-config on sys.executable and return the parsed
     config.json — the four warmstart keys must round-trip through the REAL
     argparse surface, not a hand-built Namespace (which would only exercise
     build_train_config's getattr fallbacks and hide a missing add_argument).
 
+    Not `uv run`, for the #220 reason in test_dump_config_writes_json.
     120s (not 60s) for the same reason as gh#95 on run_train_command: this
     subprocess competes with a live GPU training run on this box, and the
     failure mode was contention, not runtime growth."""
@@ -137,15 +127,7 @@ def _dump_config(tmp_path, *extra_args):
 
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir(exist_ok=True)
-    r = subprocess.run([
-        "uv", "run", "python",
-        str(TRAIN_SCRIPT), "--dump-config", "--checkpoint-dir",
-        str(ckpt), *extra_args
-    ],
-                       capture_output=True,
-                       text=True,
-                       timeout=120,
-                       cwd=REPO_ROOT)
+    r = run_train_command("--dump-config", "--checkpoint-dir", str(ckpt), *extra_args, timeout=120)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     return json.loads((ckpt / "config.json").read_text())
 
