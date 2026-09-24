@@ -52,6 +52,17 @@ if str(ROOT) not in sys.path:
     # the same way the later CLIs will. Do not rely on the editable install.
     sys.path.insert(0, str(ROOT))
 
+# PITFALL: these runner imports are load-bearing for the seam gate, not only
+# for the helpers below. The reach floor (tests/test_modal_packaging.py)
+# resolves `mrl.X`, `request.X` and the rest only through aliases bound
+# unconditionally at MODULE LEVEL, in a test's file and in the file of every
+# helper it reaches, and this file's are the only route by which
+# test_manifest_records_authoritative_simple_map_not_legacy_env (in
+# tests/test_modal_core.py) reaches `core`: through `_make_manifest`'s
+# `mrl.Manifest`. Move the `mrl` import into a function or under an `if`/`try`
+# and the floor goes red on that test (the other imports carry reach the same
+# way for the tests whose helpers use them). The floor's remedy says to check
+# this route before moving the test: moving it would misplace a core test.
 import scripts.modal_runner as mrl                                     # noqa: E402, I001
 from scripts.modal_runner import checkpoint, request, training         # noqa: E402, I001
 from tests.modal_patch_binding_campaign import binding_target          # noqa: E402, I001

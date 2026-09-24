@@ -91,6 +91,9 @@ _NESTED_DESELECT = (
 # in `_IMPORTERS` in place of the unsplit one (the same 308 runner items): three
 # nested sessions reported 32.43-38.27s ("458 passed, 24 deselected") and the
 # call phase took 33.99-39.96s, so 600 is ~15x the slowest observed and stays.
+# 467 and 458 are two trees' populations, not a loss: W4 moved the runner items
+# without changing their number (308 before and after the split) and added no
+# item to any other `_IMPORTERS` file, so the 467 tree differed elsewhere.
 # The figures move with every test added to an `_IMPORTERS` file; re-measure
 # before trusting the margin after `_IMPORTERS` or `_NESTED_DESELECT` changes.
 _NESTED_TIMEOUT_S = 600
@@ -990,8 +993,10 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # reviewer reads them. This moves one number. Change it deliberately, in the
 # commit that changes the seam, and say why.
 #
-# 279 is `len(classify_seam(_seam_sources(), RUNNER_FILES)[0])` after the §2a
-# safety commit of gh#163's close-out. Against the W3b split tree's 278: one
+# 279 is `len(classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0])`, the count
+# after the §2a safety commit of gh#163's close-out, when the declared runner set
+# was still the one unsplit file (W4's split moved names; a move changes no key).
+# Against the W3b split tree's 278: one
 # runner-side test added (`test_signal_process_group_refuses_groups_a_live_child_cannot_have`),
 # nothing removed, no destination moves. W3b's own move, against 2bb32ac's 273:
 # five client-side helper/test names added, one `SEAM_GUARDS` name renamed, no
@@ -1007,21 +1012,43 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
 GOVERNED_NAME_COUNT = 279
 
-# THE DECLARED RUNNER SET: the runner-half test files the seam reads. Since W4's
-# relocation it is `RUNNER_TEST_FILES` from tests/modal_runner_tables.py, the
-# eight tests/test_modal_<m>.py files, one per module in `RUNNER_MODULES`; the
-# binding census (tests/test_modal_patch_binding_census.py) reads the same
-# constant, so neither holds a retyped copy. It is a name of its own so that the
-# gate's callers say which set they classify against, and so that the synthetic
-# probes, which pass `RUNNER_TEST_FILES` explicitly, stay pure data. PITFALL:
-# every gate in this section takes the runner files it READS from here (or as a
-# parameter); a second, retyped list anywhere is how the gate and the tree drift
-# apart. The reach floor (`reach_floor_violations`) decides which files it
-# EXAMINES, and which module each one tests, from `RUNNER_TEST_FILES` directly,
-# because only a per-module file names a module; the floor's scope assertion in
-# `test_the_modal_test_split_matches_concern_recomputed_from_source` pins that
-# the two agree.
-RUNNER_FILES = RUNNER_TEST_FILES
+# THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
+# points here, so this is the one statement of it: change it here, not there.
+#
+# A runner test lives in tests/test_modal_<m>.py, the file of the module m (in
+# `RUNNER_MODULES`) whose behaviour it tests; `RUNNER_TEST_FILES` in
+# tests/modal_runner_tables.py lists those files. Tests reach private library
+# names through their owning submodules; the package facade exposes the
+# production caller surface. The seam manifest
+# (tests/fixtures/modal_test_seam_manifest.json) records each test's file, and
+# the reach floor (`reach_floor_violations`) checks it from below: a test must
+# reach its file's module, unless `_REACH_EXEMPTIONS` exempts it with a reason
+# and the reach it was granted for, and a test in the core file may name only
+# `core` in its own body. What a change costs (the gate's failure messages spell
+# out the exact edit):
+#   * adding a test: one manifest line, and `GOVERNED_NAME_COUNT` +1 in the same
+#     commit with the reason in the commit message; deleting one: the reverse;
+#     moving one to another runner file: its manifest value, and the count stays;
+#   * a helper goes where the tests that reach it are: to their file if they all
+#     sit in one seam file, else to tests/modal_test_helpers.py (THE MEMBERSHIP
+#     RULE FOR THE SHARED FILE, below). `classify_seam` computes it.
+# PITFALLS. The seam reads module-level `test_` functions (`def` or `async def`)
+# only: a pytest `class TestX` is not supported, and the gate rejects it. And a
+# runner test never goes in a new tests/test_modal_<x>.py: a file outside
+# `RUNNER_TEST_FILES` is invisible to the seam, the floor and the binding census
+# (gh#233). A new runner test file comes only with a new module in the tables.
+#
+# THE DECLARED RUNNER SET is `RUNNER_TEST_FILES` itself, read under that one
+# name by `_seam_sources`, the live `classify_seam` calls, the reach floor and
+# the binding census (tests/test_modal_patch_binding_census.py). There is no
+# alias for it here any more: the W4b quality review widened the old one
+# (`RUNNER_FILES`) by one file, moved a request test into that file, and the
+# floor and the census stopped reading the test with every gate green, because
+# they read `RUNNER_TEST_FILES` and the seam read the alias. A second, retyped
+# or widened list anywhere is how the gate and the tree drift apart, and the
+# floor's scope check (`_floor_scope_problems`) is red on one: it compares the
+# pairs the floor examined with EVERY runner-half test in the manifest, not only
+# those in `RUNNER_TEST_FILES`.
 CLIENT_FILE = "tests/test_modal_client.py"
 PACKAGING_FILE = "tests/test_modal_packaging.py"
 
@@ -1294,9 +1321,10 @@ def classify_seam(sources, runner_files):
     `sources` is {relative path: source text}; `runner_files` is the declared
     runner set, the files a runner-half TEST may live in. It is a required
     parameter, not a default, so every caller states the set it classifies
-    against: the seam gate passes `RUNNER_FILES`, and the synthetic probes (and
-    the relocation's helper map) pass `RUNNER_TEST_FILES`, whose files need not
-    exist for a pure-data call. Returns `(destinations, defined_in)`:
+    against: the seam gate, the synthetic probes and the relocation's helper
+    map all pass `RUNNER_TEST_FILES` (whose files need not exist for a
+    pure-data call), and one probe passes a widened copy to show that the
+    rejection keys on the set passed. Returns `(destinations, defined_in)`:
     {name: destination path} and {name: [files that define it]}. Works on the
     unsplit file (one entry) and on the split (several), because it treats the
     union of the files as one namespace -- which is exactly why it can be re-run
@@ -1312,7 +1340,7 @@ def classify_seam(sources, runner_files):
        against the spec's line-3638 seam, which no longer exists. Do not try to
        re-derive it from this function's inputs, which have grown since: the
        live population is the `test_` names
-       `classify_seam(_seam_sources(), RUNNER_FILES)[0]` sends to a runner file
+       `classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0]` sends to a runner file
        or to `CLIENT_FILE` (the `SEAM_GUARDS` sit in a file `_seam_sources()`
        excludes). That population moves with every test either half adds, so
        no live count is written here; derive it when you need it.
@@ -1482,20 +1510,30 @@ def _helper_destination(name, consumers, destinations):
     pins that). PITFALL: a helper reached by no counting consumer raises
     instead of defaulting, because the two things it can be -- dead code, or a
     new entry point -- want opposite answers. That includes a helper only a
-    guard reaches: it has consumers, but none in the seam.
+    guard reaches: it has consumers, but none in the seam. A pytest test class
+    (`class TestX`) lands here too, since only module-level `test_` defs are
+    tests (`_is_test_def`) and nothing reaches the class; its message says so
+    by the `Test` prefix pytest collects, because "dead code" points the wrong
+    way for the most common pytest idiom.
     """
     files = {destinations[test] for test in consumers} - {PACKAGING_FILE}
     if not files:
+        test_class = ""
+        if name.startswith("Test"):
+            test_class = (" If it is a pytest test class: the seam supports only module-level "
+                          "`test_` functions, so write each method as one (in the runner test "
+                          "file of the module it tests, or in the client file) and add each to "
+                          "the seam manifest; the agreement check names the edit.")
         raise ValueError(
             f"{name!r} is reached by no seam test (a SEAM_GUARDS test does not count), so stage 2 "
             "cannot place it; it is dead code, a guard-only helper that belongs beside the guards "
-            "in the packaging file, or a new entry point, and needs a human")
+            "in the packaging file, or a new entry point, and needs a human." + test_class)
     if len(files) > 1:
         return SHARED_FILE
     return files.pop()
 
 
-def _seam_sources(root=ROOT, runner_files=RUNNER_FILES):
+def _seam_sources(root=ROOT, runner_files=RUNNER_TEST_FILES):
     """Return {path: source} for every declared runner file, the client file and the shared file.
 
     Exclude this classifier's own file: its source mentions client bindings,
@@ -1503,7 +1541,7 @@ def _seam_sources(root=ROOT, runner_files=RUNNER_FILES):
     three legitimate packaging destinations are supplied by SEAM_GUARDS.
 
     Derive the current population from
-    ``classify_seam(_seam_sources(), RUNNER_FILES)[0]``. A self-fed histogram
+    ``classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0]``. A self-fed histogram
     also depends on which client bindings and client-module paths this file
     happens to mention, docstrings included; it is a diagnostic measurement,
     not an invariant worth another test or prose pin.
@@ -1589,22 +1627,34 @@ def _names_defined_under_tests():
 # core rule (`reach_floor_violations`) are a floor under that judgement, not a
 # proof of it; the function's docstring states the measured residual.
 
-# Declared exemptions from the reach floor: {(file, test): reason}. Keyed by
-# FILE as well as test, so a test moved to another file loses its exemption
-# there, and its old entry, which now names a file that does not define it,
-# fails. An entry must also still be needed: an exempt test that does reach its
-# file's module fails (minimality), so this set cannot go stale unnoticed.
+# Declared exemptions from the reach floor: {(file, test): (granted, reason)}.
+# Keyed by FILE as well as test, so a test moved to another file loses its
+# exemption there, and its old entry, which now names a file that does not
+# define it, fails. An entry must also still be needed: an exempt test that does
+# reach its file's module fails (minimality), so this set cannot go stale
+# unnoticed.
+#
+# AN EXEMPTION IS NO WIDER THAN GRANTED. `granted` is the frozenset of runner
+# modules the test reached when it was exempted (possibly empty), and the gate
+# fails when the test's measured reach differs from it, in either direction.
+# The reason states a reach ("only through mrl.STATUS_FILENAME, which core
+# owns"); without `granted` nothing checks that statement, so an edit that made
+# the test reach `request` and `state` -- a misplaced request test, the shape
+# the floor exists to reject -- passed with every gate green (W4b quality
+# review, I2). When the reach changes on purpose, re-grant it and re-read the
+# reason in the same commit.
 #
 # One entry, landed with the eight per-module files in W4's relocation.
 # PITFALL: an entry cannot land before its file exists -- an entry whose file
 # does not define its test fails minimality -- and the natural "repair",
 # skipping entries whose file is not among the sources, is an existence filter
-# over this set, the class of hole `_seam_sources` refuses. The minimality and
-# (file, test) keying rules are also pinned by the `test_reach_floor_*`
-# synthetic probes, which pass their own exemptions.
-_REACH_EXEMPTIONS: dict[tuple[str, str], str] = {
+# over this set, the class of hole `_seam_sources` refuses. Every exemption rule
+# is also pinned by the `test_reach_floor_*` synthetic probes, which pass their
+# own exemptions.
+_REACH_EXEMPTIONS: dict[tuple[str, str], tuple[frozenset[str], str]] = {
     ("tests/test_modal_preflight.py", "test_recording_volume_reload_restores_committed_run_root"):
-    ("it tests the RecordingVolume test double, which lives with its only consumers, the "
+    (frozenset({"core"}),
+     "it tests the RecordingVolume test double, which lives with its only consumers, the "
      "preflight tests; it reaches the package only through mrl.STATUS_FILENAME, which core "
      "owns"),
 }
@@ -1612,12 +1662,23 @@ _REACH_EXEMPTIONS: dict[tuple[str, str], str] = {
 # What to do about each kind of floor violation, keyed like the violations'
 # first field. The manifest edit and the `GOVERNED_NAME_COUNT` rule are named
 # because they are the part a first-time reader cannot guess.
+#
+# PITFALL on "reach-floor": the measured reach can be SHORT, and then moving the
+# test is the wrong edit. The floor credits a module only through runner imports
+# bound unconditionally at module level, in the test's file and in the file of
+# each helper it reaches; move one into a function or under an `if`/`try` and a
+# test loses reach it really has (tests/modal_test_helpers.py's imports carry
+# the core file's manifest test to `core`). The remedy says to check that first.
 _FLOOR_REMEDIES = {
     "reach-floor":
-    ("move the test to the runner test file of a module it reaches (RUNNER_TEST_FILES) "
-     "and set its value in the seam manifest to that file -- a move changes no key, so "
-     "GOVERNED_NAME_COUNT stays; or, if it tests a test double rather than a module, add a "
-     "(file, test) entry with its reason to _REACH_EXEMPTIONS"),
+    ("first, if the test does test its file's module, check the route rather than move the "
+     "test: the floor credits a module only through runner imports bound unconditionally at "
+     "module level, in the test's file and in each reached helper's file, so restore any such "
+     "import that moved into a function or under an if/try. Otherwise move the test to the "
+     "runner test file of the module it tests (RUNNER_TEST_FILES) and set its value in the "
+     "seam manifest to that file -- a move changes no key, so GOVERNED_NAME_COUNT stays; or, "
+     "if it tests a test double rather than a module, add a (file, test) entry to "
+     "_REACH_EXEMPTIONS with the reach it is granted for and its reason"),
     "core-rule":
     ("a test in the core file may name only `core` in its own body: move it to the file of "
      "the module it names and set its seam manifest value to that file (GOVERNED_NAME_COUNT "
@@ -1629,7 +1690,17 @@ _FLOOR_REMEDIES = {
      "exists, or delete it"),
     "exemption-without-reason":
     ("an exemption is legal only with a reason: write it, as a non-empty string, as the "
-     "entry's value"),
+     "second item of the entry's value"),
+    "exemption-malformed":
+    ("write the entry's value as (granted, reason): granted is a frozenset of the "
+     "RUNNER_MODULES names the test reaches (exactly its measured reach, possibly empty) and "
+     "reason a non-empty string saying why the test belongs in its file"),
+    "exemption-wider-than-granted":
+    ("the test's reach is not the one its exemption was granted for, so the reason may be "
+     "false. If the test now tests another module, move it to that module's runner test file, "
+     "set its seam manifest value there (GOVERNED_NAME_COUNT stays) and delete the entry; "
+     "otherwise re-read the reason against the reach it has now, and re-grant the entry with "
+     "that reach and a true reason"),
 }
 
 
@@ -2081,20 +2152,40 @@ def _floor_reach(sources, manifest):
     return reach
 
 
-def _exemption_violations(pair, reason, reach, file_module, source_files):
-    """The minimality violations of one `_REACH_EXEMPTIONS`-shaped entry, as a list.
+def _exemption_violations(pair, entry, reach, file_module, source_files):
+    """The violations of one `_REACH_EXEMPTIONS`-shaped entry, as a list (at most one).
+
+    SHAPE FIRST. `entry` must be a `(granted, reason)` pair. The bare reason
+    string of the older shape is refused rather than unpacked, since a
+    two-character string would unpack. The reason must be a non-empty string:
+    `None` or `0` is not a reason, although `str()` of each is. `granted` must
+    be a frozenset of `RUNNER_MODULES` names: a mutable set can change after
+    the review that granted it, and a misspelt module is a grant nothing can
+    ever match.
 
     An entry that names no examined test fails for one of three reasons, and
     the detail says which, because each wants a different edit: the file is not
     a per-module runner test file at all; it is one, but it is not among the
     sources (an entry that landed before its file); or it is among them and does
-    not define the test (an entry left behind by a move). The reason must be a
-    non-empty string: `None` or `0` is not a reason, although `str()` of each is.
+    not define the test (an entry left behind by a move).
+
+    Then minimality (the test must not reach its file's module) and the grant:
+    the test's whole reach, own body plus helpers as the floor measures it, must
+    EQUAL `granted`. Wider is the failure the grant exists for (the test now
+    tests another module, and the reason is false); narrower fails too, because
+    the reason then describes a route the test no longer takes.
     """
     rel, test = pair
+    if not isinstance(entry, tuple) or len(entry) != 2:
+        return [("exemption-malformed", rel, test,
+                 f"its value is {entry!r}, not a (granted, reason) pair")]
+    granted, reason = entry
     if not isinstance(reason, str) or not reason.strip():
         return [("exemption-without-reason", rel, test,
                  f"its reason is {reason!r}, not a non-empty string")]
+    if not isinstance(granted, frozenset) or not granted <= set(RUNNER_MODULES):
+        return [("exemption-malformed", rel, test,
+                 f"its granted reach is {granted!r}, not a frozenset of RUNNER_MODULES names")]
     if rel not in file_module:
         return [("exemption-names-no-such-test", rel, test,
                  f"{rel} is not a per-module runner test file (RUNNER_TEST_FILES), so no test "
@@ -2104,8 +2195,14 @@ def _exemption_violations(pair, reason, reach, file_module, source_files):
                  f"{rel} is not among the seam sources; an entry lands with its file")]
     if pair not in reach:
         return [("exemption-names-no-such-test", rel, test, f"{rel} does not define {test}")]
-    if file_module[rel] in reach[pair][1]:
+    reached = reach[pair][1]
+    if file_module[rel] in reached:
         return [("exemption-not-needed", rel, test, f"it reaches {file_module[rel]!r}")]
+    if reached != granted:
+        return [("exemption-wider-than-granted", rel, test,
+                 f"it reaches {sorted(reached)}, granted {sorted(granted)}: beyond the grant "
+                 f"{sorted(reached - granted)}, granted but no longer reached "
+                 f"{sorted(granted - reached)}")]
     return []
 
 
@@ -2114,16 +2211,16 @@ def reach_floor_violations(sources, manifest, exemptions):
 
     `sources` is {path: source text} -- the union namespace, so pass every seam
     file, not just the runner files. `manifest` is the tables' owner map
-    (`RUNNER_OWNERS`); `exemptions` is {(file, test): reason}. Pure: it reads
-    no file, so the probes can call it on synthetic maps whose paths need not
-    exist.
+    (`RUNNER_OWNERS`); `exemptions` is {(file, test): (granted, reason)}, the
+    shape of `_REACH_EXEMPTIONS`. Pure: it reads no file, so the probes can call
+    it on synthetic maps whose paths need not exist.
 
     WHAT IS EXAMINED: every module-level `test_` function in a file of
     `RUNNER_TEST_FILES` (tests/test_modal_<m>.py for m in RUNNER_MODULES). No
     other file is: not the client file, and not the shared file, which name no
-    module. `examined` is that set of
-    (file, test) pairs, returned so the gate can assert its scope -- a floor
-    that iterates a partial file list otherwise passes every other check.
+    module. `examined` is that set of (file, test) pairs, returned so the gate
+    can assert its scope (`_floor_scope_problems`) -- a floor that iterates a
+    partial file list otherwise passes every other check.
 
     THE RULES. Violations are (rule, file, test, detail) tuples, sorted within
     each pass, and `_FLOOR_REMEDIES` says what to do about each rule:
@@ -2132,11 +2229,14 @@ def reach_floor_violations(sources, manifest, exemptions):
       * "core-rule": in the core file only, the test's OWN body names a module
         other than `core`. `core` is reached by most runner tests, so the floor
         alone does not police that file. The core rule has no exemptions.
-      * minimality, per exemption entry (the dict is iterated, not the examined
-        pairs): "exemption-not-needed" if the test reaches its file's module;
-        "exemption-names-no-such-test" if that file is not a runner test file
-        among the sources or does not define that test; "exemption-without-
-        reason" if the reason is not a non-empty string.
+      * per exemption entry (the dict is iterated, not the examined pairs):
+        "exemption-malformed" if the value is not a (granted, reason) pair or
+        granted is not a frozenset of RUNNER_MODULES names; "exemption-without-
+        reason" if the reason is not a non-empty string; "exemption-names-no-
+        such-test" if that file is not a runner test file among the sources or
+        does not define that test; "exemption-not-needed" (minimality) if the
+        test reaches its file's module; "exemption-wider-than-granted" if its
+        reach is not exactly the granted set. `_exemption_violations` has why.
 
     RESIDUAL: A FLOOR, NOT A PLACEMENT CHECK. A test that reaches two modules
     can sit in either file with both rules green; choosing between them is the
@@ -2177,9 +2277,50 @@ def reach_floor_violations(sources, manifest, exemptions):
         foreign = sorted({spelling for owner, spelling in refs if owner != "core"})
         if module == "core" and foreign:
             violations.append(("core-rule", rel, test, f"its own body names {foreign}"))
-    for pair, reason in sorted(exemptions.items()):
-        violations.extend(_exemption_violations(pair, reason, reach, file_module, set(sources)))
+    for pair, entry in sorted(exemptions.items()):
+        violations.extend(_exemption_violations(pair, entry, reach, file_module, set(sources)))
     return violations, examined
+
+
+def _floor_scope_problems(examined, manifest):
+    """The floor's scope check: a list of problems, empty when the floor read its population.
+
+    `examined` is `reach_floor_violations`' second value; `manifest` is the seam
+    manifest ({name: file}). Every other check on the floor passes on the real
+    tree, because every test there already passes it, so a floor that read a
+    partial file list would stay green. Two clauses, each naming its own cause:
+
+    * the examined pairs must EQUAL the manifest's runner-half tests: every
+      `test_` entry NOT valued at the client file or the packaging file (the
+      `SEAM_GUARDS`). Not "every `test_` entry valued at a file of
+      `RUNNER_TEST_FILES`": that population was blind to its own scope. A
+      runner set widened at the seam's call sites puts a test in a file that
+      the floor never examines and that filter never counts, so both sides
+      lost it together and the check stayed green (W4b quality review, I1).
+    * every file of `RUNNER_TEST_FILES` must hold at least one test in the
+      manifest. It is read off the manifest, not off `examined`: once the first
+      clause holds the two agree, so this fires only for a file that really
+      holds no test, and its message says that rather than blaming the floor
+      for skipping the file, which is the first clause's diagnosis.
+    """
+    runner_tests = {(rel, name)
+                    for name, rel in manifest.items()
+                    if name.startswith("test_") and rel not in (CLIENT_FILE, PACKAGING_FILE)}
+    problems = []
+    if examined != runner_tests:
+        problems.append(
+            "the reach floor did not examine exactly the manifest's runner-half tests, so it "
+            "passes over a different population than the one it certifies. examined-only="
+            f"{sorted(examined - runner_tests)[:10]} manifest-only="
+            f"{sorted(runner_tests - examined)[:10]}. A manifest-only test in a file outside "
+            "RUNNER_TEST_FILES is read by the seam and not by the floor: runner tests go in "
+            "tests/test_modal_<m>.py, one file per module in the tables")
+    empty = sorted(set(RUNNER_TEST_FILES) - {rel for rel, _ in runner_tests})
+    if empty:
+        problems.append(
+            f"{empty} hold(s) no test in the seam manifest: every runner test file must hold at "
+            "least one test of its module; add one, or remove the module from the tables")
+    return problems
 
 
 def _manifest_edits(*, add=None, delete=None, move=None):
@@ -2339,7 +2480,9 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
       packaging file), so it goes to the client file; a classifier that counted
       the guard would send it to the shared file. A helper that ONLY a guard
       reaches has no seam consumer at all and raises, with a message that says
-      so (the last case below).
+      so (the last case below). So does a pytest `class TestX`, whose message
+      must say that the seam reads only module-level `test_` functions, where
+      an orphan helper's must not.
 
     AND ONE CASE PER MODULE-LEVEL NODE KIND, which is the second half of this
     test and the more easily lost one. Review measured that the probe parsed to
@@ -2434,7 +2577,7 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     # ── SEAM_HEADER_NAMES: ungoverned must not mean invisible ────────────────
     # The unrelated `ROOT` definers are read off disk inside the message, so it
     # names today's files instead of a count that grows with every new test file.
-    seam_files = {*RUNNER_FILES, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
+    seam_files = {*RUNNER_TEST_FILES, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
     assert "ROOT" not in destinations, (
         "`ROOT` was given a destination, so `SEAM_HEADER_NAMES` has stopped "
         "exempting it. Governing it makes the seam's scan collide with every "
@@ -2487,9 +2630,22 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     # A name no test reaches has no consumers to follow, so stage 2 cannot place
     # it. It raises rather than defaulting, because the two things it can be --
     # dead code, or a new entry point -- want opposite answers.
-    with pytest.raises(ValueError, match="reached by no seam test"):
+    with pytest.raises(ValueError, match="reached by no seam test") as orphan:
         classify_seam({"orphan.py": "def _reached_by_nothing():\n    return 1\n"},
                       runner_files=RUNNER_TEST_FILES)
+    # A pytest test CLASS raises the same way (only module-level `test_` defs
+    # are tests, and nothing reaches the class), but "dead code" points the
+    # wrong way for the most common pytest idiom, so its message must say what
+    # to do with a test class -- and an orphan helper's must not.
+    test_class = "class TestRunIdEdges:\n    def test_empty_run_id(self):\n        return 1\n"
+    with pytest.raises(ValueError, match="reached by no seam test") as rejected:
+        classify_seam({probe_file: test_class}, runner_files=RUNNER_TEST_FILES)
+    assert "supports only module-level `test_` functions" in str(rejected.value), (
+        f"a pytest test class was rejected without saying the seam reads only module-level "
+        f"`test_` functions: {rejected.value}")
+    orphan_message = str(orphan.value)
+    assert "test class" not in orphan_message, (
+        f"an orphan helper's error talks about test classes: {orphan_message}")
     # A helper only a guard reaches has a consumer, but no SEAM consumer, so it
     # raises too, and the message must not claim that nothing reaches it.
     guard_only = ("def _reached_by_a_guard_only():\n    return 1\n\n"
@@ -2611,13 +2767,13 @@ def test_the_seam_source_reader_fails_on_a_missing_declared_file(tmp_path):
     assertion is the positive half: the real declared set is read whole.
     """
     bogus = "tests/test_modal_no_such_declared_file.py"
-    declared = [*RUNNER_FILES, CLIENT_FILE, SHARED_FILE]
+    declared = [*RUNNER_TEST_FILES, CLIENT_FILE, SHARED_FILE]
     assert not (ROOT / bogus).exists(), f"{bogus} exists, so it cannot stand for a missing file"
     assert all((ROOT / rel).is_file() for rel in declared), (
         "a declared seam file is missing from the tree, so this check cannot isolate the bogus "
         f"path: {[rel for rel in declared if not (ROOT / rel).is_file()]}")
     with pytest.raises(FileNotFoundError) as missing:
-        _seam_sources(root=ROOT, runner_files=(*RUNNER_FILES, bogus))
+        _seam_sources(root=ROOT, runner_files=(*RUNNER_TEST_FILES, bogus))
     message = str(missing.value)
     assert bogus in message, f"the error does not name the missing file: {message}"
     assert [rel for rel in declared if rel in message] == [], (
@@ -2665,7 +2821,7 @@ def test_seam_manifest_agrees_with_the_classifier():
     floor or duplicated into two files. That is Task 4's placement gate.
     """
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    computed, _ = classify_seam(_seam_sources(), RUNNER_FILES)
+    computed, _ = classify_seam(_seam_sources(), RUNNER_TEST_FILES)
     only_manifest = {n: manifest[n] for n in sorted(set(manifest) - set(computed))}
     only_computed = {n: computed[n] for n in sorted(set(computed) - set(manifest))}
     assert not only_manifest and not only_computed, (
@@ -2717,7 +2873,7 @@ def test_no_governed_name_is_defined_outside_the_seams_own_files():
     the tree, because that is what they would mean.
     """
     governed = set(json.loads(MANIFEST.read_text(encoding="utf-8")))
-    seam_files = {*RUNNER_FILES, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
+    seam_files = {*RUNNER_TEST_FILES, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
     found = _names_defined_under_tests()
 
     outside = {f for files in found.values() for f in files} - seam_files
@@ -2799,13 +2955,14 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
     `misplaced` check below compares on-disk with on-disk for tests and cannot
     see a test in the wrong runner file; the floor and the core rule are what
     object to one. The floor's own scope is asserted last: the (file, test)
-    pairs it examined must be exactly the manifest's runner tests, with every
-    runner test file contributing, or a floor over a partial file list would
-    pass here unseen.
+    pairs it examined must be exactly the manifest's runner-half tests, in
+    whatever file the manifest puts them, and every runner test file must hold
+    one, or a floor over a partial file list, or a seam reading a runner file
+    the floor does not, would pass here unseen (`_floor_scope_problems`).
     """
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     sources = _seam_sources()
-    computed, _ = classify_seam(sources, RUNNER_FILES)
+    computed, _ = classify_seam(sources, RUNNER_TEST_FILES)
     on_disk = _names_defined_under_tests()
     trees = {
         rel: ast.parse((ROOT / rel).read_text(encoding="utf-8"))
@@ -2878,22 +3035,11 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
     violations, examined = reach_floor_violations(sources, RUNNER_OWNERS, _REACH_EXEMPTIONS)
     assert not violations, (f"{len(violations)} reach-floor / core-rule / exemption violation(s):\n"
                             f"{_describe_floor_violations(violations)}")
-    # THE FLOOR'S SCOPE ASSERTION. Every other check on the floor passes on the
-    # real tree, because every test there already passes it, so a floor that
-    # iterated a partial file list would stay green. So the pairs it examined,
-    # exempt or not, must be exactly the manifest's `test_` entries valued at a
-    # file of RUNNER_TEST_FILES, and each of those files must contribute one.
-    declared = {(rel, name)
-                for name, rel in manifest.items()
-                if name.startswith("test_") and rel in RUNNER_TEST_FILES}
-    assert examined == declared, (
-        "the reach floor did not examine exactly the manifest's runner tests, so it passes over "
-        f"a different population than the one it certifies. examined-only="
-        f"{sorted(examined - declared)[:10]} manifest-only={sorted(declared - examined)[:10]}")
-    silent = sorted(set(RUNNER_TEST_FILES) - {rel for rel, _ in examined})
-    assert not silent, (
-        f"the reach floor examined no test in {silent}: every runner test file holds at least "
-        "one test of its module, so the floor is not reading that file")
+    # THE FLOOR'S SCOPE ASSERTION: the pairs it examined, exempt or not, are
+    # exactly the manifest's runner-half tests, and every runner test file holds
+    # one. `_floor_scope_problems` has the why, and its probe pins each clause.
+    scope = _floor_scope_problems(examined, manifest)
+    assert not scope, "\n".join(scope)
 
 
 # ── The reach floor's synthetic probes: one per rule, each with both halves ──
@@ -3495,7 +3641,10 @@ def test_reach_floor_applies_the_core_rule_to_the_core_file():
         header + (f"def test_request_file_names_core_too():\n"
                   f"    return mrl.{request_name}, mrl.{core_name}\n"),
     }
-    exempt = {(core_file, "test_exempt_but_names_request"): "reaches no core, and is exempt"}
+    exempt = {
+        (core_file, "test_exempt_but_names_request"):
+        (frozenset({"request"}), "reaches no core, and is exempt")
+    }
     got = _floor_rules(sources, exempt)
     expected = sorted(("core-rule", core_file, test) for test in (
         "test_core_and_request_in_own_body",
@@ -3527,17 +3676,18 @@ def test_reach_floor_exemption_must_still_be_needed():
               "def test_reaches_it_through_a_helper():\n    return _request_helper()\n\n"
               f"def test_reaches_only_core():\n    return mrl.{_owned('core')}\n"),
     }
-    needed = {(req, "test_reaches_only_core"): "tests a test double, not a module"}
+    only_core = frozenset({"core"})
+    needed = {(req, "test_reaches_only_core"): (only_core, "tests a test double, not a module")}
     assert _floor_rules(sources) == [("reach-floor", req, "test_reaches_only_core")]
     assert _floor_rules(sources, needed) == [], "a needed, reasoned exemption was not honoured"
     for stale_test in ("test_reaches_its_module", "test_reaches_it_through_a_helper"):
-        got = _floor_rules(sources, {**needed, (req, stale_test): "no longer true"})
+        got = _floor_rules(sources, {**needed, (req, stale_test): (only_core, "no longer true")})
         expected = [("exemption-not-needed", req, stale_test)]
         assert got == expected, (
             f"an exemption for {stale_test}, which reaches its file's module, passed minimality, "
             f"so the allow-set can go stale unnoticed. got={got}")
     for reason in ("  ", "", None, 0):
-        got = _floor_rules(sources, {(req, "test_reaches_only_core"): reason})
+        got = _floor_rules(sources, {(req, "test_reaches_only_core"): (only_core, reason)})
         expected = [("exemption-without-reason", req, "test_reaches_only_core")]
         assert got == expected, f"an exemption with the reason {reason!r} was accepted. got={got}"
 
@@ -3562,8 +3712,8 @@ def test_reach_floor_exemptions_are_keyed_by_file():
         state_file: header + f"def test_stays():\n    return mrl.{_owned('state')}\n",
         CLIENT_FILE: "def test_moved_here():\n    return 1\n",
     }
-    reason = "tests a test double, not a module"
-    assert _floor_rules(sources, {(req, "test_moved_here"): reason}) == []
+    entry = (frozenset({"core"}), "tests a test double, not a module")
+    assert _floor_rules(sources, {(req, "test_moved_here"): entry}) == []
     causes = {
         state_file: "does not define test_moved_here",
         absent: "not among the seam sources",
@@ -3571,7 +3721,7 @@ def test_reach_floor_exemptions_are_keyed_by_file():
     }
     for wrong_file, cause in causes.items():
         violations, _ = reach_floor_violations(sources, RUNNER_OWNERS,
-                                               {(wrong_file, "test_moved_here"): reason})
+                                               {(wrong_file, "test_moved_here"): entry})
         got = [violation[:3] for violation in violations]
         expected = [("reach-floor", req, "test_moved_here"),
                     ("exemption-names-no-such-test", wrong_file, "test_moved_here")]
@@ -3581,6 +3731,140 @@ def test_reach_floor_exemptions_are_keyed_by_file():
         assert cause in violations[-1][3], (
             f"the exemption keyed to {wrong_file} was reported without its cause ({cause!r}): "
             f"{violations[-1][3]!r}")
+
+
+def test_reach_floor_exemption_is_no_wider_than_granted():
+    """An exempt test's whole reach must EQUAL its grant; the entry's shape is checked first.
+
+    The W4b quality review's positive control (I2), as data. Positive: an
+    exempt preflight test that reaches only `core`, granted `{core}` (the live
+    entry's shape), passes. Negative: give it `request` and `state` as well --
+    in its own body, or only through a helper, because the grant reads the
+    whole reach as the floor does -- and it fails as wider than granted, with
+    both sets in the detail. Minimality alone passed that edit, since the test
+    still reaches no preflight. Granted the reach it now has, it passes again,
+    so the rule compares with the grant rather than rejecting any extra module.
+    Narrowed, a test granted `{core}` that reaches nothing fails too, and the
+    empty grant is legal and holds for it.
+
+    SHAPE. The value must be a `(granted, reason)` tuple: the older
+    bare-reason shape fails as malformed rather than being unpacked (a
+    two-character string would unpack), and so do a list, `None`, a triple, and
+    a grant that is a mutable set, a tuple, a string, or a frozenset naming no
+    runner module. RULE ORDER: a test that reaches its own file's module fails
+    as not needed, not as wider, even when that reach also differs from its
+    grant, because deleting the entry is the edit it wants.
+    """
+    pre = _floor_file("preflight")
+    header = "import scripts.modal_runner as mrl\nfrom scripts.modal_runner import state\n\n"
+    test = "test_reloads_the_double"
+    body = f"def {test}():\n    return mrl.{_owned('core')}"
+    granted, reason = frozenset({"core"}), "tests a test double, not a module"
+
+    def rules(source, entry):
+        return _floor_rules({pre: header + source}, {(pre, test): entry})
+
+    assert rules(body + "\n", (granted, reason)) == [], "the exact grant was not honoured"
+    extra = f"mrl.{_owned('request')}, state.anything"
+    wider = {
+        "in its own body": f"{body}, {extra}\n",
+        "through a helper": f"def _helper():\n    return {extra}\n\n{body}, _helper()\n",
+    }
+    for where, source in wider.items():
+        got = rules(source, (granted, reason))
+        expected = [("exemption-wider-than-granted", pre, test)]
+        assert got == expected, (
+            f"an exempt test that reaches request and state {where}, beyond its grant of "
+            f"{{core}}, passed, so its exemption is wider than granted. got={got}")
+        regranted = rules(source, (frozenset({"core", "request", "state"}), reason))
+        assert regranted == [], f"the grant of the test's exact reach was refused. got={regranted}"
+    violations, _ = reach_floor_violations({pre: header + wider["in its own body"]}, RUNNER_OWNERS,
+                                           {(pre, test): (granted, reason)})
+    detail = violations[0][3]
+    assert "reaches ['core', 'request', 'state'], granted ['core']" in detail, (
+        f"the wider-than-granted detail does not name the reached and granted sets: {detail!r}")
+
+    narrowed = f"def {test}():\n    return 1\n"
+    got = rules(narrowed, (granted, reason))
+    expected = [("exemption-wider-than-granted", pre, test)]
+    assert got == expected, (
+        f"an exempt test that no longer reaches its granted {{core}} passed. got={got}")
+    assert rules(narrowed, (frozenset(), reason)) == [], "the empty grant was not honoured"
+
+    not_a_pair = [reason, "ok", [granted, reason], None, (reason, ), (granted, reason, "extra")]
+    bad_grants = [{"core"}, ("core", ), "core", frozenset({"no_such_module"})]
+    expected = [("exemption-malformed", pre, test)]
+    for entry in [*not_a_pair, *((grant, reason) for grant in bad_grants)]:
+        got = rules(body + "\n", entry)
+        assert got == expected, f"the exemption value {entry!r} was not refused. got={got}"
+
+    reaches_its_module = f"def {test}():\n    return mrl.{_owned('preflight')}\n"
+    got = rules(reaches_its_module, (granted, reason))
+    expected = [("exemption-not-needed", pre, test)]
+    assert got == expected, (
+        f"an exempt test that reaches its own file's module was not reported as not needed. "
+        f"got={got}")
+
+
+def test_reach_floor_scope_counts_every_runner_half_test_in_the_manifest():
+    """`_floor_scope_problems`: each clause fires on its own cause; the real shape passes.
+
+    Positive: a manifest with one test per runner test file, a client test, a
+    guard (valued at the packaging file) and two helpers, and a floor that
+    examined exactly the eight runner tests: no problem. The client test, the
+    guard and the helpers are not runner-half tests, so a check that counted
+    every `test_` entry, or every name, is red here.
+
+    Negative, one per shape:
+    - the floor skipped a pair: the equality clause, naming it manifest-only;
+    - the floor examined a test the manifest lacks: named examined-only;
+    - I1's widening (W4b quality review): the manifest values a runner-half
+      test at a file outside `RUNNER_TEST_FILES`, which is what a seam reading
+      a file the floor does not produces. The floor did not examine it, and the
+      equality clause names it. The filter this replaced, "valued at a file of
+      `RUNNER_TEST_FILES`", counted it on neither side and passed;
+    - a runner test file with no test in the manifest, and none examined: the
+      empty-file clause alone, saying the file holds no test, not that the
+      floor skipped it (M1);
+    - the floor examined a core-file test the manifest lacks, and the manifest
+      has no other: both clauses, because the empty-file clause reads the
+      manifest, not `examined`.
+    """
+    manifest = {f"test_in_{module}": _floor_file(module) for module in RUNNER_MODULES}
+    manifest.update({
+        "test_on_the_client_side": CLIENT_FILE,
+        "test_modal_is_an_explicit_dependency_group": PACKAGING_FILE,
+        "_shared_helper": SHARED_FILE,
+        "_request_helper": _floor_file("request"),
+    })
+    examined = {(_floor_file(module), f"test_in_{module}") for module in RUNNER_MODULES}
+    real_shape = _floor_scope_problems(examined, manifest)
+    assert real_shape == [], f"the real shape failed: {real_shape}"
+
+    req, core_file = _floor_file("request"), _floor_file("core")
+    undeclared = "tests/test_modal_undeclared_probe.py"
+    assert undeclared not in RUNNER_TEST_FILES
+    no_core = {name: rel for name, rel in manifest.items() if rel != core_file}
+    widened = {**manifest, "test_in_an_undeclared_file": undeclared}
+    core_pair = (core_file, "test_in_core")
+    core_empty = f"{[core_file]} hold(s) no test in the seam manifest"
+    cases = {
+        "the floor skipped a pair": (examined - {(req, "test_in_request")}, manifest,
+                                     [f"manifest-only={[(req, 'test_in_request')]}"]),
+        "the floor examined a test the manifest lacks":
+        (examined | {(req, "test_unknown")}, manifest,
+         [f"examined-only={[(req, 'test_unknown')]} manifest-only=[]"]),
+        "a runner-half test valued at an undeclared file":
+        (examined, widened, [f"manifest-only={[(undeclared, 'test_in_an_undeclared_file')]}"]),
+        "a runner test file with no test": (examined - {core_pair}, no_core, [core_empty]),
+        "an examined core test the manifest lacks":
+        (examined, no_core, [f"examined-only={[core_pair]}", core_empty]),
+    }
+    for label, (examined_case, manifest_case, expected) in cases.items():
+        got = _floor_scope_problems(examined_case, manifest_case)
+        assert len(got) == len(expected) and all(
+            fragment in problem for fragment, problem in zip(expected, got, strict=True)), (
+                f"{label}: expected one problem per fragment {expected}, got {got}")
 
 
 def test_modal_is_an_explicit_dependency_group():

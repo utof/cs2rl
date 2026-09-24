@@ -1,14 +1,10 @@
 """Behavior tests for scripts.modal_runner.preflight: prepare_remote_source, in order.
 
-One of the eight per-module runner test files (RUNNER_TEST_FILES in
-tests/modal_runner_tables.py), split by module from the one unsplit runner test
-file in W4. A test lives in the file of the module whose behaviour it tests:
-the seam manifest (tests/fixtures/modal_test_seam_manifest.json) records that
-placement, and the seam gate in tests/test_modal_packaging.py checks it from
-below with the reach floor. Tests reach private library names through their
-owning submodules; the package facade exposes the production caller surface.
-Helpers reached by tests in two or more seam files live in
-tests/modal_test_helpers.py, with ownership recomputed by classify_seam.
+One of the per-module runner test files (RUNNER_TEST_FILES in
+tests/modal_runner_tables.py). Before you add, move or delete a test here, or
+add a helper, read THE PLACEMENT RULE FOR RUNNER TESTS in
+tests/test_modal_packaging.py: which file a test belongs in, what the change
+costs in the seam manifest, and where helpers go.
 """
 import json
 import os
