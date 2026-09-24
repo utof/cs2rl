@@ -873,7 +873,8 @@ def select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
         else:
             # Greedy: per-head argmax for discrete, μ directly for continuous.
             # μ is already tanh-squashed × max_turn_speed in HybridPolicy.forward
-            # (~line 679), so it's already bounded — no extra clamp needed.
+            # (the `torch.tanh(self.aim_mu...)` lines in build_policy's nested
+            # class), so it's already bounded — no extra clamp needed.
             act_t = torch.stack([head.argmax(dim=-1) for head in logits], dim=-1)
             cont_t = mu_aim
 
@@ -1446,7 +1447,7 @@ def build_policy(vecenv,
             # policy stays bound to the env's actual cap even if it changes
             # at make_puffer_env time. Stored as a buffer (no grad, not a
             # learnable param, follows .to(device)). T5 carry-forward (I-1):
-            # reuse the `driver_env` helper resolved at line ~526 instead of
+            # reuse the `driver_env` helper resolved at the top of build_policy instead of
             # an inline hasattr ladder — the helper already handles the
             # vecenv-vs-driver-env duality (test path passes a bare env;
             # production passes a Multiprocessing/Serial vecenv). One source
@@ -2797,8 +2798,10 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 self.actions[batch_rows, seq_pos] = action
                 self.logprobs[batch_rows, seq_pos] = logprob
                 # Batch 3 (T5): parallel writes for the new buffers added by
-                # _patch_trainer_with_hybrid_aim. The PPO update at line ~1085
-                # reads these by the same idx; missing this write would
+                # _patch_trainer_with_hybrid_aim. The PPO update (the replacement
+                # train() body, `_train_with_return_norm` in src/train_update.py:
+                # `mb_cont_actions = self.cont_actions[idx]` and the two logprob
+                # reads beside it) reads these by the same idx; missing this write would
                 # silently feed zeros to _hybrid_ppo_loss → ratio_c always
                 # equals exp(new_logp_c - 0), which would diverge.
                 self.cont_actions[batch_rows, seq_pos] = cont_action
