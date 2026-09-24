@@ -52,7 +52,9 @@ if str(ROOT) not in sys.path:
     # the same way the later CLIs will. Do not rely on the editable install.
     sys.path.insert(0, str(ROOT))
 
-from scripts.modal_runner import training              # noqa: E402, I001
+import scripts.modal_runner as mrl                                     # noqa: E402, I001
+from scripts.modal_runner import checkpoint, request, training         # noqa: E402, I001
+from tests.modal_patch_binding_campaign import binding_target          # noqa: E402, I001
 
 # ── _git / _init_source_repo: a real tiny repo for HEAD and diff checks ────
 
@@ -161,3 +163,144 @@ class FakeChild:
         if returncode is not None:
             self.returncode = returncode
         self._done.set()
+
+
+# ── Shared since W4: reached by tests in two or more runner files ──────────
+
+
+def _valid_run_kwargs(**overrides):
+    """Minimal valid run fields. Sections below tighten argv beyond this."""
+    kwargs = {
+        "run_id": "140826-b7r-seed2-shared",
+        "git_sha": "a" * 40,
+        "effective_map": "simple",
+        "train_args": "--timesteps 30000000 --seed 2",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _live_batch_size(num_envs: int = 256) -> int:
+    """Live compute_batch_dims: num_envs * 10 agents * 64 BPTT horizon."""
+    return num_envs * request.AGENTS_PER_ENV * request.BPTT_HORIZON
+
+
+def _make_manifest(**overrides) -> mrl.Manifest:
+    requested = 30_000_000
+    batch_size = _live_batch_size()
+    payload = {
+        "schema_version": 1,
+        "run_id": "ok-id",
+        "attempt_id": "attempt-a",
+        "commit": "a" * 40,
+        "tree": "b" * 40,
+        "source_archive_sha256": "c" * 64,
+        "modal_version": "1.4.3",
+        "image_digest": "sha256:6617a625f4090c76c545a0e7d63f2e441718ef9af7f4efe7dd1242a29e289fd7",
+        "effective_map": "simple",
+        "gpu": "T4",
+        "cpu_request": 8,
+        "cpu_soft_limit": 8,
+        "memory_request_mib": 16384,
+        "memory_hard_limit_mib": 16384,
+        "vec_workers": 8,
+        "timeout_minutes": 120,
+        "training_argv": ["--train", "--timesteps", "30000000"],
+        "requested_timesteps": requested,
+        "effective_timesteps": (requested // batch_size) * batch_size,
+        "batch_size": batch_size,
+        "seed": 2,
+        "created_at": "2026-08-13T00:00:00+00:00",
+        "resume_sha256": None,
+        "resume_size": None,
+        "resume_source_path": None,
+        "runner_commit": "a" * 40,
+        "config_hash": "d" * 64,
+        "thread_caps": [f"{key}={value}" for key, value in sorted(mrl.THREAD_CAP_ENV.items())],
+        "resumed_from_run_id": None,
+    }
+    payload.update(overrides)
+    return mrl.Manifest(**payload)
+
+
+def _minimal_completed_tree(tmp_path: Path, *, steps: list[int] | None = None):
+    import torch
+
+    run_root = tmp_path / "run"
+    ckpt_dir = run_root / "checkpoints"
+    ckpt_dir.mkdir(parents=True)
+    ckpt = ckpt_dir / "dust2_policy.pt"
+    torch.save({"weight": torch.tensor([1.0])}, ckpt)
+    batch_size = _live_batch_size(256)
+    requested = 30_000_000
+    effective = (requested // batch_size) * batch_size
+    if steps is None:
+        steps = [batch_size, effective]
+    _write_metrics(ckpt_dir / "metrics.jsonl", steps)
+    config = {
+        "env": "cs2-dust2",
+        "seed": 2,
+        "data_dir": str(ckpt_dir),
+        "timesteps": requested,
+    }
+    normalized = checkpoint.normalize_config_for_transport(config)
+    config_hash = mrl.sha256_bytes(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode())
+    (ckpt_dir / "config.json").write_text(json.dumps(config))
+    manifest = _make_manifest(
+        attempt_id="a1",
+        requested_timesteps=requested,
+        effective_timesteps=effective,
+        batch_size=batch_size,
+        created_at=_aware().isoformat(),
+        config_hash=config_hash,
+        training_argv=["--train"],
+    )
+    return run_root, manifest, effective, ckpt
+
+
+class FakeRegistry:
+    """In-memory Modal Dict: put_if_absent is the only atomic insert."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.data: dict[str, dict[str, object]] = {}
+        self.events: list[tuple[object, ...]] = []
+
+    def put_if_absent(self, key: str, value: dict[str, object]) -> bool:
+        with self._lock:
+            self.events.append(("put_if_absent", key))
+            if key in self.data:
+                return False
+            self.data[key] = dict(value)
+            return True
+
+    def get(self, key: str) -> dict[str, object] | None:
+        with self._lock:
+            stored = self.data.get(key)
+            return None if stored is None else dict(stored)
+
+    def set_existing(self, key: str, value: dict[str, object]) -> None:
+        with self._lock:
+            current = self.data.get(key)
+            if current is None or current.get("attempt_id") != value.get("attempt_id"):
+                raise mrl.ValidationError(
+                    f"registry claim is not owned by {value.get('attempt_id')!r}")
+            self.data[key] = dict(value)
+            self.events.append(("set_existing", key))
+
+    def expire(self, key: str) -> None:
+        """Simulate Modal's seven-day inactivity eviction."""
+        with self._lock:
+            self.data.pop(key, None)
+            self.events.append(("expire", key))
+
+
+def _no_torch(monkeypatch, *, prebuilt: str) -> None:
+    """Simulate the container runner: no in-process torch, prebuilt venv at `prebuilt`."""
+
+    def raise_import_error():
+        raise ImportError("No module named 'torch'")
+
+    monkeypatch.setattr(*binding_target("fallback-loader"), raise_import_error)
+    monkeypatch.setattr(*binding_target("fallback-python"), prebuilt)

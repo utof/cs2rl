@@ -13,6 +13,13 @@ from pathlib import Path
 import pytest
 
 from tests.modal_patch_binding_campaign import BINDING_SITES
+from tests.modal_runner_tables import RUNNER_TEST_FILES
+
+# The seam's file-name constants, from the seam gate, as
+# tests/test_modal_runner_package_shape.py imports them: that module imports only
+# the stdlib, pytest, the tables and the campaign's data at module scope, so this
+# pulls in no runner module and keeps this file out of the runner's importers.
+from tests.test_modal_packaging import CLIENT_FILE, SHARED_FILE
 
 # Repository root: the census reads the original sites' files by repo-relative
 # path.
@@ -24,19 +31,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # certificate to the original sites. `_binding_site_violations` checks it.
 _ORIGINAL_SITES = {
     "prepare-validator":
-    ("tests/test_modal_runner.py", "test_prepare_validates_resume_then_dumps_and_hashes_config"),
-    "fallback-loader": ("tests/test_modal_runner.py", "_no_torch"),
-    "fallback-python": ("tests/test_modal_runner.py", "_no_torch"),
+    ("tests/test_modal_preflight.py", "test_prepare_validates_resume_then_dumps_and_hashes_config"),
+    "fallback-loader": ("tests/modal_test_helpers.py", "_no_torch"),
+    "fallback-python": ("tests/modal_test_helpers.py", "_no_torch"),
     "interrupt-loader":
-    ("tests/test_modal_runner.py", "test_interrupt_commits_status_even_if_prebuilt_load_hangs"),
-    "watcher-publisher": ("tests/test_modal_runner.py",
+    ("tests/test_modal_training.py", "test_interrupt_commits_status_even_if_prebuilt_load_hangs"),
+    "watcher-publisher": ("tests/test_modal_training.py",
                           "test_checkpoint_watcher_threads_generation_into_last_published"),
-    "terminal-validator": ("tests/test_modal_runner.py", "_record_hash_after_terminal"),
-    "terminal-hasher": ("tests/test_modal_runner.py", "_record_hash_after_terminal"),
+    "terminal-validator": ("tests/test_modal_training.py", "_record_hash_after_terminal"),
+    "terminal-hasher": ("tests/test_modal_training.py", "_record_hash_after_terminal"),
     "attempt-watcher":
-    ("tests/test_modal_runner.py", "test_checkpoint_watcher_stops_before_terminal_status"),
+    ("tests/test_modal_training.py", "test_checkpoint_watcher_stops_before_terminal_status"),
     "attempt-transition":
-    ("tests/test_modal_runner.py", "test_checkpoint_watcher_stops_before_terminal_status"),
+    ("tests/test_modal_training.py", "test_checkpoint_watcher_stops_before_terminal_status"),
     "client-mount": ("tests/test_modal_client.py",
                      "test_train_remote_completes_against_post_dump_manifest_hash"),
 }
@@ -142,8 +149,11 @@ def _binding_site_violations(sources):
         reaches the package, and it can name nothing else.
       * A non-literal key (`binding_target(site)`) is reported, not skipped: the
         census cannot tell which site such a call installs.
-      * Only the files `_ORIGINAL_SITES` names are read. The companion in this
-        file calls `binding_target` too, by design, and is not an original site.
+      * The seam's whole file set is read (`_original_site_sources`), not only
+        the files `_ORIGINAL_SITES` names, so a second installer, a misspelt
+        key or a non-literal facade patch in a runner test file that installs
+        no site is reported too. The companion in this file calls
+        `binding_target` too, by design, and is not read.
       * This reads source. It proves that each installer calls
         `binding_target(site)`, that the installer's own body does not patch
         its site's symbol on the facade in any spelling `_facade_patches`
@@ -227,8 +237,17 @@ def _binding_site_violations(sources):
 
 
 def _original_site_sources():
-    """{repo-relative path: text} of every file `_ORIGINAL_SITES` names."""
-    files = sorted(set(rel for rel, _ in _ORIGINAL_SITES.values()))
+    """{repo-relative path: text} of the seam's whole file set: every runner test file, the shared
+    helpers file and the client file.
+
+    NOT the files `_ORIGINAL_SITES` names. Those were the whole unsplit runner test file until W4;
+    after the split by module they are four files, and reading only them would drop most runner
+    tests from the census, so a second installer, a misspelt key or a non-literal facade patch in
+    any other runner test file would go unreported. No plant that targets an installer's own file
+    can show that narrowing, which is why `test_patch_binding_sites_route_through_binding_target`
+    asserts this set, and one plant targets a runner test file that installs nothing.
+    """
+    files = sorted({*RUNNER_TEST_FILES, SHARED_FILE, CLIENT_FILE})
     return {rel: (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in files}
 
 
@@ -248,7 +267,11 @@ def test_patch_binding_sites_route_through_binding_target():
     certificate about the original tests. See `_binding_site_violations`.
     """
     assert set(_ORIGINAL_SITES) == set(BINDING_SITES)
-    assert _binding_site_violations(_original_site_sources()) == []
+    sources = _original_site_sources()
+    assert set(sources) == set(RUNNER_TEST_FILES) | {SHARED_FILE, CLIENT_FILE}, (
+        "the census no longer reads the seam's whole file set, so a site installed or respelled "
+        f"in an unread file is invisible to it: {sorted(sources)}")
+    assert _binding_site_violations(sources) == []
 
 
 # Each plant rewrites exactly one original site in memory. `old` must occur
@@ -260,129 +283,156 @@ def test_patch_binding_sites_route_through_binding_target():
 # pin the census's `from scripts import modal_runner [as x]` aliases: before
 # them, binding only the `as` form, or neither, left every row green (gh#222
 # review F1).
-_RUNNER_FILE = "tests/test_modal_runner.py"
+#
+# Keyed per file: each plant names the file its `old` text lives in, which is its
+# installer's file (the training, preflight or shared helpers file) for the 15
+# respelled sites. The 16th, `stray-call-in-a-non-installer-file`, adds a second
+# `binding_target("terminal-hasher")` call to a runner test file that installs
+# nothing: it is reported only if the census reads that file, so it is the plant
+# that bites on a census narrowed back to the installers' own files.
+_TRAINING_FILE = "tests/test_modal_training.py"
+_PREFLIGHT_FILE = "tests/test_modal_preflight.py"
+_REQUEST_FILE = "tests/test_modal_request.py"
 _SITE_CENSUS_PLANTS = {
     "package-revert":
-    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+    (_TRAINING_FILE,
+     '    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
      '    monkeypatch.setattr(mrl, "validate_local_checkpoint", wrapped_validate)\n', [
          "terminal-validator: expected exactly one binding_target('terminal-validator') call, "
-         f"in {_RUNNER_FILE}::_record_hash_after_terminal; found []",
-         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         f"in {_TRAINING_FILE}::_record_hash_after_terminal; found []",
+         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "dotted-string-revert":
-    ('    monkeypatch.setattr(*binding_target("terminal-hasher"), wrapped_hash)\n',
+    (_TRAINING_FILE, '    monkeypatch.setattr(*binding_target("terminal-hasher"), wrapped_hash)\n',
      '    monkeypatch.setattr("scripts.modal_runner.sha256_file", wrapped_hash)\n', [
          "terminal-hasher: expected exactly one binding_target('terminal-hasher') call, "
-         f"in {_RUNNER_FILE}::_record_hash_after_terminal; found []",
-         f"terminal-hasher: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         f"in {_TRAINING_FILE}::_record_hash_after_terminal; found []",
+         f"terminal-hasher: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
          "package facade's sha256_file",
      ]),
     "facade-store":
-    ("    setattr(validate_target, validate_name, monkey_validate)\n",
+    (_PREFLIGHT_FILE, "    setattr(validate_target, validate_name, monkey_validate)\n",
      "    mrl.validate_local_checkpoint = monkey_validate\n", [
-         f"prepare-validator: {_RUNNER_FILE}::"
+         f"prepare-validator: {_PREFLIGHT_FILE}::"
          "test_prepare_validates_resume_then_dumps_and_hashes_config patches the package "
          "facade's validate_local_checkpoint",
      ]),
     "unaliased-import-setattr":
-    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+    (_TRAINING_FILE,
+     '    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
      '    binding_target("terminal-validator")\n'
      '    import scripts.modal_runner\n'
      '    monkeypatch.setattr(scripts.modal_runner, "validate_local_checkpoint",\n'
      '                        wrapped_validate)\n', [
-         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "unaliased-import-store":
-    ("    setattr(validate_target, validate_name, monkey_validate)\n",
+    (_PREFLIGHT_FILE, "    setattr(validate_target, validate_name, monkey_validate)\n",
      "    import scripts.modal_runner\n"
      "    scripts.modal_runner.validate_local_checkpoint = monkey_validate\n", [
-         f"prepare-validator: {_RUNNER_FILE}::"
+         f"prepare-validator: {_PREFLIGHT_FILE}::"
          "test_prepare_validates_resume_then_dumps_and_hashes_config patches the package "
          "facade's validate_local_checkpoint",
      ]),
     "from-parent-bare":
-    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+    (_TRAINING_FILE,
+     '    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
      '    binding_target("terminal-validator")\n'
      '    from scripts import modal_runner\n'
      '    monkeypatch.setattr(modal_runner, "validate_local_checkpoint",\n'
      '                        wrapped_validate)\n', [
-         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "from-parent-as":
-    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+    (_TRAINING_FILE,
+     '    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
      '    binding_target("terminal-validator")\n'
      '    from scripts import modal_runner as runner\n'
      '    monkeypatch.setattr(runner, "validate_local_checkpoint", wrapped_validate)\n', [
-         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "dotted-via-other-import":
-    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+    (_TRAINING_FILE,
+     '    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
      '    binding_target("terminal-validator")\n'
      '    import scripts.modal_artifacts\n'
      '    monkeypatch.setattr(scripts.modal_runner, "validate_local_checkpoint",\n'
      '                        wrapped_validate)\n', [
-         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "mock-patch-dotted-string":
-    ('    monkeypatch.setattr(*binding_target("terminal-hasher"), wrapped_hash)\n',
+    (_TRAINING_FILE, '    monkeypatch.setattr(*binding_target("terminal-hasher"), wrapped_hash)\n',
      '    binding_target("terminal-hasher")\n'
      '    mock.patch("scripts.modal_runner.sha256_file", wrapped_hash).start()\n', [
-         f"terminal-hasher: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-hasher: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
          "package facade's sha256_file",
      ]),
     "mock-patch-multiple":
-    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+    (_TRAINING_FILE,
+     '    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
      '    binding_target("terminal-validator")\n'
      '    mock.patch.multiple(mrl, validate_local_checkpoint=wrapped_validate).start()\n', [
-         f"terminal-validator: {_RUNNER_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "mock-patch-multiple-non-literal":
-    ('    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
+    (_TRAINING_FILE,
+     '    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
      '    binding_target("terminal-validator")\n'
      '    mock.patch.multiple(mrl, **{"validate_local_checkpoint": wrapped_validate}).start()\n', [
-         f"non-literal facade patch name in {_RUNNER_FILE}::_record_hash_after_terminal",
+         f"non-literal facade patch name in {_TRAINING_FILE}::_record_hash_after_terminal",
      ]),
-    "misspelled": ('binding_target("terminal-hasher")', 'binding_target("terminal-hashr")', [
+    "misspelled":
+    (_TRAINING_FILE, 'binding_target("terminal-hasher")', 'binding_target("terminal-hashr")', [
         "terminal-hasher: expected exactly one binding_target('terminal-hasher') call, "
-        f"in {_RUNNER_FILE}::_record_hash_after_terminal; found []",
-        f"unknown site 'terminal-hashr' in {_RUNNER_FILE}::_record_hash_after_terminal",
+        f"in {_TRAINING_FILE}::_record_hash_after_terminal; found []",
+        f"unknown site 'terminal-hashr' in {_TRAINING_FILE}::_record_hash_after_terminal",
     ]),
-    "duplicated": ('binding_target("fallback-python")', 'binding_target("fallback-loader")', [
+    "duplicated":
+    (SHARED_FILE, 'binding_target("fallback-python")', 'binding_target("fallback-loader")', [
         "fallback-loader: expected exactly one binding_target('fallback-loader') call, "
-        f"in {_RUNNER_FILE}::_no_torch; found ['{_RUNNER_FILE}::_no_torch', "
-        f"'{_RUNNER_FILE}::_no_torch']",
+        f"in {SHARED_FILE}::_no_torch; found ['{SHARED_FILE}::_no_torch', "
+        f"'{SHARED_FILE}::_no_torch']",
         "fallback-python: expected exactly one binding_target('fallback-python') call, "
-        f"in {_RUNNER_FILE}::_no_torch; found []",
+        f"in {SHARED_FILE}::_no_torch; found []",
     ]),
     "facade-restore-non-literal":
-    ("        setattr(validate_target, validate_name, orig_validate)\n",
+    (_PREFLIGHT_FILE, "        setattr(validate_target, validate_name, orig_validate)\n",
      "        setattr(mrl, validate_name, orig_validate)\n", [
          "non-literal facade patch name in "
-         f"{_RUNNER_FILE}::test_prepare_validates_resume_then_dumps_and_hashes_config",
+         f"{_PREFLIGHT_FILE}::test_prepare_validates_resume_then_dumps_and_hashes_config",
      ]),
-    "non-literal": ('binding_target("interrupt-loader")', "binding_target(site)", [
+    "non-literal": (_TRAINING_FILE, 'binding_target("interrupt-loader")', "binding_target(site)", [
         "interrupt-loader: expected exactly one binding_target('interrupt-loader') call, "
-        f"in {_RUNNER_FILE}::test_interrupt_commits_status_even_if_prebuilt_load_hangs; "
+        f"in {_TRAINING_FILE}::test_interrupt_commits_status_even_if_prebuilt_load_hangs; "
         "found []",
         "non-literal binding_target argument in "
-        f"{_RUNNER_FILE}::test_interrupt_commits_status_even_if_prebuilt_load_hangs",
+        f"{_TRAINING_FILE}::test_interrupt_commits_status_even_if_prebuilt_load_hangs",
     ]),
+    "stray-call-in-a-non-installer-file":
+    (_REQUEST_FILE, "def test_valid_run_ids_are_accepted(run_id):\n",
+     "def test_valid_run_ids_are_accepted(run_id):\n"
+     '    binding_target("terminal-hasher")\n', [
+         "terminal-hasher: expected exactly one binding_target('terminal-hasher') call, "
+         f"in {_TRAINING_FILE}::_record_hash_after_terminal; found "
+         f"['{_REQUEST_FILE}::test_valid_run_ids_are_accepted', "
+         f"'{_TRAINING_FILE}::_record_hash_after_terminal']",
+     ]),
 }
 
 
 @pytest.mark.parametrize("plant", _SITE_CENSUS_PLANTS)
 def test_patch_binding_site_census_rejects_a_respelled_site(plant):
-    """One respelled original site is rejected for its own clause; the live tree stays green."""
-    old, new, expected = _SITE_CENSUS_PLANTS[plant]
+    """One respelled site or one stray call is rejected for its own clause; the tree stays green."""
+    rel, old, new, expected = _SITE_CENSUS_PLANTS[plant]
     sources = _original_site_sources()
     assert _binding_site_violations(sources) == []
-    assert sources[_RUNNER_FILE].count(old) == 1, f"plant {plant!r} no longer matches"
-    planted = dict(sources, **{_RUNNER_FILE: sources[_RUNNER_FILE].replace(old, new)})
+    assert sources[rel].count(old) == 1, f"plant {plant!r} no longer matches {rel}"
+    planted = dict(sources, **{rel: sources[rel].replace(old, new)})
     assert _binding_site_violations(planted) == sorted(expected)
     assert _binding_site_violations(_original_site_sources()) == []

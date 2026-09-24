@@ -41,11 +41,14 @@ PACKAGED = "scripts." + BARE
 
 # Explicit importer population, independently checked against the tracked-file
 # AST census below. Shared helpers belong even when they collect no tests.
-# New files must be staged before the tracked census can observe them.
+# New files must be staged before the tracked census can observe them. The eight
+# per-module runner test files come from `RUNNER_TEST_FILES` rather than a
+# retyped list: every one of them imports the runner, and a module added to the
+# tables brings its test file into the nested session with it.
 _IMPORTERS = [
     "tests/test_modal_argv.py",
     "tests/test_modal_protocol.py",
-    "tests/test_modal_runner.py",
+    *RUNNER_TEST_FILES,
     "tests/test_modal_client.py",
     "tests/modal_test_helpers.py",
     "tests/test_eval_baselines.py",
@@ -84,6 +87,10 @@ _NESTED_DESELECT = (
 # the runner split into scripts/modal_runner/ and `_NESTED_DESELECT` applied,
 # three nested sessions reported 49.34-50.17s ("467 passed, 24 deselected") and
 # this test's call phase took 51.06-51.90s, so 600 is ~11.5x the slowest observed.
+# Re-measured on 2026-09-24 after W4 put the eight per-module runner test files
+# in `_IMPORTERS` in place of the unsplit one (the same 308 runner items): three
+# nested sessions reported 32.43-38.27s ("458 passed, 24 deselected") and the
+# call phase took 33.99-39.96s, so 600 is ~15x the slowest observed and stays.
 # The figures move with every test added to an `_IMPORTERS` file; re-measure
 # before trusting the margin after `_IMPORTERS` or `_NESTED_DESELECT` changes.
 _NESTED_TIMEOUT_S = 600
@@ -703,8 +710,10 @@ def test_the_census_scans_the_whole_repo():
     """
     scanned = _repo_python_files()
     rel = {p.relative_to(ROOT).as_posix() for p in scanned}
+    # The W1 runner test file was split by module in W4; its eight per-module
+    # files stand in for it here, from `RUNNER_TEST_FILES` rather than retyped.
     required = {
-        "tests/test_modal_runner.py",
+        *RUNNER_TEST_FILES,
         "tests/test_eval_baselines.py",
         "tests/test_modal_argv.py",
     }
@@ -998,21 +1007,21 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
 GOVERNED_NAME_COUNT = 279
 
-# THE DECLARED RUNNER SET: the runner-half test files the seam reads, as a set,
-# so the classifier and the placement gate are written for the eight per-module
-# files before those files exist. It still holds the single unsplit runner test
-# file, and that entry is the one transitional literal the seam keeps. The
-# relocation commit that splits the runner tests by module replaces this whole
-# tuple with `RUNNER_TEST_FILES` from tests/modal_runner_tables.py; a surviving
-# copy of the literal is a hit for that commit's repo-wide grep. PITFALL: every
-# gate in this section takes the runner files it READS from here (or as a
+# THE DECLARED RUNNER SET: the runner-half test files the seam reads. Since W4's
+# relocation it is `RUNNER_TEST_FILES` from tests/modal_runner_tables.py, the
+# eight tests/test_modal_<m>.py files, one per module in `RUNNER_MODULES`; the
+# binding census (tests/test_modal_patch_binding_census.py) reads the same
+# constant, so neither holds a retyped copy. It is a name of its own so that the
+# gate's callers say which set they classify against, and so that the synthetic
+# probes, which pass `RUNNER_TEST_FILES` explicitly, stay pure data. PITFALL:
+# every gate in this section takes the runner files it READS from here (or as a
 # parameter); a second, retyped list anywhere is how the gate and the tree drift
-# apart. The one exception is deliberate: the reach floor
-# (`reach_floor_violations`) decides which of those files it EXAMINES, and which
-# module each one tests, from `RUNNER_TEST_FILES`, because only a per-module file
-# names a module. So while this tuple holds the unsplit file, the floor reads it
-# as a source and examines none of its tests.
-RUNNER_FILES = ("tests/test_modal_runner.py", )
+# apart. The reach floor (`reach_floor_violations`) decides which files it
+# EXAMINES, and which module each one tests, from `RUNNER_TEST_FILES` directly,
+# because only a per-module file names a module; the floor's scope assertion in
+# `test_the_modal_test_split_matches_concern_recomputed_from_source` pins that
+# the two agree.
+RUNNER_FILES = RUNNER_TEST_FILES
 CLIENT_FILE = "tests/test_modal_client.py"
 PACKAGING_FILE = "tests/test_modal_packaging.py"
 
@@ -1039,8 +1048,10 @@ PACKAGING_FILE = "tests/test_modal_packaging.py"
 # named for what it IS rather than for what it OWNS becomes a junk drawer, and
 # that failure mode does not care which directory it happens in. A one-line
 # membership test is what keeps this file a seam artefact instead of a drawer:
-# measured, it holds exactly 7 names, and every one of them is reached from both
-# halves.
+# measured at W4's relocation, it holds 13 names -- the 7 reached from both
+# halves of the runner/client seam, and the 6 that tests in two or more runner
+# test files reach -- and every one of them is reached from two or more seam
+# files.
 SHARED_FILE = "tests/modal_test_helpers.py"
 
 # The three module-level guards that lived above line 100 of the monolith. They
@@ -1451,8 +1462,8 @@ def _test_destinations(tests, client, defined_in, runner_files):
             f"{stray}. A test is runner-half when nothing it reaches, directly or through "
             "helpers, names a client signal (_CLIENT_BINDINGS, _CLIENT_MODULES). If it IS a "
             "runner test, move it into a declared runner file -- the tests/test_modal_<m>.py of "
-            "the module it tests once RUNNER_FILES is RUNNER_TEST_FILES, the one declared file "
-            "until then -- and set its value in the seam manifest to that file; a move changes "
+            "the module it tests (RUNNER_TEST_FILES) -- and set its value in the seam manifest "
+            "to that file; a move changes "
             "no key, so GOVERNED_NAME_COUNT stays. If it is meant to be a CLIENT test, it lacks "
             "a client signal: make it reach one (or a helper that does), and it classifies to "
             "the client file where it stands.")
@@ -1584,19 +1595,19 @@ def _names_defined_under_tests():
 # fails. An entry must also still be needed: an exempt test that does reach its
 # file's module fails (minimality), so this set cannot go stale unnoticed.
 #
-# EMPTY UNTIL THE RELOCATION COMMIT. Its one entry,
-# ("tests/test_modal_preflight.py",
-#  "test_recording_volume_reload_restores_committed_run_root"),
-# lands with the eight per-module files, with its reason: that test tests the
-# `RecordingVolume` test double, which lives with its only consumers, the
-# preflight tests, and it reaches `core` only through `mrl.STATUS_FILENAME`.
-# PITFALL: landing it before that file exists reds the floor, because an entry
-# whose file does not define its test fails minimality; and the natural
-# "repair", skipping entries whose file is not among the sources, is an
-# existence filter over this set -- the class of hole `_seam_sources` refuses.
-# Until then, minimality and the (file, test) keying are exercised only by the
-# `test_reach_floor_*` synthetic probes, which pass their own exemptions.
-_REACH_EXEMPTIONS: dict[tuple[str, str], str] = {}
+# One entry, landed with the eight per-module files in W4's relocation.
+# PITFALL: an entry cannot land before its file exists -- an entry whose file
+# does not define its test fails minimality -- and the natural "repair",
+# skipping entries whose file is not among the sources, is an existence filter
+# over this set, the class of hole `_seam_sources` refuses. The minimality and
+# (file, test) keying rules are also pinned by the `test_reach_floor_*`
+# synthetic probes, which pass their own exemptions.
+_REACH_EXEMPTIONS: dict[tuple[str, str], str] = {
+    ("tests/test_modal_preflight.py", "test_recording_volume_reload_restores_committed_run_root"):
+    ("it tests the RecordingVolume test double, which lives with its only consumers, the "
+     "preflight tests; it reaches the package only through mrl.STATUS_FILENAME, which core "
+     "owns"),
+}
 
 # What to do about each kind of floor violation, keyed like the violations'
 # first field. The manifest edit and the `GOVERNED_NAME_COUNT` rule are named
@@ -1907,7 +1918,7 @@ def _own_module_refs(node, aliases, owners):
     binding (`_resolves_to_module_scope`): a parameter, an `except ... as`, a
     comprehension or `for`/`with` target, a walrus, a nested import or def, or
     any other local binding of the same name at any depth is not the module.
-    The case is live in the unsplit file, where a runner test binds `request =
+    The case is live in the runner test files, where a test binds `request =
     mrl.build_run_request(...)` over the `request` submodule alias and reads
     `request.run_id`; a test that takes pytest's `request` fixture shadows it
     the same way.
@@ -2029,8 +2040,8 @@ def reach_floor_violations(sources, manifest, exemptions):
 
     WHAT IS EXAMINED: every module-level `test_` function in a file of
     `RUNNER_TEST_FILES` (tests/test_modal_<m>.py for m in RUNNER_MODULES). No
-    other file is: not the client file, not the shared file, and not the
-    unsplit runner test file, which names no module. `examined` is that set of
+    other file is: not the client file, and not the shared file, which name no
+    module. `examined` is that set of
     (file, test) pairs, returned so the gate can assert its scope -- a floor
     that iterates a partial file list otherwise passes every other check.
 
@@ -2439,8 +2450,9 @@ def test_the_seam_classifier_places_runner_tests_by_their_declared_file():
 
     The last pair has its positive half: the same undeclared file, once
     declared, is accepted. So the rejection is about the declared set the
-    caller passes, not about the file's name, which is what lets the gate pass
-    its transitional declared set and the relocation pass `RUNNER_TEST_FILES`.
+    caller passes, not about the file's name, which is what let the gate pass a
+    transitional one-file declared set until W4's relocation made it
+    `RUNNER_TEST_FILES`.
     """
     first, second, third = RUNNER_TEST_FILES[:3]
     sources = {
@@ -2706,9 +2718,10 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
     test, `concern says` is simply the runner file that defines it, so the
     `misplaced` check below compares on-disk with on-disk for tests and cannot
     see a test in the wrong runner file; the floor and the core rule are what
-    object to one. While the declared runner set is the one unsplit file, which
-    names no module, the floor examines nothing, and that is asserted rather
-    than left to look like a pass.
+    object to one. The floor's own scope is asserted last: the (file, test)
+    pairs it examined must be exactly the manifest's runner tests, with every
+    runner test file contributing, or a floor over a partial file list would
+    pass here unseen.
     """
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     sources = _seam_sources()
@@ -2785,15 +2798,22 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
     violations, examined = reach_floor_violations(sources, RUNNER_OWNERS, _REACH_EXEMPTIONS)
     assert not violations, (f"{len(violations)} reach-floor / core-rule / exemption violation(s):\n"
                             f"{_describe_floor_violations(violations)}")
-    # While the declared runner set is the one unsplit file, no source is a
-    # per-module test file, so the floor examines nothing. The relocation commit
-    # replaces this with the floor's scope assertion: `examined` equals the
-    # manifest's `test_` entries valued at a file of RUNNER_TEST_FILES, and each
-    # of those files contributes at least one.
-    assert examined == set(), (
-        "the reach floor examined tests although the declared runner set holds no per-module "
-        f"test file: {sorted(examined)[:10]}. If RUNNER_FILES now names the per-module files, "
-        "replace this assertion with the floor's scope assertion in the same commit.")
+    # THE FLOOR'S SCOPE ASSERTION. Every other check on the floor passes on the
+    # real tree, because every test there already passes it, so a floor that
+    # iterated a partial file list would stay green. So the pairs it examined,
+    # exempt or not, must be exactly the manifest's `test_` entries valued at a
+    # file of RUNNER_TEST_FILES, and each of those files must contribute one.
+    declared = {(rel, name)
+                for name, rel in manifest.items()
+                if name.startswith("test_") and rel in RUNNER_TEST_FILES}
+    assert examined == declared, (
+        "the reach floor did not examine exactly the manifest's runner tests, so it passes over "
+        f"a different population than the one it certifies. examined-only="
+        f"{sorted(examined - declared)[:10]} manifest-only={sorted(declared - examined)[:10]}")
+    silent = sorted(set(RUNNER_TEST_FILES) - {rel for rel, _ in examined})
+    assert not silent, (
+        f"the reach floor examined no test in {silent}: every runner test file holds at least "
+        "one test of its module, so the floor is not reading that file")
 
 
 # ── The reach floor's synthetic probes: one per rule, each with both halves ──
@@ -2889,7 +2909,7 @@ def test_reach_floor_resolves_submodule_aliases():
     scripts.modal_runner.state as st`) passes in the state file. Negative: the
     same `training.X` placed in the state file fails, and a training-file test
     that rebinds `training` locally before `training.X` fails too -- the local
-    rebinding is not the module (the unsplit file has a live case of this
+    rebinding is not the module (the request test file has live cases of this
     shape: `request = mrl.build_run_request(...)`, then `request.run_id`).
     Every other kind of local binding has its own case in
     `test_reach_floor_sees_every_local_binding_of_a_module_alias`.

@@ -10,8 +10,9 @@ import pytest
 
 from scripts.modal_runner import checkpoint as checkpoints
 from scripts.modal_runner import core, preflight, state, training
-from tests import test_modal_runner as runner
 from tests.modal_patch_binding_campaign import BINDING_SITES, binding_target
+from tests.modal_test_helpers import FakeChild, _aware, _noop_heartbeat
+from tests.test_modal_training import _consume_training_kwargs, _training_kwargs
 
 # Repository root: the campaign's children read files by repo-relative path.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -231,7 +232,7 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
             return training.PublishOutcome((111, 222))
 
         consume = _install(monkeypatch, site, training._start_checkpoint_watcher, publish)
-        now, commit, sleep = runner._aware, lambda: None, lambda seconds: None
+        now, commit, sleep = _aware, lambda: None, lambda seconds: None
         consume(run_root=tmp_path, now=now, commit=commit, sleep=sleep)
         _record_observation(record_property, site, consume, [(tmp_path, None),
                                                              (tmp_path, (111, 222))],
@@ -257,10 +258,7 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
                 return "ab" * 32
 
         consume = _install(monkeypatch, site, training.publish_stable_checkpoint, replacement)
-        outcome = consume(tmp_path,
-                          now=runner._aware,
-                          commit=lambda: None,
-                          sleep=lambda seconds: None)
+        outcome = consume(tmp_path, now=_aware, commit=lambda: None, sleep=lambda seconds: None)
         assert outcome.reason is None
         # Annotated: the terminal-hasher row adds a str digest to each.
         expected: dict[str, object] = {"calls": [checkpoint]}
@@ -288,14 +286,14 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
                 pass
 
         # Create fixtures before replacing thread construction.
-        child = runner.FakeChild(returncode=2)
+        child = FakeChild(returncode=2)
         sleeps = []
-        kwargs = runner._consume_training_kwargs(
-            runner._training_kwargs(tmp_path,
-                                    child=child,
-                                    start_heartbeat=runner._noop_heartbeat,
-                                    signal_signal=lambda *args: None,
-                                    sleep=sleeps.append))
+        kwargs = _consume_training_kwargs(
+            _training_kwargs(tmp_path,
+                             child=child,
+                             start_heartbeat=_noop_heartbeat,
+                             signal_signal=lambda *args: None,
+                             sleep=sleeps.append))
         threading = training.threading
         monkeypatch.setattr(
             training, "threading",
