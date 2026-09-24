@@ -193,7 +193,7 @@ class FakeChild:
 
 
 def _valid_run_kwargs(**overrides):
-    """Minimal valid run fields. Sections below tighten argv beyond this."""
+    """Minimal valid run fields for `mrl.build_run_request`; tests override the ones they vary."""
     kwargs = {
         "run_id": "140826-b7r-seed2-shared",
         "git_sha": "a" * 40,

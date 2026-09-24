@@ -2247,12 +2247,14 @@ def reach_floor_violations(sources, manifest, exemptions):
 
     RESIDUAL: A FLOOR, NOT A PLACEMENT CHECK. A test that reaches two modules
     can sit in either file with both rules green; choosing between them is the
-    judgement the manifest diff records. These are UNSPLIT-FILE figures: the
-    review's AST reach instrument measured them on the unsplit file's reference
-    graph (138 tests, before the process-group guard test was added), and this
-    module's `_floor_reach` reproduced every one on that tree and on the tree
-    with the guard test (139; it adds no alternative home). They are to be
-    re-measured with this function once the eight per-module files exist:
+    judgement the manifest diff records. The review's AST reach instrument
+    measured these figures on the unsplit file's reference graph (138 tests,
+    before the process-group guard test was added), and this module's
+    `_floor_reach` reproduced every one on that tree and on the tree with the
+    guard test (139). RE-MEASURED on the eight per-module files after W4's
+    split (2026-09-24, at a06761d), by calling this function on alternative
+    placements, each test moved with its file's runner imports: every figure
+    below held unchanged, and the guard test still has no other legal file:
       * 48 of the 138 tests have at least one other file where the floor and
         the core rule both stay green;
       * 13 training tests name no non-core module in their own body, so they
@@ -2265,7 +2267,8 @@ def reach_floor_violations(sources, manifest, exemptions):
         moving every core-reaching test into the core file (95 moves) fails 81
         of them, where the floor alone fails none;
       * the placement the replaced rule produces (each test in the file of the
-        non-core module it references most) fails only 3 tests;
+        non-core module it references most) fails only 3 tests: two CUDA-probe
+        tests on the floor and one interrupt test on the core rule;
       * 0 of the 49 request tests reach training, so a request test placed in
         the training file is rejected.
     So after the relocation, a misplaced new test is caught only if it breaks
