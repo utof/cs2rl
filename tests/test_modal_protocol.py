@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import scripts.modal_runner as mrl                     # noqa: E402, I001
-from scripts.modal_runner import state, training       # noqa: E402, I001
-from tests.test_modal_state import FakeArtifactIndex   # noqa: E402, I001
+import scripts.modal_runner as mrl                                     # noqa: E402, I001
+from scripts.modal_runner import checkpoint, state, training           # noqa: E402, I001
+from tests.test_modal_state import FakeArtifactIndex                   # noqa: E402, I001
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
 CKPT_OK = b"ckpt-bytes"
@@ -145,6 +145,24 @@ def test_verify_checkpoint_replaced_accepts_missing_or_unparsable_reread():
     assert unparsable.reason == "replaced"
     assert unparsable.checkpoint_bytes is None
     assert unparsable.digest is None
+
+
+def test_protocol_cases_cover_every_reason_token_and_ok():
+    """`PROTOCOL_CASES` has one case per `CHECKPOINT_REASON_TOKENS` entry, plus "ok", and no other.
+
+    gh#197. The table is hand-written, so a case deleted from it would silently
+    shrink `test_verify_checkpoint_unit_table`, and a token added to the
+    protocol without a row here would go untested. Both are red here. The
+    first value of each case is the reason the unit table asserts, so it must
+    equal the id: a mislabelled row would test one token under another's name.
+    """
+    ids = [str(param.id) for param in PROTOCOL_CASES]
+    assert len(set(ids)) == len(ids), f"duplicate case id: {ids}"
+    expected = {*checkpoint.CHECKPOINT_REASON_TOKENS, "ok"}
+    assert set(ids) == expected, (
+        f"missing cases {sorted(expected - set(ids))}; unknown cases {sorted(set(ids) - expected)}")
+    for param in PROTOCOL_CASES:
+        assert param.values[0] == param.id, f"case {param.id} asserts reason {param.values[0]!r}"
 
 
 def test_path_derive_run_view_corrupt_status_is_validation_error(tmp_path):

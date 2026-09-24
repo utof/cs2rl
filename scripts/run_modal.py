@@ -313,14 +313,15 @@ def ensure_blob(volume: object, client_path: PurePosixPath, local_path: Path) ->
 # protocol deliberately returns tokens so status reporting can collapse them to
 # a bool while launch says something actionable about *this* parent.
 #
-# This map must stay TOTAL over every non-"ok" token `mrl.verify_checkpoint`
-# can return: `prior_checkpoint_or_raise` indexes it directly, so a token added
-# to the protocol without a row here raises a bare KeyError out of launch
-# instead of a ValidationError. `test_launch_checkpoint_errors_is_total` checks
-# this map against the hand-written `PROTOCOL_TOKENS` tuple; both live in
-# tests/test_modal_client.py. That catches a row deleted from here — but not a
-# token added to `verify_checkpoint` alone, since nothing derives that tuple
-# from the protocol. Adding a token is a three-file edit, by hand.
+# This map stays TOTAL over `checkpoint.CHECKPOINT_REASON_TOKENS`, the
+# protocol's one source: `test_launch_checkpoint_errors_is_total`
+# (tests/test_modal_client.py) compares the two sets, and an AST census ties
+# that tuple to `verify_checkpoint`'s own `fail("...")` literals, so a token
+# added to the protocol goes red until a row lands here (gh#197). Should one
+# slip through anyway, `prior_checkpoint_or_raise` falls back to
+# `_UNMAPPED_CHECKPOINT_ERROR` rather than raising a bare KeyError at the
+# operator. The map itself is not derived from the tuple on purpose: each
+# sentence is launch's own wording, reviewed row by row.
 _LAUNCH_CHECKPOINT_ERRORS = {
     "missing_sidecar": "parent checkpoint sidecar missing",
     "corrupt_sidecar": "parent checkpoint sidecar is corrupt",
@@ -330,6 +331,11 @@ _LAUNCH_CHECKPOINT_ERRORS = {
     "not_loadable": "parent checkpoint is not weights-only loadable",
     "replaced": "parent checkpoint was replaced during validation",
 }
+
+# The sentence for a reason token with no row above. Unreachable while the
+# totality test is green; it exists so that a protocol/launch skew reaches the
+# operator as the usual ValidationError, naming the token, not as a traceback.
+_UNMAPPED_CHECKPOINT_ERROR = "parent checkpoint failed verification: {reason}"
 
 
 def prior_checkpoint_or_raise(volume: object, parent_id: str, now: datetime) -> tuple[bytes, str]:
@@ -372,7 +378,12 @@ def prior_checkpoint_or_raise(volume: object, parent_id: str, now: datetime) -> 
     reread_bytes = index.read_file(sidecar_path)
     verdict = mrl.verify_checkpoint(sidecar_bytes, ckpt_bytes, reread_bytes)
     if not verdict.ok:
-        raise mrl.ValidationError(_LAUNCH_CHECKPOINT_ERRORS[verdict.reason])
+        # `ok=False` implies `reason` is a token (CheckpointVerdict's invariant); the
+        # `or` only narrows the type, and a None would surface as "unknown" here.
+        reason = verdict.reason or "unknown"
+        sentence = _LAUNCH_CHECKPOINT_ERRORS.get(reason,
+                                                 _UNMAPPED_CHECKPOINT_ERROR.format(reason=reason))
+        raise mrl.ValidationError(sentence)
     if verdict.checkpoint_bytes is None or verdict.digest is None:
         raise mrl.ValidationError(_LAUNCH_CHECKPOINT_ERRORS["not_loadable"])
     return verdict.checkpoint_bytes, verdict.digest

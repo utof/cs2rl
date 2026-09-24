@@ -7,8 +7,10 @@ tests/test_modal_packaging.py: which file a test belongs in, what the change
 costs in the seam manifest, and where helpers go.
 """
 import ast
+import inspect
 import json
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -132,3 +134,39 @@ def test_completed_run_validates_without_runner_torch(tmp_path, monkeypatch):
 
     assert evidence.last_step == effective
     assert evidence.checkpoint_sha256 == core.sha256_file(ckpt)
+
+
+# ── Reason tokens: the protocol's vocabulary has one source ────────────────
+
+
+def test_verify_checkpoint_fail_literals_are_exactly_the_reason_tokens():
+    """Every `fail("...")` in `verify_checkpoint` names a token of `CHECKPOINT_REASON_TOKENS`, and
+    every token is used.
+
+    gh#197. The tuple is the single source that the launch error map and the
+    protocol parametrizes derive from. Nothing at run time ties the function
+    to it (`fail` is a closure over a literal), so this census reads the
+    function's AST: an eighth token added to the function alone, or a token
+    deleted from the tuple alone, makes the two sets differ. Each `fail`
+    argument must be a string literal, or the census could not see it.
+    """
+    source = inspect.getsource(checkpoint.verify_checkpoint)
+    tree = ast.parse(textwrap.dedent(source))
+    literals: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "fail"):
+            continue
+        assert len(node.args) == 1 and not node.keywords, ast.dump(node)
+        (arg, ) = node.args
+        assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
+            f"fail() argument is not a string literal, the census cannot see it: {ast.dump(arg)}")
+        literals.append(arg.value)
+    assert literals, "no fail(...) call found; the census is reading the wrong function"
+    tokens = checkpoint.CHECKPOINT_REASON_TOKENS
+    assert len(set(tokens)) == len(tokens), f"duplicate token in the tuple: {tokens}"
+    assert set(literals) == set(tokens), (
+        f"verify_checkpoint fails with {sorted(set(literals) - set(tokens))} not in "
+        f"CHECKPOINT_REASON_TOKENS; the tuple lists {sorted(set(tokens) - set(literals))} the "
+        "function never returns. Change both together, then add the launch sentence in "
+        "scripts/run_modal.py (_LAUNCH_CHECKPOINT_ERRORS) and the cases in tests.")
