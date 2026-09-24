@@ -1737,10 +1737,11 @@ def test_a_signal_while_taking_the_once_gate_returns_at_once(tmp_path, monkeypat
     With the old `with self.cleanup_lock:` gate a nested `finalize` on the same
     thread blocked on the held non-reentrant lock forever: the run stayed in
     TRAINING with the child killed. The gate is now one NON-BLOCKING
-    `acquire`, a single C call no handler can land inside: the nested call
-    fails the acquire and returns. (Mutant `GATE_BLOCKING`, a blocking
-    `acquire()`, deadlocks here: CPython runs pending calls while a blocking
-    acquire waits.)
+    `acquire`, and the lock is never released afterwards, so a nested
+    `finalize` fails the acquire and returns instead of waiting on a lock
+    nobody will ever give back. (Mutant `GATE_BLOCKING`, a blocking
+    `acquire()`, deadlocks here for exactly that reason: it waits forever on
+    the lock the outer finalize still holds.)
 
     The double replaces `training.threading.Lock` (the sanctioned shape:
     tests/test_modal_patch_bindings.py's attempt rows), which training.py
