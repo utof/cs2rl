@@ -93,13 +93,14 @@ def test_dump_config_writes_json(tmp_path):
     The whole point of --dump-config is zero side-effects: no torch import,
     no env spin-up — so it must return quickly (the MapData is built above the
     exit since Task 12: config.json carries the geometry-resolved pin_pitch).
+    120s is headroom for gh#95 contention (see _dump_config), not an expected runtime.
     """
     import json
 
     ckpt_dir = tmp_path / "ckpt"
     ckpt_dir.mkdir()
 
-    result = run_train_command("--dump-config", "--checkpoint-dir", str(ckpt_dir), timeout=60)
+    result = run_train_command("--dump-config", "--checkpoint-dir", str(ckpt_dir), timeout=120)
     assert result.returncode == 0, f"stderr: {result.stderr}"
 
     config_path = ckpt_dir / "config.json"

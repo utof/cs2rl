@@ -85,7 +85,8 @@ fi
 #   pyproject.toml/uv.lock the frozen count depends on installed site-packages,
 #                          so the person who bumps the lock gets the red, rather
 #                          than whoever next commits a .py -- provided they have
-#                          run `uv sync`: the hook's --no-sync never syncs for them
+#                          run `uv sync`: the hook's --no-sync never syncs for them,
+#                          so it prints a NOTE saying so (below) and does not block
 #   scripts/pyrefly_gate.py, .githooks/pre-commit
 #                          editing the gate or its wiring should run the gate
 #
@@ -110,6 +111,17 @@ for file in "${staged_all[@]}"; do
 done
 
 if [ "$pyrefly_trigger" -eq 1 ]; then
+    # A dependency change is checked against the .venv as it is NOW (#220: no hook
+    # syncs). Advisory only; keep the echo a plain double-quoted literal with no
+    # `$` or backtick, or tests/test_pyrefly_hook.py reads its `uv sync` as a call.
+    for file in "${staged_all[@]}"; do
+        case "$file" in
+            pyproject.toml|uv.lock)
+                echo "[pre-commit] NOTE: pyproject.toml/uv.lock staged and the hooks never sync (#220): run 'uv sync' in the main checkout first, or the gate below checks the old .venv."
+                break
+                ;;
+        esac
+    done
     echo "[pre-commit] pyrefly type check (index, whole project)..."
     uv run --no-sync python scripts/pyrefly_gate.py
 fi
