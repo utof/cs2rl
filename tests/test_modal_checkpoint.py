@@ -139,29 +139,95 @@ def test_completed_run_validates_without_runner_torch(tmp_path, monkeypatch):
 # ── Reason tokens: the protocol's vocabulary has one source ────────────────
 
 
+def _verify_checkpoint_census(source: str) -> tuple[list[str], list[str]]:
+    """Read `verify_checkpoint`'s source; return (its `fail` literals, rule violations).
+
+    What: the AST side of the gh#197 census, split out of the test so the
+    positive control below can run the same rules over a mutant source text.
+    A token reaches a caller only as the `reason` of a failure verdict, so the
+    census has to see every way this function can build one, not just the
+    `fail("...")` spelling. The rules, each naming what it closes:
+      * every `fail(...)` has exactly one string-literal argument (a variable
+        hides the token from the census);
+      * (R1) every `fail` or `CheckpointVerdict` read is the callee of a call
+        (type annotations excepted): `f = fail; f("x")` would otherwise be
+        invisible;
+      * (R2) every `CheckpointVerdict(...)` outside `fail`'s own body carries
+        a literal `ok=True` keyword: a direct `CheckpointVerdict(ok=False,
+        reason="x", ...)` would otherwise ship a token past the census, the
+        launch-map totality test and the protocol table at once.
+    PITFALL: a violation is returned, not asserted, so the caller decides; the
+    real-source test asserts none, the positive control asserts the named one.
+    Anything not built from `CheckpointVerdict` or `fail` (say
+    `dataclasses.replace`) is still outside these rules.
+    """
+    tree = ast.parse(textwrap.dedent(source))
+    fail_defs = [
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "fail"
+    ]
+    inside_fail = {id(inner) for fdef in fail_defs for inner in ast.walk(fdef)}
+    callees = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    # `-> CheckpointVerdict` and `x: CheckpointVerdict` name the type without
+    # building one; R1 must not read an annotation as an alias.
+    annotations = [
+        node.returns
+        for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.returns is not None
+    ] + [
+        node.annotation for node in ast.walk(tree)
+        if isinstance(node, (ast.arg, ast.AnnAssign)) and node.annotation is not None
+    ]
+    in_annotation = {id(inner) for ann in annotations for inner in ast.walk(ann)}
+    literals: list[str] = []
+    problems: list[str] = []
+    if len(fail_defs) != 1:
+        problems.append(f"expected one nested `def fail`, found {len(fail_defs)}")
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                and node.id in ("fail", "CheckpointVerdict") and id(node) not in callees
+                and id(node) not in in_annotation):
+            problems.append(f"R1 {node.id} read without being called (alias?) line {node.lineno}")
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(
+            func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else None)
+        if name == "fail":
+            if not (len(node.args) == 1 and not node.keywords):
+                problems.append(f"fail() call is not fail(<literal>): {ast.dump(node)}")
+                continue
+            (arg, ) = node.args
+            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                problems.append(
+                    f"fail() argument is not a string literal, the census cannot see it: "
+                    f"{ast.dump(arg)}")
+                continue
+            literals.append(arg.value)
+        elif name == "CheckpointVerdict" and id(node) not in inside_fail:
+            ok = [kw.value for kw in node.keywords if kw.arg == "ok"]
+            if not (len(ok) == 1 and isinstance(ok[0], ast.Constant) and ok[0].value is True
+                    and not node.args):
+                problems.append(
+                    f"R2 CheckpointVerdict built outside fail() without a literal ok=True, "
+                    f"line {node.lineno}; route every failure through fail(\"<token>\")")
+    return literals, problems
+
+
 def test_verify_checkpoint_fail_literals_are_exactly_the_reason_tokens():
-    """Every `fail("...")` in `verify_checkpoint` names a token of `CHECKPOINT_REASON_TOKENS`, and
-    every token is used.
+    """Every failure `verify_checkpoint` can return names a token of `CHECKPOINT_REASON_TOKENS`,
+    and every token is used.
 
     gh#197. The tuple is the single source that the launch error map and the
     protocol parametrizes derive from. Nothing at run time ties the function
     to it (`fail` is a closure over a literal), so this census reads the
     function's AST: an eighth token added to the function alone, or a token
-    deleted from the tuple alone, makes the two sets differ. Each `fail`
-    argument must be a string literal, or the census could not see it.
+    deleted from the tuple alone, makes the two sets differ. The rules in
+    `_verify_checkpoint_census` also refuse the routes that would bypass the
+    literal set (an aliased `fail`, a direct `CheckpointVerdict(ok=False,
+    ...)`); `test_verify_checkpoint_census_rejects_bypass_mutants` proves they
+    fire, so this test's green is not the census being blind.
     """
-    source = inspect.getsource(checkpoint.verify_checkpoint)
-    tree = ast.parse(textwrap.dedent(source))
-    literals: list[str] = []
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == "fail"):
-            continue
-        assert len(node.args) == 1 and not node.keywords, ast.dump(node)
-        (arg, ) = node.args
-        assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
-            f"fail() argument is not a string literal, the census cannot see it: {ast.dump(arg)}")
-        literals.append(arg.value)
+    literals, problems = _verify_checkpoint_census(inspect.getsource(checkpoint.verify_checkpoint))
+    assert not problems, problems
     assert literals, "no fail(...) call found; the census is reading the wrong function"
     tokens = checkpoint.CHECKPOINT_REASON_TOKENS
     assert len(set(tokens)) == len(tokens), f"duplicate token in the tuple: {tokens}"
@@ -170,3 +236,54 @@ def test_verify_checkpoint_fail_literals_are_exactly_the_reason_tokens():
         f"CHECKPOINT_REASON_TOKENS; the tuple lists {sorted(set(tokens) - set(literals))} the "
         "function never returns. Change both together, then add the launch sentence in "
         "scripts/run_modal.py (_LAUNCH_CHECKPOINT_ERRORS) and the cases in tests.")
+
+
+@pytest.mark.parametrize(
+    ("inserted", "rule"),
+    [
+        pytest.param(
+            '    if sidecar_bytes == b"eighth":\n'
+            '        return CheckpointVerdict(ok=False, reason="eighth_token",\n'
+            '                                 checkpoint_bytes=None, digest=None)\n',
+            "R2",
+            id="direct_ok_false_verdict",
+        ),
+        pytest.param(
+            '    f = fail\n'
+            '    if sidecar_bytes == b"eighth":\n'
+            '        return f("eighth_token")\n',
+            "R1",
+            id="aliased_fail",
+        ),
+        pytest.param(
+            '    tok = "eighth_token"\n'
+            '    if sidecar_bytes == b"eighth":\n'
+            '        return fail(tok)\n',
+            "not a string literal",
+            id="non_literal_fail_argument",
+        ),
+    ],
+)
+def test_verify_checkpoint_census_rejects_bypass_mutants(inserted, rule):
+    """Positive control for the census: each bypass route, spliced into the real source, is named.
+
+    The guard's own scope is what goes unwatched (the review of #245 found the
+    first census green on both an aliased `fail` and a direct
+    `CheckpointVerdict(ok=False, ...)`). Each case splices one mutation into
+    `verify_checkpoint`'s real source just before its first check and asserts
+    `_verify_checkpoint_census` reports the rule meant to catch it, and that
+    the mutant's token did not leak into the literal set unnoticed.
+    PITFALL: the splice anchors on the first check's text; if that line is
+    reworded the anchor assert below fails first, and the fix is a new anchor,
+    not deleting the case.
+    """
+    source = textwrap.dedent(inspect.getsource(checkpoint.verify_checkpoint))
+    anchor = "    if sidecar_bytes is None:\n"
+    assert source.count(anchor) == 1, "splice anchor moved; pick the first check's new text"
+    _, clean = _verify_checkpoint_census(source)
+    assert not clean, clean
+    mutant = source.replace(anchor, inserted + anchor)
+    _, problems = _verify_checkpoint_census(mutant)
+    assert any(
+        rule in problem
+        for problem in problems), (f"census missed the {rule} mutant; problems were {problems}")
