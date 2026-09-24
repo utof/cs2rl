@@ -817,7 +817,7 @@ def select_policy_actions(policy, obs_buffer, active_agents, device, policy_stat
         # floor. The cont_action is still SAMPLED (sample mode) so the policy
         # state advances identically to training; we just don't emit it. If a
         # future eval path needs Δyaw, return (act_dict, cont_dict) — keeping
-        # the int-action signature for now to avoid touching every caller.
+        # the int-action signature for now (no caller exists to adapt today).
         logits, mu_aim, log_std_aim, _ = policy.forward_eval(obs_t, policy_state)
         if policy_mode == "sample":
             # Fix #1: 6-tuple return; only need action + cont (logp/entropy unused here).
@@ -1033,8 +1033,8 @@ def evaluate_checkpoint(checkpoint_path=None,
         seed = start_seed + episode_idx
         # W3 (#154): the SECOND eval_legacy site, and the only one that passes a
         # seed. That difference is the whole reason the role's builder takes an
-        # UNSET sentinel rather than seed=None — make_env's own default is
-        # 0, so spelling the other site's absent seed as None would have changed
+        # UNSET sentinel rather than seed=None — c_env.cs2_env.make_env's own
+        # default is 0 (not train.py's own make_env, which takes no seed), so spelling the other site's absent seed as None would have changed
         # the env it builds, invisibly to static_data_scalars().
         env = build_env_for("eval_legacy", seed=seed)
         obs, _ = env.reset(seed=seed)
