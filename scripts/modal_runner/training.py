@@ -647,9 +647,12 @@ class _LiveAttempt:
         construction on (`child` None, `tee_threads` empty), and a method may
         publish into such a field only a value that is ready (`start_tees`
         appends a thread only once it is started). The once-gate is a
-        NON-BLOCKING `acquire`, which no handler can split; a blocking acquire
-        or a `with` could (CPython runs pending calls while a blocking acquire
-        waits), and the nested `finalize` would then deadlock on the lock.
+        NON-BLOCKING `acquire` of a lock that is never released, so a nested
+        `finalize` from a handler landing anywhere after the gate FAILS the
+        acquire instead of waiting. A blocking acquire would deadlock on any
+        such nested call (the lock is non-reentrant and nobody releases it);
+        a `with`, which does release, reopens the gh#238 P2 window between its
+        enter and exit, where the nested call blocks on the held lock.
       * `killpg`/`getpgid` are reached only through `_signal_process_group`, the
         process-group guard. Never call `self.process.killpg` or `getpgid` here,
         nor hand them to anything but that guard (`test_kill_seam_static_safety`
@@ -747,15 +750,16 @@ class _LiveAttempt:
         fail the non-blocking acquire and return. The lock is taken once and
         never released: it IS the once-flag (`cleaned` is the readable
         fast-path copy `finish` checks). Never make the gate a blocking
-        `acquire()` or a `with`, even for clarity: a signal handler runs on
-        this thread between any two bytecodes, and CPython runs pending calls
-        (handlers included) while a BLOCKING acquire waits, so a nested
-        `finalize` from a handler that lands inside the gate deadlocks on the
-        non-reentrant lock and the run stays TRAINING. A NON-BLOCKING acquire
-        is one C call with no pending-call check: the handler lands before or
-        after it, never inside, and the nested call fails the acquire
-        (gh#238 P2; `test_a_signal_while_taking_the_once_gate_returns_at_once`,
-        mutant `GATE_BLOCKING`). In order:
+        `acquire()` or a `with`, even for clarity. A signal handler runs on
+        this thread between any two bytecodes, so a nested `finalize` can
+        start anywhere after the gate while this call still owns the lock.
+        Because the lock is never released, that nested call must FAIL the
+        acquire, not wait: a blocking acquire deadlocks on it (the lock is
+        non-reentrant) and the run stays TRAINING. A `with` releases the lock
+        on exit, but between its enter and its exit it holds it, and a nested
+        call landing there blocks the same way; that window was gh#238 P2
+        (`test_a_signal_while_taking_the_once_gate_returns_at_once`, mutants
+        `GATE_BLOCKING` and `GATE_WITH`). In order:
           1. with `kill_child`, signal the child's group through the guard,
              BEFORE the tee joins: a join waits up to 5 s per stream on a live
              child's output (`test_finalize_kills_the_child_before_joining_the_tees`);
@@ -777,8 +781,9 @@ class _LiveAttempt:
         terminal status even when the Volume does not hold it
         (`test_failed_cleanup_commit_does_not_let_redelivery_write`, mutant T21).
         """
-        # The once-gate. NON-BLOCKING on purpose; the docstring says why a
-        # blocking acquire or a `with` deadlocks under a nested signal handler.
+        # The once-gate. NON-BLOCKING on purpose and never released; the
+        # docstring says why a blocking acquire or a `with` deadlocks under a
+        # nested signal handler.
         if not self.cleanup_lock.acquire(blocking=False):
             return
         self.cleaned = True

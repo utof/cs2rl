@@ -1583,8 +1583,8 @@ def test_a_signal_inside_finalize_does_not_finalize_again(tmp_path):
     only a racy assertion in the interrupt tests could see a late `cleaned`.)
 
     Production order (see `_signal_hooks`, ORDER). The timeout is a hard
-    bound, not a margin: a `finalize` that held `cleanup_lock` across the
-    kill would deadlock on the nested call instead of failing.
+    bound, not a margin: a `finalize` whose once-gate were a BLOCKING acquire
+    would deadlock on the nested call instead of failing it.
     """
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child, release_on=None)
@@ -1671,15 +1671,16 @@ def test_a_hung_heartbeat_does_not_strand_the_run_in_training(tmp_path, capsys, 
         if len(calls) == 1:
             raise RuntimeError("heartbeat worker did not stop")
 
+    # `hooks` is bound ONCE, outside the if: bound in both arms, pyrefly joins
+    # the two flows into a union of the dict's value types and flags every
+    # `hooks["installed"][...]` read below as not subscriptable.
+    child = FakeChild(hold=True) if ending == "signal" else FakeChild()
+    hooks = _signal_hooks(child, release_on=None if ending == "signal" else signal.SIGKILL)
     if ending == "signal":
-        child = FakeChild(hold=True)
-        hooks = _signal_hooks(child, release_on=None)
         expected = training.TrainingAttemptResult(status=core.Status.INTERRUPTED,
                                                   reason=training.REASON_SIGNAL,
                                                   exit_code=None)
     else:
-        child = FakeChild()
-        hooks = _signal_hooks(child)
         expected = training.TrainingAttemptResult(status=core.Status.FAILED,
                                                   reason=training.REASON_INVALID_EVIDENCE,
                                                   exit_code=0)
