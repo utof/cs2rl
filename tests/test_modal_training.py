@@ -14,7 +14,12 @@ same way). Never hand the attempt the real functions and never read
 tripwire in tests/conftest.py, which makes `system()` raise under pytest.
 `test_kill_seam_static_safety` checks these rules by AST and says why each
 exists (its clauses live in `_KillSeamClauses`); read it, and the tripwire,
-before you touch the seam.
+before you touch the seam. A test that fires a signal handler from the test
+thread does so through `_interrupt_in_production_order`, which releases the
+held child only after the last handler returns (production order, gh#243),
+unless the test is a key of `_SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST` (the two
+grace tests call `term_handler` by hand with a releasing `killpg`);
+`test_signal_tests_fire_handlers_in_production_order` enforces that by AST.
 
 Deterministic patch-binding controls live in test_modal_patch_bindings.py.
 The interruption tests here assert what the attempt reads and commits, and
@@ -676,7 +681,7 @@ def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
     Production order (see `_signal_hooks`, ORDER).
     """
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     rewrites = {"n": 0}
 
     def fake_sleep(seconds: float) -> None:
@@ -696,20 +701,18 @@ def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
         ))
     ckpt = _write_policy_checkpoint(kwargs["attempt"].run_root, 0.0)
     sidecar = kwargs["attempt"].run_root / "checkpoints" / "dust2_policy.pt.meta.json"
-    thread, finished, boxed = _run_attempt_in_thread(kwargs)
-    try:
-        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
-        deadline = time.monotonic() + 2.0
-        while rewrites["n"] < 2 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert rewrites["n"] >= 2
+
+    def premise(_int_handler, _term_handler):
+        # Two unstable live saves happened (`armed`) and none published: the
+        # sidecar this test then asserts is the retry's, not a watcher's.
         assert not sidecar.exists()
-        int_handler(signal.SIGINT, None)
-        child.release()
-        assert finished.wait(timeout=2.0)
-    finally:
-        child.release()
-        thread.join(timeout=2.0)
+
+    _interrupt_in_production_order(kwargs,
+                                   child,
+                                   hooks,
+                                   signal.SIGINT,
+                                   armed=lambda: rewrites["n"] >= 2,
+                                   inspect=premise)
     assert json.loads(
         (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())["status"] == "interrupted"
     deadline = time.monotonic() + 2.0
@@ -803,7 +806,7 @@ def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path,
     pins which commit carries the note on every exit path."""
     _no_torch(monkeypatch, prebuilt=str(tmp_path / "nonexistent" / "python"))
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     commits: list[bool] = []
 
     def commit() -> None:
@@ -820,15 +823,7 @@ def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path,
             signal_signal=hooks["signal_signal"],
         ))
     _write_policy_checkpoint(kwargs["attempt"].run_root, 1.0)
-    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
-    try:
-        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
-        int_handler(signal.SIGINT, None)
-        child.release()
-        assert finished.wait(timeout=2.0)
-    finally:
-        child.release()
-        thread.join(timeout=2.0)
+    _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
 
     reason_path = kwargs["attempt"].run_root / "checkpoints" / core.CHECKPOINT_PUBLISH_REASON_NAME
     assert reason_path.is_file()
@@ -856,7 +851,8 @@ def test_interrupt_commits_status_even_if_prebuilt_load_hangs(tmp_path, monkeypa
 
     monkeypatch.setattr(*binding_target("interrupt-loader"), hanging_load)
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child)
+    # Opt-out (see `_SIGNAL_HOOKS_RELEASE_ALLOWLIST`): the child dies at SIGKILL.
+    hooks = _signal_hooks(child, release_on=signal.SIGKILL)
     commits: list[str | None] = []
 
     def commit() -> None:
@@ -936,7 +932,7 @@ def test_checkpoint_watcher_threads_generation_into_last_published(tmp_path, mon
 # ── Attempt supervision: SIGINT / KeyboardInterrupt / SIGTERM cleanup ──────
 
 
-def _signal_hooks(child, *, release_on=signal.SIGKILL):
+def _signal_hooks(child, *, release_on=None):
     """Recording fakes for the attempt's signal seam: handlers, killpg, getpgid, sleep.
 
     `fake_getpgid` is the identity, so the child passes the `_signal_process_group`
@@ -963,34 +959,31 @@ def _signal_hooks(child, *, release_on=signal.SIGKILL):
     heartbeat, and closes train.log) always runs after the terminal STATUS,
     result.json and commit. A test that calls the handler from the test thread
     while the attempt waits on another thread loses that order if `killpg`
-    releases the child: the default `release_on=SIGKILL` wakes the attempt
+    releases the child: a `killpg` that releases at SIGKILL wakes the attempt
     thread in the middle of `finalize`, and its tail then races the rest of
-    `finalize`. So a test that calls the handler from the test thread passes
-    `release_on=None` and calls `child.release()` after the handler returns,
-    before waiting for the attempt to finish. That is production order.
+    `finalize`. So the default is `release_on=None`: `killpg` records and
+    releases nothing. A test that fires a handler from the test thread uses
+    `_interrupt_in_production_order`, which releases the child only after the
+    last handler returns. That is production order.
       * In production order the retry's commit follows every commit
         `finalize` makes. An assertion that means a commit inside `finalize`
         must single that commit out (by the STATUS it carries, say): "some
         commit after X" is satisfied by the retry's. Tighten such an
         assertion BEFORE converting its test, or the conversion quietly
         removes what it caught.
-      * Among tests that call the handler off the attempt's thread, a
-        releasing `killpg` is left only where it models a child that exits at
-        that signal and the test asserts nothing the tail can change:
-        `test_child_receives_term_then_kill_after_grace`,
-        `test_term_grace_is_deadline_not_mandatory_sleep`, and
-        `test_interrupt_commits_status_even_if_prebuilt_load_hangs` (its
-        handler runs on a third thread, and its retry blocks in the hung load
-        until the test's `finally`). Where `finalize` runs on the attempt's
-        own thread, `release_on` is inert, because the tail follows `finalize`
-        whatever `killpg` does: `test_keyboard_interrupt_uses_same_cleanup`,
-        `test_a_signal_while_taking_the_once_gate_returns_at_once`,
-        `test_post_spawn_failure_kills_child_and_writes_terminal_status`,
-        `test_real_sigterm_in_tee_window_never_joins_unstarted_thread`, the
+      * A releasing `killpg` is passed explicitly (`release_on=<signal>`) only
+        by the tests in `_SIGNAL_HOOKS_RELEASE_ALLOWLIST`, where it models a
+        child that dies at that signal; the static census
+        `test_signal_tests_fire_handlers_in_production_order` enforces the
+        list.
+      * Where `finalize` runs on the attempt's own thread, `release_on` is
+        inert, because the tail follows `finalize` whatever `killpg` does:
+        `test_keyboard_interrupt_uses_same_cleanup`,
+        `test_a_signal_while_taking_the_once_gate_returns_at_once`, the
         timeout half of `test_dead_run_and_timeout_have_distinct_reasons`, and
         every case of `test_publish_note_reaches_the_volume_in_the_right_commit`
         but `signal`.
-    gh#243 tracks making production order the default here, not a rule.
+    Production order is the default here (gh#243).
     """
     assert os.getpgrp() != child.pid, (
         f"the runner's own process group ({os.getpgrp()}) equals the fake child's pid "
@@ -1041,16 +1034,147 @@ def _wait_until_handlers(installed, originals, timeout=2.0):
     raise AssertionError("signal handlers were not installed around the child")
 
 
+def _interrupt_in_production_order(kwargs,
+                                   child,
+                                   hooks,
+                                   *signals,
+                                   armed=None,
+                                   inspect=None,
+                                   capture=False,
+                                   daemon=False,
+                                   timeout=2.0):
+    """Run the attempt on a thread and fire `signals`' handlers from this thread in production order.
+
+    Returns (boxed, raised). `boxed` is `_run_attempt_in_thread`'s list: the attempt's result, or
+    the Exception it raised. `raised` holds what the handlers raised; it is non-empty only with
+    `capture=True`.
+
+    ORDER (see `_signal_hooks`): wait until the handlers are installed, then poll `armed()` true
+    if given, then call `inspect(int_handler, term_handler)` if given, then call each handler in
+    turn, then `child.release()`, then wait for the attempt. The child is released only after the
+    last handler returns, so the attempt thread's tail (`finish`, the publish retry, `release()`)
+    runs after `finalize`, as in production, where the handler runs on the attempt's own thread.
+    Releasing the child BEFORE the first handler is not the racy order either: the child is then
+    dead when `_signal_process_group` checks it after SIGTERM, so SIGKILL is skipped and `kills`
+    is `[SIGTERM]` (measured: row 3 red 20 of 20 with no mutant). The racy order is a release
+    INSIDE `finalize`, at the kill, which is what a non-None `release_on` does. Do not call this
+    helper with hooks built by an allow-listed opt-out.
+
+    `armed`: a predicate polled every 1 ms up to `timeout` before the first handler fires. The tee
+    test passes `lambda: bool(child.wait_timeouts)`: handlers are installed BEFORE `start_tees`,
+    and a handler fired earlier can finalize with no tee threads (gh#238 P1).
+    `inspect`: called with the installed (SIGINT, SIGTERM) handler pair before any fires. The
+    identity test RECORDS on it here, because after the helper returns `release()` has restored
+    the two distinct originals, and asserts the record after the helper returns, so a helper
+    that never calls `inspect` is red (knock-out K-INSPECT). The live-saves test checks its
+    premise here, after `armed` and before the fire, as HEAD does.
+    `capture`: a handler that raises stops the firing loop in every mode. By default the helper
+    still releases the child and joins the thread, then RE-RAISES the first handler exception, so
+    the test is red at the helper call, naming it. With `capture=True` it returns the exceptions in
+    `raised` instead; only the hung-heartbeat test uses this, to keep its `raised == []` assertion.
+    `daemon`: for a test whose knock-out deadlocks the attempt (see `_run_attempt_in_thread`).
+
+    PITFALL: a caller whose `finally` must release something else (the tee test's streams) wraps
+    this call in its own `try`/`finally`. Do not move those releases into this helper.
+    """
+    assert signals, "no signal to fire"
+    thread, finished, boxed = _run_attempt_in_thread(kwargs, daemon=daemon)
+    raised: list[BaseException] = []
+    done = False
+    try:
+        int_handler, term_handler = _wait_until_handlers(hooks["installed"], hooks["originals"])
+        if armed is not None:
+            deadline = time.monotonic() + timeout
+            while not armed():
+                assert time.monotonic() < deadline, "the attempt never reached the armed state"
+                time.sleep(0.001)
+        if inspect is not None:
+            inspect(int_handler, term_handler)
+        handlers = {signal.SIGINT: int_handler, signal.SIGTERM: term_handler}
+        for sig in signals:
+            # Look up OUTSIDE the try: an unknown signal is a programming error and must raise
+            # KeyError even under `capture=True`, not land in `raised`.
+            handler = handlers[sig]
+            try:
+                handler(sig, None)
+            except BaseException as err:               # noqa: BLE001 - re-raised below unless capture=True
+                raised.append(err)
+                break
+        child.release()
+        done = finished.wait(timeout=timeout)
+    finally:
+        child.release()
+        thread.join(timeout=timeout)
+    if raised and not capture:
+        raise raised[0]
+    assert done, "the attempt did not finish after the handler returned"
+    return boxed, raised
+
+
+# THE TWO ALLOW-LISTS of `test_signal_tests_fire_handlers_in_production_order`
+# (gh#243). Both map a module-level test name to a one-line reason; the census
+# reads this file by AST and requires every key to own a site of the kind it
+# allows, so a stale name is red, not silently ignored. A key is a TEST name: a
+# non-test helper wrapping an opt-out is red by construction (its owner is the
+# helper, on no list). Adding a key here without the census's reason is the
+# one way to reintroduce the racy order silently; write the reason first.
+
+# Tests whose call to `_signal_hooks` passes a releasing `killpg`
+# (`release_on=<signal>`). Each models a child that DIES at that signal and
+# asserts nothing the attempt's tail can change, so the release inside
+# `finalize` cannot race anything the test reads. None of them may also call
+# `_interrupt_in_production_order`: the helper promises production order, and
+# a releasing `killpg` under it is the racy order with extra steps (rule 1).
+_SIGNAL_HOOKS_RELEASE_ALLOWLIST: dict[str, str] = {
+    "test_child_receives_term_then_kill_after_grace":
+    "the child dies at the kill; asserts the kill sequence and the grace wait",
+    "test_term_grace_is_deadline_not_mandatory_sleep":
+    "the child dies inside the grace window; asserts no mandatory sleep",
+    "test_interrupt_commits_status_even_if_prebuilt_load_hangs":
+    "the handler runs on a third thread and the retry blocks in the hung load until the "
+    "test's `finally`; the release keeps the 'child exits at SIGKILL' scenario the issue names",
+    "test_post_spawn_failure_kills_child_and_writes_terminal_status":
+    "asserts `child.poll() is not None`; only the releasing kill makes it true",
+    "test_real_sigterm_in_tee_window_never_joins_unstarted_thread":
+    "the real handler runs on the main thread and the releasing kill is the only thing that "
+    "ends `wait_for_exit`; the test's `finally` release comes after the attempt returns",
+}
+
+# Tests that wait for or fire the installed handlers BY HAND (a call to
+# `_wait_until_handlers`, or a `hooks["installed"][sig](...)` fire, outside
+# `_interrupt_in_production_order`). Each has a reason the helper does
+# not fit; a test that fires from the test thread and is not here converts to
+# the helper instead of joining this list.
+_SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST: dict[str, str] = {
+    "test_child_receives_term_then_kill_after_grace":
+    "opt-out (release list): the helper promises production order, a releasing killpg is not",
+    "test_term_grace_is_deadline_not_mandatory_sleep":
+    "opt-out (release list): the helper promises production order, a releasing killpg is not",
+    "test_interrupt_commits_status_even_if_prebuilt_load_hangs":
+    "the handler runs on a third thread while the test polls STATUS from this one",
+    "test_dead_run_and_timeout_have_distinct_reasons":
+    "waits for installation only, fires nothing: the frozen clock ends the attempt",
+    "test_a_signal_inside_finalize_does_not_finalize_again":
+    "nested fire from inside `killpg`, on the thread running `finalize`, as production "
+    "delivers it",
+    "test_a_signal_while_taking_the_once_gate_returns_at_once":
+    "fires from inside the gate double, on the attempt's thread",
+}
+
+
 def test_sigint_and_sigterm_share_cleanup_and_restore_handlers(tmp_path):
     """One handler object for both signals; `finalize` stops the heartbeat while STATUS is training.
 
     Production order (see `_signal_hooks`, ORDER): with the child released
     inside the handler, the attempt thread's `release()` also stops the
     heartbeat, racing `finalize`, and a `finalize` that no longer stopped it
-    passed about half the time.
+    (mutant `STOP_HB_DEL`) passed 11 of 20 runs (measured 2026-09-24). That
+    rate is the pre-gh#243 racy variant of this test (`_signal_hooks(child,
+    release_on=signal.SIGKILL)`), not this test's own: under the
+    production-order default the same mutant is red 20 of 20.
     """
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     order: list[object] = []
 
     def stop_and_join():
@@ -1069,17 +1193,22 @@ def test_sigint_and_sigterm_share_cleanup_and_restore_handlers(tmp_path):
         ))
     kwargs["prepared"] = _prepared_source(tmp_path,
                                           heartbeat=SimpleNamespace(stop_and_join=stop_and_join))
-    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
-    try:
-        int_handler, term_handler = _wait_until_handlers(hooks["installed"], hooks["originals"])
-        assert int_handler is term_handler
-        int_handler(signal.SIGINT, None)
-        term_handler(signal.SIGTERM, None)
-        child.release()
-        assert finished.wait(timeout=2.0)
-    finally:
-        child.release()
-        thread.join(timeout=2.0)
+    seen: list[bool] = []
+
+    def same_handler(int_handler, term_handler):
+        # Recorded here, not asserted: after the helper returns, `release()` has
+        # restored the two distinct originals, so the identity is only visible
+        # while the handlers are installed. The one assertion below is both
+        # the identity check and the proof that the helper called this once.
+        seen.append(int_handler is term_handler)
+
+    _interrupt_in_production_order(kwargs,
+                                   child,
+                                   hooks,
+                                   signal.SIGINT,
+                                   signal.SIGTERM,
+                                   inspect=same_handler)
+    assert seen == [True]
     assert hooks["installed"][signal.SIGINT] is hooks["originals"][signal.SIGINT]
     assert hooks["installed"][signal.SIGTERM] is hooks["originals"][signal.SIGTERM]
     persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
@@ -1152,7 +1281,7 @@ def test_cleanup_closes_log_before_final_commit(tmp_path):
     catches that.
     """
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     events: list[str] = []
 
     class RecordingSink(io.StringIO):
@@ -1176,15 +1305,7 @@ def test_cleanup_closes_log_before_final_commit(tmp_path):
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
-    try:
-        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
-        int_handler(signal.SIGINT, None)
-        child.release()
-        assert finished.wait(timeout=2.0)
-    finally:
-        child.release()
-        thread.join(timeout=2.0)
+    _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     assert "log_closed" in events
     assert events.index("log_closed") < events.index("commit:interrupted")
 
@@ -1202,7 +1323,7 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
     the FAILED / `REASON_NONZERO_EXIT` fallback instead.
     """
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     committed: list[dict] = []
 
     def commit():
@@ -1222,15 +1343,7 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    thread, finished, boxed = _run_attempt_in_thread(kwargs)
-    try:
-        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
-        int_handler(signal.SIGINT, None)
-        child.release()
-        assert finished.wait(timeout=2.0)
-    finally:
-        child.release()
-        thread.join(timeout=2.0)
+    boxed, _ = _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     assert len(boxed) == 1
     assert boxed[0] == training.TrainingAttemptResult(status=core.Status.INTERRUPTED,
                                                       reason=training.REASON_SIGNAL,
@@ -1255,7 +1368,9 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
 
 def test_post_spawn_failure_kills_child_and_writes_terminal_status(tmp_path):
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child)
+    # Opt-out (see `_SIGNAL_HOOKS_RELEASE_ALLOWLIST`): `child.poll()` below is
+    # non-None only because the child dies at SIGKILL.
+    hooks = _signal_hooks(child, release_on=signal.SIGKILL)
     kwargs = _consume_training_kwargs(
         _training_kwargs(
             tmp_path,
@@ -1380,7 +1495,7 @@ def test_interrupt_uses_sidecar_digest_and_skips_torch_hash(tmp_path, monkeypatc
     `_signal_hooks`).
     """
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     kwargs = _consume_training_kwargs(
         _training_kwargs(
             tmp_path,
@@ -1402,15 +1517,7 @@ def test_interrupt_uses_sidecar_digest_and_skips_torch_hash(tmp_path, monkeypatc
             "validated_at": "2026-08-13T00:00:00+00:00",
         }) + "\n")
     reads = _record_checkpoint_reads(monkeypatch, run_root)
-    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
-    try:
-        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
-        int_handler(signal.SIGINT, None)
-        child.release()
-        assert finished.wait(timeout=2.0)
-    finally:
-        child.release()
-        thread.join(timeout=2.0)
+    _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     assert reads == []
     payload = json.loads((run_root / core.RESULT_FILENAME).read_text())
     assert payload["status"] == "interrupted"
@@ -1430,7 +1537,7 @@ def test_interrupt_without_sidecar_leaves_checkpoint_hash_null(tmp_path, monkeyp
     `_signal_hooks`).
     """
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     kwargs = _consume_training_kwargs(
         _training_kwargs(
             tmp_path,
@@ -1445,15 +1552,7 @@ def test_interrupt_without_sidecar_leaves_checkpoint_hash_null(tmp_path, monkeyp
     ckpt_dir.mkdir()
     (ckpt_dir / "dust2_policy.pt").write_bytes(b"do-not-load-me")
     reads = _record_checkpoint_reads(monkeypatch, run_root)
-    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
-    try:
-        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
-        int_handler(signal.SIGINT, None)
-        child.release()
-        assert finished.wait(timeout=2.0)
-    finally:
-        child.release()
-        thread.join(timeout=2.0)
+    _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     outside_watcher = [read for read in reads if read != ("validate", "watcher")]
     assert outside_watcher == [("validate", "after-result")]
     payload = json.loads((run_root / core.RESULT_FILENAME).read_text())
@@ -1501,9 +1600,10 @@ def test_publish_note_reaches_the_volume_in_the_right_commit(tmp_path, ending, a
     Only `signal` runs the attempt on a thread, with the handler called from
     the test in production order (see `_signal_hooks`, ORDER). The other
     cases run the attempt on the test thread, where the order is production's
-    already; `release_on=None` is inert there (the attempt and `finalize`
-    share the test thread, so the tail runs after `finalize` whatever
-    `killpg` does) and is shared only to keep one construction.
+    already, so whether `killpg` releases the child is inert there (the
+    attempt and `finalize` share the test thread, so the tail runs after
+    `finalize` whatever `killpg` does); one default `_signal_hooks` serves
+    every case only to keep one construction.
     """
     commits: list[tuple[str, bool]] = []
 
@@ -1520,7 +1620,7 @@ def test_publish_note_reaches_the_volume_in_the_right_commit(tmp_path, ending, a
             raise KeyboardInterrupt
 
         child.wait = exploding_wait
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     kwargs = _consume_training_kwargs(
         _training_kwargs(
             tmp_path,
@@ -1533,15 +1633,7 @@ def test_publish_note_reaches_the_volume_in_the_right_commit(tmp_path, ending, a
             signal_signal=hooks["signal_signal"],
         ))
     if ending == "signal":
-        thread, finished, _boxed = _run_attempt_in_thread(kwargs)
-        try:
-            int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
-            int_handler(signal.SIGINT, None)
-            child.release()
-            assert finished.wait(timeout=2.0)
-        finally:
-            child.release()
-            thread.join(timeout=2.0)
+        _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     elif ending == "error":
         (kwargs["attempt"].run_root / core.TRAIN_LOG_NAME).mkdir()
         with pytest.raises(OSError):
@@ -1587,7 +1679,7 @@ def test_a_signal_inside_finalize_does_not_finalize_again(tmp_path):
     would deadlock on the nested call instead of failing it.
     """
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     nested: list[str] = []
     commits: list[tuple[str, bool]] = []
 
@@ -1616,15 +1708,7 @@ def test_a_signal_inside_finalize_does_not_finalize_again(tmp_path):
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
-    try:
-        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
-        int_handler(signal.SIGINT, None)
-        child.release()
-        assert finished.wait(timeout=2.0)
-    finally:
-        child.release()
-        thread.join(timeout=2.0)
+    _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     assert nested == ["entered", "returned"]
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
     after_terminal = [record for record in commits if record[0] != "training"]
@@ -1649,10 +1733,10 @@ def test_a_hung_heartbeat_does_not_strand_the_run_in_training(tmp_path, capsys, 
     Two endings, because two paths reach `stop_heartbeat_once` first:
       * `signal`: the handler, called from the test thread in production order
         (see `_signal_hooks`, ORDER), reaches `finalize` → INTERRUPTED /
-        `REASON_SIGNAL`. The handler call is wrapped so a RuntimeError escaping
-        it is RECORDED, not raised out of the test: `raised == []` is the first
-        assertion, and the knock-out (`try` deleted, bare `stop_heartbeat`) goes
-        red there.
+        `REASON_SIGNAL`. The helper runs with `capture=True`, so a RuntimeError
+        escaping the handler is RECORDED in `raised`, not raised out of the
+        test: `raised == []` is the first assertion, and the knock-out (`try`
+        deleted, bare `stop_heartbeat`) goes red there.
       * `exit`: the child exits 0 at once with no manifest, on the test thread
         (as `test_keyboard_interrupt_uses_same_cleanup`), so `finish` reaches
         `finalize` → FAILED / `REASON_INVALID_EVIDENCE` (`_map_child_exit`).
@@ -1675,7 +1759,7 @@ def test_a_hung_heartbeat_does_not_strand_the_run_in_training(tmp_path, capsys, 
     # the two flows into a union of the dict's value types and flags every
     # `hooks["installed"][...]` read below as not subscriptable.
     child = FakeChild(hold=True) if ending == "signal" else FakeChild()
-    hooks = _signal_hooks(child, release_on=None if ending == "signal" else signal.SIGKILL)
+    hooks = _signal_hooks(child)
     if ending == "signal":
         expected = training.TrainingAttemptResult(status=core.Status.INTERRUPTED,
                                                   reason=training.REASON_SIGNAL,
@@ -1696,20 +1780,12 @@ def test_a_hung_heartbeat_does_not_strand_the_run_in_training(tmp_path, capsys, 
     kwargs["prepared"] = _prepared_source(tmp_path,
                                           heartbeat=SimpleNamespace(stop_and_join=stop_and_join))
     run_root = kwargs["attempt"].run_root
-    raised: list[BaseException] = []
     if ending == "signal":
-        thread, finished, boxed = _run_attempt_in_thread(kwargs)
-        try:
-            _int, term_handler = _wait_until_handlers(hooks["installed"], hooks["originals"])
-            try:
-                term_handler(signal.SIGTERM, None)
-            except BaseException as err:               # noqa: BLE001 - recorded, asserted below
-                raised.append(err)
-            child.release()
-            assert finished.wait(timeout=2.0)
-        finally:
-            child.release()
-            thread.join(timeout=2.0)
+        boxed, raised = _interrupt_in_production_order(kwargs,
+                                                       child,
+                                                       hooks,
+                                                       signal.SIGTERM,
+                                                       capture=True)
         assert raised == []
     else:
         boxed = [mrl.execute_training_attempt(**kwargs)]
@@ -1881,7 +1957,7 @@ def test_finalize_kills_the_child_before_joining_the_tees(tmp_path, monkeypatch)
     # FakeChild types its streams as BytesIO; a duck-typed stream is the point here.
     child.stdout = out                 # pyrefly: ignore[bad-assignment]
     child.stderr = err                 # pyrefly: ignore[bad-assignment]
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     real_start = threading.Thread.start
     real_join = threading.Thread.join
     tee_threads_seen: set[threading.Thread] = set()
@@ -1911,21 +1987,16 @@ def test_finalize_kills_the_child_before_joining_the_tees(tmp_path, monkeypatch)
             signal_signal=hooks["signal_signal"],
         ))
     run_root = kwargs["attempt"].run_root
-    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
     try:
-        _int, term_handler = _wait_until_handlers(hooks["installed"], hooks["originals"])
-        deadline = time.monotonic() + 2.0
-        while not child.wait_timeouts:                 # the attempt is in its wait loop: start_tees is done
-            assert time.monotonic() < deadline, "the attempt never reached its wait loop"
-            time.sleep(0.001)
-        term_handler(signal.SIGTERM, None)
-        child.release()
-        assert finished.wait(timeout=2.0)
+        # `armed`: the attempt is in its wait loop, so start_tees is done.
+        _interrupt_in_production_order(kwargs,
+                                       child,
+                                       hooks,
+                                       signal.SIGTERM,
+                                       armed=lambda: bool(child.wait_timeouts))
     finally:
         out.release()
         err.release()
-        child.release()
-        thread.join(timeout=2.0)
     assert len(joins) == 2
     for kills_at_join in joins:
         assert kills_at_join == [signal.SIGTERM, signal.SIGKILL]
@@ -1935,7 +2006,7 @@ def test_finalize_kills_the_child_before_joining_the_tees(tmp_path, monkeypatch)
 
 def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child, release_on=None)
+    hooks = _signal_hooks(child)
     watcher_stop: dict[str, threading.Event | None] = {"event": None}
     at_terminal: list[tuple[str, bool]] = []
     real_start = training._start_checkpoint_watcher
@@ -1963,15 +2034,7 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
             getpgid=hooks["getpgid"],
             signal_signal=hooks["signal_signal"],
         ))
-    thread, finished, _boxed = _run_attempt_in_thread(kwargs)
-    try:
-        int_handler, _term = _wait_until_handlers(hooks["installed"], hooks["originals"])
-        int_handler(signal.SIGINT, None)
-        child.release()
-        assert finished.wait(timeout=2.0)
-    finally:
-        child.release()
-        thread.join(timeout=2.0)
+    _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     assert at_terminal == [("interrupted", True)]
     persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "interrupted"
@@ -2041,7 +2104,9 @@ def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monke
         only started threads. An earlier wording had this exactly backwards.
     """
     child = FakeChild(hold=True)
-    hooks = _signal_hooks(child)
+    # Opt-out (see `_SIGNAL_HOOKS_RELEASE_ALLOWLIST`): the real handler runs on
+    # the main thread and the child's death at SIGKILL is what ends `wait_for_exit`.
+    hooks = _signal_hooks(child, release_on=signal.SIGKILL)
     entered_finalize = threading.Event()
     killpg_hook = hooks["killpg"]
 
@@ -3402,6 +3467,220 @@ def test_kill_seam_static_safety():
         for plant, planted in clause.plants.items():
             assert clause.check(planted)[0], (f"{clause.name}: the plant {plant!r} passed it, so "
                                               "the clause cannot fail and is not evidence")
+
+
+def test_signal_tests_fire_handlers_in_production_order():
+    """No test fires a handler from the test thread with a `killpg` that releases the child,
+    unless it is on `_SIGNAL_HOOKS_RELEASE_ALLOWLIST`; hand-written choreography is listed too.
+
+    gh#243. The racy order (a releasing `killpg` inside `finalize` while the
+    handler runs on the test thread) let mutant `STOP_HB_DEL` pass 11 of 20
+    runs of the identity test. `_signal_hooks` now defaults to a `killpg` that
+    releases nothing and `_interrupt_in_production_order` is the one way to
+    fire from the test thread. This census reads THIS file by AST and never
+    imports what it checks, so a new test cannot quietly opt back into the
+    racy order: it must appear on a list, with a reason.
+
+    OWNER. A node's owner is the outermost module-level `def` enclosing it
+    (nested defs and classes belong to their test). A node at module scope has
+    owner `<module>`, on no list, so it is red; a non-test helper wrapping an
+    opt-out is red the same way (rule 1 names the helper, not a test).
+
+    THE RULES (each red names the owner and the rule):
+      0. Every load of the bare names `_signal_hooks` and `_wait_until_handlers`
+         is the callee of a call. `sh = _signal_hooks` is red: an alias is the
+         one spelling rules 1 and 3 cannot see.
+      1. A call to `_signal_hooks` whose `release_on` is anything but the
+         literal `None` (an `IfExp`, a `Name`, an attribute, a signal), or that
+         passes a `**` splat, is an OPT-OUT. Its owner must be a key of
+         `_SIGNAL_HOOKS_RELEASE_ALLOWLIST`, and must not also call
+         `_interrupt_in_production_order`: the helper promises production order.
+      2. Every release-list key is a module-level `test_*` def here that owns
+         an opt-out (a stale key is red).
+      3. Every call to `_wait_until_handlers` outside the helper has its owner in
+         `_SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST`.
+      4. Every direct fire outside the helper likewise. A direct fire is a call
+         whose callee is `hooks["installed"][sig]` (a subscript of a subscript
+         keyed by the constant `"installed"`), or a name the same owner assigned
+         from such a subscript (`handler = hooks["installed"][sig]; handler(...)`).
+      5. Every hand-written-list key is a module-level `test_*` def here that
+         owns a rule-3 or rule-4 site (a stale key is red).
+    The real file must show exactly the pinned populations below (five opt-outs,
+    twelve helper calls, four hand-written waits, two direct fires): a checker
+    that examined nothing would otherwise be green. Every plant in `plants` is
+    parsed, never run, and must produce exactly its named red.
+
+    RESIDUAL (the census cannot see these):
+      1. A hand-written fake `killpg` that calls `child.release()` itself: only
+         `_signal_hooks` keywords are read, so a wrapper around `hooks["killpg"]`
+         (like `killpg_marking_finalize`) is invisible. So is rebinding
+         `hooks["killpg"] = <releasing wrapper>` after `_signal_hooks(child)`
+         built default hooks, and so is any out-of-band release of the held
+         child: `threading.Timer(0.02, child.release).start()`, or a FakeChild
+         that dies on `poll`. The census does not see either; both were
+         measured green with the racy test green 5 of 5 (gh#243 review).
+      2. A direct fire spelled another way: `installed = hooks["installed"];
+         installed[sig](...)`, `hooks["installed"].get(sig)(...)`, or a handler
+         passed through another def.
+      3. Aliases that are not a bare `Name` load: `module._signal_hooks`, or
+         `globals()["_signal_hooks"]` (rule 0 catches the bare-name alias only).
+      4. Other test files: this reads tests/test_modal_training.py only.
+      5. A parametrized test where one arm opts out is allow-listed whole (none
+         after gh#243 rewrote the hung-heartbeat test's hooks).
+    """
+    HELPER = "_interrupt_in_production_order"
+    GOVERNED = {"_signal_hooks", "_wait_until_handlers"}
+
+    def owner_of(stmt: ast.stmt) -> str:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return stmt.name
+        return "<module>"
+
+    def is_installed_subscript(node: ast.AST) -> bool:
+        # `X["installed"][sig]`: a Subscript whose value is a Subscript keyed by "installed".
+        return (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Subscript)
+                and isinstance(node.value.slice, ast.Constant)
+                and node.value.slice.value == "installed")
+
+    def census(source: str, release: dict[str, str], handwritten: dict[str, str]):
+        """Return (reds, population). A red is (rule, owner, why)."""
+        tree = ast.parse(source)
+        reds: list[tuple[int, str, str]] = []
+        opt_out_owners: list[str] = []
+        helper_owners: set[str] = set()
+        wait_owners: list[str] = []
+        fire_owners: list[str] = []
+        module_tests = {
+            stmt.name
+            for stmt in tree.body
+            if isinstance(stmt, ast.FunctionDef) and stmt.name.startswith("test_")
+        }
+        for stmt in tree.body:
+            owner = owner_of(stmt)
+            nodes = list(ast.walk(stmt))
+            callee_ids = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
+            # Names this owner assigns from `X["installed"][sig]` (rule 4, second form).
+            fire_aliases: set[str] = set()
+            for n in nodes:
+                if isinstance(n, ast.Assign) and is_installed_subscript(n.value):
+                    fire_aliases |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+                elif (isinstance(n, ast.AnnAssign) and n.value is not None
+                      and is_installed_subscript(n.value) and isinstance(n.target, ast.Name)):
+                    fire_aliases.add(n.target.id)
+            for n in nodes:
+                # Rule 0: a governed name is loaded only as a callee.
+                if (isinstance(n, ast.Name) and n.id in GOVERNED and isinstance(n.ctx, ast.Load)
+                        and id(n) not in callee_ids):
+                    reds.append((0, owner, f"loads `{n.id}` other than as a callee (an alias)"))
+                if not isinstance(n, ast.Call):
+                    continue
+                func = n.func
+                if isinstance(func, ast.Name) and func.id == HELPER:
+                    helper_owners.add(owner)
+                elif isinstance(func, ast.Name) and func.id == "_signal_hooks":
+                    releasing = [
+                        kw for kw in n.keywords
+                        if kw.arg is None or (kw.arg == "release_on" and not (
+                            isinstance(kw.value, ast.Constant) and kw.value.value is None))
+                    ]
+                    if releasing:
+                        opt_out_owners.append(owner)
+                        if owner not in release:
+                            reds.append((1, owner, "passes `_signal_hooks` a releasing `killpg` "
+                                         "(`release_on=...` or `**`) and is not on "
+                                         "_SIGNAL_HOOKS_RELEASE_ALLOWLIST"))
+                elif isinstance(func, ast.Name) and func.id == "_wait_until_handlers":
+                    if owner != HELPER:
+                        wait_owners.append(owner)
+                        if owner not in handwritten:
+                            reds.append((3, owner, "calls `_wait_until_handlers` by hand and is "
+                                         "not on _SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST"))
+                elif (is_installed_subscript(func)
+                      or (isinstance(func, ast.Name) and func.id in fire_aliases)):
+                    if owner != HELPER:
+                        fire_owners.append(owner)
+                        if owner not in handwritten:
+                            reds.append((4, owner, "fires an installed handler by hand and is "
+                                         "not on _SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST"))
+        for owner in sorted(set(opt_out_owners) & helper_owners):
+            reds.append((1, owner, f"calls {HELPER} with hooks built by a releasing `killpg`: "
+                         "the helper must never run in the racy order"))
+        for key in release:
+            if key not in module_tests or key not in opt_out_owners:
+                reds.append((2, key, "is on _SIGNAL_HOOKS_RELEASE_ALLOWLIST but is not a "
+                             "module-level test_* that passes a releasing `killpg` (stale)"))
+        for key in handwritten:
+            if key not in module_tests or (key not in wait_owners and key not in fire_owners):
+                reds.append((5, key, "is on _SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST but is not a "
+                             "module-level test_* that waits for or fires a handler by hand "
+                             "(stale)"))
+        population = {
+            "opt_outs": len(opt_out_owners),
+            "helper_calls": len(helper_owners),
+            "handwritten_waits": len(wait_owners),
+            "direct_fires": len(fire_owners),
+        }
+        return reds, population
+
+    real = Path(__file__).read_text(encoding="utf-8")
+    reds, population = census(real, _SIGNAL_HOOKS_RELEASE_ALLOWLIST,
+                              _SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST)
+    assert reds == [], "\n".join(f"rule {rule}: {owner} {why}" for rule, owner, why in reds)
+    # The pins: a checker that examined nothing would be green above. Adding
+    # a converted test, opt-out or hand-written site moves one of these by one.
+    assert population == {
+        "opt_outs": 5,
+        "helper_calls": 12,
+        "handwritten_waits": 4,
+        "direct_fires": 2
+    }, population
+
+    # Plants: source text that is parsed, never run. Signals are bare names so
+    # no plant carries the text the acceptance grep counts. Each yields exactly
+    # its named red as (rule, owner); K13's red must name the helper.
+    RL, HL = _SIGNAL_HOOKS_RELEASE_ALLOWLIST, _SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST
+    plants: dict[str, tuple[str, dict, dict, tuple[int, str], str | None]] = {
+        "K2": ("def test_x(child): _signal_hooks(child, release_on=SIGKILL)\n", {}, {},
+               (1, "test_x"), None),
+        "K3": (real, {
+            **RL, "test_cleanup_closes_log_before_final_commit": "no opt-out here"
+        }, HL, (2, "test_cleanup_closes_log_before_final_commit"), None),
+        "K4": ("def test_x(installed, originals): _wait_until_handlers(installed, originals)\n", {},
+               {}, (3, "test_x"), None),
+        "K5": (real, {
+            k: v
+            for k, v in RL.items() if k != "test_term_grace_is_deadline_not_mandatory_sleep"
+        }, HL, (1, "test_term_grace_is_deadline_not_mandatory_sleep"), None),
+        "K7": ('def test_x(hooks): hooks["installed"][SIGINT](SIGINT, None)\n', {}, {},
+               (4, "test_x"), None),
+        "K7b": ('def test_x(hooks):\n    h = hooks["installed"][SIGTERM]\n    h(SIGTERM, None)\n',
+                {}, {}, (4, "test_x"), None),
+        "K8": (real, RL, {
+            **HL, "test_no_such_test": "nothing"
+        }, (5, "test_no_such_test"), None),
+        "K9":
+        ("def test_x(child, arm): _signal_hooks(child, release_on=None if arm else SIGKILL)\n", {},
+         {}, (1, "test_x"), None),
+        "K10": ("def _held(child): return _signal_hooks(child, release_on=SIGKILL)\n", {}, {},
+                (1, "_held"), None),
+        "K12":
+        ("def test_x(child, **kw): _signal_hooks(child, **kw)\n", {}, {}, (1, "test_x"), None),
+        "K13": ("def test_x(child, k, c, h):\n    _signal_hooks(child, release_on=SIGKILL)\n"
+                "    _interrupt_in_production_order(k, c, h, SIGINT)\n", {
+                    "test_x": "opt-out"
+                }, {}, (1, "test_x"), HELPER),
+        "K14": ("def test_x(child):\n    sh = _signal_hooks\n    sh(child)\n", {}, {},
+                (0, "test_x"), None),
+        "K14b": ("def test_x(hooks):\n    w = _wait_until_handlers\n    w(hooks, hooks)\n", {}, {},
+                 (0, "test_x"), None),
+    }
+    for plant, (source, release, handwritten, expected, why_contains) in plants.items():
+        planted, _ = census(source, release, handwritten)
+        assert [
+            (rule, owner) for rule, owner, _why in planted
+        ] == [expected], (f"plant {plant!r}: expected exactly the red {expected}, got {planted}")
+        if why_contains is not None:
+            assert why_contains in planted[0][2], (plant, planted)
 
 
 def test_process_control_tripwire_poisons_system(_process_control_tripwire,
