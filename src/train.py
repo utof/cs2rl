@@ -1959,7 +1959,7 @@ def check_spawn_counts(vecenv, map_name: str) -> tuple[int, int]:
     return n_t, n_ct
 
 
-def resolve_pin_pitch(args, verbose: bool = True) -> int:
+def resolve_pin_pitch(args, verbose: bool = True, build_vis: bool = True) -> int:
     """R0-E.2 (#131): set/validate args.pin_pitch from args.map_data; returns it.
 
     WHAT: ``args.pin_pitch is None`` (CLI default) ⇒ pin_pitch_for_map(
@@ -1979,9 +1979,11 @@ def resolve_pin_pitch(args, verbose: bool = True) -> int:
     (costs ~1 s for dust2 from the nav cache, ~0.8 s for `import map`). train()
     calls it again as a cache-safe cross-check for programmatic callers (second
     call is silent, see `verbose`). verbose=False for the train() cross-check
-    so the value is printed once per launch.
+    so the value is printed once per launch. main() passes build_vis=False for
+    --dump-config (gh#251): the dump needs geometry only, and a cold dust2 vis
+    cache would otherwise fork cpu_count() build workers before the dump exits.
     """
-    flat = bool(pin_pitch_for_map(getattr(args, "map_data", None)))
+    flat = bool(pin_pitch_for_map(getattr(args, "map_data", None), build_vis=build_vis))
     if getattr(args, "pin_pitch", None) is None:
         args.pin_pitch = int(flat)
     if bool(args.pin_pitch) != flat:
@@ -4266,13 +4268,19 @@ if __name__ == "__main__":
     # for simple/arena, ~1 s for dust2 from the nav cache (pin_pitch_for_map(
     # None) loads it via the same _ENV_CACHE make_env uses, so nothing is
     # loaded twice). PITFALL: `--dump-config --map dust2` (or --dust2)
-    # therefore needs nav/de_dust2.nav + the vis cache on the HOST that runs
-    # the dump (Modal fingerprints run host-side).
+    # therefore needs nav/de_dust2.nav on the HOST that runs the dump (Modal
+    # fingerprints run host-side). It does NOT need the vis cache: the dump
+    # loads the map with build_vis=False (gh#251), because building that
+    # cache forks a 12-worker pool that a killed dump leaves orphaned.
     if args.map is None:
         args.map = "dust2" if args.dust2 else "simple"
     args.map_data = build_map_data(args.map)
     print(f"[Map] Using {args.map} map")
-    resolve_pin_pitch(args)
+    # gh#251: the dump must exit before ANY process is forked. For dust2 the
+    # only fork on this path is the cold-cache vis-matrix build (cpu_count()
+    # workers, ~900 MB each, orphaned to PID 1 when a test killed the dump);
+    # pin_pitch reads centroids_z only, so the dump skips the vis build.
+    resolve_pin_pitch(args, build_vis=not args.dump_config)
 
     if args.dump_config:
         # Zero-side-effect mode: write config.json and exit. Runs BEFORE device

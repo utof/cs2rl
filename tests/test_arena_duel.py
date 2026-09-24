@@ -14,8 +14,11 @@ What is pinned here and why:
 import itertools
 import json
 import math
+import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +30,57 @@ AGENT_HULL_RADIUS = 12.0               # cs2_types.h:26
 EYE_STAND = 48.0                       # cs2_combat.h standing eye height
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = REPO_ROOT / "src" / "train.py"
+
+
+def _run_group(argv, *, timeout, **kw) -> subprocess.CompletedProcess:
+    """subprocess.run(capture_output=True, text=True) that never leaves a live
+    process behind, however the call ends (gh#251).
+
+    WHAT: starts argv as the leader of a NEW session/process group, waits with
+    communicate(timeout=...), and in `finally` SIGKILLs the whole group, so a
+    TimeoutExpired or a Ctrl-C (KeyboardInterrupt) during the wait, and a
+    normal exit that left grandchildren behind, all end with every descendant
+    killed (killed, not reaped: the kernel reparents them and reaps them for
+    us). The leader also gets PR_SET_PDEATHSIG
+    (SIGKILL) so it dies with this process even when `finally` cannot run.
+
+    WHY: `train.py --dump-config` used to fork a 12-worker vis-cache build (see
+    src/map.py make_cs2_map). subprocess.run's timeout kills only the direct
+    child, so each killed dump orphaned 12 workers to PID 1 at ~900 MB each
+    (~10 GB per leaked case; it took the 16 GB dev box down).
+
+    PITFALLS:
+    - kill the group by `p.pid` (== the pgid, because of start_new_session),
+      NOT `os.getpgid(p.pid)`: once communicate() has reaped the leader,
+      getpgid raises ProcessLookupError and surviving grandchildren would be
+      skipped (the normal-exit leak).
+    - start_new_session also detaches the child from the terminal's
+      foreground group, so Ctrl-C reaches ONLY pytest; the `finally` is what
+      kills the child then.
+    - pytest-timeout's thread method ends with os._exit (no `finally`). The
+      pdeathsig covers the leader there, NOT grandchildren — keeping the dump
+      fork-free (the other half of gh#251) is what covers them.
+    """
+
+    def _pdeathsig():                                                  # runs in the child between fork and exec
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)     # 1 == PR_SET_PDEATHSIG
+
+    with subprocess.Popen(argv,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE,
+                          text=True,
+                          start_new_session=True,
+                          preexec_fn=_pdeathsig if sys.platform == "linux" else None,
+                          **kw) as p:
+        try:
+            out, err = p.communicate(timeout=timeout)
+        finally:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:                 # whole group already gone
+                pass
+    return subprocess.CompletedProcess(argv, p.returncode, out, err)
 
 
 def _zero():
@@ -282,15 +336,13 @@ def test_config_env_label(tmp_path):
     )
     for i, (flags, label, pin) in enumerate(cases):
         d = tmp_path / str(i)
-        r = subprocess.run([
+        r = _run_group([
             sys.executable,
             str(TRAIN_SCRIPT), "--dump-config", *flags, "--checkpoint-dir",
             str(d)
         ],
-                           capture_output=True,
-                           text=True,
-                           cwd=REPO_ROOT,
-                           timeout=120)
+                       cwd=REPO_ROOT,
+                       timeout=120)
         assert r.returncode == 0, r.stderr[-2000:]
         cfg = json.loads((d / "config.json").read_text())
         assert cfg["env"] == label and cfg["pin_pitch"] == pin, (flags, cfg["env"],
@@ -299,14 +351,89 @@ def test_config_env_label(tmp_path):
         assert cfg["jump_enabled"] == (0 if "--jump-enabled" in flags else 1), (flags,
                                                                                 cfg["jump_enabled"])
                                                                                        # An explicit pin that disagrees with the map is refused before the dump.
-    r = subprocess.run([
+    r = _run_group([
         sys.executable,
         str(TRAIN_SCRIPT), "--dump-config", "--map", "arena-duel", "--pin-pitch", "0",
         "--checkpoint-dir",
         str(tmp_path / "bad")
     ],
-                       capture_output=True,
-                       text=True,
-                       cwd=REPO_ROOT,
-                       timeout=120)
+                   cwd=REPO_ROOT,
+                   timeout=120)
     assert r.returncode != 0 and "pin_pitch=0" in r.stderr
+
+
+# gh#251: run the REAL `train.py --dump-config --map dust2` main() with
+# NavGraph.build_vis_matrix booby-trapped. main() must reach the dump without
+# the vis build (its cold-cache ProcessPoolExecutor was the fork a killed dump
+# orphaned — 12 workers at ~900 MB each). Knock-out: main() passing
+# build_vis=True (or dropping the kwarg) makes the child exit non-zero here,
+# warm cache or cold, because the trap fires before the cache check.
+_DUMP_WITHOUT_VIS = """
+import runpy, sys
+sys.path.insert(0, {src!r})
+import nav
+def _boom(self):
+    raise SystemExit("gh251: build_vis_matrix reached on the --dump-config path")
+nav.NavGraph.build_vis_matrix = _boom
+sys.argv = [{script!r}, "--dump-config", "--map", "dust2", "--checkpoint-dir", {out!r}]
+runpy.run_path({script!r}, run_name="__main__")
+"""
+
+
+def test_dump_config_skips_vis_build(tmp_path):
+    code = _DUMP_WITHOUT_VIS.format(src=str(REPO_ROOT / "src"),
+                                    script=str(TRAIN_SCRIPT),
+                                    out=str(tmp_path))
+    r = _run_group([sys.executable, "-c", code], cwd=REPO_ROOT, timeout=120)
+    assert r.returncode == 0, r.stderr[-2000:]
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    assert cfg["env"] == "cs2-dust2" and cfg["pin_pitch"] == 1
+
+
+# gh#251 regression: a child that forks a sleeping grandchild, then either
+# hangs past the helper's timeout or exits at once. Either way nothing in its
+# process group may survive _run_group. The "exits" case pins the getpgid
+# pitfall (leader already reaped); "hangs" pins the TimeoutExpired path.
+_FORKS_A_SLEEPER = """
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    devnull = os.open(os.devnull, os.O_RDWR)                  # drop the captured pipes, or communicate()
+    os.dup2(devnull, 1)                                       # would wait for this sleeper's EOF and the
+    os.dup2(devnull, 2)                                       # "exit" case would time out instead
+    time.sleep(120)
+    os._exit(0)
+with open(sys.argv[1], "w") as f:
+    f.write(str(os.getpgid(0)))
+if sys.argv[2] == "hang":
+    time.sleep(120)
+"""
+
+
+@pytest.mark.parametrize("mode", ["hang", "exit"])
+def test_run_group_leaves_no_survivor(tmp_path, mode):
+    pid_file = tmp_path / "pgid"
+    argv = [sys.executable, "-c", _FORKS_A_SLEEPER, str(pid_file), mode]
+    pgid = None
+    try:
+        if mode == "hang":
+            with pytest.raises(subprocess.TimeoutExpired):
+                _run_group(argv, timeout=3.0)
+        else:
+            assert _run_group(argv, timeout=30).returncode == 0
+        pgid = int(pid_file.read_text())
+        # SIGKILLed members may linger as zombies until init reaps them: poll.
+        deadline = time.monotonic() + 10.0
+        while True:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                break                  # group empty: nothing survived
+            assert time.monotonic() < deadline, f"process group {pgid} survived _run_group"
+            time.sleep(0.1)
+    finally:
+        if pgid is not None:           # never leak sleepers, even when red
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

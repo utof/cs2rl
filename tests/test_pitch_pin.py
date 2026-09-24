@@ -355,6 +355,35 @@ def test_pin_pitch_for_map_none_loads_dust2():
     assert (nav.NAV_PATH, nav.CACHE_PATH) in _ENV_CACHE                # cached for make_env
 
 
+def test_pin_pitch_build_vis_false_never_builds_vis_nor_caches(monkeypatch):
+    """gh#251: the --dump-config path resolves dust2's pin_pitch WITHOUT the
+    vis-matrix build (whose cold-cache ProcessPoolExecutor forked cpu_count()
+    workers that a killed dump orphaned, ~900 MB each) and WITHOUT caching the
+    vis-less MapData (a later make_env would get vis_matrix=None).
+
+    Caches are emptied first so the cold path is exercised even when an earlier
+    test warmed them; build_vis_matrix raising proves it is never called."""
+    import argparse
+
+    import map as map_mod
+    import nav
+    from c_env import cs2_env
+    from train import pin_pitch_for_map, resolve_pin_pitch
+
+    def _boom(self):
+        raise AssertionError("build_vis_matrix called on the build_vis=False path")
+
+    monkeypatch.setattr(nav.NavGraph, "build_vis_matrix", _boom)
+    monkeypatch.setattr(map_mod, "_CS2_MAP_CACHE", {})
+    monkeypatch.setattr(cs2_env, "_ENV_CACHE", {})
+    assert pin_pitch_for_map(None, build_vis=False) == 1               # same zero-fill answer as the full load
+    a = argparse.Namespace(map_data=None, pin_pitch=None)
+    assert resolve_pin_pitch(a, build_vis=False) == 1 and a.pin_pitch == 1
+    assert map_mod._CS2_MAP_CACHE == {} and cs2_env._ENV_CACHE == {}   # vis-less MapData never cached
+    with pytest.raises(AssertionError, match="build_vis_matrix called"):
+        pin_pitch_for_map(None)                                        # positive control: default still builds vis
+
+
 def test_resolve_pin_pitch_dust2_and_simple(simple_map, capsys):
     """The train() path with the CLI's `--dust2` args (map_data=None,
     pin_pitch=None): resolves from the loaded map; an explicit value equal to
