@@ -77,13 +77,17 @@ class PreflightHost:
     is what the child environment is built from (None: `os.environ`, read
     when prepare runs). `ephemeral_parent` is where the source is extracted
     (None: the system temp dir). `start_heartbeat` starts the preflight
-    heartbeat (None: `state.start_heartbeat_worker`, resolved when prepare
-    runs). Tests replace these; production never passes a PreflightHost.
+    heartbeat (None: this module's own `start_heartbeat_worker`, the name it
+    from-imports from state, looked up when prepare runs). Tests replace these;
+    production never passes a PreflightHost.
 
     PITFALL, when defaults are resolved (gh#163 spec §4.2): `run` is bound to
-    `subprocess.run` at import, exactly as prepare's own `run` default is, so
-    a monkeypatch of the global `subprocess.run` does not reach it; inject
-    `run` instead. The three None defaults are resolved at call time.
+    `subprocess.run` at import, as prepare's own `run=subprocess.run` default
+    was before W5, so a monkeypatch of the global `subprocess.run` does not
+    reach it; inject `run` instead. The three None defaults are resolved at
+    call time, `start_heartbeat`'s through preflight's from-imported copy: a
+    patch of `state.start_heartbeat_worker` does not reach it, so inject
+    `start_heartbeat` (or patch `preflight.start_heartbeat_worker`).
     """
 
     run: Callable[..., subprocess.CompletedProcess[object]] = subprocess.run

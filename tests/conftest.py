@@ -48,10 +48,27 @@ def simple_map(make_map):
 #     tests/test_modal_packaging.py's runtime identity probe must then run (its
 #     `bare_spelling_imports` census counts imports at any depth), and an
 #     `importlib.import_module(<variable>)` would dodge that census through its
-#     documented blind spot. RESIDUAL: a test whose own body is the first thing
-#     in the process to import the package is not covered; every modal test file
-#     imports it at module scope, so collection has loaded it before any fixture
-#     runs.
+#     documented blind spot.
+#   * The patch goes through the fixture's OWN `pytest.MonkeyPatch.context()`,
+#     never the test's `monkeypatch`: a test body that calls
+#     `monkeypatch.undo()` would otherwise restore the real `system` for the rest
+#     of that test (tests/test_no_restated_env_defaults.py calls it).
+#   * RESIDUAL: three windows are not poisoned, because the fixture is
+#     function-scoped and needs the module already loaded.
+#       1. A test whose own body is the first thing in the process to import the
+#          package: the fixture found nothing to patch. Every test file that
+#          drives the attempt imports the package at module scope, so collection
+#          has loaded it before any fixture runs. Not every modal test file
+#          does: three tests/test_modal_*.py files import it only inside test
+#          bodies or not at all, and none of those reaches the attempt.
+#       2. Code that runs at collection: module level, parametrize arguments.
+#       3. Module-, class- and session-scoped fixtures, setup and teardown.
+#     The only cover for all three is static, and partial: clause (iii) of
+#     test_kill_seam_static_safety (from the W5 execute commit) bans any read of
+#     `ProcessControl.system` under tests/ outside the two tripwire tests. It
+#     does not see an attempt driven with `process` forgotten from one of these
+#     windows; today no modal test file has a higher-scoped fixture or drives
+#     the attempt at collection.
 #   * The poison raises a RuntimeError subclass on purpose. The attempt swallows
 #     a ValueError from the handler install and a ProcessLookupError from
 #     getpgid/killpg, so a poison of either type would be silent exactly there.
@@ -76,23 +93,27 @@ def _process_control_poison(field):
 
 
 @pytest.fixture(autouse=True)
-def _process_control_tripwire(monkeypatch):
-    """Make `ProcessControl.system()` return a poisoned control; return that control.
+def _process_control_tripwire():
+    """Make `ProcessControl.system()` return a poisoned control; yield that control.
 
-    Returns None, and patches nothing, when the training module is not loaded.
-    Knock-out 4(k) of the spec deletes the `monkeypatch.setattr` line: it may be
-    run only on the two tripwire test nodes, because it switches the backstop
-    off for the whole session.
+    Yields None, and patches nothing, when the training module is not loaded.
+    The patch is undone when the test ends, by the fixture's own MonkeyPatch,
+    which nothing the test does to its `monkeypatch` reaches. Knock-out 4(k) of
+    the spec deletes the one `setattr` line: it may be run only on the two
+    tripwire test nodes, because it switches the backstop off for the whole
+    session.
     """
     training = sys.modules.get("scripts.modal_runner.training")
     if training is None:
-        return None
+        yield None
+        return
     poisoned = training.ProcessControl(spawn=_process_control_poison("spawn"),
                                        getpgid=_process_control_poison("getpgid"),
                                        killpg=_process_control_poison("killpg"),
                                        install_signal=_process_control_poison("install_signal"))
-    monkeypatch.setattr(training.ProcessControl, "system", staticmethod(lambda: poisoned))
-    return poisoned
+    with pytest.MonkeyPatch.context() as tripwire_patch:
+        tripwire_patch.setattr(training.ProcessControl, "system", staticmethod(lambda: poisoned))
+        yield poisoned
 
 
 @pytest.fixture

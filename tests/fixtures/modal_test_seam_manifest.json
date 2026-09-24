@@ -18,6 +18,7 @@
   "RecordingVolume": "tests/test_modal_preflight.py",
   "_FORBIDDEN_FLAGS": "tests/test_modal_request.py",
   "_FakeClock": "tests/test_modal_training.py",
+  "_KillSeamClauses": "tests/test_modal_training.py",
   "_advance_to_building": "tests/test_modal_training.py",
   "_advance_to_training": "tests/test_modal_state.py",
   "_aware": "tests/modal_test_helpers.py",

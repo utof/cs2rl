@@ -278,8 +278,14 @@ class AttemptContext:
     Both phases take the same one. Production builds it once and hands it to
     prepare and then to training, so "the same lock, the same run_root, the
     same Volume" is one object instead of three pairs of arguments that must
-    agree. Every STATUS write is `transition_status(run_root, status,
-    now=clock.now(), attempt_id=..., lock=...)` followed by `volume.commit()`.
+    agree. Prepare's status transitions are `transition_status(run_root,
+    status, now=clock.now(), attempt_id=..., lock=...)`. PREPARING and
+    BUILD_FAILED are each followed by `volume.commit()`, and so are training's
+    TRAINING and terminal transitions. BUILDING is NOT: no commit of its own
+    follows it, and the next commit of the Volume carries it (a heartbeat
+    beat, the manifest rewrite's, or the next transition's). Keep it so when
+    prepare's phases change: a commit added after BUILDING changes the effect
+    order that gh#163 spec §4.5 requires to stay identical.
 
     PITFALL: it holds the Volume, not a bare `commit`. Prepare must reload and
     commit the SAME Volume, and a separate `commit` argument could name a
