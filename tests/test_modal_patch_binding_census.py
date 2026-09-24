@@ -138,9 +138,10 @@ def _binding_site_violations(sources):
     `_record_hash_after_terminal`) as a package patch stayed green everywhere:
     the facade exports `validate_local_checkpoint`, so there is no
     AttributeError, and that helper's callers asserted `hashed == []`, which a
-    patch that never reaches the consumer satisfies trivially. Since gh#211 one
-    caller requires a recorded read, but the other still asserts that nothing
-    was read, which such a patch still satisfies.
+    patch that never reaches the consumer satisfies trivially. Since gh#211
+    the no-sidecar caller requires a recorded validation, so that respelling
+    now fails it as well; the census still pins the spelling, because it names
+    the defect where that failure names only a missing read.
 
     PITFALLS:
       * The facade spellings are the dotted `scripts.modal_runner`, always,

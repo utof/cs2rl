@@ -815,10 +815,12 @@ def test_modal_runner_resolves_to_exactly_one_module_object(tmp_path):
     "the probe session did not finish clean" -- a headline pointing at the
     import machinery when the fault is very likely elsewhere. Read the nested
     `FAILED` line (in the message tail, or in the log it names) before you
-    suspect anything about module objects. gh#211 records what is known: 2
-    spurious failures across ~20 nested sessions, one node id captured
-    (`test_interrupt_without_publishable_checkpoint_writes_a_reason_file`),
-    cause NOT VERIFIED and not reproducible on demand.
+    suspect anything about module objects. This paragraph is where that
+    reporting hazard is recorded. gh#211 (closed) has the history: its
+    sightings came from signal-path tests whose attempt-thread tail raced
+    `finalize` (fixed there: those tests run in production order, see
+    `_signal_hooks` in tests/test_modal_training.py), from gh#217 (fixed), and
+    from the load-sensitive 2 s budgets that gh#218 tracks.
 
     AND YET THE EXIT-STATUS ASSERTION MUST STAY. Let an unrelated test in an
     `_IMPORTERS` file fail while the carrier still passes -- exactly the gh#211
