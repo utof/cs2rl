@@ -1172,6 +1172,12 @@ def _install_protocol_parent(volume, tmp_path, run_id, case):
                 **sidecar, "sha256": "1" * 64
             }).encode()
         }
+    elif case not in ("ok", "missing_sidecar", "not_loadable"):
+        # Those three are built above (sidecar=None, torn bytes) or need no
+        # mutation. Anything else is a token this chain has never heard of:
+        # without this raise it silently gets the healthy "ok" fixture and the
+        # parametrize fails on `checkpoint_loadable`, pointing at the wrong code.
+        raise ValueError(f"no protocol fixture for {case!r}; add one to _install_protocol_parent")
     return ckpt_bytes, digest
 
 

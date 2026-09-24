@@ -61,7 +61,12 @@ class CheckpointVerdict:
     sentence out of here is what stops a third error vocabulary appearing.
 
     Invariant: `ok=True` implies `reason is None` and both `checkpoint_bytes`
-    and `digest` are set; `ok=False` implies both are `None`. The payload field
+    and `digest` are set; `ok=False` implies both are `None` and `reason` is
+    one of `CHECKPOINT_REASON_TOKENS` (never `None`). `verify_checkpoint` builds
+    every failure through its `fail("<token>")` closure, and the gh#197 census
+    in tests/test_modal_checkpoint.py rejects any other construction of a
+    failure verdict there; launch still falls back to "unknown" for a
+    hand-built `reason=None` failure rather than trusting this. The payload field
     is the *checkpoint* bytes, never the sidecar's — launch uploads them under
     `INPUTS_ROOT/sha256/{digest}.pt`, so carrying the sidecar here would ship
     the metadata as the weights.
@@ -219,6 +224,11 @@ def verify_checkpoint(
         goes red until the launch sentence and the test cases follow. Each
         `fail` argument must stay a string literal: the census that ties this
         function to the tuple reads the AST and cannot see a variable.
+      * Every failure return goes through `fail`, called by that name. The
+        census rejects a `CheckpointVerdict(...)` built anywhere else in this
+        function without a literal `ok=True`, and a `fail` read without being
+        called (an alias), because either route would ship a token the tuple,
+        the launch map and the protocol cases never hear about.
     """
 
     def fail(reason: str) -> CheckpointVerdict:
