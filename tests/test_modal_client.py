@@ -30,7 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import scripts.modal_runner as mrl                                                     # noqa: E402, I001
-from scripts.modal_runner import checkpoint, core, state                               # noqa: E402, I001
+from scripts.modal_runner import checkpoint, core, preflight, state                    # noqa: E402, I001
 from tests.modal_patch_binding_campaign import binding_target                          # noqa: E402, I001
 from tests.modal_test_helpers import (                                                 # noqa: E402
     FakeChild, _aware, _git, _init_source_repo, _noop_heartbeat, _write_dumped_config,
@@ -1363,10 +1363,10 @@ def test_train_remote_writes_manifest_and_rejects_completed_without_evidence(
         manifest = kwargs["manifest"]
         assert isinstance(manifest, mrl.Manifest)
         captured["prepare_manifest"] = manifest
-        run_root = Path(kwargs["run_root"])
+        run_root = Path(kwargs["attempt"].run_root)
         run_root.mkdir(parents=True, exist_ok=True)
-        lock = kwargs["lock"]
-        attempt_id = kwargs["attempt_id"]
+        lock = kwargs["attempt"].lock
+        attempt_id = kwargs["attempt"].attempt_id
         state.transition_status(run_root,
                                 core.Status.PREPARING,
                                 now=_aware(),
@@ -1465,9 +1465,8 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
 
     def prepare_with_real_hash_rewrite(**kwargs):
         captured["prepare_in_manifest"] = kwargs["manifest"]
-        captured["run_root"] = Path(kwargs["run_root"])
-        kwargs["run"] = fake_run
-        kwargs["start_heartbeat"] = _noop_heartbeat
+        captured["run_root"] = Path(kwargs["attempt"].run_root)
+        kwargs["host"] = preflight.PreflightHost(run=fake_run, start_heartbeat=_noop_heartbeat)
         prepared = real_prepare(**kwargs)
         captured["prepared"] = prepared
         return prepared
@@ -1538,12 +1537,12 @@ def test_train_remote_redelivery_claims_before_prepare(fake_modal, tmp_path, mon
 
     def fake_prepare(**kwargs):
         prepare_calls.append(1)
-        kwargs["volume"].commit()
+        kwargs["attempt"].volume.commit()
         manifest = kwargs["manifest"]
-        run_root = Path(kwargs["run_root"])
+        run_root = Path(kwargs["attempt"].run_root)
         run_root.mkdir(parents=True, exist_ok=True)
-        lock = kwargs["lock"]
-        attempt_id = kwargs["attempt_id"]
+        lock = kwargs["attempt"].lock
+        attempt_id = kwargs["attempt"].attempt_id
         now = _aware(minute=len(prepare_calls))
         state.transition_status(run_root,
                                 core.Status.PREPARING,

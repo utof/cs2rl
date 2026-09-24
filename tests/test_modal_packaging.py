@@ -1000,8 +1000,14 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # reviewer reads them. This moves one number. Change it deliberately, in the
 # commit that changes the seam, and say why.
 #
-# 281 is `len(classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0])`, the count
-# after gh#163's W5 types commit. Against the W4 per-module tree's 279: two
+# 282 is `len(classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0])`, the count
+# after gh#163's W5 prepare commit. Against the W5 types commit's 281: one
+# runner-side test added in tests/test_modal_preflight.py
+# (`test_preflight_kwargs_routes_every_override`), and one renamed in place
+# (`test_prepare_records_install_dump_probe_then_launch` ->
+# `test_prepare_records_install_dump_probe_in_order`, a key rename that moves
+# no count), nothing removed, no destination moves. 281, after the types
+# commit, against the W4 per-module tree's 279: two
 # runner-side tests added in tests/test_modal_training.py
 # (`test_kill_seam_static_safety`, `test_process_control_tripwire_poisons_system`),
 # nothing removed, no destination moves. 279 was the count after the §2a safety
@@ -1020,7 +1026,7 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # neither and it stays green with a stale count and N ungoverned names on disk.
 # Its own message says so: it is a DELETION detector. The addition detector is
 # `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
-GOVERNED_NAME_COUNT = 281
+GOVERNED_NAME_COUNT = 282
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.

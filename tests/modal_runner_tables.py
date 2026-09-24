@@ -88,7 +88,8 @@ MANIFEST = {
     ],
     "preflight.py": [
         "ExpectedSource", "RemoteResume", "PreflightHost", "_verify_extracted_provenance",
-        "_validate_remote_resume", "_hash_dumped_config", "prepare_remote_source"
+        "_validate_remote_resume", "_hash_dumped_config", "_verify_archive_then_enter_preparing",
+        "_extract_verified_source", "_build_in_source", "_fail_preflight", "prepare_remote_source"
     ],
     "training.py": [
         "RunResult", "CHECKPOINT_SETTLE_SECONDS", "TERM_GRACE_SECONDS", "DEAD_RUN_EXIT_CODE",

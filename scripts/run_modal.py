@@ -724,22 +724,26 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
         return {"status": mrl.REDELIVERED, "run_id": run_id}
     request = _request_from_payload(payload)
     run_root = _remote_run_root(request.run_id)
-    lock = threading.Lock()
+    # One attempt for both phases: the same lock, run_root and Volume, on the
+    # default (real) clock.
+    attempt = mrl.AttemptContext(attempt_id=attempt_id,
+                                 run_root=run_root,
+                                 lock=threading.Lock(),
+                                 volume=volume)
     resume = payload.get("resume_mount_path")
     resume_sha = payload.get("resume_sha256")
     manifest = build_remote_manifest(payload)
     prepared = mrl.prepare_remote_source(
-        volume=volume,
-        archive_path=Path(str(payload["source_mount_path"])),
-        expected_archive_sha256=str(payload["source_archive_sha256"]),
-        expected_commit=str(payload["git_sha"]),
-        expected_tree=str(payload["tree"]),
+        attempt=attempt,
         request=request,
-        run_root=run_root,
-        attempt_id=attempt_id,
-        lock=lock,
-        remote_resume=None if resume is None else str(resume),
-        expected_resume_sha256=None if resume_sha is None else str(resume_sha),
+        source=mrl.ExpectedSource(
+            archive_path=Path(str(payload["source_mount_path"])),
+            archive_sha256=str(payload["source_archive_sha256"]),
+            commit=str(payload["git_sha"]),
+            tree=str(payload["tree"]),
+        ),
+        resume=None if resume is None else mrl.RemoteResume(
+            path=Path(str(resume)), sha256=None if resume_sha is None else str(resume_sha)),
         wandb_api_key=os.environ.get("WANDB_API_KEY") if payload.get("wandb_enabled") else None,
         manifest=manifest,
     )
@@ -747,12 +751,12 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
         manifest = replace(manifest, config_hash=prepared.config_hash)
     result = mrl.execute_training_attempt(
         registry=registry,
-        attempt_id=attempt_id,
-        run_root=run_root,
+        attempt_id=attempt.attempt_id,
+        run_root=attempt.run_root,
         prepared=prepared,
-        commit=volume.commit,
-        lock=lock,
-        now=lambda: datetime.now(UTC),
+        commit=attempt.volume.commit,
+        lock=attempt.lock,
+        now=attempt.clock.now,
         timeout=timedelta(minutes=request.timeout_minutes),
         manifest=manifest,
         already_claimed=True,

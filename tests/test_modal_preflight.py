@@ -6,6 +6,8 @@ add a helper, read THE PLACEMENT RULE FOR RUNNER TESTS in
 tests/test_modal_packaging.py: which file a test belongs in, what the change
 costs in the seam manifest, and where helpers go.
 """
+import ast
+import dataclasses
 import json
 import os
 import subprocess
@@ -15,6 +17,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -25,7 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import scripts.modal_runner as mrl                                                       # noqa: E402, I001
-from scripts.modal_runner import checkpoint, commands, core, state                       # noqa: E402, I001
+from scripts.modal_runner import checkpoint, commands, core, preflight, state            # noqa: E402, I001
 from tests.modal_patch_binding_campaign import binding_target                            # noqa: E402, I001
 from tests.modal_test_helpers import (                                                   # noqa: E402
     _aware, _git, _init_source_repo, _make_manifest, _noop_heartbeat, _valid_run_kwargs,
@@ -93,31 +96,229 @@ def _source_bundle(tmp_path: Path):
     return sha, tree, client_archive, mount_archive, provenance
 
 
-def _preflight_kwargs(tmp_path: Path, **overrides):
+def _preflight_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
+    """prepare_remote_source's keyword arguments over a real source bundle, from flat overrides.
+
+    Call sites pass flat keys (`run=`, `now=`, `expected_commit=`, ...); this
+    assembles them into the collaborators prepare takes (gh#163 W5): `attempt`
+    (an AttemptContext over a RecordingVolume), `request`, `source` (an
+    ExpectedSource) and `host` (a PreflightHost), plus `resume`, `manifest` and
+    `wandb_api_key` only when overridden, so an absent one keeps prepare's own
+    default.
+
+    Every known key is taken with `overrides.pop`, and a leftover raises
+    TypeError: a misspelt or retired key (`on_ready`) stays loud, as it was
+    when the flat dict went straight to prepare. The mapping from key to field
+    is hand-written, so `test_preflight_kwargs_routes_every_override` checks
+    that every key a call site passes reaches its field; a key popped here and
+    then dropped fails there instead of quietly testing the default.
+
+    PITFALLS. `remote_resume` is stored as `Path(remote_resume)`, the one
+    converted key (RemoteResume.path is a Path; call sites pass `str(ckpt)`);
+    every other value is stored as passed. `expected_resume_sha256` without
+    `remote_resume` raises: the hash names no file on its own. Without a `run`
+    override the host keeps PreflightHost's default, the real `subprocess.run`,
+    exactly as the flat builder left prepare's; every call site passes one.
+    The result is typed `dict[str, Any]` because tests reach test-double
+    members through it (`kwargs["attempt"].volume.events` on a
+    RecordingVolume), which the collaborator types do not declare.
+    """
+    known = ("request", "now", "run", "start_heartbeat", "expected_archive_sha256",
+             "expected_commit", "remote_resume", "expected_resume_sha256", "manifest",
+             "wandb_api_key")
+    given = {key: overrides.pop(key) for key in known if key in overrides}
+    if overrides:
+        raise TypeError(f"unknown override(s): {sorted(overrides)}")
+    if "expected_resume_sha256" in given and "remote_resume" not in given:
+        raise TypeError("expected_resume_sha256 needs remote_resume: the hash names no file alone")
     sha, tree, client_archive, mount_archive, provenance = _source_bundle(tmp_path)
     run_root = tmp_path / "run"
     run_root.mkdir()
-    kwargs = {
-        "volume": RecordingVolume(client_archive, mount_archive, run_root),
-        "archive_path": mount_archive,
-        "expected_archive_sha256": provenance.archive_sha256,
-        "expected_commit": sha,
-        "expected_tree": tree,
-        "request": mrl.build_run_request(**_valid_run_kwargs(run_id="ok-id")),
-        "run_root": run_root,
-        "attempt_id": "attempt-a",
-        "lock": threading.Lock(),
-        "ephemeral_parent": tmp_path / "ephemeral",
-        "parent_env": {
+    host = preflight.PreflightHost(
+        parent_env={
             "PATH": "/usr/bin",
             "HOME": "/home/modal",
             "WANDB_API_KEY": "parent-secret"
         },
-        "now": lambda: _aware(),
-        "start_heartbeat": _noop_heartbeat,
+        ephemeral_parent=tmp_path / "ephemeral",
+        start_heartbeat=given.get("start_heartbeat", _noop_heartbeat),
+    )
+    if "run" in given:
+        host = dataclasses.replace(host, run=given["run"])
+    request = (given["request"] if "request" in given else mrl.build_run_request(
+        **_valid_run_kwargs(run_id="ok-id")))
+    attempt = core.AttemptContext(
+        attempt_id="attempt-a",
+        run_root=run_root,
+        lock=threading.Lock(),
+        volume=RecordingVolume(client_archive, mount_archive, run_root),
+        clock=core.Clock(now=given.get("now", lambda: _aware())),
+    )
+    source = preflight.ExpectedSource(
+        archive_path=mount_archive,
+        archive_sha256=given.get("expected_archive_sha256", provenance.archive_sha256),
+        commit=given.get("expected_commit", sha),
+        tree=tree,
+    )
+    kwargs: dict[str, Any] = {
+        "attempt": attempt,
+        "request": request,
+        "source": source,
+        "host": host
     }
-    kwargs.update(overrides)
+    if "remote_resume" in given:
+        kwargs["resume"] = preflight.RemoteResume(path=Path(given["remote_resume"]),
+                                                  sha256=given.get("expected_resume_sha256"))
+    kwargs.update({key: given[key] for key in ("manifest", "wandb_api_key") if key in given})
     return kwargs
+
+
+def test_preflight_kwargs_routes_every_override(tmp_path):
+    """Every flat key a call site passes to `_preflight_kwargs` reaches the field prepare reads.
+
+    gh#163 spec §4.7. The builder assembles flat overrides into collaborators
+    by hand-written code, and several tests assert that something is ABSENT
+    from a recorder they injected; such an assertion goes vacuous, still
+    green, if the builder stops routing its key. So, both ways:
+      * the keys call sites pass, enumerated by AST over the modal test files
+        in any spelling (the bare name, an attribute `x._preflight_kwargs`, an
+        import or assignment alias), must equal the keys of `routes`. A key a
+        call site passes that `routes` lacks fails, and so does a `routes`
+        entry that no call site passes;
+      * each key, passed as a sentinel, must come back by identity at the
+        field `routes` names (the spec §4.7 substitution map, restricted to
+        this builder's keys). `remote_resume` alone compares by equality: the
+        builder converts it, because RemoteResume.path is a Path and call
+        sites pass `str(ckpt)`.
+    A call site whose keys cannot be read statically (a `**` splat, a second
+    positional argument) fails too. This test's own calls are not call sites.
+
+    THE PLANTS are synthetic call sites, parsed and never run, each passing an
+    unmapped key through one spelling: each must fail the key equality, or the
+    enumeration would not be evidence. Keep `routes` and the plants INSIDE
+    this function: a module-level name in this file is a governed seam name and
+    moves GOVERNED_NAME_COUNT (tests/test_modal_packaging.py). The keys that
+    are only READ back from the built kwargs and passed at no call site
+    (`run_root`, `volume`, `archive_path`, `expected_tree`) are not here, by
+    the same two-way rule: each would be an entry no call site passes.
+    """
+    routes = {
+        "expected_archive_sha256": lambda built: built["source"].archive_sha256,
+        "expected_commit": lambda built: built["source"].commit,
+        "expected_resume_sha256": lambda built: built["resume"].sha256,
+        "manifest": lambda built: built["manifest"],
+        "now": lambda built: built["attempt"].clock.now,
+        "remote_resume": lambda built: built["resume"].path,
+        "request": lambda built: built["request"],
+        "run": lambda built: built["host"].run,
+        "start_heartbeat": lambda built: built["host"].start_heartbeat,
+        "wandb_api_key": lambda built: built["wandb_api_key"],
+    }
+    builder = "_preflight_kwargs"
+    this_test = "test_preflight_kwargs_routes_every_override"
+
+    def last_name(expr):
+        """The callee spelling a call site is matched on: a bare name, or the last attribute."""
+        if isinstance(expr, ast.Name):
+            return expr.id
+        if isinstance(expr, ast.Attribute):
+            return expr.attr
+        return None
+
+    def call_site_keys(sources):
+        """({key: [file:line, ...]}, problems) over every builder call outside this test."""
+        keys, problems = {}, []
+        for rel, text in sources.items():
+            tree = ast.parse(text)
+            spellings = {builder}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    spellings |= {
+                        alias.asname
+                        for alias in node.names if alias.name == builder and alias.asname
+                    }
+                elif isinstance(node, ast.Assign) and last_name(node.value) == builder:
+                    spellings |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+            own = {
+                id(node)
+                for top in tree.body if isinstance(top, ast.FunctionDef) and top.name == this_test
+                for node in ast.walk(top)
+            }
+            for node in ast.walk(tree):
+                if (not isinstance(node, ast.Call) or last_name(node.func) not in spellings
+                        or id(node) in own):
+                    continue
+                where = f"{rel}:{node.lineno}"
+                if len(node.args) != 1 or any(k.arg is None for k in node.keywords):
+                    problems.append(f"{where} {ast.unparse(node)[:100]}")
+                for keyword in node.keywords:
+                    if keyword.arg is not None:
+                        keys.setdefault(keyword.arg, []).append(where)
+        return keys, problems
+
+    sources = {
+        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+        for pattern in ("test_modal_*.py", "modal_test_helpers.py",
+                        "modal_patch_binding_campaign.py")
+        for path in sorted((ROOT / "tests").glob(pattern))
+    }
+    assert {
+        "tests/test_modal_preflight.py", "tests/modal_test_helpers.py",
+        "tests/modal_patch_binding_campaign.py"
+    } <= set(sources), sorted(sources)[:5]
+    keys, problems = call_site_keys(sources)
+    assert problems == [], (
+        f"call sites whose override keys cannot be read statically: {problems}. Pass every "
+        "override as a keyword, so this test can check that it is routed")
+    unrouted = sorted(set(keys) - set(routes))
+    unused = sorted(set(routes) - set(keys))
+    assert not unrouted and not unused, (
+        f"call sites pass {unrouted} ({ {key: keys[key] for key in unrouted} }), which "
+        f"`routes` does not map, and `routes` maps {unused}, which no call site passes. A new "
+        "key needs a field in `_preflight_kwargs` and an entry here; a key nobody passes any "
+        "more comes out of both")
+
+    plants = {
+        "the bare name":
+        "_preflight_kwargs(tmp_path, on_ready=f)\n",
+        "an attribute":
+        "preflight_tests._preflight_kwargs(tmp_path, on_ready=f)\n",
+        "an import alias": ("from tests.test_modal_preflight import _preflight_kwargs as build\n"
+                            "build(tmp_path, on_ready=f)\n"),
+        "an assignment alias":
+        "build = _preflight_kwargs\nbuild(tmp_path, on_ready=f)\n",
+    }
+    for plant, source in plants.items():
+        planted, _ = call_site_keys({**sources, "tests/test_modal_plant.py": source})
+        assert set(planted) != set(routes), (
+            f"a call site passing an unmapped key through {plant} left the key sets equal, "
+            "so the enumeration cannot see that spelling and its green is not evidence")
+    _, splat = call_site_keys({"tests/test_modal_plant.py": "_preflight_kwargs(tmp_path, **k)\n"})
+    assert splat, "a `**` splat call site was not reported, so its keys would go unchecked"
+
+    resume = str(tmp_path / "warm.pt")
+    sentinels: dict[str, object] = {key: object() for key in routes}
+    sentinels["remote_resume"] = resume
+    built = _preflight_kwargs(tmp_path, **sentinels)
+    assert set(built) == {
+        "attempt", "request", "source", "host", "resume", "manifest", "wandb_api_key"
+    }, sorted(built)
+    for key, route in routes.items():
+        if key == "remote_resume":
+            # Equality, not identity: the one key the builder converts (call sites pass
+            # str(ckpt); RemoteResume.path is a Path), so it stores a new object.
+            assert route(built) == Path(resume), f"{key} does not reach its field"
+        else:
+            assert route(built) is sentinels[key], f"{key} does not reach its field"
+    # A directory each, so a builder that stopped raising would build there and fail on
+    # DID NOT RAISE, rather than on colliding with the build above.
+    leftover, hash_alone = tmp_path / "leftover", tmp_path / "hash-alone"
+    leftover.mkdir()
+    hash_alone.mkdir()
+    with pytest.raises(TypeError, match=r"unknown override\(s\): \['on_ready'\]"):
+        _preflight_kwargs(leftover, on_ready=lambda prepared: None)
+    with pytest.raises(TypeError, match="needs remote_resume"):
+        _preflight_kwargs(hash_alone, expected_resume_sha256="0" * 64)
 
 
 def test_recording_volume_reload_restores_committed_run_root(tmp_path):
@@ -157,8 +358,8 @@ def test_prepare_reloads_before_status_write_and_commits_before_heartbeat(tmp_pa
         return SimpleNamespace(stop_and_join=lambda: None)
 
     kwargs = _preflight_kwargs(tmp_path, run=fake_run, start_heartbeat=start_heartbeat)
-    volume = kwargs["volume"]
-    run_root = kwargs["run_root"]
+    volume = kwargs["attempt"].volume
+    run_root = kwargs["attempt"].run_root
     orig_reload = volume.reload
     orig_commit = volume.commit
 
@@ -195,8 +396,8 @@ def test_prepare_reloads_verifies_extracts_then_installs(tmp_path):
         return subprocess.CompletedProcess(cmd, 0)
 
     kwargs = _preflight_kwargs(tmp_path, run=fake_run, start_heartbeat=start_heartbeat)
-    volume = kwargs["volume"]
-    run_root = kwargs["run_root"]
+    volume = kwargs["attempt"].volume
+    run_root = kwargs["attempt"].run_root
     prepared = mrl.prepare_remote_source(**kwargs)
     assert volume.events[0] == "reload"
     assert recorded, "install command was never invoked"
@@ -209,10 +410,10 @@ def test_prepare_reloads_verifies_extracts_then_installs(tmp_path):
     assert "WANDB_API_KEY" not in install_kwargs["env"]
     assert (prepared.source_dir / "readme.txt").read_text() == "hello\n"
     sidecar = json.loads((prepared.source_dir / core.PROVENANCE_NAME).read_text())
-    assert sidecar["commit"] == kwargs["expected_commit"]
-    assert sidecar["tree"] == kwargs["expected_tree"]
+    assert sidecar["commit"] == kwargs["source"].commit
+    assert sidecar["tree"] == kwargs["source"].tree
     assert prepared.source_dir.is_relative_to(tmp_path / "ephemeral")
-    assert not mount_is_extract_root(prepared.source_dir, kwargs["archive_path"])
+    assert not mount_is_extract_root(prepared.source_dir, kwargs["source"].archive_path)
 
 
 def mount_is_extract_root(source_dir: Path, archive_path: Path) -> bool:
@@ -224,14 +425,21 @@ def test_prepare_rejects_archive_hash_mismatch(tmp_path):
     with pytest.raises(mrl.ValidationError):
         mrl.prepare_remote_source(**kwargs)
     # Hash is checked after reload; the archive must not be trusted blindly.
-    assert kwargs["volume"].events[0] == "reload"
-    assert not (kwargs["run_root"] / mrl.STATUS_FILENAME).exists()
+    assert kwargs["attempt"].volume.events[0] == "reload"
+    assert not (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).exists()
 
 
 def test_prepare_rejects_provenance_sidecar_mismatch(tmp_path):
     kwargs = _preflight_kwargs(tmp_path, expected_commit="f" * 40, run=lambda *a, **k: None)
-    with pytest.raises(mrl.ValidationError):
+    # Bound on purpose (spec §4.5): the live traceback keeps the failing frame, and with it
+    # the TemporaryDirectory whose finalizer would otherwise erase the extracted tree when the
+    # block exits, so the cleanup assertion below could not see a skipped cleanup.
+    with pytest.raises(mrl.ValidationError) as excinfo:                # noqa: F841
         mrl.prepare_remote_source(**kwargs)
+    ephemeral = kwargs["host"].ephemeral_parent
+    assert not ephemeral.exists() or not any(ephemeral.iterdir())
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
+    assert persisted["status"] == "build_failed"
 
 
 def test_prepare_reads_archive_only_after_volume_reload(tmp_path):
@@ -246,10 +454,10 @@ def test_prepare_reads_archive_only_after_volume_reload(tmp_path):
         def commit(self) -> None:
             self.events.append("commit")
 
-    kwargs["volume"] = BlindVolume()
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"], volume=BlindVolume())
     with pytest.raises((mrl.ValidationError, FileNotFoundError, OSError)):
         mrl.prepare_remote_source(**kwargs)
-    assert kwargs["volume"].events[0] == "reload"
+    assert kwargs["attempt"].volume.events[0] == "reload"
 
 
 def test_prepare_validates_resume_then_dumps_and_hashes_config(tmp_path):
@@ -288,7 +496,7 @@ def test_prepare_validates_resume_then_dumps_and_hashes_config(tmp_path):
         expected_resume_sha256=digest,
         manifest=manifest,
     )
-    kwargs_run_root = kwargs["run_root"]
+    kwargs_run_root = kwargs["attempt"].run_root
     monkey_validate = tracking_validate
     setattr(validate_target, validate_name, monkey_validate)
     try:
@@ -303,12 +511,12 @@ def test_prepare_validates_resume_then_dumps_and_hashes_config(tmp_path):
     assert dump_kwargs["cwd"] == os.fspath(prepared.source_dir)
     assert dump_kwargs["shell"] is False
     assert dump_kwargs["env"]["OMP_NUM_THREADS"] == "1"
-    dumped = json.loads((kwargs["run_root"] / "checkpoints" / "config.json").read_text())
+    dumped = json.loads((kwargs["attempt"].run_root / "checkpoints" / "config.json").read_text())
     expected_hash = mrl.sha256_bytes(
         json.dumps(checkpoint.normalize_config_for_transport(dumped),
                    sort_keys=True,
                    separators=(",", ":")).encode())
-    payload = json.loads((kwargs["run_root"] / core.MANIFEST_FILENAME).read_text())
+    payload = json.loads((kwargs["attempt"].run_root / core.MANIFEST_FILENAME).read_text())
     assert payload["config_hash"] == expected_hash
     assert prepared.config_hash == expected_hash
     assert "data_dir" not in checkpoint.normalize_config_for_transport(dumped)
@@ -327,7 +535,7 @@ def test_prepare_rejects_resume_hash_mismatch(tmp_path):
         expected_resume_sha256="0" * 64,
         manifest=_make_manifest(),
     )
-    with pytest.raises(mrl.ValidationError):
+    with pytest.raises(mrl.ValidationError, match="resume sha256"):
         mrl.prepare_remote_source(**kwargs)
 
 
@@ -349,9 +557,8 @@ def test_prepare_rejects_non_checkpoint_resume(tmp_path):
 # ── Preflight: command order, build failure, secrets, heartbeat ────────────
 
 
-def test_prepare_records_install_dump_probe_then_launch(tmp_path):
+def test_prepare_records_install_dump_probe_in_order(tmp_path):
     recorded: list[list[str]] = []
-    launched: list[object] = []
 
     def fake_run(cmd, **kwargs):
         recorded.append(list(cmd))
@@ -359,29 +566,17 @@ def test_prepare_records_install_dump_probe_then_launch(tmp_path):
             _write_dumped_config(kwargs_run_root)
         return subprocess.CompletedProcess(cmd, 0)
 
-    def on_ready(prepared):
-        launched.append(prepared)
-        fake_run(
-            prepared.train_command,
-            cwd=os.fspath(prepared.source_dir),
-            shell=False,
-            env=prepared.child_env,
-        )
-
     kwargs = _preflight_kwargs(
         tmp_path,
         run=fake_run,
         start_heartbeat=_noop_heartbeat,
-        on_ready=on_ready,
         manifest=_make_manifest(run_id="ok-id"),
     )
-    kwargs_run_root = kwargs["run_root"]
+    kwargs_run_root = kwargs["attempt"].run_root
     prepared = mrl.prepare_remote_source(**kwargs)
-    assert launched and launched[0] is prepared
     assert recorded[0] == commands.build_install_command(prepared.source_dir)
     assert recorded[1] == commands.build_dump_config_command(kwargs["request"], None)
     assert recorded[2] == commands.build_cuda_probe_command()
-    assert recorded[3] == prepared.train_command
     assert prepared.train_command == commands.build_train_command(
         commands.build_train_argv(kwargs["request"], None))
     assert prepared.heartbeat is not None
@@ -395,7 +590,7 @@ def test_preflight_failure_stops_heartbeat_then_writes_build_failed(tmp_path):
 
         def stop_and_join():
             order.append("stop")
-            status_path = kwargs["run_root"] / mrl.STATUS_FILENAME
+            status_path = kwargs["attempt"].run_root / mrl.STATUS_FILENAME
             status_at_stop.append(json.loads(status_path.read_text())["status"])
 
         return SimpleNamespace(stop_and_join=stop_and_join)
@@ -408,7 +603,7 @@ def test_preflight_failure_stops_heartbeat_then_writes_build_failed(tmp_path):
     kwargs = _preflight_kwargs(tmp_path, run=fake_run, start_heartbeat=start_heartbeat)
     with pytest.raises(subprocess.CalledProcessError):
         mrl.prepare_remote_source(**kwargs)
-    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert order == ["stop"]
     assert status_at_stop == ["building"]
     assert persisted["status"] == "build_failed"
@@ -430,12 +625,15 @@ def test_preflight_failure_keeps_build_failed_when_heartbeat_stop_raises(tmp_pat
         return subprocess.CompletedProcess(cmd, 0)
 
     kwargs = _preflight_kwargs(tmp_path, run=fake_run, start_heartbeat=start_heartbeat)
-    with pytest.raises(subprocess.CalledProcessError):
+    # Bound on purpose (spec §4.5): the live traceback keeps the failing frame, and with it
+    # the TemporaryDirectory whose finalizer would otherwise erase the extracted tree when the
+    # block exits, so the cleanup assertion below could not see a skipped cleanup.
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:      # noqa: F841
         mrl.prepare_remote_source(**kwargs)
-    persisted = json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text())
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "build_failed"
     assert persisted["attempt_id"] == "attempt-a"
-    ephemeral = kwargs["ephemeral_parent"]
+    ephemeral = kwargs["host"].ephemeral_parent
     assert not ephemeral.exists() or not any(ephemeral.iterdir())
 
 
@@ -462,12 +660,12 @@ def test_prepare_does_not_persist_wandb_secret(tmp_path):
         wandb_api_key=secret,
         manifest=_make_manifest(run_id="ok-id"),
     )
-    kwargs_run_root = kwargs["run_root"]
+    kwargs_run_root = kwargs["attempt"].run_root
     prepared = mrl.prepare_remote_source(**kwargs)
     assert all(env["WANDB_API_KEY"] == secret for env in recorded_envs)
     assert prepared.child_env["WANDB_API_KEY"] == secret
     assert secret not in repr(prepared)
-    for path in kwargs["run_root"].rglob("*"):
+    for path in kwargs["attempt"].run_root.rglob("*"):
         if path.is_file():
             assert secret not in path.read_text(errors="ignore")
 
@@ -528,8 +726,8 @@ def test_heartbeat_commits_throughout_blocked_preflight(tmp_path):
         now=clock.now,
         manifest=_make_manifest(run_id="ok-id"),
     )
-    kwargs_run_root = kwargs["run_root"]
-    volume = kwargs["volume"]
+    kwargs_run_root = kwargs["attempt"].run_root
+    volume = kwargs["attempt"].volume
     orig_commit = volume.commit
 
     def recording_commit():
@@ -546,6 +744,6 @@ def test_heartbeat_commits_throughout_blocked_preflight(tmp_path):
     for earlier, later in zip(beat_times, beat_times[1:], strict=False):
         assert later - earlier <= timedelta(seconds=60)
     status = state.RunStatus.from_dict(
-        json.loads((kwargs["run_root"] / mrl.STATUS_FILENAME).read_text()))
+        json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text()))
     derived = state.derive_status(status, now=clock.now())
     assert derived.stale is False

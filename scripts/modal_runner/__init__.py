@@ -104,12 +104,13 @@ from .core import (
     SOURCES_ROOT,
     STATUS_FILENAME,
     VOLUME_NAME,
+    AttemptContext,
     Manifest,
     ValidationError,
     mounted_path,
     sha256_bytes,
 )
-from .preflight import prepare_remote_source
+from .preflight import ExpectedSource, RemoteResume, prepare_remote_source
 from .request import (
     ALLOWED_MAPS,
     DEFAULT_CPU_CORES,
@@ -138,10 +139,11 @@ from .state import (
 from .training import execute_training_attempt
 
 __all__ = [
-    'ALLOWED_MAPS', 'Action', 'CHECKPOINT_NAME', 'CHECKPOINT_SIDECAR_NAME', 'DEFAULT_CPU_CORES',
-    'DEFAULT_GPU', 'DEFAULT_MEMORY_MIB', 'DEFAULT_NUM_ENVS', 'DEFAULT_SAVE_EVERY_SECONDS',
-    'DEFAULT_TIMEOUT_MINUTES', 'DEFAULT_VEC_WORKERS', 'INPUTS_ROOT', 'Manifest', 'REDELIVERED',
-    'REGISTRY_NAME', 'RESERVATION_FILENAME', 'RUNS_ROOT', 'RunRequest', 'SCHEMA_VERSION',
+    'ALLOWED_MAPS', 'Action', 'AttemptContext', 'CHECKPOINT_NAME', 'CHECKPOINT_SIDECAR_NAME',
+    'DEFAULT_CPU_CORES', 'DEFAULT_GPU', 'DEFAULT_MEMORY_MIB', 'DEFAULT_NUM_ENVS',
+    'DEFAULT_SAVE_EVERY_SECONDS', 'DEFAULT_TIMEOUT_MINUTES', 'DEFAULT_VEC_WORKERS',
+    'ExpectedSource', 'INPUTS_ROOT', 'Manifest', 'REDELIVERED', 'REGISTRY_NAME',
+    'RESERVATION_FILENAME', 'RUNS_ROOT', 'RemoteResume', 'RunRequest', 'SCHEMA_VERSION',
     'SOURCES_ROOT', 'STATUS_FILENAME', 'TERMINAL_STATUSES', 'THREAD_CAP_ENV', 'VOLUME_NAME',
     'ValidationError', 'build_run_request', 'claim_attempt', 'create_source_bundle',
     'derive_run_view_from_bytes', 'execute_training_attempt', 'finish_reservation',
