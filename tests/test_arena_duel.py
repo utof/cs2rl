@@ -310,3 +310,35 @@ def test_config_env_label(tmp_path):
                        cwd=REPO_ROOT,
                        timeout=120)
     assert r.returncode != 0 and "pin_pitch=0" in r.stderr
+
+
+# gh#251: run the REAL `train.py --dump-config --map dust2` main() with
+# NavGraph.build_vis_matrix booby-trapped. main() must reach the dump without
+# the vis build (its cold-cache ProcessPoolExecutor was the fork a killed dump
+# orphaned — 12 workers at ~900 MB each). Knock-out: main() passing
+# build_vis=True (or dropping the kwarg) makes the child exit non-zero here,
+# warm cache or cold, because the trap fires before the cache check.
+_DUMP_WITHOUT_VIS = """
+import runpy, sys
+sys.path.insert(0, {src!r})
+import nav
+def _boom(self):
+    raise SystemExit("gh251: build_vis_matrix reached on the --dump-config path")
+nav.NavGraph.build_vis_matrix = _boom
+sys.argv = [{script!r}, "--dump-config", "--map", "dust2", "--checkpoint-dir", {out!r}]
+runpy.run_path({script!r}, run_name="__main__")
+"""
+
+
+def test_dump_config_skips_vis_build(tmp_path):
+    code = _DUMP_WITHOUT_VIS.format(src=str(REPO_ROOT / "src"),
+                                    script=str(TRAIN_SCRIPT),
+                                    out=str(tmp_path))
+    r = subprocess.run([sys.executable, "-c", code],
+                       capture_output=True,
+                       text=True,
+                       cwd=REPO_ROOT,
+                       timeout=120)
+    assert r.returncode == 0, r.stderr[-2000:]
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    assert cfg["env"] == "cs2-dust2" and cfg["pin_pitch"] == 1

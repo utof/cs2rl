@@ -153,15 +153,29 @@ class MapData:
 _CS2_MAP_CACHE: dict = {}
 
 
-def make_cs2_map(nav_path: str, cache_path: str) -> MapData:
-    """Build MapData from the real dust2 nav mesh."""
+def make_cs2_map(nav_path: str, cache_path: str, *, build_vis: bool = True) -> MapData:
+    """Build MapData from the real dust2 nav mesh.
+
+    ``build_vis=False`` (gh#251) skips NavGraph.build_vis_matrix and returns an
+    UNCACHED MapData whose ``vis_matrix`` is None. It exists for
+    `train.py --dump-config`, which only reads geometry (centroids_z → pin_pitch)
+    and must never fork: on a cold `src/vis_cache.npy` (every fresh worktree —
+    it is gitignored) build_vis_matrix spawns a cpu_count()-worker
+    ProcessPoolExecutor for minutes, and a killed dump orphaned all 12 workers
+    to PID 1 at ~900 MB each.
+
+    PITFALL: never hand a build_vis=False MapData to an env (vis_matrix None) and
+    never cache it — a later build_vis=True caller for the same key would get
+    the vis-less object. A warm cached full MapData IS returned for either flag.
+    """
     key = (nav_path, cache_path)
     cached = _CS2_MAP_CACHE.get(key)
     if cached is not None:
         return cached
 
     nav_graph = NavGraph(nav_path, cache_path)
-    nav_graph.build_vis_matrix()
+    if build_vis:
+        nav_graph.build_vis_matrix()
 
     xs = [c[0] for c in nav_graph.centroids.values()]
     ys = [c[1] for c in nav_graph.centroids.values()]
@@ -257,7 +271,8 @@ def make_cs2_map(nav_path: str, cache_path: str) -> MapData:
         nav_graph=nav_graph,
     )
 
-    _CS2_MAP_CACHE[key] = map_data
+    if build_vis:                      # vis-less MapData is never cached (see docstring)
+        _CS2_MAP_CACHE[key] = map_data
 
     print(f"[MapData] Map bounds: X=[{x_min:.0f},{x_max:.0f}] Y=[{y_min:.0f},{y_max:.0f}]")
     print(f"[MapData] T-spawn: {len(t_spawn_areas)} areas  "

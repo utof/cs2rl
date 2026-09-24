@@ -240,7 +240,7 @@ _R0G_KNOBS = (("round_time_ticks", "round_time"), ("laser_range", "laser_range")
               ("max_turn_speed", "max_turn_speed"))
 
 
-def pin_pitch_for_map(map_data) -> int:
+def pin_pitch_for_map(map_data, *, build_vis: bool = True) -> int:
     """R0-E.2 (#131): 1 iff the map is FLAT (every area centroid shares one z).
 
     WHAT: pure geometry test on the MapData the envs will actually run on.
@@ -261,6 +261,13 @@ def pin_pitch_for_map(map_data) -> int:
     path both end here. When real dust2 verticality lands this flips to 0 by
     itself and every dust2 resume is refused by the config guard (pin_pitch is
     not allowlisted) — the intended tripwire.
+
+    ``build_vis=False`` (gh#251, `--dump-config` only): resolve None WITHOUT
+    the visibility matrix — make_cs2_map(build_vis=False), NOT stored in
+    _ENV_CACHE. The answer reads centroids_z only, so it is identical; what is
+    skipped is the cold-cache vis build, which forks cpu_count() workers that a
+    killed dump used to orphan (~900 MB each). A warm _ENV_CACHE entry is still
+    reused.
     """
     md = map_data
     if md is None:
@@ -271,7 +278,8 @@ def pin_pitch_for_map(map_data) -> int:
         key = (nav.NAV_PATH, nav.CACHE_PATH)
         md = _ENV_CACHE.get(key)
         if md is None:
-            md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)
-            _ENV_CACHE[key] = md
+            md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH, build_vis=build_vis)
+            if build_vis:              # a vis-less MapData must never reach make_env
+                _ENV_CACHE[key] = md
     z = np.asarray(md.centroids_z, dtype=np.float32)
     return int(float(z.max() - z.min()) == 0.0)
