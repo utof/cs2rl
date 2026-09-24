@@ -16,7 +16,9 @@ tripwire in tests/conftest.py, which makes `system()` raise under pytest.
 exists (its clauses live in `_KillSeamClauses`); read it, and the tripwire,
 before you touch the seam. A test that fires a signal handler from the test
 thread does so through `_interrupt_in_production_order`, which releases the
-held child only after the last handler returns (production order, gh#243);
+held child only after the last handler returns (production order, gh#243),
+unless the test is a key of `_SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST` (the two
+grace tests call `term_handler` by hand with a releasing `killpg`);
 `test_signal_tests_fire_handlers_in_production_order` enforces that by AST.
 
 Deterministic patch-binding controls live in test_modal_patch_bindings.py.
@@ -1090,8 +1092,11 @@ def _interrupt_in_production_order(kwargs,
             inspect(int_handler, term_handler)
         handlers = {signal.SIGINT: int_handler, signal.SIGTERM: term_handler}
         for sig in signals:
+            # Look up OUTSIDE the try: an unknown signal is a programming error and must raise
+            # KeyError even under `capture=True`, not land in `raised`.
+            handler = handlers[sig]
             try:
-                handlers[sig](sig, None)
+                handler(sig, None)
             except BaseException as err:               # noqa: BLE001 - re-raised below unless capture=True
                 raised.append(err)
                 break
@@ -1163,7 +1168,10 @@ def test_sigint_and_sigterm_share_cleanup_and_restore_handlers(tmp_path):
     Production order (see `_signal_hooks`, ORDER): with the child released
     inside the handler, the attempt thread's `release()` also stops the
     heartbeat, racing `finalize`, and a `finalize` that no longer stopped it
-    (mutant `STOP_HB_DEL`) passed 11 of 20 runs (measured 2026-09-24).
+    (mutant `STOP_HB_DEL`) passed 11 of 20 runs (measured 2026-09-24). That
+    rate is the pre-gh#243 racy variant of this test (`_signal_hooks(child,
+    release_on=signal.SIGKILL)`), not this test's own: under the
+    production-order default the same mutant is red 20 of 20.
     """
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child)
@@ -3505,7 +3513,12 @@ def test_signal_tests_fire_handlers_in_production_order():
     RESIDUAL (the census cannot see these):
       1. A hand-written fake `killpg` that calls `child.release()` itself: only
          `_signal_hooks` keywords are read, so a wrapper around `hooks["killpg"]`
-         (like `killpg_marking_finalize`) is invisible.
+         (like `killpg_marking_finalize`) is invisible. So is rebinding
+         `hooks["killpg"] = <releasing wrapper>` after `_signal_hooks(child)`
+         built default hooks, and so is any out-of-band release of the held
+         child: `threading.Timer(0.02, child.release).start()`, or a FakeChild
+         that dies on `poll`. The census does not see either; both were
+         measured green with the racy test green 5 of 5 (gh#243 review).
       2. A direct fire spelled another way: `installed = hooks["installed"];
          installed[sig](...)`, `hooks["installed"].get(sig)(...)`, or a handler
          passed through another def.
