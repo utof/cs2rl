@@ -38,8 +38,10 @@ def _run_group(argv, *, timeout, **kw) -> subprocess.CompletedProcess:
 
     WHAT: starts argv as the leader of a NEW session/process group, waits with
     communicate(timeout=...), and in `finally` SIGKILLs the whole group, so a
-    TimeoutExpired, an assertion, or a Ctrl-C (KeyboardInterrupt) inside the
-    wait still reaps every descendant. The leader also gets PR_SET_PDEATHSIG
+    TimeoutExpired or a Ctrl-C (KeyboardInterrupt) during the wait, and a
+    normal exit that left grandchildren behind, all end with every descendant
+    killed (killed, not reaped: the kernel reparents them and reaps them for
+    us). The leader also gets PR_SET_PDEATHSIG
     (SIGKILL) so it dies with this process even when `finally` cannot run.
 
     WHY: `train.py --dump-config` used to fork a 12-worker vis-cache build (see

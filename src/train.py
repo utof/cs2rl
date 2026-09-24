@@ -4268,8 +4268,10 @@ if __name__ == "__main__":
     # for simple/arena, ~1 s for dust2 from the nav cache (pin_pitch_for_map(
     # None) loads it via the same _ENV_CACHE make_env uses, so nothing is
     # loaded twice). PITFALL: `--dump-config --map dust2` (or --dust2)
-    # therefore needs nav/de_dust2.nav + the vis cache on the HOST that runs
-    # the dump (Modal fingerprints run host-side).
+    # therefore needs nav/de_dust2.nav on the HOST that runs the dump (Modal
+    # fingerprints run host-side). It does NOT need the vis cache: the dump
+    # loads the map with build_vis=False (gh#251), because building that
+    # cache forks a 12-worker pool that a killed dump leaves orphaned.
     if args.map is None:
         args.map = "dust2" if args.dust2 else "simple"
     args.map_data = build_map_data(args.map)
