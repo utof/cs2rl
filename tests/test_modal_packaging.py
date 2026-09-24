@@ -815,10 +815,13 @@ def test_modal_runner_resolves_to_exactly_one_module_object(tmp_path):
     "the probe session did not finish clean" -- a headline pointing at the
     import machinery when the fault is very likely elsewhere. Read the nested
     `FAILED` line (in the message tail, or in the log it names) before you
-    suspect anything about module objects. gh#211 records what is known: 2
-    spurious failures across ~20 nested sessions, one node id captured
-    (`test_interrupt_without_publishable_checkpoint_writes_a_reason_file`),
-    cause NOT VERIFIED and not reproducible on demand.
+    suspect anything about module objects. This paragraph is where that
+    reporting hazard is recorded. gh#211 has the history: its attributed
+    sightings came from signal-path tests whose attempt-thread tail raced
+    `finalize` (fixed there: those tests run in production order, see
+    `_signal_hooks` in tests/test_modal_training.py), from gh#217 (fixed), and
+    from the load-sensitive 2 s budgets that gh#218 tracks; two occurrences had
+    no node id captured and stay unattributed.
 
     AND YET THE EXIT-STATUS ASSERTION MUST STAY. Let an unrelated test in an
     `_IMPORTERS` file fail while the carrier still passes -- exactly the gh#211
@@ -1000,8 +1003,14 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # reviewer reads them. This moves one number. Change it deliberately, in the
 # commit that changes the seam, and say why.
 #
-# 285 is `len(classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0])`, the count
-# after gh#163's W5 execute commit. Against the W5 types fold's 283: two
+# 287 is `len(classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0])`, the count
+# after gh#211's signal-test fix. Against gh#163's 285: two runner-side tests
+# added in tests/test_modal_training.py
+# (`test_publish_note_reaches_the_volume_in_the_right_commit`,
+# `test_a_signal_inside_finalize_does_not_finalize_again`), and one helper
+# renamed in place (`_record_hash_after_terminal` -> `_record_checkpoint_reads`,
+# a key rename that moves no count), nothing removed, no destination moves.
+# 285, after gh#163's W5 execute commit, against the W5 types fold's 283: two
 # runner-side tests added in tests/test_modal_training.py
 # (`test_training_kwargs_routes_every_override`, the training builder's
 # self-test, and `test_process_control_tripwire_guards_the_resolution_path`, the
@@ -1037,7 +1046,7 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # neither and it stays green with a stale count and N ungoverned names on disk.
 # Its own message says so: it is a DELETION detector. The addition detector is
 # `test_seam_manifest_agrees_with_the_classifier`, which recomputes.
-GOVERNED_NAME_COUNT = 285
+GOVERNED_NAME_COUNT = 287
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.

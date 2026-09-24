@@ -38,8 +38,8 @@ _ORIGINAL_SITES = {
     ("tests/test_modal_training.py", "test_interrupt_commits_status_even_if_prebuilt_load_hangs"),
     "watcher-publisher": ("tests/test_modal_training.py",
                           "test_checkpoint_watcher_threads_generation_into_last_published"),
-    "terminal-validator": ("tests/test_modal_training.py", "_record_hash_after_terminal"),
-    "terminal-hasher": ("tests/test_modal_training.py", "_record_hash_after_terminal"),
+    "terminal-validator": ("tests/test_modal_training.py", "_record_checkpoint_reads"),
+    "terminal-hasher": ("tests/test_modal_training.py", "_record_checkpoint_reads"),
     "attempt-watcher":
     ("tests/test_modal_training.py", "test_checkpoint_watcher_stops_before_terminal_status"),
     "attempt-transition":
@@ -134,11 +134,14 @@ def _binding_site_violations(sources):
 
     WHY: `test_patch_binding_campaign` proves that `binding_target(site)` reaches
     each consumer, and nothing more. A review of the package split found that
-    respelling `_record_hash_after_terminal`'s validator patch as a package patch
-    stayed green everywhere: the facade exports `validate_local_checkpoint`, so
-    there is no AttributeError, and that helper's callers assert
-    `hashed == []`, which a patch that never reaches the consumer satisfies
-    trivially.
+    respelling the validator patch of `_record_checkpoint_reads` (then
+    `_record_hash_after_terminal`) as a package patch stayed green everywhere:
+    the facade exports `validate_local_checkpoint`, so there is no
+    AttributeError, and that helper's callers asserted `hashed == []`, which a
+    patch that never reaches the consumer satisfies trivially. Since gh#211
+    the no-sidecar caller requires a recorded validation, so that respelling
+    now fails it as well; the census still pins the spelling, because it names
+    the defect where that failure names only a missing read.
 
     PITFALLS:
       * The facade spellings are the dotted `scripts.modal_runner`, always,
@@ -299,16 +302,16 @@ _SITE_CENSUS_PLANTS = {
      '    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
      '    monkeypatch.setattr(mrl, "validate_local_checkpoint", wrapped_validate)\n', [
          "terminal-validator: expected exactly one binding_target('terminal-validator') call, "
-         f"in {_TRAINING_FILE}::_record_hash_after_terminal; found []",
-         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
+         f"in {_TRAINING_FILE}::_record_checkpoint_reads; found []",
+         f"terminal-validator: {_TRAINING_FILE}::_record_checkpoint_reads patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "dotted-string-revert":
     (_TRAINING_FILE, '    monkeypatch.setattr(*binding_target("terminal-hasher"), wrapped_hash)\n',
      '    monkeypatch.setattr("scripts.modal_runner.sha256_file", wrapped_hash)\n', [
          "terminal-hasher: expected exactly one binding_target('terminal-hasher') call, "
-         f"in {_TRAINING_FILE}::_record_hash_after_terminal; found []",
-         f"terminal-hasher: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
+         f"in {_TRAINING_FILE}::_record_checkpoint_reads; found []",
+         f"terminal-hasher: {_TRAINING_FILE}::_record_checkpoint_reads patches the "
          "package facade's sha256_file",
      ]),
     "facade-store":
@@ -325,7 +328,7 @@ _SITE_CENSUS_PLANTS = {
      '    import scripts.modal_runner\n'
      '    monkeypatch.setattr(scripts.modal_runner, "validate_local_checkpoint",\n'
      '                        wrapped_validate)\n', [
-         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-validator: {_TRAINING_FILE}::_record_checkpoint_reads patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "unaliased-import-store":
@@ -343,7 +346,7 @@ _SITE_CENSUS_PLANTS = {
      '    from scripts import modal_runner\n'
      '    monkeypatch.setattr(modal_runner, "validate_local_checkpoint",\n'
      '                        wrapped_validate)\n', [
-         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-validator: {_TRAINING_FILE}::_record_checkpoint_reads patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "from-parent-as":
@@ -352,7 +355,7 @@ _SITE_CENSUS_PLANTS = {
      '    binding_target("terminal-validator")\n'
      '    from scripts import modal_runner as runner\n'
      '    monkeypatch.setattr(runner, "validate_local_checkpoint", wrapped_validate)\n', [
-         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-validator: {_TRAINING_FILE}::_record_checkpoint_reads patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "dotted-via-other-import":
@@ -362,14 +365,14 @@ _SITE_CENSUS_PLANTS = {
      '    import scripts.modal_artifacts\n'
      '    monkeypatch.setattr(scripts.modal_runner, "validate_local_checkpoint",\n'
      '                        wrapped_validate)\n', [
-         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-validator: {_TRAINING_FILE}::_record_checkpoint_reads patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "mock-patch-dotted-string":
     (_TRAINING_FILE, '    monkeypatch.setattr(*binding_target("terminal-hasher"), wrapped_hash)\n',
      '    binding_target("terminal-hasher")\n'
      '    mock.patch("scripts.modal_runner.sha256_file", wrapped_hash).start()\n', [
-         f"terminal-hasher: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-hasher: {_TRAINING_FILE}::_record_checkpoint_reads patches the "
          "package facade's sha256_file",
      ]),
     "mock-patch-multiple":
@@ -377,7 +380,7 @@ _SITE_CENSUS_PLANTS = {
      '    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
      '    binding_target("terminal-validator")\n'
      '    mock.patch.multiple(mrl, validate_local_checkpoint=wrapped_validate).start()\n', [
-         f"terminal-validator: {_TRAINING_FILE}::_record_hash_after_terminal patches the "
+         f"terminal-validator: {_TRAINING_FILE}::_record_checkpoint_reads patches the "
          "package facade's validate_local_checkpoint",
      ]),
     "mock-patch-multiple-non-literal":
@@ -385,13 +388,13 @@ _SITE_CENSUS_PLANTS = {
      '    monkeypatch.setattr(*binding_target("terminal-validator"), wrapped_validate)\n',
      '    binding_target("terminal-validator")\n'
      '    mock.patch.multiple(mrl, **{"validate_local_checkpoint": wrapped_validate}).start()\n', [
-         f"non-literal facade patch name in {_TRAINING_FILE}::_record_hash_after_terminal",
+         f"non-literal facade patch name in {_TRAINING_FILE}::_record_checkpoint_reads",
      ]),
     "misspelled":
     (_TRAINING_FILE, 'binding_target("terminal-hasher")', 'binding_target("terminal-hashr")', [
         "terminal-hasher: expected exactly one binding_target('terminal-hasher') call, "
-        f"in {_TRAINING_FILE}::_record_hash_after_terminal; found []",
-        f"unknown site 'terminal-hashr' in {_TRAINING_FILE}::_record_hash_after_terminal",
+        f"in {_TRAINING_FILE}::_record_checkpoint_reads; found []",
+        f"unknown site 'terminal-hashr' in {_TRAINING_FILE}::_record_checkpoint_reads",
     ]),
     "duplicated":
     (SHARED_FILE, 'binding_target("fallback-python")', 'binding_target("fallback-loader")', [
@@ -419,9 +422,9 @@ _SITE_CENSUS_PLANTS = {
      "def test_valid_run_ids_are_accepted(run_id):\n"
      '    binding_target("terminal-hasher")\n', [
          "terminal-hasher: expected exactly one binding_target('terminal-hasher') call, "
-         f"in {_TRAINING_FILE}::_record_hash_after_terminal; found "
+         f"in {_TRAINING_FILE}::_record_checkpoint_reads; found "
          f"['{_REQUEST_FILE}::test_valid_run_ids_are_accepted', "
-         f"'{_TRAINING_FILE}::_record_hash_after_terminal']",
+         f"'{_TRAINING_FILE}::_record_checkpoint_reads']",
      ]),
 }
 
