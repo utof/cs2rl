@@ -966,13 +966,21 @@ def _signal_hooks(child, *, release_on=signal.SIGKILL):
         commit after X" is satisfied by the retry's. Tighten such an
         assertion BEFORE converting its test, or the conversion quietly
         removes what it caught.
-      * A releasing `killpg` is left only where it models a child that exits
-        at that signal and the test asserts nothing the tail can change:
+      * Among tests that call the handler off the attempt's thread, a
+        releasing `killpg` is left only where it models a child that exits at
+        that signal and the test asserts nothing the tail can change:
         `test_child_receives_term_then_kill_after_grace`,
         `test_term_grace_is_deadline_not_mandatory_sleep`, and
         `test_interrupt_commits_status_even_if_prebuilt_load_hangs` (its
         handler runs on a third thread, and its retry blocks in the hung load
-        until the test's `finally`).
+        until the test's `finally`). Where `finalize` runs on the attempt's
+        own thread, `release_on` is inert, because the tail follows `finalize`
+        whatever `killpg` does: `test_keyboard_interrupt_uses_same_cleanup`,
+        `test_post_spawn_failure_kills_child_and_writes_terminal_status`,
+        `test_real_sigterm_in_tee_window_never_joins_unstarted_thread`, the
+        timeout half of `test_dead_run_and_timeout_have_distinct_reasons`, and
+        every case of `test_publish_note_reaches_the_volume_in_the_right_commit`
+        but `signal`.
     gh#243 tracks making production order the default here, not a rule.
     """
     assert os.getpgrp() != child.pid, (
@@ -1127,8 +1135,12 @@ def test_cleanup_closes_log_before_final_commit(tmp_path):
     """`finalize` closes the log sink before the commit that carries the terminal STATUS.
 
     Each commit is recorded with the STATUS it carries, so the assertion
-    names the terminal commit: the retry's commit follows `log_closed` in
-    production order whatever `finalize` does (see `_signal_hooks`, ORDER).
+    names the first commit that carries the terminal STATUS, which is
+    `finalize`'s: "some commit after `log_closed`" would be satisfied by the
+    retry's commit, which follows it in production order (see `_signal_hooks`,
+    ORDER). With no terminal commit from `finalize` at all, the retry's would
+    satisfy this too; `test_publish_note_reaches_the_volume_in_the_right_commit`
+    catches that.
     """
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child, release_on=None)
@@ -1280,10 +1292,11 @@ def _record_checkpoint_reads(monkeypatch, run_root: Path) -> list[tuple[str, str
     as a sidecar) or "hash" (`core.sha256_file`, stubbed to a fixed digest).
     `phase` is one of:
       * "watcher": the checkpoint watcher's own thread, which validates every
-        50 ms while training. It is known by its name, a copy of the literal
-        in `training._start_checkpoint_watcher`; the first statement below
-        fails, naming the rename, if that literal changes (otherwise the
-        watcher's reads would land in "before-result" and blame `finalize`);
+        50 ms while training. It is known by its name, a copy of the `name=`
+        literal in `training._start_checkpoint_watcher`; the assert below
+        (read through the AST, so quote style does not matter) fails, naming
+        the rename, if that literal changes. Otherwise the watcher's reads
+        would land in "before-result" and blame `finalize`;
       * "before-result": any other thread, before result.json exists. On the
         interrupt path that is `finalize`, which must not load or hash the
         checkpoint: the prebuilt load can take 120 s, and Modal's kill window
@@ -1296,19 +1309,25 @@ def _record_checkpoint_reads(monkeypatch, run_root: Path) -> list[tuple[str, str
     once STATUS was no longer `training`, and its callers asserted it recorded
     nothing. But the retry runs after the terminal STATUS by design, so the
     no-sidecar caller's assertion held only when the tests' own thread order
-    let the retry win a race with `finalize`; under CPU load it failed. And `finalize` publishes
-    BEFORE its STATUS write, so a `finalize` that published on INTERRUPTED was
-    invisible to it.
+    let the retry win a race with `finalize`; under CPU load it failed. And
+    `finalize` publishes BEFORE its STATUS write, so a `finalize` that
+    published on INTERRUPTED was invisible to it.
 
     Callers must run in production order (`_signal_hooks`, ORDER). If the
     child is released inside the handler, the retry can run while `finalize`
     is still going, and its read is recorded as "before-result".
     """
     watcher_name = "cs2rl-checkpoint-watch"
-    assert f'name="{watcher_name}"' in inspect.getsource(training._start_checkpoint_watcher), (
-        f"the checkpoint watcher thread is no longer named {watcher_name!r}: update "
-        "_record_checkpoint_reads and the copy in "
-        "test_interrupt_commits_status_even_if_prebuilt_load_hangs")
+    source = ast.parse(inspect.getsource(training._start_checkpoint_watcher))
+    names = [
+        keyword.value.value for node in ast.walk(source) if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "name" and isinstance(keyword.value, ast.Constant)
+    ]
+    renamed = (f"the checkpoint watcher thread's `name=` is no longer the literal "
+               f"{watcher_name!r} (found {names}): update _record_checkpoint_reads and the "
+               "copy in test_interrupt_commits_status_even_if_prebuilt_load_hangs")
+    assert names == [watcher_name], renamed
     reads: list[tuple[str, str]] = []
 
     def phase() -> str:
@@ -1386,9 +1405,10 @@ def test_interrupt_without_sidecar_leaves_checkpoint_hash_null(tmp_path, monkeyp
     validation, after result.json exists. That read is also this test's
     positive control for the validator stub: one that stopped reaching its
     consumer (see `_record_checkpoint_reads`) records nothing and fails here.
-    The hasher stub has no such control: unmutated code never hashes here. A read before
-    result.json means `finalize` loaded or hashed the checkpoint, or the retry
-    ran before `finalize` finished. Production order (see `_signal_hooks`).
+    The hasher stub has no such control: unmutated code never hashes here. A
+    read before result.json means `finalize` loaded or hashed the checkpoint,
+    or the retry ran before `finalize` finished. Production order (see
+    `_signal_hooks`).
     """
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child, release_on=None)
@@ -1440,11 +1460,12 @@ def test_publish_note_reaches_the_volume_in_the_right_commit(tmp_path, ending, a
     gh#211, gh#238 (mutants F11-F13). There is no checkpoint, so every
     `_publish_and_note` writes the note ("no checkpoint at ..."); the
     watcher's publishes drop their reasons by design. The attempt writes the
-    note twice: in `finalize`, with `commit_note=False` and not at all on
-    INTERRUPTED (a 120 s prebuilt load must not sit before the terminal
-    STATUS), then in the retry after it, with `commit_note=True`. The commit fake records
-    `(STATUS, note on disk?)` at every commit. `after_terminal` is the record
-    of the commits made once STATUS is terminal:
+    note in `finalize`, with `commit_note=False` (and not at all on
+    INTERRUPTED: a 120 s prebuilt load must not sit before the terminal
+    STATUS), then again in the retry after it, with `commit_note=True`. The
+    commit fake records `(STATUS, note on disk?)` at every commit.
+    `after_terminal` is the record of the commits made once STATUS is
+    terminal:
       * FAILED (`exit`: the child exits 1; `error`: the attempt raises after
         the spawn): the note written by `finalize` goes out with the terminal
         commit, and the retry commits its rewrite;
@@ -1461,8 +1482,9 @@ def test_publish_note_reaches_the_volume_in_the_right_commit(tmp_path, ending, a
     Only `signal` runs the attempt on a thread, with the handler called from
     the test in production order (see `_signal_hooks`, ORDER). The other
     cases run the attempt on the test thread, where the order is production's
-    already; `release_on=None` is inert there (the wait loop has exited before
-    `finalize` kills) and is shared only to keep one construction.
+    already; `release_on=None` is inert there (the attempt and `finalize`
+    share the test thread, so the tail runs after `finalize` whatever
+    `killpg` does) and is shared only to keep one construction.
     """
     commits: list[tuple[str, bool]] = []
 
@@ -3213,8 +3235,9 @@ def test_exit_zero_fails_when_completion_evidence_invalid(tmp_path):
     persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
     assert persisted["status"] == "failed"
     assert "log_closed" in events
-    # The terminal commit, not any later one: the retry's commit follows
-    # `log_closed` whatever `finalize` does (`_signal_hooks`, ORDER).
+    # The first commit carrying the terminal STATUS (finalize's), not any
+    # later one: the retry's commit also follows `log_closed` (`_signal_hooks`,
+    # ORDER).
     assert events.index("log_closed") < events.index("commit:failed")
 
 

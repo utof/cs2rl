@@ -816,11 +816,12 @@ def test_modal_runner_resolves_to_exactly_one_module_object(tmp_path):
     import machinery when the fault is very likely elsewhere. Read the nested
     `FAILED` line (in the message tail, or in the log it names) before you
     suspect anything about module objects. This paragraph is where that
-    reporting hazard is recorded. gh#211 (closed) has the history: its
+    reporting hazard is recorded. gh#211 has the history: its attributed
     sightings came from signal-path tests whose attempt-thread tail raced
     `finalize` (fixed there: those tests run in production order, see
     `_signal_hooks` in tests/test_modal_training.py), from gh#217 (fixed), and
-    from the load-sensitive 2 s budgets that gh#218 tracks.
+    from the load-sensitive 2 s budgets that gh#218 tracks; two occurrences had
+    no node id captured and stay unattributed.
 
     AND YET THE EXIT-STATUS ASSERTION MUST STAY. Let an unrelated test in an
     `_IMPORTERS` file fail while the carrier still passes -- exactly the gh#211
