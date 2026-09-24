@@ -730,8 +730,8 @@ def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, p
     else:
         ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
     # W3 (#154): role eval_legacy — the DOCUMENTED bare-call defaults, which are
-    # now EnvConfig()'s own field defaults: a knob-free make_puffer_env() call
-    # resolves to EnvConfig(), and env_config.py declares those fields to be the
+    # now EnvConfig()'s own field defaults: the eval_legacy builder passes a
+    # bare EnvConfig(), and env_config.py declares those fields to be the
     # trained baseline, which is exactly the pre-Rung-0 env (full 5v5, pitch
     # live, crouch and jump enabled); test_defaults_equal_the_139a3a3_values in
     # tests/test_env_config.py pins them. Passing no knobs is the behaviour, not
@@ -811,13 +811,13 @@ def select_policy_actions(policy, obs_buffer, active_agents, device, policy_stat
 
     with torch.no_grad():
         # Batch 3 (T5): policy now emits 4-tuple (logits, mu_aim, log_std, value).
-        # This helper is eval/inspection only — used by record_episode and the
-        # Python-side scripted rollout. Its callers don't currently consume the
+        # This helper is eval/inspection only, and nothing calls it today —
+        # record_episode uses select_policy_actions_native. It does not return the
         # continuous (Δyaw) component, so the sampled cont_t is dropped on the
         # floor. The cont_action is still SAMPLED (sample mode) so the policy
         # state advances identically to training; we just don't emit it. If a
         # future eval path needs Δyaw, return (act_dict, cont_dict) — keeping
-        # the int-action signature for now to avoid touching every caller.
+        # the int-action signature for now (no caller exists to adapt today).
         logits, mu_aim, log_std_aim, _ = policy.forward_eval(obs_t, policy_state)
         if policy_mode == "sample":
             # Fix #1: 6-tuple return; only need action + cont (logp/entropy unused here).
@@ -1033,8 +1033,8 @@ def evaluate_checkpoint(checkpoint_path=None,
         seed = start_seed + episode_idx
         # W3 (#154): the SECOND eval_legacy site, and the only one that passes a
         # seed. That difference is the whole reason the role's builder takes an
-        # UNSET sentinel rather than seed=None — make_puffer_env's own default is
-        # 0, so spelling the other site's absent seed as None would have changed
+        # UNSET sentinel rather than seed=None — c_env.cs2_env.make_env's own
+        # default is 0 (not train.py's own make_env, which takes no seed), so spelling the other site's absent seed as None would have changed
         # the env it builds, invisibly to static_data_scalars().
         env = build_env_for("eval_legacy", seed=seed)
         obs, _ = env.reset(seed=seed)
@@ -1445,7 +1445,7 @@ def build_policy(vecenv,
             # max_turn_speed mirrors C sd->max_turn_speed (StaticData, π/4
             # default). Pulled from the vecenv's static-data block so the
             # policy stays bound to the env's actual cap even if it changes
-            # at make_puffer_env time. Stored as a buffer (no grad, not a
+            # at env construction time. Stored as a buffer (no grad, not a
             # learnable param, follows .to(device)). T5 carry-forward (I-1):
             # reuse the `driver_env` helper resolved at the top of build_policy instead of
             # an inline hasattr ladder — the helper already handles the
@@ -1565,7 +1565,7 @@ def build_policy(vecenv,
                 # cheap to keep this future-proof).
                 continuous_action = aim_dist.rsample()
                 # Re-clamp post-sample (T5 carry-forward I-2): σ exploration
-                # can land outside the tanh band. The C env (cs2_env.h:129)
+                # can land outside the tanh band. The C env (env_step, cs2_env.h)
                 # clamps |Δyaw| ≤ max_turn_speed silently with fminf/fmaxf —
                 # NOT an assert. The Python-side clamp keeps the recorded
                 # `continuous_action` byte-identical to what the env actually
@@ -2664,10 +2664,10 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 # Task 7: process_step_rewards also ORs the per-tick
                 # bomb_planted flag into _batch1_current_segment_has_event for
                 # every agent row in the env. The C side sets ss->bomb_planted
-                # only on the transition tick (cs2_bomb.h:60 — guarded by
+                # only on the transition tick (process_bomb, cs2_bomb.h — guarded by
                 # `if g->bomb_plant_ticks >= sd->bomb_plant_time`) and StepStats
                 # is cleared every step via clear_stats(ss) at the top of
-                # cs2_env.h:75, so the field is already a per-tick delta (1 only
+                # env_step (cs2_env.h), so the field is already a per-tick delta (1 only
                 # on the plant tick) — NO edge-trigger needed. All 10 agent rows
                 # in an env share the event state; it is flushed into
                 # _batch1_event_mask at the segment boundary below.
@@ -2752,7 +2752,7 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 #
                 # Bin 0 on every discrete head is the no-op action by
                 # construction (cs2_env.h:51-63; move_dir == 0 is genuinely
-                # stationary, cs2_movement.h:214) and is never masked out by
+                # stationary, valid_dir in process_movement) and is never masked out by
                 # the C-side action mask, so this cannot sample an illegal
                 # action. cont_action = 0 means zero Δyaw/Δpitch: the statue
                 # keeps its spawn orientation.
@@ -3050,7 +3050,7 @@ def _hybrid_sample_logits(policy_out,
         continuous_action = mu_aim + sigma * torch.randn_like(mu_aim)
         if max_turn_speed is not None:
             # Same clamp logic as HybridPolicy.get_action_and_value (T4).
-            # The C env (cs2_env.h:129) clamps silently with fminf/fmaxf;
+            # The C env (env_step, cs2_env.h) clamps silently with fminf/fmaxf;
             # storing the post-clamp value keeps the PPO ratio honest.
             continuous_action = torch.clamp(continuous_action, -max_turn_speed, max_turn_speed)
     diff = (continuous_action - mu_aim) / sigma
@@ -4250,7 +4250,7 @@ if __name__ == "__main__":
     env_seed_base(args.seed)
     # Same idea for the aim σ cap: range-check it here (torch-free) so
     # --dump-config / the sweep fingerprint reject a bad --aim-log-std-max
-    # instead of make_policy() 30 s into every retry.
+    # instead of build_policy() 30 s into every retry.
     validate_aim_log_std_max(args.aim_log_std_max)
     # Rung 1a T3: --opponent noop is only coherent with self-play bookkeeping
     # off. Checked HERE, above the --dump-config exit, for the same reason as

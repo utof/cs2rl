@@ -66,7 +66,7 @@ class MapData:
     t_spawn_areas: list                # len 1–15
     ct_spawn_areas: list               # len 1–5
 
-    # Map bounds (used to compute normalization constants in wrapper.py)
+    # Map bounds (used to compute normalization constants in Cs2Env.__init__)
     x_min: float
     x_max: float
     y_min: float

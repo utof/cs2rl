@@ -626,7 +626,7 @@ class BaselineEvaluator:
         self.max_turn_speed = float(sd.max_turn_speed)
         self.laser_range = float(sd.laser_range)
         # vis_from_obs() expects distances in world units; obs stores dist/map_diag
-        # (probe driver combat_rollout.py:642-666 derives it the same way).
+        # (probe driver combat_rollout.py's main() derives it the same way).
         self.map_diag = math.sqrt((1.0 / sd.inv_x_range)**2 + (1.0 / sd.inv_y_range)**2)
         self.nav = NavHelper(sd)
         self.reader = StateReader(env)

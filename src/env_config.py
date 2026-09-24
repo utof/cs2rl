@@ -71,7 +71,7 @@ def _reject_unset(name, value):
 
 
 def _check_weight(name, value):
-    """Today's make_puffer_env rule (the last boundary before C): real, non-bool, finite."""
+    """make_puffer_env's pre-#165 rule (then the last boundary before C): real, non-bool, finite."""
     if isinstance(value, bool) or not isinstance(value, numbers.Real):
         raise ValueError(f"reward weight {name}={value!r} is not a real number "
                          f"(got {type(value).__name__})")

@@ -24,14 +24,14 @@ Pitfalls carried over from the Gate 0 measurement (scripts/measure_budget.py):
     250 u/s); setup_bomb_carrier pokes it in as round-state initialization.
   * The plant press (discrete head 4 = USE) must be held BOMB_PLANT_TIME
     ticks, and those ticks count against the same ROUND_TIME budget.
-  * One-tick-ahead steering: process_movement (cs2_env.h:107) consumes
-    `a->facing` BEFORE the dyaw action lands (cs2_env.h:133). A dyaw emitted
+  * One-tick-ahead steering: process_movement (called by env_step, cs2_env.h)
+    consumes `a->facing` BEFORE the dyaw action lands (later in env_step). A dyaw emitted
     at tick t only steers movement at t+1, so each tick we command the facing
     we want for the NEXT tick's movement and accept the one-tick lag.
   * dyaw is clamped by the env to +/-MAX_TURN_SPEED_RAD (pi/4 rad/tick); we
     pre-clamp so the recorded label equals what the env actually applied.
   * Poking pitch does NOT survive env.step (absolute-pitch overwrite,
-    cs2_env.h:170); the expert always emits pitch=0 (level) as the label.
+    env_step in cs2_env.h); the expert always emits pitch=0 (level) as the label.
 """
 import math
 from collections import deque
@@ -207,8 +207,8 @@ class ScriptedBomber:
     Steering: each tick, discrete = move-forward (or USE while planting) and
     continuous[bomber] = [dyaw, 0.0] with
         dyaw = clamp(wrap_pi(target_facing - facing_now), +/-MAX_TURN_SPEED_RAD).
-    The dyaw commanded now lands AFTER this tick's movement (cs2_env.h:107 vs
-    :133), i.e. we steer one tick ahead; the walk tolerates the resulting
+    The dyaw commanded now lands AFTER this tick's movement (call order in
+    env_step, cs2_env.h), i.e. we steer one tick ahead; the walk tolerates the resulting
     slight curve. Rate-limited turning makes this strictly slower than the
     facing-poke test driver — Gate 0 measured 54-93 ticks spawn->plant on the
     simple map, comfortably inside ROUND_TIME=640.

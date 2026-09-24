@@ -51,12 +51,11 @@ if len(sizes) != len(names):
 action_dim = len(sizes)
 action_mask_dim = sum(sizes)
 
-# Batch 3: continuous heads. Currently 1 head ("aim"), gaussian, 1D Δyaw.
+# Batch 3: continuous heads. Currently 1 head ("aim"), gaussian, 2D [Δyaw, pitch].
 # Spec format: tuple of (name, distribution_kind, dim) — same shape as
 # DISCRETE_HEAD_SPEC for consumer symmetry. dim is the parameterised
-# dimensionality (Gaussian mean/log_std vector size); for a 1D Gaussian
-# the policy emits 2 floats per agent (mean, log_std) but the action
-# buffer is dim=AIM_DIM=1 (the sampled Δyaw).
+# dimensionality (Gaussian mean/log_std vector size); the action
+# buffer is dim=AIM_DIM=2 (the sampled Δyaw and absolute pitch).
 continuous_head_names = ("aim", )
 continuous_head_spec = (("aim", "gaussian", aim_dim), )
 discrete_head_spec = tuple(

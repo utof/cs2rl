@@ -386,7 +386,7 @@ def test_common_argv_is_accepted_by_train_py_dump_config(tmp_path):
 def test_arm_argv_is_accepted_by_train_py_dump_config(tmp_path, arm):
     """Sweep-day regression (2026-08-30): the neg-control leg passed
     --aim-log-std-max -0.6931, which is ABOVE log 0.5 by 5e-5, so train.py
-    rejected it in make_policy() — 30 s into every retry, AFTER all 5 treatment
+    rejected it in build_policy() — 30 s into every retry, AFTER all 5 treatment
     seeds had run, and invisible to the COMMON-only test above. Parse each
     arm's `run_seed "<arm>$s" "$s" <flags> \\` line out of the script and run
     the REAL train.py --dump-config with COMMON + those flags; the σ-cap check

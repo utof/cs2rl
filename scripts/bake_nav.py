@@ -117,7 +117,7 @@ lines = [
     _arr_int8(bm_flat, "NAV_BOMBSITE_MASK"),
     _arr_int8(bi_flat, "NAV_BOMBSITE_BY_IDX"),
     _arr_float(bd_flat, "NAV_BOMBSITE_DIST"),
-                                                                                # Verticality batch — referenced by cs2_movement.h:74 cliff guard
+                                                                                # Verticality batch — referenced by cs2_movement.h _resolve_xy_collision cliff guard
                                                                                 # and cs2_combat.h 3D hit-test (Batch 3.5 T5).
     _arr_float(cz_flat, "NAV_CENTROIDS_Z"),
     _arr_int8(isr_flat, "NAV_IS_RAMP"),

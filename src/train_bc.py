@@ -191,8 +191,8 @@ DEFAULT_EPOCHS = 2000
 # stateless rate is a diagnostic and is never gated on (module docstring).
 DEFAULT_GATE_PLANT_RATE = 0.5
 
-# The C env clamps the two continuous dims DIFFERENTLY (cs2_env.h ~line 146 and
-# ~line 262): dim 0 is a Δyaw *delta*, clamped to ±max_turn_speed; dim 1 is an
+# The C env clamps the two continuous dims DIFFERENTLY (both in env_step,
+# cs2_env.h): dim 0 is a Δyaw *delta*, clamped to ±max_turn_speed; dim 1 is an
 # ABSOLUTE pitch target, clamped to ±π/2. Mirroring the C clamp Python-side
 # keeps what we feed equal to what executes (same reason the expert pre-clamps).
 # Today it is inert — the policy's own tanh already bounds both dims to
