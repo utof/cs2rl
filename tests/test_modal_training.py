@@ -6,6 +6,16 @@ add a helper, read THE PLACEMENT RULE FOR RUNNER TESTS in
 tests/test_modal_packaging.py: which file a test belongs in, what the change
 costs in the seam manifest, and where helpers go.
 
+THE KILL SEAM. A test that drives the training attempt takes its arguments
+from `_training_kwargs`, whose ProcessControl always has fake `spawn`,
+`getpgid` and `killpg` (a client test's execute wrapper builds its own the
+same way). Never hand the attempt the real functions and never read
+`ProcessControl.system`: a test that leaves `process` out meets the autouse
+tripwire in tests/conftest.py, which makes `system()` raise under pytest.
+`test_kill_seam_static_safety` checks these rules by AST and says why each
+exists (its clauses live in `_KillSeamClauses`); read it, and the tripwire,
+before you touch the seam.
+
 Deterministic patch-binding controls live in test_modal_patch_bindings.py;
 interruption tests here retain their original negative assertions.
 """
@@ -117,7 +127,10 @@ def _training_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
     group, and a test that drops `process` from the result meets the
     tests/conftest.py tripwire instead of the real functions (only
     `test_process_control_tripwire_guards_the_resolution_path` does so, on
-    purpose).
+    purpose). The default child has FakeChild's default pid, which
+    tests/conftest.py checks once per session is not the session's own process
+    group: the guard refuses that group, so a `kills == []` here would pass
+    without testing anything.
 
     Every known key is taken with `overrides.pop`, and a leftover raises
     TypeError: a misspelt or retired key (`start_heartbeat`) stays loud, as it
@@ -905,15 +918,19 @@ def _signal_hooks(child, *, release_on=signal.SIGKILL):
     `fake_getpgid` is the identity, so the child passes the `_signal_process_group`
     guard's `pgid!=pid` clause, and `fake_killpg` records instead of signalling.
 
-    The precondition sits here because every test that drives an attempt into
-    its kill path takes its fakes from this helper, so one assertion covers
-    them all. (The process-group guard test,
+    The assertion below is the own-group precondition. The guard also
+    refuses the runner's OWN process group, so if this session's group
+    equalled the child's pid every kill would be refused: a test asserting a
+    kill would fail for a reason unrelated to its subject, and one asserting
+    that nothing was killed would pass without testing anything. It is not
+    the only copy: tests/conftest.py checks the same precondition once per
+    session for FakeChild's default pid, the pid of every child the modal
+    tests hand a recording killpg (this helper's, `_training_kwargs`'
+    defaults, the client wrappers'), and this repeats it for the child it is
+    given, whatever its pid. (The process-group guard test,
     `test_signal_process_group_refuses_groups_a_live_child_cannot_have`, calls
-    `_signal_process_group` directly and builds its own.) The guard also
-    refuses the runner's OWN group: if this session's process group happened
-    to equal the fake child's pid (4242 by default), each of those tests would
-    see its kills refused and fail for a reason unrelated to its subject, so
-    this stops at the cause instead.
+    `_signal_process_group` directly and builds its own pids, apart from the
+    session's group by construction.)
     """
     assert os.getpgrp() != child.pid, (
         f"the runner's own process group ({os.getpgrp()}) equals the fake child's pid "
@@ -1577,13 +1594,21 @@ class _KillSeamClauses:
 
     ADDING A CLAUSE: write its checker as a method here, plus a `clause_<n>`
     method that returns `_clause(...)` with its plants; list it in `clauses()`;
-    and add its label to the test's pinned list. Each plant carries its own
-    path, so a clause that reads both training.py and tests/ (as (iii) does)
-    plants into either.
+    and add its label and source sets to the test's pinned list. Each plant
+    carries its own path, so a clause that reads both the runner and tests/ (as
+    (iii) does) plants into either, and a runner-side plant names the module it
+    stands in for (training.py, or another module of the package).
     """
 
     TRAINING = "scripts/modal_runner/training.py"
+    # The "runner" source set is every module of the package and the Modal entry script;
+    # a runner path is one under `scripts/`. Only training.py holds the allowances: system()'s
+    # body, the process-group guard and its two handoffs.
+    RUNNER_ENTRY = "scripts/run_modal.py"
+    RUNNER_PLANT = "scripts/modal_runner/state.py"
     PLANT_TEST = "tests/test_kill_seam_plant.py"
+    CONFTEST = "tests/conftest.py"
+    TRIPWIRE = "_process_control_tripwire"
     FIELDS = ("spawn", "getpgid", "killpg", "install_signal")
     REAL_SYSTEM = {
         "spawn": "subprocess.Popen",
@@ -1631,7 +1656,8 @@ class _KillSeamClauses:
             cls.clause_iv(),
             cls.clause_v(),
             cls.clause_vi(),
-            cls.clause_vii()
+            cls.clause_vii(),
+            cls.clause_viii(),
         ]
 
     @staticmethod
@@ -1816,10 +1842,18 @@ class _KillSeamClauses:
     def clause_iii(cls):
         pc = "class ProcessControl:\n"
         live = "class _LiveAttempt:\n    def kill(self):\n"
+        system = (
+            "    @classmethod\n"
+            "    def system(cls):\n"
+            "        return cls(spawn=subprocess.Popen, getpgid=os.getpgid, killpg=os.killpg,\n"
+            "                   install_signal=signal.signal)\n")
+        inert_kill = ("import os\n\n\ndef _never_called():\n"
+                      "    os.killpg(os.getpgid(os.getpid()), 0)\n")
         return cls._clause(
             "(iii)", "os.killpg/os.getpgid/signal.signal/subprocess.Popen only inside "
-            "ProcessControl.system(); `.system` read under tests/ only by the two tripwire tests",
-            reads=("training", "tests"),
+            "ProcessControl.system() in training.py, across the runner; `.system` read under "
+            "tests/ only by the two tripwire tests",
+            reads=("runner", "tests"),
             check=cls.real_functions_only_in_system,
             population=("system()'s os.getpgid, os.killpg, signal.signal and subprocess.Popen, "
                         "and both exempt tests' calls"),
@@ -1868,6 +1902,20 @@ class _KillSeamClauses:
                         "from subprocess import Popen\n",
                     }),
                 **cls._at(
+                    cls.RUNNER_PLANT, {
+                        "an os.killpg in another runner module":
+                        inert_kill,
+                        "a system() in another runner module":
+                        pc + system,
+                        "a from-import of kill in another runner module":
+                        "from os import kill\n",
+                        "a Popen in another runner module":
+                        "child = subprocess.Popen(command, start_new_session=True)\n",
+                    }),
+                "a signal.signal in the Modal entry script": {
+                    cls.RUNNER_ENTRY: "signal.signal(signal.SIGTERM, on_term)\n",
+                },
+                **cls._at(
                     cls.PLANT_TEST, {
                         "the incident's half-fake":
                         "control = dataclasses.replace(training.ProcessControl.system(), spawn=fake)\n",
@@ -1893,11 +1941,14 @@ class _KillSeamClauses:
 
     @classmethod
     def real_functions_only_in_system(cls, sources):
-        """(iii). In training.py the real os/posix `killpg`, `getpgid`, `kill`,
-        `signal.signal` and `subprocess.Popen` (`REAL_FUNCTIONS`) are loaded only inside
-        `ProcessControl.system()`'s body, in the spellings (iv) reads (`_banned_load`,
+        """(iii). In every runner module (a path under `scripts/`) the real os/posix
+        `killpg`, `getpgid`, `kill`, `signal.signal` and `subprocess.Popen`
+        (`REAL_FUNCTIONS`) are loaded only inside the body of training.py's
+        `ProcessControl.system()`, in the spellings (iv) reads (`_banned_load`,
         `_banned_from_imports`): a direct Popen would spawn the real train command past the
-        tripwire, which poisons only what `system()` returns. Under tests/, any read
+        tripwire, which poisons only what `system()` returns, and the tripwire does not
+        reach a raw `os.killpg` in any module at all. A `ProcessControl.system()` in another
+        module earns no allowance. Under tests/, any read
         of an attribute named `system` on any receiver counts, because a
         ProcessControl instance or `type(control)` reaches the same classmethod: it is
         allowed only inside the `(file, test)` pairs of `SYSTEM_READERS`, and each pair
@@ -1907,7 +1958,7 @@ class _KillSeamClauses:
         problems, examined = [], []
         for rel, text in sources.items():
             tree = ast.parse(text)
-            if rel == cls.TRAINING:
+            if rel.startswith("scripts/"):
                 found, seen = cls._real_function_loads(rel, tree)
             else:
                 found, seen = cls._system_reads_in_tests(rel, tree)
@@ -1917,8 +1968,9 @@ class _KillSeamClauses:
 
     @classmethod
     def _real_function_loads(cls, rel, tree):
-        """(iii), training.py: `(problems, examined)` for the real functions' loads."""
-        inside = cls._system_body(tree)
+        """(iii), one runner module: `(problems, examined)` for the real functions' loads.
+        Only training.py's `ProcessControl.system()` body is allowed them."""
+        inside = cls._system_body(tree) if rel == cls.TRAINING else set()
         problems, examined = [], []
         for modules, banned in cls.REAL_FUNCTIONS:
             problems.extend(cls._banned_from_imports(rel, tree, modules, banned))
@@ -2018,6 +2070,8 @@ class _KillSeamClauses:
                     'controls = {n: getattr(os, n) for n in ("getpgid", "killpg")}\n',
                     "an __import__ receiver":
                     '__import__("os").getpgid(1)\n',
+                    "an import_module receiver":
+                    'importlib.import_module("posix").killpg(4242, 15)\n',
                     "a sys.modules receiver":
                     'sys.modules["posix"].killpg(1, 15)\n',
                     "a module attribute's os":
@@ -2331,15 +2385,21 @@ class _KillSeamClauses:
                 pending.extend(ast.iter_child_nodes(node))
         return found
 
-    # ── (vii) killpg/getpgid called only inside the process-group guard
+    # ── (vii) killpg/getpgid called only inside the process-group guard, across the runner
 
     @classmethod
     def clause_vii(cls):
         live = "class _LiveAttempt:\n    def kill(self):\n"
+        stop = "def stop(process, child):\n"
+        same_name = ("def _signal_process_group(child, *, killpg, getpgid):\n"
+                     "    killpg(getpgid(child.pid), 15)\n")
+        handoff = (stop + "    training._signal_process_group(child, killpg=process.killpg,\n"
+                   "                                   getpgid=process.getpgid)\n")
         return cls._clause(
             "(vii)",
-            "killpg/getpgid are called only inside _signal_process_group",
-            reads=("training", ),
+            "killpg/getpgid are called only inside training._signal_process_group, across the "
+            "runner",
+            reads=("runner", ),
             check=cls.kill_calls_only_in_the_guard,
             population=("the guard's own getpgid and killpg calls, and exactly one handoff to "
                         f"each of GUARD_HANDOFFS {cls.GUARD_HANDOFFS}"),
@@ -2351,27 +2411,36 @@ class _KillSeamClauses:
                 [f"handed to {callee}" for callee in cls.GUARD_HANDOFFS[1:]],
                 "no guard calls": [f"handed to {callee}" for callee in cls.GUARD_HANDOFFS],
             },
-            plants=cls._at(
-                cls.TRAINING, {
-                    "a direct kill in a new method":
-                    live + "        os.killpg(os.getpgid(self.child.pid), signal.SIGTERM)\n",
-                    "a kill by another name":
-                    live + "        os.kill(-self.child.pid, signal.SIGTERM)\n",
-                    "a kill by another name through posix":
-                    live + "        posix.kill(-self.child.pid, 15)\n",
-                    "an aliased callee":
-                    live + "        kp = self.process.killpg\n        kp(self.child.pid, 15)\n",
-                    "getattr":
-                    live + '        getattr(self.process, "killpg")(self.child.pid, 15)\n',
-                    "handed to a helper that is not the guard":
-                    (live + "        _terminate(self.child, killpg=self.process.killpg,\n"
-                     "                   getpgid=self.process.getpgid)\n"),
-                    "handed to a ProcessControl re-wrap":
-                    (live + "        return ProcessControl(spawn=self.process.spawn,\n"
-                     "                              getpgid=self.process.getpgid,\n"
-                     "                              killpg=self.process.killpg,\n"
-                     "                              install_signal=self.process.install_signal)\n"),
-                }))
+            plants={
+                **cls._at(
+                    cls.RUNNER_PLANT, {
+                        "a killpg call in another runner module": stop + "    process.killpg(child.pid, 15)\n",
+                        "a guard of the same name in another runner module": same_name,
+                        "a handoff to the guard from another runner module": handoff,
+                    }),
+                "an os.kill in the Modal entry script": {
+                    cls.RUNNER_ENTRY: "os.kill(-child.pid, signal.SIGTERM)\n",
+                },
+                **cls._at(
+                    cls.TRAINING, {
+                        "a direct kill in a new method":
+                        live + "        os.killpg(os.getpgid(self.child.pid), signal.SIGTERM)\n",
+                        "a kill by another name":
+                        live + "        os.kill(-self.child.pid, signal.SIGTERM)\n",
+                        "a kill by another name through posix":
+                        live + "        posix.kill(-self.child.pid, 15)\n",
+                        "an aliased callee":
+                        live + "        kp = self.process.killpg\n        kp(self.child.pid, 15)\n",
+                        "getattr":
+                        live + '        getattr(self.process, "killpg")(self.child.pid, 15)\n',
+                        "handed to a helper that is not the guard": (live + "        _terminate(self.child, killpg=self.process.killpg,\n"
+                                                                     "                   getpgid=self.process.getpgid)\n"),
+                        "handed to a ProcessControl re-wrap": (live + "        return ProcessControl(spawn=self.process.spawn,\n"
+                                                               "                              getpgid=self.process.getpgid,\n"
+                                                               "                              killpg=self.process.killpg,\n"
+                                                               "                              install_signal=self.process.install_signal)\n"),
+                    }),
+            })
 
     @classmethod
     def kill_calls_only_in_the_guard(cls, sources):
@@ -2389,14 +2458,14 @@ class _KillSeamClauses:
         too, since `kill(-pgid, s)` is `killpg` by another name. `examined` is the
         callee names of the calls found inside the guard, plus `handed to <callee>`
         once per call that hands one on, which the population pins to exactly one
-        per `GUARD_HANDOFFS` entry. Only training.py is read (see the test's
-        RESIDUAL).
+        per `GUARD_HANDOFFS` entry. Every runner module is read; the guard and the
+        handoffs are allowed in training.py only (`_guard_allowances`), so in any
+        other module every such load is a problem.
         """
         problems, examined = [], []
         for rel, text in sources.items():
             tree = ast.parse(text)
-            inside = cls._inside_the_guard(tree)
-            handed, callees = cls._handed_to_the_guard(tree)
+            inside, handed, callees = cls._guard_allowances(rel, tree)
             examined.extend(f"handed to {callee}" for callee in callees)
             os_names = cls._module_names(tree, cls.OS_MODULES)
             for node in ast.walk(tree):
@@ -2420,6 +2489,16 @@ class _KillSeamClauses:
             entry.removeprefix("handed to ") for entry in seen if entry.startswith("handed to ")
         ]
         return {"killpg", "getpgid"} <= set(seen) and sorted(handoffs) == sorted(cls.GUARD_HANDOFFS)
+
+    @classmethod
+    def _guard_allowances(cls, rel, tree):
+        """(vii), one runner module: `(inside, handed, callees)`, the guard's node ids and the
+        handoffs' value ids and callees (`_inside_the_guard`, `_handed_to_the_guard`). Empty
+        outside training.py: a `_signal_process_group` elsewhere is not the guard, and no
+        other module may hand the functions on."""
+        if rel != cls.TRAINING:
+            return set(), set(), []
+        return (cls._inside_the_guard(tree), *cls._handed_to_the_guard(tree))
 
     @classmethod
     def _kill_load(cls, node, os_names):
@@ -2464,9 +2543,90 @@ class _KillSeamClauses:
             for node in ast.walk(guard)
         }
 
+    # ── (viii) the tripwire is one autouse, function-scoped fixture in tests/conftest.py
+
+    @classmethod
+    def clause_viii(cls):
+        fixture = (f"def {cls.TRIPWIRE}():\n"
+                   "    poisoned = training.ProcessControl(spawn=p, getpgid=p, killpg=p,\n"
+                   "                                       install_signal=p)\n"
+                   "    yield poisoned\n")
+        autouse = "@pytest.fixture(autouse=True)\n"
+        nested = "if True:\n" + "".join(f"    {line}\n"
+                                        for line in (autouse + fixture).splitlines())
+        outside = ("poisoned = training.ProcessControl(\n"
+                   "    spawn=p, getpgid=p, killpg=p, install_signal=p)\n\n\n"
+                   f"{autouse}def {cls.TRIPWIRE}():\n"
+                   "    yield poisoned\n")
+        return cls._clause(
+            "(viii)",
+            f"{cls.TRIPWIRE} is one autouse, function-scoped fixture in {cls.CONFTEST} that "
+            "builds the poison",
+            reads=("tests", ),
+            check=cls.tripwire_is_autouse,
+            population=f"the one {cls.TRIPWIRE} definition, in {cls.CONFTEST}",
+            populated=lambda seen: len(seen) == 1 and seen[0].startswith(f"{cls.CONFTEST}:"),
+            unpopulated={
+                "no definition": [],
+                "one definition outside conftest": ["tests/test_modal_training.py:1"],
+                "two definitions": [f"{cls.CONFTEST}:1", f"{cls.CONFTEST}:9"],
+            },
+            plants={
+                **cls._at(
+                    cls.CONFTEST, {
+                        "autouse dropped": "@pytest.fixture\n" + fixture,
+                        "autouse=False": "@pytest.fixture(autouse=False)\n" + fixture,
+                        "a wider scope": '@pytest.fixture(autouse=True, scope="session")\n' + fixture,
+                        "no decorator": fixture,
+                        "a second decorator": autouse + "@wraps(poison)\n" + fixture,
+                        "nested under a module-level statement": nested,
+                        "the poison built outside it": outside,
+                        "no definition": "",
+                    }),
+                "moved into a test file": {
+                    cls.CONFTEST: "",
+                    "tests/test_modal_training.py": autouse + fixture,
+                },
+                "shadowed by a narrower conftest": {
+                    cls.CONFTEST: autouse + fixture,
+                    "tests/fixtures/conftest.py": "@pytest.fixture\n" + fixture,
+                },
+            })
+
+    @classmethod
+    def tripwire_is_autouse(cls, sources):
+        """(viii). The tripwire covers a test that does not name it only because it is
+        `autouse`: dropped, or moved into a test file or a narrower conftest, it still reaches
+        the tests that name it (both tripwire tests name it or fetch it), and every other
+        test that drives the attempt silently loses it. So under tests/ there must be exactly
+        one definition named `TRIPWIRE`, at module level in `CONFTEST`, decorated exactly
+        `@pytest.fixture(autouse=True)` (function scope: a wider-scoped fixture patches once
+        and is undone by nothing a test does), and the one ProcessControl construction, the
+        poison, must be inside it. `examined` is that definition.
+        """
+        found = [(rel, node, tree) for rel, text in sources.items() for tree in [ast.parse(text)]
+                 for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef,
+                                      ast.AsyncFunctionDef)) and node.name == cls.TRIPWIRE]
+        problems = [] if len(found) == 1 else [
+            f"{len(found)} definitions of {cls.TRIPWIRE} under tests/, not one: "
+            f"{[f'{rel}:{node.lineno}' for rel, node, _tree in found]}"
+        ]
+        for rel, node, tree in found:
+            where = f"{rel}:{node.lineno}"
+            decorators = [ast.unparse(decorator) for decorator in node.decorator_list]
+            if rel != cls.CONFTEST or node not in tree.body:
+                problems.append(f"{where} is not a module-level definition in {cls.CONFTEST}")
+            if decorators != ["pytest.fixture(autouse=True)"]:
+                problems.append(f"{where} is decorated {decorators}, not exactly "
+                                "@pytest.fixture(autouse=True)")
+            if len(cls._constructions(node)) != 1:
+                problems.append(f"{where} does not build the one poisoned ProcessControl itself")
+        return problems, [f"{rel}:{node.lineno}" for rel, node, _tree in found]
+
 
 def test_kill_seam_static_safety():
-    """No test, and no training code outside the process-group guard, can reach the real kill seam.
+    """No test, and no runner code outside the process-group guard, can reach the real kill seam.
 
     gh#163 W5. On 2026-09-23 an agent's throwaway script ran
     the real `killpg(getpgid(1), SIGTERM)`, which is `kill(-1, SIGTERM)`, and
@@ -2475,7 +2635,11 @@ def test_kill_seam_static_safety():
     round them that only a static check sees, so this test reads source by AST.
     It NEVER imports or calls what it checks: training.py is read through
     `training.__file__` (which is also how the reach floor credits this test to
-    `training`), and every tests/*.py from disk.
+    `training`), the rest of the runner package from that file's directory,
+    scripts/run_modal.py and every tests/*.py from disk. The "runner" source
+    set (the package and scripts/run_modal.py) must hold every module that
+    tests/modal_runner_tables.py declares, so a new module is read from the
+    day it is declared.
 
     THE CLAUSES, each a checker with its plants in `_KillSeamClauses` above.
     A plant is source text that is parsed and never run, and must fail its
@@ -2485,10 +2649,10 @@ def test_kill_seam_static_safety():
       (ii)  Every ProcessControl(...) construction under tests/, through the
             name or an import or assignment alias of it, passes the four fields
             as four keywords: no positional argument and no `*`/`**` splat.
-      (iii) In training.py the real os/posix `killpg`, `getpgid` and `kill`,
-            `signal.signal` and `subprocess.Popen` are loaded only inside
-            ProcessControl.system(), in the spellings (iv) reads. Under tests/,
-            an attribute named `system`
+      (iii) In every runner module the real os/posix `killpg`, `getpgid` and
+            `kill`, `signal.signal` and `subprocess.Popen` are loaded only
+            inside training.py's ProcessControl.system(), in the spellings (iv)
+            reads. Under tests/, an attribute named `system`
             is read (on any receiver: an instance or `type(control)` reaches the
             same classmethod) only inside the two tripwire tests, each exempt by
             (file, test), and each exempt test must still call it.
@@ -2506,23 +2670,32 @@ def test_kill_seam_static_safety():
             defaults and decorators are not body). That is the `process=None`
             resolution; a module-level alias or a default would capture the real
             factory at import, out of the tripwire's reach.
-      (vii) In training.py, outside `_signal_process_group` (which holds the
-            process-group guard), nothing named `killpg` or `getpgid` is
-            loaded, as a bare name, the last attribute on any receiver or
-            through `getattr`, except handed on as the same-named keyword to
-            that guard or to system()'s own `cls(...)` construction, once
-            each (`GUARD_HANDOFFS`, pinned); and no os/posix `kill` is loaded.
+      (vii) In every runner module, outside training.py's
+            `_signal_process_group` (which holds the process-group guard),
+            nothing named `killpg` or `getpgid` is loaded, as a bare name, the
+            last attribute on any receiver or through `getattr`, except, in
+            training.py, handed on as the same-named keyword to that guard or
+            to system()'s own `cls(...)` construction, once each
+            (`GUARD_HANDOFFS`, pinned); and no os/posix `kill` is loaded.
+      (viii) `_process_control_tripwire` is defined once under tests/, at
+            module level in tests/conftest.py, decorated exactly
+            `@pytest.fixture(autouse=True)`, and builds the poisoned
+            ProcessControl itself. A test that does not name the tripwire gets
+            it only through `autouse`, which nothing else declares.
     Each clause also asserts its population on the real tree, so a checker that
     silently examines nothing cannot pass: the four fields (i), the tripwire's
     own construction in tests/conftest.py (ii), system()'s four real-function
     loads and both exempt tests' `.system` calls (iii), the real-SIGTERM test's
     `os.kill(os.getpid(), SIGTERM)` (iv), the system() construction (v), the one
     `ProcessControl.system()` call (vi), and the guard's own getpgid and killpg
-    calls plus exactly one handoff to each `GUARD_HANDOFFS` callee (vii). A
-    population that pins an allow-set, as (vii)'s does, also carries
-    `unpopulated` samples it must reject, so the pin itself can be seen to
-    fail. The list of clause labels is pinned below, so a clause dropped from
-    `_KillSeamClauses.clauses()` is red, not silently unchecked.
+    calls plus exactly one handoff to each `GUARD_HANDOFFS` callee (vii), the
+    one tripwire definition in tests/conftest.py (viii). A
+    population that pins an allow-set or a count, as (vii)'s and (viii)'s do,
+    also carries `unpopulated` samples it must reject, so the pin itself can be
+    seen to fail. The clause labels are pinned below together with each clause's
+    source sets, so a clause dropped from `_KillSeamClauses.clauses()`, or
+    narrowed from the runner back to training.py (its plants, which are handed
+    to the checker directly, would stay red), is red, not silently unchecked.
 
     ADDING A CLAUSE: see `_KillSeamClauses`.
 
@@ -2535,18 +2708,28 @@ def test_kill_seam_static_safety():
     `killpg`, a shell `kill` in a subprocess, and code inside a string a child
     interpreter runs. A wrapper passes only when what it wraps does:
     `functools.partial(os.killpg, 0)` is caught, because it loads `os.killpg`.
-    (vii), like (v) and (vi), reads training.py only: the whole control handed
-    to a function in another runner module (`state.stop_heartbeat(self.process)`),
-    which could then call its `killpg`, passes it. They are a backstop for the
-    mistakes this branch has seen, not a sandbox.
+    (i), (v) and (vi) read training.py only: a `ProcessControl.system` captured
+    at import in another runner module passes (vi) (the tripwire still poisons
+    it when called under pytest). (iii) and (vii) read the runner package and
+    scripts/run_modal.py, not the rest of scripts/ or src/: the whole control
+    handed out of the runner, to code that then calls its `killpg`, passes
+    them. (viii) reads the declaration, not pytest's behaviour; the
+    resolution-path control's first statement checks the behaviour. They are a
+    backstop for the mistakes this branch has seen, not a sandbox.
     """
     training_file = Path(training.__file__).resolve()
     assert training_file.is_relative_to(ROOT), (
         f"scripts.modal_runner.training was imported from {training_file}, outside this checkout "
         f"({ROOT}), so these clauses would read another tree's training.py")
+    runner_files = sorted(
+        training_file.parent.glob("*.py")) + [ROOT / _KillSeamClauses.RUNNER_ENTRY]
     sources = {
         "training": {
             _KillSeamClauses.TRAINING: training_file.read_text(encoding="utf-8")
+        },
+        "runner": {
+            path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+            for path in runner_files
         },
         "tests": {
             path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
@@ -2555,10 +2738,20 @@ def test_kill_seam_static_safety():
     }
     assert {"tests/conftest.py",
             "tests/test_modal_training.py"} <= set(sources["tests"]), sorted(sources["tests"])[:5]
+    # The declared module list: every module in it must be in the runner set (iii) and (vii) read.
+    from tests.modal_runner_tables import RUNNER_PATHS
+    declared = {*RUNNER_PATHS, "scripts/modal_runner/__init__.py", _KillSeamClauses.RUNNER_ENTRY}
+    assert declared <= set(sources["runner"]), (
+        f"the runner source set lacks {sorted(declared - set(sources['runner']))}, so (iii) and "
+        "(vii) would not read them")
     clauses = _KillSeamClauses.clauses()
-    pinned = ["(i)", "(ii)", "(iii)", "(iv)", "(v)", "(vi)", "(vii)"]
-    assert [clause.label for clause in clauses] == pinned, (
-        "_KillSeamClauses.clauses() lost or gained a clause; a new one also adds its label here")
+    pinned = [("(i)", ("training", )), ("(ii)", ("tests", )), ("(iii)", ("runner", "tests")),
+              ("(iv)", ("tests", )), ("(v)", ("training", )), ("(vi)", ("training", )),
+              ("(vii)", ("runner", )), ("(viii)", ("tests", ))]
+    assert [(clause.label, clause.reads) for clause in clauses] == pinned, (
+        "_KillSeamClauses.clauses() lost or gained a clause, or a clause reads other source sets "
+        "than pinned here (one narrowed to training.py would stop reading the rest of the runner "
+        "while its plants stay red); a new clause also adds its label and reads here")
     for clause in clauses:
         real = {rel: text for scope in clause.reads for rel, text in sources[scope].items()}
         problems, examined = clause.check(real)
@@ -2609,7 +2802,9 @@ def test_process_control_tripwire_poisons_system(_process_control_tripwire,
     the first field an attempt calls; and the field set is compared with the
     dataclass's, so a fifth field cannot go unpoisoned. The resolution path
     itself (execute_training_attempt with `process` omitted) has its own
-    control, `test_process_control_tripwire_guards_the_resolution_path` below.
+    control, `test_process_control_tripwire_guards_the_resolution_path` below,
+    which does not name the fixture, so it also pins that the fixture is
+    autouse; this test names it, so it runs even with `autouse` dropped.
     """
     assert training.ProcessControl.system() is _process_control_tripwire, (
         "ProcessControl.system() is not the tests/conftest.py tripwire's poisoned control, so a "
@@ -2637,7 +2832,7 @@ def test_process_control_tripwire_poisons_system(_process_control_tripwire,
             call()
 
 
-def test_process_control_tripwire_guards_the_resolution_path(_process_control_tripwire,
+def test_process_control_tripwire_guards_the_resolution_path(request,
                                                              process_control_tripwire_error,
                                                              tmp_path):
     """execute_training_attempt with `process` omitted meets the tripwire, not the real OS.
@@ -2649,11 +2844,22 @@ def test_process_control_tripwire_guards_the_resolution_path(_process_control_tr
     fixture's poisoned control, so the attempt's first ProcessControl call,
     `spawn`, raises the dedicated type.
 
-    SAFETY, two belts. Never weaken either.
-      1. The FIRST statement asserts that `system()` IS the fixture's poison.
-         That builds a dataclass and calls no field, so with the fixture's
+    IT DOES NOT NAME THE FIXTURE, on purpose, unlike the tripwire test above.
+    Every other test that drives the attempt (the client wrappers, the binding
+    rows, the rest of this file) meets the tripwire only because it is
+    autouse; a test that names it would receive it either way. So this test
+    sees what they see, and its first statement pins `autouse`.
+
+    SAFETY, three belts. Never weaken any.
+      1. The FIRST statement asserts that the fixture is active here although
+         nothing requests it. With `autouse=True` dropped it fails before
+         anything is called. A fixture moved into this file, still autouse,
+         would pass it while the other files lose it: clause (viii) of the
+         static test pins the fixture's home and decorator for that.
+      2. The poisoned control is then fetched by name, and `system()` must BE
+         it. That builds a dataclass and calls no field, so with the fixture's
          one setattr deleted this test fails before anything is called.
-      2. The train command is `/nonexistent/cs2rl-tripwire-must-not-run`, so
+      3. The train command is `/nonexistent/cs2rl-tripwire-must-not-run`, so
          even a real spawn (an implementation that captured the real factory
          at import, which clause (vi) of the static test bans) fails to exec
          and runs nothing.
@@ -2666,7 +2872,12 @@ def test_process_control_tripwire_guards_the_resolution_path(_process_control_tr
     `_noop_heartbeat()`, so no fallback heartbeat thread starts. Every other
     collaborator is the builder's fake: only `process` is popped.
     """
-    assert training.ProcessControl.system() is _process_control_tripwire, (
+    assert "_process_control_tripwire" in request.fixturenames, (
+        "the tests/conftest.py tripwire is not active in a test that does not request it: it is "
+        "no longer autouse, so every other test that drives the attempt has lost it. Nothing was "
+        "called.")
+    tripwire = request.getfixturevalue("_process_control_tripwire")
+    assert training.ProcessControl.system() is tripwire, (
         "ProcessControl.system() is not the tests/conftest.py tripwire's poisoned control, so "
         "the attempt below would reach the REAL spawn and killpg. Nothing was called.")
     kwargs = _consume_training_kwargs(

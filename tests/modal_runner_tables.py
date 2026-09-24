@@ -27,6 +27,17 @@ scope check. THE PLACEMENT RULE FOR RUNNER TESTS in
 tests/test_modal_packaging.py says what a test there must reach and what
 adding one costs.
 
+A MODULE THAT SPAWNS OR SIGNALS PROCESSES goes through
+`training.ProcessControl`, the kill seam: `test_kill_seam_static_safety` in
+tests/test_modal_training.py reads every module of the package (it too
+expects the new file from step (1) on) and fails on a real `os.killpg`,
+`os.getpgid`, `os.kill`, `signal.signal` or `subprocess.Popen` outside
+`ProcessControl.system()`, and on any `killpg`/`getpgid` outside the
+process-group guard in `training._signal_process_group`. Its tests hand the
+module a ProcessControl whose `spawn`, `getpgid` and `killpg` are fakes (the
+tests/conftest.py tripwire makes the real `system()` raise under pytest).
+Read that test's clauses before adding either.
+
 Data only: no function and no import, of the package or anything else, so
 importing this file from any test module costs nothing and cannot collect a
 test.

@@ -1078,13 +1078,25 @@ GOVERNED_NAME_COUNT = 285
 # tests/test_modal_<x>.py: a file outside `RUNNER_TEST_FILES` is invisible to
 # the seam, the floor and the binding census (gh#233). A new runner test file
 # comes only with a new module in the tables.
+# THE KILL SEAM. A test that drives the training attempt, in any file, follows
+# the kill-seam rules as well as this one. It hands the attempt a
+# `training.ProcessControl` whose `spawn`, `getpgid` and `killpg` are fakes:
+# `_training_kwargs` in tests/test_modal_training.py always builds one, and a
+# client test's execute wrapper builds its own with all four fields as
+# keywords. No test passes the real OS functions, and none but the two
+# tripwire tests reads `ProcessControl.system`; a test that leaves `process`
+# out meets the autouse tripwire in tests/conftest.py, which makes `system()`
+# raise under pytest. `test_kill_seam_static_safety`
+# (tests/test_modal_training.py) checks the rules by AST, over tests/, every
+# module of the runner package and scripts/run_modal.py, and says why each
+# exists.
 #
 # THE DECLARED RUNNER SET is `RUNNER_TEST_FILES` itself, read under that one
 # name by `_seam_sources`, the live `classify_seam` calls, the reach floor and
 # the binding census (tests/test_modal_patch_binding_census.py). There is no
-# alias for it here any more: the W4b quality review widened the old one
-# (`RUNNER_FILES`) by one file, moved a request test into that file, and the
-# floor and the census stopped reading the test with every gate green, because
+# alias for it here any more: with the old one (`RUNNER_FILES`) widened by one
+# file and a request test moved into that file, the floor and the census
+# stopped reading the test with every gate green, because
 # they read `RUNNER_TEST_FILES` and the seam read the alias. A second, retyped
 # or widened list is how the gate and the tree drift apart. At the seam's
 # reading sites (`_seam_sources`, the `classify_seam` calls) the floor's scope
@@ -1292,7 +1304,7 @@ def _module_level_binding_counts(tree):
 def _defs_under_module_level_statements(tree):
     """[(name, line, keyword, statement line)] per def or class under a module-level statement.
 
-    The census `classify_seam` rejects on (the final gate review, I1). pytest
+    The census `classify_seam` rejects on. pytest
     collects a `test` function wherever the module defines it, so a test under
     a module-level `if hasattr(os, "killpg"):` or in the `else` of a `try:
     import X` is collected, run and passed. But `_module_level_names` reads
@@ -1312,7 +1324,7 @@ def _defs_under_module_level_statements(tree):
     statement are not reported: the header's `if str(ROOT) not in sys.path:`
     and a `try: import X / except ImportError: X = None` fallback are legal.
     A constant bound there is ungoverned, like any non-def binding under a
-    compound statement (0 in the ten seam files at the final gate review).
+    compound statement (0 in the ten seam files when this census landed).
     `keyword` is the statement's keyword (`try` for `try ... except*`).
     """
     found = []
@@ -1758,14 +1770,14 @@ def _names_defined_under_tests():
 # fails when the test's measured reach differs from it, in either direction.
 # Without `granted` nothing checked the reach a reason states, so an edit that
 # made the test reach `request` and `state` -- a misplaced request test, the
-# shape the floor exists to reject -- passed with every gate green (W4b quality
-# review, I2). When the reach changes on purpose, re-grant it and re-read the
-# reason in the same commit.
+# shape the floor exists to reject -- passed with every gate green. When the
+# reach changes on purpose, re-grant it and re-read the reason in the same
+# commit.
 #
-# THE GRANT IS PER MODULE, NOT PER ROUTE, as the amended spec defines reach (a
-# set of runner modules). A second route to a granted module passes: the live
-# test gaining `mrl.Manifest`, which core also owns, stays green (final gate
-# review, M5). So a reason states the reach the grant checks, as modules, and
+# THE GRANT IS PER MODULE, NOT PER ROUTE, because reach is a set of runner
+# modules. A second route to a granted module passes: the live
+# test gaining `mrl.Manifest`, which core also owns, stays green. So a reason
+# states the reach the grant checks, as modules, and
 # names a route only as history ("at exemption time, through ..."), which a
 # later route cannot make false. A reason that says "only through X" is a
 # claim nothing checks.
@@ -1887,8 +1899,8 @@ def _runner_imports_the_floor_cannot_resolve(sources):
     The floor and the core rule read a runner module only through a name
     bound to the facade or to a whole `RUNNER_MODULES` submodule
     (`_bind_runner_alias`). An import that names the runner but binds anything
-    else gives them nothing to resolve, in both directions at once (the final
-    gate review, M3): a correctly placed request test that calls
+    else gives them nothing to resolve, in both directions at once: a
+    correctly placed request test that calls
     `build_run_request` imported by itself reaches nothing and fails the
     floor, whose remedy then points at a move or an exemption; and a core-file
     test that calls it passes the core rule with every gate green. Rejecting
@@ -2354,7 +2366,7 @@ def _exemption_violations(pair, entry, reach, file_module, source_files):
     two-character string would unpack. The reason must be a non-empty string:
     `None` or `0` is not a reason, although `str()` of each is. `granted` must
     be a frozenset of `RUNNER_MODULES` names: a mutable set can change after
-    the review that granted it, and a misspelt module is a grant nothing can
+    it was granted, and a misspelt module is a grant nothing can
     ever match.
 
     An entry that names no examined test fails for one of three reasons, and
@@ -2437,7 +2449,7 @@ def reach_floor_violations(sources, manifest, exemptions):
 
     RESIDUAL: A FLOOR, NOT A PLACEMENT CHECK. A test that reaches two modules
     can sit in either file with both rules green; choosing between them is the
-    judgement the manifest diff records. The review's AST reach instrument
+    judgement the manifest diff records. A separate AST reach instrument
     measured these figures on the unsplit file's reference graph (138 tests,
     before the process-group guard test was added), and this module's
     `_floor_reach` reproduced every one on that tree and on the tree with the
@@ -2490,7 +2502,7 @@ def _floor_scope_problems(examined, manifest):
     tree, because every test there already passes it, so a floor that read a
     partial file list would stay green. BOTH SIDES are module-level `test_`
     definitions: a test nested under a module-level `if` or `try` is in
-    neither, so this check cannot see one (the final gate review, I1).
+    neither, so this check cannot see one.
     `classify_seam` rejects such a test before the split test gets here.
     Two clauses, each naming its own cause:
 
@@ -2500,7 +2512,7 @@ def _floor_scope_problems(examined, manifest):
       `RUNNER_TEST_FILES`": that population was blind to its own scope. A
       runner set widened at the seam's call sites puts a test in a file that
       the floor never examines and that filter never counts, so both sides
-      lost it together and the check stayed green (W4b quality review, I1).
+      lost it together and the check stayed green.
     * every file of `RUNNER_TEST_FILES` must hold at least one test in the
       manifest. It is read off the manifest, not off `examined`: once the first
       clause holds the two agree, so this fires only for a file that really
@@ -2849,7 +2861,7 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
         f"a pytest test class was rejected without saying the seam reads only module-level "
         f"`test_` functions: {rejected.value}")
     # So does a `def testfoo()`: pytest collects the prefix `test` (this repo
-    # sets no `python_functions`), but the seam reads only `test_` (M4).
+    # sets no `python_functions`), but the seam reads only `test_`.
     with pytest.raises(ValueError, match="reached by no seam test") as rejected:
         classify_seam({probe_file: "def testrunidedges():\n    return 1\n"},
                       runner_files=RUNNER_TEST_FILES)
@@ -3024,7 +3036,7 @@ _NESTED_DEFINITION_CASES = {
                                      "_helper:4:if"),
     "an async test in an `except`":
     ("try:\n    pass\nexcept Exception:\n    async def test_x(): pass\n", "test_x:4:try"),
-    "a test in a `try`'s `else` (the review's training-file shape)":
+    "a test in a `try`'s `else`":
     ("try:\n    import tomllib\nexcept ImportError:\n    tomllib = None\nelse:\n"
      "    def test_x(): pass\n", "test_x:6:try"),
     "a class in a `finally`": ("try:\n    pass\nfinally:\n    class TestX: pass\n", "TestX:4:try"),
@@ -3059,7 +3071,7 @@ _UNNESTED_DEFINITION_CASES = {
 def test_the_seam_rejects_a_definition_nested_under_a_module_level_statement():
     """A def or class under a module-level `if`, `try`, `with`, `for`, `while` or `match` raises.
 
-    THE HOLE THIS PINS (the final gate review, I1). pytest collects a test
+    THE HOLE THIS PINS. pytest collects a test
     defined under a module-level compound statement, but the classifier, the
     manifest, the reach floor, the core rule and the floor's scope check all
     read `tree.body` (`_module_level_names`), so such a test is checked by
@@ -3074,7 +3086,7 @@ def test_the_seam_rejects_a_definition_nested_under_a_module_level_statement():
     every one by file and line, in a runner file and in the shared file.
     Green half: the same test at module level is classified by the existing
     rules (it stays in its file, and in the core file the floor and the core
-    rule both object to its request name, the review's positive control), and
+    rule both object to its request name: the positive control), and
     `_UNNESTED_DEFINITION_CASES` -- every seam file's `sys.path` guard, an
     import fallback, a def nested in a module-level def or class -- report
     nothing.
@@ -3767,8 +3779,8 @@ _EVERY_FIELD_KINDS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.L
 # `_scope_parts`' outer and inner lists moves its read by a frame or more, so
 # this pins WHICH scope each field is evaluated in, where the skip check pins
 # only that it is visited: moving a comprehension's conditions outside it, or
-# a def's defaults inside it, passed every other check (the final gate review,
-# I2). Checked read by read against the language reference: decorators,
+# a def's defaults inside it, once passed every other check. Checked read by
+# read against the language reference: decorators,
 # argument defaults and annotations run where the def or class statement
 # runs, a class's bases and keywords too, a lambda's defaults where the lambda
 # is, a comprehension's first iterable in the enclosing scope and the rest of
@@ -3866,7 +3878,7 @@ def test_the_scope_walk_visits_every_expression_ast_walk_visits():
     comprehension's condition reads its own target as the module, or a
     default's `training.X` resolves to a parameter named `training` and the
     core rule stops seeing it. Thirteen such
-    moves passed every committed test (the final gate review, I2). So the
+    moves once passed every committed test. So the
     number of frames each read of `_EVERY_FIELD_SOURCE` is walked in must
     equal `_EVERY_FIELD_FRAMES`, a table checked against the language
     reference, compared as a list so a repeated read cannot hide in a dict.
@@ -4019,8 +4031,8 @@ def test_reach_floor_applies_the_core_rule_to_the_core_file():
     tree objects once the declared placement passes it: a core-file test whose
     own body names a module other than core through the facade
     (`mrl.<request name>`), a submodule alias (`training.X`) or a binding site
-    (`binding_target("interrupt-loader")`, the spec's own motivating case: it
-    resolves to `checkpoint`), or whose parametrize list names one, fails the
+    (`binding_target("interrupt-loader")`, the case the core rule was written
+    for: it resolves to `checkpoint`), or whose parametrize list names one, fails the
     core rule, although each also names core and so passes the floor. An
     EXEMPT core-file test fails it too: the core rule has no exemptions.
 
@@ -4155,7 +4167,7 @@ def test_reach_floor_exemptions_are_keyed_by_file():
 def test_reach_floor_exemption_is_no_wider_than_granted():
     """An exempt test's whole reach must EQUAL its grant; the entry's shape is checked first.
 
-    The W4b quality review's positive control (I2), as data. Positive: an
+    The grant rule's positive control, as data. Positive: an
     exempt preflight test that reaches only `core`, granted `{core}` (the live
     entry's shape), passes. Negative: give it `request` and `state` as well --
     in its own body, or only through a helper, because the grant reads the
@@ -4212,7 +4224,7 @@ def test_reach_floor_exemption_is_no_wider_than_granted():
     assert rules(narrowed, (frozenset(), reason)) == [], "the empty grant was not honoured"
     # Its negative half: an empty grant is a grant of nothing, not a wildcard. A
     # rule that skipped the check for an empty grant would switch the floor off
-    # again for any test so granted (the final gate review, M1).
+    # again for any test so granted.
     got = rules(body + "\n", (frozenset(), reason))
     expected = [("exemption-wider-than-granted", pre, test)]
     assert got == expected, (
@@ -4246,17 +4258,17 @@ def test_reach_floor_scope_counts_every_runner_half_test_in_the_manifest():
     Negative, one per shape:
     - the floor skipped a pair: the equality clause, naming it manifest-only;
     - the floor examined a test the manifest lacks: named examined-only;
-    - I1's widening (W4b quality review): the manifest values a runner-half
+    - a widened runner set: the manifest values a runner-half
       test at a file outside `RUNNER_TEST_FILES`, which is what a seam reading
       a file the floor does not produces. The floor did not examine it, and the
       equality clause names it. The filter this replaced, "valued at a file of
       `RUNNER_TEST_FILES`", counted it on neither side and passed. Three such
       files: one named like a runner test file, one outside the
       `tests/test_modal_` prefix (a population re-narrowed by that pattern
-      passes the first; the final gate review, M2), and the shared file;
+      passes the first), and the shared file;
     - each runner test file in turn with no test in the manifest, and none
       examined: the empty-file clause alone, saying the file holds no test,
-      not that the floor skipped it (M1);
+      not that the floor skipped it;
     - the floor examined a core-file test the manifest lacks, and the manifest
       has no other: both clauses, because the empty-file clause reads the
       manifest, not `examined`.
@@ -4316,7 +4328,7 @@ def test_reach_floor_scope_counts_every_runner_half_test_in_the_manifest():
 _RUNNER_IMPORT_CASES = {
     "a facade name imported by itself": ("from scripts.modal_runner import build_run_request\n",
                                          ["from scripts.modal_runner import build_run_request"]),
-    "a facade name beside a module in one import (the review's shape)":
+    "a facade name beside a module in one import":
     ("from scripts.modal_runner import build_run_request, core\n",
      ["from scripts.modal_runner import build_run_request"]),
     "a name imported from a submodule": ("from scripts.modal_runner.core import VOLUME_MOUNT\n",
@@ -4354,7 +4366,7 @@ _RUNNER_IMPORT_CASES = {
 def test_a_runner_import_must_bind_the_facade_or_a_whole_module():
     """A runner import in a seam file that binds anything but the facade or a module is reported.
 
-    THE HOLE THIS PINS (the final gate review, M3). The floor and the core
+    THE HOLE THIS PINS. The floor and the core
     rule resolve `mrl.X`, `<module alias>.X` and `binding_target("key")`, and
     nothing else. A core-file test that imports `build_run_request` by itself
     and calls it passes the core rule; a request-file test doing the same

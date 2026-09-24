@@ -166,7 +166,8 @@ class ProcessControl:
     argument captures the real factory at import and bypasses the tripwire's
     patch of the class attribute. `killpg` and `getpgid` are called only by
     `_signal_process_group`, which holds the process-group guard; a direct call
-    anywhere else in this module bypasses it.
+    anywhere else in the runner bypasses it (the static test reads every module
+    of the package and scripts/run_modal.py for that).
     """
 
     spawn: Callable[..., object]
@@ -486,6 +487,10 @@ def _signal_process_group(
 
     THE GUARD. The two `killpg` calls below are the runner's only `killpg`
     calls, the only place it signals a process group, so the guard lives here.
+    `test_kill_seam_static_safety` holds that for every module of the package
+    and scripts/run_modal.py: its clause (vii) fails on a `killpg` or `getpgid`
+    anywhere but here (or handed to here), and its clause (iii) on a real
+    `os.killpg`, `os.getpgid` or `os.kill` outside `ProcessControl.system()`.
     It refuses, with one stderr line naming the condition, to signal a group
     that a live or unreaped child cannot have. The conditions are checked in
     this order, and the first that holds is the one reported:
