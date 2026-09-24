@@ -117,8 +117,10 @@ def _preflight_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
     converted key (RemoteResume.path is a Path; call sites pass `str(ckpt)`);
     every other value is stored as passed. `expected_resume_sha256` without
     `remote_resume` raises: the hash names no file on its own. Without a `run`
-    override the host keeps PreflightHost's default, the real `subprocess.run`,
-    exactly as the flat builder left prepare's; every call site passes one.
+    override the host's `run` raises AssertionError naming the missing
+    override; it is never PreflightHost's default, the real `subprocess.run`,
+    which would run the install and probe commands on the machine running the
+    tests. Every call site passes one.
     The result is typed `dict[str, Any]` because tests reach test-double
     members through it (`kwargs["attempt"].volume.events` on a
     RecordingVolume), which the collaborator types do not declare.
@@ -134,7 +136,13 @@ def _preflight_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
     sha, tree, client_archive, mount_archive, provenance = _source_bundle(tmp_path)
     run_root = tmp_path / "run"
     run_root.mkdir()
+
+    def run_not_overridden(cmd, **_kwargs):
+        raise AssertionError(f"prepare ran {cmd!r} through the default host run: pass run= to "
+                             "_preflight_kwargs, or the real subprocess.run would run it")
+
     host = preflight.PreflightHost(
+        run=given.get("run", run_not_overridden),
         parent_env={
             "PATH": "/usr/bin",
             "HOME": "/home/modal",
@@ -143,8 +151,6 @@ def _preflight_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
         ephemeral_parent=tmp_path / "ephemeral",
         start_heartbeat=given.get("start_heartbeat", _noop_heartbeat),
     )
-    if "run" in given:
-        host = dataclasses.replace(host, run=given["run"])
     request = (given["request"] if "request" in given else mrl.build_run_request(
         **_valid_run_kwargs(run_id="ok-id")))
     attempt = core.AttemptContext(
@@ -180,27 +186,35 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
     by hand-written code, and several tests assert that something is ABSENT
     from a recorder they injected; such an assertion goes vacuous, still
     green, if the builder stops routing its key. So, both ways:
-      * the keys call sites pass, enumerated by AST over the modal test files
-        in any spelling (the bare name, an attribute `x._preflight_kwargs`, an
-        import or assignment alias), must equal the keys of `routes`. A key a
-        call site passes that `routes` lacks fails, and so does a `routes`
-        entry that no call site passes;
+      * the keys call sites pass, enumerated by AST over the modal test files,
+        must equal the keys of `routes`. A call is read through the bare name,
+        an attribute `x._preflight_kwargs`, or an `import ... as` or plain
+        `name = ...` alias. A key a call site passes that `routes` lacks fails,
+        and so does a `routes` entry that no call site passes;
       * each key, passed as a sentinel, must come back by identity at the
         field `routes` names (the spec §4.7 substitution map, restricted to
         this builder's keys). `remote_resume` alone compares by equality: the
         builder converts it, because RemoteResume.path is a Path and call
         sites pass `str(ckpt)`.
     A call site whose keys cannot be read statically (a `**` splat, a second
-    positional argument) fails too. This test's own calls are not call sites.
+    positional argument) fails too, and so does any other reference to the
+    builder: its name loaded anywhere but as a callee or a plain alias's value
+    (`functools.partial(_preflight_kwargs, ...)`, a tuple assignment), or the
+    name as a string (`getattr(module, "_preflight_kwargs")`). RESIDUAL: a
+    name computed at run time (a concatenated string, `vars()` with a variable
+    key) is not seen. This test's own calls and strings are not call sites.
+    Without `run=`, the built host's `run` must raise, never be the real
+    `subprocess.run`; that is checked last.
 
     THE PLANTS are synthetic call sites, parsed and never run, each passing an
-    unmapped key through one spelling: each must fail the key equality, or the
-    enumeration would not be evidence. Keep `routes` and the plants INSIDE
-    this function: a module-level name in this file is a governed seam name and
-    moves GOVERNED_NAME_COUNT (tests/test_modal_packaging.py). The keys that
-    are only READ back from the built kwargs and passed at no call site
-    (`run_root`, `volume`, `archive_path`, `expected_tree`) are not here, by
-    the same two-way rule: each would be an entry no call site passes.
+    unmapped key through one spelling: each must fail the key equality or be
+    reported as a problem, or the enumeration would not be evidence. Keep
+    `routes` and the plants INSIDE this function: a module-level name in this
+    file is a governed seam name and moves GOVERNED_NAME_COUNT
+    (tests/test_modal_packaging.py). The keys that are only READ back from the
+    built kwargs and passed at no call site (`run_root`, `volume`,
+    `archive_path`, `expected_tree`) are not here, by the same two-way rule:
+    each would be an entry no call site passes.
     """
     routes = {
         "expected_archive_sha256": lambda built: built["source"].archive_sha256,
@@ -226,11 +240,18 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
         return None
 
     def call_site_keys(sources):
-        """({key: [file:line, ...]}, problems) over every builder call outside this test."""
+        """({key: [file:line, ...]}, problems) over every builder call outside this test.
+
+        A reference to the builder that is not read as a call (see the
+        docstring above) is a problem, so a spelling this cannot read fails
+        rather than hiding its keys.
+        """
         keys, problems = {}, []
         for rel, text in sources.items():
             tree = ast.parse(text)
             spellings = {builder}
+            # ids of the loads a spelling may occupy: callees and plain alias values
+            read = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
                     spellings |= {
@@ -239,6 +260,7 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
                     }
                 elif isinstance(node, ast.Assign) and last_name(node.value) == builder:
                     spellings |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+                    read.add(id(node.value))
             own = {
                 id(node)
                 for top in tree.body if isinstance(top, ast.FunctionDef) and top.name == this_test
@@ -248,12 +270,22 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
                 if (not isinstance(node, ast.Call) or last_name(node.func) not in spellings
                         or id(node) in own):
                     continue
+                read.add(id(node.func))
                 where = f"{rel}:{node.lineno}"
                 if len(node.args) != 1 or any(k.arg is None for k in node.keywords):
                     problems.append(f"{where} {ast.unparse(node)[:100]}")
                 for keyword in node.keywords:
                     if keyword.arg is not None:
                         keys.setdefault(keyword.arg, []).append(where)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Name, ast.Attribute)):
+                    stray = last_name(node) in spellings and isinstance(node.ctx, ast.Load)
+                elif isinstance(node, ast.Constant):
+                    stray = node.value == builder
+                else:
+                    continue
+                if stray and id(node) not in read and id(node) not in own:
+                    problems.append(f"{rel}:{node.lineno} not a call: {ast.unparse(node)[:100]}")
         return keys, problems
 
     sources = {
@@ -268,8 +300,9 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
     } <= set(sources), sorted(sources)[:5]
     keys, problems = call_site_keys(sources)
     assert problems == [], (
-        f"call sites whose override keys cannot be read statically: {problems}. Pass every "
-        "override as a keyword, so this test can check that it is routed")
+        f"call sites whose override keys cannot be read statically: {problems}. Call the "
+        "builder by its name, an attribute or a plain alias, and pass every override as a "
+        "keyword, so this test can check that it is routed")
     unrouted = sorted(set(keys) - set(routes))
     unused = sorted(set(routes) - set(keys))
     assert not unrouted and not unused, (
@@ -287,12 +320,19 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
                             "build(tmp_path, on_ready=f)\n"),
         "an assignment alias":
         "build = _preflight_kwargs\nbuild(tmp_path, on_ready=f)\n",
+        "functools.partial":
+        "build = functools.partial(_preflight_kwargs, on_ready=f)\nbuild(tmp_path)\n",
+        "getattr by name":
+        "getattr(preflight_tests, '_preflight_kwargs')(tmp_path, on_ready=f)\n",
+        "a tuple-assignment alias":
+        "build, _ = _preflight_kwargs, None\nbuild(tmp_path, on_ready=f)\n",
     }
     for plant, source in plants.items():
-        planted, _ = call_site_keys({**sources, "tests/test_modal_plant.py": source})
-        assert set(planted) != set(routes), (
-            f"a call site passing an unmapped key through {plant} left the key sets equal, "
-            "so the enumeration cannot see that spelling and its green is not evidence")
+        planted, planted_problems = call_site_keys({**sources, "tests/test_modal_plant.py": source})
+        assert planted_problems or set(planted) != set(routes), (
+            f"a call site passing an unmapped key through {plant} left the key sets equal and "
+            "reported no problem, so the enumeration cannot see that spelling and its green is "
+            "not evidence")
     _, splat = call_site_keys({"tests/test_modal_plant.py": "_preflight_kwargs(tmp_path, **k)\n"})
     assert splat, "a `**` splat call site was not reported, so its keys would go unchecked"
 
@@ -319,6 +359,12 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
         _preflight_kwargs(leftover, on_ready=lambda prepared: None)
     with pytest.raises(TypeError, match="needs remote_resume"):
         _preflight_kwargs(hash_alone, expected_resume_sha256="0" * 64)
+    # Without run=, the host's run is loud, never the real subprocess.run. The program named
+    # does not exist, so even a builder that fell back to the real one would execute nothing.
+    no_run = tmp_path / "no-run"
+    no_run.mkdir()
+    with pytest.raises(AssertionError, match="pass run="):
+        _preflight_kwargs(no_run)["host"].run(["/nonexistent/cs2rl-never-run"])
 
 
 def test_recording_volume_reload_restores_committed_run_root(tmp_path):
@@ -434,7 +480,7 @@ def test_prepare_rejects_provenance_sidecar_mismatch(tmp_path):
     # Bound on purpose (spec §4.5): the live traceback keeps the failing frame, and with it
     # the TemporaryDirectory whose finalizer would otherwise erase the extracted tree when the
     # block exits, so the cleanup assertion below could not see a skipped cleanup.
-    with pytest.raises(mrl.ValidationError) as excinfo:                # noqa: F841
+    with pytest.raises(mrl.ValidationError, match="provenance sidecar") as excinfo: # noqa: F841
         mrl.prepare_remote_source(**kwargs)
     ephemeral = kwargs["host"].ephemeral_parent
     assert not ephemeral.exists() or not any(ephemeral.iterdir())
@@ -550,7 +596,7 @@ def test_prepare_rejects_non_checkpoint_resume(tmp_path):
         expected_resume_sha256=core.sha256_file(ckpt),
         manifest=_make_manifest(),
     )
-    with pytest.raises(mrl.ValidationError):
+    with pytest.raises(mrl.ValidationError, match="weights-only loadable"):
         mrl.prepare_remote_source(**kwargs)
 
 

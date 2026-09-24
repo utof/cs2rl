@@ -126,7 +126,8 @@ def _hash_dumped_config(run_root: Path) -> str:
     return sha256_bytes(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode())
 
 
-def _verify_archive_then_enter_preparing(attempt: AttemptContext, source: ExpectedSource) -> None:
+def _verify_archive_then_enter_preparing(attempt: AttemptContext, *,
+                                         source: ExpectedSource) -> None:
     """Phase 1: reload the Volume, verify the uploaded archive, and enter PREPARING.
 
     Reload FIRST: Volume.reload() replaces the mount, so a STATUS written
@@ -151,7 +152,7 @@ def _verify_archive_then_enter_preparing(attempt: AttemptContext, source: Expect
         attempt.volume.commit()
 
 
-def _extract_verified_source(attempt: AttemptContext, source: ExpectedSource, source_dir: Path,
+def _extract_verified_source(attempt: AttemptContext, *, source: ExpectedSource, source_dir: Path,
                              manifest: Manifest | None) -> None:
     """Phase 3: extract the archive into `source_dir`, check its provenance, write the manifest.
 
@@ -168,26 +169,42 @@ def _extract_verified_source(attempt: AttemptContext, source: ExpectedSource, so
         attempt.volume.commit()
 
 
+@dataclass(frozen=True)
+class _BuiltSource:
+    """What phase 4 hands phase 5 for the PreparedSource and the train command.
+
+    A named value rather than a tuple: `resume_str` and `config_hash` are both
+    strings (one optional), so two swapped tuple positions would type-check
+    and fail only at run time. `resume_str` is the resume path exactly as the
+    dump-config command received it; the train command must receive the same.
+    """
+
+    child_env: dict[str, str]
+    resume_str: str | None
+    config_hash: str
+
+
 def _build_in_source(
     attempt: AttemptContext,
+    *,
     request: RunRequest,
     source_dir: Path,
-    *,
     resume: RemoteResume | None,
     manifest: Manifest | None,
     wandb_api_key: str | None,
     host: PreflightHost,
-) -> tuple[dict[str, str], str | None, str]:
+) -> _BuiltSource:
     """Phase 4, BUILDING: install, validate the resume, dump and hash the config, then probe.
 
-    Returns `(child_env, resume_str, config_hash)` for the PreparedSource the
-    orchestrator builds. The order is the contract: the install runs before
-    the resume is validated, the resume is validated before the cheap
-    dump-config run, the dumped config is hashed and the manifest rewritten
-    with that hash, and the CUDA probe runs last. `host.parent_env=None` reads
-    `os.environ` here, at call time. `resume` is unpacked into
-    `_validate_remote_resume`'s positional arguments, never passed whole (its
-    PITFALL, on RemoteResume).
+    The order is the contract: the install runs before the resume is
+    validated, the resume is validated before the cheap dump-config run, the
+    dumped config is hashed and the manifest rewritten with that hash, and the
+    CUDA probe runs last. BUILDING gets no commit of its own: the next Volume
+    commit (the manifest rewrite's, or a heartbeat's) carries it, and adding
+    one changes the effect order (gh#163 spec §4.5; no test pins it, gh#236).
+    `host.parent_env=None` reads `os.environ` here, at call time. `resume` is
+    unpacked into `_validate_remote_resume`'s positional arguments, never
+    passed whole (its PITFALL, on RemoteResume).
     """
     state.transition_status(attempt.run_root,
                             Status.BUILDING,
@@ -201,8 +218,9 @@ def _build_in_source(
     )
     cwd = os.fspath(source_dir)
     host.run(build_install_command(source_dir), cwd=cwd, shell=False, env=child_env, check=True)
-    resume_str = os.fspath(resume.path) if resume is not None else None
+    resume_str: str | None = None
     if resume is not None:
+        resume_str = os.fspath(resume.path)
         _validate_remote_resume(resume.path, resume.sha256)
     host.run(
         build_dump_config_command(request, resume_str),
@@ -219,10 +237,10 @@ def _build_in_source(
         )
         attempt.volume.commit()
     host.run(build_cuda_probe_command(), cwd=cwd, shell=False, env=child_env, check=True)
-    return child_env, resume_str, config_hash
+    return _BuiltSource(child_env=child_env, resume_str=resume_str, config_hash=config_hash)
 
 
-def _fail_preflight(attempt: AttemptContext, heartbeat: object | None,
+def _fail_preflight(attempt: AttemptContext, *, heartbeat: object | None,
                     staging: tempfile.TemporaryDirectory[str] | None) -> None:
     """The failure arm: stop the heartbeat, write BUILD_FAILED, remove the extracted source.
 
@@ -279,9 +297,10 @@ def prepare_remote_source(
     archive and enters PREPARING; phase 2, here, starts the heartbeat; phase 3
     extracts and verifies the source and writes the manifest; phase 4 is
     BUILDING; phase 5, here, builds the PreparedSource. `_fail_preflight` is
-    the failure arm. `attempt` is the one AttemptContext production also hands
-    to training (same lock, run_root and Volume); `host=None` is production's
-    `PreflightHost()`.
+    the failure arm. Each phase and the arm take `attempt` positionally and
+    everything else by keyword. `attempt` is the one AttemptContext production
+    also hands to training (same lock, run_root and Volume); `host=None` is
+    production's `PreflightHost()`.
 
     PITFALL, the resource-acquisition rule (gh#163 spec §4.5): every
     statement that acquires something the failure arm must release,
@@ -299,7 +318,7 @@ def prepare_remote_source(
     heartbeat: object | None = None
     staging: tempfile.TemporaryDirectory[str] | None = None
     try:
-        _verify_archive_then_enter_preparing(attempt, source)
+        _verify_archive_then_enter_preparing(attempt, source=source)
         heartbeat = start_heartbeat(
             run_root=attempt.run_root,
             attempt_id=attempt.attempt_id,
@@ -311,22 +330,22 @@ def prepare_remote_source(
             host.ephemeral_parent.mkdir(parents=True, exist_ok=True)
         staging = tempfile.TemporaryDirectory(prefix="cs2rl-src-", dir=host.ephemeral_parent)
         source_dir = Path(staging.name)
-        _extract_verified_source(attempt, source, source_dir, manifest)
-        child_env, resume_str, config_hash = _build_in_source(attempt,
-                                                              request,
-                                                              source_dir,
-                                                              resume=resume,
-                                                              manifest=manifest,
-                                                              wandb_api_key=wandb_api_key,
-                                                              host=host)
+        _extract_verified_source(attempt, source=source, source_dir=source_dir, manifest=manifest)
+        built = _build_in_source(attempt,
+                                 request=request,
+                                 source_dir=source_dir,
+                                 resume=resume,
+                                 manifest=manifest,
+                                 wandb_api_key=wandb_api_key,
+                                 host=host)
         return PreparedSource(
             source_dir=source_dir,
-            child_env=child_env,
-            train_command=build_train_command(build_train_argv(request, resume_str)),
+            child_env=built.child_env,
+            train_command=build_train_command(build_train_argv(request, built.resume_str)),
             heartbeat=heartbeat,
-            config_hash=config_hash,
+            config_hash=built.config_hash,
             _staging=staging,
         )
     except Exception:
-        _fail_preflight(attempt, heartbeat, staging)
+        _fail_preflight(attempt, heartbeat=heartbeat, staging=staging)
         raise
