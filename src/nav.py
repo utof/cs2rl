@@ -56,9 +56,7 @@ def _die_with_parent(parent_pid: int, poll_s: float = 0.5) -> None:
       in; `os.getppid()` from inside a worker whose parent is already dead
       returns the reaper's pid, which is exactly the case we must detect.
     - Use SIGKILL on ourselves, not `sys.exit`: from the watchdog thread
-      `sys.exit` would end only that thread, and in the initializer the
-      `SystemExit` is caught by `_process_worker`, which just returns and
-      leaves the worker's fate to the (dead) parent.
+      `sys.exit` would end only that thread, not the worker.
     - `fork` start method ONLY, pinned at the pool (`mp_context`). Under
       `forkserver` every worker's parent is the fork server, not the caller,
       so the post-prctl re-check SIGKILLs each worker in its initializer and
