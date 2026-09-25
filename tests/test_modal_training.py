@@ -2345,6 +2345,46 @@ class _KillSeamClauses:
         ("tests/test_modal_training.py", "test_process_control_tripwire_poisons_system"),
         ("tests/test_modal_training.py", RESOLUTION_CONTROL),
     )
+    # (iv)'s exemptions, keyed (file, enclosing function): the only functions under tests/
+    # that may load os/posix `killpg`, `getpgid` or `kill`. WHAT: each spawns its own child
+    # with `start_new_session=True` and kills that group in a `finally`, so a red test cannot
+    # leak ~900 MB vis-cache workers (gh#251 `_run_group`, gh#254). WHY it is not the seam:
+    # the seam is Modal's ProcessControl in training.py, and a hygiene kill of the test's
+    # own child group cannot bypass it, PROVIDED the file cannot reach the runner at all: an
+    # exempt function may load anything banned, so one that imported the runner could hand
+    # the real `os.killpg` to `ProcessControl(...)` in the clear. So `kill_seam_loads` also
+    # makes a file that owns a row red on any import of `RUNNER_PACKAGES` (`_runner_imports`),
+    # in every Import/ImportFrom spelling `_runner_imports` reads: `import
+    # scripts.modal_runner.training`, `from scripts.modal_runner import training`, `from
+    # scripts import modal_runner`, and the same for tests/modal_test_helpers.py, which binds
+    # `training` and the package at module level (a one-hop re-export). WATCHED: (iv)'s population
+    # requires every row here to have examined a banned load on the real tree, so a renamed
+    # function, a deleted file or a dropped kill turns the test red, not silently green
+    # (`hygiene_kills_and_the_sigterm_test`). PITFALLS: the key is the innermost enclosing
+    # def's dotted name (`_enclosing_functions`), so a load at module level of an exempt
+    # file, in any other function of it, in a same-named method (`T._run_group`) or in the
+    # exempt def's own decorators or parameter defaults (evaluated at import) is red; and
+    # `from os import killpg` is red even inside an exempt function. Never exempt by file.
+    # A runner test that needs a hygiene kill cannot be listed here: give it a fake.
+    KILL_HYGIENE_EXEMPT = frozenset({
+        ("tests/test_arena_duel.py", "_run_group"),
+        ("tests/test_arena_duel.py", "test_run_group_leaves_no_survivor"),
+        ("tests/test_vis_pool_parent_death.py", "_kill_child_and_count_survivors"),
+    })
+    # The runner, as import targets: a file owning a KILL_HYGIENE_EXEMPT row may import
+    # neither the package (any module of it), nor the Modal entry script, nor the shared
+    # helper module, which binds `mrl`, `checkpoint`, `request` and `training` from the
+    # runner at module level, so `from <helpers> import training` reaches ProcessControl in
+    # one hop without spelling `scripts.`. PITFALL: the entry script's and the helper's
+    # dotted names are DERIVED from their path constants, never spelled: any string constant
+    # in this class or its test containing the entry script's dotted name is the
+    # `_CLIENT_MODULES` seed of tests/test_modal_packaging.py (`_reaches_client_directly`, a
+    # substring match that reads docstrings too), which reclassifies both to the client file
+    # and turns the split red. The helper's is derived the same way so the two stay alike.
+    HELPERS = "tests/modal_test_helpers.py"
+    RUNNER_PACKAGES = tuple(
+        ["scripts.modal_runner"] +
+        [path.removesuffix(".py").replace("/", ".") for path in (RUNNER_ENTRY, HELPERS)])
 
     @classmethod
     def clauses(cls):
@@ -2736,62 +2776,120 @@ class _KillSeamClauses:
 
     @classmethod
     def clause_iv(cls):
+        rows = sorted(f"{file}::{function}" for file, function in cls.KILL_HYGIENE_EXEMPT)
+        sigterm = "tests/test_modal_training.py:1"
+        assert rows, "KILL_HYGIENE_EXEMPT is empty: delete the exemption machinery and its plants"
+        # The exempt-file plants stand in one exempt (file, function): the first row, sorted.
+        exempt_file, exempt_function = rows[0].split("::")
         return cls._clause(
-            "(iv)",
-            "no load of os/posix killpg, getpgid or kill under tests/",
+            "(iv)", "no load of os/posix killpg, getpgid or kill under tests/, outside the "
+            "KILL_HYGIENE_EXEMPT functions",
             reads=("tests", ),
             check=cls.kill_seam_loads,
-            population="the real-SIGTERM test's os.kill(os.getpid(), SIGTERM)",
-            populated=lambda seen: any(
-                where.startswith("tests/test_modal_training.py:") for where in seen),
-            plants=cls._at(
-                cls.PLANT_TEST, {
-                    "the real functions passed explicitly":
-                    ("training.ProcessControl(spawn=fake, getpgid=os.getpgid, killpg=os.killpg,\n"
-                     "                         install_signal=signal.signal)\n"),
-                    "a module alias":
-                    "import os as o\no.killpg(4242, 15)\n",
-                    "an assignment alias":
-                    "o = os\no.killpg(4242, 15)\n",
-                    "an annotated assignment alias":
-                    "o: object = training.os\no.getpgid(4242)\n",
-                    "an os from-imported out of another module":
-                    ("from scripts.modal_runner.training import os as tos\n"
-                     "tos.getpgid(4242)\n"),
-                    "a from-import":
-                    "from posix import getpgid\n",
-                    "a from-import of kill":
-                    "from os import kill as k\n",
-                    "a star import":
-                    "from os import *\n",
-                    "getattr":
-                    'getattr(os, "killpg")(4242, 15)\n',
-                    "getattr with a computed name":
-                    'controls = {n: getattr(os, n) for n in ("getpgid", "killpg")}\n',
-                    "an __import__ receiver":
-                    '__import__("os").getpgid(1)\n',
-                    "an import_module receiver":
-                    'importlib.import_module("posix").killpg(4242, 15)\n',
-                    "a sys.modules receiver":
-                    'sys.modules["posix"].killpg(1, 15)\n',
-                    "a module attribute's os":
-                    ("training.ProcessControl(spawn=fake, getpgid=lambda pid: pid,\n"
-                     "                         killpg=training.os.killpg, install_signal=s)\n"),
-                    "a nested module attribute's os":
-                    "mrl.training.os.getpgid(4242)\n",
-                    "another module's os":
-                    "subprocess.os.killpg(4242, 15)\n",
-                    "kill of a group":
-                    "os.kill(-4242, 15)\n",
-                    "kill of a group through a module attribute's os":
-                    "training.os.kill(-4242, 0)\n",
-                    "kill of self through a module alias":
-                    "import os as o\no.kill(o.getpid(), 0)\n",
-                    "kill of self through posix":
-                    "import posix\nposix.kill(posix.getpid(), 0)\n",
-                    "kill of self through a module attribute's os":
-                    "training.os.kill(training.os.getpid(), 0)\n",
-                }))
+            population=("the real-SIGTERM test's os.kill(os.getpid(), SIGTERM), and a banned "
+                        "load in every KILL_HYGIENE_EXEMPT function"),
+            populated=cls.hygiene_kills_and_the_sigterm_test,
+            unpopulated={
+                "the SIGTERM test alone": [sigterm],
+                "an exempt row with no load": [sigterm] + rows[1:],
+                "an exempt function's name in another file":
+                [sigterm] + rows[1:] + [f"{cls.PLANT_TEST}::{exempt_function}"],
+                "the exempt rows without the SIGTERM test":
+                rows,
+                "an exempt row as the SIGTERM test's file":
+                [sigterm] + rows[1:] + [f"tests/test_modal_training.py::{exempt_function}"],
+            },
+            plants={
+                **cls._at(
+                    exempt_file, {
+                        "a module-level load in an exempt file":
+                        "os.killpg(1, 15)\n",
+                        "a load in a non-exempt function of an exempt file":
+                        "def _other():\n    os.killpg(1, 15)\n",
+                        "a same-named method in an exempt file":
+                        f"class T:\n    def {exempt_function}(self):\n        os.killpg(1, 15)\n",
+                        "a load in an exempt function's parameter default":
+                        f"def {exempt_function}(argv, kill=os.killpg):\n    pass\n",
+                        "a load in an exempt function's decorator":
+                        f"@functools.partial(os.killpg, 1)\ndef {exempt_function}():\n    pass\n",
+                        "a from-import inside an exempt function":
+                        f"def {exempt_function}():\n    from os import killpg\n",
+                        "an exempt file importing a runner module":
+                        "from scripts.modal_runner import training\n",
+                        "an exempt file importing the runner package from scripts":
+                        "from scripts import modal_runner\n",
+                        "an exempt file importing a runner module as a dotted name":
+                        "import scripts.modal_runner.training as t\n",
+                        "an exempt file importing the Modal entry script":
+                        f"import {cls.RUNNER_PACKAGES[1]}\n",
+                        "an exempt file importing the runner through the helper module":
+                        f"from {cls.RUNNER_PACKAGES[2]} import training\n",
+                        "an exempt file importing the helper module from tests":
+                        f"from tests import {cls.RUNNER_PACKAGES[2].split('.')[1]}\n",
+                        "an exempt function importing the runner inside its body":
+                        f"def {exempt_function}():\n    from scripts.modal_runner import training\n",
+                    }),
+                **cls._at(
+                    cls.PLANT_TEST, {
+                        "an exempt function's name in another file":
+                        f"def {exempt_function}():\n    os.killpg(1, 15)\n",
+                        "the real functions passed explicitly": ("training.ProcessControl(spawn=fake, getpgid=os.getpgid, killpg=os.killpg,\n"
+                                                                 "                         install_signal=signal.signal)\n"),
+                        "a module alias":
+                        "import os as o\no.killpg(4242, 15)\n",
+                        "an assignment alias":
+                        "o = os\no.killpg(4242, 15)\n",
+                        "an annotated assignment alias":
+                        "o: object = training.os\no.getpgid(4242)\n",
+                        "an os from-imported out of another module": ("from scripts.modal_runner.training import os as tos\n"
+                                                                      "tos.getpgid(4242)\n"),
+                        "a from-import":
+                        "from posix import getpgid\n",
+                        "a from-import of kill":
+                        "from os import kill as k\n",
+                        "a star import":
+                        "from os import *\n",
+                        "getattr":
+                        'getattr(os, "killpg")(4242, 15)\n',
+                        "getattr with a computed name":
+                        'controls = {n: getattr(os, n) for n in ("getpgid", "killpg")}\n',
+                        "an __import__ receiver":
+                        '__import__("os").getpgid(1)\n',
+                        "an import_module receiver":
+                        'importlib.import_module("posix").killpg(4242, 15)\n',
+                        "a sys.modules receiver":
+                        'sys.modules["posix"].killpg(1, 15)\n',
+                        "a module attribute's os": ("training.ProcessControl(spawn=fake, getpgid=lambda pid: pid,\n"
+                                                    "                         killpg=training.os.killpg, install_signal=s)\n"),
+                        "a nested module attribute's os":
+                        "mrl.training.os.getpgid(4242)\n",
+                        "another module's os":
+                        "subprocess.os.killpg(4242, 15)\n",
+                        "kill of a group":
+                        "os.kill(-4242, 15)\n",
+                        "kill of a group through a module attribute's os":
+                        "training.os.kill(-4242, 0)\n",
+                        "kill of self through a module alias":
+                        "import os as o\no.kill(o.getpid(), 0)\n",
+                        "kill of self through posix":
+                        "import posix\nposix.kill(posix.getpid(), 0)\n",
+                        "kill of self through a module attribute's os":
+                        "training.os.kill(training.os.getpid(), 0)\n",
+                    }),
+            })
+
+    @classmethod
+    def hygiene_kills_and_the_sigterm_test(cls, seen):
+        """(iv)'s population. `seen` holds the real-SIGTERM test's allowed call, as
+        `tests/test_modal_training.py:<line>`, and one `<file>::<function>` per exempt load;
+        it must hold the first and every KILL_HYGIENE_EXEMPT row. A row whose function no
+        longer loads a banned name (renamed, its file deleted, its kill dropped) fails here,
+        so the allow-set cannot go stale and stay green. The line form is matched on digits,
+        so a `<file>::<function>` row in this file cannot stand in for the SIGTERM call."""
+        prefix = "tests/test_modal_training.py:"
+        sigterm = any(where.startswith(prefix) and where[len(prefix):].isdigit() for where in seen)
+        rows = {f"{file}::{function}" for file, function in cls.KILL_HYGIENE_EXEMPT}
+        return sigterm and rows <= set(seen)
 
     @classmethod
     def kill_seam_loads(cls, sources):
@@ -2803,20 +2901,103 @@ class _KillSeamClauses:
         <a computed name>)`, nor from-imported (`from os import X` or `*`). `kill`
         likewise, except the one allowed call, `os.kill(os.getpid(), ...)`: any
         other target could be `-pgid`, which is `killpg` by another name.
-        `examined` is the allowed calls.
+
+        EXEMPT: a load (not a from-import) whose innermost enclosing def is a
+        `(file, function)` row of `KILL_HYGIENE_EXEMPT`, keyed by the dotted name
+        `_enclosing_functions` computes; a module-level load in an exempt file is
+        not inside any def, so it is red. The exemption is per function, not per
+        load, so an exempt function could hand the real `os.killpg` to the runner
+        unseen; therefore a file that owns any row is red on any import of
+        `RUNNER_PACKAGES` (`_runner_imports`), anywhere in it. `examined` is the
+        allowed calls, as `<file>:<line>`, and `<file>::<function>` for each
+        exempt load, which the population reads back per row.
         """
         problems, examined = [], []
         for rel, text in sources.items():
             tree = ast.parse(text)
             names = cls._module_names(tree, cls.OS_MODULES)
             allowed = cls._allowed_kills(tree)
+            owner = cls._enclosing_functions(tree)
             examined.extend(f"{rel}:{line}" for line in allowed.values())
             problems.extend(cls._banned_from_imports(rel, tree, cls.OS_MODULES, cls.BANNED))
+            if any(file == rel for file, _ in cls.KILL_HYGIENE_EXEMPT):
+                problems.extend(cls._runner_imports(rel, tree))
             for node in ast.walk(tree):
                 loaded = cls._banned_load(node, names, allowed, cls.OS_MODULES, cls.BANNED)
-                if loaded is not None:
+                if loaded is None:
+                    continue
+                function = owner.get(id(loaded))
+                if (rel, function) in cls.KILL_HYGIENE_EXEMPT:
+                    examined.append(f"{rel}::{function}")
+                else:
                     problems.append(f"{rel}:{loaded.lineno} {ast.unparse(loaded)}")
         return problems, examined
+
+    @classmethod
+    def _runner_imports(cls, rel, tree):
+        """Every import of a `RUNNER_PACKAGES` module in `tree`, one problem each, anywhere
+        in the file (module level or inside a def). `import scripts.modal_runner[.x] [as y]`
+        and `from scripts.modal_runner[.x] import z` match on the dotted name, a package or
+        any module under it; `from scripts import modal_runner` / `run_modal` and `from
+        tests import modal_test_helpers` name the module as the alias under its parent. A
+        relative import with a module (`from ..scripts.modal_runner import x`) is read on
+        its `module` text like an absolute one; only the bare `from . import x` (`module`
+        None) is not read. Import/ImportFrom only: see the test's RESIDUAL for what passes."""
+        heads = {tuple(package.rsplit(".", 1)) for package in cls.RUNNER_PACKAGES}
+        problems = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                hit = any(cls._under_runner(alias.name) for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                hit = cls._under_runner(node.module) or any(
+                    (node.module, alias.name) in heads for alias in node.names)
+            else:
+                continue
+            if hit:
+                problems.append(f"{rel}:{node.lineno} {ast.unparse(node)}: a file with a "
+                                "KILL_HYGIENE_EXEMPT row may not import the runner or a "
+                                "module that binds it (RUNNER_PACKAGES)")
+        return problems
+
+    @classmethod
+    def _under_runner(cls, dotted):
+        """Whether `dotted` is one of `RUNNER_PACKAGES` or a module under one."""
+        return any(dotted == package or dotted.startswith(f"{package}.")
+                   for package in cls.RUNNER_PACKAGES)
+
+    @staticmethod
+    def _enclosing_functions(tree):
+        """`{id(node): dotted name of the innermost def whose BODY holds node}`, by a
+        parent walk from the module down.
+
+        The name is the enclosing classes' and defs' names joined with `.`, outermost
+        first (`_run_group`, `TestX.test_y`, `test_y.inner`), without Python's
+        `<locals>` marker. Only a def's `body` counts as inside it: its decorators,
+        parameter defaults and annotations run where the def is bound, so they keep
+        the enclosing scope. A class body adds its name to the path but is not a def:
+        a node directly under a module-level class is absent, like a module-level one.
+        ASYMMETRY, kept on purpose: a load inside a lambda or a comprehension in an
+        exempt def inherits the def's name (exempt), while one inside a nested def
+        is owned by `outer.inner` (red): a lambda or comprehension has no def name
+        a KILL_HYGIENE_EXEMPT row could key on, a nested def does.
+        """
+        owner = {}
+        stack = [(tree, "", False)]
+        while stack:
+            node, name, inside = stack.pop()
+            scoped = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            body = {id(statement) for statement in node.body} if scoped else set()
+            inner = f"{name}.{node.name}" if scoped and name else (node.name if scoped else name)
+            is_def = scoped and not isinstance(node, ast.ClassDef)
+            for child in ast.iter_child_nodes(node):
+                if id(child) in body:
+                    child_name, child_inside = inner, inside or is_def
+                else:
+                    child_name, child_inside = name, inside
+                if child_inside:
+                    owner[id(child)] = child_name
+                stack.append((child, child_name, child_inside))
+        return owner
 
     @classmethod
     def _is_module(cls, expr, names, modules):
@@ -3361,7 +3542,21 @@ def test_kill_seam_static_safety():
             either, a module attribute's `os` (`training.os`), `__import__`,
             `importlib.import_module` or `sys.modules[...]`; `from <m> import X`
             or `*`; `getattr` with that name or a computed one. `kill` likewise,
-            except a call spelled exactly `os.kill(os.getpid(), ...)`.
+            except a call spelled exactly `os.kill(os.getpid(), ...)`. A load
+            (never a from-import) inside a function listed in
+            `KILL_HYGIENE_EXEMPT` is exempt, by (file, innermost enclosing
+            def's dotted name): those functions kill a process group the test
+            itself spawned, in a `finally`, so a red test leaks no vis-cache
+            workers (gh#251, gh#254). That is hygiene of the test's own child,
+            not the seam, which is Modal's ProcessControl: because the exemption
+            is per function, not per load, a file that owns a row is also red
+            on any import of `scripts.modal_runner`, scripts/run_modal.py or
+            tests/modal_test_helpers.py, which re-exports the runner
+            (`RUNNER_PACKAGES`, in every Import/ImportFrom spelling
+            `_runner_imports` reads), so an exempt function cannot hand the
+            real `os.killpg` to the runner.
+            A load anywhere else in an exempt file, at module level or in
+            another function, is red: never exempt by file.
       (v)   ProcessControl.system() builds exactly spawn=subprocess.Popen,
             getpgid=os.getpgid, killpg=os.killpg, install_signal=signal.signal.
       (vi)  In training.py an attribute named `system` is read exactly once: as
@@ -3386,13 +3581,16 @@ def test_kill_seam_static_safety():
     silently examines nothing cannot pass: the four fields (i), the tripwire's
     own construction in tests/conftest.py (ii), system()'s four real-function
     loads and both exempt tests' `.system` calls (iii), the real-SIGTERM test's
-    `os.kill(os.getpid(), SIGTERM)` (iv), the system() construction (v), the one
+    `os.kill(os.getpid(), SIGTERM)` and a banned load in every
+    `KILL_HYGIENE_EXEMPT` function (iv), so a stale exemption row (function
+    renamed, file deleted, kill dropped) is red rather than an unwatched
+    allowance, the system() construction (v), the one
     `ProcessControl.system()` call (vi), and the guard's own getpgid and killpg
     calls plus exactly one handoff to each `GUARD_HANDOFFS` callee (vii), the
     one tripwire definition in tests/conftest.py (viii). A
-    population that pins an allow-set or a count, as (vii)'s and (viii)'s do,
-    also carries `unpopulated` samples it must reject, so the pin itself can be
-    seen to fail. The clause labels are pinned below together with each clause's
+    population that pins an allow-set or a count, as (iv)'s, (vii)'s and
+    (viii)'s do, also carries `unpopulated` samples it must reject, so the pin
+    itself can be seen to fail. The clause labels are pinned below together with each clause's
     source sets, so a clause dropped from `_KillSeamClauses.clauses()`, or
     narrowed from the runner back to training.py (its plants, which are handed
     to the checker directly, would stay red), is red, not silently unchecked.
@@ -3408,6 +3606,9 @@ def test_kill_seam_static_safety():
     `killpg`, a shell `kill` in a subprocess, and code inside a string a child
     interpreter runs. A wrapper passes only when what it wraps does:
     `functools.partial(os.killpg, 0)` is caught, because it loads `os.killpg`.
+    `_runner_imports` reads Import/ImportFrom spellings only: in an exempt
+    file, `import scripts` then `scripts.modal_runner`, `from scripts import
+    *`, `importlib.import_module`, `__import__` and `sys.modules` pass it.
     (i), (v) and (vi) read training.py only: a `ProcessControl.system` captured
     at import in another runner module passes (vi) (the tripwire still poisons
     it when called under pytest). (iii) and (vii) read the runner package and
