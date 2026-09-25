@@ -1252,6 +1252,17 @@ def _call_in(path, qualname, func_name):
     return found[0]
 
 
+# Enclosing qualnames that MOVED after the capture, old -> current. The fixture is
+# frozen, so its `enclosing` locator stays as captured and the move is recorded
+# here. gh#168 W1 factored the harness's env_factory closure (and everything else
+# built before the trainer constructor) out of `_build_trainer_for_test` into
+# `_harness_parts`; the call itself is unchanged, which the test below still
+# proves by comparing its source against the captured one.
+MOVED_ENCLOSING = {
+    "_build_trainer_for_test.env_factory": "_harness_parts.env_factory",
+}
+
+
 def _migrated_sites():
     """(role, enclosing qualname, source file, one pre-migration call_source).
 
@@ -1259,12 +1270,19 @@ def _migrated_sites():
     its `enclosing` qualname and its `site` as `<relpath>[:<lineno>]`, so the
     whole table — including which file each site lives in — comes from the
     pre-migration snapshot rather than from a list someone transcribed off the
-    migrated code.
+    migrated code. The enclosing qualname is mapped through MOVED_ENCLOSING so
+    a site that was factored into another function is still located, and a
+    site that was NOT (a stale map entry) still fails `_call_in` loudly.
     """
+    captured = {cap["enclosing"] for caps in FIXTURE_DATA["roles"].values() for cap in caps}
+    stale = sorted(set(MOVED_ENCLOSING) - captured)
+    assert not stale, (f"MOVED_ENCLOSING keys {stale} match no captured `enclosing`; a key the "
+                       "fixture never names is a dead map entry that watches nothing")
     sites = {}
     for role, caps in FIXTURE_DATA["roles"].items():
         for cap in caps:
-            key = (role, cap["enclosing"], cap["site"].split(":")[0])
+            enclosing = MOVED_ENCLOSING.get(cap["enclosing"], cap["enclosing"])
+            key = (role, enclosing, cap["site"].split(":")[0])
             sites.setdefault(key, set()).add(cap["call_source"])
     out = []
     for (role, enclosing, relpath), sources in sorted(sites.items()):

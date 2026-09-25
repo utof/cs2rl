@@ -19,8 +19,11 @@ What's stripped vs. production ``src.train.train()``:
       longer exists: 2cffc35 moved timing to train()'s call sites.)
 
 Design contract:
-    - Public API is a single ``_build_trainer_for_test(...)`` function that
-      returns ``(trainer, cleanup)``. Tuple rather than contextmanager because
+    - Public API is ``_build_trainer_for_test(...)``, which returns
+      ``(trainer, cleanup)``, plus (gh#168 W1) ``_harness_parts(...)``, which
+      returns everything built BEFORE the trainer constructor so a test can
+      construct ``trainer.Cs2PuffeRL(**parts)`` itself
+      (tests/test_trainer_composition.py). Tuple rather than contextmanager because
       (a) the smoke-test shape in the task spec uses try/finally, and
       (b) downstream tests may need to leak the trainer between helper
       functions — easier with an explicit cleanup callable.
@@ -59,7 +62,7 @@ from env_factory import build_env_for, build_selfplay_manager
 _ENV_DEFAULTS = EnvConfig()
 
 
-def _build_trainer_for_test(
+def _harness_parts(
     num_envs: int = 32,
     with_selfplay: bool = False,
     device: str = "cpu",
@@ -75,118 +78,40 @@ def _build_trainer_for_test(
     aim_entropy_bonus: bool = True,
     opponent: str = "self",
 ):
-    """Build a tiny in-process PuffeRL trainer for Batch-1 trainer-level tests.
+    """Everything ``_build_trainer_for_test`` builds BEFORE the trainer constructor.
 
-    Parameters
-    ----------
-    num_envs : int
-        Vectorised-env count. 32 is enough to populate the rollout buffer in
-        one evaluate() round on the Serial backend in under ~5s; bump only if
-        a test specifically needs more parallelism (cost is roughly linear).
-    with_selfplay : bool
-        If True, apply ``_patch_trainer_with_selfplay`` so ``trainer.evaluate``
-        is the self-play variant. The SelfPlayManager is constructed with an
-        EMPTY pool, so ``should_use_past()`` always returns False — the past-
-        policy branch is NOT exercised, but the replacement evaluate() is.
-        Required by Task 6c (reward-clamp removal test).
-    device : str
-        Torch device. Default "cpu" keeps tests deterministic and CI-friendly.
-    seed : int
-        Passed into both the env factory and the PPO config. Fixed default so
-        back-to-back harness invocations produce identical rollouts.
-    tct_split_heads : bool
-        Batch 7 (spec 2026-08-13): build the policy with per-team T/CT policy
-        heads. Default False keeps every existing harness caller on the legacy
-        architecture bit-for-bit. Exists so trainer-level split contracts (the
-        obs-bit ⇔ slot-index invariant) can be pinned against a real rollout.
-    tct_split_trunk : bool
-        Spec 2026-08-15: build the policy with per-team T/CT encoder+LSTM.
-        Default False keeps every existing harness caller on the shared trunk.
-        Independent of ``tct_split_heads`` — either bit can be on alone.
-    n_active_per_team : int
-        Rung 0 (spec 2026-08-29 §2.1/§2.2): agents per team the env spawns;
-        slots ``n..4`` of each team are parked (noop-masked, zero reward).
-        Threaded into BOTH the envs (through the EnvConfig the closure below
-        builds) and the trainer (``participating_rows`` →
-        ``trainer.participating``), because a test
-        that set only one of the two would be testing a configuration
-        production can never reach. The default is EnvConfig's own field default
-        — full N-vs-N, i.e. an all-ones participation mask — which is what every
-        pre-Rung-0 harness caller gets. Named, never spelled: a literal here is
-        a second declaration of the value, and it sits on a different line from
-        the parameter so tests/test_no_restated_env_defaults.py's line probe
-        cannot see it go stale.
-    map_data : MapData or None
-        R0-E: the map every env is built on. None ⇒ ``make_simple_map()`` (the
-        pre-R0-E hardcoded default). Pass the session ``simple_map`` fixture or
-        an arena map; the harness never inspects flatness (that check lives in
-        train() only), so pin_pitch=1 on a non-flat map is allowed HERE.
-    pin_pitch, crouch_enabled : int
-        R0-E.2 sim knobs, threaded into BOTH the envs (through the EnvConfig
-        the closure below builds) and the policy (``build_policy(pin_pitch=)``
-        → aim_dim_mask) and both SelfPlayManager constructions — exactly like production, so
-        ``assert_pin_pitch_agreement`` holds on a harness trainer.
-    jump_enabled : int
-        Rung 1a sim knob (spec 2026-08-30 T2b): 0 masks the jump action.
-        Threaded into the envs and into ``args`` (⇒ config ``jump_enabled``),
-        but NOT into build_policy — unlike pin_pitch it changes no action
-        dimension, only a mask bit, so there is no policy-side mirror to keep
-        in agreement. The default is EnvConfig's own field default — jump live,
-        i.e. every pre-Rung-1a caller is unaffected. Named rather than spelled,
-        for the reason under n_active_per_team above.
-    aim_log_std_max : float or None
-        R0-E.3 per-run σ cap → ``policy.aim_log_std_max`` and config
-        ``aim_log_std_max``. None ⇒ LOG_STD_MAX.
-    aim_entropy_bonus : bool
-        R0-E.4 → config ``aim_entropy_bonus`` (the CLI spells it "on"/"off";
-        build_train_config accepts both).
-    opponent : str
-        Rung 1a T3 (spec 2026-08-30): ``"self"`` (default, today's behaviour —
-        both teams train) or ``"noop"`` (the opponent team is a stationary
-        statue: no-op action bin on every head and NON-participating rows).
-        Threaded into ``args`` (⇒ config ``opponent`` and the halved
-        participating-step budget), into ``build_participating_rows`` and into
-        BOTH SelfPlayManager constructions — the same three surfaces train()
-        touches, so a harness rollout exercises the production statue path
-        rather than a harness-only imitation of it.
-        PITFALL: ``opponent="noop"`` with ``with_selfplay=True`` is refused
-        here exactly as train() refuses ``--opponent noop`` without
-        ``--no-self-play`` — a past-policy opponent is not a statue, and
-        maybe_switch_teams would flip the statue's team mid-run.
+    WHAT: the Serial vecenv, the policy, the train config, the action-mask shm view,
+    the participation vector and the self-play manager, returned as two dicts:
+    ``parts`` (keyed exactly like ``trainer.Cs2PuffeRL.__init__``'s parameters, so
+    ``Cs2PuffeRL(**parts)`` constructs the production class) and ``pins`` (the
+    ``mask_shm`` RawArray the trainer must hold against GC, and ``tmp_checkpoint_dir``
+    for cleanup). Parameters are ``_build_trainer_for_test``'s; see its docstring.
 
-    Returns
-    -------
-    trainer : pufferlib.pufferl.PuffeRL
-        Fully-constructed trainer with all production attributes the Batch-1
-        downstream tests assert against (see tests/test_train_harness_smoke.py
-        for the pinned surface).
-    cleanup : Callable[[], None]
-        Idempotent teardown: closes the vecenv, wipes the scratch checkpoint
-        dir. Tests MUST call this in a ``finally:`` to avoid leaking fd's /
-        shared-memory / tmp dirs.
+    WHY a separate function (gh#168 W1): production's train() builds the participation
+    vector and the (possibly pre-seeded) self-play manager BEFORE constructing the
+    trainer, because Cs2PuffeRL.__init__ reads both at patch time. The harness used
+    to build them after a bare PuffeRL and hand them to the patchers one by one. This
+    is the same hoist, so tests/test_trainer_composition.py can construct the
+    production class from the harness's parts, and W1.5 can make
+    ``_build_trainer_for_test`` itself return that class with no further re-ordering.
+    Measured neutral: build_participating_rows is pure and SelfPlayManager.__init__
+    draws no RNG (construct_snapshot.py: 39 attrs x 4 configs, 0 diffs).
 
-    Pitfalls
-    --------
-    - Re-using the same mp.Value across two harness instances in the same
-      process is fine — ``shared_ts`` is a local to this call.
-    - ``args`` is a ``types.SimpleNamespace``, not an argparse Namespace — just
-      mirrors the attribute access that ``build_train_config`` does.
-    - Serial backend means ``trainer.vecenv`` has a synchronous ``send``/``recv``
-      cycle; tests can inject observations by monkey-patching those if needed.
+    PITFALL: ``cont_action_view_main`` is None on purpose. The harness is Serial-only,
+    and the hybrid-aim patcher takes None to mean "no Multiprocessing shm to forward";
+    it is spelled out in ``parts`` so ``Cs2PuffeRL(**parts)`` needs no extra kwarg.
     """
     # Imports are function-local so importing this module in a test that
     # doesn't actually call the factory (e.g. a smoke import test) is free.
-    # PuffeRL is lazy-imported inside train.train() in production; do the same
-    # here so this module is importable even if pufferlib's optional torch deps
-    # are mid-install in an isolated test runner.
+    # Cs2PuffeRL is lazy-imported inside train.train() in production (gh#168 W1
+    # dropped train()'s own PuffeRL import); do the same here so this module is
+    # importable even if pufferlib's optional torch deps are mid-install in an
+    # isolated test runner.
     import pufferlib.vector
-    from pufferlib.pufferl import PuffeRL
 
     from map import make_simple_map
     from train import (
         SelfPlayManager,
-        _patch_trainer_with_hybrid_aim,
-        _patch_trainer_with_selfplay,
         assert_opponent_self_play_compatible,
         build_participating_rows,
         build_policy,
@@ -361,32 +286,19 @@ def _build_trainer_for_test(
         vecenv.close()
         shutil.rmtree(tmp_checkpoint_dir, ignore_errors=True)
         raise
-    trainer = PuffeRL(train_config, vecenv, policy)
-
-    # Batch 3 (T5): the hybrid-aim patcher is REQUIRED for any test that
-    # exercises evaluate() / train() because those code paths now read
-    # trainer.cont_actions / trainer.logprobs_{d,c}. Apply unconditionally
-    # so the harness shape matches production. _patch_trainer_with_return_norm
-    # is intentionally NOT applied here — harness tests that need it apply
-    # it explicitly (matches the pre-Batch-3 contract documented at module
-    # docstring "return-norm patch and full checkpointing: skipped").
-    # F8: mask_view_main plumbed so harness rollouts run MASKED, same as
-    # production. Pin the RawArray on the trainer against GC (prod pattern).
-    trainer._action_mask_shm = mask_shm
     # Rung 0 §2.2 + Rung 1a T3: the SHARED helper train() calls, not a copy of
     # its formula. The copy was the hazard: a participation change patched into
     # only one of the two left the headline harness test green against a
-    # formula production never ran. Built here (not inside the patcher) so the
-    # trainer-construction path still mirrors production's call order.
+    # formula production never ran. Built here, BEFORE the constructor and not
+    # inside the patcher, so the harness mirrors production's call order (gh#168
+    # W1: train() builds it before Cs2PuffeRL, whose __init__ reads it at patch
+    # time).
     participating_rows = build_participating_rows(num_envs,
                                                   n_active_per_team,
                                                   opponent_mode=opponent,
                                                   hero_team=SelfPlayManager.initial_hero_team())
-    _patch_trainer_with_hybrid_aim(trainer,
-                                   mask_view_main=mask_view_main,
-                                   participating_rows=participating_rows)
 
-    # ── Self-play patch (always applied at T5) ──────────────────────────────
+    # ── Self-play manager (the patch is always applied at T5) ──────────────
     # Pre-Batch-3: this was gated on `with_selfplay` so the no-selfplay path
     # could exercise PufferLib's library evaluate(). T4 changed the policy
     # contract to a 4-tuple; PufferLib's library evaluate still expects a
@@ -415,7 +327,177 @@ def _build_trainer_for_test(
         pin_pitch=pin_pitch,
         opponent_mode=opponent,
     )
-    _patch_trainer_with_selfplay(trainer, self_play_mgr)
+    parts = dict(
+        config=train_config,
+        vecenv=vecenv,
+        policy=policy,
+        cont_action_view_main=None,
+        mask_view_main=mask_view_main,
+        participating_rows=participating_rows,
+        self_play_mgr=self_play_mgr,
+    )
+    pins = dict(mask_shm=mask_shm, tmp_checkpoint_dir=tmp_checkpoint_dir)
+    return parts, pins
+
+
+def _build_trainer_for_test(
+    num_envs: int = 32,
+    with_selfplay: bool = False,
+    device: str = "cpu",
+    seed: int = 0,
+    tct_split_heads: bool = False,
+    tct_split_trunk: bool = False,
+    n_active_per_team: int = _ENV_DEFAULTS.n_active_per_team,
+    map_data=None,
+    pin_pitch: int = _ENV_DEFAULTS.pin_pitch,
+    crouch_enabled: int = _ENV_DEFAULTS.crouch_enabled,
+    jump_enabled: int = _ENV_DEFAULTS.jump_enabled,
+    aim_log_std_max=None,
+    aim_entropy_bonus: bool = True,
+    opponent: str = "self",
+):
+    """Build a tiny in-process PuffeRL trainer for Batch-1 trainer-level tests.
+
+    Parameters
+    ----------
+    num_envs : int
+        Vectorised-env count. 32 is enough to populate the rollout buffer in
+        one evaluate() round on the Serial backend in under ~5s; bump only if
+        a test specifically needs more parallelism (cost is roughly linear).
+    with_selfplay : bool
+        If True, apply ``_patch_trainer_with_selfplay`` so ``trainer.evaluate``
+        is the self-play variant. The SelfPlayManager is constructed with an
+        EMPTY pool, so ``should_use_past()`` always returns False — the past-
+        policy branch is NOT exercised, but the replacement evaluate() is.
+        Required by Task 6c (reward-clamp removal test).
+    device : str
+        Torch device. Default "cpu" keeps tests deterministic and CI-friendly.
+    seed : int
+        Passed into both the env factory and the PPO config. Fixed default so
+        back-to-back harness invocations produce identical rollouts.
+    tct_split_heads : bool
+        Batch 7 (spec 2026-08-13): build the policy with per-team T/CT policy
+        heads. Default False keeps every existing harness caller on the legacy
+        architecture bit-for-bit. Exists so trainer-level split contracts (the
+        obs-bit ⇔ slot-index invariant) can be pinned against a real rollout.
+    tct_split_trunk : bool
+        Spec 2026-08-15: build the policy with per-team T/CT encoder+LSTM.
+        Default False keeps every existing harness caller on the shared trunk.
+        Independent of ``tct_split_heads`` — either bit can be on alone.
+    n_active_per_team : int
+        Rung 0 (spec 2026-08-29 §2.1/§2.2): agents per team the env spawns;
+        slots ``n..4`` of each team are parked (noop-masked, zero reward).
+        Threaded into BOTH the envs (through the EnvConfig the closure below
+        builds) and the trainer (``participating_rows`` →
+        ``trainer.participating``), because a test
+        that set only one of the two would be testing a configuration
+        production can never reach. The default is EnvConfig's own field default
+        — full N-vs-N, i.e. an all-ones participation mask — which is what every
+        pre-Rung-0 harness caller gets. Named, never spelled: a literal here is
+        a second declaration of the value, and it sits on a different line from
+        the parameter so tests/test_no_restated_env_defaults.py's line probe
+        cannot see it go stale.
+    map_data : MapData or None
+        R0-E: the map every env is built on. None ⇒ ``make_simple_map()`` (the
+        pre-R0-E hardcoded default). Pass the session ``simple_map`` fixture or
+        an arena map; the harness never inspects flatness (that check lives in
+        train() only), so pin_pitch=1 on a non-flat map is allowed HERE.
+    pin_pitch, crouch_enabled : int
+        R0-E.2 sim knobs, threaded into BOTH the envs (through the EnvConfig
+        the closure below builds) and the policy (``build_policy(pin_pitch=)``
+        → aim_dim_mask) and both SelfPlayManager constructions — exactly like production, so
+        ``assert_pin_pitch_agreement`` holds on a harness trainer.
+    jump_enabled : int
+        Rung 1a sim knob (spec 2026-08-30 T2b): 0 masks the jump action.
+        Threaded into the envs and into ``args`` (⇒ config ``jump_enabled``),
+        but NOT into build_policy — unlike pin_pitch it changes no action
+        dimension, only a mask bit, so there is no policy-side mirror to keep
+        in agreement. The default is EnvConfig's own field default — jump live,
+        i.e. every pre-Rung-1a caller is unaffected. Named rather than spelled,
+        for the reason under n_active_per_team above.
+    aim_log_std_max : float or None
+        R0-E.3 per-run σ cap → ``policy.aim_log_std_max`` and config
+        ``aim_log_std_max``. None ⇒ LOG_STD_MAX.
+    aim_entropy_bonus : bool
+        R0-E.4 → config ``aim_entropy_bonus`` (the CLI spells it "on"/"off";
+        build_train_config accepts both).
+    opponent : str
+        Rung 1a T3 (spec 2026-08-30): ``"self"`` (default, today's behaviour —
+        both teams train) or ``"noop"`` (the opponent team is a stationary
+        statue: no-op action bin on every head and NON-participating rows).
+        Threaded into ``args`` (⇒ config ``opponent`` and the halved
+        participating-step budget), into ``build_participating_rows`` and into
+        BOTH SelfPlayManager constructions — the same three surfaces train()
+        touches, so a harness rollout exercises the production statue path
+        rather than a harness-only imitation of it.
+        PITFALL: ``opponent="noop"`` with ``with_selfplay=True`` is refused
+        here exactly as train() refuses ``--opponent noop`` without
+        ``--no-self-play`` — a past-policy opponent is not a statue, and
+        maybe_switch_teams would flip the statue's team mid-run.
+
+    Returns
+    -------
+    trainer : pufferlib.pufferl.PuffeRL
+        Fully-constructed trainer with all production attributes the Batch-1
+        downstream tests assert against (see tests/test_train_harness_smoke.py
+        for the pinned surface).
+    cleanup : Callable[[], None]
+        Idempotent teardown: closes the vecenv, wipes the scratch checkpoint
+        dir. Tests MUST call this in a ``finally:`` to avoid leaking fd's /
+        shared-memory / tmp dirs.
+
+    Pitfalls
+    --------
+    - Re-using the same mp.Value across two harness instances in the same
+      process is fine — ``shared_ts`` is a local to this call.
+    - ``args`` is a ``types.SimpleNamespace``, not an argparse Namespace — just
+      mirrors the attribute access that ``build_train_config`` does.
+    - Serial backend means ``trainer.vecenv`` has a synchronous ``send``/``recv``
+      cycle; tests can inject observations by monkey-patching those if needed.
+    """
+    # Lazy for the reason _harness_parts gives above its own import block.
+    from pufferlib.pufferl import PuffeRL
+
+    from train import _patch_trainer_with_hybrid_aim, _patch_trainer_with_selfplay
+
+    parts, pins = _harness_parts(
+        num_envs=num_envs,
+        with_selfplay=with_selfplay,
+        device=device,
+        seed=seed,
+        tct_split_heads=tct_split_heads,
+        tct_split_trunk=tct_split_trunk,
+        n_active_per_team=n_active_per_team,
+        map_data=map_data,
+        pin_pitch=pin_pitch,
+        crouch_enabled=crouch_enabled,
+        jump_enabled=jump_enabled,
+        aim_log_std_max=aim_log_std_max,
+        aim_entropy_bonus=aim_entropy_bonus,
+        opponent=opponent,
+    )
+    train_config, vecenv, policy = parts["config"], parts["vecenv"], parts["policy"]
+    tmp_checkpoint_dir = pins["tmp_checkpoint_dir"]
+    # gh#168 W1: the parts are built exactly as production builds them, but the
+    # harness STILL composes a bare PuffeRL plus the two patches it always applied,
+    # so no test's behaviour changes in W1. W1.5 replaces the four lines below with
+    # `Cs2PuffeRL(**parts)`.
+    trainer = PuffeRL(train_config, vecenv, policy)
+
+    # Batch 3 (T5): the hybrid-aim patcher is REQUIRED for any test that
+    # exercises evaluate() / train() because those code paths now read
+    # trainer.cont_actions / trainer.logprobs_{d,c}. Apply unconditionally
+    # so the harness shape matches production. _patch_trainer_with_return_norm
+    # is intentionally NOT applied here — harness tests that need it apply
+    # it explicitly (matches the pre-Batch-3 contract documented at module
+    # docstring "return-norm patch and full checkpointing: skipped").
+    # F8: mask_view_main plumbed so harness rollouts run MASKED, same as
+    # production. Pin the RawArray on the trainer against GC (prod pattern).
+    trainer._action_mask_shm = pins["mask_shm"]
+    _patch_trainer_with_hybrid_aim(trainer,
+                                   mask_view_main=parts["mask_view_main"],
+                                   participating_rows=parts["participating_rows"])
+    _patch_trainer_with_selfplay(trainer, parts["self_play_mgr"])
 
     def cleanup():
         """Idempotent teardown. Safe to call twice.
