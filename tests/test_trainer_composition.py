@@ -4,9 +4,11 @@ Four assertions; the first three in the spec's order
 (.superpowers/sdd/2026-09-24-168-trainer-subclass/spec.md §W1 test), the fourth from the
 review of PR #257:
 
-1. The class is a direct ``PuffeRL`` subclass, constructed from the harness's parts
-   (``_harness_parts``), with the STOCK attribute surface recorded by wrapping
-   ``PuffeRL.__init__`` and snapshotting ``vars(self)`` at its end.
+1. The class is a direct ``PuffeRL`` subclass, and (W1.5) it is what the harness's
+   ``_build_trainer_for_test`` returns: ``type(trainer) is Cs2PuffeRL``, so no harness
+   test can run stock ``PuffeRL.train`` or skip full checkpointing (gh#169). The STOCK
+   attribute surface is recorded by wrapping ``PuffeRL.__init__`` and snapshotting
+   ``vars(self)`` at its end.
 2. The attributes the constructor adds ON TOP of stock equal a FROZEN list (spec §1.1: the
    35 names the four patch functions plus ``_timing`` set at 2a3573f). This is the
    declaration-versus-runtime pin: a patch call dropped from ``__init__`` (knock-out W1-K1)
@@ -24,7 +26,8 @@ review of PR #257:
    method aliases (``train``/``evaluate``/``save_checkpoint`` are class attributes of
    PuffeRL, filtered out), and every read-before-write or never-read name (``_timing``,
    ``_cont_action_view_main``, ``_action_mask_view_main``, ``_normalize_returns`` and the
-   ``_batch1_*`` names the bodies assign before reading). Those are pinned by (2) only,
+   ``_batch1_*`` names the bodies assign somewhere; some, like ``_batch1_reward_scratch``
+   and ``_batch1_log_alpha_reset_done``, are read first). Those are pinned by (2) only,
    plus (4) for the aliases. Measured on PR #257's first commit: dropping
    ``_install_full_checkpointing`` from ``__init__`` AND ``save_checkpoint`` from the list
    left all three green; so did dropping ``self._timing`` AND ``_timing``. With (4) the
@@ -49,7 +52,6 @@ PITFALLS
 from __future__ import annotations
 
 import ast
-import shutil
 import types
 from pathlib import Path
 
@@ -217,15 +219,18 @@ def derive_anchor():
 
 @pytest.fixture
 def composed(monkeypatch):
-    """(trainer, stock_surface): a Cs2PuffeRL built from the harness parts.
+    """(trainer, stock_surface): the trainer ``_build_trainer_for_test`` returns.
 
     ``PuffeRL.__init__`` is wrapped so the stock surface is measured on THIS instance, not
-    copied from a list that could drift with a pufferlib bump.
+    copied from a list that could drift with a pufferlib bump. W1 built the trainer here
+    from ``_harness_parts``; since W1.5 the harness constructs ``Cs2PuffeRL`` itself, so
+    going through it is what proves the production class is the one every harness test
+    gets. ``_action_mask_shm`` (a GC pin the harness and train() both set after the
+    constructor) is removed from the measured surface so (2) compares construction only.
     """
     from pufferlib.pufferl import PuffeRL
 
-    from train_test_harness import _harness_parts
-    from trainer import Cs2PuffeRL
+    from train_test_harness import _build_trainer_for_test
 
     stock = {}
     orig_init = PuffeRL.__init__
@@ -235,25 +240,26 @@ def composed(monkeypatch):
         stock["names"] = set(vars(self))
 
     monkeypatch.setattr(PuffeRL, "__init__", recording_init)
-    parts, pins = _harness_parts(num_envs=16)
-    trainer = None
+    trainer, cleanup = _build_trainer_for_test(num_envs=16)
     try:
-        trainer = Cs2PuffeRL(**parts)
-        yield trainer, stock["names"]
+        # Pin the pin: folding a name into the stock set that the harness no
+        # longer sets would hide its disappearance from (2), so check first.
+        assert "_action_mask_shm" in vars(trainer), (
+            "the harness no longer pins the mask RawArray on the trainer after the "
+            "constructor; (2) would silently absorb the missing name")
+        yield trainer, stock["names"] | {"_action_mask_shm"}
     finally:
-        for obj in (trainer, parts["vecenv"]):
-            try:
-                if obj is not None:
-                    obj.close()
-            except Exception:          # noqa: BLE001 — best-effort teardown
-                pass
-        shutil.rmtree(pins["tmp_checkpoint_dir"], ignore_errors=True)
-        del pins                       # the mask RawArray outlives the envs until here
+        cleanup()
 
 
-def test_direct_pufferl_subclass_built_from_harness_parts(composed):
+def test_harness_returns_a_direct_pufferl_subclass(composed):
     from pufferlib.pufferl import PuffeRL
+
+    from trainer import Cs2PuffeRL
     trainer, stock = composed
+    assert type(trainer) is Cs2PuffeRL, (
+        f"_build_trainer_for_test returned a {type(trainer).__name__}; since gh#168 W1.5 the "
+        "harness must construct the production class (gh#169)")
     assert type(trainer).__mro__[1] is PuffeRL
     assert stock, "PuffeRL.__init__ did not run through the recording wrapper"
 
@@ -307,3 +313,58 @@ def test_method_aliases_are_bound_to_the_closure_bodies(composed):
             "closure with types.MethodType")
         got = bound.__func__.__qualname__.replace(".<locals>.", ".")
         assert got == qualname, f"{name!r} is bound to {got!r}, expected {qualname!r}"
+
+
+def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path):
+    """A patch that raises inside ``Cs2PuffeRL.__init__`` must not hang the interpreter.
+
+    ``PuffeRL.__init__`` starts ``Utilization``, a NON-daemon thread whose loop ends only
+    when its ``stop()`` is called, and the only production caller of that is
+    ``PuffeRL.close()``. A raise after ``super().__init__`` leaves an instance nobody can
+    close, so before the fix (PR #259 review, MAJOR-1) pytest printed its summary and
+    then sat forever on the thread. The harness's own wrapper cannot help: it never gets
+    the half-built trainer. So ``Cs2PuffeRL.__init__`` stops the thread itself on any
+    raise, and this test drives that path in-process (no subprocess: a hang would be a
+    timeout, not a diagnosis) by making the LAST patch raise, so every earlier patch has
+    run and the thread has been alive the longest.
+
+    Two assertions, both against the interpreter's state rather than the code:
+    - every ``Utilization`` thread that exists afterwards has ``stopped`` set (the fix's
+      one line), and each one actually ends within its own ``delay`` (1 s) plus slack;
+    - the harness scratch dir is gone (``_harness_parts`` and ``_build_trainer_for_test``
+      both rmtree on a raise; ``tempfile.tempdir`` is pointed at ``tmp_path`` so the
+      check is exact and cannot see another process's scratch dirs).
+    The threads are enumerated by TYPE: pufferlib names them "Thread-N", not
+    "Utilization". A mutant that deletes the ``stop()`` is red on the first assertion
+    immediately (``stopped`` is False) and on the second after the join times out.
+    """
+    import tempfile
+    import threading
+
+    from pufferlib.pufferl import Utilization
+
+    import trainer as trainer_mod
+    from train_test_harness import _build_trainer_for_test
+
+    def _boom(self, self_play_mgr):
+        raise RuntimeError("simulated patch-time failure")
+
+    monkeypatch.setattr(trainer_mod, "_install_full_checkpointing", _boom)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    before = {t for t in threading.enumerate() if isinstance(t, Utilization)}
+
+    with pytest.raises(RuntimeError, match="simulated patch-time failure"):
+        _build_trainer_for_test(num_envs=16)
+
+    started = [t for t in threading.enumerate() if isinstance(t, Utilization)]
+    started = [t for t in started if t not in before]
+    assert started, "PuffeRL.__init__ did not start a Utilization thread; the test drives nothing"
+    assert all(t.stopped for t in started), (
+        "Cs2PuffeRL.__init__ raised without stopping the Utilization thread; the "
+        "interpreter would hang at exit")
+    for t in started:
+        t.join(timeout=5.0)
+    still_alive = [t.name for t in started if t.is_alive()]
+    assert not still_alive, f"Utilization threads still alive after stop()+join: {still_alive}"
+    leaked = sorted(p.name for p in tmp_path.glob("cs2rl-harness-*"))
+    assert leaked == [], f"harness scratch dirs leaked on the raise path: {leaked}"

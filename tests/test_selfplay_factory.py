@@ -521,6 +521,40 @@ def test_harness_call_site_builds_the_captured_manager(monkeypatch, with_selfpla
                            ], f"the harness call site's kwarg set is {sorted(got)}"
 
 
+def test_harness_given_manager_skips_the_builder(monkeypatch):
+    """With ``self_play_mgr=`` given, the harness calls ``build_selfplay_manager`` 0 times.
+
+    gh#168 W1.5 added the parameter so a test can seed a manager BEFORE construction the
+    way a resume does (tests/test_resume_state.py, tests/test_pitch_pin.py). The
+    companion case above pins the 1-call path; without this one, a harness that built a
+    second manager and silently discarded the given one would keep every test green
+    (the trainer would carry the builder's manager, not the caller's). Same spy shape as
+    the companion, for the same reason: a stub that raised would leave the trainer
+    unclosed. The manager passed must agree with the harness knobs (the harness asserts
+    that), so it is built with the defaults the harness would pass: ``opponent="self"``
+    and ``pin_pitch`` from the env defaults, with ``p_past=0.0`` (no self-play).
+    """
+    import train_test_harness
+    from train import SelfPlayManager
+
+    recorded = []
+    real_builder = train_test_harness.build_selfplay_manager
+
+    def _spy(**kwargs):
+        recorded.append(kwargs)
+        return real_builder(**kwargs)
+
+    monkeypatch.setattr(train_test_harness, "build_selfplay_manager", _spy)
+    mgr = SelfPlayManager(p_past=0.0)
+    _, cleanup = train_test_harness._build_trainer_for_test(num_envs=2, self_play_mgr=mgr)
+    try:
+        assert recorded == [], (
+            f"the harness called build_selfplay_manager {len(recorded)}x although a manager "
+            "was given; the caller's pre-seeded manager would be discarded")
+    finally:
+        cleanup()
+
+
 def test_harness_no_longer_branches_on_with_selfplay_to_construct():
     """The two harness constructions really did collapse to one call site.
 

@@ -122,11 +122,9 @@ def test_return_stats_update_on_participating_rows_only():
     """Spec §2.2 (i) for _ret_mean/_ret_var: one _normalize_returns call from the
     zero-count state must leave the running stats equal to the participating
     sub-tensor's mean / population variance (Welford's first update)."""
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=4, n_active_per_team=1)
     try:
-        _patch_trainer_with_return_norm(trainer)
         torch.manual_seed(1)
         x = torch.randn(10, 8) * 3 + 1
         part = torch.zeros(10, 8, dtype=torch.bool)
@@ -141,12 +139,10 @@ def test_return_stats_update_on_participating_rows_only():
 
 
 def test_harness_n_active_1_masks_four_fifths_of_rows():
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=16, n_active_per_team=1)
     try:
-        _patch_trainer_with_return_norm(trainer)
         bs = trainer.config["batch_size"]
         assert trainer.config["participating_timesteps"] * 5 == trainer.config["total_timesteps"]
         trainer.evaluate()
@@ -177,13 +173,11 @@ def test_twenty_update_ratio_identity_n_active_1():
     updates (±5%; per-update σ≈4.6% from the hypergeometric minibatch draw, ≈1.0% over
     the mean). Preconditions are load-bearing: prioritised sampling or any event
     segment would sample parked segments non-uniformly and break the identity."""
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=16,
                                                n_active_per_team=1,
                                                aim_entropy_bonus=False)
     try:
-        _patch_trainer_with_return_norm(trainer)
         assert trainer.config["prio_alpha"] == 0
         assert not bool(trainer._batch1_event_mask.any())
         ent, ent_u, floor, mbs, alpha = [], [], 0.0, 0.0, {}
@@ -387,12 +381,10 @@ def test_noop_opponent_rows_are_statues_excluded_from_global_step():
     agent row (segments == total_agents, ep_indices starts as arange), so
     buffer row i IS agent row i — asserted below rather than assumed.
     """
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=16, n_active_per_team=1, opponent="noop")
     try:
-        _patch_trainer_with_return_norm(trainer)
         bs = trainer.config["batch_size"]
         assert trainer.config["opponent"] == "noop"
         assert trainer.config["participating_timesteps"] * 10 == trainer.config["total_timesteps"]

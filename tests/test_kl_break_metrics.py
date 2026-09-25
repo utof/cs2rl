@@ -17,9 +17,10 @@ Contract pinned here (implemented in _patch_trainer_with_return_norm):
      finishes the current pass (total_minibatches // update_epochs minibatches)
      before stopping, and can never truncate epoch 0 mid-pass.
 
-Uses the minimal harness (src/train_test_harness.py) + explicit
-_patch_trainer_with_return_norm, same pattern as tests/test_train_env.py.
-One harness build serves all scenarios (builds cost ~5s each on the VM).
+Uses the minimal harness (src/train_test_harness.py), whose trainer is
+Cs2PuffeRL with the return-norm train() already installed (gh#168 W1.5), same
+pattern as tests/test_train_env.py. One harness build serves all scenarios
+(builds cost ~5s each on the VM).
 """
 
 
@@ -33,12 +34,10 @@ def _run_train_once(trainer):
 
 
 def test_kl_break_metrics_and_granularity():
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
         update_epochs = int(trainer.config["update_epochs"])
         total_mb = int(trainer.total_minibatches)
         mbs_per_epoch = max(1, total_mb // max(1, update_epochs))
@@ -82,12 +81,10 @@ def test_kl_break_metrics_and_granularity():
 
 
 def test_clipfrac_halves_and_event_fraction_are_logged():
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
         trainer.config["target_kl"] = 1e9
         losses = _run_train_once(trainer)
         assert "clipfrac_d" in losses

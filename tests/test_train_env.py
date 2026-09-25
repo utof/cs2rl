@@ -313,8 +313,10 @@ def test_event_mask_detects_injected_bomb_planted():
 
 
 # ── Task 8: prio_probs event-biased oversampling ───────────────────────────
-# These tests cover the prio_probs boosting added to the patched train()
-# closure inside _patch_trainer_with_return_norm. The plan target: segments
+# These tests cover the prio_probs boosting added to the replacement train()
+# body (_train_with_return_norm in src/train_update.py, installed by
+# Cs2PuffeRL.__init__ — the harness trainer always has it since gh#168 W1.5).
+# The plan target: segments
 # whose _batch1_event_mask is True get sampled at least 25% of the time when
 # at least one event segment exists.
 #
@@ -369,15 +371,12 @@ def test_prio_probs_event_oversample():
         so a +20pp lift can only come from the boost actually running."""
     import torch
 
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        # Apply the return-norm patch — that's where the prio_probs boost
-        # lives. The harness intentionally does NOT apply this patch so
-        # downstream tests can opt in.
-        _patch_trainer_with_return_norm(trainer)
+        # The prio_probs boost lives in the return-norm train() body, which
+        # the harness trainer carries by construction (gh#168 W1.5).
         trainer.evaluate()             # populate the rollout buffer
 
         # Force half of segments to be "event" segments. Segment count
@@ -421,12 +420,10 @@ def test_prio_probs_no_events_fallback():
     metric must be 0.0."""
     import torch
 
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
         trainer.evaluate()
         trainer._batch1_event_mask.zero_()
 
@@ -451,12 +448,10 @@ def test_event_oversample_fraction_exposed():
     """Task 8: the metric reports the RAW event-segment fraction (mask mean),
     not the post-boost sampled fraction. With half the mask True the metric
     must land in [0.4, 0.6]."""
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
         trainer.evaluate()
 
         seg_count = trainer._batch1_event_mask.shape[0]
@@ -475,16 +470,18 @@ def test_event_oversample_fraction_exposed():
 
 
 # ── Task 9: target_entropy schedule + log_alpha reset + Batch 1 metrics ────
-# These tests cover three sub-features added to _patch_trainer_with_return_norm:
+# These tests cover three sub-features of the return-norm patch
+# (_patch_trainer_with_return_norm, src/train_update.py):
 #   (A) target_entropy schedule — linear ramp 0.7→0.5 * max_entropy across
 #       global_step ∈ [0, 10_000_000]; constant after.
-#   (B) log_alpha reset — first train() after patch sets log_alpha to
+#   (B) log_alpha reset — first train() after construction sets log_alpha to
 #       log(ent_coef); idempotent thereafter.
 #   (C) Metric exposure — log_alpha, effective_alpha, per-channel std,
 #       grad_norm exposed as trainer attributes for the wandb log layer.
 #
-# Each test applies _patch_trainer_with_return_norm explicitly because the
-# harness intentionally does NOT (Task 8 tests use the same pattern).
+# gh#168 W1.5: the harness applies that patch itself (Cs2PuffeRL.__init__), so
+# none of these tests applies it; each reads the attributes straight off the
+# built trainer (Task 8 tests are the same shape).
 
 
 def test_target_entropy_schedule_applied():
@@ -511,13 +508,11 @@ def test_target_entropy_schedule_applied():
         ACTION_HEAD_SIZES,
         AIM_DIM,
         LOG_STD_MAX,
-        _patch_trainer_with_return_norm,
     )
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
 
         expected_max_discrete = sum(math.log(n) for n in ACTION_HEAD_SIZES)
         # Closed-form Normal entropy at σ = exp(LOG_STD_MAX), summed across
@@ -577,17 +572,16 @@ def test_target_entropy_schedule_applied():
 
 
 def test_log_alpha_reset_at_batch_start():
-    """Task 9B: first train() call after _patch_trainer_with_return_norm
+    """Task 9B: the first train() call on a freshly constructed trainer (the
+    return-norm patch runs in Cs2PuffeRL.__init__, gh#168 W1.5)
     must reset log_alpha to log(ent_coef). Subsequent calls must NOT
     re-reset (idempotent via the _batch1_log_alpha_reset_done flag)."""
     import math
 
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
 
         # Pre-train invariant: flag is False.
         assert trainer._batch1_log_alpha_reset_done is False, (
@@ -619,12 +613,10 @@ def test_batch1_metrics_exposed():
     (set by Task 8), and grad_norm (pre-clip)."""
     import math
 
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
         trainer.evaluate()
         trainer.train()
 
@@ -654,17 +646,16 @@ def test_batch1_metrics_exposed():
 
 def test_return_norm_stats_reset_on_batch_start():
     """Task 9a: applying the return-norm patch must put _ret_mean/_ret_var/
-    _ret_count into a neutral state and expose them on the trainer.
+    _ret_count into a neutral state and expose them on the trainer (the patch
+    runs inside Cs2PuffeRL.__init__, gh#168 W1.5).
 
     Reading them BEFORE any train() call pins the patch-time invariant —
     this is what guarantees a fresh start in symlog space when Batch 1 is
     enabled on a previously-trained checkpoint."""
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
         assert float(trainer._ret_mean.item()) == 0.0
         assert float(trainer._ret_var.item()) == 1.0
         assert int(trainer._ret_count.item()) == 0
@@ -681,12 +672,10 @@ def test_ret_var_reflects_symlog_scale():
     return std lands well under 10. The 10.0 threshold is a soft sanity
     bound: anything much higher would indicate the symlog/normalise
     pipeline isn't actually feeding the value head."""
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
         trainer.evaluate()
         trainer.train()
         std = trainer._ret_var.item()**0.5

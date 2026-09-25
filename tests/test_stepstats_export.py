@@ -184,11 +184,9 @@ def test_environment_episodes_counts_terminal_infos():
     ("inject after mean_and_log returns"): pufferl.py logs INSIDE
     mean_and_log, so a post-hoc write reaches metrics.jsonl but not the
     logger; writing self.stats first satisfies both. Same observable result."""
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=16)
     try:
-        _patch_trainer_with_return_norm(trainer)
         trainer.evaluate()
         trainer.stats["kills_t"] = [0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0] # 7 synthetic episodes
         trainer.last_log_time = 0.0                                    # force the throttled mean_and_log to run

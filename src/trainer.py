@@ -17,9 +17,9 @@ WHY a module of its own and not a class inside train.py: this module subclasses
 ``PuffeRL``, so it imports torch and pufferlib at module scope and is HEAVY by
 construction. ``import train`` must stay torch-free (tests/test_w1_modules.py: it is what
 keeps ``--dump-config`` at ~1 s), so train.py imports this module function-locally, inside
-``train()``. At W1 that is the ONLY production import site; train_test_harness.py does not
-import it (it still composes a bare PuffeRL plus two patches until W1.5), and
-tests/test_trainer_composition.py imports it inside a fixture. Never add
+``train()``. train_test_harness.py (gh#168 W1.5) imports it the same way, function-locally
+inside ``_build_trainer_for_test``, so ``import train_test_harness`` stays as light as
+``import train``; tests/test_trainer_composition.py imports it inside a fixture. Never add
 ``from trainer import ...`` at train.py's module level (knock-out W1-K3 in the spec:
 test_import_train_stays_light_and_really_imports_the_shims goes red: with the import next
 to the other module-level imports it is a circular-import ImportError, after all defs it
@@ -90,21 +90,43 @@ class Cs2PuffeRL(PuffeRL):
                  self_play_mgr,
                  logger=None):
         super().__init__(config, vecenv, policy, logger=logger)
-        _patch_trainer_with_return_norm(self)
-        _patch_trainer_with_hybrid_aim(self,
-                                       cont_action_view_main=cont_action_view_main,
-                                       mask_view_main=mask_view_main,
-                                       participating_rows=participating_rows)
-        _patch_trainer_with_selfplay(self, self_play_mgr)
-        # Per-epoch wall-clock, measured at the evaluate()/train() call sites in
-        # train()'s loop (#166 replaced a monkey-patch that wrapped both methods; the
-        # patch had to be installed LAST so selfplay could not shadow it, which made
-        # patch order load-bearing for a measurement). The dict is created here
-        # because the loop assigns INTO it and the [Timing] print reads it, so it
-        # has to exist before the first epoch.
-        self._timing = {"collect_ms": 0.0, "update_ms": 0.0}
-        # R0-C (#134): full-state checkpointing. Last here because train() applied it
-        # last at 2a3573f, not because anything depends on it: the installer reads no
-        # trainer attribute at patch time, and knock-out W1-K2 (installed BEFORE the
-        # selfplay patch) reproduced every hash of both byte gates.
-        _install_full_checkpointing(self, self_play_mgr)
+        # WHAT: everything after super().__init__ runs under one try that stops the
+        # Utilization thread on ANY raise, then re-raises.
+        # WHY: PuffeRL.__init__ starts ``self.utilization = Utilization()``, a
+        # NON-daemon threading.Thread whose loop only ends when its stop() is called,
+        # and the only production caller of that is PuffeRL.close(). A raise from a
+        # patch function (an assert on a bad view shape, a config the patcher
+        # refuses) leaves a half-built instance nobody can close(), so the thread
+        # keeps the interpreter alive at exit: pytest prints its summary and then
+        # hangs (gh#168 W1.5 review, MAJOR-1; pinned by
+        # tests/test_trainer_composition.py::test_a_raise_inside_init_stops_the_utilization_thread).
+        # PITFALLS: this is the ONE line of PuffeRL.close() that must run on the
+        # failure path; vecenv.close() is the caller's (the vecenv was theirs before
+        # this constructor), and save_checkpoint() would write a half-built trainer.
+        # ``except BaseException`` so KeyboardInterrupt mid-construction does not
+        # hang either. Never move the try above super().__init__: before it returns
+        # there is no ``self.utilization`` to stop (AttributeError would replace the
+        # real error). Keep the patch order below unchanged (the class docstring).
+        try:
+            _patch_trainer_with_return_norm(self)
+            _patch_trainer_with_hybrid_aim(self,
+                                           cont_action_view_main=cont_action_view_main,
+                                           mask_view_main=mask_view_main,
+                                           participating_rows=participating_rows)
+            _patch_trainer_with_selfplay(self, self_play_mgr)
+            # Per-epoch wall-clock, measured at the evaluate()/train() call sites in
+            # train()'s loop (#166 replaced a monkey-patch that wrapped both methods; the
+            # patch had to be installed LAST so selfplay could not shadow it, which made
+            # patch order load-bearing for a measurement). The dict is created here
+            # because the loop assigns INTO it and the [Timing] print reads it, so it
+            # has to exist before the first epoch.
+            self._timing = {"collect_ms": 0.0, "update_ms": 0.0}
+            # R0-C (#134): full-state checkpointing. Last here because train() applied it
+            # last at 2a3573f, not because anything depends on it: the installer reads no
+            # trainer attribute at patch time, and knock-out W1-K2 (installed BEFORE the
+            # selfplay patch) reproduced every hash of both byte gates.
+            _install_full_checkpointing(self, self_play_mgr)
+        except BaseException:
+            # Exactly what PuffeRL.close() does to the thread; nothing else of close().
+            self.utilization.stop()
+            raise
