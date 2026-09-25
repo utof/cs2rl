@@ -1,10 +1,10 @@
 """Warm-start entropy mode — trainer-contract tests (spec 2026-08-01 §5.2).
 
-Uses the minimal harness + explicit _patch_trainer_with_return_norm, same
-pattern as tests/test_kl_break_metrics.py. Config keys are injected into
-trainer.config before patching (ordering is actually indifferent — the patch
-init block only seeds attributes; the keys are read per train() call — but
-before-patching keeps the setup unambiguous).
+Uses the minimal harness, whose trainer is Cs2PuffeRL with the return-norm
+train() already installed (gh#168 W1.5), same pattern as
+tests/test_kl_break_metrics.py. Config keys are injected into trainer.config
+AFTER construction; that is fine because the patch's init block only seeds
+attributes and the warmstart_* keys are read per train() call.
 
 PITFALL: trainer.losses is a defaultdict(float) — losses["warmstart_phase"]
 == 0 would be vacuously true on a missing key. Always assert membership
@@ -36,13 +36,11 @@ def _run_train_once(trainer):
 
 
 def _build_ws_trainer(num_envs=32, **ws_overrides):
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=num_envs, with_selfplay=True)
     trainer.config["warmstart_entropy"] = True
     trainer.config["warmstart_alpha_ceiling"] = 0.0
     trainer.config.update(ws_overrides)
-    _patch_trainer_with_return_norm(trainer)
     return trainer, cleanup
 
 
@@ -60,9 +58,11 @@ def _force_floor_above_entropy(trainer, floor=1e6):
     attribute to monkeypatch after the fact, and the harness policy sits near max
     entropy so the condition never trips naturally.
 
-    PITFALL: must be called AFTER _patch_trainer_with_return_norm (the cell does
-    not exist before) and the name is matched by co_freevars, so a rename of the
-    local makes this raise instead of silently no-opping.
+    PITFALL: the cell exists only on the return-norm train() body, which the
+    harness trainer carries from construction (gh#168 W1.5); the name is matched
+    by co_freevars, so a rename of the local makes this raise instead of
+    silently no-opping. gh#168 W2a turns the closure local into
+    `trainer._entropy_floor`, and this helper becomes a plain attribute write.
     """
     fn = trainer.train.__func__
     freevars = fn.__code__.co_freevars
@@ -103,11 +103,9 @@ def test_floor_clamps_effective_alpha_when_mode_off():
     Without this, the GRACE test above would also pass on a build where the floor
     clamp was deleted outright.
     """
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
         _force_floor_above_entropy(trainer)
         losses = _run_train_once(trainer)
         assert "warmstart_phase" not in losses, "test precondition: mode must be off"
@@ -179,12 +177,10 @@ def test_grace_zero_anchors_on_second_update_and_ramps():
 
 
 def test_mode_off_is_unchanged_behavior():
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         # no warmstart keys at all
-        _patch_trainer_with_return_norm(trainer)
         losses = _run_train_once(trainer)
         assert "warmstart_phase" not in losses
         assert "warmstart_h_over_h0" not in losses

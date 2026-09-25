@@ -14,21 +14,28 @@ What's stripped vs. production ``src.train.train()``:
       shared-memory handshake, deterministic teardown).
     - checkpoint_dir: a ``tempfile.mkdtemp()`` scratch dir, wiped by cleanup().
     - wandb / metrics.jsonl / dead-run detection / save loop: omitted.
-    - return-norm patch and full checkpointing: skipped. Tests can apply
-      them explicitly if they need to exercise them. (The timing patch no
-      longer exists: 2cffc35 moved timing to train()'s call sites.)
+    - nothing on the trainer itself (gh#168 W1.5): the harness constructs
+      ``trainer.Cs2PuffeRL``, the production class, so return-norm, hybrid-aim,
+      self-play evaluate() and full checkpointing are ALWAYS on, exactly as in
+      ``train()``. Before W1.5 it composed a bare PuffeRL plus two patches and
+      26 tests applied return-norm themselves; ``tests/`` now applies no patch
+      function. (The timing patch no longer exists: 2cffc35 moved timing to
+      train()'s call sites.)
 
 Design contract:
     - Public API is ``_build_trainer_for_test(...)``, which returns
-      ``(trainer, cleanup)``, plus (gh#168 W1) ``_harness_parts(...)``, which
-      returns everything built BEFORE the trainer constructor so a test can
-      construct ``trainer.Cs2PuffeRL(**parts)`` itself
-      (tests/test_trainer_composition.py). Tuple rather than contextmanager because
+      ``(trainer, cleanup)`` with ``type(trainer) is trainer.Cs2PuffeRL``
+      (pinned by tests/test_trainer_composition.py), plus (gh#168 W1)
+      ``_harness_parts(...)``, which returns everything built BEFORE the
+      trainer constructor so a test can construct ``Cs2PuffeRL(**parts)``
+      itself. Tuple rather than contextmanager because
       (a) the smoke-test shape in the task spec uses try/finally, and
       (b) downstream tests may need to leak the trainer between helper
       functions — easier with an explicit cleanup callable.
     - ``with_selfplay`` defaults to False (Task 6c needs True; Tasks 7-11
-      default False to keep the attribute surface small).
+      default False to keep the attribute surface small). A test that needs
+      its OWN SelfPlayManager (a pre-seeded pool, p_past=1.0) passes it as
+      ``self_play_mgr=`` and the harness constructs the trainer around it.
 
 If PufferLib ever renames ``PuffeRL`` or drops a constructor kwarg, this file
 is where the breakage will first surface — giving us a single ~line-diff review
@@ -77,6 +84,7 @@ def _harness_parts(
     aim_log_std_max=None,
     aim_entropy_bonus: bool = True,
     opponent: str = "self",
+    self_play_mgr=None,
 ):
     """Everything ``_build_trainer_for_test`` builds BEFORE the trainer constructor.
 
@@ -92,19 +100,28 @@ def _harness_parts(
     trainer, because Cs2PuffeRL.__init__ reads both at patch time. The harness used
     to build them after a bare PuffeRL and hand them to the patchers one by one. This
     is the same hoist, so tests/test_trainer_composition.py can construct the
-    production class from the harness's parts, and W1.5 can make
-    ``_build_trainer_for_test`` itself return that class with no further re-ordering.
+    production class from the harness's parts, and (W1.5) ``_build_trainer_for_test``
+    itself returns that class with no further re-ordering.
     Measured neutral: build_participating_rows is pure and SelfPlayManager.__init__
     draws no RNG (construct_snapshot.py: 39 attrs x 4 configs, 0 diffs).
 
     PITFALL: ``cont_action_view_main`` is None on purpose. The harness is Serial-only,
     and the hybrid-aim patcher takes None to mean "no Multiprocessing shm to forward";
     it is spelled out in ``parts`` so ``Cs2PuffeRL(**parts)`` needs no extra kwarg.
+
+    ``self_play_mgr`` (gh#168 W1.5): a caller-built SelfPlayManager is used AS IS and
+    ``build_selfplay_manager`` is not called (tests/test_selfplay_factory.py spies on
+    that call and must see exactly one when nothing is given). The two tests that need
+    their own manager (tests/test_resume_state.py, tests/test_pitch_pin.py) used to
+    apply ``_patch_trainer_with_selfplay`` a second time on top of the harness's; now
+    the constructor reads the manager once. Its pool is read only inside evaluate(),
+    so a caller may seed it AFTER construction.
     """
     # Imports are function-local so importing this module in a test that
     # doesn't actually call the factory (e.g. a smoke import test) is free.
     # Cs2PuffeRL is lazy-imported inside train.train() in production (gh#168 W1
-    # dropped train()'s own PuffeRL import); do the same here so this module is
+    # dropped train()'s own PuffeRL import) and inside _build_trainer_for_test
+    # here; keeping every heavy import function-local also keeps this module
     # importable even if pufferlib's optional torch deps are mid-install in an
     # isolated test runner.
     import pufferlib.vector
@@ -321,12 +338,13 @@ def _harness_parts(
     # tests/test_selfplay_factory.py asserts the builder still produces each —
     # which is the only oracle here, since the §3 gate runs --no-self-play and
     # nothing on this branch reaches the harness at all.
-    self_play_mgr = build_selfplay_manager(
-        self_play_enabled=with_selfplay,
-        aim_log_std_max=aim_log_std_max,
-        pin_pitch=pin_pitch,
-        opponent_mode=opponent,
-    )
+    if self_play_mgr is None:
+        self_play_mgr = build_selfplay_manager(
+            self_play_enabled=with_selfplay,
+            aim_log_std_max=aim_log_std_max,
+            pin_pitch=pin_pitch,
+            opponent_mode=opponent,
+        )
     parts = dict(
         config=train_config,
         vecenv=vecenv,
@@ -355,8 +373,9 @@ def _build_trainer_for_test(
     aim_log_std_max=None,
     aim_entropy_bonus: bool = True,
     opponent: str = "self",
+    self_play_mgr=None,
 ):
-    """Build a tiny in-process PuffeRL trainer for Batch-1 trainer-level tests.
+    """Build a tiny in-process ``Cs2PuffeRL`` trainer for trainer-level tests.
 
     Parameters
     ----------
@@ -365,11 +384,12 @@ def _build_trainer_for_test(
         one evaluate() round on the Serial backend in under ~5s; bump only if
         a test specifically needs more parallelism (cost is roughly linear).
     with_selfplay : bool
-        If True, apply ``_patch_trainer_with_selfplay`` so ``trainer.evaluate``
-        is the self-play variant. The SelfPlayManager is constructed with an
-        EMPTY pool, so ``should_use_past()`` always returns False — the past-
-        policy branch is NOT exercised, but the replacement evaluate() is.
-        Required by Task 6c (reward-clamp removal test).
+        The ``self_play_enabled`` flag handed to ``build_selfplay_manager``
+        (p_past 0.3 when True, 0.0 when False). Either way the trainer's
+        evaluate() is the self-play replacement (Cs2PuffeRL always installs
+        it) and the manager's pool starts EMPTY, so ``should_use_past()``
+        returns False and the past-policy branch is NOT exercised unless a
+        test seeds the pool. Required by Task 6c (reward-clamp removal test).
     device : str
         Torch device. Default "cpu" keeps tests deterministic and CI-friendly.
     seed : int
@@ -434,13 +454,19 @@ def _build_trainer_for_test(
         here exactly as train() refuses ``--opponent noop`` without
         ``--no-self-play`` — a past-policy opponent is not a statue, and
         maybe_switch_teams would flip the statue's team mid-run.
+    self_play_mgr : SelfPlayManager or None
+        gh#168 W1.5: a caller-built manager the constructor uses INSTEAD of
+        ``build_selfplay_manager``'s (see ``_harness_parts``). None (default)
+        builds one from ``with_selfplay`` and the knobs above.
 
     Returns
     -------
-    trainer : pufferlib.pufferl.PuffeRL
-        Fully-constructed trainer with all production attributes the Batch-1
-        downstream tests assert against (see tests/test_train_harness_smoke.py
-        for the pinned surface).
+    trainer : trainer.Cs2PuffeRL
+        The production trainer class (gh#168 W1.5), fully composed: return-norm
+        train(), hybrid-aim buffers, self-play evaluate(), full checkpointing
+        save_checkpoint() and ``_timing`` are all present, exactly as train()
+        builds it (tests/test_trainer_composition.py pins the surface, and
+        tests/test_train_harness_smoke.py the stock attributes).
     cleanup : Callable[[], None]
         Idempotent teardown: closes the vecenv, wipes the scratch checkpoint
         dir. Tests MUST call this in a ``finally:`` to avoid leaking fd's /
@@ -455,10 +481,11 @@ def _build_trainer_for_test(
     - Serial backend means ``trainer.vecenv`` has a synchronous ``send``/``recv``
       cycle; tests can inject observations by monkey-patching those if needed.
     """
-    # Lazy for the reason _harness_parts gives above its own import block.
-    from pufferlib.pufferl import PuffeRL
-
-    from train import _patch_trainer_with_hybrid_aim, _patch_trainer_with_selfplay
+    # Lazy for the reason _harness_parts gives above its own import block, and
+    # (gh#168 W1) because trainer.py imports train at module scope: this module
+    # must never import it at ITS module scope or the two would cycle through
+    # tests that import the harness before train.
+    from trainer import Cs2PuffeRL
 
     parts, pins = _harness_parts(
         num_envs=num_envs,
@@ -475,29 +502,28 @@ def _build_trainer_for_test(
         aim_log_std_max=aim_log_std_max,
         aim_entropy_bonus=aim_entropy_bonus,
         opponent=opponent,
+        self_play_mgr=self_play_mgr,
     )
-    train_config, vecenv, policy = parts["config"], parts["vecenv"], parts["policy"]
+    vecenv = parts["vecenv"]
     tmp_checkpoint_dir = pins["tmp_checkpoint_dir"]
-    # gh#168 W1: the parts are built exactly as production builds them, but the
-    # harness STILL composes a bare PuffeRL plus the two patches it always applied,
-    # so no test's behaviour changes in W1. W1.5 replaces the four lines below with
-    # `Cs2PuffeRL(**parts)`.
-    trainer = PuffeRL(train_config, vecenv, policy)
-
-    # Batch 3 (T5): the hybrid-aim patcher is REQUIRED for any test that
-    # exercises evaluate() / train() because those code paths now read
-    # trainer.cont_actions / trainer.logprobs_{d,c}. Apply unconditionally
-    # so the harness shape matches production. _patch_trainer_with_return_norm
-    # is intentionally NOT applied here — harness tests that need it apply
-    # it explicitly (matches the pre-Batch-3 contract documented at module
-    # docstring "return-norm patch and full checkpointing: skipped").
-    # F8: mask_view_main plumbed so harness rollouts run MASKED, same as
-    # production. Pin the RawArray on the trainer against GC (prod pattern).
+    # gh#168 W1.5: the production class, from the same parts train() builds. Its
+    # __init__ applies return-norm, hybrid-aim (mask_view_main plumbed so harness
+    # rollouts run MASKED, F8), the self-play evaluate() and full checkpointing,
+    # so a harness test can no longer forget return-norm and run stock
+    # PuffeRL.train() (gh#169), which cannot unpack the 4-tuple policy output.
+    # The constructor is wrapped for the same reason build_policy is inside
+    # _harness_parts: a raise here (PuffeRL's APIUsageError on a config it
+    # refuses, or a patch-time assert) would otherwise leak the Serial envs and
+    # the scratch dir, since `cleanup` only exists once we return.
+    try:
+        trainer = Cs2PuffeRL(**parts)
+    except Exception:
+        vecenv.close()
+        shutil.rmtree(tmp_checkpoint_dir, ignore_errors=True)
+        raise
+    # Pin the RawArray on the trainer against GC, after the constructor exactly
+    # as train() pins its shm (the pin is a GC anchor, not trainer state).
     trainer._action_mask_shm = pins["mask_shm"]
-    _patch_trainer_with_hybrid_aim(trainer,
-                                   mask_view_main=parts["mask_view_main"],
-                                   participating_rows=parts["participating_rows"])
-    _patch_trainer_with_selfplay(trainer, parts["self_play_mgr"])
 
     def cleanup():
         """Idempotent teardown. Safe to call twice.

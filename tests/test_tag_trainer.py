@@ -1,8 +1,10 @@
 """TAG diagnostic — trainer-contract tests (spec 2026-08-13 §5, tests 1/3/4).
 
-Uses train_test_harness._build_trainer_for_test + _patch_trainer_with_
-return_norm, the same pattern as tests/test_warmstart_entropy_trainer.py.
-Config keys are injected into trainer.config before patching.
+Uses train_test_harness._build_trainer_for_test, whose trainer is Cs2PuffeRL
+with the return-norm train() already installed (gh#168 W1.5), the same pattern
+as tests/test_warmstart_entropy_trainer.py. Config keys (target_kl, tag_*) are
+injected into trainer.config after construction; they are read per train()
+call, not at patch time.
 
 PITFALL: target_kl is set to None in TAG trainer tests so the KL early-stop
 cannot end the update mid-way — the mbL measurement then lands
@@ -19,7 +21,6 @@ import torch
 
 
 def _build(tag_on, seed=0):
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
     torch.manual_seed(seed)            # identical policy init both arms
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True, seed=seed)
@@ -27,7 +28,6 @@ def _build(tag_on, seed=0):
     if tag_on:
         trainer.config["tag_diagnostic"] = True
         trainer.config["tag_every"] = 1
-    _patch_trainer_with_return_norm(trainer)
     return trainer, cleanup
 
 
@@ -220,7 +220,6 @@ def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
     pin is test_row_mask_matches_obs_team_bit above; this one proves the
     invariant survives building the trainer with a split policy.
     """
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
     torch.manual_seed(0)
     trainer, cleanup = _build_trainer_for_test(num_envs=32,
@@ -228,7 +227,6 @@ def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
                                                seed=0,
                                                tct_split_heads=True)
     trainer.config["target_kl"] = None
-    _patch_trainer_with_return_norm(trainer)
     try:
         assert trainer.policy.tct_split_heads is True
         trainer.evaluate()
@@ -261,7 +259,6 @@ def test_row_mask_matches_obs_team_bit_on_a_both_flags_trainer():
     PITFALL: do not probe t=0 on the first evaluate() — that slot is
     still the zero-initialized pre-step obs.
     """
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
     torch.manual_seed(0)
     trainer, cleanup = _build_trainer_for_test(num_envs=32,
@@ -270,7 +267,6 @@ def test_row_mask_matches_obs_team_bit_on_a_both_flags_trainer():
                                                tct_split_heads=True,
                                                tct_split_trunk=True)
     trainer.config["target_kl"] = None
-    _patch_trainer_with_return_norm(trainer)
     try:
         assert trainer.policy.tct_split_heads is True
         assert trainer.policy.tct_split_trunk is True

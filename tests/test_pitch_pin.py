@@ -247,18 +247,23 @@ def _ratio_c_after_rollout(pin_pitch, map_data, num_envs=8):
     import tempfile
     from pathlib import Path
 
-    from train import SelfPlayManager, _hybrid_ppo_loss, _patch_trainer_with_selfplay
+    from train import SelfPlayManager, _hybrid_ppo_loss
     from train_test_harness import _build_trainer_for_test
+    # gh#168 W1.5: the p_past=1.0 manager is built first and handed to the
+    # harness, which constructs Cs2PuffeRL around it (the harness's own manager
+    # would have p_past=0.0). The pool is seeded AFTER construction: the
+    # constructor never reads it, only evaluate() does, and the snapshot has to
+    # be of the policy the constructor built.
+    mgr = SelfPlayManager(p_past=1.0, pin_pitch=bool(pin_pitch))
     trainer, cleanup = _build_trainer_for_test(num_envs=num_envs,
                                                map_data=map_data,
-                                               pin_pitch=pin_pitch)
+                                               pin_pitch=pin_pitch,
+                                               self_play_mgr=mgr)
     try:
         d = Path(tempfile.mkdtemp())
         snap = d / "sp_000000.pt"
         torch.save(trainer.policy.state_dict(), snap)
-        mgr = SelfPlayManager(p_past=1.0, pin_pitch=bool(pin_pitch))
         mgr._add_to_pool(snap)
-        _patch_trainer_with_selfplay(trainer, mgr)
         trainer.evaluate()
         assert trainer._selfplay_used_past
         past = mgr.load_past_policy(trainer.config["device"], trainer.vecenv)

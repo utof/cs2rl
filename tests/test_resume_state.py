@@ -21,23 +21,24 @@ TRAIN_SCRIPT = REPO_ROOT / "src" / "train.py"
 
 
 def _make(num_envs=16, seed=3):
-    from train import (
-        SelfPlayManager,
-        _install_full_checkpointing,
-        _patch_trainer_with_return_norm,
-        _patch_trainer_with_selfplay,
-    )
+    """A harness trainer whose self-play manager this test owns.
+
+    gh#168 W1.5: the manager is built FIRST and handed to the harness, which
+    constructs the production trainer class around it, so `save_checkpoint`
+    (full checkpointing is always installed by Cs2PuffeRL.__init__) pickles
+    THIS manager's pool state and `restore_train_state` can be checked against
+    the same object. Before W1.5 this helper applied the self-play and
+    checkpointing patches a second time on top of the harness's own.
+    """
+    from train import SelfPlayManager
     from train_test_harness import _build_trainer_for_test
-    trainer, cleanup = _build_trainer_for_test(num_envs=num_envs, seed=seed)
-    _patch_trainer_with_return_norm(trainer)
     mgr = SelfPlayManager(pool_size=15,
                           p_past=0.0,
                           save_every_epochs=25,
                           win_threshold=0.6,
                           phase_length=50)
-    _patch_trainer_with_selfplay(trainer, mgr)
+    trainer, cleanup = _build_trainer_for_test(num_envs=num_envs, seed=seed, self_play_mgr=mgr)
     trainer.logger.run_id = "rid-test"
-    _install_full_checkpointing(trainer, mgr)
     return trainer, mgr, cleanup
 
 

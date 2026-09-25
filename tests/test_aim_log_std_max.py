@@ -71,7 +71,7 @@ def test_reinit_frozen_respects_cap():
 
 
 def test_max_entropy_reflects_cap_pin_and_bonus(simple_map):
-    from train import ACTION_HEAD_SIZES, _patch_trainer_with_return_norm
+    from train import ACTION_HEAD_SIZES
     from train_test_harness import _build_trainer_for_test
     disc = sum(math.log(n) for n in ACTION_HEAD_SIZES)
     cap = math.log(0.05)
@@ -85,7 +85,6 @@ def test_max_entropy_reflects_cap_pin_and_bonus(simple_map):
             assert trainer.config["aim_entropy_bonus"] is bonus
             assert trainer.config["aim_log_std_max"] == pytest.approx(cap)
             assert trainer.config["pin_pitch"] == pin
-            _patch_trainer_with_return_norm(trainer)
             cont = n_dims * 0.5 * math.log(2 * math.pi * math.e * math.exp(cap)**2)
             assert trainer._batch1_max_entropy == pytest.approx(disc + cont)
         finally:
@@ -143,7 +142,6 @@ def test_parked_rows_do_not_move_objective(simple_map):
     parked rows' stored advantages/logprobs by a huge amount, re-run the
     minibatch reductions through a second identical trainer and compare
     losses/policy_loss, losses/entropy, losses/approx_kl."""
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     def _one(perturb):
@@ -154,7 +152,6 @@ def test_parked_rows_do_not_move_objective(simple_map):
                                                    n_active_per_team=1,
                                                    aim_entropy_bonus=False)
         try:
-            _patch_trainer_with_return_norm(trainer)
             trainer.evaluate()
             if perturb:
                 parked = ~trainer.participating

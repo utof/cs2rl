@@ -56,12 +56,10 @@ def test_batch1_smoke_runs_without_nan():
     """
     import math
 
-    from train import _patch_trainer_with_return_norm
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        _patch_trainer_with_return_norm(trainer)
 
         # ── Run one full round ──────────────────────────────────────────
         trainer.evaluate()

@@ -249,15 +249,15 @@ def test_scheduled_eval_survives_log_throttle(simple_map):
     """Binding ruling: eval runs on the eval epoch even when PuffeRL's 0.25 s
     log throttle returns logs=None, and its keys land on the NEXT logged row
     (with eval/epoch stamping the epoch they were measured at)."""
-    from train import ScheduledEval, _patch_trainer_with_return_norm
+    from train import ScheduledEval
     from train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=16,
                                                map_data=simple_map,
                                                n_active_per_team=1)
     try:
-        # The hybrid-aware train() (stock PuffeRL.train cannot unpack the
-        # 4-tuple policy output) — same pattern as every other harness test.
-        _patch_trainer_with_return_norm(trainer)
+        # The harness trainer is Cs2PuffeRL (gh#168 W1.5), so its train() is
+        # the hybrid-aware body (stock PuffeRL.train cannot unpack the 4-tuple
+        # policy output); nothing has to be applied here.
         stub = _StubEvaluator()
         hook = ScheduledEval(stub, interval=1, policy=trainer.policy, device="cpu")
         # Epoch 1: throttled → logs is None; eval must still run and buffer.
