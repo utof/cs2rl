@@ -3280,7 +3280,6 @@ def train(args):
     """Run PPO training via PufferLib 3.0."""
     import pufferlib.vector
     import torch
-    from pufferlib.pufferl import PuffeRL
 
     # Fix #2 (perf): disable torch.distributions argument validation globally.
     # Most of our hot paths replaced torch.distributions with hand-rolled
@@ -3570,36 +3569,6 @@ def train(args):
               "will suppress entropy pressure on a from-scratch policy (legal, but "
               "probably not what you want).")
 
-    trainer = PuffeRL(train_config, vecenv, policy)
-    # R0-C: PuffeRL's NoLogger invents a timestamp run_id; pin ours so
-    # <data_dir>/<run_id>/ matches the metrics rows and --resume-run can find it.
-    trainer.logger.run_id = run_id
-    trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
-    # Rung 1a T1: …but NOT on the aim σ. Decay adds wd·θ to the gradient and
-    # aim_log_std is always negative, so it would drift σ upward at exactly
-    # zero true gradient — faking the gate's learning signal and eating the
-    # init's clamp margin. Must run after the line above (it clones group 0's
-    # hypers) and before load_full_resume (see the helper's PITFALLS).
-    _n_sigma = isolate_aim_log_std_param_group(trainer)
-    print(f"[Train] aim_log_std: {_n_sigma} parameter(s) moved to a weight_decay=0 param group "
-          f"(fresh init {train_config['aim_log_std_init']:.4f}, "
-          f"cap {train_config['aim_log_std_max']:.4f})")
-    _patch_trainer_with_return_norm(trainer)
-    # Batch 3 (T5): the hybrid-aim patch follows return_norm here, but the
-    # dependency is at CALL time, not patch time: the replacement train()
-    # body that return_norm installs (types.MethodType, train_update.py; it
-    # never calls the stock train()) reads self.cont_actions /
-    # self.logprobs_{d,c} on its first call, and nothing at patch time checks
-    # they exist. Likewise selfplay's replacement evaluate() writes those
-    # buffers every rollout. The only load-bearing order is "all patches
-    # applied before the first evaluate()/train() call".
-    # Pin the shm + view on the trainer so neither is GC'd mid-run. Without
-    # holding _cont_action_shm here, Python could free the RawArray once
-    # this function returns (Python doesn't know workers/numpy views are
-    # using it via the OS-level mapping).
-    trainer._cont_action_shm = _cont_action_shm
-    trainer._action_mask_shm = _mask_shm               # F8: same GC-pinning rationale
-
     # Rung 0 §2.2 + Rung 1a T3: static per-run participation vector, env-row
     # major (10 rows per env: T at 0-4, CT at 5-9). Under --opponent self it
     # selects slots 0..n-1 of BOTH teams — the exact slots the C env spawns
@@ -3614,11 +3583,7 @@ def train(args):
                                                    _n_active,
                                                    opponent_mode=_opponent_mode,
                                                    hero_team=SelfPlayManager.initial_hero_team())
-    assert trainer.vecenv.driver_env.n_active_per_team == _n_active, "driver env / args disagree"
-    _patch_trainer_with_hybrid_aim(trainer,
-                                   cont_action_view_main=_cont_action_view_main,
-                                   mask_view_main=_mask_view_main,
-                                   participating_rows=_participating_rows)
+    assert vecenv.driver_env.n_active_per_team == _n_active, "driver env / args disagree"
 
     # ── Self-play setup ──────────────────────────────────────────────────────
     # F11 (2026-07-06 adversarial review): the selfplay replacement evaluate()
@@ -3651,7 +3616,53 @@ def train(args):
         _shutil.copy2(resume_path, seed_path)
         self_play_mgr._add_to_pool(seed_path)
         print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
-    _patch_trainer_with_selfplay(trainer, self_play_mgr)
+
+    # gh#168 W1 (ADR 0002): the trainer is a SUBCLASS, not a PuffeRL mutated in
+    # place. Everything the four patch functions read at patch time —
+    # participating_rows, the shm views, the (possibly pre-seeded) self-play
+    # manager — is built ABOVE this line, exactly as before; everything that
+    # used to be set on the instance after construction (run_id, weight_decay,
+    # the aim-σ param group, the GC pins) stays below it, because no patch
+    # reads it at patch time (spec §W1 table; both byte gates pin this order).
+    # Function-local import ON PURPOSE: trainer.py subclasses PuffeRL and so
+    # imports torch at module scope; `import train` must stay torch-free
+    # (tests/test_w1_modules.py).
+    from trainer import Cs2PuffeRL
+    trainer = Cs2PuffeRL(train_config,
+                         vecenv,
+                         policy,
+                         cont_action_view_main=_cont_action_view_main,
+                         mask_view_main=_mask_view_main,
+                         participating_rows=_participating_rows,
+                         self_play_mgr=self_play_mgr)
+    # R0-C: PuffeRL's NoLogger invents a timestamp run_id; pin ours so
+    # <data_dir>/<run_id>/ matches the metrics rows and --resume-run can find it.
+    trainer.logger.run_id = run_id
+    trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
+    # Rung 1a T1: …but NOT on the aim σ. Decay adds wd·θ to the gradient and
+    # aim_log_std is always negative, so it would drift σ upward at exactly
+    # zero true gradient — faking the gate's learning signal and eating the
+    # init's clamp margin. Must run after the line above (it clones group 0's
+    # hypers) and before load_full_resume (see the helper's PITFALLS).
+    _n_sigma = isolate_aim_log_std_param_group(trainer)
+    print(f"[Train] aim_log_std: {_n_sigma} parameter(s) moved to a weight_decay=0 param group "
+          f"(fresh init {train_config['aim_log_std_init']:.4f}, "
+          f"cap {train_config['aim_log_std_max']:.4f})")
+    # Batch 3 (T5): Cs2PuffeRL.__init__ applies the hybrid-aim patch after
+    # return_norm, but the dependency is at CALL time, not patch time: the
+    # replacement train() body that return_norm installs (types.MethodType,
+    # train_update.py; it never calls the stock train()) reads
+    # self.cont_actions / self.logprobs_{d,c} on its first call, and nothing
+    # at patch time checks they exist. Likewise selfplay's replacement
+    # evaluate() writes those buffers every rollout. The only load-bearing
+    # order is "all patches applied before the first evaluate()/train() call".
+    # Pin the shm + view on the trainer so neither is GC'd mid-run. Without
+    # holding _cont_action_shm here, Python could free the RawArray once
+    # this function returns (Python doesn't know workers/numpy views are
+    # using it via the OS-level mapping).
+    trainer._cont_action_shm = _cont_action_shm
+    trainer._action_mask_shm = _mask_shm               # F8: same GC-pinning rationale
+
     # R0-E.2: env flag ⇔ policy mask, or stop before the first rollout.
     assert_pin_pitch_agreement(vecenv, policy)
     # R0-G: env aim clamp ⇔ policy tanh scale (a resumed checkpoint may carry
@@ -3679,18 +3690,6 @@ def train(args):
               f"{int(_participating_rows.sum()):,} of {_participating_rows.size:,} agent rows "
               f"participate (raw horizon {train_config['total_timesteps']:,} rows = "
               f"{train_config['participating_timesteps']:,} hero steps).")
-    # Per-epoch wall-clock, measured at the evaluate()/train() call sites in the
-    # loop below (#166 replaced a monkey-patch that wrapped both methods; the
-    # patch had to be installed LAST so selfplay could not shadow it, which made
-    # patch order load-bearing for a measurement). The dict is created here
-    # because the loop assigns INTO it and the [Timing] print reads it, so it
-    # has to exist before the first epoch.
-    trainer._timing = {"collect_ms": 0.0, "update_ms": 0.0}
-    # ────────────────────────────────────────────────────────────────────────
-
-    # ── R0-C (#134): full-state checkpointing + restore ─────────────────────
-    # Installed after EVERY patch so the sidecar sees the final aliases.
-    _install_full_checkpointing(trainer, self_play_mgr)
     _resumed_from_step = None
     if resume_run:
         _info = load_full_resume(trainer, self_play_mgr, _resume_paths)

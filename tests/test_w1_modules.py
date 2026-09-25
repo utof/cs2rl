@@ -58,6 +58,13 @@ SRC = REPO_ROOT / "src"
 # its scope. If that ownership ever flipped back, or someone imported a policy
 # class to spell a type hint, eight string constants would start costing a torch
 # import, and only this test would say so.
+#
+# `trainer` (gh#168 W1) is deliberately NOT here: it subclasses PuffeRL, so it
+# imports pufferlib (and through it torch) at module scope and is heavy by
+# construction. It cannot pass property 3, and train.py / train_test_harness.py
+# import it function-locally for exactly that reason (knock-out W1-K3: a
+# module-level `from trainer import Cs2PuffeRL` in train.py turns
+# test_import_train_stays_light_and_really_imports_the_shims red naming torch).
 W1_MODULES = ("train_shared", "resume_state", "train_config", "train_metrics", "train_update",
               "env_factory", "metrics_schema", "env_config")
 
