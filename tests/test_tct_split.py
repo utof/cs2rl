@@ -415,8 +415,8 @@ def test_self_play_loads_both_checkpoint_vintages(env, tmp_path):
     torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
 
     for path, expect_split in ((legacy_pt, False), (split_pt, True)):
-        # Constructor is all-default at HEAD, and _evaluate_with_selfplay calls
-        # `self_play_mgr.load_past_policy(dev, self.vecenv)` — mirrored here.
+        # Constructor is all-default at HEAD, and Cs2PuffeRL.evaluate calls
+        # `self._self_play_mgr.load_past_policy(dev, self.vecenv)` — mirrored here.
         mgr = train.SelfPlayManager()
         mgr.pool = [path]
         past = mgr.load_past_policy("cpu", env)

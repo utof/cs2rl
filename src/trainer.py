@@ -13,10 +13,11 @@ attribute-for-attribute the trainer ``train()`` built before (the byte gates and
 construction snapshot in .superpowers/sdd/2026-09-24-168-trainer-subclass/ pin that).
 W2a (gh#168) folded the first of the four in: ``_init_return_norm`` seeds the return-norm
 state and ``train`` / ``_normalize_returns`` / ``_update_return_stats`` are methods, so
-``__init__`` now calls ``_init_return_norm`` and then the three remaining patch functions
-in the same order: ``_patch_trainer_with_hybrid_aim`` (folds in W3, with the vecenv
-plumbing), ``_patch_trainer_with_selfplay`` (the evaluate body, W2b) and
-``_install_full_checkpointing`` (the save_checkpoint override, W2c).
+W2b folded the self-play patcher: ``_init_selfplay`` stores the manager, the past
+policy's LSTM state and the ``_batch1_*`` reward state, and ``evaluate`` is a method, so
+``__init__`` now calls ``_init_return_norm``, ``_patch_trainer_with_hybrid_aim`` (folds in
+W3, with the vecenv plumbing), ``_init_selfplay`` and ``_install_full_checkpointing`` (the
+save_checkpoint override, W2c), in the same order the four patch calls had.
 
 WHY a module of its own and not a class inside train.py: this module subclasses
 ``PuffeRL``, so it imports torch and pufferlib at module scope and is HEAVY by
@@ -46,19 +47,36 @@ from collections import defaultdict
 import numpy as np
 
 # Heavy by construction (module docstring): pufferl imports torch at ITS module scope.
+# `pufferlib` is read by the self-play evaluate body (gh#168 W2b) at exactly one site,
+# `pufferlib.unroll_nested_dict`. `import pufferlib.pytorch` has NO use in this module:
+# the old closure imported both forms and never touched `.pytorch`, and ast_oracle.py
+# check S2 passes only if this module binds `pufferlib` through every import form the
+# old closure used (extra forms are fine) or re-imports the name from train.py. Measured
+# in the #262 fold: without this line O1 fails S2 on `pufferlib`. Carried for that check
+# only; it can go once `--moves evaluate` is no longer run as a gate.
+import pufferlib
+import pufferlib.pytorch
 import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
 from _action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, AIM_DIM
 from resume_state import _install_full_checkpointing
-from train import _patch_trainer_with_hybrid_aim, _patch_trainer_with_selfplay
+from train import _hybrid_sample_logits, _patch_trainer_with_hybrid_aim
 
 # W2a (gh#168): everything train() reads that used to be a function-local import of
 # the patcher, or a global of train_update.py, is a module-level import HERE, of the
 # same object from its defining module. ast_oracle.py check S2 fails on a shadowing
 # definition or a missing import; tests/test_tag_trainer.py patches tag_grad_cossim
-# on THIS module because the body resolves it through these globals.
-from train_helpers_batch1 import WS_GRACE, WS_OFF, warmstart_entropy_state
+# on THIS module because the body resolves it through these globals. W2b added
+# `WelfordStd` / `process_step_rewards` (the self-play state and evaluate body) and
+# `_hybrid_sample_logits` above, under the same rule.
+from train_helpers_batch1 import (
+    WS_GRACE,
+    WS_OFF,
+    WelfordStd,
+    process_step_rewards,
+    warmstart_entropy_state,
+)
 from train_shared import LOG_STD_MAX
 from train_update import (
     _hybrid_ppo_loss,
@@ -143,7 +161,7 @@ class Cs2PuffeRL(PuffeRL):
                                            cont_action_view_main=cont_action_view_main,
                                            mask_view_main=mask_view_main,
                                            participating_rows=participating_rows)
-            _patch_trainer_with_selfplay(self, self_play_mgr)
+            self._init_selfplay(self_play_mgr)
             # Per-epoch wall-clock, measured at the evaluate()/train() call sites in
             # train()'s loop (#166 replaced a monkey-patch that wrapped both methods; the
             # patch had to be installed LAST so selfplay could not shadow it, which made
@@ -351,6 +369,412 @@ class Cs2PuffeRL(PuffeRL):
         self._update_return_stats(sel.flatten())
         std = (self._ret_var + 1e-8).sqrt()
         return (mb_returns - self._ret_mean) / std
+
+    def _init_selfplay(self, self_play_mgr):
+        """Self-play state for evaluate() (the patch-time half of the former self-play
+        patcher in train.py; W2b of gh#168). Called from __init__ right after
+        the hybrid-aim patch and before ``_timing`` / checkpointing, i.e. exactly where the
+        patch call stood, so construction order is unchanged.
+
+        Stores the manager, the past policy's own LSTM state (the same dict structure as
+        ``self.lstm_h``: keyed by agent-batch start ``i*n``, one ``(agents_per_batch,
+        hidden_size)`` tensor per chunk, so ``evaluate`` can index it by ``env_id.start``),
+        and the six ``_batch1_*`` reward-processing attributes. ``process_step_rewards``
+        updates the three ``WelfordStd`` and reads their ``std()``; ``train`` copies the
+        three ``std()`` values into ``_batch1_std_*`` at the end of each call.
+        ``process_step_rewards`` writes each env's channel sum into
+        ``_batch1_reward_scratch`` and reads it back for one host-to-device copy;
+        ``evaluate`` replaces the buffer with a longer one when the info list (at most one
+        entry per env) is longer than it. ``process_step_rewards`` only sets rows of
+        ``_batch1_current_segment_has_event`` to True (bomb planted this tick); ``evaluate``
+        reads those rows into ``_batch1_event_mask`` and clears them at the segment
+        boundary. Apart from the zero fill here, ``_batch1_event_mask`` is written only by
+        ``evaluate`` at that boundary, and ``train`` reads it.
+        ``_install_full_checkpointing`` still takes the manager as an argument
+        (resume_state.py is untouched by W2b).
+        """
+        self._self_play_mgr = self_play_mgr
+        self._past_lstm_h = {k: torch.zeros_like(v) for k, v in self.lstm_h.items()}
+        self._past_lstm_c = {k: torch.zeros_like(v) for k, v in self.lstm_h.items()}
+        # Batch 1 reward processing state (per-channel Welford, per-segment event
+        # masks, and the numpy scratch buffer process_step_rewards writes into; evaluate
+        # replaces it with a longer one when the info list, at most one entry per env, is
+        # longer than the buffer).
+        self._batch1_welford_combat = WelfordStd(prior_std=1.0, min_count=1000)
+        self._batch1_welford_objective = WelfordStd(prior_std=1.0, min_count=1000)
+        self._batch1_welford_positional = WelfordStd(prior_std=1.0, min_count=1000)
+        _dev = self.config["device"]
+        self._batch1_event_mask = torch.zeros(self.segments, dtype=torch.bool, device=_dev)
+        self._batch1_current_segment_has_event = torch.zeros(self.total_agents,
+                                                             dtype=torch.bool,
+                                                             device=_dev)
+        self._batch1_reward_scratch = np.empty(0, dtype=np.float32)
+        print("[Train] Self-play evaluate patch enabled.")
+
+    def evaluate(self):
+        """Rollout collection with the self-play opponent override (the body of the
+        former self-play patcher's closure in train.py; W2b of gh#168).
+
+        For each evaluation epoch ``SelfPlayManager.should_use_past()`` decides (once)
+        whether to activate self-play. When active, a random past checkpoint is loaded
+        and its actions+logprobs replace the current-policy outputs for the
+        opponent-team slots in the rollout buffer. The current policy's LSTM state is
+        updated normally; the past policy has its own independent LSTM state tensors
+        (``self._past_lstm_h`` / ``self._past_lstm_c``, allocated by
+        ``_init_selfplay``). ``train()`` sees the overridden actions as if they came
+        from the current policy at collection time; the importance ratio
+        (pi_new / pi_old) is well-defined because the *past* policy's logprobs are
+        stored as pi_old.
+
+        Rung 1a T3: a SECOND, unconditional opponent override for
+        ``self._self_play_mgr.opponent_mode == "noop"`` (the stationary statue). It is
+        independent of the past-policy branch (dead at p_past = 0, the only
+        configuration noop allows) and pairs with the hero-team-only participation
+        vector from ``build_participating_rows``.
+
+        Every module global the body reads (``pufferlib``, ``torch``, ``np``,
+        ``process_step_rewards``, ``_hybrid_sample_logits``) is imported at the top
+        of this module from its defining module; ast_oracle.py check S2 pins that.
+        """
+        profile = self.profile
+        epoch = self.epoch
+        profile("eval", epoch)
+        profile("eval_misc", epoch, nest=True)
+
+        cfg = self.config
+        dev = cfg["device"]
+
+        if cfg["use_rnn"]:
+            for k in self.lstm_h:
+                self.lstm_h[k].zero_()
+                self.lstm_c[k].zero_()
+
+        # ── Decide self-play for this epoch ────────────────────────────────
+        use_past = self._self_play_mgr.should_use_past()
+        past_policy = None
+        if use_past:
+            past_policy = self._self_play_mgr.load_past_policy(dev, self.vecenv)
+            use_past = past_policy is not None
+
+        # TAG (spec 2026-08-13 §4.2): expose whether THIS epoch's rollout
+        # used a past-policy opponent — on those epochs one team's rows are
+        # off-policy and cross-team cos-sim measures on-vs-off-policy
+        # asymmetry, not T/CT conflict; the analyzer drops them.
+        self._selfplay_used_past = bool(use_past)
+
+        if use_past:
+            for k in self._past_lstm_h:
+                self._past_lstm_h[k].zero_()
+                self._past_lstm_c[k].zero_()
+        # ───────────────────────────────────────────────────────────────────
+
+        self.full_rows = 0
+        while self.full_rows < self.segments:
+            profile("env", epoch)
+            o, r, d, t, info, env_id, mask = self.vecenv.recv()
+
+            profile("eval_misc", epoch)
+            env_id = slice(env_id[0], env_id[-1] + 1)
+            # Rung 0 §2.2: global_step counts PARTICIPATING agent-steps, so
+            # --timesteps means the same thing at any n_active_per_team.
+            # `mask` is the recv() chunk's live-agent mask (all-True for this
+            # env, vector.py:188); env_id is the agent-row slice bound just
+            # above, so the static row flags line up element-for-element.
+            self.global_step += int(
+                (np.asarray(mask, dtype=bool) & self._participating_rows_np[env_id]).sum())
+
+            profile("eval_copy", epoch)
+            o = torch.as_tensor(o)
+            o_device = o.to(dev)
+            r = torch.as_tensor(r).to(dev)
+            d = torch.as_tensor(d).to(dev)
+
+            # F8: pull the C-computed action masks for exactly this batch of
+            # agent rows. env_id indexes agent rows, matching the shm layout
+            # (num_envs*N_AGENTS, ACTION_MASK_DIM). `!= 0` both converts to
+            # bool AND copies — the shm bytes get overwritten by the next
+            # worker step, so we must not keep a view. None ⇒ unmasked
+            # (legacy trainer built without the mask shm).
+            mask_view = getattr(self, "_action_mask_view_main", None)
+            action_mask = None
+            if mask_view is not None:
+                action_mask = torch.as_tensor(mask_view[env_id]).to(dev) != 0
+
+            profile("eval_forward", epoch)
+            with torch.no_grad(), self.amp_context:
+                state = dict(reward=r, done=d, env_id=env_id, mask=mask)
+                if cfg["use_rnn"]:
+                    state["lstm_h"] = self.lstm_h[env_id.start]
+                    state["lstm_c"] = self.lstm_c[env_id.start]
+
+                # Batch 3 (T5) + Fix #1: hybrid rollout. Policy returns 4-tuple
+                # (logits, mu_aim, log_std, value). _hybrid_sample_logits now
+                # returns the per-factor log-prob halves directly (6-tuple),
+                # eliminating the previous double-construction of 7 Categorical
+                # + 1 Normal at the rollout site (was +437 ms/epoch on the
+                # smoke benchmark per perf investigation post-PR #28).
+                logits, mu_aim, log_std_aim, value = self.policy.forward_eval(o_device, state)
+                action, cont_action, logprob_d, logprob_c, _, _ = _hybrid_sample_logits(
+                    (logits, mu_aim, log_std_aim, value),
+                    max_turn_speed=self.policy.max_turn_speed.item(),
+                    mask=action_mask,
+                    aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
+                )
+                # Joint log-prob for self.logprobs (back-compat slot read by
+                # PufferLib's diagnostics + the KL/clipfrac path). Per-factor
+                # halves go to self.logprobs_d / self.logprobs_c for the
+                # H-PPO clip in _hybrid_ppo_loss.
+                logprob = logprob_d + logprob_c
+
+                # ── Task 6c: per-channel reward norm + symlog (replaces the
+                # old hard-clip of r to [-1, 1]). Pipeline:
+                #   step_stats (Task 6a info payload)
+                #     → split_into_channels (Task 4)
+                #     → WelfordStd.update + normalize per channel (Task 5)
+                #     → sum channels → symlog (Task 4) → r written to buffer
+                #
+                # Info shape: PufferLib's Serial/Multiprocessing backend
+                # collects info with list-extend semantics (pufferlib/vector.py
+                # ~L149-153). Cs2Env returns `[{"step_stats": view}]` per tick
+                # so `len(info)` is the number of envs in this batch, while
+                # r.shape[0] == len(info) * agents_per_env (10 for Cs2Env).
+                # All 10 agents in an env share the same step_stats because
+                # step_stats aggregates team-level reward fields; we update
+                # Welford ONCE per env (not per agent — that would over-count
+                # by 10x) and apply the same symlog'd channel sum to every
+                # agent row in that env.
+                #
+                # Fallback: if info[e] lacks step_stats (flag off OR an older
+                # info entry that predates Task 6a), pass raw r through for
+                # that env's rows unchanged — the minimal-disruption path if
+                # the flag gets toggled or an upstream change sneaks through.
+                #
+                # Task 7: process_step_rewards also ORs the per-tick
+                # bomb_planted flag into _batch1_current_segment_has_event for
+                # every agent row in the env. The C side sets ss->bomb_planted
+                # only on the transition tick (process_bomb, cs2_bomb.h — guarded by
+                # `if g->bomb_plant_ticks >= sd->bomb_plant_time`) and StepStats
+                # is cleared every step via clear_stats(ss) at the top of
+                # env_step (cs2_env.h), so the field is already a per-tick delta (1 only
+                # on the plant tick) — NO edge-trigger needed. All 10 agent rows
+                # in an env share the event state; it is flushed into
+                # _batch1_event_mask at the segment boundary below.
+                #
+                # PERF: the per-env loop lives in process_step_rewards() and
+                # builds the tick's rewards in a host float32 scratch buffer, so
+                # the device sees one H2D copy + one symlog per tick instead of
+                # three single-scalar torch.tensor() constructions per env
+                # (~213k launch-bound CUDA ops/epoch at 256 envs x 64 ticks,
+                # inside this timed eval_forward region). The helper's docstring
+                # carries the bit-exactness invariants — read it before touching
+                # the arithmetic.
+                agents_per_env_local = self.vecenv.driver_env.num_agents
+                if self._batch1_reward_scratch.shape[0] < len(info):
+                    self._batch1_reward_scratch = np.empty(len(info), dtype=np.float32)
+                r = process_step_rewards(
+                    info,
+                    r,
+                    agents_per_env_local,
+                    self._batch1_welford_combat,
+                    self._batch1_welford_objective,
+                    self._batch1_welford_positional,
+                    self._batch1_reward_scratch,
+                    current_segment_has_event=self._batch1_current_segment_has_event,
+                )
+
+                # ── SELF-PLAY: override opponent-team actions ───────────────
+                if use_past:
+                    batch_n = o_device.shape[0]
+                    opp_mask = self._self_play_mgr.get_opponent_mask(batch_n, dev)
+                    opp_idx = torch.where(opp_mask)[0]
+
+                    past_state = {
+                        "done": d[opp_mask],
+                        "lstm_h": self._past_lstm_h[env_id.start][opp_mask],
+                        "lstm_c": self._past_lstm_c[env_id.start][opp_mask],
+                    }
+                    # Batch 3 (T5) + Fix #1: past policy is a HybridPolicy too;
+                    # same 4-tuple contract. _hybrid_sample_logits now surfaces
+                    # the per-factor log-prob halves directly (6-tuple), so we
+                    # no longer reconstruct 7 Categorical + 1 Normal here. The
+                    # rollout buffer entries stored at this opponent slot stay
+                    # consistent with the current-policy branch (PPO update
+                    # treats them indistinguishably).
+                    opp_logits, opp_mu, opp_log_std, _opp_value = past_policy.forward_eval(
+                        o_device[opp_mask], past_state)
+                    (opp_action, opp_cont_action, opp_logprob_d, opp_logprob_c, _,
+                     _) = _hybrid_sample_logits(
+                         (opp_logits, opp_mu, opp_log_std, None),
+                         max_turn_speed=past_policy.max_turn_speed.item(),
+                         mask=action_mask[opp_mask] if action_mask is not None else None,
+                         aim_dim_mask=getattr(past_policy, "aim_dim_mask", None),
+                     )
+                    opp_logprob = opp_logprob_d + opp_logprob_c
+
+                    # Write back updated past-policy LSTM states (cast from fp16 if needed)
+                    self._past_lstm_h[env_id.start][opp_mask] = past_state["lstm_h"].to(
+                        self._past_lstm_h[env_id.start].dtype)
+                    self._past_lstm_c[env_id.start][opp_mask] = past_state["lstm_c"].to(
+                        self._past_lstm_c[env_id.start].dtype)
+
+                    # Replace opponent slots in action & logprob buffers.
+                    # Cast to destination dtype (amp_context may yield fp16).
+                    # Continuous action and per-factor logprobs are also
+                    # spliced in so train()'s _hybrid_ppo_loss sees consistent
+                    # mb_cont_actions / mb_old_logp_{d,c} for opponent rows.
+                    action[opp_idx] = opp_action.to(action.dtype)
+                    logprob[opp_idx] = opp_logprob.to(logprob.dtype)
+                    cont_action[opp_idx] = opp_cont_action.to(cont_action.dtype)
+                    logprob_d[opp_idx] = opp_logprob_d.to(logprob_d.dtype)
+                    logprob_c[opp_idx] = opp_logprob_c.to(logprob_c.dtype)
+                # ──────────────────────────────────────────────────────────
+
+                # ── STATUE OPPONENT (--opponent noop, Rung 1a T3) ──────────
+                # UNCONDITIONAL branch, deliberately NOT nested in the
+                # `if use_past:` splice above: that branch never runs at
+                # p_past = 0, which is exactly the configuration noop demands
+                # (assert_opponent_self_play_compatible). It sits AFTER the
+                # splice so the statue would win if both were ever live, and
+                # BEFORE both the buffer scatter and vecenv.send below — the
+                # same tensors feed the rollout buffer and the env.
+                #
+                # Bin 0 on every discrete head is the no-op action by
+                # construction (cs2_env.h:51-63; move_dir == 0 is genuinely
+                # stationary, valid_dir in process_movement) and is never masked out by
+                # the C-side action mask, so this cannot sample an illegal
+                # action. cont_action = 0 means zero Δyaw/Δpitch: the statue
+                # keeps its spawn orientation.
+                #
+                # The stored logprobs go to 0 for the same reason the past-
+                # policy splice rewrites them: they are the π_old the PPO
+                # update would divide by. Under noop these rows are
+                # non-participating, so every loss masks them out anyway —
+                # this keeps the buffer self-consistent rather than carrying
+                # log-probs of actions that were never sampled.
+                if self._self_play_mgr.opponent_mode == "noop":
+                    opp_idx = torch.where(
+                        self._self_play_mgr.get_opponent_mask(o_device.shape[0], dev))[0]
+                    action[opp_idx] = 0
+                    cont_action[opp_idx] = 0
+                    logprob[opp_idx] = 0
+                    logprob_d[opp_idx] = 0
+                    logprob_c[opp_idx] = 0
+                    # Redundant with the participation scatter below (which
+                    # multiplies values by the row flag) and kept anyway: the
+                    # statue's critic output must never bootstrap GAE, no
+                    # matter which of the two masks a future edit touches.
+                    value[opp_idx] = 0
+                # ──────────────────────────────────────────────────────────
+
+            profile("eval_copy", epoch)
+            with torch.no_grad():
+                if cfg["use_rnn"]:
+                    self.lstm_h[env_id.start] = state["lstm_h"]
+                    self.lstm_c[env_id.start] = state["lstm_c"]
+
+                seq_pos = self.ep_lengths[env_id.start].item()
+                batch_rows = slice(
+                    self.ep_indices[env_id.start].item(),
+                    1 + self.ep_indices[env_id.stop - 1].item(),
+                )
+
+                if cfg["cpu_offload"]:
+                    self.observations[batch_rows, seq_pos] = o
+                else:
+                    self.observations[batch_rows, seq_pos] = o_device
+
+                self.actions[batch_rows, seq_pos] = action
+                self.logprobs[batch_rows, seq_pos] = logprob
+                # Batch 3 (T5): parallel writes for the new buffers added by
+                # _patch_trainer_with_hybrid_aim. The PPO update (`Cs2PuffeRL.train`
+                # in src/trainer.py, gh#168 W2a:
+                # `mb_cont_actions = self.cont_actions[idx]` and the two logprob
+                # reads beside it) reads these by the same idx; missing this write would
+                # silently feed zeros to _hybrid_ppo_loss → ratio_c always
+                # equals exp(new_logp_c - 0), which would diverge.
+                self.cont_actions[batch_rows, seq_pos] = cont_action
+                self.logprobs_d[batch_rows, seq_pos] = logprob_d
+                self.logprobs_c[batch_rows, seq_pos] = logprob_c
+                # F8: persist the masks the sampler just used so the PPO
+                # update (mb_masks in _hybrid_ppo_loss) recomputes logprobs
+                # over the identical masked distribution. Skipped when
+                # unmasked — the buffer's all-ones default is the no-op mask.
+                if action_mask is not None:
+                    self.action_masks[batch_rows, seq_pos] = action_mask
+                self.rewards[batch_rows, seq_pos] = r
+                self.terminals[batch_rows, seq_pos] = d.float()
+                # Rung 0 §2.2: scatter the static row flag into buffer layout,
+                # and zero the critic output on parked rows (defence in depth —
+                # the masked reductions in train() are what make it correct;
+                # this just keeps GAE from propagating a bootstrap value
+                # through rows whose reward is identically 0).
+                # OUTSIDE the `if action_mask is not None:` guard above ON
+                # PURPOSE: inside it, `participating` would stay all-zero for a
+                # mask-less run and the per-epoch any() assert would fire.
+                _part_rows = self._participating_rows[env_id]
+                self.participating[batch_rows, seq_pos] = _part_rows
+                self.values[batch_rows, seq_pos] = value.flatten() * _part_rows.to(value.dtype)
+
+                self.ep_lengths[env_id] += 1
+                if seq_pos + 1 >= cfg["bptt_horizon"]:
+                    num_full = env_id.stop - env_id.start
+                    # Task 7: flush the live event accumulator → segment mask
+                    # BEFORE overwriting ep_indices. Each agent row's current
+                    # segment index lives in self.ep_indices[env_id]; once we
+                    # reassign ep_indices to (free_idx + arange(num_full)) a
+                    # few lines down, the old segment index is lost. Clone
+                    # first, write to _batch1_event_mask at those OLD slots,
+                    # then reset the live accumulator so the next segment
+                    # starts clean. Pitfall: writing AFTER the re-index would
+                    # clobber freshly-allocated future segments (off-by-one
+                    # bug that would silently mark the wrong rollout rows).
+                    old_seg_indices = self.ep_indices[env_id].clone().long()
+                    self._batch1_event_mask[old_seg_indices] = (
+                        self._batch1_current_segment_has_event[env_id])
+                    self._batch1_current_segment_has_event[env_id] = False
+                    self.ep_indices[env_id] = (self.free_idx +
+                                               torch.arange(num_full, device=dev).int())
+                    self.ep_lengths[env_id] = 0
+                    self.free_idx += num_full
+                    self.full_rows += num_full
+
+                action = action.cpu().numpy()
+                if isinstance(logits, torch.distributions.Normal):
+                    import numpy as _np
+
+                    lo, hi = self.vecenv.action_space.low, self.vecenv.action_space.high
+                    action = _np.clip(action, lo, hi)
+
+            profile("eval_misc", epoch)
+            for i in info:
+                for k, v in pufferlib.unroll_nested_dict(i):
+                    if isinstance(v, np.ndarray):
+                        v = v.tolist()
+                    elif isinstance(v, (list, tuple)):
+                        self.stats[k].extend(v)
+                    else:
+                        self.stats[k].append(v)
+
+            profile("env", epoch)
+            # Batch 3 (T5/T5b): vecenv.send patched by
+            # _patch_trainer_with_hybrid_aim to accept (action, cont_action)
+            # tuple. Discrete action is the numpy int32 buffer that the C
+            # env still receives positionally. For the Serial backend
+            # cont_action is forwarded to env.step's continuous_actions
+            # kwarg via the per-env step wrapper. For the Multiprocessing
+            # backend cont_action is mirrored into a multiprocessing.RawArray
+            # shm view by _hybrid_send before orig_send runs, so workers
+            # see the same Δyaw on their next Cs2Env.step via the per-env
+            # numpy view installed by _attach_cont_action_view (see the
+            # _patch_trainer_with_hybrid_aim docstring for the shm pattern).
+            self.vecenv.send((action, cont_action))
+
+        profile("eval_misc", epoch)
+        self.free_idx = self.total_agents
+        self.ep_indices = torch.arange(self.total_agents, device=dev, dtype=torch.int32)
+        self.ep_lengths.zero_()
+        profile.end()
+        return self.stats
 
     def train(self):
         """One PPO update over the rollout buffer; the return-norm patcher's inner train()
@@ -1037,9 +1461,9 @@ class Cs2PuffeRL(PuffeRL):
         # after the gh#90 divisor, and it reads the trainer attr rather than
         # the loop-local so the KL-early-break edge cannot NameError.
         losses["effective_alpha"] = float(self._batch1_effective_alpha)
-        # Welford std exposure: guard with getattr+fallback because
-        # _patch_trainer_with_selfplay (Task 6c, where these get attached)
-        # may not have been applied — preserves the no-selfplay code path.
+        # Welford std exposure: guard with getattr+fallback so a trainer whose
+        # _init_selfplay (where these get attached) did not run keeps the
+        # no-selfplay code path (a legacy guard from the monkey-patch era).
         _w_combat = getattr(self, "_batch1_welford_combat", None)
         self._batch1_std_combat = (float(_w_combat.std()) if _w_combat is not None else 1.0)
         _w_obj = getattr(self, "_batch1_welford_objective", None)

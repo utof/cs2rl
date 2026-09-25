@@ -3,8 +3,8 @@
 The first two tests exercise the bare Cs2Env factory (obs/rewards shape
 sanity). The Task 6c tests below use the minimal trainer harness from
 src/train_test_harness.py (Task 6b). Do NOT import the full production
-trainer setup — those tests only need to verify the
-_patch_trainer_with_selfplay changes from Task 6c.
+trainer setup — those tests only need to verify the Task 6c changes to the
+self-play state (``Cs2PuffeRL._init_selfplay`` / ``evaluate``, gh#168 W2b).
 """
 import numpy as np
 
@@ -109,8 +109,8 @@ def test_make_env_default_keeps_step_stats_off():
 # If any of the above regress, these tests will surface the break early.
 
 
-def test_selfplay_patch_attaches_welford_and_event_mask():
-    """Task 6c: _patch_trainer_with_selfplay must attach three WelfordStd
+def test_selfplay_init_attaches_welford_and_event_mask():
+    """Task 6c: Cs2PuffeRL._init_selfplay must attach three WelfordStd
     instances and two event-mask buffers to the trainer object."""
     from train_helpers_batch1 import WelfordStd
     from train_test_harness import _build_trainer_for_test
@@ -138,8 +138,8 @@ def test_rewards_not_clamped_to_unit_range():
     the symlog-compressed per-channel sum, not a hard [-1, 1] clamp.
 
     Structural assertion (not numerical): verify the source of
-    _patch_trainer_with_selfplay no longer contains `torch.clamp(r, -1, 1)`,
-    AND verify the patched evaluate() produces at least one Welford update
+    Cs2PuffeRL (evaluate() included) no longer contains `torch.clamp(r, -1, 1)`,
+    AND verify evaluate() produces at least one Welford update
     during a rollout (proving the new path executed).
 
     NOTE the structural-first approach: the plan's original `max_abs > 1.0`
@@ -149,12 +149,12 @@ def test_rewards_not_clamped_to_unit_range():
     """
     import inspect
 
-    from train import _patch_trainer_with_selfplay
     from train_test_harness import _build_trainer_for_test
+    from trainer import Cs2PuffeRL
 
-    src = inspect.getsource(_patch_trainer_with_selfplay)
+    src = inspect.getsource(Cs2PuffeRL)
     assert "torch.clamp(r, -1, 1)" not in src, (
-        "Task 6c expected torch.clamp(r, -1, 1) removed from selfplay patch")
+        "Task 6c expected torch.clamp(r, -1, 1) removed from the self-play evaluate body")
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         c0 = trainer._batch1_welford_combat.count

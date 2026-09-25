@@ -66,19 +66,20 @@ def test_build_trainer_for_test_smoke():
 
 
 def test_build_trainer_for_test_with_selfplay():
-    """Harness can engage the self-play patch — required for Task 6c.
+    """Harness can engage self-play — required for Task 6c.
 
-    Task 6c removes torch.clamp(r, -1, 1) in _patch_trainer_with_selfplay,
-    so the test it ships needs a trainer that has that patch active. Here
-    we just confirm the patched evaluate() runs end-to-end on a tiny rollout.
+    Task 6c removed torch.clamp(r, -1, 1) from the self-play evaluate body
+    (now Cs2PuffeRL.evaluate, gh#168 W2b), so the test it ships needs a
+    trainer with self-play engaged. Here we just confirm evaluate() runs
+    end-to-end on a tiny rollout.
     """
     from train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        # Self-play patch replaces trainer.evaluate with _evaluate_with_selfplay.
-        # If it raises (e.g. past_policy loading NRE), the patch is broken for
-        # the harness — Task 6c can't proceed until this passes.
+        # Cs2PuffeRL.evaluate is the self-play rollout (gh#168 W2b). If it
+        # raises (e.g. past_policy loading NRE), self-play is broken for the
+        # harness — Task 6c can't proceed until this passes.
         trainer.evaluate()
     finally:
         cleanup()
