@@ -2349,20 +2349,33 @@ class _KillSeamClauses:
     # that may load os/posix `killpg`, `getpgid` or `kill`. WHAT: each spawns its own child
     # with `start_new_session=True` and kills that group in a `finally`, so a red test cannot
     # leak ~900 MB vis-cache workers (gh#251 `_run_group`, gh#254). WHY it is not the seam:
-    # the seam is Modal's ProcessControl in training.py, and none of these files import the
-    # runner; a hygiene kill of the test's own child group cannot bypass it. WATCHED: (iv)'s
-    # population requires every row here to have examined a banned load on the real tree, so
-    # a renamed function, a deleted file or a dropped kill turns the test red, not silently
-    # green (`hygiene_kills_and_the_sigterm_test`). PITFALLS: the key is the innermost
-    # enclosing def's dotted name (`_enclosing_functions`), so a load at module level of an
-    # exempt file, in any other function of it, in a same-named method (`T._run_group`) or in
-    # the exempt def's own decorators or parameter defaults (evaluated at import) is red; and
+    # the seam is Modal's ProcessControl in training.py, and a hygiene kill of the test's
+    # own child group cannot bypass it, PROVIDED the file cannot reach the runner at all: an
+    # exempt function may load anything banned, so one that imported the runner could hand
+    # the real `os.killpg` to `ProcessControl(...)` in the clear. So `kill_seam_loads` also
+    # makes a file that owns a row red on any import of `RUNNER_PACKAGES` (`_runner_imports`),
+    # in every spelling: `import scripts.modal_runner.training`, `from scripts.modal_runner
+    # import training`, `from scripts import modal_runner`. WATCHED: (iv)'s population
+    # requires every row here to have examined a banned load on the real tree, so a renamed
+    # function, a deleted file or a dropped kill turns the test red, not silently green
+    # (`hygiene_kills_and_the_sigterm_test`). PITFALLS: the key is the innermost enclosing
+    # def's dotted name (`_enclosing_functions`), so a load at module level of an exempt
+    # file, in any other function of it, in a same-named method (`T._run_group`) or in the
+    # exempt def's own decorators or parameter defaults (evaluated at import) is red; and
     # `from os import killpg` is red even inside an exempt function. Never exempt by file.
+    # A runner test that needs a hygiene kill cannot be listed here: give it a fake.
     KILL_HYGIENE_EXEMPT = frozenset({
         ("tests/test_arena_duel.py", "_run_group"),
         ("tests/test_arena_duel.py", "test_run_group_leaves_no_survivor"),
         ("tests/test_vis_pool_parent_death.py", "_kill_child_and_count_survivors"),
     })
+    # The runner, as import targets: a file owning a KILL_HYGIENE_EXEMPT row may import
+    # neither the package (any module of it) nor the Modal entry script. PITFALL: the entry
+    # script's dotted name is DERIVED from RUNNER_ENTRY, never spelled: any string constant
+    # in this class or its test containing that dotted name is the `_CLIENT_MODULES` seed of
+    # tests/test_modal_packaging.py (`_reaches_client_directly`, a substring match that reads
+    # docstrings too), which reclassifies both to the client file and turns the split red.
+    RUNNER_PACKAGES = ("scripts.modal_runner", RUNNER_ENTRY.removesuffix(".py").replace("/", "."))
 
     @classmethod
     def clauses(cls):
@@ -2756,6 +2769,7 @@ class _KillSeamClauses:
     def clause_iv(cls):
         rows = sorted(f"{file}::{function}" for file, function in cls.KILL_HYGIENE_EXEMPT)
         sigterm = "tests/test_modal_training.py:1"
+        assert rows, "KILL_HYGIENE_EXEMPT is empty: delete the exemption machinery and its plants"
         # The exempt-file plants stand in one exempt (file, function): the first row, sorted.
         exempt_file, exempt_function = rows[0].split("::")
         return cls._clause(
@@ -2791,6 +2805,16 @@ class _KillSeamClauses:
                         f"@functools.partial(os.killpg, 1)\ndef {exempt_function}():\n    pass\n",
                         "a from-import inside an exempt function":
                         f"def {exempt_function}():\n    from os import killpg\n",
+                        "an exempt file importing a runner module":
+                        "from scripts.modal_runner import training\n",
+                        "an exempt file importing the runner package from scripts":
+                        "from scripts import modal_runner\n",
+                        "an exempt file importing a runner module as a dotted name":
+                        "import scripts.modal_runner.training as t\n",
+                        "an exempt file importing the Modal entry script":
+                        f"import {cls.RUNNER_PACKAGES[1]}\n",
+                        "an exempt function importing the runner inside its body":
+                        f"def {exempt_function}():\n    from scripts.modal_runner import training\n",
                     }),
                 **cls._at(
                     cls.PLANT_TEST, {
@@ -2868,9 +2892,12 @@ class _KillSeamClauses:
         EXEMPT: a load (not a from-import) whose innermost enclosing def is a
         `(file, function)` row of `KILL_HYGIENE_EXEMPT`, keyed by the dotted name
         `_enclosing_functions` computes; a module-level load in an exempt file is
-        not inside any def, so it is red. `examined` is the allowed calls, as
-        `<file>:<line>`, and `<file>::<function>` for each exempt load, which the
-        population reads back per row.
+        not inside any def, so it is red. The exemption is per function, not per
+        load, so an exempt function could hand the real `os.killpg` to the runner
+        unseen; therefore a file that owns any row is red on any import of
+        `RUNNER_PACKAGES` (`_runner_imports`), anywhere in it. `examined` is the
+        allowed calls, as `<file>:<line>`, and `<file>::<function>` for each
+        exempt load, which the population reads back per row.
         """
         problems, examined = [], []
         for rel, text in sources.items():
@@ -2880,6 +2907,8 @@ class _KillSeamClauses:
             owner = cls._enclosing_functions(tree)
             examined.extend(f"{rel}:{line}" for line in allowed.values())
             problems.extend(cls._banned_from_imports(rel, tree, cls.OS_MODULES, cls.BANNED))
+            if any(file == rel for file, _ in cls.KILL_HYGIENE_EXEMPT):
+                problems.extend(cls._runner_imports(rel, tree))
             for node in ast.walk(tree):
                 loaded = cls._banned_load(node, names, allowed, cls.OS_MODULES, cls.BANNED)
                 if loaded is None:
@@ -2890,6 +2919,36 @@ class _KillSeamClauses:
                 else:
                     problems.append(f"{rel}:{loaded.lineno} {ast.unparse(loaded)}")
         return problems, examined
+
+    @classmethod
+    def _runner_imports(cls, rel, tree):
+        """Every import of a `RUNNER_PACKAGES` module in `tree`, one problem each, anywhere
+        in the file (module level or inside a def). `import scripts.modal_runner[.x] [as y]`
+        and `from scripts.modal_runner[.x] import z` match on the dotted name, a package or
+        any module under it; `from scripts import modal_runner` / `run_modal` names the
+        package as the alias. A relative import (`module` None) cannot reach scripts/ from
+        tests/ and is not read."""
+        heads = {package.split(".")[1] for package in cls.RUNNER_PACKAGES}
+        problems = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                hit = any(cls._under_runner(alias.name) for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                hit = cls._under_runner(node.module) or (node.module == "scripts"
+                                                         and any(alias.name in heads
+                                                                 for alias in node.names))
+            else:
+                continue
+            if hit:
+                problems.append(f"{rel}:{node.lineno} {ast.unparse(node)}: a file with a "
+                                "KILL_HYGIENE_EXEMPT row may not import the runner")
+        return problems
+
+    @classmethod
+    def _under_runner(cls, dotted):
+        """Whether `dotted` is one of `RUNNER_PACKAGES` or a module under one."""
+        return any(dotted == package or dotted.startswith(f"{package}.")
+                   for package in cls.RUNNER_PACKAGES)
 
     @staticmethod
     def _enclosing_functions(tree):
@@ -2902,6 +2961,10 @@ class _KillSeamClauses:
         parameter defaults and annotations run where the def is bound, so they keep
         the enclosing scope. A class body adds its name to the path but is not a def:
         a node directly under a module-level class is absent, like a module-level one.
+        ASYMMETRY, kept on purpose: a load inside a lambda or a comprehension in an
+        exempt def inherits the def's name (exempt), while one inside a nested def
+        is owned by `outer.inner` (red): a lambda or comprehension has no def name
+        a KILL_HYGIENE_EXEMPT row could key on, a nested def does.
         """
         owner = {}
         stack = [(tree, "", False)]
@@ -3470,9 +3533,13 @@ def test_kill_seam_static_safety():
             def's dotted name): those functions kill a process group the test
             itself spawned, in a `finally`, so a red test leaks no vis-cache
             workers (gh#251, gh#254). That is hygiene of the test's own child,
-            not the seam, which is Modal's ProcessControl; none of them import
-            the runner. A load anywhere else in an exempt file, at module level
-            or in another function, is red: never exempt by file.
+            not the seam, which is Modal's ProcessControl: because the exemption
+            is per function, not per load, a file that owns a row is also red
+            on any import of `scripts.modal_runner` or scripts/run_modal.py
+            (`RUNNER_PACKAGES`, in every spelling `_runner_imports` reads), so
+            an exempt function cannot hand the real `os.killpg` to the runner.
+            A load anywhere else in an exempt file, at module level or in
+            another function, is red: never exempt by file.
       (v)   ProcessControl.system() builds exactly spawn=subprocess.Popen,
             getpgid=os.getpgid, killpg=os.killpg, install_signal=signal.signal.
       (vi)  In training.py an attribute named `system` is read exactly once: as
