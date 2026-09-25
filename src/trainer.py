@@ -7,11 +7,16 @@ replace ``evaluate`` (self-play), replace ``save_checkpoint`` (full checkpointin
 ``_timing`` dict. ADR 0002 (docs/adr/0002-subclass-pufferl-do-not-mutate.md, a LOCAL file:
 docs/ is under .git/info/exclude and is in no clone; the decision is restated in gh#168 and
 in the spec at .superpowers/sdd/2026-09-24-168-trainer-subclass/spec.md) says that
-composition belongs in a subclass. W1 moves ONLY the composition here: ``__init__`` still
-calls the same four patch functions, in ``train()``'s order, so an instance is
+composition belongs in a subclass. W1 moved ONLY the composition here: ``__init__`` called
+the same four patch functions, in ``train()``'s order, so an instance is
 attribute-for-attribute the trainer ``train()`` built before (the byte gates and the
 construction snapshot in .superpowers/sdd/2026-09-24-168-trainer-subclass/ pin that).
-The bodies move in W2a-c and the vecenv plumbing in W3.
+W2a (gh#168) folded the first of the four in: ``_init_return_norm`` seeds the return-norm
+state and ``train`` / ``_normalize_returns`` / ``_update_return_stats`` are methods, so
+``__init__`` now calls ``_init_return_norm`` and then the three remaining patch functions
+in the same order: ``_patch_trainer_with_hybrid_aim`` (folds in W3, with the vecenv
+plumbing), ``_patch_trainer_with_selfplay`` (the evaluate body, W2b) and
+``_install_full_checkpointing`` (the save_checkpoint override, W2c).
 
 WHY a module of its own and not a class inside train.py: this module subclasses
 ``PuffeRL``, so it imports torch and pufferlib at module scope and is HEAVY by

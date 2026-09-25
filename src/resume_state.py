@@ -112,11 +112,14 @@ def restore_train_state(trainer, self_play_mgr, state: dict):
     """In-place restore of collect_train_state's dict.
 
     PITFALL: copy_() into `_ret_*` and `_log_alpha_tensor`, never rebind.
-    Until gh#168 W2a they were closure locals aliased onto the trainer, so a
-    rebind left the closure training on its own stale copy; since W2a
-    Cs2PuffeRL.train reads the attributes directly, but `_alpha_optimizer`
-    still holds the ORIGINAL `_log_alpha_tensor` as its parameter, so a
-    rebound tensor would never be stepped. Same in-place rule, new reason.
+    Until gh#168 W2a all four were closure locals aliased onto the trainer,
+    so a rebind of any of them left the closure training on its own stale
+    copy. Since W2a the two cases differ: `_log_alpha_tensor` MUST stay in
+    place, because `_alpha_optimizer` holds the original tensor as its
+    parameter and a rebound one would never be stepped; `_ret_*` could be
+    rebound harmlessly now (Cs2PuffeRL.train, _update_return_stats and
+    collect_train_state all read the attribute), and copy_() is kept there
+    for the bit-exact round trip and so that all four follow one rule.
     """
     # Function-local ON PURPOSE: this module's scope stays torch-free.
     # (The comment sits on its own line, not after the import: a trailing

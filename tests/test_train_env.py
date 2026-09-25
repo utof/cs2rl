@@ -573,7 +573,8 @@ def test_target_entropy_schedule_applied():
 
 def test_log_alpha_reset_at_batch_start():
     """Task 9B: the first train() call on a freshly constructed trainer (the
-    return-norm patch runs in Cs2PuffeRL.__init__, gh#168 W1.5)
+    return-norm state is seeded by Cs2PuffeRL._init_return_norm, gh#168 W2a;
+    the harness trainer is a Cs2PuffeRL since W1.5)
     must reset log_alpha to log(ent_coef). Subsequent calls must NOT
     re-reset (idempotent via the _batch1_log_alpha_reset_done flag)."""
     import math
@@ -645,9 +646,9 @@ def test_batch1_metrics_exposed():
 
 
 def test_return_norm_stats_reset_on_batch_start():
-    """Task 9a: applying the return-norm patch must put _ret_mean/_ret_var/
-    _ret_count into a neutral state and expose them on the trainer (the patch
-    runs inside Cs2PuffeRL.__init__, gh#168 W1.5).
+    """Task 9a: Cs2PuffeRL._init_return_norm (run by __init__, gh#168 W2a) must
+    put _ret_mean/_ret_var/_ret_count into a neutral state and expose them on
+    the trainer.
 
     Reading them BEFORE any train() call pins the patch-time invariant —
     this is what guarantees a fresh start in symlog space when Batch 1 is

@@ -3649,13 +3649,13 @@ def train(args):
           f"(fresh init {train_config['aim_log_std_init']:.4f}, "
           f"cap {train_config['aim_log_std_max']:.4f})")
     # Batch 3 (T5): Cs2PuffeRL.__init__ applies the hybrid-aim patch after
-    # return_norm, but the dependency is at CALL time, not patch time: the
-    # replacement train() body that return_norm installs (types.MethodType,
-    # train_update.py; it never calls the stock train()) reads
-    # self.cont_actions / self.logprobs_{d,c} on its first call, and nothing
-    # at patch time checks they exist. Likewise selfplay's replacement
-    # evaluate() writes those buffers every rollout. The only load-bearing
-    # order is "all patches applied before the first evaluate()/train() call".
+    # _init_return_norm, but the dependency is at CALL time, not construction
+    # time: Cs2PuffeRL.train (src/trainer.py, gh#168 W2a; it never calls the
+    # stock train()) reads self.cont_actions / self.logprobs_{d,c} on its
+    # first call, and nothing at construction time checks they exist. Likewise
+    # selfplay's replacement evaluate() writes those buffers every rollout.
+    # The only load-bearing order is "all patches applied before the first
+    # evaluate()/train() call".
     # Pin the shm + view on the trainer so neither is GC'd mid-run. Without
     # holding _cont_action_shm here, Python could free the RawArray once
     # this function returns (Python doesn't know workers/numpy views are

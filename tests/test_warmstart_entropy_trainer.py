@@ -1,10 +1,10 @@
 """Warm-start entropy mode — trainer-contract tests (spec 2026-08-01 §5.2).
 
-Uses the minimal harness, whose trainer is Cs2PuffeRL with the return-norm
-train() already installed (gh#168 W1.5), same pattern as
+Uses the minimal harness, whose trainer is Cs2PuffeRL (gh#168 W1.5), whose
+train() is the return-norm body (a method since gh#168 W2a), same pattern as
 tests/test_kl_break_metrics.py. Config keys are injected into trainer.config
-AFTER construction; that is fine because the patch's init block only seeds
-attributes and the warmstart_* keys are read per train() call.
+AFTER construction; that is fine because Cs2PuffeRL._init_return_norm only
+seeds attributes and the warmstart_* keys are read per train() call.
 
 PITFALL: trainer.losses is a defaultdict(float) — losses["warmstart_phase"]
 == 0 would be vacuously true on a missing key. Always assert membership
@@ -45,16 +45,27 @@ def _build_ws_trainer(num_envs=32, **ws_overrides):
 
 
 def _force_floor_above_entropy(trainer, floor=1e6):
-    """Raise the trainer's entropy floor above any achievable entropy (gh#96).
+    """Raise the trainer's entropy floor far above any achievable entropy (gh#96).
 
     WHAT: sets `trainer._entropy_floor` so `current_entropy.item() <
-    self._entropy_floor` in Cs2PuffeRL.train is unconditionally true, which is
-    the only way to exercise the `_ws_floor_active` gate on the min=0.5 clamp.
+    self._entropy_floor` in Cs2PuffeRL.train is true by an explicit margin,
+    not by the harness's numbers.
+
+    WHY a margin and not a precondition: on this harness the floor trips
+    NATURALLY. Measured (num_envs=32, with_selfplay=True, mode off, PR #261
+    review): losses["entropy"] ~1.60 nats against _entropy_floor = 0.3 * 8.21
+    = 2.46, so entropy_floor_fires is 7/7 and _batch1_effective_alpha is 0.5
+    with no forcing at all, and deleting the write below leaves both floor
+    tests green. The helper pins those two tests to the below-floor arm however
+    the harness policy's entropy drifts; the proof that the body READS
+    self._entropy_floor is the opposite direction,
+    test_floor_below_entropy_leaves_alpha_unclamped_when_mode_off. (An earlier
+    docstring here claimed the harness sits near max entropy and the condition
+    never trips naturally; that was false before W2a too.)
 
     WHY a write after construction and not a config knob: the floor is computed
     once in Cs2PuffeRL._init_return_norm as `0.3 * max_entropy`, from the
-    module-level ACTION_HEAD_SIZES / LOG_STD_MAX — never from config — and the
-    harness policy sits near max entropy so the condition never trips naturally.
+    module-level ACTION_HEAD_SIZES / LOG_STD_MAX — never from config.
 
     PITFALL: until gh#168 W2a the floor was a closure cell of the patched
     train() body and this helper rewrote it through `__closure__`; W2a made it
@@ -110,6 +121,45 @@ def test_floor_clamps_effective_alpha_when_mode_off():
         assert trainer._batch1_effective_alpha >= 0.5, (
             "floor clamp did not fire with the mode off: effective_alpha "
             f"{trainer._batch1_effective_alpha} < 0.5")
+    finally:
+        cleanup()
+
+
+def test_floor_below_entropy_leaves_alpha_unclamped_when_mode_off():
+    """Positive control for the floor READ (PR #261 review): the floor forced BELOW the
+    entropy, and the clamp must not fire.
+
+    The two tests above force the floor up, but on this harness the floor trips on its
+    own (entropy ~1.60 nats < 0.3 * max_entropy = 2.46; see _force_floor_above_entropy),
+    so both stay green for a body that never reads self._entropy_floor and clamps
+    unconditionally, or that compares against a copy taken at construction. This
+    direction is what such a body cannot pass: with _entropy_floor = -1.0 the
+    comparison `current_entropy < floor` is false on every minibatch, so
+    entropy_floor_fires must be 0 and effective alpha must stay at the raw alpha
+    (exp(log_alpha) ~ ent_coef = 0.1 after the Task 9B reset), i.e. < 0.5.
+
+    Measured mutants of `if _ws_floor_active and current_entropy.item() <
+    self._entropy_floor:` in Cs2PuffeRL.train: comparison replaced by `True` -> this
+    test red (fires 7, alpha 0.5), the mode-off test above green; replaced by `False`
+    -> the mode-off test above red (alpha ~0.1), this one green. The pair pins both
+    constant replacements; neither alone does.
+    """
+    from train_test_harness import _build_trainer_for_test
+    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    try:
+        assert hasattr(trainer, "_entropy_floor"), (
+            "trainer has no _entropy_floor: Cs2PuffeRL._init_return_norm renamed it")
+        trainer._entropy_floor = -1.0
+        losses = _run_train_once(trainer)
+        assert "warmstart_phase" not in losses, "test precondition: mode must be off"
+        # defaultdict(float): membership first, or a missing key reads as 0 == 0.
+        assert "entropy_floor_fires" in losses
+        assert losses["entropy_floor_fires"] == 0, (
+            f"floor fired {losses['entropy_floor_fires']}x with _entropy_floor = -1.0: "
+            "Cs2PuffeRL.train is not comparing against self._entropy_floor")
+        assert trainer._batch1_effective_alpha < 0.5, (
+            "floor clamp fired with the floor below the entropy: effective_alpha "
+            f"{trainer._batch1_effective_alpha}")
     finally:
         cleanup()
 
