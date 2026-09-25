@@ -19,8 +19,11 @@ What's stripped vs. production ``src.train.train()``:
       longer exists: 2cffc35 moved timing to train()'s call sites.)
 
 Design contract:
-    - Public API is a single ``_build_trainer_for_test(...)`` function that
-      returns ``(trainer, cleanup)``. Tuple rather than contextmanager because
+    - Public API is ``_build_trainer_for_test(...)``, which returns
+      ``(trainer, cleanup)``, plus (gh#168 W1) ``_harness_parts(...)``, which
+      returns everything built BEFORE the trainer constructor so a test can
+      construct ``trainer.Cs2PuffeRL(**parts)`` itself
+      (tests/test_trainer_composition.py). Tuple rather than contextmanager because
       (a) the smoke-test shape in the task spec uses try/finally, and
       (b) downstream tests may need to leak the trainer between helper
       functions — easier with an explicit cleanup callable.
@@ -100,9 +103,10 @@ def _harness_parts(
     """
     # Imports are function-local so importing this module in a test that
     # doesn't actually call the factory (e.g. a smoke import test) is free.
-    # PuffeRL / Cs2PuffeRL are lazy-imported inside train.train() in production;
-    # do the same here so this module is importable even if pufferlib's optional
-    # torch deps are mid-install in an isolated test runner.
+    # Cs2PuffeRL is lazy-imported inside train.train() in production (gh#168 W1
+    # dropped train()'s own PuffeRL import); do the same here so this module is
+    # importable even if pufferlib's optional torch deps are mid-install in an
+    # isolated test runner.
     import pufferlib.vector
 
     from map import make_simple_map

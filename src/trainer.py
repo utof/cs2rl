@@ -4,7 +4,9 @@ WHAT: ``Cs2PuffeRL`` is the trainer ``train()`` builds. Before gh#168 W1, ``trai
 constructed a stock ``PuffeRL`` and then mutated the INSTANCE four times: replace
 ``train`` (return-norm), extend the rollout buffers + wrap ``vecenv.send`` (hybrid aim),
 replace ``evaluate`` (self-play), replace ``save_checkpoint`` (full checkpointing), plus a
-``_timing`` dict. ADR 0002 (docs/adr/0002-subclass-pufferl-do-not-mutate.md) says that
+``_timing`` dict. ADR 0002 (docs/adr/0002-subclass-pufferl-do-not-mutate.md, a LOCAL file:
+docs/ is under .git/info/exclude and is in no clone; the decision is restated in gh#168 and
+in the spec at .superpowers/sdd/2026-09-24-168-trainer-subclass/spec.md) says that
 composition belongs in a subclass. W1 moves ONLY the composition here: ``__init__`` still
 calls the same four patch functions, in ``train()``'s order, so an instance is
 attribute-for-attribute the trainer ``train()`` built before (the byte gates and the
@@ -14,10 +16,14 @@ The bodies move in W2a-c and the vecenv plumbing in W3.
 WHY a module of its own and not a class inside train.py: this module subclasses
 ``PuffeRL``, so it imports torch and pufferlib at module scope and is HEAVY by
 construction. ``import train`` must stay torch-free (tests/test_w1_modules.py: it is what
-keeps ``--dump-config`` at ~1 s), so train.py and train_test_harness.py import this module
-function-locally, inside ``train()`` and ``_build_trainer_for_test``. Never add
+keeps ``--dump-config`` at ~1 s), so train.py imports this module function-locally, inside
+``train()``. At W1 that is the ONLY production import site; train_test_harness.py does not
+import it (it still composes a bare PuffeRL plus two patches until W1.5), and
+tests/test_trainer_composition.py imports it inside a fixture. Never add
 ``from trainer import ...`` at train.py's module level (knock-out W1-K3 in the spec:
-test_import_train_stays_light_and_really_imports_the_shims goes red naming torch).
+test_import_train_stays_light_and_really_imports_the_shims goes red: with the import next
+to the other module-level imports it is a circular-import ImportError, after all defs it
+is the guard naming torch).
 
 IMPORT DIRECTION: this module imports ``train`` at module scope; ``train`` imports this
 module only inside ``train()``. That is acyclic at import time: by the time ``train()``
@@ -47,8 +53,10 @@ class Cs2PuffeRL(PuffeRL):
     patch functions took at train()'s call sites:
 
     cont_action_view_main : np.ndarray or None
-        Main-process view of the continuous-action shared array (Multiprocessing backend);
-        None on Serial, where the harness passes nothing.
+        Main-process view of the continuous-action shared array. train() allocates it and
+        passes it on BOTH backends (src/train.py builds `_cont_action_view_main` before the
+        vecenv, unconditionally); only the harness passes None, and the hybrid-aim patcher
+        takes None to mean "nothing to forward".
     mask_view_main : np.ndarray
         Main-process view of the action-mask shared array (F8).
     participating_rows : np.ndarray
@@ -95,6 +103,8 @@ class Cs2PuffeRL(PuffeRL):
         # because the loop assigns INTO it and the [Timing] print reads it, so it
         # has to exist before the first epoch.
         self._timing = {"collect_ms": 0.0, "update_ms": 0.0}
-        # R0-C (#134): full-state checkpointing. Installed after EVERY patch so the
-        # sidecar sees the final aliases.
+        # R0-C (#134): full-state checkpointing. Last here because train() applied it
+        # last at 2a3573f, not because anything depends on it: the installer reads no
+        # trainer attribute at patch time, and knock-out W1-K2 (installed BEFORE the
+        # selfplay patch) reproduced every hash of both byte gates.
         _install_full_checkpointing(self, self_play_mgr)

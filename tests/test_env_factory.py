@@ -1274,6 +1274,10 @@ def _migrated_sites():
     a site that was factored into another function is still located, and a
     site that was NOT (a stale map entry) still fails `_call_in` loudly.
     """
+    captured = {cap["enclosing"] for caps in FIXTURE_DATA["roles"].values() for cap in caps}
+    stale = sorted(set(MOVED_ENCLOSING) - captured)
+    assert not stale, (f"MOVED_ENCLOSING keys {stale} match no captured `enclosing`; a key the "
+                       "fixture never names is a dead map entry that watches nothing")
     sites = {}
     for role, caps in FIXTURE_DATA["roles"].items():
         for cap in caps:

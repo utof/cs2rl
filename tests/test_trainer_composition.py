@@ -1,7 +1,8 @@
 """gh#168 W1: ``trainer.Cs2PuffeRL`` composes exactly the trainer ``train()`` used to build.
 
-Three assertions, in the spec's order (.superpowers/sdd/2026-09-24-168-trainer-subclass/spec.md
-§W1 test):
+Four assertions; the first three in the spec's order
+(.superpowers/sdd/2026-09-24-168-trainer-subclass/spec.md §W1 test), the fourth from the
+review of PR #257:
 
 1. The class is a direct ``PuffeRL`` subclass, constructed from the harness's parts
    (``_harness_parts``), with the STOCK attribute surface recorded by wrapping
@@ -17,19 +18,39 @@ Three assertions, in the spec's order (.superpowers/sdd/2026-09-24-168-trainer-s
    checkpoint helpers READ through ``self.``/``trainer.`` (or a 2-argument ``getattr``) and
    never assign must be present on the instance. The functions are located by qualname
    with an exactly-once binding rule, so a renamed or duplicated def raises instead of
-   silently anchoring on nothing. Deleting a name from BOTH the frozen list and
-   ``__init__`` keeps (2) green; (3) catches it. ``_WARMSTART_ATTRS`` is read by
-   ``collect_train_state`` through a getattr over a tuple, which the AST walk cannot see,
-   so it is asserted as a subset separately.
+   silently anchoring on nothing. WHAT (3) COVERS, measured at W1: the 18 DATA attributes
+   the moved bodies read. Deleting one of those from BOTH the frozen list and ``__init__``
+   keeps (2) green and (3) catches it. It does NOT cover the other 17 names: the three
+   method aliases (``train``/``evaluate``/``save_checkpoint`` are class attributes of
+   PuffeRL, filtered out), and every read-before-write or never-read name (``_timing``,
+   ``_cont_action_view_main``, ``_action_mask_view_main``, ``_normalize_returns`` and the
+   ``_batch1_*`` names the bodies assign before reading). Those are pinned by (2) only,
+   plus (4) for the aliases. Measured on PR #257's first commit: dropping
+   ``_install_full_checkpointing`` from ``__init__`` AND ``save_checkpoint`` from the list
+   left all three green; so did dropping ``self._timing`` AND ``_timing``. With (4) the
+   first mutant is red naming ``save_checkpoint``; the second still passes, by design:
+   ``_timing`` has no reader among the moved bodies (train()'s loop reads it), so the
+   frozen list is its only pin here.
+   ``_WARMSTART_ATTRS`` is read by ``collect_train_state`` through a getattr over a tuple,
+   which the AST walk cannot see, so it is asserted as a subset separately.
+4. Method identity, independent of the frozen list: each of ``train``, ``evaluate``,
+   ``save_checkpoint`` is an INSTANCE attribute whose bound function is the closure body
+   named in ANCHOR_FUNCTIONS. A dropped patch call (or a stock method left in place) is
+   red here by name even after the list is edited to match. W2a/b/c each turn one of these
+   into a class method and re-point the pin.
 
-PITFALL: the anchor count is asserted (18 at W1) as a positive control on the derivation
-itself, not as a second frozen list: a walk that silently found zero reads would otherwise
-pass (3) vacuously. Each W that moves a body updates the expected count (W2a: 19, W2b: 22).
+PITFALLS
+- The anchor is PRESENCE-only: ``self._ret_count = None`` in ``__init__`` passes (3). Values
+  are the byte gates' and construct_snapshot.py's job, not this file's.
+- The anchor count is asserted (18 at W1) as a positive control on the derivation itself,
+  not as a second frozen list: a walk that silently found zero reads would otherwise pass
+  (3) vacuously. Each W that moves a body re-derives the count and updates it here.
 """
 from __future__ import annotations
 
 import ast
 import shutil
+import types
 from pathlib import Path
 
 import pytest
@@ -89,12 +110,22 @@ ANCHOR_FUNCTIONS = (
 )
 EXPECTED_ANCHOR_COUNT = 18
 
+# Assertion (4): instance method alias -> the closure body it must be bound to (the same
+# qualnames as ANCHOR_FUNCTIONS, so the two cannot drift apart). Python spells a nested
+# def's __qualname__ as `outer.<locals>.inner`; the `<locals>` is dropped before comparing.
+METHOD_ALIASES = {
+    "train": ANCHOR_FUNCTIONS[0][1],
+    "evaluate": ANCHOR_FUNCTIONS[1][1],
+    "save_checkpoint": ANCHOR_FUNCTIONS[2][1],
+}
+
 
 def _bindings_in_scope(scope, name):
     """Statements in `scope`'s OWN body that bind `name` (def/class, Name target, import).
 
     Recurses through if/for/while/try/with blocks (same scope) but never into a nested
-    def/class body, which is its own scope. Mirrors ast_oracle.find_def in the SDD folder.
+    def/class body, which is its own scope. Same rule as ast_oracle._scope_bindings in
+    the SDD folder.
     """
     hits: list[ast.stmt] = []
 
@@ -128,15 +159,23 @@ def find_def(module, qualname):
     Python keeps the LAST binding, so a first-match lookup would anchor on a dead def
     while a later duplicate runs (spec §2.1, re-review Major 2). Raising on zero or two
     bindings is what makes a rename or a stale copy fail loudly instead of vacuously.
+    A part may be a ClassDef (W2a re-points to `Cs2PuffeRL.train`), exactly as
+    ast_oracle.find_def accepts; the LAST part must be a def, since the caller reads its
+    arguments and body.
     """
     node = module
     for part in qualname.split("."):
         hits = _bindings_in_scope(node, part)
-        defs = [h for h in hits if isinstance(h, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        defs = [
+            h for h in hits if isinstance(h, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
         if len(hits) != 1 or not defs:
             raise AssertionError(f"{qualname!r}: {part!r} bound {len(hits)} times "
-                                 f"(lines {[h.lineno for h in hits]}); expected exactly one def")
+                                 f"(lines {[h.lineno for h in hits]}); expected exactly one "
+                                 "def/class")
         node = defs[0]
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        raise AssertionError(f"{qualname!r} names a class, not a function")
     return node
 
 
@@ -230,11 +269,13 @@ def test_constructed_surface_equals_the_frozen_list(composed):
 
 
 def test_every_attribute_the_bodies_read_is_declared(composed):
-    from pufferlib.pufferl import PuffeRL
-
     from train_shared import _WARMSTART_ATTRS
     trainer, stock = composed
-    anchor = {n for n in derive_anchor() if n not in stock and not hasattr(PuffeRL, n)}
+    # Class attributes are excluded through the INSTANCE's class, not PuffeRL: at W1 the
+    # two agree (the 18-name count below asserts it), and from W2a on Cs2PuffeRL's own
+    # methods (`_normalize_returns`, `train`, ...) must be excluded too.
+    cls = type(trainer)
+    anchor = {n for n in derive_anchor() if n not in stock and not hasattr(cls, n)}
     assert len(anchor) == EXPECTED_ANCHOR_COUNT, (
         f"derived anchor is {sorted(anchor)} ({len(anchor)} names); the derivation changed "
         f"or a body gained/lost a read. Update EXPECTED_ANCHOR_COUNT only with the W that "
@@ -243,3 +284,26 @@ def test_every_attribute_the_bodies_read_is_declared(composed):
     assert not absent, f"read by a moved body but never set by __init__: {sorted(absent)}"
     warm_absent = set(_WARMSTART_ATTRS) - set(vars(trainer))
     assert not warm_absent, f"_WARMSTART_ATTRS not on the instance: {sorted(warm_absent)}"
+
+
+def test_method_aliases_are_bound_to_the_closure_bodies(composed):
+    """(4): the three replaced methods are instance attributes bound to the named closures.
+
+    Independent of FROZEN_COMPOSED_SURFACE on purpose: a patch call dropped from __init__
+    together with its name from the list keeps (2) green and, for these three names,
+    (3) too (they are PuffeRL class attributes, which the anchor excludes). Here the name
+    must be in `vars(trainer)` (stock `PuffeRL.train` is a class attribute, so a missing
+    patch shows as "not an instance attribute") and its `__func__.__qualname__` must be
+    the closure body ANCHOR_FUNCTIONS names.
+    """
+    trainer, _ = composed
+    for name, qualname in METHOD_ALIASES.items():
+        assert name in vars(trainer), (
+            f"{name!r} is not an instance attribute: the patch that replaces it was not applied, "
+            f"so stock PuffeRL.{name} would run")
+        bound = vars(trainer)[name]
+        assert isinstance(bound, types.MethodType), (
+            f"{name!r} is a {type(bound).__name__}, not a bound method: the patch binds the "
+            "closure with types.MethodType")
+        got = bound.__func__.__qualname__.replace(".<locals>.", ".")
+        assert got == qualname, f"{name!r} is bound to {got!r}, expected {qualname!r}"

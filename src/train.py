@@ -2920,7 +2920,8 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 #                            cont_actions / logprobs_d / logprobs_c parallel
 #                            to the existing actions / logprobs, and wraps
 #                            vecenv.send (the wrapper calls the original) to
-#                            forward the float buffer to the env. train()
+#                            forward the float buffer to the env.
+#                            Cs2PuffeRL.__init__ (src/trainer.py, gh#168 W1)
 #                            applies it AFTER _patch_trainer_with_return_norm
 #                            (which REPLACES train() via types.MethodType and
 #                            never calls the stock body) and BEFORE
@@ -3074,9 +3075,10 @@ def _patch_trainer_with_hybrid_aim(trainer,
                                    participating_rows=None):
     """Extend trainer with continuous-action rollout storage + vecenv plumbing.
 
-    train() applies this AFTER _patch_trainer_with_return_norm (which
-    REPLACES train() via types.MethodType; it does not wrap the stock body)
-    and BEFORE the first evaluate()/train() call. The ordering is a
+    Cs2PuffeRL.__init__ (src/trainer.py, gh#168 W1) applies this AFTER
+    _patch_trainer_with_return_norm (which REPLACES train() via
+    types.MethodType; it does not wrap the stock body) and BEFORE the first
+    evaluate()/train() call. The ordering is a
     CALL-time dependency, not a patch-time one: the replacement train()
     body reads self.cont_actions / self.logprobs_{d,c}, which this patcher
     allocates, and nothing at patch time checks they exist. The
