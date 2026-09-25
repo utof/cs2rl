@@ -25,9 +25,9 @@ def _die_with_parent(parent_pid: int, poll_s: float = 0.5) -> None:
 
     WHAT: two independent guards, installed once in a pool worker's initializer.
       1. Linux `prctl(PR_SET_PDEATHSIG, SIGKILL)`: the kernel SIGKILLs us the
-         moment the parent THREAD that forked us exits. Kernel-level, so it
-         works even while the worker is inside a long C call (awpy's
-         VisibilityChecker holds the GIL for seconds per row).
+         moment the parent THREAD that forked us exits. Kernel-level: no
+         0.5 s polling latency, and immune to a worker stuck in GIL-holding
+         native code, which (2) is not.
       2. A daemon watchdog thread that polls `os.getppid()` every `poll_s`
          and SIGKILLs this process when it stops being `parent_pid`. Portable
          (no prctl on macOS), and the fallback if (1) is unavailable.
@@ -39,7 +39,8 @@ def _die_with_parent(parent_pid: int, poll_s: float = 0.5) -> None:
     ~900 MB. `ProcessPoolExecutor.__exit__` is the only thing that stops
     them, so any parent death that skips it (pytest-timeout's `os._exit`, an
     outer `timeout`, SIGKILL, OOM) reparented all 12 to PID 1 and they kept
-    computing (16 GB box at 15.3 GB used on 2026-09-25).
+    computing: 24 orphans from two killed parents took the 16 GB box to
+    15.3 GB used on 2026-09-25.
 
     PITFALLS:
     - PDEATHSIG is per forking THREAD, not per process: if the thread that
@@ -54,9 +55,17 @@ def _die_with_parent(parent_pid: int, poll_s: float = 0.5) -> None:
     - `parent_pid` must be captured in the PARENT (before the fork) and passed
       in; `os.getppid()` from inside a worker whose parent is already dead
       returns the reaper's pid, which is exactly the case we must detect.
-    - Use SIGKILL on ourselves, not `sys.exit`: the worker loop in
-      `concurrent.futures.process` swallows exceptions from a task and blocks
-      forever in `call_queue.get()` once the parent is gone.
+    - Use SIGKILL on ourselves, not `sys.exit`: from the watchdog thread
+      `sys.exit` would end only that thread, and in the initializer the
+      `SystemExit` is caught by `_process_worker`, which just returns and
+      leaves the worker's fate to the (dead) parent.
+    - `fork` start method ONLY, pinned at the pool (`mp_context`). Under
+      `forkserver` every worker's parent is the fork server, not the caller,
+      so the post-prctl re-check SIGKILLs each worker in its initializer and
+      the build dies with BrokenProcessPool (measured on a 2-worker pool:
+      fork ok, spawn ok, forkserver broken). Python 3.14 makes forkserver
+      the Linux default, so the pin is what keeps a cold build working there;
+      the test's pre-fork stub injection depends on fork as well.
     - Never call this in the parent: it would arm the parent to die with ITS
       parent (the shell).
     """
@@ -408,6 +417,7 @@ class NavGraph:
         Parallelised: one worker process per CPU core, each loading its own VisibilityChecker
         instance once (via ProcessPoolExecutor initializer), then processing a share of rows.
         """
+        import multiprocessing
         import os
         import time
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -448,10 +458,15 @@ class NavGraph:
         # gh#254: workers die with THIS process (see _die_with_parent). os.getpid()
         # is captured here, in the parent, and handed to every worker; a worker
         # reading os.getppid() after its parent died would see the reaper instead.
+        # The start method is pinned to fork: the guard compares against the pid
+        # of the process that forked the worker, which under forkserver is the
+        # fork server, so an unpinned pool would kill every worker at init once
+        # forkserver becomes the Linux default (Python 3.14).
         with ProcessPoolExecutor(
                 max_workers=n_workers,
                 initializer=_vis_worker_init,
                 initargs=(str(tri_path), os.getpid()),
+                mp_context=multiprocessing.get_context("fork"),
         ) as executor:
             futures = [executor.submit(_vis_compute_rows, chunk, pts) for chunk in chunks]
             for fut in as_completed(futures):

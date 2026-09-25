@@ -3,7 +3,8 @@
 `NavGraph.build_vis_matrix` forks `os.cpu_count()` workers (~900 MB each on
 dust2). Before this fix any parent death that skipped `__exit__` (pytest-timeout's
 `os._exit`, an outer `timeout`, SIGKILL, OOM) reparented every worker to PID 1 and
-they kept computing; 24 of them took the 16 GB dev box to 15.3 GB on 2026-09-25.
+they kept computing; 24 orphans from two killed parents took the 16 GB dev box
+to 15.3 GB on 2026-09-25.
 
 Knock-out (`test_pool_workers_die_with_parent`): run the REAL `build_vis_matrix`
 in a child process on an 8-area synthetic map (never dust2, never a cold cache),
