@@ -20,11 +20,86 @@ from _obs_spec import OBS_BLOCKS, OBS_DIM              # noqa: F401  generated; 
 _vc = None                             # per-worker VisibilityChecker instance
 
 
-def _vis_worker_init(tri_path_str: str):
-    """Runs once per worker process — loads VisibilityChecker into a module global."""
+def _die_with_parent(parent_pid: int, poll_s: float = 0.5) -> None:
+    """Make THIS process die when the process that forked it dies (gh#254).
+
+    WHAT: two independent guards, installed once in a pool worker's initializer.
+      1. Linux `prctl(PR_SET_PDEATHSIG, SIGKILL)`: the kernel SIGKILLs us the
+         moment the parent THREAD that forked us exits. Kernel-level: no
+         0.5 s polling latency, and immune to a worker stuck in GIL-holding
+         native code, which (2) is not.
+      2. A daemon watchdog thread that polls `os.getppid()` every `poll_s`
+         and SIGKILLs this process when it stops being `parent_pid`. Portable
+         (no prctl on macOS), and the fallback if (1) is unavailable.
+    Both are followed by a re-check of `os.getppid()`: if the parent already
+    died between the fork and the prctl call, PDEATHSIG never fires (it is
+    only sent on a FUTURE parent exit), so we exit right here.
+
+    WHY: `build_vis_matrix` forks `os.cpu_count()` workers that each grow to
+    ~900 MB. `ProcessPoolExecutor.__exit__` is the only thing that stops
+    them, so any parent death that skips it (pytest-timeout's `os._exit`, an
+    outer `timeout`, SIGKILL, OOM) reparented all 12 to PID 1 and they kept
+    computing: 24 orphans from two killed parents took the 16 GB box to
+    15.3 GB used on 2026-09-25.
+
+    PITFALLS:
+    - PDEATHSIG is per forking THREAD, not per process: if the thread that
+      called `Process.start()` exits while the parent lives, the worker is
+      killed anyway. That cannot happen in `build_vis_matrix` — under the
+      `fork` start method every worker is forked by the thread that made the
+      first `submit()` (measured: `_launch_processes` runs there), and that
+      thread is blocked in `as_completed` inside the `with` block until every
+      future is done; replacement workers are forked by the executor's
+      manager thread, which lives until shutdown. A caller that starts the
+      build on a thread and lets that thread die mid-build would regress.
+    - `parent_pid` must be captured in the PARENT (before the fork) and passed
+      in; `os.getppid()` from inside a worker whose parent is already dead
+      returns the reaper's pid, which is exactly the case we must detect.
+    - Use SIGKILL on ourselves, not `sys.exit`: from the watchdog thread
+      `sys.exit` would end only that thread, not the worker.
+    - `fork` start method ONLY, pinned at the pool (`mp_context`). Under
+      `forkserver` every worker's parent is the fork server, not the caller,
+      so the post-prctl re-check SIGKILLs each worker in its initializer and
+      the build dies with BrokenProcessPool (measured on a 2-worker pool:
+      fork ok, spawn ok, forkserver broken). Python 3.14 makes forkserver
+      the Linux default, so the pin is what keeps a cold build working there;
+      the test's pre-fork stub injection depends on fork as well.
+    - Never call this in the parent: it would arm the parent to die with ITS
+      parent (the shell).
+    """
+    import os
+    import signal
+    import sys
+    import threading
+
+    def _suicide():
+        os.kill(os.getpid(), signal.SIGKILL)
+
+    if sys.platform == "linux":
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(1, int(signal.SIGKILL), 0, 0, 0)    # 1 == PR_SET_PDEATHSIG
+    if os.getppid() != parent_pid:                     # parent died before the prctl landed
+        _suicide()
+
+    def _watch():
+        import time
+        while True:
+            time.sleep(poll_s)
+            if os.getppid() != parent_pid:
+                _suicide()
+
+    threading.Thread(target=_watch, name="cs2rl-parent-watchdog", daemon=True).start()
+
+
+def _vis_worker_init(tri_path_str: str, parent_pid: int):
+    """Runs once per worker process: arms the parent-death guard (gh#254), then loads
+    VisibilityChecker into a module global. The guard goes FIRST so a worker whose
+    parent dies during the ~40 s checker load is killed too."""
     global _vc
     from pathlib import Path
 
+    _die_with_parent(parent_pid)
     from awpy.visibility import VisibilityChecker
 
     _vc = VisibilityChecker(path=Path(tri_path_str))
@@ -340,6 +415,7 @@ class NavGraph:
         Parallelised: one worker process per CPU core, each loading its own VisibilityChecker
         instance once (via ProcessPoolExecutor initializer), then processing a share of rows.
         """
+        import multiprocessing
         import os
         import time
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -377,10 +453,18 @@ class NavGraph:
         t0 = time.time()
 
         partial_rows: dict = {}
+        # gh#254: workers die with THIS process (see _die_with_parent). os.getpid()
+        # is captured here, in the parent, and handed to every worker; a worker
+        # reading os.getppid() after its parent died would see the reaper instead.
+        # The start method is pinned to fork: the guard compares against the pid
+        # of the process that forked the worker, which under forkserver is the
+        # fork server, so an unpinned pool would kill every worker at init once
+        # forkserver becomes the Linux default (Python 3.14).
         with ProcessPoolExecutor(
                 max_workers=n_workers,
                 initializer=_vis_worker_init,
-                initargs=(str(tri_path), ),
+                initargs=(str(tri_path), os.getpid()),
+                mp_context=multiprocessing.get_context("fork"),
         ) as executor:
             futures = [executor.submit(_vis_compute_rows, chunk, pts) for chunk in chunks]
             for fut in as_completed(futures):
