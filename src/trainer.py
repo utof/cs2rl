@@ -50,10 +50,10 @@ import numpy as np
 # `pufferlib` is read by the self-play evaluate body (gh#168 W2b) at exactly one site,
 # `pufferlib.unroll_nested_dict`. `import pufferlib.pytorch` has NO use in this module:
 # the old closure imported both forms and never touched `.pytorch`, and ast_oracle.py
-# check S2 requires the new module to bind `pufferlib` through the SAME set of import
-# forms (measured in the #262 fold: dropping it is `S2 'pufferlib': old binding
-# [import pufferlib, import pufferlib.pytorch], new module binds [import pufferlib]`).
-# Carried for that parity only; W3 may drop it together with the oracle's old-side reading.
+# check S2 passes only if this module binds `pufferlib` through every import form the
+# old closure used (extra forms are fine) or re-imports the name from train.py. Measured
+# in the #262 fold: without this line O1 fails S2 on `pufferlib`. Carried for that check
+# only; it can go once `--moves evaluate` is no longer run as a gate.
 import pufferlib
 import pufferlib.pytorch
 import torch
@@ -379,11 +379,17 @@ class Cs2PuffeRL(PuffeRL):
         Stores the manager, the past policy's own LSTM state (the same dict structure as
         ``self.lstm_h``: keyed by agent-batch start ``i*n``, one ``(agents_per_batch,
         hidden_size)`` tensor per chunk, so ``evaluate`` can index it by ``env_id.start``),
-        and the six ``_batch1_*`` reward-processing attributes: the three ``WelfordStd``,
-        ``_batch1_reward_scratch`` and ``_batch1_current_segment_has_event`` are read and
-        written by ``process_step_rewards`` (the scratch buffer is also regrown by
-        ``evaluate`` when an obs batch is larger); ``_batch1_event_mask`` is written only by
-        ``evaluate`` at the segment boundary and read by ``train``.
+        and the six ``_batch1_*`` reward-processing attributes. ``process_step_rewards``
+        updates the three ``WelfordStd`` and reads their ``std()``; ``train`` copies the
+        three ``std()`` values into ``_batch1_std_*`` at the end of each call.
+        ``process_step_rewards`` writes each env's channel sum into
+        ``_batch1_reward_scratch`` and reads it back for one host-to-device copy;
+        ``evaluate`` replaces the buffer with a longer one when the info list (at most one
+        entry per env) is longer than it. ``process_step_rewards`` only sets rows of
+        ``_batch1_current_segment_has_event`` to True (bomb planted this tick); ``evaluate``
+        reads those rows into ``_batch1_event_mask`` and clears them at the segment
+        boundary. Apart from the zero fill here, ``_batch1_event_mask`` is written only by
+        ``evaluate`` at that boundary, and ``train`` reads it.
         ``_install_full_checkpointing`` still takes the manager as an argument
         (resume_state.py is untouched by W2b).
         """
@@ -392,7 +398,8 @@ class Cs2PuffeRL(PuffeRL):
         self._past_lstm_c = {k: torch.zeros_like(v) for k, v in self.lstm_h.items()}
         # Batch 1 reward processing state (per-channel Welford, per-segment event
         # masks, and the numpy scratch buffer process_step_rewards writes into; evaluate
-        # regrows it when an obs batch is longer than the buffer).
+        # replaces it with a longer one when the info list, at most one entry per env, is
+        # longer than the buffer).
         self._batch1_welford_combat = WelfordStd(prior_std=1.0, min_count=1000)
         self._batch1_welford_objective = WelfordStd(prior_std=1.0, min_count=1000)
         self._batch1_welford_positional = WelfordStd(prior_std=1.0, min_count=1000)
