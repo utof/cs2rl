@@ -185,6 +185,20 @@ def _bindings_in_scope(scope, name):
     return hits
 
 
+def test_bindings_in_scope_sees_a_def_inside_a_match_case():
+    """Pin on the `cases` clause of _bindings_in_scope (W2b fold of the W2a review nit).
+
+    A `match` arm's body is neither `body` nor `orelse` nor a handler, so before the
+    clause a def bound inside one was invisible: `find_def` would report the name as
+    unbound and the anchor derivation would raise on a body that actually exists.
+    Measured: deleting the two `cases` lines makes this test red (0 hits) and nothing
+    else in the file notices.
+    """
+    mod = ast.parse("match x:\n    case 1:\n        def f(): ...\n")
+    hits = _bindings_in_scope(mod, "f")
+    assert len(hits) == 1 and isinstance(hits[0], ast.FunctionDef), hits
+
+
 def find_def(module, qualname):
     """The def at a dotted qualname; each part must be bound EXACTLY once in its scope.
 

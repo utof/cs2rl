@@ -109,7 +109,7 @@ def test_make_env_default_keeps_step_stats_off():
 # If any of the above regress, these tests will surface the break early.
 
 
-def test_selfplay_patch_attaches_welford_and_event_mask():
+def test_selfplay_init_attaches_welford_and_event_mask():
     """Task 6c: Cs2PuffeRL._init_selfplay must attach three WelfordStd
     instances and two event-mask buffers to the trainer object."""
     from train_helpers_batch1 import WelfordStd
