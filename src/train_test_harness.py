@@ -18,8 +18,8 @@ What's stripped vs. production ``src.train.train()``:
       ``trainer.Cs2PuffeRL``, the production class, so return-norm, hybrid-aim,
       self-play evaluate() and full checkpointing are ALWAYS on, exactly as in
       ``train()``. Before W1.5 it composed a bare PuffeRL plus two patches and
-      26 tests applied return-norm themselves; ``tests/`` now applies no patch
-      function. (The timing patch no longer exists: 2cffc35 moved timing to
+      26 call statements (several inside shared helpers) applied return-norm
+      themselves; ``tests/`` now applies no patch function. (The timing patch no longer exists: 2cffc35 moved timing to
       train()'s call sites.)
 
 Design contract:
@@ -146,215 +146,241 @@ def _harness_parts(
     # but build_train_config requires it as a string. Using mkdtemp keeps each
     # harness instance isolated; cleanup removes it wholesale.
     tmp_checkpoint_dir = tempfile.mkdtemp(prefix="cs2rl-harness-")
-
-    # ── Shared team-spirit value (production pattern) ───────────────────────
-    # Production uses mp.Value so multiprocess workers can read a scalar that
-    # the main trainer anneals each epoch. Serial backend doesn't actually
-    # need shared memory, but the harness role builder requires a shared_ts.
-    shared_ts = mp.Value("f", 0.3)
-
-    # Simple 5-room map — the production default for non-dust2 runs. Avoids
-    # depending on any pre-generated mapdata file on disk. R0-E: overridable.
-    if map_data is None:
-        map_data = make_simple_map()
-
-    # ── F8: action-mask shm, same env→trainer pattern as production ─────────
-    # Serial backend runs envs in-process, but the RawArray pattern is kept
-    # identical to train.train() so harness-built trainers exercise the REAL
-    # masked rollout path (sampler + rollout buffer + PPO-loss mask).
-    from multiprocessing import RawArray
-
-    import numpy as np
-
-    from _action_spec import ACTION_MASK_DIM
-
-    # (`from nav import TEAM_SIZE` used to sit in this import block for the
-    # participation-row formula below; Rung 1a T3 moved that formula into
-    # train.build_participating_rows, the one copy production also calls.)
-    _agents_per_env = 10
-    mask_shm = RawArray("b", num_envs * _agents_per_env * ACTION_MASK_DIM)
-    mask_view_main = np.frombuffer(mask_shm, dtype=np.int8).reshape(num_envs * _agents_per_env,
-                                                                    ACTION_MASK_DIM)
-
-    # One config for every env this trainer builds, so the harness cannot drift
-    # from production in the only way that matters: what the env is constructed
-    # with. The four values come from this function's own parameters, and the
-    # `args` namespace below is built from the SAME four, so build_train_config
-    # records exactly what the envs ran with.
-    config = EnvConfig(n_active_per_team=n_active_per_team,
-                       pin_pitch=pin_pitch,
-                       crouch_enabled=crouch_enabled,
-                       jump_enabled=jump_enabled)
-
-    def env_factory(*_args, buf=None, seed=None, _mask_idx=None, **_kwargs):
-        # W3 (#154): construction routes through the role factory. What USED to
-        # be spelled out here — the `0 if seed is None else seed` remap (an
-        # explicit None check, not `seed or 0`, so a legitimate seed=0 survives)
-        # and the unconditional include_step_stats_in_info=True (uniform
-        # attribute/info surface across selfplay and no-selfplay modes; one
-        # pre-built singleton dict per env, no per-tick allocation) — now lives
-        # in env_factory._build_harness with the same reasoning attached.
-        #
-        # The harness is production-SHAPED on purpose, but it is not the `train`
-        # role: it adds include_step_stats_in_info and takes its knobs as plain
-        # arguments rather than from a CLI-derived dict, so it has its own.
-        #
-        # WHAT COVERS THE FOUR-KNOB MAPPING ABOVE, knob by knob — it is not one
-        # test, and #165 PR B2 changed which.
-        # tests/fixtures/env_config_pre_165b.json holds the config and runtime
-        # kwargs this call produced before the builders were typed, and
-        # tests/test_env_factory.py drives this closure against both harness rows
-        # (test_harness_call_site_forwards_the_captured_kwargs). Those two rows
-        # differ from each other in n_active_per_team and jump_enabled, so the
-        # fixture sees either of THOSE dropped from the mapping — but both rows
-        # hold the FIELD DEFAULT for pin_pitch and for crouch_enabled, so it is
-        # blind to either of those two going missing.
-        #   pin_pitch     is caught outside this file, by
-        #                 tests/test_pitch_pin.py::test_env_trainer_pin_agreement_raises:
-        #                 it builds a harness trainer with a non-default pin and
-        #                 then calls assert_pin_pitch_agreement, which reads
-        #                 StaticData.pin_pitch off the DRIVER ENV and compares it
-        #                 with the policy mask. A mapping that dropped pin_pitch
-        #                 would send the envs the field default while build_policy
-        #                 still got the parameter, and that check would raise.
-        #   crouch_enabled is caught by NOTHING ELSE — no test in the tree passes
-        #                 it to _build_trainer_for_test. Its only cover is
-        #                 test_harness_config_carries_the_knobs_no_fixture_row_varies
-        #                 in tests/test_env_factory.py, which drives this closure
-        #                 off-fixture with a non-default crouch. Delete that test
-        #                 and this comment becomes false in the same edit.
-        env = build_env_for("harness",
-                            shared_ts=shared_ts,
-                            buf=buf,
-                            seed=seed,
-                            map_data=map_data,
-                            config=config)
-        # STAYS AT THE CALL SITE, outside the factory: this needs the harness's
-        # own shm handle and the per-env index pufferlib passes in, neither of
-        # which is the factory's business.
-        if _mask_idx is not None:
-            env._attach_mask_view(mask_shm, _mask_idx)
-        return env
-
-    # ── Vec env (Serial: no worker processes) ───────────────────────────────
-    # Serial makes teardown synchronous and deterministic — critical for
-    # pytest where a lingering process would block the whole session.
-    # Factory-list form (not single callable) for the same reason as
-    # production: per-env kwargs survive only when env_creators is a list
-    # (pufferlib vector.py broadcast quirk).
-    vecenv = pufferlib.vector.make(
-        [env_factory] * num_envs,
-        env_args=[[] for _ in range(num_envs)],
-        env_kwargs=[{
-            "_mask_idx": i
-        } for i in range(num_envs)],
-        num_envs=num_envs,
-        backend=pufferlib.vector.Serial,
-    )
-
-    # ── Minimal argparse-shaped config object ───────────────────────────────
-    # build_train_config reads these attributes. Everything else in the
-    # production parser (wandb, vec-backend, etc.) is irrelevant once we've
-    # already instantiated the vecenv.
-    # Tiny horizon — ONE evaluate() round is all downstream tests need.
-    # PuffeRL requires total_timesteps >= batch_size; pad by NUM_ROLLOUT_ROUNDS
-    # so a few back-to-back evaluate() calls in a single test stay within the
-    # configured timestep budget.
-    NUM_ROLLOUT_ROUNDS = 4
-    _agents_per_env, bptt_horizon, batch_size = compute_batch_dims(num_envs)
-    args = types.SimpleNamespace(
-        device=device,
-        seed=seed,
-        timesteps=batch_size * NUM_ROLLOUT_ROUNDS,
-        checkpoint_dir=tmp_checkpoint_dir,
-        n_active_per_team=n_active_per_team,
-        pin_pitch=pin_pitch,
-        crouch_enabled=crouch_enabled,
-        jump_enabled=jump_enabled,
-        aim_log_std_max=aim_log_std_max,
-        aim_entropy_bonus=aim_entropy_bonus,
-        opponent=opponent,
-    )
-    train_config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
-
-    # Small-env tests: build_train_config pins minibatch_size =
-    # max_minibatch_size = 8192, and PuffeRL raises APIUsageError when
-    # batch_size < minibatch_size (pufferl.py:121-124). batch_size =
-    # num_envs*640, so anything under 16 envs cannot construct a trainer at
-    # all. Clamp HERE (harness only) so tests can use num_envs=4/8 without
-    # touching the production (fingerprinted) config. Subprocess tests that go
-    # through train.py's real CLI must still use --num_envs >= 16.
-    # PITFALL: this changes total_minibatches / accumulate_minibatches for
-    # sub-16-env harness trainers — do not port it into build_train_config.
-    train_config["minibatch_size"] = train_config["max_minibatch_size"] = min(8192, batch_size)
-
-    # R0-E: cap + pin go to the policy exactly as train() passes them, so the
-    # harness policy carries aim_log_std_max / aim_dim_mask. build_policy
-    # raises ValueError on a cap outside the band — close the vecenv first so
-    # a refused harness does not leak the Serial envs.
+    # Everything from here to the return runs under ONE try (gh#168 W1.5 review):
+    # `cleanup` exists only once _build_trainer_for_test returns, so any raise in
+    # between (build_train_config → resolve_opponent_mode on a bad `opponent`,
+    # build_policy on a cap outside the band, build_participating_rows,
+    # build_selfplay_manager, the given-manager asserts above the return) used
+    # to leak the scratch dir and, once built, the Serial vecenv. Measured:
+    # `opponent="bogus"` left a /tmp/cs2rl-harness-* behind.
+    vecenv = None
     try:
+        # ── Shared team-spirit value (production pattern) ───────────────────────
+        # Production uses mp.Value so multiprocess workers can read a scalar that
+        # the main trainer anneals each epoch. Serial backend doesn't actually
+        # need shared memory, but the harness role builder requires a shared_ts.
+        shared_ts = mp.Value("f", 0.3)
+
+        # Simple 5-room map — the production default for non-dust2 runs. Avoids
+        # depending on any pre-generated mapdata file on disk. R0-E: overridable.
+        if map_data is None:
+            map_data = make_simple_map()
+
+        # ── F8: action-mask shm, same env→trainer pattern as production ─────────
+        # Serial backend runs envs in-process, but the RawArray pattern is kept
+        # identical to train.train() so harness-built trainers exercise the REAL
+        # masked rollout path (sampler + rollout buffer + PPO-loss mask).
+        from multiprocessing import RawArray
+
+        import numpy as np
+
+        from _action_spec import ACTION_MASK_DIM
+
+        # (`from nav import TEAM_SIZE` used to sit in this import block for the
+        # participation-row formula below; Rung 1a T3 moved that formula into
+        # train.build_participating_rows, the one copy production also calls.)
+        _agents_per_env = 10
+        mask_shm = RawArray("b", num_envs * _agents_per_env * ACTION_MASK_DIM)
+        mask_view_main = np.frombuffer(mask_shm,
+                                       dtype=np.int8).reshape(num_envs * _agents_per_env,
+                                                              ACTION_MASK_DIM)
+
+        # One config for every env this trainer builds, so the harness cannot drift
+        # from production in the only way that matters: what the env is constructed
+        # with. The four values come from this function's own parameters, and the
+        # `args` namespace below is built from the SAME four, so build_train_config
+        # records exactly what the envs ran with.
+        config = EnvConfig(n_active_per_team=n_active_per_team,
+                           pin_pitch=pin_pitch,
+                           crouch_enabled=crouch_enabled,
+                           jump_enabled=jump_enabled)
+
+        def env_factory(*_args, buf=None, seed=None, _mask_idx=None, **_kwargs):
+            # W3 (#154): construction routes through the role factory. What USED to
+            # be spelled out here — the `0 if seed is None else seed` remap (an
+            # explicit None check, not `seed or 0`, so a legitimate seed=0 survives)
+            # and the unconditional include_step_stats_in_info=True (uniform
+            # attribute/info surface across selfplay and no-selfplay modes; one
+            # pre-built singleton dict per env, no per-tick allocation) — now lives
+            # in env_factory._build_harness with the same reasoning attached.
+            #
+            # The harness is production-SHAPED on purpose, but it is not the `train`
+            # role: it adds include_step_stats_in_info and takes its knobs as plain
+            # arguments rather than from a CLI-derived dict, so it has its own.
+            #
+            # WHAT COVERS THE FOUR-KNOB MAPPING ABOVE, knob by knob — it is not one
+            # test, and #165 PR B2 changed which.
+            # tests/fixtures/env_config_pre_165b.json holds the config and runtime
+            # kwargs this call produced before the builders were typed, and
+            # tests/test_env_factory.py drives this closure against both harness rows
+            # (test_harness_call_site_forwards_the_captured_kwargs). Those two rows
+            # differ from each other in n_active_per_team and jump_enabled, so the
+            # fixture sees either of THOSE dropped from the mapping — but both rows
+            # hold the FIELD DEFAULT for pin_pitch and for crouch_enabled, so it is
+            # blind to either of those two going missing.
+            #   pin_pitch     is caught outside this file, by
+            #                 tests/test_pitch_pin.py::test_env_trainer_pin_agreement_raises:
+            #                 it builds a harness trainer with a non-default pin and
+            #                 then calls assert_pin_pitch_agreement, which reads
+            #                 StaticData.pin_pitch off the DRIVER ENV and compares it
+            #                 with the policy mask. A mapping that dropped pin_pitch
+            #                 would send the envs the field default while build_policy
+            #                 still got the parameter, and that check would raise.
+            #   crouch_enabled is caught by NOTHING ELSE — no test in the tree passes
+            #                 it to _build_trainer_for_test. Its only cover is
+            #                 test_harness_config_carries_the_knobs_no_fixture_row_varies
+            #                 in tests/test_env_factory.py, which drives this closure
+            #                 off-fixture with a non-default crouch. Delete that test
+            #                 and this comment becomes false in the same edit.
+            env = build_env_for("harness",
+                                shared_ts=shared_ts,
+                                buf=buf,
+                                seed=seed,
+                                map_data=map_data,
+                                config=config)
+            # STAYS AT THE CALL SITE, outside the factory: this needs the harness's
+            # own shm handle and the per-env index pufferlib passes in, neither of
+            # which is the factory's business.
+            if _mask_idx is not None:
+                env._attach_mask_view(mask_shm, _mask_idx)
+            return env
+
+        # ── Vec env (Serial: no worker processes) ───────────────────────────────
+        # Serial makes teardown synchronous and deterministic — critical for
+        # pytest where a lingering process would block the whole session.
+        # Factory-list form (not single callable) for the same reason as
+        # production: per-env kwargs survive only when env_creators is a list
+        # (pufferlib vector.py broadcast quirk).
+        vecenv = pufferlib.vector.make(
+            [env_factory] * num_envs,
+            env_args=[[] for _ in range(num_envs)],
+            env_kwargs=[{
+                "_mask_idx": i
+            } for i in range(num_envs)],
+            num_envs=num_envs,
+            backend=pufferlib.vector.Serial,
+        )
+
+        # ── Minimal argparse-shaped config object ───────────────────────────────
+        # build_train_config reads these attributes. Everything else in the
+        # production parser (wandb, vec-backend, etc.) is irrelevant once we've
+        # already instantiated the vecenv.
+        # Tiny horizon — ONE evaluate() round is all downstream tests need.
+        # PuffeRL requires total_timesteps >= batch_size; pad by NUM_ROLLOUT_ROUNDS
+        # so a few back-to-back evaluate() calls in a single test stay within the
+        # configured timestep budget.
+        NUM_ROLLOUT_ROUNDS = 4
+        _agents_per_env, bptt_horizon, batch_size = compute_batch_dims(num_envs)
+        args = types.SimpleNamespace(
+            device=device,
+            seed=seed,
+            timesteps=batch_size * NUM_ROLLOUT_ROUNDS,
+            checkpoint_dir=tmp_checkpoint_dir,
+            n_active_per_team=n_active_per_team,
+            pin_pitch=pin_pitch,
+            crouch_enabled=crouch_enabled,
+            jump_enabled=jump_enabled,
+            aim_log_std_max=aim_log_std_max,
+            aim_entropy_bonus=aim_entropy_bonus,
+            opponent=opponent,
+        )
+        train_config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
+
+        # Small-env tests: build_train_config pins minibatch_size =
+        # max_minibatch_size = 8192, and PuffeRL raises APIUsageError when
+        # batch_size < minibatch_size (pufferl.py:121-124). batch_size =
+        # num_envs*640, so anything under 16 envs cannot construct a trainer at
+        # all. Clamp HERE (harness only) so tests can use num_envs=4/8 without
+        # touching the production (fingerprinted) config. Subprocess tests that go
+        # through train.py's real CLI must still use --num_envs >= 16.
+        # PITFALL: this changes total_minibatches / accumulate_minibatches for
+        # sub-16-env harness trainers — do not port it into build_train_config.
+        train_config["minibatch_size"] = train_config["max_minibatch_size"] = min(8192, batch_size)
+
+        # R0-E: cap + pin go to the policy exactly as train() passes them, so the
+        # harness policy carries aim_log_std_max / aim_dim_mask. build_policy
+        # raises ValueError on a cap outside the band; the enclosing try closes the
+        # vecenv so a refused harness does not leak the Serial envs.
         policy = build_policy(vecenv,
                               device,
                               tct_split_heads=tct_split_heads,
                               tct_split_trunk=tct_split_trunk,
                               aim_log_std_max=aim_log_std_max,
                               pin_pitch=bool(pin_pitch))
-    except Exception:
-        vecenv.close()
+        # Rung 0 §2.2 + Rung 1a T3: the SHARED helper train() calls, not a copy of
+        # its formula. The copy was the hazard: a participation change patched into
+        # only one of the two left the headline harness test green against a
+        # formula production never ran. Built here, BEFORE the constructor and not
+        # inside the patcher, so the harness mirrors production's call order (gh#168
+        # W1: train() builds it before Cs2PuffeRL, whose __init__ reads it at patch
+        # time).
+        participating_rows = build_participating_rows(num_envs,
+                                                      n_active_per_team,
+                                                      opponent_mode=opponent,
+                                                      hero_team=SelfPlayManager.initial_hero_team())
+
+        # ── Self-play manager (the patch is always applied at T5) ──────────────
+        # Pre-Batch-3: this was gated on `with_selfplay` so the no-selfplay path
+        # could exercise PufferLib's library evaluate(). T4 changed the policy
+        # contract to a 4-tuple; PufferLib's library evaluate still expects a
+        # 2-tuple, so the no-selfplay path can't run end-to-end without our
+        # hybrid-aware evaluate() replacement. The selfplay patch IS that
+        # replacement (types.MethodType; it never calls the stock evaluate());
+        # `with_selfplay=False` now means "no past-policy mixing" (empty pool
+        # never activates) — the replacement evaluate() still runs. The
+        # `with_selfplay=True` path additionally pre-seeds the manager. This
+        # keeps the test harness honest with production where the hybrid-aim
+        # rollout requires the patched evaluate path.
+        #
+        # W3 (#154): this used to be an `if not with_selfplay: ... else: ...` whose
+        # two SelfPlayManager constructions were IDENTICAL apart from
+        # `p_past=0.0` / `p_past=0.3` — and production's third copy computed the same
+        # two values as `0.3 if self_play_enabled else 0.0`. That rule is now
+        # build_selfplay_manager's, taking the FLAG, so all three sites collapse onto
+        # one call and the branch disappears with them. The pre-migration shapes of
+        # all three are frozen in tests/fixtures/selfplay_kwargs_pre_w3.json and
+        # tests/test_selfplay_factory.py asserts the builder still produces each —
+        # which is the only oracle here, since the §3 gate runs --no-self-play and
+        # nothing on this branch reaches the harness at all.
+        if self_play_mgr is None:
+            self_play_mgr = build_selfplay_manager(
+                self_play_enabled=with_selfplay,
+                aim_log_std_max=aim_log_std_max,
+                pin_pitch=pin_pitch,
+                opponent_mode=opponent,
+            )
+        else:
+            # A caller-built manager must agree with the envs and the policy this
+            # call built, or the harness would compose a trainer production can
+            # never reach (the statue team and the pitch mask are read from the
+            # manager inside evaluate()). `with_selfplay` has no say when the
+            # manager is given: its p_past IS the self-play flag, so the startup
+            # guard is re-run on that instead. `aim_log_std_max` is trusted: the
+            # manager only forwards it to past-policy loading, which the two
+            # current callers (tests/test_resume_state.py, tests/test_pitch_pin.py)
+            # never reach with a non-default cap.
+            assert_opponent_self_play_compatible(opponent, self_play_mgr.p_past > 0)
+            assert (self_play_mgr.opponent_mode == opponent
+                    and self_play_mgr.pin_pitch == bool(pin_pitch)), (
+                        f"self_play_mgr disagrees with the harness knobs: manager "
+                        f"opponent_mode={self_play_mgr.opponent_mode!r} pin_pitch="
+                        f"{self_play_mgr.pin_pitch!r} vs opponent={opponent!r} "
+                        f"pin_pitch={bool(pin_pitch)!r}")
+        parts = dict(
+            config=train_config,
+            vecenv=vecenv,
+            policy=policy,
+            cont_action_view_main=None,
+            mask_view_main=mask_view_main,
+            participating_rows=participating_rows,
+            self_play_mgr=self_play_mgr,
+        )
+        pins = dict(mask_shm=mask_shm, tmp_checkpoint_dir=tmp_checkpoint_dir)
+    except BaseException:
+        if vecenv is not None:
+            vecenv.close()
         shutil.rmtree(tmp_checkpoint_dir, ignore_errors=True)
         raise
-    # Rung 0 §2.2 + Rung 1a T3: the SHARED helper train() calls, not a copy of
-    # its formula. The copy was the hazard: a participation change patched into
-    # only one of the two left the headline harness test green against a
-    # formula production never ran. Built here, BEFORE the constructor and not
-    # inside the patcher, so the harness mirrors production's call order (gh#168
-    # W1: train() builds it before Cs2PuffeRL, whose __init__ reads it at patch
-    # time).
-    participating_rows = build_participating_rows(num_envs,
-                                                  n_active_per_team,
-                                                  opponent_mode=opponent,
-                                                  hero_team=SelfPlayManager.initial_hero_team())
-
-    # ── Self-play manager (the patch is always applied at T5) ──────────────
-    # Pre-Batch-3: this was gated on `with_selfplay` so the no-selfplay path
-    # could exercise PufferLib's library evaluate(). T4 changed the policy
-    # contract to a 4-tuple; PufferLib's library evaluate still expects a
-    # 2-tuple, so the no-selfplay path can't run end-to-end without our
-    # hybrid-aware evaluate() replacement. The selfplay patch IS that
-    # replacement (types.MethodType; it never calls the stock evaluate());
-    # `with_selfplay=False` now means "no past-policy mixing" (empty pool
-    # never activates) — the replacement evaluate() still runs. The
-    # `with_selfplay=True` path additionally pre-seeds the manager. This
-    # keeps the test harness honest with production where the hybrid-aim
-    # rollout requires the patched evaluate path.
-    #
-    # W3 (#154): this used to be an `if not with_selfplay: ... else: ...` whose
-    # two SelfPlayManager constructions were IDENTICAL apart from
-    # `p_past=0.0` / `p_past=0.3` — and production's third copy computed the same
-    # two values as `0.3 if self_play_enabled else 0.0`. That rule is now
-    # build_selfplay_manager's, taking the FLAG, so all three sites collapse onto
-    # one call and the branch disappears with them. The pre-migration shapes of
-    # all three are frozen in tests/fixtures/selfplay_kwargs_pre_w3.json and
-    # tests/test_selfplay_factory.py asserts the builder still produces each —
-    # which is the only oracle here, since the §3 gate runs --no-self-play and
-    # nothing on this branch reaches the harness at all.
-    if self_play_mgr is None:
-        self_play_mgr = build_selfplay_manager(
-            self_play_enabled=with_selfplay,
-            aim_log_std_max=aim_log_std_max,
-            pin_pitch=pin_pitch,
-            opponent_mode=opponent,
-        )
-    parts = dict(
-        config=train_config,
-        vecenv=vecenv,
-        policy=policy,
-        cont_action_view_main=None,
-        mask_view_main=mask_view_main,
-        participating_rows=participating_rows,
-        self_play_mgr=self_play_mgr,
-    )
-    pins = dict(mask_shm=mask_shm, tmp_checkpoint_dir=tmp_checkpoint_dir)
     return parts, pins
 
 
@@ -511,13 +537,17 @@ def _build_trainer_for_test(
     # rollouts run MASKED, F8), the self-play evaluate() and full checkpointing,
     # so a harness test can no longer forget return-norm and run stock
     # PuffeRL.train() (gh#169), which cannot unpack the 4-tuple policy output.
-    # The constructor is wrapped for the same reason build_policy is inside
-    # _harness_parts: a raise here (PuffeRL's APIUsageError on a config it
-    # refuses, or a patch-time assert) would otherwise leak the Serial envs and
-    # the scratch dir, since `cleanup` only exists once we return.
+    # The constructor is wrapped for the same reason _harness_parts runs under
+    # one try: a raise here (PuffeRL's APIUsageError on a config it refuses, or
+    # a patch-time assert) would otherwise leak the Serial envs and the scratch
+    # dir, since `cleanup` only exists once we return. What this wrapper does
+    # NOT cover is the Utilization thread PuffeRL.__init__ starts: it is
+    # non-daemon and only its own stop() ends it, so a raise AFTER
+    # super().__init__ would hang the interpreter at exit. Cs2PuffeRL.__init__
+    # stops it itself on that path (tests/test_trainer_composition.py pins it).
     try:
         trainer = Cs2PuffeRL(**parts)
-    except Exception:
+    except BaseException:
         vecenv.close()
         shutil.rmtree(tmp_checkpoint_dir, ignore_errors=True)
         raise
@@ -532,6 +562,12 @@ def _build_trainer_for_test(
         never masks a test assertion error. If PufferLib drops trainer.close()
         in a future release, this silently no-ops — the smoke test pins
         ``close`` in the attribute surface so the rename will be caught there.
+
+        Since W1.5 the trainer is a Cs2PuffeRL, so ``trainer.close()`` runs
+        the FULL-checkpointing ``save_checkpoint`` (policy + optimizer + RNG +
+        self-play pool) before returning. That is a cost only, never a
+        leak: ``data_dir`` is ``args.checkpoint_dir`` (train_config.py), i.e.
+        this scratch dir, which the rmtree below removes wholesale.
         """
         try:
             trainer.close()

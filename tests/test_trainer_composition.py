@@ -242,6 +242,11 @@ def composed(monkeypatch):
     monkeypatch.setattr(PuffeRL, "__init__", recording_init)
     trainer, cleanup = _build_trainer_for_test(num_envs=16)
     try:
+        # Pin the pin: folding a name into the stock set that the harness no
+        # longer sets would hide its disappearance from (2), so check first.
+        assert "_action_mask_shm" in vars(trainer), (
+            "the harness no longer pins the mask RawArray on the trainer after the "
+            "constructor; (2) would silently absorb the missing name")
         yield trainer, stock["names"] | {"_action_mask_shm"}
     finally:
         cleanup()
@@ -308,3 +313,58 @@ def test_method_aliases_are_bound_to_the_closure_bodies(composed):
             "closure with types.MethodType")
         got = bound.__func__.__qualname__.replace(".<locals>.", ".")
         assert got == qualname, f"{name!r} is bound to {got!r}, expected {qualname!r}"
+
+
+def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path):
+    """A patch that raises inside ``Cs2PuffeRL.__init__`` must not hang the interpreter.
+
+    ``PuffeRL.__init__`` starts ``Utilization``, a NON-daemon thread whose loop ends only
+    when its ``stop()`` is called, and the only production caller of that is
+    ``PuffeRL.close()``. A raise after ``super().__init__`` leaves an instance nobody can
+    close, so before the fix (PR #259 review, MAJOR-1) pytest printed its summary and
+    then sat forever on the thread. The harness's own wrapper cannot help: it never gets
+    the half-built trainer. So ``Cs2PuffeRL.__init__`` stops the thread itself on any
+    raise, and this test drives that path in-process (no subprocess: a hang would be a
+    timeout, not a diagnosis) by making the LAST patch raise, so every earlier patch has
+    run and the thread has been alive the longest.
+
+    Two assertions, both against the interpreter's state rather than the code:
+    - every ``Utilization`` thread that exists afterwards has ``stopped`` set (the fix's
+      one line), and each one actually ends within its own ``delay`` (1 s) plus slack;
+    - the harness scratch dir is gone (``_harness_parts`` and ``_build_trainer_for_test``
+      both rmtree on a raise; ``tempfile.tempdir`` is pointed at ``tmp_path`` so the
+      check is exact and cannot see another process's scratch dirs).
+    The threads are enumerated by TYPE: pufferlib names them "Thread-N", not
+    "Utilization". A mutant that deletes the ``stop()`` is red on the first assertion
+    immediately (``stopped`` is False) and on the second after the join times out.
+    """
+    import tempfile
+    import threading
+
+    from pufferlib.pufferl import Utilization
+
+    import trainer as trainer_mod
+    from train_test_harness import _build_trainer_for_test
+
+    def _boom(self, self_play_mgr):
+        raise RuntimeError("simulated patch-time failure")
+
+    monkeypatch.setattr(trainer_mod, "_install_full_checkpointing", _boom)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    before = {t for t in threading.enumerate() if isinstance(t, Utilization)}
+
+    with pytest.raises(RuntimeError, match="simulated patch-time failure"):
+        _build_trainer_for_test(num_envs=16)
+
+    started = [t for t in threading.enumerate() if isinstance(t, Utilization)]
+    started = [t for t in started if t not in before]
+    assert started, "PuffeRL.__init__ did not start a Utilization thread; the test drives nothing"
+    assert all(t.stopped for t in started), (
+        "Cs2PuffeRL.__init__ raised without stopping the Utilization thread; the "
+        "interpreter would hang at exit")
+    for t in started:
+        t.join(timeout=5.0)
+    still_alive = [t.name for t in started if t.is_alive()]
+    assert not still_alive, f"Utilization threads still alive after stop()+join: {still_alive}"
+    leaked = sorted(p.name for p in tmp_path.glob("cs2rl-harness-*"))
+    assert leaked == [], f"harness scratch dirs leaked on the raise path: {leaked}"
