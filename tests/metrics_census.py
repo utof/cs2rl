@@ -1709,15 +1709,15 @@ def tag_key_axes():
 
 
 def stats_collection_is_append_shaped():
-    """True iff train.py accumulates episode infos into `self.stats` as LISTS.
+    """True iff Cs2PuffeRL.evaluate accumulates episode infos into `self.stats` as LISTS.
 
     The `window-mean-pufferlib` aggregation of every `environment/*` key rests
     on this loop appending to a list that PufferLib later np.means. If it were
     ever rewritten to `self.stats[k] = v`, every one of those declarations
     would become wrong at once — and nothing else in the suite would notice.
     """
-    tree = _module_ast("train.py")
-    fn = _find_qualname(tree, "_patch_trainer_with_selfplay._evaluate_with_selfplay")
+    tree = _module_ast("trainer.py")
+    fn = _find_qualname(tree, "Cs2PuffeRL.evaluate")
     for node in ast.walk(fn):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr in ("append", "extend")

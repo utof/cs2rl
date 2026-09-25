@@ -113,8 +113,8 @@ def _harness_parts(
     ``build_selfplay_manager`` is not called (tests/test_selfplay_factory.py spies on
     that call and must see exactly one when nothing is given). The two tests that need
     their own manager (tests/test_resume_state.py, tests/test_pitch_pin.py) used to
-    apply ``_patch_trainer_with_selfplay`` a second time on top of the harness's; now
-    the constructor reads the manager once. Its pool is read only inside evaluate(),
+    apply the self-play monkey-patch a second time on top of the harness's; now
+    ``Cs2PuffeRL._init_selfplay`` reads the manager once. Its pool is read only inside evaluate(),
     so a caller may seed it AFTER construction.
     """
     # Imports are function-local so importing this module in a test that
