@@ -21,11 +21,16 @@ review of PR #257:
    never assign must be present on the instance. The functions are located by qualname
    with an exactly-once binding rule, so a renamed or duplicated def raises instead of
    silently anchoring on nothing. WHAT (3) COVERS, measured at W1: the 18 DATA attributes
-   the moved bodies read. Deleting one of those from BOTH the frozen list and ``__init__``
-   keeps (2) green and (3) catches it. It does NOT cover the other 17 names: the three
-   method aliases (``train``/``evaluate``/``save_checkpoint`` are class attributes of
-   PuffeRL, filtered out), and every read-before-write or never-read name (``_timing``,
-   ``_cont_action_view_main``, ``_action_mask_view_main``, ``_normalize_returns`` and the
+   the moved bodies read; 19 since W2a, when the closure local ``entropy_floor`` became
+   the attribute ``_entropy_floor`` that ``Cs2PuffeRL.train`` reads (knock-out W2a-K1:
+   deleting its store in ``_init_return_norm`` is red here by name, in (2), and in the
+   warm-start tests). Deleting one of those from BOTH the frozen list and ``__init__``
+   keeps (2) green and (3) catches it. It does NOT cover the other 16 names: the two
+   remaining method aliases (``evaluate``/``save_checkpoint`` are class attributes of
+   PuffeRL, filtered out; ``train`` and ``_normalize_returns`` are Cs2PuffeRL's own
+   methods since W2a and are filtered the same way), and every read-before-write or
+   never-read name (``_timing``, ``_cont_action_view_main``, ``_action_mask_view_main``,
+   ``_ret_device`` (read by ``_update_return_stats``, not an anchor function) and the
    ``_batch1_*`` names the bodies assign somewhere; some, like ``_batch1_reward_scratch``
    and ``_batch1_log_alpha_reset_done``, are read first). Those are pinned by (2) only,
    plus (4) for the aliases. Measured on PR #257's first commit: dropping
@@ -39,13 +44,15 @@ review of PR #257:
 4. Method identity, independent of the frozen list: each of ``train``, ``evaluate``,
    ``save_checkpoint`` is an INSTANCE attribute whose bound function is the closure body
    named in ANCHOR_FUNCTIONS. A dropped patch call (or a stock method left in place) is
-   red here by name even after the list is edited to match. W2a/b/c each turn one of these
-   into a class method and re-point the pin.
+   red here by name even after the list is edited to match. W2a (gh#168) turned ``train``
+   into a class method and re-pointed its pin (test_train_is_the_class_method: the class
+   defines it, it is not ``PuffeRL.train``, and no instance binding shadows it); W2b/W2c
+   do the same for ``evaluate`` and ``save_checkpoint``.
 
 PITFALLS
 - The anchor is PRESENCE-only: ``self._ret_count = None`` in ``__init__`` passes (3). Values
   are the byte gates' and construct_snapshot.py's job, not this file's.
-- The anchor count is asserted (18 at W1) as a positive control on the derivation itself,
+- The anchor count is asserted (18 at W1, 19 at W2a) as a positive control on the derivation itself,
   not as a second frozen list: a walk that silently found zero reads would otherwise pass
   (3) vacuously. Each W that moves a body re-derives the count and updates it here.
 """
@@ -60,7 +67,11 @@ import pytest
 SRC = Path(__file__).resolve().parents[1] / "src"
 
 # Spec §1.1: set(vars(trainer)) after the four patches and _timing, minus set(vars(trainer))
-# at the end of PuffeRL.__init__, measured on main. Re-derive with construct_snapshot.py.
+# at the end of PuffeRL.__init__, measured on main at 2a3573f, then edited per W. W2a (gh#168):
+# `train` and `_normalize_returns` are class methods now (no instance binding), and the two
+# closure locals train() reads became attributes: `_entropy_floor` (the 0.3·max_entropy
+# warm-start floor) and `_ret_device` (the device the Welford tensors live on). Re-derive
+# with construct_snapshot.py; its --expect-only-a/-b flags name exactly this delta.
 FROZEN_COMPOSED_SURFACE = frozenset({
     "_action_mask_view_main",
     "_alpha_optimizer",
@@ -81,11 +92,12 @@ FROZEN_COMPOSED_SURFACE = frozenset({
     "_batch1_welford_objective",
     "_batch1_welford_positional",
     "_cont_action_view_main",
+    "_entropy_floor",
     "_log_alpha_tensor",
-    "_normalize_returns",
     "_participating_rows",
     "_participating_rows_np",
     "_ret_count",
+    "_ret_device",
     "_ret_mean",
     "_ret_var",
     "_timing",
@@ -96,27 +108,31 @@ FROZEN_COMPOSED_SURFACE = frozenset({
     "logprobs_d",
     "participating",
     "save_checkpoint",
-    "train",
 })
 assert len(FROZEN_COMPOSED_SURFACE) == 35
 
 # (file, qualname) of every function that reads trainer state the constructor must have
-# declared. W2a re-points the train body to trainer.py::Cs2PuffeRL.train, W2b the evaluate
-# body, W2c the save body; the two resume_state helpers stay.
+# declared. W2a re-pointed the train body to trainer.py::Cs2PuffeRL.train (gh#168); W2b
+# re-points the evaluate body, W2c the save body; the two resume_state helpers stay.
 ANCHOR_FUNCTIONS = (
-    ("train_update.py", "_patch_trainer_with_return_norm._train_with_return_norm"),
+    ("trainer.py", "Cs2PuffeRL.train"),
     ("train.py", "_patch_trainer_with_selfplay._evaluate_with_selfplay"),
     ("resume_state.py", "_install_full_checkpointing._save_checkpoint"),
     ("resume_state.py", "collect_train_state"),
     ("resume_state.py", "restore_train_state"),
 )
-EXPECTED_ANCHOR_COUNT = 18
+# 18 at W1. W2a: 19 — `_entropy_floor` was a closure local and is now read as
+# `self._entropy_floor`; `_ret_device` is read only by `_update_return_stats`, which is
+# not an anchor function, so it is pinned by the frozen list and construct_snapshot only.
+EXPECTED_ANCHOR_COUNT = 19
 
 # Assertion (4): instance method alias -> the closure body it must be bound to (the same
 # qualnames as ANCHOR_FUNCTIONS, so the two cannot drift apart). Python spells a nested
 # def's __qualname__ as `outer.<locals>.inner`; the `<locals>` is dropped before comparing.
+# W2a (gh#168) took `train` out: it is a method of the class now, pinned by
+# test_train_is_the_class_method below (the same ANCHOR_FUNCTIONS[0] qualname, checked on
+# the class rather than in vars(trainer)). W2b/W2c will move the other two the same way.
 METHOD_ALIASES = {
-    "train": ANCHOR_FUNCTIONS[0][1],
     "evaluate": ANCHOR_FUNCTIONS[1][1],
     "save_checkpoint": ANCHOR_FUNCTIONS[2][1],
 }
@@ -293,14 +309,15 @@ def test_every_attribute_the_bodies_read_is_declared(composed):
 
 
 def test_method_aliases_are_bound_to_the_closure_bodies(composed):
-    """(4): the three replaced methods are instance attributes bound to the named closures.
+    """(4): the still-patched methods are instance attributes bound to the named closures.
 
     Independent of FROZEN_COMPOSED_SURFACE on purpose: a patch call dropped from __init__
-    together with its name from the list keeps (2) green and, for these three names,
-    (3) too (they are PuffeRL class attributes, which the anchor excludes). Here the name
-    must be in `vars(trainer)` (stock `PuffeRL.train` is a class attribute, so a missing
-    patch shows as "not an instance attribute") and its `__func__.__qualname__` must be
-    the closure body ANCHOR_FUNCTIONS names.
+    together with its name from the list keeps (2) green and, for these names, (3) too
+    (they are PuffeRL class attributes, which the anchor excludes). Here the name must be
+    in `vars(trainer)` (stock `PuffeRL.evaluate` is a class attribute, so a missing patch
+    shows as "not an instance attribute") and its `__func__.__qualname__` must be the
+    closure body ANCHOR_FUNCTIONS names. `train` left this loop at W2a; see
+    test_train_is_the_class_method.
     """
     trainer, _ = composed
     for name, qualname in METHOD_ALIASES.items():
@@ -313,6 +330,33 @@ def test_method_aliases_are_bound_to_the_closure_bodies(composed):
             "closure with types.MethodType")
         got = bound.__func__.__qualname__.replace(".<locals>.", ".")
         assert got == qualname, f"{name!r} is bound to {got!r}, expected {qualname!r}"
+
+
+def test_train_is_the_class_method(composed):
+    """(4) for `train` after gh#168 W2a: the class defines it, and nothing re-binds it.
+
+    Two halves, both needed. (a) `Cs2PuffeRL.train` is the def ANCHOR_FUNCTIONS[0] names
+    and is NOT `PuffeRL.train`: a `def train` deleted from the class would fall through
+    to the stock body, which knows nothing of return normalisation, and every harness
+    test would run it. (b) `train` is not in `vars(trainer)`: a leftover MethodType
+    binding (a re-introduced patcher, or a test that pokes one in) would shadow the
+    class method and (a) alone would stay green. Read through `type(trainer)` so a
+    subclass used by the harness would be caught too.
+    """
+    from pufferlib.pufferl import PuffeRL
+
+    from trainer import Cs2PuffeRL
+    trainer, _ = composed
+    cls = type(trainer)
+    assert cls.train is Cs2PuffeRL.train and cls.train is not PuffeRL.train, (
+        "Cs2PuffeRL no longer defines train(); the stock PuffeRL body would run")
+    assert Cs2PuffeRL.train.__qualname__ == ANCHOR_FUNCTIONS[0][1], (
+        f"Cs2PuffeRL.train is {Cs2PuffeRL.train.__qualname__!r}; ANCHOR_FUNCTIONS[0] names "
+        f"{ANCHOR_FUNCTIONS[0][1]!r}")
+    assert "train" not in vars(trainer), (
+        "train is an INSTANCE attribute again: something re-bound it after construction "
+        "and shadows Cs2PuffeRL.train")
+    assert trainer.train.__func__ is Cs2PuffeRL.train
 
 
 def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path):
@@ -358,13 +402,23 @@ def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path)
 
     started = [t for t in threading.enumerate() if isinstance(t, Utilization)]
     started = [t for t in started if t not in before]
-    assert started, "PuffeRL.__init__ did not start a Utilization thread; the test drives nothing"
-    assert all(t.stopped for t in started), (
-        "Cs2PuffeRL.__init__ raised without stopping the Utilization thread; the "
-        "interpreter would hang at exit")
-    for t in started:
-        t.join(timeout=5.0)
-    still_alive = [t.name for t in started if t.is_alive()]
-    assert not still_alive, f"Utilization threads still alive after stop()+join: {still_alive}"
-    leaked = sorted(p.name for p in tmp_path.glob("cs2rl-harness-*"))
-    assert leaked == [], f"harness scratch dirs leaked on the raise path: {leaked}"
+    try:
+        assert started, (
+            "PuffeRL.__init__ did not start a Utilization thread; the test drives nothing")
+        assert all(t.stopped for t in started), (
+            "Cs2PuffeRL.__init__ raised without stopping the Utilization thread; the "
+            "interpreter would hang at exit")
+        for t in started:
+            t.join(timeout=5.0)
+        still_alive = [t.name for t in started if t.is_alive()]
+        assert not still_alive, (
+            f"Utilization threads still alive after stop()+join: {still_alive}")
+        leaked = sorted(p.name for p in tmp_path.glob("cs2rl-harness-*"))
+        assert leaked == [], f"harness scratch dirs leaked on the raise path: {leaked}"
+    finally:
+        # PR #259 review nit: when the assertion under test FAILS (the stop() mutant), the
+        # non-daemon thread it complains about would otherwise outlive the test and hang
+        # the whole pytest process at exit, turning a red test into a timeout. Stop it
+        # here, after the assertions have already recorded the failure.
+        for t in started:
+            t.stopped = True

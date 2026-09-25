@@ -385,7 +385,7 @@ REGISTRY.update({
     "environment/episodes":
     _e(
         "last", "count", ("rung1_gate", "rung1a_smoke_read"),
-        "ONE-ELEMENT-LIST wrap in train_update._train_with_return_norm — np.mean over a "
+        "ONE-ELEMENT-LIST wrap in trainer.Cs2PuffeRL.train — np.mean over a "
         "1-list is an identity, so this is the episode COUNT of the window, not a mean. "
         "Turning it into a bare write would silently divide every gate ratio by the "
         "window length; that is the case the aggregation assert pins by name."),

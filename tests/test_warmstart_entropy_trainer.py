@@ -45,31 +45,29 @@ def _build_ws_trainer(num_envs=32, **ws_overrides):
 
 
 def _force_floor_above_entropy(trainer, floor=1e6):
-    """Raise the patched train()'s entropy_floor above any achievable entropy (gh#96).
+    """Raise the trainer's entropy floor above any achievable entropy (gh#96).
 
-    WHAT: rewrites the `entropy_floor` closure cell captured by
-    _train_with_return_norm so `current_entropy.item() < entropy_floor` is
-    unconditionally true, which is the only way to exercise the
-    `_ws_floor_active` gate on the min=0.5 clamp.
+    WHAT: sets `trainer._entropy_floor` so `current_entropy.item() <
+    self._entropy_floor` in Cs2PuffeRL.train is unconditionally true, which is
+    the only way to exercise the `_ws_floor_active` gate on the min=0.5 clamp.
 
-    WHY a closure poke and not a config knob: entropy_floor is computed once in
-    _patch_trainer_with_return_norm as `0.3 * max_entropy`, from the module-level
-    ACTION_HEAD_SIZES / LOG_STD_MAX — never from trainer state — so there is no
-    attribute to monkeypatch after the fact, and the harness policy sits near max
-    entropy so the condition never trips naturally.
+    WHY a write after construction and not a config knob: the floor is computed
+    once in Cs2PuffeRL._init_return_norm as `0.3 * max_entropy`, from the
+    module-level ACTION_HEAD_SIZES / LOG_STD_MAX — never from config — and the
+    harness policy sits near max entropy so the condition never trips naturally.
 
-    PITFALL: the cell exists only on the return-norm train() body, which the
-    harness trainer carries from construction (gh#168 W1.5); the name is matched
-    by co_freevars, so a rename of the local makes this raise instead of
-    silently no-opping. gh#168 W2a turns the closure local into
-    `trainer._entropy_floor`, and this helper becomes a plain attribute write.
+    PITFALL: until gh#168 W2a the floor was a closure cell of the patched
+    train() body and this helper rewrote it through `__closure__`; W2a made it
+    the instance attribute `_entropy_floor` (declared in `_init_return_norm`,
+    pinned by tests/test_trainer_composition.py's frozen list and the O4
+    construction snapshot). The attribute must exist BEFORE the write: a
+    renamed attribute would otherwise create a dead one and this helper would
+    silently no-op, which is what the assert below turns into a failure.
     """
-    fn = trainer.train.__func__
-    freevars = fn.__code__.co_freevars
-    assert "entropy_floor" in freevars, (
-        f"entropy_floor is no longer a closure local of {fn.__name__}; "
-        f"free variables are {freevars}. Update this helper to match.")
-    fn.__closure__[freevars.index("entropy_floor")].cell_contents = float(floor)
+    assert hasattr(trainer, "_entropy_floor"), (
+        "trainer has no _entropy_floor: Cs2PuffeRL._init_return_norm renamed it; update this "
+        "helper to match, or the floor write below would create a dead attribute")
+    trainer._entropy_floor = float(floor)
 
 
 def test_floor_stays_disarmed_during_grace_even_below_floor():

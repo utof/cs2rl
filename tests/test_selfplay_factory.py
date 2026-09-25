@@ -531,8 +531,10 @@ def test_harness_given_manager_skips_the_builder(monkeypatch):
     (the trainer would carry the builder's manager, not the caller's). Same spy shape as
     the companion, for the same reason: a stub that raised would leave the trainer
     unclosed. The manager passed must agree with the harness knobs (the harness asserts
-    that), so it is built with the defaults the harness would pass: ``opponent="self"``
-    and ``pin_pitch`` from the env defaults, with ``p_past=0.0`` (no self-play).
+    that), so it is built with the values the harness would pass: ``opponent_mode="self"``
+    and ``pin_pitch=bool(_ENV_DEFAULTS.pin_pitch)`` (spelled, not left to
+    SelfPlayManager's own default coinciding with the env default), with ``p_past=0.0``
+    (no self-play).
     """
     import train_test_harness
     from train import SelfPlayManager
@@ -545,7 +547,9 @@ def test_harness_given_manager_skips_the_builder(monkeypatch):
         return real_builder(**kwargs)
 
     monkeypatch.setattr(train_test_harness, "build_selfplay_manager", _spy)
-    mgr = SelfPlayManager(p_past=0.0)
+    mgr = SelfPlayManager(p_past=0.0,
+                          opponent_mode="self",
+                          pin_pitch=bool(train_test_harness._ENV_DEFAULTS.pin_pitch))
     _, cleanup = train_test_harness._build_trainer_for_test(num_envs=2, self_play_mgr=mgr)
     try:
         assert recorded == [], (

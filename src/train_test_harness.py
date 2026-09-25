@@ -353,9 +353,10 @@ def _harness_parts(
             # A caller-built manager must agree with the envs and the policy this
             # call built, or the harness would compose a trainer production can
             # never reach (the statue team and the pitch mask are read from the
-            # manager inside evaluate()). `with_selfplay` has no say when the
-            # manager is given: its p_past IS the self-play flag, so the startup
-            # guard is re-run on that instead. `aim_log_std_max` is trusted: the
+            # manager inside evaluate()). When a manager is given its p_past IS
+            # the self-play flag, so the startup guard (run on `with_selfplay`
+            # above, before mkdtemp) is re-run on the manager here, not
+            # replaced. `aim_log_std_max` is trusted: the
             # manager only forwards it to past-policy loading, which the two
             # current callers (tests/test_resume_state.py, tests/test_pitch_pin.py)
             # never reach with a non-default cap.
