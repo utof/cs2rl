@@ -2354,8 +2354,10 @@ class _KillSeamClauses:
     # exempt function may load anything banned, so one that imported the runner could hand
     # the real `os.killpg` to `ProcessControl(...)` in the clear. So `kill_seam_loads` also
     # makes a file that owns a row red on any import of `RUNNER_PACKAGES` (`_runner_imports`),
-    # in every spelling: `import scripts.modal_runner.training`, `from scripts.modal_runner
-    # import training`, `from scripts import modal_runner`. WATCHED: (iv)'s population
+    # in every Import/ImportFrom spelling `_runner_imports` reads: `import
+    # scripts.modal_runner.training`, `from scripts.modal_runner import training`, `from
+    # scripts import modal_runner`, and the same for tests/modal_test_helpers.py, which binds
+    # `training` and the package at module level (a one-hop re-export). WATCHED: (iv)'s population
     # requires every row here to have examined a banned load on the real tree, so a renamed
     # function, a deleted file or a dropped kill turns the test red, not silently green
     # (`hygiene_kills_and_the_sigterm_test`). PITFALLS: the key is the innermost enclosing
@@ -2370,12 +2372,19 @@ class _KillSeamClauses:
         ("tests/test_vis_pool_parent_death.py", "_kill_child_and_count_survivors"),
     })
     # The runner, as import targets: a file owning a KILL_HYGIENE_EXEMPT row may import
-    # neither the package (any module of it) nor the Modal entry script. PITFALL: the entry
-    # script's dotted name is DERIVED from RUNNER_ENTRY, never spelled: any string constant
-    # in this class or its test containing that dotted name is the `_CLIENT_MODULES` seed of
-    # tests/test_modal_packaging.py (`_reaches_client_directly`, a substring match that reads
-    # docstrings too), which reclassifies both to the client file and turns the split red.
-    RUNNER_PACKAGES = ("scripts.modal_runner", RUNNER_ENTRY.removesuffix(".py").replace("/", "."))
+    # neither the package (any module of it), nor the Modal entry script, nor the shared
+    # helper module, which binds `mrl`, `checkpoint`, `request` and `training` from the
+    # runner at module level, so `from <helpers> import training` reaches ProcessControl in
+    # one hop without spelling `scripts.`. PITFALL: the entry script's and the helper's
+    # dotted names are DERIVED from their path constants, never spelled: any string constant
+    # in this class or its test containing the entry script's dotted name is the
+    # `_CLIENT_MODULES` seed of tests/test_modal_packaging.py (`_reaches_client_directly`, a
+    # substring match that reads docstrings too), which reclassifies both to the client file
+    # and turns the split red. The helper's is derived the same way so the two stay alike.
+    HELPERS = "tests/modal_test_helpers.py"
+    RUNNER_PACKAGES = tuple(
+        ["scripts.modal_runner"] +
+        [path.removesuffix(".py").replace("/", ".") for path in (RUNNER_ENTRY, HELPERS)])
 
     @classmethod
     def clauses(cls):
@@ -2813,6 +2822,10 @@ class _KillSeamClauses:
                         "import scripts.modal_runner.training as t\n",
                         "an exempt file importing the Modal entry script":
                         f"import {cls.RUNNER_PACKAGES[1]}\n",
+                        "an exempt file importing the runner through the helper module":
+                        f"from {cls.RUNNER_PACKAGES[2]} import training\n",
+                        "an exempt file importing the helper module from tests":
+                        f"from tests import {cls.RUNNER_PACKAGES[2].split('.')[1]}\n",
                         "an exempt function importing the runner inside its body":
                         f"def {exempt_function}():\n    from scripts.modal_runner import training\n",
                     }),
@@ -2925,23 +2938,25 @@ class _KillSeamClauses:
         """Every import of a `RUNNER_PACKAGES` module in `tree`, one problem each, anywhere
         in the file (module level or inside a def). `import scripts.modal_runner[.x] [as y]`
         and `from scripts.modal_runner[.x] import z` match on the dotted name, a package or
-        any module under it; `from scripts import modal_runner` / `run_modal` names the
-        package as the alias. A relative import (`module` None) cannot reach scripts/ from
-        tests/ and is not read."""
-        heads = {package.split(".")[1] for package in cls.RUNNER_PACKAGES}
+        any module under it; `from scripts import modal_runner` / `run_modal` and `from
+        tests import modal_test_helpers` name the module as the alias under its parent. A
+        relative import with a module (`from ..scripts.modal_runner import x`) is read on
+        its `module` text like an absolute one; only the bare `from . import x` (`module`
+        None) is not read. Import/ImportFrom only: see the test's RESIDUAL for what passes."""
+        heads = {tuple(package.rsplit(".", 1)) for package in cls.RUNNER_PACKAGES}
         problems = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 hit = any(cls._under_runner(alias.name) for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module is not None:
-                hit = cls._under_runner(node.module) or (node.module == "scripts"
-                                                         and any(alias.name in heads
-                                                                 for alias in node.names))
+                hit = cls._under_runner(node.module) or any(
+                    (node.module, alias.name) in heads for alias in node.names)
             else:
                 continue
             if hit:
                 problems.append(f"{rel}:{node.lineno} {ast.unparse(node)}: a file with a "
-                                "KILL_HYGIENE_EXEMPT row may not import the runner")
+                                "KILL_HYGIENE_EXEMPT row may not import the runner or a "
+                                "module that binds it (RUNNER_PACKAGES)")
         return problems
 
     @classmethod
@@ -3535,9 +3550,11 @@ def test_kill_seam_static_safety():
             workers (gh#251, gh#254). That is hygiene of the test's own child,
             not the seam, which is Modal's ProcessControl: because the exemption
             is per function, not per load, a file that owns a row is also red
-            on any import of `scripts.modal_runner` or scripts/run_modal.py
-            (`RUNNER_PACKAGES`, in every spelling `_runner_imports` reads), so
-            an exempt function cannot hand the real `os.killpg` to the runner.
+            on any import of `scripts.modal_runner`, scripts/run_modal.py or
+            tests/modal_test_helpers.py, which re-exports the runner
+            (`RUNNER_PACKAGES`, in every Import/ImportFrom spelling
+            `_runner_imports` reads), so an exempt function cannot hand the
+            real `os.killpg` to the runner.
             A load anywhere else in an exempt file, at module level or in
             another function, is red: never exempt by file.
       (v)   ProcessControl.system() builds exactly spawn=subprocess.Popen,
@@ -3589,6 +3606,9 @@ def test_kill_seam_static_safety():
     `killpg`, a shell `kill` in a subprocess, and code inside a string a child
     interpreter runs. A wrapper passes only when what it wraps does:
     `functools.partial(os.killpg, 0)` is caught, because it loads `os.killpg`.
+    `_runner_imports` reads Import/ImportFrom spellings only: in an exempt
+    file, `import scripts` then `scripts.modal_runner`, `from scripts import
+    *`, `importlib.import_module`, `__import__` and `sys.modules` pass it.
     (i), (v) and (vi) read training.py only: a `ProcessControl.system` captured
     at import in another runner module passes (vi) (the tripwire still poisons
     it when called under pytest). (iii) and (vii) read the runner package and
