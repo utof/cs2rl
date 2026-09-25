@@ -18,8 +18,7 @@ lines and their order are pinned by tests/test_kl_break_metrics.py inside
 ``inspect.getsource(train)``, and they guard the key scripts/rung1_gate.py reads;
 keeping definition and call sites together is the lower-risk spelling.
 PufferLib's own ``self.mean_and_log()`` likewise stays out of this module — its
-single call site lives inside ``_train_with_return_norm`` and therefore travels
-with the patcher in train_update.py.
+single call site lives inside ``Cs2PuffeRL.train`` (src/trainer.py, gh#168 W2a).
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/c_env-free, for the
 reason spelled out in train_shared.py's header. Every torch import below is

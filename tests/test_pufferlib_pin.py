@@ -39,9 +39,10 @@ def test_segments_equals_total_agents_invariant():
     This equality makes BPTT zero-initial-state EXACT (each agent row fills
     exactly one buffer segment per evaluate(); see Dust2Policy.forward /
     _lstm_bptt in src/train.py). Upstream only enforces <=; our equality holds
-    by construction in compute_batch_dims. The patch-time assert in
-    _patch_trainer_with_return_norm guards production; this test guards the
-    harness/config path and documents the invariant where reviewers look.
+    by construction in compute_batch_dims. The construction-time assert in
+    Cs2PuffeRL._init_return_norm (src/trainer.py, gh#168 W2a) guards production;
+    this test guards the harness/config path and documents the invariant where
+    reviewers look.
     """
     from train_test_harness import _build_trainer_for_test
 
@@ -50,6 +51,6 @@ def test_segments_equals_total_agents_invariant():
         assert trainer.segments == trainer.total_agents, (
             f"segments={trainer.segments} total_agents={trainer.total_agents} — "
             "BPTT zero-init exactness broken; see gh #85 and the assert in "
-            "_patch_trainer_with_return_norm.")
+            "Cs2PuffeRL._init_return_norm.")
     finally:
         cleanup()

@@ -314,8 +314,8 @@ def test_event_mask_detects_injected_bomb_planted():
 
 # ── Task 8: prio_probs event-biased oversampling ───────────────────────────
 # These tests cover the prio_probs boosting added to the replacement train()
-# body (_train_with_return_norm in src/train_update.py, installed by
-# Cs2PuffeRL.__init__ — the harness trainer always has it since gh#168 W1.5).
+# body (Cs2PuffeRL.train in src/trainer.py since gh#168 W2a — the harness
+# trainer is a Cs2PuffeRL since gh#168 W1.5).
 # The plan target: segments
 # whose _batch1_event_mask is True get sampled at least 25% of the time when
 # at least one event segment exists.
@@ -470,8 +470,8 @@ def test_event_oversample_fraction_exposed():
 
 
 # ── Task 9: target_entropy schedule + log_alpha reset + Batch 1 metrics ────
-# These tests cover three sub-features of the return-norm patch
-# (_patch_trainer_with_return_norm, src/train_update.py):
+# These tests cover three sub-features of the return-norm machinery
+# (Cs2PuffeRL._init_return_norm + Cs2PuffeRL.train, src/trainer.py, gh#168 W2a):
 #   (A) target_entropy schedule — linear ramp 0.7→0.5 * max_entropy across
 #       global_step ∈ [0, 10_000_000]; constant after.
 #   (B) log_alpha reset — first train() after construction sets log_alpha to
@@ -516,7 +516,7 @@ def test_target_entropy_schedule_applied():
 
         expected_max_discrete = sum(math.log(n) for n in ACTION_HEAD_SIZES)
         # Closed-form Normal entropy at σ = exp(LOG_STD_MAX), summed across
-        # AIM_DIM. Mirrors the calc inside _patch_trainer_with_return_norm
+        # AIM_DIM. Mirrors the calc inside Cs2PuffeRL._init_return_norm
         # so this pin tracks the production formula exactly.
         sigma_max = math.exp(LOG_STD_MAX)
         expected_max_continuous = AIM_DIM * 0.5 * math.log(2 * math.pi * math.e * sigma_max**2)
@@ -573,7 +573,8 @@ def test_target_entropy_schedule_applied():
 
 def test_log_alpha_reset_at_batch_start():
     """Task 9B: the first train() call on a freshly constructed trainer (the
-    return-norm patch runs in Cs2PuffeRL.__init__, gh#168 W1.5)
+    return-norm state is seeded by Cs2PuffeRL._init_return_norm, gh#168 W2a;
+    the harness trainer is a Cs2PuffeRL since W1.5)
     must reset log_alpha to log(ent_coef). Subsequent calls must NOT
     re-reset (idempotent via the _batch1_log_alpha_reset_done flag)."""
     import math
@@ -645,9 +646,9 @@ def test_batch1_metrics_exposed():
 
 
 def test_return_norm_stats_reset_on_batch_start():
-    """Task 9a: applying the return-norm patch must put _ret_mean/_ret_var/
-    _ret_count into a neutral state and expose them on the trainer (the patch
-    runs inside Cs2PuffeRL.__init__, gh#168 W1.5).
+    """Task 9a: Cs2PuffeRL._init_return_norm (run by __init__, gh#168 W2a) must
+    put _ret_mean/_ret_var/_ret_count into a neutral state and expose them on
+    the trainer.
 
     Reading them BEFORE any train() call pins the patch-time invariant —
     this is what guarantees a fresh start in symlog space when Batch 1 is

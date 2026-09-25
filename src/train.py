@@ -102,7 +102,6 @@ from train_shared import (
 from train_update import (
     _aim_dim_weight,
     _hybrid_ppo_loss,
-    _patch_trainer_with_return_norm,
     _scheduled_target_entropy,
     _tag_param_groups,
     masked_explained_variance,
@@ -177,7 +176,6 @@ __all__ = (
     "_hybrid_ppo_loss",
     "_inject_tag_metrics",
     "_install_full_checkpointing",
-    "_patch_trainer_with_return_norm",
     "_rng_load_state_dict",
     "_rng_state_dict",
     "_scheduled_target_entropy",
@@ -2800,8 +2798,8 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
                 self.actions[batch_rows, seq_pos] = action
                 self.logprobs[batch_rows, seq_pos] = logprob
                 # Batch 3 (T5): parallel writes for the new buffers added by
-                # _patch_trainer_with_hybrid_aim. The PPO update (the replacement
-                # train() body, `_train_with_return_norm` in src/train_update.py:
+                # _patch_trainer_with_hybrid_aim. The PPO update (`Cs2PuffeRL.train`
+                # in src/trainer.py, gh#168 W2a:
                 # `mb_cont_actions = self.cont_actions[idx]` and the two logprob
                 # reads beside it) reads these by the same idx; missing this write would
                 # silently feed zeros to _hybrid_ppo_loss → ratio_c always
@@ -2922,9 +2920,9 @@ def _patch_trainer_with_selfplay(trainer, self_play_mgr: SelfPlayManager):
 #                            vecenv.send (the wrapper calls the original) to
 #                            forward the float buffer to the env.
 #                            Cs2PuffeRL.__init__ (src/trainer.py, gh#168 W1)
-#                            applies it AFTER _patch_trainer_with_return_norm
-#                            (which REPLACES train() via types.MethodType and
-#                            never calls the stock body) and BEFORE
+#                            applies it AFTER _init_return_norm (the return-norm
+#                            state; Cs2PuffeRL.train REPLACES the stock train()
+#                            outright, gh#168 W2a) and BEFORE
 #                            _patch_trainer_with_selfplay (which REPLACES
 #                            evaluate() the same way). The dependency is at
 #                            CALL time, not patch time: the replacement
@@ -3076,14 +3074,14 @@ def _patch_trainer_with_hybrid_aim(trainer,
     """Extend trainer with continuous-action rollout storage + vecenv plumbing.
 
     Cs2PuffeRL.__init__ (src/trainer.py, gh#168 W1) applies this AFTER
-    _patch_trainer_with_return_norm (which REPLACES train() via
-    types.MethodType; it does not wrap the stock body) and BEFORE the first
+    _init_return_norm (the return-norm state; Cs2PuffeRL.train overrides the
+    stock train() outright since gh#168 W2a) and BEFORE the first
     evaluate()/train() call. The ordering is a
-    CALL-time dependency, not a patch-time one: the replacement train()
-    body reads self.cont_actions / self.logprobs_{d,c}, which this patcher
+    CALL-time dependency, not a construction-time one: Cs2PuffeRL.train
+    reads self.cont_actions / self.logprobs_{d,c}, which this patcher
     allocates, and nothing at patch time checks they exist. The
     PPO-update-side rewrites live in src/train_update.py (_hybrid_ppo_loss,
-    called from _train_with_return_norm); this patcher only handles the
+    called from Cs2PuffeRL.train); this patcher only handles the
     rollout/storage side.
 
     Multiprocessing vecenv path (Batch 3 T5b)
@@ -3651,13 +3649,13 @@ def train(args):
           f"(fresh init {train_config['aim_log_std_init']:.4f}, "
           f"cap {train_config['aim_log_std_max']:.4f})")
     # Batch 3 (T5): Cs2PuffeRL.__init__ applies the hybrid-aim patch after
-    # return_norm, but the dependency is at CALL time, not patch time: the
-    # replacement train() body that return_norm installs (types.MethodType,
-    # train_update.py; it never calls the stock train()) reads
-    # self.cont_actions / self.logprobs_{d,c} on its first call, and nothing
-    # at patch time checks they exist. Likewise selfplay's replacement
-    # evaluate() writes those buffers every rollout. The only load-bearing
-    # order is "all patches applied before the first evaluate()/train() call".
+    # _init_return_norm, but the dependency is at CALL time, not construction
+    # time: Cs2PuffeRL.train (src/trainer.py, gh#168 W2a; it never calls the
+    # stock train()) reads self.cont_actions / self.logprobs_{d,c} on its
+    # first call, and nothing at construction time checks they exist. Likewise
+    # selfplay's replacement evaluate() writes those buffers every rollout.
+    # The only load-bearing order is "all patches applied before the first
+    # evaluate()/train() call".
     # Pin the shm + view on the trainer so neither is GC'd mid-run. Without
     # holding _cont_action_shm here, Python could free the RawArray once
     # this function returns (Python doesn't know workers/numpy views are

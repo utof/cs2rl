@@ -188,7 +188,7 @@ RESUME_CONFIG_ALLOWLIST = frozenset(
 # callers without the flag) — two literals drifted once (final review #7).
 DEFAULT_CHECKPOINT_INTERVAL = 200
 # Trainer attrs of the warm-start entropy machine + SAC target (all set in
-# _patch_trainer_with_return_norm). Plain Python scalars/None — pickled as-is.
+# Cs2PuffeRL._init_return_norm, src/trainer.py). Plain Python scalars/None — pickled as-is.
 _WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
                     "_batch1_log_alpha_reset_done", "_batch1_current_target_entropy",
                     "_batch1_warmstart_h_anchor", "_batch1_warmstart_h0",

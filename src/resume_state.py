@@ -82,8 +82,8 @@ def _rng_load_state_dict(st):
 
 def collect_train_state(trainer, self_play_mgr) -> dict:
     """Everything train.py adds on top of PuffeRL's trainer_state.pt, CPU-side
-    so the file is device-agnostic. Requires _patch_trainer_with_return_norm
-    (the _log_alpha_tensor / _alpha_optimizer / _ret_* aliases)."""
+    so the file is device-agnostic. Requires a Cs2PuffeRL (the _log_alpha_tensor /
+    _alpha_optimizer / _ret_* attributes its _init_return_norm sets, gh#168 W2a)."""
     return {
                                                                        # Set identity (fix round 1, review #1): load_full_resume refuses a
                                                                        # sidecar whose epoch/global_step disagree with trainer_state.pt — a
@@ -111,9 +111,15 @@ def collect_train_state(trainer, self_play_mgr) -> dict:
 def restore_train_state(trainer, self_play_mgr, state: dict):
     """In-place restore of collect_train_state's dict.
 
-    PITFALL: `_ret_*` and `log_alpha` are closure-locals aliased onto the
-    trainer (_patch_trainer_with_return_norm) — copy_() into them, never
-    rebind, or the closure keeps training on its own stale copy.
+    PITFALL: copy_() into `_ret_*` and `_log_alpha_tensor`, never rebind.
+    Until gh#168 W2a all four were closure locals aliased onto the trainer,
+    so a rebind of any of them left the closure training on its own stale
+    copy. Since W2a the two cases differ: `_log_alpha_tensor` MUST stay in
+    place, because `_alpha_optimizer` holds the original tensor as its
+    parameter and a rebound one would never be stepped; `_ret_*` could be
+    rebound harmlessly now (Cs2PuffeRL.train, _update_return_stats and
+    collect_train_state all read the attribute), and copy_() is kept there
+    for the bit-exact round trip and so that all four follow one rule.
     """
     # Function-local ON PURPOSE: this module's scope stays torch-free.
     # (The comment sits on its own line, not after the import: a trailing
@@ -155,8 +161,9 @@ def restore_train_state(trainer, self_play_mgr, state: dict):
 
 
 def _install_full_checkpointing(trainer, self_play_mgr):
-    """Override PuffeRL.save_checkpoint on this instance (same MethodType
-    pattern as _patch_trainer_with_return_norm). Differences from stock:
+    """Override PuffeRL.save_checkpoint on this instance (the MethodType
+    pattern the return-norm patcher used before gh#168 W2a; W2c makes this a
+    method too). Differences from stock:
     no `model_path exists → return` early-out (a resumed run re-saves the
     same epoch after loading, and a crash between the model write and the
     state writes must not freeze the state files), atomic writes for all

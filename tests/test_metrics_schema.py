@@ -159,7 +159,7 @@ def test_environment_episodes_is_the_one_element_list_identity():
     """
     ek = EMITTED_BY_KEY.get("environment/episodes")
     assert ek is not None, ("environment/episodes is no longer censused — it moved out of "
-                            "train_update._train_with_return_norm; update EMITTER_SITES")
+                            "trainer.Cs2PuffeRL.train; update EMITTER_SITES")
     assert ek.shape == "stats-one-element-list", (
         f"environment/episodes is written as {ek.shape!r} at {ek.site}:{ek.lineno}, not as a "
         "one-element list. PufferLib would now MEAN it over the collection window and every "

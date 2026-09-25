@@ -51,7 +51,7 @@ THE THREE THINGS THIS FILE PRODUCES, per emitter site:
                        which the expected aggregation follows.
 
 PITFALL — why the extractor is keyed on WRITE POSITIONS and not on "every
-string constant in the function": ``_train_with_return_norm`` is ~700 lines and
+string constant in the function": ``Cs2PuffeRL.train`` is ~700 lines and
 mentions dozens of identifier-shaped strings that are config keys, tensor group
 names and dict labels. Collecting all of them and then exempting the
 false positives is how an extractor gets loosened until it enforces nothing.
@@ -98,6 +98,9 @@ class EmitterSite(NamedTuple):
     containers: dict                   # container expression -> key prefix
 
 
+# gh#168 W2a: the return-norm train body is `Cs2PuffeRL.train` (src/trainer.py); its
+# `trainer._tag_metrics` container became `self._tag_metrics` with the trainer->self
+# rename. The site's key multiset is pinned identical across the move (ledger W2a, O6).
 EMITTER_SITES = (
     EmitterSite("train_metrics.py", "compute_network_health", {"metrics": ""}),
     EmitterSite("train_metrics.py", "log_aim_log_std", {"logs": ""}),
@@ -106,10 +109,10 @@ EMITTER_SITES = (
     EmitterSite("train_metrics.py", "ScheduledEval.after_train", {"self.pending": ""}),
     EmitterSite("train_metrics.py", "compute_game_metrics", {"game_metrics": ""}),
     EmitterSite("train_metrics.py", "_inject_tag_metrics", {"logs": ""}),
-    EmitterSite("train_update.py", "_patch_trainer_with_return_norm._train_with_return_norm", {
+    EmitterSite("trainer.py", "Cs2PuffeRL.train", {
         "losses": "losses/",
         "self.stats": "environment/",
-        "trainer._tag_metrics": "",
+        "self._tag_metrics": "",
     }),
     EmitterSite("train_update.py", "tag_grad_cossim", {"out": ""}),
     EmitterSite("train.py", "train", {
@@ -194,7 +197,7 @@ ISLAND_MERGE_SOURCES = (
     IslandMerge(
         "_inject_tag_metrics", "getattr(trainer, '_tag_metrics', None)",
         "A re-read of the island's OWN `trainer._tag_metrics` container: every key in it "
-        "was written under _train_with_return_norm / tag_grad_cossim, both of which are "
+        "was written under Cs2PuffeRL.train / tag_grad_cossim, both of which are "
         "EMITTER_SITES entries, so the merge adds no key the census has not already seen."),
 )
 
@@ -352,27 +355,102 @@ def _module_ast(rel_path):
     return _parse_file(SRC / rel_path)
 
 
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _bindings_in_scope(scope, name):
+    """Statements in `scope`'s OWN body that bind `name`: def/class, a Name assignment
+    target (Assign/AnnAssign/AugAssign), an import alias.
+
+    Recurses through if/for/while/try/with/match blocks (same scope) but never into a
+    nested def/class body, which is its own scope. The same rule as
+    ast_oracle._scope_bindings in the gh#168 SDD folder and
+    tests/test_trainer_composition.py::_bindings_in_scope: a `train = None` after the def
+    is a binding Python honours, so it must count.
+    """
+    hits: list[ast.stmt] = []          # annotated: pyrefly infers list[def] from the first append
+
+    def walk(stmts):
+        for s in stmts:
+            if isinstance(s, _DEFS):
+                if s.name == name:
+                    hits.append(s)
+                continue
+            if isinstance(s, (ast.Import, ast.ImportFrom)):
+                if any((a.asname or a.name.split(".")[0]) == name for a in s.names):
+                    hits.append(s)
+            elif isinstance(s, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = s.targets if isinstance(s, ast.Assign) else [s.target]
+                if any(
+                        isinstance(n, ast.Name) and n.id == name for t in targets
+                        for n in ast.walk(t)):
+                    hits.append(s)
+            for field in ("body", "orelse", "finalbody"):
+                walk(getattr(s, field, []) or [])
+            for h in getattr(s, "handlers", []) or []:
+                walk(h.body)
+            for c in getattr(s, "cases", []) or []:
+                walk(c.body)
+
+    walk(scope.body)
+    return hits
+
+
+def _enclosing_scope(tree, target):
+    """The nearest Module/def/class whose body (transitively, through compound statements)
+    contains `target`."""
+    parents = {}
+    for p in ast.walk(tree):
+        for c in ast.iter_child_nodes(p):
+            parents[c] = p
+    n = parents[target]
+    while not isinstance(n, (ast.Module, *_DEFS)):
+        n = parents[n]
+    return n
+
+
 def _find_qualname(tree, qualname):
     """The FunctionDef/ClassDef node at `qualname` ('A.b.c'), or raise.
 
     Raising rather than returning None is deliberate: a renamed emitter must
     break this file loudly. Silently censusing zero keys for a site that moved
     is the failure mode that would make every downstream assertion vacuous.
+
+    EXACTLY-ONCE (gh#168 W2a, spec §W2a hazard; PR #261 review): each part must be
+    BOUND once in the scope it is looked up in, where a binding is a def/class, a
+    Name assignment or an import alias (`_bindings_in_scope`). Python keeps the LAST
+    binding of a name, so a first-match lookup would census a dead `def train` while
+    a later duplicate def, or a later `train = None`, is what runs; any second binding
+    is therefore an error, the same rule as ast_oracle.find_def. The first part is
+    still searched at any depth because some emitters are nested defs: its def/class
+    node is found anywhere in the tree, and the exactly-once rule is then applied in
+    THAT node's enclosing scope; every later part is looked up in its parent's body.
     """
     parts = qualname.split(".")
+    first = [n for n in ast.walk(tree) if isinstance(n, _DEFS) and n.name == parts[0]]
+    if not first:
+        raise AssertionError(f"emitter {qualname!r} not found — it was renamed or moved; "
+                             "update EMITTER_SITES in tests/metrics_census.py")
+    if len(first) > 1:
+        raise AssertionError(
+            f"emitter {qualname!r}: {parts[0]!r} is defined {len(first)} times (lines "
+            f"{[h.lineno for h in first]}); Python keeps the LAST, so the census refuses to "
+            "pick one — delete the dead duplicate")
+    scope = _enclosing_scope(tree, first[0])
     node = tree
     for part in parts:
-        nxt = None
-        for child in ast.walk(node) if node is tree else ast.iter_child_nodes(node):
-            if isinstance(child,
-                          (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and (child.name
-                                                                                      == part):
-                nxt = child
-                break
-        if nxt is None:
+        hits = _bindings_in_scope(scope, part)
+        defs = [h for h in hits if isinstance(h, _DEFS)]
+        if not defs:
             raise AssertionError(f"emitter {qualname!r} not found — it was renamed or moved; "
                                  "update EMITTER_SITES in tests/metrics_census.py")
-        node = nxt
+        if len(hits) > 1:
+            raise AssertionError(
+                f"emitter {qualname!r}: {part!r} is defined {len(hits)} times (lines "
+                f"{[h.lineno for h in hits]}); Python keeps the LAST, so the census refuses to "
+                "pick one — delete the dead duplicate (a def, an assignment or an import)")
+        node = defs[0]
+        scope = node
     return node
 
 
@@ -623,7 +701,7 @@ def _divisor_lineno(fn):
                 return node.lineno
     raise AssertionError(
         "the gh#90 `for _lk in list(losses): losses[_lk] /= ...` divisor loop is gone from "
-        "_train_with_return_norm — every losses/* aggregation in metrics_schema.py is "
+        "Cs2PuffeRL.train — every losses/* aggregation in metrics_schema.py is "
         "classified relative to it, so its removal is a registry-wide event, not a refactor")
 
 
@@ -1571,8 +1649,7 @@ def losses_entropy_head_source():
     name, so re-pointing the emitter at a different head list fails the test
     instead of silently leaving the registry describing the old heads.
     """
-    fn = _find_qualname(_module_ast("train_update.py"),
-                        "_patch_trainer_with_return_norm._train_with_return_norm")
+    fn = _find_qualname(_module_ast("trainer.py"), "Cs2PuffeRL.train")
     # The write we are anchored on: `losses[f"entropy/{_hn}"] += ...` inside a
     # `for ... in zip(<names>, ...)`. Walk outwards from the write to its loop.
     loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
@@ -1596,7 +1673,7 @@ def losses_entropy_head_source():
                     if inner:
                         return inner[-1]
     raise AssertionError(
-        "no `losses[f\"entropy/{...}\"] += ...` loop found in _train_with_return_norm — the "
+        "no `losses[f\"entropy/{...}\"] += ...` loop found in Cs2PuffeRL.train — the "
         "per-head entropy family moved, and metrics_schema's losses/entropy/* member list "
         "is no longer tied to anything")
 

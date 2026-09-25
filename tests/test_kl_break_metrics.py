@@ -9,7 +9,7 @@ Additionally the flattened minibatch loop (all update_epochs collapsed into
 one ``range``) aborted passes over data never visited — harsher than standard
 PPO, which finishes the current epoch before stopping.
 
-Contract pinned here (implemented in _patch_trainer_with_return_norm):
+Contract pinned here (implemented in Cs2PuffeRL.train, src/trainer.py):
   1. losses/* are normalized by the EXECUTED minibatch count, not the planned
      total — so a truncated update reports true per-minibatch means.
   2. ``losses["minibatches_run"]`` reports the executed count.
@@ -18,8 +18,8 @@ Contract pinned here (implemented in _patch_trainer_with_return_norm):
      before stopping, and can never truncate epoch 0 mid-pass.
 
 Uses the minimal harness (src/train_test_harness.py), whose trainer is
-Cs2PuffeRL with the return-norm train() already installed (gh#168 W1.5), same
-pattern as tests/test_train_env.py. One harness build serves all scenarios
+Cs2PuffeRL (gh#168 W1.5) whose train() is the return-norm body (a method since
+gh#168 W2a), same pattern as tests/test_train_env.py. One harness build serves all scenarios
 (builds cost ~5s each on the VM).
 """
 

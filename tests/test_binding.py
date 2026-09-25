@@ -240,7 +240,7 @@ def test_binding_default_continuous_actions_zero(make_map):
 # ── Batch 3 Task 5: NaN guard test ─────────────────────────────────────────
 #
 # This test exercises the inline NaN guard that lives in the trainer's
-# patched train() method (_train_with_return_norm). Rebuilding the full
+# train() method (Cs2PuffeRL.train, src/trainer.py). Rebuilding the full
 # PufferLib trainer just to test this would be expensive and fragile against
 # unrelated PufferLib API drift; instead we replicate the guard's structure
 # locally — same control flow, same warning string, same zero-grad call —
@@ -251,13 +251,14 @@ def test_binding_default_continuous_actions_zero(make_map):
 # If the guard's structure changes (new warning string, different zero_grad
 # signature), update BOTH this test and the real guard in the same PR. The real
 # guard is the `if not torch.isfinite(loss).all():` block inside
-# `_train_with_return_norm`, which moved out of train.py with its patcher on
-# 2026-08-31 and now lives in src/train_update.py (:815 at that commit; search
-# the "Batch 3 (T5) NaN guard" banner rather than trusting the number).
+# `Cs2PuffeRL.train`, which moved out of train.py with its patcher on
+# 2026-08-31 (src/train_update.py) and into src/trainer.py as a method on
+# gh#168 W2a; search the "Batch 3 (T5) NaN guard" banner rather than trusting
+# a line number.
 
 
 def test_continuous_aim_nan_guard():
-    """T5: NaN guard in _train_with_return_norm skips optimizer.step() and
+    """T5: NaN guard in Cs2PuffeRL.train skips optimizer.step() and
     prints a throttled warning when the loss is non-finite, without
     poisoning subsequent gradients."""
     import io
@@ -300,8 +301,8 @@ def test_continuous_aim_nan_guard():
         old_stdout = _sys.stdout
         _sys.stdout = captured
 
-        # Mirror the guard control flow at src/train.py inside
-        # _train_with_return_norm. Throttle field name MUST match the
+        # Mirror the guard control flow inside Cs2PuffeRL.train
+        # (src/trainer.py). Throttle field name MUST match the
         # production attribute (`_last_nan_warn_t`) so a future regression
         # touching the attribute name fails this test.
         class _Self:

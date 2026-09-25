@@ -1,10 +1,10 @@
 """TAG diagnostic — trainer-contract tests (spec 2026-08-13 §5, tests 1/3/4).
 
 Uses train_test_harness._build_trainer_for_test, whose trainer is Cs2PuffeRL
-with the return-norm train() already installed (gh#168 W1.5), the same pattern
-as tests/test_warmstart_entropy_trainer.py. Config keys (target_kl, tag_*) are
-injected into trainer.config after construction; they are read per train()
-call, not at patch time.
+(gh#168 W1.5), whose train() is the return-norm body (a method since gh#168
+W2a), the same pattern as tests/test_warmstart_entropy_trainer.py. Config keys
+(target_kl, tag_*) are injected into trainer.config after construction; they
+are read per train() call, not at construction.
 
 PITFALL: target_kl is set to None in TAG trainer tests so the KL early-stop
 cannot end the update mid-way — the mbL measurement then lands
@@ -39,13 +39,16 @@ def _run_once(trainer):
 
 def test_flag_off_is_inert(monkeypatch):
     """Spec §5 test 1: flag off ⇒ helper never called, no _tag_metrics."""
-    # PATCH THE DEFINING MODULE, NOT `train`: tag_grad_cossim moved to
-    # train_update.py (post-rung1a refactor, 2026-08-31) and its call site inside
-    # _train_with_return_norm resolves through train_update's globals. `train`
-    # only re-exports it, so a patch there is unreachable and this test would
-    # pass while asserting nothing — verified by forcing the hook on, where the
-    # train-side patch never fires and the train_update-side patch always does.
-    import train_update as tag_mod
+    # PATCH THE MODULE THE CALL SITE RESOLVES THROUGH, NOT `train` or
+    # `train_update`: tag_grad_cossim is DEFINED in train_update.py (post-rung1a
+    # refactor, 2026-08-31), but since gh#168 W2a its call site is inside
+    # Cs2PuffeRL.train in src/trainer.py, which imports the name at module level
+    # and resolves it through trainer.py's globals. `train` and `train_update`
+    # both still hold the real function, so a patch on either is unreachable and
+    # this test would pass while asserting nothing — the positive control below
+    # (test_monkeypatch_target_actually_reaches_the_hook) goes red if the patch
+    # point drifts again.
+    import trainer as tag_mod
     calls = []
     real = tag_mod.tag_grad_cossim
     monkeypatch.setattr(tag_mod, "tag_grad_cossim",
@@ -69,11 +72,13 @@ def test_monkeypatch_target_actually_reaches_the_hook(monkeypatch):
     which is green whether or not the patch can reach the call site at all. A
     patch aimed at the wrong module is therefore indistinguishable from a
     correctly-inert hook, and the test silently stops testing anything. That
-    is not hypothetical: the call site inside `_train_with_return_norm`
-    resolves `tag_grad_cossim` through `train_update`'s globals, so patching
-    `train` (its pre-2026-08-31 home, now only a re-exporting shim) is
-    unreachable — measured, both directions. This test goes red for that,
-    for a future move of `tag_grad_cossim`, and for a changed call site.
+    is not hypothetical: the call site inside `Cs2PuffeRL.train` (src/trainer.py,
+    gh#168 W2a) resolves `tag_grad_cossim` through `trainer`'s globals, so
+    patching `train` (its pre-2026-08-31 home, a re-exporting shim) or
+    `train_update` (where it is defined, and where the call site lived until
+    W2a) is unreachable — measured, both directions, at each move. This test
+    goes red for that, for a future move of the call site, and for a changed
+    call site.
 
     PITFALL: assert ONLY `calls != []`. With the flag on, `_tag_metrics` is
     populated, so reusing the inert test's second assert here would fail for
@@ -83,7 +88,7 @@ def test_monkeypatch_target_actually_reaches_the_hook(monkeypatch):
     not swap in a stub trainer, which would stop exercising the real call
     site and reintroduce exactly the vacuity this test exists to prevent.
     """
-    import train_update as tag_mod
+    import trainer as tag_mod
     calls = []
     real = tag_mod.tag_grad_cossim
     monkeypatch.setattr(tag_mod, "tag_grad_cossim",

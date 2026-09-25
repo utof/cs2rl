@@ -129,7 +129,7 @@ def test_return_stats_update_on_participating_rows_only():
         x = torch.randn(10, 8) * 3 + 1
         part = torch.zeros(10, 8, dtype=torch.bool)
         part[0] = part[5] = True
-        trainer._normalize_returns(x, part)            # alias installed in Step 6
+        trainer._normalize_returns(x, part)            # a Cs2PuffeRL method since gh#168 W2a
         sel = x[part]
         assert trainer._ret_mean.item() == pytest.approx(sel.mean().item(), abs=1e-6)
         assert trainer._ret_var.item() == pytest.approx(sel.var(unbiased=False).item(), abs=1e-6)
