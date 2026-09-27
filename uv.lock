@@ -12,6 +12,7 @@ resolution-markers = [
 
 [manifest]
 overrides = [{ name = "numpy", specifier = ">=2.0.0" }]
+excludes = ["pynvml"]
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -413,7 +414,6 @@ dependencies = [
     { name = "onnxruntime" },
     { name = "pettingzoo" },
     { name = "pufferlib" },
-    { name = "pynvml" },
     { name = "rerun-sdk" },
     { name = "shapely" },
 ]
@@ -442,7 +442,6 @@ requires-dist = [
     { name = "onnxruntime", specifier = ">=1.24.4" },
     { name = "pettingzoo", specifier = ">=1.24.0" },
     { name = "pufferlib", specifier = "==3.0.0" },
-    { name = "pynvml", specifier = ">=13.0.1" },
     { name = "rerun-sdk", specifier = ">=0.21.0" },
     { name = "shapely", specifier = ">=2.0.4" },
 ]
@@ -1783,7 +1782,6 @@ dependencies = [
     { name = "numpy" },
     { name = "pettingzoo" },
     { name = "psutil" },
-    { name = "pynvml" },
     { name = "pyro-ppl" },
     { name = "rich" },
     { name = "rich-argparse" },
@@ -1906,18 +1904,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c2/27/a3b6e5bf6ff856d2509292e95c8f57f0df7017cf5394921fc4e4ef40308a/pyjwt-2.12.1.tar.gz", hash = "sha256:c74a7a2adf861c04d002db713dd85f84beb242228e671280bf709d765b03672b", size = 102564, upload-time = "2026-03-13T19:27:37.25Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/7a/8dd906bd22e79e47397a61742927f6747fe93242ef86645ee9092e610244/pyjwt-2.12.1-py3-none-any.whl", hash = "sha256:28ca37c070cad8ba8cd9790cd940535d40274d22f80ab87f3ac6a713e6e8454c", size = 29726, upload-time = "2026-03-13T19:27:35.677Z" },
-]
-
-[[package]]
-name = "pynvml"
-version = "13.0.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "nvidia-ml-py" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5c/57/da7dc63a79f59e082e26a66ac02d87d69ea316b35b35b7a00d82f3ce3d2f/pynvml-13.0.1.tar.gz", hash = "sha256:1245991d9db786b4d2f277ce66869bd58f38ac654e38c9397d18f243c8f6e48f", size = 35226, upload-time = "2025-09-05T20:33:25.377Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d7/4a/cac76c174bb439a0c46c9a4413fcbea5c6cabfb01879f7bbdb9fdfaed76c/pynvml-13.0.1-py3-none-any.whl", hash = "sha256:e2b20e0a501eeec951e2455b7ab444759cf048e0e13a57b08049fa2775266aa8", size = 28810, upload-time = "2025-09-05T20:33:24.13Z" },
 ]
 
 [[package]]

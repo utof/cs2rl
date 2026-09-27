@@ -22,7 +22,6 @@ dependencies = [
                                                        # resolve to 4.0 and break loudly at a random moment. Upgrade is a
                                                        # deliberate migration (see #85 playbook), not a version bump.
     "pufferlib==3.0.0",
-    "pynvml>=13.0.1",
     "rerun-sdk>=0.21.0",
     "shapely>=2.0.4",
 ]
@@ -60,6 +59,9 @@ modal = [
 override-dependencies = [
     "numpy>=2.0.0",
 ]
+# nvidia-ml-py supplies the pynvml import. This excluded distribution only
+# adds deprecated utilities and an import warning hook (via PufferLib).
+exclude-dependencies = ["pynvml"]
 
 [tool.ruff]
 line-length = 100
