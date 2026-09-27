@@ -244,6 +244,7 @@
 {"concise_description": "Object of class `FunctionType` has no attribute `parameters`", "name": "missing-attribute", "path": "src/trainer.py", "source_line": "_t9_grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(),"}
 {"concise_description": "Object of class `NoneType` has no attribute `forward_eval`", "name": "missing-attribute", "path": "src/trainer.py", "source_line": "opp_logits, opp_mu, opp_log_std, _opp_value = past_policy.forward_eval("}
 {"concise_description": "Object of class `NoneType` has no attribute `max_turn_speed`", "name": "missing-attribute", "path": "src/trainer.py", "source_line": "max_turn_speed=past_policy.max_turn_speed.item(),"}
+{"concise_description": "Object of class `NoneType` has no attribute `run_id`", "name": "missing-attribute", "path": "src/trainer.py", "source_line": "run_id = self.logger.run_id"}
 {"concise_description": "Object of class `int` has no attribute `dtype`", "name": "missing-attribute", "path": "src/trainer.py", "source_line": "logprob_d[opp_idx] = opp_logprob_d.to(logprob_d.dtype)"}
 {"concise_description": "Object of class `int` has no attribute `mean`", "name": "missing-attribute", "path": "src/trainer.py", "source_line": "entropy_unmasked = entropy.mean()          # diagnostic only (losses/entropy_unmasked)"}
 {"concise_description": "Object of class `int` has no attribute `to`", "name": "missing-attribute", "path": "src/trainer.py", "source_line": "logprob_d[opp_idx] = opp_logprob_d.to(logprob_d.dtype)"}
@@ -549,7 +550,6 @@
 {"concise_description": "`None` is not subscriptable", "name": "unsupported-operation", "path": "tests/test_play_policy.py", "source_line": "st[\"lstm_h\"] += 3"}
 {"concise_description": "Argument `stmt` is not assignable to parameter `node` with type `AsyncFunctionDef | ClassDef | FunctionDef | Module` in function `ast.get_docstring`", "name": "bad-argument-type", "path": "tests/test_recoil.py", "source_line": "if ast.get_docstring(fn) is not None:"}
 {"concise_description": "Object of class `stmt` has no attribute `body`", "name": "missing-attribute", "path": "tests/test_recoil.py", "source_line": "fn.body = fn.body[1:]"}
-{"concise_description": "Argument `str | None` is not assignable to parameter `*args` with type `PathLike[str] | str` in function `pathlib.Path.__new__`", "name": "bad-argument-type", "path": "tests/test_resume_state.py", "source_line": "assert p1 == p2 and Path(p1).name == f\"model_{trainer.epoch:06d}.pt\""}
 {"concise_description": "Cannot index into `dict[str, Any]`", "name": "bad-index", "path": "tests/test_resume_state.py", "source_line": "\"np_random\": np.random.get_state()[1].tobytes(),"}
 {"concise_description": "Object of class `FunctionType` has no attribute `state_dict`", "name": "missing-attribute", "path": "tests/test_resume_state.py", "source_line": "torch.save(trainer.policy.state_dict(), sp_path)"}
 {"concise_description": "Object of class `NoneType` has no attribute `run_id`", "name": "missing-attribute", "path": "tests/test_resume_state.py", "source_line": "trainer.logger.run_id = \"rid-test\""}

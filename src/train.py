@@ -47,7 +47,6 @@ from env_config import EnvConfig, RewardWeights
 from env_factory import build_env_for, build_selfplay_manager
 from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from resume_state import (
-    _install_full_checkpointing,
     _rng_load_state_dict,
     _rng_state_dict,
     check_checkpoint_set,
@@ -174,7 +173,6 @@ __all__ = (
     "_atomic_save_state_dict",
     "_hybrid_ppo_loss",
     "_inject_tag_metrics",
-    "_install_full_checkpointing",
     "_rng_load_state_dict",
     "_rng_state_dict",
     "_scheduled_target_entropy",

@@ -324,8 +324,8 @@ def _harness_parts(
         # could exercise PufferLib's library evaluate(). T4 changed the policy
         # contract to a 4-tuple; PufferLib's library evaluate still expects a
         # 2-tuple, so the no-selfplay path can't run end-to-end without our
-        # hybrid-aware evaluate() replacement. The selfplay patch IS that
-        # replacement (types.MethodType; it never calls the stock evaluate());
+        # hybrid-aware evaluate() override. Cs2PuffeRL defines that method
+        # directly; it never calls the stock evaluate();
         # `with_selfplay=False` now means "no past-policy mixing" (empty pool
         # never activates) — the replacement evaluate() still runs. The
         # `with_selfplay=True` path additionally pre-seeds the manager. This

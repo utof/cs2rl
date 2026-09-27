@@ -1,152 +1,37 @@
-"""gh#168 W1: ``trainer.Cs2PuffeRL`` composes exactly the trainer ``train()`` used to build.
+"""Constructor composition and moved-method guards for Cs2PuffeRL.
 
-Four assertions; the first three in the spec's order
-(.superpowers/sdd/2026-09-24-168-trainer-subclass/spec.md §W1 test), the fourth from the
-review of PR #257:
+The stock surface is measured at the end of PuffeRL.__init__. The remaining
+constructor surface is compared against self stores in Cs2PuffeRL.__init__,
+its called _init_* methods, and the hybrid-aim patcher (until W3). Source
+scanning includes inactive branches, so an undeclared runtime attribute or
+an unexecuted declaration turns the test red.
 
-1. The class is a direct ``PuffeRL`` subclass, and (W1.5) it is what the harness's
-   ``_build_trainer_for_test`` returns: ``type(trainer) is Cs2PuffeRL``, so no harness
-   test can run stock ``PuffeRL.train`` or skip full checkpointing (gh#169). The STOCK
-   attribute surface is recorded by wrapping ``PuffeRL.__init__`` and snapshotting
-   ``vars(self)`` at its end.
-2. The attributes the constructor adds ON TOP of stock equal a FROZEN list (spec §1.1: the
-   35 names the four patch functions plus ``_timing`` set at 2a3573f). This is the
-   declaration-versus-runtime pin: a patch call dropped from ``__init__`` (knock-out W1-K1)
-   makes this red naming the missing buffers. The list changes only when a W says so
-   (W2a: -train -_normalize_returns +_entropy_floor +_ret_device, 35; W2b: -evaluate
-   +_self_play_mgr +_past_lstm_h +_past_lstm_c, 37; W2c: -save_checkpoint; after W2c the
-   list becomes a derivation from ``__init__``'s ``self.<name>`` store targets).
-3. An EXTERNAL anchor, derived rather than listed: every attribute the moved bodies and the
-   checkpoint helpers READ through ``self.``/``trainer.`` (or a 2-argument ``getattr``) and
-   never assign must be present on the instance. The functions are located by qualname
-   with an exactly-once binding rule, so a renamed or duplicated def raises instead of
-   silently anchoring on nothing. WHAT (3) COVERS, measured at W1: the 18 DATA attributes
-   the moved bodies read; 19 since W2a, when the closure local ``entropy_floor`` became
-   the attribute ``_entropy_floor`` that ``Cs2PuffeRL.train`` reads (knock-out W2a-K1:
-   deleting its store in ``_init_return_norm`` is red here by name, in (2), and in the
-   warm-start tests); 22 since W2b, when the three closure locals of the self-play
-   patcher became ``_self_play_mgr`` / ``_past_lstm_h`` / ``_past_lstm_c``, read by
-   ``Cs2PuffeRL.evaluate`` (knock-out W2b-K1: deleting the ``_past_lstm_h`` store in
-   ``_init_selfplay`` is red here by name and in (2)). Deleting one of those from BOTH
-   the frozen list and ``__init__`` keeps (2) green and (3) catches it. It does NOT cover
-   the other 15 names: the one remaining method alias (``save_checkpoint`` is a class
-   attribute of PuffeRL, filtered out; ``train``, ``evaluate`` and ``_normalize_returns``
-   are Cs2PuffeRL's own methods since W2a/W2b and are filtered the same way), and every
-   read-before-write or never-read name (``_timing``, ``_cont_action_view_main``,
-   ``_action_mask_view_main``, ``_ret_device`` (read by ``_update_return_stats``, not an
-   anchor function) and the ``_batch1_*`` names the bodies assign somewhere; some, like
-   ``_batch1_reward_scratch`` and ``_batch1_log_alpha_reset_done``, are read first).
-   Those are pinned by (2) only, plus (4) for the alias. Measured on PR #257's first commit: dropping
-   ``_install_full_checkpointing`` from ``__init__`` AND ``save_checkpoint`` from the list
-   left all three green; so did dropping ``self._timing`` AND ``_timing``. With (4) the
-   first mutant is red naming ``save_checkpoint``; the second still passes, by design:
-   ``_timing`` has no reader among the moved bodies (train()'s loop reads it), so the
-   frozen list is its only pin here.
-   ``_WARMSTART_ATTRS`` is read by ``collect_train_state`` through a getattr over a tuple,
-   which the AST walk cannot see, so it is asserted as a subset separately.
-4. Method identity, independent of the frozen list: ``save_checkpoint`` is an INSTANCE
-   attribute whose bound function is the closure body named in ANCHOR_FUNCTIONS. A
-   dropped patch call (or a stock method left in place) is red here by name even after
-   the list is edited to match. W2a (gh#168) turned ``train`` into a class method and
-   re-pointed its pin (test_train_is_the_class_method: the class defines it, it is not
-   ``PuffeRL.train``, and no instance binding shadows it); W2b did the same for
-   ``evaluate`` (test_evaluate_is_the_class_method); W2c does it for ``save_checkpoint``.
-
-PITFALLS
-- The anchor is PRESENCE-only: ``self._ret_count = None`` in ``__init__`` passes (3). Values
-  are the byte gates' and construct_snapshot.py's job, not this file's.
-- The anchor count is asserted (18 at W1, 19 at W2a, 22 at W2b) as a positive control on the derivation itself,
-  not as a second frozen list: a walk that silently found zero reads would otherwise pass
-  (3) vacuously. Each W that moves a body re-derives the count and updates it here.
+The independent anchor reads moved method bodies and checkpoint helpers to
+check that required attributes exist. Method identity tests pin train,
+evaluate and save_checkpoint to Cs2PuffeRL, with no instance bindings.
 """
 from __future__ import annotations
 
 import ast
-import types
 from pathlib import Path
 
 import pytest
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
-# Spec §1.1: set(vars(trainer)) after the four patches and _timing, minus set(vars(trainer))
-# at the end of PuffeRL.__init__, measured on main at 2a3573f, then edited per W. W2a (gh#168):
-# `train` and `_normalize_returns` are class methods now (no instance binding), and the two
-# closure locals train() reads became attributes: `_entropy_floor` (the 0.3·max_entropy
-# warm-start floor) and `_ret_device` (the device the Welford tensors live on). W2b:
-# `evaluate` is a class method now and the self-play patcher's three closure locals became
-# `_self_play_mgr`, `_past_lstm_h`, `_past_lstm_c` (set by `_init_selfplay`). Re-derive
-# with construct_snapshot.py; its --expect-only-a/-b flags name exactly this delta.
-FROZEN_COMPOSED_SURFACE = frozenset({
-    "_action_mask_view_main",
-    "_alpha_optimizer",
-    "_batch1_current_segment_has_event",
-    "_batch1_current_target_entropy",
-    "_batch1_effective_alpha",
-    "_batch1_event_mask",
-    "_batch1_grad_norm",
-    "_batch1_last_entropy_mean",
-    "_batch1_log_alpha_reset_done",
-    "_batch1_max_entropy",
-    "_batch1_reward_scratch",
-    "_batch1_warmstart_h0",
-    "_batch1_warmstart_h_anchor",
-    "_batch1_warmstart_phase",
-    "_batch1_warmstart_warn_epoch",
-    "_batch1_welford_combat",
-    "_batch1_welford_objective",
-    "_batch1_welford_positional",
-    "_cont_action_view_main",
-    "_entropy_floor",
-    "_log_alpha_tensor",
-    "_participating_rows",
-    "_participating_rows_np",
-    "_past_lstm_c",
-    "_past_lstm_h",
-    "_ret_count",
-    "_ret_device",
-    "_ret_mean",
-    "_ret_var",
-    "_self_play_mgr",
-    "_timing",
-    "action_masks",
-    "cont_actions",
-    "logprobs_c",
-    "logprobs_d",
-    "participating",
-    "save_checkpoint",
-})
-assert len(FROZEN_COMPOSED_SURFACE) == 37
-
-# (file, qualname) of every function that reads trainer state the constructor must have
-# declared. W2a re-pointed the train body to trainer.py::Cs2PuffeRL.train (gh#168), W2b
-# the evaluate body to Cs2PuffeRL.evaluate; W2c re-points the save body; the two
-# resume_state helpers stay.
+# (file, qualname) of each moved body and checkpoint helper whose self/trainer
+# reads must be backed by constructor state. The save body moved to the class
+# in W2c; all three public bodies now resolve from trainer.py.
 ANCHOR_FUNCTIONS = (
     ("trainer.py", "Cs2PuffeRL.train"),
     ("trainer.py", "Cs2PuffeRL.evaluate"),
-    ("resume_state.py", "_install_full_checkpointing._save_checkpoint"),
+    ("trainer.py", "Cs2PuffeRL.save_checkpoint"),
     ("resume_state.py", "collect_train_state"),
     ("resume_state.py", "restore_train_state"),
 )
-# 18 at W1. W2a: 19 — `_entropy_floor` was a closure local and is now read as
-# `self._entropy_floor`; `_ret_device` is read only by `_update_return_stats`, which is
-# not an anchor function, so it is pinned by the frozen list and construct_snapshot only.
-# W2b: 22 — the self-play patcher's closure locals `self_play_mgr`, `past_lstm_h`,
-# `past_lstm_c` are read by Cs2PuffeRL.evaluate as `self._self_play_mgr`,
-# `self._past_lstm_h`, `self._past_lstm_c` (stored by `_init_selfplay`).
+# 22 required data names: 19 after W2a plus three self-play fields after W2b.
+# W2c uses the already-anchored `_self_play_mgr`, so this count stays 22.
 EXPECTED_ANCHOR_COUNT = 22
-
-# Assertion (4): instance method alias -> the closure body it must be bound to (the same
-# qualnames as ANCHOR_FUNCTIONS, so the two cannot drift apart). Python spells a nested
-# def's __qualname__ as `outer.<locals>.inner`; the `<locals>` is dropped before comparing.
-# W2a (gh#168) took `train` out and W2b `evaluate`: they are methods of the class now,
-# pinned by test_train_is_the_class_method / test_evaluate_is_the_class_method below (the
-# same ANCHOR_FUNCTIONS[0] / [1] qualnames, checked on the class rather than in
-# vars(trainer)). W2c will move `save_checkpoint` the same way.
-METHOD_ALIASES = {
-    "save_checkpoint": ANCHOR_FUNCTIONS[2][1],
-}
 
 
 def _bindings_in_scope(scope, name):
@@ -308,14 +193,120 @@ def test_harness_returns_a_direct_pufferl_subclass(composed):
     assert stock, "PuffeRL.__init__ did not run through the recording wrapper"
 
 
-def test_constructed_surface_equals_the_frozen_list(composed):
+@pytest.mark.parametrize(
+    ("source", "receiver", "expected_stores", "expected_init_calls"),
+    [
+        (
+            "def patch(trainer):\n"
+            "    trainer.constructed = 1\n"
+            "    def callback():\n"
+            "        trainer.call_time_only = 2\n"
+            "    class Deferred:\n"
+            "        trainer.class_time_only = 3\n",
+            "trainer",
+            {"constructed"},
+            set(),
+        ),
+        (
+            "def init(self):\n"
+            "    del self.removed\n"
+            "    def callback():\n"
+            "        self._init_deferred()\n",
+            "self",
+            set(),
+            set(),
+        ),
+        (
+            "def init(self):\n"
+            "    if False:\n"
+            "        self.inactive = 1\n"
+            "        self._init_inactive()\n"
+            "    try:\n"
+            "        for value in ():\n"
+            "            self.loop_store = value\n"
+            "    except Exception:\n"
+            "        self.error_store = 2\n",
+            "self",
+            {"inactive", "loop_store", "error_store"},
+            {"_init_inactive"},
+        ),
+    ],
+)
+def test_constructor_scope_scan_ignores_deferred_stores_and_deletes(source, receiver,
+                                                                    expected_stores,
+                                                                    expected_init_calls):
+    """Only own-scope stores declare constructed state, even in inactive arms."""
+    fn = ast.parse(source).body[0]
+    assert _constructor_scope(fn, receiver) == (expected_stores, expected_init_calls)
+
+
+def _constructor_scope(fn, receiver):
+    """Own-scope Store targets and called initializers, including inactive branches.
+
+    Nested defs/classes/lambdas run later or in a different scope; their stores
+    cannot declare construction-time state. Del targets do not create state.
+    The independent body-read anchor deliberately uses a deeper scan above.
+    """
+    stores, init_calls = set(), set()
+
+    class Scan(ast.NodeVisitor):
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+        visit_ClassDef = visit_FunctionDef
+        visit_Lambda = visit_FunctionDef
+
+        def visit_Attribute(self, node):
+            if (isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name)
+                    and node.value.id == receiver):
+                stores.add(node.attr)
+            self.generic_visit(node)
+
+        def visit_Call(self, node):
+            if (receiver == "self" and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "self"
+                    and node.func.attr.startswith("_init_")):
+                init_calls.add(node.func.attr)
+            self.generic_visit(node)
+
+    scan = Scan()
+    for statement in fn.body:
+        scan.visit(statement)
+    return stores, init_calls
+
+
+def derive_constructor_surface():
+    """All names the subclass declares during construction, including inactive branches.
+
+    W3 will move the remaining hybrid-aim stores into the constructor; until then its
+    top-level trainer stores are part of the same declared surface.
+    """
+    trainer_tree = ast.parse((SRC / "trainer.py").read_text())
+    cls = next(n for n in trainer_tree.body
+               if isinstance(n, ast.ClassDef) and n.name == "Cs2PuffeRL")
+    methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+    init = methods["__init__"]
+    names, init_calls = _constructor_scope(init, "self")
+    for method_name in sorted(init_calls):
+        stores, _ = _constructor_scope(methods[method_name], "self")
+        names |= stores
+    patch = find_def(ast.parse((SRC / "train.py").read_text()), "_patch_trainer_with_hybrid_aim")
+    stores, _ = _constructor_scope(patch, "trainer")
+    return names | stores
+
+
+def test_constructed_surface_equals_declared_constructor_surface(composed):
+    """A dead-branch self store is a declaration and must be detected as extra."""
     trainer, stock = composed
     composed_surface = set(vars(trainer)) - stock
-    missing = FROZEN_COMPOSED_SURFACE - composed_surface
-    extra = composed_surface - FROZEN_COMPOSED_SURFACE
+    declared = derive_constructor_surface()
+    missing = declared - composed_surface
+    extra = composed_surface - declared
     assert not missing and not extra, (
-        f"Cs2PuffeRL.__init__ no longer composes the 2a3573f surface: "
-        f"missing {sorted(missing)}, unexpected {sorted(extra)}")
+        f"constructor declaration differs from runtime: missing {sorted(missing)}, "
+        f"unexpected {sorted(extra)}")
 
 
 def test_every_attribute_the_bodies_read_is_declared(composed):
@@ -336,28 +327,18 @@ def test_every_attribute_the_bodies_read_is_declared(composed):
     assert not warm_absent, f"_WARMSTART_ATTRS not on the instance: {sorted(warm_absent)}"
 
 
-def test_method_aliases_are_bound_to_the_closure_bodies(composed):
-    """(4): the still-patched methods are instance attributes bound to the named closures.
+def test_save_checkpoint_is_the_class_method(composed):
+    """The full-state checkpoint body belongs to the subclass and has no instance binding."""
+    from pufferlib.pufferl import PuffeRL
 
-    Independent of FROZEN_COMPOSED_SURFACE on purpose: a patch call dropped from __init__
-    together with its name from the list keeps (2) green and, for these names, (3) too
-    (they are PuffeRL class attributes, which the anchor excludes). Here the name must be
-    in `vars(trainer)` (stock `PuffeRL.evaluate` is a class attribute, so a missing patch
-    shows as "not an instance attribute") and its `__func__.__qualname__` must be the
-    closure body ANCHOR_FUNCTIONS names. `train` left this loop at W2a and `evaluate`
-    at W2b; see test_train_is_the_class_method / test_evaluate_is_the_class_method.
-    """
+    from trainer import Cs2PuffeRL
     trainer, _ = composed
-    for name, qualname in METHOD_ALIASES.items():
-        assert name in vars(trainer), (
-            f"{name!r} is not an instance attribute: the patch that replaces it was not applied, "
-            f"so stock PuffeRL.{name} would run")
-        bound = vars(trainer)[name]
-        assert isinstance(bound, types.MethodType), (
-            f"{name!r} is a {type(bound).__name__}, not a bound method: the patch binds the "
-            "closure with types.MethodType")
-        got = bound.__func__.__qualname__.replace(".<locals>.", ".")
-        assert got == qualname, f"{name!r} is bound to {got!r}, expected {qualname!r}"
+    cls = type(trainer)
+    assert cls.save_checkpoint is Cs2PuffeRL.save_checkpoint
+    assert cls.save_checkpoint is not PuffeRL.save_checkpoint
+    assert Cs2PuffeRL.save_checkpoint.__qualname__ == ANCHOR_FUNCTIONS[2][1]
+    assert "save_checkpoint" not in vars(trainer)
+    assert trainer.save_checkpoint.__func__ is Cs2PuffeRL.save_checkpoint
 
 
 def test_train_is_the_class_method(composed):
@@ -415,7 +396,7 @@ def test_evaluate_is_the_class_method(composed):
 
 
 def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path):
-    """A patch that raises inside ``Cs2PuffeRL.__init__`` must not hang the interpreter.
+    """A setup failure inside ``Cs2PuffeRL.__init__`` must not hang the interpreter.
 
     ``PuffeRL.__init__`` starts ``Utilization``, a NON-daemon thread whose loop ends only
     when its ``stop()`` is called, and the only production caller of that is
@@ -424,8 +405,8 @@ def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path)
     then sat forever on the thread. The harness's own wrapper cannot help: it never gets
     the half-built trainer. So ``Cs2PuffeRL.__init__`` stops the thread itself on any
     raise, and this test drives that path in-process (no subprocess: a hang would be a
-    timeout, not a diagnosis) by making the LAST patch raise, so every earlier patch has
-    run and the thread has been alive the longest.
+    timeout, not a diagnosis) by making ``_init_selfplay`` raise, after the
+    hybrid-aim patch has run.
 
     Two assertions, both against the interpreter's state rather than the code:
     - every ``Utilization`` thread that exists afterwards has ``stopped`` set (the fix's
@@ -448,7 +429,7 @@ def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path)
     def _boom(self, self_play_mgr):
         raise RuntimeError("simulated patch-time failure")
 
-    monkeypatch.setattr(trainer_mod, "_install_full_checkpointing", _boom)
+    monkeypatch.setattr(trainer_mod.Cs2PuffeRL, "_init_selfplay", _boom)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     before = {t for t in threading.enumerate() if isinstance(t, Utilization)}
 
