@@ -193,6 +193,90 @@ def test_harness_returns_a_direct_pufferl_subclass(composed):
     assert stock, "PuffeRL.__init__ did not run through the recording wrapper"
 
 
+@pytest.mark.parametrize(
+    ("source", "receiver", "expected_stores", "expected_init_calls"),
+    [
+        (
+            "def patch(trainer):\n"
+            "    trainer.constructed = 1\n"
+            "    def callback():\n"
+            "        trainer.call_time_only = 2\n"
+            "    class Deferred:\n"
+            "        trainer.class_time_only = 3\n",
+            "trainer",
+            {"constructed"},
+            set(),
+        ),
+        (
+            "def init(self):\n"
+            "    del self.removed\n"
+            "    def callback():\n"
+            "        self._init_deferred()\n",
+            "self",
+            set(),
+            set(),
+        ),
+        (
+            "def init(self):\n"
+            "    if False:\n"
+            "        self.inactive = 1\n"
+            "        self._init_inactive()\n"
+            "    try:\n"
+            "        for value in ():\n"
+            "            self.loop_store = value\n"
+            "    except Exception:\n"
+            "        self.error_store = 2\n",
+            "self",
+            {"inactive", "loop_store", "error_store"},
+            {"_init_inactive"},
+        ),
+    ],
+)
+def test_constructor_scope_scan_ignores_deferred_stores_and_deletes(source, receiver,
+                                                                    expected_stores,
+                                                                    expected_init_calls):
+    """Only own-scope stores declare constructed state, even in inactive arms."""
+    fn = ast.parse(source).body[0]
+    assert _constructor_scope(fn, receiver) == (expected_stores, expected_init_calls)
+
+
+def _constructor_scope(fn, receiver):
+    """Own-scope Store targets and called initializers, including inactive branches.
+
+    Nested defs/classes/lambdas run later or in a different scope; their stores
+    cannot declare construction-time state. Del targets do not create state.
+    The independent body-read anchor deliberately uses a deeper scan above.
+    """
+    stores, init_calls = set(), set()
+
+    class Scan(ast.NodeVisitor):
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+        visit_ClassDef = visit_FunctionDef
+        visit_Lambda = visit_FunctionDef
+
+        def visit_Attribute(self, node):
+            if (isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name)
+                    and node.value.id == receiver):
+                stores.add(node.attr)
+            self.generic_visit(node)
+
+        def visit_Call(self, node):
+            if (receiver == "self" and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "self"
+                    and node.func.attr.startswith("_init_")):
+                init_calls.add(node.func.attr)
+            self.generic_visit(node)
+
+    scan = Scan()
+    for statement in fn.body:
+        scan.visit(statement)
+    return stores, init_calls
+
+
 def derive_constructor_surface():
     """All names the subclass declares during construction, including inactive branches.
 
@@ -204,20 +288,13 @@ def derive_constructor_surface():
                if isinstance(n, ast.ClassDef) and n.name == "Cs2PuffeRL")
     methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
     init = methods["__init__"]
-    init_calls = {
-        n.func.attr
-        for n in ast.walk(init) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-        and isinstance(n.func.value, ast.Name) and n.func.value.id == "self"
-        and n.func.attr.startswith("_init_")
-    }
-    names = set()
-    for method in (init, *(methods[n] for n in sorted(init_calls))):
-        _, stores = _attribute_reads_and_stores(method)
+    names, init_calls = _constructor_scope(init, "self")
+    for method_name in sorted(init_calls):
+        stores, _ = _constructor_scope(methods[method_name], "self")
         names |= stores
     patch = find_def(ast.parse((SRC / "train.py").read_text()), "_patch_trainer_with_hybrid_aim")
-    _, stores = _attribute_reads_and_stores(patch)
-    names |= stores
-    return names
+    stores, _ = _constructor_scope(patch, "trainer")
+    return names | stores
 
 
 def test_constructed_surface_equals_declared_constructor_surface(composed):
