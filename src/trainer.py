@@ -44,7 +44,7 @@ import math
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -180,25 +180,26 @@ class Cs2PuffeRL(PuffeRL):
       after this constructor returns: none of it is read at patch time (spec §W1 table).
     """
 
-    # PuffeRL's rollout tensors and LSTM maps are writable by indexed assignment.
-    # Its inferred third-party types lack __setitem__; these instance declarations
-    # express the stock mutable buffer contract without changing construction.
-    actions: Any
-    logprobs: Any
-    observations: Any
-    rewards: Any
-    terminals: Any
-    values: Any
-    lstm_h: Any
-    lstm_c: Any
+    # PuffeRL owns the stock rollout buffers and recurrent-state maps; their
+    # indexed writes in evaluate use integer indices narrowed at that boundary.
+    actions: torch.Tensor
+    logprobs: torch.Tensor
+    observations: torch.Tensor
+    rewards: torch.Tensor
+    terminals: torch.Tensor
+    values: torch.Tensor
+    lstm_h: dict[int, torch.Tensor]
+    lstm_c: dict[int, torch.Tensor]
+    # PuffeRL may replace the concrete policy with torch.compile; its base
+    # attribute inference is FunctionType, so retain the dynamic policy boundary.
     policy: Any
-    # Hybrid buffers are torch tensors but pyrefly cannot type indexed writes
-    # through the installed torch stub. Runtime allocation remains in _init_hybrid_aim.
-    action_masks: Any
-    cont_actions: Any
-    logprobs_c: Any
-    logprobs_d: Any
-    participating: Any
+    # Hybrid tensors are allocated by _init_hybrid_aim; annotations do not
+    # initialize state or change the constructor's attribute surface.
+    action_masks: torch.Tensor
+    cont_actions: torch.Tensor
+    logprobs_c: torch.Tensor
+    logprobs_d: torch.Tensor
+    participating: torch.Tensor
     _tag_metrics: dict | None
 
     def __init__(self,
@@ -833,13 +834,15 @@ class Cs2PuffeRL(PuffeRL):
             profile("eval_copy", epoch)
             with torch.no_grad():
                 if cfg["use_rnn"]:
-                    self.lstm_h[env_id.start] = state["lstm_h"]
-                    self.lstm_c[env_id.start] = state["lstm_c"]
+                    self.lstm_h[env_id.start] = cast(torch.Tensor, state["lstm_h"])
+                    self.lstm_c[env_id.start] = cast(torch.Tensor, state["lstm_c"])
 
-                seq_pos = self.ep_lengths[env_id.start].item()
+                # These rollout counters are integer tensors. The installed
+                # Tensor.item() stub returns a wider scalar union than runtime.
+                seq_pos = cast(int, self.ep_lengths[env_id.start].item())
                 batch_rows = slice(
-                    self.ep_indices[env_id.start].item(),
-                    1 + self.ep_indices[env_id.stop - 1].item(),
+                    cast(int, self.ep_indices[env_id.start].item()),
+                    1 + cast(int, self.ep_indices[env_id.stop - 1].item()),
                 )
 
                 if cfg["cpu_offload"]:
@@ -1499,11 +1502,11 @@ class Cs2PuffeRL(PuffeRL):
                     tag_metrics = getattr(self, "_tag_metrics", None)
                     if tag_metrics is None:
                         tag_metrics = {}
-                        self._tag_metrics = tag_metrics
-                    tag_metrics.update(_tag)
+                    self._tag_metrics = tag_metrics
+                    self._tag_metrics.update(_tag)
                     if not _tag_mb0:
-                        tag_metrics["tag/mbL_index"] = float(mb)
-                    tag_metrics["tag/selfplay_active"] = float(
+                        self._tag_metrics["tag/mbL_index"] = float(mb)
+                    self._tag_metrics["tag/selfplay_active"] = float(
                         getattr(self, "_selfplay_used_past", False))
             # ──────────────────────────────────────────────────────────────
             loss.backward()
