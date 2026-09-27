@@ -1,8 +1,7 @@
 """Full-state checkpoint / resume surface (R0-C #134), split out of train.py.
 
 WHAT: RNG snapshot/restore + seeding, the ``train_state.pt`` sidecar
-(collect_train_state / restore_train_state), the ``save_checkpoint`` override
-that writes the three-file checkpoint set, and the ``--resume-run`` resolution
+(collect_train_state / restore_train_state), and the ``--resume-run`` resolution
 and guard chain. Moved here VERBATIM by the 2026-08-31 post-rung1a refactor: no
 renames, no signature changes, no behaviour change. ``train.py`` re-exports
 every name below (see its ``__all__``), so existing ``from train import X`` call
@@ -24,12 +23,11 @@ function-local ON PURPOSE.
 import json
 import math
 import random
-import types
 from pathlib import Path
 
 import numpy as np
 
-from train_shared import _WARMSTART_ATTRS, RESUME_CONFIG_ALLOWLIST, _atomic_save_state_dict
+from train_shared import _WARMSTART_ATTRS, RESUME_CONFIG_ALLOWLIST
 
 
 def _rng_state_dict():
@@ -81,7 +79,7 @@ def _rng_load_state_dict(st):
 
 
 def collect_train_state(trainer, self_play_mgr) -> dict:
-    """Everything train.py adds on top of PuffeRL's trainer_state.pt, CPU-side
+    """Everything Cs2PuffeRL adds on top of PuffeRL's trainer_state.pt, CPU-side
     so the file is device-agnostic. Requires a Cs2PuffeRL (the _log_alpha_tensor /
     _alpha_optimizer / _ret_* attributes its _init_return_norm sets, gh#168 W2a)."""
     return {
@@ -158,46 +156,6 @@ def restore_train_state(trainer, self_play_mgr, state: dict):
         setattr(trainer, k, v)
     self_play_mgr.load_state_dict(state["self_play"])
     _rng_load_state_dict(state["rng"])
-
-
-def _install_full_checkpointing(trainer, self_play_mgr):
-    """Override PuffeRL.save_checkpoint on this instance (the MethodType
-    pattern the return-norm patcher used before gh#168 W2a; W2c makes this a
-    method too). Differences from stock:
-    no `model_path exists → return` early-out (a resumed run re-saves the
-    same epoch after loading, and a crash between the model write and the
-    state writes must not freeze the state files), atomic writes for all
-    three files, and the train_state.pt sidecar. Still returns the model
-    path — PuffeRL.close() copies it to <data_dir>/<run_id>.pt.
-
-    WRITE ORDER is load-bearing: model → train_state → trainer_state. The
-    LAST file written (trainer_state.pt) names the model (model_name) and
-    carries the epoch the sidecar is checked against, so a crash anywhere
-    in the sequence leaves a set that resolve_resume_run/load_full_resume
-    either accept whole (all three from the same epoch) or refuse — never
-    a newer model with an older optimizer."""
-
-    def _save_checkpoint(self):
-        run_id = self.logger.run_id
-        path = Path(self.config["data_dir"]) / run_id
-        path.mkdir(parents=True, exist_ok=True)
-        model_name = f"model_{self.epoch:06d}.pt"
-        model_path = path / model_name
-        _atomic_save_state_dict(self.uncompiled_policy.state_dict(), model_path)
-        _atomic_save_state_dict(collect_train_state(self, self_play_mgr), path / "train_state.pt")
-        _atomic_save_state_dict(
-            {
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "global_step": self.global_step,
-                "agent_step": self.global_step,
-                "update": self.epoch,
-                "model_name": model_name,
-                "run_id": run_id,
-            }, path / "trainer_state.pt")
-        return str(model_path)
-
-    trainer.save_checkpoint = types.MethodType(_save_checkpoint, trainer)
-    return trainer
 
 
 def resolve_resume_run(run_dir: Path, run_id: str | None = None) -> dict:

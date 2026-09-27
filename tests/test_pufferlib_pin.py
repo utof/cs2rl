@@ -2,16 +2,13 @@
 #
 # Canary tests for the PufferLib dependency surface (gh #85).
 #
-# WHY: trainer.Cs2PuffeRL.__init__ (gh#168 W1) replaces PuffeRL's
-# evaluate()/train()/save_checkpoint() bodies via instance monkey-patches
-# (types.MethodType; the patch functions live in src/train.py,
-# src/train_update.py and src/resume_state.py) — a de-facto fork of the hot
-# loops pinned to a frozen upstream (3.0.0, PyPI-latest since 2025-06).
+# WHY: Cs2PuffeRL overrides PuffeRL's evaluate()/train()/save_checkpoint()
+# and still extends rollout storage and vecenv plumbing via the hybrid-aim
+# patcher. This is a de-facto fork of the hot loops pinned to upstream 3.0.0.
 # Upstream 4.0 deletes pufferlib.vector and pufferlib.pytorch and rewrites the
-# trainer, so an accidental version bump would produce dozens of confusing
-# failures. These tests turn that into ONE clear failure pointing at the
-# upgrade playbook, and pin the single silent-wrongness invariant that the
-# three _patch_trainer_with_* patches plus _install_full_checkpointing rely on.
+# trainer, so an accidental version bump would produce confusing failures.
+# These tests turn that into one clear failure pointing at the upgrade playbook
+# and pin the upstream invariant the hybrid-aim patcher still relies on.
 
 import pufferlib
 
@@ -29,7 +26,7 @@ def test_pufferlib_version_pinned():
     # via str() so this survives either representation without false alarms.
     assert str(pufferlib.__version__) == "3.0", (
         f"pufferlib version changed to {pufferlib.__version__!r} (expected '3.0'). "
-        "The monkey-patch surface in src/train.py is written against 3.0.0 "
+        "The trainer subclass and remaining hybrid-aim patch target 3.0.0 "
         "internals. See gh #85 for the upgrade playbook before proceeding.")
 
 

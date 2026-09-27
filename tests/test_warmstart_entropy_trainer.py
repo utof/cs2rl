@@ -70,7 +70,7 @@ def _force_floor_above_entropy(trainer, floor=1e6):
     PITFALL: until gh#168 W2a the floor was a closure cell of the patched
     train() body and this helper rewrote it through `__closure__`; W2a made it
     the instance attribute `_entropy_floor` (declared in `_init_return_norm`,
-    pinned by tests/test_trainer_composition.py's frozen list and the O4
+    pinned by tests/test_trainer_composition.py's derived constructor surface and the O4
     construction snapshot). The attribute must exist BEFORE the write: a
     renamed attribute would otherwise create a dead one and this helper would
     silently no-op, which is what the assert below turns into a failure.

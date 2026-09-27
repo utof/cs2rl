@@ -16,8 +16,8 @@ state and ``train`` / ``_normalize_returns`` / ``_update_return_stats`` are meth
 W2b folded the self-play patcher: ``_init_selfplay`` stores the manager, the past
 policy's LSTM state and the ``_batch1_*`` reward state, and ``evaluate`` is a method, so
 ``__init__`` now calls ``_init_return_norm``, ``_patch_trainer_with_hybrid_aim`` (folds in
-W3, with the vecenv plumbing), ``_init_selfplay`` and ``_install_full_checkpointing`` (the
-save_checkpoint override, W2c), in the same order the four patch calls had.
+W3, with the vecenv plumbing), and ``_init_selfplay``. The checkpoint body is
+``save_checkpoint`` on the class. Construction keeps the state setup order.
 
 WHY a module of its own and not a class inside train.py: this module subclasses
 ``PuffeRL``, so it imports torch and pufferlib at module scope and is HEAVY by
@@ -43,6 +43,7 @@ from __future__ import annotations
 import math
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 
@@ -60,7 +61,7 @@ import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
 from _action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, AIM_DIM
-from resume_state import _install_full_checkpointing
+from resume_state import collect_train_state
 from train import _hybrid_sample_logits, _patch_trainer_with_hybrid_aim
 
 # W2a (gh#168): everything train() reads that used to be a function-local import of
@@ -77,7 +78,7 @@ from train_helpers_batch1 import (
     process_step_rewards,
     warmstart_entropy_state,
 )
-from train_shared import LOG_STD_MAX
+from train_shared import LOG_STD_MAX, _atomic_save_state_dict
 from train_update import (
     _hybrid_ppo_loss,
     _scheduled_target_entropy,
@@ -95,7 +96,8 @@ class Cs2PuffeRL(PuffeRL):
     2a3573f. W2a moved the return-norm step in as well: ``_init_return_norm`` (state) and
     ``train`` / ``_normalize_returns`` / ``_update_return_stats`` (bodies) are methods now, and
     the return-norm patcher is gone from train_update.py. The self-play evaluate body (W2b), the
-    checkpoint override (W2c) and the vecenv plumbing (W3) still arrive as patch functions.
+    checkpoint override is also a class method (W2c); only the vecenv plumbing (W3)
+    still arrives through a patch function.
 
     Parameters beyond PuffeRL's ``(config, vecenv, policy, logger=None)`` are exactly what the
     patch functions took at train()'s call sites:
@@ -116,10 +118,8 @@ class Cs2PuffeRL(PuffeRL):
         would also work today; the order is kept to match train() byte for byte.
 
     PITFALLS
-    - The order of the four steps is the order train() applied them. The only
-      load-bearing constraint is "all four before the first evaluate()/train() call"
-      (spec §1); knock-out W1-K2 measured that swapping selfplay and checkpointing leaves
-      both byte gates identical.
+    - The order of state setup matches train()'s former patch order. All state
+      must exist before the first evaluate()/train()/save_checkpoint() call.
     - ``_timing`` is created here because train()'s loop assigns INTO it and the [Timing]
       print reads it; it is not a patch (#166 deleted the timing patch).
     - Everything a caller used to set on the instance AFTER construction (``logger.run_id``,
@@ -169,11 +169,6 @@ class Cs2PuffeRL(PuffeRL):
             # because the loop assigns INTO it and the [Timing] print reads it, so it
             # has to exist before the first epoch.
             self._timing = {"collect_ms": 0.0, "update_ms": 0.0}
-            # R0-C (#134): full-state checkpointing. Last here because train() applied it
-            # last at 2a3573f, not because anything depends on it: the installer reads no
-            # trainer attribute at patch time, and knock-out W1-K2 (installed BEFORE the
-            # selfplay patch) reproduced every hash of both byte gates.
-            _install_full_checkpointing(self, self_play_mgr)
         except BaseException:
             # Exactly what PuffeRL.close() does to the thread; nothing else of close().
             self.utilization.stop()
@@ -195,7 +190,7 @@ class Cs2PuffeRL(PuffeRL):
 
         PITFALLS: two names that were closure variables before W2a are now attributes,
         ``_entropy_floor`` and ``_ret_device``; ``tests/test_trainer_composition.py``'s
-        frozen list and the O4 snapshot both expect them. Everything else is set on
+        derived constructor-surface test and the O4 snapshot both expect them. Everything else is set on
         ``self`` exactly as the patcher set it on ``trainer`` (relocation, not a rewrite).
         """
         # gh #85: BPTT zero-init exactness (Dust2Policy.forward/_lstm_bptt) is only
@@ -373,8 +368,7 @@ class Cs2PuffeRL(PuffeRL):
     def _init_selfplay(self, self_play_mgr):
         """Self-play state for evaluate() (the patch-time half of the former self-play
         patcher in train.py; W2b of gh#168). Called from __init__ right after
-        the hybrid-aim patch and before ``_timing`` / checkpointing, i.e. exactly where the
-        patch call stood, so construction order is unchanged.
+        the hybrid-aim patch and before ``_timing``, where the patch call stood.
 
         Stores the manager, the past policy's own LSTM state (the same dict structure as
         ``self.lstm_h``: keyed by agent-batch start ``i*n``, one ``(agents_per_batch,
@@ -383,15 +377,15 @@ class Cs2PuffeRL(PuffeRL):
         updates the three ``WelfordStd`` and reads their ``std()``; ``train`` copies the
         three ``std()`` values into ``_batch1_std_*`` at the end of each call.
         ``process_step_rewards`` writes each env's channel sum into
-        ``_batch1_reward_scratch`` and reads it back for one host-to-device copy;
+        ``_batch1_reward_scratch`` when step_stats exists, or a 0.0 placeholder
+        when it does not, then reads the scratch buffer for one host-to-device copy;
         ``evaluate`` replaces the buffer with a longer one when the info list (at most one
         entry per env) is longer than it. ``process_step_rewards`` only sets rows of
         ``_batch1_current_segment_has_event`` to True (bomb planted this tick); ``evaluate``
         reads those rows into ``_batch1_event_mask`` and clears them at the segment
         boundary. Apart from the zero fill here, ``_batch1_event_mask`` is written only by
         ``evaluate`` at that boundary, and ``train`` reads it.
-        ``_install_full_checkpointing`` still takes the manager as an argument
-        (resume_state.py is untouched by W2b).
+        ``save_checkpoint`` reads the stored manager when writing the sidecar.
         """
         self._self_play_mgr = self_play_mgr
         self._past_lstm_h = {k: torch.zeros_like(v) for k, v in self.lstm_h.items()}
@@ -410,6 +404,38 @@ class Cs2PuffeRL(PuffeRL):
                                                              device=_dev)
         self._batch1_reward_scratch = np.empty(0, dtype=np.float32)
         print("[Train] Self-play evaluate patch enabled.")
+
+    def save_checkpoint(self):
+        """Write the full three-file checkpoint set and return its model path.
+
+        Unlike stock PuffeRL, never return early when the model path exists:
+        a resumed run can re-save an epoch after loading, and a crash between
+        writes must not freeze older state files. Every write is atomic, and
+        ``train_state.pt`` holds the extra Cs2PuffeRL state. PuffeRL.close()
+        copies the returned model path to ``<data_dir>/<run_id>.pt``.
+
+        WRITE ORDER is load-bearing: model → train_state → trainer_state. The
+        LAST file names the model and carries the epoch checked against the
+        sidecar, so a crash leaves a set that resume accepts whole or refuses.
+        """
+        run_id = self.logger.run_id
+        path = Path(self.config["data_dir"]) / run_id
+        path.mkdir(parents=True, exist_ok=True)
+        model_name = f"model_{self.epoch:06d}.pt"
+        model_path = path / model_name
+        _atomic_save_state_dict(self.uncompiled_policy.state_dict(), model_path)
+        _atomic_save_state_dict(collect_train_state(self, self._self_play_mgr),
+                                path / "train_state.pt")
+        _atomic_save_state_dict(
+            {
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "global_step": self.global_step,
+                "agent_step": self.global_step,
+                "update": self.epoch,
+                "model_name": model_name,
+                "run_id": run_id,
+            }, path / "trainer_state.pt")
+        return str(model_path)
 
     def evaluate(self):
         """Rollout collection with the self-play opponent override (the body of the
