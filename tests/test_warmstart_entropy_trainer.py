@@ -199,11 +199,16 @@ def test_grace_zero_anchors_on_second_update_and_ramps():
         assert losses1["warmstart_phase"] == 0
         h_after_1 = trainer._batch1_last_entropy_mean
         # anchors to update 1's mean H
+        assert h_after_1 is not None
         losses2 = _run_train_once(trainer)
         assert losses2["warmstart_phase"] == 1
-        assert abs(trainer._batch1_warmstart_h_anchor - h_after_1) < 1e-9
+        anchor = trainer._batch1_warmstart_h_anchor
+        assert anchor is not None
+        assert abs(anchor - h_after_1) < 1e-9
         # ramp_steps is huge so the mirrored target sits ~at the anchor
-        assert abs(trainer._batch1_current_target_entropy - h_after_1) < 1e-3
+        target = trainer._batch1_current_target_entropy
+        assert target is not None
+        assert abs(target - h_after_1) < 1e-3
         # COUPLING: the assertion above only proves the MIRROR (the wandb
         # trace) was overridden. This one proves the CONSUMED target — the
         # _t9_target_entropy that alpha_loss is actually computed from — was

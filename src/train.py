@@ -1512,7 +1512,7 @@ def build_policy(vecenv,
                 their log-probs sum, and the Gaussian factor adds to the
                 total. PPO loss assembly + the matching trainer side
                 (rollout buffer for continuous_action, ratio computation)
-                lands in task 5 via _patch_trainer_with_hybrid_aim.
+                lands in task 5 via HybridAimVecEnv.
             """
             hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
             if self.tct_split_heads:
@@ -2500,21 +2500,10 @@ class SelfPlayManager:
 #                            can keep KL/clipfrac diagnostics on the discrete
 #                            half (back-compat with the existing log surface).
 #
-#   _patch_trainer_with_hybrid_aim — extends the rollout buffer with
-#                            cont_actions / logprobs_d / logprobs_c parallel
-#                            to the existing actions / logprobs, and wraps
-#                            vecenv.send (the wrapper calls the original) to
-#                            forward the float buffer to the env.
-#                            Cs2PuffeRL.__init__ (src/trainer.py, gh#168 W1)
-#                            applies it AFTER _init_return_norm (the return-norm
-#                            state; Cs2PuffeRL.train REPLACES the stock train()
-#                            outright, gh#168 W2a) and BEFORE _init_selfplay
-#                            (Cs2PuffeRL.evaluate REPLACES evaluate() the same
-#                            way, gh#168 W2b). The dependency is at CALL time,
-#                            not patch time: the replacement train()/evaluate()
-#                            bodies read the buffers this patcher allocates, so
-#                            all three must run before the first
-#                            evaluate()/train() call.
+#   HybridAimVecEnv — wraps the backend send and Serial per-env step to
+#                         forward continuous aim. Cs2PuffeRL._init_hybrid_aim
+#                         owns the parallel rollout buffers used by train and
+#                         evaluate. Both are ready before the first rollout.
 
 
 def _hybrid_sample_logits(policy_out,
@@ -2651,212 +2640,6 @@ def _hybrid_sample_logits(policy_out,
     entropy_c = ((0.5 + 0.5 * _LOG_2PI + log_std_b) * w).sum(-1)
 
     return action, continuous_action, log_prob_d, log_prob_c, entropy_d, entropy_c
-
-
-def _patch_trainer_with_hybrid_aim(trainer,
-                                   cont_action_view_main=None,
-                                   mask_view_main=None,
-                                   participating_rows=None):
-    """Extend trainer with continuous-action rollout storage + vecenv plumbing.
-
-    Cs2PuffeRL.__init__ (src/trainer.py, gh#168 W1) applies this AFTER
-    _init_return_norm (the return-norm state; Cs2PuffeRL.train overrides the
-    stock train() outright since gh#168 W2a) and BEFORE the first
-    evaluate()/train() call. The ordering is a
-    CALL-time dependency, not a construction-time one: Cs2PuffeRL.train
-    reads self.cont_actions / self.logprobs_{d,c}, which this patcher
-    allocates, and nothing at patch time checks they exist. The
-    PPO-update-side rewrites live in src/train_update.py (_hybrid_ppo_loss,
-    called from Cs2PuffeRL.train); this patcher only handles the
-    rollout/storage side.
-
-    Multiprocessing vecenv path (Batch 3 T5b)
-    ─────────────────────────────────────────
-    PufferLib's Multiprocessing vecenv uses ``multiprocessing.RawArray`` for
-    its shm dict and forks workers AFTER allocation (see
-    ``.venv/.../pufferlib/vector.py:300-346``). Workers inherit the OS
-    shared mapping, so main process and workers see the same physical bytes
-    via different numpy views.
-
-    To carry continuous (Δyaw) actions across the fork boundary we mirror
-    that pattern — train() allocates its own RawArray BEFORE
-    pufferlib.vector.make and threads it through env_kwargs to each env's
-    ``Cs2Env._attach_cont_action_view``. The trainer-side numpy view over
-    the SAME RawArray is passed in here as ``cont_action_view_main``;
-    inside the patched ``_hybrid_send`` we write the policy's Δyaw sample
-    into it ``BEFORE`` calling ``orig_send(action)``. Workers' next
-    ``Cs2Env.step`` reads the data via their attached view, returning the
-    correct value from ``_prepare_continuous_actions(None)``.
-
-    Backwards compat: if ``cont_action_view_main`` is None (legacy callers
-    such as the test harness that builds a trainer without the shm path),
-    only the in-process Serial wrapper at the bottom of this function is
-    used. The Serial path uses a ``trainer.vecenv._cont_action_buf`` Python
-    attr stash + a per-env step wrapper, untouched from T5.
-
-    ``participating_rows`` (Rung 0 §2.2): bool array over agent rows saying
-    which ones the C env actually spawns. Allocated here rather than in a
-    patcher of its own because the buffers it sizes (`trainer.participating`)
-    must match `trainer.actions`, which this function already mirrors — and
-    because the rollout writes that fill it live in the evaluate() this
-    patcher's sibling installs. None ⇒ every row participates.
-    """
-    import torch
-    # Stash on the trainer so _hybrid_send (defined below) can close over
-    # it via attribute access. Storing on trainer (not closure-captured
-    # local) keeps it visible to instrumentation/inspection.
-    trainer._cont_action_view_main = cont_action_view_main
-    # F8: main-process numpy view over the mask shm (env→trainer direction;
-    # see Cs2Env._attach_mask_view). Cs2PuffeRL.evaluate reads rows for
-    # the recv'd env_id slice right after recv() — the workers finished their
-    # step by then, so the bytes are the masks for the obs batch in hand.
-    # None ⇒ rollout runs unmasked (legacy callers without shm plumbing) and
-    # action_masks stays all-ones, which makes the update path a no-op mask.
-    trainer._action_mask_view_main = mask_view_main
-
-    # ── Rollout buffer extension (step 5.4) ──
-    # self.actions has shape (segments, bptt_horizon, ACTION_DIM=7) int32 —
-    # we mirror with AIM_DIM trailing dim, float32. self.logprobs is
-    # (segments, bptt_horizon) float32; we add per-factor halves with the
-    # same shape so the caller can fetch self.logprobs_d[idx] etc. without
-    # any reshaping.
-    trainer.cont_actions = torch.zeros(
-        (*trainer.actions.shape[:-1], AIM_DIM),
-        dtype=torch.float32,
-        device=trainer.actions.device,
-    )
-    trainer.logprobs_d = torch.zeros_like(trainer.logprobs)
-    trainer.logprobs_c = torch.zeros_like(trainer.logprobs)
-    # F8: per-step action masks, parallel to actions but ACTION_MASK_DIM wide.
-    # Initialised to ONES (= everything valid): rows never written (mask shm
-    # absent, or rollout rounds that don't fill every segment) degrade to the
-    # exact pre-F8 unmasked behaviour instead of masking everything to the
-    # no-op. bool keeps the buffer small (segments × 64 × 22 bytes).
-    trainer.action_masks = torch.ones(
-        (*trainer.actions.shape[:-1], ACTION_MASK_DIM),
-        dtype=torch.bool,
-        device=trainer.actions.device,
-    )
-
-    # ── Rung 0 §2.2: per-row participation ───────────────────────────────
-    # participating_rows: numpy bool (total_agents,) — STATIC per run, derived
-    # from args.n_active_per_team in train(). None ⇒ all rows participate
-    # (harness default, exact identity with pre-Rung-0 behaviour).
-    # trainer.participating is the BUFFER-LAYOUT flag [segments, bptt],
-    # scattered by evaluate() via ep_indices exactly like action_masks.
-    # ZERO-initialised (unlike action_masks, which defaults to all-ones): a
-    # skipped write must mask EVERYTHING and trip the per-epoch
-    # `participating.any()` assert in train(), never silently train on parked
-    # rows. _participating_rows_np is kept beside the torch copy because
-    # evaluate()'s global_step accounting works on the numpy `mask` recv()
-    # returns; converting per-recv would allocate on every rollout tick.
-    n_rows = trainer.total_agents
-    if participating_rows is None:
-        participating_rows = np.ones(n_rows, dtype=bool)
-    participating_rows = np.asarray(participating_rows, dtype=bool).reshape(-1)
-    assert participating_rows.shape == (n_rows, ), (participating_rows.shape, n_rows)
-    assert participating_rows.any(), "no participating rows — n_active_per_team=0?"
-    trainer._participating_rows_np = participating_rows
-    trainer._participating_rows = torch.as_tensor(participating_rows, device=trainer.actions.device)
-    trainer.participating = torch.zeros(trainer.actions.shape[:-1],
-                                        dtype=torch.bool,
-                                        device=trainer.actions.device)
-
-    # ── vecenv.send patch (step 5.5) ──
-    # Goal: forward both the int discrete buffer and the float cont buffer
-    # to env.step(). Cs2PuffeRL.evaluate calls self.vecenv.send(action)
-    # with a numpy int array; we change that callsite to send a tuple
-    # (action, cont_action) and the wrapper here unpacks. For the
-    # Multiprocessing backend cont_action lands on a vecenv-local stash
-    # only — see class docstring. For Serial, we forward via positional
-    # kwarg into env.step(actions, continuous_actions=...).
-    orig_send = trainer.vecenv.send
-
-    def _hybrid_send(action_pair):
-        """vecenv.send(...) wrapper accepting (action, cont_action) tuple.
-
-        Backwards-compatible with bare ndarrays so legacy callers (e.g. the
-        record path) continue to work — cont_action defaults to None which
-        makes Cs2Env.step fall back to its zero scratch buffer.
-
-        T5b dual-path:
-        - Serial backend: stash on `vecenv._cont_action_buf`; the per-env
-          step wrapper installed below reads it and forwards to
-          `Cs2Env.step(continuous_actions=...)`.
-        - Multiprocessing backend: also write the same buffer into the
-          shared-memory view (`trainer._cont_action_view_main`). Workers
-          read via `Cs2Env._cont_action_view` on the very next step.
-        Doing BOTH covers the test harness (which uses Serial wrapped in
-        the patcher) AND production training (Serial or MP).
-        """
-        if isinstance(action_pair, tuple):
-            action, cont_action = action_pair
-        else:
-            action, cont_action = action_pair, None
-        if cont_action is not None and hasattr(cont_action, 'cpu'):
-            cont_action = cont_action.cpu().numpy().astype(np.float32, copy=False)
-        # Stash on the vecenv so the Serial backend's send path (below) and
-        # any custom step wrapper can pull it. None on a non-Serial path is
-        # the documented fallback (zero Δyaw → no turning).
-        trainer.vecenv._cont_action_buf = cont_action
-        # T5b: mirror the cont buffer into the shared-memory window so MP
-        # workers' attached views see the latest sample. We DELIBERATELY
-        # write all-zeros when cont_action is None so a stale prior write
-        # doesn't bleed into the next tick. The view shape is
-        # (num_envs * N_AGENTS, AIM_DIM) — same flatten as the per-env
-        # cont_action that comes from _hybrid_sample_logits.
-        view = trainer._cont_action_view_main
-        if view is not None:
-            if cont_action is None:
-                view.fill(0.0)
-            else:
-                # cont_action shape may be (total_agents, AIM_DIM) or
-                # already flat. We assert total element count matches
-                # view.shape before reshape — this catches a future
-                # rollout-side shape change loudly instead of silently
-                # broadcasting (project style: strict shape validation,
-                # see _prepare_continuous_actions).
-                assert cont_action.size == view.size, (
-                    f"cont_action.size={cont_action.size} but "
-                    f"view.size={view.size} (view.shape={view.shape})")
-                view[:] = cont_action.reshape(view.shape)
-        return orig_send(action)
-
-    trainer.vecenv.send = _hybrid_send
-
-    # ── Serial backend: extend send() to actually forward cont_action ──
-    # PufferLib's Serial.send loops env.step(atns) → we monkey-patch the
-    # individual env step to consult vecenv._cont_action_buf and forward
-    # the matching slice to Cs2Env.step(actions, continuous_actions=...).
-    # On Multiprocessing, trainer.vecenv has no .envs attribute — skip.
-    if hasattr(trainer.vecenv, 'envs'):
-        envs = trainer.vecenv.envs
-        agents_per_env = trainer.vecenv.driver_env.num_agents
-        # Pre-compute per-env cont slices once so the wrapper closure is O(1).
-        for env_idx, env in enumerate(envs):
-            row_start = env_idx * agents_per_env
-            row_end = row_start + agents_per_env
-            orig_step = env.step
-
-            def _make_step_wrapper(orig, rs, re):
-
-                def _hybrid_env_step(actions):
-                    cont_buf = getattr(trainer.vecenv, '_cont_action_buf', None)
-                    cont = None
-                    if cont_buf is not None:
-                        # cont_buf is a flat numpy array shaped
-                        # (total_agents, AIM_DIM) — slice this env's chunk.
-                        cont = cont_buf[rs:re]
-                    return orig(actions, continuous_actions=cont)
-
-                return _hybrid_env_step
-
-            env.step = _make_step_wrapper(orig_step, row_start, row_end)
-
-    print("[Train] Hybrid-aim trainer patch enabled "
-          f"(cont_actions buffer={trainer.cont_actions.shape}, "
-          f"vecenv_kind={type(trainer.vecenv).__name__}).")
-    return trainer
 
 
 # ── SECTION: PufferLib training ────────────────────────────────────────────
@@ -2999,13 +2782,12 @@ def train(args):
     # own shm dict, so any Python attribute set on the main vecenv after
     # fork is invisible to workers. Mirror the pattern with our own
     # RawArray('f', num_envs * N_AGENTS * AIM_DIM) allocated BEFORE
-    # pufferlib.vector.make runs. The trainer-side patch
-    # (_patch_trainer_with_hybrid_aim) writes the policy's Δyaw sample into
-    # `_cont_action_view_main` every send(); each worker's Cs2Env receives a
+    # pufferlib.vector.make runs. HybridAimVecEnv.send writes the policy's
+    # Δyaw sample into `_cont_action_view_main` every send(); each worker's Cs2Env receives a
     # numpy view onto the same physical bytes via _attach_cont_action_view
     # (called inside env_factory below). For the Serial backend the view is
-    # also attached, but the per-env step wrapper installed by the patcher
-    # takes precedence — see that function for the dual-path docstring.
+    # also attached, but the per-env step wrapper installed by HybridAimVecEnv
+    # takes precedence — see HybridAimVecEnv for the dual-path contract.
     from multiprocessing import RawArray
 
     # 10 (5 T + 5 CT) — N_AGENTS not exported via _action_spec; use AGENT_IDS.
@@ -3213,7 +2995,8 @@ def train(args):
     # Function-local import ON PURPOSE: trainer.py subclasses PuffeRL and so
     # imports torch at module scope; `import train` must stay torch-free
     # (tests/test_w1_modules.py).
-    from trainer import Cs2PuffeRL
+    from trainer import Cs2PuffeRL, HybridAimVecEnv
+    vecenv = HybridAimVecEnv(vecenv, _cont_action_view_main)
     trainer = Cs2PuffeRL(train_config,
                          vecenv,
                          policy,
@@ -3234,14 +3017,8 @@ def train(args):
     print(f"[Train] aim_log_std: {_n_sigma} parameter(s) moved to a weight_decay=0 param group "
           f"(fresh init {train_config['aim_log_std_init']:.4f}, "
           f"cap {train_config['aim_log_std_max']:.4f})")
-    # Batch 3 (T5): Cs2PuffeRL.__init__ applies the hybrid-aim patch after
-    # _init_return_norm, but the dependency is at CALL time, not construction
-    # time: Cs2PuffeRL.train (src/trainer.py, gh#168 W2a; it never calls the
-    # stock train()) reads self.cont_actions / self.logprobs_{d,c} on its
-    # first call, and nothing at construction time checks they exist. Likewise
-    # selfplay's replacement evaluate() writes those buffers every rollout.
-    # The only load-bearing order is "all patches applied before the first
-    # evaluate()/train() call".
+    # The constructor allocates hybrid rollout buffers before the first
+    # evaluate()/train() call; the vecenv wrapper was installed above.
     # Pin the shm + view on the trainer so neither is GC'd mid-run. Without
     # holding _cont_action_shm here, Python could free the RawArray once
     # this function returns (Python doesn't know workers/numpy views are

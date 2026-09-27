@@ -2,7 +2,7 @@
 
 The stock surface is measured at the end of PuffeRL.__init__. The remaining
 constructor surface is compared against self stores in Cs2PuffeRL.__init__,
-its called _init_* methods, and the hybrid-aim patcher (until W3). Source
+its called _init_* methods, including hybrid-aim state. Source
 scanning includes inactive branches, so an undeclared runtime attribute or
 an unexecuted declaration turns the test red.
 
@@ -280,21 +280,24 @@ def _constructor_scope(fn, receiver):
 def derive_constructor_surface():
     """All names the subclass declares during construction, including inactive branches.
 
-    W3 will move the remaining hybrid-aim stores into the constructor; until then its
-    top-level trainer stores are part of the same declared surface.
+    The constructor and called initializers own every added runtime field.
     """
     trainer_tree = ast.parse((SRC / "trainer.py").read_text())
     cls = next(n for n in trainer_tree.body
                if isinstance(n, ast.ClassDef) and n.name == "Cs2PuffeRL")
     methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
-    init = methods["__init__"]
-    names, init_calls = _constructor_scope(init, "self")
-    for method_name in sorted(init_calls):
-        stores, _ = _constructor_scope(methods[method_name], "self")
+    names = set()
+    pending = ["__init__"]
+    scanned = set()
+    while pending:
+        method_name = pending.pop()
+        if method_name in scanned:
+            continue
+        scanned.add(method_name)
+        stores, init_calls = _constructor_scope(methods[method_name], "self")
         names |= stores
-    patch = find_def(ast.parse((SRC / "train.py").read_text()), "_patch_trainer_with_hybrid_aim")
-    stores, _ = _constructor_scope(patch, "trainer")
-    return names | stores
+        pending.extend(init_calls - scanned)
+    return names
 
 
 def test_constructed_surface_equals_declared_constructor_surface(composed):

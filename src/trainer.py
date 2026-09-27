@@ -15,8 +15,8 @@ W2a (gh#168) folded the first of the four in: ``_init_return_norm`` seeds the re
 state and ``train`` / ``_normalize_returns`` / ``_update_return_stats`` are methods, so
 W2b folded the self-play patcher: ``_init_selfplay`` stores the manager, the past
 policy's LSTM state and the ``_batch1_*`` reward state, and ``evaluate`` is a method, so
-``__init__`` now calls ``_init_return_norm``, ``_patch_trainer_with_hybrid_aim`` (folds in
-W3, with the vecenv plumbing), and ``_init_selfplay``. The checkpoint body is
+``__init__`` calls ``_init_return_norm``, ``_init_hybrid_aim``, and
+``_init_selfplay``; callers install ``HybridAimVecEnv`` first. The checkpoint body is
 ``save_checkpoint`` on the class. Construction keeps the state setup order.
 
 WHY a module of its own and not a class inside train.py: this module subclasses
@@ -44,6 +44,7 @@ import math
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -60,9 +61,9 @@ import pufferlib.pytorch
 import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
-from _action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, AIM_DIM
+from _action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from resume_state import collect_train_state
-from train import _hybrid_sample_logits, _patch_trainer_with_hybrid_aim
+from train import _hybrid_sample_logits
 
 # W2a (gh#168): everything train() reads that used to be a function-local import of
 # the patcher, or a global of train_update.py, is a module-level import HERE, of the
@@ -88,6 +89,59 @@ from train_update import (
 )
 
 
+class HybridAimVecEnv:
+    """Carry continuous aim beside discrete actions through Serial or shared MP views.
+
+    PuffeRL sees the vector interface through delegation. Serial calls each env's
+    step with its matching agent rows; MP workers consume the shared view written
+    before the backend is sent its discrete actions.
+    """
+
+    def __init__(self, backend, cont_action_view_main=None):
+        self._backend = backend
+        self._cont_action_view_main = cont_action_view_main
+        self._cont_action_buf = None
+        if hasattr(backend, "envs"):
+            agents_per_env = backend.driver_env.num_agents
+            for env_idx, env in enumerate(backend.envs):
+                row_start = env_idx * agents_per_env
+                row_end = row_start + agents_per_env
+                orig_step = env.step
+
+                def hybrid_step(actions, _orig=orig_step, _start=row_start, _end=row_end):
+                    """Forward only this env's action rows to the original step."""
+                    cont = self._cont_action_buf
+                    if cont is not None:
+                        cont = cont[_start:_end]
+                    return _orig(actions, continuous_actions=cont)
+
+                env.step = hybrid_step
+
+    def __getattr__(self, name):
+        """Expose the backend's vector properties and methods to PuffeRL."""
+        return getattr(self._backend, name)
+
+    def send(self, action_pair):
+        """Mirror float aim before dispatch; a bare action clears stale aim."""
+        if isinstance(action_pair, tuple):
+            action, cont_action = action_pair
+        else:
+            action, cont_action = action_pair, None
+        if cont_action is not None and hasattr(cont_action, "cpu"):
+            cont_action = cont_action.cpu().numpy().astype(np.float32, copy=False)
+        self._cont_action_buf = cont_action
+        view = self._cont_action_view_main
+        if view is not None:
+            if cont_action is None:
+                view.fill(0.0)
+            else:
+                assert cont_action.size == view.size, (
+                    f"cont_action.size={cont_action.size} but "
+                    f"view.size={view.size} (view.shape={view.shape})")
+                view[:] = cont_action.reshape(view.shape)
+        return self._backend.send(action)
+
+
 class Cs2PuffeRL(PuffeRL):
     """The cs2rl trainer: PuffeRL plus the behaviours train() used to bolt on after construction.
 
@@ -96,8 +150,8 @@ class Cs2PuffeRL(PuffeRL):
     2a3573f. W2a moved the return-norm step in as well: ``_init_return_norm`` (state) and
     ``train`` / ``_normalize_returns`` / ``_update_return_stats`` (bodies) are methods now, and
     the return-norm patcher is gone from train_update.py. The self-play evaluate body (W2b), the
-    checkpoint override is also a class method (W2c); only the vecenv plumbing (W3)
-    still arrives through a patch function.
+    checkpoint override is also a class method (W2c); hybrid action transport
+    lives in the vecenv wrapper (W3).
 
     Parameters beyond PuffeRL's ``(config, vecenv, policy, logger=None)`` are exactly what the
     patch functions took at train()'s call sites:
@@ -105,8 +159,7 @@ class Cs2PuffeRL(PuffeRL):
     cont_action_view_main : np.ndarray or None
         Main-process view of the continuous-action shared array. train() allocates it and
         passes it on BOTH backends (src/train.py builds `_cont_action_view_main` before the
-        vecenv, unconditionally); only the harness passes None, and the hybrid-aim patcher
-        takes None to mean "nothing to forward".
+        vecenv, unconditionally); only the harness passes None.
     mask_view_main : np.ndarray
         Main-process view of the action-mask shared array (F8).
     participating_rows : np.ndarray
@@ -126,6 +179,27 @@ class Cs2PuffeRL(PuffeRL):
       ``weight_decay``, the aim-σ param group, the shm GC pins) still happens in train(),
       after this constructor returns: none of it is read at patch time (spec §W1 table).
     """
+
+    # PuffeRL's rollout tensors and LSTM maps are writable by indexed assignment.
+    # Its inferred third-party types lack __setitem__; these instance declarations
+    # express the stock mutable buffer contract without changing construction.
+    actions: Any
+    logprobs: Any
+    observations: Any
+    rewards: Any
+    terminals: Any
+    values: Any
+    lstm_h: Any
+    lstm_c: Any
+    policy: Any
+    # Hybrid buffers are torch tensors but pyrefly cannot type indexed writes
+    # through the installed torch stub. Runtime allocation remains in _init_hybrid_aim.
+    action_masks: Any
+    cont_actions: Any
+    logprobs_c: Any
+    logprobs_d: Any
+    participating: Any
+    _tag_metrics: dict | None
 
     def __init__(self,
                  config,
@@ -157,10 +231,7 @@ class Cs2PuffeRL(PuffeRL):
         # real error). Keep the step order below unchanged (the class docstring).
         try:
             self._init_return_norm()
-            _patch_trainer_with_hybrid_aim(self,
-                                           cont_action_view_main=cont_action_view_main,
-                                           mask_view_main=mask_view_main,
-                                           participating_rows=participating_rows)
+            self._init_hybrid_aim(cont_action_view_main, mask_view_main, participating_rows)
             self._init_selfplay(self_play_mgr)
             # Per-epoch wall-clock, measured at the evaluate()/train() call sites in
             # train()'s loop (#166 replaced a monkey-patch that wrapped both methods; the
@@ -173,6 +244,73 @@ class Cs2PuffeRL(PuffeRL):
             # Exactly what PuffeRL.close() does to the thread; nothing else of close().
             self.utilization.stop()
             raise
+
+    def _init_hybrid_aim(self, cont_action_view_main, mask_view_main, participating_rows):
+        """Allocate the nine hybrid rollout fields after stock PuffeRL buffers exist.
+
+        The view aliases the shared array used by the vecenv wrapper. This setup
+        keeps construction state on the class; action transport belongs to the
+        wrapper, before the trainer is constructed.
+        """
+        self._cont_action_view_main = cont_action_view_main
+        # F8: main-process numpy view over the mask shm (env→trainer direction;
+        # see Cs2Env._attach_mask_view). Cs2PuffeRL.evaluate reads rows for
+        # the recv'd env_id slice right after recv() — the workers finished their
+        # step by then, so the bytes are the masks for the obs batch in hand.
+        # None ⇒ rollout runs unmasked (legacy callers without shm plumbing) and
+        # action_masks stays all-ones, which makes the update path a no-op mask.
+        self._action_mask_view_main = mask_view_main
+
+        # ── Rollout buffer extension (step 5.4) ──
+        # self.actions has shape (segments, bptt_horizon, ACTION_DIM=7) int32 —
+        # we mirror with AIM_DIM trailing dim, float32. self.logprobs is
+        # (segments, bptt_horizon) float32; we add per-factor halves with the
+        # same shape so the caller can fetch self.logprobs_d[idx] etc. without
+        # any reshaping.
+        self.cont_actions = torch.zeros(
+            (*self.actions.shape[:-1], AIM_DIM),
+            dtype=torch.float32,
+            device=self.actions.device,
+        )
+        self.logprobs_d = torch.zeros_like(self.logprobs)
+        self.logprobs_c = torch.zeros_like(self.logprobs)
+        # F8: per-step action masks, parallel to actions but ACTION_MASK_DIM wide.
+        # Initialised to ONES (= everything valid): rows never written (mask shm
+        # absent, or rollout rounds that don't fill every segment) degrade to the
+        # exact pre-F8 unmasked behaviour instead of masking everything to the
+        # no-op. bool keeps the buffer small (segments × 64 × 22 bytes).
+        self.action_masks = torch.ones(
+            (*self.actions.shape[:-1], ACTION_MASK_DIM),
+            dtype=torch.bool,
+            device=self.actions.device,
+        )
+
+        # ── Rung 0 §2.2: per-row participation ───────────────────────────────
+        # participating_rows: numpy bool (total_agents,) — STATIC per run, derived
+        # from args.n_active_per_team in train(). None ⇒ all rows participate
+        # (harness default, exact identity with pre-Rung-0 behaviour).
+        # self.participating is the BUFFER-LAYOUT flag [segments, bptt],
+        # scattered by evaluate() via ep_indices exactly like action_masks.
+        # ZERO-initialised (unlike action_masks, which defaults to all-ones): a
+        # skipped write must mask EVERYTHING and trip the per-epoch
+        # `participating.any()` assert in train(), never silently train on parked
+        # rows. _participating_rows_np is kept beside the torch copy because
+        # evaluate()'s global_step accounting works on the numpy `mask` recv()
+        # returns; converting per-recv would allocate on every rollout tick.
+        n_rows = self.total_agents
+        if participating_rows is None:
+            participating_rows = np.ones(n_rows, dtype=bool)
+        participating_rows = np.asarray(participating_rows, dtype=bool).reshape(-1)
+        assert participating_rows.shape == (n_rows, ), (participating_rows.shape, n_rows)
+        assert participating_rows.any(), "no participating rows — n_active_per_team=0?"
+        self._participating_rows_np = participating_rows
+        self._participating_rows = torch.as_tensor(participating_rows, device=self.actions.device)
+        self.participating = torch.zeros(self.actions.shape[:-1],
+                                         dtype=torch.bool,
+                                         device=self.actions.device)
+        print("[Train] Hybrid-aim trainer patch enabled "
+              f"(cont_actions buffer={self.cont_actions.shape}, "
+              f"vecenv_kind={type(self.vecenv._backend).__name__}).")
 
     def _init_return_norm(self):
         """Return-normalisation + adaptive-entropy state; was the patch-time body of
@@ -368,7 +506,7 @@ class Cs2PuffeRL(PuffeRL):
     def _init_selfplay(self, self_play_mgr):
         """Self-play state for evaluate() (the patch-time half of the former self-play
         patcher in train.py; W2b of gh#168). Called from __init__ right after
-        the hybrid-aim patch and before ``_timing``, where the patch call stood.
+        hybrid-aim buffer setup and before ``_timing``, where the patch call stood.
 
         Stores the manager, the past policy's own LSTM state (the same dict structure as
         ``self.lstm_h``: keyed by agent-batch start ``i*n``, one ``(agents_per_batch,
@@ -711,8 +849,8 @@ class Cs2PuffeRL(PuffeRL):
 
                 self.actions[batch_rows, seq_pos] = action
                 self.logprobs[batch_rows, seq_pos] = logprob
-                # Batch 3 (T5): parallel writes for the new buffers added by
-                # _patch_trainer_with_hybrid_aim. The PPO update (`Cs2PuffeRL.train`
+                # Batch 3 (T5): parallel writes for the new buffers allocated
+                # by _init_hybrid_aim. The PPO update (`Cs2PuffeRL.train`
                 # in src/trainer.py, gh#168 W2a:
                 # `mb_cont_actions = self.cont_actions[idx]` and the two logprob
                 # reads beside it) reads these by the same idx; missing this write would
@@ -782,17 +920,17 @@ class Cs2PuffeRL(PuffeRL):
                         self.stats[k].append(v)
 
             profile("env", epoch)
-            # Batch 3 (T5/T5b): vecenv.send patched by
-            # _patch_trainer_with_hybrid_aim to accept (action, cont_action)
+            # Batch 3 (T5/T5b): HybridAimVecEnv.send accepts an
+            # (action, cont_action)
             # tuple. Discrete action is the numpy int32 buffer that the C
             # env still receives positionally. For the Serial backend
             # cont_action is forwarded to env.step's continuous_actions
             # kwarg via the per-env step wrapper. For the Multiprocessing
             # backend cont_action is mirrored into a multiprocessing.RawArray
-            # shm view by _hybrid_send before orig_send runs, so workers
+            # shm view by HybridAimVecEnv.send before backend.send runs, so workers
             # see the same Δyaw on their next Cs2Env.step via the per-env
             # numpy view installed by _attach_cont_action_view (see the
-            # _patch_trainer_with_hybrid_aim docstring for the shm pattern).
+            # HybridAimVecEnv docstring for the shm pattern).
             self.vecenv.send((action, cont_action))
 
         profile("eval_misc", epoch)
@@ -1044,7 +1182,7 @@ class Cs2PuffeRL(PuffeRL):
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
             # Batch 3 (T5): pull continuous actions + per-factor old logprobs
-            # from the parallel buffers added by _patch_trainer_with_hybrid_aim.
+            # from the parallel buffers allocated by _init_hybrid_aim.
             # mb_logprobs (the SUM) stays the canonical "logp from rollout" for
             # KL/clipfrac diagnostics below; the per-factor halves drive the
             # per-factor PPO clip in _hybrid_ppo_loss.
@@ -1052,7 +1190,7 @@ class Cs2PuffeRL(PuffeRL):
             mb_old_logp_d = self.logprobs_d[idx]
             mb_old_logp_c = self.logprobs_c[idx]
             # F8: rollout-stored action masks (all-ones = unmasked fallback).
-            # getattr for trainers built before _patch_trainer_with_hybrid_aim
+            # getattr for trainers built before hybrid buffer setup
             # ran (shouldn't happen in prod; keeps direct-call tests working).
             _masks_buf = getattr(self, "action_masks", None)
             mb_masks = _masks_buf[idx] if _masks_buf is not None else None
@@ -1358,12 +1496,14 @@ class Cs2PuffeRL(PuffeRL):
                         aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
                         aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
                     )
-                    if getattr(self, "_tag_metrics", None) is None:
-                        self._tag_metrics = {}
-                    self._tag_metrics.update(_tag)
+                    tag_metrics = getattr(self, "_tag_metrics", None)
+                    if tag_metrics is None:
+                        tag_metrics = {}
+                        self._tag_metrics = tag_metrics
+                    tag_metrics.update(_tag)
                     if not _tag_mb0:
-                        self._tag_metrics["tag/mbL_index"] = float(mb)
-                    self._tag_metrics["tag/selfplay_active"] = float(
+                        tag_metrics["tag/mbL_index"] = float(mb)
+                    tag_metrics["tag/selfplay_active"] = float(
                         getattr(self, "_selfplay_used_past", False))
             # ──────────────────────────────────────────────────────────────
             loss.backward()

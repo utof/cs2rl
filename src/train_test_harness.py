@@ -106,8 +106,8 @@ def _harness_parts(
     draws no RNG (construct_snapshot.py: 39 attrs x 4 configs, 0 diffs).
 
     PITFALL: ``cont_action_view_main`` is None on purpose. The harness is Serial-only,
-    and the hybrid-aim patcher takes None to mean "no Multiprocessing shm to forward";
-    it is spelled out in ``parts`` so ``Cs2PuffeRL(**parts)`` needs no extra kwarg.
+    and its HybridAimVecEnv receives no Multiprocessing shared-memory view.
+    The None is also explicit in ``parts`` for ``Cs2PuffeRL(**parts)``.
 
     ``self_play_mgr`` (gh#168 W1.5): a caller-built SelfPlayManager is used AS IS and
     ``build_selfplay_manager`` is not called (tests/test_selfplay_factory.py spies on
@@ -135,6 +135,7 @@ def _harness_parts(
         build_train_config,
         compute_batch_dims,
     )
+    from trainer import HybridAimVecEnv
 
     # Rung 1a T3: mirror of train()'s startup guard. `with_selfplay` is the
     # harness's spelling of "self-play bookkeeping on" (it is what sets
@@ -261,6 +262,8 @@ def _harness_parts(
             backend=pufferlib.vector.Serial,
         )
 
+        vecenv = HybridAimVecEnv(vecenv)
+
         # ── Minimal argparse-shaped config object ───────────────────────────────
         # build_train_config reads these attributes. Everything else in the
         # production parser (wandb, vec-backend, etc.) is irrelevant once we've
@@ -311,9 +314,8 @@ def _harness_parts(
         # its formula. The copy was the hazard: a participation change patched into
         # only one of the two left the headline harness test green against a
         # formula production never ran. Built here, BEFORE the constructor and not
-        # inside the patcher, so the harness mirrors production's call order (gh#168
-        # W1: train() builds it before Cs2PuffeRL, whose __init__ reads it at patch
-        # time).
+        # inside the trainer, so the harness mirrors production's call order:
+        # train() builds it before Cs2PuffeRL._init_hybrid_aim reads it.
         participating_rows = build_participating_rows(num_envs,
                                                       n_active_per_team,
                                                       opponent_mode=opponent,

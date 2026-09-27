@@ -1234,7 +1234,7 @@ class Cs2Env(pufferlib.PufferEnv):
         # instead of the (always-zero) scratch — so MP workers actually see
         # the policy's Δyaw sample. Serial backend continues to bypass this
         # via the per-env step wrapper and a Python attr stash on the
-        # vecenv (see _patch_trainer_with_hybrid_aim in src/train.py).
+        # vecenv (see HybridAimVecEnv.send in src/trainer.py).
         self._cont_action_view = None
         # Hold the parent-process RawArray to keep it from being GC'd if the
         # caller passes it transiently (it is also kept alive on the trainer
