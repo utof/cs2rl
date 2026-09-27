@@ -171,7 +171,7 @@ def build_participating_rows(num_envs: int,
     PITFALLS
     - Derived from ARGS, while the envs are built separately from the same
       args; train() keeps an explicit driver-env agreement assert beside its
-      call site, and _patch_trainer_with_hybrid_aim re-checks the length.
+      call site, and Cs2PuffeRL._init_hybrid_aim re-checks the length.
     - ``hero_team`` must stay the complement of SelfPlayManager.opponent_team
       (use SelfPlayManager.initial_hero_team()). Under "noop" that team is
       constant for the whole run because the mode forbids self-play; a
