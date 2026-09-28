@@ -7,7 +7,7 @@ FRESH interpreter, one subprocess per case:
      first" ordering luck);
   2. it does not pull `cs2rl.train` back in — the dependency graph stays acyclic, so
      the leaf really is a leaf;
-  3. its module scope stays free of torch / nav / c_env.cs2_env;
+  3. its module scope stays free of torch / nav / c_env.cs2_env / rerun;
   4. the only sibling edge any of them has is into a LEAF, and the leaves
      import no sibling except each other in the one allowed direction
      (train_shared -> env_config). The shape spec §2 W1 fixes: leaves at the
@@ -88,11 +88,16 @@ W1_MODULES = ("cs2rl.train_shared", "cs2rl.resume_state", "cs2rl.train_config",
 # so both directions bite: a shim that goes lazy fails, and a carve-out that starts
 # being imported fails too. Adding a name here is then a deliberate, reasoned edit
 # rather than a deletion nobody notices.
+#
+# An entry can be a prohibition, not only a description. metrics_schema sits in the
+# layer above train in pyproject.toml's `cs2rl layers` contract, so train.py importing
+# it, at any scope, is an upward edge lint-imports rejects (tests/test_import_layers.py).
+# That entry leaves only if the layering changes, never because an import appeared.
 NOT_IMPORTED_BY_TRAIN = {
     "cs2rl.metrics_schema":
     "took EVAL_KEYS from eval_baselines, not from train.py, so train.py's body holds no "
-    "reference to it; a module-level import added purely to satisfy an assert would be "
-    "the test dictating a dead line of code",
+    "reference to it; and it is in the layer above train (pyproject.toml's `cs2rl layers` "
+    "contract), so a train.py import of it is an upward edge lint-imports rejects",
 }
 
 
@@ -125,14 +130,23 @@ TRAIN_MODULE_LEVEL_IMPORTS = _train_module_level_imports()
 # TWO leaves. train_shared owns the names moved out of train.py; env_config owns
 # the env contract. train_config -> env_config is the load-bearing edge between
 # the leaves and the spokes (env_config_from_args builds an EnvConfig); train.py
-# imports both. The reverse edge would make "leaf" meaningless —
-# test_the_leaf_edge_has_a_direction pins it.
+# imports both. The reverse edge would make "leaf" meaningless — pyproject.toml's
+# `cs2rl layers` contract pins it (env_config is in the bottom layer, train_shared two
+# above; tests/test_import_layers.py runs it), and so does
+# tests/test_env_config.py::test_module_is_stdlib_only.
 LEAVES = frozenset({"cs2rl.train_shared", "cs2rl.env_config"})
 
 # Imports whose presence in sys.modules means the import-lightness invariant is
 # gone. `cs2rl.c_env.cs2_env` rather than `cs2rl.c_env` on purpose: the package
 # itself is cheap, the ctypes/binding module underneath it is not.
-HEAVY = ("torch", "cs2rl.nav", "cs2rl.c_env.cs2_env")
+#
+# `rerun` stands in for `cs2rl.viz`, which imports it at module scope and which train.py
+# reaches only inside record_episode (`--record`). The layers contract ignores the
+# train -> viz pair and the scope pin in tests/test_import_layers.py keeps its import
+# statements inside a def, but neither sees a function-local import that is CALLED at
+# module scope; test_import_train_stays_light_and_really_imports_the_shims, through
+# this entry, does.
+HEAVY = ("torch", "cs2rl.nav", "cs2rl.c_env.cs2_env", "rerun")
 
 
 def _run_child(body: str) -> subprocess.CompletedProcess:
@@ -206,7 +220,9 @@ def test_import_train_stays_light_and_really_imports_the_shims():
         f"{sorted(expected)}. A module that dropped out went LAZY (function-local) — the ten "
         "module-level reads of moved names in train.py's body would then NameError at run time "
         "while this suite stayed green. A module that appeared is listed in "
-        "NOT_IMPORTED_BY_TRAIN and no longer belongs there.")
+        "NOT_IMPORTED_BY_TRAIN, whose entry says why train.py must not import it (for "
+        "metrics_schema: an upward edge pyproject.toml's `cs2rl layers` contract rejects); "
+        "remove the import, not the entry.")
     r = _run_child(f"""
 from cs2rl import train
 heavy = [m for m in {HEAVY!r} if m in sys.modules]
@@ -379,29 +395,5 @@ for (lo, hi), size in zip(train_shared._MASK_HEAD_SLICES, ACTION_HEAD_SIZES, str
 for (_, hi), (lo, _) in zip(train_shared._MASK_HEAD_SLICES,
                             train_shared._MASK_HEAD_SLICES[1:], strict=False):
     assert hi == lo, "mask head slices are not contiguous"
-""")
-    assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
-
-
-def test_the_leaf_edge_has_a_direction():
-    """env_config must not import train_shared: the leaves stay independent.
-
-    NO edge runs between the two leaves today. This summary used to read
-    "train_shared -> env_config is allowed", and it was — train_shared imported
-    RewardWeights until #165 B1 deleted that import, leaving train_config ->
-    env_config as the load-bearing edge (see the LEAVES comment above). What
-    still needs pinning is the DIRECTION: env_config is the deepest module here,
-    so if the edge is ever reintroduced it must point that way and never back.
-
-    `allowed = {mod} | LEAVES` is symmetric, so nothing above would notice
-    env_config importing train_shared — and train_shared is light, so the HEAVY
-    probe would not either. This is the only test that says the edge has a
-    direction (spec 2026-09-03 §6).
-    """
-    r = _run_child("""
-import importlib
-importlib.import_module("cs2rl.env_config")
-assert "cs2rl.train_shared" not in sys.modules, "env_config must not import train_shared"
-assert "cs2rl.nav" not in sys.modules and "cs2rl.c_env.cs2_env" not in sys.modules
 """)
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"

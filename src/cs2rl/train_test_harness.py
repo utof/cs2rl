@@ -50,13 +50,12 @@ import tempfile
 import types
 
 # Module level for the same reason as env_factory below: env_config is the
-# stdlib-only leaf of the config graph, so importing it here pulls in nothing
-# and cannot cycle.
+# stdlib-only leaf of the config graph, so importing it here pulls in nothing.
 from cs2rl.env_config import EnvConfig
 
 # Module level, unlike the `from cs2rl.train import ...` block inside the builder:
 # env_factory's own module scope pulls nothing (torch/nav/c_env stay behind its
-# function-local imports), so importing it here costs nothing and is acyclic.
+# function-local imports), so importing it here costs nothing.
 # `from ... import build_env_for`, never `from cs2rl import env_factory` — the builder
 # below defines a LOCAL named env_factory, which would shadow the module.
 from cs2rl.env_factory import build_env_for, build_selfplay_manager
@@ -510,10 +509,12 @@ def _build_trainer_for_test(
     - Serial backend means ``trainer.vecenv`` has a synchronous ``send``/``recv``
       cycle; tests can inject observations by monkey-patching those if needed.
     """
-    # Lazy for the reason _harness_parts gives above its own import block, and
-    # (gh#168 W1) because trainer.py imports train at module scope: this module
-    # must never import it at ITS module scope or the two would cycle through
-    # tests that import the harness before train.
+    # Lazy for the reason _harness_parts gives above its own import block (gh#168
+    # W1): trainer.py subclasses PuffeRL, so it imports torch, and train, at module
+    # scope. At THIS module's scope, `from cs2rl import train_test_harness` would load
+    # torch, cs2rl.train and cs2rl.trainer, none of which it loads today. It would not
+    # be a cycle: with it at module scope, importing this module alone, or train first
+    # and then this module, still succeeds.
     from cs2rl.trainer import Cs2PuffeRL
 
     parts, pins = _harness_parts(

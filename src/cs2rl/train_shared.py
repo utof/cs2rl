@@ -9,9 +9,8 @@ scripts and src/ siblings alike — keep working unchanged.
 
 WHY a leaf: this module imports NOTHING from train.py or from any other module
 split out of it. That is what keeps the new dependency graph acyclic; every
-other new module may import this one, never the reverse. Adding an import of
-``train`` here would create a cycle that only shows up as a half-initialised
-module at some unrelated call site.
+other new module may import this one, never the reverse. An import of ``train``
+here is a cycle: pyproject.toml's `cs2rl acyclic siblings` contract rejects it.
 
 IMPORT-LIGHTNESS INVARIANT (measured, load-bearing): module scope here must stay
 free of torch, nav and c_env. train.py imports this module at ITS module level,

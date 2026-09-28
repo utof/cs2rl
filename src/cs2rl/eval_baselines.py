@@ -240,8 +240,10 @@ class PolicyActor:
     def __init__(self, policy, device):
         # Post-vendoring edit (Task 13): takes a LIVE policy module — the
         # training loop hands its own `policy` in; use from_checkpoint for the
-        # probe's original load-from-file behaviour. Late import: train.py
-        # imports this module, a top-level import would be circular.
+        # probe's original load-from-file behaviour. Late import, though not for a
+        # module-level cycle: train.py imports this module only inside train(), so
+        # the pair cycles only through function-local imports, which pyproject.toml's
+        # acyclic contract records as its `train -> eval_baselines` ignore entry.
         from cs2rl.train import _hybrid_sample_logits, init_policy_state
         self.torch = torch
         self._sample = _hybrid_sample_logits

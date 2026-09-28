@@ -3263,8 +3263,9 @@ if __name__ == "__main__":
     # copies of it: two sets of module-level constants, two of every class object, and
     # `isinstance` between them silently False. eval_baselines does exactly that
     # import, function-locally inside PolicyActor.__init__ and
-    # PolicyActor.from_checkpoint, to dodge a circular top-level import — so a
-    # plain `--eval-interval N` script run is enough to trigger it.
+    # PolicyActor.from_checkpoint (a pair that cycles only through function-local
+    # imports; see the comment there) — so a plain `--eval-interval N` script run
+    # is enough to trigger it.
     #
     # WHY setdefault and not `=`: under `from cs2rl import train` (the whole test
     # suite, scripts/, the Modal runner) "cs2rl.train" is already a real,

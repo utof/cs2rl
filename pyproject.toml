@@ -42,6 +42,13 @@ dev = [
     # exact message strings; a minor-version bump rewrites concise_description
     # wholesale and turns the next commit into an unreadable wall of diffs.
     "pyrefly==1.2.0",
+    # Enforces the package's layering: the contracts are [tool.importlinter] below,
+    # and tests/test_import_layers.py runs them on every suite run. Dev-only (no
+    # runtime import), so the Modal image, built from the runtime graph alone, does
+    # not change. The CLI is the `lint-imports` console script; 2.15 ships no
+    # `python -m importlinter`. The floor is the version the contracts were measured
+    # on (`broken_contract_guidance` and `--no-logo` need 2.14).
+    "import-linter>=2.15,<3",
 ]
 # NON-DEFAULT group (RL-overhaul task 14, tracker #82): the Modal SDK is needed
 # only for the optional cloud training runner (scripts/run_modal.py). A plain
@@ -148,3 +155,70 @@ column_limit            = 100
 # Tune these stops to match typical line lengths in the codebase.
 spaces_before_comment   = "40, 56, 72"
 indent_width            = 4
+
+# The package's layering (#205), checked by tests/test_import_layers.py on every suite
+# run; by hand: `lint-imports --no-cache --no-logo` from the repo root with
+# PYTHONPATH=<checkout>/src. Without that PYTHONPATH a worktree checks MAIN's tree and
+# passes: import-linter finds cs2rl with find_spec, which never runs the package's
+# foreign-checkout guard.
+#
+# import-linter counts function-local imports as edges, and an ignore_imports entry names
+# a module PAIR, never a line or a scope: it hides every site of that pair, a future
+# module-scope one included. tests/test_import_layers.py therefore pins every ignored
+# pair's sites inside a def (the scope pin), and fails if a module is invisible to the
+# graph (a directory without __init__.py).
+[tool.importlinter]
+root_package = "cs2rl"
+
+# Higher layers may import lower ones, never the reverse. exhaustive: every module
+# directly under cs2rl must be named here, so a new module fails until it gets a layer.
+# `|` members may not import each other; `:` members may, so this contract does not
+# reject a cycle among them. The acyclic contract below does.
+[[tool.importlinter.contracts]]
+name = "cs2rl layers"
+type = "layers"
+containers = ["cs2rl"]
+exhaustive = true
+layers = [
+    "experiment | deploy",
+    # metrics_schema sits here with eval (#184 §4's eval/), so train -> metrics_schema is
+    # an upward edge; tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN relies on that.
+    "train_bc : bc_demos : scripted_expert : play : play_actions : eval_baselines : profile_step : viz : metrics_schema",
+    "train : trainer : train_shared : train_config : train_metrics : train_update : resume_state : train_helpers_batch1 : train_test_harness",
+    "nav : map : c_env : env_factory",
+    "_action_spec : _obs_spec : paths : env_config",
+]
+ignore_imports = [
+    # env_factory.py:415, in build_selfplay_manager: SelfPlayManager lives in train.py.
+    # Function-local because train.py imports env_factory at module scope (a module-scope
+    # import back would cycle) and runs as `__main__` (env_factory's docstring). #92
+    # removes it.
+    "cs2rl.env_factory -> cs2rl.train",
+    # train.py:3047, in train(), only under --eval-interval: eval_baselines imports torch
+    # at module scope and `from cs2rl import train` must stay torch-free. #92 removes it.
+    "cs2rl.train -> cs2rl.eval_baselines",
+    # train.py:903 and :916, in record_episode (--record): viz imports rerun at module
+    # scope. #92 removes it.
+    "cs2rl.train -> cs2rl.viz",
+]
+broken_contract_guidance = "Give a new module a layer in pyproject.toml. Move an upward import down, or into the function that needs it. Never widen ignore_imports: #92 retires its entries."
+
+# No cycles among the children of cs2rl, or of any package inside it, at any scope
+# (import-linter sees function-local imports too). One cycle exists today, through
+# {env_factory, eval_baselines, train, trainer}; each ignored pair below is a
+# function-local edge of it, and ignoring the three is what breaks it.
+[[tool.importlinter.contracts]]
+name = "cs2rl acyclic siblings"
+type = "acyclic_siblings"
+ancestors = ["cs2rl"]
+ignore_imports = [
+    # env_factory.py:415, as in the layers contract above. #92 removes it.
+    "cs2rl.env_factory -> cs2rl.train",
+    # train.py:3047, as in the layers contract above. #92 removes it.
+    "cs2rl.train -> cs2rl.eval_baselines",
+    # train.py:2951, in train(): trainer subclasses PuffeRL, so it imports torch at module
+    # scope, and `from cs2rl import train` must stay torch-free (train.py:2948-2950). Not
+    # #92's: it stays while trainer.py imports train at module scope.
+    "cs2rl.train -> cs2rl.trainer",
+]
+broken_contract_guidance = "Break the cycle: move one of its imports into the function that needs it, or move the shared code down a layer. Never widen ignore_imports: #92 retires its entries."
