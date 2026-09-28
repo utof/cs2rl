@@ -3,8 +3,8 @@
 
 Emits TWO generated modules, both derived from the C header so a dimension
 change is a one-file (cs2_types.h) edit that propagates to Python:
-  - src/_action_spec.py : action head spec (discrete + continuous / AIM_DIM).
-  - src/_obs_spec.py     : OBS_DIM + OBS_BLOCKS (named per-block start:stop
+  - src/cs2rl/_action_spec.py : action head spec (discrete + continuous / AIM_DIM).
+  - src/cs2rl/_obs_spec.py     : OBS_DIM + OBS_BLOCKS (named per-block start:stop
                            slices) so masking / demo-zeroing code never
                            hardcodes 25 / 53 / 93.
 
@@ -20,9 +20,9 @@ macro (block sizes / OBS_DIM) in cs2_types.h:
 import re
 from pathlib import Path
 
-HEADER = Path(__file__).resolve().parent.parent / "src" / "c_env" / "cs2_types.h"
-OUTPUT = Path(__file__).resolve().parent.parent / "src" / "_action_spec.py"
-OBS_OUTPUT = Path(__file__).resolve().parent.parent / "src" / "_obs_spec.py"
+HEADER = Path(__file__).resolve().parent.parent / "src" / "cs2rl" / "c_env" / "cs2_types.h"
+OUTPUT = Path(__file__).resolve().parent.parent / "src" / "cs2rl" / "_action_spec.py"
+OBS_OUTPUT = Path(__file__).resolve().parent.parent / "src" / "cs2rl" / "_obs_spec.py"
 
 text = HEADER.read_text()
 
@@ -90,7 +90,7 @@ print(f"  ACTION_DIM={action_dim}  ACTION_MASK_DIM={action_mask_dim}  AIM_DIM={a
 print(f"  NAMES={names}")
 print(f"  SIZES={sizes}")
 
-# ── Obs block layout → src/_obs_spec.py ──────────────────────────────────────
+# ── Obs block layout → src/cs2rl/_obs_spec.py ──────────────────────────────────────
 # Parse the PRIMITIVE OBS_* literals from cs2_types.h and recompute the block
 # bases exactly as the C macros derive them (base = prev_base + prev_width).
 # We deliberately do NOT try to eval the C base expressions — we mirror the

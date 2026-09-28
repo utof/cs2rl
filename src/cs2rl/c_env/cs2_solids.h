@@ -398,7 +398,7 @@ static inline void build_solids_from_rooms(StaticData* sd) {
 
                 /* Portal — the nav graph says i<->jj is walkable, so NOTHING
                  * may be emitted here, not even a lip. map.py exempts ramp
-                 * endpoints from cliff pruning (src/map.py, the L9 post-prune
+                 * endpoints from cliff pruning (src/cs2rl/map.py, the L9 post-prune
                  * loop), so catwalk(z=128) stays adjacent to CT-ramp(z=64)
                  * across a 64u drop; a lip on that interval would put an
                  * impassable face exactly where nav-distance shaping is

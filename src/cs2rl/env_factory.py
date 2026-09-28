@@ -24,7 +24,7 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
                the terminal tick's C state after step() returns.
   eval_legacy  `load_policy_from_checkpoint` and `evaluate_checkpoint`. Both
                build `config=EnvConfig()`, so every knob they get is the field
-               default `src/env_config.py` DECLARES — that module is the one
+               default `src/cs2rl/env_config.py` DECLARES — that module is the one
                declaration, and tests/test_env_config.py pins those fields
                against the trained baseline. They deliberately do NOT get the
                training knobs. #143 tracks that; this module is not the fix, it
@@ -83,13 +83,13 @@ makes `train.py --dump-config` cost ~1 s instead of ~30 s. Only `env_config` is
 imported at module scope, and it is the stdlib-only leaf.
 
 PITFALL — THIS MODULE STILL NEEDS train.py's `__main__` SELF-ALIAS, and removing
-it because `build_env_for` stopped importing `train` would break every real run.
-`build_selfplay_manager` below still does `from train import SelfPlayManager`.
-Every real run executes train.py as a SCRIPT, so the module sits in `sys.modules`
-as `__main__`, not `train`. Without the
-`sys.modules.setdefault("train", sys.modules["__main__"])` at the top of
+it because `build_env_for` stopped importing `cs2rl.train` would break every real
+run. `build_selfplay_manager` below still does `from cs2rl.train import
+SelfPlayManager`. Every real run executes train.py as `python -m cs2rl.train`, so
+the module sits in `sys.modules` as `__main__`, not `cs2rl.train`. Without the
+`sys.modules.setdefault("cs2rl.train", sys.modules["__main__"])` at the top of
 train.py's `if __name__ == "__main__":` block, that import would EXECUTE TRAIN.PY
-A SECOND TIME under the name `train`, leaving two live copies of it per process —
+A SECOND TIME under the name `cs2rl.train`, leaving two live copies of it per process —
 two sets of module constants, cross-copy `isinstance` silently False, and any
 `train.<attr>` monkeypatch unreachable from script runs. The alias is pinned by
 `test_train_aliases_itself_into_sys_modules_first` and its behavioural twin; keep
@@ -136,7 +136,7 @@ census and the entry has to be added.
 # and cannot cycle. tests/test_w1_modules.py::test_only_sibling_edge_is_to_the_leaf
 # lets a split-out module import only the two LEAVES — `train_shared` and
 # `env_config` — and this is one of them.
-from env_config import EnvConfig
+from cs2rl.env_config import EnvConfig
 
 # The role names, in the order the spec lists them. Callers pass one of these
 # strings; anything else is a ValueError naming the whole set, because a typo'd
@@ -243,7 +243,7 @@ def _build_eval_legacy(_make, /, *, seed=UNSET):
 
     These deliberately carry NO training knobs. `config=EnvConfig()` is what
     says so: a bare EnvConfig IS the declared field defaults, and
-    `src/env_config.py` is the single place those are declared. That is today's
+    `src/cs2rl/env_config.py` is the single place those are declared. That is today's
     behaviour and #143, not a bug to fix in passing here. Naming the config
     object moved no value, and that is asserted rather than asserted-by-hand:
     the pre-migration capture's two `eval_legacy` rows record an
@@ -292,7 +292,7 @@ def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
     carries used to be four separate parameters here; since #165 PR B2 the
     mapping from `_build_trainer_for_test`'s plain arguments into an EnvConfig
     lives at the CALL SITE, and that is where the coverage question moved with
-    it — see the closure comment in `src/train_test_harness.py` for which knob
+    it — see the closure comment in `src/cs2rl/train_test_harness.py` for which knob
     each test can and cannot see going missing.
 
     NOTE the mask view is NOT attached here. `env._attach_mask_view(mask_shm,
@@ -344,8 +344,8 @@ def build_env_for(role, **kwargs):
     exists because a reward key routed through the wrong channel once vanished
     and made an experiment arm train the baseline.
 
-    Import callers as ``from env_factory import build_env_for``, never
-    ``import env_factory``: three functions this factory is called from bind a
+    Import callers as ``from cs2rl.env_factory import build_env_for``, never
+    ``from cs2rl import env_factory``: three functions this factory is called from bind a
     LOCAL named ``env_factory`` (the nested closures in `build_env_factory` and
     `_build_trainer_for_test`, and ``env_factory = build_train_env_factory(...)``
     in `train()`), and inside those an attribute access on the module name would
@@ -367,7 +367,7 @@ def build_env_for(role, **kwargs):
     # so train.py's `__main__` self-alias remains a hard prerequisite here.
     # Re-reading per call also keeps a test that rebinds
     # c_env.cs2_env.make_env able to see its stand-in used.
-    from c_env.cs2_env import make_env
+    from cs2rl.c_env.cs2_env import make_env
 
     return builder(make_env, **kwargs)
 
@@ -407,7 +407,7 @@ def build_selfplay_manager(*, self_play_enabled, aim_log_std_max, pin_pitch, opp
     """
     # Function-local for the same cycle/lightness/`__main__`-alias reasons as
     # `build_env_for`'s import — see the module docstring.
-    from train import SelfPlayManager
+    from cs2rl.train import SelfPlayManager
 
     return SelfPlayManager(
         pool_size=15,

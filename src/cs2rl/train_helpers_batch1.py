@@ -2,7 +2,7 @@
 
 Separate module so unit tests can import without pulling in the full
 PufferLib trainer. These functions are imported by the monkey-patches in
-src/train.py.
+src/cs2rl/train.py.
 
 Functions:
     symlog(x):           sign-preserving log compression; bounds scale without hard cutoff

@@ -23,7 +23,7 @@ import torch
 
 
 def test_frozen_aim_log_std_is_reinitialized():
-    from train import AIM_LOG_STD_RESUME_INIT, LOG_STD_INIT, reinit_frozen_aim_log_std
+    from cs2rl.train import AIM_LOG_STD_RESUME_INIT, LOG_STD_INIT, reinit_frozen_aim_log_std
 
     sd = {
         "aim_log_std": torch.full((2, ), LOG_STD_INIT),
@@ -42,7 +42,7 @@ def test_frozen_aim_log_std_is_reinitialized():
 
 
 def test_trained_aim_log_std_is_left_alone():
-    from train import LOG_STD_INIT, reinit_frozen_aim_log_std
+    from cs2rl.train import LOG_STD_INIT, reinit_frozen_aim_log_std
 
     # An RL-trained checkpoint: sigma has moved off the init (e.g. the 30M
     # validation run ended around log_std_pitch ~ -0.98). Must be untouched.
@@ -59,7 +59,7 @@ def test_trained_aim_log_std_is_left_alone():
 
 
 def test_missing_aim_log_std_is_a_noop():
-    from train import reinit_frozen_aim_log_std
+    from cs2rl.train import reinit_frozen_aim_log_std
 
     sd = {"encoder.weight": torch.randn(4, 4)}
     assert reinit_frozen_aim_log_std(sd) is False

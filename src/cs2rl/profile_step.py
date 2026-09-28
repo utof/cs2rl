@@ -13,9 +13,9 @@ It also captures `cProfile` summaries for the cs2_env path and
 writes machine-readable JSON reports for regression tracking.
 
 Examples:
-    uv run python src/profile_step.py
-    uv run python src/profile_step.py --steps 30000 --action-mode noop
-    uv run python src/profile_step.py --action-mode random --no-cprofile
+    uv run python -m cs2rl.profile_step
+    uv run python -m cs2rl.profile_step --steps 30000 --action-mode noop
+    uv run python -m cs2rl.profile_step --action-mode random --no-cprofile
 """
 
 from __future__ import annotations
@@ -32,10 +32,10 @@ from typing import Any
 
 import numpy as np
 
-from _action_spec import AIM_DIM
-from c_env.cs2_env import make_env as make_c_env
-from nav import ACTION_DIM, N_AGENTS, OBS_DIM
-from paths import LOGS_DIR
+from cs2rl._action_spec import AIM_DIM
+from cs2rl.c_env.cs2_env import make_env as make_c_env
+from cs2rl.nav import ACTION_DIM, N_AGENTS, OBS_DIM
+from cs2rl.paths import LOGS_DIR
 
 REPORT_DIR = LOGS_DIR / "profiles"
 NOOP_ACTION_C = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
@@ -136,7 +136,7 @@ def _make_cs2_env_manual_reset_stepper(seed: int):
 
 
 def _make_binding_direct_stepper(seed: int):
-    import binding                     # available after cs2_env import adds src/c_env/ to sys.path
+    from cs2rl.c_env import binding
 
     env = make_c_env(seed=seed, auto_reset=False)
     env.reset(seed=seed)

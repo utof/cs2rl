@@ -1,4 +1,4 @@
-"""No `make_puffer_env(...)` or `SelfPlayManager(...)` call outside `src/env_factory.py`.
+"""No `make_puffer_env(...)` or `SelfPlayManager(...)` call outside `src/cs2rl/env_factory.py`.
 
 READ THE SCOPE LINE ABOVE LITERALLY. This file enforces exactly two SYMBOLS in
 two ROOTS, and nothing wider. It is not "no env is built outside the factory" —
@@ -39,12 +39,12 @@ looked at it. Hence five separate guards ahead of the enforcement assertion:
      local name WITHOUT the aliasing import is left alone — kills "a one-line
      rename walks past the matcher", which it did until the final review's I-4.
 
-ALIAS RESOLUTION, and why it is not optional. `from train import make_puffer_env
+ALIAS RESOLUTION, and why it is not optional. `from cs2rl.train import make_puffer_env
 as _mpe` followed by `_mpe(...)` is one line and defeats a matcher that keys on
 the literal spelling of the call. That is not a hypothetical spelling in this
-repo: `from c_env.cs2_env import make_env as make_c_env` is house style at three
+repo: `from cs2rl.c_env.cs2_env import make_env as make_c_env` is house style at three
 of the FILES in the LOWER_LAYER_SITES census below — three import STATEMENTS,
-because `src/train.py` writes it once, function-locally in `record_episode` — so
+because `src/cs2rl/train.py` writes it once, function-locally in `record_episode` — so
 the alias form is what this codebase actually writes. `import_aliases` therefore
 binds `asname -> symbol` per FILE and the matcher resolves through it, reporting
 the canonical symbol with the local name in the spelling column so a failure
@@ -64,7 +64,7 @@ position (`attr`) rather than the value position is the whole mechanism — a
 naive value-position match flags those two sites, and the tempting fix is to
 loosen the matcher until the real coverage dies, with nothing to notice.
 
-WHY `src/env_factory.py` SHOWS ONE OF THE TWO BANNED CONSTRUCTIONS, AND WHY THE
+WHY `src/cs2rl/env_factory.py` SHOWS ONE OF THE TWO BANNED CONSTRUCTIONS, AND WHY THE
 ABSENT ONE IS NOW PINNED TWICE OVER. Careful with the numbers here: the "two" in
 CONSTRUCTED and the "two" in "two pins" count different things. It builds the
 manager directly (`build_selfplay_manager`'s `return SelfPlayManager(...)`), so the
@@ -99,11 +99,11 @@ below is their census, pinned by a test so this paragraph cannot rot into a clai
 about a population that has since doubled. Note what they no longer all share:
 #165 gave five of the twelve resolved calls an `EnvConfig` — the wrapper chain's
 own two (`Cs2Env` inside `make_env`, `make_c_env` inside `make_puffer_env`) plus
-`src/play.py`, `scripts/oracle_statue_check.py` and `scripts/sim_fingerprint.py` —
+`src/cs2rl/play.py`, `scripts/oracle_statue_check.py` and `scripts/sim_fingerprint.py` —
 while the other seven still take `make_env`'s defaults and so see no W5 stance flag
 and no Rung-0 knob from config: `scripts/gen_bc_demos.py`,
-`scripts/measure_budget.py`, all three in `src/profile_step.py`, `record_episode` in
-`src/train.py`, and `src/train_bc.py` (measured 2026-09-10; `LOWER_LAYER_SITES` pins
+`scripts/measure_budget.py`, all three in `src/cs2rl/profile_step.py`, `record_episode` in
+`src/cs2rl/train.py`, and `src/cs2rl/train_bc.py` (measured 2026-09-10; `LOWER_LAYER_SITES` pins
 calls per FILE, not which of them are configured, so this split is prose, not a
 pin). Extending the ban (or adding factory roles) to that layer is a separate
 decision, tracked as future work, not something this file quietly did.
@@ -125,7 +125,7 @@ _CONSTRUCTED_NAMES = frozenset({"make_puffer_env", "SelfPlayManager"})
 ROOTS = (REPO_ROOT / "src", REPO_ROOT / "scripts")
 
 # The one file allowed to construct. Everything else routes through it.
-FACTORY = REPO_ROOT / "src" / "env_factory.py"
+FACTORY = REPO_ROOT / "src" / "cs2rl" / "env_factory.py"
 
 # Sanity floors for the "the root is real" guard. Deliberately far below the
 # current counts (24 and 19 files) so ordinary churn never touches them; they
@@ -135,7 +135,7 @@ MIN_FILES_PER_ROOT = 8
 # Anchors that must be among the scanned files. A root can exist, contain .py
 # files and still be the WRONG directory; naming the files whose contents this
 # test is actually about removes that.
-ANCHORS = ("src/train.py", "src/train_test_harness.py", "src/env_factory.py")
+ANCHORS = ("src/cs2rl/train.py", "src/cs2rl/train_test_harness.py", "src/cs2rl/env_factory.py")
 
 # ── The lower layer this file deliberately does NOT ban ─────────────────────
 #
@@ -162,8 +162,8 @@ ANCHORS = ("src/train.py", "src/train_test_harness.py", "src/env_factory.py")
 #   9 files import it; 3 ALIAS it (3 STATEMENTS); 6 import it bare. FIVE of those six bare importers are
 #   keys in LOWER_LAYER_SITES below — `scripts/gen_bc_demos.py`,
 #   `scripts/measure_budget.py`, `scripts/oracle_statue_check.py`,
-#   `scripts/sim_fingerprint.py`, `src/play.py`. The sixth is
-#   `src/env_factory.py`, which imports it to pass as a VALUE and is the subject
+#   `scripts/sim_fingerprint.py`, `src/cs2rl/play.py`. The sixth is
+#   `src/cs2rl/env_factory.py`, which imports it to pass as a VALUE and is the subject
 #   of the asymmetry pin below.
 # Widen to `tests/` and it is 35 importers against the same 3 aliasers, so the
 # minority reading holds under both scopes. State the scope with the figure: the
@@ -174,8 +174,8 @@ ANCHORS = ("src/train.py", "src/train_test_harness.py", "src/env_factory.py")
 # until PR B3: "wherever it is imported into a module that also has a
 # `make_*_env` of its own". That rule fails to explain one of the three
 # aliasers. Measured, `grep -nE '^ *def make_.*_env' <file>` over each of them:
-# `src/train.py` defines `make_puffer_env` (`:705`) and `src/train_bc.py`
-# defines `make_bc_env` (`:459`), so those two fit — but `src/profile_step.py`
+# `src/cs2rl/train.py` defines `make_puffer_env` (`:705`) and `src/cs2rl/train_bc.py`
+# defines `make_bc_env` (`:459`), so those two fit — but `src/cs2rl/profile_step.py`
 # returns NOTHING for that grep and still writes the alias, at module level, at
 # `:36`. Its own step factories are `_make_cs2_env_stepper` and two siblings,
 # which no `make_*_env` glob matches. Nor is that line new: `git blame` dates it
@@ -192,11 +192,11 @@ LOWER_LAYER = ("make_env", "Cs2Env")
 # allowed, it just has to be written down here so the docstring above keeps
 # telling the truth.
 LOWER_LAYER_SITES = {
-    "src/c_env/cs2_env.py": 1,                         # `make_env`'s own `return Cs2Env(...)`
-    "src/play.py": 1,                                  # the interactive viewer
-    "src/profile_step.py": 3,                          # three step-timing harnesses
-    "src/train.py": 1,                                 # `record_episode`
-    "src/train_bc.py": 1,                              # BC demo replay env
+    "src/cs2rl/c_env/cs2_env.py": 1,                   # `make_env`'s own `return Cs2Env(...)`
+    "src/cs2rl/play.py": 1,                            # the interactive viewer
+    "src/cs2rl/profile_step.py": 3,                    # three step-timing harnesses
+    "src/cs2rl/train.py": 1,                           # `record_episode`
+    "src/cs2rl/train_bc.py": 1,                        # BC demo replay env
     "scripts/gen_bc_demos.py": 1,
     "scripts/measure_budget.py": 1,
     "scripts/oracle_statue_check.py": 1,
@@ -204,18 +204,18 @@ LOWER_LAYER_SITES = {
 }
 
 # The alias-spelled SUBSET of LOWER_LAYER_SITES: `{file: calls}` for the calls
-# reachable only through `from c_env.cs2_env import make_env as make_c_env`.
+# reachable only through `from cs2rl.c_env.cs2_env import make_env as make_c_env`.
 # Three UNITS meet here and they differ, which is how a `>= 4` ended up under a
 # docstring claiming six: five CALLS, in three FILES, bound by three import
 # STATEMENTS, named by their owner rather than by line so they cannot rot:
-# `src/profile_step.py` imports it once at MODULE level and covers all three of
-# its calls, while `src/train.py`'s `record_episode` and
-# `src/train_bc.py`'s `make_bc_env` each import it function-locally for one call.
+# `src/cs2rl/profile_step.py` imports it once at MODULE level and covers all three of
+# its calls, while `src/cs2rl/train.py`'s `record_episode` and
+# `src/cs2rl/train_bc.py`'s `make_bc_env` each import it function-locally for one call.
 #
 # WHY EXACT EQUALITY RATHER THAN A FLOOR, and where the headroom went. This dict
 # is the oracle of the live positive control below, whose entire value IS the
 # count: a floor lets the population shrink under a green run, and at `>= 4`
-# either `src/train_bc.py` (1 call) or `src/train.py` (2) could stop resolving,
+# either `src/cs2rl/train_bc.py` (1 call) or `src/cs2rl/train.py` (2) could stop resolving,
 # or stop being written with the alias, with the docstring above false and
 # nothing red. Zero headroom in the total costs a one-line edit here — in the
 # commit that already has to fix the two docstrings naming these numbers — and it
@@ -225,9 +225,9 @@ LOWER_LAYER_SITES = {
 # and the failure message names which, while a legitimate de-alias of one file
 # changes that entry and nothing else.
 ALIASED_LOWER_LAYER_SITES = {
-    "src/profile_step.py": 3,
-    "src/train.py": 1,
-    "src/train_bc.py": 1,
+    "src/cs2rl/profile_step.py": 3,
+    "src/cs2rl/train.py": 1,
+    "src/cs2rl/train_bc.py": 1,
 }
 
 
@@ -235,9 +235,9 @@ def import_aliases(tree, symbols):
     """`{local name: symbol}` for every `from <mod> import <symbol> as <local>`.
 
     WHY (final review I-4): the matcher below keys on the literal spelling of the
-    call, so `from train import make_puffer_env as _mpe` + `_mpe(...)` walked
+    call, so `from cs2rl.train import make_puffer_env as _mpe` + `_mpe(...)` walked
     straight past it — a one-line bypass. And the alias form is not hypothetical
-    here: `from c_env.cs2_env import make_env as make_c_env` is house style at
+    here: `from cs2rl.c_env.cs2_env import make_env as make_c_env` is house style at
     three FILES — three import STATEMENTS — so it is a spelling this repo
     genuinely writes.
 
@@ -342,7 +342,7 @@ def test_the_matcher_finds_every_spelling_in_this_repos_own_source():
     THE POSITIVE CONTROL. `CONSTRUCTED` still names `make_puffer_env` as a
     banned symbol (knock-outs plant it; there is no live `make_puffer_env(...)`
     specimen). The live population this matcher must recognise is the
-    SelfPlayManager pair: name in tests/, attribute in `src/env_factory.py`.
+    SelfPlayManager pair: name in tests/, attribute in `src/cs2rl/env_factory.py`.
     A matcher that only looked at bare names reports zero findings in `src/`;
     here it fails loudly.
 
@@ -370,7 +370,7 @@ def test_constructed_names_are_the_declared_frozenset():
 
 
 def test_the_factory_itself_is_where_the_construction_lives():
-    """`src/env_factory.py` constructs — the exemption is not covering an empty file.
+    """`src/cs2rl/env_factory.py` constructs — the exemption is not covering an empty file.
 
     An exemption for a file that constructs nothing is the same vacuous-pass
     shape as an empty root: it would mean the constructions moved somewhere the
@@ -394,7 +394,7 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
     symbol #165 PR B2 put at risk.
 
     `build_env_for` imports `c_env.cs2_env.make_env` function-locally and hands it
-    to the role builder as a VALUE (its own `from c_env.cs2_env import make_env`
+    to the role builder as a VALUE (its own `from cs2rl.c_env.cs2_env import make_env`
     and the `return builder(make_env, **kwargs)` it ends on; the six role builders
     receive it positional-only as `_make`), so no CALL node in that file names it.
     B2 is what made this the pin worth adding: it swapped the function-local
@@ -409,7 +409,7 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
     every one of them on a docstring line and none in a comment, while `make_env`
     has two code references, the import and the value pass.
     (`SelfPlayManager` has exactly two as well, and the second one IS the call:
-    the `from train import SelfPlayManager` at `:410` and the `ast.Name` at
+    the `from cs2rl.train import SelfPlayManager` at `:410` and the `ast.Name` at
     `:412` that is that `Call` node's own `func`. So there is no third reference
     to add for the call — it is a manager rather than an env and belongs to the
     assertion above.)
@@ -419,7 +419,7 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
 
     This is an ADDITION, not a replacement. The `make_puffer_env` assertion above
     is a live negative, not a vacuous one: plant a real `make_puffer_env(...)` call
-    into a copy of `src/env_factory.py` and the same scan reports
+    into a copy of `src/cs2rl/env_factory.py` and the same scan reports
     `{'SelfPlayManager', 'make_puffer_env'}`. And
     `test_no_make_puffer_env_or_selfplaymanager_call_outside_the_factory` filters
     the factory out of its own scan (`if p != FACTORY`), so deleting that assertion
@@ -428,21 +428,21 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
 
     If a later branch inlines `_make` into the builders this goes red: update
     `env_factory`'s docstring and `LOWER_LAYER_SITES` (which gains ONE entry,
-    `"src/env_factory.py"`, with a count — the dict is keyed by file, not by
+    `"src/cs2rl/env_factory.py"`, with a count — the dict is keyed by file, not by
     builder), do not delete the assertion.
     """
     _, found = scan([FACTORY], symbols=LOWER_LAYER)
     symbols = {symbol for _, symbol, _, _ in found}
     assert "make_env" not in symbols, (
-        "src/env_factory.py now contains a direct make_env(...) call. Both this file's "
+        "src/cs2rl/env_factory.py now contains a direct make_env(...) call. Both this file's "
         "module docstring and env_factory's own explain that it does NOT — update both, and "
         "LOWER_LAYER_SITES, rather than deleting this assertion.")
     assert "Cs2Env" not in symbols, (
-        "src/env_factory.py now constructs a Cs2Env directly, bypassing make_env's map "
+        "src/cs2rl/env_factory.py now constructs a Cs2Env directly, bypassing make_env's map "
         "loading entirely.")
 
 
-# symbol -> the body inlined into a planted copy of `src/env_factory.py`. One
+# symbol -> the body inlined into a planted copy of `src/cs2rl/env_factory.py`. One
 # entry per assertion in the pin above; a pin with two negatives needs two
 # knock-outs, not one.
 #
@@ -473,9 +473,9 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
 # constructor — a property of the imports, not of the plant. A string literal is
 # unconditionally safe, which is why these are strings.
 _INLINED_CONSTRUCTION = {
-    "make_env": ("    from c_env.cs2_env import make_env\n"
+    "make_env": ("    from cs2rl.c_env.cs2_env import make_env\n"
                  "    return make_env(config=None, map_data=md)\n"),
-    "Cs2Env": ("    from c_env.cs2_env import Cs2Env\n"
+    "Cs2Env": ("    from cs2rl.c_env.cs2_env import Cs2Env\n"
                "    return Cs2Env(config=None, map_data=md)\n"),
 }
 
@@ -534,7 +534,7 @@ def test_the_inlined_construction_set_is_pinned_and_covers_both_of_the_pins_nega
 @pytest.mark.parametrize("symbol", sorted(_INLINED_CONSTRUCTION))
 def test_knockout_the_repointed_asymmetry_pin_fails_on_a_planted_call(tmp_path, symbol):
     """The pin above is a NEGATIVE over one real file, so on today's tree it is
-    green no matter what the matcher does. Plant `src/env_factory.py`'s own source
+    green no matter what the matcher does. Plant `src/cs2rl/env_factory.py`'s own source
     PLUS one direct call and require the same scan to report it.
 
     Parametrized over BOTH of the pin's assertions: they are two separate
@@ -704,7 +704,7 @@ def test_knockout_the_enforcement_assertion_fails_on_a_planted_offender(tmp_path
 
 @pytest.mark.parametrize("symbol", CONSTRUCTED)
 def test_knockout_an_import_aliased_construction_is_found(tmp_path, symbol):
-    """`from train import <symbol> as _x` + `_x(...)` must be reported as <symbol>.
+    """`from cs2rl.train import <symbol> as _x` + `_x(...)` must be reported as <symbol>.
 
     THE I-4 KNOCK-OUT. Before alias resolution this planted file scanned clean —
     one import line was the entire bypass — so this is the test that fails if
@@ -713,7 +713,7 @@ def test_knockout_an_import_aliased_construction_is_found(tmp_path, symbol):
     enforcement failure message readable, and that the local name survives in the
     spelling so the message points at the line to change.
     """
-    (tmp_path / "offender.py").write_text(f"from train import {symbol} as _aliased\n"
+    (tmp_path / "offender.py").write_text(f"from cs2rl.train import {symbol} as _aliased\n"
                                           "def f():\n"
                                           "    return _aliased(seed=1)\n")
     _, found = scan([tmp_path])
@@ -731,8 +731,8 @@ def test_an_unimported_local_of_the_same_name_is_not_a_construction():
     is an ordinary local function; the file has no aliasing import, so nothing is
     flagged. The `as` form of an UNRELATED symbol must not bind either.
     """
-    source = ("from train import build_env_factory as _aliased\n"
-              "from train import make_puffer_env\n"
+    source = ("from cs2rl.train import build_env_factory as _aliased\n"
+              "from cs2rl.train import make_puffer_env\n"
               "a = _aliased(seed=1)\n"
               "b = make_puffer_env(seed=1)\n")
     assert constructions(source) == [
@@ -779,7 +779,8 @@ def test_the_real_classmethod_call_sites_still_exist_and_are_not_flagged():
     that the scan leaves them alone.
     """
     live = []
-    for path in (REPO_ROOT / "src" / "train.py", REPO_ROOT / "src" / "train_test_harness.py"):
+    for path in (REPO_ROOT / "src" / "cs2rl" / "train.py",
+                 REPO_ROOT / "src" / "cs2rl" / "train_test_harness.py"):
         tree = ast.parse(path.read_text())
         live += [(path.name, n.lineno) for n in ast.walk(tree)
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
@@ -817,6 +818,6 @@ def test_no_make_puffer_env_or_selfplaymanager_call_outside_the_factory():
     _, found = scan(ROOTS)
     offenders = [(str(p.relative_to(REPO_ROOT)), symbol, lineno, spelling)
                  for p, symbol, lineno, spelling in found if p != FACTORY]
-    assert not offenders, ("constructions found outside src/env_factory.py:\n" +
+    assert not offenders, ("constructions found outside src/cs2rl/env_factory.py:\n" +
                            "\n".join(f"  {p}:{ln} {sym} ({sp})" for p, sym, ln, sp in offenders) +
                            "\nRoute them through build_env_for / build_selfplay_manager.")

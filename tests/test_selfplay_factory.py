@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from env_factory import build_selfplay_manager
+from cs2rl.env_factory import build_selfplay_manager
 
 FIXTURE = Path(__file__).parent / "fixtures" / "selfplay_kwargs_pre_w3.json"
 
@@ -91,7 +91,7 @@ def _construct(monkeypatch, **kwargs):
     import reads from — so this also proves that import is a per-call attribute
     read rather than something cached at module scope.
     """
-    import train
+    from cs2rl import train
 
     rec = _Recorder()
     monkeypatch.setattr(train, "SelfPlayManager", rec)
@@ -178,7 +178,7 @@ def test_builder_passes_every_parameter_explicitly(monkeypatch, site, scenario, 
     """
     import inspect
 
-    import train
+    from cs2rl import train
 
     # Read the signature BEFORE _construct swaps in the stub; afterwards it would
     # be the recorder's `**kwargs` and this would collapse to comparing an empty
@@ -205,7 +205,7 @@ def test_builder_kwargs_bind_to_the_real_signature(monkeypatch):
     """
     import inspect
 
-    import train
+    from cs2rl import train
 
     sig = inspect.signature(train.SelfPlayManager)
     for site, scenario, capture in _cases():
@@ -311,7 +311,7 @@ def test_knockout_dropping_one_kwarg_fails_that_sites_capture(monkeypatch, site)
     never passed it. That keeps the knock-out reproducible in CI instead of a
     procedure someone has to remember to perform by hand.
     """
-    import train
+    from cs2rl import train
 
     dropped = _KNOCKOUT_KWARG[site]
     captures = [c for s, _, c in _cases() if s == site and dropped in c["explicit_kwargs"]]
@@ -408,7 +408,7 @@ def _factory_call_in(path, qualname, func_name):
     return found[0]
 
 
-SRC = Path(__file__).resolve().parents[1] / "src"
+PACKAGE = Path(__file__).resolve().parents[1] / "src" / "cs2rl"
 
 
 def test_train_call_site_forwards_the_same_expressions_it_used_to():
@@ -430,7 +430,7 @@ def test_train_call_site_forwards_the_same_expressions_it_used_to():
     capture = FIXTURE_DATA["sites"]["train"][0]
     old = _routing(capture["call_source"])
     new = _routing(
-        ast.unparse(_factory_call_in(SRC / "train.py", "train", "build_selfplay_manager")))
+        ast.unparse(_factory_call_in(PACKAGE / "train.py", "train", "build_selfplay_manager")))
 
     for kwarg in ("aim_log_std_max", "opponent_mode"):
         assert new.get(kwarg) == old[kwarg], (
@@ -482,7 +482,7 @@ def test_harness_call_site_builds_the_captured_manager(monkeypatch, with_selfpla
     NON-default at this site, so a builder that dropped it (falling back to
     SelfPlayManager's own "self") is caught here rather than nowhere.
     """
-    import train_test_harness
+    from cs2rl import train_test_harness
 
     site = "harness_selfplay" if with_selfplay else "harness_no_selfplay"
     capture = FIXTURE_DATA["sites"][site][0]
@@ -539,8 +539,8 @@ def test_harness_given_manager_skips_the_builder(monkeypatch):
     SelfPlayManager's own default coinciding with the env default), with ``p_past=0.0``
     (no self-play).
     """
-    import train_test_harness
-    from train import SelfPlayManager
+    from cs2rl import train_test_harness
+    from cs2rl.train import SelfPlayManager
 
     recorded = []
     real_builder = train_test_harness.build_selfplay_manager
@@ -570,7 +570,7 @@ def test_harness_no_longer_branches_on_with_selfplay_to_construct():
     this file would stay green, and the next knob would go into one arm only,
     which is the drift W3 exists to end.
     """
-    tree = ast.parse((SRC / "train_test_harness.py").read_text())
+    tree = ast.parse((PACKAGE / "train_test_harness.py").read_text())
     calls = [
         n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
         and n.func.id == "build_selfplay_manager"

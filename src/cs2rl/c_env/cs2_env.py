@@ -1,25 +1,19 @@
-# src/c_env/cs2_env.py — PufferEnv subclass backed by binding.c C API bridge.
+# src/cs2rl/c_env/cs2_env.py — PufferEnv subclass backed by binding.c C API bridge.
 
 import ctypes
 import hashlib
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 import gymnasium
 import numpy as np
 import pufferlib
 
-import nav
-from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
-from env_config import EnvConfig
-from map import make_cs2_map
-from nav import N_AGENTS, OBS_DIM, TEAM_SIZE
-
-_DIR = Path(__file__).parent
-if str(_DIR) not in sys.path:
-    sys.path.insert(0, str(_DIR))
-import binding                         # noqa: E402
+from cs2rl import nav
+from cs2rl._action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
+from cs2rl.c_env import binding
+from cs2rl.env_config import EnvConfig
+from cs2rl.map import make_cs2_map
+from cs2rl.nav import N_AGENTS, OBS_DIM, TEAM_SIZE
 
 # ── Viz dataclasses (used by snapshot_state) ─────────────────────────────────
 
@@ -348,7 +342,7 @@ class StepStatsView:
     Cs2Env.step() returns a reference to this wrapper in info[0]["step_stats"]
     when include_step_stats_in_info=True. The wrapper proxies __getitem__ to
     attribute access on the underlying struct, so downstream consumers (e.g.
-    split_into_channels in src/train_helpers_batch1.py) can read fields by
+    split_into_channels in src/cs2rl/train_helpers_batch1.py) can read fields by
     name with zero per-tick allocation.
 
     ndim is set to 0 so split_into_channels's length-1 squeeze (which only
@@ -417,7 +411,7 @@ class Dust2EnvC(ctypes.Structure):
 #     set(binding.struct_sizes()) == _C_SIZE_KEYS_CHECKED.
 # Both live in tests/test_struct_sizes.py.
 #
-# Pitfall: struct_sizes() reads the CURRENTLY BUILT .so. Editing src/c_env/*.h
+# Pitfall: struct_sizes() reads the CURRENTLY BUILT .so. Editing src/cs2rl/c_env/*.h
 # without rebuilding (`python setup.py build_ext --inplace`) compares a new
 # mirror against a stale binary — it can pass on a broken tree or fail on a
 # correct one. Rebuild first, then trust this.
@@ -559,7 +553,7 @@ def _canonical_ctype_name(ctype):
         raise RuntimeError(
             f"StaticDataC field type {name!r} is outside the layout-hash vocabulary "
             f"{sorted(_CANONICAL_SCALAR_CTYPES)}; add it here AND to SD_TYPE_NAMES in "
-            "src/c_env/binding.c, then rebuild")
+            "src/cs2rl/c_env/binding.c, then rebuild")
     return name
 
 
@@ -765,7 +759,7 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
     WHAT: for agent i on team A facing team B,
         r_i' = 0.5 * ( r_i - mean_{j in ACTIVE(B)}(r_j) )
     Agents 0..TEAM_SIZE-1 are T, TEAM_SIZE..N_AGENTS-1 are CT (same split the
-    C CT-survival loop uses, compute_rewards in src/c_env/cs2_rewards.h). Only the first
+    C CT-survival loop uses, compute_rewards in src/cs2rl/c_env/cs2_rewards.h). Only the first
     n_active_per_team slots of each team are read or written; the parked
     remainder (Rung 0, spec 2026-08-29 §2.1) is left untouched at exactly 0.0.
 
@@ -788,7 +782,7 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
        0.5*(S_A - n*mean_B) + 0.5*(S_B - n*mean_A), and the two half-terms
        cancel ONLY because both means are scaled by the same constant n. The
        C team_spirit loop right below the PBRS block IS alive-gated
-       (compute_rewards in src/c_env/cs2_rewards.h), so mirroring it here looks like the
+       (compute_rewards in src/cs2rl/c_env/cs2_rewards.h), so mirroring it here looks like the
        obvious consistency fix; it would silently destroy zero-sum.
        Consequence to carry into analysis, not a wart to repair: late-round
        with n-1 dead CTs, the lone survivor's stall drip is attenuated to 1/n
@@ -801,7 +795,7 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
        this array is the PufferLib shared reward buffer the trainer reads,
        and the returned tuple is ignored by the Multiprocessing backend.
     4. Safe to mutate the zero-copy C view: env_step memsets env->rewards
-       (src/c_env/cs2_env.h) before accumulating this tick's terms, and
+       (src/cs2rl/c_env/cs2_env.h) before accumulating this tick's terms, and
        nothing reads the reward array ahead of that memset — the calls that
        precede it (update_enemy_memory, compute_observations) touch obs and
        memory, not rewards. The C episode / step stat channels are separate
@@ -972,7 +966,7 @@ class Cs2Env(pufferlib.PufferEnv):
 
         # Rung 0 (spec 2026-08-29 §2.1): these are validated BEFORE binding.init,
         # in Python, and since #165 that validation lives in
-        # EnvConfig.__post_init__ (src/env_config.py) rather than here. WHY
+        # EnvConfig.__post_init__ (src/cs2rl/env_config.py) rather than here. WHY
         # Python-side at all: env_init asserts the same range in C, and a failed
         # C assert aborts the whole process — inside a Puffer worker that is a
         # silent death with no traceback. Raising in Python turns a bad training
@@ -1234,7 +1228,7 @@ class Cs2Env(pufferlib.PufferEnv):
         # instead of the (always-zero) scratch — so MP workers actually see
         # the policy's Δyaw sample. Serial backend continues to bypass this
         # via the per-env step wrapper and a Python attr stash on the
-        # vecenv (see HybridAimVecEnv.send in src/trainer.py).
+        # vecenv (see HybridAimVecEnv.send in src/cs2rl/trainer.py).
         self._cont_action_view = None
         # Hold the parent-process RawArray to keep it from being GC'd if the
         # caller passes it transiently (it is also kept alive on the trainer
@@ -1422,7 +1416,7 @@ class Cs2Env(pufferlib.PufferEnv):
         ``(env_idx + 1) * N_AGENTS * AIM_DIM`` float32 slots. We do NOT
         revalidate the global length here (we don't know num_envs); a too-
         small allocation will manifest as np.frombuffer raising or as
-        out-of-range data. The caller (env factory in src/train.py) owns
+        out-of-range data. The caller (env factory in src/cs2rl/train.py) owns
         the sizing.
         """
         if raw_shm is None:

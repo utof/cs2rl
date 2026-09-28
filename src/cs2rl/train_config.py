@@ -5,7 +5,7 @@ args-to-env-knob and args-to-mode resolvers, the batch-dimension formula, the
 opponent-mode vocabulary and the static participating-rows vector. Moved here
 VERBATIM by the 2026-08-31 post-rung1a refactor: no renames, no signature
 changes, no behaviour change. ``train.py`` re-exports every name below (see its
-``__all__``), so existing ``from train import X`` call sites keep working
+``__all__``), so existing ``from cs2rl.train import X`` call sites keep working
 unchanged.
 
 WHY its own module: scripts/run_experiment.py hashes build_train_config's dict
@@ -27,8 +27,8 @@ import math
 
 import numpy as np
 
-from env_config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
-from train_shared import (
+from cs2rl.env_config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
+from cs2rl.train_shared import (
     _R0G_KNOBS,
     AIM_LOG_STD_CAP_MIN_HEADROOM,
     AIM_LOG_STD_INIT_MARGIN,

@@ -12,8 +12,10 @@ from shapely.geometry import Point
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.strtree import STRtree
 
-from _action_spec import ACTION_DIM                    # derived from cs2_types.h
-from _obs_spec import OBS_BLOCKS, OBS_DIM              # noqa: F401  generated; re-exported (see Constants)
+from cs2rl._action_spec import ACTION_DIM              # derived from cs2_types.h
+from cs2rl._obs_spec import (                          # noqa: F401  generated; re-exported (see Constants)
+    OBS_BLOCKS, OBS_DIM,
+)
 
 # ── Multiprocessing workers for vis matrix (must be module-level to be picklable) ──
 

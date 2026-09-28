@@ -6,9 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from play_actions import (
+from cs2rl.play_actions import (
     find_repo_root,
     play_fill_actions,
     play_mark_done,
@@ -38,8 +36,8 @@ def _load_play_lib(repo: Path):
     if envp:
         candidates.append(Path(envp))
     candidates += [
-        repo / "src/c_env/zig-out/lib/libcs2_play.so",
-        repo / "src/c_env/zig-out/bin/libcs2_play.so",
+        repo / "src/cs2rl/c_env/zig-out/lib/libcs2_play.so",
+        repo / "src/cs2rl/c_env/zig-out/bin/libcs2_play.so",
     ]
     lib = None
     for c in candidates:
@@ -52,7 +50,7 @@ def _load_play_lib(repo: Path):
             continue
     if lib is None:
         print(
-            "build with: uv run --with 'ziglang>=0.14,<0.15' zig build cs2_demo (from src/c_env)",
+            "build with: uv run --with 'ziglang>=0.14,<0.15' zig build cs2_demo (from src/cs2rl/c_env)",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -92,7 +90,7 @@ def main(argv=None):
         print(e, file=sys.stderr)
         return 2
 
-    from train import (
+    from cs2rl.train import (
         init_policy_state,
         load_policy_from_checkpoint,
         select_policy_actions_native,
@@ -102,9 +100,9 @@ def main(argv=None):
 
     import numpy as np
 
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
-    from map import make_simple_map
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
+    from cs2rl.map import make_simple_map
 
     repo = find_repo_root(Path(__file__))
     lib = _load_play_lib(repo)
@@ -139,7 +137,7 @@ def main(argv=None):
     cont_buf = np.zeros((10, 2), dtype=np.float32)
     # Same room quad MapData already published into sd->area_bounds.
     bounds = np.ascontiguousarray(md.area_bounds.reshape(-1))
-    resource_dir = str(repo / "src/c_env/zig-out/bin/resources").encode()
+    resource_dir = str(repo / "src/cs2rl/c_env/zig-out/bin/resources").encode()
     human_idx = -1 if args.spectate else 0
     mode = "sample" if args.sample else "greedy"
     env_ptr = _PyCapsule_GetPointer(env._capsule, None)

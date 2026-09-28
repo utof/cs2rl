@@ -54,6 +54,14 @@ modal = [
     "modal>=1.4.3,<2",
 ]
 
+[tool.setuptools.packages.find]
+# One package, cs2rl, under src/. Explicit because automatic src-layout discovery
+# also scans PEP 420 namespace directories (src/cs2rl/c_env/demo_assets, zig-out,
+# zig-pkg); namespaces = false keeps the wheel to the two real packages.
+where = ["src"]
+include = ["cs2rl*"]
+namespaces = false
+
 [tool.uv]
 # Keep numpy>=2 available for the current awpy stack in this repo.
 override-dependencies = [
@@ -84,7 +92,7 @@ ignore = ["E501"]
 # one misses the other. Each entry bans the spelling that is NOT canonical; the
 # runtime half is the session guard in tests/conftest.py.
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-"src".msg = "src/ is on sys.path: import `X`, not `src.X`"
+"src".msg = "import `cs2rl.X`, not `src.cs2rl.X`"
 "deploy".msg = "put deploy/ on sys.path and import `X`, not `deploy.X`, as deploy/verify_onnx.py does"
 "modal_runner".msg = "import `scripts.modal_runner`"
 "run_modal".msg = "import `scripts.run_modal`"

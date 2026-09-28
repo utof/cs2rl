@@ -131,7 +131,7 @@ pub fn build(b: *std.Build) void {
     const install_demo = b.addInstallArtifact(demo, .{});
     cs2_demo_step.dependOn(&install_demo.step);
 
-    // Voices live in demo_assets/ — src/c_env/resources is a pufferlib
+    // Voices live in demo_assets/ — src/cs2rl/c_env/resources is a pufferlib
     // symlink (and gitignored). Copy next to zig-out/bin/cs2_demo so the
     // runtime walk (GetApplicationDirectory() + "resources/") finds them.
     const install_voices = b.addInstallDirectory(.{
@@ -141,7 +141,7 @@ pub fn build(b: *std.Build) void {
     });
     cs2_demo_step.dependOn(&install_voices.step);
 
-    // libcs2_play: Raylib attach ABI for src/play.py. Same source as the
+    // libcs2_play: Raylib attach ABI for src/cs2rl/play.py. Same source as the
     // statue exe. Installed only via cs2_demo_step — do not
     // b.installArtifact this on the default/binding path.
     const play_lib = b.addSharedLibrary(.{

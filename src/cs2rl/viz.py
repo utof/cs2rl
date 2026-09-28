@@ -1,6 +1,6 @@
 """CS2 RL Sim — rerun.io visualization.
 
-Imported ONLY when --record is passed to src/train.py.
+Imported ONLY when --record is passed to src/cs2rl/train.py.
 Zero rerun dependency during training.
 """
 
@@ -126,7 +126,7 @@ def log_simple_map(map_data):
     Called once at recording startup when map_data is not the real dust2 map.
     Toggle map/rooms and map/walls in the Rerun entity tree.
     """
-    from map import SIMPLE_ROOMS
+    from cs2rl.map import SIMPLE_ROOMS
 
     rooms = SIMPLE_ROOMS               # list of (idx, x0, y0, x1, y1)
 

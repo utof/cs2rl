@@ -339,7 +339,7 @@ def test_common_argv_is_accepted_by_train_py_dump_config(tmp_path):
     test was COMMON itself against the REAL argparse — every other test here
     drives a fake trainer. Parse `COMMON=(...)` out of the script, drop
     --train, run train.py --dump-config with it (no torch, ~1-2 s for
-    `import map`) and pin the spec §4 values config.json must carry, incl. the
+    `from cs2rl import map`) and pin the spec §4 values config.json must carry, incl. the
     participating-budget arithmetic (total = 5x participating at n_active=1).
     PITFALL: a renamed reward key / CLI flag otherwise only dies at argparse on
     a booked GPU box. sys.executable + cwd=REPO_ROOT like tests/test_train_cli.py."""
@@ -356,8 +356,7 @@ def test_common_argv_is_accepted_by_train_py_dump_config(tmp_path):
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir()
     r = subprocess.run([
-        sys.executable,
-        str(REPO_ROOT / "src" / "train.py"), "--dump-config", *common, "--seed", "0",
+        sys.executable, "-m", "cs2rl.train", "--dump-config", *common, "--seed", "0",
         "--checkpoint-dir",
         str(ckpt)
     ],
@@ -404,8 +403,7 @@ def test_arm_argv_is_accepted_by_train_py_dump_config(tmp_path, arm):
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir()
     r = subprocess.run([
-        sys.executable,
-        str(REPO_ROOT / "src" / "train.py"), "--dump-config", *common, *arm_flags, "--seed", "0",
+        sys.executable, "-m", "cs2rl.train", "--dump-config", *common, *arm_flags, "--seed", "0",
         "--checkpoint-dir",
         str(ckpt)
     ],
@@ -423,8 +421,7 @@ def test_dump_config_rejects_out_of_range_aim_log_std_max(tmp_path):
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir()
     r = subprocess.run([
-        sys.executable,
-        str(REPO_ROOT / "src" / "train.py"), "--dump-config", "--map", "arena-duel",
+        sys.executable, "-m", "cs2rl.train", "--dump-config", "--map", "arena-duel",
         "--aim-log-std-max", "-0.6931", "--seed", "0", "--checkpoint-dir",
         str(ckpt)
     ],

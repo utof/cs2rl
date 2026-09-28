@@ -52,21 +52,19 @@ Usage:
 """
 import argparse
 import subprocess
-import sys
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "src"))
+from cs2rl._action_spec import ACTION_DIM, AIM_DIM
+from cs2rl._obs_spec import OBS_BLOCKS, OBS_DIM
+from cs2rl.c_env.cs2_env import make_env
+from cs2rl.map import make_simple_map
+from cs2rl.nav import N_AGENTS, ROUND_TIME, TEAM_SIZE
+from cs2rl.scripted_expert import ScriptedBomber, setup_bomb_carrier
 
-from _action_spec import ACTION_DIM, AIM_DIM                           # noqa: E402
-from _obs_spec import OBS_BLOCKS, OBS_DIM                              # noqa: E402
-from c_env.cs2_env import make_env                                     # noqa: E402
-from map import make_simple_map                                        # noqa: E402
-from nav import N_AGENTS, ROUND_TIME, TEAM_SIZE                        # noqa: E402
-from scripted_expert import ScriptedBomber, setup_bomb_carrier         # noqa: E402
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Self-identifying map tag stored in every demo. The demo distribution is only
 # valid for BC → PPO on this exact map (per-map obs normalization + geometry);

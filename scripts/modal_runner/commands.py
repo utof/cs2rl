@@ -21,7 +21,11 @@ if TYPE_CHECKING:
 # __init__.py).
 
 UV_BIN = "/usr/local/bin/uv"
-TRAIN_SCRIPT = "src/train.py"
+# The entry module, launched with `-m` from the installed wheel (build_install_command).
+# Never the file path: a script-path launch runs the checkout's copy as __main__
+# against the installed package's modules, and puts src/cs2rl/ first on sys.path,
+# which re-creates the old flat module names in that process.
+TRAIN_MODULE = "cs2rl.train"
 
 # Child env is an allowlist, not a denylist: Modal/image leftovers (tokens,
 # extra WANDB_* creds, host thread caps) must not leak into uv/train.
@@ -178,8 +182,8 @@ def build_install_command(source_dir: str | Path) -> list[str]:
 
 
 def build_train_command(argv: Sequence[str]) -> list[str]:
-    """Prebuilt interpreter + live script + already-split argv. Never a shell."""
-    return [core.PREBUILT_PYTHON, TRAIN_SCRIPT, *argv]
+    """Prebuilt interpreter + `-m` entry module + already-split argv. Never a shell."""
+    return [core.PREBUILT_PYTHON, "-m", TRAIN_MODULE, *argv]
 
 
 def build_dump_config_command(request: RunRequest, remote_resume: str | None) -> list[str]:

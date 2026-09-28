@@ -4,7 +4,7 @@ WHAT: RNG snapshot/restore + seeding, the ``train_state.pt`` sidecar
 (collect_train_state / restore_train_state), and the ``--resume-run`` resolution
 and guard chain. Moved here VERBATIM by the 2026-08-31 post-rung1a refactor: no
 renames, no signature changes, no behaviour change. ``train.py`` re-exports
-every name below (see its ``__all__``), so existing ``from train import X`` call
+every name below (see its ``__all__``), so existing ``from cs2rl.train import X`` call
 sites keep working unchanged.
 
 WHY its own module: this is the one surface whose silent breakage a training run
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from train_shared import _WARMSTART_ATTRS, RESUME_CONFIG_ALLOWLIST
+from cs2rl.train_shared import _WARMSTART_ATTRS, RESUME_CONFIG_ALLOWLIST
 
 
 def _rng_state_dict():

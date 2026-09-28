@@ -122,27 +122,16 @@ PITFALLS
   the statue mid-round, which is a different failure than a bad encoding).
 * This script never writes to ``outputs/`` and never touches training state.
 """
-# src/ has to be on sys.path before the repo imports near the bottom of this
-# block can resolve, so they cannot sit at the top of the file. E402 is
-# suppressed file-wide rather than per-line because a per-line suppression puts
-# ruff's isort and yapf's trailing-comment aligner in a permanent fight over
-# which column the comment belongs in.
-# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
-
-from _obs_spec import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
-from c_env.cs2_env import N_AGENTS, TEAM_SIZE
-from eval_baselines import (
+from cs2rl._obs_spec import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
+from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
+from cs2rl.eval_baselines import (
     ACTION_DIM,
     AIM_DIM,
     EYE_CROUCH,
@@ -180,7 +169,7 @@ PASS_MAX_MEDIAN_TTK = 120.0
 GRAVITY_SAG_PER_TICK = 0.5 * 800.0 * (1.0 / 16.0)**2
 
 # ── observation-vector layout, for --obs-only ────────────────────────────────
-# Block bounds come from the GENERATED spec (src/_obs_spec.py, regenerated from
+# Block bounds come from the GENERATED spec (src/cs2rl/_obs_spec.py, regenerated from
 # the OBS_* macros in cs2_types.h by scripts/sync_action_spec.py) — never
 # hardcode 56 / 5 / 8 here.
 OBS_ENEMY_BASE = OBS_BLOCKS["enemy"][0]
@@ -241,9 +230,9 @@ def build_env(seed: int, round_time: int = ROUND_TIME):
     the check is that it runs the env the smoke runs. A caller that wants a
     different env is asking a different question and should say so in code.
     """
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
-    from map import make_arena_duel_map
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
+    from cs2rl.map import make_arena_duel_map
     return make_env(config=EnvConfig(n_active_per_team=N_ACTIVE_PER_TEAM,
                                      pin_pitch=PIN_PITCH,
                                      crouch_enabled=CROUCH_ENABLED,

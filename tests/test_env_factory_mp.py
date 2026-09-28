@@ -25,8 +25,8 @@ TWO TESTS, because fork and cold import are different failures:
      nothing about the import, which is a dictionary hit there.
   2. `test_build_env_for_works_from_a_cold_interpreter` closes exactly that gap
      in a fresh subprocess that has imported NOTHING of the training stack: it
-     puts only `src/` on `sys.path`, imports `env_factory` and calls
-     `build_env_for`, and asserts that `train` is still absent afterwards.
+     imports `cs2rl.env_factory` alone and calls `build_env_for`, and asserts
+     that `cs2rl.train` is still absent afterwards.
 
      THAT ASSERTION IS INVERTED FROM WHAT IT USED TO BE, and the inversion is
      the point. Before #165 PR B2 the child asserted `train` WAS imported,
@@ -52,7 +52,6 @@ import numpy as np
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC = REPO_ROOT / "src"
 
 NUM_ENVS = 2
 TICKS = 3
@@ -92,9 +91,9 @@ def test_train_closure_builds_envs_in_forked_workers():
 
     import pufferlib.vector
 
-    from map import make_simple_map
-    from train import build_env_factory
-    from train_config import env_config_from_args
+    from cs2rl.map import make_simple_map
+    from cs2rl.train import build_env_factory
+    from cs2rl.train_config import env_config_from_args
 
     args = Namespace(reward_ct_survival=0.0,
                      n_active_per_team=3,
@@ -171,8 +170,8 @@ def test_build_env_for_works_from_a_cold_interpreter():
     The half the fork smoke above cannot prove. On Linux pufferlib's
     Multiprocessing backend forks, so its children inherit the parent's
     `sys.modules` wholesale and the function-local import is a dictionary hit
-    whose real behaviour is untested. Here the child puts only `src/` on
-    `sys.path`, imports `env_factory` ALONE, and the import inside
+    whose real behaviour is untested. Here the child imports
+    `cs2rl.env_factory` ALONE, and the import inside
     `build_env_for` has to do the whole job from nothing.
 
     WHAT IT ASSERTS AFTER THE CALL IS THE INVERSE OF WHAT IT USED TO. Since #165
@@ -192,24 +191,23 @@ def test_build_env_for_works_from_a_cold_interpreter():
 
     SCOPE: the `smoke` role only. See the module docstring.
     """
-    code = f"""
+    code = """
 import sys
-sys.path.insert(0, {str(SRC)!r})
-import env_factory
-assert "train" not in sys.modules, (
-    "env_factory pulled `train` at module scope; this test can no longer see the "
+from cs2rl import env_factory
+assert "cs2rl.train" not in sys.modules, (
+    "env_factory pulled `cs2rl.train` at module scope; this test can no longer see the "
     "function-local import it exists to exercise")
-assert "c_env.cs2_env" not in sys.modules, (
+assert "cs2rl.c_env.cs2_env" not in sys.modules, (
     "env_factory pulled the C env at module scope; the post-call assertion below "
     "would then be satisfied by the import rather than by build_env_for, and the "
     "W1 import-lightness invariant is broken besides")
 env = env_factory.build_env_for("smoke")
 try:
-    assert "train" not in sys.modules, (
-        "building an env pulled `train`. Since #165 PR B2 env construction has NO L3 "
+    assert "cs2rl.train" not in sys.modules, (
+        "building an env pulled `cs2rl.train`. Since #165 PR B2 env construction has NO L3 "
         "dependency at all — build_env_for imports c_env.cs2_env.make_env directly — and "
         "this assertion is what keeps that true from a cold interpreter")
-    assert "c_env.cs2_env" in sys.modules, "build_env_for did not import the C env module"
+    assert "cs2rl.c_env.cs2_env" in sys.modules, "build_env_for did not import the C env module"
     obs, _ = env.reset(seed=env_factory.SMOKE_SEED)
     assert obs.shape[0] == 10, obs.shape
     print("COLD-IMPORT-OK", obs.shape)

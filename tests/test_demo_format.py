@@ -23,14 +23,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 import gen_bc_demos                    # noqa: E402
 
-from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, AIM_DIM        # noqa: E402
-from _obs_spec import OBS_BLOCKS, OBS_DIM                              # noqa: E402
-from nav import MAX_TURN_SPEED_RAD, ROUND_TIME                         # noqa: E402
+from cs2rl._action_spec import ACTION_DIM, ACTION_HEAD_SIZES, AIM_DIM
+from cs2rl._obs_spec import OBS_BLOCKS, OBS_DIM
+from cs2rl.nav import MAX_TURN_SPEED_RAD, ROUND_TIME
 
 
 @pytest.fixture(scope="module")

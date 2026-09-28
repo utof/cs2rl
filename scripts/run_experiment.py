@@ -131,7 +131,7 @@ def release_lock() -> None:
 # ── Main entry point ───────────────────────────────────────────────────────
 
 
-def _python_cmd(train_py: Path) -> list[str]:
+def _python_cmd() -> list[str]:
     """Pick interpreter: in test mode (CS2RL_REPO_ROOT set) use sys.executable,
     else use `uv run python` so project deps are resolved via uv.
 
@@ -140,10 +140,29 @@ def _python_cmd(train_py: Path) -> list[str]:
     pyproject.toml — `uv run` would fail there. The env var CS2RL_REPO_ROOT is
     already the test-mode signal the script uses everywhere else, so we reuse
     it as the "use sys.executable directly" flag.
+
+    Both modes launch the package entry module (`-m cs2rl.train`), never the file
+    path: a script-path launch would put src/cs2rl/ on sys.path[0] and re-create
+    the flat module namespace in the child. Pair it with `_child_env()`.
     """
     if os.environ.get("CS2RL_REPO_ROOT"):
-        return [sys.executable, str(train_py)]
-    return ["uv", "run", "python", str(train_py)]
+        return [sys.executable, "-m", "cs2rl.train"]
+    return ["uv", "run", "python", "-m", "cs2rl.train"]
+
+
+def _child_env() -> dict[str, str]:
+    """os.environ with <REPO_ROOT>/src PREPENDED to PYTHONPATH, for the train child.
+
+    WHY: `-m cs2rl.train` resolves `cs2rl` through sys.path, and the shared venv's
+    editable install points at ONE checkout's src/ (main's). Without the prepend,
+    a run launched from a worktree, or from the tests' fake repo, silently trains
+    another checkout's code. Prepend, never replace: a replaced PYTHONPATH drops
+    whatever the caller already put there.
+    """
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")]))
+    return env
 
 
 def _read_baseline() -> str | None:
@@ -247,13 +266,13 @@ def main_run(args) -> int:
                                          f"**Budget steps:** {args.timesteps}\n\n"
                                          f"**Resume from:** {args.resume or '(none)'}\n")
 
-        train_py = REPO_ROOT / "src" / "train.py"
-        rewards_h = REPO_ROOT / "src" / "c_env" / "cs2_rewards.h"
-        env_c = REPO_ROOT / "src" / "c_env" / "cs2_env.c"
-        c_env_sha = exp_lib.path_last_commit_sha(REPO_ROOT / "src" / "c_env")
+        train_py = REPO_ROOT / "src" / "cs2rl" / "train.py"
+        rewards_h = REPO_ROOT / "src" / "cs2rl" / "c_env" / "cs2_rewards.h"
+        env_c = REPO_ROOT / "src" / "cs2rl" / "c_env" / "cs2_env.c"
+        c_env_sha = exp_lib.path_last_commit_sha(REPO_ROOT / "src" / "cs2rl" / "c_env")
         train_py_sha = exp_lib.path_last_commit_sha(train_py)
 
-        dump_cmd = _python_cmd(train_py) + [
+        dump_cmd = _python_cmd() + [
             "--dump-config",
             "--checkpoint-dir",
             str(ckpt_dir),
@@ -261,6 +280,7 @@ def main_run(args) -> int:
         dump_r = subprocess.run(
             dump_cmd,
             cwd=REPO_ROOT,
+            env=_child_env(),
             capture_output=True,
             text=True,
         )
@@ -297,11 +317,11 @@ def main_run(args) -> int:
                        check=True,
                        capture_output=True)
 
-        if any(f.startswith("src/c_env/") for f in changed_files):
+        if any(f.startswith("src/cs2rl/c_env/") for f in changed_files):
             exp_lib.write_status(run_dir, "building")
             zig_r = subprocess.run(
                 ["uv", "run", "--no-sync", "zig", "build"],
-                cwd=REPO_ROOT / "src" / "c_env",
+                cwd=REPO_ROOT / "src" / "cs2rl" / "c_env",
                 capture_output=True,
                 text=True,
             )
@@ -343,7 +363,7 @@ def main_run(args) -> int:
         # resolve_run_name's double-prefix logic inside train.py.
         exp_lib.write_status(run_dir, "training")
         train_log = run_dir / "train.log"
-        train_cmd = _python_cmd(train_py) + [
+        train_cmd = _python_cmd() + [
             "--train",
             "--timesteps",
             str(args.timesteps),
@@ -358,6 +378,7 @@ def main_run(args) -> int:
             train_r = subprocess.run(
                 train_cmd,
                 cwd=REPO_ROOT,
+                env=_child_env(),
                 stdout=logf,
                 stderr=subprocess.STDOUT,
             )

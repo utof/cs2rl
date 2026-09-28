@@ -29,12 +29,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 import gen_bc_demos                    # noqa: E402
 
-import train_bc                        # noqa: E402
+from cs2rl import train_bc
 
 torch = pytest.importorskip("torch")
 
@@ -172,7 +171,7 @@ def test_greedy_action_respects_the_c_action_masks(demo_dir):
     unmasked greedy action would have chosen: the masked call must return a
     different bin for that head, and it must be one the mask allows.
     """
-    from _action_spec import ACTION_HEAD_SIZES
+    from cs2rl._action_spec import ACTION_HEAD_SIZES
     policy = train_bc.build_bc_policy(device="cpu", seed=0)
     obs_row = np.load(sorted(Path(demo_dir).glob("*.npz"))[0])["obs"][0].astype(np.float32)
 

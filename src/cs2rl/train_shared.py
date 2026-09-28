@@ -4,7 +4,7 @@ WHAT: the symbols both ``train.py`` and the modules carved out of it
 (``resume_state.py``, ``train_config.py``, ...) need. Moved here VERBATIM from
 train.py by the 2026-08-31 post-rung1a refactor: no renames, no signature
 changes, no behaviour change. ``train.py`` re-exports every name below (see its
-``__all__``), so the existing ``from train import X`` call sites — tests,
+``__all__``), so the existing ``from cs2rl.train import X`` call sites — tests,
 scripts and src/ siblings alike — keep working unchanged.
 
 WHY a leaf: this module imports NOTHING from train.py or from any other module
@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-from _action_spec import ACTION_HEAD_SIZES
+from cs2rl._action_spec import ACTION_HEAD_SIZES
 
 # Agents per team. A bare literal ON PURPOSE, for the same class of reason as
 # train.py's OBS_DIM: this leaf and train.py must both stay import-light
@@ -45,7 +45,7 @@ TEAM_SIZE = 5
 # floors entropy without flooding the policy with noise; tanh+max_turn_speed
 # clamp dominates the per-tick range regardless of σ. σ_max = 0.5 rad ≈ 28.6°
 # — symmetric bound prevents explosion that would mask μ.
-# Module-level so tests can `import train; train.LOG_STD_MIN` without poking
+# Module-level so tests can `from cs2rl import train; train.LOG_STD_MIN` without poking
 # at the inner Dust2Policy class. Used in build_policy() forward paths and
 # in the max_entropy calc that drives the SAC-α dual loop.
 LOG_STD_INIT = math.log(0.1)
@@ -188,7 +188,7 @@ RESUME_CONFIG_ALLOWLIST = frozenset(
 # callers without the flag) — two literals drifted once (final review #7).
 DEFAULT_CHECKPOINT_INTERVAL = 200
 # Trainer attrs of the warm-start entropy machine + SAC target (all set in
-# Cs2PuffeRL._init_return_norm, src/trainer.py). Plain Python scalars/None — pickled as-is.
+# Cs2PuffeRL._init_return_norm, src/cs2rl/trainer.py). Plain Python scalars/None — pickled as-is.
 _WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
                     "_batch1_log_alpha_reset_done", "_batch1_current_target_entropy",
                     "_batch1_warmstart_h_anchor", "_batch1_warmstart_h0",
@@ -272,9 +272,9 @@ def pin_pitch_for_map(map_data, *, build_vis: bool = True) -> int:
     md = map_data
     if md is None:
         # Same cache key make_env uses, so train() never loads the nav twice.
-        import nav
-        from c_env.cs2_env import _ENV_CACHE
-        from map import make_cs2_map
+        from cs2rl import nav
+        from cs2rl.c_env.cs2_env import _ENV_CACHE
+        from cs2rl.map import make_cs2_map
         key = (nav.NAV_PATH, nav.CACHE_PATH)
         md = _ENV_CACHE.get(key)
         if md is None:

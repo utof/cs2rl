@@ -35,11 +35,9 @@ project-includes = ["src", "scripts", "tests", "deploy", "setup.py"]
 # here is what makes the frozen count reproducible off the hook path.
 python-version = "3.12"
 
-# Import roots. This repo has no single package root: modules are imported bare
-# from src/ (`import train`), from src/c_env/ (`import binding`), and from
-# scripts/, tests/ and deploy/ by their own basenames.
-search-path = ["src", "src/c_env", "scripts", "tests", "deploy", "."]
+search-path = ["src", "scripts", "tests", "deploy", "."]
 
-# `binding` is a compiled C extension (binding.cpython-312-*.so) with no stub.
-# No static checker can introspect a .so; treat it as Any rather than an error.
-ignore-missing-imports = ["binding"]
+# `cs2rl.c_env.binding` is a compiled C extension (binding.cpython-312-*.so) with
+# no stub. No static checker can introspect a .so; treat it as Any rather than an
+# error.
+ignore-missing-imports = ["cs2rl.c_env.binding"]

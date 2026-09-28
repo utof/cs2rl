@@ -1,4 +1,4 @@
-/* src/c_env/binding.c — Python C API bridge for the Dust2 C environment.
+/* src/cs2rl/c_env/binding.c — Python C API bridge for the Dust2 C environment.
  *
  * Exposes: binding.init(...) -> capsule
  *          binding.reset(capsule)

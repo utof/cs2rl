@@ -10,15 +10,11 @@ criterion-4 tests pin Python's unexpected-keyword contract after **legacy
 was deleted.
 """
 import inspect
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from c_env.cs2_env import Cs2Env, make_env             # noqa: E402, I001
-from env_config import EnvConfig                       # noqa: E402, I001
+from cs2rl.c_env.cs2_env import Cs2Env, make_env
+from cs2rl.env_config import EnvConfig
 
 
 def test_bare_call_builds_the_default_config(simple_map):

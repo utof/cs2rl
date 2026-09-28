@@ -13,8 +13,13 @@ import numpy as np
 import pytest
 import torch
 
-from _action_spec import ACTION_HEAD_SIZES
-from train import masked_explained_variance, masked_mean, masked_normalize_adv, masked_std_unbiased
+from cs2rl._action_spec import ACTION_HEAD_SIZES
+from cs2rl.train import (
+    masked_explained_variance,
+    masked_mean,
+    masked_normalize_adv,
+    masked_std_unbiased,
+)
 
 
 @pytest.fixture
@@ -68,8 +73,8 @@ def test_pg_loss_masked_equals_participating_subtensor():
     terms → masked mean) must equal _hybrid_ppo_loss run on the participating
     rows alone with mb_part=None. This is the non-obvious claim; helper-level
     tests do not cover it."""
-    from train import _hybrid_ppo_loss
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train import _hybrid_ppo_loss
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=4, n_active_per_team=1)
     try:
         torch.manual_seed(0)
@@ -122,7 +127,7 @@ def test_return_stats_update_on_participating_rows_only():
     """Spec §2.2 (i) for _ret_mean/_ret_var: one _normalize_returns call from the
     zero-count state must leave the running stats equal to the participating
     sub-tensor's mean / population variance (Welford's first update)."""
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=4, n_active_per_team=1)
     try:
         torch.manual_seed(1)
@@ -139,7 +144,7 @@ def test_return_stats_update_on_participating_rows_only():
 
 
 def test_harness_n_active_1_masks_four_fifths_of_rows():
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=16, n_active_per_team=1)
     try:
@@ -173,7 +178,7 @@ def test_twenty_update_ratio_identity_n_active_1():
     updates (±5%; per-update σ≈4.6% from the hypergeometric minibatch draw, ≈1.0% over
     the mean). Preconditions are load-bearing: prioritised sampling or any event
     segment would sample parked segments non-uniformly and break the identity."""
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=16,
                                                n_active_per_team=1,
                                                aim_entropy_bonus=False)
@@ -216,7 +221,7 @@ def test_build_participating_rows_noop_marks_the_hero_team_only():
     train_test_harness) call THIS function, so this test plus the two call
     sites is what makes the harness and production agree by construction.
     """
-    from train import TEAM_SIZE, build_participating_rows
+    from cs2rl.train import TEAM_SIZE, build_participating_rows
 
     n_envs = 3
     self_rows = build_participating_rows(n_envs, 1, "self", "t")
@@ -236,7 +241,7 @@ def test_build_participating_rows_noop_marks_the_hero_team_only():
         ct_hero,
         np.array([TEAM_SIZE <= (i % 10) < TEAM_SIZE + 2 for i in range(n_envs * 10)], dtype=bool))
     # SelfPlayManager starts with CT as the opponent, so the hero is T.
-    from train import SelfPlayManager
+    from cs2rl.train import SelfPlayManager
     assert SelfPlayManager.initial_hero_team() == "t"
     assert SelfPlayManager().opponent_team == "ct"
 
@@ -258,7 +263,8 @@ def test_train_passes_the_resolved_opponent_mode_to_build_participating_rows():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).resolve().parents[1] / "src" / "train.py").read_text())
+    tree = ast.parse(
+        (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train.py").read_text())
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "train")
     calls = [
         c for c in ast.walk(fn) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
@@ -288,7 +294,7 @@ def test_train_passes_the_resolved_opponent_mode_to_build_participating_rows():
 def test_build_participating_rows_refuses_nonsense(bad):
     """Every argument is validated: a silently-wrong participation vector is
     the one failure mode this experiment cannot detect from its metrics."""
-    from train import build_participating_rows
+    from cs2rl.train import build_participating_rows
     kwargs = dict(num_envs=2, n_active=1, opponent_mode="self", hero_team="t")
     kwargs.update(bad)
     with pytest.raises(ValueError):
@@ -304,7 +310,7 @@ def test_opponent_mode_resolution_and_self_play_guard():
     """
     import types
 
-    from train import assert_opponent_self_play_compatible, resolve_opponent_mode
+    from cs2rl.train import assert_opponent_self_play_compatible, resolve_opponent_mode
 
     assert resolve_opponent_mode(types.SimpleNamespace()) == "self"
     assert resolve_opponent_mode(types.SimpleNamespace(opponent="noop")) == "noop"
@@ -330,7 +336,7 @@ def test_noop_budget_doubles_total_timesteps_and_records_the_mode():
     """
     import types
 
-    from train import build_train_config, compute_batch_dims
+    from cs2rl.train import build_train_config, compute_batch_dims
 
     def cfg(**over):
         kwargs = dict(device="cpu",
@@ -381,7 +387,7 @@ def test_noop_opponent_rows_are_statues_excluded_from_global_step():
     agent row (segments == total_agents, ep_indices starts as arange), so
     buffer row i IS agent row i — asserted below rather than assumed.
     """
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=16, n_active_per_team=1, opponent="noop")
     try:
@@ -407,7 +413,7 @@ def test_noop_opponent_rows_are_statues_excluded_from_global_step():
         # statue, element for element — see
         # test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent
         # for why the two definitions have to agree.
-        from eval_baselines import IdleActor
+        from cs2rl.eval_baselines import IdleActor
         _idle_act, _idle_cont = IdleActor().act(None, None, None, None)
         assert trainer.actions.shape[-1] == _idle_act.shape[-1]
         assert trainer.cont_actions.shape[-1] == _idle_cont.shape[-1]
@@ -453,8 +459,8 @@ def test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent():
     test_noop_opponent_rows_are_statues_excluded_from_global_step (which also
     compares the trainer's produced rows to IdleActor's output directly).
     """
-    from c_env.cs2_env import N_AGENTS
-    from eval_baselines import ACTION_DIM, AIM_DIM, IdleActor
+    from cs2rl.c_env.cs2_env import N_AGENTS
+    from cs2rl.eval_baselines import ACTION_DIM, AIM_DIM, IdleActor
 
     statue = IdleActor()
     act, cont = statue.act(None, None, None, None)
@@ -474,6 +480,6 @@ def test_harness_refuses_noop_with_selfplay():
     """The harness mirrors train()'s startup guard, so no test can construct a
     trainer in a configuration production refuses (a past-policy opponent is
     not a statue, and maybe_switch_teams would move the statue's team)."""
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     with pytest.raises(ValueError, match="no-self-play"):
         _build_trainer_for_test(num_envs=4, opponent="noop", with_selfplay=True)

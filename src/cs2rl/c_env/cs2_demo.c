@@ -140,7 +140,7 @@ static void absolutize_policy(const char* path, char* out, size_t n) {
     join_path(out, n, cwd, path);
 }
 
-/* Walk up from the binary dir for pyproject.toml + src/play.py. */
+/* Walk up from the binary dir for pyproject.toml + src/cs2rl/play.py. */
 static int find_repo(char* out, size_t n) {
     const char* app = play_host_app_dir();
     if (!app || !app[0])
@@ -153,7 +153,7 @@ static int find_repo(char* out, size_t n) {
     for (;;) {
         char toml[PATH_MAX], play[PATH_MAX];
         join_path(toml, sizeof(toml), cur, "pyproject.toml");
-        join_path(play, sizeof(play), cur, "src/play.py");
+        join_path(play, sizeof(play), cur, "src/cs2rl/play.py");
         if (path_exists(toml) && path_exists(play)) {
             snprintf(out, n, "%s", cur);
             return 1;
@@ -194,7 +194,7 @@ static int resolve_python(const char* repo, char* out, size_t n) {
 }
 
 static void print_borrow_hint(const char* abs_policy, int argc, char** argv) {
-    fprintf(stderr, "cs2_demo: $PYTHON src/play.py --policy %s", abs_policy);
+    fprintf(stderr, "cs2_demo: $PYTHON -m cs2rl.play --policy %s", abs_policy);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
             i++;
@@ -237,10 +237,12 @@ static int demo_exec_play(int argc, char** argv, const char* policy_path) {
     }
     join_path(abs_python, sizeof(abs_python), abs_parent, base + 1);
 
-    char* eargv[argc + 5]; /* python, src/play.py, --policy, abs, rest, NULL */
+    /* python, -m, cs2rl.play, --policy, abs: 5; rest: at most argc - 1; NULL: 1. */
+    char* eargv[argc + 5];
     int   n    = 0;
     eargv[n++] = abs_python;
-    eargv[n++] = "src/play.py";
+    eargv[n++] = "-m";
+    eargv[n++] = "cs2rl.play";
     eargv[n++] = "--policy";
     eargv[n++] = abs_policy;
     for (int i = 1; i < argc; i++) {
@@ -253,6 +255,20 @@ static int demo_exec_play(int argc, char** argv, const char* policy_path) {
     eargv[n] = NULL;
 
     if (chdir(repo) != 0) {
+        print_borrow_hint(abs_policy, argc, argv);
+        return 2;
+    }
+    /* `-m cs2rl.play` finds cs2rl through sys.path, and a shared venv's editable
+     * install names ONE checkout's src/. Prepend this repo's src/ to PYTHONPATH
+     * (never replace it) so the demo runs the checkout it was found in. */
+    const char* old_pp = getenv("PYTHONPATH");
+    size_t      pp_len = strlen(repo) + sizeof("/src:") + (old_pp ? strlen(old_pp) : 0);
+    char        pypath[pp_len];
+    if (old_pp && old_pp[0])
+        snprintf(pypath, pp_len, "%s/src:%s", repo, old_pp);
+    else
+        snprintf(pypath, pp_len, "%s/src", repo);
+    if (setenv("PYTHONPATH", pypath, 1) != 0) {
         print_borrow_hint(abs_policy, argc, argv);
         return 2;
     }
@@ -269,7 +285,7 @@ int main(int argc, char** argv) {
      * both work. Unknown args are silently ignored (keeps backward compat with
      * existing scripts that pass --record, --eval, etc. to the trainer demo).
      *
-     *   --policy PATH : exec src/play.py (never open a window here).
+     *   --policy PATH : exec `python -m cs2rl.play` (never open a window here).
      *   --spectate : detach camera from any agent (free-fly, render all).
      *   --fog      : human-agent fog-of-war — only draw enemies your agent's
      *                line_of_sight_2d says are visible. Forces you to play

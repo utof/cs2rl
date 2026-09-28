@@ -91,7 +91,7 @@ def _prepared_source(tmp_path: Path, **overrides) -> core.PreparedSource:
             "PATH": "/usr/bin",
             "OMP_NUM_THREADS": "1"
         },
-        train_command=["/opt/cs2rl/.venv/bin/python", "src/train.py", "--train"],
+        train_command=["/opt/cs2rl/.venv/bin/python", "-m", "cs2rl.train", "--train"],
         heartbeat=None,
         config_hash="d" * 64,
     )

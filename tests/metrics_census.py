@@ -3,7 +3,7 @@
 WHAT: a no-import, source-only extractor. Given the NAMED island of emitter
 functions (``EMITTER_SITES``) it returns, for every metrics key those functions
 write, the key itself plus the *shape* of the write — which is what
-``src/metrics_schema.py``'s declared ``aggregation`` is checked against in
+``src/cs2rl/metrics_schema.py``'s declared ``aggregation`` is checked against in
 tests/test_metrics_schema.py.
 
 WHY AST and not import-and-run: the emitters are gated on flags
@@ -64,11 +64,13 @@ from pathlib import Path
 from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC = REPO_ROOT / "src"
+# The package root: every EMITTER_SITES / NON_ISLAND_WRITES path below is relative to it,
+# and the sweep walks it. src/ holds nothing else first-party.
+SRC = REPO_ROOT / "src" / "cs2rl"
 
 # ── The named emitter island ──────────────────────────────────────────────
 #
-# (relative path under src/, qualname, container names that hold metrics keys,
+# (relative path under src/cs2rl/, qualname, container names that hold metrics keys,
 #  prefix applied to slash-free keys).
 #
 # The prefix column is the difference between a key as WRITTEN and the key as it
@@ -98,7 +100,7 @@ class EmitterSite(NamedTuple):
     containers: dict                   # container expression -> key prefix
 
 
-# gh#168 W2a: the return-norm train body is `Cs2PuffeRL.train` (src/trainer.py); its
+# gh#168 W2a: the return-norm train body is `Cs2PuffeRL.train` (src/cs2rl/trainer.py); its
 # `trainer._tag_metrics` container became `self._tag_metrics` with the trainer->self
 # rename. The site's key multiset is pinned identical across the move (ledger W2a, O6).
 EMITTER_SITES = (
@@ -138,7 +140,7 @@ EMITTER_SITES = (
 
 
 class NonIslandWrite(NamedTuple):
-    path: str                          # relative to src/
+    path: str                          # relative to src/cs2rl/
     qualname: str                      # "" = the whole file, including module scope
     reason: str
 
@@ -989,7 +991,7 @@ def census():
 
 
 class MetricsWrite(NamedTuple):
-    path: str                          # relative to src/
+    path: str                          # relative to src/cs2rl/
     qualname: str                      # enclosing def/class chain; "" at module scope
     container: str                     # write target's container expr; "" for a bare dict literal
     key: str                           # the key literal, f-string placeholders as `*`

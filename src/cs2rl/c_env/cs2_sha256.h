@@ -1,4 +1,4 @@
-/* src/c_env/cs2_sha256.h — minimal SHA-256, for the StaticData layout hash only.
+/* src/cs2rl/c_env/cs2_sha256.h — minimal SHA-256, for the StaticData layout hash only.
  *
  * WHAT: FIPS 180-4 SHA-256 over a byte stream, streaming API (init/update/final).
  *       `cs2_sha256_final_hex` writes 64 lowercase hex chars + NUL.

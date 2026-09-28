@@ -1,7 +1,7 @@
 # MANIFEST.in — files to include in source distributions (sdist / pip install from source).
 # Without these, setuptools SOURCES.txt only discovers .py files, so `zig build` fails
 # when building from a source tarball or git archive.
-include src/c_env/build.zig
-include src/c_env/build.zig.zon
-include src/c_env/binding.c
-recursive-include src/c_env *.h
+include src/cs2rl/c_env/build.zig
+include src/cs2rl/c_env/build.zig.zon
+include src/cs2rl/c_env/binding.c
+recursive-include src/cs2rl/c_env *.h

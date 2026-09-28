@@ -1,6 +1,6 @@
 """Bit-exact equivalence between the old per-scalar reward loop and the batched one.
 
-The rollout in src/train.py used to build three single-scalar CUDA tensors per
+The rollout in src/cs2rl/train.py used to build three single-scalar CUDA tensors per
 env per tick to normalise the reward channels. process_step_rewards() batches
 that into one host-to-device copy + one symlog. Training values must not move by
 a single ULP, so `_reference_loop` below is a verbatim transcription of the old
@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import torch
 
-from train_helpers_batch1 import (
+from cs2rl.train_helpers_batch1 import (
     WelfordStd,
     process_step_rewards,
     split_into_channels,
@@ -72,7 +72,7 @@ def _new_welfords():
 
 
 def _reference_loop(info, r, agents_per_env, wc, wo, wp, event=None):
-    """Verbatim transcription of the pre-batching inline loop in src/train.py."""
+    """Verbatim transcription of the pre-batching inline loop in src/cs2rl/train.py."""
     dev = r.device
     r_new = torch.empty_like(r)
     for e in range(len(info)):

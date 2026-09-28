@@ -38,8 +38,8 @@ from collections import deque
 
 import numpy as np
 
-from _action_spec import AIM_DIM
-from nav import ACTION_DIM, MAX_TURN_SPEED_RAD, N_AGENTS, ROUND_TIME
+from cs2rl._action_spec import AIM_DIM
+from cs2rl.nav import ACTION_DIM, MAX_TURN_SPEED_RAD, N_AGENTS, ROUND_TIME
 
 HEAD_MOVE = 0                          # discrete head order: move=0 shoot=1 reload=2 weapon=3 use=4 crouch=5 jump=6
 HEAD_USE = 4
@@ -71,7 +71,7 @@ def _id_to_idx(map_data) -> dict:
 
     GOTCHA this mapping exists to absorb: simple maps have area_id == index
     (area_ids = arange(N)), but de_dust2's NavGraph uses sparse real ids.
-    MapData.area_ids/centroids are filled for BOTH map types (src/map.py), so
+    MapData.area_ids/centroids are filled for BOTH map types (src/cs2rl/map.py), so
     deriving the mapping here works uniformly and nothing in this module may
     touch env.nav_graph."""
     return {int(aid): i for i, aid in enumerate(map_data.area_ids)}

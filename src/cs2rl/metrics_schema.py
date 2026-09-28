@@ -15,11 +15,11 @@ directions — an unregistered key fails, and a registered key nothing emits fai
 too. A registry that could only be wrong by omission would be a docstring again.
 
 WHY THIS MODULE MUST STAY IMPORT-LIGHT (spec §2 W1, guarded by
-`tests/test_w1_modules.py`): `EVAL_KEYS` used to live in `src/eval_baselines.py`,
+`tests/test_w1_modules.py`): `EVAL_KEYS` used to live in `src/cs2rl/eval_baselines.py`,
 which imports torch and `c_env.cs2_env` at module scope. Any consumer that wanted
 those eight strings — including this registry — paid ~30 s of torch import for a
 tuple of strings. So the ownership is INVERTED: `EVAL_KEYS` lives here and
-`eval_baselines` does `from metrics_schema import EVAL_KEYS` (never the reverse;
+`eval_baselines` does `from cs2rl.metrics_schema import EVAL_KEYS` (never the reverse;
 that direction is what the import-lightness test exists to catch). The only
 import in this module's scope is `_action_spec`, itself nothing but literals
 auto-generated from `cs2_types.h`.
@@ -72,7 +72,7 @@ literals instead. Their ROW LOADER (`scripts/analyze_tplant.py`, plus
 """
 from typing import NamedTuple
 
-from _action_spec import ACTION_HEAD_NAMES
+from cs2rl._action_spec import ACTION_HEAD_NAMES
 
 # ── Vocabularies ──────────────────────────────────────────────────────────
 #
@@ -181,7 +181,7 @@ def _f(aggregation, units, members=(), consumers=(), notes=""):
 
 # eval/* keys emitted by BaselineEvaluator.evaluate — the analysis contract.
 # Lives HERE, not in eval_baselines: that module imports torch and
-# c_env.cs2_env at module scope, so `from eval_baselines import EVAL_KEYS`
+# c_env.cs2_env at module scope, so `from cs2rl.eval_baselines import EVAL_KEYS`
 # would make a tuple of 8 strings cost a torch import. eval_baselines imports
 # it back and re-exports it for existing consumers.
 EVAL_KEYS = (

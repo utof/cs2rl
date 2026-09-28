@@ -2,10 +2,10 @@
 """CS2 RL Sim — training entry point.
 
 Usage:
-  python src/train.py --smoke       # sanity check: 20k native-env steps, no crash, print steps/sec
-  python src/train.py --train       # full PPO self-play training (PufferLib 3.0)
-  python src/train.py --record      # run 1 episode, save rerun recording (random policy)
-  python src/train.py --eval        # evaluate a checkpoint across many seeds
+  python -m cs2rl.train --smoke     # sanity check: 20k native-env steps, no crash, print steps/sec
+  python -m cs2rl.train --train     # full PPO self-play training (PufferLib 3.0)
+  python -m cs2rl.train --record    # run 1 episode, save rerun recording (random policy)
+  python -m cs2rl.train --eval      # evaluate a checkpoint across many seeds
 """
 
 import os
@@ -37,16 +37,16 @@ import numpy as np
 # ruff reports I001 forever. Second gh#97 trap: a suppression directive must END its
 # line — trailing prose after its code list makes the directive malformed and inert
 # (and ruff then parses the prose as rule codes, warning on every invocation).
-from _action_spec import (
+from cs2rl._action_spec import (
     ACTION_HEAD_NAMES,
     ACTION_HEAD_SIZES,
     ACTION_MASK_DIM,
     AIM_DIM,
 )
-from env_config import EnvConfig, RewardWeights
-from env_factory import build_env_for, build_selfplay_manager
-from paths import CHECKPOINTS_DIR, RECORDINGS_DIR
-from resume_state import (
+from cs2rl.env_config import EnvConfig, RewardWeights
+from cs2rl.env_factory import build_env_for, build_selfplay_manager
+from cs2rl.paths import CHECKPOINTS_DIR, RECORDINGS_DIR
+from cs2rl.resume_state import (
     _rng_load_state_dict,
     _rng_state_dict,
     check_checkpoint_set,
@@ -58,7 +58,7 @@ from resume_state import (
     restore_train_state,
     seed_everything,
 )
-from train_config import (
+from cs2rl.train_config import (
     OPPONENT_MODES,
     assert_opponent_self_play_compatible,
     build_participating_rows,
@@ -68,7 +68,7 @@ from train_config import (
     resolve_opponent_mode,
     validate_aim_log_std_max,
 )
-from train_metrics import (
+from cs2rl.train_metrics import (
     ScheduledEval,
     _inject_tag_metrics,
     compute_game_metrics,
@@ -77,7 +77,7 @@ from train_metrics import (
     compute_trunk_divergence,
     log_aim_log_std,
 )
-from train_shared import (
+from cs2rl.train_shared import (
     _LOG_2PI,
     _MASK_HEAD_SLICES,
     _R0G_KNOBS,
@@ -97,7 +97,7 @@ from train_shared import (
     resolve_aim_log_std_init,
     resolve_gammas,
 )
-from train_update import (
+from cs2rl.train_update import (
     _aim_dim_weight,
     _hybrid_ppo_loss,
     _scheduled_target_entropy,
@@ -111,14 +111,14 @@ from train_update import (
 
 # Explicit re-export marker: naming a symbol here is what tells ruff that an
 # otherwise-unused import is intentional. A trailing per-line F401 suppression cannot
-# be used instead, for the formatter reason above. Nothing does `from train import *`,
+# be used instead, for the formatter reason above. Nothing does `from cs2rl.train import *`,
 # so this tuple has no star-import effect on any caller: it is a lint marker AND the
 # inventory of what `train` re-exports.
 #
 # The five `from train_shared/resume_state/train_config/train_metrics/train_update
 # import` blocks above are SHIMS (post-rung1a refactor, 2026-08-31): those symbols are
 # now DEFINED in the split-out modules and re-exported here so the existing
-# `from train import X` call sites in tests/, scripts/ and src/ keep working without
+# `from cs2rl.train import X` call sites in tests/, scripts/ and src/ keep working without
 # being rewritten (rewriting them is a separate, mechanical branch — spec §4).
 # A SHIM IS NOT A PATCH POINT: `monkeypatch.setattr(train, "<name>", ...)` on any name
 # below rebinds only train's own reference. Call sites inside the defining module
@@ -138,8 +138,8 @@ from train_update import (
 # longer cites it.
 # Every one of those sits BELOW this block, so moving the shims below the
 # __main__ block breaks every real launch — and ONLY a real launch, now that no
-# read is left outside it. Measured by doing it: `import train` still succeeds,
-# while `python src/train.py --help` dies in its own argparse setup with
+# read is left outside it. Measured by doing it: `from cs2rl import train` still succeeds,
+# while `python -m cs2rl.train --help` dies in its own argparse setup with
 # `NameError: name 'DEFAULT_CHECKPOINT_INTERVAL' is not defined`. The SUITE DOES
 # catch that, so this comment is not standing in for a missing test: 25 tests go
 # red under exactly that move (measured 2026-09-04, whole suite, -p no:randomly),
@@ -945,10 +945,10 @@ def record_episode(
         save_path=str(RECORDINGS_DIR / "latest.rrd"),
         map_data=None,
 ):
-    from c_env.cs2_env import make_env as make_c_env
-    from map import make_cs2_map
-    from nav import CACHE_PATH, NAV_PATH
-    from viz import init_recording, log_navmesh, log_tick, log_trimap
+    from cs2rl.c_env.cs2_env import make_env as make_c_env
+    from cs2rl.map import make_cs2_map
+    from cs2rl.nav import CACHE_PATH, NAV_PATH
+    from cs2rl.viz import init_recording, log_navmesh, log_tick, log_trimap
 
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -961,7 +961,7 @@ def record_episode(
         log_trimap()
         log_navmesh(md.nav_graph)
     else:
-        from viz import log_simple_map
+        from cs2rl.viz import log_simple_map
 
         log_simple_map(env.map_data)
 
@@ -1920,9 +1920,9 @@ def build_map_data(name: str):
     if name == "dust2":
         return None
     if name == "arena-duel":
-        from map import make_arena_duel_map
+        from cs2rl.map import make_arena_duel_map
         return make_arena_duel_map()
-    from map import make_simple_map
+    from cs2rl.map import make_simple_map
     return make_simple_map()
 
 
@@ -1971,7 +1971,7 @@ def resolve_pin_pitch(args, verbose: bool = True, build_vis: bool = True) -> int
     PITFALL: args.map_data is None for `--map dust2`/`--dust2`; the helper
     LOADS the map (cached). main() calls this ABOVE the --dump-config exit on
     purpose — the Modal fingerprint dump must carry the geometry-resolved value
-    (costs ~1 s for dust2 from the nav cache, ~0.8 s for `import map`). train()
+    (costs ~1 s for dust2 from the nav cache, ~0.8 s for `from cs2rl import map`). train()
     calls it again as a cache-safe cross-check for programmatic callers (second
     call is silent, see `verbose`). verbose=False for the train() cross-check
     so the value is printed once per launch. main() passes build_vis=False for
@@ -2270,7 +2270,7 @@ def self_play_used_past_metric(trainer) -> float:
 
     WHAT: expose whether this epoch's evaluate() rollout used a past-policy
       opponent (`trainer._selfplay_used_past`, set in
-      `Cs2PuffeRL.evaluate`, src/trainer.py).
+      `Cs2PuffeRL.evaluate`, src/cs2rl/trainer.py).
     WHY: the persist filter on the outer logs dict drops non-floats, so a
       bool never reaches metrics.jsonl. Callers write the returned float
       onto the outer dict next to self_play/pool_size — never under
@@ -2665,7 +2665,8 @@ def train(args):
     torch.distributions.Distribution.set_default_validate_args(False)
 
     # Load .env from repo root if present (sets WANDB_* vars picked up by wandb)
-    _env_file = Path(__file__).parent.parent / ".env"
+    # This file is <repo>/src/cs2rl/train.py, so the repo root is parents[2].
+    _env_file = Path(__file__).parents[2] / ".env"
     if _env_file.exists():
         for _line in _env_file.read_text().splitlines():
             _line = _line.strip()
@@ -2993,9 +2994,9 @@ def train(args):
     # the aim-σ param group, the GC pins) stays below it, because no patch
     # reads it at patch time (spec §W1 table; both byte gates pin this order).
     # Function-local import ON PURPOSE: trainer.py subclasses PuffeRL and so
-    # imports torch at module scope; `import train` must stay torch-free
+    # imports torch at module scope; `from cs2rl import train` must stay torch-free
     # (tests/test_w1_modules.py).
-    from trainer import Cs2PuffeRL, HybridAimVecEnv
+    from cs2rl.trainer import Cs2PuffeRL, HybridAimVecEnv
     vecenv = HybridAimVecEnv(vecenv, _cont_action_view_main)
     trainer = Cs2PuffeRL(train_config,
                          vecenv,
@@ -3091,7 +3092,7 @@ def train(args):
     _eval_hook = None
     _eval_interval = int(getattr(args, "eval_interval", 0) or 0)
     if _eval_interval > 0:
-        from eval_baselines import BaselineEvaluator
+        from cs2rl.eval_baselines import BaselineEvaluator
         # W3 (#154), retyped by #165 PR B2: role eval. `team_spirit=None`, the
         # 10_000_003 seed, the load-bearing `auto_reset=False` AND the
         # raw-reward rule all live in env_factory._build_eval; this site passes
@@ -3302,34 +3303,35 @@ def train(args):
 if __name__ == "__main__":
     # MUST BE THE FIRST STATEMENT IN THIS BLOCK.
     #
-    # WHAT: running `python src/train.py` binds THIS file's module object to the
-    # name "__main__", leaving sys.modules["train"] empty. Any runtime
-    # `from train import ...` then RE-EXECUTES this whole module body under the
-    # name "train", and the process ends up holding two independent copies of it:
-    # two sets of module-level constants, two of every class object, and
+    # WHAT: running `python -m cs2rl.train` binds THIS file's module object to
+    # the name "__main__" (runpy executes it as a script, not as the package
+    # module), leaving sys.modules["cs2rl.train"] empty. Any runtime
+    # `from cs2rl.train import ...` then RE-EXECUTES this whole module body under
+    # the name "cs2rl.train", and the process ends up holding two independent
+    # copies of it: two sets of module-level constants, two of every class object, and
     # `isinstance` between them silently False. eval_baselines does exactly that
     # import, function-locally inside PolicyActor.__init__ and
     # PolicyActor.from_checkpoint, to dodge a circular top-level import — so a
     # plain `--eval-interval N` script run is enough to trigger it.
     #
-    # WHY setdefault and not `=`: under `import train` (the whole test suite,
-    # scripts/, the Modal runner) "train" is already a real, fully-initialised
-    # module and this block is never reached anyway; setdefault keeps the
+    # WHY setdefault and not `=`: under `from cs2rl import train` (the whole test
+    # suite, scripts/, the Modal runner) "cs2rl.train" is already a real,
+    # fully-initialised module and this block is never reached anyway; setdefault keeps the
     # invariant "the first binding wins" true in every launch mode.
     #
     # PITFALL for whoever tests this: an AST pin proves the statement is WRITTEN,
     # not that it does anything, and the §3 determinism gate cannot see it — that
     # gate runs `--no-self-play --eval-interval 0`, precisely the flag set on
-    # which no runtime `from train import` ever fires. The behavioural check is a
-    # child interpreter under `-X importtime`: WITHOUT this line its stderr
-    # carries an `import time: ... | train` line (the second body execution),
+    # which no runtime `from cs2rl.train import` ever fires. The behavioural check
+    # is a child interpreter under `-X importtime`: WITHOUT this line its stderr
+    # carries an `import time: ... | cs2rl.train` line (the second body execution),
     # WITH it none. Do NOT spell that check as
     # `runpy.run_path(..., run_name="__main__")` plus a post-hoc identity assert:
     # run_path swaps sys.modules["__main__"] only for the duration of the call
     # and restores it on return, so the assert compares the alias against the
     # RESTORED __main__ and reports a false failure (measured: False after the
     # call, True inside it).
-    sys.modules.setdefault("train", sys.modules["__main__"])
+    sys.modules.setdefault("cs2rl.train", sys.modules["__main__"])
 
     # The env's own defaults, read from the dataclass that declares them, so the
     # CLI cannot drift from the env (spec 2026-09-03 R11). Bound once here rather
@@ -3626,7 +3628,7 @@ if __name__ == "__main__":
     # The Modal runner fingerprints every launch from --dump-config, so the
     # dump must carry the same env label and the same geometry-resolved
     # pin_pitch the run's own config.json will (Task 9 ruling: the value comes
-    # from the LOADED map, never a name table). Cost: ~0.8 s (`import map`)
+    # from the LOADED map, never a name table). Cost: ~0.8 s (`from cs2rl import map`)
     # for simple/arena, ~1 s for dust2 from the nav cache (pin_pitch_for_map(
     # None) loads it via the same _ENV_CACHE make_env uses, so nothing is
     # loaded twice). PITFALL: `--dump-config --map dust2` (or --dust2)

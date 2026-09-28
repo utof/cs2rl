@@ -19,10 +19,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from map import SIMPLE_ROOMS, make_simple_map
+from cs2rl.map import SIMPLE_ROOMS, make_simple_map
 
 # Pinned on feat/rung1-duel @ 1936393 (before this task) via
-#   UV_NO_SYNC=1 uv run python -c "from map import make_simple_map as m; print(repr(m().bombsite_dist_scale))"
+#   UV_NO_SYNC=1 uv run python -c "from cs2rl.map import make_simple_map as m; print(repr(m().bombsite_dist_scale))"
 SIMPLE_SCALE_BEFORE = 0.2                              # max hop 5.0 → 1/5
                                                        # Same, from make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH): max hop 42 → 1/42.
                                                        # 273 entries were inf pre-change (area-id gaps + unreachable areas).
@@ -58,8 +58,8 @@ def test_no_bombsites_yields_zero_scale_and_inf_array():
 
 
 def test_dust2_scale_bit_identical():
-    import nav
-    from map import make_cs2_map
+    from cs2rl import nav
+    from cs2rl.map import make_cs2_map
 
     if not Path(nav.NAV_PATH).exists():
         pytest.skip("dust2 nav data absent")

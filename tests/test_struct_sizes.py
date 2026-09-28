@@ -19,28 +19,26 @@ new field is unguarded.
 
 import ctypes
 import dataclasses
-import sys
-from pathlib import Path
 
 import pytest
 
-# Repo convention (same two sys.path.insert lines at the top of
-# tests/test_binding.py): `binding` is a C extension living in src/c_env, so
-# that directory must be on sys.path before the import. conftest.py only adds
-# src/. Anchored by name, not by line number — line anchors rot.
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "c_env"))
-# I001 is suppressed, not fixed: yapf snaps these trailing `noqa` comments to its
-# spaces_before_comment stops while ruff's isort wants one space, and the two then
-# fight forever (gh#97; same waiver as tests/test_env_config.py:21).
-import binding                         # noqa: E402, I001
-
-from c_env.cs2_env import (                                                                   # noqa: E402
-    _C_SIZE_KEYS_CHECKED, AgentStateC, Dust2EnvC, GameStateC, StaticDataC, StepStatsC, WallC,
-    WallListC, make_env,
+from cs2rl.c_env import binding
+from cs2rl.c_env.cs2_env import (
+    _C_SIZE_KEYS_CHECKED,
+    AgentStateC,
+    Dust2EnvC,
+    GameStateC,
+    StaticDataC,
+    StepStatsC,
+    WallC,
+    WallListC,
+    make_env,
 )
-from env_config import (                                                                      # noqa: E402
-    KNOB_FIELDS, REWARD_FIELDS, EnvConfig, RewardWeights,
+from cs2rl.env_config import (
+    KNOB_FIELDS,
+    REWARD_FIELDS,
+    EnvConfig,
+    RewardWeights,
 )
 
 
@@ -209,7 +207,7 @@ def _config_from_field_kwargs(kwargs):
 
 
 def test_config_from_field_kwargs_partitions_flat_reward_and_knob_names():
-    from env_config import EnvConfig, RewardWeights
+    from cs2rl.env_config import EnvConfig, RewardWeights
     payload = {"reward_kill": 1.0, "n_active_per_team": 3}
     cfg = _config_from_field_kwargs(payload)
     assert payload == {"reward_kill": 1.0, "n_active_per_team": 3}
@@ -295,7 +293,7 @@ def test_struct_sizes_exposes_team_constants():
     macro, so a drift between nav.TEAM_SIZE and the header would mis-slice every
     per-team reward view in cs2_env.py.
     """
-    from nav import N_AGENTS, TEAM_SIZE
+    from cs2rl.nav import N_AGENTS, TEAM_SIZE
     sizes = binding.struct_sizes()
     assert sizes["TEAM_SIZE"] == 5
     assert sizes["TEAM_SIZE"] == TEAM_SIZE
@@ -358,7 +356,7 @@ def test_static_data_scalars_round_trip(simple_map):
     properly means sentinels, which means kwargs; out of scope here, and
     deliberately not papered over.
     """
-    import nav
+    from cs2rl import nav
 
     # Sequential, not two live envs at once: nothing here needs them to coexist,
     # and one env at a time keeps a failure attributable to a single config.
@@ -370,7 +368,7 @@ def test_static_data_scalars_round_trip(simple_map):
             absent = sorted(name for name in sentinels if name not in sc)
             assert not absent, (
                 f"config {cfg_i}: make_env kwargs with no static_data_scalars() key: {absent}; add "
-                "SD_INT/SD_FLOAT for them in src/c_env/binding.c and rebuild (see "
+                "SD_INT/SD_FLOAT for them in src/cs2rl/c_env/binding.c and rebuild (see "
                 "test_static_data_scalars_covers_every_scalar_field)")
             wrong = {}
             for name, sent in sentinels.items():
@@ -387,7 +385,7 @@ def test_static_data_scalars_round_trip(simple_map):
             assert not wrong, (
                 f"config {cfg_i} ({_BOOL_SENTINEL_CONFIGS[cfg_i]}): sentinel landed in the wrong "
                 "StaticData field — two of the named assignments in the `static_data` mapping in "
-                "Cs2Env.__init__ (src/c_env/cs2_env.py) carry each other's values. "
+                "Cs2Env.__init__ (src/cs2rl/c_env/cs2_env.py) carry each other's values. "
                 f"{{field: (sent, got, whose_sentinel_got_is)}} = {wrong}")
             # R0-G (Task 11): round_time / laser_range / max_turn_speed are now
             # make_env kwargs, so they are in the config and were checked above.
@@ -468,7 +466,7 @@ def test_static_data_scalars_covers_every_scalar_field(simple_map):
     _is_scalar_ctype's docstring.
 
     If this fails: add SD_INT/SD_FLOAT(<field>) to py_static_data_scalars in
-    src/c_env/binding.c, rebuild the .so, and add a value assert for the field to
+    src/cs2rl/c_env/binding.c, rebuild the .so, and add a value assert for the field to
     test_static_data_scalars_round_trip.
 
     PITFALL: a stale .so is the likeliest cause of a surprise failure here — the
@@ -507,11 +505,11 @@ def test_every_ctypes_mirror_is_size_guarded():
     today) is not spuriously demanded, and ctypes.Structure itself is excluded.
 
     If this fails after you added a mirror: add a key to py_struct_sizes() in
-    src/c_env/binding.c and the (key, mirror) pair to _C_SIZE_MIRRORS. Deleting
+    src/cs2rl/c_env/binding.c and the (key, mirror) pair to _C_SIZE_MIRRORS. Deleting
     the mirror is the other valid fix; deleting this assert is not.
     """
-    from c_env import cs2_env
-    from c_env.cs2_env import _C_SIZE_MIRRORS
+    from cs2rl.c_env import cs2_env
+    from cs2rl.c_env.cs2_env import _C_SIZE_MIRRORS
     defined = {
         obj.__name__
         for obj in vars(cs2_env).values() if isinstance(obj, type)

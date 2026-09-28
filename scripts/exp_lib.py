@@ -23,7 +23,7 @@ from pathlib import Path
 def resolve_run_id(tag: str, checkpoints_root: Path) -> str:
     """Return DDMMYY-N-<tag> where N = count of existing dirs with today's prefix.
 
-    Duplicates src/train.py::resolve_run_name so this script doesn't need to
+    Duplicates src/cs2rl/train.py::resolve_run_name so this script doesn't need to
     import the full training stack.
     """
     today_prefix = date.today().strftime("%d%m%y")

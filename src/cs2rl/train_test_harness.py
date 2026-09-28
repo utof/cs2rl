@@ -52,14 +52,14 @@ import types
 # Module level for the same reason as env_factory below: env_config is the
 # stdlib-only leaf of the config graph, so importing it here pulls in nothing
 # and cannot cycle.
-from env_config import EnvConfig
+from cs2rl.env_config import EnvConfig
 
-# Module level, unlike the `from train import ...` block inside the builder:
+# Module level, unlike the `from cs2rl.train import ...` block inside the builder:
 # env_factory's own module scope pulls nothing (torch/nav/c_env stay behind its
 # function-local imports), so importing it here costs nothing and is acyclic.
-# `from ... import build_env_for`, never `import env_factory` — the builder
+# `from ... import build_env_for`, never `from cs2rl import env_factory` — the builder
 # below defines a LOCAL named env_factory, which would shadow the module.
-from env_factory import build_env_for, build_selfplay_manager
+from cs2rl.env_factory import build_env_for, build_selfplay_manager
 
 # The harness's four env-knob defaults are the dataclass's, read once rather
 # than copied. Four literals here would be four more places #165 has to keep in
@@ -126,8 +126,8 @@ def _harness_parts(
     # isolated test runner.
     import pufferlib.vector
 
-    from map import make_simple_map
-    from train import (
+    from cs2rl.map import make_simple_map
+    from cs2rl.train import (
         SelfPlayManager,
         assert_opponent_self_play_compatible,
         build_participating_rows,
@@ -135,7 +135,7 @@ def _harness_parts(
         build_train_config,
         compute_batch_dims,
     )
-    from trainer import HybridAimVecEnv
+    from cs2rl.trainer import HybridAimVecEnv
 
     # Rung 1a T3: mirror of train()'s startup guard. `with_selfplay` is the
     # harness's spelling of "self-play bookkeeping on" (it is what sets
@@ -175,7 +175,7 @@ def _harness_parts(
 
         import numpy as np
 
-        from _action_spec import ACTION_MASK_DIM
+        from cs2rl._action_spec import ACTION_MASK_DIM
 
         # (`from nav import TEAM_SIZE` used to sit in this import block for the
         # participation-row formula below; Rung 1a T3 moved that formula into
@@ -514,7 +514,7 @@ def _build_trainer_for_test(
     # (gh#168 W1) because trainer.py imports train at module scope: this module
     # must never import it at ITS module scope or the two would cycle through
     # tests that import the harness before train.
-    from trainer import Cs2PuffeRL
+    from cs2rl.trainer import Cs2PuffeRL
 
     parts, pins = _harness_parts(
         num_envs=num_envs,

@@ -36,7 +36,7 @@ def _run_train_once(trainer):
 
 
 def _build_ws_trainer(num_envs=32, **ws_overrides):
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=num_envs, with_selfplay=True)
     trainer.config["warmstart_entropy"] = True
     trainer.config["warmstart_alpha_ceiling"] = 0.0
@@ -112,7 +112,7 @@ def test_floor_clamps_effective_alpha_when_mode_off():
     Without this, the GRACE test above would also pass on a build where the floor
     clamp was deleted outright.
     """
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         _force_floor_above_entropy(trainer)
@@ -144,7 +144,7 @@ def test_floor_below_entropy_leaves_alpha_unclamped_when_mode_off():
     -> the mode-off test above red (alpha ~0.1), this one green. The pair pins both
     constant replacements; neither alone does.
     """
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         assert hasattr(trainer, "_entropy_floor"), (
@@ -230,7 +230,7 @@ def test_grace_zero_anchors_on_second_update_and_ramps():
 
 
 def test_mode_off_is_unchanged_behavior():
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         # no warmstart keys at all

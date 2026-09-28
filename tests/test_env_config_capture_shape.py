@@ -40,16 +40,11 @@ genuinely changed. The two cases that actually come up:
   fixture. Find out which builder started sending something different, and why.
 """
 import json
-import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
+from cs2rl.env_config import KNOB_FIELDS, REWARD_FIELDS
 
-# I001 is suppressed, not fixed: the import has to follow the sys.path insert
-# above, and ruff's isort wants it in the block at the top (same waiver as
-# tests/test_env_config.py:21).
-from env_config import KNOB_FIELDS, REWARD_FIELDS      # noqa: E402, I001
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "env_config_pre_165b.json"
 

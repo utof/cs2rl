@@ -91,7 +91,7 @@ MANIFEST = {
         "derive_run_view", "list_run_artifacts", "start_heartbeat_worker", "stop_heartbeat"
     ],
     "commands.py": [
-        "UV_BIN", "TRAIN_SCRIPT", "_PRESERVED_CHILD_ENV_KEYS", "THREAD_CAP_ENV",
+        "UV_BIN", "TRAIN_MODULE", "_PRESERVED_CHILD_ENV_KEYS", "THREAD_CAP_ENV",
         "CUDA_PROBE_SOURCE", "assemble_train_argv", "build_train_argv", "build_dump_config_argv",
         "_is_preserved_child_env_key", "build_child_env", "build_install_command",
         "build_train_command", "build_dump_config_command", "build_cuda_probe_command"

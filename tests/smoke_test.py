@@ -10,8 +10,8 @@ import pytest
 def test_c_env_smoke():
     import glob as _glob
 
-    from c_env.cs2_env import make_env
-    so_files = _glob.glob("src/c_env/binding.cpython-*.so")
+    from cs2rl.c_env.cs2_env import make_env
+    so_files = _glob.glob("src/cs2rl/c_env/binding.cpython-*.so")
     assert so_files, ("binding.cpython-*.so missing — run: "
                       "uv run python setup.py build_ext --inplace")
 
@@ -56,7 +56,7 @@ def test_batch1_smoke_runs_without_nan():
     """
     import math
 
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:

@@ -49,20 +49,20 @@ import math
 import numpy as np
 import torch
 
-from _action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES
-from _obs_spec import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
-from c_env.cs2_env import N_AGENTS, TEAM_SIZE
+from cs2rl._action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES
+from cs2rl._obs_spec import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
+from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
 
 # The eval/* analysis contract, RE-EXPORTED. It used to be DEFINED in this file;
 # W4 moved it to the metrics registry so there is one authority for every key.
 # The direction is load-bearing, not stylistic: this module imports torch and
 # c_env.cs2_env at module scope (just above), so a registry that did
-# `from eval_baselines import EVAL_KEYS` would make a tuple of eight strings cost
+# `from cs2rl.eval_baselines import EVAL_KEYS` would make a tuple of eight strings cost
 # a torch import and break the import-lightness invariant every new module is
 # held to (tests/test_w1_modules.py). metrics_schema imports nothing from src
 # except `_action_spec`, so this edge is acyclic and cheap in the one direction
 # that matters.
-from metrics_schema import EVAL_KEYS   # noqa: F401  (re-export)
+from cs2rl.metrics_schema import EVAL_KEYS             # noqa: F401  (re-export)
 
 HEAD_SIZES = ACTION_HEAD_SIZES                                             # probe name, kept for the vendored code
 OBS_ENEMY_BASE = OBS_BLOCKS["enemy"][0]
@@ -300,7 +300,7 @@ class PolicyActor:
         # training loop hands its own `policy` in; use from_checkpoint for the
         # probe's original load-from-file behaviour. Late import: train.py
         # imports this module, a top-level import would be circular.
-        from train import _hybrid_sample_logits, init_policy_state
+        from cs2rl.train import _hybrid_sample_logits, init_policy_state
         self.torch = torch
         self._sample = _hybrid_sample_logits
         self._init_state = init_policy_state
@@ -340,7 +340,7 @@ class PolicyActor:
         """Probe-style: rebuild from a bare state_dict file. `build_kwargs`
         (aim_log_std_max, pin_pitch) are RUN properties the checkpoint cannot
         tell you — pass the run's values (see load_policy_from_checkpoint)."""
-        from train import load_policy_from_checkpoint
+        from cs2rl.train import load_policy_from_checkpoint
         return cls(load_policy_from_checkpoint(ckpt, device, **build_kwargs), device)
 
 
@@ -590,7 +590,7 @@ def episode_outcome(kills_for: int, kills_against: int) -> float:
 
 
 # EVAL_KEYS — the eval/* keys evaluate() below returns, i.e. the analysis
-# contract — is NOT defined here any more. It lives in src/metrics_schema.py
+# contract — is NOT defined here any more. It lives in src/cs2rl/metrics_schema.py
 # (W4, spec 2026-08-31 §2 W4) and is imported at the top of this file, which
 # re-exports it for existing `eval_baselines.EVAL_KEYS` consumers.
 

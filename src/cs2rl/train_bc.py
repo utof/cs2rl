@@ -8,12 +8,12 @@ state_dict to outputs/checkpoints/bc_warmstart.pt, and then runs the BC-only
 eval gate: greedy rollouts on the demo-generation spawn set, reporting the
 plant rate BEFORE any RL touches the weights.
 
-    uv run python src/train_bc.py                       # train + eval gate
-    uv run python src/train_bc.py --skip-eval           # train only
-    uv run python src/train_bc.py --eval-only <ckpt>    # re-run the gate
+    uv run python -m cs2rl.train_bc                     # train + eval gate
+    uv run python -m cs2rl.train_bc --skip-eval         # train only
+    uv run python -m cs2rl.train_bc --eval-only <ckpt>  # re-run the gate
 
 The checkpoint is consumed with zero extra code by
-    uv run python -m src.train --train --resume outputs/checkpoints/bc_warmstart.pt ...
+    uv run python -m cs2rl.train --train --resume outputs/checkpoints/bc_warmstart.pt ...
 (spec D-8: `--resume` torch.load()s a bare state_dict).
 
 WHY BC MUST TRAIN THROUGH PPO'S FORWARD CONTRACT (read before "simplifying")
@@ -23,9 +23,9 @@ ticks and run the policy STATELESSLY — `policy(x, {})`, i.e. a T=1 sequence
 from a ZERO LSTM state on every tick. That premise is **stale**: it predates
 commit 456c361, which made PPO do true BPTT. Today
 
-  * PPO's rollout (src/train.py `forward_eval`) CARRIES lstm_h/lstm_c from
+  * PPO's rollout (src/cs2rl/train.py `forward_eval`) CARRIES lstm_h/lstm_c from
     tick to tick within an episode, and
-  * PPO's update (src/train.py `Dust2Policy.forward` → `_lstm_bptt`) unrolls a
+  * PPO's update (src/cs2rl/train.py `Dust2Policy.forward` → `_lstm_bptt`) unrolls a
     whole 64-tick segment through the LSTM in one call.
 
 So a stateless clone optimises a function PPO never evaluates. Measured on the
@@ -49,7 +49,7 @@ The fix, and the shape of this file:
     contaminate the hidden states that matter).
   * **The gate is a carried-state rollout.** `rollout_episode(..., carry_state=
     True)` drives the env with `forward_eval` and a persistent state dict,
-    byte-for-byte the loop src/train.py's rollout runs. The stateless number is
+    byte-for-byte the loop src/cs2rl/train.py's rollout runs. The stateless number is
     still printed, clearly labelled as a diagnostic — it is the quantity that
     lied, so it is worth watching, but it is NOT the gate.
 
@@ -106,7 +106,7 @@ PITFALLS (each one cost time; do not "simplify" them away)
 """
 import os
 
-# Match src/train.py: BLAS thread caps must be set before torch/numpy spin up
+# Match src/cs2rl/train.py: BLAS thread caps must be set before torch/numpy spin up
 # their pools, or a CPU BC run oversubscribes every core on this box.
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -115,24 +115,20 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 import argparse                                        # noqa: E402
 import math                                            # noqa: E402
 import subprocess                                      # noqa: E402
-import sys                                             # noqa: E402
 from dataclasses import dataclass, field               # noqa: E402
 from pathlib import Path                               # noqa: E402
 
 import numpy as np                     # noqa: E402
 
-SRC_DIR = Path(__file__).resolve().parent
-if str(SRC_DIR) not in sys.path:       # allows `python src/train_bc.py`
-    sys.path.insert(0, str(SRC_DIR))   # AND `import train_bc` from tests
+# This file is <repo>/src/cs2rl/train_bc.py: parents[2] is the checkout root.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
-REPO_ROOT = SRC_DIR.parent
-
-from _action_spec import ACTION_DIM, ACTION_MASK_DIM, AIM_DIM          # noqa: E402
-from _obs_spec import OBS_BLOCKS, OBS_DIM                              # noqa: E402
-from map import make_simple_map                                        # noqa: E402
-from nav import MAX_TURN_SPEED_RAD, N_AGENTS, ROUND_TIME, TEAM_SIZE    # noqa: E402
-from paths import CHECKPOINTS_DIR                                      # noqa: E402
-from scripted_expert import setup_bomb_carrier                         # noqa: E402
+from cs2rl._action_spec import ACTION_DIM, ACTION_MASK_DIM, AIM_DIM       # noqa: E402
+from cs2rl._obs_spec import OBS_BLOCKS, OBS_DIM                           # noqa: E402
+from cs2rl.map import make_simple_map                                     # noqa: E402
+from cs2rl.nav import MAX_TURN_SPEED_RAD, N_AGENTS, ROUND_TIME, TEAM_SIZE # noqa: E402
+from cs2rl.paths import CHECKPOINTS_DIR                                   # noqa: E402
+from cs2rl.scripted_expert import setup_bomb_carrier                      # noqa: E402
 
 # The map tag every demo must carry. Demos are only meaningful for BC → PPO on
 # the map they were generated on (geometry + per-map obs normalisation), so a
@@ -149,12 +145,12 @@ DEFAULT_CHECKPOINT = Path(CHECKPOINTS_DIR) / "bc_warmstart.pt"
 # check_demo_sha for why we diff this surface instead of comparing shas
 # verbatim.
 DEMO_RELEVANT_PATHS = (
-    "src/c_env",
-    "src/_obs_spec.py",
-    "src/_action_spec.py",
-    "src/map.py",
-    "src/nav.py",
-    "src/scripted_expert.py",
+    "src/cs2rl/c_env",
+    "src/cs2rl/_obs_spec.py",
+    "src/cs2rl/_action_spec.py",
+    "src/cs2rl/map.py",
+    "src/cs2rl/nav.py",
+    "src/cs2rl/scripted_expert.py",
     "scripts/gen_bc_demos.py",
 )
 
@@ -464,7 +460,7 @@ def make_bc_env(seed: int = 0):
     map is mandatory (plan §Target map) — bare make_env() defaults to real
     de_dust2, whose geometry the demos say nothing about.
     """
-    from c_env.cs2_env import make_env as make_c_env
+    from cs2rl.c_env.cs2_env import make_env as make_c_env
     return make_c_env(seed=seed, map_data=make_simple_map(), auto_reset=False)
 
 
@@ -489,7 +485,7 @@ def build_bc_policy(device="cpu", seed: int = 0):
     """
     import torch
 
-    from train import build_policy
+    from cs2rl.train import build_policy
     torch.manual_seed(seed)
     env = make_bc_env(seed=seed)
     try:
@@ -543,7 +539,7 @@ def bc_loss(policy, obs_t, disc_t, cont_t, valid=None, entropy_coef: float = DEF
     """
     import torch
 
-    from train import _hybrid_sample_logits
+    from cs2rl.train import _hybrid_sample_logits
 
     flat_disc = disc_t.reshape(-1, disc_t.shape[-1])
     flat_cont = cont_t.reshape(-1, cont_t.shape[-1])
@@ -670,7 +666,7 @@ def greedy_carrier_action(policy, obs_row, state=None, action_mask=None, device=
     of the module docstring:
       * dict  → `policy.forward_eval(x, state)`, which READS and WRITES
         state["lstm_h"]/["lstm_c"] — the LSTM state is carried tick-to-tick,
-        exactly as src/train.py's rollout does. This is what the gate uses.
+        exactly as src/cs2rl/train.py's rollout does. This is what the gate uses.
       * None  → `policy(x, {})`, a T=1 unroll from ZERO state every tick. Kept
         ONLY as the labelled diagnostic; it is the number that read 1.000 while
         the carried-state truth was 0.200.
@@ -685,7 +681,7 @@ def greedy_carrier_action(policy, obs_row, state=None, action_mask=None, device=
     """
     import torch
 
-    from train import _apply_action_masks
+    from cs2rl.train import _apply_action_masks
 
     with torch.no_grad():
         x = torch.as_tensor(obs_row, dtype=torch.float32, device=device).unsqueeze(0)
@@ -717,7 +713,7 @@ def rollout_episode(policy,
     at all-zero actions — the same frozen-idle world the demos recorded.
 
     `carry_state=True` (the DEFAULT, and what the gate measures) threads one
-    LSTM state dict through the whole episode, which is what src/train.py's
+    LSTM state dict through the whole episode, which is what src/cs2rl/train.py's
     rollout does and therefore what PPO inherits. `carry_state=False` resets to
     zero state every tick; it exists only to print the historical stateless
     diagnostic alongside the real number. Never gate on the False variant.
@@ -927,7 +923,7 @@ def main(argv=None):
 
     if args.eval_only is not None:
         policy = build_bc_policy(device=args.device, seed=args.seed)
-        # weights_only=True matches src/train.py's load sites: a checkpoint is
+        # weights_only=True matches src/cs2rl/train.py's load sites: a checkpoint is
         # data, and unpickling arbitrary objects out of one is a code-execution
         # surface we have no reason to keep open.
         policy.load_state_dict(

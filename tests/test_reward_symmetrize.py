@@ -13,12 +13,12 @@ auto_reset=True — pinned below).
 import numpy as np
 import pytest
 
-from _action_spec import (             # definition site — nav/train only re-export, and importing train drags torch into a numpy-only test
+from cs2rl._action_spec import (       # definition site — nav/train only re-export, and importing train drags torch into a numpy-only test
     ACTION_DIM, ACTION_HEAD_SIZES,
 )
-from c_env.cs2_env import make_env, symmetrize_rewards
-from env_config import EnvConfig
-from nav import TEAM_SIZE
+from cs2rl.c_env.cs2_env import make_env, symmetrize_rewards
+from cs2rl.env_config import EnvConfig
+from cs2rl.nav import TEAM_SIZE
 
 
 def _expected(raw):
@@ -124,7 +124,7 @@ def _twin_episode_check(n_steps=900, seed=1234, team_spirit=0.0):
 @pytest.mark.parametrize("team_spirit", [0.0, 0.3])
 def test_symmetrization_holds_every_tick_including_terminals(team_spirit):
     # 0.0 = make_env default; 0.3 = the value training actually uses
-    # (src/train.py team_spirit config) — review finding 2.
+    # (src/cs2rl/train.py team_spirit config) — review finding 2.
     assert _twin_episode_check(team_spirit=team_spirit), (
         "no terminal tick with a win bonus was observed in 900 steps — the "
         "terminal case (spec §6.4) went unexercised; raise n_steps")
@@ -171,7 +171,7 @@ def test_symmetrization_holds_on_the_external_buffer_vecenv_path():
 
     import pufferlib.vector
 
-    import train
+    from cs2rl import train
 
     def _make(symmetrize):
         factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3),
@@ -216,8 +216,8 @@ def test_symmetrization_holds_on_the_external_buffer_vecenv_path():
 
 
 def test_make_env_threads_the_flag():
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
     env = make_env(seed=5, config=EnvConfig(reward_symmetrize=True))
     try:
         assert env._reward_symmetrize is True
@@ -228,7 +228,7 @@ def test_make_env_threads_the_flag():
 def test_env_factory_threads_the_flag():
     import multiprocessing as mp
 
-    import train
+    from cs2rl import train
     factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3),
                                       map_data=None,
                                       config=EnvConfig(reward_symmetrize=True))

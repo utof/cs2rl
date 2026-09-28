@@ -21,21 +21,22 @@ policy's LSTM state and the ``_batch1_*`` reward state, and ``evaluate`` is a me
 
 WHY a module of its own and not a class inside train.py: this module subclasses
 ``PuffeRL``, so it imports torch and pufferlib at module scope and is HEAVY by
-construction. ``import train`` must stay torch-free (tests/test_w1_modules.py: it is what
+construction. ``from cs2rl import train`` must stay torch-free (tests/test_w1_modules.py: it is what
 keeps ``--dump-config`` at ~1 s), so train.py imports this module function-locally, inside
 ``train()``. train_test_harness.py (gh#168 W1.5) imports it the same way, function-locally
-inside ``_build_trainer_for_test``, so ``import train_test_harness`` stays as light as
-``import train``; tests/test_trainer_composition.py imports it inside a fixture. Never add
-``from trainer import ...`` at train.py's module level (knock-out W1-K3 in the spec:
+inside ``_build_trainer_for_test``, so ``from cs2rl import train_test_harness`` stays as light
+as ``from cs2rl import train``; tests/test_trainer_composition.py imports it inside a fixture. Never add
+``from cs2rl.trainer import ...`` at train.py's module level (knock-out W1-K3 in the spec:
 test_import_train_stays_light_and_really_imports_the_shims goes red: with the import next
 to the other module-level imports it is a circular-import ImportError, after all defs it
 is the guard naming torch).
 
 IMPORT DIRECTION: this module imports ``train`` at module scope; ``train`` imports this
 module only inside ``train()``. That is acyclic at import time: by the time ``train()``
-runs, ``train`` is fully initialised. When src/train.py runs as a script, its main block
-aliases ``sys.modules["train"]`` to ``__main__`` as its first statement, before ``train()``
-is called, so ``from train import ...`` here does not re-execute train.py.
+runs, ``train`` is fully initialised. When train.py runs as ``python -m cs2rl.train``, its
+main block aliases ``sys.modules["cs2rl.train"]`` to ``__main__`` as its first statement,
+before ``train()`` is called, so ``from cs2rl.train import ...`` here does not re-execute
+train.py.
 """
 
 from __future__ import annotations
@@ -61,9 +62,9 @@ import pufferlib.pytorch
 import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
-from _action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
-from resume_state import collect_train_state
-from train import _hybrid_sample_logits
+from cs2rl._action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
+from cs2rl.resume_state import collect_train_state
+from cs2rl.train import _hybrid_sample_logits
 
 # W2a (gh#168): everything train() reads that used to be a function-local import of
 # the patcher, or a global of train_update.py, is a module-level import HERE, of the
@@ -72,15 +73,15 @@ from train import _hybrid_sample_logits
 # on THIS module because the body resolves it through these globals. W2b added
 # `WelfordStd` / `process_step_rewards` (the self-play state and evaluate body) and
 # `_hybrid_sample_logits` above, under the same rule.
-from train_helpers_batch1 import (
+from cs2rl.train_helpers_batch1 import (
     WS_GRACE,
     WS_OFF,
     WelfordStd,
     process_step_rewards,
     warmstart_entropy_state,
 )
-from train_shared import LOG_STD_MAX, _atomic_save_state_dict
-from train_update import (
+from cs2rl.train_shared import LOG_STD_MAX, _atomic_save_state_dict
+from cs2rl.train_update import (
     _hybrid_ppo_loss,
     _scheduled_target_entropy,
     masked_explained_variance,
@@ -158,7 +159,7 @@ class Cs2PuffeRL(PuffeRL):
 
     cont_action_view_main : np.ndarray or None
         Main-process view of the continuous-action shared array. train() allocates it and
-        passes it on BOTH backends (src/train.py builds `_cont_action_view_main` before the
+        passes it on BOTH backends (src/cs2rl/train.py builds `_cont_action_view_main` before the
         vecenv, unconditionally); only the harness passes None.
     mask_view_main : np.ndarray
         Main-process view of the action-mask shared array (F8).
@@ -315,7 +316,7 @@ class Cs2PuffeRL(PuffeRL):
 
     def _init_return_norm(self):
         """Return-normalisation + adaptive-entropy state; was the patch-time body of
-        the return-norm patcher (src/train_update.py) until gh#168 W2a.
+        the return-norm patcher (src/cs2rl/train_update.py) until gh#168 W2a.
 
         WHAT: asserts the BPTT segment invariant (gh#85), creates the Welford running
         stats (``_ret_mean/_ret_var/_ret_count``), the SAC-style ``_log_alpha_tensor`` +
@@ -854,7 +855,7 @@ class Cs2PuffeRL(PuffeRL):
                 self.logprobs[batch_rows, seq_pos] = logprob
                 # Batch 3 (T5): parallel writes for the new buffers allocated
                 # by _init_hybrid_aim. The PPO update (`Cs2PuffeRL.train`
-                # in src/trainer.py, gh#168 W2a:
+                # in src/cs2rl/trainer.py, gh#168 W2a:
                 # `mb_cont_actions = self.cont_actions[idx]` and the two logprob
                 # reads beside it) reads these by the same idx; missing this write would
                 # silently feed zeros to _hybrid_ppo_loss → ratio_c always
@@ -945,7 +946,7 @@ class Cs2PuffeRL(PuffeRL):
 
     def train(self):
         """One PPO update over the rollout buffer; the return-norm patcher's inner train()
-        replacement (src/train_update.py) until gh#168 W2a, moved verbatim.
+        replacement (src/cs2rl/train_update.py) until gh#168 W2a, moved verbatim.
 
         WHAT: return-normalised value targets, the hybrid discrete+continuous PPO loss
         (``_hybrid_ppo_loss``), the SAC-style α dual loop, the warm-start entropy mode,
@@ -954,7 +955,7 @@ class Cs2PuffeRL(PuffeRL):
 
         WHY this replaces ``PuffeRL.train`` outright (it never calls ``super().train``):
         the stock loop cannot unpack the policy's 4-tuple output (see the F11 note in
-        src/train.py::train). The AST oracle in
+        src/cs2rl/train.py::train). The AST oracle in
         .superpowers/sdd/2026-09-24-168-trainer-subclass/ast_oracle.py pins this body
         to the pre-move closure node for node (N1-N5); the byte gates pin the arms the
         2-epoch run executes.

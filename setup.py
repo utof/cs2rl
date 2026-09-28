@@ -5,7 +5,7 @@
 # CMake + MSVC/GCC + vcpkg.
 #
 # Responsibility split:
-#   setup.py  — discovers Python/NumPy headers, finds zig binary, renames output
+#   setup.py  — discovers Python/NumPy headers, finds zig binary, places the output
 #   build.zig — compiles binding.c with the correct flags
 import os
 import shutil
@@ -41,28 +41,22 @@ def _find_zig():
 
 
 class ZigExtension(Extension):
+
     def __init__(self, name, source_dir=""):
         super().__init__(name, sources=[])
         self.source_dir = str(Path(source_dir).resolve())
 
 
 class ZigBuild(build_ext):
+
     def build_extension(self, ext):
-        import numpy  # imported here so it's only required at build time
+        # Imported here so numpy is only required at build time.
+        import numpy
 
-        src     = Path(ext.source_dir)           # src/c_env/ (absolute)
-        out_dir = src                             # .so lands next to C sources
-        lib_dir = Path(self.build_lib).resolve()  # setuptools staging dir
-        lib_dir.mkdir(parents=True, exist_ok=True)
-
-        zig            = _find_zig()
+        src = Path(ext.source_dir)     # src/cs2rl/c_env/ (absolute)
+        zig = _find_zig()
         python_include = sysconfig.get_path("include")
-        numpy_include  = numpy.get_include()
-        # EXT_SUFFIX is the full suffix including SOABI + extension:
-        #   Linux:   .cpython-312-x86_64-linux-gnu.so
-        #   macOS:   .cpython-312-darwin.so
-        #   Windows: .cp312-win_amd64.pyd
-        ext_suffix  = sysconfig.get_config_var("EXT_SUFFIX")
+        numpy_include = numpy.get_include()
         link_python = "true" if sys.platform == "win32" else "false"
 
         subprocess.check_call(
@@ -83,17 +77,21 @@ class ZigBuild(build_ext):
         if not candidates:
             raise RuntimeError(
                 f"zig build produced no binding artifact in {zig_out_lib} or {zig_out_bin}. "
-                "Check zig build output above for errors."
-            )
-        built     = candidates[0]
-        dest_name = f"binding{ext_suffix}"
+                "Check zig build output above for errors.")
 
-        shutil.copy2(built, out_dir / dest_name)
-        shutil.copy2(built, lib_dir / dest_name)
+        # ONE write, to the path setuptools owns for this extension:
+        # build_lib/cs2rl/c_env/binding<EXT_SUFFIX>. Placing it anywhere else is
+        # setuptools' job, not ours: a wheel packs build_lib, and `--inplace` /
+        # an editable install copy it into src/cs2rl/c_env/ afterwards
+        # (build_ext.copy_extensions_to_source). PITFALL: get_ext_fullpath does
+        # not create the directory, and `setup.py build_ext --inplace` runs no
+        # build_py that would, so mkdir it here.
+        dest = Path(self.get_ext_fullpath(ext.name))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(candidates[0], dest)
 
 
 setup(
-    name="cs2rl-env",
-    ext_modules=[ZigExtension("binding", source_dir="src/c_env")],
+    ext_modules=[ZigExtension("cs2rl.c_env.binding", source_dir="src/cs2rl/c_env")],
     cmdclass={"build_ext": ZigBuild},
 )

@@ -18,19 +18,17 @@ def test_pytest_resolves_nvml_from_maintained_distribution():
     assert Path(pynvml.__file__).resolve() == OFFICIAL_MODULE.resolve()
 
 
-def test_src_first_torch_import_uses_maintained_nvml_without_deprecation_warning():
-    """A fresh src-first process catches shadowing and the deprecated import hook."""
+def test_fresh_process_torch_import_uses_maintained_nvml_without_deprecation_warning():
+    """A fresh process run from the repo root catches shadowing and the deprecated import hook."""
     child = subprocess.run(
         [
             sys.executable,
             "-c",
             """
 import json
-import sys
 import warnings
 from pathlib import Path
 
-sys.path.insert(0, "src")
 with warnings.catch_warnings(record=True) as observed:
     warnings.simplefilter("always")
     import torch

@@ -1,4 +1,4 @@
-"""src/metrics_schema.py checked against the SOURCE of every emitter and reader.
+"""src/cs2rl/metrics_schema.py checked against the SOURCE of every emitter and reader.
 
 WHAT is enforced, and why each half exists:
 
@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-# tests/ is NOT on sys.path under this repo's pytest (conftest.py adds only src/,
+# tests/ is NOT on sys.path under this repo's pytest (conftest.py adds nothing,
 # and pytest's own insertion is the rootdir, not the test directory). Inserted
 # here rather than in conftest.py so the extra path stays scoped to the one
 # module that needs it — `metrics_census`, the AST extractor this file checks the
@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import metrics_census as census        # noqa: E402
 
-import metrics_schema as ms            # noqa: E402  (src/ is on sys.path via conftest)
+from cs2rl import metrics_schema as ms                 # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -456,7 +456,7 @@ def test_losses_entropy_family_members_track_the_action_spec():
         f"the per-head entropy loop iterates {source!r}, not ACTION_HEAD_NAMES; "
         "metrics_schema's losses/entropy/* member list is derived from ACTION_HEAD_NAMES "
         "and is now describing a different set of heads")
-    from _action_spec import ACTION_HEAD_NAMES
+    from cs2rl._action_spec import ACTION_HEAD_NAMES
     declared = ms.REGISTRY["losses/entropy/*"].members
     assert tuple(sorted(declared)) == tuple(sorted(f"losses/entropy/{h}"
                                                    for h in ACTION_HEAD_NAMES))
@@ -959,34 +959,38 @@ def test_eval_surface_is_eval_keys_plus_the_two_scheduler_stamps():
 
 def test_eval_baselines_imports_eval_keys_from_here_and_not_the_reverse():
     """The direction is load-bearing, not stylistic: eval_baselines imports torch and
-    c_env.cs2_env at module scope, so `from eval_baselines import EVAL_KEYS` would make
+    c_env.cs2_env at module scope, so `from cs2rl.eval_baselines import EVAL_KEYS` would make
     a tuple of eight strings cost a torch import and break metrics_schema's
     import-lightness (tests/test_w1_modules.py). Checked from SOURCE — importing
     eval_baselines here to compare the objects would pull torch into this test."""
-    tree = ast.parse((REPO_ROOT / "src" / "eval_baselines.py").read_text())
+    tree = ast.parse((REPO_ROOT / "src" / "cs2rl" / "eval_baselines.py").read_text())
     imports_from_schema = any(
-        isinstance(n, ast.ImportFrom) and n.module == "metrics_schema" and any(a.name == "EVAL_KEYS"
-                                                                               for a in n.names)
-        for n in ast.walk(tree))
-    assert imports_from_schema, ("src/eval_baselines.py must do `from metrics_schema import "
-                                 "EVAL_KEYS` — the registry is the single authority")
+        isinstance(n, ast.ImportFrom) and n.module == "cs2rl.metrics_schema" and any(
+            a.name == "EVAL_KEYS" for a in n.names) for n in ast.walk(tree))
+    assert imports_from_schema, (
+        "src/cs2rl/eval_baselines.py must do `from cs2rl.metrics_schema import "
+        "EVAL_KEYS` — the registry is the single authority")
     assigns = [
         n for n in tree.body if isinstance(n, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "EVAL_KEYS" for t in n.targets)
     ]
-    assert not assigns, ("src/eval_baselines.py still assigns EVAL_KEYS — two authorities for "
-                         "the same contract is exactly what the move removed")
+    assert not assigns, (
+        "src/cs2rl/eval_baselines.py still assigns EVAL_KEYS — two authorities for "
+        "the same contract is exactly what the move removed")
 
-    schema_tree = ast.parse((REPO_ROOT / "src" / "metrics_schema.py").read_text())
+    schema_tree = ast.parse((REPO_ROOT / "src" / "cs2rl" / "metrics_schema.py").read_text())
+    # Both spellings of the back edge: the module path, and the package-member form.
     back_edge = [
         n for n in ast.walk(schema_tree)
-        if isinstance(n, ast.ImportFrom) and n.module == "eval_baselines"
+        if isinstance(n, ast.ImportFrom) and (n.module == "cs2rl.eval_baselines" or (
+            n.module == "cs2rl" and any(a.name == "eval_baselines" for a in n.names)))
     ]
-    assert not back_edge, "metrics_schema must never import eval_baselines (torch at its scope)"
+    assert not back_edge, ("metrics_schema must never import cs2rl.eval_baselines (torch at "
+                           "its scope)")
 
 
 def test_metrics_schema_is_in_the_import_lightness_test():
     """Creating a module and adding it to the subprocess guard is ONE task, by spec —
     a module that slips in unguarded is how the invariant dies."""
     from tests.test_w1_modules import W1_MODULES
-    assert "metrics_schema" in W1_MODULES
+    assert "cs2rl.metrics_schema" in W1_MODULES

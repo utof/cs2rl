@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
-"""bake_nav.py — Generate src/c_env/nav_data.h from make_simple_map().
+"""bake_nav.py — Generate src/cs2rl/c_env/nav_data.h from make_simple_map().
 
 Run: uv run python scripts/bake_nav.py
 Re-run whenever map.py or SIMPLE_ROOMS changes.
 """
-import sys
 from pathlib import Path
 
-SRC = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(SRC))
+import numpy as np
 
-import numpy as np                     # noqa: E402
-
-from map import SIMPLE_ROOMS, make_simple_map                                                       # noqa: E402
-from nav import (                                                                                   # noqa: E402
-    _DELTA_VECTORS, _DIR_FACING, BOMB_DEFUSE_TIME, BOMB_PLANT_TIME, BOMB_TIMER, ENEMY_MEMORY_TICKS,
-    FOOTSTEP_RADIUS, GUNSHOT_RADIUS, LASER_DAMAGE, LASER_RANGE, MAX_TURN_SPEED_RAD, ROUND_TIME,
-    SHOOT_COOLDOWN, STALE_MEMORY_TICK,
+from cs2rl.map import SIMPLE_ROOMS, make_simple_map
+from cs2rl.nav import (
+    _DELTA_VECTORS,
+    _DIR_FACING,
+    BOMB_DEFUSE_TIME,
+    BOMB_PLANT_TIME,
+    BOMB_TIMER,
+    ENEMY_MEMORY_TICKS,
+    FOOTSTEP_RADIUS,
+    GUNSHOT_RADIUS,
+    LASER_DAMAGE,
+    LASER_RANGE,
+    MAX_TURN_SPEED_RAD,
+    ROUND_TIME,
+    SHOOT_COOLDOWN,
+    STALE_MEMORY_TICK,
 )
 
 md = make_simple_map()
@@ -129,6 +136,6 @@ lines = [
     _arr_int32(ct_spawns, "NAV_CT_SPAWNS"),
 ]
 
-out = Path(__file__).parent.parent / "src" / "c_env" / "nav_data.h"
+out = Path(__file__).parent.parent / "src" / "cs2rl" / "c_env" / "nav_data.h"
 out.write_text("".join(lines))
 print(f"Written: {out}  (N={md.N}, grid={W}x{H})")

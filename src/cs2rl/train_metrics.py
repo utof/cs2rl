@@ -5,7 +5,7 @@ emitter, the TCT head/trunk divergence probes, the scheduled fixed-baseline eval
 wrapper, the game-metrics dashboard derivation, and the TAG metrics hand-off.
 Moved here VERBATIM by the 2026-08-31 post-rung1a refactor: no renames, no
 signature changes, no behaviour change. ``train.py`` re-exports every name below
-(see its ``__all__``), so existing ``from train import X`` call sites keep
+(see its ``__all__``), so existing ``from cs2rl.train import X`` call sites keep
 working unchanged.
 
 WHY its own module: these are read-only derivations over a dict or a policy —
@@ -18,7 +18,7 @@ lines and their order are pinned by tests/test_kl_break_metrics.py inside
 ``inspect.getsource(train)``, and they guard the key scripts/rung1_gate.py reads;
 keeping definition and call sites together is the lower-risk spelling.
 PufferLib's own ``self.mean_and_log()`` likewise stays out of this module — its
-single call site lives inside ``Cs2PuffeRL.train`` (src/trainer.py, gh#168 W2a).
+single call site lives inside ``Cs2PuffeRL.train`` (src/cs2rl/trainer.py, gh#168 W2a).
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/c_env-free, for the
 reason spelled out in train_shared.py's header. Every torch import below is
@@ -28,7 +28,7 @@ import time
 
 import numpy as np
 
-from train_shared import LOG_STD_MAX, LOG_STD_MIN
+from cs2rl.train_shared import LOG_STD_MAX, LOG_STD_MIN
 
 # ── SECTION: Network Health Monitoring ────────────────────────────────────
 

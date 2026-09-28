@@ -42,7 +42,6 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TRAIN_SCRIPT = REPO_ROOT / "src" / "train.py"
 FIXTURE = Path(__file__).parent / "fixtures" / "dump_config_pre_165.json"
 
 # Bumped if the fixture's own shape changes, so a stale file fails on the tag
@@ -81,8 +80,7 @@ def _require_clean_src():
 def dump(argv, checkpoint_dir) -> dict:
     """Run train.py --dump-config and return its config.json, placeholder applied."""
     r = subprocess.run(
-        [sys.executable,
-         str(TRAIN_SCRIPT), *argv, "--checkpoint-dir",
+        [sys.executable, "-m", "cs2rl.train", *argv, "--checkpoint-dir",
          str(checkpoint_dir)],
         cwd=REPO_ROOT,
         capture_output=True,

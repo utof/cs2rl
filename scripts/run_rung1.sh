@@ -15,7 +15,9 @@
 #                    Unquoted on purpose: word-split into tokens (no spaces in values).
 #   RUNG1_SEEDS      treatment seeds (default "0 1 2 3 4"); "" = none
 #   RUNG1_NEG_SEEDS  negative-control seeds (default "0 1"); "" = none
-#   RUNG1_TRAIN_CMD  command prefix (default "env UV_NO_SYNC=1 uv run python <repo>/src/train.py");
+#   RUNG1_TRAIN_CMD  command prefix (default "env UV_NO_SYNC=1 PYTHONPATH=<repo>/src:$PYTHONPATH
+#                    uv run python -m cs2rl.train": the prepend makes the sweep train THIS
+#                    checkout's cs2rl, not whichever src/ the shared venv's editable install names);
 #                    tests point it at a fake trainer.
 #
 # Per-seed state machine (all decisions are on files, so re-running the script
@@ -62,7 +64,7 @@ if [[ -n "${RUNG1_TRAIN_CMD:-}" ]]; then
   # shellcheck disable=SC2206
   TRAIN=($RUNG1_TRAIN_CMD)
 else
-  TRAIN=(env UV_NO_SYNC=1 uv run python "$REPO/src/train.py")
+  TRAIN=(env UV_NO_SYNC=1 "PYTHONPATH=$REPO/src${PYTHONPATH:+:$PYTHONPATH}" uv run python -m cs2rl.train)
 fi
 SEEDS=${RUNG1_SEEDS-0 1 2 3 4}
 NEG_SEEDS=${RUNG1_NEG_SEEDS-0 1}

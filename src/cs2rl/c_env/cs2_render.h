@@ -37,8 +37,8 @@
 _Static_assert(WALL_HEIGHT == SOLID_WALL_HEIGHT,
                "WALL_HEIGHT drifted from SOLID_WALL_HEIGHT in cs2_solids.h");
 
-/* Demo-juice audio (P0). Voices live in src/c_env/demo_assets/ because
- * src/c_env/resources is a pufferlib symlink in the parent tree (and is
+/* Demo-juice audio (P0). Voices live in src/cs2rl/c_env/demo_assets/ because
+ * src/cs2rl/c_env/resources is a pufferlib symlink in the parent tree (and is
  * gitignored). build.zig copies the WAVs to zig-out/bin/resources/. */
 #define DEMO_VOICE_SHOT   0
 #define DEMO_VOICE_FOOT   1

@@ -3,15 +3,15 @@ import math
 
 import numpy as np
 
-from c_env.cs2_env import make_env
-from nav import ACTION_DIM, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
+from cs2rl.c_env.cs2_env import make_env
+from cs2rl.nav import ACTION_DIM, BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
 
 # Batch 6 Task 2: the pathing + driving helpers were extracted to
-# src/scripted_expert.py (spec D-3) so the BC demo generator shares one
+# src/cs2rl/scripted_expert.py (spec D-3) so the BC demo generator shares one
 # canonical implementation with these tests. drive_agent_through_area_path
 # is the facing-poke TEST driver; the action-interface expert used for demo
 # recording is scripted_expert.ScriptedBomber.
-from scripted_expert import bfs_area_path, bombsite_areas, drive_agent_through_area_path
+from cs2rl.scripted_expert import bfs_area_path, bombsite_areas, drive_agent_through_area_path
 
 
 def test_spawn_areas_are_distinct_and_site_reachable():

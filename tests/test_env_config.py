@@ -1,4 +1,4 @@
-"""Unit tests for src/env_config.py — the env configuration contract (spec 2026-09-03 §2.1).
+"""Unit tests for src/cs2rl/env_config.py — the env configuration contract (spec 2026-09-03 §2.1).
 
 This file is the ONE place the default numbers are restated (spec §6 "Added"):
 the literals below were copied from train_shared.REWARD_WEIGHT_DEFAULTS at
@@ -9,17 +9,11 @@ drifted.
 import dataclasses
 import pickle
 import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-# I001 is suppressed, not fixed: yapf snaps these trailing `noqa` comments to its
-# spaces_before_comment stops while ruff's isort wants one space, and the two then
-# fight forever (gh#97; same waiver as the runner imports in each tests/test_modal_<module>.py).
-import env_config                                                      # noqa: E402, I001
-from env_config import TEAM_SIZE, UNSET, EnvConfig, RewardWeights      # noqa: E402
+from cs2rl import env_config
+from cs2rl.env_config import TEAM_SIZE, UNSET, EnvConfig, RewardWeights
 
 DEFAULTS_AT_139a3a3 = {
     "reward_win": 1.0,
@@ -220,11 +214,13 @@ def test_module_is_stdlib_only():
     Why a whitelist and not a blacklist of known-bad names: the stdlib-only
     import budget is this module's single hardest global constraint, and a
     blacklist of six names stays GREEN the day someone adds `import polars`,
-    `import yaml` or `import env_factory`. That is exactly the silent failure
-    this test exists to prevent. So we diff sys.modules across the import and
-    require every newly-added TOP-LEVEL name to be in sys.stdlib_module_names
-    (Python 3.10+). Top-level, so `import cs2_env` and `import c_env.cs2_env`
-    are both caught.
+    `import yaml` or `from cs2rl import env_factory`. That is exactly the silent
+    failure this test exists to prevent. So we diff sys.modules across the import
+    and require every newly-added name to be exactly `cs2rl` or
+    `cs2rl.env_config` (the package and this module), or to have a TOP-LEVEL name
+    in sys.stdlib_module_names (Python 3.10+). First-party names are compared in
+    FULL: every one of them is top-level `cs2rl`, so a top-level allowance for
+    it would let `cs2rl.env_factory` and `cs2rl.c_env.cs2_env` through.
 
     Pitfall: this MUST stay in a subprocess. The parent pytest process has
     already imported numpy, torch and the whole src tree, so an in-process
@@ -232,14 +228,13 @@ def test_module_is_stdlib_only():
     "someone else did" and would mask every violation.
     """
     import subprocess
-    src = Path(__file__).resolve().parents[1] / "src"
     child = ("import sys\n"
-             f"sys.path.insert(0, {str(src)!r})\n"
              "before = set(sys.modules)\n"
-             "import env_config\n"
-             "added = {m.split('.')[0] for m in set(sys.modules) - before}\n"
+             "from cs2rl import env_config\n"
+             "added = set(sys.modules) - before\n"
              "bad = sorted(m for m in added\n"
-             "             if m != 'env_config' and m not in sys.stdlib_module_names)\n"
+             "             if m not in ('cs2rl', 'cs2rl.env_config')\n"
+             "             and m.split('.')[0] not in sys.stdlib_module_names)\n"
              "print('NON_STDLIB=' + ','.join(bad))\n"
              "sys.exit(1 if bad else 0)\n")
     r = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True)

@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from _action_spec import ACTION_HEAD_SIZES
+from cs2rl._action_spec import ACTION_HEAD_SIZES
 
 N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
 H_SHOOT = 1
@@ -25,8 +25,8 @@ def _zero():
 
 
 def test_c_ignores_pitch_when_pinned(simple_map):
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
     env = make_env(map_data=simple_map, config=EnvConfig(pin_pitch=1), seed=1)
     try:
         env.reset()
@@ -42,7 +42,7 @@ def test_c_ignores_pitch_when_pinned(simple_map):
 def test_c_applies_pitch_when_unpinned(simple_map):
     """Control for the test above: the default path must still consume cont[:,1]
     (otherwise a broken gate that pins EVERYONE would pass the pinned test)."""
-    from c_env.cs2_env import make_env
+    from cs2rl.c_env.cs2_env import make_env
     env = make_env(map_data=simple_map, seed=1)
     try:
         env.reset()
@@ -56,8 +56,8 @@ def test_c_applies_pitch_when_unpinned(simple_map):
 
 
 def test_crouch_masked_when_disabled(simple_map):
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
     moff = np.concatenate([[0], np.cumsum(ACTION_HEAD_SIZES)[:-1]])
     for flag, expect in ((1, 1), (0, 0)):
         env = make_env(map_data=simple_map, config=EnvConfig(crouch_enabled=flag), seed=1)
@@ -82,8 +82,8 @@ def test_jump_masked_when_disabled(simple_map):
     OPEN unless the knob closed it. Bin 0 (no jump) stays valid either way: the
     per-head no-op invariant the masked softmax depends on.
     """
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
     moff = np.concatenate([[0], np.cumsum(ACTION_HEAD_SIZES)[:-1]])
     for flag, expect in ((1, 1), (0, 0)):
         env = make_env(map_data=simple_map, config=EnvConfig(jump_enabled=flag), seed=1)
@@ -128,9 +128,9 @@ def test_arena_stance_parity_hit_and_stance_blocked():
     they answer different questions (see the counters' comment in
     cs2_combat.h), so a coupled `blocked == 1 - hit` assert would pass if both
     ever flipped together."""
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
-    from map import make_arena_duel_map
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
+    from cs2rl.map import make_arena_duel_map
     arena = make_arena_duel_map()
     env = make_env(map_data=arena,
                    config=EnvConfig(n_active_per_team=1, pin_pitch=1, crouch_enabled=0),
@@ -196,7 +196,7 @@ def test_arena_stance_parity_hit_and_stance_blocked():
 
 
 def test_aim_dim_mask_shapes_logprob_and_entropy():
-    from train import _hybrid_sample_logits
+    from cs2rl.train import _hybrid_sample_logits
     B = 4
     logits = [torch.zeros(B, n) for n in ACTION_HEAD_SIZES]
     mu = torch.zeros(B, AIM_DIM)
@@ -217,7 +217,7 @@ def test_policy_get_action_and_value_respects_aim_dim_mask(simple_map):
     """The nn.Module path (get_action_and_value) must apply the same mask as
     the functional sampler — it is what BC/eval callers and the ONNX-free
     action path use."""
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=4, map_data=simple_map, pin_pitch=1)
     try:
         pol = trainer.policy
@@ -247,8 +247,8 @@ def _ratio_c_after_rollout(pin_pitch, map_data, num_envs=8):
     import tempfile
     from pathlib import Path
 
-    from train import SelfPlayManager, _hybrid_ppo_loss
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train import SelfPlayManager, _hybrid_ppo_loss
+    from cs2rl.train_test_harness import _build_trainer_for_test
     # gh#168 W1.5: the p_past=1.0 manager is built first and handed to the
     # harness, which constructs Cs2PuffeRL around it (the harness's own manager
     # would have p_past=0.0). The pool is seeded AFTER construction: the
@@ -299,13 +299,13 @@ def test_ratio_c_identity_simple_map_unpinned(simple_map):
 
 
 def test_ratio_c_identity_arena_pinned():
-    from map import make_arena_duel_map
+    from cs2rl.map import make_arena_duel_map
     assert _ratio_c_after_rollout(1, make_arena_duel_map()) == [1.0, 0.0]
 
 
 def test_env_trainer_pin_agreement_raises(simple_map):
-    from train import assert_pin_pitch_agreement
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train import assert_pin_pitch_agreement
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=4, map_data=simple_map, pin_pitch=1)
     try:
         assert_pin_pitch_agreement(trainer.vecenv, trainer.policy)
@@ -317,7 +317,7 @@ def test_env_trainer_pin_agreement_raises(simple_map):
 
 
 def test_pin_agreement_rejects_non_c_env():
-    from train import assert_pin_pitch_agreement
+    from cs2rl.train import assert_pin_pitch_agreement
 
     class _Pol:
         aim_dim_mask = torch.tensor([1.0, 1.0])
@@ -338,7 +338,7 @@ def _flat_copy_of(md):
 def test_pin_pitch_for_map_geometry(simple_map):
     """simple_map spans z 0..128 ⇒ 0; the same map flattened ⇒ 1. Pins that the
     decision is the z-span of the map passed in, nothing else."""
-    from train import pin_pitch_for_map
+    from cs2rl.train import pin_pitch_for_map
     assert float(simple_map.centroids_z.max() - simple_map.centroids_z.min()) == 128.0
     assert pin_pitch_for_map(simple_map) == 0
     assert pin_pitch_for_map(_flat_copy_of(simple_map)) == 1
@@ -349,10 +349,10 @@ def test_pin_pitch_for_map_none_loads_dust2():
     key). The expected value is computed from THAT MapData's centroids_z, so
     this test keeps holding when dust2 verticality lands (today make_cs2_map
     zero-fills z ⇒ 1, matching plan §R0-E.2 "true for dust2")."""
-    import nav
-    from c_env.cs2_env import _ENV_CACHE
-    from map import make_cs2_map
-    from train import pin_pitch_for_map
+    from cs2rl import nav
+    from cs2rl.c_env.cs2_env import _ENV_CACHE
+    from cs2rl.map import make_cs2_map
+    from cs2rl.train import pin_pitch_for_map
     md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)
     expect = int(float(md.centroids_z.max() - md.centroids_z.min()) == 0.0)
     assert pin_pitch_for_map(None) == expect
@@ -370,10 +370,10 @@ def test_pin_pitch_build_vis_false_never_builds_vis_nor_caches(monkeypatch):
     test warmed them; build_vis_matrix raising proves it is never called."""
     import argparse
 
-    import map as map_mod
-    import nav
-    from c_env import cs2_env
-    from train import pin_pitch_for_map, resolve_pin_pitch
+    from cs2rl import map as map_mod
+    from cs2rl import nav
+    from cs2rl.c_env import cs2_env
+    from cs2rl.train import pin_pitch_for_map, resolve_pin_pitch
 
     def _boom(self):
         raise AssertionError("build_vis_matrix called on the build_vis=False path")
@@ -395,7 +395,7 @@ def test_resolve_pin_pitch_dust2_and_simple(simple_map, capsys):
     it is accepted, the other one refused. simple_map: None ⇒ 0, 1 refused."""
     import argparse
 
-    from train import pin_pitch_for_map, resolve_pin_pitch
+    from cs2rl.train import pin_pitch_for_map, resolve_pin_pitch
     dust2 = pin_pitch_for_map(None)
 
     a = argparse.Namespace(map_data=None, pin_pitch=None)
@@ -415,8 +415,8 @@ def test_resolve_pin_pitch_dust2_and_simple(simple_map, capsys):
 
 def test_log_aim_log_std_skips_pitch_when_pinned(simple_map):
     """Minor: a pinned policy must not report a σ for the dead pitch dim."""
-    from train import log_aim_log_std
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train import log_aim_log_std
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=4, map_data=simple_map, pin_pitch=1)
     try:
         logs = {}

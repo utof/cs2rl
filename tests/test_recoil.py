@@ -5,14 +5,14 @@ import math
 import numpy as np
 import pytest
 
-from c_env.cs2_env import OBS_DIM, make_env
-from env_config import EnvConfig
+from cs2rl.c_env.cs2_env import OBS_DIM, make_env
+from cs2rl.env_config import EnvConfig
 
 ALPHA = math.exp(-1.0 / 16.0 / 0.08)
 
 
 def _zero_actions():
-    import _action_spec as spec
+    from cs2rl import _action_spec as spec
     return (
         np.zeros((10, spec.ACTION_DIM), dtype=np.int32),
         np.zeros((10, spec.AIM_DIM), dtype=np.float32),
@@ -162,7 +162,7 @@ def test_recoil_is_not_reachable_from_the_cli():
     import textwrap
     from argparse import Namespace
 
-    import train_config
+    from cs2rl import train_config
     assert train_config.env_config_from_args(Namespace(recoil=True)).recoil is False
     # AST, not a raw getsource scan: getsource INCLUDES the docstring, and that
     # docstring is where the rule is explained — a plain substring pin would

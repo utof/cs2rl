@@ -87,18 +87,14 @@ import argparse
 import hashlib
 import math
 import sys
-from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
-
-from _action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM # noqa: E402
-from c_env.cs2_env import make_env                                               # noqa: E402
-from env_config import EnvConfig                                                 # noqa: E402
-from map import SIMPLE_ROOMS, make_simple_map                                    # noqa: E402
-from nav import N_AGENTS, TEAM_SIZE                                              # noqa: E402
+from cs2rl._action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
+from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env_config import EnvConfig
+from cs2rl.map import SIMPLE_ROOMS, make_simple_map
+from cs2rl.nav import N_AGENTS, TEAM_SIZE
 
 # The mask buffer is the discrete heads laid end to end. If a head is ever added
 # or resized without ACTION_MASK_DIM following, the per-head slicing below would
@@ -108,7 +104,7 @@ from nav import N_AGENTS, TEAM_SIZE                                             
 if sum(ACTION_HEAD_SIZES) != ACTION_MASK_DIM or len(ACTION_HEAD_SIZES) != ACTION_DIM:
     raise RuntimeError(f"mask layout drift: sum(ACTION_HEAD_SIZES)={sum(ACTION_HEAD_SIZES)} "
                        f"!= ACTION_MASK_DIM={ACTION_MASK_DIM} or len != ACTION_DIM={ACTION_DIM}; "
-                       "regenerate src/_action_spec.py")
+                       "regenerate src/cs2rl/_action_spec.py")
 
 
 def sample_masked_actions(masks, rng):
@@ -176,7 +172,7 @@ def build_map(aim_mode):
     return make_simple_map()
 
 
-# Hitbox geometry mirrored from process_combat (src/c_env/cs2_combat.h): the
+# Hitbox geometry mirrored from process_combat (src/cs2rl/c_env/cs2_combat.h): the
 # hitscan ray starts at the shooter's EYE and the perpendicular-distance gate is
 # measured against the target's TORSO point. Track mode aims eye→torso so a
 # converged aim gives perp ≈ 0 and the shot connects.

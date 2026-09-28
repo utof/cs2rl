@@ -5,17 +5,17 @@ every trainer statistic goes through, the hybrid discrete+continuous PPO loss,
 the TAG gradient-cosine diagnostic and its parameter partition, and the
 entropy-target schedule. Moved here VERBATIM by the 2026-08-31 post-rung1a
 refactor; ``train.py`` re-exports every name below (see its ``__all__``), so
-existing ``from train import X`` call sites keep working unchanged.
+existing ``from cs2rl.train import X`` call sites keep working unchanged.
 
 HISTORY (gh#168 W2a, 2026-09-25): this module also held the 911-line
 return-norm patcher whose inner 713-line ``train()`` replacement closed over 15
-freevars. That body is now ``Cs2PuffeRL.train`` in src/trainer.py (its
+freevars. That body is now ``Cs2PuffeRL.train`` in src/cs2rl/trainer.py (its
 construction-time state is ``Cs2PuffeRL._init_return_norm``, the closure
 locals are ``self._*`` attributes), and trainer.py imports the helpers below
 at module scope. Nothing here touches a trainer instance any more.
 
 PITFALL (runtime rebinding): a test that wants to intercept ``tag_grad_cossim``
-at its call site must patch it on ``trainer`` (src/trainer.py), NOT on this
+at its call site must patch it on ``trainer`` (src/cs2rl/trainer.py), NOT on this
 module and NOT on ``train`` — the call site inside ``Cs2PuffeRL.train`` resolves
 the name through trainer.py's globals, so a patch here is silently unreachable
 and the assertion becomes vacuous. See tests/test_tag_trainer.py, whose
@@ -26,7 +26,7 @@ reason spelled out in train_shared.py's header. Every torch, pufferlib and
 train_helpers_batch1 import below is function-local ON PURPOSE.
 """
 
-from train_shared import _LOG_2PI, _apply_action_masks
+from cs2rl.train_shared import _LOG_2PI, _apply_action_masks
 
 # ── Masked reductions over participating rows (Rung 0, spec 2026-08-29 §2.2) ──
 # WHY these are free functions and not methods on the trainer: the trainer is a
@@ -107,14 +107,14 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
     """Config-driven entropy target for the SAC-style α controller.
 
     Single source for both the construction-time seed (Cs2PuffeRL._init_return_norm)
-    and the per-call recompute in Cs2PuffeRL.train (src/trainer.py) — keeping them identical
+    and the per-call recompute in Cs2PuffeRL.train (src/cs2rl/trainer.py) — keeping them identical
     means a checkpoint-resumed trainer seeds at its true scheduled value
     instead of a hardcoded warmup constant. `config` is anything with
     .get() (PuffeRL config or a plain dict); missing keys fall back to the
     build_train_config defaults so harness/older-checkpoint configs keep
     working.
     """
-    from train_helpers_batch1 import target_entropy_schedule
+    from cs2rl.train_helpers_batch1 import target_entropy_schedule
     return target_entropy_schedule(
         global_step,
         max_entropy,

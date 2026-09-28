@@ -3,8 +3,8 @@ from pathlib import Path
 
 import numpy as np
 
-from map import make_simple_map
-from train import init_policy_state
+from cs2rl.map import make_simple_map
+from cs2rl.train import init_policy_state
 
 
 def play_fill_actions(act_buf, cont_buf, pa, pc):
@@ -34,9 +34,9 @@ def find_repo_root(start: Path) -> Path:
     if cur.is_file():
         cur = cur.parent
     for p in [cur, *cur.parents]:
-        if (p / "pyproject.toml").is_file() and (p / "src" / "play.py").is_file():
+        if (p / "pyproject.toml").is_file() and (p / "src" / "cs2rl" / "play.py").is_file():
             return p
-    raise FileNotFoundError(f"no repo root (pyproject.toml + src/play.py) above {start}")
+    raise FileNotFoundError(f"no repo root (pyproject.toml + src/cs2rl/play.py) above {start}")
 
 
 def resolve_policy_path(path: str) -> Path:

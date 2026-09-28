@@ -43,7 +43,6 @@ import time
 import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-SRC = REPO_ROOT / "src"
 N_WORKERS = 3
 N_AREAS = 8
 
@@ -54,8 +53,7 @@ N_AREAS = 8
 # worker count. `nav._die_with_parent` is the guard under test; the control
 # replaces it with a no-op via {noguard}.
 _CHILD = """
-import os, pathlib, signal, sys, time
-sys.path.insert(0, {src!r})
+import os, pathlib, signal, time
 import awpy.data as _d
 import awpy.visibility as _v
 _d.TRIS_DIR = pathlib.Path({tri_dir!r})
@@ -67,7 +65,7 @@ class _StubChecker:
         return True
 _v.VisibilityChecker = _StubChecker
 os.cpu_count = lambda: {n_workers}
-import nav
+from cs2rl import nav
 if {noguard!r}:
     nav._die_with_parent = lambda *a, **k: None
 class _Centroid:
@@ -116,8 +114,7 @@ def _kill_child_and_count_survivors(tmp_path, *, noguard: bool) -> tuple[list[in
     (tri_dir / "de_dust2.tri").write_bytes(b"")
     nav_path = tmp_path / "fake.json"
     nav_path.write_text("{}")
-    script = _CHILD.format(src=str(SRC),
-                           tri_dir=str(tri_dir),
+    script = _CHILD.format(tri_dir=str(tri_dir),
                            n_workers=N_WORKERS,
                            noguard=noguard,
                            n_areas=N_AREAS,
@@ -190,8 +187,7 @@ def test_guard_does_not_kill_a_healthy_build(tmp_path):
     nav_path = tmp_path / "fake.json"
     nav_path.write_text("{}")
     cache = tmp_path / "vis.npy"
-    script = _CHILD.format(src=str(SRC),
-                           tri_dir=str(tri_dir),
+    script = _CHILD.format(tri_dir=str(tri_dir),
                            n_workers=N_WORKERS,
                            noguard=False,
                            n_areas=N_AREAS,
@@ -216,7 +212,7 @@ def test_guard_kills_a_worker_whose_parent_is_already_gone():
     alone: the re-check of os.getppid() against the pid captured in the parent
     has to end it. Simulated with a parent_pid that is not our parent."""
     r = subprocess.run([
-        sys.executable, "-c", f"import sys; sys.path.insert(0, {str(SRC)!r}); import nav; "
+        sys.executable, "-c", "from cs2rl import nav; "
         "nav._die_with_parent(parent_pid=2**22 - 1); "
         "import time; time.sleep(5); print('survived')"
     ],
