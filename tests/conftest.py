@@ -57,9 +57,10 @@ def simple_map(make_map):
 # builds the poison itself.
 #
 # PITFALLS.
-#   * The module is LOOKED UP in sys.modules, never imported: both fixtures below
-#     act only in a session that has loaded the runner, and an import of it in
-#     this file, even inside a fixture, would load it into every pytest session.
+#   * The module is LOOKED UP in sys.modules, never imported. That keeps a
+#     session that never loads the runner free of it. Importing it here would
+#     close RESIDUAL 1 below, at the cost of loading the runner into every
+#     pytest session.
 #   * The patch goes through the fixture's OWN `pytest.MonkeyPatch.context()`,
 #     never the test's `monkeypatch`: a test body that calls
 #     `monkeypatch.undo()` would otherwise restore the real `system` for the rest
@@ -270,11 +271,17 @@ def pytest_collection_modifyitems(config, items):
 #       session that also loads the other spelling.
 #   (b) the ban is enforced by the pre-commit hook, at commit time and on staged
 #       files only, so `--no-verify`, merges, rebases and cherry-picks skip it.
-#   (c) this is a snapshot of sys.modules at session end, so a second spelling
-#       that is evicted before session end is invisible. `fake_modal` in
+#   (c) this is a snapshot of sys.modules at session end, so a second copy
+#       is invisible if it is evicted before then, registered only while it
+#       runs (an in-process `runpy.run_path`), or never registered at all
+#       (`importlib.util.module_from_spec` + `exec_module`). `fake_modal` in
 #       tests/test_modal_client.py pops `scripts.run_modal`,
 #       `scripts.modal_artifacts` and `scripts.modal_backfill_sidecar`, so for
 #       those three the ruff ban on their bare names is the only check.
+#   (d) imports made in a child process are invisible to both: ruff reads a
+#       code string as a string, and this guard reads only its own process's
+#       sys.modules. A code string that imports two spellings rebuilds the trap
+#       in the child with nothing objecting.
 #   Under `-x` with a failure, or with collection errors, pytest stops before
 #   the check runs; that session fails anyway, and only the report is lost.
 def files_under_two_module_names(modules: Mapping[str, object], root: Path,

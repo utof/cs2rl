@@ -19,9 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import files_under_two_module_names
+from tests.conftest import REPO_ROOT, files_under_two_module_names
 
-ROOT = Path(__file__).resolve().parents[1]
 # The hook's report header, as tests/conftest.py writes it.
 _REPORT_TITLE = "repo files loaded under two module names"
 # Generous next to a child's ~2 s runtime; the bound exists so a wedged child
@@ -116,7 +115,7 @@ def test_the_guard_reports_a_repo_file_under_two_names_with_every_name(tmp_path)
 
 def _plant(spellings: tuple[str, ...], *, at_module_scope: bool) -> str:
     """A test file that imports src/paths.py under each of `spellings`."""
-    lines = ["import sys", f"sys.path.insert(0, {str(ROOT / 'src')!r})", ""]
+    lines = ["import sys", f"sys.path.insert(0, {str(REPO_ROOT / 'src')!r})", ""]
     imports = [f"import {name}" for name in spellings]
     if at_module_scope:
         lines += [*imports, "", "", "def test_plant():", "    pass"]
@@ -140,7 +139,7 @@ def test_a_session_that_loads_a_repo_file_under_two_names_fails(tmp_path, collec
     plant = tmp_path / "test_plant.py"
     plant.write_text(_plant(spellings, at_module_scope=collect_only))
     env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
-    env["PYTHONPATH"] = str(ROOT)
+    env["PYTHONPATH"] = str(REPO_ROOT)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     argv = [
         sys.executable, "-m", "pytest",
@@ -158,7 +157,7 @@ def test_a_session_that_loads_a_repo_file_under_two_names_fails(tmp_path, collec
               f"--- stderr ---\n{child.stderr[-2000:]}")
     ran = "1 test collected" if collect_only else "1 passed"
     assert ran in child.stdout, f"the planted test did not run as planned\n{output}"
-    report = f"{ROOT / 'src' / 'paths.py'}: ['paths', 'src.paths']"
+    report = f"{REPO_ROOT / 'src' / 'paths.py'}: ['paths', 'src.paths']"
     if len(spellings) == 2:
         assert child.returncode == 1, f"the session did not fail\n{output}"
         assert _REPORT_TITLE in child.stdout and report in child.stdout, (

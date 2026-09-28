@@ -3511,12 +3511,16 @@ def test_local_entrypoints_do_not_import_modal():
     # the child's path. Relying on the editable install's .pth instead would make
     # this test pass/fail on ambient venv state (any `uv sync --no-install-project`
     # removes it) and could silently import siblings from a DIFFERENT checkout.
+    # One name per entry point, because neither guard sees a child process
+    # (tests/conftest.py, limit (d)): `train` bare, as src/ imports it, and
+    # exp_lib only through run_experiment's own bare `import exp_lib`. Adding
+    # `src.train` or `scripts.exp_lib` would load a second copy of that file.
     code = """
 import sys
 sys.path.insert(0, "src")
-import src.train
-import scripts.exp_lib
+import train
 import scripts.run_experiment
+assert 'exp_lib' in sys.modules
 assert 'modal' not in sys.modules
 """
     subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
