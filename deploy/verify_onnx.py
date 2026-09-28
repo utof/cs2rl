@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Verify ONNX export matches PyTorch reference model output.
 
-Usage:
+Usage (run from repo root; from a worktree, prefix `env PYTHONPATH=<checkout>/src`):
     python deploy/verify_onnx.py [--onnx deploy/models/policy_lstm.onnx] [--steps 100]
 """
 
@@ -14,8 +14,7 @@ import numpy as np
 import onnxruntime as ort
 import torch
 
-sys.path.insert(0, str(Path(__file__).parent))
-from export_policy import build_model
+from cs2rl.deploy.export_policy import build_model
 
 
 def main():
@@ -49,7 +48,7 @@ def main():
     num_heads = len(action_sizes)
     # Batch 3: aim_dim is missing on legacy sidecars (treat as 0). When >0, the
     # ONNX graph emits an extra `mu_aim` slot between the last logit and the
-    # LSTM state pair — see deploy/export_policy.py:LSTMPolicyONNXWrapper.forward.
+    # LSTM state pair — see cs2rl/deploy/export_policy.py:LSTMPolicyONNXWrapper.forward.
     aim_dim = sidecar.get("aim_dim", 0)
 
     if not checkpoint_path.exists():

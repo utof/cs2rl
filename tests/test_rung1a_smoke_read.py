@@ -1,4 +1,4 @@
-"""scripts/rung1a_smoke_read.py — the frozen Rung 1a smoke rules on synthetic rows.
+"""cs2rl/experiment/smoke_read.py — the frozen Rung 1a smoke rules on synthetic rows.
 
 Rules source: docs/science-superpowers/preregistrations/2026-08-31-rung1a-smoke.md
 (the pre-registration is frozen by sha256; if an expectation here disagrees with
@@ -16,14 +16,14 @@ from every row) must report SMOKE INVALID, never a vacuous "ok" — a vacuous ok
 would let a harness defect be published as a scientific FAIL.
 """
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from rung1a_smoke_read import EXIT_CODES, main, read_run               # noqa: E402, I001
+from cs2rl.experiment.smoke_read import EXIT_CODES, main, read_run
 
 STEP = 16384                           # hero steps per epoch row (256 envs x 64 bptt x 1 active)
 N_ROWS = 61                            # 61 * 16384 = 999,424 — the T4 budget as delivered
@@ -424,12 +424,27 @@ def test_main_exit_codes(tmp_path, capsys, window_over, expected):
 
 
 def test_script_runs_as_a_subprocess(tmp_path):
-    """stdlib-only: the reader must run with no third-party import available."""
+    """stdlib-only: the reader must run with no third-party import available.
+
+    `python -S` really removes site-packages (no `site`, so no venv and no .pth),
+    and PYTHONPATH=<this checkout>/src puts back exactly one thing: cs2rl. The
+    import chain is then cs2rl/__init__.py, cs2rl/experiment/__init__.py and the
+    reader, so a third-party import added to any of them fails this launch (#204).
+
+    PITFALL: an uncaught ModuleNotFoundError exits 1, the same rc as the FAIL
+    verdict this run expects, so rc alone would pass a broken import. The
+    Traceback and stdout assertions are the ones that catch it.
+    """
     run = _write(tmp_path, _rows())
-    script = Path(__file__).resolve().parent.parent / "scripts" / "rung1a_smoke_read.py"
-    proc = subprocess.run([sys.executable, str(script), str(run)],
+    src = Path(__file__).resolve().parent.parent / "src"
+    proc = subprocess.run([sys.executable, "-S", "-m", "cs2rl.experiment.smoke_read",
+                           str(run)],
+                          env={
+                              **os.environ, "PYTHONPATH": str(src)
+                          },
                           capture_output=True,
                           text=True,
                           check=False)
+    assert "Traceback" not in proc.stderr, proc.stderr
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "VERDICT: FAIL-aim-head-untrained" in proc.stdout

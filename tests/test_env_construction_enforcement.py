@@ -2,8 +2,8 @@
 
 READ THE SCOPE LINE ABOVE LITERALLY. This file enforces exactly two SYMBOLS in
 two ROOTS, and nothing wider. It is not "no env is built outside the factory" —
-a lower layer of constructors (`make_env` / `Cs2Env`) is called directly at a
-dozen live sites inside those same roots, on purpose, and this scan does not look
+a lower layer of constructors (`make_env` / `Cs2Env`) is called directly at
+ten live sites inside those same roots, on purpose, and this scan does not look
 at them. The census and the reasoning are in LOWER_LAYER_SITES below; read it
 before quoting this file as evidence that all env construction is centralised.
 
@@ -97,16 +97,18 @@ using a lower constructor on purpose. Those calls are real, they are inside the
 scanned roots, and a green result here says NOTHING about them. LOWER_LAYER_SITES
 below is their census, pinned by a test so this paragraph cannot rot into a claim
 about a population that has since doubled. Note what they no longer all share:
-#165 gave five of the twelve resolved calls an `EnvConfig` — the wrapper chain's
-own two (`Cs2Env` inside `make_env`, `make_c_env` inside `make_puffer_env`) plus
-`src/cs2rl/play.py`, `scripts/oracle_statue_check.py` and `scripts/sim_fingerprint.py` —
-while the other seven still take `make_env`'s defaults and so see no W5 stance flag
-and no Rung-0 knob from config: `scripts/gen_bc_demos.py`,
-`scripts/measure_budget.py`, all three in `src/cs2rl/profile_step.py`, `record_episode` in
-`src/cs2rl/train.py`, and `src/cs2rl/train_bc.py` (measured 2026-09-10; `LOWER_LAYER_SITES` pins
-calls per FILE, not which of them are configured, so this split is prose, not a
-pin). Extending the ban (or adding factory roles) to that layer is a separate
-decision, tracked as future work, not something this file quietly did.
+#165 gave four of the ten resolved calls an `EnvConfig` — the wrapper's own
+(`Cs2Env` inside `make_env`) plus `src/cs2rl/play.py`,
+`src/cs2rl/experiment/oracle_statue.py` and `scripts/sim_fingerprint.py` — while
+the other six still take `make_env`'s defaults and so see no W5 stance flag and
+no Rung-0 knob from config: `src/cs2rl/bc_demos.py`, all three in
+`src/cs2rl/profile_step.py`, `record_episode` in
+`src/cs2rl/train.py`, and `src/cs2rl/train_bc.py` (re-measured 2026-09-28 by AST, after
+`make_puffer_env` and the `make_c_env` call inside it were deleted and #204 deleted
+the Gate 0 measurement script; `LOWER_LAYER_SITES` pins calls per FILE, not which of
+them are configured, so this split is prose, not a pin). Extending the ban (or
+adding factory roles) to that layer is a separate decision, tracked as future
+work, not something this file quietly did.
 """
 import ast
 from pathlib import Path
@@ -128,7 +130,7 @@ ROOTS = (REPO_ROOT / "src", REPO_ROOT / "scripts")
 FACTORY = REPO_ROOT / "src" / "cs2rl" / "env_factory.py"
 
 # Sanity floors for the "the root is real" guard. Deliberately far below the
-# current counts (24 and 19 files) so ordinary churn never touches them; they
+# current counts (37 and 21 files after #204) so ordinary churn never touches them; they
 # exist to catch a root that resolved to nothing, not to pin a file count.
 MIN_FILES_PER_ROOT = 8
 
@@ -159,13 +161,14 @@ ANCHORS = ("src/cs2rl/train.py", "src/cs2rl/train_test_harness.py", "src/cs2rl/e
 # this paragraph itself adds moved two of the three citations off their target
 # before the draft was even committed.
 # Over this file's own roots, `src/` + `scripts/`:
-#   9 files import it; 3 ALIAS it (3 STATEMENTS); 6 import it bare. FIVE of those six bare importers are
-#   keys in LOWER_LAYER_SITES below — `scripts/gen_bc_demos.py`,
-#   `scripts/measure_budget.py`, `scripts/oracle_statue_check.py`,
-#   `scripts/sim_fingerprint.py`, `src/cs2rl/play.py`. The sixth is
+#   8 files import it; 3 ALIAS it (3 STATEMENTS); 5 import it bare. FOUR of those five bare importers are
+#   keys in LOWER_LAYER_SITES below — `src/cs2rl/bc_demos.py`,
+#   `src/cs2rl/experiment/oracle_statue.py`, `scripts/sim_fingerprint.py`,
+#   `src/cs2rl/play.py`. The fifth is
 #   `src/cs2rl/env_factory.py`, which imports it to pass as a VALUE and is the subject
-#   of the asymmetry pin below.
-# Widen to `tests/` and it is 35 importers against the same 3 aliasers, so the
+#   of the asymmetry pin below (re-measured 2026-09-28 by AST, after #204 deleted the
+#   Gate 0 measurement script, which was a sixth bare importer).
+# Widen to `tests/` and it is 38 importers against the same 3 aliasers, so the
 # minority reading holds under both scopes. State the scope with the figure: the
 # module docstring's ALIAS RESOLUTION paragraph and `import_aliases`' docstring
 # both state the ALIASING count and must keep agreeing with this one.
@@ -185,21 +188,20 @@ ANCHORS = ("src/cs2rl/train.py", "src/cs2rl/train_test_harness.py", "src/cs2rl/e
 # the third.
 LOWER_LAYER = ("make_env", "Cs2Env")
 
-# Every call to one of those, per file. One of the eleven is the constructor's
+# Every call to one of those, per file. One of the ten is the constructor's
 # own definition (`return Cs2Env(...)` inside `make_env`) — i.e. the wrapper
-# itself, not an extra caller; the other ten are the direct callers named in
-# review finding I-1. This is a DISCLOSURE list, not a ban: a new entry is
-# allowed, it just has to be written down here so the docstring above keeps
-# telling the truth.
+# itself, not an extra caller; the other nine are the direct callers named in
+# review finding I-1, less the deleted Gate 0 measurement script's one. This is
+# a DISCLOSURE list, not a ban: a new entry is allowed, it just has to be written
+# down here so the docstring above keeps telling the truth.
 LOWER_LAYER_SITES = {
     "src/cs2rl/c_env/cs2_env.py": 1,                   # `make_env`'s own `return Cs2Env(...)`
     "src/cs2rl/play.py": 1,                            # the interactive viewer
     "src/cs2rl/profile_step.py": 3,                    # three step-timing harnesses
     "src/cs2rl/train.py": 1,                           # `record_episode`
     "src/cs2rl/train_bc.py": 1,                        # BC demo replay env
-    "scripts/gen_bc_demos.py": 1,
-    "scripts/measure_budget.py": 1,
-    "scripts/oracle_statue_check.py": 1,
+    "src/cs2rl/bc_demos.py": 1,                        # BC demo generation (#204: was scripts/)
+    "src/cs2rl/experiment/oracle_statue.py": 1,        # oracle-vs-statue check (#204: was scripts/)
     "scripts/sim_fingerprint.py": 1,
 }
 
@@ -631,7 +633,7 @@ def test_the_unbanned_lower_layer_census_is_accurate():
 
     This is a DISCLOSURE test, not an enforcement one — read a failure as "the
     module docstring's LOWER LAYER paragraph just went stale", not as "route this
-    through the factory". The paragraph tells readers that a dozen direct
+    through the factory". The paragraph tells readers that ten direct
     `make_env`/`Cs2Env` calls live inside the scanned roots and are NOT covered by
     the enforcement assertion below; an un-pinned prose count is exactly the kind
     of claim that is true on the day it is written and quietly false a year later,
@@ -802,7 +804,7 @@ def test_no_make_puffer_env_or_selfplaymanager_call_outside_the_factory():
     """Zero `make_puffer_env(...)` / `SelfPlayManager(...)` in src/ or scripts/.
 
     THE TWO BANNED SYMBOLS AND NOTHING ELSE. Passing does not mean no env is
-    built outside the factory: the eleven LOWER_LAYER_SITES calls to `make_env` /
+    built outside the factory: the ten LOWER_LAYER_SITES calls to `make_env` /
     `Cs2Env` are in these same roots and are out of scope by design. Read the
     module docstring's LOWER LAYER paragraph before citing this test.
 

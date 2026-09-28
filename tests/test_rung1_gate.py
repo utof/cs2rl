@@ -1,7 +1,7 @@
-"""scripts/rung1_gate.py — spec 2026-08-29 §5 gate arithmetic on synthetic metrics rows.
+"""cs2rl/experiment/gate.py — spec 2026-08-29 §5 gate arithmetic on synthetic metrics rows.
 
 Every number below is hand-derivable from GOOD (see the comment on it); if a
-threshold in spec §5 changes, change rung1_gate.GATES and these expectations
+threshold in spec §5 changes, change gate.GATES and these expectations
 together.
 
 PITFALL (Task 15 ruling): the fixture config.json carries BOTH
@@ -20,12 +20,10 @@ controls never ran used to report PASS. A seed that fails on its MERITS
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from rung1_gate import REPORT_EXTRA, gate_report, main, print_report, seed_metrics # noqa: E402
+from cs2rl.experiment.gate import REPORT_EXTRA, gate_report, main, print_report, seed_metrics
 
 PT = 1000.0                            # participating_timesteps (config.json) → window starts at agent_steps >= 900
 
@@ -356,13 +354,23 @@ def test_main_exit_status_and_verdict_line(tmp_path, capsys):
 
 
 def test_script_is_runnable_as_cli(tmp_path):
-    """`uv run python scripts/rung1_gate.py <dir>` — the documented invocation."""
-    gate = Path(__file__).resolve().parent.parent / "scripts" / "rung1_gate.py"
-    r = subprocess.run(
-        [sys.executable, str(gate),
-         str(tmp_path), "--seeds", "0", "--neg-seeds"],
-        capture_output=True,
-        text=True,
-        timeout=120)
+    """`python -m cs2rl.experiment.gate <dir>` — the documented invocation.
+
+    The child inherits this session's PYTHONPATH, and tests/conftest.py's checkout
+    tripwire has already refused the session unless `cs2rl` resolves under this
+    checkout's src/, so `-m` runs this checkout's gate.
+
+    PITFALL: rc alone proves nothing here. A launch by a path that no longer
+    exists (the pre-#204 scripts/rung1_gate.py) exits 2 with "can't open file",
+    which is the gate's own INVALID rc, so the stdout assertion is the one that
+    tells them apart.
+    """
+    r = subprocess.run([
+        sys.executable, "-m", "cs2rl.experiment.gate",
+        str(tmp_path), "--seeds", "0", "--neg-seeds"
+    ],
+                       capture_output=True,
+                       text=True,
+                       timeout=120)
     assert r.returncode == 2, r.stderr                 # missing dir → INVALID
     assert "VERDICT: INVALID" in r.stdout and "FileNotFoundError" in r.stdout

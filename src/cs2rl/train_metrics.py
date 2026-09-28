@@ -15,7 +15,7 @@ loop to unit-test and the part most often edited when a metric is added.
 SCOPE BOUNDARY (deliberate, do not "finish the job"): ``self_play_used_past_metric``
 and the ``logs["self_play/*"]`` assignments STAY in train.py. Those two call
 lines and their order are pinned by tests/test_kl_break_metrics.py inside
-``inspect.getsource(train)``, and they guard the key scripts/rung1_gate.py reads;
+``inspect.getsource(train)``, and they guard the key cs2rl/experiment/gate.py reads;
 keeping definition and call sites together is the lower-risk spelling.
 PufferLib's own ``self.mean_and_log()`` likewise stays out of this module — its
 single call site lives inside ``Cs2PuffeRL.train`` (src/cs2rl/trainer.py, gh#168 W2a).

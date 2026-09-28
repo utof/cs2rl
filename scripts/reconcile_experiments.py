@@ -8,6 +8,9 @@ Detects and helps clean up:
 
 Offers listing and flagged-action modes; no confirmation prompts in MVP —
 user runs these one at a time.
+
+From a worktree, put its own src/ first: `env PYTHONPATH=<checkout>/src python
+scripts/reconcile_experiments.py ...` (it imports cs2rl.experiment.lib).
 """
 
 from __future__ import annotations
@@ -17,8 +20,7 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-import exp_lib
+from cs2rl.experiment import lib as exp_lib
 
 IN_PROGRESS_STATUSES = {"started", "built", "training", "analyzing"}
 

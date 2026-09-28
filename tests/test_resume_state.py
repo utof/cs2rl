@@ -349,8 +349,7 @@ def test_selfplay_pool_paths_persist_absolute(tmp_path, monkeypatch, capsys):
 
 
 def test_analyze_tplant_last_row_wins():
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    from analyze_tplant import dedupe_resume_rows
+    from cs2rl.experiment.analyze_tplant import dedupe_resume_rows
     rows = [{
         "run_id": "r",
         "step": 100,

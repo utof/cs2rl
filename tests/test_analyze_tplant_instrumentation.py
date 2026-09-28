@@ -5,14 +5,12 @@ Mix assertions use pytest.approx so IEEE 0.6-0.1-0.4 (~0.0999…) is
 accepted; production must not wash floats to make exact == pass.
 """
 import io
-import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from analyze_tplant import analyze_run, outcome_mix, print_report, t_plant
+from cs2rl.experiment.analyze_tplant import analyze_run, outcome_mix, print_report, t_plant
 
 CAP, BOMB, PMIN = 640.0, 640.0, 0.15
 _MIX_KEYS = ("t_detonation", "ct_defuse", "timeout", "t_elimination", "ct_elimination")

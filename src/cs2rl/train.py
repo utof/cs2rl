@@ -207,7 +207,7 @@ __all__ = (
     "validate_aim_log_std_max",
 )
 
-# MUST stay a bare integer literal: scripts/exp_lib.py fingerprints the env by
+# MUST stay a bare integer literal: cs2rl/experiment/lib.py fingerprints the env by
 # regex-grepping `OBS_DIM = <int>` out of this file's source text (env_fingerprint),
 # so it cannot be an `import`. Mirrors nav.OBS_DIM / _obs_spec.OBS_DIM (generated
 # from cs2_types.h); cross-checked by test_obs_dim_constant_consistency (test_train_env.py).

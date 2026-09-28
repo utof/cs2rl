@@ -17,16 +17,10 @@ Load-bearing checks:
   * recorded actions are within the env's own bounds (discrete head sizes,
     |Δyaw| ≤ MAX_TURN_SPEED_RAD) — the labels a BC loss will consume.
 """
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-
-import gen_bc_demos                    # noqa: E402
-
+from cs2rl import bc_demos
 from cs2rl._action_spec import ACTION_DIM, ACTION_HEAD_SIZES, AIM_DIM
 from cs2rl._obs_spec import OBS_BLOCKS, OBS_DIM
 from cs2rl.nav import MAX_TURN_SPEED_RAD, ROUND_TIME
@@ -37,10 +31,36 @@ def demo_dir(tmp_path_factory):
     """Generate a small real demo set once for the whole module: 2 seeds × 5
     carrier slots (~70 ticks each, all expected in-budget per Gate 0)."""
     out = tmp_path_factory.mktemp("demos")
-    stats = gen_bc_demos.generate_demos(2, out)
+    stats = bc_demos.generate_demos(2, out)
     assert stats["kept"] == 10, f"expected 10/10 kept (Gate 0 measured 100/100), got {stats}"
     assert stats["discarded"] == 0
     return out
+
+
+def test_the_default_out_dir_is_the_one_train_bc_reads(monkeypatch):
+    """`--out` defaults to train_bc.DEFAULT_DEMO_DIR, the directory BC training reads.
+
+    WHY (#204, review C1): the default is computed from this module's own location
+    (`REPO_ROOT / "outputs" / "demos"`). Moving the file from scripts/ into
+    src/cs2rl/ turned the old `.parent.parent` into <repo>/src, so `python -m
+    cs2rl.bc_demos` wrote to a gitignored src/outputs/demos that train_bc never
+    reads, with rc 0 and nothing red. The value is read back from the PARSER
+    (main() with generate_demos stubbed), not from REPO_ROOT, so a default that
+    stops being built on REPO_ROOT is caught too.
+    """
+    from cs2rl import train_bc
+
+    seen = {}
+
+    def fake_generate_demos(n_seeds, out_dir, start_seed=0):
+        seen["out_dir"] = out_dir
+        return {"kept": 1}
+
+    monkeypatch.setattr(bc_demos, "generate_demos", fake_generate_demos)
+    assert bc_demos.main([]) == 0
+    assert seen["out_dir"] == train_bc.DEFAULT_DEMO_DIR, (
+        f"python -m cs2rl.bc_demos would write demos to {seen['out_dir']}, but train_bc "
+        f"reads {train_bc.DEFAULT_DEMO_DIR}")
 
 
 def _load_all(demo_dir):
@@ -73,7 +93,7 @@ def test_demo_metadata_matches_live_constants(demo_dir):
         assert int(d["OBS_DIM"]) == OBS_DIM
         assert int(d["ACTION_DIM"]) == ACTION_DIM
         assert int(d["AIM_DIM"]) == AIM_DIM
-        assert str(d["map"]) == gen_bc_demos.MAP_NAME
+        assert str(d["map"]) == bc_demos.MAP_NAME
         assert int(d["tick_count"]) <= ROUND_TIME
         assert 0 <= int(d["carrier_idx"]) <= 4, "carrier must be a T-side slot (spec R3)"
         assert len(str(d["git_sha"])) == 40, "git_sha must be a full 40-char sha"

@@ -26,16 +26,9 @@ WHAT IS PINNED HERE
 
 WHY the thresholds here are looser than the script's (0.8 vs 0.90 kill rate):
 this is the fast regression tripwire at N=20, not the gate. The gate is
-``UV_NO_SYNC=1 uv run python scripts/oracle_statue_check.py`` at N>=200.
+``UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue`` at N>=200.
 """
-import sys
-from pathlib import Path
-
 import pytest
-
-SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
 
 # Offset that reproduces a crouched target's |rz| against a STANDING hitbox
 # (TORSO_OFFSET_CROUCH 24 vs EYE_HEIGHT_STAND 48), and one that clears the
@@ -49,7 +42,7 @@ GRAVITY_SAG = 0.5 * 800.0 * (1.0 / 16.0)**2
 
 def test_oracle_kills_grounded_statue():
     """The precondition itself: perfect aim vs a target that never moves."""
-    from oracle_statue_check import run_check, verdict
+    from cs2rl.experiment.oracle_statue import run_check, verdict
     res = run_check(episodes=20, seed=0)
     assert res["kill_rate"] >= 0.8, res
     assert res["ttk_min"] is not None and res["ttk_min"] < 160, res
@@ -76,7 +69,7 @@ def test_oracle_kills_statue_held_at_crouch_height_offset():
     gate used HH = 36. crouch_enabled=0 masks the crouch head, so a genuinely
     crouched target is not reachable through the Rung 1a action space.
     """
-    from oracle_statue_check import run_check, verdict
+    from cs2rl.experiment.oracle_statue import run_check, verdict
     res = run_check(episodes=20, seed=0, statue_z=CROUCH_HEIGHT_OFFSET)
     expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
     assert res["rz_min"] == pytest.approx(expect_rz, abs=0.05), res
@@ -98,7 +91,7 @@ def test_statue_above_the_standing_semi_axis_is_unkillable():
 
     Few episodes on purpose: nothing dies, so each one runs the full 160 ticks.
     """
-    from oracle_statue_check import run_check, verdict
+    from cs2rl.experiment.oracle_statue import run_check, verdict
     res = run_check(episodes=4, seed=0, statue_z=ABOVE_SEMI_AXIS_OFFSET)
     assert res["rz_min"] == pytest.approx(ABOVE_SEMI_AXIS_OFFSET - GRAVITY_SAG, abs=0.05), res
     assert res["kills"] == 0 and res["ttk_min"] is None, res
@@ -126,7 +119,7 @@ def test_obs_only_oracle_kills_the_statue_it_can_only_see_in_the_obs():
     than one per episode means visibility dropped mid-round, which would make
     the kill numbers below a statement about LoS rather than about encoding.
     """
-    from oracle_statue_check import run_check, verdict
+    from cs2rl.experiment.oracle_statue import run_check, verdict
     res = run_check(episodes=20, seed=0, obs_only=True)
     assert res["kill_rate"] >= 0.8, res
     assert res["ttk_min"] is not None and res["ttk_min"] < 160, res
@@ -148,7 +141,7 @@ def test_obs_only_decodes_the_enemy_z_delta_the_c_state_reports():
     dropped entirely. The elevated statue puts a known, non-zero offset in that
     slot (24 u minus one half gravity step) and asserts the actor read it back.
     """
-    from oracle_statue_check import OBS_RZ_TOL, _rz_disagrees, run_check
+    from cs2rl.experiment.oracle_statue import OBS_RZ_TOL, _rz_disagrees, run_check
     res = run_check(episodes=4, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, obs_only=True)
     expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
     assert res["obs_rz_min"] == pytest.approx(expect_rz, abs=0.05), res
@@ -171,7 +164,7 @@ def test_obs_only_and_ground_truth_modes_agree():
     lose a KILL, and its shots must still overwhelmingly land — an encoding bug
     shows up here as a collapsed hit rate, not as a two-tick delay.
     """
-    from oracle_statue_check import run_check
+    from cs2rl.experiment.oracle_statue import run_check
     truth = run_check(episodes=20, seed=0)
     obs = run_check(episodes=20, seed=0, obs_only=True)
     assert obs["kills"] == truth["kills"], (truth, obs)
@@ -184,7 +177,7 @@ def test_obs_only_and_ground_truth_modes_agree():
 
 def test_verdict_is_the_conjunction_of_all_three_checks():
     """Pure-function gate arithmetic: each check must be able to fail alone."""
-    from oracle_statue_check import PASS_MAX_MEDIAN_TTK, PASS_MIN_KILL_RATE, verdict
+    from cs2rl.experiment.oracle_statue import PASS_MAX_MEDIAN_TTK, PASS_MIN_KILL_RATE, verdict
     ok = {"kill_rate": 1.0, "ttk_median": 10.0, "shots_stance_blocked": 0}
     passed, checks = verdict(ok)
     assert passed and len(checks) == 3
@@ -209,7 +202,7 @@ def test_obs_only_verdict_gates_on_each_obs_tripwire():
     PASS", which is what a controller scripts against. Pure-function here; the
     two mutations that motivated the fix are driven end to end below.
     """
-    from oracle_statue_check import OBS_RZ_TOL, verdict
+    from cs2rl.experiment.oracle_statue import OBS_RZ_TOL, verdict
     ok = {
         "kill_rate": 1.0,
         "ttk_median": 11.0,
@@ -245,7 +238,7 @@ def test_ground_truth_verdict_ignores_the_obs_diagnostics():
     carries every obs key as None because that actor never read a slot and so
     cannot claim "0 inconsistent". Neither may grow a fourth check.
     """
-    from oracle_statue_check import verdict
+    from cs2rl.experiment.oracle_statue import verdict
     ok = {"kill_rate": 1.0, "ttk_median": 10.0, "shots_stance_blocked": 0}
     passed, checks = verdict(ok)
     assert passed and len(checks) == 3, checks
@@ -281,7 +274,7 @@ def test_a_mutated_enemy_distance_slot_fails_the_obs_only_exit_code(monkeypatch)
     on any garbage distance and the run still kills 2/2. Before the fix this
     printed "obs slot inconsistency 20  <-- WARNING" and exited 0.
     """
-    import oracle_statue_check as mod
+    from cs2rl.experiment import oracle_statue as mod
     argv = ["--episodes", "2", "--seed", "0", "--obs-only"]
     assert mod.main(argv) == 0
     monkeypatch.setattr(mod, "EN_DIST", mod.EN_DZ)
@@ -303,7 +296,7 @@ def test_a_mutated_z_normaliser_fails_the_obs_only_exit_code(monkeypatch):
     +2): the rz cross-check against the C state is the only thing in the run
     that sees it. Needs the elevated statue — at rz 0 both scalings decode 0.
     """
-    import oracle_statue_check as mod
+    from cs2rl.experiment import oracle_statue as mod
     argv = ["--episodes", "2", "--seed", "0", "--statue-z", str(CROUCH_HEIGHT_OFFSET), "--obs-only"]
     assert mod.main(argv) == 0
     monkeypatch.setattr(mod, "OBS_Z_SCALE", mod.OBS_Z_SCALE / 2)
@@ -320,7 +313,7 @@ def test_a_mutated_z_normaliser_fails_the_obs_only_exit_code(monkeypatch):
 
 def test_main_exit_code_follows_the_verdict(capsys):
     """The CLI contract the controller scripts against: 0 on PASS, 1 on FAIL."""
-    from oracle_statue_check import main
+    from cs2rl.experiment.oracle_statue import main
     assert main(["--episodes", "4", "--seed", "0"]) == 0
     assert "PASS" in capsys.readouterr().out
     assert main(["--episodes", "2", "--seed", "0", "--statue-z", str(ABOVE_SEMI_AXIS_OFFSET)]) == 1
@@ -334,7 +327,7 @@ def test_obs_only_is_reachable_from_the_cli(capsys):
     tests above; what is pinned HERE is that the flag is not silently ignored,
     which would make an obs-encoding bug read as a pass.
     """
-    from oracle_statue_check import main
+    from cs2rl.experiment.oracle_statue import main
     assert main(["--episodes", "2", "--seed", "0", "--obs-only"]) == 0
     out = capsys.readouterr().out
     assert "OBSERVATION VECTOR" in out and "obs blind ticks" in out
@@ -352,7 +345,7 @@ def test_fail_report_names_the_facing_denominator_and_the_censored_ttk():
     * the failing episodes' indices and spawn geometry are printed (M2-lite),
       which is what separates "one bad spawn row" from "nothing can die".
     """
-    from oracle_statue_check import format_summary, run_check
+    from cs2rl.experiment.oracle_statue import format_summary, run_check
     res = run_check(episodes=1, seed=0, statue_z=ABOVE_SEMI_AXIS_OFFSET)
     out = format_summary(res)
     assert res["kills"] == 0 and res["shots_facing_enemy"] > 0, res
@@ -373,7 +366,7 @@ def test_failure_detail_is_capped_but_the_spread_is_always_reported():
     that survive it — with 200 failures the individual rows stop being the
     useful read, but "did they all share one spawn distance?" still is.
     """
-    from oracle_statue_check import FAIL_DETAIL_LIMIT, _failure_lines
+    from cs2rl.experiment.oracle_statue import FAIL_DETAIL_LIMIT, _failure_lines
     n = FAIL_DETAIL_LIMIT + 15
     failures = [{
         "episode": i,

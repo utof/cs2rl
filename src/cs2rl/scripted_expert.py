@@ -1,9 +1,10 @@
 """Scripted walk-to-bombsite-and-plant expert (Batch 6 Task 2, spec D-3/D-5).
 
-Extracted from tests/test_env_feasibility.py + scripts/measure_budget.py so
-that (a) the feasibility tests import one canonical implementation and (b) the
-BC demo generator (Task 3) can replay the expert through the REAL action
-interface and record per-tick (obs, discrete, continuous) triples.
+Extracted from tests/test_env_feasibility.py + the Gate 0 measurement script
+(deleted; `git show 9b9bf2f:scripts/measure_budget.py`) so that (a) the
+feasibility tests import one canonical implementation and (b) the BC demo
+generator (Task 3) can replay the expert through the REAL action interface and
+record per-tick (obs, discrete, continuous) triples.
 
 Two drivers live here, deliberately kept separate:
 
@@ -16,7 +17,8 @@ Two drivers live here, deliberately kept separate:
     i.e. only through env.step(discrete, continuous) — the exact interface
     the policy uses, so recorded actions are legitimate BC labels (spec D-5).
 
-Pitfalls carried over from the Gate 0 measurement (scripts/measure_budget.py):
+Pitfalls carried over from the Gate 0 measurement
+(`git show 9b9bf2f:scripts/measure_budget.py`):
 
   * auto_reset=False on the env — a mid-run silent reset corrupts tick counts
     and splices two rounds into one recorded trajectory.

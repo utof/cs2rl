@@ -7,8 +7,8 @@ Do NOT bump the obs_version literal or extend the export surface as sim
 obs/action heads evolve. ONNX I/O may not match a future sim refactor;
 expect this module to need a from-scratch revisit on resume. See gh #(filed).
 
-Usage:
-    python deploy/export_policy.py --checkpoint <path_to_.pt> [--output <path_to_.onnx>]
+Usage (run from repo root; from a worktree, prefix `env PYTHONPATH=<checkout>/src`):
+    python -m cs2rl.deploy.export_policy --checkpoint <path_to_.pt> [--output <path_to_.onnx>]
 """
 
 import argparse
@@ -202,7 +202,8 @@ def build_model(state_dict: dict) -> tuple:
 
 def main():
     """CLI entry point — parse args, call load_and_wrap_policy, export ONNX + JSON sidecar."""
-    parser = argparse.ArgumentParser(description="Export PufferLib LSTM policy to ONNX")
+    parser = argparse.ArgumentParser(prog="python -m cs2rl.deploy.export_policy",
+                                     description="Export PufferLib LSTM policy to ONNX")
     parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint file")
     parser.add_argument(
         "--output",
@@ -295,7 +296,7 @@ def main():
     sidecar_path = output_path.with_suffix(".json")
     # obs_version tags which observation schema was used at training time.
     # The C# plugin reads this to validate it loaded the correct mapdata JSON.
-    # Must match OBS_VERSION in deploy/export_mapdata.py and the C# plugin constant.
+    # Must match OBS_VERSION in cs2rl/deploy/export_mapdata.py and the C# plugin constant.
     # Batch 3: bumped obs_version to v1-105dim to match the new role-bit
     # observation; aim_dim records whether this export carries the aim head
     # (0 = legacy Batch 2 graph, 1 = single-axis aim, 2+ = future Batch 3.5).

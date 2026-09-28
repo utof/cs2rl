@@ -9,18 +9,23 @@ WHAT: reads ONE run dir (`metrics.jsonl` + `config.json`), prints the five
 pre-flight assertions with their observed values, the episode-weighted window
 aggregates, and exactly one verdict line. Usage:
 
-    UV_NO_SYNC=1 uv run python scripts/rung1a_smoke_read.py outputs/checkpoints/rung1a/s0
+    UV_NO_SYNC=1 uv run python -m cs2rl.experiment.smoke_read outputs/checkpoints/rung1a/s0
+
+From a worktree, put its own src/ first:
+
+    env UV_NO_SYNC=1 PYTHONPATH=<checkout>/src uv run python -m cs2rl.experiment.smoke_read ...
 
 Exit status: 0 PASS, 1 FAIL (any routing), 2 SMOKE INVALID.
 
-WHY a new reader instead of scripts/rung1_gate.py: that gate encodes the Rung 1
+WHY a new reader instead of the Rung 1 gate (cs2rl/experiment/gate.py): that gate encodes the Rung 1
 sweep's rules — a MIN_SHOTS_FIRED floor, two `eval/win_vs_random_*` completeness
 requirements and the negative-control invalidation clause — none of which apply
 to a 1-seed run against a noop statue (there is no control arm, and the fixed
 baselines shoot back so their win rates are not the object of study). What IS
 reused are its *conventions*, because they are properties of the metrics stream
-rather than of that gate: dedup of replayed rows (rung1_gate.py:110), a missing
-`self_play/used_past` reading as 0.0 (:116), and episode weighting (:120-128).
+rather than of that gate: dedup of replayed rows (gate_window's precondition,
+done in seed_metrics), a missing `self_play/used_past` reading as 0.0
+(gate_window), and episode weighting (weighted_sum / ratio).
 
 WHY EPISODE WEIGHTING (the single most important thing in this file): every
 `game/*` value on a row is the MEAN OVER THE EPISODES THAT FINISHED INSIDE THAT
@@ -467,7 +472,8 @@ def print_report(rep, file=None):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(prog="python -m cs2rl.experiment.smoke_read",
+                                 description=__doc__.splitlines()[0])
     ap.add_argument("run_dir",
                     nargs="?",
                     type=Path,

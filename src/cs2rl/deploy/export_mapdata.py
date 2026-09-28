@@ -7,8 +7,8 @@ Do NOT bump OBS_VERSION or extend the sidecar schema as sim obs evolves; sim
 should grow its own internal versioning independent of deploy. Tests stay
 green to prevent silent bit-rot. See gh #(filed) for resume criteria.
 
-Usage (run from repo root):
-    python deploy/export_mapdata.py --map de_dust2
+Usage (run from repo root; from a worktree, prefix `env PYTHONPATH=<checkout>/src`):
+    python -m cs2rl.deploy.export_mapdata --map de_dust2
 
 Reads MapData from the real dust2 nav mesh via make_cs2_map().
 Writes deploy/mapdata/<map>.json with the 5 constants needed by ObservationBuilder.
@@ -38,12 +38,20 @@ from cs2rl import nav
 from cs2rl.map import make_cs2_map
 
 # This version tag must stay in sync with:
-#   - deploy/export_policy.py  (obs_version field)
+#   - cs2rl/deploy/export_policy.py  (obs_version field)
 #   - C# plugin  ObservationBuilder.cs  (OBS_VERSION constant)
 # Batch 5 (map-verticality T5): bumped v1→v2 to signal centroids_z is now
 # present in the sidecar.  The C# plugin T6 will reject v1 exports that lack
 # this field (spec §2 L4 / OBS_VERSION discovery row).
 OBS_VERSION = "v2-105dim"
+
+# Where main() writes <map>.json: <repo>/deploy/mapdata/, gitignored, where it has
+# always been written and copied from to the server's mapdata/ dir that
+# deploy/CS2RLBot/CS2RLBot.cs loads. This file is
+# <repo>/src/cs2rl/deploy/export_mapdata.py, so parents[3] is the checkout root;
+# `Path(__file__).parent` would now be src/cs2rl/deploy/, which is not gitignored
+# (pinned by tests/test_export_mapdata.py).
+OUT_DIR = Path(__file__).resolve().parents[3] / "deploy" / "mapdata"
 
 
 def export_mapdata(map_name: str) -> dict:
@@ -132,6 +140,7 @@ def export_mapdata(map_name: str) -> dict:
 def main():
     """CLI entry point — parse --map, compute constants, write JSON sidecar."""
     parser = argparse.ArgumentParser(
+        prog="python -m cs2rl.deploy.export_mapdata",
         description="Export map normalization constants for the CS2RL plugin.")
     parser.add_argument(
         "--map",
@@ -143,7 +152,7 @@ def main():
     data = export_mapdata(args.map)
 
     # Write to deploy/mapdata/<map>.json (deploy/mapdata/ is gitignored — runtime artifact)
-    out_dir = Path(__file__).parent / "mapdata"
+    out_dir = OUT_DIR
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / f"{args.map}.json"
 

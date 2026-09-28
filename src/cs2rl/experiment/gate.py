@@ -6,7 +6,11 @@ Reads the seed dirs written by scripts/run_rung1.sh
 and prints a per-seed + median table with ONE verdict: PASS / FAIL / INVALID.
 Exit status: 0 PASS, 1 FAIL, 2 INVALID. Usage:
 
-    UV_NO_SYNC=1 uv run python scripts/rung1_gate.py outputs/checkpoints/rung1
+    UV_NO_SYNC=1 uv run python -m cs2rl.experiment.gate outputs/checkpoints/rung1
+
+From a worktree, put its own src/ first:
+
+    env UV_NO_SYNC=1 PYTHONPATH=<checkout>/src uv run python -m cs2rl.experiment.gate ...
 
 Rules (all from spec §5 — change the spec first, then this file):
   W       rows with agent_steps >= 0.9 * participating_timesteps (config.json;
@@ -59,8 +63,7 @@ import statistics
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from analyze_tplant import dedupe_resume_rows, load_rows               # noqa: E402
+from cs2rl.experiment.analyze_tplant import dedupe_resume_rows, load_rows
 
 WINDOW_FRAC = 0.9
 MIN_WINDOW_ROWS = 3
@@ -345,7 +348,8 @@ def print_report(rep, prefix="rung1", file=None):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(prog="python -m cs2rl.experiment.gate",
+                                 description=__doc__.splitlines()[0])
     ap.add_argument("out_root", type=Path, help="OUT_ROOT passed to scripts/run_rung1.sh")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     ap.add_argument(

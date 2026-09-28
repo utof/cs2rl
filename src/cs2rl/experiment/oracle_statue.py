@@ -18,9 +18,12 @@ actors and no learning anywhere in the loop:
 It reports kill rate, time-to-kill quantiles and the R0-A shot counters, then
 prints one PASS/FAIL line. Exit status 0 = PASS, 1 = FAIL.
 
-    UV_NO_SYNC=1 uv run python scripts/oracle_statue_check.py
-    UV_NO_SYNC=1 uv run python scripts/oracle_statue_check.py --statue-z 24
-    UV_NO_SYNC=1 uv run python scripts/oracle_statue_check.py --obs-only
+    UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue
+    UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue --statue-z 24
+    UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue --obs-only
+
+From a worktree, put its own src/ first: ``env UV_NO_SYNC=1
+PYTHONPATH=<checkout>/src uv run python -m cs2rl.experiment.oracle_statue ...``.
 
 WHY
 ---
@@ -163,10 +166,6 @@ STATUE = TEAM_SIZE
 # gate, and a gate whose threshold is an argument is not a gate.
 PASS_MIN_KILL_RATE = 0.90
 PASS_MAX_MEDIAN_TTK = 120.0
-
-# cs2_movement.h: leapfrog applies half a gravity step before the position
-# update, so a held-still airborne agent loses this much z before combat runs.
-GRAVITY_SAG_PER_TICK = 0.5 * 800.0 * (1.0 / 16.0)**2
 
 # ── observation-vector layout, for --obs-only ────────────────────────────────
 # Block bounds come from the GENERATED spec (src/cs2rl/_obs_spec.py, regenerated from
@@ -446,9 +445,11 @@ def _hold_statue_above_ground(env, ground_z: float, offset: float) -> None:
         ``z`` each tick it would arc back down within ~10 ticks and the
         experiment would silently become the ground experiment.
 
-    PITFALL: the value the combat ray sees is ``offset − GRAVITY_SAG_PER_TICK``,
-    not ``offset`` — process_movement runs between this write and
-    process_combat. Callers measure the realised offset instead of assuming it.
+    PITFALL: the value the combat ray sees is ``offset − 1.5625``, not
+    ``offset`` — process_movement runs between this write and process_combat,
+    and its leapfrog applies half a gravity step first (cs2_movement.h:
+    ``0.5 · 800 · (1/16)² = 1.5625``). Callers measure the realised offset
+    instead of assuming it.
     """
     a = env._c_env.game.agents[STATUE]
     a.z = ground_z + offset
@@ -797,7 +798,8 @@ def format_summary(res: dict) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
+    ap = argparse.ArgumentParser(prog="python -m cs2rl.experiment.oracle_statue",
+                                 description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--episodes",
                     type=int,

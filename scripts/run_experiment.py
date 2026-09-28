@@ -8,6 +8,10 @@ Usage:
                     [--timesteps N] [--resume <ckpt>]
 
   run_experiment.py --reappend-ledger <run_id>
+
+From a worktree, put its own src/ first: `env PYTHONPATH=<checkout>/src python
+scripts/run_experiment.py ...`. This script imports cs2rl.experiment.lib, so
+without it cs2rl's checkout guard refuses the shared .venv's copy (main's).
 """
 
 from __future__ import annotations
@@ -21,8 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-import exp_lib
+from cs2rl.experiment import lib as exp_lib
 
 # Repo root is parameterizable via CS2RL_REPO_ROOT env var so tests can point
 # this whole script at a fake repo. Without the override, falls back to the

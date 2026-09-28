@@ -1,10 +1,13 @@
 """Shared helpers for the experiment-runner scripts.
 
-Used by: run_experiment.py, analyze_experiment.py, reconcile_experiments.py,
-promote_baseline.py.
+Used by: scripts/run_experiment.py, scripts/analyze_experiment.py and
+scripts/reconcile_experiments.py, each as `from cs2rl.experiment import lib as
+exp_lib`.
 
-Deliberately stdlib-only so these helpers start fast. Do NOT import from
-src/ (would pull torch + pufferlib and make every CLI call slow).
+Deliberately stdlib-only so these helpers start fast. Do NOT import another cs2rl
+module (train and its neighbours pull torch + pufferlib and make every CLI call
+slow); `cs2rl/__init__.py` and `cs2rl/experiment/__init__.py`, the two files in
+this module's import chain, import only the stdlib.
 """
 
 from __future__ import annotations

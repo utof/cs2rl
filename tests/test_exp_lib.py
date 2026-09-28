@@ -1,13 +1,8 @@
-"""Unit tests for scripts/exp_lib.py shared helpers."""
+"""Unit tests for cs2rl/experiment/lib.py, the experiment-runner shared helpers."""
 
 import json
-import sys
-from pathlib import Path
 
-# Make scripts/ importable
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-
-import exp_lib                         # noqa: E402
+from cs2rl.experiment import lib as exp_lib
 
 
 def test_resolve_run_id_counts_existing_dirs(tmp_path, monkeypatch):

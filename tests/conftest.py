@@ -417,7 +417,8 @@ def pytest_runtestloop(session: pytest.Session) -> Generator[None, object, objec
             reporter.line(
                 "Import each module under one name: `tests.X` for a module under tests/ (the "
                 "name pytest collects it under); pyproject.toml's banned-api table names the "
-                "spelling for src/, deploy/ and the Modal scripts.",
+                "spelling for src/, the libraries #204 moved out of scripts/ and deploy/, and "
+                "the Modal scripts.",
                 red=True)
         session.testsfailed += 1
     return result
