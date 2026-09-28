@@ -4,9 +4,9 @@ import math
 import numpy as np
 import pytest
 
-from _obs_spec import OBS_BLOCKS
-from c_env.cs2_env import make_env
-from env_config import EnvConfig
+from cs2rl._obs_spec import OBS_BLOCKS
+from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env_config import EnvConfig
 
 ENEMY_BASE = OBS_BLOCKS["enemy"][0]    # 56; agent 0's enemy slot 0 = agent 5
 TM_BASE = OBS_BLOCKS["teammate"][0]    # 28

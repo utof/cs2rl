@@ -33,6 +33,13 @@ EXPERIMENTS_DIR = REPO_ROOT / "outputs" / "experiments"
 CHECKPOINTS_DIR = REPO_ROOT / "outputs" / "checkpoints"
 LOCK_PATH = EXPERIMENTS_DIR / ".lock"
 LEDGER_PATH = EXPERIMENTS_DIR / "results.jsonl"
+# What the experiment fingerprint hashes and the c_env rebuild reads. A stale path
+# here is SILENT (env_fingerprint skips a missing file, path_last_commit_sha
+# returns ""), so tests/test_path_constants_exist.py pins each to a tracked path.
+TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
+C_ENV_DIR = REPO_ROOT / "src" / "cs2rl" / "c_env"
+REWARDS_H = C_ENV_DIR / "cs2_rewards.h"
+ENV_C = C_ENV_DIR / "cs2_env.c"
 
 DEFAULT_TIMESTEPS = 2_000_000
 MIN_FREE_DISK_GB = 5
@@ -131,7 +138,7 @@ def release_lock() -> None:
 # ── Main entry point ───────────────────────────────────────────────────────
 
 
-def _python_cmd(train_py: Path) -> list[str]:
+def _python_cmd() -> list[str]:
     """Pick interpreter: in test mode (CS2RL_REPO_ROOT set) use sys.executable,
     else use `uv run python` so project deps are resolved via uv.
 
@@ -140,10 +147,29 @@ def _python_cmd(train_py: Path) -> list[str]:
     pyproject.toml — `uv run` would fail there. The env var CS2RL_REPO_ROOT is
     already the test-mode signal the script uses everywhere else, so we reuse
     it as the "use sys.executable directly" flag.
+
+    Both modes launch the package entry module (`-m cs2rl.train`), never the file
+    path: a script-path launch would put src/cs2rl/ on sys.path[0] and re-create
+    the flat module namespace in the child. Pair it with `_child_env()`.
     """
     if os.environ.get("CS2RL_REPO_ROOT"):
-        return [sys.executable, str(train_py)]
-    return ["uv", "run", "python", str(train_py)]
+        return [sys.executable, "-m", "cs2rl.train"]
+    return ["uv", "run", "python", "-m", "cs2rl.train"]
+
+
+def _child_env() -> dict[str, str]:
+    """os.environ with <REPO_ROOT>/src PREPENDED to PYTHONPATH, for the train child.
+
+    WHY: `-m cs2rl.train` resolves `cs2rl` through sys.path, and the shared venv's
+    editable install points at ONE checkout's src/ (main's). Without the prepend,
+    a run launched from a worktree, or from the tests' fake repo, silently trains
+    another checkout's code. Prepend, never replace: a replaced PYTHONPATH drops
+    whatever the caller already put there.
+    """
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")]))
+    return env
 
 
 def _read_baseline() -> str | None:
@@ -247,13 +273,10 @@ def main_run(args) -> int:
                                          f"**Budget steps:** {args.timesteps}\n\n"
                                          f"**Resume from:** {args.resume or '(none)'}\n")
 
-        train_py = REPO_ROOT / "src" / "train.py"
-        rewards_h = REPO_ROOT / "src" / "c_env" / "cs2_rewards.h"
-        env_c = REPO_ROOT / "src" / "c_env" / "cs2_env.c"
-        c_env_sha = exp_lib.path_last_commit_sha(REPO_ROOT / "src" / "c_env")
-        train_py_sha = exp_lib.path_last_commit_sha(train_py)
+        c_env_sha = exp_lib.path_last_commit_sha(C_ENV_DIR)
+        train_py_sha = exp_lib.path_last_commit_sha(TRAIN_PY)
 
-        dump_cmd = _python_cmd(train_py) + [
+        dump_cmd = _python_cmd() + [
             "--dump-config",
             "--checkpoint-dir",
             str(ckpt_dir),
@@ -261,6 +284,7 @@ def main_run(args) -> int:
         dump_r = subprocess.run(
             dump_cmd,
             cwd=REPO_ROOT,
+            env=_child_env(),
             capture_output=True,
             text=True,
         )
@@ -269,9 +293,9 @@ def main_run(args) -> int:
         cfg_hash = exp_lib.config_hash(ckpt_dir / "config.json")
 
         env_fp = exp_lib.env_fingerprint(
-            train_py_path=train_py,
-            rewards_h_path=rewards_h,
-            env_c_path=env_c,
+            train_py_path=TRAIN_PY,
+            rewards_h_path=REWARDS_H,
+            env_c_path=ENV_C,
         )
         env_fp["c_env_sha"] = c_env_sha
         env_fp["train_py_sha"] = train_py_sha
@@ -297,11 +321,12 @@ def main_run(args) -> int:
                        check=True,
                        capture_output=True)
 
-        if any(f.startswith("src/c_env/") for f in changed_files):
+        c_env_prefix = C_ENV_DIR.relative_to(REPO_ROOT).as_posix() + "/"
+        if any(f.startswith(c_env_prefix) for f in changed_files):
             exp_lib.write_status(run_dir, "building")
             zig_r = subprocess.run(
                 ["uv", "run", "--no-sync", "zig", "build"],
-                cwd=REPO_ROOT / "src" / "c_env",
+                cwd=C_ENV_DIR,
                 capture_output=True,
                 text=True,
             )
@@ -343,7 +368,7 @@ def main_run(args) -> int:
         # resolve_run_name's double-prefix logic inside train.py.
         exp_lib.write_status(run_dir, "training")
         train_log = run_dir / "train.log"
-        train_cmd = _python_cmd(train_py) + [
+        train_cmd = _python_cmd() + [
             "--train",
             "--timesteps",
             str(args.timesteps),
@@ -358,6 +383,7 @@ def main_run(args) -> int:
             train_r = subprocess.run(
                 train_cmd,
                 cwd=REPO_ROOT,
+                env=_child_env(),
                 stdout=logf,
                 stderr=subprocess.STDOUT,
             )

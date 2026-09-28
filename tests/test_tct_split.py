@@ -19,9 +19,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import train
-from _action_spec import AIM_DIM
-from c_env.cs2_env import make_env
+from cs2rl import train
+from cs2rl._action_spec import AIM_DIM
+from cs2rl.c_env.cs2_env import make_env
 
 
 @pytest.fixture(scope="module")

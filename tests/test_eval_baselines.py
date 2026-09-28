@@ -22,13 +22,13 @@ import time
 import numpy as np
 import pytest
 
-from c_env.cs2_env import N_AGENTS, TEAM_SIZE
+from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
 
 
 def _arena_env(**kw):
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
-    from map import make_arena_duel_map
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
+    from cs2rl.map import make_arena_duel_map
     base = dict(n_active_per_team=1,
                 pin_pitch=1,
                 crouch_enabled=0,
@@ -52,7 +52,7 @@ def _arena_env(**kw):
 
 
 def test_oracle_beats_random():
-    from eval_baselines import BaselineEvaluator, OracleActor, RandomActor
+    from cs2rl.eval_baselines import BaselineEvaluator, OracleActor, RandomActor
     env = _arena_env()
     try:
         ev = BaselineEvaluator(env, episodes=40, seed=0)
@@ -72,7 +72,7 @@ def test_oracle_never_blind():
     evaluator threads vis_prev correctly — feeding None every tick makes the
     oracle fire at nothing (it would still walk and, on the arena, win).
     """
-    from eval_baselines import BaselineEvaluator, IdleActor, OracleActor
+    from cs2rl.eval_baselines import BaselineEvaluator, IdleActor, OracleActor
     env = _arena_env()
     try:
         ev = BaselineEvaluator(env, episodes=40, seed=0)
@@ -86,7 +86,7 @@ def test_oracle_never_blind():
 
 
 def test_win_definition_excludes_timeouts():
-    from eval_baselines import episode_outcome
+    from cs2rl.eval_baselines import episode_outcome
     # (kills_for, kills_against) → win score
     assert episode_outcome(1, 0) == 1.0 and episode_outcome(0, 1) == 0.0
     assert episode_outcome(0, 0) == 0.0                # timeout is NOT a CT win here
@@ -118,7 +118,7 @@ def test_win_definition_through_episode_at_n_active_2(side):
     episode_stats.kills_* are TEAM counters. Per-policy credit is n=1-only.
     Timeout (nobody shoots) scores 0 on both sides.
     """
-    from eval_baselines import BaselineEvaluator, IdleActor, OracleActor
+    from cs2rl.eval_baselines import BaselineEvaluator, IdleActor, OracleActor
     env = _arena_env(n_active_per_team=2)
     try:
         ev = BaselineEvaluator(env, episodes=2, seed=0)
@@ -138,7 +138,7 @@ def test_win_definition_through_episode_at_n_active_2(side):
 
 
 def test_eval_keys_and_selfplay_receives_elimination_only_rate():
-    from train import elimination_only_win_rates
+    from cs2rl.train import elimination_only_win_rates
     logs = {"environment/winner_t": 0.2, "environment/winner_ct": 0.7, "environment/timed_out": 0.5}
     wt, wct = elimination_only_win_rates(logs)
     assert wt == 0.2 and wct == pytest.approx(0.2)
@@ -147,12 +147,12 @@ def test_eval_keys_and_selfplay_receives_elimination_only_rate():
 
 
 def test_policy_actor_from_live_policy_fills_all_rows(simple_map):
-    from eval_baselines import BaselineEvaluator, PolicyActor
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.eval_baselines import BaselineEvaluator, PolicyActor
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=16, map_data=simple_map)
     env = None
     try:
-        from c_env.cs2_env import make_env
+        from cs2rl.c_env.cs2_env import make_env
         env = make_env(map_data=simple_map, seed=1, auto_reset=False)
         ev = BaselineEvaluator(env, episodes=2, seed=0)
         pa = PolicyActor.from_policy(trainer.policy, "cpu")
@@ -196,13 +196,13 @@ def test_evaluate_emits_all_eval_keys_and_keeps_training_rng(simple_map):
     not perturb the training torch RNG stream (spec §6 seeding)."""
     import torch
 
-    from eval_baselines import BaselineEvaluator
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.eval_baselines import BaselineEvaluator
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=16, map_data=simple_map)
     env = None
     try:
-        from c_env.cs2_env import make_env
-        from env_config import EnvConfig
+        from cs2rl.c_env.cs2_env import make_env
+        from cs2rl.env_config import EnvConfig
         env = make_env(map_data=simple_map,
                        seed=1,
                        auto_reset=False,
@@ -249,8 +249,8 @@ def test_scheduled_eval_survives_log_throttle(simple_map):
     """Binding ruling: eval runs on the eval epoch even when PuffeRL's 0.25 s
     log throttle returns logs=None, and its keys land on the NEXT logged row
     (with eval/epoch stamping the epoch they were measured at)."""
-    from train import ScheduledEval
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train import ScheduledEval
+    from cs2rl.train_test_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=16,
                                                map_data=simple_map,
                                                n_active_per_team=1)
@@ -286,7 +286,7 @@ def test_scheduled_eval_interval_gating():
     builds the hook then — a 0 here would be a modulo-by-zero on the first epoch)."""
     import types
 
-    from train import ScheduledEval
+    from cs2rl.train import ScheduledEval
     stub = _StubEvaluator()
     hook = ScheduledEval(stub, interval=3, policy=None, device="cpu")
     for epoch in range(1, 7):
@@ -301,8 +301,8 @@ def test_eval_interval_cli_config_and_modal_mirror():
     import types
     from pathlib import Path
 
-    from train import build_train_config, compute_batch_dims
-    src = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
+    from cs2rl.train import build_train_config, compute_batch_dims
+    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train.py").read_text()
     m = re.search(r'add_argument\(\s*"--eval-interval",(.*?)\)\n', src, re.S)
     assert m and "type=int" in m.group(1) and "default=0" in m.group(1) \
         and 'dest="eval_interval"' in m.group(1)
@@ -318,7 +318,7 @@ def test_eval_interval_cli_config_and_modal_mirror():
     assert cfg["eval_interval"] == 7
     args.eval_interval = 0
     assert build_train_config(args, batch_size=bs, bptt_horizon=bptt)["eval_interval"] == 0
-    from train import RESUME_CONFIG_ALLOWLIST
+    from cs2rl.train import RESUME_CONFIG_ALLOWLIST
     assert "eval_interval" not in RESUME_CONFIG_ALLOWLIST
     from scripts.modal_runner import request
     assert request.LIVE_TRAIN_OPTION_ARITY.get("--eval-interval") == 1
@@ -335,9 +335,10 @@ def test_hit_geometry_constants_match_cs2_combat_h():
     import re
     from pathlib import Path
 
-    import eval_baselines as eb
+    from cs2rl import eval_baselines as eb
 
-    header = (Path(__file__).resolve().parents[1] / "src" / "c_env" / "cs2_combat.h").read_text()
+    header = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "c_env" /
+              "cs2_combat.h").read_text()
     pattern = re.compile(r"static const float\s+(HIT_HALF_WIDTH|HIT_HALF_HEIGHT_STAND|"
                          r"HIT_HALF_HEIGHT_CROUCH|EYE_HEIGHT_STAND|EYE_HEIGHT_CROUCH|"
                          r"TORSO_OFFSET_STAND|TORSO_OFFSET_CROUCH)\s*=\s*([0-9.]+)f")

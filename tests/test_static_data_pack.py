@@ -45,16 +45,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# Repo convention (tests/test_binding.py, tests/test_struct_sizes.py,
-# tests/test_static_data_layout.py): `binding` is a C extension under src/c_env
-# and conftest.py only puts src/ on the path.
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "c_env"))
-import binding                         # noqa: E402
-
-from c_env import cs2_env              # noqa: E402
-from c_env.cs2_env import (            # noqa: E402
-    TEAM_SIZE, StaticDataC, make_env,
+from cs2rl.c_env import binding, cs2_env
+from cs2rl.c_env.cs2_env import (
+    TEAM_SIZE,
+    StaticDataC,
+    make_env,
 )
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "static_data_scalars_pre_w2.json"
@@ -94,7 +89,7 @@ def test_static_data_scalars_match_the_pre_w2_capture(simple_map):
     pigeonhole argument spelled out at _BOOL_SENTINEL_CONFIGS in
     tests/test_struct_sizes.py.
 
-    PITFALL: this reads the CURRENTLY BUILT .so. After editing src/c_env,
+    PITFALL: this reads the CURRENTLY BUILT .so. After editing src/cs2rl/c_env,
     rebuild before believing a pass OR a failure.
     """
     fixture = _load_fixture()
@@ -335,7 +330,7 @@ def _capture():
     """
     import subprocess
 
-    from map import make_simple_map
+    from cs2rl.map import make_simple_map
     from tests.test_struct_sizes import _SENTINEL_CONFIGS, _config_from_field_kwargs
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -355,7 +350,7 @@ def _capture():
     provenance = {
         "format": _CAPTURE_FORMAT,
         "captured_at_commit": head,
-        "map": "map.make_simple_map()",
+        "map": "cs2rl.map.make_simple_map()",
         "why": why,
         "regenerate": regenerate,
     }

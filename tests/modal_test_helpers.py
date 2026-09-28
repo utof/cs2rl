@@ -123,7 +123,7 @@ def _write_metrics(path: Path, steps: list[int]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for epoch, step in enumerate(steps, start=1):
-        # Representative live row: pin the live key `step` (src/train.py).
+        # Representative live row: pin the live key `step` (src/cs2rl/train.py).
         rows.append(
             json.dumps({
                 "run_id": "ok-id",

@@ -5,14 +5,14 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TRAIN_SCRIPT = REPO_ROOT / "src" / "train.py"
+TRAIN_SCRIPT = REPO_ROOT / "src" / "cs2rl" / "train.py"
 
 
 # gh#95: 600s (not 180s) because the --smoke subprocess competes with a live GPU
 # training run on this box — the flake was CPU/GPU contention, not runtime growth.
 def run_train_command(*args, timeout=600):
     return subprocess.run(
-        [sys.executable, str(TRAIN_SCRIPT), *args],
+        [sys.executable, "-m", "cs2rl.train", *args],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -71,10 +71,10 @@ def test_train_help_shows_current_cli():
 def test_dump_config_without_checkpoint_dir_uses_default(tmp_path):
     """R0-C made --checkpoint-dir default=None; --dump-config must still resolve
     it to CHECKPOINTS_DIR instead of crashing on Path(None). CHECKPOINTS_DIR is
-    cwd-relative (src/paths.py: Path("outputs") / "checkpoints"), so running
+    cwd-relative (src/cs2rl/paths.py: Path("outputs") / "checkpoints"), so running
     with cwd=tmp_path keeps the write out of the repo. sys.executable (not
     `uv run`) because uv would not find the project from a tmp cwd."""
-    r = subprocess.run([sys.executable, str(TRAIN_SCRIPT), "--dump-config"],
+    r = subprocess.run([sys.executable, "-m", "cs2rl.train", "--dump-config"],
                        capture_output=True,
                        text=True,
                        timeout=120,
@@ -161,7 +161,7 @@ def test_reward_weight_config_keys_default_to_make_env_values(tmp_path):
     dest= or a missing add_argument would leave the key at the getattr
     fallback and could not be caught by a hand-built Namespace.
     """
-    from env_config import RewardWeights
+    from cs2rl.env_config import RewardWeights
 
     cfg = _dump_config(tmp_path)
     for name, default in RewardWeights().as_dict().items():
@@ -232,8 +232,7 @@ def test_dump_config_matches_the_pre_165_fixture(tmp_path, arm):
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir()
     r = subprocess.run(
-        [sys.executable,
-         str(TRAIN_SCRIPT), *entry["argv"], "--checkpoint-dir",
+        [sys.executable, "-m", "cs2rl.train", *entry["argv"], "--checkpoint-dir",
          str(ckpt)],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -329,12 +328,11 @@ def test_opponent_noop_without_no_self_play_is_refused_at_startup(tmp_path):
     instead of the run discovering at epoch 50 that maybe_switch_teams moved
     the statue to the hero's side of a spawn-asymmetric map. Nothing is
     written: the error precedes even the map build."""
-    r = subprocess.run(
-        [sys.executable, str(TRAIN_SCRIPT), "--dump-config", "--opponent", "noop"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=tmp_path)
+    r = subprocess.run([sys.executable, "-m", "cs2rl.train", "--dump-config", "--opponent", "noop"],
+                       capture_output=True,
+                       text=True,
+                       timeout=120,
+                       cwd=tmp_path)
     assert r.returncode != 0, r.stdout[-2000:]
     assert "--no-self-play" in r.stderr, r.stderr[-2000:]
     assert not (tmp_path / "outputs").exists(), "the guard must fire before any side effect"
@@ -347,8 +345,8 @@ def test_opponent_flag_declared_with_both_modes():
     both modes and default to the historical one.
 
     TWO FILES since the post-rung1a refactor (2026-08-31): the parser (and so
-    the `choices=OPPONENT_MODES` reference) stays in src/train.py, while the
-    OPPONENT_MODES tuple itself moved to src/train_config.py. Both halves are
+    the `choices=OPPONENT_MODES` reference) stays in src/cs2rl/train.py, while the
+    OPPONENT_MODES tuple itself moved to src/cs2rl/train_config.py. Both halves are
     pinned — a `choices=` naming a vocabulary that no longer holds both modes
     is exactly the silent narrowing this test exists to catch."""
     import re
@@ -359,7 +357,7 @@ def test_opponent_flag_declared_with_both_modes():
     body = m.group(1)
     assert "choices=OPPONENT_MODES" in body and 'default="self"' in body, body
     assert 'dest="opponent"' in body, body
-    config_src = (REPO_ROOT / "src" / "train_config.py").read_text()
+    config_src = (REPO_ROOT / "src" / "cs2rl" / "train_config.py").read_text()
     assert 'OPPONENT_MODES = ("self", "noop")' in config_src
 
 

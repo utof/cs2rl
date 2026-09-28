@@ -37,22 +37,17 @@ Pitfalls encoded here (so later tasks don't rediscover them):
 
 import math
 import statistics
-import sys
-from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "src"))
+import numpy as np
 
-import numpy as np                     # noqa: E402
-
-from _action_spec import AIM_DIM                                                       # noqa: E402
-from c_env.cs2_env import make_env                                                     # noqa: E402
-from map import make_simple_map                                                        # noqa: E402
-from nav import ACTION_DIM, BOMB_PLANT_TIME, MAX_TURN_SPEED_RAD, ROUND_TIME, TEAM_SIZE # noqa: E402
+from cs2rl._action_spec import AIM_DIM
+from cs2rl.c_env.cs2_env import make_env
+from cs2rl.map import make_simple_map
+from cs2rl.nav import ACTION_DIM, BOMB_PLANT_TIME, MAX_TURN_SPEED_RAD, ROUND_TIME, TEAM_SIZE
 
 # Batch 6 Task 2: helpers extracted from tests/test_env_feasibility.py into
-# src/scripted_expert.py; they now take MapData directly (no NavGraph/shim).
-from scripted_expert import area_centroid, bfs_area_path, bombsite_areas # noqa: E402
+# src/cs2rl/scripted_expert.py; they now take MapData directly (no NavGraph/shim).
+from cs2rl.scripted_expert import area_centroid, bfs_area_path, bombsite_areas
 
 N_AGENTS = 10
 HEAD_USE = 4                           # discrete head order: move=0 shoot=1 reload=2 weapon=3 use=4 crouch=5 jump=6

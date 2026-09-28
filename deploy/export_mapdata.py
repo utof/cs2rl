@@ -13,12 +13,12 @@ Usage (run from repo root):
 Reads MapData from the real dust2 nav mesh via make_cs2_map().
 Writes deploy/mapdata/<map>.json with the 5 constants needed by ObservationBuilder.
 
-Formulas (from src/c_env/cs2_env.py:312-315):
+Formulas (from src/cs2rl/c_env/cs2_env.py:312-315):
     inv_x = 2.0 / (x_max - x_min)
     inv_y = 2.0 / (y_max - y_min)
     x_off = (x_max + x_min) / (x_max - x_min)
     y_off = (y_max + y_min) / (y_max - y_min)
-    map_diag = sqrt((1/inv_x)^2 + (1/inv_y)^2)  # from src/c_env/cs2_observations.h:15-17
+    map_diag = sqrt((1/inv_x)^2 + (1/inv_y)^2)  # from src/cs2rl/c_env/cs2_observations.h:15-17
 
 IMPORTANT — normalization convention:
     The formula applied per-coordinate is:  norm = x * inv_range - offset
@@ -32,14 +32,10 @@ obs_version matches the baked-in constant before proceeding.
 import argparse
 import json
 import math
-import sys
 from pathlib import Path
 
-# Add src/ to sys.path so map.py and nav.py are importable without package install.
-# We insert at position 0 so local src/ takes precedence over any installed packages.
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-import nav
-from map import make_cs2_map
+from cs2rl import nav
+from cs2rl.map import make_cs2_map
 
 # This version tag must stay in sync with:
 #   - deploy/export_policy.py  (obs_version field)

@@ -86,7 +86,7 @@ internal sealed class ObservationBuilder
     private const int    CounterTerrorist = 3; // CS2 TeamNum for CT-side
 
     // Z-axis normalization scale for self z and z-delta obs slots (world-space CS units).
-    // Matches the literal `128.0f` divisor in src/c_env/cs2_observations.h:38, :78, :135.
+    // Matches the literal `128.0f` divisor in src/cs2rl/c_env/cs2_observations.h:38, :78, :135.
     // Picked to keep typical map z-spans (catwalk ≈128u above bombsite ≈64u above floor 0)
     // within roughly [-1, 1] for the network ingest. NOT a clip — values outside the range
     // (e.g. mid-jump apex) pass through, then get bounded by the global ClipAll() to ±5.
@@ -107,7 +107,7 @@ internal sealed class ObservationBuilder
     // Keyed by bot.Slot (int) because ObservationBuilder is a singleton shared across
     // all bots — NOT per-bot instance state.
     //
-    // Semantics (mirroring sim emission at src/c_env/cs2_observations.h:178-185):
+    // Semantics (mirroring sim emission at src/cs2rl/c_env/cs2_observations.h:178-185):
     //   - Set ONCE per round: the first tick a bot is observed to own the bomb
     //     (HasC4 == true), that bot's Slot is latched as designated carrier.
     //   - NEVER updated mid-round on drop+pickup — the role bit is intentionally

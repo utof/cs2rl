@@ -4,13 +4,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "c_env"))
-import binding                         # noqa
+from cs2rl.c_env import binding
 
 
 def _make_env(map_data=None):
-    from c_env.cs2_env import make_env
+    from cs2rl.c_env.cs2_env import make_env
     env = make_env(seed=0, map_data=map_data)
     return env._capsule, env
 
@@ -50,7 +48,7 @@ def test_step_returns_none(make_map):
     raw int32(10,) buffer happens to be ≥10*7*4 bytes only if reinterpreted —
     use the proper 2D shape now to be safe.
     """
-    from _action_spec import ACTION_DIM, AIM_DIM
+    from cs2rl._action_spec import ACTION_DIM, AIM_DIM
     _, env = _make_env(map_data=make_map)
     binding.reset(env._capsule)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int32)
@@ -89,7 +87,7 @@ def test_agentstate_has_punch_fields():
     """
     import ctypes
 
-    from c_env.cs2_env import AgentStateC, Dust2EnvC, GameStateC
+    from cs2rl.c_env.cs2_env import AgentStateC, Dust2EnvC, GameStateC
     names = [n for n, _ in AgentStateC._fields_]
     # Adjacency + order, NOT a tail slice. The punch pair stopped being the last
     # two fields when Rung 0 (spec 2026-08-29 §2.1) appended
@@ -123,8 +121,8 @@ def test_make_env_writes_recoil_enabled(make_map):
     """
     import dataclasses
 
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
     assert "recoil" in {f.name for f in dataclasses.fields(EnvConfig)}
     env = make_env(seed=0, map_data=make_map, config=EnvConfig(recoil=False))
     try:
@@ -155,7 +153,7 @@ def test_stepstats_has_plant_tick(make_map):
     """
     import ctypes
 
-    from c_env.cs2_env import Dust2EnvC, StepStatsC
+    from cs2rl.c_env.cs2_env import Dust2EnvC, StepStatsC
     _, env = _make_env(map_data=make_map)
     assert hasattr(env._c_env.episode_stats, "plant_tick")
     env.reset()
@@ -175,7 +173,7 @@ def test_human_controlled_uses_aim_rad_not_bin(make_map):
     Δyaw to confirm it is ignored — only aim_rad sets facing for human
     agents.
     """
-    from _action_spec import ACTION_DIM, AIM_DIM
+    from cs2rl._action_spec import ACTION_DIM, AIM_DIM
     _, env = _make_env(map_data=make_map)
     binding.reset(env._capsule)
 
@@ -205,7 +203,7 @@ def test_binding_step_accepts_continuous_array(make_map):
     before the C call). Correct shape is accepted.
     Batch 3.5: wrong-shape probe uses AIM_DIM+1 so it stays wrong even as AIM_DIM grows.
     """
-    from _action_spec import ACTION_DIM, AIM_DIM
+    from cs2rl._action_spec import ACTION_DIM, AIM_DIM
     _, env = _make_env(map_data=make_map)
     env.reset(seed=0)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int32)
@@ -225,7 +223,7 @@ def test_binding_default_continuous_actions_zero(make_map):
     (an RL agent, not human_controlled) so the continuous branch in env_step
     fires.
     """
-    from _action_spec import ACTION_DIM
+    from cs2rl._action_spec import ACTION_DIM
     _, env = _make_env(map_data=make_map)
     env.reset(seed=0)
     g = env._c_env.game
@@ -240,7 +238,7 @@ def test_binding_default_continuous_actions_zero(make_map):
 # ── Batch 3 Task 5: NaN guard test ─────────────────────────────────────────
 #
 # This test exercises the inline NaN guard that lives in the trainer's
-# train() method (Cs2PuffeRL.train, src/trainer.py). Rebuilding the full
+# train() method (Cs2PuffeRL.train, src/cs2rl/trainer.py). Rebuilding the full
 # PufferLib trainer just to test this would be expensive and fragile against
 # unrelated PufferLib API drift; instead we replicate the guard's structure
 # locally — same control flow, same warning string, same zero-grad call —
@@ -252,7 +250,7 @@ def test_binding_default_continuous_actions_zero(make_map):
 # signature), update BOTH this test and the real guard in the same PR. The real
 # guard is the `if not torch.isfinite(loss).all():` block inside
 # `Cs2PuffeRL.train`, which moved out of train.py with its patcher on
-# 2026-08-31 (src/train_update.py) and into src/trainer.py as a method on
+# 2026-08-31 (src/cs2rl/train_update.py) and into src/cs2rl/trainer.py as a method on
 # gh#168 W2a; search the "Batch 3 (T5) NaN guard" banner rather than trusting
 # a line number.
 
@@ -267,8 +265,8 @@ def test_continuous_aim_nan_guard():
 
     import torch
 
-    import train
-    from c_env.cs2_env import make_env
+    from cs2rl import train
+    from cs2rl.c_env.cs2_env import make_env
 
     env = make_env(seed=0)
     try:
@@ -302,7 +300,7 @@ def test_continuous_aim_nan_guard():
         _sys.stdout = captured
 
         # Mirror the guard control flow inside Cs2PuffeRL.train
-        # (src/trainer.py). Throttle field name MUST match the
+        # (src/cs2rl/trainer.py). Throttle field name MUST match the
         # production attribute (`_last_nan_warn_t`) so a future regression
         # touching the attribute name fails this test.
         class _Self:
@@ -372,8 +370,8 @@ def test_continuous_aim_mp_backend_receives_buffer():
 
     import pufferlib.vector
 
-    from _action_spec import ACTION_DIM, AIM_DIM
-    from c_env.cs2_env import make_env
+    from cs2rl._action_spec import ACTION_DIM, AIM_DIM
+    from cs2rl.c_env.cs2_env import make_env
 
     # ROUND_TIME=640 ticks; pad MAX_TICKS in case the first ticks are spent
     # in a setup state where round_over fires immediately and resets the
@@ -497,8 +495,8 @@ def test_onnx_export_output_order_pinned():
     import onnxruntime as ort
     from export_policy import LSTMPolicyONNXWrapper
 
-    import train
-    from c_env.cs2_env import make_env
+    from cs2rl import train
+    from cs2rl.c_env.cs2_env import make_env
 
     env = make_env(seed=0)
     try:

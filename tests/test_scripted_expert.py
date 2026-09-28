@@ -13,11 +13,11 @@ the shapes/dtypes env.step consumes, so a recorder can capture
 """
 import numpy as np
 
-from _action_spec import AIM_DIM
-from c_env.cs2_env import make_env
-from map import make_simple_map
-from nav import ACTION_DIM, N_AGENTS, ROUND_TIME
-from scripted_expert import ScriptedBomber, bfs_area_path, bombsite_areas, setup_bomb_carrier
+from cs2rl._action_spec import AIM_DIM
+from cs2rl.c_env.cs2_env import make_env
+from cs2rl.map import make_simple_map
+from cs2rl.nav import ACTION_DIM, N_AGENTS, ROUND_TIME
+from cs2rl.scripted_expert import ScriptedBomber, bfs_area_path, bombsite_areas, setup_bomb_carrier
 
 
 def test_scripted_bomber_plants_within_round_time_on_simple_map():

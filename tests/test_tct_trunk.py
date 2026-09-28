@@ -8,8 +8,8 @@ tests 6 and 10 so that file stays under the plan's ~800-line cap.
 import pytest
 import torch
 
-import train
-from c_env.cs2_env import make_env
+from cs2rl import train
+from cs2rl.c_env.cs2_env import make_env
 
 
 @pytest.fixture(scope="module")

@@ -18,7 +18,7 @@ import torch
 
 def test_atomic_save_roundtrip_and_no_tmp_left(tmp_path):
     """Saved dict loads back intact; no .tmp sibling survives."""
-    from train import _atomic_save_state_dict
+    from cs2rl.train import _atomic_save_state_dict
 
     path = tmp_path / "policy.pt"
     state = {"w": torch.tensor([1.0, 2.0, 3.0])}
@@ -36,7 +36,7 @@ def test_atomic_save_preserves_old_checkpoint_on_crash(tmp_path, monkeypatch):
     Simulates the power-loss/bus-drop by making torch.save die after
     opening the tmp file — the destination must still hold the OLD state.
     """
-    from train import _atomic_save_state_dict
+    from cs2rl.train import _atomic_save_state_dict
 
     path = tmp_path / "policy.pt"
     old = {"w": torch.tensor([1.0])}

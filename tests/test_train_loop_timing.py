@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-TRAIN_PY = ROOT / "src" / "train.py"
+TRAIN_PY = ROOT / "src" / "cs2rl" / "train.py"
 
 # The ONE helper name allowed to stand in for an inline perf_counter at a call
 # site. Deliberately an exact name rather than a `_time*` prefix: `_timestamp_dir`

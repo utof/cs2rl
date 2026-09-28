@@ -1,4 +1,4 @@
-"""Gate: no env default is restated outside src/env_config.py (spec 2026-09-03 R11).
+"""Gate: no env default is restated outside src/cs2rl/env_config.py (spec 2026-09-03 R11).
 
 WHY THREE PROBES. A default can be written down in three shapes and each is
 invisible to the other two probes:
@@ -17,7 +17,7 @@ gate with only probes 1 and 2 would report 0 both before and after that removal
 file exists to prevent.
 
 WHAT COUNTS AS A RESTATEMENT: a literal equal to the field's default, written
-anywhere under src/ or scripts/ except src/env_config.py, which is where the
+anywhere under src/ or scripts/ except src/cs2rl/env_config.py, which is where the
 defaults are DECLARED. A value that merely happens to equal a default is still a
 restatement unless there is a written reason (see ALLOWLIST).
 
@@ -38,7 +38,7 @@ both ways: a docstring anywhere under src/ that spells a counter-example as
 `getattr(args, "<knob>", <the literal>)` is a HIT, and the fix is the prose.
 
 PITFALL: the line regex pairs a name and a literal only when they share a LINE.
-`src/train_config.py`'s R0-J docstring names `pbrs_gamma` on one line and the
+`src/cs2rl/train_config.py`'s R0-J docstring names `pbrs_gamma` on one line and the
 field default on the next, so it is out of reach by construction, not by
 allowance. Do not "helpfully" widen the probe across lines: the pairing would
 stop meaning anything and every prose paragraph that mentions two knobs would
@@ -53,16 +53,10 @@ from pathlib import Path
 
 import pytest
 
+from cs2rl.env_config import KNOB_FIELDS, EnvConfig, RewardWeights
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC = REPO_ROOT / "src"
-sys.path.insert(0, str(SRC))
-
-# I001 is suppressed, not fixed: the import has to follow the sys.path insert
-# above, and ruff's isort wants it in the block at the top (same waiver as
-# tests/test_env_config.py:21).
-from env_config import KNOB_FIELDS, EnvConfig, RewardWeights           # noqa: E402, I001
-
-DECLARATION = SRC / "env_config.py"
+DECLARATION = REPO_ROOT / "src" / "cs2rl" / "env_config.py"
 
 # name -> default, for the 23 weights and the seven non-None knobs. The three
 # None-valued R0-G knobs are excluded: `x = None` is not a restatement of
@@ -221,7 +215,7 @@ def _assert_exactly(found, pending, probe):
         return "\n".join(rows)
 
     extra = sorted(k for k in counts if counts[k] > pending.get(k, 0))
-    assert not extra, (f"{probe}: env default(s) restated outside src/env_config.py:\n" +
+    assert not extra, (f"{probe}: env default(s) restated outside src/cs2rl/env_config.py:\n" +
                        _fmt(extra) +
                        "\nDerive the value from EnvConfig()/RewardWeights() instead. A comment or "
                        "docstring counts — write `<the field default>`, not the number. If it is "
@@ -283,7 +277,7 @@ def test_no_argparse_default_restates_a_field_default():
     argparse kept the same number one line away — the restatement moved, not
     removed.
 
-    SCOPE: every file the other two probes read, not just src/train.py. Measured
+    SCOPE: every file the other two probes read, not just src/cs2rl/train.py. Measured
     2026-09-04: 131 add_argument calls live in 17 of the 44 scanned files and
     only 54 of them are in train.py. None of the other 77 names an env knob
     today — that is the point. A probe scoped to one file reports the same 0
@@ -393,10 +387,10 @@ def test_the_probes_find_a_planted_restatement(tmp_path, monkeypatch, probe):
     `test_the_probes_can_actually_fail` does not close this: it exercises the
     PATTERNS against a scratch string and never touches the file walk.
     """
-    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "cs2rl").mkdir(parents=True)
     (tmp_path / "scripts").mkdir()
-    declaration = tmp_path / "src" / "env_config.py"
-    anchor = tmp_path / "src" / "train_config.py"
+    declaration = tmp_path / "src" / "cs2rl" / "env_config.py"
+    anchor = tmp_path / "src" / "cs2rl" / "train_config.py"
     name = "crouch_enabled"
     value = FIELD_DEFAULTS[name]
     plant = (f"{name} = {value!r}\n"
@@ -415,7 +409,7 @@ def test_the_probes_find_a_planted_restatement(tmp_path, monkeypatch, probe):
     found = _hits(pattern)
     assert sorted((f, n) for f, _, n in found) == [
         ("scripts/planted.py", name),
-        ("src/train_config.py", name),
+        ("src/cs2rl/train_config.py", name),
     ], f"the walk did not report one hit under EACH root: {found}"
     # cross-probe negative: neither planted shape matches the other probe
     other = _getattr_pattern if probe == "line" else _line_pattern

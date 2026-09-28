@@ -110,7 +110,7 @@ class Manifest:
     """Minimum manifest.json contract from design §5.
 
     effective_map is authoritative. Do not store live config's `env` field: it
-    is only a label, which src/train_config.py derives as `cs2-<map>` from
+    is only a label, which src/cs2rl/train_config.py derives as `cs2-<map>` from
     train.py's resolved `--map` (`cs2-dust2` when the `map` attribute is
     missing or empty). The map the runner validated is effective_map.
     """

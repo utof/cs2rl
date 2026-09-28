@@ -10,8 +10,32 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).parent.parent
 RUN_EXP = REPO / "scripts" / "run_experiment.py"
+# The keys the fake train.py's --dump-config writes. The real cs2rl.train dumps
+# far more, so an exact key-set match proves the FAKE ran: under `-m cs2rl.train`
+# the real package (this checkout's, or whichever the venv's .pth names) could
+# otherwise stand in for it and every assertion below would still hold.
+_FAKE_CONFIG_KEYS = {"batch_size", "clip_coef", "data_dir", "gamma", "learning_rate", "seed"}
+
+
+@pytest.fixture(autouse=True)
+def _a_launch_without_the_prepend_stops_at_import(tmp_path_factory, monkeypatch):
+    """Put a `cs2rl` that refuses to import at the front of the inherited PYTHONPATH.
+
+    run_experiment's launches prepend <fake repo>/src (_child_env), so the fake still
+    wins. A launch that lost that prepend would otherwise resolve the REAL cs2rl.train
+    and could start a real training run; this makes it stop at its first import.
+    """
+    trap = tmp_path_factory.mktemp("trap")
+    init = trap / "cs2rl" / "__init__.py"
+    init.parent.mkdir()
+    init.write_text(
+        "raise SystemExit('cs2rl trap: this launch lost run_experiment._child_env()')\n")
+    inherited = os.environ.get("PYTHONPATH")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(trap), inherited])))
 
 
 def _init_fake_repo(tmp_path: Path) -> Path:
@@ -19,22 +43,26 @@ def _init_fake_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "t@test"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" /
-     "train.py").write_text("OBS_DIM = 105\nACTION_HEAD_SIZES = (9, 2, 2, 3, 2, 2, 2)\n")
-    (tmp_path / "src" / "c_env").mkdir()
-    (tmp_path / "src" / "c_env" / "cs2_rewards.h").write_text(
-        "#define INACTION_PENALTY -0.0005f\n"
-        "static const float terminal_win_bonus = 1.0f;\n")
-    (tmp_path / "src" / "c_env" / "cs2_env.c").write_text("float plant_progress_reward = 0.05f;\n")
+    # The package layout run_experiment launches: `-m cs2rl.train` with <repo>/src
+    # first on PYTHONPATH. The __init__.py is load-bearing: without it this cs2rl
+    # is a namespace portion, and a regular `cs2rl` package later on the path wins.
+    pkg = tmp_path / "src" / "cs2rl"
+    (pkg / "c_env").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "train.py").write_text("OBS_DIM = 105\nACTION_HEAD_SIZES = (9, 2, 2, 3, 2, 2, 2)\n")
+    (pkg / "c_env" / "cs2_rewards.h").write_text("#define INACTION_PENALTY -0.0005f\n"
+                                                 "static const float terminal_win_bonus = 1.0f;\n")
+    (pkg / "c_env" / "cs2_env.c").write_text("float plant_progress_reward = 0.05f;\n")
     (tmp_path / "outputs").mkdir()
     (tmp_path / "outputs" / "checkpoints").mkdir()
     (tmp_path / "outputs" / "experiments").mkdir()
     (tmp_path / "outputs" / "experiments" / "results.jsonl").touch()
     # Gitignore outputs/ so train-produced files (checkpoints, new run dirs,
     # ledger updates) don't show up in git status and trip the post-run
-    # clean-tree assertion. Mirrors the real repo's .gitignore layout.
-    (tmp_path / ".gitignore").write_text("outputs/\n")
+    # clean-tree assertion. Mirrors the real repo's .gitignore layout, including
+    # __pycache__/: `-m cs2rl.train` imports the fake package's __init__.py, which
+    # writes bytecode under src/cs2rl/.
+    (tmp_path / ".gitignore").write_text("outputs/\n__pycache__/\n")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True)
     return tmp_path
@@ -66,14 +94,14 @@ _BASE_ARGS = ("--tag", "foo", "--hypothesis", "h", "--change-type", "hp")
 def test_precondition_not_on_main_fails(tmp_path):
     repo = _init_fake_repo(tmp_path)
     subprocess.run(["git", "checkout", "-b", "other", "-q"], cwd=repo, check=True)
-    r = _run(repo, *_BASE_ARGS, "--changed-files", "src/train.py")
+    r = _run(repo, *_BASE_ARGS, "--changed-files", "src/cs2rl/train.py")
     assert r.returncode != 0
     assert "main" in (r.stdout + r.stderr).lower()
 
 
 def test_precondition_dirty_tree_fails(tmp_path):
     repo = _init_fake_repo(tmp_path)
-    (repo / "src" / "train.py").write_text("OBS_DIM = 999\n")          # dirty but not declared
+    (repo / "src" / "cs2rl" / "train.py").write_text("OBS_DIM = 999\n") # dirty but not declared
     r = _run(repo, *_BASE_ARGS, "--changed-files", "")
     assert r.returncode != 0
     err = (r.stdout + r.stderr).lower()
@@ -82,8 +110,8 @@ def test_precondition_dirty_tree_fails(tmp_path):
 
 def test_precondition_changed_files_mismatch_fails(tmp_path):
     repo = _init_fake_repo(tmp_path)
-    (repo / "src" / "train.py").write_text("OBS_DIM = 999\n")
-    r = _run(repo, *_BASE_ARGS, "--changed-files", "src/c_env/cs2_env.c")
+    (repo / "src" / "cs2rl" / "train.py").write_text("OBS_DIM = 999\n")
+    r = _run(repo, *_BASE_ARGS, "--changed-files", "src/cs2rl/c_env/cs2_env.c")
     assert r.returncode != 0
     err = (r.stdout + r.stderr).lower()
     assert "mismatch" in err or "declared" in err or "changed-files" in err
@@ -108,7 +136,7 @@ def test_precondition_passes_clean_main(tmp_path):
 
 
 def _mock_train_py(repo: Path) -> None:
-    """Replace src/train.py with a fake that just writes metrics + checkpoint.
+    """Replace src/cs2rl/train.py with a fake that just writes metrics + checkpoint.
     Simulates the real train.py without pufferlib/torch imports.
     """
     fake = """#!/usr/bin/env python
@@ -166,8 +194,8 @@ if args.train:
 
 sys.exit(0)
 """
-    (repo / "src" / "train.py").write_text(fake)
-    subprocess.run(["git", "add", "src/train.py"], cwd=repo, check=True)
+    (repo / "src" / "cs2rl" / "train.py").write_text(fake)
+    subprocess.run(["git", "add", "src/cs2rl/train.py"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "use fake train.py"], cwd=repo, check=True)
 
 
@@ -206,6 +234,7 @@ def test_full_run_happy_path(tmp_path):
     exp_dirs = list((repo / "outputs" / "experiments").glob("*-happy"))
     assert len(exp_dirs) == 1
     run_dir = exp_dirs[0]
+    _assert_the_fake_ran(repo, run_dir)
 
     assert (run_dir / "STATUS.txt").read_text().startswith("done")
     summary = json.loads((run_dir / "summary.json").read_text())
@@ -239,12 +268,25 @@ def test_full_run_happy_path(tmp_path):
     assert not (repo / "outputs" / "experiments" / ".lock").exists()
 
 
+def _assert_the_fake_ran(repo: Path, run_dir: Path) -> None:
+    """Both launches ran the fake repo's cs2rl.train, not a real one.
+
+    --dump-config: the config it wrote holds exactly the fake's keys. --train: the
+    fake's own stdout line is in the run's train.log.
+    """
+    config = json.loads(
+        (repo / "outputs" / "checkpoints" / run_dir.name / "config.json").read_text())
+    assert set(config) == _FAKE_CONFIG_KEYS, f"--dump-config did not run the fake: {sorted(config)}"
+    log = (run_dir / "train.log").read_text()
+    assert "[FakeTrain]" in log, f"--train did not run the fake:\n{log[-2000:]}"
+
+
 def test_full_run_with_changed_file(tmp_path):
-    """Subagent edits src/train.py; run_experiment commits only that declared file."""
+    """Subagent edits src/cs2rl/train.py; run_experiment commits only that declared file."""
     repo = _init_fake_repo(tmp_path)
     _mock_train_py(repo)
 
-    tp = repo / "src" / "train.py"
+    tp = repo / "src" / "cs2rl" / "train.py"
     tp.write_text(tp.read_text().replace('"fake weights"', '"edited weights"'))
 
     env = os.environ.copy()
@@ -261,7 +303,7 @@ def test_full_run_with_changed_file(tmp_path):
             "--change-type",
             "hp",
             "--changed-files",
-            "src/train.py",
+            "src/cs2rl/train.py",
         ],
         cwd=repo,
         capture_output=True,
@@ -270,6 +312,9 @@ def test_full_run_with_changed_file(tmp_path):
         env=env,
     )
     assert r.returncode == 0, f"stdout: {r.stdout}\nstderr: {r.stderr}"
+    exp_dirs = list((repo / "outputs" / "experiments").glob("*-edit"))
+    assert len(exp_dirs) == 1
+    _assert_the_fake_ran(repo, exp_dirs[0])
 
     branches = subprocess.run(
         ["git", "branch", "--list", "exp/*"],

@@ -67,8 +67,8 @@ def _forced_step(map_data,
     is closed inside the helper, so no caller can read through `game.agents` or
     the obs view after the C arena is freed.
     """
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
     env = make_env(map_data=map_data,
                    config=EnvConfig(crouch_enabled=crouch_enabled, jump_enabled=jump_enabled),
                    seed=_SEED)

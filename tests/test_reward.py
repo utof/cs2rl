@@ -4,10 +4,10 @@ import math
 import numpy as np
 import pytest
 
-from c_env.cs2_env import make_env
-from env_config import EnvConfig, RewardWeights
-from nav import ACTION_DIM
-from train import ACTION_HEAD_SIZES
+from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env_config import EnvConfig, RewardWeights
+from cs2rl.nav import ACTION_DIM
+from cs2rl.train import ACTION_HEAD_SIZES
 
 
 def test_pbrs_rewards_are_finite():

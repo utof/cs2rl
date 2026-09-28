@@ -28,24 +28,16 @@ still matches. That is what the sentinel round trip and the two-env pigeonhole
 scheme in tests/test_struct_sizes.py cover, and why neither is retired here.
 
 PITFALL: like every other check against binding, this reads the CURRENTLY BUILT
-.so. After editing anything in src/c_env, rebuild
+.so. After editing anything in src/cs2rl/c_env, rebuild
 (`uv run --with "ziglang>=0.14.0,<0.15" python setup.py build_ext --inplace`)
 before believing a pass OR a failure.
 """
 
 import ctypes
 import hashlib
-import sys
-from pathlib import Path
 
-# Same two inserts as tests/test_binding.py and tests/test_struct_sizes.py:
-# `binding` is a C extension in src/c_env and conftest.py only adds src/.
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "c_env"))
-import binding                         # noqa: E402
-
-from c_env import cs2_env              # noqa: E402
-from c_env.cs2_env import StaticDataC  # noqa: E402
+from cs2rl.c_env import binding, cs2_env
+from cs2rl.c_env.cs2_env import StaticDataC
 
 # Largest alignment any StaticData prefix member can demand on the 64-bit targets
 # this builds for: the pointer fields. Used as the ceiling on a legitimate
@@ -92,7 +84,7 @@ def test_layout_fields_agree_field_by_field():
     }
     assert not mismatched, (
         "the C struct and the ctypes mirror disagree about these fields. Fix the mirror in "
-        "src/c_env/cs2_env.py or the table in src/c_env/cs2_types.h — never this assert. "
+        "src/cs2rl/c_env/cs2_env.py or the table in src/cs2rl/c_env/cs2_types.h — never this assert. "
         f"{mismatched}")
 
 

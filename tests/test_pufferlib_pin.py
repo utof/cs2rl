@@ -18,7 +18,7 @@ def test_pufferlib_version_pinned():
 
     If this fails you (or a relock) changed the pufferlib version. Upgrading is
     a deliberate migration, not a bump: 4.0 deletes pufferlib.vector/pytorch
-    (both imported by src/train.py), moves the trainer to torch_pufferl, and
+    (both imported by src/cs2rl/train.py), moves the trainer to torch_pufferl, and
     adds native self-play. Read the playbook in gh #85 before touching the pin
     in pyproject.toml.
     """
@@ -35,13 +35,13 @@ def test_segments_equals_total_agents_invariant():
 
     This equality makes BPTT zero-initial-state EXACT (each agent row fills
     exactly one buffer segment per evaluate(); see Dust2Policy.forward /
-    _lstm_bptt in src/train.py). Upstream only enforces <=; our equality holds
+    _lstm_bptt in src/cs2rl/train.py). Upstream only enforces <=; our equality holds
     by construction in compute_batch_dims. The construction-time assert in
-    Cs2PuffeRL._init_return_norm (src/trainer.py, gh#168 W2a) guards production;
+    Cs2PuffeRL._init_return_norm (src/cs2rl/trainer.py, gh#168 W2a) guards production;
     this test guards the harness/config path and documents the invariant where
     reviewers look.
     """
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=False)
     try:

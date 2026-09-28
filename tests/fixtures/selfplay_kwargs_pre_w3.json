@@ -5,7 +5,7 @@
   "why": "pre-W3 baseline for build_selfplay_manager (spec 2026-08-31 \u00a72 W3); a snapshot taken after the migration would compare the factory to itself",
   "how": "each site's call expression is located by enclosing-function qualname (plus a branch index guarded by its own p_past literal), unparsed from the AST and evaluated against a recording stub bound to SelfPlayManager's real signature",
   "sentinels": "aim_log_std_max / opponent_mode are distinct string sentinels; pin_pitch is 0/1 instead, because both call sites wrap it in bool()",
-  "regenerate": "UV_NO_SYNC=1 uv run python tests/capture_selfplay_kwargs_pre_w3.py --capture"
+  "regenerate": "never: the capture is immutable; its script is at git show 9878725:tests/capture_selfplay_kwargs_pre_w3.py"
  },
  "sites": {
   "train": [

@@ -11,9 +11,6 @@ import math
 import sys
 from pathlib import Path
 
-# Ensure src/ is importable (nav.py, map.py live there)
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 
 def test_export_mapdata_dust2():
     """Verify that export_mapdata produces correct, internally-consistent constants

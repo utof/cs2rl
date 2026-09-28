@@ -22,15 +22,11 @@ Pitfalls covered here:
   * nearest-site selection must be per-agent Euclidean (dust2 has 2 sites).
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
-from _obs_spec import OBS_BLOCKS       # noqa: E402
+from cs2rl._obs_spec import OBS_BLOCKS
 
 # Slot indices derived from the generated spec — never hardcoded, so this test
 # keeps working if an earlier self-block slot is ever inserted.
@@ -43,8 +39,8 @@ SITE_DIST = _SELF_STOP - 1
 def _zero_actions():
     """Zero discrete+continuous actions: dyaw=0 preserves poked facing,
     move=0 preserves poked position (velocity is 0 after reset)."""
-    from _action_spec import AIM_DIM
-    from nav import ACTION_DIM, N_AGENTS
+    from cs2rl._action_spec import AIM_DIM
+    from cs2rl.nav import ACTION_DIM, N_AGENTS
     return (np.zeros((N_AGENTS, ACTION_DIM),
                      dtype=np.int32), np.zeros((N_AGENTS, AIM_DIM), dtype=np.float32))
 
@@ -74,9 +70,9 @@ def _obs_after_pose(env, x: float, y: float, facing: float):
 def test_bearing_facing_directly_at_site():
     """Agent due west of the (single) simple-map site, facing +X straight at it:
     rel_bearing = 0 → sin=0, cos=1; distance slot = 400/map_diag."""
-    from c_env.cs2_env import Cs2Env
-    from env_config import EnvConfig
-    from map import make_simple_map
+    from cs2rl.c_env.cs2_env import Cs2Env
+    from cs2rl.env_config import EnvConfig
+    from cs2rl.map import make_simple_map
     md = make_simple_map()
     env = Cs2Env(config=EnvConfig(), map_data=md)
     try:
@@ -92,9 +88,9 @@ def test_bearing_facing_directly_at_site():
 
 def test_bearing_facing_directly_away_from_site():
     """Same pose but facing -X (away): rel = ±π → sin=0, cos=-1."""
-    from c_env.cs2_env import Cs2Env
-    from env_config import EnvConfig
-    from map import make_simple_map
+    from cs2rl.c_env.cs2_env import Cs2Env
+    from cs2rl.env_config import EnvConfig
+    from cs2rl.map import make_simple_map
     md = make_simple_map()
     env = Cs2Env(config=EnvConfig(), map_data=md)
     try:
@@ -111,9 +107,9 @@ def test_bearing_sign_convention_site_to_the_left():
     """Site due east (+X), agent facing -Y (south, facing=-π/2): the site is
     90° counter-clockwise → rel = +π/2 → sin=+1. A policy that turns with
     positive Δyaw when sin>0 turns TOWARD the site — the BC-critical sign."""
-    from c_env.cs2_env import Cs2Env
-    from env_config import EnvConfig
-    from map import make_simple_map
+    from cs2rl.c_env.cs2_env import Cs2Env
+    from cs2rl.env_config import EnvConfig
+    from cs2rl.map import make_simple_map
     md = make_simple_map()
     env = Cs2Env(config=EnvConfig(), map_data=md)
     try:
@@ -129,9 +125,9 @@ def test_bearing_sign_convention_site_to_the_left():
 def test_bearing_diagonal_offset_and_distance():
     """Agent offset both in x and y: full atan2 path (not axis-aligned) and
     the distance slot must equal hypot/map_diag exactly."""
-    from c_env.cs2_env import Cs2Env
-    from env_config import EnvConfig
-    from map import make_simple_map
+    from cs2rl.c_env.cs2_env import Cs2Env
+    from cs2rl.env_config import EnvConfig
+    from cs2rl.map import make_simple_map
     md = make_simple_map()
     env = Cs2Env(config=EnvConfig(), map_data=md)
     try:
@@ -152,7 +148,7 @@ def test_bearing_nearest_site_selection_dust2():
     """de_dust2 has TWO bombsites: every agent's slots must reflect the
     Euclidean-nearest one (per-agent selection, not a global site pick).
     Checked for all 10 agents at their natural spawn poses."""
-    from c_env.cs2_env import make_env
+    from cs2rl.c_env.cs2_env import make_env
     env = make_env(seed=7)             # bare make_env → real de_dust2
     try:
         env.reset(seed=7)

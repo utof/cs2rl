@@ -101,7 +101,7 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--tct-split-heads": 0,
     "--tct-split-trunk": 0,
                                                        # Reward weights: dest is underscore, CLI is hyphen. Mirror the generator
-                                                       # in src/train.py (`--{_rw_name.replace('_', '-')}`) so a new weight is a
+                                                       # in src/cs2rl/train.py (`--{_rw_name.replace('_', '-')}`) so a new weight is a
                                                        # one-line add here, not a silent "unknown option" after a train.py bump.
     "--reward-win": 1,
     "--reward-kill": 1,

@@ -2,7 +2,7 @@
 
 WHAT: builds a scratch `binding` via `zig build -Dfast_math={true,false}`
 into a tmp prefix (NEVER through setup.py — that overwrites the production
-.so in src/c_env) and steps 500 ticks on two maps whose bombsite_dist
+.so in src/cs2rl/c_env) and steps 500 ticks on two maps whose bombsite_dist
 contains inf / a 4×max sentinel: bombsites=[] and a simple_map with an
 unreachable room. Every reward must be finite in both builds.
 
@@ -32,23 +32,34 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-C_DIR = REPO / "src" / "c_env"
+C_DIR = REPO / "src" / "cs2rl" / "c_env"
 
 CHECK = r"""
-import sys, numpy as np
-sys.path.insert(0, sys.argv[1])          # scratch binding first
-sys.path.insert(1, str(__import__('pathlib').Path(sys.argv[2]) / 'src'))
-# ORDER IS LOAD-BEARING: cs2_env.py inserts src/c_env (the PRODUCTION .so) at
-# sys.path[0] on import. Importing `binding` FIRST pre-seeds sys.modules with
-# the scratch build; swap these two lines and this script silently tests the
-# production .so (the check below is what catches it).
-import binding
-if not binding.__file__.startswith(sys.argv[1]):
-    raise RuntimeError("wrong binding loaded: " + binding.__file__)
-from c_env.cs2_env import make_env
-from map import SIMPLE_ROOMS, make_simple_map
-from _action_spec import ACTION_HEAD_SIZES, AIM_DIM
-from nav import N_AGENTS
+import importlib.util, sys, numpy as np
+from pathlib import Path
+# ORDER IS LOAD-BEARING: cs2_env.py does `from cs2rl.c_env import binding`, which
+# takes whatever sys.modules["cs2rl.c_env.binding"] already holds and otherwise
+# loads the PRODUCTION .so next to it. Pre-seeding that key with the scratch
+# build BEFORE importing cs2_env is what makes this script test the variant; drop
+# the pre-seed and it silently tests the production .so (the check below is what
+# catches it).
+# PITFALL: binding is single-phase init (PyModule_Create), and for such a module
+# module_from_spec ITSELF registers the key (measured, #199), so deleting only the
+# explicit assignment below still tests the variant; the pre-seed is the whole load.
+import cs2rl.c_env
+spec = importlib.util.spec_from_file_location("cs2rl.c_env.binding",
+                                              next(Path(sys.argv[1]).glob("binding*")))
+scratch = importlib.util.module_from_spec(spec)
+sys.modules["cs2rl.c_env.binding"] = scratch
+spec.loader.exec_module(scratch)
+cs2rl.c_env.binding = scratch
+from cs2rl.c_env import cs2_env
+if not cs2_env.binding.__file__.startswith(sys.argv[1]):
+    raise RuntimeError("wrong binding loaded: " + cs2_env.binding.__file__)
+from cs2rl.c_env.cs2_env import make_env
+from cs2rl.map import SIMPLE_ROOMS, make_simple_map
+from cs2rl._action_spec import ACTION_HEAD_SIZES, AIM_DIM
+from cs2rl.nav import N_AGENTS
 maps = {"nobomb": make_simple_map(bombsites=[]),
         "unreachable": make_simple_map(rooms=list(SIMPLE_ROOMS) +
                         [(len(SIMPLE_ROOMS), 5000.0, 5000.0, 5100.0, 5100.0, 0.0, False)])}
@@ -129,10 +140,9 @@ def test_rewards_finite_under_both_fast_math_settings(tmp_path, fast_math):
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     shutil.copy2(built, scratch / f"binding{sysconfig.get_config_var('EXT_SUFFIX')}")
-    env = dict(os.environ, PYTHONPATH=f"{scratch}{os.pathsep}{REPO / 'src'}")
-    r = subprocess.run([sys.executable, "-c", CHECK,
-                        str(scratch), str(REPO)],
-                       env=env,
+    # The child inherits this session's PYTHONPATH, so `cs2rl` resolves to the checkout
+    # tests/conftest.py's tripwire already required; only the binding is swapped.
+    r = subprocess.run([sys.executable, "-c", CHECK, str(scratch)],
                        capture_output=True,
                        text=True,
                        timeout=600)

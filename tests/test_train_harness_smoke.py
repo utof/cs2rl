@@ -18,7 +18,7 @@ def test_build_trainer_for_test_smoke():
     7-11, which exercise trainer internals without the self-play opponent
     override.
     """
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=False)
     try:
@@ -73,7 +73,7 @@ def test_build_trainer_for_test_with_selfplay():
     trainer with self-play engaged. Here we just confirm evaluate() runs
     end-to-end on a tiny rollout.
     """
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:

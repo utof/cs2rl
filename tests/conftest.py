@@ -1,3 +1,5 @@
+import importlib.machinery
+import importlib.util
 import os
 import sys
 from collections.abc import Generator, Iterable, Mapping
@@ -8,14 +10,99 @@ import pytest
 # The repo root, from this file's own location. Never `config.rootpath`, which
 # narrows to a subdirectory when pytest is started from one.
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = REPO_ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+
+# ── Checkout tripwire: this session imports THIS checkout's cs2rl (#199) ──
+#
+# The code is one package, `cs2rl`, under src/, found through sys.path: the
+# editable install's .pth, or PYTHONPATH. Nothing here inserts src/ itself. The
+# .pth belongs to the shared .venv and names ONE checkout's src/ (main's), so a
+# worktree borrowing that venv would silently test main's code unless its own
+# src/ comes first. The session stops before collection when either holds:
+#   (a) `cs2rl` does not resolve under this conftest's own src/. Fix: put
+#       <this checkout>/src first on PYTHONPATH.
+#   (b) a checkout's src/ on sys.path (basename `src`, parent holds
+#       pyproject.toml) holds an importable top-level name other than cs2rl: a
+#       leftover flat module, a stale binding*.so or bytecode, or an old package
+#       or namespace directory such as c_env/. Such a name imports silently
+#       where it should fail, so a bare `import train` left anywhere would load
+#       it instead of raising.
+# WHY NOT pytest's `pythonpath = ["src"]` ini option: it edits only this
+# process's sys.path. Child interpreters (the many tests that launch
+# `-m cs2rl.train`, or code strings) do not inherit it and would import through
+# the .pth, i.e. possibly another checkout's code. PYTHONPATH reaches them.
+# tests/test_checkout_resolution.py pins (a), (b) and a negative control. At import,
+# src/cs2rl/__init__.py's guard also refuses a script run by path, or else a cwd,
+# that sits in a checkout other than the one cs2rl came from.
+
+# Longest first, so `binding.cpython-312-x86_64-linux-gnu.so` strips the whole
+# ABI tag (name `binding`) before the bare `.so` suffix could leave a non-name.
+_IMPORTABLE_SUFFIXES = sorted(importlib.machinery.SOURCE_SUFFIXES +
+                              importlib.machinery.BYTECODE_SUFFIXES +
+                              importlib.machinery.EXTENSION_SUFFIXES,
+                              key=len,
+                              reverse=True)
+
+
+def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> list[str]:
+    """Why this process would not import `cs2rl` from `own_src` alone; empty when it would.
+
+    `path_entries` is sys.path. PITFALL: compared with os.path.samefile, not by
+    string: this drive is mounted under two names, and a string compare would
+    call the same directory two different checkouts.
+    """
+    problems = []
+    spec = importlib.util.find_spec("cs2rl")
+    origin = spec.origin if spec is not None else None
+    if origin is None or not os.path.samefile(Path(origin).parent.parent, own_src):
+        # `origin` is None for a namespace package (no __init__.py): name its dirs.
+        if spec is None:
+            where = "nowhere"
+        elif origin is None:
+            where = list(spec.submodule_search_locations or [])
+        else:
+            where = Path(origin).parent
+        # `env VAR=value cmd` parses in bash and fish alike (the owner's shell is fish).
+        problems.append(f"(a) cs2rl resolves to {where}, not to {own_src / 'cs2rl'}. Put this "
+                        f"checkout's src/ first: env PYTHONPATH={own_src} <command>")
+    for entry in path_entries:
+        src = Path(entry or ".").resolve()
+        if src.name != "src" or not src.is_dir() or not (src.parent / "pyproject.toml").is_file():
+            continue
+        stray = set()
+        # A file counts only with an importable suffix (so vis_cache*.npy and
+        # *.egg-info files do not); a directory counts by its name alone.
+        for child in src.iterdir():
+            suffix = "" if child.is_dir() else next(
+                (s for s in _IMPORTABLE_SUFFIXES if child.name.endswith(s)), None)
+            if suffix is None:
+                continue
+            name = child.name[:len(child.name) - len(suffix)]
+            if name.isidentifier() and name not in ("cs2rl", "__pycache__"):
+                stray.add(name)
+        if stray:
+            problems.append(f"(b) {src} is on sys.path and holds importable names other than "
+                            f"cs2rl: {sorted(stray)}. Move them out, or take that src/ off "
+                            "sys.path.")
+        if "resources" in stray:
+            # A resolving symlink is a directory, so it counts; a dangling one does not.
+            problems.append(f"    `resources` is the symlink `import pufferlib` plants in its "
+                            f"working directory (pufferlib/__init__.py runs os.symlink(<pufferlib>/"
+                            f"resources, 'resources')), left by a process started with cwd = "
+                            f"{src}. Removing it is safe.")
+    return problems
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Stop the session, before collection, if it would import another checkout's code."""
+    problems = checkout_resolution_problems(REPO_ROOT / "src", sys.path)
+    if problems:
+        raise pytest.UsageError("checkout tripwire (tests/conftest.py):\n  " +
+                                "\n  ".join(problems))
 
 
 @pytest.fixture(scope="session")
 def make_map():
-    from map import make_simple_map
+    from cs2rl.map import make_simple_map
     return make_simple_map()
 
 
@@ -256,7 +343,7 @@ def pytest_collection_modifyitems(config, items):
 
 # ── One module object per file ──
 #
-# A file imported under two names (`paths` and `src.paths`) is two module
+# A file imported under two names (`cs2rl.paths` and `src.cs2rl.paths`) is two module
 # objects with two copies of the module's state, so a monkeypatch or an
 # `except` aimed at one misses the other. After the last test (or after
 # collection, under --collect-only) every session checks sys.modules for a repo

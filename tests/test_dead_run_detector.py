@@ -10,14 +10,8 @@ contributor so the fix cannot decay into "zero kills is never reported".
 
 No env is built here: check() is pure metric bookkeeping.
 """
-import sys
-from pathlib import Path
 
-SRC_DIR = Path(__file__).resolve().parents[1] / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
-import train                           # noqa: E402
+from cs2rl import train
 
 _STEP = 600_000                        # past the rule's 500k arming threshold
 

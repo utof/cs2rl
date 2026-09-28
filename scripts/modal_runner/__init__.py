@@ -86,7 +86,7 @@ PITFALLS:
   * Client Volume APIs take root-relative PurePosixPath (`runs/...`); the
     container sees the same object at `/artifacts/runs/...`. Mixing the two
     namespaces silently talks to the wrong path.
-  * config.json's `env` field is only a label: src/train_config.py writes
+  * config.json's `env` field is only a label: src/cs2rl/train_config.py writes
     `cs2-<map>` from train.py's resolved `--map`, and the historical `cs2-dust2`
     only for callers whose `map` attribute is missing or empty. effective_map is
     the runner's source of truth and is never derived from that field.

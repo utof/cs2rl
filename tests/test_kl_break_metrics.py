@@ -9,7 +9,7 @@ Additionally the flattened minibatch loop (all update_epochs collapsed into
 one ``range``) aborted passes over data never visited — harsher than standard
 PPO, which finishes the current epoch before stopping.
 
-Contract pinned here (implemented in Cs2PuffeRL.train, src/trainer.py):
+Contract pinned here (implemented in Cs2PuffeRL.train, src/cs2rl/trainer.py):
   1. losses/* are normalized by the EXECUTED minibatch count, not the planned
      total — so a truncated update reports true per-minibatch means.
   2. ``losses["minibatches_run"]`` reports the executed count.
@@ -17,7 +17,7 @@ Contract pinned here (implemented in Cs2PuffeRL.train, src/trainer.py):
      finishes the current pass (total_minibatches // update_epochs minibatches)
      before stopping, and can never truncate epoch 0 mid-pass.
 
-Uses the minimal harness (src/train_test_harness.py), whose trainer is
+Uses the minimal harness (src/cs2rl/train_test_harness.py), whose trainer is
 Cs2PuffeRL (gh#168 W1.5) whose train() is the return-norm body (a method since
 gh#168 W2a), same pattern as tests/test_train_env.py. One harness build serves all scenarios
 (builds cost ~5s each on the VM).
@@ -34,7 +34,7 @@ def _run_train_once(trainer):
 
 
 def test_kl_break_metrics_and_granularity():
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -81,7 +81,7 @@ def test_kl_break_metrics_and_granularity():
 
 
 def test_clipfrac_halves_and_event_fraction_are_logged():
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -107,7 +107,7 @@ def test_clipfrac_halves_and_event_fraction_are_logged():
 
 
 def test_self_play_used_past_metric():
-    from train import self_play_used_past_metric
+    from cs2rl.train import self_play_used_past_metric
 
     class _T:
         _selfplay_used_past = True
@@ -131,7 +131,7 @@ def test_self_play_used_past_is_assigned_on_outer_logs():
     """The persist site is the outer logs dict, not trainer.losses."""
     import inspect
 
-    import train
+    from cs2rl import train
     src = inspect.getsource(train)
     assert 'logs["self_play/used_past"] = self_play_used_past_metric(trainer)' in src
     assert src.index('logs["self_play/pool_size"]') < src.index('logs["self_play/used_past"]')

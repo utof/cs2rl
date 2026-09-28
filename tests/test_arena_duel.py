@@ -29,7 +29,6 @@ H_SHOOT = 1                            # cs2_types.h head order (same pin as tes
 AGENT_HULL_RADIUS = 12.0               # cs2_types.h:26
 EYE_STAND = 48.0                       # cs2_combat.h standing eye height
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TRAIN_SCRIPT = REPO_ROOT / "src" / "train.py"
 
 
 def _run_group(argv, *, timeout, **kw) -> subprocess.CompletedProcess:
@@ -45,7 +44,7 @@ def _run_group(argv, *, timeout, **kw) -> subprocess.CompletedProcess:
     (SIGKILL) so it dies with this process even when `finally` cannot run.
 
     WHY: `train.py --dump-config` used to fork a 12-worker vis-cache build (see
-    src/map.py make_cs2_map). subprocess.run's timeout kills only the direct
+    src/cs2rl/map.py make_cs2_map). subprocess.run's timeout kills only the direct
     child, so each killed dump orphaned 12 workers to PID 1 at ~900 MB each
     (~10 GB per leaked case; it took the 16 GB dev box down).
 
@@ -88,7 +87,7 @@ def _zero():
 
 
 def test_preset_geometry():
-    from map import ARENA_DUEL_V1, make_arena_duel_map
+    from cs2rl.map import ARENA_DUEL_V1, make_arena_duel_map
     md = make_arena_duel_map()
     assert md.N == 24 and md.grid_cell_size == 20.0
     for idx in range(md.N):
@@ -106,12 +105,12 @@ def test_preset_geometry():
     assert ARENA_DUEL_V1["cell_size"] == 20.0
 
     # R0-E.2 geometry resolver (Task 9) agrees with the spec: flat ⇒ pinned.
-    from train import pin_pitch_for_map
+    from cs2rl.train import pin_pitch_for_map
     assert pin_pitch_for_map(md) == 1
 
 
 def test_spawn_gaps_and_bearing_span():
-    from map import make_arena_duel_map
+    from cs2rl.map import make_arena_duel_map
     md = make_arena_duel_map()
     gaps, bear_t, bear_ct = [], [], []
     for t, ct in itertools.product(md.t_spawn_areas, md.ct_spawn_areas):
@@ -129,15 +128,15 @@ def test_spawn_gaps_and_bearing_span():
 def test_dir_facing_3_is_plus_x_and_7_is_minus_x():
     """R12.4: spawn facing comes from sd->dir_facing[3] (T) / [7] (CT)
     (cs2_player.h:16); pin the nav.py direction table those indices read."""
-    from nav import _DIR_FACING, _DIR_VECTORS
+    from cs2rl.nav import _DIR_FACING, _DIR_VECTORS
     assert _DIR_VECTORS[3].tolist() == [1.0, 0.0] and _DIR_FACING[3] == 0.0
     assert _DIR_VECTORS[7].tolist() == [-1.0, 0.0] and abs(_DIR_FACING[7]) == math.pi
 
 
 def test_env_runs_and_spawns_in_columns():
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
-    from map import make_arena_duel_map
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
+    from cs2rl.map import make_arena_duel_map
     env = make_env(map_data=make_arena_duel_map(),
                    config=EnvConfig(n_active_per_team=1, pin_pitch=1, crouch_enabled=0),
                    seed=3,
@@ -160,7 +159,7 @@ def test_env_runs_and_spawns_in_columns():
         for _ in range(50):
             _, rew, *_ = env.step(a, c)
             assert np.isfinite(rew).all()
-        from _obs_spec import OBS_BLOCKS
+        from cs2rl._obs_spec import OBS_BLOCKS
         obs, *_ = env.step(a, c)
         assert obs[0][OBS_BLOCKS["enemy"][0] + 3] == 1.0               # mutually visible
     finally:
@@ -173,8 +172,8 @@ def _best_bias_only_score(md, seed, n_rounds=16, ticks=160):
     holds and shoots every tick; agent 5 (CT) is a statue. Returns the best
     over 13 constants of min(kills/ep ÷ 0.5, hit/facing ÷ 0.45) — both §5
     bullets normalised by their thresholds, so ≥ 1.0 means "passes both"."""
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
     env = make_env(map_data=md,
                    config=EnvConfig(n_active_per_team=1,
                                     pin_pitch=1,
@@ -214,7 +213,7 @@ def test_constant_yaw_open_loop_fails_a_gate_bullet():
     Teeth: the same search on a 1-spawn-per-side variant (same row, dead
     ahead) DOES clear both, so a regression that made every round identical
     (e.g. sidx ≡ 0) would flip the first assert."""
-    from map import ARENA_DUEL_V1, make_arena_duel_map, make_simple_map
+    from cs2rl.map import ARENA_DUEL_V1, make_arena_duel_map, make_simple_map
     arena = make_arena_duel_map()
     assert _best_bias_only_score(arena, seed=5) < 1.0
     p = ARENA_DUEL_V1
@@ -238,11 +237,10 @@ def test_arena_survives_solids_bake():
     every T→CT lane clear at standing eye height. A ray that leaves the arena
     is blocked, proving the list is live (an empty bake would make every
     ray "clear")."""
-    import binding
-
-    from c_env.cs2_env import make_env
-    from env_config import EnvConfig
-    from map import make_arena_duel_map
+    from cs2rl.c_env import binding
+    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env_config import EnvConfig
+    from cs2rl.map import make_arena_duel_map
     md = make_arena_duel_map()
     env = make_env(map_data=md,
                    config=EnvConfig(n_active_per_team=1, pin_pitch=1),
@@ -286,7 +284,7 @@ def test_check_spawn_counts_raises_not_asserts():
     cs2_types.h t_spawns[15] / ct_spawns[5]; the arena pins 4/4."""
     from types import SimpleNamespace
 
-    from train import check_spawn_counts
+    from cs2rl.train import check_spawn_counts
 
     def fake(nt, nct):
         sd = SimpleNamespace(n_t_spawns=nt, n_ct_spawns=nct)
@@ -305,7 +303,7 @@ def test_check_spawn_counts_raises_not_asserts():
 
 
 def test_build_map_data_names():
-    from train import MAP_NAMES, build_map_data
+    from cs2rl.train import MAP_NAMES, build_map_data
     assert MAP_NAMES == ("simple", "dust2", "arena-duel")
     assert build_map_data("dust2") is None             # make_env(None) loads the nav map
     assert build_map_data("arena-duel").N == 24
@@ -314,7 +312,7 @@ def test_build_map_data_names():
         build_map_data("nope")
 
 
-@pytest.mark.slow                                                                      # 7 train.py --dump-config subprocesses
+@pytest.mark.slow                                                                                   # 7 train.py --dump-config subprocesses
 def test_config_env_label(tmp_path):
     """Real CLI: --map sets config["env"] and pin_pitch is resolved from the
     built map ABOVE the --dump-config exit (the Modal runner fingerprints
@@ -330,15 +328,14 @@ def test_config_env_label(tmp_path):
         (["--map", "simple"], "cs2-simple", 0),
         (["--map", "dust2"], "cs2-dust2", 1),
         (["--map", "arena-duel", "--jump-enabled", "0"], "cs2-arena-duel", 1),
-        ([], "cs2-simple", 0),                                                         # default map
-        (["--dust2"], "cs2-dust2", 1),                                                 # alias
-        (["--dust2", "--map", "simple"], "cs2-simple", 0),                             # --map wins
+        ([], "cs2-simple", 0),                                                                      # default map
+        (["--dust2"], "cs2-dust2", 1),                                                              # alias
+        (["--dust2", "--map", "simple"], "cs2-simple", 0),                                          # --map wins
     )
     for i, (flags, label, pin) in enumerate(cases):
         d = tmp_path / str(i)
         r = _run_group([
-            sys.executable,
-            str(TRAIN_SCRIPT), "--dump-config", *flags, "--checkpoint-dir",
+            sys.executable, "-m", "cs2rl.train", "--dump-config", *flags, "--checkpoint-dir",
             str(d)
         ],
                        cwd=REPO_ROOT,
@@ -347,14 +344,13 @@ def test_config_env_label(tmp_path):
         cfg = json.loads((d / "config.json").read_text())
         assert cfg["env"] == label and cfg["pin_pitch"] == pin, (flags, cfg["env"],
                                                                  cfg["pin_pitch"])
-                                                                                       # Explicit 0 must survive to the dump; every other case pins the default (1).
+                                                                                                    # Explicit 0 must survive to the dump; every other case pins the default (1).
         assert cfg["jump_enabled"] == (0 if "--jump-enabled" in flags else 1), (flags,
                                                                                 cfg["jump_enabled"])
-                                                                                       # An explicit pin that disagrees with the map is refused before the dump.
+                                                                                                    # An explicit pin that disagrees with the map is refused before the dump.
     r = _run_group([
-        sys.executable,
-        str(TRAIN_SCRIPT), "--dump-config", "--map", "arena-duel", "--pin-pitch", "0",
-        "--checkpoint-dir",
+        sys.executable, "-m", "cs2rl.train", "--dump-config", "--map", "arena-duel", "--pin-pitch",
+        "0", "--checkpoint-dir",
         str(tmp_path / "bad")
     ],
                    cwd=REPO_ROOT,
@@ -368,22 +364,21 @@ def test_config_env_label(tmp_path):
 # orphaned — 12 workers at ~900 MB each). Knock-out: main() passing
 # build_vis=True (or dropping the kwarg) makes the child exit non-zero here,
 # warm cache or cold, because the trap fires before the cache check.
+# run_module(alter_sys=True) is `python -m cs2rl.train` in-process: the entry
+# module runs as __main__ against the same `cs2rl.nav` the trap patched.
 _DUMP_WITHOUT_VIS = """
 import runpy, sys
-sys.path.insert(0, {src!r})
-import nav
+from cs2rl import nav
 def _boom(self):
     raise SystemExit("gh251: build_vis_matrix reached on the --dump-config path")
 nav.NavGraph.build_vis_matrix = _boom
-sys.argv = [{script!r}, "--dump-config", "--map", "dust2", "--checkpoint-dir", {out!r}]
-runpy.run_path({script!r}, run_name="__main__")
+sys.argv = ["cs2rl.train", "--dump-config", "--map", "dust2", "--checkpoint-dir", {out!r}]
+runpy.run_module("cs2rl.train", run_name="__main__", alter_sys=True)
 """
 
 
 def test_dump_config_skips_vis_build(tmp_path):
-    code = _DUMP_WITHOUT_VIS.format(src=str(REPO_ROOT / "src"),
-                                    script=str(TRAIN_SCRIPT),
-                                    out=str(tmp_path))
+    code = _DUMP_WITHOUT_VIS.format(out=str(tmp_path))
     r = _run_group([sys.executable, "-c", code], cwd=REPO_ROOT, timeout=120)
     assert r.returncode == 0, r.stderr[-2000:]
     cfg = json.loads((tmp_path / "config.json").read_text())

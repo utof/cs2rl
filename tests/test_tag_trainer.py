@@ -21,7 +21,7 @@ import torch
 
 
 def _build(tag_on, seed=0):
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     torch.manual_seed(seed)            # identical policy init both arms
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True, seed=seed)
     trainer.config["target_kl"] = None
@@ -42,13 +42,13 @@ def test_flag_off_is_inert(monkeypatch):
     # PATCH THE MODULE THE CALL SITE RESOLVES THROUGH, NOT `train` or
     # `train_update`: tag_grad_cossim is DEFINED in train_update.py (post-rung1a
     # refactor, 2026-08-31), but since gh#168 W2a its call site is inside
-    # Cs2PuffeRL.train in src/trainer.py, which imports the name at module level
+    # Cs2PuffeRL.train in src/cs2rl/trainer.py, which imports the name at module level
     # and resolves it through trainer.py's globals. `train` and `train_update`
     # both still hold the real function, so a patch on either is unreachable and
     # this test would pass while asserting nothing — the positive control below
     # (test_monkeypatch_target_actually_reaches_the_hook) goes red if the patch
     # point drifts again.
-    import trainer as tag_mod
+    from cs2rl import trainer as tag_mod
     calls = []
     real = tag_mod.tag_grad_cossim
     monkeypatch.setattr(tag_mod, "tag_grad_cossim",
@@ -72,7 +72,7 @@ def test_monkeypatch_target_actually_reaches_the_hook(monkeypatch):
     which is green whether or not the patch can reach the call site at all. A
     patch aimed at the wrong module is therefore indistinguishable from a
     correctly-inert hook, and the test silently stops testing anything. That
-    is not hypothetical: the call site inside `Cs2PuffeRL.train` (src/trainer.py,
+    is not hypothetical: the call site inside `Cs2PuffeRL.train` (src/cs2rl/trainer.py,
     gh#168 W2a) resolves `tag_grad_cossim` through `trainer`'s globals, so
     patching `train` (its pre-2026-08-31 home, a re-exporting shim) or
     `train_update` (where it is defined, and where the call site lived until
@@ -88,7 +88,7 @@ def test_monkeypatch_target_actually_reaches_the_hook(monkeypatch):
     not swap in a stub trainer, which would stop exercising the real call
     site and reintroduce exactly the vacuity this test exists to prevent.
     """
-    import trainer as tag_mod
+    from cs2rl import trainer as tag_mod
     calls = []
     real = tag_mod.tag_grad_cossim
     monkeypatch.setattr(tag_mod, "tag_grad_cossim",
@@ -111,7 +111,7 @@ def test_inject_tag_metrics_lifecycle():
     logs=None (throttled epoch: the top-of-loop reset drops the
     measurement; injecting here would mislabel its epoch).
     """
-    from train import _inject_tag_metrics
+    from cs2rl.train import _inject_tag_metrics
     trainer = SimpleNamespace(_tag_metrics={
         "tag/cossim_cross/trunk/mb0": 0.4,
         "tag/cossim_within_ct/trunk/mb0": float("nan"),
@@ -166,7 +166,7 @@ def test_flag_on_emits_final_key_names():
 def test_row_mask_matches_obs_team_bit():
     """Spec §5 test 3: (segment % 10) < 5 ⇔ team T, pinned against the
     INDEPENDENT obs-side team bit obs[24] = (team == 0) the C env writes
-    (src/c_env/cs2_observations.h:96; spawn slots src/c_env/cs2_round.h:32).
+    (src/cs2rl/c_env/cs2_observations.h:96; spawn slots src/cs2rl/c_env/cs2_round.h:32).
     Fails if PufferLib segment ordering or the env's slot layout changes.
     """
     trainer, cleanup = _build(tag_on=False)
@@ -217,7 +217,7 @@ def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
     Two independent identity sources must agree or the whole batch is
     meaningless: TAG partitions by slot index ((idx % 10) < 5, inside
     `tag_grad_cossim` — which moved out of train.py with its patcher on
-    2026-08-31 and now lives in src/train_update.py, :1403 at that commit;
+    2026-08-31 and now lives in src/cs2rl/train_update.py, :1403 at that commit;
     search the symbol, not the line) while the split routes by the obs bit
     obs[24]. If they ever
     disagree, TAG would silently measure the wrong partition of a correctly
@@ -225,7 +225,7 @@ def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
     pin is test_row_mask_matches_obs_team_bit above; this one proves the
     invariant survives building the trainer with a split policy.
     """
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     torch.manual_seed(0)
     trainer, cleanup = _build_trainer_for_test(num_envs=32,
                                                with_selfplay=True,
@@ -264,7 +264,7 @@ def test_row_mask_matches_obs_team_bit_on_a_both_flags_trainer():
     PITFALL: do not probe t=0 on the first evaluate() — that slot is
     still the zero-initialized pre-step obs.
     """
-    from train_test_harness import _build_trainer_for_test
+    from cs2rl.train_test_harness import _build_trainer_for_test
     torch.manual_seed(0)
     trainer, cleanup = _build_trainer_for_test(num_envs=32,
                                                with_selfplay=True,

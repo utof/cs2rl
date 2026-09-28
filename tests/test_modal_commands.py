@@ -148,7 +148,8 @@ def test_install_and_train_commands_are_exact():
     argv = ["--train", "--timesteps", "1"]
     assert commands.build_train_command(argv) == [
         "/opt/cs2rl/.venv/bin/python",
-        "src/train.py",
+        "-m",
+        "cs2rl.train",
         *argv,
     ]
 
@@ -161,7 +162,8 @@ def test_dump_config_command_is_exact():
     resume = "/artifacts/inputs/sha256/abc.pt"
     assert commands.build_dump_config_command(request, resume) == [
         "/opt/cs2rl/.venv/bin/python",
-        "src/train.py",
+        "-m",
+        "cs2rl.train",
         *commands.build_dump_config_argv(request, resume),
     ]
 

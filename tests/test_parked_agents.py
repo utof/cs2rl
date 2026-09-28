@@ -15,9 +15,9 @@ area_idx/enemy_mem_idx == -1 and team, not merely `alive`.
 import numpy as np
 import pytest
 
-from _obs_spec import OBS_BLOCKS
-from c_env.cs2_env import make_env, symmetrize_rewards
-from env_config import EnvConfig, RewardWeights
+from cs2rl._obs_spec import OBS_BLOCKS
+from cs2rl.c_env.cs2_env import make_env, symmetrize_rewards
+from cs2rl.env_config import EnvConfig, RewardWeights
 
 N_AGENTS, TEAM_SIZE, AIM_DIM = 10, 5, 2
 HEAD_SIZES = (9, 2, 2, 3, 2, 2, 2)
@@ -283,8 +283,8 @@ def test_round_rollover_reparks_the_same_slots(simple_map):
 def test_oracle_episode_kills_and_credits_rewards():
     """Spec §8: vendored-oracle 1v1 through env.step() ends in a kill; reward_kill on the
     shooter's row; elimination win on the terminal tick; parked rows zero throughout."""
-    from eval_baselines import BaselineEvaluator, OracleActor, StateReader, vis_from_obs
-    from map import make_arena_duel_map
+    from cs2rl.eval_baselines import BaselineEvaluator, OracleActor, StateReader, vis_from_obs
+    from cs2rl.map import make_arena_duel_map
     env = make_env(map_data=make_arena_duel_map(),
                    auto_reset=False,
                    seed=2,
