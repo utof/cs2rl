@@ -305,12 +305,3 @@ def log_tick(game_state, tick: int, rewards: dict):
         team = "T" if agent_id_str.startswith("t") else "CT"
         idx = agent_id_str[1:]
         rr.log(f"rewards/{team}/{idx}", rr.Scalars(float(rew)))
-
-
-def log_shot(shooter_pos, hit_pos, tick: int, hit: bool):
-    rr.set_time("tick", sequence=tick)
-    color = [255, 255, 0] if hit else [255, 255, 200]
-    shot_id = f"shots/s{tick}"
-    rr.log(shot_id, rr.LineStrips3D([[shooter_pos, hit_pos]], colors=[color]))
-    rr.set_time("tick", sequence=tick + 1)
-    rr.log(shot_id, rr.Clear(recursive=False))

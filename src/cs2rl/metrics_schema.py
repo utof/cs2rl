@@ -913,8 +913,3 @@ def keys_of_kind(kind):
     if kind not in KINDS:
         raise ValueError(f"unknown kind {kind!r}; expected one of {sorted(KINDS)}")
     return tuple(sorted(k for k, v in REGISTRY.items() if v.kind == kind))
-
-
-def family_members():
-    """{family template: members} for every CLOSED family (open ones excluded)."""
-    return {k: v.members for k, v in REGISTRY.items() if v.kind == "family" and v.members}

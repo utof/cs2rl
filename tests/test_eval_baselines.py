@@ -325,8 +325,8 @@ def test_eval_interval_cli_config_and_modal_mirror():
 
 
 def test_hit_geometry_constants_match_cs2_combat_h():
-    """F16 tripwire: eval_baselines vendors the C hit geometry (HIT_HALF_WIDTH,
-    eye heights, torso offsets) as Python literals — the oracle's LoS/aim math
+    """F16 tripwire: eval_baselines vendors the C hit geometry (eye heights,
+    torso offsets) as Python literals — the oracle's LoS/aim math
     silently diverges from the sim if either side is edited alone. Regex the
     `static const float NAME = X.Yf;` declarations out of cs2_combat.h and
     compare; a missing name is a failure too (renamed constant = same drift).
@@ -339,14 +339,10 @@ def test_hit_geometry_constants_match_cs2_combat_h():
 
     header = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "c_env" /
               "cs2_combat.h").read_text()
-    pattern = re.compile(r"static const float\s+(HIT_HALF_WIDTH|HIT_HALF_HEIGHT_STAND|"
-                         r"HIT_HALF_HEIGHT_CROUCH|EYE_HEIGHT_STAND|EYE_HEIGHT_CROUCH|"
+    pattern = re.compile(r"static const float\s+(EYE_HEIGHT_STAND|EYE_HEIGHT_CROUCH|"
                          r"TORSO_OFFSET_STAND|TORSO_OFFSET_CROUCH)\s*=\s*([0-9.]+)f")
     found = {name: float(val) for name, val in pattern.findall(header)}
     expected = {
-        "HIT_HALF_WIDTH": eb.HIT_HALF_WIDTH,
-        "HIT_HALF_HEIGHT_STAND": eb.HIT_HALF_HEIGHT_STAND,
-        "HIT_HALF_HEIGHT_CROUCH": eb.HIT_HALF_HEIGHT_CROUCH,
         "EYE_HEIGHT_STAND": eb.EYE_STAND,
         "EYE_HEIGHT_CROUCH": eb.EYE_CROUCH,
         "TORSO_OFFSET_STAND": eb.TORSO_STAND,

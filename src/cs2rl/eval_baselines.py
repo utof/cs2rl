@@ -33,7 +33,7 @@ enemy reads invisible on its death tick). Edits after vendoring are limited to
 ``PolicyActor`` taking a live policy (+ ``from_policy`` / ``from_checkpoint``).
 
 * Geometry constants below MIRROR cs2_combat.h; the header is not exported
-  through the binding. If HIT_HALF_WIDTH / EYE_* / TORSO_* change there, the
+  through the binding. If EYE_* / TORSO_* change there, the
   oracle silently drifts — ``tests/test_eval_baselines.py::test_oracle_never_blind``
   and ``test_oracle_beats_random`` are the tripwires.
 * ``vis_from_obs`` MUST be threaded tick-to-tick (``vis_prev``): the oracle
@@ -72,9 +72,7 @@ if ACTION_HEAD_NAMES[H_SHOOT] != "shoot" or ACTION_HEAD_NAMES[H_CROUCH] != "crou
     raise RuntimeError(f"action head order changed: {ACTION_HEAD_NAMES}; "
                        "re-derive H_* indices in eval_baselines.py")
                                                                            # Geometry MIRRORS of cs2_combat.h — silent-drift hazard, this branch edits that
-                                                                           # header. Verified equal on main: HIT_HALF_WIDTH :200, EYE_HEIGHT_* / TORSO_OFFSET_* :234-237.
-HIT_HALF_WIDTH = 16.0
-HIT_HALF_HEIGHT_STAND, HIT_HALF_HEIGHT_CROUCH = 36.0, 27.0                 # v1c ellipsoid (gh #150)
+                                                                           # header. Verified equal on main: EYE_HEIGHT_* / TORSO_OFFSET_* :234-237.
 EYE_STAND, EYE_CROUCH = 48.0, 24.0
 TORSO_STAND, TORSO_CROUCH = 48.0, 24.0
 TICK_DT = 1.0 / 16.0
@@ -197,62 +195,6 @@ def vis_from_obs(obs, st, map_diag, match_tol=2.0):
             else:
                 unmatched += 1
     return vis, unmatched
-
-
-def _vis_at_combat(vis_now, vis_prev, died_mask):
-    """Visibility as process_combat saw it this tick.
-
-    compute_observations zeroes can_see for enemies that died THIS tick, so
-    the killer's own target reads invisible in the post-step obs. Back-fill
-    those columns from the previous tick's obs, which is the closest
-    available proxy (positions move <16 u/tick, LoS rarely flips).
-    """
-    if not died_mask.any() or vis_prev is None:
-        return vis_now
-    v = vis_now.copy()
-    for j in np.nonzero(died_mask)[0]:
-        v[:, j] = vis_prev[:, j]
-    return v
-
-
-def aim_geometry(st, i, j):
-    """Exact combat-ray geometry from shooter i to target j (post-step state).
-
-    Returns (rx, ry, rz, dist3d, true_yaw, true_pitch) where true_yaw /
-    true_pitch are the facing/pitch that would put the ray dead-centre on
-    the target's torso, using the sim's own eye/torso offsets.
-    """
-    eye_z = st["z"][i] + (EYE_CROUCH if st["is_crouching"][i] else EYE_STAND)
-    torso_z = st["z"][j] + (TORSO_CROUCH if st["is_crouching"][j] else TORSO_STAND)
-    rx = st["x"][j] - st["x"][i]
-    ry = st["y"][j] - st["y"][i]
-    rz = torso_z - eye_z
-    dist = math.sqrt(rx * rx + ry * ry + rz * rz)
-    true_yaw = math.atan2(ry, rx)
-    true_pitch = math.atan2(rz, math.hypot(rx, ry))
-    return rx, ry, rz, dist, true_yaw, true_pitch
-
-
-def perp_and_forward(st, i, j):
-    """Replicate cs2_combat.h's 3D gate for shooter i against target j.
-
-    Returns (perp, forward, dist) where `perp` is the v1c ELLIPSOID-normalised
-    perpendicular: HIT_HALF_WIDTH * sqrt((p_h/16)² + (p_v/HH)²), HH by the
-    target's stance — so the v1b rule "connects iff dist <= laser_range,
-    dist > 0, forward > 0 and perp <= HIT_HALF_WIDTH" still reads correctly.
-    At pitch 0 with the same z AND the same stance it equals the plain
-    perpendicular distance. Mixed stance is not that case: p_v = rz = ±24 even
-    at pitch 0 and equal z, which is exactly the shot v1c turns into a hit.
-    """
-    rx, ry, rz, dist, _, _ = aim_geometry(st, i, j)
-    yaw, pitch = st["facing"][i], st["pitch"][i]
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    dx, dy, dz = cp * math.cos(yaw), cp * math.sin(yaw), sp
-    forward = rx * dx + ry * dy + rz * dz
-    px, py, pz = rx - forward * dx, ry - forward * dy, rz - forward * dz
-    hh = HIT_HALF_HEIGHT_CROUCH if st["is_crouching"][j] else HIT_HALF_HEIGHT_STAND
-    perp = HIT_HALF_WIDTH * math.sqrt((px * px + py * py) / HIT_HALF_WIDTH**2 + pz * pz / hh**2)
-    return perp, forward, dist
 
 
 # ── action sources ───────────────────────────────────────────────────────────
