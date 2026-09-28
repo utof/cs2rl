@@ -164,10 +164,6 @@ STATUE = TEAM_SIZE
 PASS_MIN_KILL_RATE = 0.90
 PASS_MAX_MEDIAN_TTK = 120.0
 
-# cs2_movement.h: leapfrog applies half a gravity step before the position
-# update, so a held-still airborne agent loses this much z before combat runs.
-GRAVITY_SAG_PER_TICK = 0.5 * 800.0 * (1.0 / 16.0)**2
-
 # ── observation-vector layout, for --obs-only ────────────────────────────────
 # Block bounds come from the GENERATED spec (src/cs2rl/_obs_spec.py, regenerated from
 # the OBS_* macros in cs2_types.h by scripts/sync_action_spec.py) — never
@@ -446,9 +442,11 @@ def _hold_statue_above_ground(env, ground_z: float, offset: float) -> None:
         ``z`` each tick it would arc back down within ~10 ticks and the
         experiment would silently become the ground experiment.
 
-    PITFALL: the value the combat ray sees is ``offset − GRAVITY_SAG_PER_TICK``,
-    not ``offset`` — process_movement runs between this write and
-    process_combat. Callers measure the realised offset instead of assuming it.
+    PITFALL: the value the combat ray sees is ``offset − 1.5625``, not
+    ``offset`` — process_movement runs between this write and process_combat,
+    and its leapfrog applies half a gravity step first (cs2_movement.h:
+    ``0.5 · 800 · (1/16)² = 1.5625``). Callers measure the realised offset
+    instead of assuming it.
     """
     a = env._c_env.game.agents[STATUE]
     a.z = ground_z + offset

@@ -1,7 +1,8 @@
 # tests/test_scripted_expert.py
 """Regression tests for the extracted scripted bomber expert (Batch 6 Task 2).
 
-Contract under test (spec D-3/D-5 + Gate 0 measurement, scripts/measure_budget.py):
+Contract under test (spec D-3/D-5 + Gate 0 measurement,
+`git show 9b9bf2f:scripts/measure_budget.py`):
 on the SIMPLE map the expert must reach the bombsite and plant well inside the
 real round timer (ROUND_TIME = 640 ticks; Gate 0 measured 54-93 ticks across
 all 5 T-spawns) using ONLY the real action interface — no facing pokes.

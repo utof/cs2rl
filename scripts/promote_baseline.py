@@ -16,9 +16,6 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-import exp_lib                         # noqa: F401  (kept for parity with other scripts; may be used in future)
-
 EXPERIMENTS_DIR = Path(__file__).parent.parent / "outputs" / "experiments"
 
 

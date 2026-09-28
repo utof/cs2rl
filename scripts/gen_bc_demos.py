@@ -90,8 +90,9 @@ def generate_episode(seed: int, carrier_idx: int, git_sha: str) -> dict | None:
 
     A FRESH env is built per episode: Cs2Env.reset(seed=...) ignores its seed
     argument (the C RNG is seeded once at init), so per-episode determinism
-    requires constructing with make_env(seed=...) — same pattern as
-    scripts/measure_budget.py and evaluate_checkpoint.
+    requires constructing with make_env(seed=...) — same pattern as the Gate 0
+    measurement (`git show 9b9bf2f:scripts/measure_budget.py`) and
+    evaluate_checkpoint.
     """
     env = make_env(seed=seed, map_data=make_simple_map(), auto_reset=False)
     try:
