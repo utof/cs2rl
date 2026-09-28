@@ -26,7 +26,8 @@ this branch has:
 
 So the oracle is a CAPTURE, taken before the builders were typed
 (`tests/fixtures/env_config_pre_165b.json`, recorded by
-`tests/capture_env_config_pre_165b.py` one commit earlier). Comparing against a
+`tests/capture_env_config_pre_165b.py` one commit earlier; deleted since, it is
+at `git show 9878725:tests/capture_env_config_pre_165b.py`). Comparing against a
 list transcribed from the typed factory would compare the factory to itself. The
 fixture is FROZEN: re-capturing it on the migrated tree would rewrite the oracle
 to match whatever was built and turn every red green.
@@ -95,7 +96,8 @@ from env_factory import ROLES, UNSET, build_env_for
 
 FIXTURE = Path(__file__).parent / "fixtures" / "env_config_pre_165b.json"
 
-# Must match capture_env_config_pre_165b.CAPTURE_FORMAT. Duplicated rather than
+# Must match CAPTURE_FORMAT in the capture script (`git show
+# 9878725:tests/capture_env_config_pre_165b.py`). Duplicated rather than
 # imported so a stale fixture fails on the tag here, in the file that consumes
 # it, rather than on a KeyError deep inside a comparison.
 CAPTURE_FORMAT = "cs2rl-env-config-capture-v1"

@@ -11,10 +11,10 @@ WHAT IT CHECKS: the file's SHAPE, against a hand-written expectation, plus the
 commit it was captured at. Not the values — the values ARE the oracle, and the
 only meaningful check on them is a re-capture, which is a B1-only gate (the B1
 plan's Task 8). The role/scenario table and the seven `(site, enclosing)` pairs
-are written out below rather than imported from
-`tests/capture_env_config_pre_165b.py`, on purpose: a check that imports the
-producer's own constants compares the fixture to itself and stays green after an
-edit that breaks both.
+are written out below rather than imported from the capture script (deleted
+since; `git show 9878725:tests/capture_env_config_pre_165b.py`), on purpose: a
+check that imports the producer's own constants compares the fixture to itself
+and stays green after an edit that breaks both.
 
 WHAT IT MUST NOT DO: re-run the capture. B2 legitimately changes the call
 sources this fixture records, so a re-capture assertion here would fail in B2 by
@@ -42,8 +42,6 @@ genuinely changed. The two cases that actually come up:
 import json
 import sys
 from pathlib import Path
-
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -108,8 +106,9 @@ def test_format_tag_and_provenance():
     assert d["_provenance"]["format"] == "cs2rl-env-config-capture-v1"
     assert set(d["_provenance"]["runtime_names"]) == RUNTIME_NAMES
     assert d["_provenance"]["captured_at_commit"] == PRE_165B_CAPTURE_COMMIT, (
-        "the fixture was regenerated at a different commit. Re-running "
-        "tests/capture_env_config_pre_165b.py --capture to turn a red Phase B test "
+        "the fixture was regenerated at a different commit. Re-running the capture "
+        "script (git show 9878725:tests/capture_env_config_pre_165b.py) with "
+        "--capture to turn a red Phase B test "
         "green is exactly how this oracle becomes a mirror: the new capture records "
         "post-migration payloads, and B2's test_env_factory.py then checks the new "
         "builders against themselves while staying green. The format tag and the "
@@ -194,22 +193,3 @@ def test_symmetrize_is_the_only_row_where_the_two_configs_differ():
     assert fields == {"reward_symmetrize"}, fields
     assert cap["expected_config"]["reward_symmetrize"] is False
     assert cap["input_config"]["reward_symmetrize"] is True
-
-
-def test_the_capture_script_refuses_to_run():
-    """The re-capture guard is code, so it needs a test, or it is a comment.
-
-    tests/capture_env_config_pre_165b.py is not collected by pytest and is
-    imported by nothing, so deleting its refusal would be silent. The refusal
-    is what stops a `--capture` from rewriting this fixture to POST-migration
-    behaviour and turning every red in tests/test_env_factory.py green — the
-    trap this module's docstring is written to warn about.
-
-    Free to run: the raise is the first statement in capture(), above the
-    dirty-src git call and above the function-local c_env import, and the
-    module's own imports are stdlib only.
-    """
-    from tests import capture_env_config_pre_165b
-
-    with pytest.raises(SystemExit, match="FROZEN"):
-        capture_env_config_pre_165b.capture()

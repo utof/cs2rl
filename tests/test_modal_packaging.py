@@ -813,7 +813,8 @@ def _names_defined_under_tests():
 
     Scope is `tests/test_*.py` plus the shared helper module: a stray file that
     pytest never collects is not the threat, and measured, widening past
-    `test_*.py` pulls in `tests/capture_dump_config_pre_165.py` and
+    `test_*.py` pulls in `tests/capture_dump_config_pre_165.py` and (until its
+    deletion; `git show 9878725:tests/capture_env_config_pre_165b.py`)
     `tests/capture_env_config_pre_165b.py`, which each define a `_git` of their
     own and would make a gate built on this red for an unrelated reason.
 

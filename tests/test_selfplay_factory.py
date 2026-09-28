@@ -16,7 +16,8 @@ that go wrong:
     factor the live policy's does not and self-play `ratio_c` drifts. Silent.
 
 So the oracle is `tests/fixtures/selfplay_kwargs_pre_w3.json`, captured by
-`tests/capture_selfplay_kwargs_pre_w3.py` one commit before the builder existed.
+`tests/capture_selfplay_kwargs_pre_w3.py` one commit before the builder existed
+(deleted since; `git show 9878725:tests/capture_selfplay_kwargs_pre_w3.py`).
 Comparing against a list transcribed from the builder would compare the builder
 to itself.
 
@@ -38,7 +39,8 @@ from env_factory import build_selfplay_manager
 
 FIXTURE = Path(__file__).parent / "fixtures" / "selfplay_kwargs_pre_w3.json"
 
-# Must match capture_selfplay_kwargs_pre_w3.CAPTURE_FORMAT. Duplicated rather
+# Must match CAPTURE_FORMAT in the capture script (`git show
+# 9878725:tests/capture_selfplay_kwargs_pre_w3.py`). Duplicated rather
 # than imported so a stale fixture fails on the tag here, in the file that reads
 # it, rather than on a KeyError deep inside a comparison.
 CAPTURE_FORMAT = "cs2rl-selfplay-kwargs-capture-v1"
@@ -63,7 +65,8 @@ def _fixture():
         data = json.load(fh)
     assert data["_provenance"]["format"] == CAPTURE_FORMAT, (
         f"{FIXTURE.name} was written in format {data['_provenance']['format']!r}, this module "
-        f"reads {CAPTURE_FORMAT!r} — regenerate it with --capture")
+        f"reads {CAPTURE_FORMAT!r} — its capture script is only in git history now "
+        f"(git show 9878725:tests/capture_selfplay_kwargs_pre_w3.py)")
     return data
 
 
