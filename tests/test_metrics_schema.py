@@ -29,8 +29,8 @@ stays green while the registry silently rots. The §3 gate's two-epoch row, for
 instance, carries none of `game/plant_tick`, `actions/use_at_site_frac`, the
 eight split `policy/aim_log_std_*` keys or `eval/epoch`.
 
-WHY the frozen readers are parsed rather than migrated: `scripts/rung1_gate.py`
-and `scripts/rung1a_smoke_read.py` are registered evidence and must not change.
+WHY the frozen readers are parsed rather than migrated: `cs2rl/experiment/gate.py`
+and `cs2rl/experiment/smoke_read.py` are registered evidence and must not change.
 The registry chases them; a hardcoded snapshot of their keys would go stale
 silently, since nothing enforces that they stay frozen.
 """
@@ -763,7 +763,7 @@ def test_rung1_gate_report_columns_are_registered():
     not emitted keys at all. Registering them is what keeps the extractor from being
     loosened until it demands an emitter for a column heading."""
     cols = census.reader_report_columns()
-    assert cols, "extracted zero report columns from rung1_gate.py — the extractor is vacuous"
+    assert cols, "extracted zero report columns from experiment/gate.py — the extractor is vacuous"
     missing = sorted(c for c in cols if c not in ms.REGISTRY)
     assert not missing, "unregistered rung1_gate report columns:\n  " + "\n  ".join(missing)
     assert ms.REGISTRY["losses/approx_kl_p90"].kind == "derived", (
@@ -845,7 +845,7 @@ def test_derived_gate_columns_declare_the_source_keys_the_gate_actually_reads():
     and as a measurement.
     """
     sources = census.reader_derived_column_sources()
-    assert sources, "extracted zero derived-column sources from rung1_gate.py — vacuous"
+    assert sources, "extracted zero derived-column sources from experiment/gate.py — vacuous"
 
     # An UNREGISTERED column is test_rung1_gate_report_columns_are_registered's
     # failure to report, not this one's — skipped here so that test owns it and

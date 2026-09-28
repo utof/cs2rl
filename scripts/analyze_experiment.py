@@ -12,8 +12,7 @@ import math
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-import exp_lib
+from cs2rl.experiment import lib as exp_lib
 
 KEY_METRICS = [
     "winner_t",

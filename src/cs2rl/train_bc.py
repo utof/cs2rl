@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Behaviour-cloning warm-start trainer (Batch 6 Task 4 — spec D-6, §8 gate 1).
 
-Reads the scripted-expert demonstrations written by scripts/gen_bc_demos.py,
+Reads the scripted-expert demonstrations written by cs2rl/bc_demos.py,
 fits the SAME policy architecture PPO uses (build_policy) to them by maximum
 likelihood **through the same forward contract PPO uses**, writes a bare
 state_dict to outputs/checkpoints/bc_warmstart.pt, and then runs the BC-only
@@ -95,7 +95,7 @@ PITFALLS (each one cost time; do not "simplify" them away)
   states rather than a 10×-inflated 50.
 * Eval obs must be masked **exactly** like the recorded obs (spec R8:
   teammate + enemy blocks zeroed) — otherwise the greedy rollout feeds the
-  clone dims it never saw. `mask_idle_agent_blocks` mirrors gen_bc_demos.py;
+  clone dims it never saw. `mask_idle_agent_blocks` mirrors bc_demos.py;
   `tests/test_train_bc_smoke.py` pins the two together by comparing a real
   recorded obs against a live eval-rollout obs.
 * `Cs2Env.reset(seed=)` **ignores** its seed (the C RNG is seeded at init) —
@@ -132,7 +132,7 @@ from cs2rl.scripted_expert import setup_bomb_carrier                      # noqa
 
 # The map tag every demo must carry. Demos are only meaningful for BC → PPO on
 # the map they were generated on (geometry + per-map obs normalisation), so a
-# mismatch is a hard error rather than a warning. Mirrors gen_bc_demos.MAP_NAME.
+# mismatch is a hard error rather than a warning. Mirrors bc_demos.MAP_NAME.
 EXPECTED_MAP = "simple_v1"
 
 DEFAULT_DEMO_DIR = REPO_ROOT / "outputs" / "demos"
@@ -151,7 +151,7 @@ DEMO_RELEVANT_PATHS = (
     "src/cs2rl/map.py",
     "src/cs2rl/nav.py",
     "src/cs2rl/scripted_expert.py",
-    "scripts/gen_bc_demos.py",
+    "src/cs2rl/bc_demos.py",
 )
 
 # λ_ent from spec D-6 (imitation-lib default). Small on purpose: it only keeps
@@ -209,7 +209,7 @@ def mask_idle_agent_blocks(obs: np.ndarray) -> np.ndarray:
     Boundaries come from _obs_spec.OBS_BLOCKS (generated from cs2_types.h) —
     hardcoding 28/56/96 here would silently check the wrong slots after the
     next layout bump (they were 25/53/93 before Task 2.5). MUST stay identical
-    to scripts/gen_bc_demos.py's mask; tests/test_train_bc_smoke.py pins them
+    to cs2rl/bc_demos.py's mask; tests/test_train_bc_smoke.py pins them
     together against a real recorded demo.
     """
     obs[..., slice(*OBS_BLOCKS["teammate"])] = 0.0
@@ -283,7 +283,7 @@ def check_demo_sha(sha: str, allow_stale: bool = False, name: str = "demo") -> s
     raise ValueError(
         f"{name}: STALE DEMO — recorded at git sha {sha[:9]} but {why}. The recorded "
         f"observations and expert actions may no longer describe this env. Regenerate: "
-        f"uv run python scripts/gen_bc_demos.py --seeds 10 "
+        f"uv run python -m cs2rl.bc_demos --seeds 10 "
         f"(or pass --allow-stale-demos if you really mean to train on them).")
 
 
@@ -378,7 +378,7 @@ def load_demos(demo_dir,
     files = sorted(demo_dir.glob("*.npz"))
     if not files:
         raise FileNotFoundError(f"no .npz demos in {demo_dir} — generate them first: "
-                                f"uv run python scripts/gen_bc_demos.py --seeds 10")
+                                f"uv run python -m cs2rl.bc_demos --seeds 10")
 
     obs_parts, disc_parts, cont_parts, done_parts, lengths = [], [], [], [], []
     episodes, seen = [], {}
@@ -705,7 +705,7 @@ def rollout_episode(policy,
                     carry_state: bool = True):
     """One greedy BC rollout on a demo-generation start state.
 
-    Mirrors gen_bc_demos.generate_episode exactly EXCEPT that the policy, not
+    Mirrors bc_demos.generate_episode exactly EXCEPT that the policy, not
     ScriptedBomber, drives: fresh seeded env on the simple map, the carrier
     pokes (bomb + knife + designated-carrier role bit), a priming zero-action
     step so env.observations is real (reset() only zeroes the buffer), then

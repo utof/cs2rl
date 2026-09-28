@@ -131,9 +131,12 @@ EMITTER_SITES = (
 # `metrics_write_sites()` sweeps all of src/ for metrics-SHAPED writes without
 # consulting EMITTER_SITES, and every hit it finds outside the island has to be
 # named here with the reason it is not an emitter. This is the audit that
-# otherwise gets redone from scratch by every reviewer — three of these six look
-# exactly like emitters to a grep (`metrics[...]`, `summary = {...}`,
-# `stats = {...}` with the same bare key names cs2_env uses) and are not.
+# otherwise gets redone from scratch by every reviewer — three of the six
+# pre-#204 entries look exactly like emitters to a grep (`metrics[...]`,
+# `summary = {...}`, `stats = {...}` with the same bare key names cs2_env uses)
+# and are not. The last two are experiment and BC-demo code that #204 moved into
+# src/cs2rl/, which puts it inside this sweep: each writes into a container that
+# shares a NAME with an island container (`stats`, `out`), and neither is a row.
 #
 # The list cannot rot into a blanket exemption: an entry that matches no hit fails
 # too, so deleting an emitter-shaped site here is as loud as adding one.
@@ -174,6 +177,17 @@ NON_ISLAND_WRITES = (
         "train_bc.py", "eval_plant_rate",
         "The BC-eval report dict (`summary = {...}`) with its own printer — a separate "
         "analysis path, never merged into a training row."),
+    NonIslandWrite(
+        "bc_demos.py", "generate_demos",
+        "Demo-GENERATION stats (kept/discarded episodes, ticks min/median/max, spawn "
+        "coverage), printed and returned to the CLI and the demo tests; never written into "
+        "a metrics row. Hit only because `stats` is also an island container name."),
+    NonIslandWrite(
+        "experiment/analyze_tplant.py", "tag_summary",
+        "An OFFLINE analysis summary: the `_vf`/`_n_raw`/backstop bookkeeping of the report "
+        "dict tag_summary builds from a FINISHED run's metrics.jsonl. It reads rows and never "
+        "writes one — not a trainer row. Hit only because `out` is also an island container "
+        "name."),
 )
 
 # Non-literal dicts merged into an island container that resolve, one hop back, to
@@ -205,12 +219,14 @@ ISLAND_MERGE_SOURCES = (
 
 # The two frozen gate readers (spec: never migrated, so the registry has to
 # chase THEM). Only their own key literals are in scope — not their row loader
-# (`scripts/analyze_tplant.py`), which #155 records as future-reader residue.
-FROZEN_READERS = ("scripts/rung1_gate.py", "scripts/rung1a_smoke_read.py")
+# (`src/cs2rl/experiment/analyze_tplant.py`), which #155 records as future-reader
+# residue. Their consumer LABELS stay `rung1_gate` / `rung1a_smoke_read` (the names
+# metrics_schema's consumers column uses); only their paths moved, in #204.
+FROZEN_READERS = ("src/cs2rl/experiment/gate.py", "src/cs2rl/experiment/smoke_read.py")
 
 # A frozen reader's key literal: slash-namespaced, or the one bare key the gate
 # scripts read (`agent_steps`, PufferLib's own step counter — no *_KEY constant
-# exists for it, it appears inline at three sites in rung1a_smoke_read.py).
+# exists for it, it appears inline at three sites in experiment/smoke_read.py).
 # Deliberately NOT "any identifier-shaped string": the readers are full of
 # verdict labels ("PASS"), column kinds ("median") and dict keys ("fail") that
 # are not metrics keys, and widening the predicate to swallow them would force
@@ -229,10 +245,10 @@ KEY_SHAPED = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z0-9_.\-]+)*$")
 # These three CALLS are excluded because their string argument provably is not
 # a key. Excluded by position, so a real key literal cannot hide by being
 # written next to one:
-#   .replace  — `rung1_gate.print_report` shortens a COLUMN HEADING with
+#   .replace  — the gate's `print_report` shortens a COLUMN HEADING with
 #               `.replace('eval/win_vs_random_', 'eval_')`; the spec puts that
 #               literal out of surface entirely.
-#   .compile  — rung1a_smoke_read's MOVE_KEY_RE. Its family gets a
+#   .compile  — smoke_read.py's MOVE_KEY_RE. Its family gets a
 #               hand-written registry entry naming the regex; there is no key
 #               literal to extract from a pattern.
 #   Path      — a filesystem path (RUN_DIR_DEFAULT), not a metrics key.
@@ -1047,6 +1063,9 @@ def metrics_write_sites(src=None):
         EMITTER_SITES entry — which is what makes it an emitter — also widens this
         predicate, so the gap only exists for a container that is never declared.
       * anything outside ``src/``. Scripts and notebooks are out of scope by spec.
+        Experiment and BC-demo code that #204 moved INTO ``src/cs2rl/``
+        (``experiment/``, ``bc_demos.py``, ``deploy/``) is in scope, and its two
+        metrics-shaped writes are declared in NON_ISLAND_WRITES.
       * a key that reaches a row without a write shape at all, e.g. PufferLib's
         own `mean_and_log` literals (covered instead by PUFFERLIB_OWNED and a
         cross-package AST pin) or `**` splats of a non-literal mapping (covered by
@@ -1349,7 +1368,7 @@ def reader_hidden_call_literals(rel_path):
     into an unexplained set and fails, and a literal that stops being hidden makes
     its declaration stale and fails too — the exemption is enumerated, not blanket.
 
-    `rung1a_smoke_read`'s `MOVE_KEY_RE` pattern is not returned: a regex with `^`
+    `smoke_read.py`'s `MOVE_KEY_RE` pattern is not returned: a regex with `^`
     and `(\\d+)` in it fails `KEY_SHAPED`, so it is out by SHAPE and never needed
     the positional rule. The registry entry for `environment/action_move_*` names
     the regex in prose instead.
@@ -1387,19 +1406,19 @@ class ReaderOutOfSurface(NamedTuple):
 
 READER_OUT_OF_SURFACE = (
     ReaderOutOfSurface(
-        "scripts/rung1_gate.py", "eval/win_vs_random_",
+        "src/cs2rl/experiment/gate.py", "eval/win_vs_random_",
         "A DISPLAY PREFIX. print_report shortens the two eval column HEADINGS with "
         "`.replace('eval/win_vs_random_', 'eval_')` so they fit a 22-char field. It is a "
         "fragment of two real keys, not a key — `eval/win_vs_random_as_t` and `_as_ct` are "
         "registered separately and read from the row under their full names."),
     ReaderOutOfSurface(
-        "scripts/rung1a_smoke_read.py", "outputs/checkpoints/rung1a/s0",
+        "src/cs2rl/experiment/smoke_read.py", "outputs/checkpoints/rung1a/s0",
         "A FILESYSTEM PATH (RUN_DIR_DEFAULT), slash-namespaced by coincidence. It names the "
         "registered-evidence run directory the smoke read defaults to, not a metrics key."),
 )
 
 
-def reader_derived_column_sources(rel_path="scripts/rung1_gate.py"):
+def reader_derived_column_sources(rel_path="src/cs2rl/experiment/gate.py"):
     """{report column: frozenset(emitted keys the script reads to compute it)}.
 
     WHY, given that `reader_report_columns` already forces every column to be
@@ -1485,7 +1504,7 @@ def reader_derived_column_sources(rel_path="scripts/rung1_gate.py"):
     out = {}
     seed_metrics = mod_fns.get("seed_metrics")
     if seed_metrics is None:
-        raise AssertionError("scripts/rung1_gate.py has no seed_metrics — every GATES and "
+        raise AssertionError("src/cs2rl/experiment/gate.py has no seed_metrics — every GATES and "
                              "REPORT_ONLY column's provenance was read from its `m = {...}` "
                              "literal; this extractor now measures nothing")
     for node in ast.walk(seed_metrics):
@@ -1528,8 +1547,8 @@ def reader_derived_column_sources(rel_path="scripts/rung1_gate.py"):
     return out
 
 
-def reader_report_columns(rel_path="scripts/rung1_gate.py"):
-    """Column names of rung1_gate's GATES / REPORT_ONLY / REPORT_EXTRA tables.
+def reader_report_columns(rel_path="src/cs2rl/experiment/gate.py"):
+    """Column names of the gate's (experiment/gate.py) GATES / REPORT_ONLY / REPORT_EXTRA tables.
 
     These are the DERIVED report columns (`kills_per_episode` the ratio, not
     `game/kills_per_episode` the emitted key) plus the two eval/* keys the gate
@@ -1577,8 +1596,8 @@ def consumer_key_reads():
     out = {
         name: dict(reader_key_literals(path))
         for name, path in (
-            ("rung1_gate", "scripts/rung1_gate.py"),
-            ("rung1a_smoke_read", "scripts/rung1a_smoke_read.py"),
+            ("rung1_gate", "src/cs2rl/experiment/gate.py"),
+            ("rung1a_smoke_read", "src/cs2rl/experiment/smoke_read.py"),
         )
     }
     for name, path, qualname, receiver, prefix in IN_REPO_CONSUMERS:

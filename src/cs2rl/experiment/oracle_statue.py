@@ -18,9 +18,12 @@ actors and no learning anywhere in the loop:
 It reports kill rate, time-to-kill quantiles and the R0-A shot counters, then
 prints one PASS/FAIL line. Exit status 0 = PASS, 1 = FAIL.
 
-    UV_NO_SYNC=1 uv run python scripts/oracle_statue_check.py
-    UV_NO_SYNC=1 uv run python scripts/oracle_statue_check.py --statue-z 24
-    UV_NO_SYNC=1 uv run python scripts/oracle_statue_check.py --obs-only
+    UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue
+    UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue --statue-z 24
+    UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue --obs-only
+
+From a worktree, put its own src/ first: ``env UV_NO_SYNC=1
+PYTHONPATH=<checkout>/src uv run python -m cs2rl.experiment.oracle_statue ...``.
 
 WHY
 ---
@@ -795,7 +798,8 @@ def format_summary(res: dict) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
+    ap = argparse.ArgumentParser(prog="python -m cs2rl.experiment.oracle_statue",
+                                 description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--episodes",
                     type=int,

@@ -1,6 +1,3 @@
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -480,23 +477,15 @@ def test_onnx_export_output_order_pinned():
     unchanged.
     """
     import math
-    import sys as _sys
     import tempfile
-    from pathlib import Path as _Path
 
+    import onnxruntime as ort
     import torch
     from torch import nn
 
-    # export_policy is imported bare from deploy/, as deploy/verify_onnx.py
-    # imports it: `deploy.export_policy` would load a second copy of the
-    # module. src/ (for train) is already on the path, from this file's header.
-    _sys.path.insert(0, str(_Path(__file__).parent.parent / "deploy"))
-
-    import onnxruntime as ort
-    from export_policy import LSTMPolicyONNXWrapper
-
     from cs2rl import train
     from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.deploy.export_policy import LSTMPolicyONNXWrapper
 
     env = make_env(seed=0)
     try:
@@ -528,7 +517,7 @@ def test_onnx_export_output_order_pinned():
                 output_names=([f"logits_{i}"
                                for i in range(7)] + ["mu_aim", "lstm_h_out", "lstm_c_out"]),
                 opset_version=17,
-                                                                                             # dynamo=False matches deploy/export_policy.py:main(); the
+                                                                                             # dynamo=False matches cs2rl/deploy/export_policy.py:main(); the
                                                                                              # dynamo-based exporter pulls in onnxscript which isn't part
                                                                                              # of this project's lockfile.
                 dynamo=False,
@@ -574,8 +563,7 @@ def test_build_model_state_dict_round_trip():
 
     import torch
 
-    sys.path.insert(0, str(Path(__file__).parent.parent / "deploy"))
-    from export_policy import build_model
+    from cs2rl.deploy.export_policy import build_model
 
     obs_dim, hidden, aim_dim = 105, 256, 1
     head_sizes = (9, 2, 2, 3, 2, 2, 2)

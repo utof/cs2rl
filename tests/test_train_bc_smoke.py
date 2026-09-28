@@ -13,7 +13,7 @@ The load-bearing tests here:
           step, per-tick stepping); a 0% gate result therefore means the POLICY
           failed, not the harness;
       (2) the eval-time obs (masked by train_bc.mask_idle_agent_blocks) is
-          byte-identical to what gen_bc_demos recorded (spec R8). The two masks
+          byte-identical to what bc_demos recorded (spec R8). The two masks
           live in different files by design — this test is what keeps them equal.
   * `test_gate_rollout_carries_lstm_state` pins that the GATE measures the
     function PPO inherits. The gate used to run a stateless per-tick forward,
@@ -23,17 +23,12 @@ The load-bearing tests here:
 Demo generation is real (not fixtures) and module-scoped: ~5 episodes of ~70
 ticks, a few seconds.
 """
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-
-import gen_bc_demos                    # noqa: E402
-
-from cs2rl import train_bc
+from cs2rl import bc_demos, train_bc
 
 torch = pytest.importorskip("torch")
 
@@ -44,7 +39,7 @@ def demo_dir(tmp_path_factory):
     simple map (spawns are deterministic centroids, so this is the whole
     start-state distribution)."""
     out = tmp_path_factory.mktemp("bc_demos")
-    stats = gen_bc_demos.generate_demos(1, out)
+    stats = bc_demos.generate_demos(1, out)
     assert stats["kept"] == 5, f"expected 5/5 kept episodes, got {stats}"
     return out
 

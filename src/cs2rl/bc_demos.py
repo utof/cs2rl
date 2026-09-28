@@ -47,8 +47,8 @@ Schema (spec §7) per .npz:
     train_bc.py must assert these against its live constants before training
     (spec R7 — the --resume path has no shape guard).
 
-Usage:
-    uv run python scripts/gen_bc_demos.py --seeds 10 --out outputs/demos
+Usage (from a worktree, prefix `env PYTHONPATH=<checkout>/src`):
+    uv run python -m cs2rl.bc_demos --seeds 10 --out outputs/demos
 """
 import argparse
 import subprocess
@@ -64,7 +64,11 @@ from cs2rl.map import make_simple_map
 from cs2rl.nav import N_AGENTS, ROUND_TIME, TEAM_SIZE
 from cs2rl.scripted_expert import ScriptedBomber, setup_bomb_carrier
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# This file is <repo>/src/cs2rl/bc_demos.py: parents[2] is the checkout root, the
+# same root train_bc.DEFAULT_DEMO_DIR is built on (pinned equal by
+# tests/test_demo_format.py). Deliberately not imported from train_bc: demo
+# generation must not depend on the trainer.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Self-identifying map tag stored in every demo. The demo distribution is only
 # valid for BC → PPO on this exact map (per-map obs normalization + geometry);
@@ -201,7 +205,8 @@ def generate_demos(n_seeds: int, out_dir: Path, start_seed: int = 0) -> dict:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(prog="python -m cs2rl.bc_demos",
+                                     description=__doc__.splitlines()[0])
     parser.add_argument("--seeds",
                         type=int,
                         default=10,

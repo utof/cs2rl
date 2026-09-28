@@ -98,10 +98,11 @@ scanned roots, and a green result here says NOTHING about them. LOWER_LAYER_SITE
 below is their census, pinned by a test so this paragraph cannot rot into a claim
 about a population that has since doubled. Note what they no longer all share:
 #165 gave four of the ten resolved calls an `EnvConfig` — the wrapper's own
-(`Cs2Env` inside `make_env`) plus `src/cs2rl/play.py`, `scripts/oracle_statue_check.py`
-and `scripts/sim_fingerprint.py` — while the other six still take `make_env`'s
-defaults and so see no W5 stance flag and no Rung-0 knob from config:
-`scripts/gen_bc_demos.py`, all three in `src/cs2rl/profile_step.py`, `record_episode` in
+(`Cs2Env` inside `make_env`) plus `src/cs2rl/play.py`,
+`src/cs2rl/experiment/oracle_statue.py` and `scripts/sim_fingerprint.py` — while
+the other six still take `make_env`'s defaults and so see no W5 stance flag and
+no Rung-0 knob from config: `src/cs2rl/bc_demos.py`, all three in
+`src/cs2rl/profile_step.py`, `record_episode` in
 `src/cs2rl/train.py`, and `src/cs2rl/train_bc.py` (re-measured 2026-09-28 by AST, after
 `make_puffer_env` and the `make_c_env` call inside it were deleted and #204 deleted
 the Gate 0 measurement script; `LOWER_LAYER_SITES` pins calls per FILE, not which of
@@ -129,7 +130,7 @@ ROOTS = (REPO_ROOT / "src", REPO_ROOT / "scripts")
 FACTORY = REPO_ROOT / "src" / "cs2rl" / "env_factory.py"
 
 # Sanity floors for the "the root is real" guard. Deliberately far below the
-# current counts (24 and 19 files) so ordinary churn never touches them; they
+# current counts (37 and 21 files after #204) so ordinary churn never touches them; they
 # exist to catch a root that resolved to nothing, not to pin a file count.
 MIN_FILES_PER_ROOT = 8
 
@@ -161,8 +162,8 @@ ANCHORS = ("src/cs2rl/train.py", "src/cs2rl/train_test_harness.py", "src/cs2rl/e
 # before the draft was even committed.
 # Over this file's own roots, `src/` + `scripts/`:
 #   8 files import it; 3 ALIAS it (3 STATEMENTS); 5 import it bare. FOUR of those five bare importers are
-#   keys in LOWER_LAYER_SITES below — `scripts/gen_bc_demos.py`,
-#   `scripts/oracle_statue_check.py`, `scripts/sim_fingerprint.py`,
+#   keys in LOWER_LAYER_SITES below — `src/cs2rl/bc_demos.py`,
+#   `src/cs2rl/experiment/oracle_statue.py`, `scripts/sim_fingerprint.py`,
 #   `src/cs2rl/play.py`. The fifth is
 #   `src/cs2rl/env_factory.py`, which imports it to pass as a VALUE and is the subject
 #   of the asymmetry pin below (re-measured 2026-09-28 by AST, after #204 deleted the
@@ -199,8 +200,8 @@ LOWER_LAYER_SITES = {
     "src/cs2rl/profile_step.py": 3,                    # three step-timing harnesses
     "src/cs2rl/train.py": 1,                           # `record_episode`
     "src/cs2rl/train_bc.py": 1,                        # BC demo replay env
-    "scripts/gen_bc_demos.py": 1,
-    "scripts/oracle_statue_check.py": 1,
+    "src/cs2rl/bc_demos.py": 1,                        # BC demo generation (#204: was scripts/)
+    "src/cs2rl/experiment/oracle_statue.py": 1,        # oracle-vs-statue check (#204: was scripts/)
     "scripts/sim_fingerprint.py": 1,
 }
 

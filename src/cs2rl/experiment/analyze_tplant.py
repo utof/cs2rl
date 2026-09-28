@@ -46,9 +46,9 @@ PITFALLS:
     transform costs ~33µs/step, so cross-arm wall-clock comparisons are
     meaningless and pre-registered as out of scope.
 
-Usage:
-  uv run python scripts/analyze_tplant.py outputs/checkpoints/<run-a> [<run-b> ...]
-  uv run python scripts/analyze_tplant.py --cap 1280 outputs/checkpoints/roundtime-1280-run
+Usage (from a worktree, prefix `env PYTHONPATH=<checkout>/src`):
+  uv run python -m cs2rl.experiment.analyze_tplant outputs/checkpoints/<run-a> [<run-b> ...]
+  uv run python -m cs2rl.experiment.analyze_tplant --cap 1280 outputs/checkpoints/roundtime-1280-run
 """
 
 import argparse
@@ -640,7 +640,8 @@ def print_report(r, window_steps):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(prog="python -m cs2rl.experiment.analyze_tplant",
+                                 description=__doc__.splitlines()[0])
     ap.add_argument("run_dirs", nargs="+", type=Path)
     ap.add_argument(
         "--cap",

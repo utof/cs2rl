@@ -7,13 +7,9 @@ measurements, norm ratio outside [0.1, 10].
 """
 import io
 import math
-import sys
 from contextlib import redirect_stdout
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-
-from analyze_tplant import print_tag_report, tag_summary
+from cs2rl.experiment.analyze_tplant import print_tag_report, tag_summary
 
 
 def _row(step,

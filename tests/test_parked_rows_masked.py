@@ -443,7 +443,7 @@ def test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent():
       - the trainer's, an inline override in evaluate() under `--opponent noop`
         (bin 0 on every discrete head, zero aim delta);
       - the oracle's, ``eval_baselines.IdleActor``, which
-        scripts/oracle_statue_check.py drives as agent 5 to establish Rung 1a's
+        cs2rl/experiment/oracle_statue.py drives as agent 5 to establish Rung 1a's
         SOLVABILITY PRECONDITION — "a perfect aimer can kill this opponent".
 
     WHY this coupling is load-bearing: that precondition is what licenses

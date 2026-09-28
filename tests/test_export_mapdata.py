@@ -8,8 +8,22 @@ embeds at runtime — any drift breaks observation normalization in the C# plugi
 """
 
 import math
-import sys
 from pathlib import Path
+
+
+def test_out_dir_is_the_deploy_mapdata_dir_the_plugin_reads():
+    """OUT_DIR is <repo>/deploy/mapdata, the gitignored dir the sidecar has always gone to.
+
+    WHY (#204, review C1): the output dir is computed from the module's own location,
+    and moving it into src/cs2rl/deploy/ turned the old `Path(__file__).parent /
+    "mapdata"` into src/cs2rl/deploy/mapdata: not gitignored, and not where the
+    plugin's remedy message and the deploy docs send the user for the file.
+    """
+    from cs2rl.deploy.export_mapdata import OUT_DIR
+
+    repo = Path(__file__).resolve().parents[1]
+    assert OUT_DIR == repo / "deploy" / "mapdata", (
+        f"export_mapdata would write to {OUT_DIR}, not {repo / 'deploy' / 'mapdata'}")
 
 
 def test_export_mapdata_dust2():
@@ -23,17 +37,15 @@ def test_export_mapdata_dust2():
       4. x_offset / y_offset are within a plausible range for dust2 world coords.
       5. map_diag is within a plausible range for dust2 (~3 000–5 000 units).
     """
-    # Import after sys.path is set so deploy/ modules resolve correctly
-    sys.path.insert(0, str(Path(__file__).parent.parent / "deploy"))
-    from export_mapdata import export_mapdata
+    from cs2rl.deploy.export_mapdata import export_mapdata
 
     data = export_mapdata("de_dust2")
 
     # --- Identity fields ---
     # Batch 3: bumped 104dim → 105dim (carrier-bit added at obs[104]).
     # Batch 5 (map-verticality T5): bumped v1→v2 to signal centroids_z presence.
-    # Must stay in sync with deploy/export_mapdata.py:OBS_VERSION,
-    # deploy/export_policy.py sidecar `obs_version`, and the C# plugin
+    # Must stay in sync with cs2rl/deploy/export_mapdata.py:OBS_VERSION,
+    # cs2rl/deploy/export_policy.py sidecar `obs_version`, and the C# plugin
     # ObservationBuilder.SupportedVersion.
     assert data["obs_version"] == "v2-105dim", (f"obs_version mismatch: {data['obs_version']!r}")
     assert data["map"] == "de_dust2", f"map field mismatch: {data['map']!r}"
@@ -97,8 +109,7 @@ def test_export_mapdata_includes_centroids_z():
     NOTE: is_ramp is intentionally absent from the sidecar; movement enforcement
     is handled by the CS2 server, not the deploy plugin.
     """
-    sys.path.insert(0, str(Path(__file__).parent.parent / "deploy"))
-    from export_mapdata import export_mapdata
+    from cs2rl.deploy.export_mapdata import export_mapdata
 
     data = export_mapdata("de_dust2")
 

@@ -251,7 +251,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # ── TAG diagnostic (spec 2026-08-13 §4.1) ──
     # getattr fallbacks keep harness/dump-config args objects that predate
     # these flags working, same pattern as the warmstart block above.
-    # NOTE: these keys change exp_lib.behavior_hash for ALL future runs
+    # NOTE: these keys change experiment.lib.behavior_hash for ALL future runs
     # (hash covers sorted config.json) — recorded decision, spec §4.1.
     tag_diagnostic = bool(getattr(args, "tag_diagnostic", False))
     tag_every = int(getattr(args, "tag_every", 5))
@@ -261,7 +261,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # FLAG, not the resolved architecture: a flag-less crash-resume of a split
     # run writes false here on purpose, which is precisely why the analyzer
     # reads the per-epoch split/active metric rather than config.json
-    # (spec §3.4). Adding this key also shifts exp_lib.behavior_hash for all
+    # (spec §3.4). Adding this key also shifts experiment.lib.behavior_hash for all
     # future runs — recorded decision, spec §6.
     tct_split_heads = bool(getattr(args, "tct_split_heads", False))
     # Trunk twin (spec 2026-08-15): same FLAG-not-architecture contract as
@@ -290,7 +290,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # while putting cosine-LR T_max on the real horizon under noop:
     # 1M requested at n_active=1, num_envs=256 ⇒ total_timesteps = 10M ⇒
     # 61 epochs (batch 163,840; 61 × 16,384 = 999,424 hero steps).
-    # PITFALL: adding these keys shifts exp_lib.behavior_hash for all future
+    # PITFALL: adding these keys shifts experiment.lib.behavior_hash for all future
     # runs (the hash covers sorted config.json) — recorded decision, same as
     # the TAG/tct keys above, and the same for `opponent`, `jump_enabled` and
     # `aim_log_std_init` below (plus the σ weight-decay exclusion of T1, which
@@ -319,7 +319,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # the reader must not have to re-derive the formula. Goes through the same
     # helper build_policy uses so config.json and the policy cannot drift.
     # PITFALL: this key AND the σ weight-decay exclusion
-    # (isolate_aim_log_std_param_group) shift exp_lib.behavior_hash for all
+    # (isolate_aim_log_std_param_group) shift experiment.lib.behavior_hash for all
     # future runs — recorded decision, same convention as the TAG/tct keys
     # above. The weight-decay change is a real behaviour change for EVERY run,
     # not just capped ones; the init only moves when cap < LOG_STD_INIT + 0.2.
@@ -430,7 +430,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # recorded above under their CLI names so a None survives as None.
     # None of these keys is in RESUME_CONFIG_ALLOWLIST: a run with different
     # weights, a different roster or a different PBRS discount is a different
-    # experiment. Adding or removing one shifts exp_lib.behavior_hash for every
+    # experiment. Adding or removing one shifts experiment.lib.behavior_hash for every
     # future run.
     # Merged via an explicit collision check rather than a trailing splat: a
     # splat in last position would SILENTLY overwrite an existing config key if
