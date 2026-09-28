@@ -42,9 +42,10 @@ import pytest
 
 # tests/ is NOT on sys.path under this repo's pytest (conftest.py adds only src/,
 # and pytest's own insertion is the rootdir, not the test directory). Inserted
-# here rather than in conftest.py so the extra path stays scoped to the two
-# modules that need it — `metrics_census`, the AST extractor this file checks the
-# registry against, and `test_w1_modules`, whose module list it asserts on.
+# here rather than in conftest.py so the extra path stays scoped to the one
+# module that needs it — `metrics_census`, the AST extractor this file checks the
+# registry against. `test_w1_modules` is imported as `tests.test_w1_modules`, the
+# name pytest collects it under; a bare import would load a second copy.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import metrics_census as census        # noqa: E402
@@ -987,5 +988,5 @@ def test_eval_baselines_imports_eval_keys_from_here_and_not_the_reverse():
 def test_metrics_schema_is_in_the_import_lightness_test():
     """Creating a module and adding it to the subprocess guard is ONE task, by spec —
     a module that slips in unguarded is how the invariant dies."""
-    from test_w1_modules import W1_MODULES
+    from tests.test_w1_modules import W1_MODULES
     assert "metrics_schema" in W1_MODULES

@@ -489,17 +489,16 @@ def test_onnx_export_output_order_pinned():
     import torch
     from torch import nn
 
-    # Both deploy/ (for export_policy) and src/ (for train) need to be on the
-    # path. The conftest already inserts src/, but deploy/ is repo-root-relative.
-    _repo_root = _Path(__file__).parent.parent
-    _sys.path.insert(0, str(_repo_root))
-    _sys.path.insert(0, str(_repo_root / "src"))
+    # export_policy is imported bare from deploy/, as deploy/verify_onnx.py
+    # imports it: `deploy.export_policy` would load a second copy of the
+    # module. src/ (for train) is already on the path, from this file's header.
+    _sys.path.insert(0, str(_Path(__file__).parent.parent / "deploy"))
 
     import onnxruntime as ort
+    from export_policy import LSTMPolicyONNXWrapper
 
     import train
     from c_env.cs2_env import make_env
-    from deploy.export_policy import LSTMPolicyONNXWrapper
 
     env = make_env(seed=0)
     try:

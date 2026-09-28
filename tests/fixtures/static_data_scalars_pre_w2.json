@@ -4,7 +4,7 @@
   "captured_at_commit": "f8896c5433468248f77258f1f8c2d36684084fde",
   "map": "map.make_simple_map()",
   "why": "pre-W2 baseline for the StaticData transfer rewrite (spec 2026-08-31 \u00a72 W2); a snapshot taken after the rewrite would compare the packer to itself",
-  "regenerate": "UV_NO_SYNC=1 uv run python tests/test_static_data_pack.py --capture"
+  "regenerate": "UV_NO_SYNC=1 uv run python -m tests.test_static_data_pack --capture"
  },
  "configs": [
   {

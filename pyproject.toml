@@ -66,14 +66,30 @@ exclude-dependencies = ["pynvml"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# scripts/ has no __init__.py, so ruff otherwise resolves the relative imports
+# inside scripts/modal_runner to a top-level `modal_runner`.
+namespace-packages = ["scripts"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+# TID251 enforces the banned-api table below: one import spelling per module.
+select = ["E", "F", "I", "UP", "B", "TID251"]
 # E501 (line-too-long) disabled: YAPF's `spaces_before_comment` aligner pushes
 # trailing comments past column 100 when the preceding code is long, producing
 # fights between the formatter and the linter. YAPF's column_limit=100 still
 # keeps lines reasonable for actual code; we just stop policing trailing comments.
 ignore = ["E501"]
+
+# One spelling per module. A module imported under two names is two module
+# objects with two copies of its state, so a monkeypatch or an `except` aimed at
+# one misses the other. Each entry bans the spelling that is NOT canonical; the
+# runtime half is the session guard in tests/conftest.py.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"src".msg = "src/ is on sys.path: import `X`, not `src.X`"
+"deploy".msg = "put deploy/ on sys.path and import `X`, not `deploy.X`, as deploy/verify_onnx.py does"
+"modal_runner".msg = "import `scripts.modal_runner`"
+"run_modal".msg = "import `scripts.run_modal`"
+"modal_artifacts".msg = "import `scripts.modal_artifacts`"
+"modal_backfill_sidecar".msg = "import `scripts.modal_backfill_sidecar`"
 
 [tool.ruff.format]
 quote-style = "double"

@@ -105,7 +105,6 @@ from tests.test_modal_packaging import (
     _module_scope_shape_violations,
     _nonstdlib_module_scope_imports,
     _runner_module_population,
-    bare_spelling_imports,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -448,6 +447,59 @@ def _trusted_binding_violations(tree):
     return sorted(found)
 
 
+def _absolute_imports_of(source: str, module: str) -> list[tuple[int, str]]:
+    """Every absolute import of `module` or a submodule of it in `source`, at ANY depth.
+
+    Returns [(lineno, kind)]. `ast.walk`, never `tree.body`, so an import inside
+    a function body or under an `if` or `try` counts. Four shapes, one kind each:
+
+    * `import M`, `import M.sub` (`import`);
+    * `from M import X`, `from M.sub import X` (`from-import`);
+    * `from <parent> import <leaf>` of a dotted `module`, e.g. `from scripts
+      import modal_runner` (`from-parent-import`). The leaf is matched exactly,
+      so `from scripts import modal_runner_extra` is not a hit, and the alias in
+      `... import modal_runner as mrl` changes nothing;
+    * `importlib.import_module("M")` or `__import__("M")` with a STRING LITERAL
+      argument, positional or `name=` (`dynamic-import`).
+
+    A name matches `module` exactly or as a dotted prefix (`M.sub`), never as a
+    plain prefix, so `modal_runner_extra` is a different module. Relative imports
+    are never hits: `from .modal_runner import X` names a sibling of the importing
+    package, which is a different module.
+
+    PITFALL, blind spots: `importlib.import_module(<variable>)`, and an import
+    written inside a code string that a child process runs. String literals are
+    deliberately not parsed as code: a string that looks like code is not
+    necessarily executed as code.
+    """
+    parent, _, leaf = module.rpartition(".")
+
+    def names_module(dotted: str) -> bool:
+        return dotted == module or dotted.startswith(module + ".")
+
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            hits.extend((node.lineno, "import") for alias in node.names if names_module(alias.name))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            if names_module(node.module or ""):
+                hits.append((node.lineno, "from-import"))
+            elif parent and node.module == parent:
+                hits.extend((node.lineno, "from-parent-import") for alias in node.names
+                            if alias.name == leaf)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            # Both callables take the module name first, positionally or as
+            # `name=`; `arg` is None for a call with neither.
+            arg = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg == "name"), None)
+            if (name in ("import_module", "__import__") and isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str) and names_module(arg.value)):
+                hits.append((node.lineno, "dynamic-import"))
+    return hits
+
+
 def _dependency_edges(sources):
     """({module: runtime edges}, {module: annotation-only edges}) between package modules.
 
@@ -455,12 +507,10 @@ def _dependency_edges(sources):
     import (`from . import core`, `from .core import X`). Every other way to
     reach the package from inside it is recorded as an edge no table allows:
     a `..`-relative import as its dotted spelling (`..`, `..modal_runner`), and
-    any absolute spelling as `PACKAGED`. The absolute shapes come from
-    `bare_spelling_imports(source, PACKAGED)`, the static guard's walker, so
-    this gate and that guard share one definition of an import of the package
-    (`import`, from-import, `from scripts import modal_runner`, and literal
-    `importlib.import_module` / `__import__`) instead of this file keeping a
-    second, weaker copy that missed the package-level and parent spellings.
+    any absolute spelling as `PACKAGED`. The absolute shapes are the four
+    `_absolute_imports_of` finds (`import`, from-import, `from scripts import
+    modal_runner`, and literal `importlib.import_module` / `__import__`), so the
+    package-level and parent spellings an older walker here missed are edges too.
 
     PITFALL: that walker is an `ast.walk`, so an absolute spelling is recorded
     as a runtime edge even under `if TYPE_CHECKING:`. That fails closed: the
@@ -470,7 +520,7 @@ def _dependency_edges(sources):
     for filename, source in sources.items():
         module = filename.removesuffix(".py")
         runtime[module], annotations[module] = set(), set()
-        if bare_spelling_imports(source, PACKAGED):
+        if _absolute_imports_of(source, PACKAGED):
             runtime[module].add(PACKAGED)
         stack = [(ast.parse(source), False)]
         while stack:
@@ -1358,6 +1408,33 @@ def test_package_dependency_controls(live_sources, plant):
             changed[module + ".py"] += f"\nfrom . import {edge}\n"
         _assert_rejected(_dependency_violations(changed), ("runtime-edges", module), plant)
         _assert_no_violations(_dependency_violations(live_sources), precondition)
+
+
+@pytest.mark.parametrize("planted, shape", [
+    ("import scripts.modal_runner\n", "module scope"),
+    ("import scripts.modal_runner as mrl\n", "module scope, aliased"),
+    ("from scripts.modal_runner import ValidationError\n", "from-import on the full path"),
+    ("def f():\n    import scripts.modal_runner as mrl\n", "function body"),
+    ('import importlib\nm = importlib.import_module("scripts.modal_runner")\n',
+     "importlib.import_module literal"),
+    ("import scripts.modal_runner.state\n", "submodule"),
+    ("from scripts import modal_runner\n", "from-parent-import -- THE SHAPE THAT WAS MISSING"),
+    ("from scripts import modal_runner as mrl\n", "from-parent-import, aliased"),
+    ("from scripts import modal_artifacts, modal_runner\n",
+     "from-parent-import, one of several names"),
+    ("def f():\n    from scripts import modal_runner\n", "from-parent-import in a body"),
+])
+def test_the_walker_finds_the_packaged_spelling_in_every_shape(planted, shape):
+    """POSITIVE CONTROL for `_absolute_imports_of` aimed at `PACKAGED`, one row per shape.
+
+    The walker is how `_dependency_edges` sees an absolute import of the package
+    from inside it, so a shape it misses is an import of the package that no
+    clause reports. The from-parent rows are the shape an earlier version
+    missed: `from scripts import modal_runner` (then `modal_runner_lib`)
+    returned `[]`, because a from-import was matched on its module path only,
+    and for a dotted target the leaf can also be imported from its parent.
+    """
+    assert _absolute_imports_of(planted, PACKAGED), f"walker is blind to {shape} under PACKAGED"
 
 
 @pytest.mark.parametrize("statement, edge", [
