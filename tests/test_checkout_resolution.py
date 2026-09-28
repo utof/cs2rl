@@ -18,12 +18,19 @@ The inherited value is what put this checkout's src/ first (in a worktree that
 borrows main's venv), so replacing it would make the negative control fail (a)
 for a reason that has nothing to do with the case under test.
 
-2. The import guard in src/cs2rl/__init__.py, for every entry point outside
-pytest. Each case is a child `python -c "import cs2rl"` that inherits this
-session's PYTHONPATH (so cs2rl is THIS checkout's) and differs only in its cwd:
-a tmp checkout (pyproject.toml + src/cs2rl/__init__.py) must fail and name the
-fix; this checkout's root, a directory in no checkout, and an installed copy of
-the package (the Modal wheel path) must import silently.
+2. The import guard in src/cs2rl/__init__.py. Each case is a child interpreter
+that inherits this session's PYTHONPATH, so the cs2rl it imports is THIS
+checkout's; the cases differ in the child's cwd and in what it runs.
+  - Refused: `python -c "import cs2rl"` with the cwd inside a tmp checkout
+    (pyproject.toml + src/cs2rl/__init__.py); a tmp checkout's script run by
+    path, from a cwd in no checkout and from this checkout's root (verifier
+    finding N1: the script's checkout decides, not the cwd).
+  - Silent: the cwd in this checkout, in no checkout, deleted, or under a bare
+    pyproject.toml; an installed copy (the Modal wheel path); no sys.argv at
+    all; this checkout's script run by path from inside another checkout (N2);
+    a console script or a site-packages __main__.py that sits inside another
+    checkout (the shapes of `.venv/bin/pytest` and `python -m pytest`, whose
+    files resolve into main's .venv), which must go by the cwd.
 """
 import os
 import subprocess
@@ -117,17 +124,22 @@ def test_b_names_the_pufferlib_origin_of_a_resources_entry(tmp_path):
     assert any("import pufferlib" in p and "Removing it is safe" in p for p in problems), problems
 
 
-def _import_cs2rl(cwd: Path, *first_on_path: Path) -> subprocess.CompletedProcess:
-    """`python -c "import cs2rl"` in `cwd`, with `first_on_path` PREPENDED to PYTHONPATH."""
+def _python(cwd: Path, args: list[str], *first_on_path: Path) -> subprocess.CompletedProcess:
+    """`python <args>` in `cwd`, with `first_on_path` PREPENDED to PYTHONPATH."""
     entries = [*map(str, first_on_path), os.environ.get("PYTHONPATH")]
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, entries)))
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return subprocess.run([sys.executable, "-c", "import cs2rl"],
+    return subprocess.run([sys.executable, *args],
                           cwd=cwd,
                           env=env,
                           capture_output=True,
                           text=True,
                           timeout=_CHILD_TIMEOUT_S)
+
+
+def _import_cs2rl(cwd: Path, *first_on_path: Path) -> subprocess.CompletedProcess:
+    """`python -c "import cs2rl"` in `cwd`: the cwd decides (sys.argv[0] is '-c')."""
+    return _python(cwd, ["-c", "import cs2rl"], *first_on_path)
 
 
 def _fake_checkout(root: Path) -> Path:
@@ -145,8 +157,47 @@ def test_importing_cs2rl_from_inside_another_checkout_fails_and_names_the_fix(tm
     child = _import_cs2rl(other / "deeper")
     output = f"exit {child.returncode}\n--- stderr ---\n{child.stderr[-3000:]}"
     assert child.returncode != 0 and "ImportError" in child.stderr, output
-    assert f"another checkout, {other}." in child.stderr, output
+    assert f"the working directory is inside another checkout, {other}." in child.stderr, output
     assert f"env PYTHONPATH={other / 'src'} <command>" in child.stderr, output
+    assert f"To run {REPO_ROOT}'s code, cd {REPO_ROOT} first" in child.stderr, output
+
+
+@pytest.mark.parametrize("cwd", ["no checkout", "this checkout"])
+def test_a_script_of_another_checkout_run_by_path_is_refused_from_any_cwd(tmp_path, cwd):
+    """N1: `python <other>/scripts/run.py`. From /tmp or from main's root the cwd
+    names no checkout or cs2rl's own, so only the script's path can tell."""
+    other = _fake_checkout(tmp_path / "other")
+    script = other / "scripts" / "run.py"
+    script.parent.mkdir()
+    script.write_text("import cs2rl\n")
+    child = _python(tmp_path if cwd == "no checkout" else REPO_ROOT, [str(script)])
+    output = f"exit {child.returncode}\n--- stderr ---\n{child.stderr[-3000:]}"
+    assert child.returncode != 0 and "ImportError" in child.stderr, output
+    assert f"the script {script} is inside another checkout, {other}." in child.stderr, output
+    assert f"env PYTHONPATH={other / 'src'} <command>" in child.stderr, output
+    assert (f"run {REPO_ROOT}'s copy of the script instead: {REPO_ROOT / 'scripts' / 'run.py'}"
+            in child.stderr), output
+
+
+def test_this_checkouts_script_run_by_path_from_inside_another_checkout_is_silent(tmp_path):
+    """N2: cs2rl and the script are both this checkout's; only the cwd is elsewhere."""
+    child = _python(_fake_checkout(tmp_path / "other"),
+                    [str(REPO_ROOT / "scripts" / "sim_fingerprint.py"), "--help"])
+    assert child.returncode == 0, f"exit {child.returncode}\n{child.stderr[-3000:]}"
+    assert "usage: sim_fingerprint.py" in child.stdout, child.stdout[-3000:]
+
+
+@pytest.mark.parametrize("entry", ["console script", "site-packages __main__.py"])
+def test_launchers_inside_another_checkout_go_by_the_cwd(tmp_path, entry):
+    """`.venv/bin/pytest` and pytest's __main__.py resolve into main's .venv, i.e. into
+    another checkout once main is one. They are not the user's script: the cwd decides."""
+    other = _fake_checkout(tmp_path / "other")
+    launcher = other / ("bin/pytest"
+                        if entry == "console script" else "lib/site-packages/pytest/__main__.py")
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("import cs2rl\n")
+    child = _python(REPO_ROOT, [str(launcher)])
+    assert child.returncode == 0, f"exit {child.returncode}\n{child.stderr[-3000:]}"
 
 
 @pytest.mark.parametrize("where", ["this checkout", "no checkout", "installed copy"])
@@ -165,4 +216,20 @@ def test_the_import_guard_is_silent_when_the_checkouts_agree(tmp_path, where):
         site.mkdir(parents=True)
         (site / "__init__.py").write_text((REPO_ROOT / "src" / "cs2rl" / "__init__.py").read_text())
         child = _import_cs2rl(_fake_checkout(tmp_path / "archive"), site.parent)
+    assert child.returncode == 0, f"exit {child.returncode}\n{child.stderr[-3000:]}"
+
+
+@pytest.mark.parametrize("case", ["deleted cwd", "pyproject.toml alone", "no sys.argv"])
+def test_the_import_guard_skips_what_it_cannot_judge(tmp_path, case):
+    """N3: an OSError (here a deleted cwd) skips the check; a pyproject.toml without
+    src/cs2rl/__init__.py is not a checkout; an embedded interpreter may lack sys.argv."""
+    if case == "deleted cwd":
+        code = ("import os, tempfile\nd = tempfile.mkdtemp()\nos.chdir(d)\nos.rmdir(d)\n"
+                "import cs2rl\n")
+        child = _python(tmp_path, ["-c", code])
+    elif case == "pyproject.toml alone":
+        (tmp_path / "pyproject.toml").write_text("")
+        child = _import_cs2rl(tmp_path)
+    else:
+        child = _python(tmp_path, ["-c", "import sys\ndel sys.argv\nimport cs2rl\n"])
     assert child.returncode == 0, f"exit {child.returncode}\n{child.stderr[-3000:]}"

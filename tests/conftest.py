@@ -30,8 +30,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # process's sys.path. Child interpreters (the many tests that launch
 # `-m cs2rl.train`, or code strings) do not inherit it and would import through
 # the .pth, i.e. possibly another checkout's code. PYTHONPATH reaches them.
-# tests/test_checkout_resolution.py pins (a), (b) and a negative control. Outside
-# pytest, src/cs2rl/__init__.py's import guard refuses a cwd in another checkout.
+# tests/test_checkout_resolution.py pins (a), (b) and a negative control. At import,
+# src/cs2rl/__init__.py's guard also refuses a script run by path, or else a cwd,
+# that sits in a checkout other than the one cs2rl came from.
 
 # Longest first, so `binding.cpython-312-x86_64-linux-gnu.so` strips the whole
 # ABI tag (name `binding`) before the bare `.so` suffix could leave a non-name.
