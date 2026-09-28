@@ -23,8 +23,9 @@ requirements and the negative-control invalidation clause — none of which appl
 to a 1-seed run against a noop statue (there is no control arm, and the fixed
 baselines shoot back so their win rates are not the object of study). What IS
 reused are its *conventions*, because they are properties of the metrics stream
-rather than of that gate: dedup of replayed rows (rung1_gate.py:110), a missing
-`self_play/used_past` reading as 0.0 (:116), and episode weighting (:120-128).
+rather than of that gate: dedup of replayed rows (gate_window's precondition,
+done in seed_metrics), a missing `self_play/used_past` reading as 0.0
+(gate_window), and episode weighting (weighted_sum / ratio).
 
 WHY EPISODE WEIGHTING (the single most important thing in this file): every
 `game/*` value on a row is the MEAN OVER THE EPISODES THAT FINISHED INSIDE THAT
