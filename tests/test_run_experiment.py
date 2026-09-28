@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).parent.parent
 RUN_EXP = REPO / "scripts" / "run_experiment.py"
 # The keys the fake train.py's --dump-config writes. The real cs2rl.train dumps
@@ -17,6 +19,23 @@ RUN_EXP = REPO / "scripts" / "run_experiment.py"
 # the real package (this checkout's, or whichever the venv's .pth names) could
 # otherwise stand in for it and every assertion below would still hold.
 _FAKE_CONFIG_KEYS = {"batch_size", "clip_coef", "data_dir", "gamma", "learning_rate", "seed"}
+
+
+@pytest.fixture(autouse=True)
+def _a_launch_without_the_prepend_stops_at_import(tmp_path_factory, monkeypatch):
+    """Put a `cs2rl` that refuses to import at the front of the inherited PYTHONPATH.
+
+    run_experiment's launches prepend <fake repo>/src (_child_env), so the fake still
+    wins. A launch that lost that prepend would otherwise resolve the REAL cs2rl.train
+    and could start a real training run; this makes it stop at its first import.
+    """
+    trap = tmp_path_factory.mktemp("trap")
+    init = trap / "cs2rl" / "__init__.py"
+    init.parent.mkdir()
+    init.write_text(
+        "raise SystemExit('cs2rl trap: this launch lost run_experiment._child_env()')\n")
+    inherited = os.environ.get("PYTHONPATH")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(trap), inherited])))
 
 
 def _init_fake_repo(tmp_path: Path) -> Path:

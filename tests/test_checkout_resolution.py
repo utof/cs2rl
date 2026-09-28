@@ -1,7 +1,8 @@
-"""The checkout tripwire in tests/conftest.py: a session imports THIS checkout's cs2rl or stops.
+"""A process imports THIS checkout's cs2rl, or stops: the two checkout guards.
 
-Each case is a child pytest session that loads the real conftest as a plugin
-(`-p tests.conftest`, as tests/test_one_module_object_per_file.py does) over one
+1. The pytest tripwire in tests/conftest.py. Each case is a child pytest session
+that loads the real conftest as a plugin (`-p tests.conftest`, as
+tests/test_one_module_object_per_file.py does) over one
 planted passing test, with a `pytest.ini` in its tmp dir so the repo's own config
 stays out of it. Only the child's PYTHONPATH differs between the cases:
 
@@ -16,6 +17,13 @@ PITFALL: every child PREPENDS to the inherited PYTHONPATH, never replaces it.
 The inherited value is what put this checkout's src/ first (in a worktree that
 borrows main's venv), so replacing it would make the negative control fail (a)
 for a reason that has nothing to do with the case under test.
+
+2. The import guard in src/cs2rl/__init__.py, for every entry point outside
+pytest. Each case is a child `python -c "import cs2rl"` that inherits this
+session's PYTHONPATH (so cs2rl is THIS checkout's) and differs only in its cwd:
+a tmp checkout (pyproject.toml + src/cs2rl/__init__.py) must fail and name the
+fix; this checkout's root, a directory in no checkout, and an installed copy of
+the package (the Modal wheel path) must import silently.
 """
 import os
 import subprocess
@@ -74,7 +82,7 @@ def test_a_foreign_cs2rl_first_on_the_path_stops_the_session_and_names_the_fix(t
     _assert_stopped_before_collection(child, output)
     assert "(a)" in child.stderr and str(fake / "cs2rl") in child.stderr, (
         f"the message does not say where cs2rl resolved\n{output}")
-    assert f"PYTHONPATH={REPO_ROOT / 'src'}" in child.stderr, (
+    assert f"env PYTHONPATH={REPO_ROOT / 'src'} <command>" in child.stderr, (
         f"the message does not name the fix\n{output}")
 
 
@@ -97,3 +105,64 @@ def test_negative_control_the_same_session_without_either_runs(tmp_path):
     assert child.returncode == 0, f"the session failed\n{output}"
     assert "1 passed" in child.stdout, f"the planted test did not run\n{output}"
     assert _TRIPWIRE not in child.stderr, f"the tripwire fired\n{output}"
+
+
+def test_b_names_the_pufferlib_origin_of_a_resources_entry(tmp_path):
+    """(b)'s message says where a `resources` directory in src/ comes from (verifier V2)."""
+    from tests.conftest import checkout_resolution_problems
+    (tmp_path / "pyproject.toml").write_text("")
+    (tmp_path / "src" / "resources").mkdir(parents=True)
+    problems = checkout_resolution_problems(REPO_ROOT / "src", [str(tmp_path / "src")])
+    assert any("['resources']" in p for p in problems), problems
+    assert any("import pufferlib" in p and "Removing it is safe" in p for p in problems), problems
+
+
+def _import_cs2rl(cwd: Path, *first_on_path: Path) -> subprocess.CompletedProcess:
+    """`python -c "import cs2rl"` in `cwd`, with `first_on_path` PREPENDED to PYTHONPATH."""
+    entries = [*map(str, first_on_path), os.environ.get("PYTHONPATH")]
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, entries)))
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return subprocess.run([sys.executable, "-c", "import cs2rl"],
+                          cwd=cwd,
+                          env=env,
+                          capture_output=True,
+                          text=True,
+                          timeout=_CHILD_TIMEOUT_S)
+
+
+def _fake_checkout(root: Path) -> Path:
+    """What the import guard calls a checkout: pyproject.toml + src/cs2rl/__init__.py."""
+    (root / "src" / "cs2rl").mkdir(parents=True)
+    (root / "pyproject.toml").write_text("")
+    (root / "src" / "cs2rl" / "__init__.py").write_text("")
+    return root.resolve()
+
+
+def test_importing_cs2rl_from_inside_another_checkout_fails_and_names_the_fix(tmp_path):
+    """cwd in a different checkout than the one cs2rl came from: ImportError, both named."""
+    other = _fake_checkout(tmp_path / "other")
+    (other / "deeper").mkdir()
+    child = _import_cs2rl(other / "deeper")
+    output = f"exit {child.returncode}\n--- stderr ---\n{child.stderr[-3000:]}"
+    assert child.returncode != 0 and "ImportError" in child.stderr, output
+    assert f"another checkout, {other}." in child.stderr, output
+    assert f"env PYTHONPATH={other / 'src'} <command>" in child.stderr, output
+
+
+@pytest.mark.parametrize("where", ["this checkout", "no checkout", "installed copy"])
+def test_the_import_guard_is_silent_when_the_checkouts_agree(tmp_path, where):
+    """Negative controls: this checkout's root, no checkout at all, and a wheel-style copy.
+
+    `installed copy` is the Modal path: the package outside any src/, run with the
+    cwd inside a checkout (there, the extracted archive).
+    """
+    if where == "this checkout":
+        child = _import_cs2rl(REPO_ROOT)
+    elif where == "no checkout":
+        child = _import_cs2rl(tmp_path)
+    else:
+        site = tmp_path / "site" / "cs2rl"
+        site.mkdir(parents=True)
+        (site / "__init__.py").write_text((REPO_ROOT / "src" / "cs2rl" / "__init__.py").read_text())
+        child = _import_cs2rl(_fake_checkout(tmp_path / "archive"), site.parent)
+    assert child.returncode == 0, f"exit {child.returncode}\n{child.stderr[-3000:]}"

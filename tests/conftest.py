@@ -30,7 +30,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # process's sys.path. Child interpreters (the many tests that launch
 # `-m cs2rl.train`, or code strings) do not inherit it and would import through
 # the .pth, i.e. possibly another checkout's code. PYTHONPATH reaches them.
-# tests/test_checkout_resolution.py pins (a), (b) and a negative control.
+# tests/test_checkout_resolution.py pins (a), (b) and a negative control. Outside
+# pytest, src/cs2rl/__init__.py's import guard refuses a cwd in another checkout.
 
 # Longest first, so `binding.cpython-312-x86_64-linux-gnu.so` strips the whole
 # ABI tag (name `binding`) before the bare `.so` suffix could leave a non-name.
@@ -59,8 +60,9 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
             where = list(spec.submodule_search_locations or [])
         else:
             where = Path(origin).parent
+        # `env VAR=value cmd` parses in bash and fish alike (the owner's shell is fish).
         problems.append(f"(a) cs2rl resolves to {where}, not to {own_src / 'cs2rl'}. Put this "
-                        f"checkout's src/ first: PYTHONPATH={own_src}${{PYTHONPATH:+:$PYTHONPATH}}")
+                        f"checkout's src/ first: env PYTHONPATH={own_src} <command>")
     for entry in path_entries:
         src = Path(entry or ".").resolve()
         if src.name != "src" or not src.is_dir() or not (src.parent / "pyproject.toml").is_file():
@@ -80,6 +82,12 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
             problems.append(f"(b) {src} is on sys.path and holds importable names other than "
                             f"cs2rl: {sorted(stray)}. Move them out, or take that src/ off "
                             "sys.path.")
+        if "resources" in stray:
+            # A resolving symlink is a directory, so it counts; a dangling one does not.
+            problems.append(f"    `resources` is the symlink `import pufferlib` plants in its "
+                            f"working directory (pufferlib/__init__.py runs os.symlink(<pufferlib>/"
+                            f"resources, 'resources')), left by a process started with cwd = "
+                            f"{src}. Removing it is safe.")
     return problems
 
 

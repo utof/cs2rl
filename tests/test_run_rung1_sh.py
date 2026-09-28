@@ -167,6 +167,32 @@ def test_fresh_run_argv_matches_spec_s4(fake, tmp_path):
     assert (out / "rung1-s3" / "DONE").exists()
 
 
+@pytest.mark.parametrize("inherited", [None, "/a:/b"])
+def test_default_train_cmd_puts_this_checkouts_src_first(fake, tmp_path, inherited):
+    """RUNG1_TRAIN_CMD unset: the default (production) launch line, which no other test runs.
+
+    A fake `uv` first on PATH records what `env ... uv run python -m cs2rl.train` hands
+    it, then runs the fake trainer on the remaining argv.
+    """
+    (tmp_path / "bin").mkdir()
+    uv = tmp_path / "bin" / "uv"
+    uv.write_text(f'#!/bin/sh\necho "$UV_NO_SYNC|$PYTHONPATH|$1 $2 $3 $4" >> {tmp_path}/uv.log\n'
+                  f'shift 4\nexec {sys.executable} {fake} "$@"\n')
+    uv.chmod(0o755)
+    e = {k: v for k, v in os.environ.items() if k not in ("RUNG1_TRAIN_CMD", "PYTHONPATH")}
+    e.update(FAKE_MODE="ok", RUNG1_SEEDS="0", RUNG1_NEG_SEEDS="", PATH=f"{uv.parent}:{e['PATH']}")
+    e.update({"PYTHONPATH": inherited} if inherited else {})
+    r = subprocess.run(["bash", str(SCRIPT), str(tmp_path / "root")],
+                       env=e,
+                       cwd=tmp_path,
+                       capture_output=True,
+                       text=True,
+                       timeout=120)
+    assert r.returncode == 0, r.stderr
+    pythonpath = ":".join(filter(None, [str(REPO_ROOT / "src"), inherited]))
+    assert (tmp_path / "uv.log").read_text() == f"1|{pythonpath}|run python -m cs2rl.train\n"
+
+
 def test_negative_control_flags(fake, tmp_path):
     out = tmp_path / "root"
     r = run_script(fake, out, "ok", seeds="", neg_seeds="1")

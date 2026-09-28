@@ -33,6 +33,13 @@ EXPERIMENTS_DIR = REPO_ROOT / "outputs" / "experiments"
 CHECKPOINTS_DIR = REPO_ROOT / "outputs" / "checkpoints"
 LOCK_PATH = EXPERIMENTS_DIR / ".lock"
 LEDGER_PATH = EXPERIMENTS_DIR / "results.jsonl"
+# What the experiment fingerprint hashes and the c_env rebuild reads. A stale path
+# here is SILENT (env_fingerprint skips a missing file, path_last_commit_sha
+# returns ""), so tests/test_path_constants_exist.py pins each to a tracked path.
+TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
+C_ENV_DIR = REPO_ROOT / "src" / "cs2rl" / "c_env"
+REWARDS_H = C_ENV_DIR / "cs2_rewards.h"
+ENV_C = C_ENV_DIR / "cs2_env.c"
 
 DEFAULT_TIMESTEPS = 2_000_000
 MIN_FREE_DISK_GB = 5
@@ -266,11 +273,8 @@ def main_run(args) -> int:
                                          f"**Budget steps:** {args.timesteps}\n\n"
                                          f"**Resume from:** {args.resume or '(none)'}\n")
 
-        train_py = REPO_ROOT / "src" / "cs2rl" / "train.py"
-        rewards_h = REPO_ROOT / "src" / "cs2rl" / "c_env" / "cs2_rewards.h"
-        env_c = REPO_ROOT / "src" / "cs2rl" / "c_env" / "cs2_env.c"
-        c_env_sha = exp_lib.path_last_commit_sha(REPO_ROOT / "src" / "cs2rl" / "c_env")
-        train_py_sha = exp_lib.path_last_commit_sha(train_py)
+        c_env_sha = exp_lib.path_last_commit_sha(C_ENV_DIR)
+        train_py_sha = exp_lib.path_last_commit_sha(TRAIN_PY)
 
         dump_cmd = _python_cmd() + [
             "--dump-config",
@@ -289,9 +293,9 @@ def main_run(args) -> int:
         cfg_hash = exp_lib.config_hash(ckpt_dir / "config.json")
 
         env_fp = exp_lib.env_fingerprint(
-            train_py_path=train_py,
-            rewards_h_path=rewards_h,
-            env_c_path=env_c,
+            train_py_path=TRAIN_PY,
+            rewards_h_path=REWARDS_H,
+            env_c_path=ENV_C,
         )
         env_fp["c_env_sha"] = c_env_sha
         env_fp["train_py_sha"] = train_py_sha
@@ -317,11 +321,12 @@ def main_run(args) -> int:
                        check=True,
                        capture_output=True)
 
-        if any(f.startswith("src/cs2rl/c_env/") for f in changed_files):
+        c_env_prefix = C_ENV_DIR.relative_to(REPO_ROOT).as_posix() + "/"
+        if any(f.startswith(c_env_prefix) for f in changed_files):
             exp_lib.write_status(run_dir, "building")
             zig_r = subprocess.run(
                 ["uv", "run", "--no-sync", "zig", "build"],
-                cwd=REPO_ROOT / "src" / "cs2rl" / "c_env",
+                cwd=C_ENV_DIR,
                 capture_output=True,
                 text=True,
             )

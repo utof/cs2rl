@@ -25,6 +25,7 @@ UV_BIN = "/usr/local/bin/uv"
 # Never the file path: a script-path launch runs the checkout's copy as __main__
 # against the installed package's modules, and puts src/cs2rl/ first on sys.path,
 # which re-creates the old flat module names in that process.
+# PYTHONPATH IS preserved (allowlist below): a checkout src/cs2rl on it would shadow the wheel.
 TRAIN_MODULE = "cs2rl.train"
 
 # Child env is an allowlist, not a denylist: Modal/image leftovers (tokens,

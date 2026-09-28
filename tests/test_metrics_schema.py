@@ -979,12 +979,19 @@ def test_eval_baselines_imports_eval_keys_from_here_and_not_the_reverse():
         "the same contract is exactly what the move removed")
 
     schema_tree = ast.parse((REPO_ROOT / "src" / "cs2rl" / "metrics_schema.py").read_text())
-    # Both spellings of the back edge: the module path, and the package-member form.
-    back_edge = [
-        n for n in ast.walk(schema_tree)
-        if isinstance(n, ast.ImportFrom) and (n.module == "cs2rl.eval_baselines" or (
-            n.module == "cs2rl" and any(a.name == "eval_baselines" for a in n.names)))
-    ]
+
+    def is_back_edge(n):
+        """All three spellings: `import cs2rl.eval_baselines`, `from cs2rl.eval_baselines
+        import ...` and `from cs2rl import eval_baselines`."""
+        if isinstance(n, ast.Import):
+            return any(a.name == "cs2rl.eval_baselines" for a in n.names)
+        if isinstance(n, ast.ImportFrom):
+            return n.module == "cs2rl.eval_baselines" or (n.module == "cs2rl"
+                                                          and any(a.name == "eval_baselines"
+                                                                  for a in n.names))
+        return False
+
+    back_edge = [n for n in ast.walk(schema_tree) if is_back_edge(n)]
     assert not back_edge, ("metrics_schema must never import cs2rl.eval_baselines (torch at "
                            "its scope)")
 

@@ -1178,8 +1178,6 @@ def test_train_calls_assert_eval_env_agreement():
 # recorded verbatim one commit before the builders were typed — so it compares
 # the migrated site to the OLD site rather than to the builder it now calls.
 
-SRC = Path(__file__).resolve().parents[1] / "src"
-
 # The ONLY change PR B2 is allowed to make to what a site READS. Everything
 # else about the call — the role literal, the per-kwarg expressions, the
 # absence of a splat — must be unchanged, and the three unlisted roles must be
