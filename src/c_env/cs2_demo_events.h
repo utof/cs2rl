@@ -26,7 +26,7 @@ typedef struct {
 } DemoWorldTick;
 
 typedef struct {
-    unsigned shot_mask;   /* bit i = agent i shot this tick */
+    unsigned shot_mask;       /* bit i = agent i shot this tick */
     unsigned foot_mask;
     unsigned reload_mask;     /* 0 → >0 start */
     unsigned reload_end_mask; /* >0 → 0 complete (or cancel) */
