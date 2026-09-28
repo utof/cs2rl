@@ -20,12 +20,14 @@ RUN_EXP = REPO / "scripts" / "run_experiment.py"
 # otherwise stand in for it and every assertion below would still hold.
 _FAKE_CONFIG_KEYS = {"batch_size", "clip_coef", "data_dir", "gamma", "learning_rate", "seed"}
 
-# The trap's `cs2rl/__init__.py`. It stops only a `-m` launch: while `python -m
-# pkg.mod` imports `pkg`, sys.argv[0] is "-m" (docs.python.org/3/using/cmdline.html
-# #cmdoption-m), and the only `-m cs2rl.*` launch run_experiment makes is the train
-# child. The run_experiment parent and its analyzer child are scripts launched by
-# path (sys.argv[0] is the script) and, since #204, import cs2rl.experiment.lib
-# legitimately; for them the trap steps aside and loads the REAL package.
+# The trap's `cs2rl/__init__.py`. It lets through exactly the two processes that
+# import cs2rl legitimately and stops every other one. The run_experiment parent and
+# its analyzer child are scripts launched by path, so sys.argv[0] is the script and,
+# since #204, they import cs2rl.experiment.lib. Anything else is refused: the train
+# child (`-m cs2rl.train`, sys.argv[0] is "-m" while the package imports,
+# docs.python.org/3/using/cmdline.html#cmdoption-m), and also a `-c` or by-path
+# train launch. An allowlist, not a `-m` check, so a future launch form cannot slip
+# past the trap into a real training run.
 #
 # HOW it steps aside: CPython's documented self-replacement in sys.modules. The
 # import statement returns sys.modules["cs2rl"], not the module whose code ran
@@ -37,12 +39,12 @@ _FAKE_CONFIG_KEYS = {"batch_size", "clip_coef", "data_dir", "gamma", "learning_r
 # own __file__/__path__ and exec'ing the real source instead leaves __spec__,
 # __loader__ and importlib.resources naming the trap (measured during #204 review).
 TRAP_INIT = """\
+import os
 import sys
-if sys.argv[0] == "-m":
+if os.path.basename(sys.argv[0]) not in ("run_experiment.py", "analyze_experiment.py"):
     raise SystemExit('cs2rl trap: this launch lost run_experiment._child_env()')
 import importlib.machinery
 import importlib.util
-import os
 _trap_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 _spec = importlib.machinery.PathFinder.find_spec(
     "cs2rl", [p for p in sys.path if os.path.realpath(p or ".") != _trap_dir])
@@ -54,7 +56,7 @@ _spec.loader.exec_module(_real)
 
 @pytest.fixture(autouse=True)
 def _a_launch_without_the_prepend_stops_at_import(tmp_path_factory, monkeypatch):
-    """Put a `cs2rl` that refuses a `-m` launch at the front of the inherited PYTHONPATH.
+    """Put a `cs2rl` that refuses every launch but the two scripts at the front of PYTHONPATH.
 
     run_experiment's launches prepend <fake repo>/src (_child_env), so the fake still
     wins. A launch that lost that prepend would otherwise resolve the REAL cs2rl.train

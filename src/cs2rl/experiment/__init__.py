@@ -5,8 +5,9 @@ Each module with a `main()` is a CLI, launched by module name from the repo root
     python -m cs2rl.experiment.gate outputs/checkpoints/rung1
 
 From a worktree, put its own src/ first (`env PYTHONPATH=<checkout>/src python -m
-...`); otherwise the shared .venv's editable install runs main's copy (see
-`cs2rl/__init__.py`).
+...`). Otherwise the #199 guard in `cs2rl/__init__.py` refuses the import, because
+the shared .venv's editable install names main's copy. From a working directory
+outside any checkout the guard cannot tell, and main's copy runs silently (#242).
 
 WHY this file holds a docstring and nothing else (#204): it is in the import chain
 of every module below it, and `smoke_read` must run with no third-party import
