@@ -1,10 +1,14 @@
 import os
 import sys
+from collections.abc import Generator, Iterable, Mapping
 from pathlib import Path
 
 import pytest
 
-SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+# The repo root, from this file's own location. Never `config.rootpath`, which
+# narrows to a subdirectory when pytest is started from one.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
@@ -53,12 +57,9 @@ def simple_map(make_map):
 # builds the poison itself.
 #
 # PITFALLS.
-#   * The module is LOOKED UP in sys.modules, never imported: any import of the
-#     runner here, even inside the fixture, makes this file an importer that
-#     tests/test_modal_packaging.py's runtime identity probe must then run (its
-#     `bare_spelling_imports` census counts imports at any depth), and an
-#     `importlib.import_module(<variable>)` would dodge that census through its
-#     documented blind spot.
+#   * The module is LOOKED UP in sys.modules, never imported: both fixtures below
+#     act only in a session that has loaded the runner, and an import of it in
+#     this file, even inside a fixture, would load it into every pytest session.
 #   * The patch goes through the fixture's OWN `pytest.MonkeyPatch.context()`,
 #     never the test's `monkeypatch`: a test body that calls
 #     `monkeypatch.undo()` would otherwise restore the real `system` for the rest
@@ -250,3 +251,79 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "performance" in item.keywords:
             item.add_marker(skip_performance)
+
+
+# ── One module object per file ──
+#
+# A file imported under two names (`paths` and `src.paths`) is two module
+# objects with two copies of the module's state, so a monkeypatch or an
+# `except` aimed at one misses the other. After the last test (or after
+# collection, under --collect-only) every session checks sys.modules for a repo
+# file held under two names and fails if it finds one, the way pytest-cov fails
+# a session on coverage: `session.testsfailed += 1` in a `pytest_runtestloop`
+# wrapper. The static half is ruff's TID251 banned-api table in pyproject.toml.
+# tests/test_one_module_object_per_file.py pins both the function and the hook.
+#
+# LIMITS.
+#   (a) ruff cannot see a literal `importlib.import_module("...")` or
+#       `__import__("...")`, and this guard sees one only when it executes in a
+#       session that also loads the other spelling.
+#   (b) the ban is enforced by the pre-commit hook, at commit time and on staged
+#       files only, so `--no-verify`, merges, rebases and cherry-picks skip it.
+#   (c) this is a snapshot of sys.modules at session end, so a second spelling
+#       that is evicted before session end is invisible. `fake_modal` in
+#       tests/test_modal_client.py pops `scripts.run_modal`,
+#       `scripts.modal_artifacts` and `scripts.modal_backfill_sidecar`, so for
+#       those three the ruff ban on their bare names is the only check.
+#   Under `-x` with a failure, or with collection errors, pytest stops before
+#   the check runs; that session fails anyway, and only the report is lost.
+def files_under_two_module_names(modules: Mapping[str, object], root: Path,
+                                 ignored_prefixes: Iterable[Path]) -> dict[Path, list[str]]:
+    """Map every file under `root` that `modules` holds under two or more names to those names.
+
+    Files are compared by resolved real path, so a symlink and its target are one
+    file. A module without a string `__file__` (builtins, namespace packages) is
+    skipped, and so is every file under one of `ignored_prefixes`. There are no
+    name-based exclusions.
+
+    PITFALL: the session passes the interpreter's `sys.prefix` and
+    `sys.base_prefix` as `ignored_prefixes`, and both are needed. The stdlib and
+    the venv hold legitimate aliases (`os.path` is `posixpath`), and
+    `multiprocessing` registers `__main__` a second time as `__mp_main__`: under
+    `.venv/bin/pytest` (what `uv run pytest` runs) that file is
+    `<repo>/.venv/bin/pytest`, under the repo root and outside any
+    site-packages directory, so only the prefix rule excludes it.
+    """
+    root = root.resolve()
+    ignored = [prefix.resolve() for prefix in ignored_prefixes]
+    names: dict[Path, list[str]] = {}
+    # A copy: sys.modules can change size mid-iteration when another thread imports.
+    for name, module in list(modules.items()):
+        file = getattr(module, "__file__", None)
+        if not isinstance(file, str):
+            continue
+        path = Path(file).resolve()
+        if path.is_relative_to(root) and not any(path.is_relative_to(p) for p in ignored):
+            names.setdefault(path, []).append(name)
+    return {path: sorted(found) for path, found in names.items() if len(found) > 1}
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtestloop(session: pytest.Session) -> Generator[None, object, object]:
+    """Fail the session, with a red report, if a repo file is loaded under two module names."""
+    result = yield
+    duplicates = files_under_two_module_names(sys.modules, REPO_ROOT,
+                                              (Path(sys.prefix), Path(sys.base_prefix)))
+    if duplicates:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_sep("=", "repo files loaded under two module names", red=True, bold=True)
+            for path, names in duplicates.items():
+                reporter.line(f"{path}: {names}", red=True)
+            reporter.line(
+                "Import each module under one name: `tests.X` for a module under tests/ (the "
+                "name pytest collects it under); pyproject.toml's banned-api table names the "
+                "spelling for src/, deploy/ and the Modal scripts.",
+                red=True)
+        session.testsfailed += 1
+    return result

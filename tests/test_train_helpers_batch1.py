@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from src.train_helpers_batch1 import (
+from train_helpers_batch1 import (
     WelfordStd,
     split_into_channels,
     symexp,

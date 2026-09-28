@@ -24,9 +24,11 @@ after the rewrite would compare the packer to itself and assert nothing.
 REGENERATING THE FIXTURE is legitimate when make_simple_map or a nav.py constant
 changes on purpose, and at no other time. Regenerating it to make a failing
 packer change go green deletes the only evidence that the two transfers agree,
-which is the entire reason the file is committed. Command:
+which is the entire reason the file is committed. Command, from the repository
+root (`-m` so that `tests.test_struct_sizes`, the name pytest gives that module,
+resolves):
 
-    UV_NO_SYNC=1 uv run python tests/test_static_data_pack.py --capture
+    UV_NO_SYNC=1 uv run python -m tests.test_static_data_pack --capture
 
 The second half of the module covers binding.init's three preconditions (layout
 hash, buffer length, and the order of the two) plus the packing invariants that
@@ -333,9 +335,8 @@ def _capture():
     """
     import subprocess
 
-    from test_struct_sizes import _SENTINEL_CONFIGS, _config_from_field_kwargs
-
     from map import make_simple_map
+    from tests.test_struct_sizes import _SENTINEL_CONFIGS, _config_from_field_kwargs
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     simple_map = make_simple_map()
@@ -350,7 +351,7 @@ def _capture():
 
     why = ("pre-W2 baseline for the StaticData transfer rewrite (spec 2026-08-31 §2 W2); "
            "a snapshot taken after the rewrite would compare the packer to itself")
-    regenerate = "UV_NO_SYNC=1 uv run python tests/test_static_data_pack.py --capture"
+    regenerate = "UV_NO_SYNC=1 uv run python -m tests.test_static_data_pack --capture"
     provenance = {
         "format": _CAPTURE_FORMAT,
         "captured_at_commit": head,

@@ -31,11 +31,11 @@ caller): python -m tests.modal_patch_binding_campaign --repo-root .
 --evidence-root <new directory> --matrix <JSON list of BINDING_SITES' keys, in order>
 
 PITFALLS:
-  * `binding_target` imports the owner from a formatted string. The tracked
-    importer census in tests/test_modal_packaging.py (`_test_files_importing`)
-    matches only literal module names, so this file is not in `_IMPORTERS`. A
-    literal `from scripts.modal_runner import ...` here would make
-    `test_the_runtime_probe_runs_every_test_file_that_imports_the_runner` demand it.
+  * `binding_target` imports the owner from a formatted string, always under
+    the `scripts.modal_runner.<owner>` spelling. No static reader sees that
+    import, ruff's TID251 ban included. The module scope imports only
+    importlib and typing, so importing `BINDING_SITES` (tests/test_modal_packaging.py
+    does) loads no runner module.
   * Children run `sys.executable -m pytest` from `repo_root` with
     `-p no:cacheprovider`. `uv run` would depend on uv being on PATH and on the
     venv's console-script shebang, and could re-sync the shared venv; the cache

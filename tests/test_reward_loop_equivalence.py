@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.train_helpers_batch1 import (
+from train_helpers_batch1 import (
     WelfordStd,
     process_step_rewards,
     split_into_channels,
