@@ -6,13 +6,13 @@ import numpy as np
 import pytest
 
 from cs2rl.c_env.cs2_env import OBS_DIM, make_env
-from cs2rl.env_config import EnvConfig
+from cs2rl.env.config import EnvConfig
 
 ALPHA = math.exp(-1.0 / 16.0 / 0.08)
 
 
 def _zero_actions():
-    from cs2rl import _action_spec as spec
+    from cs2rl.spec import action as spec
     return (
         np.zeros((10, spec.ACTION_DIM), dtype=np.int32),
         np.zeros((10, spec.AIM_DIM), dtype=np.float32),

@@ -330,7 +330,7 @@ def _capture():
     """
     import subprocess
 
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.map import make_simple_map
     from tests.test_struct_sizes import _SENTINEL_CONFIGS, _config_from_field_kwargs
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -350,7 +350,7 @@ def _capture():
     provenance = {
         "format": _CAPTURE_FORMAT,
         "captured_at_commit": head,
-        "map": "cs2rl.map.make_simple_map()",
+        "map": "cs2rl.env.map.make_simple_map()",
         "why": why,
         "regenerate": regenerate,
     }

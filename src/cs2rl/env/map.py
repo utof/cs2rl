@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from cs2rl.nav import (
+from cs2rl.env.nav import (
     _A_SITE,
     _B_SITE,
     _CT_SPAWN_SLOTS,
@@ -159,8 +159,8 @@ def make_cs2_map(nav_path: str, cache_path: str, *, build_vis: bool = True) -> M
     ``build_vis=False`` (gh#251) skips NavGraph.build_vis_matrix and returns an
     UNCACHED MapData whose ``vis_matrix`` is None. It exists for
     `train.py --dump-config`, which only reads geometry (centroids_z → pin_pitch)
-    and must never fork: on a cold `src/vis_cache.npy` (every fresh worktree —
-    it is gitignored) build_vis_matrix spawns a cpu_count()-worker
+    and must never fork: on a cold `src/cs2rl/vis_cache.npy` (nav.CACHE_PATH; every
+    fresh worktree — it is gitignored) build_vis_matrix spawns a cpu_count()-worker
     ProcessPoolExecutor for minutes, and a killed dump orphaned all 12 workers
     to PID 1 at ~900 MB each.
 

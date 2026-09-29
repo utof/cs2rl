@@ -248,7 +248,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 @pytest.fixture(scope="session")
 def make_map():
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.map import make_simple_map
     return make_simple_map()
 
 

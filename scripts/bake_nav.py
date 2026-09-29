@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from cs2rl.map import SIMPLE_ROOMS, make_simple_map
-from cs2rl.nav import (
+from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
+from cs2rl.env.nav import (
     _DELTA_VECTORS,
     _DIR_FACING,
     BOMB_DEFUSE_TIME,

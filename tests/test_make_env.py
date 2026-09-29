@@ -14,7 +14,7 @@ import inspect
 import pytest
 
 from cs2rl.c_env.cs2_env import Cs2Env, make_env
-from cs2rl.env_config import EnvConfig
+from cs2rl.env.config import EnvConfig
 
 
 def test_bare_call_builds_the_default_config(simple_map):

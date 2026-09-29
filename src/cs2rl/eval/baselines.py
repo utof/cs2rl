@@ -49,8 +49,6 @@ import math
 import numpy as np
 import torch
 
-from cs2rl._action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES
-from cs2rl._obs_spec import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
 from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
 
 # The eval/* analysis contract, RE-EXPORTED. It used to be DEFINED in this file;
@@ -62,7 +60,9 @@ from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
 # held to (tests/test_w1_modules.py). metrics_schema imports nothing from src
 # except `_action_spec`, so this edge is acyclic and cheap in the one direction
 # that matters.
-from cs2rl.metrics_schema import EVAL_KEYS             # noqa: F401  (re-export)
+from cs2rl.eval.metrics_schema import EVAL_KEYS        # noqa: F401  (re-export)
+from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES
+from cs2rl.spec.obs import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
 
 HEAD_SIZES = ACTION_HEAD_SIZES         # probe name, kept for the vendored code
 OBS_ENEMY_BASE = OBS_BLOCKS["enemy"][0]

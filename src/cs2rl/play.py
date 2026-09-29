@@ -101,8 +101,8 @@ def main(argv=None):
     import numpy as np
 
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
 
     repo = find_repo_root(Path(__file__))
     lib = _load_play_lib(repo)

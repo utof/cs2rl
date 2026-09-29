@@ -8,12 +8,12 @@ import gymnasium
 import numpy as np
 import pufferlib
 
-from cs2rl import nav
-from cs2rl._action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from cs2rl.c_env import binding
-from cs2rl.env_config import EnvConfig
-from cs2rl.map import make_cs2_map
-from cs2rl.nav import N_AGENTS, OBS_DIM, TEAM_SIZE
+from cs2rl.env import nav
+from cs2rl.env.config import EnvConfig
+from cs2rl.env.map import make_cs2_map
+from cs2rl.env.nav import N_AGENTS, OBS_DIM, TEAM_SIZE
+from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 
 # ── Viz dataclasses (used by snapshot_state) ─────────────────────────────────
 

@@ -37,8 +37,8 @@ import numpy as np
 import pytest
 
 from cs2rl import train_bc
-from cs2rl._action_spec import ACTION_DIM, AIM_DIM
-from cs2rl._obs_spec import OBS_DIM
+from cs2rl.spec.action import ACTION_DIM, AIM_DIM
+from cs2rl.spec.obs import OBS_DIM
 
 torch = pytest.importorskip("torch")
 
@@ -62,7 +62,7 @@ def _fake_batch(b=2, t=4, seed=0, pad=0):
     """
     rng = np.random.default_rng(seed)
     obs = rng.standard_normal((b, t, OBS_DIM), dtype=np.float32)
-    from cs2rl._action_spec import ACTION_HEAD_SIZES
+    from cs2rl.spec.action import ACTION_HEAD_SIZES
     disc = np.stack([rng.integers(0, s, size=(b, t)) for s in ACTION_HEAD_SIZES], axis=-1)
     cont = rng.uniform(-0.5, 0.5, size=(b, t, AIM_DIM)).astype(np.float32)
     valid = np.ones((b, t), dtype=bool)
@@ -211,7 +211,7 @@ def test_train_bc_feeds_sequences_not_shuffled_ticks(policy):
 def _seq_demoset(seed=4, lengths=(5, 3)):
     """Synthetic multi-episode DemoSet with UNEQUAL episode lengths, so every
     consumer has to deal with padding."""
-    from cs2rl._action_spec import ACTION_HEAD_SIZES
+    from cs2rl.spec.action import ACTION_HEAD_SIZES
     rng = np.random.default_rng(seed)
     n = int(sum(lengths))
     return train_bc.DemoSet(

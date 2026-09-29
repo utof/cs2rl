@@ -91,7 +91,7 @@ from pathlib import Path
 
 import pytest
 
-from cs2rl.env_config import KNOB_FIELDS, REWARD_FIELDS, EnvConfig, RewardWeights
+from cs2rl.env.config import KNOB_FIELDS, REWARD_FIELDS, EnvConfig, RewardWeights
 from cs2rl.env_factory import ROLES, UNSET, build_env_for
 
 FIXTURE = Path(__file__).parent / "fixtures" / "env_config_pre_165b.json"

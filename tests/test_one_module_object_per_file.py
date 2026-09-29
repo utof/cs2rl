@@ -118,7 +118,7 @@ def test_the_guard_reports_a_repo_file_under_two_names_with_every_name(tmp_path)
 
 
 def _plant(spellings: tuple[str, ...], *, at_module_scope: bool) -> str:
-    """A test file that imports src/cs2rl/paths.py under each of `spellings`.
+    """A test file that imports src/cs2rl/spec/paths.py under each of `spellings`.
 
     No `sys.path` edit: the child's PYTHONPATH makes both spellings importable.
     """
@@ -131,7 +131,7 @@ def _plant(spellings: tuple[str, ...], *, at_module_scope: bool) -> str:
 
 
 @pytest.mark.parametrize("collect_only", [False, True], ids=["session", "collect-only"])
-@pytest.mark.parametrize("spellings", [("cs2rl.paths", "paths"), ("cs2rl.paths", )],
+@pytest.mark.parametrize("spellings", [("cs2rl.spec.paths", "paths"), ("cs2rl.spec.paths", )],
                          ids=["two-names", "one-name"])
 def test_a_session_that_loads_a_repo_file_under_two_names_fails(tmp_path, collect_only, spellings):
     """The hook, end to end: two names fail the session and name the file; one name passes.
@@ -147,9 +147,13 @@ def test_a_session_that_loads_a_repo_file_under_two_names_fails(tmp_path, collec
     env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
     # PREPENDED, never replacing the inherited value: that value is what put this
     # checkout's src/ first, and without it the child would import another
-    # checkout's cs2rl. REPO_ROOT makes `tests.conftest` importable; src/cs2rl
+    # checkout's cs2rl. REPO_ROOT makes `tests.conftest` importable; src/cs2rl/spec
     # makes bare `paths` importable.
-    entries = [str(REPO_ROOT), str(REPO_ROOT / "src" / "cs2rl"), os.environ.get("PYTHONPATH")]
+    entries = [
+        str(REPO_ROOT),
+        str(REPO_ROOT / "src" / "cs2rl" / "spec"),
+        os.environ.get("PYTHONPATH")
+    ]
     env["PYTHONPATH"] = os.pathsep.join(filter(None, entries))
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     argv = [
@@ -168,7 +172,7 @@ def test_a_session_that_loads_a_repo_file_under_two_names_fails(tmp_path, collec
               f"--- stderr ---\n{child.stderr[-2000:]}")
     ran = "1 test collected" if collect_only else "1 passed"
     assert ran in child.stdout, f"the planted test did not run as planned\n{output}"
-    report = f"{REPO_ROOT / 'src' / 'cs2rl' / 'paths.py'}: ['cs2rl.paths', 'paths']"
+    report = f"{REPO_ROOT / 'src' / 'cs2rl' / 'spec' / 'paths.py'}: ['cs2rl.spec.paths', 'paths']"
     if len(spellings) == 2:
         assert child.returncode == 1, f"the session did not fail\n{output}"
         assert _REPORT_TITLE in child.stdout and report in child.stdout, (

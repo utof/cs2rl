@@ -118,8 +118,8 @@ def test_centroids_z_plumbed_through_binding():
     import gc
 
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
 
     map_data = make_simple_map()
 
@@ -178,13 +178,13 @@ def _make_simple_env(seed=42):
     all zeros), so verticality tests MUST explicitly pass map_data=simple_map.
     """
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.map import make_simple_map
     return make_env(seed=seed, map_data=make_simple_map())
 
 
 def _zero_actions(n_agents=10):
     """Return (actions, continuous_actions) zero buffers for n_agents."""
-    from cs2rl import _action_spec as spec
+    from cs2rl.spec import action as spec
     return (
         np.zeros((n_agents, spec.ACTION_DIM), dtype=np.int32),
         np.zeros((n_agents, spec.AIM_DIM), dtype=np.float32),
@@ -203,7 +203,7 @@ def _room_y_lerp(y0, y1, z_s, z_n, y):
 
 def test_simple_map_area_bounds_match_rooms(simple_map):
     """make_simple_map publishes the room tuples, not a raster AABB."""
-    from cs2rl.map import SIMPLE_ROOMS
+    from cs2rl.env.map import SIMPLE_ROOMS
     assert simple_map.area_bounds is not None
     assert simple_map.area_bounds.shape == (simple_map.N, 4)
     assert simple_map.area_bounds.dtype == np.float32
@@ -707,7 +707,7 @@ def test_ct_ramp_portal_is_walkable():
 
 
 def test_corridors_do_not_enter_spawn():
-    from cs2rl.map import SIMPLE_ROOMS
+    from cs2rl.env.map import SIMPLE_ROOMS
     t = next(r for r in SIMPLE_ROOMS if r[0] == 5)
     ct = next(r for r in SIMPLE_ROOMS if r[0] == 7)
     assert t[4] == 416.0 or t[4] == 416, t

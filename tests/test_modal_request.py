@@ -301,7 +301,7 @@ def _live_train_long_options_from_source() -> set[str]:
     # calls are still recovered from source below.
     import dataclasses
 
-    from cs2rl.env_config import RewardWeights
+    from cs2rl.env.config import RewardWeights
     names.update(f"--{f.name.replace('_', '-')}" for f in dataclasses.fields(RewardWeights))
     for rel in ("src/cs2rl/train.py", ):
         tree = ast.parse((ROOT / rel).read_text())

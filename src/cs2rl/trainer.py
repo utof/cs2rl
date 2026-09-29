@@ -63,8 +63,8 @@ import pufferlib.pytorch
 import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
-from cs2rl._action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from cs2rl.resume_state import collect_train_state
+from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from cs2rl.train import _hybrid_sample_logits
 
 # W2a (gh#168): everything train() reads that used to be a function-local import of

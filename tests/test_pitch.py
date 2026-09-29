@@ -14,13 +14,13 @@ import pytest
 
 def test_aim_dim_bumped_to_2():
     """T1: AIM_DIM in _action_spec mirrors cs2_types.h after sync."""
-    from cs2rl._action_spec import AIM_DIM
+    from cs2rl.spec.action import AIM_DIM
     assert AIM_DIM == 2
 
 
 def test_obs_dim_bumped_to_110():
     """T1 (re-pinned Batch 6 Task 2.5): nav.OBS_DIM tracks the C-side OBS_DIM."""
-    from cs2rl import nav
+    from cs2rl.env import nav
     assert nav.OBS_DIM == 110
 
 
@@ -33,8 +33,8 @@ def test_pitch_initialized_to_zero():
     every alive agent should report pitch == 0.0 immediately after env.reset.
     """
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -55,7 +55,7 @@ def _zero_actions():
     Returns (discrete_actions, continuous_actions) ready to feed env.step().
     discrete_actions: int32 (10, ACTION_DIM); continuous_actions: float32 (10, AIM_DIM).
     """
-    from cs2rl import _action_spec as spec
+    from cs2rl.spec import action as spec
     return (
         np.zeros((10, spec.ACTION_DIM), dtype=np.int32),
         np.zeros((10, spec.AIM_DIM), dtype=np.float32),
@@ -76,8 +76,8 @@ def test_pitch_consumed_from_continuous_actions():
     env_step pitch read. This test catches a missed consumer (would-be silent
     bug: pitch stays at 0.0 even when continuous_actions[1] is non-zero)."""
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -102,8 +102,8 @@ def test_pitch_clamps_at_pi_over_2_up():
     import math
 
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -139,8 +139,8 @@ def test_welford_pitch_accumulates():
     multi-step totals. After 5 ticks: 10 agents × 5 ticks = 50.
     """
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map(), include_step_stats_in_info=True)
     try:
         obs, info = env.reset(seed=42)
@@ -178,10 +178,10 @@ def test_binding_rejects_wrong_aim_dim_shape():
     callers that bypass the Python wrapper (direct binding consumers, regression
     tests, future C-only entry points). This test passes if EITHER layer fires —
     Python wrapper OR binding.c's defensive check (Opus C4 review note)."""
-    from cs2rl import _action_spec as spec
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
+    from cs2rl.spec import action as spec
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -214,8 +214,8 @@ def test_obs_pitch_sin_cos_populated():
     import math
 
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -238,8 +238,8 @@ def test_obs_dim_is_110_in_runtime():
     observations buffer. If cs2_observations.h misses an obs[N] write (or writes
     past 110), this catches it at runtime."""
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -320,10 +320,10 @@ def test_3d_hit_at_correct_pitch_elevated_target():
     area_idx for vis_matrix lookup, not raw coordinates."""
     import math
 
-    from cs2rl import _action_spec as spec
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
+    from cs2rl.spec import action as spec
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -369,10 +369,10 @@ def test_3d_miss_at_zero_pitch_elevated_target():
     Pitfall: if the 3D hit-test reduced back to 2D-equivalent (e.g., dz term
     dropped, or perp computed without rz), this test would FAIL — the shot
     would land. This catches an implementation that "compiled but ignored z"."""
-    from cs2rl import _action_spec as spec
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
+    from cs2rl.spec import action as spec
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -443,10 +443,10 @@ def test_3d_hit_pitch_down_from_ramp():
     SAME down-pitch math without hitting the wall-height limitation."""
     import math
 
-    from cs2rl import _action_spec as spec
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
+    from cs2rl.spec import action as spec
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -516,10 +516,10 @@ def test_3d_perp_perfectly_aligned_no_nan():
     Uses area 5→6 (vis=True) with the exact 3D pitch so forward = dist_3d exactly."""
     import math
 
-    from cs2rl import _action_spec as spec
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
+    from cs2rl.spec import action as spec
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -565,8 +565,8 @@ def test_pitch_clamps_at_pi_over_2_down():
     import math
 
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
@@ -591,8 +591,8 @@ def test_pinned_pitch_stays_zero_across_ticks_and_default_moves():
     default env move pitch — so the gate is the StaticData flag, not a
     coincidence of zero inputs."""
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     rng = np.random.default_rng(0)
     for pin in (1, 0):
         env = Cs2Env(config=EnvConfig(pin_pitch=pin), map_data=make_simple_map())

@@ -40,8 +40,8 @@ from collections import deque
 
 import numpy as np
 
-from cs2rl._action_spec import ACTION_DIM, AIM_DIM
-from cs2rl.nav import MAX_TURN_SPEED_RAD, N_AGENTS, ROUND_TIME
+from cs2rl.env.nav import MAX_TURN_SPEED_RAD, N_AGENTS, ROUND_TIME
+from cs2rl.spec.action import ACTION_DIM, AIM_DIM
 
 HEAD_MOVE = 0                          # discrete head order: move=0 shoot=1 reload=2 weapon=3 use=4 crouch=5 jump=6
 HEAD_USE = 4

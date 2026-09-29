@@ -53,10 +53,10 @@ from pathlib import Path
 
 import pytest
 
-from cs2rl.env_config import KNOB_FIELDS, EnvConfig, RewardWeights
+from cs2rl.env.config import KNOB_FIELDS, EnvConfig, RewardWeights
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DECLARATION = REPO_ROOT / "src" / "cs2rl" / "env_config.py"
+DECLARATION = REPO_ROOT / "src" / "cs2rl" / "env" / "config.py"
 
 # name -> default, for the 23 weights and the seven non-None knobs. The three
 # None-valued R0-G knobs are excluded: `x = None` is not a restatement of
@@ -92,11 +92,13 @@ FIELD_DEFAULTS = {
 ALLOWLIST = ("config.replace(reward_symmetrize=False)", )
 
 # The roots every probe reads, and one file that MUST be among the results.
-# ANCHOR is derived from DECLARATION rather than written as a bare "src/..."
-# string: a rename that moved the declaration would move the anchor with it,
-# where a hard-coded path would just start pointing at nothing.
+# ANCHOR is spelled out from REPO_ROOT, never derived from DECLARATION: the two live
+# in different packages (#205 moved the declaration into env/, train_config.py stayed
+# at the package root), so `DECLARATION.parent / ...` would name a file that does not
+# exist. A path that points at nothing is loud here, not silent: _scanned_files
+# asserts ANCHOR is among the scanned files.
 SCAN_ROOTS = ("src", "scripts")
-ANCHOR = DECLARATION.parent / "train_config.py"
+ANCHOR = REPO_ROOT / "src" / "cs2rl" / "train_config.py"
 
 
 def _scanned_files():
@@ -133,8 +135,7 @@ def _scanned_files():
     assert ANCHOR in files, (
         f"{ANCHOR} is missing from the scan of {list(SCAN_ROOTS)} ({len(files)} file(s) found). "
         f"That file holds the CLI and the R0-G/R0-J prose, so a scan without it is not scanning "
-        f"src/, whatever its length. If the file legitimately moved, repoint ANCHOR — it is "
-        f"derived from DECLARATION so that a rename shows up here instead of silently.")
+        f"src/, whatever its length. If the file legitimately moved, repoint ANCHOR.")
     return files
 
 
@@ -215,7 +216,7 @@ def _assert_exactly(found, pending, probe):
         return "\n".join(rows)
 
     extra = sorted(k for k in counts if counts[k] > pending.get(k, 0))
-    assert not extra, (f"{probe}: env default(s) restated outside src/cs2rl/env_config.py:\n" +
+    assert not extra, (f"{probe}: env default(s) restated outside src/cs2rl/env/config.py:\n" +
                        _fmt(extra) +
                        "\nDerive the value from EnvConfig()/RewardWeights() instead. A comment or "
                        "docstring counts — write `<the field default>`, not the number. If it is "

@@ -74,7 +74,7 @@ completeness test AST-parses their key literals instead. Their ROW LOADER
 """
 from typing import NamedTuple
 
-from cs2rl._action_spec import ACTION_HEAD_NAMES
+from cs2rl.spec.action import ACTION_HEAD_NAMES
 
 # ── Vocabularies ──────────────────────────────────────────────────────────
 #

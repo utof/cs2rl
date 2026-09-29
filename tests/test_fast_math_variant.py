@@ -57,9 +57,9 @@ from cs2rl.c_env import cs2_env
 if not cs2_env.binding.__file__.startswith(sys.argv[1]):
     raise RuntimeError("wrong binding loaded: " + cs2_env.binding.__file__)
 from cs2rl.c_env.cs2_env import make_env
-from cs2rl.map import SIMPLE_ROOMS, make_simple_map
-from cs2rl._action_spec import ACTION_HEAD_SIZES, AIM_DIM
-from cs2rl.nav import N_AGENTS
+from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
+from cs2rl.spec.action import ACTION_HEAD_SIZES, AIM_DIM
+from cs2rl.env.nav import N_AGENTS
 maps = {"nobomb": make_simple_map(bombsites=[]),
         "unreachable": make_simple_map(rooms=list(SIMPLE_ROOMS) +
                         [(len(SIMPLE_ROOMS), 5000.0, 5000.0, 5100.0, 5100.0, 0.0, False)])}

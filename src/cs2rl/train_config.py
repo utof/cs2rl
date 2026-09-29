@@ -27,7 +27,7 @@ import math
 
 import numpy as np
 
-from cs2rl.env_config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
+from cs2rl.env.config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
 from cs2rl.train_shared import (
     _R0G_KNOBS,
     AIM_LOG_STD_CAP_MIN_HEADROOM,

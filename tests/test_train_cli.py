@@ -161,7 +161,7 @@ def test_reward_weight_config_keys_default_to_make_env_values(tmp_path):
     dest= or a missing add_argument would leave the key at the getattr
     fallback and could not be caught by a hand-built Namespace.
     """
-    from cs2rl.env_config import RewardWeights
+    from cs2rl.env.config import RewardWeights
 
     cfg = _dump_config(tmp_path)
     for name, default in RewardWeights().as_dict().items():

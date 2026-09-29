@@ -27,25 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
-# _action_spec is generated from cs2_types.h. Notes on the names imported below:
-#   ACTION_MASK_DIM - F8: trainer-side mask buffer width (= sum of head sizes).
-#   AIM_DIM         - T4→T5 carry-forward (M-1): unused in this module, imported so the
-#                     T6 ONNX exporter can pull it from `train` (see __all__ below).
-# PITFALL (gh#97): no trailing comments anywhere in this import block. yapf snaps
-# trailing comments to its spaces_before_comment stops (40/56/72) while ruff's isort
-# wants exactly one space, so any comment in here makes the two formatters fight and
-# ruff reports I001 forever. Second gh#97 trap: a suppression directive must END its
-# line — trailing prose after its code list makes the directive malformed and inert
-# (and ruff then parses the prose as rule codes, warning on every invocation).
-from cs2rl._action_spec import (
-    ACTION_HEAD_NAMES,
-    ACTION_HEAD_SIZES,
-    ACTION_MASK_DIM,
-    AIM_DIM,
-)
-from cs2rl.env_config import EnvConfig, RewardWeights
+from cs2rl.env.config import EnvConfig, RewardWeights
 from cs2rl.env_factory import build_env_for, build_selfplay_manager
-from cs2rl.paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from cs2rl.resume_state import (
     _rng_load_state_dict,
     _rng_state_dict,
@@ -58,6 +41,24 @@ from cs2rl.resume_state import (
     restore_train_state,
     seed_everything,
 )
+
+# _action_spec is generated from cs2_types.h. Notes on the names imported below:
+#   ACTION_MASK_DIM - F8: trainer-side mask buffer width (= sum of head sizes).
+#   AIM_DIM         - T4→T5 carry-forward (M-1): unused in this module, imported so the
+#                     T6 ONNX exporter can pull it from `train` (see __all__ below).
+# PITFALL (gh#97): no trailing comments anywhere in this import block. yapf snaps
+# trailing comments to its spaces_before_comment stops (40/56/72) while ruff's isort
+# wants exactly one space, so any comment in here makes the two formatters fight and
+# ruff reports I001 forever. Second gh#97 trap: a suppression directive must END its
+# line — trailing prose after its code list makes the directive malformed and inert
+# (and ruff then parses the prose as rule codes, warning on every invocation).
+from cs2rl.spec.action import (
+    ACTION_HEAD_NAMES,
+    ACTION_HEAD_SIZES,
+    ACTION_MASK_DIM,
+    AIM_DIM,
+)
+from cs2rl.spec.paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from cs2rl.train_config import (
     OPPONENT_MODES,
     assert_opponent_self_play_compatible,
@@ -898,8 +899,8 @@ def record_episode(
         map_data=None,
 ):
     from cs2rl.c_env.cs2_env import make_env as make_c_env
-    from cs2rl.map import make_cs2_map
-    from cs2rl.nav import CACHE_PATH, NAV_PATH
+    from cs2rl.env.map import make_cs2_map
+    from cs2rl.env.nav import CACHE_PATH, NAV_PATH
     from cs2rl.viz import init_recording, log_navmesh, log_tick, log_trimap
 
     save_path = Path(save_path)
@@ -1872,9 +1873,9 @@ def build_map_data(name: str):
     if name == "dust2":
         return None
     if name == "arena-duel":
-        from cs2rl.map import make_arena_duel_map
+        from cs2rl.env.map import make_arena_duel_map
         return make_arena_duel_map()
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.map import make_simple_map
     return make_simple_map()
 
 
@@ -3044,7 +3045,7 @@ def train(args):
     _eval_hook = None
     _eval_interval = int(getattr(args, "eval_interval", 0) or 0)
     if _eval_interval > 0:
-        from cs2rl.eval_baselines import BaselineEvaluator
+        from cs2rl.eval.baselines import BaselineEvaluator
         # W3 (#154), retyped by #165 PR B2: role eval. `team_spirit=None`, the
         # 10_000_003 seed, the load-bearing `auto_reset=False` AND the
         # raw-reward rule all live in env_factory._build_eval; this site passes

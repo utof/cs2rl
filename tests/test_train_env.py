@@ -944,8 +944,8 @@ def test_obs_dim_constant_consistency():
     binding.struct_sizes()) catch struct-size drift; this test is the
     higher-level constant-agreement check.
     """
-    from cs2rl import nav
     from cs2rl import train as t
+    from cs2rl.env import nav
     assert nav.OBS_DIM == t.OBS_DIM, (f"nav.OBS_DIM ({nav.OBS_DIM}) != train.OBS_DIM ({t.OBS_DIM})")
     assert nav.OBS_DIM == 110, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 110 for Batch 6 Task 2.5"
     # Rung 0 (spec 2026-08-29 §2.2): train.TEAM_SIZE is a bare literal for the
@@ -969,8 +969,10 @@ def test_team_size_literals_agree():
     """env_config.TEAM_SIZE and train_shared.TEAM_SIZE are literals (both leaves
     refuse to import nav just to read a 5). This is the cross-check that makes
     the literals safe (spec 2026-09-03 §2.1)."""
-    from cs2rl import env_config, nav, train_shared
+    from cs2rl import train_shared
     from cs2rl.c_env.cs2_env import TEAM_SIZE as c_team
+    from cs2rl.env import config as env_config
+    from cs2rl.env import nav
     assert env_config.TEAM_SIZE == train_shared.TEAM_SIZE == nav.TEAM_SIZE == c_team
 
 
@@ -981,7 +983,7 @@ def test_obs_blocks_tile_obs_dim():
     table (obs[start:stop]) instead of hardcoding 28/56/96 — a drift here would
     silently zero the wrong obs slice, so pin the boundaries explicitly.
     Catches the regen-not-run footgun (edit cs2_types.h, forget the generator)."""
-    from cs2rl import _obs_spec as spec
+    from cs2rl.spec import obs as spec
 
     # Named boundaries are the ones the upcoming demo code depends on.
     assert spec.OBS_BLOCKS["self"] == (0, 28)
@@ -1015,7 +1017,7 @@ def test_action_spec_aim_is_gaussian_2d():
        - Backwards-compat ACTION_DIM is 7, ACTION_MASK_DIM is 22.
     Catches the regen-not-run footgun (modifying cs2_types.h without
     re-running scripts/sync_action_spec.py)."""
-    from cs2rl import _action_spec as spec
+    from cs2rl.spec import action as spec
     assert spec.AIM_DIM == 2, f"AIM_DIM={spec.AIM_DIM}, expected 2 for Batch 3.5"
     assert spec.ACTION_DIM == 7, f"ACTION_DIM={spec.ACTION_DIM}, expected 7 (HEAD_AIM removed)"
     assert spec.ACTION_MASK_DIM == 22, f"ACTION_MASK_DIM={spec.ACTION_MASK_DIM}, expected 22"
@@ -1035,7 +1037,7 @@ def test_continuous_aim_action_consumed():
     designated bomb carrier (RL agent, not human_controlled) to ensure the
     continuous branch fires.
     """
-    from cs2rl import _action_spec as spec
+    from cs2rl.spec import action as spec
     env = make_env(seed=42)
     try:
         env.reset(seed=42)
@@ -1066,7 +1068,7 @@ def test_continuous_aim_clamped_at_max_turn():
     the policy could turn arbitrarily fast and break collision/visibility
     invariants.
     """
-    from cs2rl import _action_spec as spec
+    from cs2rl.spec import action as spec
     env = make_env(seed=42)
     try:
         env.reset(seed=42)
@@ -1097,7 +1099,7 @@ def test_continuous_aim_facing_wraps_around_pi():
     that assume the bounded representation (renderer, observation
     normalisation, etc.).
     """
-    from cs2rl import _action_spec as spec
+    from cs2rl.spec import action as spec
     env = make_env(seed=42)
     try:
         env.reset(seed=42)
@@ -1123,7 +1125,7 @@ def test_step_stats_aim_delta_tracking():
     storing the full rollout. Resets the fields before the loop because
     other tests in the same env instance may have populated them.
     """
-    from cs2rl import _action_spec as spec
+    from cs2rl.spec import action as spec
     env = make_env(seed=42)
     try:
         env.reset(seed=42)
@@ -1158,7 +1160,7 @@ def test_policy_forward_emits_mu_and_logstd():
     same. AIM_DIM bump to 2 (Batch 3.5) is a single-line change here."""
     import torch
 
-    from cs2rl import _action_spec as spec
+    from cs2rl.spec import action as spec
     env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
@@ -1241,7 +1243,7 @@ def test_hybrid_sample_writes_two_buffers():
     float Δaim within ±max_turn_speed. Batch 3.5: AIM_DIM=2 (Δyaw + Δpitch)."""
     import torch
 
-    from cs2rl._action_spec import AIM_DIM
+    from cs2rl.spec.action import AIM_DIM
     env = make_env(seed=0)
     try:
         policy = train.build_policy(env, device='cpu')
@@ -1472,7 +1474,7 @@ def test_pbrs_gamma_matches_training_gamma():
     import pytest
 
     from cs2rl import train
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
 
     args = SimpleNamespace(seed=0, timesteps=1_000, checkpoint_dir="/tmp/unused", device="cpu")
     cfg = train.build_train_config(args, batch_size=1024, bptt_horizon=64)
@@ -1975,7 +1977,7 @@ def test_env_publishes_masks_after_reset_and_step():
     agent (dead row = per-head no-ops, the C invariant the sampler needs)."""
     from multiprocessing import RawArray
 
-    from cs2rl._action_spec import ACTION_MASK_DIM
+    from cs2rl.spec.action import ACTION_MASK_DIM
 
     env = make_env(seed=0)
     try:
@@ -2093,8 +2095,8 @@ def test_enemy_slot_sort_does_not_leak_invisible_rank():
 
     Invisibility here is forced via area_idx = -1 — build_vis_matrix
     short-circuits off-mesh agents to can_see=0 regardless of position."""
-    from cs2rl._obs_spec import OBS_BLOCKS, OBS_ENEMY_STRIDE
     from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.spec.obs import OBS_BLOCKS, OBS_ENEMY_STRIDE
 
     env = make_env(seed=0, auto_reset=False)
     try:

@@ -42,7 +42,7 @@ genuinely changed. The two cases that actually come up:
 import json
 from pathlib import Path
 
-from cs2rl.env_config import KNOB_FIELDS, REWARD_FIELDS
+from cs2rl.env.config import KNOB_FIELDS, REWARD_FIELDS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

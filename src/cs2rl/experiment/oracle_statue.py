@@ -132,9 +132,8 @@ import math
 
 import numpy as np
 
-from cs2rl._obs_spec import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
 from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
-from cs2rl.eval_baselines import (
+from cs2rl.eval.baselines import (
     ACTION_DIM,
     AIM_DIM,
     EYE_CROUCH,
@@ -149,6 +148,7 @@ from cs2rl.eval_baselines import (
     vis_from_obs,
     wrap_pi,
 )
+from cs2rl.spec.obs import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
 
 # Rung 1a env preset — these MUST mirror the smoke run's env knobs. Changing one
 # here without changing the smoke makes the precondition test a different env.
@@ -230,8 +230,8 @@ def build_env(seed: int, round_time: int = ROUND_TIME):
     different env is asking a different question and should say so in code.
     """
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_arena_duel_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_arena_duel_map
     return make_env(config=EnvConfig(n_active_per_team=N_ACTIVE_PER_TEAM,
                                      pin_pitch=PIN_PITCH,
                                      crouch_enabled=CROUCH_ENABLED,

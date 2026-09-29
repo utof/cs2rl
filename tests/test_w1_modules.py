@@ -71,7 +71,7 @@ TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
 # test_import_train_stays_light_and_really_imports_the_shims red naming torch).
 W1_MODULES = ("cs2rl.train_shared", "cs2rl.resume_state", "cs2rl.train_config",
               "cs2rl.train_metrics", "cs2rl.train_update", "cs2rl.env_factory",
-              "cs2rl.metrics_schema", "cs2rl.env_config")
+              "cs2rl.eval.metrics_schema", "cs2rl.env.config")
 
 # W1 modules train.py deliberately does NOT import at its module level, and why.
 #
@@ -95,8 +95,8 @@ W1_MODULES = ("cs2rl.train_shared", "cs2rl.resume_state", "cs2rl.train_config",
 # That entry leaves only if the layering changes, never because an import appeared;
 # tests/test_import_layers.py::test_metrics_schema_sits_above_train pins the layering.
 NOT_IMPORTED_BY_TRAIN = {
-    "cs2rl.metrics_schema":
-    "took EVAL_KEYS from eval_baselines, not from train.py, so train.py's body holds no "
+    "cs2rl.eval.metrics_schema":
+    "took EVAL_KEYS from eval.baselines, not from train.py, so train.py's body holds no "
     "reference to it; and it is in the layer above train (pyproject.toml's `cs2rl layers` "
     "contract), so a train.py import of it is an upward edge lint-imports rejects",
 }
@@ -132,10 +132,10 @@ TRAIN_MODULE_LEVEL_IMPORTS = _train_module_level_imports()
 # the env contract. train_config -> env_config is the load-bearing edge between
 # the leaves and the spokes (env_config_from_args builds an EnvConfig); train.py
 # imports both. The reverse edge would make "leaf" meaningless — pyproject.toml's
-# `cs2rl layers` contract pins it (env_config is in the bottom layer, train_shared two
+# `cs2rl layers` contract pins it (env.config is in the env layer, train_shared one
 # above; tests/test_import_layers.py runs it), and so does
 # tests/test_env_config.py::test_module_is_stdlib_only.
-LEAVES = frozenset({"cs2rl.train_shared", "cs2rl.env_config"})
+LEAVES = frozenset({"cs2rl.train_shared", "cs2rl.env.config"})
 
 # Imports whose presence in sys.modules means the import-lightness invariant is
 # gone. `cs2rl.c_env.cs2_env` rather than `cs2rl.c_env` on purpose: the package
@@ -147,7 +147,7 @@ LEAVES = frozenset({"cs2rl.train_shared", "cs2rl.env_config"})
 # statements inside a def, but neither sees a function-local import that is CALLED at
 # module scope; test_import_train_stays_light_and_really_imports_the_shims, through
 # this entry, does.
-HEAVY = ("torch", "cs2rl.nav", "cs2rl.c_env.cs2_env", "rerun")
+HEAVY = ("torch", "cs2rl.env.nav", "cs2rl.c_env.cs2_env", "rerun")
 
 
 def _run_child(body: str) -> subprocess.CompletedProcess:
@@ -400,7 +400,7 @@ def test_mask_head_slices_is_complete_in_a_leaf_only_interpreter():
     r = _run_child("""
 assert "cs2rl.train" not in sys.modules
 from cs2rl import train_shared
-from cs2rl._action_spec import ACTION_HEAD_SIZES
+from cs2rl.spec.action import ACTION_HEAD_SIZES
 assert "cs2rl.train" not in sys.modules, "this check is vacuous once `cs2rl.train` is imported"
 assert len(train_shared._MASK_HEAD_SLICES) == len(ACTION_HEAD_SIZES), (
     f"_MASK_HEAD_SLICES has {len(train_shared._MASK_HEAD_SLICES)} entries for "

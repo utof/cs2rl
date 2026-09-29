@@ -34,8 +34,8 @@ import json
 import math
 from pathlib import Path
 
-from cs2rl import nav
-from cs2rl.map import make_cs2_map
+from cs2rl.env import nav
+from cs2rl.env.map import make_cs2_map
 
 # This version tag must stay in sync with:
 #   - cs2rl/deploy/export_policy.py  (obs_version field)

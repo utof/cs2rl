@@ -45,7 +45,7 @@ def test_step_returns_none(make_map):
     raw int32(10,) buffer happens to be ≥10*7*4 bytes only if reinterpreted —
     use the proper 2D shape now to be safe.
     """
-    from cs2rl._action_spec import ACTION_DIM, AIM_DIM
+    from cs2rl.spec.action import ACTION_DIM, AIM_DIM
     _, env = _make_env(map_data=make_map)
     binding.reset(env._capsule)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int32)
@@ -119,7 +119,7 @@ def test_make_env_writes_recoil_enabled(make_map):
     import dataclasses
 
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     assert "recoil" in {f.name for f in dataclasses.fields(EnvConfig)}
     env = make_env(seed=0, map_data=make_map, config=EnvConfig(recoil=False))
     try:
@@ -170,7 +170,7 @@ def test_human_controlled_uses_aim_rad_not_bin(make_map):
     Δyaw to confirm it is ignored — only aim_rad sets facing for human
     agents.
     """
-    from cs2rl._action_spec import ACTION_DIM, AIM_DIM
+    from cs2rl.spec.action import ACTION_DIM, AIM_DIM
     _, env = _make_env(map_data=make_map)
     binding.reset(env._capsule)
 
@@ -200,7 +200,7 @@ def test_binding_step_accepts_continuous_array(make_map):
     before the C call). Correct shape is accepted.
     Batch 3.5: wrong-shape probe uses AIM_DIM+1 so it stays wrong even as AIM_DIM grows.
     """
-    from cs2rl._action_spec import ACTION_DIM, AIM_DIM
+    from cs2rl.spec.action import ACTION_DIM, AIM_DIM
     _, env = _make_env(map_data=make_map)
     env.reset(seed=0)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int32)
@@ -220,7 +220,7 @@ def test_binding_default_continuous_actions_zero(make_map):
     (an RL agent, not human_controlled) so the continuous branch in env_step
     fires.
     """
-    from cs2rl._action_spec import ACTION_DIM
+    from cs2rl.spec.action import ACTION_DIM
     _, env = _make_env(map_data=make_map)
     env.reset(seed=0)
     g = env._c_env.game
@@ -367,8 +367,8 @@ def test_continuous_aim_mp_backend_receives_buffer():
 
     import pufferlib.vector
 
-    from cs2rl._action_spec import ACTION_DIM, AIM_DIM
     from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.spec.action import ACTION_DIM, AIM_DIM
 
     # ROUND_TIME=640 ticks; pad MAX_TICKS in case the first ticks are spent
     # in a setup state where round_over fires immediately and resets the

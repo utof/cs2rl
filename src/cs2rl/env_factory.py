@@ -136,7 +136,7 @@ census and the entry has to be added.
 # tests/test_w1_modules.py::test_only_sibling_edge_is_to_the_leaf
 # lets a split-out module import only the two LEAVES — `train_shared` and
 # `env_config` — and this is one of them.
-from cs2rl.env_config import EnvConfig
+from cs2rl.env.config import EnvConfig
 
 # The role names, in the order the spec lists them. Callers pass one of these
 # strings; anything else is a ValueError naming the whole set, because a typo'd

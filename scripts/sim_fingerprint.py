@@ -90,11 +90,11 @@ import sys
 
 import numpy as np
 
-from cs2rl._action_spec import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from cs2rl.c_env.cs2_env import make_env
-from cs2rl.env_config import EnvConfig
-from cs2rl.map import SIMPLE_ROOMS, make_simple_map
-from cs2rl.nav import N_AGENTS, TEAM_SIZE
+from cs2rl.env.config import EnvConfig
+from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
+from cs2rl.env.nav import N_AGENTS, TEAM_SIZE
+from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 
 # The mask buffer is the discrete heads laid end to end. If a head is ever added
 # or resized without ACTION_MASK_DIM following, the per-head slicing below would
@@ -104,7 +104,7 @@ from cs2rl.nav import N_AGENTS, TEAM_SIZE
 if sum(ACTION_HEAD_SIZES) != ACTION_MASK_DIM or len(ACTION_HEAD_SIZES) != ACTION_DIM:
     raise RuntimeError(f"mask layout drift: sum(ACTION_HEAD_SIZES)={sum(ACTION_HEAD_SIZES)} "
                        f"!= ACTION_MASK_DIM={ACTION_MASK_DIM} or len != ACTION_DIM={ACTION_DIM}; "
-                       "regenerate src/cs2rl/_action_spec.py")
+                       "regenerate src/cs2rl/spec/action.py")
 
 
 def sample_masked_actions(masks, rng):

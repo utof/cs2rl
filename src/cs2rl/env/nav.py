@@ -1,5 +1,6 @@
 # ── SECTION: NavGraph ──────────────────────────────────────────────────────
 
+import importlib.resources
 import math
 import os
 import pathlib
@@ -12,7 +13,7 @@ from shapely.geometry import Point
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.strtree import STRtree
 
-from cs2rl._obs_spec import (          # noqa: F401  generated; re-exported (see Constants)
+from cs2rl.spec.obs import (           # noqa: F401  generated; re-exported (see Constants)
     OBS_BLOCKS, OBS_DIM,
 )
 
@@ -518,7 +519,13 @@ def _resolve_nav_path(map_name: str = "de_dust2") -> str:
 
 
 NAV_PATH = _resolve_nav_path()
-CACHE_PATH = str(pathlib.Path(__file__).with_name("vis_cache.npy"))
+# The vis cache sits at the PACKAGE root, src/cs2rl/vis_cache.npy, anchored on the cs2rl
+# package and never on this file: when #205 moved nav into env/, a `__file__`-relative path
+# silently moved the cache with it. A moved path is a cold cache, and a cold cache on dust2
+# rebuilds the grid, then the vis matrix through a cpu_count() worker pool (~900 MB each,
+# orphaned on a kill). *.npy is gitignored, so a stray copy anywhere is invisible to git
+# status. tests/test_path_constants_exist.py pins this location.
+CACHE_PATH = str(importlib.resources.files("cs2rl") / "vis_cache.npy")
 
 
 def _areas_near(nav_graph: NavGraph, xy, radius: float):

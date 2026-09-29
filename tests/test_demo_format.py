@@ -21,9 +21,9 @@ import numpy as np
 import pytest
 
 from cs2rl import bc_demos
-from cs2rl._action_spec import ACTION_DIM, ACTION_HEAD_SIZES, AIM_DIM
-from cs2rl._obs_spec import OBS_BLOCKS, OBS_DIM
-from cs2rl.nav import MAX_TURN_SPEED_RAD, ROUND_TIME
+from cs2rl.env.nav import MAX_TURN_SPEED_RAD, ROUND_TIME
+from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES, AIM_DIM
+from cs2rl.spec.obs import OBS_BLOCKS, OBS_DIM
 
 
 @pytest.fixture(scope="module")

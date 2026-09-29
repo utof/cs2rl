@@ -153,17 +153,17 @@ class NonIslandWrite(NamedTuple):
 
 NON_ISLAND_WRITES = (
     NonIslandWrite(
-        "metrics_schema.py", "", "The registry ITSELF. Its ~200 dict-literal keys are "
+        "eval/metrics_schema.py", "", "The registry ITSELF. Its ~200 dict-literal keys are "
         "declarations, not writes into a metrics row — they are the thing the census is "
         "compared against, so counting them as emissions would make every completeness "
         "test compare the registry with itself."),
     NonIslandWrite(
-        "eval_baselines.py", "BaselineEvaluator.evaluate",
+        "eval/baselines.py", "BaselineEvaluator.evaluate",
         "A REAL source of row keys, censused by its own extractor (`eval_output_keys()`) "
         "rather than as an island site: ScheduledEval merges the returned dict wholesale, "
         "so there is no per-key write for `_walk` to classify a shape from."),
     NonIslandWrite(
-        "eval_baselines.py", "BaselineEvaluator._episode",
+        "eval/baselines.py", "BaselineEvaluator._episode",
         "Per-episode RETURN VALUE of the evaluator's inner loop (shots_fired, "
         "shots_with_enemy_in_los, timed_out), consumed by evaluate() to build the eval/* "
         "numbers. Never written into a row itself."),
@@ -722,7 +722,7 @@ def _divisor_lineno(fn):
                 return node.lineno
     raise AssertionError(
         "the gh#90 `for _lk in list(losses): losses[_lk] /= ...` divisor loop is gone from "
-        "Cs2PuffeRL.train — every losses/* aggregation in metrics_schema.py is "
+        "Cs2PuffeRL.train — every losses/* aggregation in eval/metrics_schema.py is "
         "classified relative to it, so its removal is a registry-wide event, not a refactor")
 
 
@@ -1651,7 +1651,7 @@ def eval_output_keys():
     `--eval-interval 0`. This is the same contract checked from source, so it
     holds in a suite that never constructs an evaluator.
     """
-    tree = _module_ast("eval_baselines.py")
+    tree = _module_ast("eval/baselines.py")
     fn = _find_qualname(tree, "BaselineEvaluator.evaluate")
     for node in ast.walk(fn):
         if (isinstance(node, ast.Assign) and len(node.targets) == 1

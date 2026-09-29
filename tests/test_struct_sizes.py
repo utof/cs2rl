@@ -34,7 +34,7 @@ from cs2rl.c_env.cs2_env import (
     WallListC,
     make_env,
 )
-from cs2rl.env_config import (
+from cs2rl.env.config import (
     KNOB_FIELDS,
     REWARD_FIELDS,
     EnvConfig,
@@ -207,7 +207,7 @@ def _config_from_field_kwargs(kwargs):
 
 
 def test_config_from_field_kwargs_partitions_flat_reward_and_knob_names():
-    from cs2rl.env_config import EnvConfig, RewardWeights
+    from cs2rl.env.config import EnvConfig, RewardWeights
     payload = {"reward_kill": 1.0, "n_active_per_team": 3}
     cfg = _config_from_field_kwargs(payload)
     assert payload == {"reward_kill": 1.0, "n_active_per_team": 3}
@@ -293,7 +293,7 @@ def test_struct_sizes_exposes_team_constants():
     macro, so a drift between nav.TEAM_SIZE and the header would mis-slice every
     per-team reward view in cs2_env.py.
     """
-    from cs2rl.nav import N_AGENTS, TEAM_SIZE
+    from cs2rl.env.nav import N_AGENTS, TEAM_SIZE
     sizes = binding.struct_sizes()
     assert sizes["TEAM_SIZE"] == 5
     assert sizes["TEAM_SIZE"] == TEAM_SIZE
@@ -356,7 +356,7 @@ def test_static_data_scalars_round_trip(simple_map):
     properly means sentinels, which means kwargs; out of scope here, and
     deliberately not papered over.
     """
-    from cs2rl import nav
+    from cs2rl.env import nav
 
     # Sequential, not two live envs at once: nothing here needs them to coexist,
     # and one env at a time keeps a failure attributable to a single config.
