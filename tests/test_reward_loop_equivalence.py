@@ -120,6 +120,11 @@ def _assert_bit_exact(ref_out, new_out):
 
 
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+# Under `pytest -n 2 --dist loadgroup` (#285) one xdist worker owns this file's CUDA work: the
+# file's tests share a group, so they run in one process and open ONE CUDA context. Under
+# plain `--dist load` two workers each opened one. loadgroup appends `@gpu` to these nodeids.
+# The GPU stays visible in `-n` runs; `--dist load` still works, only with two contexts.
+pytestmark = pytest.mark.xdist_group("gpu")
 
 
 @pytest.mark.parametrize("device", DEVICES)
