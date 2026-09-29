@@ -372,6 +372,9 @@ def test_analyze_tplant_last_row_wins():
                                                                ("s", 200, 4)]
 
 
+# always-on (~27 s, over the `slow` threshold): the only subprocess `--resume-run` proof left
+# in the fast loop (`-m 'not slow'`); its flat-map sibling below is `slow`. It drives the real
+# CLI through a fresh run, a resume and the config.json mismatch refusals.
 @pytest.mark.timeout(1800)
 def test_subprocess_resume_run(tmp_path):
     ckpt = tmp_path / "run"

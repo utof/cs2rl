@@ -34,8 +34,8 @@ PITFALLS:
   * `binding_target` imports the owner from a formatted string, always under
     the `scripts.modal_runner.<owner>` spelling. No static reader sees that
     import, ruff's TID251 ban included. The module scope imports only
-    importlib and typing, so importing `BINDING_SITES` (tests/test_modal_packaging.py
-    does) loads no runner module.
+    importlib, concurrent.futures and typing, so importing `BINDING_SITES`
+    (tests/test_modal_packaging.py does) loads no runner module.
   * Children run `sys.executable -m pytest` from `repo_root` with
     `-p no:cacheprovider`. `uv run` would depend on uv being on PATH and on the
     venv's console-script shebang, and could re-sync the shared venv; the cache
@@ -45,6 +45,7 @@ PITFALLS:
     `--basetemp` decides where the checked-in caller puts it.
 """
 import importlib
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 BINDING_SITES = {
@@ -67,6 +68,13 @@ BINDING_SITES = {
 # a loaded machine, not for a slow test.
 _PROBE_TIMEOUT_S = 60
 
+# How many sites `run_campaign` runs at once (each site's probes stay sequential).
+# 4 is the measured knee (#285): the campaign's call took 63 s serially and 25 s on 4
+# threads, with its whole process tree (up to 4 child pytest sessions at a time) at 690 MB
+# RSS. It is a constant, not a knob: the campaign runs inside a pytest session that may
+# itself be one of two xdist workers on a 15 GB box, so a bigger pool is a memory decision.
+_SITE_POOL_SIZE = 4
+
 
 def binding_target(site):
     """One installation target for the original patch and its observation."""
@@ -80,6 +88,10 @@ def binding_target(site):
 # graph, grep for a call, or rename tool sees that reach. Rename both together:
 # a renamed function leaves that assignment inert, and its supplied-evidence
 # rows then run real pytest children instead of the planted evidence.
+# The same reach constrains `_campaign_site`: it must call `_run_probe` as a MODULE
+# GLOBAL, looked up at call time. A reference bound earlier (a default argument, a
+# closure, a partial made at def time) keeps calling the real function after the
+# assignment, and the rejection rows turn red (#285's early-binding knock-out).
 def _run_probe(repo_root, evidence_root, site, mode, label):
     """Run one isolated pytest and retain its own observation and failure clause.
 
@@ -189,56 +201,64 @@ def run_campaign(repo_root, evidence_root, sites):
         raise ValueError("declared matrix must equal BINDING_SITES, in order "
                          f"(tests/modal_patch_binding_campaign.py): got {sites}, "
                          f"expected {list(BINDING_SITES)}")
-    records = []
-    for site in sites:
-        repetitions = []
-        for repeat in range(2):
-            results = {
-                mode: _run_probe(repo_root, evidence_root, site, mode, f"{site}-{repeat}-{mode}")
-                for mode in ("baseline", "captured", "restored")
-            }
-            for mode in ("baseline", "restored"):
-                observed = results[mode]
-                if (observed["exit_code"] != 0 or "expected_observation" not in observed
-                        or observed["expected_observation"] != observed["observed_observation"]):
-                    raise RuntimeError(f"{site}: {mode} observation failed: {observed}")
-            broken = results["captured"]
-            if (broken["exit_code"] != 1 or broken["exception_type"] != "AssertionError"
-                    or site + ":" not in (broken["rejecting_assertion"] or "")
-                    or not broken["source_line"] or "expected_observation" not in broken
-                    or broken["expected_observation"] == broken["observed_observation"]):
-                raise RuntimeError(
-                    f"{site}: single-binding defect did not lose its own observation: {broken}")
-            repetitions.append({
-                "repointed_outcome": results["baseline"],
-                "broken_binding_outcome": broken,
-                "restored_outcome": results["restored"]
-            })
-        package = _run_probe(repo_root, evidence_root, site, "package", f"{site}-package")
-        expected_exception = ("AssertionError" if BINDING_SITES[site][1]
-                              == "validate_local_checkpoint" else "AttributeError")
-        if package["exit_code"] != 1 or package["exception_type"] != expected_exception:
-            raise RuntimeError(f"{site}: unexpected package-reversion diagnostic: {package}")
-        baseline = repetitions[0]["repointed_outcome"]
-        records.append({
-            **{
-                key: baseline[key]
-                for key in ("site", "probe_kind", "consumer", "stimulus", "expected_observation", "observed_observation")
-            },
-            "repointed_outcome":
-            baseline,
-            "broken_binding_outcome":
-            repetitions[0]["broken_binding_outcome"],
-            "rejecting_assertion":
-            repetitions[0]["broken_binding_outcome"]["rejecting_assertion"],
-            "package_revert_outcome":
-            package,
-            "package_revert_exception":
-            package["exception_type"],
-            "repetitions":
-            repetitions,
+    # The sites are independent, so each site's sequential probes run as one task on a
+    # THREAD pool. Never processes: the rejection test replaces `_run_probe` by name in its
+    # own interpreter, and `_campaign_site` reads that module global at call time. Records
+    # are collected in BINDING_SITES order and the first failing site IN THAT ORDER raises,
+    # so a failure names the same site as it did serially.
+    with ThreadPoolExecutor(max_workers=_SITE_POOL_SIZE) as pool:
+        futures = [pool.submit(_campaign_site, repo_root, evidence_root, site) for site in sites]
+        try:
+            return [future.result() for future in futures]
+        except BaseException:
+            # Sites not yet started never start; running ones finish before the pool exits.
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+
+
+def _campaign_site(repo_root, evidence_root, site):
+    """One site's record: two baseline/captured/restored repetitions and the package probe."""
+    repetitions = []
+    for repeat in range(2):
+        results = {
+            mode: _run_probe(repo_root, evidence_root, site, mode, f"{site}-{repeat}-{mode}")
+            for mode in ("baseline", "captured", "restored")
+        }
+        for mode in ("baseline", "restored"):
+            observed = results[mode]
+            if (observed["exit_code"] != 0 or "expected_observation" not in observed
+                    or observed["expected_observation"] != observed["observed_observation"]):
+                raise RuntimeError(f"{site}: {mode} observation failed: {observed}")
+        broken = results["captured"]
+        if (broken["exit_code"] != 1 or broken["exception_type"] != "AssertionError"
+                or site + ":" not in (broken["rejecting_assertion"] or "")
+                or not broken["source_line"] or "expected_observation" not in broken
+                or broken["expected_observation"] == broken["observed_observation"]):
+            raise RuntimeError(
+                f"{site}: single-binding defect did not lose its own observation: {broken}")
+        repetitions.append({
+            "repointed_outcome": results["baseline"],
+            "broken_binding_outcome": broken,
+            "restored_outcome": results["restored"]
         })
-    return records
+    package = _run_probe(repo_root, evidence_root, site, "package", f"{site}-package")
+    expected_exception = ("AssertionError" if BINDING_SITES[site][1] == "validate_local_checkpoint"
+                          else "AttributeError")
+    if package["exit_code"] != 1 or package["exception_type"] != expected_exception:
+        raise RuntimeError(f"{site}: unexpected package-reversion diagnostic: {package}")
+    baseline = repetitions[0]["repointed_outcome"]
+    return {
+        **{
+            key: baseline[key]
+            for key in ("site", "probe_kind", "consumer", "stimulus", "expected_observation", "observed_observation")
+        },
+        "repointed_outcome": baseline,
+        "broken_binding_outcome": repetitions[0]["broken_binding_outcome"],
+        "rejecting_assertion": repetitions[0]["broken_binding_outcome"]["rejecting_assertion"],
+        "package_revert_outcome": package,
+        "package_revert_exception": package["exception_type"],
+        "repetitions": repetitions,
+    }
 
 
 def main():

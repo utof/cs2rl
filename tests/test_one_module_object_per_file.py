@@ -14,6 +14,21 @@ case, also as bare `paths`. That second name is reachable because the child's
 PYTHONPATH carries `src/cs2rl/spec` (prepended in both cases, so the two cases differ
 only in the plant): the same thing a script-path launch of a package module does
 to `sys.path[0]`, which is how the trap arises in practice.
+
+Every child goes through `_session`. Two more kinds of row run the child on pytest-xdist
+workers (`-n 2`), because a serial child cannot see what xdist takes away (#285): a
+worker's `testsfailed` and terminal output never reach the controller, so the hook
+relays each worker's facts through `workeroutput` and the controller judges their union.
+  - dup: both names in one test, on one worker. The controller must still report it.
+  - split: the two names in two files pinned to two workers by `xdist_group`, so NO
+    process holds both. Only the union sees the duplicate. The row proves the split by
+    reading each worker's id from the plant, not by parsing output.
+  - negative control: one name, green.
+  - sends-nothing: a plugin makes worker gw1 drop its findings, and the child must be
+    red only through the controller's fail-closed "finished without reporting" report.
+  - torch: the worker's thread cap must not import torch into a plant that never did.
+The `-n 2` rows never skip: without pytest-xdist in the environment they fail with the
+remedy (`assert_child_had_xdist`).
 """
 import os
 import subprocess
@@ -23,10 +38,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import REPO_ROOT, files_under_two_module_names
+from tests.conftest import REPO_ROOT, assert_child_had_xdist, files_under_two_module_names
 
 # The hook's report header, as tests/conftest.py writes it.
 _REPORT_TITLE = "repo files loaded under two module names"
+# The report of a worker that never delivered its findings, as tests/conftest.py writes it.
+_LOST_TITLE = "session guards could not check an xdist worker"
+_XDIST = ("-n", "2")
+# What the report says about the plants' shared file, when both names reached the judge.
+_PATHS_REPORT = f"{REPO_ROOT / 'src' / 'cs2rl' / 'spec' / 'paths.py'}: ['cs2rl.spec.paths', 'paths']"
 # Generous next to a child's ~2 s runtime; the bound exists so a wedged child
 # fails with its output instead of hanging the suite.
 _CHILD_TIMEOUT_S = 120
@@ -130,6 +150,44 @@ def _plant(spellings: tuple[str, ...], *, at_module_scope: bool) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _session(tmp_path: Path, plant_files: dict[str, str], *extra_args:
+             str) -> tuple[subprocess.CompletedProcess, str]:
+    """Run a child session over the planted files (name -> source) with the real conftest loaded.
+
+    `extra_args` go after the plant paths, e.g. `-n 2` or `--collect-only`. Returns the
+    finished process and a printable dump of its exit code and output tails.
+    """
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    for name, source in plant_files.items():
+        (tmp_path / name).write_text(source)
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
+    # PREPENDED, never replacing the inherited value: that value is what put this
+    # checkout's src/ first, and without it the child would import another
+    # checkout's cs2rl. REPO_ROOT makes `tests.conftest` importable; src/cs2rl/spec
+    # makes bare `paths` importable; tmp_path makes a plugin module planted there
+    # importable by the child and by its xdist workers.
+    entries = [
+        str(tmp_path),
+        str(REPO_ROOT),
+        str(REPO_ROOT / "src" / "cs2rl" / "spec"),
+        os.environ.get("PYTHONPATH")
+    ]
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, entries))
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    argv = [sys.executable, "-m", "pytest", *(str(tmp_path / name) for name in plant_files)]
+    argv += ["-p", "tests.conftest", "-p", "no:cacheprovider", "-q", *extra_args]
+    child = subprocess.run(argv,
+                           cwd=tmp_path,
+                           env=env,
+                           capture_output=True,
+                           text=True,
+                           timeout=_CHILD_TIMEOUT_S)
+    assert_child_had_xdist(child)
+    output = (f"exit {child.returncode}\n{child.stdout[-3000:]}\n"
+              f"--- stderr ---\n{child.stderr[-2000:]}")
+    return child, output
+
+
 @pytest.mark.parametrize("collect_only", [False, True], ids=["session", "collect-only"])
 @pytest.mark.parametrize("spellings", [("cs2rl.spec.paths", "paths"), ("cs2rl.spec.paths", )],
                          ids=["two-names", "one-name"])
@@ -141,42 +199,112 @@ def test_a_session_that_loads_a_repo_file_under_two_names_fails(tmp_path, collec
     the guard's `session.testsfailed += 1`; the report line is asserted too, so a
     child that failed for any other reason cannot pass for the guard.
     """
-    (tmp_path / "pytest.ini").write_text("[pytest]\n")
-    plant = tmp_path / "test_plant.py"
-    plant.write_text(_plant(spellings, at_module_scope=collect_only))
-    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
-    # PREPENDED, never replacing the inherited value: that value is what put this
-    # checkout's src/ first, and without it the child would import another
-    # checkout's cs2rl. REPO_ROOT makes `tests.conftest` importable; src/cs2rl/spec
-    # makes bare `paths` importable.
-    entries = [
-        str(REPO_ROOT),
-        str(REPO_ROOT / "src" / "cs2rl" / "spec"),
-        os.environ.get("PYTHONPATH")
-    ]
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, entries))
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    argv = [
-        sys.executable, "-m", "pytest",
-        str(plant), "-p", "tests.conftest", "-p", "no:cacheprovider", "-q"
-    ]
-    if collect_only:
-        argv.append("--collect-only")
-    child = subprocess.run(argv,
-                           cwd=tmp_path,
-                           env=env,
-                           capture_output=True,
-                           text=True,
-                           timeout=_CHILD_TIMEOUT_S)
-    output = (f"exit {child.returncode}\n{child.stdout[-3000:]}\n"
-              f"--- stderr ---\n{child.stderr[-2000:]}")
+    plant = {"test_plant.py": _plant(spellings, at_module_scope=collect_only)}
+    child, output = _session(tmp_path, plant, *(["--collect-only"] if collect_only else []))
     ran = "1 test collected" if collect_only else "1 passed"
     assert ran in child.stdout, f"the planted test did not run as planned\n{output}"
-    report = f"{REPO_ROOT / 'src' / 'cs2rl' / 'spec' / 'paths.py'}: ['cs2rl.spec.paths', 'paths']"
     if len(spellings) == 2:
         assert child.returncode == 1, f"the session did not fail\n{output}"
-        assert _REPORT_TITLE in child.stdout and report in child.stdout, (
+        assert _REPORT_TITLE in child.stdout and _PATHS_REPORT in child.stdout, (
             f"the session failed without naming the file and both names\n{output}")
     else:
         assert child.returncode == 0, f"the session failed\n{output}"
         assert _REPORT_TITLE not in child.stdout, f"the guard reported one name\n{output}"
+
+
+def test_two_names_in_one_test_on_an_xdist_worker_fail_the_session_and_are_named(tmp_path):
+    """dup at `-n 2`: the worker holds both names, and only the relay lets the controller see it."""
+    child, output = _session(
+        tmp_path, {"test_plant.py": _plant(
+            ("cs2rl.spec.paths", "paths"), at_module_scope=False)}, *_XDIST)
+    assert "1 passed" in child.stdout, f"the planted test did not run as planned\n{output}"
+    assert child.returncode == 1, f"the session did not fail\n{output}"
+    assert _REPORT_TITLE in child.stdout and _PATHS_REPORT in child.stdout, (
+        f"the session failed without naming the file and both names\n{output}")
+    assert _LOST_TITLE not in child.stdout, f"a worker failed to report\n{output}"
+
+
+def test_two_names_in_two_workers_fail_the_session_and_are_named(tmp_path):
+    """split at `-n 2 --dist loadgroup`: no process holds both names, so only the union does.
+
+    The two plants sit in two xdist groups, so they run on two workers, and each imports ONE
+    spelling: a per-worker verdict (the natural way to add xdist support) finds nothing. Each
+    plant records its worker's id, which proves the split without parsing output; a serial
+    child would raise on `workerinput`, so this row cannot pass without workers.
+    """
+    plants, records = {}, {}
+    for group, spelling in (("a", "cs2rl.spec.paths"), ("b", "paths")):
+        records[group] = tmp_path / f"{group}.worker"
+        plants[f"test_plant_{group}.py"] = (
+            "from pathlib import Path\n\nimport pytest\n\n\n"
+            f"@pytest.mark.xdist_group({group!r})\n"
+            f"def test_plant_{group}(request):\n"
+            f"    import {spelling}\n"
+            f"    Path({str(records[group])!r}).write_text(request.config.workerinput['workerid'])\n"
+        )
+    child, output = _session(tmp_path, plants, *_XDIST, "--dist", "loadgroup")
+    assert "2 passed" in child.stdout, f"the planted tests did not run as planned\n{output}"
+    workers = {group: record.read_text() for group, record in records.items()}
+    assert workers["a"] != workers[
+        "b"], f"the plants shared a worker, so nothing was split\n{workers}\n{output}"
+    assert child.returncode == 1, f"the session did not fail\n{output}"
+    assert _REPORT_TITLE in child.stdout and _PATHS_REPORT in child.stdout, (
+        f"the session failed without naming the file and both names\n{output}")
+    assert _LOST_TITLE not in child.stdout, f"a worker failed to report\n{output}"
+
+
+def test_one_name_on_xdist_workers_passes(tmp_path):
+    """NEGATIVE CONTROL at `-n 2`: one name is green and no worker is reported lost."""
+    child, output = _session(
+        tmp_path, {"test_plant.py": _plant(("cs2rl.spec.paths", ), at_module_scope=False)}, *_XDIST)
+    assert "1 passed" in child.stdout, f"the planted test did not run as planned\n{output}"
+    assert child.returncode == 0, f"the session failed\n{output}"
+    assert _REPORT_TITLE not in child.stdout, f"the guard reported one name\n{output}"
+    assert _LOST_TITLE not in child.stdout, f"a worker failed to report\n{output}"
+
+
+# A plain (non-wrapper) sessionfinish that makes worker gw1 drop its findings. xdist's own
+# sessionfinish is a hookwrapper that sends `workerfinished` (with `workeroutput`) after its
+# yield, so this pop lands first. The plugin also loads in the child's controller, which has
+# no `workerinput`, hence the gw1 test.
+_WITHHOLD_PLUGIN = """\
+from tests.conftest import _WORKER_GUARD_KEY
+
+
+def pytest_sessionfinish(session):
+    workerid = getattr(session.config, "workerinput", {}).get("workerid")
+    if workerid == "gw1":
+        getattr(session.config, "workeroutput", {}).pop(_WORKER_GUARD_KEY, None)
+"""
+
+
+def test_a_worker_that_sends_no_findings_fails_the_session_and_is_named(tmp_path):
+    """SENDS-NOTHING at `-n 2`: the guard fails closed, naming the worker that went quiet.
+
+    The plant is the one-name negative control, which is green on its own, so the child is
+    red only through the controller's "finished without reporting" report. The exit code is
+    exactly 1 (a test failure, not an internal error), and there is one report, for gw1 alone.
+    """
+    (tmp_path / "withhold_findings.py").write_text(_WITHHOLD_PLUGIN)
+    child, output = _session(
+        tmp_path, {"test_plant.py": _plant(
+            ("cs2rl.spec.paths", ), at_module_scope=False)}, *_XDIST, "-p", "withhold_findings")
+    assert "1 passed" in child.stdout, f"the planted test did not run as planned\n{output}"
+    assert child.returncode == 1, f"the session did not fail with exit 1\n{output}"
+    assert "Traceback" not in child.stdout + child.stderr, f"the child crashed\n{output}"
+    assert _LOST_TITLE in child.stdout, f"the lost worker was not reported\n{output}"
+    lost = [line for line in child.stdout.splitlines() if "without reporting" in line]
+    assert len(lost) == 1 and "gw1" in lost[0] and "gw0" not in lost[0], (
+        f"expected one report, for gw1 alone\n{output}")
+    assert "worker gw1 finished without" in lost[0], (
+        f"the report does not say the worker finished quietly\n{output}")
+    assert _REPORT_TITLE not in child.stdout, f"the guard reported a duplicate\n{output}"
+
+
+def test_an_xdist_worker_does_not_import_torch_for_its_thread_cap(tmp_path):
+    """The cap only touches a torch that a test module already loaded (conftest, pitfall 2)."""
+    plant = 'import sys\n\n\ndef test_plant():\n    assert "torch" not in sys.modules\n'
+    child, output = _session(tmp_path, {"test_plant.py": plant}, *_XDIST)
+    assert "1 passed" in child.stdout, f"a worker imported torch\n{output}"
+    assert child.returncode == 0, f"the session failed\n{output}"
+    assert _LOST_TITLE not in child.stdout, f"a worker was reported lost\n{output}"

@@ -62,17 +62,16 @@ You do **not** need to touch `train.py`, `cs2_env.py` MultiDiscrete, or `src/cs2
 ## Tests
 
 ```bash
-uv run python -m pytest tests/ -x -q                    # full suite in one session (split run below)
-uv run python -m pytest tests/ -x -q -m "not slow"      # skip the multi-minute subprocess and rollout tests
+uv run python -m pytest -n 2 --dist loadgroup tests -q  # the full suite, one session
+uv run python -m pytest tests/test_x.py -q -n 0         # one test or file: no workers
 uv run python -m cs2rl.train --smoke                    # env sanity check
 ```
 
-Four test files are heavy and are best run on their own, each in its own pytest process, rather than in the same session as the rest: `tests/test_arena_duel.py`, `tests/test_binding.py`, `tests/test_pitch_pin.py`, `tests/test_train_cli.py`.
+The full suite is one session on 2 pytest-xdist workers (`-n 2`); it is the run that HEAD, verifiers and post-merge checks use.
+- **Why 2.** Memory. Two workers took 2.9 GB more than a serial session on a 15 GB machine that also runs the owner's work, and four left 74 MB above the 2.5 GB kill line and needed a torch thread cap. `-n auto` is capped to 2 by `tests/conftest.py` when the args name `tests` or a path under it (`PYTEST_XDIST_AUTO_NUM_WORKERS` overrides it), so a mistyped `-n auto` does not start one worker per core. `-n`, `--dist` and `-m` are never in `addopts`: a full run must not depend on undoing them.
+- **Why `--dist loadgroup`.** `tests/test_reward_loop_equivalence.py` carries `xdist_group("gpu")`, so that file's CUDA work runs in one worker and opens one context there instead of up to two (other files can still open CUDA in either worker). loadgroup appends `@gpu` to those test ids.
+- **The guards.** The session-end guards in `tests/conftest.py` (one module object per file, the namespace guard) relay each worker's facts to the controller, so they hold under `-n`. Their `-n 2` tests need pytest-xdist in the environment: run `uv sync --all-groups --inexact` in the main checkout, or they fail with that remedy.
+- **No separate sessions.** The four files that used to run each alone (`tests/test_arena_duel.py`, `tests/test_binding.py`, `tests/test_pitch_pin.py`, `tests/test_train_cli.py`) run inside the `-n 2` session. The recorded reason for "each alone" (cold vis-cache orphans, #251/#254) is closed, and the full session with them passed with MemAvailable never below 6.6 GB from a 10.1 GB start (about 3.5 GB used, no swap growth). Start a full run with at least 7 GB of MemAvailable, which leaves about 1 GB above a 2.5 GB floor. One hazard remains: a cold vis cache. Copy `src/cs2rl/vis_cache*.npy` into a fresh worktree before any test run.
+- **Fast loop.** `-m "not slow"` (with `-n 2`) is for intermediate per-commit checks only. The `slow` marker (over about 15 s of wall) drops real coverage: the patch-binding campaign, the seed positive control and the fast-math builds. HEAD, verifiers and post-merge run the full suite.
 
-```bash
-uv run python -m pytest tests/ -q --ignore=tests/test_arena_duel.py --ignore=tests/test_binding.py \
-    --ignore=tests/test_pitch_pin.py --ignore=tests/test_train_cli.py
-uv run python -m pytest tests/test_arena_duel.py -q     # then the other three, one at a time
-```
-
-A full run takes several minutes: measured on one development machine on 2026-09-29, about 7 min for the main session plus about 1 min for the four heavy files.
+A full run takes several minutes: measured on one development machine on 2026-09-30, about 5.5 min for the full suite at `-n 2` (one run, 1782 tests), against about 8-9 min serial (main session plus the four former each-alone files).
