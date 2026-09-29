@@ -512,9 +512,10 @@ def _build_trainer_for_test(
     # Lazy for the reason _harness_parts gives above its own import block (gh#168
     # W1): trainer.py subclasses PuffeRL, so it imports torch, and train, at module
     # scope. At THIS module's scope, `from cs2rl import train_test_harness` would load
-    # torch, cs2rl.train and cs2rl.trainer, none of which it loads today. It would not
-    # be a cycle: with it at module scope, importing this module alone, or train first
-    # and then this module, still succeeds.
+    # torch, cs2rl.train and cs2rl.trainer, none of which it loads today (the torch is
+    # what tests/test_w1_modules.py::test_import_train_test_harness_stays_light catches).
+    # It would not be a cycle: with it at module scope, importing this module alone, or
+    # train first and then this module, still succeeds.
     from cs2rl.trainer import Cs2PuffeRL
 
     parts, pins = _harness_parts(

@@ -71,8 +71,9 @@ H_MOVE, H_SHOOT, H_RELOAD, H_WEAPON, H_USE, H_CROUCH, H_JUMP = range(7)
 if ACTION_HEAD_NAMES[H_SHOOT] != "shoot" or ACTION_HEAD_NAMES[H_CROUCH] != "crouch":
     raise RuntimeError(f"action head order changed: {ACTION_HEAD_NAMES}; "
                        "re-derive H_* indices in eval_baselines.py")
-                                                                           # Geometry MIRRORS of cs2_combat.h — silent-drift hazard, this branch edits that
-                                                                           # header. Verified equal on main: EYE_HEIGHT_* / TORSO_OFFSET_* :234-237.
+                                                                           # Geometry MIRRORS of cs2_combat.h's EYE_HEIGHT_* / TORSO_OFFSET_* (silent-drift
+                                                                           # hazard): tests/test_eval_baselines.py::test_hit_geometry_constants_match_cs2_combat_h
+                                                                           # pins them equal.
 EYE_STAND, EYE_CROUCH = 48.0, 24.0
 TORSO_STAND, TORSO_CROUCH = 48.0, 24.0
 TICK_DT = 1.0 / 16.0

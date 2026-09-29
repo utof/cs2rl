@@ -25,7 +25,8 @@ construction. ``from cs2rl import train`` must stay torch-free (tests/test_w1_mo
 keeps ``--dump-config`` at ~1 s), so train.py imports this module function-locally, inside
 ``train()``. train_test_harness.py (gh#168 W1.5) imports it the same way, function-locally
 inside ``_build_trainer_for_test``, so ``from cs2rl import train_test_harness`` stays as light
-as ``from cs2rl import train``; tests/test_trainer_composition.py imports it inside a fixture. Never add
+as ``from cs2rl import train`` (tests/test_w1_modules.py::test_import_train_test_harness_stays_light);
+tests/test_trainer_composition.py imports it inside a fixture. Never add
 ``from cs2rl.trainer import ...`` at train.py's module level (knock-out W1-K3 in the spec:
 test_import_train_stays_light_and_really_imports_the_shims goes red: with the import next
 to the other module-level imports it is a circular-import ImportError, after all defs it

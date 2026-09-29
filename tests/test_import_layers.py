@@ -7,17 +7,22 @@ WHAT runs here:
   4. The scope pin: every site of every ignore_imports pair sits inside a def.
   5. Positive controls on a tmp copy of the package, one plant each, so every check
      above has been seen to reject something.
+  6. The one layer placement a test elsewhere relies on: metrics_schema above train.
 
 WHY 2: import-linter and grimp find `cs2rl` with importlib.util.find_spec, which
 never executes src/cs2rl/__init__.py, so the package's foreign-checkout guard cannot
 fire. In a worktree whose PYTHONPATH does not put its own src/ first they check
-MAIN's tree and pass. PYTHONPATH wins over the editable install's .pth.
+MAIN's tree and pass. PYTHONPATH wins over the editable install's .pth. Every graph
+child (this checkout's and each control's) asserts it resolved the tree whose files
+the checks then read, so no check can map one tree's lines onto another's AST.
 
 WHY 3: grimp skips a directory without an __init__.py, silently. A module in such
 a directory is in no layer and in no cycle, whatever it imports, and `exhaustive`
 never hears of it. The expected set comes from `git ls-files`, never from grimp
 (comparing grimp with itself is a tautology), so a new file must be tracked to be
-covered; an untracked one fails here as "extra in grimp".
+covered. An untracked module fails here as "extra in grimp" only where grimp can see
+its directory; an untracked one in a directory without __init__.py is on neither
+side and passes until it is tracked (or `git add -N`).
 
 WHY 4: grimp counts a function-local import as an edge, and an ignore_imports entry
 names a module PAIR, never a line or a scope. So an ignored pair hides every future
@@ -36,7 +41,10 @@ PITFALLS:
     (2.15 ships no __main__).
   - Never in-process: `importlinter.cli.lint_imports()` inserts cwd on sys.path for
     good, and grimp's find_spec would then return the cs2rl this session already
-    imported. Every tree is checked in a child.
+    imported. Every tree is checked in a child. (`importlinter.api.read_configuration`
+    has no such side effect; test 6 calls it in-process.)
+  - Every lint passes `--config <this checkout>/pyproject.toml`, this checkout's
+    included: see `_lint`.
   - COLUMNS=200 in every child: rich wraps at 80 columns when stdout is not a TTY,
     which splits the tokens the controls look for.
   - Nothing here skips. A venv without the dev group fails with the remedy.
@@ -44,11 +52,14 @@ PITFALLS:
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from collections.abc import Iterable
 from pathlib import Path
+
+import pytest
 
 from tests.conftest import REPO_ROOT
 
@@ -91,24 +102,33 @@ def _child_env(src: Path) -> dict[str, str]:
     return dict(os.environ, PYTHONPATH=pythonpath, COLUMNS="200")
 
 
-def _lint(tree: Path, *extra: str) -> subprocess.CompletedProcess:
-    """`lint-imports --no-cache --no-logo` over `tree`/src, with cwd = `tree`.
+def _lint(tree: Path) -> subprocess.CompletedProcess:
+    """`lint-imports --no-cache --no-logo --config <PYPROJECT>` over `tree`/src, cwd = `tree`.
 
-    The config is always this checkout's pyproject.toml (passed explicitly when the
-    tree is a tmp copy, which has none).
+    `--config` is passed for this checkout too, not only for the tmp copies (which
+    have no config of their own). Without it import-linter 2.15 discovers its config
+    from cwd and tries the INI files, setup.cfg and .importlinter, BEFORE
+    pyproject.toml (adapters/user_options.py; application/use_cases.py
+    `read_user_options`), so a stray `.importlinter` at the repo root would silently
+    replace the contracts under test.
     """
     assert LINT_IMPORTS.is_file(), f"{_MISSING_TOOLS} (no {LINT_IMPORTS})"
-    return subprocess.run(
-        [sys.executable, str(LINT_IMPORTS), "--no-cache", "--no-logo", *extra],
-        cwd=tree,
-        env=_child_env(tree / "src"),
-        capture_output=True,
-        text=True,
-        timeout=_CHILD_TIMEOUT_S)
+    argv = [sys.executable, str(LINT_IMPORTS), "--no-cache", "--no-logo"]
+    return subprocess.run([*argv, "--config", str(PYPROJECT)],
+                          cwd=tree,
+                          env=_child_env(tree / "src"),
+                          capture_output=True,
+                          text=True,
+                          timeout=_CHILD_TIMEOUT_S)
 
 
 def _graph_facts(tree: Path) -> dict:
-    """The graph child's report for `tree`: {"origin", "modules", "sites"}."""
+    """The graph child's report for `tree`: {"origin", "modules", "sites"}.
+
+    Asserts the child resolved `cs2rl` to `tree` itself. Every consumer maps grimp's
+    line numbers onto `tree`'s files, so facts from any other tree (main's, through
+    the editable .pth, when `tree`'s own package is broken) must never reach them.
+    """
     r = subprocess.run(
         [sys.executable, "-c", _GRAPH_CHILD, str(PYPROJECT)],
         cwd=tree,
@@ -118,7 +138,14 @@ def _graph_facts(tree: Path) -> dict:
         timeout=_CHILD_TIMEOUT_S)
     assert r.returncode == 0, (f"the grimp child failed (if it cannot import grimp or "
                                f"importlinter: {_MISSING_TOOLS}).\nSTDERR:\n{r.stderr}")
-    return json.loads(r.stdout)
+    facts = json.loads(r.stdout)
+    # samefile, not a string compare: the drive is mounted under two names.
+    own = tree / "src" / "cs2rl" / "__init__.py"
+    origin = facts["origin"]
+    assert origin is not None and own.is_file() and os.path.samefile(origin, own), (
+        f"the graph child resolved cs2rl to {origin}, not {own}: it is checking another "
+        f"tree. Put that tree's src/ first: env PYTHONPATH={tree / 'src'} <command>")
+    return facts
 
 
 def _dotted(relative: str) -> str:
@@ -158,8 +185,9 @@ def scope_pin_failures(tree: Path, facts: dict) -> list[str]:
     """Every site of every ignored pair is inside a FunctionDef or AsyncFunctionDef.
 
     A method counts (a FunctionDef inside a ClassDef); a class body, an `if` at
-    module level, or a `try:` at module level does not. grimp reports a multi-line
-    import at its first line, which is inside the def whenever the statement is.
+    module level (`if TYPE_CHECKING:` included), or a `try:` at module level does not:
+    control (e) plants one site of each shape. grimp reports a multi-line import at
+    its first line, which is inside the def whenever the statement is.
 
     BLIND SPOT, stated: this checks where an import STATEMENT sits, not when it
     RUNS. `def f(): import cs2rl.viz` followed by a module-level `f()` passes the
@@ -211,14 +239,11 @@ def test_contracts_hold_on_this_checkout():
 def test_the_linter_checks_this_checkout():
     """The child that builds the graph resolved `cs2rl` to this checkout's src/.
 
-    Compared with os.path.samefile, not as strings: the drive is mounted under two
-    names, and a string compare would call one directory two checkouts.
+    The assertion lives in `_graph_facts`, so every other check on this checkout, and
+    every control on its tmp copy, makes it too; this test is the one that names it.
+    The lint child runs with the same env and cwd, so it resolves the same way.
     """
-    origin = _graph_facts(REPO_ROOT)["origin"]
-    own = REPO_ROOT / "src" / "cs2rl" / "__init__.py"
-    assert origin is not None and os.path.samefile(origin, own), (
-        f"the linter's child resolved cs2rl to {origin}, not {own}: it is checking another "
-        f"checkout. Put this checkout's src/ first: env PYTHONPATH={REPO_ROOT / 'src'} <command>")
+    _graph_facts(REPO_ROOT)
 
 
 def test_every_tracked_module_is_in_the_graph():
@@ -229,6 +254,34 @@ def test_every_tracked_module_is_in_the_graph():
 def test_every_ignored_import_stays_function_local():
     failures = scope_pin_failures(REPO_ROOT, _graph_facts(REPO_ROOT))
     assert not failures, "\n".join(failures)
+
+
+def test_metrics_schema_sits_above_train():
+    """The layers contract puts metrics_schema in a higher layer than train.
+
+    tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN says a train.py import of
+    metrics_schema is an upward edge lint-imports rejects. That is true only while this
+    holds: moving metrics_schema down into train's layer keeps every other check green
+    and makes that entry silently false.
+    """
+    try:
+        from importlinter import api
+    except ImportError as e:
+        raise AssertionError(_MISSING_TOOLS) from e
+    [layers] = [
+        c["layers"] for c in api.read_configuration(str(PYPROJECT))["contracts_options"]
+        if c["type"] == "layers"
+    ]
+    # Highest layer first; `|` and `:` both separate the members of one layer.
+    rank = {
+        member.strip(): index
+        for index, layer in enumerate(layers)
+        for member in re.split(r"[|:]", layer)
+    }
+    assert rank["metrics_schema"] < rank["train"], (
+        f"metrics_schema is in layer {layers[rank['metrics_schema']]!r}, not above train's "
+        f"{layers[rank['train']]!r}: tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN entry "
+        "for it is no longer true. Move it back up, or rewrite that entry.")
 
 
 # ── positive controls: a tmp copy of the package, one plant each ─────────────────
@@ -244,21 +297,22 @@ def _copy_package(tmp_path: Path) -> tuple[Path, list[str]]:
     return tmp_path, files
 
 
-def _append(tree: Path, relative: str, line: str) -> None:
-    """Append `line` at column 0 after the last statement, i.e. at module scope."""
+def _append(tree: Path, relative: str, text: str) -> int:
+    """Append `text` at column 0 after the last statement, i.e. at module scope.
+
+    Returns the line number `text` starts on (after the one blank separator line).
+    """
     path = tree / relative
-    path.write_text(path.read_text(encoding="utf-8") + f"\n{line}\n", encoding="utf-8")
-
-
-def _lint_copy(tree: Path) -> subprocess.CompletedProcess:
-    return _lint(tree, "--config", str(PYPROJECT))
+    before = path.read_text(encoding="utf-8")
+    path.write_text(before + f"\n{text}\n", encoding="utf-8")
+    return before.count("\n") + 2
 
 
 def test_control_upward_import_breaks_the_layers(tmp_path):
     """(a) nav (L1) importing train (L2) at module scope."""
     tree, _ = _copy_package(tmp_path)
     _append(tree, "src/cs2rl/nav.py", "from cs2rl import train")
-    r = _lint_copy(tree)
+    r = _lint(tree)
     assert r.returncode == 1 and "cs2rl.nav -> cs2rl.train" in r.stdout, r.stdout + r.stderr
 
 
@@ -266,18 +320,19 @@ def test_control_a_module_without_a_layer_is_rejected(tmp_path):
     """(b) `exhaustive`: a new module in no layer."""
     tree, _ = _copy_package(tmp_path)
     (tree / "src" / "cs2rl" / "newmod.py").write_text('"""Planted."""\n')
-    r = _lint_copy(tree)
+    r = _lint(tree)
     assert r.returncode == 1 and "- cs2rl.newmod" in r.stdout, r.stdout + r.stderr
 
 
 def test_control_the_unplanted_copy_passes_every_check(tmp_path):
-    """(c) The copy is complete: every check that the controls turn red passes on it."""
+    """(c) The copy is complete: every check that the controls turn red passes on it.
+
+    `_graph_facts` also asserts the child resolved the copy, not this checkout.
+    """
     tree, files = _copy_package(tmp_path)
-    r = _lint_copy(tree)
+    r = _lint(tree)
     assert r.returncode == 0, r.stdout + r.stderr
     facts = _graph_facts(tree)
-    assert os.path.samefile(facts["origin"],
-                            tree / "src" / "cs2rl" / "__init__.py"), facts["origin"]
     failures = coverage_failures(facts, files) + scope_pin_failures(tree, facts)
     assert not failures, "\n".join(failures)
 
@@ -286,19 +341,37 @@ def test_control_a_cycle_inside_one_layer_is_rejected(tmp_path):
     """(d) nav <-> map, both in L1: only the acyclic contract sees it."""
     tree, _ = _copy_package(tmp_path)
     _append(tree, "src/cs2rl/nav.py", "from cs2rl import map")
-    r = _lint_copy(tree)
+    r = _lint(tree)
     assert r.returncode == 1 and ".nav -> .map" in r.stdout, r.stdout + r.stderr
 
 
-def test_control_a_module_scope_site_of_an_ignored_pair(tmp_path):
-    """(e) The blind spot: import-linter accepts it, the scope pin does not."""
+# One module-scope `import cs2rl.viz` site per construct that is not a def. The pin's
+# docstring says none of them counts as function-local; a pin widened to exempt one
+# (say, `if TYPE_CHECKING:` blocks) fails the matching case.
+_MODULE_SCOPE_SHAPES = {
+    "bare": "import cs2rl.viz",
+    "if_type_checking": "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import cs2rl.viz",
+    "class_body": "class _Plant:\n    import cs2rl.viz",
+    "try_except": "try:\n    import cs2rl.viz\nexcept ImportError:\n    pass",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_MODULE_SCOPE_SHAPES))
+def test_control_a_module_scope_site_of_an_ignored_pair(tmp_path, shape):
+    """(e) The blind spot: import-linter accepts it, the scope pin rejects the planted line.
+
+    The assertion names the planted LINE, not only the pair: the pin's "no import
+    site" failure carries the pair too, and would satisfy a pair-only check.
+    """
     tree, _ = _copy_package(tmp_path)
-    _append(tree, "src/cs2rl/train.py", "import cs2rl.viz")
-    r = _lint_copy(tree)
+    text = _MODULE_SCOPE_SHAPES[shape]
+    start = _append(tree, "src/cs2rl/train.py", text)
+    planted = start + next(i for i, line in enumerate(text.split("\n")) if "cs2rl.viz" in line)
+    r = _lint(tree)
     assert r.returncode == 0, ("import-linter now rejects a module-scope site of an ignored "
                                "pair; the scope pin's premise changed.\n" + r.stdout + r.stderr)
     failures = scope_pin_failures(tree, _graph_facts(tree))
-    assert any("cs2rl.train -> cs2rl.viz" in f for f in failures), failures
+    assert any(f"train.py:{planted} is not inside a def" in f for f in failures), failures
 
 
 def test_control_a_directory_without_init_is_covered(tmp_path):
@@ -307,7 +380,7 @@ def test_control_a_directory_without_init_is_covered(tmp_path):
     plant = "src/cs2rl/spec/action.py"
     (tree / plant).parent.mkdir()
     (tree / plant).write_text("from cs2rl import train\n")
-    r = _lint_copy(tree)
+    r = _lint(tree)
     assert r.returncode == 0, ("import-linter now sees a directory without __init__.py; the "
                                "coverage check's premise changed.\n" + r.stdout + r.stderr)
     failures = coverage_failures(_graph_facts(tree), [*files, plant])

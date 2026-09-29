@@ -409,7 +409,8 @@ def build_selfplay_manager(*, self_play_enabled, aim_log_std_max, pin_pitch, opp
     # above this module), allowed only by the `cs2rl.env_factory -> cs2rl.train`
     # ignore_imports entries in pyproject.toml, which #92 retires; the scope pin in
     # tests/test_import_layers.py fails if a site of that pair leaves a def. At module
-    # scope it would also be a circular ImportError, because train.py imports this
+    # scope it would also be a circular ImportError whenever train is imported first
+    # (every real run, and `from cs2rl import train`), because train.py imports this
     # module at its module level. And it relies on train.py's `__main__` self-alias
     # (the PITFALL in the module docstring).
     from cs2rl.train import SelfPlayManager

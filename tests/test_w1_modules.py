@@ -92,7 +92,8 @@ W1_MODULES = ("cs2rl.train_shared", "cs2rl.resume_state", "cs2rl.train_config",
 # An entry can be a prohibition, not only a description. metrics_schema sits in the
 # layer above train in pyproject.toml's `cs2rl layers` contract, so train.py importing
 # it, at any scope, is an upward edge lint-imports rejects (tests/test_import_layers.py).
-# That entry leaves only if the layering changes, never because an import appeared.
+# That entry leaves only if the layering changes, never because an import appeared;
+# tests/test_import_layers.py::test_metrics_schema_sits_above_train pins the layering.
 NOT_IMPORTED_BY_TRAIN = {
     "cs2rl.metrics_schema":
     "took EVAL_KEYS from eval_baselines, not from train.py, so train.py's body holds no "
@@ -229,6 +230,25 @@ heavy = [m for m in {HEAVY!r} if m in sys.modules]
 assert not heavy, f"`from cs2rl import train` pulled {{heavy}} — --dump-config is no longer cheap"
 missing = [m for m in {TRAIN_MODULE_LEVEL_IMPORTS!r} if m not in sys.modules]
 assert not missing, f"train.py does not import {{missing}} at module level"
+""")
+    assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+
+
+def test_import_train_test_harness_stays_light():
+    """`from cs2rl import train_test_harness` pulls nothing heavy either.
+
+    The harness is not a W1 module (it is test-only and imports train function-locally),
+    so the probes above never import it. Its lightness is what lets a test import it
+    without paying for torch, and it rests on `_build_trainer_for_test` importing
+    `cs2rl.trainer` function-locally: trainer subclasses PuffeRL and imports torch at
+    module scope, so one module-scope trainer import here loads torch, cs2rl.train and
+    cs2rl.trainer, and neither import-linter contract nor the scope pin objects to that
+    downward edge. This probe is the check that does.
+    """
+    r = _run_child(f"""
+from cs2rl import train_test_harness
+heavy = [m for m in {HEAVY!r} if m in sys.modules]
+assert not heavy, f"`from cs2rl import train_test_harness` pulled {{heavy}}"
 """)
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
 

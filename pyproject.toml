@@ -189,7 +189,7 @@ layers = [
     "_action_spec : _obs_spec : paths : env_config",
 ]
 ignore_imports = [
-    # env_factory.py:415, in build_selfplay_manager: SelfPlayManager lives in train.py.
+    # env_factory.py:416, in build_selfplay_manager: SelfPlayManager lives in train.py.
     # Function-local because train.py imports env_factory at module scope (a module-scope
     # import back would cycle) and runs as `__main__` (env_factory's docstring). #92
     # removes it.
@@ -212,7 +212,7 @@ name = "cs2rl acyclic siblings"
 type = "acyclic_siblings"
 ancestors = ["cs2rl"]
 ignore_imports = [
-    # env_factory.py:415, as in the layers contract above. #92 removes it.
+    # env_factory.py:416, as in the layers contract above. #92 removes it.
     "cs2rl.env_factory -> cs2rl.train",
     # train.py:3047, as in the layers contract above. #92 removes it.
     "cs2rl.train -> cs2rl.eval_baselines",
