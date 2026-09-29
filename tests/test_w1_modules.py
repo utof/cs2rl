@@ -243,7 +243,7 @@ def test_import_train_test_harness_stays_light():
     `cs2rl.trainer` function-locally: trainer subclasses PuffeRL and imports torch at
     module scope, so one module-scope trainer import here loads torch, cs2rl.train and
     cs2rl.trainer, and neither import-linter contract nor the scope pin objects to that
-    downward edge. This probe is the check that does.
+    same-layer (L2) edge, which forms no cycle. This probe is the check that does.
     """
     r = _run_child(f"""
 from cs2rl import train_test_harness
