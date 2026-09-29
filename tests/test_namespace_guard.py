@@ -2,9 +2,10 @@
 
 WHY (#207). tests/ has no __init__.py since pytest moved to importlib mode, so
 `tests`, like `scripts`, is a PEP 420 namespace package: its __path__ is every
-`tests/` directory on sys.path, recomputed whenever sys.path changes. Another
-tree on sys.path (another checkout's root) then serves any `tests.X` that this
-checkout lacks, silently. The guard has two halves: (c) stops a session whose
+`tests/` directory without an __init__.py on sys.path, recomputed whenever
+sys.path changes (a `tests/` WITH one, anywhere on sys.path, replaces it
+outright). Another tree on sys.path (another checkout's root) then serves any
+`tests.X` that this checkout lacks, silently. The guard has two halves: (c) stops a session whose
 sys.path, at the start, holds either name outside this checkout's root, and (d)
 fails a session that ends holding a `tests`/`scripts` module from anywhere but
 the place its dotted name implies in this checkout.
@@ -288,7 +289,8 @@ def test_the_end_check_is_silent_on_this_checkouts_own_modules(tmp_path):
     `__init__` file and an extension module (`tests._native`, with the ABI-tagged
     suffix) are home too. `testsuite` only STARTS with `tests`; the top-level
     name decides. A module with no `__file__` and no `__path__` has no place to
-    judge.
+    judge. `tests.linked` sits beside a symlinked `tests/linked/`: a module file
+    is home by its own parent, never by the directory's target.
     """
     root = _checkout(tmp_path / "root")
     (root / "tests" / "_helpers").mkdir()
@@ -296,12 +298,15 @@ def test_the_end_check_is_silent_on_this_checkouts_own_modules(tmp_path):
     alias = tmp_path / "alias"
     alias.symlink_to(root)
     runner = root / "scripts" / "modal_runner"
+    (tmp_path / "elsewhere" / "linked").mkdir(parents=True)
+    (root / "tests" / "linked").symlink_to(tmp_path / "elsewhere" / "linked")
     own = [
         _module("tests", path=[root / "tests"]),
         _module("tests.conftest", file=root / "tests" / "conftest.py"),
         _module("tests._helpers", path=[root / "tests" / "_helpers"]),
         _module("tests._native", file=root / "tests" / f"_native{EXTENSION_SUFFIXES[0]}"),
         _module("tests.no_place"),
+        _module("tests.linked", file=root / "tests" / "linked.py"),
         _module("scripts", path=[alias / "scripts"]),
         _module("scripts.modal_runner", file=runner / "__init__.py", path=[runner]),
         _module("testsuite", file=tmp_path / "other" / "testsuite.py"),

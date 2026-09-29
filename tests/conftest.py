@@ -579,9 +579,10 @@ def pytest_runtestloop(session: pytest.Session) -> Generator[None, object, objec
             for name, places in outside.items():
                 reporter.line(f"{name}: {places}", red=True)
             reporter.line(
-                "`tests` and `scripts` are namespace packages (no __init__.py), so a directory of "
-                "either name anywhere on sys.path merges into them. Take the other tree off "
-                "sys.path; see the namespace guard in tests/conftest.py.",
+                "Each `tests`/`scripts` module must load from where its dotted name puts it in "
+                "this checkout. Neither package has an __init__.py, so a directory of either name "
+                "elsewhere on sys.path merges into it, or, holding an __init__.py, replaces it. "
+                "Take the other tree off sys.path; see the namespace guard in tests/conftest.py.",
                 red=True)
         session.testsfailed += 1
     return result
