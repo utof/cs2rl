@@ -12,7 +12,7 @@ uv run --with 'ziglang>=0.14,<0.15' python setup.py build_ext --inplace --force
 uv run python -m pytest tests/ -x -q    # whole suite in one session; see Tests for the split run
 ```
 
-In a git worktree that shares the main checkout's `.venv`, do not use `uv run`: it syncs the environment first, which re-points the shared editable install at the worktree. Use the venv's interpreter with the worktree's `src/` first instead, e.g. `env UV_NO_SYNC=1 PYTHONPATH=<worktree>/src .venv/bin/python -m pytest tests -q`.
+In a git worktree, first symlink the main checkout's `.venv` into it (`ln -s <main>/.venv <worktree>/.venv`; `git worktree add` does not create one). Then do not use `uv run`: it syncs the environment first, which re-points the shared editable install at the worktree. Use the venv's interpreter with the worktree's `src/` first instead, e.g. `env UV_NO_SYNC=1 PYTHONPATH=<worktree>/src .venv/bin/python -m pytest tests -q`.
 
 ## Adding or changing an action head
 

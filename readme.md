@@ -36,8 +36,9 @@ Notes:
   `[build-system]`. Without the bound, uv pulls Zig 0.15+ which dropped
   `addSharedLibrary` and breaks `build.zig`.
 - The `ziglang` package puts no `zig` command on PATH (it has no entry
-  point; the binary sits inside the package): call it as `python -m ziglang`. `uvx` runs it in its own throwaway environment, so the
-  project's `.venv` is not touched.
+  point; the binary sits inside the package): call it as
+  `python -m ziglang`. `uvx` runs it in its own throwaway environment, so
+  the project's `.venv` is not touched.
 - The link step prints "archive member ... is neither ET_REL nor LLVM bitcode"
   warnings and may label a step "failure" while still exiting 0. They are
   harmless; check that `zig-out/bin/cs2_demo` exists.
@@ -49,10 +50,11 @@ Notes:
   `<root>/prefix/lib -> ../usr/lib/x86_64-linux-gnu`. Then build with
   `--search-prefix <root>/prefix`.
 - In that unpack, the dev `.so` symlinks point at runtime libraries the dev
-  packages do not ship; repoint each at the installed library in
-  `/usr/lib/x86_64-linux-gnu` (e.g. `libX11.so -> libX11.so.6`). A dangling
-  one does not fail the build: zig silently falls back to the static `.a` in
-  the same directory.
+  packages do not ship; repoint each at the installed library by absolute
+  path, e.g. `<root>/usr/lib/x86_64-linux-gnu/libX11.so` ->
+  `/usr/lib/x86_64-linux-gnu/libX11.so.6` (`ln -sfn <target> <link>`). A
+  dangling one does not fail the build: zig silently falls back to the
+  static `.a` in the same directory.
 - Raylib is fetched automatically on first build from `build.zig.zon`;
   subsequent runs use the Zig package cache (`~/.cache/zig`).
 - If you have system Zig 0.14 installed, `zig build cs2_demo` from
