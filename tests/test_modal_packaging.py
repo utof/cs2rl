@@ -3516,9 +3516,10 @@ def test_local_entrypoints_do_not_import_modal():
     # tests/conftest.py's checkout tripwire has already refused the session unless
     # `cs2rl` resolves under this checkout's src/. So the child imports this
     # checkout's files, not those of whichever checkout the shared venv's .pth names.
-    # The entry point checked is `cs2rl.train`, imported as src/ imports it. It runs in a
-    # child so that `modal` is absent from sys.modules unless train itself pulls it in;
-    # neither guard sees a child process (tests/conftest.py, limit (d)).
+    # The entry point checked is `cs2rl.train`, imported once, by the name src/ uses: the
+    # one-module-object guards cannot see a child process (tests/conftest.py, limit (d)), so
+    # a second spelling here would go unchecked. It runs in a child so that `modal` is absent
+    # from sys.modules unless train itself pulls it in.
     code = """
 import sys
 from cs2rl import train

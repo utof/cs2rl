@@ -204,7 +204,7 @@ def test_dump_config_matches_the_pre_165_fixture(tmp_path, arm):
     This is the provenance half of "not one value moves": build_train_config
     stops restating six keys and starts merging EnvConfig.to_config_dict(), and
     the Modal runner hashes this dict as its config_hash, so
-    a single reordered or retyped value silently invalidates every future
+    a single retyped or renamed value silently invalidates every future
     comparison against past runs. The .pt gate cannot see it — that command sets
     no --reward-*/knob flag at all, which is why the non_default arm exists.
 
