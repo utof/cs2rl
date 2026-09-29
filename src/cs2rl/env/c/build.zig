@@ -33,7 +33,8 @@ pub fn build(b: *std.Build) void {
 
     // fast_math: R0-F (#136). Default true = production flags. `-Dfast_math=false`
     // builds a diagnostic variant WITHOUT -ffast-math so tests/test_fast_math_variant.py
-    // can prove the reward guards do not depend on the optimiser folding isfinite().
+    // runs the reward guards in both builds (the strict one catches removed guards; the
+    // #136 isfinite() shape is caught by -Werror=nan-infinity-disabled below, #288).
     // PITFALL: never build the production .so with false — setup.py does not
     // pass this option, so `setup.py build_ext` always yields the fast-math build.
     const fast_math      = b.option(bool, "fast_math",
@@ -43,6 +44,12 @@ pub fn build(b: *std.Build) void {
         "-O3",           // intentional: C-level flag overrides -Doptimize for this file
         "-march=native", // safe: all users build from source, no .so committed
         "-ffast-math",
+        // #136/#288: under -ffast-math, isfinite()/isinf()/INFINITY fold away, so a
+        // guard written with them is dead code. Make clang's diagnostic for that an
+        // ERROR: a plain warning is not enough, because zig prints no warnings for a
+        // compile that succeeds (#294). tests/test_fast_math_variant.py cannot see
+        // the #136 shape at runtime (the reward clamp scrubs the NaN); this flag can.
+        "-Werror=nan-infinity-disabled",
         "-Wall",
         "-Wno-unused-function",
     };

@@ -167,7 +167,10 @@ def test_load_play_lib_unloadable_so_exits_2(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as ei:
         _load_play_lib(zig_out=tmp_path)
     assert ei.value.code == 2
-    assert "zig build cs2_demo" in capsys.readouterr().err
+    # The full working command: ziglang ships no `zig` executable, so a hint that says
+    # `zig build` cannot run (#288); a regression back to that spelling goes red here.
+    assert ("uvx --from 'ziglang>=0.14,<0.15' python -m ziglang build cs2_demo"
+            in capsys.readouterr().err)
 
 
 def test_cs2_demo_relative_venv_is_realpathd(tmp_path):

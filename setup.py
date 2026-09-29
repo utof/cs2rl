@@ -91,7 +91,13 @@ class ZigBuild(build_ext):
         shutil.copy2(candidates[0], dest)
 
 
-setup(
-    ext_modules=[ZigExtension("cs2rl.env.c.binding", source_dir="src/cs2rl/env/c")],
-    cmdclass={"build_ext": ZigBuild},
-)
+# Guarded so tests/test_fast_math_variant.py can import _find_zig (#146, #288); an
+# unguarded import runs setuptools on pytest's argv and exits. Every build path still
+# reaches setup(): `python setup.py ...` runs as __main__, and so does setuptools'
+# PEP 517 backend (build_meta execs this file with __name__ == "__main__"), which is
+# also what uv's build and Modal's `pip install --no-build-isolation` go through.
+if __name__ == "__main__":
+    setup(
+        ext_modules=[ZigExtension("cs2rl.env.c.binding", source_dir="src/cs2rl/env/c")],
+        cmdclass={"build_ext": ZigBuild},
+    )

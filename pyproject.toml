@@ -49,6 +49,11 @@ dev = [
     # `python -m importlinter`. The floor is the version the contracts were measured
     # on (`broken_contract_guidance` and `--no-logo` need 2.14).
     "import-linter>=2.15,<3",
+    # Same range as [build-system].requires. The build gets zig from its isolated
+    # build env; the test suite needs its own: tests/test_fast_math_variant.py (#136)
+    # resolves zig through setup.py's `python -m ziglang` route, and without the
+    # wheel in .venv that test skipped in every session (#288).
+    "ziglang>=0.14.0,<0.15",
 ]
 # NON-DEFAULT group (RL-overhaul task 14, tracker #82): the Modal SDK is needed
 # only for the optional cloud training runner (scripts/run_modal.py). A plain
@@ -103,7 +108,11 @@ exclude-dependencies = ["pynvml"]
 # child interpreter never inherits that, so code that launches one keeps setting
 # PYTHONPATH and the cwd itself (tests/conftest.py:29-32).
 [tool.pytest]
-addopts = ["--import-mode=importlib"]
+# -rfEs adds every skip and its reason to the short summary (#288: a skip was one `s`
+# among the dots, and hid the fast-math guard for a whole refactor wave).
+# PITFALL: -r chars REPLACE pytest's default `fE`, they do not add to it. `-rs` alone
+# drops every FAILED/ERROR line from the summary, so keep the f and the E.
+addopts = ["--import-mode=importlib", "-rfEs"]
 pythonpath = ["."]
 
 [tool.ruff]
