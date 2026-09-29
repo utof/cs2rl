@@ -39,8 +39,8 @@ SITE_DIST = _SELF_STOP - 1
 def _zero_actions():
     """Zero discrete+continuous actions: dyaw=0 preserves poked facing,
     move=0 preserves poked position (velocity is 0 after reset)."""
-    from cs2rl._action_spec import AIM_DIM
-    from cs2rl.nav import ACTION_DIM, N_AGENTS
+    from cs2rl._action_spec import ACTION_DIM, AIM_DIM
+    from cs2rl.nav import N_AGENTS
     return (np.zeros((N_AGENTS, ACTION_DIM),
                      dtype=np.int32), np.zeros((N_AGENTS, AIM_DIM), dtype=np.float32))
 

@@ -32,9 +32,9 @@ from typing import Any
 
 import numpy as np
 
-from cs2rl._action_spec import AIM_DIM
+from cs2rl._action_spec import ACTION_DIM, AIM_DIM
 from cs2rl.c_env.cs2_env import make_env as make_c_env
-from cs2rl.nav import ACTION_DIM, N_AGENTS, OBS_DIM
+from cs2rl.nav import N_AGENTS, OBS_DIM
 from cs2rl.paths import LOGS_DIR
 
 REPORT_DIR = LOGS_DIR / "profiles"

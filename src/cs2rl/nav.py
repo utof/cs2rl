@@ -12,8 +12,7 @@ from shapely.geometry import Point
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.strtree import STRtree
 
-from cs2rl._action_spec import ACTION_DIM              # derived from cs2_types.h
-from cs2rl._obs_spec import (                          # noqa: F401  generated; re-exported (see Constants)
+from cs2rl._obs_spec import (          # noqa: F401  generated; re-exported (see Constants)
     OBS_BLOCKS, OBS_DIM,
 )
 
@@ -143,9 +142,7 @@ class NavGraph:
         _cache_path  -- stored vis cache path
     """
 
-    def __init__(self, nav_path: str, cache_path: str | None = None):
-        if cache_path is None:
-            cache_path = str(pathlib.Path(__file__).with_name("vis_cache.npy"))
+    def __init__(self, nav_path: str, cache_path: str):
         self._nav_path = nav_path
         self._cache_path = cache_path
 
@@ -198,7 +195,7 @@ class NavGraph:
         self._area_polys, self._area_strtree = self._build_area_index()
 
         # ── Rasterized grid for O(1) position lookup ───────────────────────
-        # Replaces per-step Shapely Point+STRtree+contains in get_area_if_on_mesh.
+        # map.py exports it to C, whose _raster_at (cs2_movement.h) does the per-step lookup.
         self._grid_cache_path = cache_path.replace(".npy", "_grid.npy") if cache_path else None
         self._build_pos_grid()
 
@@ -250,8 +247,8 @@ class NavGraph:
     def _build_pos_grid(self, cell_size: float = 4.0):
         """Build a rasterized 2D grid mapping (gx, gy) → area_idx for O(1) lookups.
 
-        Replaces per-step Shapely Point + STRtree + contains chain in
-        get_area_if_on_mesh.  Cached to disk alongside the vis matrix.
+        map.py exports it to C as MapData.grid, where _raster_at (cs2_movement.h)
+        does the per-step position lookup.  Cached to disk alongside the vis matrix.
 
         Grid cell (gx, gy) covers the square [x_min + gx*cell, y_min + gy*cell].
         Value is the index into self.area_ids, or -1 for off-mesh.
@@ -331,73 +328,6 @@ class NavGraph:
             )
 
     # ── Public API ────────────────────────────────────────────────────────
-
-    def get_area(self, pos_xy: np.ndarray) -> int:
-        """Return the area_id that contains pos_xy.
-
-        First checks which area polygon contains the point via an STRtree
-        spatial index.  If the point falls outside every polygon (e.g. it
-        was snapped to a slightly off-mesh coordinate), always falls back to
-        the nearest centroid so that callers always receive a valid area_id.
-        Agents always spawn on the map, so a None return is never appropriate.
-
-        Args:
-            pos_xy: np.array([x, y])
-
-        Returns:
-            area_id (int) — always the nearest valid area, never None
-        """
-        pt = Point(pos_xy[0], pos_xy[1])
-        # Query candidates from STRtree
-        candidate_indices = self._area_strtree.query(pt)
-        for idx in candidate_indices:
-            if self._area_polys[idx].contains(pt):
-                return self.area_ids[idx]
-        # Fallback: nearest centroid — vectorised over all N areas
-        diff = self._centroid_matrix - pos_xy          # (N, 2)
-        idx = int(np.argmin((diff * diff).sum(axis=1)))
-        return self.area_ids[idx]
-
-    def is_on_mesh(self, pos_xy: np.ndarray) -> bool:
-        """Return True only if pos_xy falls inside a known nav polygon."""
-        pt = Point(pos_xy[0], pos_xy[1])
-        for idx in self._area_strtree.query(pt):
-            if self._area_polys[idx].contains(pt):
-                return True
-        return False
-
-    def get_area_if_on_mesh(self, pos_xy: np.ndarray):
-        """Combined get_area + is_on_mesh — O(1) rasterized grid lookup.
-
-        Returns (area_id, True) if pos_xy is inside a nav polygon.
-        Returns (None, False) if the point is outside the mesh.
-
-        Uses a precomputed raster grid built at init (no Shapely overhead per call).
-        """
-        gx = int((pos_xy[0] - self._grid_x_min) * self._grid_inv_cell)
-        gy = int((pos_xy[1] - self._grid_y_min) * self._grid_inv_cell)
-        if 0 <= gx < self._grid_w and 0 <= gy < self._grid_h:
-            idx = self._pos_grid[gy, gx]
-            if idx >= 0:
-                return self.area_ids[idx], True
-        return None, False
-
-    def can_see(self, area_i: int, area_j: int) -> bool:
-        """Return True if area_i can see area_j (requires vis_matrix from Task 2).
-
-        Falls back to graph connectivity if vis_matrix not yet built.
-        Returns False for any unknown area_id rather than raising KeyError.
-        """
-        if area_i == area_j:
-            return True
-        if area_i not in self._id_to_idx or area_j not in self._id_to_idx:
-            return False
-        if self.vis_matrix is not None:
-            i = self._id_to_idx[area_i]
-            j = self._id_to_idx[area_j]
-            return bool(self.vis_matrix[i, j])
-        # Fallback: connected in graph
-        return self.graph.has_edge(area_i, area_j) or area_i == area_j
 
     def path(self, area_i: int, area_j: int) -> list[int]:
         """Return shortest path of area_ids from area_i to area_j.
@@ -505,17 +435,7 @@ BOMB_TIMER = int(40 * TICK_RATE)
 ROUND_TIME = int(40 * TICK_RATE)
 FOOTSTEP_RADIUS = 800
 GUNSHOT_RADIUS = 2000
-BOMB_BEEP_RADIUS = 1500
 ENEMY_MEMORY_TICKS = 32
-
-MAP_X_MIN, MAP_X_MAX = -2476.0, 2000.0
-MAP_Y_MIN, MAP_Y_MAX = -1050.0, 3420.0
-
-# Precomputed reciprocals once used by _norm_xy (deleted in e3cb78b); nothing reads them now
-_INV_MAP_X_RANGE = 2.0 / (MAP_X_MAX - MAP_X_MIN)
-_INV_MAP_Y_RANGE = 2.0 / (MAP_Y_MAX - MAP_Y_MIN)
-_MAP_X_OFFSET = (MAP_X_MAX + MAP_X_MIN) / (MAP_X_MAX - MAP_X_MIN)
-_MAP_Y_OFFSET = (MAP_Y_MAX + MAP_Y_MIN) / (MAP_Y_MAX - MAP_Y_MIN)
 
 # Direction vectors for movement actions (built once at import time)
 _DIR_VECTORS = {
@@ -546,10 +466,7 @@ TEAM_SIZE = 5
 # the obs layout. Do NOT reintroduce a literal here; a bump is a cs2_types.h edit
 # followed by `uv run python scripts/sync_action_spec.py`.
 
-INVALID_AREA_ID = -1
 STALE_MEMORY_TICK = -9999
-_NOOP_ACTION = np.zeros(ACTION_DIM, dtype=np.int64)
-_POSSIBLE_AGENTS = tuple([f"t{i}" for i in range(TEAM_SIZE)] + [f"ct{i}" for i in range(TEAM_SIZE)])
 
 # CS2 setpos_exact spawn slots (from Valve competitive map data, with z)
 _T_SPAWN_SLOTS = (
@@ -663,7 +580,7 @@ def _build_area_adjacency(nav_graph: NavGraph) -> np.ndarray:
     Source navmesh, but are not directly traversable in this sim because movement
     is a 2D point step over the rasterized walkable surface. Derive adjacency from
     neighboring on-mesh raster cells so pathfinding matches the areas agents can
-    actually enter via get_area_if_on_mesh + fixed XY moves.
+    actually enter via the raster lookup (C's _raster_at) + fixed XY moves.
     """
     adj = np.zeros((nav_graph.N, nav_graph.N), dtype=bool)
     np.fill_diagonal(adj, True)

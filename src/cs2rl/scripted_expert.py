@@ -40,8 +40,8 @@ from collections import deque
 
 import numpy as np
 
-from cs2rl._action_spec import AIM_DIM
-from cs2rl.nav import ACTION_DIM, MAX_TURN_SPEED_RAD, N_AGENTS, ROUND_TIME
+from cs2rl._action_spec import ACTION_DIM, AIM_DIM
+from cs2rl.nav import MAX_TURN_SPEED_RAD, N_AGENTS, ROUND_TIME
 
 HEAD_MOVE = 0                          # discrete head order: move=0 shoot=1 reload=2 weapon=3 use=4 crouch=5 jump=6
 HEAD_USE = 4
@@ -319,9 +319,3 @@ class ScriptedBomber:
             self.env.step(*action)
             self.ticks += 1
             self.planted = bool(self.env._c_env.game.bomb_planted)
-
-    def drive(self) -> bool:
-        """Run to completion without recording. Returns True iff planted."""
-        for _ in self.run():
-            pass
-        return self.planted

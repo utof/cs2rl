@@ -901,12 +901,6 @@ REGISTRY.update({
 })
 
 
-def spec(key):
-    """The `MetricSpec` for `key`, or None. Exact match only — a concrete member
-    of a family has its own entry when the family is closed."""
-    return REGISTRY.get(key)
-
-
 def keys_of_kind(kind):
     """Sorted registry keys of one kind. Raises on an unknown kind rather than
     returning an empty tuple, which is how a typo'd filter goes unnoticed."""
