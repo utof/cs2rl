@@ -35,22 +35,20 @@ The registry chases them; a hardcoded snapshot of their keys would go stale
 silently, since nothing enforces that they stay frozen.
 """
 import ast
-import sys
 from pathlib import Path
 
 import pytest
 
-# tests/ is NOT on sys.path under this repo's pytest (conftest.py adds nothing,
-# and pytest's own insertion is the rootdir, not the test directory). Inserted
-# here rather than in conftest.py so the extra path stays scoped to the one
-# module that needs it — `metrics_census`, the AST extractor this file checks the
-# registry against. `test_w1_modules` is imported as `tests.test_w1_modules`, the
-# name pytest collects it under; a bare import would load a second copy.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cs2rl import metrics_schema as ms
 
-import metrics_census as census        # noqa: E402
-
-from cs2rl import metrics_schema as ms                 # noqa: E402
+# `metrics_census`, the AST extractor this file checks the registry against, is test
+# code, so it lives in tests/_helpers/ rather than in the shipped package. It is
+# imported under its one name, through `tests`, which pyproject.toml's pytest
+# `pythonpath = ["."]` makes importable; `test_w1_modules` below is imported the same
+# way, as `tests.test_w1_modules`, the name pytest collects it under. A bare
+# `import metrics_census` would need tests/_helpers/ on sys.path and would load a
+# second copy; TID251 bans it and the old `tests.metrics_census`.
+from tests._helpers import metrics_census as census
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

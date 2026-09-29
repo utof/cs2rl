@@ -818,10 +818,11 @@ def _names_defined_under_tests():
 
     Scope is `tests/test_*.py` plus the shared helper module: a stray file that
     pytest never collects is not the threat, and measured, widening past
-    `test_*.py` pulls in `tests/capture_dump_config_pre_165.py` and (until its
-    deletion; `git show 9878725:tests/capture_env_config_pre_165b.py`)
-    `tests/capture_env_config_pre_165b.py`, which each define a `_git` of their
-    own and would make a gate built on this red for an unrelated reason.
+    `test_*.py` pulled in `tests/capture_dump_config_pre_165.py` (until its
+    deletion in #207; `git show 6db06b5:tests/capture_dump_config_pre_165.py`)
+    and `tests/capture_env_config_pre_165b.py` (until its deletion; `git show
+    9878725:tests/capture_env_config_pre_165b.py`), which each defined a `_git`
+    of their own and made a gate built on this red for an unrelated reason.
 
     CONTRACT for the caller: the return value is a SUPERSET of the seam. It
     covers every `tests/test_*.py` in the repo, not just the four destination

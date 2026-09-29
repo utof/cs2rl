@@ -37,9 +37,11 @@ python-version = "3.12"
 
 # No "scripts" or "deploy": those roots served bare `import exp_lib` / `import
 # export_policy` spellings, which #204 removed with the libraries themselves (they are
-# `cs2rl.experiment.*` / `cs2rl.deploy.*` now). "tests" serves the one bare import
-# left, tests/test_metrics_schema.py's `import metrics_census`; "." serves `scripts.X`.
-search-path = ["src", "tests", "."]
+# `cs2rl.experiment.*` / `cs2rl.deploy.*` now). No "tests" either: it served the last
+# bare import, tests/test_metrics_schema.py's `import metrics_census`, which #207
+# replaced with `tests._helpers.metrics_census`. "." serves `scripts.X` and `tests.X`,
+# as pyproject.toml's pytest `pythonpath = ["."]` does at run time.
+search-path = ["src", "."]
 
 # `cs2rl.c_env.binding` is a compiled C extension (binding.cpython-312-*.so) with
 # no stub. No static checker can introspect a .so; treat it as Any rather than an

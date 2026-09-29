@@ -92,8 +92,8 @@ exclude-dependencies = ["pynvml"]
 # or `scripts/` into them (#207).
 #
 # pytest's docs recommend putting test utilities with the library code instead. They
-# stay under tests/ because cs2rl ships in the wheel and the Modal image, and test code
-# must not.
+# stay under tests/ (tests/_helpers/) because cs2rl ships in the wheel and the Modal
+# image, and test code must not.
 #
 # The config is in-process only: pytest applies `pythonpath` to its own sys.path, and a
 # child interpreter never inherits that, so code that launches one keeps setting
@@ -165,6 +165,10 @@ ignore = ["E501"]
 "run_modal".msg = "import `scripts.run_modal`"
 "modal_artifacts".msg = "import `scripts.modal_artifacts`"
 "modal_backfill_sidecar".msg = "import `scripts.modal_backfill_sidecar`"
+# #207 moved the metrics census, a test helper, into tests/_helpers/. The bare spelling
+# (a sys.path insert of tests/) and the old dotted one are both banned.
+"metrics_census".msg = "import `tests._helpers.metrics_census` (#207 moved it)"
+"tests.metrics_census".msg = "import `tests._helpers.metrics_census` (#207 moved it)"
 
 [tool.ruff.format]
 quote-style = "double"

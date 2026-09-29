@@ -219,14 +219,15 @@ def test_dump_config_matches_the_pre_165_fixture(tmp_path, arm):
     fixture = json.loads(FIXTURE_DUMP_CONFIG.read_text())
     assert fixture["_provenance"]["format"] == "cs2rl-dump-config-capture-v1"
     assert fixture["_provenance"]["captured_at_commit"] == PRE_165_CAPTURE_COMMIT, (
-        "the fixture was regenerated at a different commit. Re-running "
-        "tests/capture_dump_config_pre_165.py --capture to turn a red test green is "
-        "exactly how this oracle becomes a mirror: the new capture records "
-        "post-migration values, and the comparison below then checks the new code "
-        "against itself while staying green. The format tag would not move, so this "
-        "assertion is the only thing that catches it. The ONLY legitimate way to "
-        "change this fixture is to change PRE_165_CAPTURE_COMMIT deliberately, in a "
-        "commit whose message explains which config key moved and why.")
+        "the fixture was regenerated at a different commit. Its capture script was "
+        "deleted in #207 and can be read with `git show "
+        "6db06b5:tests/capture_dump_config_pre_165.py`. Never regenerate the fixture to "
+        "turn a red test green: that is exactly how this oracle becomes a mirror, because "
+        "the new capture records post-migration values, and the comparison below then "
+        "checks the new code against itself while staying green. The format tag would "
+        "not move, so this assertion is the only thing that catches it. The ONLY "
+        "legitimate way to change this fixture is to change PRE_165_CAPTURE_COMMIT "
+        "deliberately, in a commit whose message explains which config key moved and why.")
     entry = fixture["arms"][arm]
 
     ckpt = tmp_path / "ckpt"
