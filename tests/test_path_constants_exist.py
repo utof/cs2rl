@@ -4,7 +4,6 @@ WHAT: one case per constant. Each one must match at least one tracked file,
 checked with `git ls-files --error-unmatch`, which also works for a directory
 (it matches the files under it). The constants:
   - train_bc.DEMO_RELEVANT_PATHS;
-  - run_experiment's TRAIN_PY / REWARDS_H / ENV_C / C_ENV_DIR;
   - sync_action_spec's OUTPUT / OBS_OUTPUT, the generated spec modules (#205
     moved them into spec/; the generator would write a stray file at a stale
     path and leave the real one unregenerated). Both are tracked, so a row
@@ -31,8 +30,8 @@ deleting a row, or a whole list, is itself a failure.
 
 The ROOTS those constants hang off are pinned too, against the conftest's
 REPO_ROOT and never against their own: a case built relative to a module's own
-REPO_ROOT cannot see that root being wrong (#207 found the run_experiment rows
-blind to it: its REPO_ROOT one level off still left them green). So every
+REPO_ROOT cannot see that root being wrong (#207 found the rows of a since-deleted
+script blind to it: its REPO_ROOT one level off still left them green). So every
 module constant above is taken relative to the conftest's REPO_ROOT.
 
 WHY a standing test and not a one-shot check (#199 verifier finding V3): none of
@@ -40,8 +39,6 @@ these consumers fails on a wrong path, they go quiet.
   - `git diff --quiet <sha> -- <path>` is quiet for a path on neither side, so
     check_demo_sha stops watching it (#199's knock-out, from nav's path before
     #205: `src/cs2rl/nav.py` -> `src/nav.py` left the whole BC suite green).
-  - cs2rl.experiment.lib.env_fingerprint skips a missing file, and path_last_commit_sha
-    returns "".
   - A MANIFEST.in line that matches nothing only warns during the build.
   - A stale .gitignore line lets a 37 KB generated nav_data.h show as untracked, to
     be committed; a stale .clangd `-I` or .clang-tidy HeaderFilterRegex silently
@@ -53,12 +50,10 @@ naming the constant.
 PITFALL: setup.py is read with ast, never imported (importing it runs
 setuptools on pytest's argv).
 
-scripts/run_experiment.py is a CLI, not a library (#204), so its constants are
-read with `runpy.run_path(..., run_name=...)`: the module-level code is only path
-constants and imports, and a run_name other than "__main__" skips main().
-scripts/sync_action_spec.py is read the same way; #205 moved its side effects
-into main() so that reading it writes nothing, and
-test_sync_action_spec_module_body_runs_nothing keeps them there.
+scripts/sync_action_spec.py is a CLI, not a library (#204), so its constants are
+read with `runpy.run_path(..., run_name=...)`: a run_name other than "__main__"
+skips main(). #205 moved its side effects into main() so that reading it writes
+nothing, and test_sync_action_spec_module_body_runs_nothing keeps them there.
 
 Also here: nav.CACHE_PATH, the vis cache, is pinned to its one location
 (test_vis_cache_path_is_the_package_root_file). Its file is untracked, so it has
@@ -80,8 +75,6 @@ from cs2rl.train_bc import DEMO_RELEVANT_PATHS
 from tests._helpers import metrics_census
 from tests.conftest import REPO_ROOT
 
-run_experiment = runpy.run_path(str(REPO_ROOT / "scripts" / "run_experiment.py"),
-                                run_name="run_experiment_constants")
 sync_action_spec = runpy.run_path(str(REPO_ROOT / "scripts" / "sync_action_spec.py"),
                                   run_name="sync_action_spec_constants")
 
@@ -135,11 +128,9 @@ def _clang_tidy_header_filter() -> str | None:
     return None
 
 
-_RUN_EXPERIMENT = ("TRAIN_PY", "REWARDS_H", "ENV_C", "C_ENV_DIR")
 # A `.clangd:-I` row carries a trailing `/`: an include path must be a directory, not a file.
 CASES = [
     *[(f"DEMO_RELEVANT_PATHS:{p}", p) for p in DEMO_RELEVANT_PATHS],
-    *[(f"run_experiment.{n}", _in_this_checkout(run_experiment[n])) for n in _RUN_EXPERIMENT],
     *[(f"sync_action_spec.{n}", _in_this_checkout(sync_action_spec[n]))
       for n in ("OUTPUT", "OBS_OUTPUT", "HEADER")],
     ("metrics_census.SRC", f"{_in_this_checkout(metrics_census.SRC)}/"),
@@ -164,7 +155,6 @@ EXACT_LABELS = ("sync_action_spec.HEADER", ".gitignore:nav_data.h", ".gitignore:
 
 # The roots the module constants above hang off, each read from its module.
 ROOTS = {
-    "run_experiment.REPO_ROOT": run_experiment["REPO_ROOT"],
     "metrics_census.REPO_ROOT": metrics_census.REPO_ROOT,
 }
 
@@ -178,14 +168,12 @@ def test_every_source_is_represented():
     is named by its exact label (EXACT_LABELS).
     """
     labels = [label for label, _ in CASES + GITIGNORE_CASES + CLANG_TIDY_CASES]
-    for prefix in ("DEMO_RELEVANT_PATHS:", "run_experiment.", "sync_action_spec.",
-                   "metrics_census.", "MANIFEST.in:", "setup.py:", ".clangd:-I", ".gitignore:",
-                   ".clang-tidy:"):
+    for prefix in ("DEMO_RELEVANT_PATHS:", "sync_action_spec.", "metrics_census.", "MANIFEST.in:",
+                   "setup.py:", ".clangd:-I", ".gitignore:", ".clang-tidy:"):
         assert any(label.startswith(prefix) for label in labels), f"no case from {prefix}"
     for label in EXACT_LABELS:
         assert label in labels, f"no case labelled {label}"
-    for module in ("run_experiment", "metrics_census"):
-        assert f"{module}.REPO_ROOT" in ROOTS, f"{module}'s root is not pinned in ROOTS"
+    assert "metrics_census.REPO_ROOT" in ROOTS, "metrics_census's root is not pinned in ROOTS"
 
 
 @pytest.mark.parametrize("name", sorted(ROOTS))
