@@ -26,9 +26,8 @@ BLIND SPOTS (the measured scope, not a proof):
     assigned first and passed later);
   * argv whose first element is not the literal "uv" (`["env", "FOO=1", "uv",
     ...]`, `[shutil.which("uv"), ...]`);
-  * scripts/ that tests execute. scripts/run_experiment.py's `_python_cmd`
-    returns a bare `uv run python` argv and is safe under test only because
-    every test sets CS2RL_REPO_ROOT, which switches it to sys.executable.
+  * scripts/ that tests execute. scripts/run_rung1.sh runs `uv run python` and is
+    safe under test only because it prefixes `UV_NO_SYNC=1`.
 """
 
 from __future__ import annotations

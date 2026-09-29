@@ -58,6 +58,7 @@ from cs2rl.spec.action import (
     ACTION_MASK_DIM,
     AIM_DIM,
 )
+from cs2rl.spec.obs import OBS_DIM
 from cs2rl.spec.paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from cs2rl.train_config import (
     OPPONENT_MODES,
@@ -161,6 +162,7 @@ __all__ = (
     "LOG_STD_INIT",
     "LOG_STD_MAX",
     "LOG_STD_MIN",
+    "OBS_DIM",
     "OPPONENT_MODES",
     "RESUME_CONFIG_ALLOWLIST",
     "ScheduledEval",
@@ -207,13 +209,6 @@ __all__ = (
     "tag_grad_cossim",
     "validate_aim_log_std_max",
 )
-
-# MUST stay a bare integer literal: cs2rl/experiment/lib.py fingerprints the env by
-# regex-grepping `OBS_DIM = <int>` out of this file's source text (env_fingerprint),
-# so it cannot be an `import`. Mirrors nav.OBS_DIM / spec.obs.OBS_DIM (generated
-# from cs2_types.h); cross-checked by test_obs_dim_constant_consistency (test_train_env.py).
-# On an OBS_DIM bump, update cs2_types.h + rerun the generator, then bump this literal.
-OBS_DIM = 110
 
 
 def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
@@ -3602,10 +3597,11 @@ if __name__ == "__main__":
     if args.dump_config:
         # Zero-side-effect mode: write config.json and exit. Runs BEFORE device
         # detection so no torch import is triggered (the map is built above:
-        # config.json needs its pin_pitch/env label). This lets
-        # scripts/run_experiment.py fingerprint the HPs cheaply (no env, no
-        # CUDA probe). Keep this branch lean — anything imported here adds
-        # startup cost to every experiment launch.
+        # config.json needs its pin_pitch/env label). This lets the Modal
+        # runner (scripts/modal_runner/preflight.py hashes the dumped
+        # config.json) fingerprint the HPs cheaply (no env, no CUDA probe).
+        # Keep this branch lean — anything imported here adds startup cost
+        # to every launch.
         if args.device is None:
             args.device = "cpu"        # placeholder; never used for training
 

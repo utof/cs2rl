@@ -935,21 +935,21 @@ def test_post_pickup_plant_mask_unmasked():
 
 # ── Batch 2 task 4: OBS_DIM constant-consistency ─────────────────────────────
 def test_obs_dim_constant_consistency():
-    """Three OBS_DIM declarations must agree:
-       - src/cs2rl/env/nav.py
-       - src/cs2rl/train.py
-       - env.single_observation_space.shape[0]
+    """nav.OBS_DIM must agree with env.single_observation_space.shape[0].
     A drift here means the C ↔ Python boundary is misconfigured. The
     ctypes-vs-C layout asserts in cs2_env.py (the `_C_SIZES` block, fed by
     binding.struct_sizes()) catch struct-size drift; this test is the
     higher-level constant-agreement check.
+    train.OBS_DIM is no third declaration: it and nav.OBS_DIM are the one
+    generated spec.obs.OBS_DIM, so comparing them proves nothing. It is checked
+    against the env by test_make_env_reset_returns_expected_batch. The
+    TEAM_SIZE literals are cross-checked here too.
     """
     from cs2rl import train as t
     from cs2rl.env import nav
-    assert nav.OBS_DIM == t.OBS_DIM, (f"nav.OBS_DIM ({nav.OBS_DIM}) != train.OBS_DIM ({t.OBS_DIM})")
     assert nav.OBS_DIM == 110, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 110 for Batch 6 Task 2.5"
-    # Rung 0 (spec 2026-08-29 §2.2): train.TEAM_SIZE is a bare literal for the
-    # same import-cost reason as OBS_DIM, so it needs the same drift guard —
+    # Rung 0 (spec 2026-08-29 §2.2): train.TEAM_SIZE is a bare literal (train_shared
+    # must stay free of the nav import), so it needs a drift guard —
     # it divides the participating-step budget and builds the per-row
     # participation vector.
     from cs2rl.env.c import cs2_env

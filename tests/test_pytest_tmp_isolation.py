@@ -246,11 +246,10 @@ def test_default_temp_root_is_under_home_cache(tmp_path):
     """With PYTEST_DEBUG_TEMPROOT unset, basetemp is numbered under ~/.cache/cs2rl-pytest.
 
     This is the free-space half of the conftest: /tmp sits on the small root
-    partition, and test_run_experiment.py's full runs need >= 5 GB free. The
-    basetemp must be pytest's own `pytest-of-<user>/pytest-<N>` below that root,
-    never one fixed directory that every session shares (gh#219). And nothing
-    may land in ~/.pytest_tmp, which pre-gh#219 conftests on other checkouts
-    still rm_rf.
+    partition, which is regularly tight. The basetemp must be pytest's own
+    `pytest-of-<user>/pytest-<N>` below that root, never one fixed directory
+    that every session shares (gh#219). And nothing may land in ~/.pytest_tmp,
+    which pre-gh#219 conftests on other checkouts still rm_rf.
     """
     home = tmp_path / "home"
     root = (home / ".cache" / "cs2rl-pytest").resolve()
