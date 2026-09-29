@@ -92,9 +92,121 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
     return problems
 
 
+# ── Namespace guard: `tests` and `scripts` are this checkout's own (#207) ──
+#
+# Neither tests/ nor scripts/ has an __init__.py (tests/ since #207; scripts/
+# never had one), so each is a PEP 420 namespace package. CPython builds a
+# namespace package's __path__ from EVERY same-named directory on sys.path, and
+# recomputes it whenever sys.path changes or importlib.invalidate_caches() runs.
+# So a second `tests/` anywhere on sys.path (another checkout's root, e.g. main's
+# while a worktree is tested) becomes part of this checkout's `tests`, and a
+# `tests.X` that this checkout lacks loads SILENTLY from the other tree instead
+# of raising ModuleNotFoundError. Neither guard beside this one sees it: the
+# tripwire above looks only at `cs2rl` and src/ directories, and the
+# one-module-object guard below only at files under REPO_ROOT. Two halves:
+#   (c) at session start, reported with the tripwire: every sys.path entry other
+#       than this checkout's root that holds a `tests` or `scripts` directory or
+#       module stops the session, naming the entry and the name.
+#   (d) at session end, in the pytest_runtestloop wrapper below: every
+#       `tests`, `tests.*`, `scripts` or `scripts.*` module in sys.modules whose
+#       __file__, or a __path__ entry, lies outside ITS OWN package directory
+#       (REPO_ROOT/tests or REPO_ROOT/scripts) fails the session, naming each
+#       such module and path. It catches what reaches sys.path after (c) ran.
+# tests/test_namespace_guard.py pins both halves, with positive controls
+# (including the nested layout) and a negative control.
+#
+# PITFALLS.
+#   * Never compare against REPO_ROOT itself. Worktrees live in
+#     <main>/.worktrees/, so another checkout's tests/ can sit UNDER this root:
+#     "under REPO_ROOT" does not mean "ours". (c) skips only the root itself, by
+#     os.path.samefile (the drive is mounted under two names), and (d) compares
+#     each module with its own package directory.
+#   * `''` on sys.path is the cwd (`python -c`; `python -m pytest` puts the
+#     absolute cwd there instead), so (c) takes every entry against the cwd.
+#     Measured at #207, the only entry holding either name is the root itself
+#     (pyproject.toml's `pythonpath = ["."]`, and sys.path[0] under `python -m
+#     pytest` from the root): the stdlib, site-packages and the src/ entries hold
+#     none. A future dependency that ships a top-level `tests` or `scripts` stops
+#     the session at (c), which is right: its modules would merge into ours.
+#
+# LIMITS.
+#   1. (d) inspects a snapshot of sys.modules at session end. A foreign module
+#      evicted before then leaves no trace, and `monkeypatch.syspath_prepend`
+#      restores sys.path at teardown, so `tests.__path__` recalculates back as
+#      well: measured, `syspath_prepend` + import + `del sys.modules[...]`
+#      passes. So (d) does NOT catch every sys.path change made during the
+#      session, only those whose modules are still loaded at its end.
+#   2. (c) reads sys.path once, before collection, and never looks inside a zip
+#      or other non-directory entry.
+#   3. Imports made in a child process are invisible to both halves, as to the
+#      one-module-object guard: a child is checked only if it loads this conftest.
+#   Under `-x` with a failure, or with collection errors, pytest stops before
+#   (d) runs; that session fails anyway, and only the report is lost.
+_NAMESPACE_PACKAGES = ("tests", "scripts")
+
+
+def namespace_entry_problems(root: Path, path_entries: Iterable[str]) -> list[str]:
+    """(c): each entry of `path_entries` (sys.path), other than `root`, that holds a namespace name.
+
+    One problem per entry and name, naming both and the file or directory found.
+    `''` and any relative entry are taken against the cwd, which the message then
+    names. An entry that does not exist holds nothing and is skipped. A
+    directory counts by its name alone (a namespace portion needs no
+    __init__.py); a file counts with an importable suffix.
+    """
+    problems = []
+    for entry in path_entries:
+        # '' is the cwd: os.path.abspath('') == os.getcwd().
+        where = Path(os.path.abspath(entry))
+        try:
+            if os.path.samefile(where, root):
+                continue
+        except OSError:
+            continue
+        shown = repr(entry) if entry == str(where) else f"{entry!r} ({where})"
+        for name in _NAMESPACE_PACKAGES:
+            found = where / name
+            if not found.is_dir():
+                modules = (where / f"{name}{suffix}" for suffix in _IMPORTABLE_SUFFIXES)
+                found = next((module for module in modules if module.is_file()), None)
+            if found is not None:
+                problems.append(f"(c) sys.path entry {shown} holds `{name}` ({found}). `{name}` is "
+                                "a namespace package here, so that tree's modules would load as "
+                                "this checkout's. Take the entry off sys.path (PYTHONPATH, or the "
+                                "cwd under `python -m pytest`).")
+    return problems
+
+
+def namespace_modules_outside_their_package(modules: Mapping[str, object],
+                                            root: Path) -> dict[str, list[str]]:
+    """(d): map each `tests`/`scripts` module with a place outside its own package dir to those places.
+
+    A module's places are its string `__file__` and its `__path__` entries. Its
+    own package directory is `root / <top-level name>`, both resolved, so a
+    symlink or the drive's second mount name is no false alarm. PITFALL: never
+    `root` itself, which a checkout nested under it (<main>/.worktrees/x) passes.
+    """
+    own = {name: (root / name).resolve() for name in _NAMESPACE_PACKAGES}
+    outside: dict[str, list[str]] = {}
+    # A copy: sys.modules can change size mid-iteration when another thread imports.
+    for name, module in list(modules.items()):
+        package = own.get(name.partition(".")[0])
+        if package is None:
+            continue
+        file = getattr(module, "__file__", None)
+        places = [file] if isinstance(file, str) else []
+        # A namespace package's __path__ is recomputed from sys.path as it is read.
+        places += [p for p in getattr(module, "__path__", None) or () if isinstance(p, str)]
+        foreign = [p for p in places if not Path(p).resolve().is_relative_to(package)]
+        if foreign:
+            outside[name] = foreign
+    return outside
+
+
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Stop the session, before collection, if it would import another checkout's code."""
     problems = checkout_resolution_problems(REPO_ROOT / "src", sys.path)
+    problems += namespace_entry_problems(REPO_ROOT, sys.path)
     if problems:
         raise pytest.UsageError("checkout tripwire (tests/conftest.py):\n  " +
                                 "\n  ".join(problems))
@@ -404,7 +516,8 @@ def files_under_two_module_names(modules: Mapping[str, object], root: Path,
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtestloop(session: pytest.Session) -> Generator[None, object, object]:
-    """Fail the session, with a red report, if a repo file is loaded under two module names."""
+    """Fail the session, with a red report, if a repo file is loaded under two module names,
+    or a `tests`/`scripts` module came from another tree (the namespace guard's (d))."""
     result = yield
     duplicates = files_under_two_module_names(sys.modules, REPO_ROOT,
                                               (Path(sys.prefix), Path(sys.base_prefix)))
@@ -419,6 +532,22 @@ def pytest_runtestloop(session: pytest.Session) -> Generator[None, object, objec
                 "name pytest collects it under); pyproject.toml's banned-api table names the "
                 "spelling for src/, the libraries #204 moved out of scripts/ and deploy/, and "
                 "the Modal scripts.",
+                red=True)
+        session.testsfailed += 1
+    outside = namespace_modules_outside_their_package(sys.modules, REPO_ROOT)
+    if outside:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_sep("=",
+                               "tests/scripts modules loaded from another tree",
+                               red=True,
+                               bold=True)
+            for name, places in outside.items():
+                reporter.line(f"{name}: {places}", red=True)
+            reporter.line(
+                "`tests` and `scripts` are namespace packages (no __init__.py), so a directory of "
+                "either name anywhere on sys.path merges into them. Take the other tree off "
+                "sys.path; see the namespace guard in tests/conftest.py.",
                 red=True)
         session.testsfailed += 1
     return result

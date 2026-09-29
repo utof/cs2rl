@@ -9,7 +9,8 @@ running at the time (gh#219; possibly gh#195).
 
 Every check here runs in a CHILD pytest session, so how the outer session chose
 its own basetemp cannot matter. Each child loads the real tests/conftest.py as a
-plugin (`-p tests.conftest` with cwd at the repo root; tests/ is a package) and
+plugin (`-p tests.conftest` with cwd at the repo root, which `python -m` puts on
+sys.path; tests/ is a namespace package, with no __init__.py since #207) and
 reports the file it loaded, so a child that ran without the conftest fails
 loudly instead of passing vacuously. Every child's HOME, and any
 PYTEST_DEBUG_TEMPROOT it is given, point inside the outer tmp_path, and children

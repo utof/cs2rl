@@ -10,16 +10,11 @@ Also pins: the runner owns `--map` (emits `--map <effective_map>` first, never
 `--dust2`), `--resume-run` is not a Modal flag (the runner owns paths/ids), and
 the small-budget guard compares --timesteps against a RAW batch (conservative).
 """
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    # scripts/ is a namespace package; import the runner the same way the CLIs
-    # do. Inserting scripts/ instead would bind the module under a SECOND name.
-    sys.path.insert(0, str(ROOT))
 
 import scripts.modal_runner as mrl                     # noqa: E402, I001
 from scripts.modal_runner import commands, request     # noqa: E402, I001
