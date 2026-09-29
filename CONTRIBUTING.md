@@ -14,21 +14,23 @@ uv run python -m pytest tests/ -x -q
 
 ## Adding or changing an action head
 
-The action head layout (names, sizes, ordering) is defined in **one place**: `src/c_env/cs2_types.h`. Everything else is derived from it.
+The action head layout (names, sizes, ordering) is defined in **one place**: `src/cs2rl/env/c/cs2_types.h`. Everything else is derived from it.
 
 ### Where the spec lives
 
 ```c
-// src/c_env/cs2_types.h
+// src/cs2rl/env/c/cs2_types.h
 enum ActionHead {
-    HEAD_MOVE = 0, HEAD_AIM = 1, HEAD_SHOOT = 2, HEAD_RELOAD = 3,
-    HEAD_WEAPON = 4, HEAD_USE = 5, HEAD_CROUCH = 6, HEAD_JUMP = 7,
+    HEAD_MOVE = 0, HEAD_SHOOT = 1, HEAD_RELOAD = 2, HEAD_WEAPON = 3,
+    HEAD_USE = 4, HEAD_CROUCH = 5, HEAD_JUMP = 6,
 };
-static const int  ACTION_HEAD_SIZES[] = {9, 16, 2, 2, 3, 2, 2, 2};
+static const int  ACTION_HEAD_SIZES[] = {9, 2, 2, 3, 2, 2, 2};
 static const char* ACTION_HEAD_NAMES[] = {
-    "move", "aim", "shoot", "reload", "weapon", "use", "crouch", "jump",
+    "move", "shoot", "reload", "weapon", "use", "crouch", "jump",
 };
 ```
+
+Aim is not one of these discrete heads: it is a continuous head of `AIM_DIM` floats (Δyaw, pitch) in a separate buffer.
 
 ### Steps to add head N
 
@@ -36,22 +38,22 @@ static const char* ACTION_HEAD_NAMES[] = {
 2. **C behaviour code**: Add the head's logic in the appropriate `.h` file. Use `actions[i * ACTION_DIM + HEAD_NEWHEAD]` — never a bare integer.
 3. **C masking**: Add mask logic in `cs2_env.h` using `moff[HEAD_NEWHEAD]`.
 4. **C stats**: Add `action_newhead[N]` to `StepStats` in `cs2_types.h`, add `count_action()` call.
-5. **Run codegen**: `uv run python scripts/sync_action_spec.py` — this regenerates `src/_action_spec.py` from the C header.
+5. **Run codegen**: `uv run python scripts/sync_action_spec.py` — this regenerates `src/cs2rl/spec/action.py` (and `src/cs2rl/spec/obs.py`) from the C header.
 6. **Python ctypes mirror**: Add the new `StepStats` field to `StepStatsC` in `cs2_env.py`.
 7. **Deploy (if applicable)**: Add the head to `ActionExecutor.cs`.
 8. **Rebuild + test**: `uv run --with 'ziglang>=0.14,<0.15' python setup.py build_ext --inplace --force && uv run python -m pytest tests/ -x -q`
 
-You do **not** need to touch `nav.py`, `train.py`, `cs2_env.py` MultiDiscrete, or `_action_spec.py` manually — they all import from `_action_spec` which is regenerated in step 5.
+You do **not** need to touch `train.py`, `cs2_env.py` MultiDiscrete, or `src/cs2rl/spec/action.py` manually — the first two import from `cs2rl.spec.action`, which is regenerated in step 5.
 
 ### What NOT to do
 
 - Never hardcode action indices as bare integers in C — use `HEAD_*` enum values
-- Never define `ACTION_HEAD_SIZES` or `ACTION_HEAD_NAMES` in Python — import from `_action_spec`
-- Never edit `src/_action_spec.py` by hand — it's generated
+- Never define `ACTION_HEAD_SIZES` or `ACTION_HEAD_NAMES` in Python — import from `cs2rl.spec.action`
+- Never edit `src/cs2rl/spec/action.py` by hand — it's generated
 
 ## Running experiments
 
-See `docs/experiment-framework-guide.md` for the full experiment workflow.
+The experiment runner is `scripts/run_experiment.py`; its module docstring gives the usage.
 
 Key rules:
 - Never write to `outputs/experiments/baseline.txt` — only the user runs `scripts/promote_baseline.py`
@@ -67,6 +69,17 @@ Key rules:
 ## Tests
 
 ```bash
-uv run python -m pytest tests/ -x -q    # full suite (~60 tests, ~2 min)
-uv run python src/train.py --smoke       # env sanity check
+uv run python -m pytest tests/ -x -q                    # full suite
+uv run python -m pytest tests/ -x -q -m "not slow"      # skip the multi-minute subprocess and rollout tests
+uv run python -m cs2rl.train --smoke                    # env sanity check
 ```
+
+Four test files are heavy and are best run on their own, each in its own pytest process, rather than in the same session as the rest: `tests/test_arena_duel.py`, `tests/test_binding.py`, `tests/test_pitch_pin.py`, `tests/test_train_cli.py`.
+
+```bash
+uv run python -m pytest tests/ -q --ignore=tests/test_arena_duel.py --ignore=tests/test_binding.py \
+    --ignore=tests/test_pitch_pin.py --ignore=tests/test_train_cli.py
+uv run python -m pytest tests/test_arena_duel.py -q     # then the other three, one at a time
+```
+
+A full run takes several minutes: measured on one development machine on 2026-09-29, about 7 min for the main session plus about 1 min for the four heavy files.

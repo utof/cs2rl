@@ -19,14 +19,14 @@ Linux prerequisites (install once):
 ```
 sudo apt install libx11-dev libxcursor-dev libxext-dev libxfixes-dev \
                  libxi-dev libxinerama-dev libxrandr-dev libxrender-dev \
-                 libgl1-mesa-dev
+                 libgl-dev
 ```
 
 Then:
 
 ```
 uv run python scripts/bake_nav.py
-cd src/c_env
+cd src/cs2rl/env/c
 uv run --with 'ziglang>=0.14,<0.15' python -m ziglang build cs2_demo
 ./zig-out/bin/cs2_demo
 ```
@@ -38,7 +38,7 @@ Notes:
 - Raylib is fetched automatically on first build from `build.zig.zon`;
   subsequent runs use the Zig package cache (`~/.cache/zig`).
 - If you have system Zig 0.14 installed, `zig build cs2_demo` from
-  `src/c_env/` also works.
+  `src/cs2rl/env/c/` also works.
 
 # quick launch: watch RL bots play on a live CS2 server
 
