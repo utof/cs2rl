@@ -57,7 +57,7 @@ def _load_play_lib(zig_out: Path = ZIG_OUT):
             continue
     if lib is None:
         print(
-            f"build with: uv run --with 'ziglang>=0.14,<0.15' zig build cs2_demo (from {SOURCE_DIR})",
+            f"build with: uvx --from 'ziglang>=0.14,<0.15' python -m ziglang build cs2_demo (from {SOURCE_DIR})",
             file=sys.stderr,
         )
         raise SystemExit(2)
