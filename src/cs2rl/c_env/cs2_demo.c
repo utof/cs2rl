@@ -140,7 +140,13 @@ static void absolutize_policy(const char* path, char* out, size_t n) {
     join_path(out, n, cwd, path);
 }
 
-/* Walk up from the binary dir for pyproject.toml + src/cs2rl/play.py. */
+/* Walk up from the binary dir to the nearest checkout: pyproject.toml +
+ * src/cs2rl/__init__.py, the same marker src/cs2rl/__init__.py's own guard uses.
+ * WHY the package marker and not a module path: a module path (it was
+ * src/cs2rl/play.py) goes stale on every move of that module, and then a binary
+ * nested in a worktree under an older checkout walks past its own tree and
+ * silently runs the ancestor's code. The package marker survives any move short of
+ * renaming the package, and a nested worktree finds itself first. */
 static int find_repo(char* out, size_t n) {
     const char* app = play_host_app_dir();
     if (!app || !app[0])
@@ -151,10 +157,10 @@ static int find_repo(char* out, size_t n) {
     while (len > 1 && cur[len - 1] == '/')
         cur[--len] = '\0';
     for (;;) {
-        char toml[PATH_MAX], play[PATH_MAX];
+        char toml[PATH_MAX], pkg[PATH_MAX];
         join_path(toml, sizeof(toml), cur, "pyproject.toml");
-        join_path(play, sizeof(play), cur, "src/cs2rl/play.py");
-        if (path_exists(toml) && path_exists(play)) {
+        join_path(pkg, sizeof(pkg), cur, "src/cs2rl/__init__.py");
+        if (path_exists(toml) && path_exists(pkg)) {
             snprintf(out, n, "%s", cur);
             return 1;
         }

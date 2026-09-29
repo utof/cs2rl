@@ -6,8 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from cs2rl.c_env import SOURCE_DIR, ZIG_OUT
 from cs2rl.play_actions import (
-    find_repo_root,
     play_fill_actions,
     play_mark_done,
     play_reset_round,
@@ -30,14 +30,21 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
-def _load_play_lib(repo: Path):
+def _load_play_lib(zig_out: Path = ZIG_OUT):
+    """Load libcs2_play.so from $CS2_PLAY_LIB, then `zig_out`/lib and /bin; exit 2 if none loads.
+
+    `zig_out` defaults to the C package's own zig-out/ (cs2rl.c_env.ZIG_OUT), so the
+    lookup follows the package wherever it moves; a test passes a tmp directory. A
+    candidate that is absent or fails to load is skipped, so a stale location is not an
+    error here: it only ends in the "build with" hint.
+    """
     candidates = []
     envp = os.environ.get("CS2_PLAY_LIB")
     if envp:
         candidates.append(Path(envp))
     candidates += [
-        repo / "src/cs2rl/c_env/zig-out/lib/libcs2_play.so",
-        repo / "src/cs2rl/c_env/zig-out/bin/libcs2_play.so",
+        zig_out / "lib" / "libcs2_play.so",
+        zig_out / "bin" / "libcs2_play.so",
     ]
     lib = None
     for c in candidates:
@@ -50,7 +57,7 @@ def _load_play_lib(repo: Path):
             continue
     if lib is None:
         print(
-            "build with: uv run --with 'ziglang>=0.14,<0.15' zig build cs2_demo (from src/cs2rl/c_env)",
+            f"build with: uv run --with 'ziglang>=0.14,<0.15' zig build cs2_demo (from {SOURCE_DIR})",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -104,8 +111,7 @@ def main(argv=None):
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_simple_map
 
-    repo = find_repo_root(Path(__file__))
-    lib = _load_play_lib(repo)
+    lib = _load_play_lib()
     md = make_simple_map()
     # `recoil` is the one non-default this viewer wants; everything else is
     # EnvConfig's default.
@@ -137,7 +143,7 @@ def main(argv=None):
     cont_buf = np.zeros((10, 2), dtype=np.float32)
     # Same room quad MapData already published into sd->area_bounds.
     bounds = np.ascontiguousarray(md.area_bounds.reshape(-1))
-    resource_dir = str(repo / "src/cs2rl/c_env/zig-out/bin/resources").encode()
+    resource_dir = str(ZIG_OUT / "bin" / "resources").encode()
     human_idx = -1 if args.spectate else 0
     mode = "sample" if args.sample else "greedy"
     env_ptr = _PyCapsule_GetPointer(env._capsule, None)

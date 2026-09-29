@@ -1341,9 +1341,6 @@ class Cs2Env(pufferlib.PufferEnv):
             symmetrize_rewards(rewards, self.n_active_per_team)
         return self.observations, rewards, terminals, truncations, infos
 
-    def set_team_spirit(self, value: float):
-        self._c_env.team_spirit = float(value)
-
     def close(self):
         binding.close(self._capsule)
 

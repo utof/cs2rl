@@ -27,12 +27,14 @@ import shutil
 import subprocess
 import sys
 import sysconfig
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-C_DIR = REPO / "src" / "cs2rl" / "c_env"
+from cs2rl.c_env import SOURCE_DIR
+
+# The zig build's working directory, from the package itself: a restated path here went
+# stale silently, because the test skips wherever zig is missing.
+C_DIR = SOURCE_DIR
 
 CHECK = r"""
 import importlib.util, sys, numpy as np

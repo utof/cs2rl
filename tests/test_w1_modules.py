@@ -253,6 +253,33 @@ assert not heavy, f"`from cs2rl import train_test_harness` pulled {{heavy}}"
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
 
 
+def test_c_env_package_import_stays_light():
+    """`import cs2rl.c_env` binds SOURCE_DIR and ZIG_OUT and loads no submodule and no numpy.
+
+    WHY: play.py, scripts/bake_nav.py, scripts/sync_action_spec.py and several test
+    modules import the package for its two path constants (#205 part 2b), some at
+    module scope or at collection. One `from . import binding` in its __init__ would
+    load the built .so (and cs2_env, numpy) for every one of them.
+    PITFALL: the probe runs through _run_child (cwd = REPO_ROOT, this session's
+    PYTHONPATH), so cs2rl's guard refuses another checkout's install. A child started
+    from a tmp cwd without PYTHONPATH would import main's package, whose __init__ may
+    be anything, and pass or fail for that tree. The location check names src/, not
+    REPO_ROOT: a worktree nests under main's root, so containment in the root would
+    accept a worktree's file from main.
+    """
+    r = _run_child(f"""
+import cs2rl.c_env as package
+from pathlib import Path
+loaded = sorted(m for m in sys.modules if m.startswith("cs2rl.c_env.") or m == "numpy")
+assert not loaded, f"`import cs2rl.c_env` loaded {{loaded}}: keep its __init__ to pathlib"
+here = Path(package.__file__).resolve()
+assert here.is_relative_to({str(REPO_ROOT / "src")!r}), f"imported another checkout's {{here}}"
+assert package.SOURCE_DIR == here.parent, package.SOURCE_DIR
+assert package.ZIG_OUT == here.parent / "zig-out", package.ZIG_OUT
+""")
+    assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+
+
 def _main_block_body():
     """Top-level statements of train.py's `if __name__ == "__main__":` block.
 

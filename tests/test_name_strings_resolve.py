@@ -88,18 +88,6 @@ EXEMPT = {
     "(a) the same extension name, which the CHECK child pre-seeds in sys.modules with a "
     "scratch build. PITFALL: this text always fails, so the row never goes stale by itself; "
     "#205 part 2b must rename this string and this key together.",
-    ("src/cs2rl/play.py", "_load_play_lib", "src/cs2rl/c_env/zig-out/lib/libcs2_play.so"):
-    "(c) a zig build output, never tracked; the loader skips a candidate that is absent.",
-    ("src/cs2rl/play.py", "_load_play_lib", "src/cs2rl/c_env/zig-out/bin/libcs2_play.so"):
-    "(c) a zig build output, never tracked; the loader skips a candidate that is absent.",
-    ("src/cs2rl/play.py", "main", "src/cs2rl/c_env/zig-out/bin/resources"):
-    "(c) the zig build's resource directory, never tracked.",
-    ("tests/smoke_test.py", "test_c_env_smoke", "src/cs2rl/c_env/binding.cpython-*.so"):
-    "(c) a glob for the built extension, never tracked.",
-    ("tests/test_play_policy.py", "test_cs2_demo_policy_missing_exits_nonzero", "src/cs2rl/c_env/zig-out/bin/cs2_demo"):
-    "(c) a zig build output, never tracked; the test skips when it is absent.",
-    ("tests/test_play_policy.py", "test_cs2_demo_relative_venv_is_realpathd", "src/cs2rl/c_env/zig-out/bin/cs2_demo"):
-    "(c) a zig build output, never tracked; the test skips when it is absent.",
     ("tests/test_import_layers.py", "_tracked_package_files", "src/cs2rl/*.py"):
     "(c) a git pathspec glob, not a path.",
     ("tests/test_import_layers.py", "test_control_a_directory_without_init_is_covered", "src/cs2rl/noinit/action.py"):
