@@ -17,9 +17,9 @@ The raylib demo is a separate target — build it explicitly.
 Linux prerequisites (install once):
 
 ```
-sudo apt install libx11-dev libxcursor-dev libxext-dev libxfixes-dev \
-                 libxi-dev libxinerama-dev libxrandr-dev libxrender-dev \
-                 libgl-dev
+sudo apt install libx11-dev x11proto-dev libxcursor-dev libxext-dev \
+                 libxfixes-dev libxi-dev libxinerama-dev libxrandr-dev \
+                 libxrender-dev libglx-dev libgl-dev
 ```
 
 Then:
@@ -27,14 +27,26 @@ Then:
 ```
 uv run python scripts/bake_nav.py
 cd src/cs2rl/env/c
-uv run --with 'ziglang>=0.14,<0.15' python -m ziglang build cs2_demo
+uvx --from 'ziglang>=0.14,<0.15' python -m ziglang build cs2_demo
 ./zig-out/bin/cs2_demo
 ```
 
 Notes:
-- `--with 'ziglang>=0.14,<0.15'` matches the pin in `pyproject.toml`'s
+- `--from 'ziglang>=0.14,<0.15'` matches the pin in `pyproject.toml`'s
   `[build-system]`. Without the bound, uv pulls Zig 0.15+ which dropped
   `addSharedLibrary` and breaks `build.zig`.
+- The `ziglang` package ships no `zig` executable: call it as
+  `python -m ziglang`. `uvx` runs it in its own throwaway environment, so the
+  project's `.venv` is not touched.
+- The link step prints "archive member ... is neither ET_REL nor LLVM bitcode"
+  warnings and may label a step "failure" while still exiting 0. They are
+  harmless; check that `zig-out/bin/cs2_demo` exists.
+- Without sudo: `apt-get download` the same packages, unpack them with
+  `dpkg -x` into a user-local directory, and pass `--search-prefix <prefix>`
+  to the build, where `<prefix>/include` holds the headers and `<prefix>/lib`
+  the `x86_64-linux-gnu` libraries. The unpacked dev `.so` symlinks point at
+  runtime libraries that are not in the unpack; repoint them at the installed
+  ones in `/usr/lib/x86_64-linux-gnu`.
 - Raylib is fetched automatically on first build from `build.zig.zon`;
   subsequent runs use the Zig package cache (`~/.cache/zig`).
 - If you have system Zig 0.14 installed, `zig build cs2_demo` from
