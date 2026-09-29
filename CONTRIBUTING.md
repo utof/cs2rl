@@ -9,8 +9,10 @@ git clone <repo> && cd cs2rl
 uv sync
 git config core.hooksPath .githooks
 uv run --with 'ziglang>=0.14,<0.15' python setup.py build_ext --inplace --force
-uv run python -m pytest tests/ -x -q
+uv run python -m pytest tests/ -x -q    # whole suite in one session; see Tests for the split run
 ```
+
+In a git worktree that shares the main checkout's `.venv`, do not use `uv run`: it syncs the environment first, which re-points the shared editable install at the worktree. Use the venv's interpreter with the worktree's `src/` first instead, e.g. `env UV_NO_SYNC=1 PYTHONPATH=<worktree>/src .venv/bin/python -m pytest tests -q`.
 
 ## Adding or changing an action head
 
@@ -37,11 +39,11 @@ Aim is not one of these discrete heads: it is a continuous head of `AIM_DIM` flo
 1. **`cs2_types.h`**: Add enum value `HEAD_NEWHEAD = N`, append size to `ACTION_HEAD_SIZES[]`, append name to `ACTION_HEAD_NAMES[]`, bump `#define ACTION_DIM` and `#define ACTION_MASK_DIM`.
 2. **C behaviour code**: Add the head's logic in the appropriate `.h` file. Use `actions[i * ACTION_DIM + HEAD_NEWHEAD]` — never a bare integer.
 3. **C masking**: Add mask logic in `cs2_env.h` using `moff[HEAD_NEWHEAD]`.
-4. **C stats**: Add `action_newhead[N]` to `StepStats` in `cs2_types.h`, add `count_action()` call.
+4. **C stats**: Add `action_newhead[<size>]` to `StepStats` in `cs2_types.h`, sized by the head's number of choices (its `ACTION_HEAD_SIZES` entry, not its index N), and add a `count_action()` call.
 5. **Run codegen**: `uv run python scripts/sync_action_spec.py` — this regenerates `src/cs2rl/spec/action.py` (and `src/cs2rl/spec/obs.py`) from the C header.
-6. **Python ctypes mirror**: Add the new `StepStats` field to `StepStatsC` in `cs2_env.py`.
-7. **Deploy (if applicable)**: Add the head to `ActionExecutor.cs`.
-8. **Rebuild + test**: `uv run --with 'ziglang>=0.14,<0.15' python setup.py build_ext --inplace --force && uv run python -m pytest tests/ -x -q`
+6. **Python ctypes mirror**: Add the new `StepStats` field to `StepStatsC` in `cs2_env.py`, and add an `action_newhead_{idx}` loop to the hand-listed per-head keys in `_build_terminal_info()` in the same file.
+7. **Deploy (if applicable)**: Add the head to `ActionExecutor.cs`, and bump the hard-coded action-cache length `new int[7]` in `deploy/CS2RLBot/CS2RLBot.cs`.
+8. **Rebuild + test**: `uv run --with 'ziglang>=0.14,<0.15' python setup.py build_ext --inplace --force && uv run python -m pytest tests/ -x -q` (or the split run under Tests)
 
 You do **not** need to touch `train.py`, `cs2_env.py` MultiDiscrete, or `src/cs2rl/spec/action.py` manually — the first two import from `cs2rl.spec.action`, which is regenerated in step 5.
 
@@ -69,7 +71,7 @@ Key rules:
 ## Tests
 
 ```bash
-uv run python -m pytest tests/ -x -q                    # full suite
+uv run python -m pytest tests/ -x -q                    # full suite in one session (split run below)
 uv run python -m pytest tests/ -x -q -m "not slow"      # skip the multi-minute subprocess and rollout tests
 uv run python -m cs2rl.train --smoke                    # env sanity check
 ```
