@@ -1,4 +1,4 @@
-"""Experiment tooling: the runner's shared helpers, the gate readers and offline analyses.
+"""Experiment tooling: the gate readers and offline analyses.
 
 Each module with a `main()` is a CLI, launched by module name from the repo root:
 

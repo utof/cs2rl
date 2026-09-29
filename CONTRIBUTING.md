@@ -53,15 +53,6 @@ You do **not** need to touch `train.py`, `cs2_env.py` MultiDiscrete, or `src/cs2
 - Never define `ACTION_HEAD_SIZES` or `ACTION_HEAD_NAMES` in Python — import from `cs2rl.spec.action`
 - Never edit `src/cs2rl/spec/action.py` by hand — it's generated
 
-## Running experiments
-
-The experiment runner is `scripts/run_experiment.py`; its module docstring gives the usage.
-
-Key rules:
-- Never write to `outputs/experiments/baseline.txt` — only the user runs `scripts/promote_baseline.py`
-- Never auto-merge `exp/*` branches to `main`
-- One experiment at a time (global lock file)
-
 ## Code style
 
 - Python: ruff + yapf (enforced by pre-commit hook)

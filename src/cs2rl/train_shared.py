@@ -29,9 +29,8 @@ import numpy as np
 
 from cs2rl.spec.action import ACTION_HEAD_SIZES
 
-# Agents per team. A bare literal ON PURPOSE, for the same class of reason as
-# train.py's OBS_DIM: this leaf and train.py must both stay import-light
-# (`--dump-config` guarantees no torch/nav import — see
+# Agents per team. A bare literal ON PURPOSE: this leaf and train.py must both
+# stay import-light (`--dump-config` guarantees no torch/nav import — see
 # _atomic_save_state_dict's docstring below), and `nav` pulls
 # awpy/polars/shapely (+0.6 s and a polars warning) just to read one 5.
 # Cross-checked against nav.TEAM_SIZE and cs2_env.TEAM_SIZE by

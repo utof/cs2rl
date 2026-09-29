@@ -3516,18 +3516,13 @@ def test_local_entrypoints_do_not_import_modal():
     # tests/conftest.py's checkout tripwire has already refused the session unless
     # `cs2rl` resolves under this checkout's src/. So the child imports this
     # checkout's files, not those of whichever checkout the shared venv's .pth names.
-    # One name per entry point, because neither guard sees a child process
-    # (tests/conftest.py, limit (d)): `cs2rl.train`, as src/ imports it, and
-    # run_experiment as the CLI it is (#204: nothing imports scripts/), run in
-    # process with runpy under a non-__main__ name, so its module-level imports
-    # run and main() does not. Its `cs2rl.experiment.lib` stays in sys.modules
-    # afterwards (runpy is not a sandbox), which proves the script really ran.
+    # The entry point checked is `cs2rl.train`, imported once, by the name src/ uses: the
+    # one-module-object guards cannot see a child process (tests/conftest.py, limit (d)), so
+    # a second spelling here would go unchecked. It runs in a child so that `modal` is absent
+    # from sys.modules unless train itself pulls it in.
     code = """
-import runpy
 import sys
 from cs2rl import train
-runpy.run_path("scripts/run_experiment.py", run_name="run_experiment_constants")
-assert 'cs2rl.experiment.lib' in sys.modules
 assert 'modal' not in sys.modules
 """
     subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)

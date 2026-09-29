@@ -67,8 +67,7 @@ PITFALL — the readers are FROZEN, so the registry chases them.
 `rung1_gate` and `rung1a_smoke_read`, their names before #204 moved them out of
 scripts/) are registered evidence and are never migrated to import from here; the
 completeness test AST-parses their key literals instead. Their ROW LOADER
-(`cs2rl/experiment/analyze_tplant.py`, plus `scripts/analyze_experiment.py` and
-`iter_metrics_steps` in
+(`cs2rl/experiment/analyze_tplant.py`, plus `iter_metrics_steps` in
 `scripts/modal_runner/checkpoint.py`) is deliberately OUT of scope — recorded in
 #155 as the future-reader residue.
 """

@@ -143,8 +143,6 @@ ignore = ["E501"]
 # #204 moved the experiment and BC-demo libraries out of scripts/ into the package, so
 # scripts/ holds only CLIs. Each old spelling, bare (a sys.path insert of scripts/ or
 # deploy/) and dotted, names the one it became.
-"exp_lib".msg = "import `cs2rl.experiment.lib` (e.g. `from cs2rl.experiment import lib as exp_lib`)"
-"scripts.exp_lib".msg = "import `cs2rl.experiment.lib` (e.g. `from cs2rl.experiment import lib as exp_lib`)"
 "analyze_tplant".msg = "import `cs2rl.experiment.analyze_tplant`"
 "scripts.analyze_tplant".msg = "import `cs2rl.experiment.analyze_tplant`"
 "rung1_gate".msg = "import `cs2rl.experiment.gate`"
@@ -157,18 +155,6 @@ ignore = ["E501"]
 "scripts.gen_bc_demos".msg = "import `cs2rl.bc_demos`"
 "export_policy".msg = "import `cs2rl.deploy.export_policy`"
 "export_mapdata".msg = "import `cs2rl.deploy.export_mapdata`"
-# The experiment CLIs that stay in scripts/ hold nothing another module may import
-# (#204): a test that needs a constant reads it with runpy.run_path, which also keeps
-# the file out of sys.modules under a second name. Bare (a sys.path insert of
-# scripts/) and dotted spellings are both banned.
-"scripts.run_experiment".msg = "a CLI, not a library: read its constants with runpy.run_path"
-"scripts.analyze_experiment".msg = "a CLI, not a library: import what it uses from cs2rl.experiment"
-"scripts.reconcile_experiments".msg = "a CLI, not a library: import what it uses from cs2rl.experiment"
-"scripts.promote_baseline".msg = "a CLI, not a library: import what it uses from cs2rl.experiment"
-"run_experiment".msg = "a CLI, not a library: read its constants with runpy.run_path"
-"analyze_experiment".msg = "a CLI, not a library: import what it uses from cs2rl.experiment"
-"reconcile_experiments".msg = "a CLI, not a library: import what it uses from cs2rl.experiment"
-"promote_baseline".msg = "a CLI, not a library: import what it uses from cs2rl.experiment"
 # The Modal runner STAYS under scripts/: the owner's carve-out, recorded here as that
 # comment asked ("the Modal runner must stay under `scripts/`",
 # https://github.com/utof/cs2rl/issues/204#issuecomment-5654424835). It is baked into the

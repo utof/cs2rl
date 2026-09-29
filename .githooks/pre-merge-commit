@@ -9,7 +9,7 @@
 #   git commit resolving a CONFLICTED merge   pre-commit ran
 #   git revert / cherry-pick / rebase     NEITHER ran
 #
-# So a clean merge was an ungated commit, and every `exp/*` or feature merge in
+# So a clean merge was an ungated commit, and every feature merge in
 # this repo's workflow is a clean merge. This hook closes that case: it fires
 # with the merged result already in the index, which is exactly what the gate's
 # `git checkout-index` needs.

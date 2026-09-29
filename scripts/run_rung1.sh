@@ -2,7 +2,6 @@
 # Rung 1 launcher (spec 2026-08-29 §4): 5 treatment seeds + 2 negative-control
 # seeds, each retried with --resume-run on a non-zero exit (the training box's
 # GPU falls off the bus mid-run — R0-C full-state resume exists for this).
-# Results are NOT promoted through outputs/experiments/.
 #
 # Usage:  scripts/run_rung1.sh [OUT_ROOT] [MAX_RETRIES]
 #   OUT_ROOT     per-seed dirs <OUT_ROOT>/rung1-s<k>, <OUT_ROOT>/rung1-neg-s<k>

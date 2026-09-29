@@ -519,12 +519,10 @@ def pytest_configure(config):
         "slow: multi-minute subprocess/rollout tests; deselect with -m 'not slow'",
     )
 
-    # Some tests (e.g. test_run_experiment.py::test_full_run_*) spawn the real
-    # scripts/run_experiment.py subprocess, which enforces a >=5 GB free-disk
-    # precondition on the repo root it's pointed at. The default pytest
-    # tmp_path lives under /tmp on the system root partition, which on small
-    # devices is regularly tight. So unless the user passed --basetemp or set
-    # PYTEST_DEBUG_TEMPROOT, the temp ROOT moves to $HOME/.cache/cs2rl-pytest:
+    # The default pytest tmp_path lives under /tmp on the system root
+    # partition, which on small devices is regularly tight. So unless the user
+    # passed --basetemp or set PYTEST_DEBUG_TEMPROOT, the temp ROOT moves to
+    # $HOME/.cache/cs2rl-pytest:
     # $HOME is the user's primary partition, with persistent free space. Keep
     # it on $HOME, not in the repo: on the main dev machine the repo drive is
     # fuseblk/NTFS, where chmod is a no-op, and chmod-based tests (e.g.
