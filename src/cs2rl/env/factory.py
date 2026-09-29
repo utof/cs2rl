@@ -367,7 +367,7 @@ def build_env_for(role, **kwargs):
     # so train.py's `__main__` self-alias remains a hard prerequisite here.
     # Re-reading per call also keeps a test that rebinds
     # c_env.cs2_env.make_env able to see its stand-in used.
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     return builder(make_env, **kwargs)
 

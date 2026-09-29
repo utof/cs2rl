@@ -30,7 +30,7 @@ def _mix(seed):
 
 
 def test_c_rng_mixing_distinct_for_adjacent_seeds(simple_map):
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     e0 = make_env(map_data=simple_map, seed=0)
     e1 = make_env(map_data=simple_map, seed=1)
     try:
@@ -45,7 +45,7 @@ def test_c_rng_mixing_distinct_for_adjacent_seeds(simple_map):
 def test_c_rng_mixing_zero_fallback_only_at_the_one_wrapping_seed(simple_map):
     """The `: 1u` fallback fires only when seed + 0x9E3779B9 wraps to 0, i.e.
     seed == 0x61C88647. Every other seed maps to its (nonzero) mixed value."""
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     env = make_env(map_data=simple_map, seed=0x61C88647)
     try:
         assert env._c_env.rng == 1
@@ -186,7 +186,7 @@ def _run(tmp, seed, timesteps=10240):
 
 def test_in_process_env_determinism(simple_map):
     """Fast always-on check: two envs with the same seed produce identical obs/rewards."""
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     outs = []
     for _ in range(2):
         env = make_env(map_data=simple_map, seed=7)

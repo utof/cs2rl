@@ -4,7 +4,7 @@ import math
 import numpy as np
 import pytest
 
-from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig, RewardWeights
 from cs2rl.train import compute_game_metrics
 from cs2rl.train_helpers_batch1 import split_into_channels

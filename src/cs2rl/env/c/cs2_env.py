@@ -8,8 +8,8 @@ import gymnasium
 import numpy as np
 import pufferlib
 
-from cs2rl.c_env import binding
 from cs2rl.env import nav
+from cs2rl.env.c import binding
 from cs2rl.env.config import EnvConfig
 from cs2rl.env.map import make_cs2_map
 from cs2rl.env.nav import N_AGENTS, OBS_DIM, TEAM_SIZE
@@ -553,7 +553,7 @@ def _canonical_ctype_name(ctype):
         raise RuntimeError(
             f"StaticDataC field type {name!r} is outside the layout-hash vocabulary "
             f"{sorted(_CANONICAL_SCALAR_CTYPES)}; add it here AND to SD_TYPE_NAMES in "
-            "src/cs2rl/c_env/binding.c, then rebuild")
+            "src/cs2rl/env/c/binding.c, then rebuild")
     return name
 
 

@@ -127,7 +127,7 @@ _CONSTRUCTED_NAMES = frozenset({"make_puffer_env", "SelfPlayManager"})
 ROOTS = (REPO_ROOT / "src", REPO_ROOT / "scripts")
 
 # The one file allowed to construct. Everything else routes through it.
-FACTORY = REPO_ROOT / "src" / "cs2rl" / "env_factory.py"
+FACTORY = REPO_ROOT / "src" / "cs2rl" / "env" / "factory.py"
 
 # Sanity floors for the "the root is real" guard. Deliberately far below the
 # current counts (37 and 21 files after #204) so ordinary churn never touches them; they
@@ -137,7 +137,7 @@ MIN_FILES_PER_ROOT = 8
 # Anchors that must be among the scanned files. A root can exist, contain .py
 # files and still be the WRONG directory; naming the files whose contents this
 # test is actually about removes that.
-ANCHORS = ("src/cs2rl/train.py", "src/cs2rl/train_test_harness.py", "src/cs2rl/env_factory.py")
+ANCHORS = ("src/cs2rl/train.py", "src/cs2rl/train_test_harness.py", "src/cs2rl/env/factory.py")
 
 # ── The lower layer this file deliberately does NOT ban ─────────────────────
 #
@@ -195,8 +195,8 @@ LOWER_LAYER = ("make_env", "Cs2Env")
 # a DISCLOSURE list, not a ban: a new entry is allowed, it just has to be written
 # down here so the docstring above keeps telling the truth.
 LOWER_LAYER_SITES = {
-    "src/cs2rl/c_env/cs2_env.py": 1,                   # `make_env`'s own `return Cs2Env(...)`
-    "src/cs2rl/play.py": 1,                            # the interactive viewer
+    "src/cs2rl/env/c/cs2_env.py": 1,                   # `make_env`'s own `return Cs2Env(...)`
+    "src/cs2rl/viz/play.py": 1,                        # the interactive viewer
     "src/cs2rl/profile_step.py": 3,                    # three step-timing harnesses
     "src/cs2rl/train.py": 1,                           # `record_episode`
     "src/cs2rl/train_bc.py": 1,                        # BC demo replay env
@@ -436,11 +436,11 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
     _, found = scan([FACTORY], symbols=LOWER_LAYER)
     symbols = {symbol for _, symbol, _, _ in found}
     assert "make_env" not in symbols, (
-        "src/cs2rl/env_factory.py now contains a direct make_env(...) call. Both this file's "
+        "src/cs2rl/env/factory.py now contains a direct make_env(...) call. Both this file's "
         "module docstring and env_factory's own explain that it does NOT — update both, and "
         "LOWER_LAYER_SITES, rather than deleting this assertion.")
     assert "Cs2Env" not in symbols, (
-        "src/cs2rl/env_factory.py now constructs a Cs2Env directly, bypassing make_env's map "
+        "src/cs2rl/env/factory.py now constructs a Cs2Env directly, bypassing make_env's map "
         "loading entirely.")
 
 
@@ -475,9 +475,9 @@ def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
 # constructor — a property of the imports, not of the plant. A string literal is
 # unconditionally safe, which is why these are strings.
 _INLINED_CONSTRUCTION = {
-    "make_env": ("    from cs2rl.c_env.cs2_env import make_env\n"
+    "make_env": ("    from cs2rl.env.c.cs2_env import make_env\n"
                  "    return make_env(config=None, map_data=md)\n"),
-    "Cs2Env": ("    from cs2rl.c_env.cs2_env import Cs2Env\n"
+    "Cs2Env": ("    from cs2rl.env.c.cs2_env import Cs2Env\n"
                "    return Cs2Env(config=None, map_data=md)\n"),
 }
 
@@ -820,6 +820,6 @@ def test_no_make_puffer_env_or_selfplaymanager_call_outside_the_factory():
     _, found = scan(ROOTS)
     offenders = [(str(p.relative_to(REPO_ROOT)), symbol, lineno, spelling)
                  for p, symbol, lineno, spelling in found if p != FACTORY]
-    assert not offenders, ("constructions found outside src/cs2rl/env_factory.py:\n" +
+    assert not offenders, ("constructions found outside src/cs2rl/env/factory.py:\n" +
                            "\n".join(f"  {p}:{ln} {sym} ({sp})" for p, sym, ln, sp in offenders) +
                            "\nRoute them through build_env_for / build_selfplay_manager.")

@@ -103,7 +103,7 @@ from pathlib import Path
 
 import pytest
 
-from cs2rl import c_env
+from cs2rl.env import c as c_env
 from tests.conftest import REPO_ROOT
 
 # Exactly a dotted cs2rl name: clause (a).
@@ -551,7 +551,7 @@ def masking_row_problem(key: tuple[str, str, str]) -> str | None:
         return None
     return (f"MASKING EXEMPTION {key}: its path sits in the package {ancestor}, and an "
             "exempted path keeps matching after that package moves. Derive this path from its "
-            "package instead of exempting it (cs2rl.c_env.SOURCE_DIR / ZIG_OUT)")
+            "package instead of exempting it (cs2rl.env.c.SOURCE_DIR / ZIG_OUT)")
 
 
 def scan(files: list[str],
@@ -907,9 +907,9 @@ def test_c_string_literals_reports_each_string_at_its_line():
 # Every (a)/(c) occurrence in the tracked C files at this commit, resolving or not:
 # cs2_demo.c's find_repo marker (:162), its borrow hint (:203) and its `-m` argv (:251).
 _C_OCCURRENCES = [
-    ("src/cs2rl/c_env/cs2_demo.c", "a", "cs2rl.play"),
-    ("src/cs2rl/c_env/cs2_demo.c", "a", "cs2rl.play"),
-    ("src/cs2rl/c_env/cs2_demo.c", "c", "src/cs2rl/__init__.py"),
+    ("src/cs2rl/env/c/cs2_demo.c", "a", "cs2rl.viz.play"),
+    ("src/cs2rl/env/c/cs2_demo.c", "a", "cs2rl.viz.play"),
+    ("src/cs2rl/env/c/cs2_demo.c", "c", "src/cs2rl/__init__.py"),
 ]
 
 

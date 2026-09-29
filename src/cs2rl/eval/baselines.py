@@ -49,7 +49,7 @@ import math
 import numpy as np
 import torch
 
-from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
+from cs2rl.env.c.cs2_env import N_AGENTS, TEAM_SIZE
 
 # The eval/* analysis contract, RE-EXPORTED. It used to be DEFINED in this file;
 # W4 moved it to the metrics registry so there is one authority for every key.

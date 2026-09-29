@@ -193,11 +193,11 @@ def test_build_env_for_works_from_a_cold_interpreter():
     """
     code = """
 import sys
-from cs2rl import env_factory
+from cs2rl.env import factory as env_factory
 assert "cs2rl.train" not in sys.modules, (
     "env_factory pulled `cs2rl.train` at module scope; this test can no longer see the "
     "function-local import it exists to exercise")
-assert "cs2rl.c_env.cs2_env" not in sys.modules, (
+assert "cs2rl.env.c.cs2_env" not in sys.modules, (
     "env_factory pulled the C env at module scope; the post-call assertion below "
     "would then be satisfied by the import rather than by build_env_for, and the "
     "W1 import-lightness invariant is broken besides")
@@ -207,7 +207,7 @@ try:
         "building an env pulled `cs2rl.train`. Since #165 PR B2 env construction has NO L3 "
         "dependency at all — build_env_for imports c_env.cs2_env.make_env directly — and "
         "this assertion is what keeps that true from a cold interpreter")
-    assert "cs2rl.c_env.cs2_env" in sys.modules, "build_env_for did not import the C env module"
+    assert "cs2rl.env.c.cs2_env" in sys.modules, "build_env_for did not import the C env module"
     obs, _ = env.reset(seed=env_factory.SMOKE_SEED)
     assert obs.shape[0] == 10, obs.shape
     print("COLD-IMPORT-OK", obs.shape)

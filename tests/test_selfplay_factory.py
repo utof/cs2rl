@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from cs2rl.env_factory import build_selfplay_manager
+from cs2rl.env.factory import build_selfplay_manager
 
 FIXTURE = Path(__file__).parent / "fixtures" / "selfplay_kwargs_pre_w3.json"
 

@@ -145,7 +145,7 @@ DEFAULT_CHECKPOINT = Path(CHECKPOINTS_DIR) / "bc_warmstart.pt"
 # check_demo_sha for why we diff this surface instead of comparing shas
 # verbatim.
 DEMO_RELEVANT_PATHS = (
-    "src/cs2rl/c_env",
+    "src/cs2rl/env/c",
     "src/cs2rl/spec/obs.py",
     "src/cs2rl/spec/action.py",
     "src/cs2rl/env/map.py",
@@ -460,7 +460,7 @@ def make_bc_env(seed: int = 0):
     map is mandatory (plan §Target map) — bare make_env() defaults to real
     de_dust2, whose geometry the demos say nothing about.
     """
-    from cs2rl.c_env.cs2_env import make_env as make_c_env
+    from cs2rl.env.c.cs2_env import make_env as make_c_env
     return make_c_env(seed=seed, map_data=make_simple_map(), auto_reset=False)
 
 

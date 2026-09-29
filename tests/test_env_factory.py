@@ -92,7 +92,7 @@ from pathlib import Path
 import pytest
 
 from cs2rl.env.config import KNOB_FIELDS, REWARD_FIELDS, EnvConfig, RewardWeights
-from cs2rl.env_factory import ROLES, UNSET, build_env_for
+from cs2rl.env.factory import ROLES, UNSET, build_env_for
 
 FIXTURE = Path(__file__).parent / "fixtures" / "env_config_pre_165b.json"
 
@@ -155,7 +155,7 @@ def _construct(monkeypatch, role, **kwargs):
     """Run `build_env_for(role, ...)` against a recording stub at
     `c_env.cs2_env.make_env` — where build_env_for's function-local import now
     reads from, so this also proves that import is a per-call attribute read."""
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
@@ -172,7 +172,7 @@ def _construct_dropping(monkeypatch, role, dropped, **kwargs):
     never passed it, and it keeps the knock-out reproducible in CI instead of a
     procedure someone has to remember to perform by hand.
     """
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     class _Dropping(_Recorder):
 
@@ -261,7 +261,7 @@ def _real_runtime_signature():
     """
     import inspect
 
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     sig = inspect.signature(make_env)
     return sig.replace(
@@ -442,7 +442,7 @@ def test_train_closure_still_rejects_stray_kwargs(monkeypatch):
     only thing that can fire.
     """
     from cs2rl import train
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     monkeypatch.setattr(cs2_env, "make_env", _Recorder())
     factory = train.build_env_factory(shared_ts=None, map_data=None)
@@ -496,7 +496,7 @@ def test_every_role_builder_parameter_is_required():
     """
     import inspect
 
-    from cs2rl import env_factory
+    from cs2rl.env import factory as env_factory
 
     for role, builder in env_factory._ROLE_BUILDERS.items():
         for name, param in inspect.signature(builder).parameters.items():
@@ -666,7 +666,7 @@ def test_train_call_site_forwards_the_captured_kwargs(monkeypatch, capture):
     from argparse import Namespace
 
     from cs2rl import train
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     b, rt = capture["bindings"], capture["runtime_kwargs"]
     rec = _Recorder()
@@ -721,7 +721,7 @@ def test_harness_call_site_forwards_the_captured_kwargs(monkeypatch, tmp_path, c
     `shared_ts` and `buf` remain distinct sentinels, so those two runtime slots
     are still swap-checked by value.
     """
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     b, rt = capture["bindings"], capture["runtime_kwargs"]
     rec = _Recorder()
@@ -770,7 +770,7 @@ def test_harness_config_carries_the_knobs_no_fixture_row_varies(monkeypatch, tmp
     this drive; that pair is separated by the seed_none_becomes_zero scenario
     above, which is why both tests are needed.)
     """
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
@@ -983,7 +983,7 @@ def test_external_role_returns_under_a_stub(monkeypatch):
     the same thing statically; this one would still fail if a future indirection
     reintroduced the cycle by some spelling the AST check does not enumerate.
     """
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
@@ -1137,7 +1137,7 @@ def test_eval_env_agreement_two_directions(simple_map, field_name):
     finding.
     """
     from cs2rl import train
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     base = make_env(config=EnvConfig(), map_data=simple_map, seed=0)
     try:
@@ -1433,7 +1433,7 @@ def test_mask_view_attach_stays_out_of_the_factory():
     substring check would either fail on the prose or be weakened until it
     stopped checking anything.
     """
-    from cs2rl import env_factory
+    from cs2rl.env import factory as env_factory
 
     tree = ast.parse(Path(env_factory.__file__).read_text())
     attached = [
@@ -1463,7 +1463,7 @@ def test_env_factory_never_names_train_make_env():
     is legitimate — it is why train.py's `__main__` self-alias is still a hard
     prerequisite of this module — and must not be flagged.
     """
-    from cs2rl import env_factory
+    from cs2rl.env import factory as env_factory
 
     tree = ast.parse(Path(env_factory.__file__).read_text())
     offenders = []

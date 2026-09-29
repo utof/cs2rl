@@ -7,7 +7,7 @@ CompileFlags:
     # internal header is pulled in with a same-directory quoted include
     # (`#include "cs2_env.h"`), which resolves without any -I. It is kept so
     # headers still resolve when clangd is driven from another working dir.
-    - -Isrc/cs2rl/c_env
+    - -Isrc/cs2rl/env/c
     # `<Python.h>` and `<numpy/arrayobject.h>` (binding.c) are NOT resolved by
     # this file — their paths are per-machine, so hardcoding them into a tracked
     # file would break every other checkout. To get a clangd that can actually

@@ -30,7 +30,7 @@ import sysconfig
 
 import pytest
 
-from cs2rl.c_env import SOURCE_DIR
+from cs2rl.env.c import SOURCE_DIR
 
 # The zig build's working directory, from the package itself: a restated path here went
 # stale silently, because the test skips wherever zig is missing.
@@ -39,8 +39,8 @@ C_DIR = SOURCE_DIR
 CHECK = r"""
 import importlib.util, sys, numpy as np
 from pathlib import Path
-# ORDER IS LOAD-BEARING: cs2_env.py does `from cs2rl.c_env import binding`, which
-# takes whatever sys.modules["cs2rl.c_env.binding"] already holds and otherwise
+# ORDER IS LOAD-BEARING: cs2_env.py does `from cs2rl.env.c import binding`, which
+# takes whatever sys.modules["cs2rl.env.c.binding"] already holds and otherwise
 # loads the PRODUCTION .so next to it. Pre-seeding that key with the scratch
 # build BEFORE importing cs2_env is what makes this script test the variant; drop
 # the pre-seed and it silently tests the production .so (the check below is what
@@ -48,17 +48,17 @@ from pathlib import Path
 # PITFALL: binding is single-phase init (PyModule_Create), and for such a module
 # module_from_spec ITSELF registers the key (measured, #199), so deleting only the
 # explicit assignment below still tests the variant; the pre-seed is the whole load.
-import cs2rl.c_env
-spec = importlib.util.spec_from_file_location("cs2rl.c_env.binding",
+import cs2rl.env.c
+spec = importlib.util.spec_from_file_location("cs2rl.env.c.binding",
                                               next(Path(sys.argv[1]).glob("binding*")))
 scratch = importlib.util.module_from_spec(spec)
-sys.modules["cs2rl.c_env.binding"] = scratch
+sys.modules["cs2rl.env.c.binding"] = scratch
 spec.loader.exec_module(scratch)
-cs2rl.c_env.binding = scratch
-from cs2rl.c_env import cs2_env
+cs2rl.env.c.binding = scratch
+from cs2rl.env.c import cs2_env
 if not cs2_env.binding.__file__.startswith(sys.argv[1]):
     raise RuntimeError("wrong binding loaded: " + cs2_env.binding.__file__)
-from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
 from cs2rl.spec.action import ACTION_HEAD_SIZES, AIM_DIM
 from cs2rl.env.nav import N_AGENTS

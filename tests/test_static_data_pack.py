@@ -45,8 +45,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cs2rl.c_env import binding, cs2_env
-from cs2rl.c_env.cs2_env import (
+from cs2rl.env.c import binding, cs2_env
+from cs2rl.env.c.cs2_env import (
     TEAM_SIZE,
     StaticDataC,
     make_env,

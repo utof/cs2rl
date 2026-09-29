@@ -36,8 +36,8 @@ before believing a pass OR a failure.
 import ctypes
 import hashlib
 
-from cs2rl.c_env import binding, cs2_env
-from cs2rl.c_env.cs2_env import StaticDataC
+from cs2rl.env.c import binding, cs2_env
+from cs2rl.env.c.cs2_env import StaticDataC
 
 # Largest alignment any StaticData prefix member can demand on the 64-bit targets
 # this builds for: the pointer fields. Used as the ceiling on a legitimate
@@ -84,7 +84,7 @@ def test_layout_fields_agree_field_by_field():
     }
     assert not mismatched, (
         "the C struct and the ctypes mirror disagree about these fields. Fix the mirror in "
-        "src/cs2rl/c_env/cs2_env.py or the table in src/cs2rl/c_env/cs2_types.h — never this assert. "
+        "src/cs2rl/env/c/cs2_env.py or the table in src/cs2rl/env/c/cs2_types.h — never this assert. "
         f"{mismatched}")
 
 

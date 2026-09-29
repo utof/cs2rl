@@ -75,7 +75,7 @@ from pathlib import Path
 
 import pytest
 
-from cs2rl.c_env import SOURCE_DIR
+from cs2rl.env.c import SOURCE_DIR
 from cs2rl.train_bc import DEMO_RELEVANT_PATHS
 from tests._helpers import metrics_census
 from tests.conftest import REPO_ROOT

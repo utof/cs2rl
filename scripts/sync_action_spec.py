@@ -29,7 +29,7 @@ src/ first: `env PYTHONPATH=<worktree>/src .venv/bin/python scripts/sync_action_
 import re
 from pathlib import Path
 
-from cs2rl.c_env import SOURCE_DIR
+from cs2rl.env.c import SOURCE_DIR
 
 HEADER = SOURCE_DIR / "cs2_types.h"
 OUTPUT = Path(__file__).resolve().parent.parent / "src" / "cs2rl" / "spec" / "action.py"

@@ -271,8 +271,8 @@ def pin_pitch_for_map(map_data, *, build_vis: bool = True) -> int:
     md = map_data
     if md is None:
         # Same cache key make_env uses, so train() never loads the nav twice.
-        from cs2rl.c_env.cs2_env import _ENV_CACHE
         from cs2rl.env import nav
+        from cs2rl.env.c.cs2_env import _ENV_CACHE
         from cs2rl.env.map import make_cs2_map
         key = (nav.NAV_PATH, nav.CACHE_PATH)
         md = _ENV_CACHE.get(key)

@@ -389,10 +389,11 @@ def test_control_env_config_importing_nav_breaks_the_env_layers(tmp_path):
 # docstring says none of them counts as function-local; a pin widened to exempt one
 # (say, `if TYPE_CHECKING:` blocks) fails the matching case.
 _MODULE_SCOPE_SHAPES = {
-    "bare": "import cs2rl.viz",
-    "if_type_checking": "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import cs2rl.viz",
-    "class_body": "class _Plant:\n    import cs2rl.viz",
-    "try_except": "try:\n    import cs2rl.viz\nexcept ImportError:\n    pass",
+    "bare": "import cs2rl.viz.render",
+    "if_type_checking":
+    "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import cs2rl.viz.render",
+    "class_body": "class _Plant:\n    import cs2rl.viz.render",
+    "try_except": "try:\n    import cs2rl.viz.render\nexcept ImportError:\n    pass",
 }
 
 
@@ -406,7 +407,8 @@ def test_control_a_module_scope_site_of_an_ignored_pair(tmp_path, shape):
     tree, _ = _copy_package(tmp_path)
     text = _MODULE_SCOPE_SHAPES[shape]
     start = _append(tree, "src/cs2rl/train.py", text)
-    planted = start + next(i for i, line in enumerate(text.split("\n")) if "cs2rl.viz" in line)
+    planted = start + next(i
+                           for i, line in enumerate(text.split("\n")) if "cs2rl.viz.render" in line)
     r = _lint(tree)
     assert r.returncode == 0, ("import-linter now rejects a module-scope site of an ignored "
                                "pair; the scope pin's premise changed.\n" + r.stdout + r.stderr)

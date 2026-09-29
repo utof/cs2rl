@@ -70,7 +70,7 @@ TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
 # module-level `from cs2rl.trainer import Cs2PuffeRL` in train.py turns
 # test_import_train_stays_light_and_really_imports_the_shims red naming torch).
 W1_MODULES = ("cs2rl.train_shared", "cs2rl.resume_state", "cs2rl.train_config",
-              "cs2rl.train_metrics", "cs2rl.train_update", "cs2rl.env_factory",
+              "cs2rl.train_metrics", "cs2rl.train_update", "cs2rl.env.factory",
               "cs2rl.eval.metrics_schema", "cs2rl.env.config")
 
 # W1 modules train.py deliberately does NOT import at its module level, and why.
@@ -147,7 +147,7 @@ LEAVES = frozenset({"cs2rl.train_shared", "cs2rl.env.config"})
 # statements inside a def, but neither sees a function-local import that is CALLED at
 # module scope; test_import_train_stays_light_and_really_imports_the_shims, through
 # this entry, does.
-HEAVY = ("torch", "cs2rl.env.nav", "cs2rl.c_env.cs2_env", "rerun")
+HEAVY = ("torch", "cs2rl.env.nav", "cs2rl.env.c.cs2_env", "rerun")
 
 
 def _run_child(body: str) -> subprocess.CompletedProcess:
@@ -253,7 +253,7 @@ assert not heavy, f"`from cs2rl import train_test_harness` pulled {{heavy}}"
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
 
 
-def test_c_env_package_import_stays_light():
+def test_env_c_package_import_stays_light():
     """`import cs2rl.c_env` binds SOURCE_DIR and ZIG_OUT and loads no submodule and no numpy.
 
     WHY: play.py, scripts/bake_nav.py, scripts/sync_action_spec.py and several test
@@ -268,10 +268,10 @@ def test_c_env_package_import_stays_light():
     accept a worktree's file from main.
     """
     r = _run_child(f"""
-import cs2rl.c_env as package
+import cs2rl.env.c as package
 from pathlib import Path
-loaded = sorted(m for m in sys.modules if m.startswith("cs2rl.c_env.") or m == "numpy")
-assert not loaded, f"`import cs2rl.c_env` loaded {{loaded}}: keep its __init__ to pathlib"
+loaded = sorted(m for m in sys.modules if m.startswith("cs2rl.env.c.") or m == "numpy")
+assert not loaded, f"`import cs2rl.env.c` loaded {{loaded}}: keep its __init__ to pathlib"
 here = Path(package.__file__).resolve()
 assert here.is_relative_to({str(REPO_ROOT / "src")!r}), f"imported another checkout's {{here}}"
 assert package.SOURCE_DIR == here.parent, package.SOURCE_DIR

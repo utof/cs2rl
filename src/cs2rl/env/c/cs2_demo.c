@@ -200,7 +200,7 @@ static int resolve_python(const char* repo, char* out, size_t n) {
 }
 
 static void print_borrow_hint(const char* abs_policy, int argc, char** argv) {
-    fprintf(stderr, "cs2_demo: $PYTHON -m cs2rl.play --policy %s", abs_policy);
+    fprintf(stderr, "cs2_demo: $PYTHON -m cs2rl.viz.play --policy %s", abs_policy);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
             i++;
@@ -243,12 +243,12 @@ static int demo_exec_play(int argc, char** argv, const char* policy_path) {
     }
     join_path(abs_python, sizeof(abs_python), abs_parent, base + 1);
 
-    /* python, -m, cs2rl.play, --policy, abs: 5; rest: at most argc - 1; NULL: 1. */
+    /* python, -m, cs2rl.viz.play, --policy, abs: 5; rest: at most argc - 1; NULL: 1. */
     char* eargv[argc + 5];
     int   n    = 0;
     eargv[n++] = abs_python;
     eargv[n++] = "-m";
-    eargv[n++] = "cs2rl.play";
+    eargv[n++] = "cs2rl.viz.play";
     eargv[n++] = "--policy";
     eargv[n++] = abs_policy;
     for (int i = 1; i < argc; i++) {
@@ -264,7 +264,7 @@ static int demo_exec_play(int argc, char** argv, const char* policy_path) {
         print_borrow_hint(abs_policy, argc, argv);
         return 2;
     }
-    /* `-m cs2rl.play` finds cs2rl through sys.path, and a shared venv's editable
+    /* `-m cs2rl.viz.play` finds cs2rl through sys.path, and a shared venv's editable
      * install names ONE checkout's src/. Prepend this repo's src/ to PYTHONPATH
      * (never replace it) so the demo runs the checkout it was found in. */
     const char* old_pp = getenv("PYTHONPATH");
@@ -291,7 +291,7 @@ int main(int argc, char** argv) {
      * both work. Unknown args are silently ignored (keeps backward compat with
      * existing scripts that pass --record, --eval, etc. to the trainer demo).
      *
-     *   --policy PATH : exec `python -m cs2rl.play` (never open a window here).
+     *   --policy PATH : exec `python -m cs2rl.viz.play` (never open a window here).
      *   --spectate : detach camera from any agent (free-fly, render all).
      *   --fog      : human-agent fog-of-war — only draw enemies your agent's
      *                line_of_sight_2d says are visible. Forces you to play

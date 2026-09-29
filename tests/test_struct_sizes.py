@@ -22,8 +22,8 @@ import dataclasses
 
 import pytest
 
-from cs2rl.c_env import binding
-from cs2rl.c_env.cs2_env import (
+from cs2rl.env.c import binding
+from cs2rl.env.c.cs2_env import (
     _C_SIZE_KEYS_CHECKED,
     AgentStateC,
     Dust2EnvC,
@@ -368,7 +368,7 @@ def test_static_data_scalars_round_trip(simple_map):
             absent = sorted(name for name in sentinels if name not in sc)
             assert not absent, (
                 f"config {cfg_i}: make_env kwargs with no static_data_scalars() key: {absent}; add "
-                "SD_INT/SD_FLOAT for them in src/cs2rl/c_env/binding.c and rebuild (see "
+                "SD_INT/SD_FLOAT for them in src/cs2rl/env/c/binding.c and rebuild (see "
                 "test_static_data_scalars_covers_every_scalar_field)")
             wrong = {}
             for name, sent in sentinels.items():
@@ -385,7 +385,7 @@ def test_static_data_scalars_round_trip(simple_map):
             assert not wrong, (
                 f"config {cfg_i} ({_BOOL_SENTINEL_CONFIGS[cfg_i]}): sentinel landed in the wrong "
                 "StaticData field — two of the named assignments in the `static_data` mapping in "
-                "Cs2Env.__init__ (src/cs2rl/c_env/cs2_env.py) carry each other's values. "
+                "Cs2Env.__init__ (src/cs2rl/env/c/cs2_env.py) carry each other's values. "
                 f"{{field: (sent, got, whose_sentinel_got_is)}} = {wrong}")
             # R0-G (Task 11): round_time / laser_range / max_turn_speed are now
             # make_env kwargs, so they are in the config and were checked above.
@@ -508,8 +508,8 @@ def test_every_ctypes_mirror_is_size_guarded():
     src/cs2rl/c_env/binding.c and the (key, mirror) pair to _C_SIZE_MIRRORS. Deleting
     the mirror is the other valid fix; deleting this assert is not.
     """
-    from cs2rl.c_env import cs2_env
-    from cs2rl.c_env.cs2_env import _C_SIZE_MIRRORS
+    from cs2rl.env.c import cs2_env
+    from cs2rl.env.c.cs2_env import _C_SIZE_MIRRORS
     defined = {
         obj.__name__
         for obj in vars(cs2_env).values() if isinstance(obj, type)

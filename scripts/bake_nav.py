@@ -6,7 +6,7 @@ Re-run whenever env/map.py or SIMPLE_ROOMS changes.
 """
 import numpy as np
 
-from cs2rl.c_env import SOURCE_DIR
+from cs2rl.env.c import SOURCE_DIR
 from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
 from cs2rl.env.nav import (
     _DELTA_VECTORS,

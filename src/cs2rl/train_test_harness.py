@@ -58,7 +58,7 @@ from cs2rl.env.config import EnvConfig
 # function-local imports), so importing it here costs nothing.
 # `from ... import build_env_for`, never `from cs2rl import env_factory` — the builder
 # below defines a LOCAL named env_factory, which would shadow the module.
-from cs2rl.env_factory import build_env_for, build_selfplay_manager
+from cs2rl.env.factory import build_env_for, build_selfplay_manager
 
 # The harness's four env-knob defaults are the dataclass's, read once rather
 # than copied. Four literals here would be four more places #165 has to keep in

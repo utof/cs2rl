@@ -1,11 +1,11 @@
 import numpy as np
 import pytest
 
-from cs2rl.c_env import binding
+from cs2rl.env.c import binding
 
 
 def _make_env(map_data=None):
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     env = make_env(seed=0, map_data=map_data)
     return env._capsule, env
 
@@ -84,7 +84,7 @@ def test_agentstate_has_punch_fields():
     """
     import ctypes
 
-    from cs2rl.c_env.cs2_env import AgentStateC, Dust2EnvC, GameStateC
+    from cs2rl.env.c.cs2_env import AgentStateC, Dust2EnvC, GameStateC
     names = [n for n, _ in AgentStateC._fields_]
     # Adjacency + order, NOT a tail slice. The punch pair stopped being the last
     # two fields when Rung 0 (spec 2026-08-29 §2.1) appended
@@ -118,7 +118,7 @@ def test_make_env_writes_recoil_enabled(make_map):
     """
     import dataclasses
 
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     assert "recoil" in {f.name for f in dataclasses.fields(EnvConfig)}
     env = make_env(seed=0, map_data=make_map, config=EnvConfig(recoil=False))
@@ -150,7 +150,7 @@ def test_stepstats_has_plant_tick(make_map):
     """
     import ctypes
 
-    from cs2rl.c_env.cs2_env import Dust2EnvC, StepStatsC
+    from cs2rl.env.c.cs2_env import Dust2EnvC, StepStatsC
     _, env = _make_env(map_data=make_map)
     assert hasattr(env._c_env.episode_stats, "plant_tick")
     env.reset()
@@ -263,7 +263,7 @@ def test_continuous_aim_nan_guard():
     import torch
 
     from cs2rl import train
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     env = make_env(seed=0)
     try:
@@ -367,7 +367,7 @@ def test_continuous_aim_mp_backend_receives_buffer():
 
     import pufferlib.vector
 
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.spec.action import ACTION_DIM, AIM_DIM
 
     # ROUND_TIME=640 ticks; pad MAX_TICKS in case the first ticks are spent
@@ -484,8 +484,8 @@ def test_onnx_export_output_order_pinned():
     from torch import nn
 
     from cs2rl import train
-    from cs2rl.c_env.cs2_env import make_env
     from cs2rl.deploy.export_policy import LSTMPolicyONNXWrapper
+    from cs2rl.env.c.cs2_env import make_env
 
     env = make_env(seed=0)
     try:

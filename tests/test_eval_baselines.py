@@ -22,11 +22,11 @@ import time
 import numpy as np
 import pytest
 
-from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
+from cs2rl.env.c.cs2_env import N_AGENTS, TEAM_SIZE
 
 
 def _arena_env(**kw):
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_arena_duel_map
     base = dict(n_active_per_team=1,
@@ -152,7 +152,7 @@ def test_policy_actor_from_live_policy_fills_all_rows(simple_map):
     trainer, cleanup = _build_trainer_for_test(num_envs=16, map_data=simple_map)
     env = None
     try:
-        from cs2rl.c_env.cs2_env import make_env
+        from cs2rl.env.c.cs2_env import make_env
         env = make_env(map_data=simple_map, seed=1, auto_reset=False)
         ev = BaselineEvaluator(env, episodes=2, seed=0)
         pa = PolicyActor.from_policy(trainer.policy, "cpu")
@@ -201,7 +201,7 @@ def test_evaluate_emits_all_eval_keys_and_keeps_training_rng(simple_map):
     trainer, cleanup = _build_trainer_for_test(num_envs=16, map_data=simple_map)
     env = None
     try:
-        from cs2rl.c_env.cs2_env import make_env
+        from cs2rl.env.c.cs2_env import make_env
         from cs2rl.env.config import EnvConfig
         env = make_env(map_data=simple_map,
                        seed=1,
@@ -337,7 +337,7 @@ def test_hit_geometry_constants_match_cs2_combat_h():
 
     from cs2rl.eval import baselines as eb
 
-    header = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "c_env" /
+    header = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "env" / "c" /
               "cs2_combat.h").read_text()
     pattern = re.compile(r"static const float\s+(EYE_HEIGHT_STAND|EYE_HEIGHT_CROUCH|"
                          r"TORSO_OFFSET_STAND|TORSO_OFFSET_CROUCH)\s*=\s*([0-9.]+)f")

@@ -43,7 +43,7 @@ python-version = "3.12"
 # as pyproject.toml's pytest `pythonpath = ["."]` does at run time.
 search-path = ["src", "."]
 
-# `cs2rl.c_env.binding` is a compiled C extension (binding.cpython-312-*.so) with
+# `cs2rl.env.c.binding` is a compiled C extension (binding.cpython-312-*.so) with
 # no stub. No static checker can introspect a .so; treat it as Any rather than an
 # error.
-ignore-missing-imports = ["cs2rl.c_env.binding"]
+ignore-missing-imports = ["cs2rl.env.c.binding"]

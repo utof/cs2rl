@@ -2,7 +2,7 @@ build/
 build_demo/
 CMakeFiles/
 CMakeCache.txt
-src/cs2rl/c_env/nav_data.h
+src/cs2rl/env/c/nav_data.h
 .worktrees/
 .env
 **/*.npy
@@ -92,7 +92,7 @@ zig-out/
 
 # Built Python extension (inplace build lands next to C sources). The .so is
 # covered by the global *.so rules above; .pyd has no global rule.
-src/cs2rl/c_env/binding*.pyd
+src/cs2rl/env/c/binding*.pyd
 CLAUDE.md
 
 # Editor/agent scratch dir.

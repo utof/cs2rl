@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from cs2rl.env.config import EnvConfig, RewardWeights
-from cs2rl.env_factory import build_env_for, build_selfplay_manager
+from cs2rl.env.factory import build_env_for, build_selfplay_manager
 from cs2rl.resume_state import (
     _rng_load_state_dict,
     _rng_state_dict,
@@ -898,10 +898,10 @@ def record_episode(
         save_path=str(RECORDINGS_DIR / "latest.rrd"),
         map_data=None,
 ):
-    from cs2rl.c_env.cs2_env import make_env as make_c_env
+    from cs2rl.env.c.cs2_env import make_env as make_c_env
     from cs2rl.env.map import make_cs2_map
     from cs2rl.env.nav import CACHE_PATH, NAV_PATH
-    from cs2rl.viz import init_recording, log_navmesh, log_tick, log_trimap
+    from cs2rl.viz.render import init_recording, log_navmesh, log_tick, log_trimap
 
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -914,7 +914,7 @@ def record_episode(
         log_trimap()
         log_navmesh(md.nav_graph)
     else:
-        from cs2rl.viz import log_simple_map
+        from cs2rl.viz.render import log_simple_map
 
         log_simple_map(env.map_data)
 

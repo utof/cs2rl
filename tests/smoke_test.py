@@ -8,8 +8,8 @@ import pytest
 
 @pytest.mark.performance
 def test_c_env_smoke():
-    from cs2rl.c_env import SOURCE_DIR
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c import SOURCE_DIR
+    from cs2rl.env.c.cs2_env import make_env
 
     # From the package, never the cwd: a relative glob found nothing from any other directory.
     so_files = list(SOURCE_DIR.glob("binding.cpython-*.so"))

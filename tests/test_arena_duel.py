@@ -134,7 +134,7 @@ def test_dir_facing_3_is_plus_x_and_7_is_minus_x():
 
 
 def test_env_runs_and_spawns_in_columns():
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_arena_duel_map
     env = make_env(map_data=make_arena_duel_map(),
@@ -172,7 +172,7 @@ def _best_bias_only_score(md, seed, n_rounds=16, ticks=160):
     holds and shoots every tick; agent 5 (CT) is a statue. Returns the best
     over 13 constants of min(kills/ep ÷ 0.5, hit/facing ÷ 0.45) — both §5
     bullets normalised by their thresholds, so ≥ 1.0 means "passes both"."""
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     env = make_env(map_data=md,
                    config=EnvConfig(n_active_per_team=1,
@@ -237,8 +237,8 @@ def test_arena_survives_solids_bake():
     every T→CT lane clear at standing eye height. A ray that leaves the arena
     is blocked, proving the list is live (an empty bake would make every
     ray "clear")."""
-    from cs2rl.c_env import binding
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c import binding
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_arena_duel_map
     md = make_arena_duel_map()

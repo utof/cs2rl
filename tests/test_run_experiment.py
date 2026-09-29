@@ -80,12 +80,13 @@ def _init_fake_repo(tmp_path: Path) -> Path:
     # first on PYTHONPATH. The __init__.py is load-bearing: without it this cs2rl
     # is a namespace portion, and a regular `cs2rl` package later on the path wins.
     pkg = tmp_path / "src" / "cs2rl"
-    (pkg / "c_env").mkdir(parents=True)
+    (pkg / "env" / "c").mkdir(parents=True)
     (pkg / "__init__.py").write_text("")
     (pkg / "train.py").write_text("OBS_DIM = 105\nACTION_HEAD_SIZES = (9, 2, 2, 3, 2, 2, 2)\n")
-    (pkg / "c_env" / "cs2_rewards.h").write_text("#define INACTION_PENALTY -0.0005f\n"
-                                                 "static const float terminal_win_bonus = 1.0f;\n")
-    (pkg / "c_env" / "cs2_env.c").write_text("float plant_progress_reward = 0.05f;\n")
+    (pkg / "env" / "c" / "cs2_rewards.h").write_text(
+        "#define INACTION_PENALTY -0.0005f\n"
+        "static const float terminal_win_bonus = 1.0f;\n")
+    (pkg / "env" / "c" / "cs2_env.c").write_text("float plant_progress_reward = 0.05f;\n")
     (tmp_path / "outputs").mkdir()
     (tmp_path / "outputs" / "checkpoints").mkdir()
     (tmp_path / "outputs" / "experiments").mkdir()
@@ -144,7 +145,7 @@ def test_precondition_dirty_tree_fails(tmp_path):
 def test_precondition_changed_files_mismatch_fails(tmp_path):
     repo = _init_fake_repo(tmp_path)
     (repo / "src" / "cs2rl" / "train.py").write_text("OBS_DIM = 999\n")
-    r = _run(repo, *_BASE_ARGS, "--changed-files", "src/cs2rl/c_env/cs2_env.c")
+    r = _run(repo, *_BASE_ARGS, "--changed-files", "src/cs2rl/env/c/cs2_env.c")
     assert r.returncode != 0
     err = (r.stdout + r.stderr).lower()
     assert "mismatch" in err or "declared" in err or "changed-files" in err

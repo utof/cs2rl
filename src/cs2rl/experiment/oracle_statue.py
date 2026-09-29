@@ -132,7 +132,7 @@ import math
 
 import numpy as np
 
-from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
+from cs2rl.env.c.cs2_env import N_AGENTS, TEAM_SIZE
 from cs2rl.eval.baselines import (
     ACTION_DIM,
     AIM_DIM,
@@ -229,7 +229,7 @@ def build_env(seed: int, round_time: int = ROUND_TIME):
     the check is that it runs the env the smoke runs. A caller that wants a
     different env is asking a different question and should say so in code.
     """
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_arena_duel_map
     return make_env(config=EnvConfig(n_active_per_team=N_ACTIVE_PER_TEAM,

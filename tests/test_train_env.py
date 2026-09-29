@@ -9,7 +9,7 @@ self-play state (``Cs2PuffeRL._init_selfplay`` / ``evaluate``, gh#168 W2b).
 import numpy as np
 
 from cs2rl import train
-from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env.c.cs2_env import make_env
 
 
 def test_make_env_reset_returns_expected_batch():
@@ -952,7 +952,7 @@ def test_obs_dim_constant_consistency():
     # same import-cost reason as OBS_DIM, so it needs the same drift guard —
     # it divides the participating-step budget and builds the per-row
     # participation vector.
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
     assert t.TEAM_SIZE == nav.TEAM_SIZE == cs2_env.TEAM_SIZE, (
         f"train.TEAM_SIZE ({t.TEAM_SIZE}) / nav.TEAM_SIZE ({nav.TEAM_SIZE}) / "
         f"cs2_env.TEAM_SIZE ({cs2_env.TEAM_SIZE}) disagree")
@@ -970,9 +970,9 @@ def test_team_size_literals_agree():
     refuse to import nav just to read a 5). This is the cross-check that makes
     the literals safe (spec 2026-09-03 §2.1)."""
     from cs2rl import train_shared
-    from cs2rl.c_env.cs2_env import TEAM_SIZE as c_team
     from cs2rl.env import config as env_config
     from cs2rl.env import nav
+    from cs2rl.env.c.cs2_env import TEAM_SIZE as c_team
     assert env_config.TEAM_SIZE == train_shared.TEAM_SIZE == nav.TEAM_SIZE == c_team
 
 
@@ -2049,7 +2049,7 @@ def test_strafe_labels_match_geometry():
     for scripted experts, BC demos, and deploy key export."""
     import math
 
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     env = make_env(seed=0, auto_reset=False)
     try:
@@ -2095,7 +2095,7 @@ def test_enemy_slot_sort_does_not_leak_invisible_rank():
 
     Invisibility here is forced via area_idx = -1 — build_vis_matrix
     short-circuits off-mesh agents to can_see=0 regardless of position."""
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.spec.obs import OBS_BLOCKS, OBS_ENEMY_STRIDE
 
     env = make_env(seed=0, auto_reset=False)

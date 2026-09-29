@@ -92,6 +92,6 @@ class ZigBuild(build_ext):
 
 
 setup(
-    ext_modules=[ZigExtension("cs2rl.c_env.binding", source_dir="src/cs2rl/c_env")],
+    ext_modules=[ZigExtension("cs2rl.env.c.binding", source_dir="src/cs2rl/env/c")],
     cmdclass={"build_ext": ZigBuild},
 )
