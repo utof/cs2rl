@@ -6,7 +6,8 @@ docstrings excluded. An f-string is read whole, each replacement field kept as
   (a) a `cs2rl.<dotted>` name names a module (importlib.util.find_spec), or a
       module plus an attribute, whether it is the whole string or sits inside a
       longer one (a `sys.modules` check, an `-m` launch, a message). A name inside
-      an import line is left to (b). The attribute is looked up in the module
+      a cs2rl import statement is left to (b); the rest of that line is still (a)'s.
+      The attribute is looked up in the module
       file's top-level AST bindings, so no module is imported except the packages
       find_spec imports as parents.
   (b) every line inside a string that starts `from cs2rl... import` or
@@ -241,16 +242,31 @@ def import_line_problem(line: str, continuation: str) -> str | None:
     `continuation` is the rest of the string after `line`, read only to finish a
     parenthesised name list. `line` starts with a cs2rl import; each later
     `;`-joined statement is checked too if it is an `import` or a `from cs2rl`.
-    PITFALL: failures_in hands the WHOLE line to this clause and (a) skips it, so a
-    second statement checked nowhere else (`from cs2rl.env import nav; import
-    cs2rl.nav`) would be invisible.
+    PITFALL: (a) skips exactly the statements this clause reads (_import_statements),
+    so a later import statement checked only by the first (`from cs2rl.env import
+    nav; import cs2rl.nav`) would be read by nothing.
     """
-    first, *rest = (s.strip() for s in line.split(";"))
-    for statement in [first] + [s for s in rest if re.match(r"import\s|from\s+cs2rl\b", s)]:
-        problem = _statement_problem(statement, continuation)
+    for _, statement in _import_statements(line):
+        problem = _statement_problem(statement.strip(), continuation)
         if problem:
             return problem
     return None
+
+
+def _import_statements(line: str) -> list[tuple[int, str]]:
+    """(offset in `line`, text) of each `;`-joined statement that (b) checks on `line`.
+
+    The first is the cs2rl import the line starts with. A later one counts if it is
+    an `import` or a `from cs2rl`. failures_in leaves exactly these spans to (b), so
+    a later statement that is not an import (`from cs2rl.env import nav; assert
+    "cs2rl.nav" not in sys.modules`) is still read by (a). Skipping the whole line
+    hid that name from both clauses. The offsets come from re.finditer, not a running
+    sum: an off-by-one there shifts each later span left by one per `;`, which no
+    realistic line would reveal.
+    """
+    return [(m.start(), m.group()) for i, m in enumerate(re.finditer(r"[^;]+", line))
+            if i == 0 or re.match(r"import\s|from\s+cs2rl\b",
+                                  m.group().strip())]
 
 
 def _statement_problem(statement: str, continuation: str) -> str | None:
@@ -351,13 +367,16 @@ def failures_in(relative: str, source: str):
     for scope, line, value in string_occurrences(source):
         found = []
         imports = list(_IMPORT_LINE.finditer(value))
+        # The spans of the import statements (b) reads: a name inside one is (b)'s, and (a)
+        # would report it a second time, under a second EXEMPT key. Only those statements,
+        # not their whole line: see _import_statements.
+        spans = [(i.start() + offset, i.start() + offset + len(part)) for i in imports
+                 for offset, part in _import_statements(i.group(0))]
         if _DOTTED.fullmatch(value):
             found.append(("a", value, dotted_problem(value)))
         else:
-            # A name inside an import line is (b)'s: (a) would report it a second time,
-            # under a second EXEMPT key.
             for m in _EMBEDDED.finditer(value):
-                if not any(i.start() <= m.start() < i.end() for i in imports):
+                if not any(start <= m.start() < end for start, end in spans):
                     found.append(("a", m.group(0), dotted_problem(m.group(0))))
         for m in imports:
             found.append(("b", m.group(0).strip(), import_line_problem(m.group(0),
@@ -420,8 +439,9 @@ def test_clause_a_fails_a_moved_name_a_deleted_member_and_an_untracked_module():
     """(a) fails a module name #205 moved, a member it deleted, and a name that
     resolves only to an untracked file, whole or inside a longer string (a guard's
     `sys.modules` check, an `-m` launch); it passes the new names, a word that only
-    ends in `cs2rl`, and skips docstrings. That (a) leaves import lines to (b) is
-    pinned by the single (b) entries in the next test.
+    ends in `cs2rl`, and skips docstrings. That (a) leaves import statements to (b)
+    is pinned by the single (b) entries in the next test; that it still reads the
+    rest of their line, by the last case here.
 
     PITFALL: cs2rl.c_env.binding fails as untracked where the zig .so is built and
     as missing where it is not; either way it must fail, or a leftover .so could
@@ -440,6 +460,12 @@ def test_clause_a_fails_a_moved_name_a_deleted_member_and_an_untracked_module():
     assert _failing("S = 'python -m cs2rl.bc_demo --out x'\n") == [("a", "cs2rl.bc_demo")]
     assert _failing("S = 'assert \"cs2rl.env.nav\" not in sys.modules'\n"
                     "T = 'python -m cs2rl.bc_demos'\nU = 'build/libcs2rl.so'\n") == []
+    # After a cs2rl import on the same line: (b) reads only the import, so (a) must
+    # read the rest.
+    assert _failing(
+        "S = 'from cs2rl.env import nav; assert \"cs2rl.nav\" not in sys.modules'\n") == [
+            ("a", "cs2rl.nav")
+        ]
 
 
 def test_clause_b_fails_a_stale_import_in_every_spelling():
