@@ -52,7 +52,7 @@ TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
 # whose module scope is MOST tempting to make heavy, since its whole job is
 # constructing envs. Two function-local imports carry the two reasons: `from
 # cs2rl.env.c.cs2_env import make_env` in `build_env_for` stays function-local so
-# `from cs2rl import train` stays free of torch/nav/c_env, and `from cs2rl.train import
+# `from cs2rl import train` stays free of torch/nav/env.c, and `from cs2rl.train import
 # SelfPlayManager` in `build_selfplay_manager` stays function-local to break
 # the cycle (train.py imports env.factory at module level).
 #

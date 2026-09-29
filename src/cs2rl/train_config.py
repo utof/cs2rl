@@ -19,7 +19,7 @@ train.py for ``add_argument`` literals and source-scan THIS file for
 ``OPPONENT_MODES`` / ``compute_batch_dims`` — the two halves of the CLI contract
 now live in two files and both are pinned.
 
-IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/c_env-free, for the
+IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in train_shared.py's header — ``--dump-config`` reaches
 build_train_config and must still cost no torch/nav import.
 """

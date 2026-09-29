@@ -11,7 +11,7 @@ WHY (gh#165, ADR 0003): before this module the same 23 defaults were declared in
 here, is the fix.
 
 IMPORT BUDGET: stdlib ONLY. `env.c.cs2_env` (layer L1) imports this module, and
-`train.py --dump-config` must stay free of torch/nav/c_env, so nothing heavier
+`train.py --dump-config` must stay free of torch/nav/env.c, so nothing heavier
 than `dataclasses` may ever be imported here. `TEAM_SIZE` is a literal for the
 same reason `train_shared.py` carries one: `nav` costs awpy/polars to read a 5.
 tests/test_train_env.py cross-checks it against nav.TEAM_SIZE.

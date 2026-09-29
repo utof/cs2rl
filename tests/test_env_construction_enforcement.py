@@ -149,7 +149,7 @@ ANCHORS = ("src/cs2rl/train.py", "src/cs2rl/train_test_harness.py", "src/cs2rl/e
 # of this fix said "at all three files that import it", which is false twice
 # over: the alias is a MINORITY spelling, and this file's own guard list holds
 # five counterexamples. Measured 2026-09-11 by AST — every `ImportFrom` of
-# `env.c.cs2_env.make_env` — and the instrument matters: over the three roots
+# `c_env.cs2_env.make_env` — and the instrument matters: over the three roots
 # `git grep -lE 'from c_env\.cs2_env import make_env as '` reports FIVE files
 # while the AST reports THREE, because two of the five are TEST files carrying
 # that line only in prose or inside a plant string — this one (three times: the

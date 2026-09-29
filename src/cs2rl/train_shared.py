@@ -17,7 +17,7 @@ free of torch, nav and env.c. train.py imports this module at ITS module level,
 and ``train.py --dump-config`` guarantees no torch/nav import
 (tests/test_train_cli.py::test_dump_config_writes_json — "zero side-effects"),
 so a heavy import added here silently costs every --dump-config call ~30 s and
-breaks the Modal/run_rung1 fingerprint step. Every torch/nav/c_env import below
+breaks the Modal/run_rung1 fingerprint step. Every torch/nav/env.c import below
 is function-local ON PURPOSE. tests/test_w1_modules.py enforces this in a fresh
 interpreter.
 """
