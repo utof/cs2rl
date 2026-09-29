@@ -782,54 +782,6 @@ def init_policy_state(policy, device):
     }
 
 
-def init_obs_buffer():
-    return {aid: np.zeros((OBS_DIM, ), dtype=np.float32) for aid in AGENT_IDS}
-
-
-def update_obs_buffer(obs_buffer, obs, terms=None, truncs=None):
-    for aid, ob in obs.items():
-        obs_buffer[aid] = ob
-
-    for aid in AGENT_IDS:
-        if aid not in obs:
-            obs_buffer[aid].fill(0.0)
-
-
-def select_policy_actions(policy, obs_buffer, active_agents, device, policy_state, policy_mode):
-    import torch
-
-    if policy_mode == "random":
-        raise ValueError("Random action selection should bypass select_policy_actions")
-
-    obs_arr = np.stack([obs_buffer[aid] for aid in AGENT_IDS])
-    obs_t = torch.as_tensor(obs_arr, device=device)
-
-    with torch.no_grad():
-        # Batch 3 (T5): policy now emits 4-tuple (logits, mu_aim, log_std, value).
-        # This helper is eval/inspection only, and nothing calls it today —
-        # record_episode uses select_policy_actions_native. It does not return the
-        # continuous (Δyaw) component, so the sampled cont_t is dropped on the
-        # floor. The cont_action is still SAMPLED (sample mode) so the policy
-        # state advances identically to training; we just don't emit it. If a
-        # future eval path needs Δyaw, return (act_dict, cont_dict) — keeping
-        # the int-action signature for now (no caller exists to adapt today).
-        logits, mu_aim, log_std_aim, _ = policy.forward_eval(obs_t, policy_state)
-        if policy_mode == "sample":
-            # Fix #1: 6-tuple return; only need action + cont (logp/entropy unused here).
-            act_t, _cont_t, *_ = _hybrid_sample_logits(
-                (logits, mu_aim, log_std_aim, None),
-                max_turn_speed=policy.max_turn_speed.item(),
-            )
-        else:
-            # Greedy: argmax discrete + μ-only continuous (no exploration).
-            # Greedy callers care about deterministic playback, so the σ noise
-            # would actively hurt — μ_aim is the policy's best guess.
-            act_t = torch.stack([head.argmax(dim=-1) for head in logits], dim=-1)
-
-    act_np = act_t.cpu().numpy().astype(np.int64)
-    return {aid: act_np[i] for i, aid in enumerate(AGENT_IDS) if aid in active_agents}
-
-
 def select_policy_actions_native(policy, obs, device, policy_state, policy_mode):
     """Run policy in eval mode; return BOTH discrete and continuous actions.
 
@@ -3311,8 +3263,9 @@ if __name__ == "__main__":
     # copies of it: two sets of module-level constants, two of every class object, and
     # `isinstance` between them silently False. eval_baselines does exactly that
     # import, function-locally inside PolicyActor.__init__ and
-    # PolicyActor.from_checkpoint, to dodge a circular top-level import — so a
-    # plain `--eval-interval N` script run is enough to trigger it.
+    # PolicyActor.from_checkpoint (a pair that cycles only through function-local
+    # imports; see the comment there) — so a plain `--eval-interval N` script run
+    # is enough to trigger it.
     #
     # WHY setdefault and not `=`: under `from cs2rl import train` (the whole test
     # suite, scripts/, the Modal runner) "cs2rl.train" is already a real,

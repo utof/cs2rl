@@ -604,17 +604,6 @@ NAV_PATH = _resolve_nav_path()
 CACHE_PATH = str(pathlib.Path(__file__).with_name("vis_cache.npy"))
 
 
-def _snap_to_nav(nav_graph: NavGraph, xyz) -> int:
-    if len(xyz) >= 3:
-        pt = np.asarray(xyz[:3], dtype=np.float32)
-        diff = nav_graph._centroid_matrix_3d - pt
-    else:
-        pt = np.asarray(xyz[:2], dtype=np.float32)
-        diff = nav_graph._centroid_matrix - pt
-    idx = int(np.argmin((diff * diff).sum(axis=1)))
-    return nav_graph.area_ids[idx]
-
-
 def _areas_near(nav_graph: NavGraph, xy, radius: float):
     pt = np.asarray(xy[:2], dtype=np.float32)
     diff = nav_graph._centroid_matrix - pt

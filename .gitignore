@@ -109,3 +109,7 @@ CLAUDE.md
 # errors (64.9%) were they new. Nothing stops `pyrefly check --update-baseline`
 # from recreating the file, so it is ignored rather than merely deleted.
 pyrefly-baseline.json
+
+# import-linter's on-disk cache, written into cwd by a bare `lint-imports`. The suite
+# and the documented checks pass --no-cache, but the default run does not.
+.import_linter_cache/
