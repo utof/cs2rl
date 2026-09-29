@@ -102,11 +102,17 @@ ROOTS = {
 
 
 def test_every_source_is_represented():
-    """Each consumer contributes cases, so an emptied source cannot pass vacuously."""
+    """Each consumer contributes cases, and each module its root, so neither passes vacuously.
+
+    PITFALL: ROOTS is a dict, and deleting its row deletes the only case that
+    would object: the root parametrize below just runs one case fewer.
+    """
     labels = [label for label, _ in CASES]
     for prefix in ("DEMO_RELEVANT_PATHS:", "run_experiment.", "metrics_census.", "MANIFEST.in:",
                    "setup.py:"):
         assert any(label.startswith(prefix) for label in labels), f"no case from {prefix}"
+    for module in ("run_experiment", "metrics_census"):
+        assert f"{module}.REPO_ROOT" in ROOTS, f"{module}'s root is not pinned in ROOTS"
 
 
 @pytest.mark.parametrize("name", sorted(ROOTS))
@@ -123,6 +129,17 @@ def test_root_constant_is_this_checkouts_root(name):
         "points into the wrong tree. Fix its `parents[N]`.")
 
 
+def _collectable_files_under(directory: Path) -> list[str]:
+    """Each file under `directory`, at any depth, that pytest's default patterns collect.
+
+    Relative to `directory`, sorted. PITFALL: rglob, never glob: pytest collects
+    a test file one directory down just the same.
+    """
+    return sorted(
+        p.relative_to(directory).as_posix() for p in directory.rglob("*.py")
+        if p.name.startswith("test_") or p.name.endswith("_test.py"))
+
+
 def test_helpers_hold_no_collectable_file():
     """tests/_helpers/ holds no test file (#207).
 
@@ -130,11 +147,25 @@ def test_helpers_hold_no_collectable_file():
     flat, non-recursive `(ROOT / "tests").glob(...)` (tests/test_modal_packaging.py,
     tests/test_modal_preflight.py, tests/test_modal_training.py) would miss it.
     """
-    helpers = REPO_ROOT / "tests" / "_helpers"
-    found = sorted(
-        p.relative_to(REPO_ROOT).as_posix() for p in helpers.rglob("*.py")
-        if p.name.startswith("test_") or p.name.endswith("_test.py"))
+    found = _collectable_files_under(REPO_ROOT / "tests" / "_helpers")
     assert not found, f"move these test files out of tests/_helpers/: {found}"
+
+
+def test_the_helpers_scan_finds_a_test_file_at_any_depth(tmp_path):
+    """The scan above on a tmp tree: both patterns, flat and nested; near-misses skipped.
+
+    The real tests/_helpers/ holds no test file, so the check above is green
+    whether or not its scan works; this is its positive control. PITFALL
+    guarded: a flat glob() passes a test file one directory down (the #207
+    verifier's surviving V19 mutant).
+    """
+    for name in ("test_flat.py", "flat_test.py", "sub/test_x.py", "sub/deeper/y_test.py",
+                 "helper.py", "sub/testing.py", "sub/test_data.txt"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("")
+    assert _collectable_files_under(tmp_path) == [
+        "flat_test.py", "sub/deeper/y_test.py", "sub/test_x.py", "test_flat.py"
+    ]
 
 
 @pytest.mark.parametrize("path", [p for _, p in CASES], ids=[label for label, _ in CASES])

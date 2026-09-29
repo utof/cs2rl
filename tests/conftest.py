@@ -96,8 +96,11 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
 #
 # Neither tests/ nor scripts/ has an __init__.py (tests/ since #207; scripts/
 # never had one), so each is a PEP 420 namespace package. CPython builds a
-# namespace package's __path__ from EVERY same-named directory on sys.path, and
-# recomputes it whenever sys.path changes or importlib.invalidate_caches() runs.
+# namespace package's __path__ from EVERY same-named directory without an
+# __init__.py on sys.path, and recomputes it whenever sys.path changes or
+# importlib.invalidate_caches() runs. (A same-named directory WITH an
+# __init__.py, anywhere on sys.path, is a regular package: it wins outright over
+# namespace portions for an import that has not run yet, replacing ours.)
 # So a second `tests/` anywhere on sys.path (another checkout's root, e.g. main's
 # while a worktree is tested) becomes part of this checkout's `tests`, and a
 # `tests.X` that this checkout lacks loads SILENTLY from the other tree instead
@@ -109,25 +112,32 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
 #       module stops the session, naming the entry and the name.
 #   (d) at session end, in the pytest_runtestloop wrapper below: every
 #       `tests`, `tests.*`, `scripts` or `scripts.*` module in sys.modules whose
-#       __file__, or a __path__ entry, lies outside ITS OWN package directory
-#       (REPO_ROOT/tests or REPO_ROOT/scripts) fails the session, naming each
-#       such module and path. It catches what reaches sys.path after (c) ran.
+#       __file__, or a __path__ entry, is not where its dotted name puts it in
+#       ITS OWN package directory (`tests.a.b` is REPO_ROOT/tests/a/b: that
+#       directory, its __init__ file, or a/b.<importable suffix>) fails the
+#       session, naming each such module and path. It catches a tree that
+#       reached sys.path after (c) ran, wherever that tree sits, inside tests/
+#       or scripts/ included, as long as a module it served is still loaded at
+#       the end (LIMIT 1).
 # tests/test_namespace_guard.py pins both halves, with positive controls
 # (including the nested layout) and a negative control.
 #
 # PITFALLS.
-#   * Never compare against REPO_ROOT itself. Worktrees live in
+#   * Never compare against a directory prefix. Worktrees live in
 #     <main>/.worktrees/, so another checkout's tests/ can sit UNDER this root:
-#     "under REPO_ROOT" does not mean "ours". (c) skips only the root itself, by
-#     os.path.samefile (the drive is mounted under two names), and (d) compares
-#     each module with its own package directory.
+#     "under REPO_ROOT" does not mean "ours", and neither does "under
+#     REPO_ROOT/tests" (a tree at REPO_ROOT/tests/x/tests merges just the same).
+#     (c) skips only the root itself, by os.path.samefile (the drive is mounted
+#     under two names), and (d) compares each place with the exact location the
+#     module's own name implies.
 #   * `''` on sys.path is the cwd (`python -c`; `python -m pytest` puts the
 #     absolute cwd there instead), so (c) takes every entry against the cwd.
 #     Measured at #207, the only entry holding either name is the root itself
 #     (pyproject.toml's `pythonpath = ["."]`, and sys.path[0] under `python -m
 #     pytest` from the root): the stdlib, site-packages and the src/ entries hold
 #     none. A future dependency that ships a top-level `tests` or `scripts` stops
-#     the session at (c), which is right: its modules would merge into ours.
+#     the session at (c), which is right: its modules would merge into ours, or
+#     (a regular package, with __init__.py) replace them.
 #
 # LIMITS.
 #   1. (d) inspects a snapshot of sys.modules at session end. A foreign module
@@ -140,6 +150,10 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
 #      or other non-directory entry.
 #   3. Imports made in a child process are invisible to both halves, as to the
 #      one-module-object guard: a child is checked only if it loads this conftest.
+#   4. (d) judges a module by its places alone. One with neither a string
+#      __file__ nor a __path__ (a stub put in sys.modules by hand, or the empty
+#      parent pytest's importlib mode inserts for a package it cannot import) is
+#      never reported.
 #   Under `-x` with a failure, or with collection errors, pytest stops before
 #   (d) runs; that session fails anyway, and only the report is lost.
 _NAMESPACE_PACKAGES = ("tests", "scripts")
@@ -151,8 +165,9 @@ def namespace_entry_problems(root: Path, path_entries: Iterable[str]) -> list[st
     One problem per entry and name, naming both and the file or directory found.
     `''` and any relative entry are taken against the cwd, which the message then
     names. An entry that does not exist holds nothing and is skipped. A
-    directory counts by its name alone (a namespace portion needs no
-    __init__.py); a file counts with an importable suffix.
+    directory counts by its name alone: a namespace portion needs no
+    __init__.py, and one WITH an __init__.py is a regular package that replaces
+    ours outright. A file counts with an importable suffix.
     """
     problems = []
     for entry in path_entries:
@@ -179,25 +194,44 @@ def namespace_entry_problems(root: Path, path_entries: Iterable[str]) -> list[st
 
 def namespace_modules_outside_their_package(modules: Mapping[str, object],
                                             root: Path) -> dict[str, list[str]]:
-    """(d): map each `tests`/`scripts` module with a place outside its own package dir to those places.
+    """(d): map each `tests`/`scripts` module with a place other than its name's to those places.
 
     A module's places are its string `__file__` and its `__path__` entries. Its
-    own package directory is `root / <top-level name>`, both resolved, so a
-    symlink or the drive's second mount name is no false alarm. PITFALL: never
-    `root` itself, which a checkout nested under it (<main>/.worktrees/x) passes.
+    home is where its dotted name puts it under `root / <top-level name>`:
+    `tests.a.b` is `<root>/tests/a/b` as a package directory, a `b/__init__` file
+    or an `a/b` module file, each with any importable suffix (source, bytecode,
+    extension). Every place that is not one of those is reported. Both sides are
+    resolved, so a symlink or the drive's second mount name is no false alarm.
+
+    PITFALL: never a prefix compare, against `root` OR against its own package
+    directory: a checkout nested under the root (<main>/.worktrees/x) passes the
+    first, and a tree nested inside tests/ itself (<root>/tests/x/tests) passes
+    the second.
     """
     own = {name: (root / name).resolve() for name in _NAMESPACE_PACKAGES}
+    init_names = {f"__init__{suffix}" for suffix in _IMPORTABLE_SUFFIXES}
     outside: dict[str, list[str]] = {}
     # A copy: sys.modules can change size mid-iteration when another thread imports.
     for name, module in list(modules.items()):
-        package = own.get(name.partition(".")[0])
+        top, _, rest = name.partition(".")
+        package = own.get(top)
         if package is None:
             continue
         file = getattr(module, "__file__", None)
         places = [file] if isinstance(file, str) else []
         # A namespace package's __path__ is recomputed from sys.path as it is read.
         places += [p for p in getattr(module, "__path__", None) or () if isinstance(p, str)]
-        foreign = [p for p in places if not Path(p).resolve().is_relative_to(package)]
+        # `tests.a.b` -> <root>/tests/a/b; `tests` itself when `rest` is "". Each is
+        # resolved on its own: a symlinked package directory must not move the parent.
+        implied = package.joinpath(*rest.split("."))
+        home, parent = implied.resolve(), implied.parent.resolve()
+        module_names = {f"{implied.name}{suffix}" for suffix in _IMPORTABLE_SUFFIXES}
+        foreign = []
+        for place in places:
+            where = Path(place).resolve()
+            if not (where == home or (where.parent == home and where.name in init_names) or
+                    (where.parent == parent and where.name in module_names)):
+                foreign.append(place)
         if foreign:
             outside[name] = foreign
     return outside

@@ -6,8 +6,8 @@ WHY (#207). tests/ has no __init__.py since pytest moved to importlib mode, so
 tree on sys.path (another checkout's root) then serves any `tests.X` that this
 checkout lacks, silently. The guard has two halves: (c) stops a session whose
 sys.path, at the start, holds either name outside this checkout's root, and (d)
-fails a session that ends holding a `tests`/`scripts` module from outside its
-own package directory.
+fails a session that ends holding a `tests`/`scripts` module from anywhere but
+the place its dotted name implies in this checkout.
 
 1. Child pytest sessions, as in tests/test_checkout_resolution.py: each loads
 the real conftest as a plugin (`-p tests.conftest`) over one planted test, with
@@ -22,10 +22,10 @@ a `pytest.ini` in its tmp dir so the repo's own config stays out of it.
   - negative control: no foreign dir, and a plant that imports real `tests.*`
     and `scripts.*` modules, passes.
 2. The two functions on synthetic inputs, for what a child session cannot build
-without writing into the checkout: the NESTED layout, a foreign checkout UNDER
-the root the check compares against (<root>/.worktrees/x, where this repo's
-worktrees live). A committed test never writes into the checkout, so the root
-here is a tmp dir.
+without writing into the checkout: the NESTED layouts, a foreign checkout UNDER
+the root (<root>/.worktrees/x, where this repo's worktrees live) and a foreign
+tree inside our own tests/ (<root>/tests/_sim/x/tests). A committed test never
+writes into the checkout, so the root here is a tmp dir.
 
 PITFALL: every child PREPENDS to the inherited PYTHONPATH, never replaces it.
 The inherited value is what put this checkout's src/ first, and replacing it
@@ -35,6 +35,7 @@ import os
 import subprocess
 import sys
 import types
+from importlib.machinery import EXTENSION_SUFFIXES
 from pathlib import Path
 
 import pytest
@@ -143,15 +144,18 @@ def _heads(problems: list[str]) -> list[str]:
     return [problem[:problem.index(").") + 1] for problem in problems]
 
 
-@pytest.mark.parametrize("case",
-                         ["tests-dir", "scripts-dir", "tests-module", "nested-checkout", "cwd"])
+@pytest.mark.parametrize(
+    "case",
+    ["tests-dir", "scripts-dir", "tests-module", "regular-package", "nested-checkout", "cwd"])
 def test_the_start_check_names_each_foreign_entry_and_name(tmp_path, monkeypatch, case):
     """(c) on sys.path lists: every entry but the root itself that holds either name.
 
     `nested-checkout` is the nested layout: <root>/.worktrees/x is under the
     root, and is still another checkout, so "under the root" must not pass.
-    `tests-module` is a module file, not a directory. `cwd` is the entry `''`,
-    which the message must resolve to the directory it means.
+    `tests-module` is a module file, not a directory. `regular-package` is a
+    `tests/` WITH an __init__.py: not a namespace portion, but worse, since it
+    replaces our `tests` outright, so the check must not exempt it. `cwd` is
+    the entry `''`, which the message must resolve to the directory it means.
     """
     root = _checkout(tmp_path / "root")
     entry = tmp_path / "other"
@@ -166,6 +170,8 @@ def test_the_start_check_names_each_foreign_entry_and_name(tmp_path, monkeypatch
     else:
         name = "scripts" if case == "scripts-dir" else "tests"
         (entry / name).mkdir(parents=True)
+        if case == "regular-package":
+            (entry / name / "__init__.py").write_text("")
         expected = [(name, name)]
     path_entry, shown = str(entry), repr(str(entry))
     if case == "cwd":
@@ -212,22 +218,44 @@ def _module(name: str,
     return module
 
 
-@pytest.mark.parametrize("case",
-                         ["nested-checkout", "nested-scripts", "the-other-package", "another-tree"])
+@pytest.mark.parametrize("case", [
+    "nested-checkout", "nested-in-own-package", "nested-scripts", "the-other-package",
+    "misnamed-in-own-package", "another-tree"
+])
 def test_the_end_check_reports_a_module_outside_its_own_package_directory(tmp_path, case):
-    """(d) on module maps: every place outside `<root>/tests` or `<root>/scripts` is named.
+    """(d) on module maps: every place but the one the module's dotted name implies is named.
 
     `nested-checkout` is THE nested-layout control, the shape of the #207
     confirmation's plant: a worktree under the root (<root>/.worktrees/x) whose
     `tests/` merged into ours and served a module. Every path in it is under the
     root, so a check against the root itself passes it silently. It covers both
     places, the portion in `tests.__path__` and the module's `__file__`.
+    `nested-in-own-package` is the same one level down, the #207 verifier's
+    HOLE: a foreign tree at <root>/tests/_sim/x/tests is under our own tests/,
+    so a check against the package directory passes it silently.
     `the-other-package` is a `tests` module under the root's scripts/: its OWN
-    package directory decides, not either one.
+    package directory decides, not either one. `misnamed-in-own-package` pins
+    that the name decides the exact place: a module file or package `__init__`
+    in our own tests/ under another name is not home.
     """
     root = _checkout(tmp_path / "root")
     nested = root / ".worktrees" / "x"
-    if case == "nested-checkout":
+    if case == "nested-in-own-package":
+        inner = root / "tests" / "_sim" / "x" / "tests"
+        file = inner / "nested_evil.py"
+        modules = {
+            "tests": _module("tests", path=[root / "tests", inner]),
+            "tests.nested_evil": _module("tests.nested_evil", file=file),
+        }
+        expected = {"tests": [str(inner)], "tests.nested_evil": [str(file)]}
+    elif case == "misnamed-in-own-package":
+        other, helper = root / "tests" / "beta.py", root / "tests" / "pkg" / "helper.py"
+        modules = {
+            "tests.alpha": _module("tests.alpha", file=other),
+            "tests.pkg": _module("tests.pkg", file=helper, path=[root / "tests" / "pkg"]),
+        }
+        expected = {"tests.alpha": [str(other)], "tests.pkg": [str(helper)]}
+    elif case == "nested-checkout":
         file = nested / "tests" / "metrics_census_nested.py"
         modules = {
             "tests": _module("tests", path=[root / "tests", nested / "tests"]),
@@ -256,9 +284,11 @@ def test_the_end_check_is_silent_on_this_checkouts_own_modules(tmp_path):
 
     The root is passed through `alias` (the shape of the drive's second mount
     name) while most places use the real path, and one place goes through the
-    alias: both sides are resolved, so neither is a false alarm. `testsuite`
-    only STARTS with `tests`; the top-level name decides. A module with no
-    `__file__` and no `__path__` has no place to judge.
+    alias: both sides are resolved, so neither is a false alarm. A package's
+    `__init__` file and an extension module (`tests._native`, with the ABI-tagged
+    suffix) are home too. `testsuite` only STARTS with `tests`; the top-level
+    name decides. A module with no `__file__` and no `__path__` has no place to
+    judge.
     """
     root = _checkout(tmp_path / "root")
     (root / "tests" / "_helpers").mkdir()
@@ -270,6 +300,7 @@ def test_the_end_check_is_silent_on_this_checkouts_own_modules(tmp_path):
         _module("tests", path=[root / "tests"]),
         _module("tests.conftest", file=root / "tests" / "conftest.py"),
         _module("tests._helpers", path=[root / "tests" / "_helpers"]),
+        _module("tests._native", file=root / "tests" / f"_native{EXTENSION_SUFFIXES[0]}"),
         _module("tests.no_place"),
         _module("scripts", path=[alias / "scripts"]),
         _module("scripts.modal_runner", file=runner / "__init__.py", path=[runner]),
