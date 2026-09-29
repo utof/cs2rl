@@ -512,11 +512,13 @@ def pytest_configure(config):
         "markers",
         "performance: performance-sensitive tests excluded from default pytest runs",
     )
-    # R0-D (#135): multi-minute subprocess training tests (test_seed_reproducible).
     # Unregistered markers are an error under --strict-markers.
     config.addinivalue_line(
         "markers",
-        "slow: multi-minute subprocess/rollout tests; deselect with -m 'not slow'",
+        "slow = over ~15 s of wall. Deselecting it DROPS coverage (the patch-binding campaign, "
+        "the seed positive control, the fast-math builds), so `-m 'not slow'` is only for "
+        "intermediate per-commit checks and never goes in addopts. A test over ~15 s that "
+        "stays unmarked carries an `always-on: <why>` comment.",
     )
 
     # The default pytest tmp_path lives under /tmp on the system root
@@ -573,6 +575,60 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_performance)
 
 
+# ── Running the main session on pytest-xdist workers (#285) ──
+#
+# `pytest -n 2 --dist loadgroup tests ...` is the main session's command (CONTRIBUTING.md).
+# `-n`, `--dist` and `-m` stay OUT of addopts: a later `-n 0` or `-m ""` would have to undo
+# them (`-p no:xdist` would fail on the `-n`), and `-m 'not slow'` in addopts would
+# silently drop the slow tests from every full run.
+# The guards' side of this is the block after the "One module object per file" one below.
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_auto_num_workers(config) -> int:
+    """`-n auto` means 2 workers here, or $PYTEST_XDIST_AUTO_NUM_WORKERS when that is set.
+
+    WHY: the default is one worker per core, 12 on the dev box. Two workers already take
+    2.9 GB more than a serial session on a 15 GB machine that also runs the owner's work
+    (#285), so a mistyped `-n auto` must not start twelve.
+    LIMIT: xdist asks for this before it loads any conftest but the initial ones, so the
+    hook applies only when tests/conftest.py is one: the args name `tests` or a path under it.
+    """
+    return int(os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS", 2))
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """In an xdist worker, give torch an equal share of the cores, if a test module loaded it.
+
+    torch defaults to one intra-op thread per core, so N workers oversubscribe the machine
+    N-fold; at `-n 2` the effect is within noise and the cap exists for `-n 4`. In-process
+    only: child interpreters keep their own default (train.py pins OMP_NUM_THREADS=1).
+    PITFALL 1: detect a worker by `config.workerinput`, never by `PYTEST_XDIST_WORKER`: xdist
+    exports that variable into os.environ, so every child pytest a test spawns would look like
+    a worker (measured: the patch-binding campaign went from 32 s to 138 s).
+    PITFALL 2: never import torch here. The `-n 2` guard tests start nested xdist sessions
+    whose workers also have `workerinput`, and an eager import would cost each of them the
+    import for a plant that never touches torch. Only a torch that is already loaded is capped.
+    """
+    workerinput = getattr(session.config, "workerinput", None)
+    torch = sys.modules.get("torch")
+    if workerinput is not None and torch is not None:
+        torch.set_num_threads(max(1, (os.cpu_count() or 1) // int(workerinput["workercount"])))
+
+
+def assert_child_had_xdist(child: subprocess.CompletedProcess) -> None:
+    """Fail a child-session row with the remedy when the child's pytest lacks pytest-xdist.
+
+    The `-n 2` guard rows run their child unconditionally, so a missing xdist is a red row
+    with a fix, never a skip that someone can leave in place (the #288 lesson). The dev group
+    provides xdist; a checkout whose shared `.venv` predates that needs a sync in MAIN.
+    """
+    assert "unrecognized arguments: -n" not in child.stderr, (
+        "the child's pytest does not know `-n`: pytest-xdist is not installed in this "
+        "environment. Run `uv sync --all-groups --inexact` in the MAIN checkout (never in a "
+        f"worktree), then re-run.\n{child.stderr[-1000:]}")
+
+
 # ── One module object per file ──
 #
 # A file imported under two names (`cs2rl.spec.paths` and `src.cs2rl.spec.paths`) is two module
@@ -620,32 +676,107 @@ def files_under_two_module_names(modules: Mapping[str, object], root: Path,
     `<repo>/.venv/bin/pytest`, under the repo root and outside any
     site-packages directory, so only the prefix rule excludes it.
     """
+    return _files_under_two_names(_named_files(modules), root, ignored_prefixes)
+
+
+def _named_files(modules: Mapping[str, object]) -> list[tuple[str, str]]:
+    """(name, `__file__`) of every module in `modules` whose `__file__` is a string."""
+    # A copy: sys.modules can change size mid-iteration when another thread imports.
+    return [(name, file) for name, module in list(modules.items())
+            if isinstance(file := getattr(module, "__file__", None), str)]
+
+
+def _files_under_two_names(pairs: Iterable[tuple[str, str]], root: Path,
+                           ignored_prefixes: Iterable[Path]) -> dict[Path, list[str]]:
+    """The duplicate rule of `files_under_two_module_names`, on (name, `__file__`) pairs.
+
+    Pairs, not a module map, so the xdist controller can apply it to the UNION of every
+    process's pairs: the same (name, file) pair coming from two workers counts once.
+    """
     root = root.resolve()
     ignored = [prefix.resolve() for prefix in ignored_prefixes]
-    names: dict[Path, list[str]] = {}
-    # A copy: sys.modules can change size mid-iteration when another thread imports.
-    for name, module in list(modules.items()):
-        file = getattr(module, "__file__", None)
-        if not isinstance(file, str):
-            continue
+    names: dict[Path, set[str]] = {}
+    for name, file in pairs:
         path = Path(file).resolve()
         if path.is_relative_to(root) and not any(path.is_relative_to(p) for p in ignored):
-            names.setdefault(path, []).append(name)
+            names.setdefault(path, set()).add(name)
     return {path: sorted(found) for path, found in names.items() if len(found) > 1}
+
+
+# ── The session guards under pytest-xdist (#285) ──
+#
+# LIMIT xdist puts on the two checks below: the test modules are imported in the
+# WORKERS, so the controller's own sys.modules holds none of them, and a worker's
+# `session.testsfailed` and terminal output never reach the controller (xdist's
+# DSession.worker_workerfinished reads only exitstatus 2, shouldfail and shouldstop
+# from a worker). Left alone, both guards pass every `-n` session. So each worker
+# runs no verdict, only collects the facts and ships them in `config.workeroutput`
+# (xdist sends that dict with its `workerfinished` event); the controller collects
+# them per node in `pytest_testnodedown` and judges the UNION with its own facts, so
+# a file imported as `a` in one worker and `b` in another is still caught, as it is
+# serially. This is pytest-cov's own pattern for its per-worker data.
+#
+# Fail closed: a node that went down with an error, or finished without the key, is
+# itself a red finding, since its modules were never checked.
+# tests/test_one_module_object_per_file.py and tests/test_namespace_guard.py pin this
+# with `-n 2` child sessions; their other child sessions are serial and cannot see it.
+_WORKER_GUARD_KEY = "cs2rl_session_guards"
+_worker_findings = pytest.StashKey[list]()
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error) -> None:
+    """Controller side: keep what each xdist worker's guard found (or that it could not look)."""
+    found = node.config.stash.setdefault(_worker_findings, [])
+    workerid = node.gateway.id
+    output = getattr(node, "workeroutput", None) or {}
+    if error is not None or _WORKER_GUARD_KEY not in output:
+        found.append((workerid, None, f"worker {workerid} went down ({error!r}) without reporting "
+                      "the session guards' findings, so its modules were never checked"))
+        return
+    found.append((workerid, output[_WORKER_GUARD_KEY], None))
 
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtestloop(session: pytest.Session) -> Generator[None, object, object]:
     """Fail the session, with a red report, if a repo file is loaded under two module names,
-    or a `tests`/`scripts` module came from another tree (the namespace guard's (d))."""
+    or a `tests`/`scripts` module came from another tree (the namespace guard's (d)).
+
+    Serially the process judges its own sys.modules. Under xdist a worker only hands its
+    facts to the controller (see the block comment above) and the controller judges.
+    """
     result = yield
-    duplicates = files_under_two_module_names(sys.modules, REPO_ROOT,
-                                              (Path(sys.prefix), Path(sys.base_prefix)))
+    named_files = _named_files(sys.modules)
+    outside = namespace_modules_outside_their_package(sys.modules, REPO_ROOT)
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput[_WORKER_GUARD_KEY] = {"named_files": named_files, "outside": outside}
+        return result
+    lost = []
+    for _workerid, findings, problem in session.config.stash.get(_worker_findings, []):
+        if problem is not None:
+            lost.append(problem)
+            continue
+        named_files += [(name, file) for name, file in findings["named_files"]]
+        for name, places in findings["outside"].items():
+            outside[name] = sorted(set(outside.get(name, [])) | set(places))
+    duplicates = _files_under_two_names(named_files, REPO_ROOT,
+                                        (Path(sys.prefix), Path(sys.base_prefix)))
+    if lost:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_sep("=",
+                               "session guards could not check an xdist worker",
+                               red=True,
+                               bold=True)
+            for line in sorted(lost):
+                reporter.line(line, red=True)
+        session.testsfailed += 1
     if duplicates:
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if reporter is not None:
             reporter.write_sep("=", "repo files loaded under two module names", red=True, bold=True)
-            for path, names in duplicates.items():
+            for path, names in sorted(duplicates.items()):
                 reporter.line(f"{path}: {names}", red=True)
             reporter.line(
                 "Import each module under one name: `tests.X` for a module under tests/ (the "
@@ -654,7 +785,6 @@ def pytest_runtestloop(session: pytest.Session) -> Generator[None, object, objec
                 "the Modal scripts.",
                 red=True)
         session.testsfailed += 1
-    outside = namespace_modules_outside_their_package(sys.modules, REPO_ROOT)
     if outside:
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if reporter is not None:
@@ -662,7 +792,7 @@ def pytest_runtestloop(session: pytest.Session) -> Generator[None, object, objec
                                "tests/scripts modules loaded from another tree",
                                red=True,
                                bold=True)
-            for name, places in outside.items():
+            for name, places in sorted(outside.items()):
                 reporter.line(f"{name}: {places}", red=True)
             reporter.line(
                 "Each `tests`/`scripts` module must load from where its dotted name puts it in "

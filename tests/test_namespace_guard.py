@@ -28,6 +28,13 @@ the root (<root>/.worktrees/x, where this repo's worktrees live) and a foreign
 tree inside our own tests/ (<root>/tests/_sim/x/tests). A committed test never
 writes into the checkout, so the root here is a tmp dir.
 
+3. The same two end-to-end rows again on pytest-xdist workers (`-n 2`, #285). A serial child
+cannot see what xdist takes away: a worker's failures and output never reach the
+controller, and the test modules are imported in the workers. The conftest hook relays each
+worker's facts through `workeroutput` and the controller judges them; these rows pin (d)
+through that relay, and the negative control pins that nothing else turns red. They never
+skip: without pytest-xdist in the environment they fail with the remedy.
+
 PITFALL: every child PREPENDS to the inherited PYTHONPATH, never replaces it.
 The inherited value is what put this checkout's src/ first, and replacing it
 trips the checkout tripwire's (a) instead of the case under test.
@@ -43,6 +50,7 @@ import pytest
 
 from tests.conftest import (
     REPO_ROOT,
+    assert_child_had_xdist,
     namespace_entry_problems,
     namespace_modules_outside_their_package,
 )
@@ -55,10 +63,18 @@ _TRIPWIRE = "checkout tripwire (tests/conftest.py)"
 # (d)'s report header, as tests/conftest.py writes it.
 _REPORT_TITLE = "tests/scripts modules loaded from another tree"
 _FOREIGN_MODULE = "metrics_census_other"
+# The report of a worker that never delivered its findings, as tests/conftest.py writes it.
+_LOST_TITLE = "session guards could not check an xdist worker"
+_XDIST = ("-n", "2")
 
 
-def _session(tmp_path: Path, plant: str, *first: Path) -> tuple[subprocess.CompletedProcess, str]:
-    """Run a child session over `plant` with the `first` paths ahead of PYTHONPATH."""
+def _session(
+    tmp_path: Path, plant: str, *first: Path,
+    extra_args: tuple[str, ...] = ()) -> tuple[subprocess.CompletedProcess, str]:
+    """Run a child session over `plant` with the `first` paths ahead of PYTHONPATH.
+
+    `extra_args` go after the plant path, e.g. `("-n", "2")`.
+    """
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     (tmp_path / "test_plant.py").write_text(plant)
     env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
@@ -68,13 +84,15 @@ def _session(tmp_path: Path, plant: str, *first: Path) -> tuple[subprocess.Compl
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     child = subprocess.run([
         sys.executable, "-m", "pytest",
-        str(tmp_path / "test_plant.py"), "-p", "tests.conftest", "-p", "no:cacheprovider", "-q"
+        str(tmp_path / "test_plant.py"), "-p", "tests.conftest", "-p", "no:cacheprovider", "-q",
+        *extra_args
     ],
                            cwd=tmp_path,
                            env=env,
                            capture_output=True,
                            text=True,
                            timeout=_CHILD_TIMEOUT_S)
+    assert_child_had_xdist(child)
     output = (f"exit {child.returncode}\n{child.stdout[-3000:]}\n"
               f"--- stderr ---\n{child.stderr[-3000:]}")
     return child, output
@@ -100,6 +118,36 @@ def test_a_foreign_tests_dir_on_the_path_stops_the_session_and_is_named(tmp_path
     assert "passed" not in child.stdout, f"the planted test ran: collection was not stopped\n{output}"
 
 
+def _check_foreign_import_fails_the_session(tmp_path: Path, extra_args: tuple[str, ...]) -> None:
+    """(d) end to end, serially or on workers: the planted import passes, the guard fails it."""
+    other = _foreign_tree(tmp_path)
+    plant = ("import importlib\nimport sys\n\n\ndef test_plant():\n"
+             f"    sys.path.append({str(other)!r})\n"
+             "    importlib.invalidate_caches()\n"
+             f"    importlib.import_module('tests.{_FOREIGN_MODULE}')\n")
+    child, output = _session(tmp_path, plant, extra_args=extra_args)
+    assert "1 passed" in child.stdout, f"the planted import did not run as planned\n{output}"
+    assert child.returncode == 1, f"the session did not fail\n{output}"
+    assert _REPORT_TITLE in child.stdout, f"the session failed, but not by the guard\n{output}"
+    for line in (f"tests: [{str(other / 'tests')!r}]",
+                 f"tests.{_FOREIGN_MODULE}: [{str(other / 'tests' / f'{_FOREIGN_MODULE}.py')!r}]"):
+        assert line in child.stdout, f"the report does not say {line!r}\n{output}"
+    assert _LOST_TITLE not in child.stdout, f"a worker failed to report\n{output}"
+
+
+def _check_own_modules_pass(tmp_path: Path, extra_args: tuple[str, ...]) -> None:
+    """Neither half fires on this checkout's own `tests.*` and `scripts.*` modules."""
+    plant = ("def test_plant():\n"
+             "    import scripts.modal_runner.training\n"
+             "    import tests.modal_test_helpers\n")
+    child, output = _session(tmp_path, plant, extra_args=extra_args)
+    assert child.returncode == 0, f"the session failed\n{output}"
+    assert "1 passed" in child.stdout, f"the planted test did not run\n{output}"
+    assert _TRIPWIRE not in child.stderr, f"the tripwire fired\n{output}"
+    assert _REPORT_TITLE not in child.stdout, f"(d) reported this checkout's modules\n{output}"
+    assert _LOST_TITLE not in child.stdout, f"a worker failed to report\n{output}"
+
+
 def test_a_module_imported_from_a_foreign_tests_dir_fails_the_session_and_is_named(tmp_path):
     """(d), end to end: a foreign dir that reaches sys.path mid-session, after (c) ran.
 
@@ -107,30 +155,22 @@ def test_a_module_imported_from_a_foreign_tests_dir_fails_the_session_and_is_nam
     exit 1 can only come from the guard's `session.testsfailed += 1`, and the
     report must name both the merged `tests` portion and the module.
     """
-    other = _foreign_tree(tmp_path)
-    plant = ("import importlib\nimport sys\n\n\ndef test_plant():\n"
-             f"    sys.path.append({str(other)!r})\n"
-             "    importlib.invalidate_caches()\n"
-             f"    importlib.import_module('tests.{_FOREIGN_MODULE}')\n")
-    child, output = _session(tmp_path, plant)
-    assert "1 passed" in child.stdout, f"the planted import did not run as planned\n{output}"
-    assert child.returncode == 1, f"the session did not fail\n{output}"
-    assert _REPORT_TITLE in child.stdout, f"the session failed, but not by the guard\n{output}"
-    for line in (f"tests: [{str(other / 'tests')!r}]",
-                 f"tests.{_FOREIGN_MODULE}: [{str(other / 'tests' / f'{_FOREIGN_MODULE}.py')!r}]"):
-        assert line in child.stdout, f"the report does not say {line!r}\n{output}"
+    _check_foreign_import_fails_the_session(tmp_path, ())
 
 
 def test_negative_control_this_checkouts_own_tests_and_scripts_modules_pass(tmp_path):
     """Neither half fires on this checkout's own `tests.*` and `scripts.*` modules."""
-    plant = ("def test_plant():\n"
-             "    import scripts.modal_runner.training\n"
-             "    import tests.modal_test_helpers\n")
-    child, output = _session(tmp_path, plant)
-    assert child.returncode == 0, f"the session failed\n{output}"
-    assert "1 passed" in child.stdout, f"the planted test did not run\n{output}"
-    assert _TRIPWIRE not in child.stderr, f"the tripwire fired\n{output}"
-    assert _REPORT_TITLE not in child.stdout, f"(d) reported this checkout's modules\n{output}"
+    _check_own_modules_pass(tmp_path, ())
+
+
+def test_a_foreign_module_imported_on_an_xdist_worker_fails_the_session_and_is_named(tmp_path):
+    """(d) at `-n 2`: the worker sees the foreign module, the controller must report it."""
+    _check_foreign_import_fails_the_session(tmp_path, _XDIST)
+
+
+def test_negative_control_this_checkouts_own_modules_pass_on_xdist_workers(tmp_path):
+    """The negative control at `-n 2`: own modules are green and no worker is reported lost."""
+    _check_own_modules_pass(tmp_path, _XDIST)
 
 
 def _checkout(root: Path) -> Path:
