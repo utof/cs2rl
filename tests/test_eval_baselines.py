@@ -325,12 +325,12 @@ def test_eval_interval_cli_config_and_modal_mirror():
 
 
 def test_hit_geometry_constants_match_cs2_combat_h():
-    """F16 tripwire: eval_baselines vendors the C hit geometry (eye heights,
+    """F16 tripwire: eval.baselines vendors the C hit geometry (eye heights,
     torso offsets) as Python literals — the oracle's LoS/aim math
     silently diverges from the sim if either side is edited alone. Regex the
     `static const float NAME = X.Yf;` declarations out of cs2_combat.h and
     compare; a missing name is a failure too (renamed constant = same drift).
-    PITFALL: the header is the source of truth; fix eval_baselines.py, not the
+    PITFALL: the header is the source of truth; fix eval/baselines.py, not the
     regex, when this trips."""
     import re
     from pathlib import Path

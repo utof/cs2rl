@@ -1,4 +1,4 @@
-"""src/cs2rl/metrics_schema.py checked against the SOURCE of every emitter and reader.
+"""src/cs2rl/eval/metrics_schema.py checked against the SOURCE of every emitter and reader.
 
 WHAT is enforced, and why each half exists:
 
@@ -448,7 +448,7 @@ def test_closed_family_members_match_the_census_exactly():
 
 def test_losses_entropy_family_members_track_the_action_spec():
     """`losses/entropy/*` is OPEN to the AST census, so its members are declared from
-    `_action_spec.ACTION_HEAD_NAMES` — this pins that the EMITTER iterates the same
+    `spec.action.ACTION_HEAD_NAMES` — this pins that the EMITTER iterates the same
     tuple, which is the only thing making that declaration non-circular."""
     source = census.losses_entropy_head_source()
     assert source == "ACTION_HEAD_NAMES", (
@@ -652,7 +652,7 @@ def _declared_family_members():
     the emitter's own literals, and for `losses/entropy/*` — closed by declaration
     because the census sees it as open —
     `test_losses_entropy_family_members_track_the_action_spec` pins it against
-    `_action_spec` plus a source pin on the loop the emitter iterates. That both
+    `spec.action` plus a source pin on the loop the emitter iterates. That both
     checks exist for every members-declaring family is asserted in
     `test_closed_family_members_match_the_census_exactly`.
     """
@@ -941,7 +941,7 @@ def test_consumer_names_cover_every_read_and_no_read_is_invented():
 
 
 def test_eval_keys_match_the_evaluate_output_contract():
-    """EVAL_KEYS is `BaselineEvaluator.evaluate()`'s output contract. eval_baselines
+    """EVAL_KEYS is `BaselineEvaluator.evaluate()`'s output contract. eval.baselines
     raises on a set mismatch at runtime, but only when an eval actually runs — and
     the §3 gate runs with eval off, so that guard never fires in the suite. Same
     contract, read from source."""
@@ -957,11 +957,11 @@ def test_eval_surface_is_eval_keys_plus_the_two_scheduler_stamps():
 
 
 def test_eval_baselines_imports_eval_keys_from_here_and_not_the_reverse():
-    """The direction is load-bearing, not stylistic: eval_baselines imports torch and
-    c_env.cs2_env at module scope, so `from cs2rl.eval_baselines import EVAL_KEYS` would make
+    """The direction is load-bearing, not stylistic: eval.baselines imports torch and
+    c_env.cs2_env at module scope, so `from cs2rl.eval.baselines import EVAL_KEYS` would make
     a tuple of eight strings cost a torch import and break metrics_schema's
     import-lightness (tests/test_w1_modules.py). Checked from SOURCE — importing
-    eval_baselines here to compare the objects would pull torch into this test."""
+    eval.baselines here to compare the objects would pull torch into this test."""
     tree = ast.parse((REPO_ROOT / "src" / "cs2rl" / "eval" / "baselines.py").read_text())
     imports_from_schema = any(
         isinstance(n, ast.ImportFrom) and n.module == "cs2rl.eval.metrics_schema" and any(

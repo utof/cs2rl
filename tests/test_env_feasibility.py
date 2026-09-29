@@ -7,7 +7,7 @@ from cs2rl.c_env.cs2_env import make_env
 from cs2rl.env.nav import BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
 
 # Batch 6 Task 2: the pathing + driving helpers were extracted to
-# src/cs2rl/scripted_expert.py (spec D-3) so the BC demo generator shares one
+# src/cs2rl/eval/scripted_expert.py (spec D-3) so the BC demo generator shares one
 # canonical implementation with these tests. drive_agent_through_area_path
 # is the facing-poke TEST driver; the action-interface expert used for demo
 # recording is scripted_expert.ScriptedBomber.

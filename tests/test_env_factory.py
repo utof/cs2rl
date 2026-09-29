@@ -21,7 +21,7 @@ this branch has:
     config mapping is green across the whole suite except for one test written
     for that alone (test_harness_config_carries_the_knobs_no_fixture_row_varies);
   * `--eval-interval` defaults to 0, so the `eval` role's env — the one whose
-    `auto_reset=False` eval_baselines raises without, and the one PR B2 makes
+    `auto_reset=False` eval.baselines raises without, and the one PR B2 makes
     force raw rewards — is never constructed during the §3 run or any train test.
 
 So the oracle is a CAPTURE, taken before the builders were typed
@@ -550,7 +550,7 @@ def test_captured_configs_name_only_declared_fields():
     misspelled knob (or a weight that no longer exists) fails here rather than
     silently teaching the oracle the wrong shape.
 
-    Both bounds come from `env_config`, never from a list written down here: a
+    Both bounds come from `env.config`, never from a list written down here: a
     field added to the dataclass widens them automatically, and a field removed
     narrows them, which is the whole point of deriving them.
     """
@@ -805,7 +805,7 @@ def test_harness_config_carries_the_knobs_no_fixture_row_varies(monkeypatch, tmp
 #                resolves to make_env's own seed default, so dropping it is
 #                invisible there. Do not "complete" this tuple with it.
 #   eval         auto_reset (unreachable by every run-level gate on this
-#                branch; eval_baselines raises without it), plus seed and
+#                branch; eval.baselines raises without it), plus seed and
 #                map_data, both distinct from the defaults on all three.
 #   harness      include_step_stats_in_info: the flag that makes this role its
 #                own role at all, plus buf / map_data.
@@ -1456,7 +1456,7 @@ def test_env_factory_never_names_train_make_env():
     any module-LEVEL import of `cs2rl.train` at all, in every spelling
     (`import cs2rl.train`, `from cs2rl.train import ...`, `from cs2rl import train`).
     Names are compared in FULL: every first-party module is top-level `cs2rl`, so
-    a first-component check could no longer tell `train` from `env_config`.
+    a first-component check could no longer tell `train` from `env.config`.
 
     Scoped to module-level imports plus the name `make_env`, deliberately:
     `build_selfplay_manager`'s FUNCTION-LOCAL `from cs2rl.train import SelfPlayManager`

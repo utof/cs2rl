@@ -287,7 +287,7 @@ def _live_train_long_options_from_source() -> set[str]:
     ONE FILE PLUS THE DATACLASS (spec 2026-09-03 §2.3): the argparse parser
     still lives in src/cs2rl/train.py (it is built inline under
     `if __name__ == "__main__"`), but the 23 `--reward-*`/`--pbrs-*` flag names
-    are now the field names of `env_config.RewardWeights`. Taking only one of
+    are now the field names of `env.config.RewardWeights`. Taking only one of
     the two sources silently drops half the option set — train.py alone loses all 23
     reward flags, the dataclass alone loses every other flag — and the
     set-equality assert below would then "fail" against the runner mirror for a
@@ -296,7 +296,7 @@ def _live_train_long_options_from_source() -> set[str]:
     """
     names: set[str] = set()
     # The 23 --reward-*/--pbrs-* flags are generated from RewardWeights' fields
-    # (spec 2026-09-03 §2.3); env_config is stdlib-only so importing it here
+    # (spec 2026-09-03 §2.3); env.config is stdlib-only so importing it here
     # keeps collection free of torch/CUDA. train.py's static add_argument
     # calls are still recovered from source below.
     import dataclasses

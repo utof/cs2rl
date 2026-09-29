@@ -82,7 +82,7 @@ _STATIC_DATA_SCALARS = tuple(
 # Partition those scalars by whether the env CONFIG can set them. Anything the
 # config exposes is sentinel-testable (test_static_data_scalars_round_trip
 # pushes a distinct value through it); anything it does not is map-derived or a
-# nav.py constant and is checked against that source instead.
+# env/nav.py constant and is checked against that source instead.
 #
 # The settable surface is the CONFIG surface, not make_env's signature:
 # make_env has seven parameters and no **legacy, so inspect.signature would
@@ -287,7 +287,7 @@ def test_struct_offsets_match_ctypes_mirrors():
 
 
 def test_struct_sizes_exposes_team_constants():
-    """TEAM_SIZE/N_AGENTS are duplicated in nav.py; pin them to the C macros.
+    """TEAM_SIZE/N_AGENTS are duplicated in env/nav.py; pin them to the C macros.
 
     Parked-agent work reduces the *effective* team size without changing the C
     macro, so a drift between nav.TEAM_SIZE and the header would mis-slice every
@@ -349,7 +349,7 @@ def test_static_data_scalars_round_trip(simple_map):
     bomb_defuse_kit, bomb_timer, footstep_radius_sq, gunshot_radius_sq,
     enemy_memory_ticks, stale_memory_tick. They are not settable, so a value
     check would have to recompute the implementation's own formula (the
-    geometry) or restate a nav.py constant (the timings) — weaker than a
+    geometry) or restate an env/nav.py constant (the timings) — weaker than a
     sentinel, and for the geometry partly degenerate, since a symmetric fixture
     map can make x_offset == y_offset. (nav.BOMB_TIMER == nav.ROUND_TIME == 640
     at defaults; the round_time sentinel now separates the two.) Closing this
@@ -391,7 +391,7 @@ def test_static_data_scalars_round_trip(simple_map):
             # make_env kwargs, so they are in the config and were checked above.
             # laser_range_sq is NOT a kwarg — it is derived from the laser_range
             # sentinel inside Cs2Env.__init__, so check the derivation rather than
-            # a nav constant. The None ⇒ nav.py default path is covered by
+            # a nav constant. The None ⇒ env/nav.py default path is covered by
             # tests/test_env_knobs.py::test_default_knobs_match_nav_constants.
             assert sc["laser_range_sq"] == pytest.approx(sentinels["laser_range"]**2)
             assert sc["laser_damage"] == nav.LASER_DAMAGE

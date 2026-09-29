@@ -1403,11 +1403,11 @@ class Cs2PuffeRL(PuffeRL):
             # ── PER-HEAD ENTROPY ──────────────────────────────────────────
             with torch.no_grad():
                 _dists = [torch.distributions.Categorical(logits=lgt) for lgt in logits]
-                # Batch 3: head names sourced from _action_spec.ACTION_HEAD_NAMES
+                # Batch 3: head names sourced from spec.action.ACTION_HEAD_NAMES
                 # (auto-gen from cs2_types.h). Pre-Batch-3 hardcoded "aim" here;
                 # now removed since aim is a continuous head emitted on a separate
                 # path. zip(strict=True) catches any future drift between
-                # _action_spec and the policy logits list.
+                # spec.action and the policy logits list.
                 _head_names = list(ACTION_HEAD_NAMES)
                 for _hi, (_hn, _hd) in enumerate(zip(_head_names, _dists, strict=True)):
                     # flat_part: _hd.entropy() is flat (S*T,), like `entropy`.

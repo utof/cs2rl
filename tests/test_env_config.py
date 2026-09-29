@@ -1,8 +1,8 @@
-"""Unit tests for src/cs2rl/env_config.py — the env configuration contract (spec 2026-09-03 §2.1).
+"""Unit tests for src/cs2rl/env/config.py — the env configuration contract (spec 2026-09-03 §2.1).
 
 This file is the ONE place the default numbers are restated (spec §6 "Added"):
 the literals below were copied from train_shared.REWARD_WEIGHT_DEFAULTS at
-main @ 139a3a3. If a default changes on purpose, change it in env_config.py AND
+main @ 139a3a3. If a default changes on purpose, change it in env/config.py AND
 here; if this test fails and you did not mean to change a default, the module
 drifted.
 """
@@ -124,7 +124,7 @@ def test_unconvertible_knob_raises_value_error_naming_the_field(field, bad):
     same rule parent §2.1's error table sets for the weights.
 
     `max_turn_speed` is exercised with a STRING, not with None: None is that
-    field's documented sentinel ("use the nav.py constant"), `EnvConfig()` sets
+    field's documented sentinel ("use the env/nav.py constant"), `EnvConfig()` sets
     it, and `test_none_r0g_knobs_survive_untouched` pins that it survives — so a None
     param here could only ever pass by breaking `EnvConfig()` itself.
     """

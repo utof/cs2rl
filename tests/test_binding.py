@@ -492,7 +492,7 @@ def test_onnx_export_output_order_pinned():
         obs_dim, hidden = train.OBS_DIM, 256
         # Mirror the architecture build_model would produce. ACTION_HEAD_SIZES
         # is the head order MOVE/SHOOT/RELOAD/WEAPON/USE/CROUCH/JUMP per
-        # _action_spec.py — keep this list synced if those sizes ever change.
+        # spec/action.py — keep this list synced if those sizes ever change.
         encoder = nn.Sequential(nn.Linear(obs_dim, hidden), nn.ReLU(), nn.Linear(hidden, hidden),
                                 nn.ReLU())
         lstm = nn.LSTM(hidden, hidden, num_layers=1, batch_first=False)

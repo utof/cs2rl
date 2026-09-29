@@ -145,11 +145,11 @@ class StaticDataC(ctypes.Structure):
         ("reward_win", ctypes.c_float),
         # Batch 1 (RL overhaul): per-outcome win magnitudes (Task 3).
         # Must stay in same order as StaticData in cs2_types.h.
-        ("reward_win_t_detonation", ctypes.c_float),                   # default: see env_config.RewardWeights
-        ("reward_win_t_elimination", ctypes.c_float),                  # default: see env_config.RewardWeights
-        ("reward_win_ct_defuse", ctypes.c_float),                      # default: see env_config.RewardWeights
-        ("reward_win_ct_timeout", ctypes.c_float),                     # default: see env_config.RewardWeights
-        ("reward_win_ct_elimination", ctypes.c_float),                 # default: see env_config.RewardWeights
+        ("reward_win_t_detonation", ctypes.c_float),                   # default: see env.config.RewardWeights
+        ("reward_win_t_elimination", ctypes.c_float),                  # default: see env.config.RewardWeights
+        ("reward_win_ct_defuse", ctypes.c_float),                      # default: see env.config.RewardWeights
+        ("reward_win_ct_timeout", ctypes.c_float),                     # default: see env.config.RewardWeights
+        ("reward_win_ct_elimination", ctypes.c_float),                 # default: see env.config.RewardWeights
         ("reward_kill", ctypes.c_float),
         ("reward_death", ctypes.c_float),
         ("reward_bombsite_entry", ctypes.c_float),
@@ -462,7 +462,7 @@ _C_OFFSET_FIELDS = (
     (WallC, "kind", "Wall_kind_offset"),
     (WallListC, "capacity", "WallList_capacity_offset"),
 )
-# (struct_sizes() key -> Python value) — bare macros nav.py re-declares in
+# (struct_sizes() key -> Python value) — bare macros env/nav.py re-declares in
 # Python. Pin them to the header: the reward views below slice
 # rewards[:TEAM_SIZE], so a drift would mis-attribute every team-spirit term
 # rather than crash.
@@ -867,7 +867,7 @@ class Cs2Env(pufferlib.PufferEnv):
         `config` (spec 2026-09-03 §2.1) is the ONLY source of reward weights and
         sim knobs; it is validated on construction, so by the time it reaches
         here every non-None value is in range and every flag is 0/1. The None
-        R0-G knobs are resolved to the nav.py constant BELOW and re-validated
+        R0-G knobs are resolved to the env/nav.py constant BELOW and re-validated
         there — that resolved-value check is deliberately kept (spec §2.1).
         The keyword-only inputs describe this instance, not the dynamics, and
         config.json does not record them (spec §2.2).
@@ -966,7 +966,7 @@ class Cs2Env(pufferlib.PufferEnv):
 
         # Rung 0 (spec 2026-08-29 §2.1): these are validated BEFORE binding.init,
         # in Python, and since #165 that validation lives in
-        # EnvConfig.__post_init__ (src/cs2rl/env_config.py) rather than here. WHY
+        # EnvConfig.__post_init__ (src/cs2rl/env/config.py) rather than here. WHY
         # Python-side at all: env_init asserts the same range in C, and a failed
         # C assert aborts the whole process — inside a Puffer worker that is a
         # silent death with no traceback. Raising in Python turns a bad training
@@ -979,7 +979,7 @@ class Cs2Env(pufferlib.PufferEnv):
         self.crouch_enabled = config.crouch_enabled
         self.jump_enabled = config.jump_enabled
 
-        # Rung 0 R0-G: env knobs. None ⇒ the nav.py constant, so demo/test/
+        # Rung 0 R0-G: env knobs. None ⇒ the env/nav.py constant, so demo/test/
         # deploy callers that never pass them keep today's values byte-for-byte
         # (sim fingerprints at defaults must not move). Validated here, not in
         # C, for the same reason as n_active_per_team above: a C assert kills a
@@ -993,7 +993,7 @@ class Cs2Env(pufferlib.PufferEnv):
         # `config` is type-checked as an EnvConfig at the top of __init__, so
         # that holds for every caller — which makes those repeats a second line
         # of defence. What this block is the ONLY line of defence for is the
-        # nav.py constant substituted when a knob is None: env_config.py may not
+        # env/nav.py constant substituted when a knob is None: env/config.py may not
         # import nav (its stdlib-only import budget), so nothing checks
         # ROUND_TIME / LASER_RANGE / MAX_TURN_SPEED_RAD until here.
         # PITFALL: laser_range_sq is derived from _laser_range below; never

@@ -19,7 +19,7 @@ tests/test_train_env.py cross-checks it against nav.TEAM_SIZE.
 PITFALL: the values below ARE the trained baseline. An unflagged run must stay
 byte-identical to the pre-#165 env; do not "tidy" a number here.
 
-PITFALL: `None` on round_time / laser_range / max_turn_speed means "the nav.py
+PITFALL: `None` on round_time / laser_range / max_turn_speed means "the env/nav.py
 constant" and is resolved (and validated) inside Cs2Env.__init__, never here —
 resolving it here would need `nav`. Only non-None values are validated here.
 """

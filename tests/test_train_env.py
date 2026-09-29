@@ -936,7 +936,7 @@ def test_post_pickup_plant_mask_unmasked():
 # ── Batch 2 task 4: OBS_DIM constant-consistency ─────────────────────────────
 def test_obs_dim_constant_consistency():
     """Three OBS_DIM declarations must agree:
-       - src/cs2rl/nav.py
+       - src/cs2rl/env/nav.py
        - src/cs2rl/train.py
        - env.single_observation_space.shape[0]
     A drift here means the C ↔ Python boundary is misconfigured. The
@@ -1010,7 +1010,7 @@ def test_obs_blocks_tile_obs_dim():
 
 
 def test_action_spec_aim_is_gaussian_2d():
-    """`_action_spec.py` exports the discrete/continuous split:
+    """`spec/action.py` exports the discrete/continuous split:
        - DISCRETE_HEAD_SPEC has 7 categorical entries, sum(sizes) = 22
        - CONTINUOUS_HEAD_SPEC has 1 gaussian entry, dim 2 (Δyaw + Δpitch, Batch 3.5)
        - AIM_DIM == 2

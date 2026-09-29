@@ -1,4 +1,4 @@
-"""map.py — MapData abstraction for the CS2RL C environment.
+"""env/map.py — MapData abstraction for the CS2RL C environment.
 
 Provides:
   MapData           — typed container for all geometry/game-constants the C env needs

@@ -23,8 +23,8 @@ module constant above is taken relative to the conftest's REPO_ROOT.
 WHY a standing test and not a one-shot check (#199 verifier finding V3): none of
 these consumers fails on a wrong path, they go quiet.
   - `git diff --quiet <sha> -- <path>` is quiet for a path on neither side, so
-    check_demo_sha stops watching it (knock-out: `src/cs2rl/nav.py` ->
-    `src/nav.py` left the whole BC suite green).
+    check_demo_sha stops watching it (#199's knock-out, from nav's path before
+    #205: `src/cs2rl/nav.py` -> `src/nav.py` left the whole BC suite green).
   - cs2rl.experiment.lib.env_fingerprint skips a missing file, and path_last_commit_sha
     returns "".
   - A MANIFEST.in line that matches nothing only warns during the build.

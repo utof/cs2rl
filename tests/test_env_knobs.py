@@ -3,7 +3,7 @@
 `--round-time-ticks` / `--laser-range` / `--max-turn-speed` flow
 CLI → env_config_from_args → make_env → the packed StaticData buffer
 binding.init copies (StaticData.round_time / laser_range + laser_range_sq /
-max_turn_speed). None ⇒ nav.py constant, so every caller that does not pass a
+max_turn_speed). None ⇒ env/nav.py constant, so every caller that does not pass a
 knob keeps today's values (fingerprints unchanged at default).
 
 PITFALL (Task 14): the CLI-name ↔ field-name map is hand-written, split over
@@ -59,7 +59,7 @@ def test_laser_and_turn_speed_reach_static_data(simple_map):
 
 
 def test_default_knobs_match_nav_constants(simple_map):
-    """None (the default) must resolve to the nav.py constants, not 0 / garbage."""
+    """None (the default) must resolve to the env/nav.py constants, not 0 / garbage."""
     from cs2rl.c_env import binding
     from cs2rl.c_env.cs2_env import make_env
     from cs2rl.env import nav

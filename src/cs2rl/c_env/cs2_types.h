@@ -38,7 +38,7 @@ static inline float recoil_decay_punch(float prev, float dt) {
  *   - cs2_observations.h writes every slot through these bases (never bare ints);
  *   - env_init() in cs2_env.h asserts the blocks tile OBS_DIM exactly;
  *   - scripts/sync_action_spec.py parses the *_SIZE/*_STRIDE/*_COUNT literals
- *     into src/cs2rl/_obs_spec.py so Python masking / demo-zeroing code imports
+ *     into src/cs2rl/spec/obs.py so Python masking / demo-zeroing code imports
  *     OBS_BLOCKS instead of hardcoding block boundaries.
  * Pitfall: adding a feature => bump the OWNING block's *_SIZE (or *_STRIDE) AND
  * the OBS_DIM literal below. If they drift, the env_init tiling assert fires at

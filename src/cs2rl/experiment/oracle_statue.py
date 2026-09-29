@@ -7,12 +7,12 @@ Drives the EXACT Rung 1a environment (ARENA_DUEL_V1, ``n_active_per_team=1``,
 ``round_time=160``, ``pin_pitch=1``, ``crouch_enabled=0``) with two scripted
 actors and no learning anywhere in the loop:
 
-  * hero   — agent 0 (T): ``eval_baselines.OracleActor``. Per tick it reads the
+  * hero   — agent 0 (T): ``eval.baselines.OracleActor``. Per tick it reads the
              enemy's position from the live C state, turns the continuous Δyaw
              toward that bearing (clamped to ±``sd->max_turn_speed``, exactly as
              ``env_step`` will clamp it) and pulls the trigger whenever the enemy
              is visible, in range, and the weapon is off cooldown.
-  * statue — agent 5 (CT): ``eval_baselines.IdleActor``. Every discrete head at
+  * statue — agent 5 (CT): ``eval.baselines.IdleActor``. Every discrete head at
              bin 0 and Δyaw = Δpitch = 0, so it never moves, turns, or fires.
 
 It reports kill rate, time-to-kill quantiles and the R0-A shot counters, then
@@ -115,7 +115,7 @@ PITFALLS
   every tick silently degrades it into a walking, non-firing actor that times
   out — which looks exactly like a broken sim. ``unmatched_vis_slots`` in the
   summary is the tripwire for that thread going wrong (it must be 0).
-* Importing ``eval_baselines`` pulls in torch (``PolicyActor`` needs it). Nothing
+* Importing ``eval.baselines`` pulls in torch (``PolicyActor`` needs it). Nothing
   here uses it, but the import cost is real; that is the price of reusing the
   evaluator's actors instead of writing a second oracle that can drift from it.
 * ``env.reset()`` returns an ALL-ZERO obs (compute_observations has not run
@@ -168,7 +168,7 @@ PASS_MIN_KILL_RATE = 0.90
 PASS_MAX_MEDIAN_TTK = 120.0
 
 # ── observation-vector layout, for --obs-only ────────────────────────────────
-# Block bounds come from the GENERATED spec (src/cs2rl/_obs_spec.py, regenerated from
+# Block bounds come from the GENERATED spec (src/cs2rl/spec/obs.py, regenerated from
 # the OBS_* macros in cs2_types.h by scripts/sync_action_spec.py) — never
 # hardcode 56 / 5 / 8 here.
 OBS_ENEMY_BASE = OBS_BLOCKS["enemy"][0]
@@ -192,7 +192,7 @@ OBS_SELF_CROUCH = 13
 
 # Every z-delta in the obs (self +5, teammate +2, enemy +2) is normalised by
 # 128 u. MIRROR of cs2_observations.h — same silent-drift hazard as the geometry
-# constants in eval_baselines.
+# constants in eval.baselines.
 OBS_Z_SCALE = 128.0
 
 # The enemy slot encodes the same relative position TWICE — as the rotated
@@ -244,7 +244,7 @@ def build_env(seed: int, round_time: int = ROUND_TIME):
 class ObsOracleActor:
     """``OracleActor`` with the enemy located from the OBSERVATION VECTOR.
 
-    WHAT IS DIFFERENT from ``eval_baselines.OracleActor`` — and only this:
+    WHAT IS DIFFERENT from ``eval.baselines.OracleActor`` — and only this:
 
       * target choice, bearing, range and height offset come from ``obs[i]``
         (the array the policy is fed), not from the C ``AgentState``;

@@ -3,8 +3,8 @@
 
 Emits TWO generated modules, both derived from the C header so a dimension
 change is a one-file (cs2_types.h) edit that propagates to Python:
-  - src/cs2rl/_action_spec.py : action head spec (discrete + continuous / AIM_DIM).
-  - src/cs2rl/_obs_spec.py     : OBS_DIM + OBS_BLOCKS (named per-block start:stop
+  - src/cs2rl/spec/action.py : action head spec (discrete + continuous / AIM_DIM).
+  - src/cs2rl/spec/obs.py     : OBS_DIM + OBS_BLOCKS (named per-block start:stop
                            slices) so masking / demo-zeroing code never
                            hardcodes 25 / 53 / 93.
 

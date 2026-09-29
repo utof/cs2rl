@@ -208,7 +208,7 @@ def resolve_gammas(args) -> tuple[float, float]:
     EnvConfig every env is built from), must agree on the SAME resolution rule
     — PBRS is only policy-invariant (Ng et al.) when
     γ_pbrs == γ, and before R0-J the two lived as unrelated literals (train.py
-    0.999 vs cs2_env.py 0.999, now one field default in env_config.py) held
+    0.999 vs cs2_env.py 0.999, now one field default in env/config.py) held
     together by a single drift test.
     ``--pbrs-gamma`` exists ONLY for experiments that deliberately break the
     pairing; a run that omits it always gets γ_pbrs = γ.

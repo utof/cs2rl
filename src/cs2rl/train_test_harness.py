@@ -49,7 +49,7 @@ import shutil
 import tempfile
 import types
 
-# Module level for the same reason as env_factory below: env_config is the
+# Module level for the same reason as env_factory below: env.config is the
 # stdlib-only leaf of the config graph, so importing it here pulls in nothing.
 from cs2rl.env.config import EnvConfig
 
@@ -62,7 +62,7 @@ from cs2rl.env_factory import build_env_for, build_selfplay_manager
 
 # The harness's four env-knob defaults are the dataclass's, read once rather
 # than copied. Four literals here would be four more places #165 has to keep in
-# step with env_config.py, and tests/test_no_restated_env_defaults.py fails on
+# step with env/config.py, and tests/test_no_restated_env_defaults.py fails on
 # exactly that shape — including the `: int = <literal>` spelling, which a
 # regex written for `name = value` alone cannot see.
 _ENV_DEFAULTS = EnvConfig()

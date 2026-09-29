@@ -15,7 +15,7 @@ demo-gen the other 9 agents are frozen at spawn, so those blocks describe a
 static world that never occurs at RL time; zeroing makes the clone's walk
 depend only on self + goal-direction + global state. Zero is also exactly
 what those slots hold for dead/invisible agents, so the masked obs stay
-in-distribution. Block boundaries come from _obs_spec.OBS_BLOCKS (generated
+in-distribution. Block boundaries come from spec.obs.OBS_BLOCKS (generated
 from cs2_types.h) — NEVER hardcoded, they shifted in Task 2.5 (25/53/93 →
 28/56/96) and will shift again.
 

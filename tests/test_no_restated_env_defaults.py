@@ -1,4 +1,4 @@
-"""Gate: no env default is restated outside src/cs2rl/env_config.py (spec 2026-09-03 R11).
+"""Gate: no env default is restated outside src/cs2rl/env/config.py (spec 2026-09-03 R11).
 
 WHY THREE PROBES. A default can be written down in three shapes and each is
 invisible to the other two probes:
@@ -17,13 +17,13 @@ gate with only probes 1 and 2 would report 0 both before and after that removal
 file exists to prevent.
 
 WHAT COUNTS AS A RESTATEMENT: a literal equal to the field's default, written
-anywhere under src/ or scripts/ except src/cs2rl/env_config.py, which is where the
+anywhere under src/ or scripts/ except src/cs2rl/env/config.py, which is where the
 defaults are DECLARED. A value that merely happens to equal a default is still a
 restatement unless there is a written reason (see ALLOWLIST).
 
 NOT SCANNED: `default=None` in argparse. In this codebase a None argparse
 default is never a copy of a field default, it is the "resolve this later"
-sentinel — from the map for --pin-pitch, from nav.py for the R0-G trio.
+sentinel — from the map for --pin-pitch, from env/nav.py for the R0-G trio.
 
 NOT SCANNED: tests/, and widening the roots to reach it would BURY this gate
 rather than strengthen it. The line probe finds 89 hits under tests/**/*.py
@@ -306,7 +306,7 @@ def test_no_argparse_default_restates_a_field_default():
 
 
 def test_field_defaults_covers_every_declared_default():
-    """Vacuity guard: the value table must hold EVERY default env_config declares.
+    """Vacuity guard: the value table must hold EVERY default env.config declares.
 
     Both count probes above search for the values in FIELD_DEFAULTS and compare
     what they find against an EMPTY pending map. An emptied or truncated table

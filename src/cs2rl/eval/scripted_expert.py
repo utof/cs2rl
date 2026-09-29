@@ -73,7 +73,7 @@ def _id_to_idx(map_data) -> dict:
 
     GOTCHA this mapping exists to absorb: simple maps have area_id == index
     (area_ids = arange(N)), but de_dust2's NavGraph uses sparse real ids.
-    MapData.area_ids/centroids are filled for BOTH map types (src/cs2rl/map.py), so
+    MapData.area_ids/centroids are filled for BOTH map types (src/cs2rl/env/map.py), so
     deriving the mapping here works uniformly and nothing in this module may
     touch env.nav_graph."""
     return {int(aid): i for i, aid in enumerate(map_data.area_ids)}

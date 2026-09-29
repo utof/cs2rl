@@ -149,7 +149,7 @@ def _graph_facts(tree: Path) -> dict:
 
 
 def _dotted(relative: str) -> str:
-    """'src/cs2rl/c_env/__init__.py' -> 'cs2rl.c_env'; 'src/cs2rl/nav.py' -> 'cs2rl.nav'."""
+    """'src/cs2rl/c_env/__init__.py' -> 'cs2rl.c_env'; 'src/cs2rl/env/nav.py' -> 'cs2rl.env.nav'."""
     parts = Path(relative).with_suffix("").parts[1:]
     if parts[-1] == "__init__":
         parts = parts[:-1]

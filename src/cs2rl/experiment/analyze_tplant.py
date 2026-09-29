@@ -59,7 +59,7 @@ import re
 import sys
 from pathlib import Path
 
-BOMB_TIMER_DEFAULT = 640               # ticks; src/cs2rl/nav.py BOMB_TIMER — keep in sync
+BOMB_TIMER_DEFAULT = 640               # ticks; src/cs2rl/env/nav.py BOMB_TIMER — keep in sync
 CAP_DEFAULT = 640                      # ticks; src/cs2rl/c_env/nav_data.h CFG_ROUND_TIME
 
 

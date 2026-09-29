@@ -10,7 +10,7 @@ FRESH interpreter, one subprocess per case:
   3. its module scope stays free of torch / nav / c_env.cs2_env / rerun;
   4. the only sibling edge any of them has is into a LEAF, and the leaves
      import no sibling except each other in the one allowed direction
-     (train_shared -> env_config). The shape spec §2 W1 fixes: leaves at the
+     (train_shared -> env.config). The shape spec §2 W1 fixes: leaves at the
      bottom, everything else a spoke off them, never spoke-to-spoke.
 
 WHY a subprocess and not a plain import: pytest's session has already imported
@@ -40,7 +40,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
 
-# Modules split out of train.py (W1, spec 2026-08-31), plus env_config, which
+# Modules split out of train.py (W1, spec 2026-08-31), plus env.config, which
 # owns the env contract that used to live partly in train_shared (spec
 # 2026-09-03 §2.1). Every module here must import standalone and stay light.
 #
@@ -58,7 +58,7 @@ TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
 #
 # `metrics_schema` (W4) is here for the mirror-image reason: it is a registry of
 # STRINGS whose whole value is being cheap to import, and it took ownership of
-# `EVAL_KEYS` from `eval_baselines` — a module with torch and c_env.cs2_env at
+# `EVAL_KEYS` from `eval.baselines` — a module with torch and c_env.cs2_env at
 # its scope. If that ownership ever flipped back, or someone imported a policy
 # class to spell a type hint, eight string constants would start costing a torch
 # import, and only this test would say so.
@@ -128,8 +128,8 @@ def _train_module_level_imports():
 
 TRAIN_MODULE_LEVEL_IMPORTS = _train_module_level_imports()
 
-# TWO leaves. train_shared owns the names moved out of train.py; env_config owns
-# the env contract. train_config -> env_config is the load-bearing edge between
+# TWO leaves. train_shared owns the names moved out of train.py; env.config owns
+# the env contract. train_config -> env.config is the load-bearing edge between
 # the leaves and the spokes (env_config_from_args builds an EnvConfig); train.py
 # imports both. The reverse edge would make "leaf" meaningless — pyproject.toml's
 # `cs2rl layers` contract pins it (env.config is in the env layer, train_shared one
@@ -278,7 +278,7 @@ def test_train_aliases_itself_into_sys_modules_first():
     then quietly protects nothing.
 
     WHY the whole thing exists: `python -m cs2rl.train` binds this file to "__main__",
-    so a runtime `from cs2rl.train import ...` — which eval_baselines does function-locally
+    so a runtime `from cs2rl.train import ...` — which eval.baselines does function-locally
     inside PolicyActor — imports a SECOND copy of the module. Two copies means
     two sets of module constants and cross-copy `isinstance` returning False.
 
@@ -308,7 +308,7 @@ def test_script_run_has_exactly_one_train_module():
     have to be made inside it):
 
       1. a sitecustomize.py on the child's PYTHONPATH registers an atexit hook
-         that performs the same `from cs2rl.train import ...` eval_baselines performs
+         that performs the same `from cs2rl.train import ...` eval.baselines performs
          and reports whether sys.modules["cs2rl.train"] IS sys.modules["__main__"]. atexit runs
          before module teardown, so sys.modules is intact; it also runs after
          `--dump-config`'s sys.exit(0), which is why that cheap path suffices
@@ -330,7 +330,7 @@ def test_script_run_has_exactly_one_train_module():
     import re
     import tempfile
 
-    # The hook's import is the exact one eval_baselines makes.
+    # The hook's import is the exact one eval.baselines makes.
     probe_src = ("import atexit, sys\n"
                  "def _probe():\n"
                  "    from cs2rl.train import load_policy_from_checkpoint\n"

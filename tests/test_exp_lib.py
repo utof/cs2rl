@@ -69,7 +69,7 @@ def test_ledger_rewrite_atomic(tmp_path, monkeypatch):
 def test_env_fingerprint_captures_obs_dim(tmp_path):
     """env_fingerprint reads OBS_DIM from a given train.py-like file.
 
-    NOTE: real ACTION_HEAD_SIZES is exported from _action_spec (auto-gen
+    NOTE: real ACTION_HEAD_SIZES is exported from spec.action (auto-gen
     from cs2_types.h). Batch 3 dropped HEAD_AIM, so the discrete-side
     tuple is (9, 2, 2, 3, 2, 2, 2) — 7 ints. Tests mirror this string
     exactly because env_fingerprint reads it textually.

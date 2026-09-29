@@ -206,7 +206,7 @@ def mask_idle_agent_blocks(obs: np.ndarray) -> np.ndarray:
     generator zeroes them and so must every consumer that feeds the clone an
     obs, or eval/rollout obs land off-distribution.
 
-    Boundaries come from _obs_spec.OBS_BLOCKS (generated from cs2_types.h) —
+    Boundaries come from spec.obs.OBS_BLOCKS (generated from cs2_types.h) —
     hardcoding 28/56/96 here would silently check the wrong slots after the
     next layout bump (they were 25/53/93 before Task 2.5). MUST stay identical
     to cs2rl/bc_demos.py's mask; tests/test_train_bc_smoke.py pins them

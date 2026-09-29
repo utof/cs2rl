@@ -196,7 +196,7 @@ class NavGraph:
         self._area_polys, self._area_strtree = self._build_area_index()
 
         # ── Rasterized grid for O(1) position lookup ───────────────────────
-        # map.py exports it to C, whose _raster_at (cs2_movement.h) does the per-step lookup.
+        # env/map.py exports it to C, whose _raster_at (cs2_movement.h) does the per-step lookup.
         self._grid_cache_path = cache_path.replace(".npy", "_grid.npy") if cache_path else None
         self._build_pos_grid()
 
@@ -248,7 +248,7 @@ class NavGraph:
     def _build_pos_grid(self, cell_size: float = 4.0):
         """Build a rasterized 2D grid mapping (gx, gy) → area_idx for O(1) lookups.
 
-        map.py exports it to C as MapData.grid, where _raster_at (cs2_movement.h)
+        env/map.py exports it to C as MapData.grid, where _raster_at (cs2_movement.h)
         does the per-step position lookup.  Cached to disk alongside the vis matrix.
 
         Grid cell (gx, gy) covers the square [x_min + gx*cell, y_min + gy*cell].
@@ -462,7 +462,7 @@ MAX_TURN_SPEED_RAD = math.pi / 4
 
 N_AGENTS = 10
 TEAM_SIZE = 5
-# OBS_DIM + OBS_BLOCKS are imported at module top from _obs_spec (generated from
+# OBS_DIM + OBS_BLOCKS are imported at module top from spec.obs (generated from
 # cs2_types.h by scripts/sync_action_spec.py) — the single source of truth for
 # the obs layout. Do NOT reintroduce a literal here; a bump is a cs2_types.h edit
 # followed by `uv run python scripts/sync_action_spec.py`.

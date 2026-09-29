@@ -323,7 +323,7 @@ static PyObject* py_get_masks(PyObject* self, PyObject* args) {
  * The single source of truth for the ctypes mirrors in cs2_env.py.
  *
  * WHAT: sizeof of every struct Python overlays with ctypes, an offsetof anchor
- * on each of those structs' LAST field, plus the two team-size macros nav.py
+ * on each of those structs' LAST field, plus the two team-size macros env/nav.py
  * duplicates.
  *
  * WHY: cs2_env.py used to carry hand-measured literals (164/1708/204/6832 and
@@ -769,7 +769,7 @@ static PyObject* py_static_data_scalars(PyObject* self, PyObject* args) {
     SD_FLOAT(x_offset);
     SD_FLOAT(y_offset);
     SD_FLOAT(bombsite_dist_scale);
-    /* Weapon + round timing constants, forwarded from nav.py. */
+    /* Weapon + round timing constants, forwarded from env/nav.py. */
     SD_INT(laser_damage);
     SD_FLOAT(laser_range);
     SD_FLOAT(laser_range_sq);

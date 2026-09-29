@@ -356,7 +356,7 @@ def test_pin_pitch_for_map_none_loads_dust2():
     md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)
     expect = int(float(md.centroids_z.max() - md.centroids_z.min()) == 0.0)
     assert pin_pitch_for_map(None) == expect
-    assert expect == 1                                                 # documents today's in-sim dust2 (map.py zero-fill)
+    assert expect == 1                                                 # documents today's in-sim dust2 (env/map.py zero-fill)
     assert (nav.NAV_PATH, nav.CACHE_PATH) in _ENV_CACHE                # cached for make_env
 
 

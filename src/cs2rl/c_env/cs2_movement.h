@@ -31,7 +31,7 @@ count_action(int32_t* step_counts, int32_t* episode_counts, int value, int size)
 #define SV_GRAVITY_CS       800.0f      /* units/s² downward                             */
 #define SV_JUMP_IMPULSE_CS  301.993377f /* sqrt(2 * g * 57u) — 57u target jump height */
 /* Source sv_stepsize default — maximum grounded up-step height before cliff guard
- * rejects the move. Must match MAX_STEP_HEIGHT = 18.0 in src/cs2rl/map.py (L9 prune). */
+ * rejects the move. Must match MAX_STEP_HEIGHT = 18.0 in src/cs2rl/env/map.py (L9 prune). */
 #define SV_MAX_STEP_HEIGHT_CS 18.0f
 
 /* Tolerance (world units) for the is_airborne re-evaluation: an agent is treated as
@@ -109,7 +109,7 @@ static inline int _resolve_xy_collision(StaticData* sd, const AgentState* a, flo
     if (target_idx != a->area_idx && !sd->adjacency[a->area_idx * sd->N + target_idx])
         return -1;
     /* L11 cliff guard: block grounded up-steps where Δz > SV_MAX_STEP_HEIGHT_CS into a
-     * non-ramp target. Mirrors the Python adjacency post-prune (map.py L9) so nav-distance
+     * non-ramp target. Mirrors the Python adjacency post-prune (env/map.py L9) so nav-distance
      * shaping stays consistent with movement enforcement.
      * Down-steps (dz < 0) are always allowed — the ground-snap + airborne paths handle them.
      * Ramp targets are always allowed — they are the explicit walk-up affordance.

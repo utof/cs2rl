@@ -44,7 +44,7 @@ def _run_group(argv, *, timeout, **kw) -> subprocess.CompletedProcess:
     (SIGKILL) so it dies with this process even when `finally` cannot run.
 
     WHY: `train.py --dump-config` used to fork a 12-worker vis-cache build (see
-    src/cs2rl/map.py make_cs2_map). subprocess.run's timeout kills only the direct
+    src/cs2rl/env/map.py make_cs2_map). subprocess.run's timeout kills only the direct
     child, so each killed dump orphaned 12 workers to PID 1 at ~900 MB each
     (~10 GB per leaked case; it took the 16 GB dev box down).
 
@@ -127,7 +127,7 @@ def test_spawn_gaps_and_bearing_span():
 
 def test_dir_facing_3_is_plus_x_and_7_is_minus_x():
     """R12.4: spawn facing comes from sd->dir_facing[3] (T) / [7] (CT)
-    (cs2_player.h:16); pin the nav.py direction table those indices read."""
+    (cs2_player.h:16); pin the env/nav.py direction table those indices read."""
     from cs2rl.env.nav import _DIR_FACING, _DIR_VECTORS
     assert _DIR_VECTORS[3].tolist() == [1.0, 0.0] and _DIR_FACING[3] == 0.0
     assert _DIR_VECTORS[7].tolist() == [-1.0, 0.0] and abs(_DIR_FACING[7]) == math.pi

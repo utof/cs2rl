@@ -6,7 +6,7 @@ that unreachable areas get a FINITE 4×max sentinel instead of inf.
 
 WHY: the C potential (cs2_rewards.h) used `isfinite(dist)` to skip unreachable
 areas. Under -ffast-math `isfinite` folds to true and inf*scale = inf leaks
-into the PBRS potential. The fix replaces inf with 4×max in map.py so that
+into the PBRS potential. The fix replaces inf with 4×max in env/map.py so that
 closeness = 1 − 4 < 0 clamps to 0 — the same reward as the old skip — and
 scale must still be computed from the finite entries FIRST, or the sentinel
 would shrink it by 4× and silently rescale every nav reward.
@@ -22,7 +22,7 @@ import pytest
 from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
 
 # Pinned on feat/rung1-duel @ 1936393 (before this task) via
-#   UV_NO_SYNC=1 uv run python -c "from cs2rl.map import make_simple_map as m; print(repr(m().bombsite_dist_scale))"
+#   UV_NO_SYNC=1 uv run python -c "from cs2rl.env.map import make_simple_map as m; print(repr(m().bombsite_dist_scale))"
 SIMPLE_SCALE_BEFORE = 0.2                              # max hop 5.0 → 1/5
                                                        # Same, from make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH): max hop 42 → 1/42.
                                                        # 273 entries were inf pre-change (area-id gaps + unreachable areas).

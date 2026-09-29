@@ -3,7 +3,7 @@
 WHAT: a no-import, source-only extractor. Given the NAMED island of emitter
 functions (``EMITTER_SITES``) it returns, for every metrics key those functions
 write, the key itself plus the *shape* of the write — which is what
-``src/cs2rl/metrics_schema.py``'s declared ``aggregation`` is checked against in
+``src/cs2rl/eval/metrics_schema.py``'s declared ``aggregation`` is checked against in
 tests/test_metrics_schema.py.
 
 WHY AST and not import-and-run: the emitters are gated on flags
@@ -1646,7 +1646,7 @@ def _walk_reads(node, fn, receiver, prefix, env, nested, keys):
 def eval_output_keys():
     """Keys of the dict literal BaselineEvaluator.evaluate() returns.
 
-    The runtime guard in eval_baselines (`set(out) != set(EVAL_KEYS)` → raise)
+    The runtime guard in eval.baselines (`set(out) != set(EVAL_KEYS)` → raise)
     only fires when an eval actually runs, and the §3 gate runs with
     `--eval-interval 0`. This is the same contract checked from source, so it
     holds in a suite that never constructs an evaluator.
@@ -1668,7 +1668,7 @@ def losses_entropy_head_source():
     local bound to `list(ACTION_HEAD_NAMES)`, an imported Name, and the rule that
     only LITERAL iterables bind a loop variable stops one hop short of it on
     purpose. metrics_schema therefore declares that family's members FROM
-    `_action_spec.ACTION_HEAD_NAMES`, which is circular unless something pins that
+    `spec.action.ACTION_HEAD_NAMES`, which is circular unless something pins that
     the emitter reads the same tuple. This is that pin: it returns the constant's
     name, so re-pointing the emitter at a different head list fails the test
     instead of silently leaving the registry describing the old heads.

@@ -2,7 +2,7 @@
 """bake_nav.py — Generate src/cs2rl/c_env/nav_data.h from make_simple_map().
 
 Run: uv run python scripts/bake_nav.py
-Re-run whenever map.py or SIMPLE_ROOMS changes.
+Re-run whenever env/map.py or SIMPLE_ROOMS changes.
 """
 from pathlib import Path
 

@@ -55,10 +55,10 @@ from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
 # W4 moved it to the metrics registry so there is one authority for every key.
 # The direction is load-bearing, not stylistic: this module imports torch and
 # c_env.cs2_env at module scope (just above), so a registry that did
-# `from cs2rl.eval_baselines import EVAL_KEYS` would make a tuple of eight strings cost
+# `from cs2rl.eval.baselines import EVAL_KEYS` would make a tuple of eight strings cost
 # a torch import and break the import-lightness invariant every new module is
 # held to (tests/test_w1_modules.py). metrics_schema imports nothing from src
-# except `_action_spec`, so this edge is acyclic and cheap in the one direction
+# except `spec.action`, so this edge is acyclic and cheap in the one direction
 # that matters.
 from cs2rl.eval.metrics_schema import EVAL_KEYS        # noqa: F401  (re-export)
 from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES
@@ -247,7 +247,7 @@ class PolicyActor:
         # with train.load_policy_from_checkpoint first. Late import, though not for a
         # module-level cycle: train.py imports this module only inside train(), so
         # the pair cycles only through function-local imports, which pyproject.toml's
-        # acyclic contract records as its `train -> eval_baselines` ignore entry.
+        # acyclic contract records as its `train -> eval.baselines` ignore entry.
         from cs2rl.train import _hybrid_sample_logits, init_policy_state
         self.torch = torch
         self._sample = _hybrid_sample_logits
@@ -530,9 +530,9 @@ def episode_outcome(kills_for: int, kills_against: int) -> float:
 
 
 # EVAL_KEYS — the eval/* keys evaluate() below returns, i.e. the analysis
-# contract — is NOT defined here any more. It lives in src/cs2rl/metrics_schema.py
+# contract — is NOT defined here any more. It lives in src/cs2rl/eval/metrics_schema.py
 # (W4, spec 2026-08-31 §2 W4) and is imported at the top of this file, which
-# re-exports it for existing `eval_baselines.EVAL_KEYS` consumers.
+# re-exports it for existing `eval.baselines.EVAL_KEYS` consumers.
 
 
 class BaselineEvaluator:

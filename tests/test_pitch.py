@@ -13,7 +13,7 @@ import pytest
 
 
 def test_aim_dim_bumped_to_2():
-    """T1: AIM_DIM in _action_spec mirrors cs2_types.h after sync."""
+    """T1: AIM_DIM in spec.action mirrors cs2_types.h after sync."""
     from cs2rl.spec.action import AIM_DIM
     assert AIM_DIM == 2
 

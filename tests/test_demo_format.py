@@ -143,7 +143,7 @@ def test_actions_are_valid_bc_labels(demo_dir):
 
 
 # Within-block offsets of the two carrier-identifying slots. These are the one
-# place this file uses numbers rather than imports, because _obs_spec.py is
+# place this file uses numbers rather than imports, because spec/obs.py is
 # generated with BLOCK boundaries only — it has no per-field table to import.
 # Sources: cs2_observations.h `obs[22] = (a->team == 0 && a->has_bomb)` and
 # `obs[gb + 13] = (... i == g->round_designated_carrier_id)`. They are written

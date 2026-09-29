@@ -224,7 +224,7 @@ static inline void free_solids(StaticData* sd) {
  *    map-wide instead of erroring. It shouts on stderr; if you ever give
  *    this function a return value, that is the first thing to propagate.
  *  - A connected interval emits NOTHING, whatever the height difference.
- *    Checking adjacency first is the whole point: map.py exempts ramp
+ *    Checking adjacency first is the whole point: env/map.py exempts ramp
  *    endpoints from cliff pruning, so catwalk(128)↔CT-ramp(64) is a
  *    walkable 64u drop, and a lip there would be a 64u wall across an edge
  *    nav shaping actively routes through.
@@ -242,12 +242,12 @@ static inline void free_solids(StaticData* sd) {
  *    The lower side deliberately emits nothing.
  *  - The divider case (covered + not adjacent + no height difference) is
  *    what stops a pruned edge from silently becoming a doorway. It cannot
- *    trigger on SIMPLE_ROOMS today: map.py only prunes adjacency when
+ *    trigger on SIMPLE_ROOMS today: env/map.py only prunes adjacency when
  *    |Δz| > MAX_STEP_HEIGHT, which lands in the lip branch instead. It is
  *    emitted once, by the lower-indexed room, for the same anti-duplicate
  *    reason as the lip.
  *  - Not covered: a pruned ramp edge leaves a hole, because neither side of
- *    it emits. map.py exempts ramp endpoints from cliff pruning, so a pruned
+ *    it emits. env/map.py exempts ramp endpoints from cliff pruning, so a pruned
  *    ramp edge cannot exist today; revisit if that rule changes.
  */
 static inline void build_solids_from_rooms(StaticData* sd) {
@@ -397,8 +397,8 @@ static inline void build_solids_from_rooms(StaticData* sd) {
                 int   connected = (sd->adjacency != NULL) ? (sd->adjacency[i * N + jj] != 0) : 1;
 
                 /* Portal — the nav graph says i<->jj is walkable, so NOTHING
-                 * may be emitted here, not even a lip. map.py exempts ramp
-                 * endpoints from cliff pruning (src/cs2rl/map.py, the L9 post-prune
+                 * may be emitted here, not even a lip. env/map.py exempts ramp
+                 * endpoints from cliff pruning (src/cs2rl/env/map.py, the L9 post-prune
                  * loop), so catwalk(z=128) stays adjacent to CT-ramp(z=64)
                  * across a 64u drop; a lip on that interval would put an
                  * impassable face exactly where nav-distance shaping is
