@@ -27,7 +27,7 @@ import math
 
 import numpy as np
 
-from cs2rl.env_config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
+from cs2rl.env.config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
 from cs2rl.train_shared import (
     _R0G_KNOBS,
     AIM_LOG_STD_CAP_MIN_HEADROOM,
@@ -244,8 +244,8 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # ONE resolver for the weights, the flag knobs, the R0-G trio and pbrs_gamma;
     # the env factory reaches it through the wrappers below (PR B2 hands it the
     # EnvConfig itself), so provenance and the envs cannot disagree. Bound to
-    # `env_cfg`, never `env_config`: that name is the MODULE this function's own
-    # import comes from.
+    # `env_cfg`, never `env_config`: that name reads as the MODULE, cs2rl.env.config,
+    # this function's own import comes from.
     env_cfg = env_config_from_args(args)
 
     # ── TAG diagnostic (spec 2026-08-13 §4.1) ──
@@ -468,7 +468,7 @@ def env_config_from_args(args) -> EnvConfig:
 
     WHY NO DEFAULT IS RESTATED HERE: every absent flag is reached by OMISSION —
     `getattr(args, name, UNSET)` and then simply not passing it — so the field
-    default in env_config.py is the only declaration of the value. Spelling a
+    default in env/config.py is the only declaration of the value. Spelling a
     fallback as `getattr(args, "<knob>", <the field default>)` instead would put
     a second copy of six defaults in this file, which is the duplication #165
     exists to remove and which tests/test_no_restated_env_defaults.py fails on.
@@ -480,7 +480,7 @@ def env_config_from_args(args) -> EnvConfig:
     access.
 
     R0-G (round_time / laser_range / max_turn_speed): read as `None` and STORED
-    as None — None means "the nav.py constant", resolved inside Cs2Env, and
+    as None — None means "the env/nav.py constant", resolved inside Cs2Env, and
     config.json records None rather than a copied constant that would drift.
 
     R0-J: pbrs_gamma is ALWAYS resolved through resolve_gammas, never omitted —

@@ -27,25 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
-# _action_spec is generated from cs2_types.h. Notes on the names imported below:
-#   ACTION_MASK_DIM - F8: trainer-side mask buffer width (= sum of head sizes).
-#   AIM_DIM         - T4→T5 carry-forward (M-1): unused in this module, imported so the
-#                     T6 ONNX exporter can pull it from `train` (see __all__ below).
-# PITFALL (gh#97): no trailing comments anywhere in this import block. yapf snaps
-# trailing comments to its spaces_before_comment stops (40/56/72) while ruff's isort
-# wants exactly one space, so any comment in here makes the two formatters fight and
-# ruff reports I001 forever. Second gh#97 trap: a suppression directive must END its
-# line — trailing prose after its code list makes the directive malformed and inert
-# (and ruff then parses the prose as rule codes, warning on every invocation).
-from cs2rl._action_spec import (
-    ACTION_HEAD_NAMES,
-    ACTION_HEAD_SIZES,
-    ACTION_MASK_DIM,
-    AIM_DIM,
-)
-from cs2rl.env_config import EnvConfig, RewardWeights
+from cs2rl.env.config import EnvConfig, RewardWeights
 from cs2rl.env_factory import build_env_for, build_selfplay_manager
-from cs2rl.paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from cs2rl.resume_state import (
     _rng_load_state_dict,
     _rng_state_dict,
@@ -58,6 +41,24 @@ from cs2rl.resume_state import (
     restore_train_state,
     seed_everything,
 )
+
+# spec.action is generated from cs2_types.h. Notes on the names imported below:
+#   ACTION_MASK_DIM - F8: trainer-side mask buffer width (= sum of head sizes).
+#   AIM_DIM         - T4→T5 carry-forward (M-1): unused in this module, imported so the
+#                     T6 ONNX exporter can pull it from `train` (see __all__ below).
+# PITFALL (gh#97): no trailing comments anywhere in this import block. yapf snaps
+# trailing comments to its spaces_before_comment stops (40/56/72) while ruff's isort
+# wants exactly one space, so any comment in here makes the two formatters fight and
+# ruff reports I001 forever. Second gh#97 trap: a suppression directive must END its
+# line — trailing prose after its code list makes the directive malformed and inert
+# (and ruff then parses the prose as rule codes, warning on every invocation).
+from cs2rl.spec.action import (
+    ACTION_HEAD_NAMES,
+    ACTION_HEAD_SIZES,
+    ACTION_MASK_DIM,
+    AIM_DIM,
+)
+from cs2rl.spec.paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from cs2rl.train_config import (
     OPPONENT_MODES,
     assert_opponent_self_play_compatible,
@@ -209,7 +210,7 @@ __all__ = (
 
 # MUST stay a bare integer literal: cs2rl/experiment/lib.py fingerprints the env by
 # regex-grepping `OBS_DIM = <int>` out of this file's source text (env_fingerprint),
-# so it cannot be an `import`. Mirrors nav.OBS_DIM / _obs_spec.OBS_DIM (generated
+# so it cannot be an `import`. Mirrors nav.OBS_DIM / spec.obs.OBS_DIM (generated
 # from cs2_types.h); cross-checked by test_obs_dim_constant_consistency (test_train_env.py).
 # On an OBS_DIM bump, update cs2_types.h + rerun the generator, then bump this literal.
 OBS_DIM = 110
@@ -726,7 +727,7 @@ def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, p
         ckpt_obs_dim = state_dict["encoder.0.weight"].shape[1]
     # W3 (#154): role eval_legacy — the DOCUMENTED bare-call defaults, which are
     # now EnvConfig()'s own field defaults: the eval_legacy builder passes a
-    # bare EnvConfig(), and env_config.py declares those fields to be the
+    # bare EnvConfig(), and env/config.py declares those fields to be the
     # trained baseline, which is exactly the pre-Rung-0 env (full 5v5, pitch
     # live, crouch and jump enabled); test_defaults_equal_the_139a3a3_values in
     # tests/test_env_config.py pins them. Passing no knobs is the behaviour, not
@@ -898,8 +899,8 @@ def record_episode(
         map_data=None,
 ):
     from cs2rl.c_env.cs2_env import make_env as make_c_env
-    from cs2rl.map import make_cs2_map
-    from cs2rl.nav import CACHE_PATH, NAV_PATH
+    from cs2rl.env.map import make_cs2_map
+    from cs2rl.env.nav import CACHE_PATH, NAV_PATH
     from cs2rl.viz import init_recording, log_navmesh, log_tick, log_trimap
 
     save_path = Path(save_path)
@@ -1872,9 +1873,9 @@ def build_map_data(name: str):
     if name == "dust2":
         return None
     if name == "arena-duel":
-        from cs2rl.map import make_arena_duel_map
+        from cs2rl.env.map import make_arena_duel_map
         return make_arena_duel_map()
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.map import make_simple_map
     return make_simple_map()
 
 
@@ -1923,7 +1924,7 @@ def resolve_pin_pitch(args, verbose: bool = True, build_vis: bool = True) -> int
     PITFALL: args.map_data is None for `--map dust2`/`--dust2`; the helper
     LOADS the map (cached). main() calls this ABOVE the --dump-config exit on
     purpose — the Modal fingerprint dump must carry the geometry-resolved value
-    (costs ~1 s for dust2 from the nav cache, ~0.8 s for `from cs2rl import map`). train()
+    (costs ~1 s for dust2 from the nav cache, ~0.8 s for `from cs2rl.env import map`). train()
     calls it again as a cache-safe cross-check for programmatic callers (second
     call is silent, see `verbose`). verbose=False for the train() cross-check
     so the value is printed once per launch. main() passes build_vis=False for
@@ -2002,7 +2003,7 @@ def assert_eval_env_agreement(eval_env, driver_env):
           are the RESOLVED values: for round_time that is the tick count the
           sentinel becomes, not the sentinel — but the resolution is a
           deterministic function of the config field (Cs2Env.__init__ falls
-          back to the nav.py constant when it is None), and the other four are
+          back to the env/nav.py constant when it is None), and the other four are
           plain copies of the config fields, so (a) cannot fire anywhere (b)
           is silent. It runs FIRST so that a divergence in one of the five
           still raises with the message the inline loop raised before this
@@ -2048,7 +2049,7 @@ def assert_eval_env_agreement(eval_env, driver_env):
 
     PITFALL — WHAT THAT SINGLE EXPRESSION IS KEEPING SAFE. (b) compares
     `round_time` as a CONFIG FIELD, and that field has two spellings for one
-    applied value: None means "the nav.py constant" and Cs2Env resolves it, so a
+    applied value: None means "the env/nav.py constant" and Cs2Env resolves it, so a
     config pair holding None on one side and that same constant on the other is
     behaviourally identical and would still abort the run here. Unreachable only
     because both sides come from one `env_config_from_args(args)`, never from
@@ -2743,7 +2744,7 @@ def train(args):
     # takes precedence — see HybridAimVecEnv for the dual-path contract.
     from multiprocessing import RawArray
 
-    # 10 (5 T + 5 CT) — N_AGENTS not exported via _action_spec; use AGENT_IDS.
+    # 10 (5 T + 5 CT) — N_AGENTS not exported via spec.action; use AGENT_IDS.
     _agents_per_env = len(AGENT_IDS)
     _per_env_floats = _agents_per_env * AIM_DIM
     _cont_action_shm = RawArray("f", args.num_envs * _per_env_floats)
@@ -3044,7 +3045,7 @@ def train(args):
     _eval_hook = None
     _eval_interval = int(getattr(args, "eval_interval", 0) or 0)
     if _eval_interval > 0:
-        from cs2rl.eval_baselines import BaselineEvaluator
+        from cs2rl.eval.baselines import BaselineEvaluator
         # W3 (#154), retyped by #165 PR B2: role eval. `team_spirit=None`, the
         # 10_000_003 seed, the load-bearing `auto_reset=False` AND the
         # raw-reward rule all live in env_factory._build_eval; this site passes
@@ -3261,11 +3262,10 @@ if __name__ == "__main__":
     # `from cs2rl.train import ...` then RE-EXECUTES this whole module body under
     # the name "cs2rl.train", and the process ends up holding two independent
     # copies of it: two sets of module-level constants, two of every class object, and
-    # `isinstance` between them silently False. eval_baselines does exactly that
-    # import, function-locally inside PolicyActor.__init__ and
-    # PolicyActor.from_checkpoint (a pair that cycles only through function-local
-    # imports; see the comment there) — so a plain `--eval-interval N` script run
-    # is enough to trigger it.
+    # `isinstance` between them silently False. eval.baselines does exactly that
+    # import, function-locally inside PolicyActor.__init__ (a pair that cycles only
+    # through function-local imports; see the comment there) — so a plain
+    # `--eval-interval N` script run is enough to trigger it.
     #
     # WHY setdefault and not `=`: under `from cs2rl import train` (the whole test
     # suite, scripts/, the Modal runner) "cs2rl.train" is already a real,
@@ -3430,7 +3430,7 @@ if __name__ == "__main__":
                         "statue (no-op bin on every action head, zero aim delta) and excludes "
                         "its rows from participation, from --timesteps and from every loss. "
                         "Requires --no-self-play. Default 'self' = today's behaviour.")
-    # R0-G env knobs. Default None ⇒ the env's nav.py constant (config.json
+    # R0-G env knobs. Default None ⇒ the env/nav.py constant (config.json
     # records None, not a copied constant). Not in RESUME_CONFIG_ALLOWLIST:
     # changing any of them on --resume-run is a different experiment.
     # PITFALL: a config.json written before R0-G/R0-I/R0-J lacks these keys;
@@ -3581,7 +3581,7 @@ if __name__ == "__main__":
     # The Modal runner fingerprints every launch from --dump-config, so the
     # dump must carry the same env label and the same geometry-resolved
     # pin_pitch the run's own config.json will (Task 9 ruling: the value comes
-    # from the LOADED map, never a name table). Cost: ~0.8 s (`from cs2rl import map`)
+    # from the LOADED map, never a name table). Cost: ~0.8 s (`from cs2rl.env import map`)
     # for simple/arena, ~1 s for dust2 from the nav cache (pin_pitch_for_map(
     # None) loads it via the same _ENV_CACHE make_env uses, so nothing is
     # loaded twice). PITFALL: `--dump-config --map dust2` (or --dust2)

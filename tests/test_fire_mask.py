@@ -15,9 +15,9 @@ stale mask shows up as a delayed first shot (fired_this_tick).
 """
 import numpy as np
 
-from cs2rl._action_spec import ACTION_HEAD_SIZES
 from cs2rl.c_env.cs2_env import make_env
-from cs2rl.env_config import EnvConfig
+from cs2rl.env.config import EnvConfig
+from cs2rl.spec.action import ACTION_HEAD_SIZES
 
 N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
 H_SHOOT, H_RELOAD, H_WEAPON = 1, 2, 3

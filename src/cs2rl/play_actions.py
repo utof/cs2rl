@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from cs2rl.map import make_simple_map
+from cs2rl.env.map import make_simple_map
 from cs2rl.train import init_policy_state
 
 

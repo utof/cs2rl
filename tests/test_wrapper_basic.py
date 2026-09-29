@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from cs2rl._action_spec import ACTION_HEAD_SIZES
-from cs2rl.nav import ACTION_DIM, OBS_DIM
+from cs2rl.env.nav import OBS_DIM
+from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES
 
 
 def test_import_wrapper():

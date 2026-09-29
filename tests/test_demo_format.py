@@ -21,9 +21,9 @@ import numpy as np
 import pytest
 
 from cs2rl import bc_demos
-from cs2rl._action_spec import ACTION_DIM, ACTION_HEAD_SIZES, AIM_DIM
-from cs2rl._obs_spec import OBS_BLOCKS, OBS_DIM
-from cs2rl.nav import MAX_TURN_SPEED_RAD, ROUND_TIME
+from cs2rl.env.nav import MAX_TURN_SPEED_RAD, ROUND_TIME
+from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES, AIM_DIM
+from cs2rl.spec.obs import OBS_BLOCKS, OBS_DIM
 
 
 @pytest.fixture(scope="module")
@@ -143,7 +143,7 @@ def test_actions_are_valid_bc_labels(demo_dir):
 
 
 # Within-block offsets of the two carrier-identifying slots. These are the one
-# place this file uses numbers rather than imports, because _obs_spec.py is
+# place this file uses numbers rather than imports, because spec/obs.py is
 # generated with BLOCK boundaries only — it has no per-field table to import.
 # Sources: cs2_observations.h `obs[22] = (a->team == 0 && a->has_bomb)` and
 # `obs[gb + 13] = (... i == g->round_designated_carrier_id)`. They are written

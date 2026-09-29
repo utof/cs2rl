@@ -20,11 +20,11 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
                build_env_factory's closure as ONE EnvConfig; the per-env seed
                (R0-D) wins over the one pufferlib passes.
   eval         the fixed-baseline evaluator's env. `auto_reset=False` is
-               load-bearing — eval_baselines raises without it, because it reads
+               load-bearing — eval.baselines raises without it, because it reads
                the terminal tick's C state after step() returns.
   eval_legacy  `load_policy_from_checkpoint` and `evaluate_checkpoint`. Both
                build `config=EnvConfig()`, so every knob they get is the field
-               default `src/cs2rl/env_config.py` DECLARES — that module is the one
+               default `src/cs2rl/env/config.py` DECLARES — that module is the one
                declaration, and tests/test_env_config.py pins those fields
                against the trained baseline. They deliberately do NOT get the
                training knobs. #143 tracks that; this module is not the fix, it
@@ -79,7 +79,7 @@ function-local anyway because `c_env.cs2_env` is HEAVY (ctypes plus the compiled
 binding) and train.py imports this module at ITS module level: a module-scope
 import here would put the C env on `--dump-config`'s path and break the
 import-lightness invariant `tests/test_w1_modules.py` enforces, which is what
-makes `train.py --dump-config` cost ~1 s instead of ~30 s. Only `env_config` is
+makes `train.py --dump-config` cost ~1 s instead of ~30 s. Only `env.config` is
 imported at module scope, and it is the stdlib-only leaf.
 
 PITFALL — THIS MODULE STILL NEEDS train.py's `__main__` SELF-ALIAS, and removing
@@ -131,12 +131,12 @@ census and the entry has to be added.
 """
 # Module scope, unlike this module's two function-local imports (`make_env` in
 # `build_env_for` and `SelfPlayManager` in `build_selfplay_manager`):
-# `env_config` is the stdlib-only leaf of the config graph — it imports nothing
+# `env.config` is the stdlib-only leaf of the config graph — it imports nothing
 # heavier than `dataclasses` — so this costs nothing on `--dump-config`'s path.
 # tests/test_w1_modules.py::test_only_sibling_edge_is_to_the_leaf
 # lets a split-out module import only the two LEAVES — `train_shared` and
-# `env_config` — and this is one of them.
-from cs2rl.env_config import EnvConfig
+# `env.config` — and this is one of them.
+from cs2rl.env.config import EnvConfig
 
 # The role names, in the order the spec lists them. Callers pass one of these
 # strings; anything else is a ValueError naming the whole set, because a typo'd
@@ -208,7 +208,7 @@ def _build_eval(_make, /, *, map_data, config):
     """The fixed-baseline evaluator's env.
 
     ``auto_reset=False`` is the reason this role cannot be folded into any
-    other: eval_baselines reads the terminal tick's C state and episode_stats
+    other: eval.baselines reads the terminal tick's C state and episode_stats
     AFTER step() returns, which auto-reset would already have overwritten, and
     it raises outright without it.
 
@@ -243,7 +243,7 @@ def _build_eval_legacy(_make, /, *, seed=UNSET):
 
     These deliberately carry NO training knobs. `config=EnvConfig()` is what
     says so: a bare EnvConfig IS the declared field defaults, and
-    `src/cs2rl/env_config.py` is the single place those are declared. That is today's
+    `src/cs2rl/env/config.py` is the single place those are declared. That is today's
     behaviour and #143, not a bug to fix in passing here. Naming the config
     object moved no value, and that is asserted rather than asserted-by-hand:
     the pre-migration capture's two `eval_legacy` rows record an

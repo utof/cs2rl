@@ -65,7 +65,9 @@ modal = [
 # One package, cs2rl, under src/. Explicit because automatic src-layout discovery
 # also scans PEP 420 namespace directories (src/cs2rl/c_env/demo_assets, zig-out,
 # zig-pkg); namespaces = false keeps the wheel to the real packages (cs2rl and its
-# subpackages c_env, deploy and experiment).
+# subpackages c_env, deploy, env, eval, experiment and spec). The flip side: a new
+# subpackage without an __init__.py is dropped from the wheel silently. grimp skips it
+# too, so tests/test_import_layers.py's coverage check is what fails on one.
 where = ["src"]
 include = ["cs2rl*"]
 namespaces = false
@@ -171,6 +173,19 @@ ignore = ["E501"]
 # (a sys.path insert of tests/) and the old dotted one are both banned.
 "metrics_census".msg = "import `tests._helpers.metrics_census` (#207 moved it)"
 "tests.metrics_census".msg = "import `tests._helpers.metrics_census` (#207 moved it)"
+# #205 part 2a moved nine flat modules into the layer packages spec/, env/ and eval/.
+# Each old dotted name, in any spelling (`from cs2rl import nav` included), names its new
+# home. Needed because nothing else catches a leftover in a worktree before it runs: the
+# pyrefly gate resolves cs2rl through the editable install, which names MAIN's src/.
+"cs2rl._action_spec".msg = "import `cs2rl.spec.action` (#205 moved it)"
+"cs2rl._obs_spec".msg = "import `cs2rl.spec.obs` (#205 moved it)"
+"cs2rl.paths".msg = "import `cs2rl.spec.paths` (#205 moved it)"
+"cs2rl.env_config".msg = "import `cs2rl.env.config`, e.g. `from cs2rl.env import config as env_config` (#205 moved it)"
+"cs2rl.nav".msg = "import `cs2rl.env.nav` (#205 moved it)"
+"cs2rl.map".msg = "import `cs2rl.env.map` (#205 moved it)"
+"cs2rl.eval_baselines".msg = "import `cs2rl.eval.baselines` (#205 moved it)"
+"cs2rl.metrics_schema".msg = "import `cs2rl.eval.metrics_schema` (#205 moved it)"
+"cs2rl.scripted_expert".msg = "import `cs2rl.eval.scripted_expert` (#205 moved it)"
 
 [tool.ruff.format]
 quote-style = "double"
@@ -202,7 +217,9 @@ root_package = "cs2rl"
 # Higher layers may import lower ones, never the reverse. exhaustive: every module
 # directly under cs2rl must be named here, so a new module fails until it gets a layer.
 # `|` members may not import each other; `:` members may, so this contract does not
-# reject a cycle among them. The acyclic contract below does.
+# reject a cycle among them. The acyclic contract below does. A package (spec, env,
+# eval, c_env) is one member here; the `cs2rl.env layers` contract orders env's own
+# modules.
 [[tool.importlinter.contracts]]
 name = "cs2rl layers"
 type = "layers"
@@ -210,12 +227,17 @@ containers = ["cs2rl"]
 exhaustive = true
 layers = [
     "experiment | deploy",
-    # metrics_schema sits here with eval (#184 §4's eval/), so train -> metrics_schema is
-    # an upward edge; tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN relies on that.
-    "train_bc : bc_demos : scripted_expert : play : play_actions : eval_baselines : profile_step : viz : metrics_schema",
+    # eval (baselines, metrics_schema, scripted_expert) sits above train, so train ->
+    # eval.metrics_schema is an upward edge; tests/test_w1_modules.py's
+    # NOT_IMPORTED_BY_TRAIN relies on that, and tests/test_import_layers.py's
+    # test_metrics_schema_sits_above_train pins it.
+    "train_bc : bc_demos : play : play_actions : profile_step : viz : eval",
     "train : trainer : train_shared : train_config : train_metrics : train_update : resume_state : train_helpers_batch1 : train_test_harness",
-    "nav : map : c_env : env_factory",
-    "_action_spec : _obs_spec : paths : env_config",
+    # env_factory stays a flat module until #205 part 2b moves it into env/ together
+    # with c_env: its build_env_for imports c_env.cs2_env, which imports env's config,
+    # nav and map, so inside env/ before c_env it would close an env <-> c_env cycle.
+    "env : c_env : env_factory",
+    "spec",
 ]
 ignore_imports = [
     # env_factory.py:416, in build_selfplay_manager: SelfPlayManager lives in train.py.
@@ -223,19 +245,34 @@ ignore_imports = [
     # import back would cycle) and runs as `__main__` (env_factory's docstring). #92
     # removes it.
     "cs2rl.env_factory -> cs2rl.train",
-    # train.py:3047, in train(), only under --eval-interval: eval_baselines imports torch
-    # at module scope and `from cs2rl import train` must stay torch-free. #92 removes it.
-    "cs2rl.train -> cs2rl.eval_baselines",
-    # train.py:903 and :916, in record_episode (--record): viz imports rerun at module
+    # train.py:3048, in train(), only under --eval-interval: eval/baselines.py imports
+    # torch at module scope and `from cs2rl import train` must stay torch-free. #92
+    # removes it.
+    "cs2rl.train -> cs2rl.eval.baselines",
+    # train.py:904 and :917, in record_episode (--record): viz imports rerun at module
     # scope. #92 removes it.
     "cs2rl.train -> cs2rl.viz",
 ]
 broken_contract_guidance = "Give a new module a layer in pyproject.toml. Move an upward import down, or into the function that needs it. Never widen ignore_imports: #92 retires its entries."
 
-# No cycles among the children of cs2rl, or of any package inside it, at any scope
-# (import-linter sees function-local imports too). One cycle exists today, through
-# {env_factory, eval_baselines, train, trainer}; each ignored pair below is a
-# function-local edge of it, and ignoring the three is what breaks it.
+# Inside env/: config is the stdlib-only contract that c_env.cs2_env and
+# `train.py --dump-config` import, so it may import neither nav (awpy, shapely) nor map.
+# The package-wide contract above cannot say so: all three are one member, env, there.
+# exhaustive: a new module in env/ fails until it gets a layer here.
+[[tool.importlinter.contracts]]
+name = "cs2rl.env layers"
+type = "layers"
+containers = ["cs2rl.env"]
+exhaustive = true
+layers = ["map : nav", "config"]
+broken_contract_guidance = "Keep cs2rl.env.config stdlib-only: move the import into its caller. Give a new env/ module a layer here."
+
+# No cycles among the children of cs2rl, or of any package inside it (env.nav and
+# env.map included), at any scope (import-linter sees function-local imports too). One
+# cycle exists among cs2rl's children today, through {env_factory, eval, train,
+# trainer}; each ignored pair below is a function-local edge of it, and ignoring the
+# three is what breaks it. (eval -> train, PolicyActor.__init__'s function-local
+# import in eval/baselines.py, is the edge that closes it with train -> eval.baselines.)
 [[tool.importlinter.contracts]]
 name = "cs2rl acyclic siblings"
 type = "acyclic_siblings"
@@ -243,10 +280,10 @@ ancestors = ["cs2rl"]
 ignore_imports = [
     # env_factory.py:416, as in the layers contract above. #92 removes it.
     "cs2rl.env_factory -> cs2rl.train",
-    # train.py:3047, as in the layers contract above. #92 removes it.
-    "cs2rl.train -> cs2rl.eval_baselines",
-    # train.py:2951, in train(): trainer subclasses PuffeRL, so it imports torch at module
-    # scope, and `from cs2rl import train` must stay torch-free (train.py:2948-2950). Not
+    # train.py:3048, as in the layers contract above. #92 removes it.
+    "cs2rl.train -> cs2rl.eval.baselines",
+    # train.py:2952, in train(): trainer subclasses PuffeRL, so it imports torch at module
+    # scope, and `from cs2rl import train` must stay torch-free (train.py:2949-2951). Not
     # #92's: it stays while trainer.py imports train at module scope.
     "cs2rl.train -> cs2rl.trainer",
 ]

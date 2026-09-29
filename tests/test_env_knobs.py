@@ -3,7 +3,7 @@
 `--round-time-ticks` / `--laser-range` / `--max-turn-speed` flow
 CLI → env_config_from_args → make_env → the packed StaticData buffer
 binding.init copies (StaticData.round_time / laser_range + laser_range_sq /
-max_turn_speed). None ⇒ nav.py constant, so every caller that does not pass a
+max_turn_speed). None ⇒ env/nav.py constant, so every caller that does not pass a
 knob keeps today's values (fingerprints unchanged at default).
 
 PITFALL (Task 14): the CLI-name ↔ field-name map is hand-written, split over
@@ -20,7 +20,7 @@ N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
 
 def test_round_time_ticks_sets_episode_length(simple_map):
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     env = make_env(map_data=simple_map, config=EnvConfig(round_time=160), seed=1, auto_reset=False)
     try:
         assert env.round_time == 160
@@ -42,7 +42,7 @@ def test_round_time_ticks_sets_episode_length(simple_map):
 def test_laser_and_turn_speed_reach_static_data(simple_map):
     from cs2rl.c_env import binding
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     env = make_env(map_data=simple_map,
                    config=EnvConfig(laser_range=300.0, max_turn_speed=0.5),
                    seed=1)
@@ -59,10 +59,10 @@ def test_laser_and_turn_speed_reach_static_data(simple_map):
 
 
 def test_default_knobs_match_nav_constants(simple_map):
-    """None (the default) must resolve to the nav.py constants, not 0 / garbage."""
-    from cs2rl import nav
+    """None (the default) must resolve to the env/nav.py constants, not 0 / garbage."""
     from cs2rl.c_env import binding
     from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env import nav
     env = make_env(map_data=simple_map, seed=1)
     try:
         sc = binding.static_data_scalars(env._capsule)
@@ -87,7 +87,7 @@ def test_invalid_knobs_raise_value_error(simple_map, bad):
     """Validation happens in Python BEFORE binding.init: a C-side assert would
     abort a forked Puffer worker with no traceback."""
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     with pytest.raises(ValueError):
         make_env(map_data=simple_map, seed=1, config=EnvConfig(**bad))
 
@@ -140,7 +140,7 @@ def test_env_config_from_args_reads_every_channel():
     """
     import types
 
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     from cs2rl.train import env_config_from_args
     args = types.SimpleNamespace(reward_ct_survival=0.0,
                                  pbrs_nav_weight_t=0.07,
@@ -184,7 +184,7 @@ def test_env_config_from_args_pbrs_gamma_follows_gamma_unless_overridden():
     """
     import types
 
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     from cs2rl.train import env_config_from_args
     field_default = EnvConfig().pbrs_gamma
     carried, explicit = 0.97, 0.95
@@ -206,7 +206,7 @@ def test_env_config_from_args_on_a_bare_namespace_is_the_default_config():
     """
     import types
 
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     from cs2rl.train import env_config_from_args
     assert env_config_from_args(types.SimpleNamespace()) == EnvConfig()
 
@@ -257,7 +257,7 @@ def test_args_knob_coverage_is_exhaustive():
     the whole suite green. `recoil` is listed as deliberately unreachable: there
     is no flag and reading one would be new behaviour.
     """
-    from cs2rl.env_config import KNOB_FIELDS
+    from cs2rl.env.config import KNOB_FIELDS
     from cs2rl.train_config import _ARGS_KNOB_FIELDS
     from cs2rl.train_shared import _R0G_KNOBS
     routed = set(_ARGS_KNOB_FIELDS) | {f for _, f in _R0G_KNOBS} | {"pbrs_gamma", "recoil"}
@@ -267,7 +267,7 @@ def test_args_knob_coverage_is_exhaustive():
 def test_make_env_forwards_knobs(simple_map):
     from cs2rl.c_env import binding
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     env = make_env(map_data=simple_map,
                    config=EnvConfig(round_time=160, laser_range=300.0, max_turn_speed=0.5))
     try:

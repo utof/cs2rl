@@ -80,7 +80,7 @@ public sealed class PolicyInference : IDisposable
     // Batch 3: continuous-aim head (1D Gaussian Δyaw, μ-only at deploy).
     // Allocated only when HasAimHead = true; empty array sentinel otherwise so
     // callers can safely test `muAim.Length > 0` without null checks.
-    // AimDim = 1 matches AIM_DIM in src/cs2rl/_action_spec.py — μ is a scalar Δyaw
+    // AimDim = 1 matches AIM_DIM in src/cs2rl/spec/action.py — μ is a scalar Δyaw
     // (in radians, tanh-squashed and scaled to [-π/4, +π/4]).
     private readonly float[]  _muAim;
     public  const    int      AimDim = 1;

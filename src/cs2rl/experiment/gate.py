@@ -88,7 +88,7 @@ REPORT_ONLY = ("on_target_per_facing", "hit_per_on_target", "shots_fired", "epis
 # Keys are the ones train.py emits: compute_game_metrics `game/<counter>`
 # window means, pufferl's `losses/<k>` prefix over trainer losses
 # (`entropy/shoot` is the per-head entropy of ACTION_HEAD_NAMES[1]), the
-# `policy/aim_log_std_yaw` diagnostic, eval_baselines' `eval/win_vs_oracle`.
+# `policy/aim_log_std_yaw` diagnostic, eval.baselines' `eval/win_vs_oracle`.
 REPORT_EXTRA = (
     ("stance_blocked_per_facing", "ratio", ("game/shots_stance_blocked",
                                             "game/shots_facing_enemy")),

@@ -13,12 +13,12 @@ auto_reset=True — pinned below).
 import numpy as np
 import pytest
 
-from cs2rl._action_spec import (       # definition site — nav/train only re-export, and importing train drags torch into a numpy-only test
+from cs2rl.c_env.cs2_env import make_env, symmetrize_rewards
+from cs2rl.env.config import EnvConfig
+from cs2rl.env.nav import TEAM_SIZE
+from cs2rl.spec.action import (        # definition site — nav/train only re-export, and importing train drags torch into a numpy-only test
     ACTION_DIM, ACTION_HEAD_SIZES,
 )
-from cs2rl.c_env.cs2_env import make_env, symmetrize_rewards
-from cs2rl.env_config import EnvConfig
-from cs2rl.nav import TEAM_SIZE
 
 
 def _expected(raw):
@@ -217,7 +217,7 @@ def test_symmetrization_holds_on_the_external_buffer_vecenv_path():
 
 def test_make_env_threads_the_flag():
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     env = make_env(seed=5, config=EnvConfig(reward_symmetrize=True))
     try:
         assert env._reward_symmetrize is True

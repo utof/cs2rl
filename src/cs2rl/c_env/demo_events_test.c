@@ -585,7 +585,7 @@ static void solids_fix_n(SolidsFix* f, int n) {
     f->sd.centroids_z = f->zs;
     f->sd.is_ramp     = f->ramps;
     f->sd.adjacency   = f->adj;
-    /* Self-adjacency is always true in map.py. */
+    /* Self-adjacency is always true in env/map.py. */
     for (i = 0; i < n; i++)
         f->adj[i * n + i] = 1;
 }
@@ -964,7 +964,7 @@ static void test_solids_elevated_cliff_lip(void) {
     free_solids(&f.sd);
 }
 
-/* IMPORTANT: adjacency wins over the drop. map.py exempts ramp endpoints from
+/* IMPORTANT: adjacency wins over the drop. env/map.py exempts ramp endpoints from
  * cliff pruning, so on the real map catwalk(z=128) stays adjacent to
  * CT-ramp(z=64) across a 64u drop. Emitting a lip there put a 64u wall across
  * an edge the nav graph — and therefore nav-distance shaping — treats as
@@ -1037,7 +1037,7 @@ static void test_solids_ramp_neighbour_emits_no_lip(void) {
 }
 
 /* Flush + unconnected → ONE divider, emitted by the lower-indexed room.
- * SOLID_KIND_DIVIDER is unreachable on SIMPLE_ROOMS (map.py only prunes on
+ * SOLID_KIND_DIVIDER is unreachable on SIMPLE_ROOMS (env/map.py only prunes on
  * |Δz| > MAX_STEP_HEIGHT, which lands in the lip branch), so without this
  * fixture the whole branch — and the i<jj anti-duplicate guard — is dead.
  *
@@ -1105,7 +1105,7 @@ static void test_solids_ramp_emits_no_divider(void) {
  * the LOWER-indexed room (the `i < jj` anti-duplicate tie-break), so a guard
  * that only tests the emitting room makes the outcome depend on nothing but
  * array order: ramp at index 0 was silent, ramp at index 1 got a 128u wall
- * across its face. Array order is assigned by map.py's room list and carries
+ * across its face. Array order is assigned by env/map.py's room list and carries
  * no geometric meaning, so this asymmetry is a bug, not a convention. */
 static void test_solids_ramp_neighbour_emits_no_divider(void) {
     SolidsFix f;

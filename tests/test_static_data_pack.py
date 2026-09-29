@@ -12,7 +12,7 @@ arriving in the wrong (correctly-described) field, or not arriving at all.
 The sentinel round trip in tests/test_struct_sizes.py covers the routing of
 every field make_env can set. What it cannot cover is the ~16 scalars make_env
 does NOT expose — the map-derived geometry (grid_x_min, inv_x_range, x_offset,
-...) and the nav.py timing constants — which it checks by key presence only,
+...) and the env/nav.py timing constants — which it checks by key presence only,
 because a value check there would have to restate the implementation's own
 formula. Those are exactly the fields a packer bug would silently change.
 
@@ -21,7 +21,7 @@ holds the complete static_data_scalars() dict for two fixed make_env
 configurations, recorded on the tree BEFORE the packer existed. A snapshot taken
 after the rewrite would compare the packer to itself and assert nothing.
 
-REGENERATING THE FIXTURE is legitimate when make_simple_map or a nav.py constant
+REGENERATING THE FIXTURE is legitimate when make_simple_map or an env/nav.py constant
 changes on purpose, and at no other time. Regenerating it to make a failing
 packer change go green deletes the only evidence that the two transfers agree,
 which is the entire reason the file is committed. Command, from the repository
@@ -330,7 +330,7 @@ def _capture():
     """
     import subprocess
 
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.map import make_simple_map
     from tests.test_struct_sizes import _SENTINEL_CONFIGS, _config_from_field_kwargs
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -350,7 +350,7 @@ def _capture():
     provenance = {
         "format": _CAPTURE_FORMAT,
         "captured_at_commit": head,
-        "map": "cs2rl.map.make_simple_map()",
+        "map": "cs2rl.env.map.make_simple_map()",
         "why": why,
         "regenerate": regenerate,
     }

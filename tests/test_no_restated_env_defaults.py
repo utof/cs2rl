@@ -1,4 +1,4 @@
-"""Gate: no env default is restated outside src/cs2rl/env_config.py (spec 2026-09-03 R11).
+"""Gate: no env default is restated outside src/cs2rl/env/config.py (spec 2026-09-03 R11).
 
 WHY THREE PROBES. A default can be written down in three shapes and each is
 invisible to the other two probes:
@@ -17,13 +17,13 @@ gate with only probes 1 and 2 would report 0 both before and after that removal
 file exists to prevent.
 
 WHAT COUNTS AS A RESTATEMENT: a literal equal to the field's default, written
-anywhere under src/ or scripts/ except src/cs2rl/env_config.py, which is where the
+anywhere under src/ or scripts/ except src/cs2rl/env/config.py, which is where the
 defaults are DECLARED. A value that merely happens to equal a default is still a
 restatement unless there is a written reason (see ALLOWLIST).
 
 NOT SCANNED: `default=None` in argparse. In this codebase a None argparse
 default is never a copy of a field default, it is the "resolve this later"
-sentinel — from the map for --pin-pitch, from nav.py for the R0-G trio.
+sentinel — from the map for --pin-pitch, from env/nav.py for the R0-G trio.
 
 NOT SCANNED: tests/, and widening the roots to reach it would BURY this gate
 rather than strengthen it. The line probe finds 89 hits under tests/**/*.py
@@ -53,10 +53,10 @@ from pathlib import Path
 
 import pytest
 
-from cs2rl.env_config import KNOB_FIELDS, EnvConfig, RewardWeights
+from cs2rl.env.config import KNOB_FIELDS, EnvConfig, RewardWeights
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DECLARATION = REPO_ROOT / "src" / "cs2rl" / "env_config.py"
+DECLARATION = REPO_ROOT / "src" / "cs2rl" / "env" / "config.py"
 
 # name -> default, for the 23 weights and the seven non-None knobs. The three
 # None-valued R0-G knobs are excluded: `x = None` is not a restatement of
@@ -92,11 +92,13 @@ FIELD_DEFAULTS = {
 ALLOWLIST = ("config.replace(reward_symmetrize=False)", )
 
 # The roots every probe reads, and one file that MUST be among the results.
-# ANCHOR is derived from DECLARATION rather than written as a bare "src/..."
-# string: a rename that moved the declaration would move the anchor with it,
-# where a hard-coded path would just start pointing at nothing.
+# ANCHOR is spelled out from REPO_ROOT, never derived from DECLARATION: the two live
+# in different packages (#205 moved the declaration into env/, train_config.py stayed
+# at the package root), so `DECLARATION.parent / ...` would name a file that does not
+# exist. A path that points at nothing is loud here, not silent: _scanned_files
+# asserts ANCHOR is among the scanned files.
 SCAN_ROOTS = ("src", "scripts")
-ANCHOR = DECLARATION.parent / "train_config.py"
+ANCHOR = REPO_ROOT / "src" / "cs2rl" / "train_config.py"
 
 
 def _scanned_files():
@@ -133,8 +135,7 @@ def _scanned_files():
     assert ANCHOR in files, (
         f"{ANCHOR} is missing from the scan of {list(SCAN_ROOTS)} ({len(files)} file(s) found). "
         f"That file holds the CLI and the R0-G/R0-J prose, so a scan without it is not scanning "
-        f"src/, whatever its length. If the file legitimately moved, repoint ANCHOR — it is "
-        f"derived from DECLARATION so that a rename shows up here instead of silently.")
+        f"src/, whatever its length. If the file legitimately moved, repoint ANCHOR.")
     return files
 
 
@@ -215,7 +216,7 @@ def _assert_exactly(found, pending, probe):
         return "\n".join(rows)
 
     extra = sorted(k for k in counts if counts[k] > pending.get(k, 0))
-    assert not extra, (f"{probe}: env default(s) restated outside src/cs2rl/env_config.py:\n" +
+    assert not extra, (f"{probe}: env default(s) restated outside src/cs2rl/env/config.py:\n" +
                        _fmt(extra) +
                        "\nDerive the value from EnvConfig()/RewardWeights() instead. A comment or "
                        "docstring counts — write `<the field default>`, not the number. If it is "
@@ -305,7 +306,7 @@ def test_no_argparse_default_restates_a_field_default():
 
 
 def test_field_defaults_covers_every_declared_default():
-    """Vacuity guard: the value table must hold EVERY default env_config declares.
+    """Vacuity guard: the value table must hold EVERY default env.config declares.
 
     Both count probes above search for the values in FIELD_DEFAULTS and compare
     what they find against an EMPTY pending map. An emptied or truncated table
@@ -324,16 +325,18 @@ def test_field_defaults_covers_every_declared_default():
     knobs = {k: getattr(cfg, k) for k in KNOB_FIELDS if getattr(cfg, k) is not None}
     sentinels = {k for k in KNOB_FIELDS if getattr(cfg, k) is None}
 
-    assert weights and knobs, ("env_config declares no reward weights, or no non-None knobs. The "
-                               "dataclass changed shape and every probe in this file now guards "
-                               "nothing.")
+    assert weights and knobs, (
+        "env/config.py declares no reward weights, or no non-None knobs. The "
+        "dataclass changed shape and every probe in this file now guards "
+        "nothing.")
     missing = sorted((set(weights) | set(knobs)) - set(FIELD_DEFAULTS))
     assert not missing, (f"FIELD_DEFAULTS does not cover {missing}. The probes cannot see a "
                          "restatement of a field they hold no value for, and blind reads as "
                          "green.")
     wrong = sorted(n for n, v in {**weights, **knobs}.items() if FIELD_DEFAULTS[n] != v)
-    assert not wrong, (f"FIELD_DEFAULTS holds a value env_config no longer declares for {wrong}. "
-                       "The probes are searching the tree for the wrong number.")
+    assert not wrong, (
+        f"FIELD_DEFAULTS holds a value env/config.py no longer declares for {wrong}. "
+        "The probes are searching the tree for the wrong number.")
     leaked = sorted(sentinels & set(FIELD_DEFAULTS))
     assert not leaked, (f"{leaked} are None in EnvConfig — the resolve-later sentinel, not a "
                         "default. `x = None` restates nothing, and searching for it would flag "
@@ -387,9 +390,9 @@ def test_the_probes_find_a_planted_restatement(tmp_path, monkeypatch, probe):
     `test_the_probes_can_actually_fail` does not close this: it exercises the
     PATTERNS against a scratch string and never touches the file walk.
     """
-    (tmp_path / "src" / "cs2rl").mkdir(parents=True)
+    (tmp_path / "src" / "cs2rl" / "env").mkdir(parents=True)
     (tmp_path / "scripts").mkdir()
-    declaration = tmp_path / "src" / "cs2rl" / "env_config.py"
+    declaration = tmp_path / "src" / "cs2rl" / "env" / "config.py"
     anchor = tmp_path / "src" / "cs2rl" / "train_config.py"
     name = "crouch_enabled"
     value = FIELD_DEFAULTS[name]

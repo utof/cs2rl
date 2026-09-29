@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 
-from cs2rl._action_spec import ACTION_HEAD_SIZES
+from cs2rl.spec.action import ACTION_HEAD_SIZES
 from cs2rl.train import (
     masked_explained_variance,
     masked_mean,
@@ -413,7 +413,7 @@ def test_noop_opponent_rows_are_statues_excluded_from_global_step():
         # statue, element for element — see
         # test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent
         # for why the two definitions have to agree.
-        from cs2rl.eval_baselines import IdleActor
+        from cs2rl.eval.baselines import IdleActor
         _idle_act, _idle_cont = IdleActor().act(None, None, None, None)
         assert trainer.actions.shape[-1] == _idle_act.shape[-1]
         assert trainer.cont_actions.shape[-1] == _idle_cont.shape[-1]
@@ -442,7 +442,7 @@ def test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent():
     There are two, in modules that share no constant:
       - the trainer's, an inline override in evaluate() under `--opponent noop`
         (bin 0 on every discrete head, zero aim delta);
-      - the oracle's, ``eval_baselines.IdleActor``, which
+      - the oracle's, ``eval.baselines.IdleActor``, which
         cs2rl/experiment/oracle_statue.py drives as agent 5 to establish Rung 1a's
         SOLVABILITY PRECONDITION — "a perfect aimer can kill this opponent".
 
@@ -460,7 +460,7 @@ def test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent():
     compares the trainer's produced rows to IdleActor's output directly).
     """
     from cs2rl.c_env.cs2_env import N_AGENTS
-    from cs2rl.eval_baselines import ACTION_DIM, AIM_DIM, IdleActor
+    from cs2rl.eval.baselines import ACTION_DIM, AIM_DIM, IdleActor
 
     statue = IdleActor()
     act, cont = statue.act(None, None, None, None)

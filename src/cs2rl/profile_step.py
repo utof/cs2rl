@@ -1,6 +1,6 @@
 """Performance profiler for the Dust2 simulation stack.
 
-This script is meant to be rerun whenever `nav.py`, `c_env`, or the binding
+This script is meant to be rerun whenever `env/nav.py`, `c_env`, or the binding
 changes. It benchmarks the same environment at several layers so regressions
 are easy to localize:
 
@@ -32,10 +32,10 @@ from typing import Any
 
 import numpy as np
 
-from cs2rl._action_spec import AIM_DIM
 from cs2rl.c_env.cs2_env import make_env as make_c_env
-from cs2rl.nav import ACTION_DIM, N_AGENTS, OBS_DIM
-from cs2rl.paths import LOGS_DIR
+from cs2rl.env.nav import N_AGENTS, OBS_DIM
+from cs2rl.spec.action import ACTION_DIM, AIM_DIM
+from cs2rl.spec.paths import LOGS_DIR
 
 REPORT_DIR = LOGS_DIR / "profiles"
 NOOP_ACTION_C = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)

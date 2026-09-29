@@ -1,4 +1,4 @@
-"""src/cs2rl/metrics_schema.py checked against the SOURCE of every emitter and reader.
+"""src/cs2rl/eval/metrics_schema.py checked against the SOURCE of every emitter and reader.
 
 WHAT is enforced, and why each half exists:
 
@@ -35,11 +35,12 @@ The registry chases them; a hardcoded snapshot of their keys would go stale
 silently, since nothing enforces that they stay frozen.
 """
 import ast
+import importlib.util
 from pathlib import Path
 
 import pytest
 
-from cs2rl import metrics_schema as ms
+from cs2rl.eval import metrics_schema as ms
 
 # `metrics_census`, the AST extractor this file checks the registry against, is test
 # code, so it lives in tests/_helpers/ rather than in the shipped package. It is
@@ -176,7 +177,7 @@ def test_environment_star_window_means_still_rest_on_an_append_shaped_collector(
     """
     assert census.stats_collection_is_append_shaped(), (
         "train.py's info-collection loop no longer appends/extends into self.stats — every "
-        "environment/* `window-mean-pufferlib` declaration in metrics_schema.py is now a "
+        "environment/* `window-mean-pufferlib` declaration in eval/metrics_schema.py is now a "
         "claim about a pipeline that does not exist")
 
 
@@ -447,14 +448,14 @@ def test_closed_family_members_match_the_census_exactly():
 
 def test_losses_entropy_family_members_track_the_action_spec():
     """`losses/entropy/*` is OPEN to the AST census, so its members are declared from
-    `_action_spec.ACTION_HEAD_NAMES` — this pins that the EMITTER iterates the same
+    `spec.action.ACTION_HEAD_NAMES` — this pins that the EMITTER iterates the same
     tuple, which is the only thing making that declaration non-circular."""
     source = census.losses_entropy_head_source()
     assert source == "ACTION_HEAD_NAMES", (
         f"the per-head entropy loop iterates {source!r}, not ACTION_HEAD_NAMES; "
         "metrics_schema's losses/entropy/* member list is derived from ACTION_HEAD_NAMES "
         "and is now describing a different set of heads")
-    from cs2rl._action_spec import ACTION_HEAD_NAMES
+    from cs2rl.spec.action import ACTION_HEAD_NAMES
     declared = ms.REGISTRY["losses/entropy/*"].members
     assert tuple(sorted(declared)) == tuple(sorted(f"losses/entropy/{h}"
                                                    for h in ACTION_HEAD_NAMES))
@@ -651,7 +652,7 @@ def _declared_family_members():
     the emitter's own literals, and for `losses/entropy/*` — closed by declaration
     because the census sees it as open —
     `test_losses_entropy_family_members_track_the_action_spec` pins it against
-    `_action_spec` plus a source pin on the loop the emitter iterates. That both
+    `spec.action` plus a source pin on the loop the emitter iterates. That both
     checks exist for every members-declaring family is asserted in
     `test_closed_family_members_match_the_census_exactly`.
     """
@@ -940,7 +941,7 @@ def test_consumer_names_cover_every_read_and_no_read_is_invented():
 
 
 def test_eval_keys_match_the_evaluate_output_contract():
-    """EVAL_KEYS is `BaselineEvaluator.evaluate()`'s output contract. eval_baselines
+    """EVAL_KEYS is `BaselineEvaluator.evaluate()`'s output contract. eval.baselines
     raises on a set mismatch at runtime, but only when an eval actually runs — and
     the §3 gate runs with eval off, so that guard never fires in the suite. Same
     contract, read from source."""
@@ -956,46 +957,85 @@ def test_eval_surface_is_eval_keys_plus_the_two_scheduler_stamps():
 
 
 def test_eval_baselines_imports_eval_keys_from_here_and_not_the_reverse():
-    """The direction is load-bearing, not stylistic: eval_baselines imports torch and
-    c_env.cs2_env at module scope, so `from cs2rl.eval_baselines import EVAL_KEYS` would make
+    """The direction is load-bearing, not stylistic: eval.baselines imports torch and
+    c_env.cs2_env at module scope, so `from cs2rl.eval.baselines import EVAL_KEYS` would make
     a tuple of eight strings cost a torch import and break metrics_schema's
     import-lightness (tests/test_w1_modules.py). Checked from SOURCE — importing
-    eval_baselines here to compare the objects would pull torch into this test."""
-    tree = ast.parse((REPO_ROOT / "src" / "cs2rl" / "eval_baselines.py").read_text())
+    eval.baselines here to compare the objects would pull torch into this test."""
+    tree = ast.parse((REPO_ROOT / "src" / "cs2rl" / "eval" / "baselines.py").read_text())
     imports_from_schema = any(
-        isinstance(n, ast.ImportFrom) and n.module == "cs2rl.metrics_schema" and any(
+        isinstance(n, ast.ImportFrom) and n.module == "cs2rl.eval.metrics_schema" and any(
             a.name == "EVAL_KEYS" for a in n.names) for n in ast.walk(tree))
     assert imports_from_schema, (
-        "src/cs2rl/eval_baselines.py must do `from cs2rl.metrics_schema import "
+        "src/cs2rl/eval/baselines.py must do `from cs2rl.eval.metrics_schema import "
         "EVAL_KEYS` — the registry is the single authority")
     assigns = [
         n for n in tree.body if isinstance(n, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "EVAL_KEYS" for t in n.targets)
     ]
     assert not assigns, (
-        "src/cs2rl/eval_baselines.py still assigns EVAL_KEYS — two authorities for "
+        "src/cs2rl/eval/baselines.py still assigns EVAL_KEYS — two authorities for "
         "the same contract is exactly what the move removed")
 
-    schema_tree = ast.parse((REPO_ROOT / "src" / "cs2rl" / "metrics_schema.py").read_text())
+    schema_tree = ast.parse(
+        (REPO_ROOT / "src" / "cs2rl" / "eval" / "metrics_schema.py").read_text())
+    assert not [n for n in ast.walk(schema_tree) if is_back_edge(n)
+                ], ("metrics_schema must never import cs2rl.eval.baselines (torch at its scope)")
 
-    def is_back_edge(n):
-        """All three spellings: `import cs2rl.eval_baselines`, `from cs2rl.eval_baselines
-        import ...` and `from cs2rl import eval_baselines`."""
-        if isinstance(n, ast.Import):
-            return any(a.name == "cs2rl.eval_baselines" for a in n.names)
-        if isinstance(n, ast.ImportFrom):
-            return n.module == "cs2rl.eval_baselines" or (n.module == "cs2rl"
-                                                          and any(a.name == "eval_baselines"
-                                                                  for a in n.names))
+
+# The module is_back_edge looks for, and the package metrics_schema's relative imports
+# resolve against. A move of either file fails the test above loudly (its path is read).
+_BASELINES = "cs2rl.eval.baselines"
+_SCHEMA_PACKAGE = "cs2rl.eval"
+
+
+def is_back_edge(n):
+    """True if `n` imports `_BASELINES`, in any spelling a module in `_SCHEMA_PACKAGE` can use.
+
+    Absolute: `import cs2rl.eval.baselines`, `from cs2rl.eval.baselines import ...`,
+    `from cs2rl.eval import baselines`. Relative: `from . import baselines`,
+    `from .baselines import ...`, resolved against `_SCHEMA_PACKAGE` with
+    importlib.util.resolve_name first.
+
+    PITFALL: comparing `n.module` alone is blind to every relative spelling: `from .
+    import baselines` has `module=None, level=1`. The acyclic contract would still
+    see such an edge, but this test would stay green on it.
+    """
+    if isinstance(n, ast.Import):
+        return any(a.name == _BASELINES or a.name.startswith(_BASELINES + ".") for a in n.names)
+    if not isinstance(n, ast.ImportFrom):
         return False
+    module = n.module or ""
+    if n.level:
+        module = importlib.util.resolve_name("." * n.level + module, _SCHEMA_PACKAGE)
+    return (module == _BASELINES or module.startswith(_BASELINES + ".")
+            or any(f"{module}.{a.name}" == _BASELINES for a in n.names))
 
-    back_edge = [n for n in ast.walk(schema_tree) if is_back_edge(n)]
-    assert not back_edge, ("metrics_schema must never import cs2rl.eval_baselines (torch at "
-                           "its scope)")
+
+def test_is_back_edge_sees_every_spelling():
+    """Positive and negative controls for is_back_edge, one parsed statement each.
+
+    The real metrics_schema has no back-edge, so the test above is green whether or
+    not is_back_edge works; these cases are what show that it does, relative spellings
+    included (the #205 part 2a knock-out: a planted `from . import baselines` passed
+    the old module-name comparison).
+    """
+    back = ("import cs2rl.eval.baselines", "import cs2rl.eval.baselines as b",
+            "from cs2rl.eval.baselines import BaselineEvaluator",
+            "from cs2rl.eval import baselines", "from . import baselines",
+            "from .baselines import BaselineEvaluator", "from ..eval import baselines",
+            "from ..eval.baselines import H_MOVE")
+    fine = ("from cs2rl.eval import metrics_schema", "from . import metrics_schema",
+            "from .metrics_schema import EVAL_KEYS", "import cs2rl.eval", "from cs2rl import eval",
+            "from ..env import nav", "from cs2rl.eval.baselinesx import y")
+    for code in back:
+        assert any(is_back_edge(n) for n in ast.walk(ast.parse(code))), code
+    for code in fine:
+        assert not any(is_back_edge(n) for n in ast.walk(ast.parse(code))), code
 
 
 def test_metrics_schema_is_in_the_import_lightness_test():
     """Creating a module and adding it to the subprocess guard is ONE task, by spec —
     a module that slips in unguarded is how the invariant dies."""
     from tests.test_w1_modules import W1_MODULES
-    assert "cs2rl.metrics_schema" in W1_MODULES
+    assert "cs2rl.eval.metrics_schema" in W1_MODULES

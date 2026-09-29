@@ -15,7 +15,7 @@ demo-gen the other 9 agents are frozen at spawn, so those blocks describe a
 static world that never occurs at RL time; zeroing makes the clone's walk
 depend only on self + goal-direction + global state. Zero is also exactly
 what those slots hold for dead/invisible agents, so the masked obs stay
-in-distribution. Block boundaries come from _obs_spec.OBS_BLOCKS (generated
+in-distribution. Block boundaries come from spec.obs.OBS_BLOCKS (generated
 from cs2_types.h) — NEVER hardcoded, they shifted in Task 2.5 (25/53/93 →
 28/56/96) and will shift again.
 
@@ -57,12 +57,12 @@ from pathlib import Path
 
 import numpy as np
 
-from cs2rl._action_spec import ACTION_DIM, AIM_DIM
-from cs2rl._obs_spec import OBS_BLOCKS, OBS_DIM
 from cs2rl.c_env.cs2_env import make_env
-from cs2rl.map import make_simple_map
-from cs2rl.nav import N_AGENTS, ROUND_TIME, TEAM_SIZE
-from cs2rl.scripted_expert import ScriptedBomber, setup_bomb_carrier
+from cs2rl.env.map import make_simple_map
+from cs2rl.env.nav import N_AGENTS, ROUND_TIME, TEAM_SIZE
+from cs2rl.eval.scripted_expert import ScriptedBomber, setup_bomb_carrier
+from cs2rl.spec.action import ACTION_DIM, AIM_DIM
+from cs2rl.spec.obs import OBS_BLOCKS, OBS_DIM
 
 # This file is <repo>/src/cs2rl/bc_demos.py: parents[2] is the checkout root, the
 # same root train_bc.DEFAULT_DEMO_DIR is built on (pinned equal by

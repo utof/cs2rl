@@ -71,7 +71,7 @@ def test_train_help_shows_current_cli():
 def test_dump_config_without_checkpoint_dir_uses_default(tmp_path):
     """R0-C made --checkpoint-dir default=None; --dump-config must still resolve
     it to CHECKPOINTS_DIR instead of crashing on Path(None). CHECKPOINTS_DIR is
-    cwd-relative (src/cs2rl/paths.py: Path("outputs") / "checkpoints"), so running
+    cwd-relative (src/cs2rl/spec/paths.py: Path("outputs") / "checkpoints"), so running
     with cwd=tmp_path keeps the write out of the repo. sys.executable (not
     `uv run`) because uv would not find the project from a tmp cwd."""
     r = subprocess.run([sys.executable, "-m", "cs2rl.train", "--dump-config"],
@@ -161,7 +161,7 @@ def test_reward_weight_config_keys_default_to_make_env_values(tmp_path):
     dest= or a missing add_argument would leave the key at the getattr
     fallback and could not be caught by a hand-built Namespace.
     """
-    from cs2rl.env_config import RewardWeights
+    from cs2rl.env.config import RewardWeights
 
     cfg = _dump_config(tmp_path)
     for name, default in RewardWeights().as_dict().items():

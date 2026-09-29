@@ -123,12 +123,12 @@ import numpy as np                     # noqa: E402
 # This file is <repo>/src/cs2rl/train_bc.py: parents[2] is the checkout root.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-from cs2rl._action_spec import ACTION_DIM, ACTION_MASK_DIM, AIM_DIM       # noqa: E402
-from cs2rl._obs_spec import OBS_BLOCKS, OBS_DIM                           # noqa: E402
-from cs2rl.map import make_simple_map                                     # noqa: E402
-from cs2rl.nav import MAX_TURN_SPEED_RAD, N_AGENTS, ROUND_TIME, TEAM_SIZE # noqa: E402
-from cs2rl.paths import CHECKPOINTS_DIR                                   # noqa: E402
-from cs2rl.scripted_expert import setup_bomb_carrier                      # noqa: E402
+from cs2rl.env.map import make_simple_map                                     # noqa: E402
+from cs2rl.env.nav import MAX_TURN_SPEED_RAD, N_AGENTS, ROUND_TIME, TEAM_SIZE # noqa: E402
+from cs2rl.eval.scripted_expert import setup_bomb_carrier                     # noqa: E402
+from cs2rl.spec.action import ACTION_DIM, ACTION_MASK_DIM, AIM_DIM            # noqa: E402
+from cs2rl.spec.obs import OBS_BLOCKS, OBS_DIM                                # noqa: E402
+from cs2rl.spec.paths import CHECKPOINTS_DIR                                  # noqa: E402
 
 # The map tag every demo must carry. Demos are only meaningful for BC → PPO on
 # the map they were generated on (geometry + per-map obs normalisation), so a
@@ -146,11 +146,11 @@ DEFAULT_CHECKPOINT = Path(CHECKPOINTS_DIR) / "bc_warmstart.pt"
 # verbatim.
 DEMO_RELEVANT_PATHS = (
     "src/cs2rl/c_env",
-    "src/cs2rl/_obs_spec.py",
-    "src/cs2rl/_action_spec.py",
-    "src/cs2rl/map.py",
-    "src/cs2rl/nav.py",
-    "src/cs2rl/scripted_expert.py",
+    "src/cs2rl/spec/obs.py",
+    "src/cs2rl/spec/action.py",
+    "src/cs2rl/env/map.py",
+    "src/cs2rl/env/nav.py",
+    "src/cs2rl/eval/scripted_expert.py",
     "src/cs2rl/bc_demos.py",
 )
 
@@ -206,7 +206,7 @@ def mask_idle_agent_blocks(obs: np.ndarray) -> np.ndarray:
     generator zeroes them and so must every consumer that feeds the clone an
     obs, or eval/rollout obs land off-distribution.
 
-    Boundaries come from _obs_spec.OBS_BLOCKS (generated from cs2_types.h) —
+    Boundaries come from spec.obs.OBS_BLOCKS (generated from cs2_types.h) —
     hardcoding 28/56/96 here would silently check the wrong slots after the
     next layout bump (they were 25/53/93 before Task 2.5). MUST stay identical
     to cs2rl/bc_demos.py's mask; tests/test_train_bc_smoke.py pins them

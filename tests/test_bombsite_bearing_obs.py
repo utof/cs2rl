@@ -26,7 +26,7 @@ import math
 import numpy as np
 import pytest
 
-from cs2rl._obs_spec import OBS_BLOCKS
+from cs2rl.spec.obs import OBS_BLOCKS
 
 # Slot indices derived from the generated spec — never hardcoded, so this test
 # keeps working if an earlier self-block slot is ever inserted.
@@ -39,8 +39,8 @@ SITE_DIST = _SELF_STOP - 1
 def _zero_actions():
     """Zero discrete+continuous actions: dyaw=0 preserves poked facing,
     move=0 preserves poked position (velocity is 0 after reset)."""
-    from cs2rl._action_spec import AIM_DIM
-    from cs2rl.nav import ACTION_DIM, N_AGENTS
+    from cs2rl.env.nav import N_AGENTS
+    from cs2rl.spec.action import ACTION_DIM, AIM_DIM
     return (np.zeros((N_AGENTS, ACTION_DIM),
                      dtype=np.int32), np.zeros((N_AGENTS, AIM_DIM), dtype=np.float32))
 
@@ -71,8 +71,8 @@ def test_bearing_facing_directly_at_site():
     """Agent due west of the (single) simple-map site, facing +X straight at it:
     rel_bearing = 0 → sin=0, cos=1; distance slot = 400/map_diag."""
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     md = make_simple_map()
     env = Cs2Env(config=EnvConfig(), map_data=md)
     try:
@@ -89,8 +89,8 @@ def test_bearing_facing_directly_at_site():
 def test_bearing_facing_directly_away_from_site():
     """Same pose but facing -X (away): rel = ±π → sin=0, cos=-1."""
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     md = make_simple_map()
     env = Cs2Env(config=EnvConfig(), map_data=md)
     try:
@@ -108,8 +108,8 @@ def test_bearing_sign_convention_site_to_the_left():
     90° counter-clockwise → rel = +π/2 → sin=+1. A policy that turns with
     positive Δyaw when sin>0 turns TOWARD the site — the BC-critical sign."""
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     md = make_simple_map()
     env = Cs2Env(config=EnvConfig(), map_data=md)
     try:
@@ -126,8 +126,8 @@ def test_bearing_diagonal_offset_and_distance():
     """Agent offset both in x and y: full atan2 path (not axis-aligned) and
     the distance slot must equal hypot/map_diag exactly."""
     from cs2rl.c_env.cs2_env import Cs2Env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
     md = make_simple_map()
     env = Cs2Env(config=EnvConfig(), map_data=md)
     try:

@@ -34,7 +34,7 @@ from cs2rl.c_env.cs2_env import (
     WallListC,
     make_env,
 )
-from cs2rl.env_config import (
+from cs2rl.env.config import (
     KNOB_FIELDS,
     REWARD_FIELDS,
     EnvConfig,
@@ -82,7 +82,7 @@ _STATIC_DATA_SCALARS = tuple(
 # Partition those scalars by whether the env CONFIG can set them. Anything the
 # config exposes is sentinel-testable (test_static_data_scalars_round_trip
 # pushes a distinct value through it); anything it does not is map-derived or a
-# nav.py constant and is checked against that source instead.
+# env/nav.py constant and is checked against that source instead.
 #
 # The settable surface is the CONFIG surface, not make_env's signature:
 # make_env has seven parameters and no **legacy, so inspect.signature would
@@ -207,7 +207,7 @@ def _config_from_field_kwargs(kwargs):
 
 
 def test_config_from_field_kwargs_partitions_flat_reward_and_knob_names():
-    from cs2rl.env_config import EnvConfig, RewardWeights
+    from cs2rl.env.config import EnvConfig, RewardWeights
     payload = {"reward_kill": 1.0, "n_active_per_team": 3}
     cfg = _config_from_field_kwargs(payload)
     assert payload == {"reward_kill": 1.0, "n_active_per_team": 3}
@@ -287,13 +287,13 @@ def test_struct_offsets_match_ctypes_mirrors():
 
 
 def test_struct_sizes_exposes_team_constants():
-    """TEAM_SIZE/N_AGENTS are duplicated in nav.py; pin them to the C macros.
+    """TEAM_SIZE/N_AGENTS are duplicated in env/nav.py; pin them to the C macros.
 
     Parked-agent work reduces the *effective* team size without changing the C
     macro, so a drift between nav.TEAM_SIZE and the header would mis-slice every
     per-team reward view in cs2_env.py.
     """
-    from cs2rl.nav import N_AGENTS, TEAM_SIZE
+    from cs2rl.env.nav import N_AGENTS, TEAM_SIZE
     sizes = binding.struct_sizes()
     assert sizes["TEAM_SIZE"] == 5
     assert sizes["TEAM_SIZE"] == TEAM_SIZE
@@ -349,14 +349,14 @@ def test_static_data_scalars_round_trip(simple_map):
     bomb_defuse_kit, bomb_timer, footstep_radius_sq, gunshot_radius_sq,
     enemy_memory_ticks, stale_memory_tick. They are not settable, so a value
     check would have to recompute the implementation's own formula (the
-    geometry) or restate a nav.py constant (the timings) — weaker than a
+    geometry) or restate an env/nav.py constant (the timings) — weaker than a
     sentinel, and for the geometry partly degenerate, since a symmetric fixture
     map can make x_offset == y_offset. (nav.BOMB_TIMER == nav.ROUND_TIME == 640
     at defaults; the round_time sentinel now separates the two.) Closing this
     properly means sentinels, which means kwargs; out of scope here, and
     deliberately not papered over.
     """
-    from cs2rl import nav
+    from cs2rl.env import nav
 
     # Sequential, not two live envs at once: nothing here needs them to coexist,
     # and one env at a time keeps a failure attributable to a single config.
@@ -391,7 +391,7 @@ def test_static_data_scalars_round_trip(simple_map):
             # make_env kwargs, so they are in the config and were checked above.
             # laser_range_sq is NOT a kwarg — it is derived from the laser_range
             # sentinel inside Cs2Env.__init__, so check the derivation rather than
-            # a nav constant. The None ⇒ nav.py default path is covered by
+            # a nav constant. The None ⇒ env/nav.py default path is covered by
             # tests/test_env_knobs.py::test_default_knobs_match_nav_constants.
             assert sc["laser_range_sq"] == pytest.approx(sentinels["laser_range"]**2)
             assert sc["laser_damage"] == nav.LASER_DAMAGE

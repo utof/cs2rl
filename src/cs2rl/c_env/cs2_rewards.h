@@ -31,7 +31,7 @@ static float _potential(Dust2Env* env, int team) {
             /* Navigation shaping: reward every alive agent for being close to bombsite.
              * R0-F (#136): guard on scale (a float compare survives -ffast-math;
              * isfinite() does not — it folds to true and NaN/inf leaks into the
-             * potential). TWO conventions meet here, both handled: map.py fills
+             * potential). TWO conventions meet here, both handled: env/map.py fills
              * unreachable areas with the FINITE value 4×max (closeness = 1-4 < 0
              * → clamped to 0 below, same effect as the old isfinite skip), and
              * `dist < 1e29f` is the belt-and-braces guard for a genuinely

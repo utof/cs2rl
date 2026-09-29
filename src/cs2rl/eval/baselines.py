@@ -30,7 +30,7 @@ The block between the two ``# ── vendored`` markers is copied from
 file's module docstring for the sim conventions it relies on: Δyaw relative /
 pitch absolute, env_step ordering, obs after reset() is all zeros, a killed
 enemy reads invisible on its death tick). Edits after vendoring are limited to
-``PolicyActor`` taking a live policy (+ ``from_policy`` / ``from_checkpoint``).
+``PolicyActor`` taking a live policy (+ ``from_policy``).
 
 * Geometry constants below MIRROR cs2_combat.h; the header is not exported
   through the binding. If EYE_* / TORSO_* change there, the
@@ -49,31 +49,34 @@ import math
 import numpy as np
 import torch
 
-from cs2rl._action_spec import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES
-from cs2rl._obs_spec import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
 from cs2rl.c_env.cs2_env import N_AGENTS, TEAM_SIZE
 
 # The eval/* analysis contract, RE-EXPORTED. It used to be DEFINED in this file;
 # W4 moved it to the metrics registry so there is one authority for every key.
 # The direction is load-bearing, not stylistic: this module imports torch and
 # c_env.cs2_env at module scope (just above), so a registry that did
-# `from cs2rl.eval_baselines import EVAL_KEYS` would make a tuple of eight strings cost
+# `from cs2rl.eval.baselines import EVAL_KEYS` would make a tuple of eight strings cost
 # a torch import and break the import-lightness invariant every new module is
 # held to (tests/test_w1_modules.py). metrics_schema imports nothing from src
-# except `_action_spec`, so this edge is acyclic and cheap in the one direction
+# except `spec.action`, so this edge is acyclic and cheap in the one direction
 # that matters.
-from cs2rl.metrics_schema import EVAL_KEYS             # noqa: F401  (re-export)
+from cs2rl.eval.metrics_schema import EVAL_KEYS        # noqa: F401  (re-export)
+from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES
+from cs2rl.spec.obs import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
 
-HEAD_SIZES = ACTION_HEAD_SIZES                                             # probe name, kept for the vendored code
+HEAD_SIZES = ACTION_HEAD_SIZES         # probe name, kept for the vendored code
 OBS_ENEMY_BASE = OBS_BLOCKS["enemy"][0]
 ACTION_DIM, AIM_DIM = len(ACTION_HEAD_SIZES), 2
-H_MOVE, H_SHOOT, H_RELOAD, H_WEAPON, H_USE, H_CROUCH, H_JUMP = range(7)
-if ACTION_HEAD_NAMES[H_SHOOT] != "shoot" or ACTION_HEAD_NAMES[H_CROUCH] != "crouch":
-    raise RuntimeError(f"action head order changed: {ACTION_HEAD_NAMES}; "
-                       "re-derive H_* indices in eval_baselines.py")
-                                                                           # Geometry MIRRORS of cs2_combat.h's EYE_HEIGHT_* / TORSO_OFFSET_* (silent-drift
-                                                                           # hazard): tests/test_eval_baselines.py::test_hit_geometry_constants_match_cs2_combat_h
-                                                                           # pins them equal.
+
+# The three head indices the actors write, looked up by NAME: a renamed or reordered head
+# cannot shift them onto the wrong head, and a missing name raises ValueError at import.
+H_MOVE = ACTION_HEAD_NAMES.index("move")
+H_SHOOT = ACTION_HEAD_NAMES.index("shoot")
+H_RELOAD = ACTION_HEAD_NAMES.index("reload")
+
+# Geometry MIRRORS of cs2_combat.h's EYE_HEIGHT_* / TORSO_OFFSET_* (silent-drift
+# hazard): tests/test_eval_baselines.py::test_hit_geometry_constants_match_cs2_combat_h
+# pins them equal.
 EYE_STAND, EYE_CROUCH = 48.0, 24.0
 TORSO_STAND, TORSO_CROUCH = 48.0, 24.0
 TICK_DT = 1.0 / 16.0
@@ -240,11 +243,11 @@ class PolicyActor:
 
     def __init__(self, policy, device):
         # Post-vendoring edit (Task 13): takes a LIVE policy module — the
-        # training loop hands its own `policy` in; use from_checkpoint for the
-        # probe's original load-from-file behaviour. Late import, though not for a
+        # training loop hands its own `policy` in; to evaluate a checkpoint, load it
+        # with train.load_policy_from_checkpoint first. Late import, though not for a
         # module-level cycle: train.py imports this module only inside train(), so
         # the pair cycles only through function-local imports, which pyproject.toml's
-        # acyclic contract records as its `train -> eval_baselines` ignore entry.
+        # acyclic contract records as its `train -> eval.baselines` ignore entry.
         from cs2rl.train import _hybrid_sample_logits, init_policy_state
         self.torch = torch
         self._sample = _hybrid_sample_logits
@@ -279,14 +282,6 @@ class PolicyActor:
         """Wrap the live training policy (no load). One actor = one LSTM state:
         build a DISTINCT actor per side when the same module plays both."""
         return cls(policy, device)
-
-    @classmethod
-    def from_checkpoint(cls, ckpt, device, **build_kwargs):
-        """Probe-style: rebuild from a bare state_dict file. `build_kwargs`
-        (aim_log_std_max, pin_pitch) are RUN properties the checkpoint cannot
-        tell you — pass the run's values (see load_policy_from_checkpoint)."""
-        from cs2rl.train import load_policy_from_checkpoint
-        return cls(load_policy_from_checkpoint(ckpt, device, **build_kwargs), device)
 
 
 # Mirror of cs2_movement.h SV_MAX_STEP_HEIGHT_CS — the up-step the cliff
@@ -535,9 +530,9 @@ def episode_outcome(kills_for: int, kills_against: int) -> float:
 
 
 # EVAL_KEYS — the eval/* keys evaluate() below returns, i.e. the analysis
-# contract — is NOT defined here any more. It lives in src/cs2rl/metrics_schema.py
+# contract — is NOT defined here any more. It lives in src/cs2rl/eval/metrics_schema.py
 # (W4, spec 2026-08-31 §2 W4) and is imported at the top of this file, which
-# re-exports it for existing `eval_baselines.EVAL_KEYS` consumers.
+# re-exports it for existing `eval.baselines.EVAL_KEYS` consumers.
 
 
 class BaselineEvaluator:

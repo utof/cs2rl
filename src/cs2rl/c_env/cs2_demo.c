@@ -11,7 +11,7 @@
 
 /* Populate StaticData from baked nav_data.h constants. Verticality fields
  * (centroids_z, is_ramp) are baked alongside the rest by scripts/bake_nav.py
- * — re-run that whenever map.py or SIMPLE_ROOMS changes. */
+ * — re-run that whenever env/map.py or SIMPLE_ROOMS changes. */
 static void load_nav_data(StaticData* sd) {
     memset(sd, 0, sizeof(StaticData));
     /* Rung 0 + Rung 1a knobs (cs2_types.h StaticData tail). The memset above

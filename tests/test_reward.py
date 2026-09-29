@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 
 from cs2rl.c_env.cs2_env import make_env
-from cs2rl.env_config import EnvConfig, RewardWeights
-from cs2rl.nav import ACTION_DIM
+from cs2rl.env.config import EnvConfig, RewardWeights
+from cs2rl.spec.action import ACTION_DIM
 from cs2rl.train import ACTION_HEAD_SIZES
 
 

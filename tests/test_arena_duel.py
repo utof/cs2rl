@@ -44,7 +44,7 @@ def _run_group(argv, *, timeout, **kw) -> subprocess.CompletedProcess:
     (SIGKILL) so it dies with this process even when `finally` cannot run.
 
     WHY: `train.py --dump-config` used to fork a 12-worker vis-cache build (see
-    src/cs2rl/map.py make_cs2_map). subprocess.run's timeout kills only the direct
+    src/cs2rl/env/map.py make_cs2_map). subprocess.run's timeout kills only the direct
     child, so each killed dump orphaned 12 workers to PID 1 at ~900 MB each
     (~10 GB per leaked case; it took the 16 GB dev box down).
 
@@ -87,7 +87,7 @@ def _zero():
 
 
 def test_preset_geometry():
-    from cs2rl.map import ARENA_DUEL_V1, make_arena_duel_map
+    from cs2rl.env.map import ARENA_DUEL_V1, make_arena_duel_map
     md = make_arena_duel_map()
     assert md.N == 24 and md.grid_cell_size == 20.0
     for idx in range(md.N):
@@ -110,7 +110,7 @@ def test_preset_geometry():
 
 
 def test_spawn_gaps_and_bearing_span():
-    from cs2rl.map import make_arena_duel_map
+    from cs2rl.env.map import make_arena_duel_map
     md = make_arena_duel_map()
     gaps, bear_t, bear_ct = [], [], []
     for t, ct in itertools.product(md.t_spawn_areas, md.ct_spawn_areas):
@@ -127,16 +127,16 @@ def test_spawn_gaps_and_bearing_span():
 
 def test_dir_facing_3_is_plus_x_and_7_is_minus_x():
     """R12.4: spawn facing comes from sd->dir_facing[3] (T) / [7] (CT)
-    (cs2_player.h:16); pin the nav.py direction table those indices read."""
-    from cs2rl.nav import _DIR_FACING, _DIR_VECTORS
+    (cs2_player.h:16); pin the env/nav.py direction table those indices read."""
+    from cs2rl.env.nav import _DIR_FACING, _DIR_VECTORS
     assert _DIR_VECTORS[3].tolist() == [1.0, 0.0] and _DIR_FACING[3] == 0.0
     assert _DIR_VECTORS[7].tolist() == [-1.0, 0.0] and abs(_DIR_FACING[7]) == math.pi
 
 
 def test_env_runs_and_spawns_in_columns():
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_arena_duel_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_arena_duel_map
     env = make_env(map_data=make_arena_duel_map(),
                    config=EnvConfig(n_active_per_team=1, pin_pitch=1, crouch_enabled=0),
                    seed=3,
@@ -159,7 +159,7 @@ def test_env_runs_and_spawns_in_columns():
         for _ in range(50):
             _, rew, *_ = env.step(a, c)
             assert np.isfinite(rew).all()
-        from cs2rl._obs_spec import OBS_BLOCKS
+        from cs2rl.spec.obs import OBS_BLOCKS
         obs, *_ = env.step(a, c)
         assert obs[0][OBS_BLOCKS["enemy"][0] + 3] == 1.0               # mutually visible
     finally:
@@ -173,7 +173,7 @@ def _best_bias_only_score(md, seed, n_rounds=16, ticks=160):
     over 13 constants of min(kills/ep ÷ 0.5, hit/facing ÷ 0.45) — both §5
     bullets normalised by their thresholds, so ≥ 1.0 means "passes both"."""
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     env = make_env(map_data=md,
                    config=EnvConfig(n_active_per_team=1,
                                     pin_pitch=1,
@@ -213,7 +213,7 @@ def test_constant_yaw_open_loop_fails_a_gate_bullet():
     Teeth: the same search on a 1-spawn-per-side variant (same row, dead
     ahead) DOES clear both, so a regression that made every round identical
     (e.g. sidx ≡ 0) would flip the first assert."""
-    from cs2rl.map import ARENA_DUEL_V1, make_arena_duel_map, make_simple_map
+    from cs2rl.env.map import ARENA_DUEL_V1, make_arena_duel_map, make_simple_map
     arena = make_arena_duel_map()
     assert _best_bias_only_score(arena, seed=5) < 1.0
     p = ARENA_DUEL_V1
@@ -239,8 +239,8 @@ def test_arena_survives_solids_bake():
     ray "clear")."""
     from cs2rl.c_env import binding
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
-    from cs2rl.map import make_arena_duel_map
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_arena_duel_map
     md = make_arena_duel_map()
     env = make_env(map_data=md,
                    config=EnvConfig(n_active_per_team=1, pin_pitch=1),
@@ -365,10 +365,10 @@ def test_config_env_label(tmp_path):
 # build_vis=True (or dropping the kwarg) makes the child exit non-zero here,
 # warm cache or cold, because the trap fires before the cache check.
 # run_module(alter_sys=True) is `python -m cs2rl.train` in-process: the entry
-# module runs as __main__ against the same `cs2rl.nav` the trap patched.
+# module runs as __main__ against the same `cs2rl.env.nav` the trap patched.
 _DUMP_WITHOUT_VIS = """
 import runpy, sys
-from cs2rl import nav
+from cs2rl.env import nav
 def _boom(self):
     raise SystemExit("gh251: build_vis_matrix reached on the --dump-config path")
 nav.NavGraph.build_vis_matrix = _boom

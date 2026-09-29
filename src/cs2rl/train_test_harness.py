@@ -49,9 +49,9 @@ import shutil
 import tempfile
 import types
 
-# Module level for the same reason as env_factory below: env_config is the
+# Module level for the same reason as env_factory below: env.config is the
 # stdlib-only leaf of the config graph, so importing it here pulls in nothing.
-from cs2rl.env_config import EnvConfig
+from cs2rl.env.config import EnvConfig
 
 # Module level, unlike the `from cs2rl.train import ...` block inside the builder:
 # env_factory's own module scope pulls nothing (torch/nav/c_env stay behind its
@@ -62,7 +62,7 @@ from cs2rl.env_factory import build_env_for, build_selfplay_manager
 
 # The harness's four env-knob defaults are the dataclass's, read once rather
 # than copied. Four literals here would be four more places #165 has to keep in
-# step with env_config.py, and tests/test_no_restated_env_defaults.py fails on
+# step with env/config.py, and tests/test_no_restated_env_defaults.py fails on
 # exactly that shape — including the `: int = <literal>` spelling, which a
 # regex written for `name = value` alone cannot see.
 _ENV_DEFAULTS = EnvConfig()
@@ -125,7 +125,7 @@ def _harness_parts(
     # isolated test runner.
     import pufferlib.vector
 
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.map import make_simple_map
     from cs2rl.train import (
         SelfPlayManager,
         assert_opponent_self_play_compatible,
@@ -174,7 +174,7 @@ def _harness_parts(
 
         import numpy as np
 
-        from cs2rl._action_spec import ACTION_MASK_DIM
+        from cs2rl.spec.action import ACTION_MASK_DIM
 
         # (`from nav import TEAM_SIZE` used to sit in this import block for the
         # participation-row formula below; Rung 1a T3 moved that formula into

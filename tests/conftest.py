@@ -248,7 +248,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 @pytest.fixture(scope="session")
 def make_map():
-    from cs2rl.map import make_simple_map
+    from cs2rl.env.map import make_simple_map
     return make_simple_map()
 
 
@@ -489,7 +489,7 @@ def pytest_collection_modifyitems(config, items):
 
 # ── One module object per file ──
 #
-# A file imported under two names (`cs2rl.paths` and `src.cs2rl.paths`) is two module
+# A file imported under two names (`cs2rl.spec.paths` and `src.cs2rl.spec.paths`) is two module
 # objects with two copies of the module's state, so a monkeypatch or an
 # `except` aimed at one misses the other. After the last test (or after
 # collection, under --collect-only) every session checks sys.modules for a repo

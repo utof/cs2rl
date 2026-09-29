@@ -126,7 +126,7 @@ def log_simple_map(map_data):
     Called once at recording startup when map_data is not the real dust2 map.
     Toggle map/rooms and map/walls in the Rerun entity tree.
     """
-    from cs2rl.map import SIMPLE_ROOMS
+    from cs2rl.env.map import SIMPLE_ROOMS
 
     rooms = SIMPLE_ROOMS               # list of (idx, x0, y0, x1, y1)
 

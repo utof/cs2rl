@@ -1,8 +1,8 @@
-"""Unit tests for src/cs2rl/env_config.py — the env configuration contract (spec 2026-09-03 §2.1).
+"""Unit tests for src/cs2rl/env/config.py — the env configuration contract (spec 2026-09-03 §2.1).
 
 This file is the ONE place the default numbers are restated (spec §6 "Added"):
 the literals below were copied from train_shared.REWARD_WEIGHT_DEFAULTS at
-main @ 139a3a3. If a default changes on purpose, change it in env_config.py AND
+main @ 139a3a3. If a default changes on purpose, change it in env/config.py AND
 here; if this test fails and you did not mean to change a default, the module
 drifted.
 """
@@ -12,8 +12,8 @@ import sys
 
 import pytest
 
-from cs2rl import env_config
-from cs2rl.env_config import TEAM_SIZE, UNSET, EnvConfig, RewardWeights
+from cs2rl.env import config as env_config
+from cs2rl.env.config import TEAM_SIZE, UNSET, EnvConfig, RewardWeights
 
 DEFAULTS_AT_139a3a3 = {
     "reward_win": 1.0,
@@ -124,7 +124,7 @@ def test_unconvertible_knob_raises_value_error_naming_the_field(field, bad):
     same rule parent §2.1's error table sets for the weights.
 
     `max_turn_speed` is exercised with a STRING, not with None: None is that
-    field's documented sentinel ("use the nav.py constant"), `EnvConfig()` sets
+    field's documented sentinel ("use the env/nav.py constant"), `EnvConfig()` sets
     it, and `test_none_r0g_knobs_survive_untouched` pins that it survives — so a None
     param here could only ever pass by breaking `EnvConfig()` itself.
     """
@@ -216,8 +216,8 @@ def test_module_is_stdlib_only():
     blacklist of six names stays GREEN the day someone adds `import polars`,
     `import yaml` or `from cs2rl import env_factory`. That is exactly the silent
     failure this test exists to prevent. So we diff sys.modules across the import
-    and require every newly-added name to be exactly `cs2rl` or
-    `cs2rl.env_config` (the package and this module), or to have a TOP-LEVEL name
+    and require every newly-added name to be exactly `cs2rl`, `cs2rl.env` or
+    `cs2rl.env.config` (the packages and this module), or to have a TOP-LEVEL name
     in sys.stdlib_module_names (Python 3.10+). First-party names are compared in
     FULL: every one of them is top-level `cs2rl`, so a top-level allowance for
     it would let `cs2rl.env_factory` and `cs2rl.c_env.cs2_env` through.
@@ -230,10 +230,10 @@ def test_module_is_stdlib_only():
     import subprocess
     child = ("import sys\n"
              "before = set(sys.modules)\n"
-             "from cs2rl import env_config\n"
+             "from cs2rl.env import config as env_config\n"
              "added = set(sys.modules) - before\n"
              "bad = sorted(m for m in added\n"
-             "             if m not in ('cs2rl', 'cs2rl.env_config')\n"
+             "             if m not in ('cs2rl', 'cs2rl.env', 'cs2rl.env.config')\n"
              "             and m.split('.')[0] not in sys.stdlib_module_names)\n"
              "print('NON_STDLIB=' + ','.join(bad))\n"
              "sys.exit(1 if bad else 0)\n")

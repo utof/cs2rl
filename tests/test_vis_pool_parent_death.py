@@ -65,7 +65,7 @@ class _StubChecker:
         return True
 _v.VisibilityChecker = _StubChecker
 os.cpu_count = lambda: {n_workers}
-from cs2rl import nav
+from cs2rl.env import nav
 if {noguard!r}:
     nav._die_with_parent = lambda *a, **k: None
 class _Centroid:
@@ -212,7 +212,7 @@ def test_guard_kills_a_worker_whose_parent_is_already_gone():
     alone: the re-check of os.getppid() against the pid captured in the parent
     has to end it. Simulated with a parent_pid that is not our parent."""
     r = subprocess.run([
-        sys.executable, "-c", "from cs2rl import nav; "
+        sys.executable, "-c", "from cs2rl.env import nav; "
         "nav._die_with_parent(parent_pid=2**22 - 1); "
         "import time; time.sleep(5); print('survived')"
     ],

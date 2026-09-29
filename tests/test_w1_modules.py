@@ -10,7 +10,7 @@ FRESH interpreter, one subprocess per case:
   3. its module scope stays free of torch / nav / c_env.cs2_env / rerun;
   4. the only sibling edge any of them has is into a LEAF, and the leaves
      import no sibling except each other in the one allowed direction
-     (train_shared -> env_config). The shape spec §2 W1 fixes: leaves at the
+     (train_shared -> env.config). The shape spec §2 W1 fixes: leaves at the
      bottom, everything else a spoke off them, never spoke-to-spoke.
 
 WHY a subprocess and not a plain import: pytest's session has already imported
@@ -40,7 +40,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
 
-# Modules split out of train.py (W1, spec 2026-08-31), plus env_config, which
+# Modules split out of train.py (W1, spec 2026-08-31), plus env.config, which
 # owns the env contract that used to live partly in train_shared (spec
 # 2026-09-03 §2.1). Every module here must import standalone and stay light.
 #
@@ -58,7 +58,7 @@ TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
 #
 # `metrics_schema` (W4) is here for the mirror-image reason: it is a registry of
 # STRINGS whose whole value is being cheap to import, and it took ownership of
-# `EVAL_KEYS` from `eval_baselines` — a module with torch and c_env.cs2_env at
+# `EVAL_KEYS` from `eval.baselines` — a module with torch and c_env.cs2_env at
 # its scope. If that ownership ever flipped back, or someone imported a policy
 # class to spell a type hint, eight string constants would start costing a torch
 # import, and only this test would say so.
@@ -71,7 +71,7 @@ TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
 # test_import_train_stays_light_and_really_imports_the_shims red naming torch).
 W1_MODULES = ("cs2rl.train_shared", "cs2rl.resume_state", "cs2rl.train_config",
               "cs2rl.train_metrics", "cs2rl.train_update", "cs2rl.env_factory",
-              "cs2rl.metrics_schema", "cs2rl.env_config")
+              "cs2rl.eval.metrics_schema", "cs2rl.env.config")
 
 # W1 modules train.py deliberately does NOT import at its module level, and why.
 #
@@ -95,8 +95,8 @@ W1_MODULES = ("cs2rl.train_shared", "cs2rl.resume_state", "cs2rl.train_config",
 # That entry leaves only if the layering changes, never because an import appeared;
 # tests/test_import_layers.py::test_metrics_schema_sits_above_train pins the layering.
 NOT_IMPORTED_BY_TRAIN = {
-    "cs2rl.metrics_schema":
-    "took EVAL_KEYS from eval_baselines, not from train.py, so train.py's body holds no "
+    "cs2rl.eval.metrics_schema":
+    "took EVAL_KEYS from eval.baselines, not from train.py, so train.py's body holds no "
     "reference to it; and it is in the layer above train (pyproject.toml's `cs2rl layers` "
     "contract), so a train.py import of it is an upward edge lint-imports rejects",
 }
@@ -128,14 +128,14 @@ def _train_module_level_imports():
 
 TRAIN_MODULE_LEVEL_IMPORTS = _train_module_level_imports()
 
-# TWO leaves. train_shared owns the names moved out of train.py; env_config owns
-# the env contract. train_config -> env_config is the load-bearing edge between
+# TWO leaves. train_shared owns the names moved out of train.py; env.config owns
+# the env contract. train_config -> env.config is the load-bearing edge between
 # the leaves and the spokes (env_config_from_args builds an EnvConfig); train.py
 # imports both. The reverse edge would make "leaf" meaningless — pyproject.toml's
-# `cs2rl layers` contract pins it (env_config is in the bottom layer, train_shared two
+# `cs2rl layers` contract pins it (env.config is in the env layer, train_shared one
 # above; tests/test_import_layers.py runs it), and so does
 # tests/test_env_config.py::test_module_is_stdlib_only.
-LEAVES = frozenset({"cs2rl.train_shared", "cs2rl.env_config"})
+LEAVES = frozenset({"cs2rl.train_shared", "cs2rl.env.config"})
 
 # Imports whose presence in sys.modules means the import-lightness invariant is
 # gone. `cs2rl.c_env.cs2_env` rather than `cs2rl.c_env` on purpose: the package
@@ -147,7 +147,7 @@ LEAVES = frozenset({"cs2rl.train_shared", "cs2rl.env_config"})
 # statements inside a def, but neither sees a function-local import that is CALLED at
 # module scope; test_import_train_stays_light_and_really_imports_the_shims, through
 # this entry, does.
-HEAVY = ("torch", "cs2rl.nav", "cs2rl.c_env.cs2_env", "rerun")
+HEAVY = ("torch", "cs2rl.env.nav", "cs2rl.c_env.cs2_env", "rerun")
 
 
 def _run_child(body: str) -> subprocess.CompletedProcess:
@@ -278,7 +278,7 @@ def test_train_aliases_itself_into_sys_modules_first():
     then quietly protects nothing.
 
     WHY the whole thing exists: `python -m cs2rl.train` binds this file to "__main__",
-    so a runtime `from cs2rl.train import ...` — which eval_baselines does function-locally
+    so a runtime `from cs2rl.train import ...` — which eval.baselines does function-locally
     inside PolicyActor — imports a SECOND copy of the module. Two copies means
     two sets of module constants and cross-copy `isinstance` returning False.
 
@@ -308,7 +308,7 @@ def test_script_run_has_exactly_one_train_module():
     have to be made inside it):
 
       1. a sitecustomize.py on the child's PYTHONPATH registers an atexit hook
-         that performs the same `from cs2rl.train import ...` eval_baselines performs
+         that performs the same `from cs2rl.train import ...` eval.baselines performs
          and reports whether sys.modules["cs2rl.train"] IS sys.modules["__main__"]. atexit runs
          before module teardown, so sys.modules is intact; it also runs after
          `--dump-config`'s sys.exit(0), which is why that cheap path suffices
@@ -330,7 +330,7 @@ def test_script_run_has_exactly_one_train_module():
     import re
     import tempfile
 
-    # The hook's import is the exact one eval_baselines makes.
+    # The hook's import is the exact one eval.baselines makes.
     probe_src = ("import atexit, sys\n"
                  "def _probe():\n"
                  "    from cs2rl.train import load_policy_from_checkpoint\n"
@@ -400,7 +400,7 @@ def test_mask_head_slices_is_complete_in_a_leaf_only_interpreter():
     r = _run_child("""
 assert "cs2rl.train" not in sys.modules
 from cs2rl import train_shared
-from cs2rl._action_spec import ACTION_HEAD_SIZES
+from cs2rl.spec.action import ACTION_HEAD_SIZES
 assert "cs2rl.train" not in sys.modules, "this check is vacuous once `cs2rl.train` is imported"
 assert len(train_shared._MASK_HEAD_SLICES) == len(ACTION_HEAD_SIZES), (
     f"_MASK_HEAD_SLICES has {len(train_shared._MASK_HEAD_SLICES)} entries for "

@@ -1,13 +1,13 @@
 """The package's layering: pyproject.toml's import-linter contracts, and the two holes they leave.
 
 WHAT runs here:
-  1. `lint-imports` over this checkout: both contracts in [tool.importlinter] hold.
+  1. `lint-imports` over this checkout: every contract in [tool.importlinter] holds.
   2. The checkout check: the linter's child resolved `cs2rl` to THIS checkout.
   3. The coverage check: every tracked `src/cs2rl/*.py` is a module in grimp's graph.
   4. The scope pin: every site of every ignore_imports pair sits inside a def.
   5. Positive controls on a tmp copy of the package, one plant each, so every check
      above has been seen to reject something.
-  6. The one layer placement a test elsewhere relies on: metrics_schema above train.
+  6. The one layer placement a test elsewhere relies on: eval (metrics_schema) above train.
 
 WHY 2: import-linter and grimp find `cs2rl` with importlib.util.find_spec, which
 never executes src/cs2rl/__init__.py, so the package's foreign-checkout guard cannot
@@ -149,7 +149,7 @@ def _graph_facts(tree: Path) -> dict:
 
 
 def _dotted(relative: str) -> str:
-    """'src/cs2rl/c_env/__init__.py' -> 'cs2rl.c_env'; 'src/cs2rl/nav.py' -> 'cs2rl.nav'."""
+    """'src/cs2rl/c_env/__init__.py' -> 'cs2rl.c_env'; 'src/cs2rl/env/nav.py' -> 'cs2rl.env.nav'."""
     parts = Path(relative).with_suffix("").parts[1:]
     if parts[-1] == "__init__":
         parts = parts[:-1]
@@ -257,12 +257,16 @@ def test_every_ignored_import_stays_function_local():
 
 
 def test_metrics_schema_sits_above_train():
-    """The layers contract puts metrics_schema in a higher layer than train.
+    """The `cs2rl layers` contract puts eval, metrics_schema's package, above train.
 
     tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN says a train.py import of
     metrics_schema is an upward edge lint-imports rejects. That is true only while this
-    holds: moving metrics_schema down into train's layer keeps every other check green
-    and makes that entry silently false.
+    holds: moving eval down into train's layer keeps every other check green and makes
+    that entry silently false.
+
+    PITFALL: the contract is selected by NAME. pyproject.toml holds more than one layers
+    contract (`cs2rl.env layers` too), so picking "the" layers contract by type either
+    fails to unpack or reads the wrong one.
     """
     try:
         from importlinter import api
@@ -270,7 +274,7 @@ def test_metrics_schema_sits_above_train():
         raise AssertionError(_MISSING_TOOLS) from e
     [layers] = [
         c["layers"] for c in api.read_configuration(str(PYPROJECT))["contracts_options"]
-        if c["type"] == "layers"
+        if c["name"] == "cs2rl layers"
     ]
     # Highest layer first; `|` and `:` both separate the members of one layer.
     rank = {
@@ -278,10 +282,10 @@ def test_metrics_schema_sits_above_train():
         for index, layer in enumerate(layers)
         for member in re.split(r"[|:]", layer)
     }
-    assert rank["metrics_schema"] < rank["train"], (
-        f"metrics_schema is in layer {layers[rank['metrics_schema']]!r}, not above train's "
-        f"{layers[rank['train']]!r}: tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN entry "
-        "for it is no longer true. Move it back up, or rewrite that entry.")
+    assert rank["eval"] < rank["train"], (
+        f"eval (metrics_schema's package) is in layer {layers[rank['eval']]!r}, not above "
+        f"train's {layers[rank['train']]!r}: tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN "
+        "entry for it is no longer true. Move it back up, or rewrite that entry.")
 
 
 # ── positive controls: a tmp copy of the package, one plant each ─────────────────
@@ -309,11 +313,11 @@ def _append(tree: Path, relative: str, text: str) -> int:
 
 
 def test_control_upward_import_breaks_the_layers(tmp_path):
-    """(a) nav (L1) importing train (L2) at module scope."""
+    """(a) env.nav (L1) importing train (L2) at module scope."""
     tree, _ = _copy_package(tmp_path)
-    _append(tree, "src/cs2rl/nav.py", "from cs2rl import train")
+    _append(tree, "src/cs2rl/env/nav.py", "from cs2rl import train")
     r = _lint(tree)
-    assert r.returncode == 1 and "cs2rl.nav -> cs2rl.train" in r.stdout, r.stdout + r.stderr
+    assert r.returncode == 1 and "cs2rl.env.nav -> cs2rl.train" in r.stdout, r.stdout + r.stderr
 
 
 def test_control_a_module_without_a_layer_is_rejected(tmp_path):
@@ -322,6 +326,22 @@ def test_control_a_module_without_a_layer_is_rejected(tmp_path):
     (tree / "src" / "cs2rl" / "newmod.py").write_text('"""Planted."""\n')
     r = _lint(tree)
     assert r.returncode == 1 and "- cs2rl.newmod" in r.stdout, r.stdout + r.stderr
+
+
+def test_control_a_module_without_a_layer_in_env_is_rejected(tmp_path):
+    """(h) `exhaustive` on `cs2rl.env layers`: a new env/ module in no layer.
+
+    WHY: (b) plants at the top level, so it exercises only `cs2rl layers`; without
+    this, deleting the env contract's `exhaustive = true` left every test green.
+    #205 part 2b adds env/c/ and env/factory.py, the modules it exists to catch.
+    PITFALL: import-linter's exhaustive check walks the container's DIRECT children
+    only, so env/c/ needs a layer here but its own modules are not checked by it.
+    """
+    tree, _ = _copy_package(tmp_path)
+    (tree / "src" / "cs2rl" / "env" / "newmod.py").write_text('"""Planted."""\n')
+    r = _lint(tree)
+    assert r.returncode == 1 and "- cs2rl.env.newmod" in r.stdout, r.stdout + r.stderr
+    assert "cs2rl.env layers BROKEN" in r.stdout, r.stdout
 
 
 def test_control_the_unplanted_copy_passes_every_check(tmp_path):
@@ -338,11 +358,31 @@ def test_control_the_unplanted_copy_passes_every_check(tmp_path):
 
 
 def test_control_a_cycle_inside_one_layer_is_rejected(tmp_path):
-    """(d) nav <-> map, both in L1: only the acyclic contract sees it."""
+    """(d) env.nav <-> env.map, one layer of `cs2rl.env layers`: only the acyclic contract sees it.
+
+    It checks siblings at every depth, so a cycle inside env/ is caught, not only one
+    among cs2rl's own children.
+    """
     tree, _ = _copy_package(tmp_path)
-    _append(tree, "src/cs2rl/nav.py", "from cs2rl import map")
+    _append(tree, "src/cs2rl/env/nav.py", "from cs2rl.env import map")
     r = _lint(tree)
     assert r.returncode == 1 and ".nav -> .map" in r.stdout, r.stdout + r.stderr
+
+
+def test_control_env_config_importing_nav_breaks_the_env_layers(tmp_path):
+    """(g) env.config importing env.nav: only the `cs2rl.env layers` contract sees it.
+
+    config, nav and map are all the one member `env` of `cs2rl layers`, and the edge
+    closes no cycle, so the other two contracts pass it. The assertion names the
+    contract and the edge, not only rc 1: another contract's failure would satisfy rc 1.
+    """
+    tree, _ = _copy_package(tmp_path)
+    _append(tree, "src/cs2rl/env/config.py", "from cs2rl.env import nav")
+    r = _lint(tree)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "cs2rl.env layers BROKEN" in r.stdout, r.stdout + r.stderr
+    assert "cs2rl.env.config is not allowed to import cs2rl.env.nav" in r.stdout, r.stdout
+    assert "cs2rl layers KEPT" in r.stdout and "cs2rl acyclic siblings KEPT" in r.stdout, r.stdout
 
 
 # One module-scope `import cs2rl.viz` site per construct that is not a def. The pin's
@@ -375,13 +415,17 @@ def test_control_a_module_scope_site_of_an_ignored_pair(tmp_path, shape):
 
 
 def test_control_a_directory_without_init_is_covered(tmp_path):
-    """(f) grimp skips spec/ (no __init__.py), so only the coverage check sees it."""
+    """(f) grimp skips noinit/ (no __init__.py), so only the coverage check sees it.
+
+    PITFALL: the plant directory must not exist in the package. It was spec/ until #205
+    part 2a made spec/ a real package.
+    """
     tree, files = _copy_package(tmp_path)
-    plant = "src/cs2rl/spec/action.py"
+    plant = "src/cs2rl/noinit/action.py"
     (tree / plant).parent.mkdir()
     (tree / plant).write_text("from cs2rl import train\n")
     r = _lint(tree)
     assert r.returncode == 0, ("import-linter now sees a directory without __init__.py; the "
                                "coverage check's premise changed.\n" + r.stdout + r.stderr)
     failures = coverage_failures(_graph_facts(tree), [*files, plant])
-    assert any("cs2rl.spec.action" in f for f in failures), failures
+    assert any("cs2rl.noinit.action" in f for f in failures), failures

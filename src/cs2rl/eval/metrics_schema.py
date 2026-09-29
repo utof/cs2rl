@@ -3,7 +3,7 @@
 WHAT: `REGISTRY` maps a metrics key (or an f-string key FAMILY template) to a
 `MetricSpec` carrying `kind`, `aggregation`, `units`, `consumers` — plus
 `inputs` for derived columns, `members` for statically-closed families, and
-`notes`. It also owns `EVAL_KEYS`, moved here from `eval_baselines` (see below).
+`notes`. It also owns `EVAL_KEYS`, moved here from `eval.baselines` (see below).
 
 WHY it is here and not a docstring: before W4 the aggregation contract of a key
 lived in a comment next to its emitter, and the list of keys a gate script reads
@@ -15,13 +15,13 @@ directions — an unregistered key fails, and a registered key nothing emits fai
 too. A registry that could only be wrong by omission would be a docstring again.
 
 WHY THIS MODULE MUST STAY IMPORT-LIGHT (spec §2 W1, guarded by
-`tests/test_w1_modules.py`): `EVAL_KEYS` used to live in `src/cs2rl/eval_baselines.py`,
+`tests/test_w1_modules.py`): `EVAL_KEYS` used to live in `src/cs2rl/eval/baselines.py`,
 which imports torch and `c_env.cs2_env` at module scope. Any consumer that wanted
 those eight strings — including this registry — paid ~30 s of torch import for a
 tuple of strings. So the ownership is INVERTED: `EVAL_KEYS` lives here and
-`eval_baselines` does `from cs2rl.metrics_schema import EVAL_KEYS` (never the reverse;
+`eval.baselines` does `from cs2rl.eval.metrics_schema import EVAL_KEYS` (never the reverse;
 that direction is what the import-lightness test exists to catch). The only
-import in this module's scope is `_action_spec`, itself nothing but literals
+import in this module's scope is `spec.action`, itself nothing but literals
 auto-generated from `cs2_types.h`.
 
 THE THREE KINDS
@@ -74,7 +74,7 @@ completeness test AST-parses their key literals instead. Their ROW LOADER
 """
 from typing import NamedTuple
 
-from cs2rl._action_spec import ACTION_HEAD_NAMES
+from cs2rl.spec.action import ACTION_HEAD_NAMES
 
 # ── Vocabularies ──────────────────────────────────────────────────────────
 #
@@ -179,12 +179,12 @@ def _f(aggregation, units, members=(), consumers=(), notes=""):
                       notes=notes)
 
 
-# ── EVAL_KEYS — moved here from eval_baselines (spec §2 W4) ───────────────
+# ── EVAL_KEYS — moved here from eval.baselines (spec §2 W4) ───────────────
 
 # eval/* keys emitted by BaselineEvaluator.evaluate — the analysis contract.
-# Lives HERE, not in eval_baselines: that module imports torch and
-# c_env.cs2_env at module scope, so `from cs2rl.eval_baselines import EVAL_KEYS`
-# would make a tuple of 8 strings cost a torch import. eval_baselines imports
+# Lives HERE, not in eval.baselines: that module imports torch and
+# c_env.cs2_env at module scope, so `from cs2rl.eval.baselines import EVAL_KEYS`
+# would make a tuple of 8 strings cost a torch import. eval.baselines imports
 # it back and re-exports it for existing consumers.
 EVAL_KEYS = (
     "eval/win_vs_random",
@@ -403,7 +403,7 @@ REGISTRY.update({
 })
 
 # environment/action_* — per-bin action histograms, one f-string family per head.
-# The bin counts come from _action_spec (auto-generated from cs2_types.h), and the
+# The bin counts come from spec.action (auto-generated from cs2_types.h), and the
 # census resolves every member statically, so a head gaining a bin fails the
 # closed-member assert rather than silently going unregistered.
 # NOTE: rung1a_smoke_read builds `environment/action_move_*` by REGEX
@@ -501,7 +501,7 @@ REGISTRY.update({
         "mean", "nats", tuple(f"losses/entropy/{h}" for h in ACTION_HEAD_NAMES), (),
         "Per-discrete-head entropy. OPEN in the AST census (the loop iterates the "
         "imported ACTION_HEAD_NAMES, not a literal), so the member list is taken from "
-        "_action_spec here — the same auto-generated tuple the emitter zips over, which "
+        "cs2rl.spec.action here — the same auto-generated tuple the emitter zips over, which "
         "is what makes a new head in cs2_types.h propagate instead of drifting."),
 })
 for _head in ACTION_HEAD_NAMES:
@@ -899,12 +899,6 @@ REGISTRY.update({
        "produces it today, so both `inputs` and `producer` are empty by fact, not by "
        "omission."),
 })
-
-
-def spec(key):
-    """The `MetricSpec` for `key`, or None. Exact match only — a concrete member
-    of a family has its own entry when the family is closed."""
-    return REGISTRY.get(key)
 
 
 def keys_of_kind(kind):

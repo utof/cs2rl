@@ -95,7 +95,7 @@ def test_ppo_loss_entropy_bonus_switch():
     """aim_entropy_bonus=False ⇒ the entropy the loss returns is the DISCRETE
     entropy only; True (default) ⇒ discrete + Gaussian. Pure-function check on
     a fake 2D-input policy so it needs no env."""
-    from cs2rl._action_spec import ACTION_HEAD_SIZES, AIM_DIM
+    from cs2rl.spec.action import ACTION_HEAD_SIZES, AIM_DIM
     from cs2rl.train import _LOG_2PI, _hybrid_ppo_loss
     B = 5
 

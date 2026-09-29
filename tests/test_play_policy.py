@@ -124,7 +124,7 @@ def test_cs2_demo_policy_missing_exits_nonzero():
 
 def test_env_scripted_movers_not_statues(make_map):
     from cs2rl.c_env.cs2_env import make_env
-    from cs2rl.env_config import EnvConfig
+    from cs2rl.env.config import EnvConfig
     env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=True))
     env.reset()
     acts = np.zeros((10, 7), np.int32)

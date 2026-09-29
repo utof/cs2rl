@@ -3,7 +3,7 @@
 WHAT: a no-import, source-only extractor. Given the NAMED island of emitter
 functions (``EMITTER_SITES``) it returns, for every metrics key those functions
 write, the key itself plus the *shape* of the write — which is what
-``src/cs2rl/metrics_schema.py``'s declared ``aggregation`` is checked against in
+``src/cs2rl/eval/metrics_schema.py``'s declared ``aggregation`` is checked against in
 tests/test_metrics_schema.py.
 
 WHY AST and not import-and-run: the emitters are gated on flags
@@ -153,17 +153,17 @@ class NonIslandWrite(NamedTuple):
 
 NON_ISLAND_WRITES = (
     NonIslandWrite(
-        "metrics_schema.py", "", "The registry ITSELF. Its ~200 dict-literal keys are "
+        "eval/metrics_schema.py", "", "The registry ITSELF. Its ~200 dict-literal keys are "
         "declarations, not writes into a metrics row — they are the thing the census is "
         "compared against, so counting them as emissions would make every completeness "
         "test compare the registry with itself."),
     NonIslandWrite(
-        "eval_baselines.py", "BaselineEvaluator.evaluate",
+        "eval/baselines.py", "BaselineEvaluator.evaluate",
         "A REAL source of row keys, censused by its own extractor (`eval_output_keys()`) "
         "rather than as an island site: ScheduledEval merges the returned dict wholesale, "
         "so there is no per-key write for `_walk` to classify a shape from."),
     NonIslandWrite(
-        "eval_baselines.py", "BaselineEvaluator._episode",
+        "eval/baselines.py", "BaselineEvaluator._episode",
         "Per-episode RETURN VALUE of the evaluator's inner loop (shots_fired, "
         "shots_with_enemy_in_los, timed_out), consumed by evaluate() to build the eval/* "
         "numbers. Never written into a row itself."),
@@ -722,7 +722,7 @@ def _divisor_lineno(fn):
                 return node.lineno
     raise AssertionError(
         "the gh#90 `for _lk in list(losses): losses[_lk] /= ...` divisor loop is gone from "
-        "Cs2PuffeRL.train — every losses/* aggregation in metrics_schema.py is "
+        "Cs2PuffeRL.train — every losses/* aggregation in eval/metrics_schema.py is "
         "classified relative to it, so its removal is a registry-wide event, not a refactor")
 
 
@@ -1646,12 +1646,12 @@ def _walk_reads(node, fn, receiver, prefix, env, nested, keys):
 def eval_output_keys():
     """Keys of the dict literal BaselineEvaluator.evaluate() returns.
 
-    The runtime guard in eval_baselines (`set(out) != set(EVAL_KEYS)` → raise)
+    The runtime guard in eval.baselines (`set(out) != set(EVAL_KEYS)` → raise)
     only fires when an eval actually runs, and the §3 gate runs with
     `--eval-interval 0`. This is the same contract checked from source, so it
     holds in a suite that never constructs an evaluator.
     """
-    tree = _module_ast("eval_baselines.py")
+    tree = _module_ast("eval/baselines.py")
     fn = _find_qualname(tree, "BaselineEvaluator.evaluate")
     for node in ast.walk(fn):
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -1668,7 +1668,7 @@ def losses_entropy_head_source():
     local bound to `list(ACTION_HEAD_NAMES)`, an imported Name, and the rule that
     only LITERAL iterables bind a loop variable stops one hop short of it on
     purpose. metrics_schema therefore declares that family's members FROM
-    `_action_spec.ACTION_HEAD_NAMES`, which is circular unless something pins that
+    `spec.action.ACTION_HEAD_NAMES`, which is circular unless something pins that
     the emitter reads the same tuple. This is that pin: it returns the constant's
     name, so re-pointing the emitter at a different head list fails the test
     instead of silently leaving the registry describing the old heads.
