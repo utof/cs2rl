@@ -13,7 +13,21 @@ checked with `git ls-files --error-unmatch`, which also works for a directory
     pathspec's trailing `/`): its sweeps walk `SRC.rglob("*.py")`, which yields
     nothing on a wrong SRC, so they would pass vacuously;
   - every MANIFEST.in include;
-  - setup.py's `source_dir`.
+  - setup.py's `source_dir`;
+  - sync_action_spec's HEADER, the C header it generates from (read by no test run);
+  - every `-I` directory in .clangd, which must be a tracked DIRECTORY.
+Two more sources are checked by behaviour, not by a tracked path, each in its own test:
+  - .gitignore must ignore the C package's generated files, nav_data.h (baked by
+    scripts/bake_nav.py) and a Windows `binding*.pyd`. `git check-ignore -q
+    --no-index` answers for paths that do not exist, so the paths are derived from
+    cs2rl.c_env.SOURCE_DIR and checked wherever the package is. PITFALL: rc 0 means
+    ignored, 1 not ignored, 128 a path git rejects (outside the checkout); only
+    `== 0` passes, so a truthiness or `!= 1` check would pass on 128;
+  - .clang-tidy's HeaderFilterRegex must match a tracked header, both repo-relative
+    and absolute (compile commands may use either). llvm::Regex is an unanchored
+    POSIX search, so the test uses re.search.
+test_every_source_is_represented names each of these sources by its own label, so
+deleting a row, or a whole list, is itself a failure.
 
 The ROOTS those constants hang off are pinned too, against the conftest's
 REPO_ROOT and never against their own: a case built relative to a module's own
@@ -29,6 +43,10 @@ these consumers fails on a wrong path, they go quiet.
   - cs2rl.experiment.lib.env_fingerprint skips a missing file, and path_last_commit_sha
     returns "".
   - A MANIFEST.in line that matches nothing only warns during the build.
+  - A stale .gitignore line lets a 37 KB generated nav_data.h show as untracked, to
+    be committed; a stale .clangd `-I` or .clang-tidy HeaderFilterRegex silently
+    stops resolving or reporting the headers; a stale HEADER makes the generator
+    read a missing file (#205 part 2b measured all four SILENT: every test green).
 A rename that forgets one of them is then invisible. Here it is a red test
 naming the constant.
 
@@ -50,12 +68,14 @@ Also here, because it is a rule about where test code may live: tests/_helpers/
 holds no collectable file (test_helpers_hold_no_collectable_file).
 """
 import ast
+import re
 import runpy
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from cs2rl.c_env import SOURCE_DIR
 from cs2rl.train_bc import DEMO_RELEVANT_PATHS
 from tests._helpers import metrics_census
 from tests.conftest import REPO_ROOT
@@ -98,16 +118,49 @@ def _in_this_checkout(path: Path) -> str:
     return str(resolved)
 
 
+def _clangd_include_dirs() -> list[str]:
+    """Every `-I<dir>` flag in .clangd's `CompileFlags: Add:` list, as written."""
+    return re.findall(r"^\s*-\s+-I(\S+)\s*$", (REPO_ROOT / ".clangd").read_text(), re.MULTILINE)
+
+
+def _clang_tidy_header_filter() -> str | None:
+    """.clang-tidy's HeaderFilterRegex, unquoted (a YAML single-quoted scalar), or None."""
+    for line in (REPO_ROOT / ".clang-tidy").read_text().splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() == "HeaderFilterRegex":
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] == "'":
+                value = value[1:-1].replace("''", "'")
+            return value
+    return None
+
+
 _RUN_EXPERIMENT = ("TRAIN_PY", "REWARDS_H", "ENV_C", "C_ENV_DIR")
+# A `.clangd:-I` row carries a trailing `/`: an include path must be a directory, not a file.
 CASES = [
     *[(f"DEMO_RELEVANT_PATHS:{p}", p) for p in DEMO_RELEVANT_PATHS],
     *[(f"run_experiment.{n}", _in_this_checkout(run_experiment[n])) for n in _RUN_EXPERIMENT],
     *[(f"sync_action_spec.{n}", _in_this_checkout(sync_action_spec[n]))
-      for n in ("OUTPUT", "OBS_OUTPUT")],
+      for n in ("OUTPUT", "OBS_OUTPUT", "HEADER")],
     ("metrics_census.SRC", f"{_in_this_checkout(metrics_census.SRC)}/"),
     *[(f"MANIFEST.in:{p}", p) for p in _manifest_paths()],
     *[(f"setup.py:source_dir={p}", p) for p in _setup_source_dirs()],
+    *[(f".clangd:-I{d}", f"{d}/") for d in _clangd_include_dirs()],
 ]
+
+# Generated files .gitignore must ignore, derived from the C package so the check
+# follows it: a path, not a pattern, since check-ignore tests paths.
+GITIGNORE_CASES = [
+    (".gitignore:nav_data.h", _in_this_checkout(SOURCE_DIR / "nav_data.h")),
+    (".gitignore:binding*.pyd", _in_this_checkout(SOURCE_DIR / "binding.cp312-win_amd64.pyd")),
+]
+
+CLANG_TIDY_CASES = [(".clang-tidy:HeaderFilterRegex", _clang_tidy_header_filter())]
+
+# Labels no other row may stand in for: a prefix shared by several rows would stay
+# satisfied after one of them is deleted.
+EXACT_LABELS = ("sync_action_spec.HEADER", ".gitignore:nav_data.h", ".gitignore:binding*.pyd",
+                ".clang-tidy:HeaderFilterRegex")
 
 # The roots the module constants above hang off, each read from its module.
 ROOTS = {
@@ -120,12 +173,17 @@ def test_every_source_is_represented():
     """Each consumer contributes cases, and each module its root, so neither passes vacuously.
 
     PITFALL: ROOTS is a dict, and deleting its row deletes the only case that
-    would object: the root parametrize below just runs one case fewer.
+    would object: the root parametrize below just runs one case fewer. The same
+    holds for every case list, so a source whose rows a prefix cannot tell apart
+    is named by its exact label (EXACT_LABELS).
     """
-    labels = [label for label, _ in CASES]
+    labels = [label for label, _ in CASES + GITIGNORE_CASES + CLANG_TIDY_CASES]
     for prefix in ("DEMO_RELEVANT_PATHS:", "run_experiment.", "sync_action_spec.",
-                   "metrics_census.", "MANIFEST.in:", "setup.py:"):
+                   "metrics_census.", "MANIFEST.in:", "setup.py:", ".clangd:-I", ".gitignore:",
+                   ".clang-tidy:"):
         assert any(label.startswith(prefix) for label in labels), f"no case from {prefix}"
+    for label in EXACT_LABELS:
+        assert label in labels, f"no case labelled {label}"
     for module in ("run_experiment", "metrics_census"):
         assert f"{module}.REPO_ROOT" in ROOTS, f"{module}'s root is not pinned in ROOTS"
 
@@ -252,3 +310,44 @@ def test_path_constant_names_a_tracked_path(path):
     assert r.returncode == 0 and r.stdout.strip(), (
         f"{path!r} matches no tracked file. Its consumer tolerates that silently; see "
         f"this file's docstring.\n{r.stderr}")
+
+
+@pytest.mark.parametrize("path", [p for _, p in GITIGNORE_CASES],
+                         ids=[label for label, _ in GITIGNORE_CASES])
+def test_gitignore_ignores_the_c_packages_generated_files(path):
+    """.gitignore ignores `path`, a generated file in the C package's own directory.
+
+    PITFALL: `returncode == 0` exactly. check-ignore returns 1 for a path it does
+    not ignore and 128 for one it rejects (outside this checkout, as a foreign
+    SOURCE_DIR would give), and a truthiness or `!= 1` check passes on 128.
+    """
+    r = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", path],
+                       cwd=REPO_ROOT,
+                       capture_output=True,
+                       text=True)
+    assert r.returncode == 0, (
+        f".gitignore does not ignore {path!r} (check-ignore rc {r.returncode}): its line names "
+        f"a path the C package no longer has, so this generated file would show as untracked "
+        f"and could be committed.\n{r.stderr}")
+
+
+@pytest.mark.parametrize("regex", [r for _, r in CLANG_TIDY_CASES],
+                         ids=[label for label, _ in CLANG_TIDY_CASES])
+def test_clang_tidy_header_filter_matches_a_tracked_header(regex):
+    """HeaderFilterRegex matches a tracked header, both repo-relative and absolute.
+
+    A regex that matches no header makes clang-tidy report on none of them, silently.
+    """
+    assert regex, ".clang-tidy has no HeaderFilterRegex"
+    headers = subprocess.run(["git", "ls-files", "--", "*.h"],
+                             cwd=REPO_ROOT,
+                             capture_output=True,
+                             text=True,
+                             check=True).stdout.split()
+    assert headers, "git ls-files found no tracked .h file"
+    pattern = re.compile(regex)
+    for spelling, paths in (("repo-relative", headers), ("absolute", [(REPO_ROOT / h).as_posix()
+                                                                      for h in headers])):
+        assert any(pattern.search(p) for p in paths), (
+            f"HeaderFilterRegex {regex!r} matches no tracked header ({spelling}), so clang-tidy "
+            f"reports on none of them. Headers: {headers}")

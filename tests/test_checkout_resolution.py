@@ -31,11 +31,19 @@ checkout's; the cases differ in the child's cwd and in what it runs.
     a console script or a site-packages __main__.py that sits inside another
     checkout (the shapes of `.venv/bin/pytest` and `python -m pytest`, whose
     files resolve into main's .venv), which must go by the cwd.
+
+3. The leftover-directory check, clause (e) of the tripwire: a directory under
+src/cs2rl/ that Python would import as a namespace package (an importable file,
+no tracked __init__.py) stops the session. Walks on tmp layouts (positive,
+negatives, an unstaged __init__.py), the fail-closed git failure, and
+pytest_sessionstart itself for the wiring and the production root.
 """
+import importlib.machinery
 import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -233,3 +241,100 @@ def test_the_import_guard_skips_what_it_cannot_judge(tmp_path, case):
     else:
         child = _python(tmp_path, ["-c", "import sys\ndel sys.argv\nimport cs2rl\n"])
     assert child.returncode == 0, f"exit {child.returncode}\n{child.stderr[-3000:]}"
+
+
+# ── 3. The leftover-directory check in tests/conftest.py, clause (e) (#205 part 2b) ──
+#
+# A directory under src/cs2rl/ with an importable file and no tracked __init__.py is a
+# namespace package: after a package move, the old directory's untracked .so imports
+# silently. The real tree has none, so the session passes whether or not the check
+# works; these are its controls. Each walk runs on a tmp layout with its own `tracked`
+# set; the wiring and the production root run pytest_sessionstart itself.
+
+# pytest_sessionstart never reads its session; this stands in for one.
+_NO_SESSION = cast(pytest.Session, None)
+
+
+def _layout(root: Path, *files: str) -> None:
+    """Create each of `files` (relative to `root`) empty, with its parent directories."""
+    for name in files:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text("")
+
+
+def test_e_flags_an_untracked_extension_left_in_a_package_directory(tmp_path):
+    """Positive: c_env/ holding only a built binding .so (a pulled move's leftover) is flagged;
+    a tracked package beside it, and a directory without an importable file, are not."""
+    from tests.conftest import leftover_package_dirs
+    so = f"binding{importlib.machinery.EXTENSION_SUFFIXES[0]}"
+    _layout(tmp_path, f"c_env/{so}", "c_env/nav_data.h", "env/__init__.py", "env/nav.py",
+            "c_env_assets/beep.wav")
+    tracked = {tmp_path / "env" / "__init__.py", tmp_path / "env" / "nav.py"}
+    assert leftover_package_dirs(tmp_path, tracked) == [tmp_path / "c_env"]
+
+
+def test_e_does_not_flag_build_outputs_bytecode_or_a_tracked_package(tmp_path):
+    """Negatives: zig-out/lib/libbinding.so (not an identifier, never walked),
+    __pycache__/x.pyc (pruned by name; .pyc is not a counted suffix), and a package
+    whose __init__.py is tracked."""
+    from tests.conftest import leftover_package_dirs
+    _layout(tmp_path, "c/__init__.py", "c/zig-out/lib/libbinding.so", "c/__pycache__/x.pyc",
+            "c/.zig-cache/o/binding.so", "__pycache__/y.pyc")
+    assert leftover_package_dirs(tmp_path, {tmp_path / "c" / "__init__.py"}) == []
+
+
+def test_e_an_unstaged_init_still_stops_the_session(tmp_path):
+    """A package whose __init__.py exists on disk but is not tracked is flagged: the
+    index decides, not the file system."""
+    from tests.conftest import leftover_package_dirs
+    _layout(tmp_path, "viz/__init__.py", "viz/render.py")
+    assert leftover_package_dirs(tmp_path, set()) == [tmp_path / "viz"]
+
+
+@pytest.mark.parametrize("failure", ["git fails", "no directory"])
+def test_e_fails_closed_when_git_ls_files_cannot_run(tmp_path, monkeypatch, failure):
+    """A `git ls-files` that fails, or cannot start, is a problem naming the failure,
+    never a silent pass."""
+    from tests.conftest import leftover_package_problems
+    if failure == "git fails":
+        monkeypatch.setenv("GIT_DIR", str(tmp_path / "no-such-git-dir"))
+        problems = leftover_package_problems(tmp_path)
+        assert len(problems) == 1 and "`git ls-files` failed" in problems[0], problems
+    else:
+        problems = leftover_package_problems(tmp_path / "no-such-directory")
+        assert len(problems) == 1 and "could not run `git ls-files`" in problems[0], problems
+
+
+def test_e_is_wired_into_the_session_start(monkeypatch):
+    """pytest_sessionstart raises the tripwire's UsageError for a leftover problem."""
+    import tests.conftest as conftest
+    monkeypatch.setattr(conftest, "leftover_package_problems", lambda root: ["(e) planted"])
+    with pytest.raises(pytest.UsageError) as stopped:
+        conftest.pytest_sessionstart(_NO_SESSION)
+    assert str(stopped.value).startswith(_TRIPWIRE) and "(e) planted" in str(stopped.value)
+
+
+def test_e_walks_the_production_package_root(monkeypatch):
+    """The session start checks REPO_ROOT/src/cs2rl, a directory, and its walk reaches
+    the known subpackages.
+
+    PITFALL: the real tree has no leftover, so a wrong root (src/, or one
+    subpackage) would pass the session silently; this spies on the root the session
+    passes, then records the directories the real check walks from it.
+    """
+    import tests.conftest as conftest
+    real_check, real_walk = conftest.leftover_package_problems, os.walk
+    roots, walked = [], []
+    monkeypatch.setattr(conftest, "leftover_package_problems",
+                        lambda root: roots.append(root) or real_check(root))
+    conftest.pytest_sessionstart(_NO_SESSION)
+    assert roots == [REPO_ROOT / "src" / "cs2rl"] and roots[0].is_dir(), roots
+
+    def recording_walk(top, *args, **kwargs):
+        for entry in real_walk(top, *args, **kwargs):
+            walked.append(Path(entry[0]).name)
+            yield entry
+
+    monkeypatch.setattr(os, "walk", recording_walk)
+    assert real_check(roots[0]) == []
+    assert {"env", "spec", "eval"} <= set(walked), walked
