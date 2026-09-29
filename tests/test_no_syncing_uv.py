@@ -27,7 +27,8 @@ BLIND SPOTS (the measured scope, not a proof):
   * argv whose first element is not the literal "uv" (`["env", "FOO=1", "uv",
     ...]`, `[shutil.which("uv"), ...]`);
   * scripts/ that tests execute. scripts/run_rung1.sh runs `uv run python` and is
-    safe under test only because it prefixes `UV_NO_SYNC=1`.
+    safe only because it prefixes `UV_NO_SYNC=1`; test_run_rung1_sh.py pins that
+    prefix against a fake `uv`.
 """
 
 from __future__ import annotations
