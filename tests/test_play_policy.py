@@ -4,7 +4,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cs2rl.play_actions import (
+from cs2rl.env.c import SOURCE_DIR, ZIG_OUT
+from cs2rl.viz.play_actions import (
     area_bounds_from_simple_rooms,
     play_fill_actions,
     play_mark_done,
@@ -96,14 +97,14 @@ def test_reset_round_zeros_hidden():
 
 
 def test_make_client_takes_resource_dir():
-    text = (Path(__file__).resolve().parents[1] / "src/cs2rl/c_env/cs2_render.h").read_text()
+    text = (SOURCE_DIR / "cs2_render.h").read_text()
     assert "make_client" in text and "const char* resource_dir" in text
 
 
 def test_cs2_demo_policy_missing_exits_nonzero():
     import os
     import subprocess
-    demo = Path(__file__).resolve().parents[1] / "src/cs2rl/c_env/zig-out/bin/cs2_demo"
+    demo = ZIG_OUT / "bin" / "cs2_demo"
     if not demo.is_file():
         pytest.skip("cs2_demo not built")
     # DISPLAY unset: dispatcher must fail before InitWindow
@@ -119,11 +120,11 @@ def test_cs2_demo_policy_missing_exits_nonzero():
     assert r.returncode != 0
     # either printed the uv/venv hint, or exec'd python which FileNotFound
     blob = (r.stderr or "") + (r.stdout or "")
-    assert "cs2rl.play" in blob or "Checkpoint" in blob or "UV_PROJECT_ENVIRONMENT" in blob
+    assert "cs2rl.viz.play" in blob or "Checkpoint" in blob or "UV_PROJECT_ENVIRONMENT" in blob
 
 
 def test_env_scripted_movers_not_statues(make_map):
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=True))
     env.reset()
@@ -148,7 +149,7 @@ def test_play_cli_missing_pt_exits_2():
     import sys
     root = Path(__file__).resolve().parents[1]
     r = subprocess.run(
-        [sys.executable, "-m", "cs2rl.play", "--policy", "/no/such/cs2rl-policy.pt"],
+        [sys.executable, "-m", "cs2rl.viz.play", "--policy", "/no/such/cs2rl-policy.pt"],
         cwd=str(root),
         capture_output=True,
         text=True,
@@ -159,12 +160,12 @@ def test_play_cli_missing_pt_exits_2():
 
 
 def test_load_play_lib_unloadable_so_exits_2(tmp_path, monkeypatch, capsys):
-    from cs2rl.play import _load_play_lib
+    from cs2rl.viz.play import _load_play_lib
     bad = tmp_path / "libcs2_play.so"
     bad.write_bytes(b"not-an-elf")
     monkeypatch.setenv("CS2_PLAY_LIB", str(bad))
     with pytest.raises(SystemExit) as ei:
-        _load_play_lib(tmp_path)
+        _load_play_lib(zig_out=tmp_path)
     assert ei.value.code == 2
     assert "zig build cs2_demo" in capsys.readouterr().err
 
@@ -173,7 +174,7 @@ def test_cs2_demo_relative_venv_is_realpathd(tmp_path):
     import os
     import subprocess
     repo = Path(__file__).resolve().parents[1]
-    demo = repo / "src/cs2rl/c_env/zig-out/bin/cs2_demo"
+    demo = ZIG_OUT / "bin" / "cs2_demo"
     if not demo.is_file():
         pytest.skip("cs2_demo not built")
     venv = None
@@ -200,9 +201,3 @@ def test_cs2_demo_relative_venv_is_realpathd(tmp_path):
     blob = (r.stderr or "") + (r.stdout or "")
     assert "Checkpoint" in blob
     assert "set UV_PROJECT_ENVIRONMENT" not in blob
-
-
-def test_find_repo_root_from_this_file():
-    from cs2rl.play_actions import find_repo_root
-    root = find_repo_root(Path(__file__))
-    assert (root / "src" / "cs2rl" / "play.py").is_file()

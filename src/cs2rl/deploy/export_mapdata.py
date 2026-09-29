@@ -13,12 +13,12 @@ Usage (run from repo root; from a worktree, prefix `env PYTHONPATH=<checkout>/sr
 Reads MapData from the real dust2 nav mesh via make_cs2_map().
 Writes deploy/mapdata/<map>.json with the 5 constants needed by ObservationBuilder.
 
-Formulas (from src/cs2rl/c_env/cs2_env.py:312-315):
+Formulas (from src/cs2rl/env/c/cs2_env.py:312-315):
     inv_x = 2.0 / (x_max - x_min)
     inv_y = 2.0 / (y_max - y_min)
     x_off = (x_max + x_min) / (x_max - x_min)
     y_off = (y_max + y_min) / (y_max - y_min)
-    map_diag = sqrt((1/inv_x)^2 + (1/inv_y)^2)  # from src/cs2rl/c_env/cs2_observations.h:15-17
+    map_diag = sqrt((1/inv_x)^2 + (1/inv_y)^2)  # from src/cs2rl/env/c/cs2_observations.h:15-17
 
 IMPORTANT — normalization convention:
     The formula applied per-coordinate is:  norm = x * inv_range - offset

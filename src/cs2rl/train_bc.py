@@ -145,7 +145,7 @@ DEFAULT_CHECKPOINT = Path(CHECKPOINTS_DIR) / "bc_warmstart.pt"
 # check_demo_sha for why we diff this surface instead of comparing shas
 # verbatim.
 DEMO_RELEVANT_PATHS = (
-    "src/cs2rl/c_env",
+    "src/cs2rl/env/c",
     "src/cs2rl/spec/obs.py",
     "src/cs2rl/spec/action.py",
     "src/cs2rl/env/map.py",
@@ -255,7 +255,7 @@ def check_demo_sha(sha: str, allow_stale: bool = False, name: str = "demo") -> s
         cannot diff against a commit we do not have.
       * Uncommitted edits to DEMO_RELEVANT_PATHS also make demos stale, and
         `git diff <sha> HEAD` cannot see them: we diff the WORKING TREE
-        (`git diff <sha> -- paths`), so a dirty c_env is caught too.
+        (`git diff <sha> -- paths`), so a dirty env/c is caught too.
       * `allow_stale=True` downgrades the error to a printed warning. It exists
         for deliberate experiments ("does the old demo set still transfer?"),
         not for silencing the check on the happy path.
@@ -460,7 +460,7 @@ def make_bc_env(seed: int = 0):
     map is mandatory (plan §Target map) — bare make_env() defaults to real
     de_dust2, whose geometry the demos say nothing about.
     """
-    from cs2rl.c_env.cs2_env import make_env as make_c_env
+    from cs2rl.env.c.cs2_env import make_env as make_c_env
     return make_c_env(seed=seed, map_data=make_simple_map(), auto_reset=False)
 
 

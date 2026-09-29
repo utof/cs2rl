@@ -140,7 +140,13 @@ static void absolutize_policy(const char* path, char* out, size_t n) {
     join_path(out, n, cwd, path);
 }
 
-/* Walk up from the binary dir for pyproject.toml + src/cs2rl/play.py. */
+/* Walk up from the binary dir to the nearest checkout: pyproject.toml +
+ * src/cs2rl/__init__.py, the same marker src/cs2rl/__init__.py's own guard uses.
+ * WHY the package marker and not a module path: a module path (it was
+ * src/cs2rl/play.py) goes stale on every move of that module, and then a binary
+ * nested in a worktree under an older checkout walks past its own tree and
+ * silently runs the ancestor's code. The package marker survives any move short of
+ * renaming the package, and a nested worktree finds itself first. */
 static int find_repo(char* out, size_t n) {
     const char* app = play_host_app_dir();
     if (!app || !app[0])
@@ -151,10 +157,10 @@ static int find_repo(char* out, size_t n) {
     while (len > 1 && cur[len - 1] == '/')
         cur[--len] = '\0';
     for (;;) {
-        char toml[PATH_MAX], play[PATH_MAX];
+        char toml[PATH_MAX], pkg[PATH_MAX];
         join_path(toml, sizeof(toml), cur, "pyproject.toml");
-        join_path(play, sizeof(play), cur, "src/cs2rl/play.py");
-        if (path_exists(toml) && path_exists(play)) {
+        join_path(pkg, sizeof(pkg), cur, "src/cs2rl/__init__.py");
+        if (path_exists(toml) && path_exists(pkg)) {
             snprintf(out, n, "%s", cur);
             return 1;
         }
@@ -194,7 +200,7 @@ static int resolve_python(const char* repo, char* out, size_t n) {
 }
 
 static void print_borrow_hint(const char* abs_policy, int argc, char** argv) {
-    fprintf(stderr, "cs2_demo: $PYTHON -m cs2rl.play --policy %s", abs_policy);
+    fprintf(stderr, "cs2_demo: $PYTHON -m cs2rl.viz.play --policy %s", abs_policy);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
             i++;
@@ -237,12 +243,12 @@ static int demo_exec_play(int argc, char** argv, const char* policy_path) {
     }
     join_path(abs_python, sizeof(abs_python), abs_parent, base + 1);
 
-    /* python, -m, cs2rl.play, --policy, abs: 5; rest: at most argc - 1; NULL: 1. */
+    /* python, -m, cs2rl.viz.play, --policy, abs: 5; rest: at most argc - 1; NULL: 1. */
     char* eargv[argc + 5];
     int   n    = 0;
     eargv[n++] = abs_python;
     eargv[n++] = "-m";
-    eargv[n++] = "cs2rl.play";
+    eargv[n++] = "cs2rl.viz.play";
     eargv[n++] = "--policy";
     eargv[n++] = abs_policy;
     for (int i = 1; i < argc; i++) {
@@ -258,7 +264,7 @@ static int demo_exec_play(int argc, char** argv, const char* policy_path) {
         print_borrow_hint(abs_policy, argc, argv);
         return 2;
     }
-    /* `-m cs2rl.play` finds cs2rl through sys.path, and a shared venv's editable
+    /* `-m cs2rl.viz.play` finds cs2rl through sys.path, and a shared venv's editable
      * install names ONE checkout's src/. Prepend this repo's src/ to PYTHONPATH
      * (never replace it) so the demo runs the checkout it was found in. */
     const char* old_pp = getenv("PYTHONPATH");
@@ -285,7 +291,7 @@ int main(int argc, char** argv) {
      * both work. Unknown args are silently ignored (keeps backward compat with
      * existing scripts that pass --record, --eval, etc. to the trainer demo).
      *
-     *   --policy PATH : exec `python -m cs2rl.play` (never open a window here).
+     *   --policy PATH : exec `python -m cs2rl.viz.play` (never open a window here).
      *   --spectate : detach camera from any agent (free-fly, render all).
      *   --fog      : human-agent fog-of-war — only draw enemies your agent's
      *                line_of_sight_2d says are visible. Forces you to play

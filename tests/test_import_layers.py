@@ -149,7 +149,7 @@ def _graph_facts(tree: Path) -> dict:
 
 
 def _dotted(relative: str) -> str:
-    """'src/cs2rl/c_env/__init__.py' -> 'cs2rl.c_env'; 'src/cs2rl/env/nav.py' -> 'cs2rl.env.nav'."""
+    """'src/cs2rl/env/c/__init__.py' -> 'cs2rl.env.c'; 'src/cs2rl/env/nav.py' -> 'cs2rl.env.nav'."""
     parts = Path(relative).with_suffix("").parts[1:]
     if parts[-1] == "__init__":
         parts = parts[:-1]
@@ -190,10 +190,10 @@ def scope_pin_failures(tree: Path, facts: dict) -> list[str]:
     its first line, which is inside the def whenever the statement is.
 
     BLIND SPOT, stated: this checks where an import STATEMENT sits, not when it
-    RUNS. `def f(): import cs2rl.viz` followed by a module-level `f()` passes the
-    pin and both contracts. For train -> viz, the one pair nothing else would
+    RUNS. `def f(): import cs2rl.viz.render` followed by a module-level `f()` passes the
+    pin and both contracts. For train -> viz.render, the one pair nothing else would
     notice, tests/test_w1_modules.py lists `rerun` in HEAVY, so `from cs2rl import
-    train` loading viz fails there.
+    train` loading viz.render fails there.
     """
     failures = []
     for importer, imported, lines in facts["sites"]:
@@ -385,14 +385,15 @@ def test_control_env_config_importing_nav_breaks_the_env_layers(tmp_path):
     assert "cs2rl layers KEPT" in r.stdout and "cs2rl acyclic siblings KEPT" in r.stdout, r.stdout
 
 
-# One module-scope `import cs2rl.viz` site per construct that is not a def. The pin's
+# One module-scope `import cs2rl.viz.render` site per construct that is not a def. The pin's
 # docstring says none of them counts as function-local; a pin widened to exempt one
 # (say, `if TYPE_CHECKING:` blocks) fails the matching case.
 _MODULE_SCOPE_SHAPES = {
-    "bare": "import cs2rl.viz",
-    "if_type_checking": "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import cs2rl.viz",
-    "class_body": "class _Plant:\n    import cs2rl.viz",
-    "try_except": "try:\n    import cs2rl.viz\nexcept ImportError:\n    pass",
+    "bare": "import cs2rl.viz.render",
+    "if_type_checking":
+    "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import cs2rl.viz.render",
+    "class_body": "class _Plant:\n    import cs2rl.viz.render",
+    "try_except": "try:\n    import cs2rl.viz.render\nexcept ImportError:\n    pass",
 }
 
 
@@ -406,7 +407,8 @@ def test_control_a_module_scope_site_of_an_ignored_pair(tmp_path, shape):
     tree, _ = _copy_package(tmp_path)
     text = _MODULE_SCOPE_SHAPES[shape]
     start = _append(tree, "src/cs2rl/train.py", text)
-    planted = start + next(i for i, line in enumerate(text.split("\n")) if "cs2rl.viz" in line)
+    planted = start + next(i
+                           for i, line in enumerate(text.split("\n")) if "cs2rl.viz.render" in line)
     r = _lint(tree)
     assert r.returncode == 0, ("import-linter now rejects a module-scope site of an ignored "
                                "pair; the scope pin's premise changed.\n" + r.stdout + r.stderr)

@@ -90,7 +90,7 @@ import sys
 
 import numpy as np
 
-from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig
 from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
 from cs2rl.env.nav import N_AGENTS, TEAM_SIZE
@@ -172,7 +172,7 @@ def build_map(aim_mode):
     return make_simple_map()
 
 
-# Hitbox geometry mirrored from process_combat (src/cs2rl/c_env/cs2_combat.h): the
+# Hitbox geometry mirrored from process_combat (src/cs2rl/env/c/cs2_combat.h): the
 # hitscan ray starts at the shooter's EYE and the perpendicular-distance gate is
 # measured against the target's TORSO point. Track mode aims eye→torso so a
 # converged aim gives perp ≈ 0 and the shot connects.

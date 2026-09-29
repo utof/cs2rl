@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from cs2rl.c_env.cs2_env import OBS_DIM, make_env
+from cs2rl.env.c.cs2_env import OBS_DIM, make_env
 from cs2rl.env.config import EnvConfig
 
 ALPHA = math.exp(-1.0 / 16.0 / 0.08)

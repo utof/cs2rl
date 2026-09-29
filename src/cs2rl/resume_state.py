@@ -16,7 +16,7 @@ PICKLE COMPAT: collect_train_state stores only ints, tensors and state_dicts —
 never a class defined in train.py — so moving these definitions cannot
 invalidate an existing ``train_state.pt``.
 
-IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/c_env-free, for the
+IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in train_shared.py's header. Every torch import below is
 function-local ON PURPOSE.
 """

@@ -15,7 +15,7 @@ stale mask shows up as a delayed first shot (fired_this_tick).
 """
 import numpy as np
 
-from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig
 from cs2rl.spec.action import ACTION_HEAD_SIZES
 

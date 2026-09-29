@@ -37,8 +37,8 @@
 _Static_assert(WALL_HEIGHT == SOLID_WALL_HEIGHT,
                "WALL_HEIGHT drifted from SOLID_WALL_HEIGHT in cs2_solids.h");
 
-/* Demo-juice audio (P0). Voices live in src/cs2rl/c_env/demo_assets/ because
- * src/cs2rl/c_env/resources is a pufferlib symlink in the parent tree (and is
+/* Demo-juice audio (P0). Voices live in src/cs2rl/env/c/demo_assets/ because
+ * src/cs2rl/env/c/resources is a pufferlib symlink in the parent tree (and is
  * gitignored). build.zig copies the WAVs to zig-out/bin/resources/. */
 #define DEMO_VOICE_SHOT   0
 #define DEMO_VOICE_FOOT   1
@@ -84,7 +84,7 @@ typedef struct {
      * "play as the bot" — see only what the trained policy sees in obs.
      * Set via --fog CLI flag in cs2_demo.c. */
     int fog_enabled;
-    /* Pointer passed to make_client (NAV_AREA_BOUNDS / play.py numpy).
+    /* Pointer passed to make_client (NAV_AREA_BOUNDS / viz/play.py numpy).
      * Not a malloc copy. Needed by draw_floor for real area sizes. */
     const float* area_bounds;
     /* Snapshot-diff audio. AgentSnapshot cannot drive this (no

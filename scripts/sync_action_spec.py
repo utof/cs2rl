@@ -16,11 +16,22 @@ CONTINUOUS_HEAD_NAMES, DISCRETE_HEAD_SPEC, CONTINUOUS_HEAD_SPEC.
 Run after changing ACTION_HEAD_SIZES/ACTION_HEAD_NAMES/AIM_DIM, or any OBS_*
 macro (block sizes / OBS_DIM) in cs2_types.h:
     uv run python scripts/sync_action_spec.py
+
+HEADER comes from the C package (cs2rl.env.c.SOURCE_DIR), so this script imports
+cs2rl. A restated path went stale silently when the package moved: the generator
+would read a missing header, and no test runs it. PITFALL: run by path from a
+worktree without `PYTHONPATH=<worktree>/src`, that import resolves to the shared
+venv's checkout (main's), and cs2rl's own guard raises its foreign-checkout
+ImportError naming both checkouts. That is correct: without the guard, the script
+would read main's header and write the worktree's spec modules. Put the worktree's
+src/ first: `env PYTHONPATH=<worktree>/src .venv/bin/python scripts/sync_action_spec.py`.
 """
 import re
 from pathlib import Path
 
-HEADER = Path(__file__).resolve().parent.parent / "src" / "cs2rl" / "c_env" / "cs2_types.h"
+from cs2rl.env.c import SOURCE_DIR
+
+HEADER = SOURCE_DIR / "cs2_types.h"
 OUTPUT = Path(__file__).resolve().parent.parent / "src" / "cs2rl" / "spec" / "action.py"
 OBS_OUTPUT = Path(__file__).resolve().parent.parent / "src" / "cs2rl" / "spec" / "obs.py"
 

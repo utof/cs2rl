@@ -29,16 +29,6 @@ def area_bounds_from_simple_rooms():
     return np.ascontiguousarray(make_simple_map().area_bounds)
 
 
-def find_repo_root(start: Path) -> Path:
-    cur = Path(start).resolve()
-    if cur.is_file():
-        cur = cur.parent
-    for p in [cur, *cur.parents]:
-        if (p / "pyproject.toml").is_file() and (p / "src" / "cs2rl" / "play.py").is_file():
-            return p
-    raise FileNotFoundError(f"no repo root (pyproject.toml + src/cs2rl/play.py) above {start}")
-
-
 def resolve_policy_path(path: str) -> Path:
     p = Path(path).expanduser().resolve()
     if not p.is_file():

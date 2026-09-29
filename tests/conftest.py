@@ -1,8 +1,9 @@
 import importlib.machinery
 import importlib.util
 import os
+import subprocess
 import sys
-from collections.abc import Generator, Iterable, Mapping
+from collections.abc import Collection, Generator, Iterable, Mapping
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,91 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
                             f"resources, 'resources')), left by a process started with cwd = "
                             f"{src}. Removing it is safe.")
     return problems
+
+
+# ── Leftover package directories under src/cs2rl (#205 part 2b) ──
+#
+# (e) The session stops if a directory under src/cs2rl/ meets all three:
+#   - it is reachable through identifier-named directories only (so Python can
+#     name it; zig-out/, .zig-cache/ and zig-pkg/ cannot be, and are skipped);
+#   - it holds a `.py` file or a file with an importlib.machinery.EXTENSION_SUFFIXES
+#     suffix (a built .so);
+#   - it has no TRACKED __init__.py (`git ls-files`, i.e. the index).
+# WHY: such a directory is a PEP 420 namespace package. After a package move (c_env
+# -> env/c), a checkout that pulls the move keeps the untracked build outputs in the
+# old directory, and `import cs2rl.c_env.binding` then SUCCEEDS on the stale .so
+# (measured, #205 part 2b). Neither the checkout tripwire above (it looks only at
+# the direct children of src/) nor import-linter (grimp sees no package without an
+# __init__.py) nor any test noticed.
+# The message names the directory: `git add` its __init__.py, or remove it. The
+# session also stops while a new package's __init__.py is written but not staged,
+# which is the point: an unstaged __init__.py is one `git commit -a` from missing.
+# PITFALLS.
+#   * __pycache__ is an identifier, so it is pruned by name. The suffixes are `.py`
+#     plus EXTENSION_SUFFIXES, never importlib.machinery.all_suffixes(): that
+#     includes `.pyc`, and on main it flagged 7 __pycache__ directories.
+#   * `git ls-files` is the session's first git subprocess. If it fails (no git, not
+#     a checkout, a broken index), the check fails CLOSED with a message naming the
+#     failure; it never passes because it could not look.
+# LIMITS.
+#   1. A sourceless legacy `.pyc` directly in a leftover directory is importable,
+#      and not flagged.
+#   2. A snapshot at session start: a directory that appears later is not seen.
+# tests/test_checkout_resolution.py pins the walk, the git failure and the wiring.
+_LEFTOVER_SUFFIXES = (".py", *importlib.machinery.EXTENSION_SUFFIXES)
+
+
+def leftover_package_dirs(package_root: Path, tracked: Collection[Path]) -> list[Path]:
+    """Directories under `package_root` Python would import, as a namespace package, that git
+    does not track as a package.
+
+    `tracked` holds the tracked files, each as `package_root / <path git printed>`, so
+    both sides are spelled from the same root (no resolve: the drive is mounted under
+    two names). The walk never enters a directory whose name is not an identifier, or
+    __pycache__, and never reports `package_root` itself.
+    """
+    leftovers = []
+    for directory, subdirs, files in os.walk(package_root):
+        subdirs[:] = sorted(d for d in subdirs if d.isidentifier() and d != "__pycache__")
+        here = Path(directory)
+        if here == package_root:
+            continue
+        importable = any(f.endswith(_LEFTOVER_SUFFIXES) for f in files)
+        if importable and here / "__init__.py" not in tracked:
+            leftovers.append(here)
+    return leftovers
+
+
+def leftover_package_problems(package_root: Path) -> list[str]:
+    """(e): one problem per leftover directory under `package_root`, or one naming a git failure.
+
+    Lists the tracked files with `git ls-files -z -- .` run IN `package_root`, so
+    git prints paths relative to it.
+    """
+    try:
+        listing = subprocess.run(["git", "ls-files", "-z", "--", "."],
+                                 cwd=package_root,
+                                 capture_output=True,
+                                 text=True,
+                                 timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return [
+            f"(e) could not run `git ls-files` in {package_root} ({e!r}), so the check for "
+            "leftover package directories cannot run. Fix git, or run from a checkout."
+        ]
+    if listing.returncode != 0:
+        return [
+            f"(e) `git ls-files` failed in {package_root} (rc {listing.returncode}: "
+            f"{listing.stderr.strip()}), so the check for leftover package directories "
+            "cannot run. Fix git, or run from a checkout."
+        ]
+    tracked = {package_root / p for p in listing.stdout.split("\0") if p}
+    return [
+        f"(e) {d} is importable as a namespace package (it holds a .py or extension file, and no "
+        "tracked __init__.py), so a stale module there imports silently. `git add` its "
+        "`__init__.py`, or remove the directory (a package move leaves its build outputs "
+        "behind)." for d in leftover_package_dirs(package_root, tracked)
+    ]
 
 
 # ── Namespace guard: `tests` and `scripts` are this checkout's own (#207) ──
@@ -238,8 +324,10 @@ def namespace_modules_outside_their_package(modules: Mapping[str, object],
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Stop the session, before collection, if it would import another checkout's code."""
+    """Stop the session, before collection, if it would import another checkout's code, or a
+    leftover directory's."""
     problems = checkout_resolution_problems(REPO_ROOT / "src", sys.path)
+    problems += leftover_package_problems(REPO_ROOT / "src" / "cs2rl")
     problems += namespace_entry_problems(REPO_ROOT, sys.path)
     if problems:
         raise pytest.UsageError("checkout tripwire (tests/conftest.py):\n  " +

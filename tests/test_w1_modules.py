@@ -7,7 +7,7 @@ FRESH interpreter, one subprocess per case:
      first" ordering luck);
   2. it does not pull `cs2rl.train` back in — the dependency graph stays acyclic, so
      the leaf really is a leaf;
-  3. its module scope stays free of torch / nav / c_env.cs2_env / rerun;
+  3. its module scope stays free of torch / nav / env.c.cs2_env / rerun;
   4. the only sibling edge any of them has is into a LEAF, and the leaves
      import no sibling except each other in the one allowed direction
      (train_shared -> env.config). The shape spec §2 W1 fixes: leaves at the
@@ -19,7 +19,7 @@ in-process measures the session, not the module. Every assert here has to start
 from an empty sys.modules or it silently passes forever.
 
 WHY property 3 is load-bearing (measured, not stylistic): `from cs2rl import train`
-today pulls neither torch nor nav nor c_env, because all ~35 torch imports in train.py
+today pulls neither torch nor nav nor env.c, because all ~35 torch imports in train.py
 are function-local ON PURPOSE. That is what makes `train.py --dump-config`
 cost ~1 s instead of ~30 s, which in turn is what makes it usable as the
 Modal/run_rung1 fingerprint step (tests/test_train_cli.py's "--dump-config means
@@ -48,17 +48,17 @@ TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
 # is compared against sys.modules: a bare `X` is never a key there, so a bare
 # entry would make every "not in sys.modules" check below pass forever.
 #
-# `env_factory` (W3) is here for a reason beyond bookkeeping: it is the module
+# `env.factory` (W3) is here for a reason beyond bookkeeping: it is the module
 # whose module scope is MOST tempting to make heavy, since its whole job is
 # constructing envs. Two function-local imports carry the two reasons: `from
-# cs2rl.c_env.cs2_env import make_env` in `build_env_for` stays function-local so
-# `from cs2rl import train` stays free of torch/nav/c_env, and `from cs2rl.train import
+# cs2rl.env.c.cs2_env import make_env` in `build_env_for` stays function-local so
+# `from cs2rl import train` stays free of torch/nav/env.c, and `from cs2rl.train import
 # SelfPlayManager` in `build_selfplay_manager` stays function-local to break
-# the cycle (train.py imports env_factory at module level).
+# the cycle (train.py imports env.factory at module level).
 #
 # `metrics_schema` (W4) is here for the mirror-image reason: it is a registry of
 # STRINGS whose whole value is being cheap to import, and it took ownership of
-# `EVAL_KEYS` from `eval.baselines` — a module with torch and c_env.cs2_env at
+# `EVAL_KEYS` from `eval.baselines` — a module with torch and env.c.cs2_env at
 # its scope. If that ownership ever flipped back, or someone imported a policy
 # class to spell a type hint, eight string constants would start costing a torch
 # import, and only this test would say so.
@@ -70,7 +70,7 @@ TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
 # module-level `from cs2rl.trainer import Cs2PuffeRL` in train.py turns
 # test_import_train_stays_light_and_really_imports_the_shims red naming torch).
 W1_MODULES = ("cs2rl.train_shared", "cs2rl.resume_state", "cs2rl.train_config",
-              "cs2rl.train_metrics", "cs2rl.train_update", "cs2rl.env_factory",
+              "cs2rl.train_metrics", "cs2rl.train_update", "cs2rl.env.factory",
               "cs2rl.eval.metrics_schema", "cs2rl.env.config")
 
 # W1 modules train.py deliberately does NOT import at its module level, and why.
@@ -138,16 +138,16 @@ TRAIN_MODULE_LEVEL_IMPORTS = _train_module_level_imports()
 LEAVES = frozenset({"cs2rl.train_shared", "cs2rl.env.config"})
 
 # Imports whose presence in sys.modules means the import-lightness invariant is
-# gone. `cs2rl.c_env.cs2_env` rather than `cs2rl.c_env` on purpose: the package
+# gone. `cs2rl.env.c.cs2_env` rather than `cs2rl.env.c` on purpose: the package
 # itself is cheap, the ctypes/binding module underneath it is not.
 #
-# `rerun` stands in for `cs2rl.viz`, which imports it at module scope and which train.py
+# `rerun` stands in for `cs2rl.viz.render`, which imports it at module scope and which train.py
 # reaches only inside record_episode (`--record`). The layers contract ignores the
-# train -> viz pair and the scope pin in tests/test_import_layers.py keeps its import
+# train -> viz.render pair and the scope pin in tests/test_import_layers.py keeps its import
 # statements inside a def, but neither sees a function-local import that is CALLED at
 # module scope; test_import_train_stays_light_and_really_imports_the_shims, through
 # this entry, does.
-HEAVY = ("torch", "cs2rl.env.nav", "cs2rl.c_env.cs2_env", "rerun")
+HEAVY = ("torch", "cs2rl.env.nav", "cs2rl.env.c.cs2_env", "rerun")
 
 
 def _run_child(body: str) -> subprocess.CompletedProcess:
@@ -249,6 +249,33 @@ def test_import_train_test_harness_stays_light():
 from cs2rl import train_test_harness
 heavy = [m for m in {HEAVY!r} if m in sys.modules]
 assert not heavy, f"`from cs2rl import train_test_harness` pulled {{heavy}}"
+""")
+    assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+
+
+def test_env_c_package_import_stays_light():
+    """`import cs2rl.env.c` binds SOURCE_DIR and ZIG_OUT and loads no submodule and no numpy.
+
+    WHY: viz/play.py, scripts/bake_nav.py, scripts/sync_action_spec.py and several test
+    modules import the package for its two path constants (#205 part 2b), some at
+    module scope or at collection. One `from . import binding` in its __init__ would
+    load the built .so (and cs2_env, numpy) for every one of them.
+    PITFALL: the probe runs through _run_child (cwd = REPO_ROOT, this session's
+    PYTHONPATH), so cs2rl's guard refuses another checkout's install. A child started
+    from a tmp cwd without PYTHONPATH would import main's package, whose __init__ may
+    be anything, and pass or fail for that tree. The location check names src/, not
+    REPO_ROOT: a worktree nests under main's root, so containment in the root would
+    accept a worktree's file from main.
+    """
+    r = _run_child(f"""
+import cs2rl.env.c as package
+from pathlib import Path
+loaded = sorted(m for m in sys.modules if m.startswith("cs2rl.env.c.") or m == "numpy")
+assert not loaded, f"`import cs2rl.env.c` loaded {{loaded}}: keep its __init__ to pathlib"
+here = Path(package.__file__).resolve()
+assert here.is_relative_to({str(REPO_ROOT / "src")!r}), f"imported another checkout's {{here}}"
+assert package.SOURCE_DIR == here.parent, package.SOURCE_DIR
+assert package.ZIG_OUT == here.parent / "zig-out", package.ZIG_OUT
 """)
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
 

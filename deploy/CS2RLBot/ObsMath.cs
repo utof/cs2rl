@@ -4,7 +4,7 @@ namespace CS2RLBot;
 /// <summary>
 /// Pure math helpers for observation normalization.
 /// All methods are stateless and side-effect free — no CSS types.
-/// Matches formulas in src/cs2rl/c_env/cs2_observations.h exactly.
+/// Matches formulas in src/cs2rl/env/c/cs2_observations.h exactly.
 /// </summary>
 internal static class ObsMath
 {

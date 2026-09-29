@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from cs2rl import train
-from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env.c.cs2_env import make_env
 
 
 @pytest.fixture(scope="module")

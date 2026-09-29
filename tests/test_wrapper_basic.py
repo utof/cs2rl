@@ -7,13 +7,13 @@ from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES
 
 
 def test_import_wrapper():
-    from cs2rl.c_env.cs2_env import Cs2Env
+    from cs2rl.env.c.cs2_env import Cs2Env
 
     assert Cs2Env is not None
 
 
 def test_reset_returns_10_obs():
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     env = make_env(seed=0)
     obs, info = env.reset()
@@ -21,7 +21,7 @@ def test_reset_returns_10_obs():
 
 
 def test_step_returns_shapes():
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     env = make_env(seed=0)
     env.reset()
@@ -32,7 +32,7 @@ def test_step_returns_shapes():
 
 
 def test_snapshot_state_exposes_agents():
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     env = make_env(seed=0, auto_reset=False)
     env.reset()
@@ -45,7 +45,7 @@ def test_make_env_honors_external_buffers():
     import gymnasium
     import pufferlib
 
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     single_action = gymnasium.spaces.MultiDiscrete(list(ACTION_HEAD_SIZES))
     joint_action = pufferlib.spaces.joint_space(single_action, 10)

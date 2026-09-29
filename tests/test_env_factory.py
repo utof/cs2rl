@@ -1,4 +1,4 @@
-"""`env_factory.build_env_for` must construct exactly the env the old sites did.
+"""`env.factory.build_env_for` must construct exactly the env the old sites did.
 
 WHY THIS FILE EXISTS. Spec 2026-08-31 §2 W3 routed every construction through
 one role-keyed factory; #165 PR B2 then retyped every role builder to take ONE
@@ -61,7 +61,7 @@ suite would tell us.
 
 SCOPE. All six roles' call sites are migrated, and none of them names
 `make_puffer_env`; `tests/test_env_construction_enforcement.py` asserts that
-permanently. Since PR B2 `build_env_for` imports `c_env.cs2_env.make_env`
+permanently. Since PR B2 `build_env_for` imports `env.c.cs2_env.make_env`
 directly, so the stub in `_construct` is installed there.
 
 FACTORY vs CALL SITE. Most of this file hands the fixture's bindings to
@@ -92,7 +92,7 @@ from pathlib import Path
 import pytest
 
 from cs2rl.env.config import KNOB_FIELDS, REWARD_FIELDS, EnvConfig, RewardWeights
-from cs2rl.env_factory import ROLES, UNSET, build_env_for
+from cs2rl.env.factory import ROLES, UNSET, build_env_for
 
 FIXTURE = Path(__file__).parent / "fixtures" / "env_config_pre_165b.json"
 
@@ -123,7 +123,7 @@ RUNTIME_NAMES = tuple(FIXTURE_DATA["_provenance"]["runtime_names"])
 
 
 class _Recorder:
-    """Stands in for `c_env.cs2_env.make_env` and records what the builder passed.
+    """Stands in for `env.c.cs2_env.make_env` and records what the builder passed.
 
     Records the call as a plain dict of what was PASSED. Signature binding is not
     repeated here: the builders call `make_env` with keywords only, so the kwargs
@@ -153,9 +153,9 @@ def _config_from(d):
 
 def _construct(monkeypatch, role, **kwargs):
     """Run `build_env_for(role, ...)` against a recording stub at
-    `c_env.cs2_env.make_env` — where build_env_for's function-local import now
+    `env.c.cs2_env.make_env` — where build_env_for's function-local import now
     reads from, so this also proves that import is a per-call attribute read."""
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
@@ -167,12 +167,12 @@ def _construct(monkeypatch, role, **kwargs):
 def _construct_dropping(monkeypatch, role, dropped, **kwargs):
     """`_construct`, with `dropped` deleted at the recording boundary.
 
-    Simulating the drop here rather than by editing `env_factory.py` is
+    Simulating the drop here rather than by editing `env/factory.py` is
     indistinguishable — from the oracle's point of view — from a builder that
     never passed it, and it keeps the knock-out reproducible in CI instead of a
     procedure someone has to remember to perform by hand.
     """
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     class _Dropping(_Recorder):
 
@@ -251,7 +251,7 @@ def _real_runtime_signature():
     test_factory_kwargs_bind_to_the_real_signature went vacuous.
 
     PITFALL — WHY THIS IS BOUND ONCE AT IMPORT AND NEVER RE-READ. `_construct`
-    monkeypatches `c_env.cs2_env.make_env` with the recording stub, whose own
+    monkeypatches `env.c.cs2_env.make_env` with the recording stub, whose own
     signature is `(**kwargs)`. Re-reading the attribute inside a comparison
     would therefore pick up the STUB, strip its VAR_KEYWORD and leave an EMPTY
     parameter list — at which point every runtime name is unbindable and every
@@ -261,7 +261,7 @@ def _real_runtime_signature():
     """
     import inspect
 
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     sig = inspect.signature(make_env)
     return sig.replace(
@@ -442,7 +442,7 @@ def test_train_closure_still_rejects_stray_kwargs(monkeypatch):
     only thing that can fire.
     """
     from cs2rl import train
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     monkeypatch.setattr(cs2_env, "make_env", _Recorder())
     factory = train.build_env_factory(shared_ts=None, map_data=None)
@@ -496,7 +496,7 @@ def test_every_role_builder_parameter_is_required():
     """
     import inspect
 
-    from cs2rl import env_factory
+    from cs2rl.env import factory as env_factory
 
     for role, builder in env_factory._ROLE_BUILDERS.items():
         for name, param in inspect.signature(builder).parameters.items():
@@ -666,7 +666,7 @@ def test_train_call_site_forwards_the_captured_kwargs(monkeypatch, capture):
     from argparse import Namespace
 
     from cs2rl import train
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     b, rt = capture["bindings"], capture["runtime_kwargs"]
     rec = _Recorder()
@@ -721,7 +721,7 @@ def test_harness_call_site_forwards_the_captured_kwargs(monkeypatch, tmp_path, c
     `shared_ts` and `buf` remain distinct sentinels, so those two runtime slots
     are still swap-checked by value.
     """
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     b, rt = capture["bindings"], capture["runtime_kwargs"]
     rec = _Recorder()
@@ -770,7 +770,7 @@ def test_harness_config_carries_the_knobs_no_fixture_row_varies(monkeypatch, tmp
     this drive; that pair is separated by the seed_none_becomes_zero scenario
     above, which is why both tests are needed.)
     """
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
@@ -915,8 +915,8 @@ def _drive(monkeypatch, module, fn, *args, **kwargs):
     """Run `fn(*args, **kwargs)` with `module.build_env_for` recording and aborting.
 
     Returns the (role, kwargs) the call site asked for. Patching the name on the
-    CALLING module rather than on `env_factory` is deliberate: both call sites'
-    modules do `from cs2rl.env_factory import build_env_for`, so the module-global is
+    CALLING module rather than on `env.factory` is deliberate: both call sites'
+    modules do `from cs2rl.env.factory import build_env_for`, so the module-global is
     the binding production actually reads, and patching the source module would
     not be seen.
     """
@@ -976,14 +976,14 @@ def test_external_role_returns_under_a_stub(monkeypatch):
     make_puffer_env`. Repointing that import at `train.make_env` — the PUBLIC
     wrapper, whose name this module now mentions twice — would have made the
     external role call itself forever. Since B2 the import is
-    `c_env.cs2_env.make_env`, the lower-layer constructor, and this test is the
+    `env.c.cs2_env.make_env`, the lower-layer constructor, and this test is the
     behavioural statement of that: with the stub installed the call RETURNS.
 
     A pure-AST guard (test_env_factory_never_names_train_make_env below) states
     the same thing statically; this one would still fail if a future indirection
     reintroduced the cycle by some spelling the AST check does not enumerate.
     """
-    from cs2rl.c_env import cs2_env
+    from cs2rl.env.c import cs2_env
 
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
@@ -1137,7 +1137,7 @@ def test_eval_env_agreement_two_directions(simple_map, field_name):
     finding.
     """
     from cs2rl import train
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
 
     base = make_env(config=EnvConfig(), map_data=simple_map, seed=0)
     try:
@@ -1433,7 +1433,7 @@ def test_mask_view_attach_stays_out_of_the_factory():
     substring check would either fail on the prose or be weakened until it
     stopped checking anything.
     """
-    from cs2rl import env_factory
+    from cs2rl.env import factory as env_factory
 
     tree = ast.parse(Path(env_factory.__file__).read_text())
     attached = [
@@ -1441,14 +1441,14 @@ def test_mask_view_attach_stays_out_of_the_factory():
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in (
             "_attach_mask_view", "_attach_cont_action_view")
     ]
-    assert not attached, (f"env_factory.py calls {attached} — shared-memory attach is the "
+    assert not attached, (f"env/factory.py calls {attached} — shared-memory attach is the "
                           "caller's job; see this test's docstring")
 
 
 def test_env_factory_never_names_train_make_env():
-    """`env_factory` must not reach `train.make_env` — statically, by any spelling.
+    """`env.factory` must not reach `train.make_env` — statically, by any spelling.
 
-    Since PR B2 `build_env_for` imports the LOWER-layer `c_env.cs2_env.make_env`.
+    Since PR B2 `build_env_for` imports the LOWER-layer `env.c.cs2_env.make_env`.
     Re-pointing that at `train`'s public wrapper would make the `external` role
     call itself forever, and would put the whole training stack back on
     `--dump-config`'s import path. Three shapes are refused: a
@@ -1463,7 +1463,7 @@ def test_env_factory_never_names_train_make_env():
     is legitimate — it is why train.py's `__main__` self-alias is still a hard
     prerequisite of this module — and must not be flagged.
     """
-    from cs2rl import env_factory
+    from cs2rl.env import factory as env_factory
 
     tree = ast.parse(Path(env_factory.__file__).read_text())
     offenders = []
@@ -1593,7 +1593,7 @@ def test_build_train_env_factory_carries_args_config():
                     test green (re-measured 2026-09-04; the review measured the
                     whole non-slow suite green with it) while this docstring and
                     two `src/` paragraphs — build_env_factory's own and
-                    _build_train's in env_factory.py — cited this test as the
+                    _build_train's in env/factory.py — cited this test as the
                     evidence for it. Only a call that OMITS config reaches the
                     resolution; five in tests/ do, and this is the one that
                     asserts what it resolved to.

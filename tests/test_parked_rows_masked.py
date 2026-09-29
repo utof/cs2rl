@@ -459,7 +459,7 @@ def test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent():
     test_noop_opponent_rows_are_statues_excluded_from_global_step (which also
     compares the trainer's produced rows to IdleActor's output directly).
     """
-    from cs2rl.c_env.cs2_env import N_AGENTS
+    from cs2rl.env.c.cs2_env import N_AGENTS
     from cs2rl.eval.baselines import ACTION_DIM, AIM_DIM, IdleActor
 
     statue = IdleActor()

@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from cs2rl import train
-from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env.c.cs2_env import make_env
 from cs2rl.spec.action import AIM_DIM
 
 

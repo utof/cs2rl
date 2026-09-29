@@ -125,8 +125,8 @@ EMITTER_SITES = (
         "log_entry": ""
     }),
     EmitterSite("train.py", "self_play_used_past_metric", {"logs": ""}),
-    EmitterSite("c_env/cs2_env.py", "Cs2Env._build_terminal_info", {"summary": "environment/"}),
-    EmitterSite("c_env/cs2_env.py", "Cs2Env.step", {"summary": "environment/"}),
+    EmitterSite("env/c/cs2_env.py", "Cs2Env._build_terminal_info", {"summary": "environment/"}),
+    EmitterSite("env/c/cs2_env.py", "Cs2Env.step", {"summary": "environment/"}),
 )
 
 # ── The island's NEGATIVE list ────────────────────────────────────────────

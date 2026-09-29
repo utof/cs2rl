@@ -13,7 +13,7 @@ import inspect
 
 import pytest
 
-from cs2rl.c_env.cs2_env import Cs2Env, make_env
+from cs2rl.env.c.cs2_env import Cs2Env, make_env
 from cs2rl.env.config import EnvConfig
 
 

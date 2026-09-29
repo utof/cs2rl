@@ -80,7 +80,7 @@ public sealed class ActionExecutor
         // Apply Δyaw ONLY on inference ticks (every 4th server tick at 16 Hz)
         // to match training semantics: the policy is trained with one Δyaw per
         // env step (= one inference call), and the C env consumes Δyaw exactly
-        // once per step (see src/cs2rl/c_env/cs2_env.h aim consumption block:
+        // once per step (see src/cs2rl/env/c/cs2_env.h aim consumption block:
         //   a->facing = wrap_pi(a->facing + clamped);  // fires once per step).
         // Re-applying the cached Δyaw on every server tick would 4× over-rotate
         // (e.g. 45° Δyaw → 180° per inference cycle). On non-inference ticks

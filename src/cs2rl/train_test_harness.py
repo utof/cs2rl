@@ -49,16 +49,16 @@ import shutil
 import tempfile
 import types
 
-# Module level for the same reason as env_factory below: env.config is the
+# Module level for the same reason as env.factory below: env.config is the
 # stdlib-only leaf of the config graph, so importing it here pulls in nothing.
 from cs2rl.env.config import EnvConfig
 
 # Module level, unlike the `from cs2rl.train import ...` block inside the builder:
-# env_factory's own module scope pulls nothing (torch/nav/c_env stay behind its
+# env.factory's own module scope pulls nothing (torch/nav/env.c stay behind its
 # function-local imports), so importing it here costs nothing.
-# `from ... import build_env_for`, never `from cs2rl import env_factory` — the builder
-# below defines a LOCAL named env_factory, which would shadow the module.
-from cs2rl.env_factory import build_env_for, build_selfplay_manager
+# `from ... import build_env_for`, never `from cs2rl.env import factory as env_factory` —
+# the builder below defines a LOCAL named env_factory, which would shadow the module.
+from cs2rl.env.factory import build_env_for, build_selfplay_manager
 
 # The harness's four env-knob defaults are the dataclass's, read once rather
 # than copied. Four literals here would be four more places #165 has to keep in
@@ -202,7 +202,7 @@ def _harness_parts(
             # and the unconditional include_step_stats_in_info=True (uniform
             # attribute/info surface across selfplay and no-selfplay modes; one
             # pre-built singleton dict per env, no per-tick allocation) — now lives
-            # in env_factory._build_harness with the same reasoning attached.
+            # in env.factory._build_harness with the same reasoning attached.
             #
             # The harness is production-SHAPED on purpose, but it is not the `train`
             # role: it adds include_step_stats_in_info and takes its knobs as plain

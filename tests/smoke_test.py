@@ -8,10 +8,11 @@ import pytest
 
 @pytest.mark.performance
 def test_c_env_smoke():
-    import glob as _glob
+    from cs2rl.env.c import SOURCE_DIR
+    from cs2rl.env.c.cs2_env import make_env
 
-    from cs2rl.c_env.cs2_env import make_env
-    so_files = _glob.glob("src/cs2rl/c_env/binding.cpython-*.so")
+    # From the package, never the cwd: a relative glob found nothing from any other directory.
+    so_files = list(SOURCE_DIR.glob("binding.cpython-*.so"))
     assert so_files, ("binding.cpython-*.so missing — run: "
                       "uv run python setup.py build_ext --inplace")
 

@@ -1,4 +1,4 @@
-# src/cs2rl/c_env/cs2_env.py — PufferEnv subclass backed by binding.c C API bridge.
+# src/cs2rl/env/c/cs2_env.py — PufferEnv subclass backed by binding.c C API bridge.
 
 import ctypes
 import hashlib
@@ -8,8 +8,8 @@ import gymnasium
 import numpy as np
 import pufferlib
 
-from cs2rl.c_env import binding
 from cs2rl.env import nav
+from cs2rl.env.c import binding
 from cs2rl.env.config import EnvConfig
 from cs2rl.env.map import make_cs2_map
 from cs2rl.env.nav import N_AGENTS, OBS_DIM, TEAM_SIZE
@@ -411,7 +411,7 @@ class Dust2EnvC(ctypes.Structure):
 #     set(binding.struct_sizes()) == _C_SIZE_KEYS_CHECKED.
 # Both live in tests/test_struct_sizes.py.
 #
-# Pitfall: struct_sizes() reads the CURRENTLY BUILT .so. Editing src/cs2rl/c_env/*.h
+# Pitfall: struct_sizes() reads the CURRENTLY BUILT .so. Editing src/cs2rl/env/c/*.h
 # without rebuilding (`python setup.py build_ext --inplace`) compares a new
 # mirror against a stale binary — it can pass on a broken tree or fail on a
 # correct one. Rebuild first, then trust this.
@@ -553,7 +553,7 @@ def _canonical_ctype_name(ctype):
         raise RuntimeError(
             f"StaticDataC field type {name!r} is outside the layout-hash vocabulary "
             f"{sorted(_CANONICAL_SCALAR_CTYPES)}; add it here AND to SD_TYPE_NAMES in "
-            "src/cs2rl/c_env/binding.c, then rebuild")
+            "src/cs2rl/env/c/binding.c, then rebuild")
     return name
 
 
@@ -759,7 +759,7 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
     WHAT: for agent i on team A facing team B,
         r_i' = 0.5 * ( r_i - mean_{j in ACTIVE(B)}(r_j) )
     Agents 0..TEAM_SIZE-1 are T, TEAM_SIZE..N_AGENTS-1 are CT (same split the
-    C CT-survival loop uses, compute_rewards in src/cs2rl/c_env/cs2_rewards.h). Only the first
+    C CT-survival loop uses, compute_rewards in src/cs2rl/env/c/cs2_rewards.h). Only the first
     n_active_per_team slots of each team are read or written; the parked
     remainder (Rung 0, spec 2026-08-29 §2.1) is left untouched at exactly 0.0.
 
@@ -782,7 +782,7 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
        0.5*(S_A - n*mean_B) + 0.5*(S_B - n*mean_A), and the two half-terms
        cancel ONLY because both means are scaled by the same constant n. The
        C team_spirit loop right below the PBRS block IS alive-gated
-       (compute_rewards in src/cs2rl/c_env/cs2_rewards.h), so mirroring it here looks like the
+       (compute_rewards in src/cs2rl/env/c/cs2_rewards.h), so mirroring it here looks like the
        obvious consistency fix; it would silently destroy zero-sum.
        Consequence to carry into analysis, not a wart to repair: late-round
        with n-1 dead CTs, the lone survivor's stall drip is attenuated to 1/n
@@ -795,7 +795,7 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
        this array is the PufferLib shared reward buffer the trainer reads,
        and the returned tuple is ignored by the Multiprocessing backend.
     4. Safe to mutate the zero-copy C view: env_step memsets env->rewards
-       (src/cs2rl/c_env/cs2_env.h) before accumulating this tick's terms, and
+       (src/cs2rl/env/c/cs2_env.h) before accumulating this tick's terms, and
        nothing reads the reward array ahead of that memset — the calls that
        precede it (update_enemy_memory, compute_observations) touch obs and
        memory, not rewards. The C episode / step stat channels are separate
@@ -1340,9 +1340,6 @@ class Cs2Env(pufferlib.PufferEnv):
             # not be attenuated by n/TEAM_SIZE (PITFALL 6 on the function).
             symmetrize_rewards(rewards, self.n_active_per_team)
         return self.observations, rewards, terminals, truncations, infos
-
-    def set_team_spirit(self, value: float):
-        self._c_env.team_spirit = float(value)
 
     def close(self):
         binding.close(self._capsule)

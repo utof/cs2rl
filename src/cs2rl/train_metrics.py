@@ -20,7 +20,7 @@ keeping definition and call sites together is the lower-risk spelling.
 PufferLib's own ``self.mean_and_log()`` likewise stays out of this module — its
 single call site lives inside ``Cs2PuffeRL.train`` (src/cs2rl/trainer.py, gh#168 W2a).
 
-IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/c_env-free, for the
+IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in train_shared.py's header. Every torch import below is
 function-local ON PURPOSE.
 """

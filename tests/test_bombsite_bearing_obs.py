@@ -70,7 +70,7 @@ def _obs_after_pose(env, x: float, y: float, facing: float):
 def test_bearing_facing_directly_at_site():
     """Agent due west of the (single) simple-map site, facing +X straight at it:
     rel_bearing = 0 → sin=0, cos=1; distance slot = 400/map_diag."""
-    from cs2rl.c_env.cs2_env import Cs2Env
+    from cs2rl.env.c.cs2_env import Cs2Env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_simple_map
     md = make_simple_map()
@@ -88,7 +88,7 @@ def test_bearing_facing_directly_at_site():
 
 def test_bearing_facing_directly_away_from_site():
     """Same pose but facing -X (away): rel = ±π → sin=0, cos=-1."""
-    from cs2rl.c_env.cs2_env import Cs2Env
+    from cs2rl.env.c.cs2_env import Cs2Env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_simple_map
     md = make_simple_map()
@@ -107,7 +107,7 @@ def test_bearing_sign_convention_site_to_the_left():
     """Site due east (+X), agent facing -Y (south, facing=-π/2): the site is
     90° counter-clockwise → rel = +π/2 → sin=+1. A policy that turns with
     positive Δyaw when sin>0 turns TOWARD the site — the BC-critical sign."""
-    from cs2rl.c_env.cs2_env import Cs2Env
+    from cs2rl.env.c.cs2_env import Cs2Env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_simple_map
     md = make_simple_map()
@@ -125,7 +125,7 @@ def test_bearing_sign_convention_site_to_the_left():
 def test_bearing_diagonal_offset_and_distance():
     """Agent offset both in x and y: full atan2 path (not axis-aligned) and
     the distance slot must equal hypot/map_diag exactly."""
-    from cs2rl.c_env.cs2_env import Cs2Env
+    from cs2rl.env.c.cs2_env import Cs2Env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_simple_map
     md = make_simple_map()
@@ -148,7 +148,7 @@ def test_bearing_nearest_site_selection_dust2():
     """de_dust2 has TWO bombsites: every agent's slots must reflect the
     Euclidean-nearest one (per-agent selection, not a global site pick).
     Checked for all 10 agents at their natural spawn poses."""
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     env = make_env(seed=7)             # bare make_env → real de_dust2
     try:
         env.reset(seed=7)

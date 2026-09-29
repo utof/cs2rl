@@ -14,7 +14,7 @@ the shapes/dtypes env.step consumes, so a recorder can capture
 """
 import numpy as np
 
-from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.map import make_simple_map
 from cs2rl.env.nav import N_AGENTS, ROUND_TIME
 from cs2rl.eval.scripted_expert import (

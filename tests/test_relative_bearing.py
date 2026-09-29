@@ -4,7 +4,7 @@ import math
 import numpy as np
 import pytest
 
-from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig
 from cs2rl.spec.obs import OBS_BLOCKS
 

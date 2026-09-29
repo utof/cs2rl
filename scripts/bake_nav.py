@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""bake_nav.py — Generate src/cs2rl/c_env/nav_data.h from make_simple_map().
+"""bake_nav.py — Generate src/cs2rl/env/c/nav_data.h from make_simple_map().
 
 Run: uv run python scripts/bake_nav.py
 Re-run whenever env/map.py or SIMPLE_ROOMS changes.
 """
-from pathlib import Path
-
 import numpy as np
 
+from cs2rl.env.c import SOURCE_DIR
 from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
 from cs2rl.env.nav import (
     _DELTA_VECTORS,
@@ -136,6 +135,9 @@ lines = [
     _arr_int32(ct_spawns, "NAV_CT_SPAWNS"),
 ]
 
-out = Path(__file__).parent.parent / "src" / "cs2rl" / "c_env" / "nav_data.h"
+# The C package's own directory (cs2_demo.c's `#include "nav_data.h"`), never a restated
+# path: a stale one would write the header into a recreated directory, silently, and leave
+# the real one old.
+out = SOURCE_DIR / "nav_data.h"
 out.write_text("".join(lines))
 print(f"Written: {out}  (N={md.N}, grid={W}x{H})")

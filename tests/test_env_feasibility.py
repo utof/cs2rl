@@ -3,7 +3,7 @@ import math
 
 import numpy as np
 
-from cs2rl.c_env.cs2_env import make_env
+from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.nav import BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
 
 # Batch 6 Task 2: the pathing + driving helpers were extracted to

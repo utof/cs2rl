@@ -1,4 +1,4 @@
-"""`env_factory.build_selfplay_manager` must construct what the three old sites did.
+"""`env.factory.build_selfplay_manager` must construct what the three old sites did.
 
 WHY THIS FILE EXISTS, separately from `test_env_factory.py`. W3 collapsed THREE
 `SelfPlayManager(...)` constructions — `train()` and both branches of
@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from cs2rl.env_factory import build_selfplay_manager
+from cs2rl.env.factory import build_selfplay_manager
 
 FIXTURE = Path(__file__).parent / "fixtures" / "selfplay_kwargs_pre_w3.json"
 
@@ -306,7 +306,7 @@ def test_knockout_dropping_one_kwarg_fails_that_sites_capture(monkeypatch, site)
     """Delete one kwarg from the construction; that site's oracle must fail.
 
     The drop is simulated at the recording boundary rather than by editing
-    `env_factory.py`: the stub discards the named kwarg before recording, which
+    `env/factory.py`: the stub discards the named kwarg before recording, which
     is — from the oracle's point of view — indistinguishable from a builder that
     never passed it. That keeps the knock-out reproducible in CI instead of a
     procedure someone has to remember to perform by hand.

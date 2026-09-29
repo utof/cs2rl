@@ -1,6 +1,6 @@
 """Performance profiler for the Dust2 simulation stack.
 
-This script is meant to be rerun whenever `env/nav.py`, `c_env`, or the binding
+This script is meant to be rerun whenever `env/nav.py`, `env/c`, or the binding
 changes. It benchmarks the same environment at several layers so regressions
 are easy to localize:
 
@@ -32,7 +32,7 @@ from typing import Any
 
 import numpy as np
 
-from cs2rl.c_env.cs2_env import make_env as make_c_env
+from cs2rl.env.c.cs2_env import make_env as make_c_env
 from cs2rl.env.nav import N_AGENTS, OBS_DIM
 from cs2rl.spec.action import ACTION_DIM, AIM_DIM
 from cs2rl.spec.paths import LOGS_DIR
@@ -136,7 +136,7 @@ def _make_cs2_env_manual_reset_stepper(seed: int):
 
 
 def _make_binding_direct_stepper(seed: int):
-    from cs2rl.c_env import binding
+    from cs2rl.env.c import binding
 
     env = make_c_env(seed=seed, auto_reset=False)
     env.reset(seed=seed)

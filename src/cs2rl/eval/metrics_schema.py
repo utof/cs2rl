@@ -16,7 +16,7 @@ too. A registry that could only be wrong by omission would be a docstring again.
 
 WHY THIS MODULE MUST STAY IMPORT-LIGHT (spec §2 W1, guarded by
 `tests/test_w1_modules.py`): `EVAL_KEYS` used to live in `src/cs2rl/eval/baselines.py`,
-which imports torch and `c_env.cs2_env` at module scope. Any consumer that wanted
+which imports torch and `env.c.cs2_env` at module scope. Any consumer that wanted
 those eight strings — including this registry — paid ~30 s of torch import for a
 tuple of strings. So the ownership is INVERTED: `EVAL_KEYS` lives here and
 `eval.baselines` does `from cs2rl.eval.metrics_schema import EVAL_KEYS` (never the reverse;
@@ -183,7 +183,7 @@ def _f(aggregation, units, members=(), consumers=(), notes=""):
 
 # eval/* keys emitted by BaselineEvaluator.evaluate — the analysis contract.
 # Lives HERE, not in eval.baselines: that module imports torch and
-# c_env.cs2_env at module scope, so `from cs2rl.eval.baselines import EVAL_KEYS`
+# env.c.cs2_env at module scope, so `from cs2rl.eval.baselines import EVAL_KEYS`
 # would make a tuple of 8 strings cost a torch import. eval.baselines imports
 # it back and re-exports it for existing consumers.
 EVAL_KEYS = (

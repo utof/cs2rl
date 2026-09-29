@@ -4,5 +4,5 @@ Checks: >-
   clang-analyzer-*,
   performance-*
 WarningsAsErrors: ''
-HeaderFilterRegex: '^(c_env/.*|.*/c_env/.*)$'
+HeaderFilterRegex: '^(env/c/.*|.*/env/c/.*)$'
 FormatStyle: file

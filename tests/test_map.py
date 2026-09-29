@@ -117,7 +117,7 @@ def test_centroids_z_plumbed_through_binding():
     """
     import gc
 
-    from cs2rl.c_env.cs2_env import Cs2Env
+    from cs2rl.env.c.cs2_env import Cs2Env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_simple_map
 
@@ -177,7 +177,7 @@ def _make_simple_env(seed=42):
     Using the default make_puffer_env() would give the dust2 map (centroids_z
     all zeros), so verticality tests MUST explicitly pass map_data=simple_map.
     """
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.map import make_simple_map
     return make_env(seed=seed, map_data=make_simple_map())
 

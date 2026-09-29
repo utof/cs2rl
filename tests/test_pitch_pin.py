@@ -25,7 +25,7 @@ def _zero():
 
 
 def test_c_ignores_pitch_when_pinned(simple_map):
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     env = make_env(map_data=simple_map, config=EnvConfig(pin_pitch=1), seed=1)
     try:
@@ -42,7 +42,7 @@ def test_c_ignores_pitch_when_pinned(simple_map):
 def test_c_applies_pitch_when_unpinned(simple_map):
     """Control for the test above: the default path must still consume cont[:,1]
     (otherwise a broken gate that pins EVERYONE would pass the pinned test)."""
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     env = make_env(map_data=simple_map, seed=1)
     try:
         env.reset()
@@ -56,7 +56,7 @@ def test_c_applies_pitch_when_unpinned(simple_map):
 
 
 def test_crouch_masked_when_disabled(simple_map):
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     moff = np.concatenate([[0], np.cumsum(ACTION_HEAD_SIZES)[:-1]])
     for flag, expect in ((1, 1), (0, 0)):
@@ -82,7 +82,7 @@ def test_jump_masked_when_disabled(simple_map):
     OPEN unless the knob closed it. Bin 0 (no jump) stays valid either way: the
     per-head no-op invariant the masked softmax depends on.
     """
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     moff = np.concatenate([[0], np.cumsum(ACTION_HEAD_SIZES)[:-1]])
     for flag, expect in ((1, 1), (0, 0)):
@@ -128,7 +128,7 @@ def test_arena_stance_parity_hit_and_stance_blocked():
     they answer different questions (see the counters' comment in
     cs2_combat.h), so a coupled `blocked == 1 - hit` assert would pass if both
     ever flipped together."""
-    from cs2rl.c_env.cs2_env import make_env
+    from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_arena_duel_map
     arena = make_arena_duel_map()
@@ -349,8 +349,8 @@ def test_pin_pitch_for_map_none_loads_dust2():
     key). The expected value is computed from THAT MapData's centroids_z, so
     this test keeps holding when dust2 verticality lands (today make_cs2_map
     zero-fills z ⇒ 1, matching plan §R0-E.2 "true for dust2")."""
-    from cs2rl.c_env.cs2_env import _ENV_CACHE
     from cs2rl.env import nav
+    from cs2rl.env.c.cs2_env import _ENV_CACHE
     from cs2rl.env.map import make_cs2_map
     from cs2rl.train import pin_pitch_for_map
     md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)
@@ -370,9 +370,9 @@ def test_pin_pitch_build_vis_false_never_builds_vis_nor_caches(monkeypatch):
     test warmed them; build_vis_matrix raising proves it is never called."""
     import argparse
 
-    from cs2rl.c_env import cs2_env
     from cs2rl.env import map as map_mod
     from cs2rl.env import nav
+    from cs2rl.env.c import cs2_env
     from cs2rl.train import pin_pitch_for_map, resolve_pin_pitch
 
     def _boom(self):

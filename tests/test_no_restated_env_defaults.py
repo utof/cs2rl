@@ -72,7 +72,7 @@ FIELD_DEFAULTS = {
 
 # The escape hatch for a line whose literal is set by a RULE rather than copied
 # from a field — one that would read the same if the field default flipped.
-# EXACTLY ONE ENTRY, and it is the reason the hatch exists: env_factory's eval
+# EXACTLY ONE ENTRY, and it is the reason the hatch exists: env.factory's eval
 # role forces raw rewards (spec 2026-09-03 R11 / §3 _build_eval). That line
 # would be spelled identically if the field's default were the other way round,
 # so it states a rule; it does not restate a default. Before #165 the same

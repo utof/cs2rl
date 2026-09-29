@@ -21,7 +21,7 @@ the name through trainer.py's globals, so a patch here is silently unreachable
 and the assertion becomes vacuous. See tests/test_tag_trainer.py, whose
 positive control pins the reachable module.
 
-IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/c_env-free, for the
+IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in train_shared.py's header. Every torch, pufferlib and
 train_helpers_batch1 import below is function-local ON PURPOSE.
 """

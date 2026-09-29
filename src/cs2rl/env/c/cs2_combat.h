@@ -11,7 +11,7 @@
  *
  * Why two checks (NOT just `raster_grid >= 0`):
  *   - raster_grid == -1 means "no room" (dead space outside any room
- *     rectangle). viz.py draws walls at room perimeters, so dead space
+ *     rectangle). viz/render.py draws walls at room perimeters, so dead space
  *     between rooms IS a wall. The raycast must reject lines crossing it.
  *   - Adjacency catches walls between rooms that SHARE an edge but aren't
  *     connected — e.g. bombsite (z=64, area 6) and catwalk (z=128, area 15)
@@ -32,7 +32,7 @@
  * grow O(cells²) for dust2 — not worth it given runtime cost).
  *
  * 2D-only by design: simple_map walls are full-height (z=0..150 per
- * viz.py WALL_H), so 2D LoS suffices for walls. Verticality (catwalk,
+ * viz/render.py WALL_H), so 2D LoS suffices for walls. Verticality (catwalk,
  * bombsite) is handled by adjacency: cross-z transitions like
  * bombsite↔catwalk are non-adjacent → blocked at the cell boundary.
  * If we ever model partial-height cover (low boxes, smokes), we'll need
@@ -121,7 +121,7 @@ static int line_of_sight_2d(StaticData* sd, float x1, float y1, float x2, float 
             return 0; /* line walked off the grid */
         int curr_area = sd->raster_grid[gy * W + gx];
         if (curr_area < 0)
-            return 0; /* dead space — wall by viz.py convention */
+            return 0; /* dead space — wall by viz/render.py convention */
         if (curr_area != prev_area) {
             /* Crossed a room boundary. Connected? */
             if (!sd->adjacency[prev_area * N + curr_area])

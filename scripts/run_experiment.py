@@ -36,11 +36,11 @@ EXPERIMENTS_DIR = REPO_ROOT / "outputs" / "experiments"
 CHECKPOINTS_DIR = REPO_ROOT / "outputs" / "checkpoints"
 LOCK_PATH = EXPERIMENTS_DIR / ".lock"
 LEDGER_PATH = EXPERIMENTS_DIR / "results.jsonl"
-# What the experiment fingerprint hashes and the c_env rebuild reads. A stale path
+# What the experiment fingerprint hashes and the env/c rebuild reads. A stale path
 # here is SILENT (env_fingerprint skips a missing file, path_last_commit_sha
 # returns ""), so tests/test_path_constants_exist.py pins each to a tracked path.
 TRAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train.py"
-C_ENV_DIR = REPO_ROOT / "src" / "cs2rl" / "c_env"
+C_ENV_DIR = REPO_ROOT / "src" / "cs2rl" / "env" / "c"
 REWARDS_H = C_ENV_DIR / "cs2_rewards.h"
 ENV_C = C_ENV_DIR / "cs2_env.c"
 

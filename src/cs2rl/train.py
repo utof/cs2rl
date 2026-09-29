@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from cs2rl.env.config import EnvConfig, RewardWeights
-from cs2rl.env_factory import build_env_for, build_selfplay_manager
+from cs2rl.env.factory import build_env_for, build_selfplay_manager
 from cs2rl.resume_state import (
     _rng_load_state_dict,
     _rng_state_dict,
@@ -655,7 +655,7 @@ AGENT_IDS = tuple([f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)])
 
 def smoke_test():
     print("[Smoke] Initialising environment...")
-    # W3 (#154): the construction seed now lives in env_factory.SMOKE_SEED. The
+    # W3 (#154): the construction seed now lives in env.factory.SMOKE_SEED. The
     # reset() seed below is deliberately NOT routed through the factory — it is
     # this function's own episode seed, not part of the env's construction, and
     # the two happening to be 42 is a coincidence the factory must not encode.
@@ -898,10 +898,10 @@ def record_episode(
         save_path=str(RECORDINGS_DIR / "latest.rrd"),
         map_data=None,
 ):
-    from cs2rl.c_env.cs2_env import make_env as make_c_env
+    from cs2rl.env.c.cs2_env import make_env as make_c_env
     from cs2rl.env.map import make_cs2_map
     from cs2rl.env.nav import CACHE_PATH, NAV_PATH
-    from cs2rl.viz import init_recording, log_navmesh, log_tick, log_trimap
+    from cs2rl.viz.render import init_recording, log_navmesh, log_tick, log_trimap
 
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -914,7 +914,7 @@ def record_episode(
         log_trimap()
         log_navmesh(md.nav_graph)
     else:
-        from cs2rl.viz import log_simple_map
+        from cs2rl.viz.render import log_simple_map
 
         log_simple_map(env.map_data)
 
@@ -981,7 +981,7 @@ def evaluate_checkpoint(checkpoint_path=None,
         seed = start_seed + episode_idx
         # W3 (#154): the SECOND eval_legacy site, and the only one that passes a
         # seed. That difference is the whole reason the role's builder takes an
-        # UNSET sentinel rather than seed=None — c_env.cs2_env.make_env's own
+        # UNSET sentinel rather than seed=None — env.c.cs2_env.make_env's own
         # default is 0 (not train.py's own make_env, which takes no seed), so spelling the other site's absent seed as None would have changed
         # the env it builds, invisibly to static_data_scalars().
         env = build_env_for("eval_legacy", seed=seed)
@@ -1156,7 +1156,7 @@ def build_env_factory(*, shared_ts, map_data, config=None):
         # W3 (#154), retyped by #165 PR B2: construction — and ONLY
         # construction — routes through the role factory. The `_seed`/`seed`
         # precedence rule moved with it and now lives in
-        # env_factory._build_train; the three payload arguments this call used
+        # env.factory._build_train; the three payload arguments this call used
         # to pass are one EnvConfig, resolved above the closure so a forked
         # worker can never receive None.
         # tests/fixtures/env_config_pre_165b.json recorded this call before it
@@ -2022,7 +2022,7 @@ def assert_eval_env_agreement(eval_env, driver_env):
           added, and do not write a number here you have not counted off
           dataclasses.fields.)
 
-    WHY reward_symmetrize is skipped and nothing else is: env_factory._build_eval
+    WHY reward_symmetrize is skipped and nothing else is: env.factory._build_eval
     FORCES it off — `config.replace(reward_symmetrize=False)` — so the eval env
     reports raw rewards while the training envs take the flag from args. Since
     #165 PR B2 that is an explicit rule at the builder rather than, as before, a
@@ -2920,7 +2920,7 @@ def train(args):
     self_play_enabled = bool(getattr(args, "self_play", True))
     # W3 (#154): the pool constants (15 / 25 / 0.6 / 50) and the
     # `0.3 if <on> else 0.0` p_past rule now live in
-    # env_factory.build_selfplay_manager, which is also what the two harness
+    # env.factory.build_selfplay_manager, which is also what the two harness
     # sites call — they used to spell the same construction out twice more.
     # `self_play_enabled` is passed as the FLAG, not a p_past value, so no caller
     # can set a different mixing probability at one site than another.
@@ -3048,7 +3048,7 @@ def train(args):
         from cs2rl.eval.baselines import BaselineEvaluator
         # W3 (#154), retyped by #165 PR B2: role eval. `team_spirit=None`, the
         # 10_000_003 seed, the load-bearing `auto_reset=False` AND the
-        # raw-reward rule all live in env_factory._build_eval; this site passes
+        # raw-reward rule all live in env.factory._build_eval; this site passes
         # only what comes from THIS run's args, which is now one EnvConfig from
         # the same resolver the workers' factory reads. Requiring that config
         # (the builder has no default) is what stops a caller handing the eval

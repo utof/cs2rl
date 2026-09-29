@@ -45,8 +45,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cs2rl.c_env import binding, cs2_env
-from cs2rl.c_env.cs2_env import (
+from cs2rl.env.c import binding, cs2_env
+from cs2rl.env.c.cs2_env import (
     TEAM_SIZE,
     StaticDataC,
     make_env,
@@ -89,7 +89,7 @@ def test_static_data_scalars_match_the_pre_w2_capture(simple_map):
     pigeonhole argument spelled out at _BOOL_SENTINEL_CONFIGS in
     tests/test_struct_sizes.py.
 
-    PITFALL: this reads the CURRENTLY BUILT .so. After editing src/cs2rl/c_env,
+    PITFALL: this reads the CURRENTLY BUILT .so. After editing src/cs2rl/env/c,
     rebuild before believing a pass OR a failure.
     """
     fixture = _load_fixture()
