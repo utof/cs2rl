@@ -19,6 +19,11 @@ fast-math). What each half catches, measured by knock-outs (#288):
     time instead: build.zig's fast-math flags carry
     -Werror=nan-infinity-disabled, so `[true]`'s variant build fails to
     compile with "use of infinity is undefined behavior".
+  - The `[true]` half also pins the flag's PRESENCE: it builds with
+    --verbose-cc and asserts the binding.c compile line carries
+    -Werror=nan-infinity-disabled. Without that, deleting the flag from
+    build.zig keeps the suite green (measured by the #288 verifier's mutant c),
+    and the one line that catches the #136 shape would go unnoticed.
 
 PITFALLS:
   - zig comes from setup.py's own resolver (PY_ZIG → `python -m ziglang` →
@@ -136,7 +141,7 @@ def test_rewards_finite_under_both_fast_math_settings(tmp_path, fast_math):
         *zig, "build", f"-Dfast_math={fast_math}", "-Dlink_python=false", "--prefix",
         str(prefix), "--cache-dir",
         str(tmp_path / "zig-cache"), f"-Dpython_include={sysconfig.get_path('include')}",
-        f"-Dnumpy_include={numpy.get_include()}"
+        f"-Dnumpy_include={numpy.get_include()}", "--verbose-cc"
     ]
     r = subprocess.run(cmd, cwd=C_DIR, capture_output=True, text=True)
     if r.returncode != 0:
@@ -155,6 +160,21 @@ def test_rewards_finite_under_both_fast_math_settings(tmp_path, fast_math):
         # Every `: error:` line first (a tail slice lost some), then the log tail.
         errors = "\n".join(line for line in err.splitlines() if ": error:" in line)
         pytest.fail(f"variant build failed to COMPILE:\n{errors}\n--- log tail ---\n{err[-3000:]}")
+    if fast_math == "true":
+        # Pin the flag itself: the build only fails on the #136 shape while
+        # -Werror=nan-infinity-disabled is in c_flags_fast, and deleting it leaves every
+        # other assert here green (#288, verifier mutant c). --verbose-cc prints the
+        # compile command on stderr, but only when zig actually compiles: the fresh
+        # --cache-dir above is what guarantees that, so keep the two together.
+        # PITFALL: no binding.c line at all means the instrument changed (a zig upgrade
+        # that words or routes the log differently), not that the flag is present, so that
+        # case fails with its own message instead of passing.
+        compile_lines = [line for line in r.stderr.splitlines() if "binding.c" in line]
+        assert compile_lines, "zig --verbose-cc printed no binding.c compile line; cannot check the flag"
+        assert any("-Werror=nan-infinity-disabled" in line for line in compile_lines), (
+            "the fast-math build no longer carries -Werror=nan-infinity-disabled "
+            "(src/cs2rl/env/c/build.zig c_flags_fast), the only thing that catches the #136 "
+            "isfinite/INFINITY shape at build time (#288)")
     built = next((prefix / "lib").glob("*binding*"))
     scratch = tmp_path / "scratch"
     scratch.mkdir()
