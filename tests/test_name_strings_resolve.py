@@ -262,7 +262,7 @@ def dotted_problem(name: str) -> str | None:
     returns an untracked extension file (a built tree) and (B) find_spec returns None
     (a fresh clone, no .so).
     PITFALL: @cache. A test that patches _tracked or find_spec must clear this cache
-    before and after (see _fresh_resolver_caches), or it reads an answer cached by an
+    before and after (see fresh_resolver_caches), or it reads an answer cached by an
     earlier test and never reaches its patch.
     """
     parts = name.split(".")
@@ -627,13 +627,49 @@ def _failing(source: str) -> list[tuple[str, str]]:
 
 
 # Every cache the resolver reads, as the cached functions themselves: a control that
-# replaces _tracked still clears the real cache through this tuple.
+# replaces _tracked still clears the real cache through this tuple. A hand-kept list:
+# test_the_cache_list_names_every_cache_this_module_defines watches it.
 _RESOLVER_CACHES = (dotted_problem, _tracked, _tracked_dirs, _bindings)
 
 
 def _clear_resolver_caches() -> None:
     for cached in _RESOLVER_CACHES:
         cached.cache_clear()
+
+
+def _caches_defined_in(namespace: dict) -> set:
+    """The cached callables (`@cache`, `@lru_cache`) in `namespace` that THIS module defines.
+
+    Keyed on `cache_clear`, which every functools cache wrapper carries, and on
+    `__module__`, which the wrapper copies from the function it wraps. So a cached
+    callable imported from elsewhere is not this module's cache to clear, and does not
+    count.
+    """
+    return {
+        v
+        for v in namespace.values()
+        if callable(getattr(v, "cache_clear", None)) and getattr(v, "__module__", None) == __name__
+    }
+
+
+def test_the_cache_list_names_every_cache_this_module_defines():
+    """_RESOLVER_CACHES is exactly the set of caches this module defines.
+
+    WHY: fresh_resolver_caches clears only what the tuple lists. A fifth `@cache`
+    helper added later and left out would bring back the test-order bug that fixture
+    exists for (a control reads a cached answer and never reaches its patch), with
+    every test green: the guard's own list, unwatched. Patches nothing, so it reads
+    the real module globals.
+    The second assertion is the filter's control: a cached callable defined elsewhere
+    (here `len`, wrapped) is not counted, so importing one can neither turn this red
+    nor stand in for a missing entry.
+    """
+    defined, listed = _caches_defined_in(globals()), set(_RESOLVER_CACHES)
+    assert defined == listed, (
+        "_RESOLVER_CACHES must list every cache this module defines. Unlisted: "
+        f"{sorted(f.__name__ for f in defined - listed)}; listed but not a cache defined "
+        f"here: {sorted(f.__name__ for f in listed - defined)}")
+    assert _caches_defined_in({"imported": cache(len)}) == set()
 
 
 @pytest.fixture
@@ -770,17 +806,30 @@ def test_an_exempted_path_under_a_subpackage_is_reported_as_masking():
     so its stale text stays hidden (the WHY above). The real EXEMPT table holds no
     such row, so the main pin is green whether or not this check works; this is its
     positive control. `src/cs2rl/env/` is a real subpackage; `nope.py` need not exist.
+    The second masking row is the shape that actually masked (four of the five texts
+    commit 1 of #205 part 2b deleted): a build output under the C package's untracked
+    zig-out/bin, whose immediate parent is untracked. Only a walk up to the deepest
+    tracked ancestor (the C package's directory) finds its package; a check of the
+    immediate parent alone reports the first row and misses this one.
     """
     masking = ("tests/x.py", "f", "src/cs2rl/env/nope.py")
+    build_output = (c_env.ZIG_OUT / "bin" / "cs2_demo").relative_to(REPO_ROOT).as_posix()
+    package = c_env.SOURCE_DIR.relative_to(REPO_ROOT).as_posix()
+    assert Path(build_output).parent.as_posix() not in _tracked_dirs(), (
+        f"{build_output}'s directory is tracked now: the row no longer needs the walk")
+    assert package in _tracked_dirs(), f"{package} is not a tracked directory"
+    masking_output = ("tests/x.py", "f", build_output)
     rows = {
         masking: "r",
+        masking_output: "r",
         ("tests/x.py", "f", "src/cs2rl/nope.py"): "r",
         ("tests/x.py", "f", "src/cs2rl/*.py"): "r",
         ("tests/x.py", "f", "cs2rl.env.nope"): "r",
     }
     report = [line for line in scan([], rows) if not line.startswith("STALE EXEMPTION")]
-    assert report == [masking_row_problem(masking)], report
+    assert report == [masking_row_problem(masking), masking_row_problem(masking_output)], report
     assert "src/cs2rl/env" in report[0] and "Derive this path" in report[0], report
+    assert f"the package {package}," in report[1], report
 
 
 # The extension controls. Names and paths derive from the C package itself, so a move
@@ -790,36 +839,52 @@ _EXTENSION = f"{c_env.__name__}.binding"
 _EXTENSION_SOURCE = (c_env.SOURCE_DIR / "binding.c").relative_to(REPO_ROOT).as_posix()
 # A tracked C file beside binding.c that defines no PyInit_: a program, not a module.
 _NOT_AN_EXTENSION = f"{c_env.__name__}.cs2_demo"
+# The same leaf under the C package's PARENT package (cs2rl.env.binding): a tracked
+# PyInit_binding exists, but not in that package's directory, so the name must fail.
+_MISPLACED_EXTENSION = f"{c_env.__name__.rpartition('.')[0]}.binding"
 
 
-def _force_an_untracked_extension_file(monkeypatch) -> str:
-    """Make find_spec return `binding<EXT_SUFFIX>` in the package directory for _EXTENSION.
+def _force_an_untracked_extension_file(monkeypatch,
+                                       name: str = _EXTENSION,
+                                       directory: Path = c_env.SOURCE_DIR) -> str:
+    """Make find_spec return `binding<EXT_SUFFIX>` in `directory` for `name`.
 
     That is what a built tree returns (path A), made independent of whether this
     tree has a built .so. The file need not exist: only the spec is read. Returns
-    the forced origin.
+    the forced origin. The default is the real extension in its own package.
     """
-    origin = c_env.SOURCE_DIR / f"binding{sysconfig.get_config_var('EXT_SUFFIX')}"
-    forced = importlib.util.spec_from_file_location(_EXTENSION, origin)
+    origin = directory / f"binding{sysconfig.get_config_var('EXT_SUFFIX')}"
+    forced = importlib.util.spec_from_file_location(name, origin)
     real = importlib.util.find_spec
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **k: forced
-                        if name == _EXTENSION else real(name, *a, **k))
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n, *a, **k: forced
+                        if n == name else real(n, *a, **k))
     return str(origin)
 
 
 def test_path_a_an_extension_file_without_its_tracked_source_does_not_resolve(
         monkeypatch, fresh_resolver_caches):
     """(i) path A, negative: with binding.c dropped from _tracked, `binding` fails, both
-    through this tree's real find_spec and with a built .so forced.
+    through this tree's real find_spec and with a built .so forced. And with binding.c
+    tracked, a `binding` .so forced beside the PARENT package (cs2rl.env.binding)
+    fails too: its PyInit_binding source is in another directory.
 
     This is the pin's "a leftover .so never resolves a stale name" case: a moved
     package's .so left behind has no tracked source beside it. It first checks that
     the same name DOES resolve with binding.c tracked, so it cannot pass on a name
-    that fails for another reason.
+    that fails for another reason. The parent-package case pins the rule's
+    same-directory condition: without it, any `P.binding` would resolve on any tracked
+    PyInit_binding anywhere (the next move of binding within env/, or a half-renamed
+    name).
     """
     real_tracked = _tracked()
     assert _EXTENSION_SOURCE in real_tracked, f"{_EXTENSION_SOURCE} is not tracked"
     assert dotted_problem(_EXTENSION) is None, dotted_problem(_EXTENSION)
+    _clear_resolver_caches()
+    misplaced = _force_an_untracked_extension_file(monkeypatch, _MISPLACED_EXTENSION,
+                                                   c_env.SOURCE_DIR.parent)
+    problem = dotted_problem(_MISPLACED_EXTENSION)
+    assert problem == (f"{_MISPLACED_EXTENSION} resolves to {misplaced}, which is not a "
+                       "tracked file"), problem
     _clear_resolver_caches()
     monkeypatch.setitem(globals(), "_tracked", lambda: real_tracked - {_EXTENSION_SOURCE})
     assert dotted_problem(_EXTENSION) is not None
@@ -843,19 +908,23 @@ def test_path_a_an_untracked_extension_file_resolves_through_its_tracked_source(
 def test_path_b_no_built_extension_resolves_through_its_tracked_source(
         monkeypatch, fresh_resolver_caches):
     """(ii) path B (a fresh clone, no .so): find_spec returns None for every submodule
-    of the package; `binding` resolves, and neither a missing name nor a tracked C
-    file without a PyInit_ (cs2_demo.c) does."""
+    of the package; `binding` resolves, and neither a missing name, nor a tracked C
+    file without a PyInit_ (cs2_demo.c), nor `binding` under the parent package
+    (cs2rl.env.binding: PyInit_binding exists, but in another directory) does."""
     prefix = f"{c_env.__name__}."
     real = importlib.util.find_spec
     monkeypatch.setattr(
         importlib.util, "find_spec", lambda name, *a, **k: None
         if name.startswith(prefix) else real(name, *a, **k))
     assert importlib.util.find_spec(_EXTENSION) is None
+    assert importlib.util.find_spec(_MISPLACED_EXTENSION) is None, (
+        f"{_MISPLACED_EXTENSION} is a real module now: pick another misplaced name")
     assert (REPO_ROOT / _EXTENSION_SOURCE).with_name("cs2_demo.c").relative_to(
         REPO_ROOT).as_posix() in _tracked(), "the PyInit_-less C file is gone: pick another"
     assert dotted_problem(_EXTENSION) is None, dotted_problem(_EXTENSION)
     assert dotted_problem(f"{prefix}nope") is not None
     assert dotted_problem(_NOT_AN_EXTENSION) is not None
+    assert dotted_problem(_MISPLACED_EXTENSION) is not None
 
 
 def _c_failing(source: str) -> list[tuple[str, str]]:
@@ -875,9 +944,15 @@ def _c_failing(source: str) -> list[tuple[str, str]]:
                  id="comment openers inside a string"),
     pytest.param("char q = '\"'; const char* s = \"cs2rl.nope\";\n", [("a", "cs2rl.nope")],
                  id="a string after a quote char literal"),
+    pytest.param("#error can't\nconst char* s = \"cs2rl.nope\";\n", [("a", "cs2rl.nope")],
+                 id="a string after an unterminated quote"),
 ])
 def test_c_strings_fail_a_stale_name_or_path(source, expected):
-    """A stale name or path in a C string literal fails, in every shape C writes one."""
+    """A stale name or path in a C string literal fails, in every shape C writes one.
+
+    The unterminated-quote case: a stray apostrophe (an `#error` line's text, which C
+    never compiles) ends at its newline, so it cannot swallow the next line's string.
+    """
     assert _c_failing(source) == expected
 
 
