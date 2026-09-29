@@ -212,8 +212,7 @@ def run_campaign(repo_root, evidence_root, sites):
             return [future.result() for future in futures]
         except BaseException:
             # Sites not yet started never start; running ones finish before the pool exits.
-            for future in futures:
-                future.cancel()
+            pool.shutdown(wait=True, cancel_futures=True)
             raise
 
 

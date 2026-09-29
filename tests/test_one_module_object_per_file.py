@@ -25,7 +25,7 @@ relays each worker's facts through `workeroutput` and the controller judges thei
     reading each worker's id from the plant, not by parsing output.
   - negative control: one name, green.
   - sends-nothing: a plugin makes worker gw1 drop its findings, and the child must be
-    red only through the controller's fail-closed "went down without reporting" report.
+    red only through the controller's fail-closed "finished without reporting" report.
   - torch: the worker's thread cap must not import torch into a plant that never did.
 The `-n 2` rows never skip: without pytest-xdist in the environment they fail with the
 remedy (`assert_child_had_xdist`).
@@ -282,7 +282,7 @@ def test_a_worker_that_sends_no_findings_fails_the_session_and_is_named(tmp_path
     """SENDS-NOTHING at `-n 2`: the guard fails closed, naming the worker that went quiet.
 
     The plant is the one-name negative control, which is green on its own, so the child is
-    red only through the controller's "went down without reporting" report. The exit code is
+    red only through the controller's "finished without reporting" report. The exit code is
     exactly 1 (a test failure, not an internal error), and there is one report, for gw1 alone.
     """
     (tmp_path / "withhold_findings.py").write_text(_WITHHOLD_PLUGIN)
@@ -296,7 +296,8 @@ def test_a_worker_that_sends_no_findings_fails_the_session_and_is_named(tmp_path
     lost = [line for line in child.stdout.splitlines() if "without reporting" in line]
     assert len(lost) == 1 and "gw1" in lost[0] and "gw0" not in lost[0], (
         f"expected one report, for gw1 alone\n{output}")
-    assert "went down" in lost[0], f"the report does not say the worker went down\n{output}"
+    assert "worker gw1 finished without" in lost[0], (
+        f"the report does not say the worker finished quietly\n{output}")
     assert _REPORT_TITLE not in child.stdout, f"the guard reported a duplicate\n{output}"
 
 
@@ -306,3 +307,4 @@ def test_an_xdist_worker_does_not_import_torch_for_its_thread_cap(tmp_path):
     child, output = _session(tmp_path, {"test_plant.py": plant}, *_XDIST)
     assert "1 passed" in child.stdout, f"a worker imported torch\n{output}"
     assert child.returncode == 0, f"the session failed\n{output}"
+    assert _LOST_TITLE not in child.stdout, f"a worker was reported lost\n{output}"

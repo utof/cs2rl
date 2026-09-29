@@ -515,7 +515,7 @@ def pytest_configure(config):
     # Unregistered markers are an error under --strict-markers.
     config.addinivalue_line(
         "markers",
-        "slow = over ~15 s of wall. Deselecting it DROPS coverage (the patch-binding campaign, "
+        "slow: over ~15 s of wall. Deselecting it DROPS coverage (the patch-binding campaign, "
         "the seed positive control, the fast-math builds), so `-m 'not slow'` is only for "
         "intermediate per-commit checks and never goes in addopts. A test over ~15 s that "
         "stays unmarked carries an `always-on: <why>` comment.",
@@ -601,7 +601,8 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     """In an xdist worker, give torch an equal share of the cores, if a test module loaded it.
 
     torch defaults to one intra-op thread per core, so N workers oversubscribe the machine
-    N-fold; at `-n 2` the effect is within noise and the cap exists for `-n 4`. In-process
+    N-fold. At `-n 2` the cap equals torch's own default on the 12-thread dev box (6), so it
+    only acts from `-n 3` on; it exists for `-n 4`. In-process
     only: child interpreters keep their own default (train.py pins OMP_NUM_THREADS=1).
     PITFALL 1: detect a worker by `config.workerinput`, never by `PYTEST_XDIST_WORKER`: xdist
     exports that variable into os.environ, so every child pytest a test spawns would look like
@@ -731,7 +732,8 @@ def pytest_testnodedown(node, error) -> None:
     workerid = node.gateway.id
     output = getattr(node, "workeroutput", None) or {}
     if error is not None or _WORKER_GUARD_KEY not in output:
-        found.append((workerid, None, f"worker {workerid} went down ({error!r}) without reporting "
+        how = "finished" if error is None else f"went down ({error!r})"
+        found.append((workerid, None, f"worker {workerid} {how} without reporting "
                       "the session guards' findings, so its modules were never checked"))
         return
     found.append((workerid, output[_WORKER_GUARD_KEY], None))
