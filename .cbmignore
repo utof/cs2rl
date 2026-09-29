@@ -1,0 +1,16 @@
+# .cbmignore: ignore rules for codebase-memory-mcp (gitignore syntax, read from the repo root).
+#
+# WHY: codebase-memory-mcp 0.10.8 skips every directory NAMED `env` or `deploy`, wherever it
+# sits, as a virtualenv or deploy-artifact guess. #204 and #205 made both names first-party
+# packages, so without these lines src/cs2rl/env/ (config, nav, map, and after #205 part 2b
+# the C env and the env factory) and src/cs2rl/deploy/ drop out of the call graph, and a
+# graph lookup silently misses their callers and callees.
+#
+# Measured on a scratch repo: with no .cbmignore, pkg/env and pkg/deploy were excluded;
+# an anchored negation re-included exactly the named directory (`!pkg/env/` indexed
+# pkg/env while pkg/deploy stayed excluded).
+#
+# PITFALL: anchor each line to its path. A bare `!env/` would also re-include any
+# virtualenv named env/ that someone creates inside the checkout.
+!src/cs2rl/env/
+!src/cs2rl/deploy/
