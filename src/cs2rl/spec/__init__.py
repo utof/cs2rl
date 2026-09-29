@@ -2,7 +2,7 @@
 
 Members:
   action -- the action-head layout (ACTION_HEAD_NAMES, ACTION_DIM, AIM_DIM, ...),
-            generated from c_env/cs2_types.h by scripts/sync_action_spec.py;
+            generated from env/c/cs2_types.h by scripts/sync_action_spec.py;
   obs    -- the observation layout (OBS_DIM, OBS_BLOCKS, ...), generated the same way;
   paths  -- the output-directory constants (OUTPUTS_DIR, CHECKPOINTS_DIR, ...).
 

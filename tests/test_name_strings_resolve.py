@@ -62,7 +62,7 @@ test_fast_math_variant's, smoke_test's .so glob and test_play_policy's two cs2_d
 paths) masked stale text through the whole move, with the STALE EXEMPTION report
 silent because each row still matched. All 6 distinct exempted texts sat under
 `src/cs2rl/c_env`. So an exempted path under a subpackage now fails outright: a
-path that moves with a package is derived from it (cs2rl.c_env.SOURCE_DIR,
+path that moves with a package is derived from it (cs2rl.env.c.SOURCE_DIR,
 ZIG_OUT), never exempted.
 
 LIMITS (the shapes it cannot see, each with its reason):
@@ -77,7 +77,7 @@ LIMITS (the shapes it cannot see, each with its reason):
     prefix has no fixed root to look up in git ls-files. Neither occurs in a string today.
   - Only .py and C (.c/.h) files are scanned: C#, .zig, CONTRIBUTING.md, TOML and
     other text are not parsed for strings. In C, adjacent-literal concatenation
-    (`"src/cs2rl/" "play.py"`) is read as two strings, neither holding the whole
+    (`"src/cs2rl/" "viz/play.py"`) is read as two strings, neither holding the whole
     path, and a numeric escape (`\\x41`) is not decoded. clang-format's
     BreakStringLiterals is on (ColumnLimit 100), but it splits a literal only at
     whitespace, and a name or path token has none, so it never splits one.
@@ -233,10 +233,10 @@ def _extension_source(package, leaf: str) -> str | None:
     `package` is the find_spec of a tracked regular package. This is how an extension
     module (built, never tracked) resolves: by the source it is built from. CPython
     takes the init symbol from the LAST name component (Python/importdl.c; PEP 489's
-    export hook name), so `cs2rl.c_env.binding` needs `PyInit_binding`.
+    export hook name), so `cs2rl.env.c.binding` needs `PyInit_binding`.
     PITFALL: the symbol is required, not just a `<leaf>.c` file: cs2_demo.c and
     cs2_play_host.c sit in the same directory, and a file-name rule would "resolve"
-    `cs2rl.c_env.cs2_demo`, which no import can load. The definition is matched as
+    `cs2rl.env.c.cs2_demo`, which no import can load. The definition is matched as
     `PyMODINIT_FUNC PyInit_<leaf>(`, the macro every CPython init function is declared
     with; an init spelled without it reads as no extension, which fails loudly.
     """
@@ -641,7 +641,7 @@ def fresh_resolver_caches():
     """Clear the resolver's caches before and after a test that patches _tracked or find_spec.
 
     WHY: dotted_problem is @cache'd, and the main pin runs first in file order and
-    caches the real answer for every name in the tree, cs2rl.c_env.binding among them.
+    caches the real answer for every name in the tree, cs2rl.env.c.binding among them.
     A control that patches _tracked or find_spec would read that cached answer and
     never reach its patch: measured (#205 part 2b), path B's control passed with path
     B's rule deleted once the main pin had run, and failed on an empty cache. So the

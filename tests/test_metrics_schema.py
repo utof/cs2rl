@@ -958,7 +958,7 @@ def test_eval_surface_is_eval_keys_plus_the_two_scheduler_stamps():
 
 def test_eval_baselines_imports_eval_keys_from_here_and_not_the_reverse():
     """The direction is load-bearing, not stylistic: eval.baselines imports torch and
-    c_env.cs2_env at module scope, so `from cs2rl.eval.baselines import EVAL_KEYS` would make
+    env.c.cs2_env at module scope, so `from cs2rl.eval.baselines import EVAL_KEYS` would make
     a tuple of eight strings cost a torch import and break metrics_schema's
     import-lightness (tests/test_w1_modules.py). Checked from SOURCE — importing
     eval.baselines here to compare the objects would pull torch into this test."""

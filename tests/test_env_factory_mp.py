@@ -3,7 +3,7 @@
 WHY THIS FILE EXISTS. Spec §2 W3 assumed fork-safety of the factory's returned
 callables was "gated by the existing multiprocessing-backend tests". It is not:
 `tests/test_binding.py`'s MP test builds its own inline factory over
-`c_env.cs2_env.make_env` and never touches `build_env_factory`, and every other
+`env.c.cs2_env.make_env` and never touches `build_env_factory`, and every other
 `build_env_factory` test in the suite is Serial or in-process. So the one path
 where the migrated closure crosses a process boundary — and therefore the only
 place `build_env_for`'s function-local import of the env constructor executes
@@ -25,13 +25,13 @@ TWO TESTS, because fork and cold import are different failures:
      nothing about the import, which is a dictionary hit there.
   2. `test_build_env_for_works_from_a_cold_interpreter` closes exactly that gap
      in a fresh subprocess that has imported NOTHING of the training stack: it
-     imports `cs2rl.env_factory` alone and calls `build_env_for`, and asserts
+     imports `cs2rl.env.factory` alone and calls `build_env_for`, and asserts
      that `cs2rl.train` is still absent afterwards.
 
      THAT ASSERTION IS INVERTED FROM WHAT IT USED TO BE, and the inversion is
      the point. Before #165 PR B2 the child asserted `train` WAS imported,
      because `build_env_for` reached the env through `train.make_puffer_env`.
-     Since B2 it imports `c_env.cs2_env.make_env` directly, so env construction
+     Since B2 it imports `env.c.cs2_env.make_env` directly, so env construction
      has NO L3 dependency at all — a strictly stronger property, and this is
      where it is stated from a cold interpreter rather than inferred.
 
@@ -39,7 +39,7 @@ TWO TESTS, because fork and cold import are different failures:
      exercises the `smoke` role only, so it proves THAT path is `train`-free,
      not all six. The other five are covered in-process by
      tests/test_env_factory.py's `_construct`, which patches
-     `c_env.cs2_env.make_env` and asserts exactly one call through it.
+     `env.c.cs2_env.make_env` and asserts exactly one call through it.
 
 Neither is a substitute for the other, and the pair is deliberately cheap: two
 envs, three ticks, a simple 5-room map instead of dust2.
@@ -171,21 +171,21 @@ def test_build_env_for_works_from_a_cold_interpreter():
     Multiprocessing backend forks, so its children inherit the parent's
     `sys.modules` wholesale and the function-local import is a dictionary hit
     whose real behaviour is untested. Here the child imports
-    `cs2rl.env_factory` ALONE, and the import inside
+    `cs2rl.env.factory` ALONE, and the import inside
     `build_env_for` has to do the whole job from nothing.
 
     WHAT IT ASSERTS AFTER THE CALL IS THE INVERSE OF WHAT IT USED TO. Since #165
-    PR B2 `build_env_for` imports `c_env.cs2_env.make_env` directly, so env
+    PR B2 `build_env_for` imports `env.c.cs2_env.make_env` directly, so env
     construction has NO L3 dependency: `train` must still be ABSENT once the env
-    is built, and `c_env.cs2_env` must be PRESENT. The old assertion (`train` in
+    is built, and `env.c.cs2_env` must be PRESENT. The old assertion (`train` in
     sys.modules) would now pass only if the dependency came back.
 
     The two PRE-call assertions are the anti-vacuity controls, one per module.
-    Without the `train` one, any future module-scope import in `env_factory`
+    Without the `train` one, any future module-scope import in `env.factory`
     would pre-load it and the post-call check would be measuring a dictionary
-    miss it never created. Without the `c_env.cs2_env` one, the post-call
+    miss it never created. Without the `env.c.cs2_env` one, the post-call
     positive control could be satisfied by a module-scope import in
-    `env_factory` rather than by `build_env_for` — and that import would break
+    `env.factory` rather than by `build_env_for` — and that import would break
     the W1 import-lightness invariant besides, which `test_w1_modules.py` guards
     separately.
 
@@ -205,7 +205,7 @@ env = env_factory.build_env_for("smoke")
 try:
     assert "cs2rl.train" not in sys.modules, (
         "building an env pulled `cs2rl.train`. Since #165 PR B2 env construction has NO L3 "
-        "dependency at all — build_env_for imports c_env.cs2_env.make_env directly — and "
+        "dependency at all — build_env_for imports env.c.cs2_env.make_env directly — and "
         "this assertion is what keeps that true from a cold interpreter")
     assert "cs2rl.env.c.cs2_env" in sys.modules, "build_env_for did not import the C env module"
     obs, _ = env.reset(seed=env_factory.SMOKE_SEED)

@@ -359,7 +359,7 @@ ARENA_DUEL_V1 = {
 # yapf: enable
 
 # Maximum grounded up-step (Source `sv_stepsize` default = 18u). MUST stay numerically
-# in lock-step with `SV_MAX_STEP_HEIGHT_CS` in src/cs2rl/c_env/cs2_movement.h (added in T3).
+# in lock-step with `SV_MAX_STEP_HEIGHT_CS` in src/cs2rl/env/c/cs2_movement.h (added in T3).
 # Drift between the two breaks the env: the cliff guard would refuse a movement that
 # nav-shaping treats as a shortcut, or vice versa.
 MAX_STEP_HEIGHT = 18.0

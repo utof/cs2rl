@@ -28,7 +28,7 @@ still matches. That is what the sentinel round trip and the two-env pigeonhole
 scheme in tests/test_struct_sizes.py cover, and why neither is retired here.
 
 PITFALL: like every other check against binding, this reads the CURRENTLY BUILT
-.so. After editing anything in src/cs2rl/c_env, rebuild
+.so. After editing anything in src/cs2rl/env/c, rebuild
 (`uv run --with "ziglang>=0.14.0,<0.15" python setup.py build_ext --inplace`)
 before believing a pass OR a failure.
 """

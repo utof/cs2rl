@@ -1,4 +1,4 @@
-/* src/cs2rl/c_env/cs2_types.h */
+/* src/cs2rl/env/c/cs2_types.h */
 #pragma once
 #include <stdint.h>
 #include <string.h>

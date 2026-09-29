@@ -12,15 +12,15 @@ Exports two paths and nothing else:
                 cs2_demo and cs2_demo's resources.
 
 WHY derive and not restate: every consumer that named this directory by a literal
-path (play.py's library lookup, bake_nav's output, sync_action_spec's header, the
+path (viz/play.py's library lookup, bake_nav's output, sync_action_spec's header, the
 tests that look for a built cs2_demo) tolerated a missing path silently, so a move
 of the package left them stale with every test green (#205 part 2b). Taken from
 here, the location moves with the package.
 
 PITFALL: importing this package must stay light, pathlib only. Never import binding
-(it loads the .so) or cs2_env (numpy, the ctypes layer) here: play.py, the scripts and
+(it loads the .so) or cs2_env (numpy, the ctypes layer) here: viz/play.py, the scripts and
 test collection import these constants. tests/test_w1_modules.py pins that
-`import cs2rl.c_env` loads no submodule and no numpy.
+`import cs2rl.env.c` loads no submodule and no numpy.
 """
 from pathlib import Path
 

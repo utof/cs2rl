@@ -434,7 +434,7 @@ def test_3d_hit_pitch_down_from_ramp():
     position-raycast `vis_matrix` (gh #36 follow-up) correctly blocks that
     line. Why: catwalk and bombsite are 2D-adjacent at y=192 with non-zero
     cliff dz=64 → adj[15][6]=0 → wall between them at z=0..WALL_H=150 (per
-    viz.py). The geometric line from catwalk eye z=176 down to T-corridor
+    viz/render.py). The geometric line from catwalk eye z=176 down to T-corridor
     target z=48 crosses that wall at z≈143 < 150, so the wall blocks it.
     With our current full-height-wall model in simple_map, catwalk-to-floor
     shots are physically impossible. Real CS has lower parapets (low cover

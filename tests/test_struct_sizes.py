@@ -466,7 +466,7 @@ def test_static_data_scalars_covers_every_scalar_field(simple_map):
     _is_scalar_ctype's docstring.
 
     If this fails: add SD_INT/SD_FLOAT(<field>) to py_static_data_scalars in
-    src/cs2rl/c_env/binding.c, rebuild the .so, and add a value assert for the field to
+    src/cs2rl/env/c/binding.c, rebuild the .so, and add a value assert for the field to
     test_static_data_scalars_round_trip.
 
     PITFALL: a stale .so is the likeliest cause of a surprise failure here — the
@@ -505,7 +505,7 @@ def test_every_ctypes_mirror_is_size_guarded():
     today) is not spuriously demanded, and ctypes.Structure itself is excluded.
 
     If this fails after you added a mirror: add a key to py_struct_sizes() in
-    src/cs2rl/c_env/binding.c and the (key, mirror) pair to _C_SIZE_MIRRORS. Deleting
+    src/cs2rl/env/c/binding.c and the (key, mirror) pair to _C_SIZE_MIRRORS. Deleting
     the mirror is the other valid fix; deleting this assert is not.
     """
     from cs2rl.env.c import cs2_env

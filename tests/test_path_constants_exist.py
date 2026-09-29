@@ -20,7 +20,7 @@ Two more sources are checked by behaviour, not by a tracked path, each in its ow
   - .gitignore must ignore the C package's generated files, nav_data.h (baked by
     scripts/bake_nav.py) and a Windows `binding*.pyd`. `git check-ignore -q
     --no-index` answers for paths that do not exist, so the paths are derived from
-    cs2rl.c_env.SOURCE_DIR and checked wherever the package is. PITFALL: rc 0 means
+    cs2rl.env.c.SOURCE_DIR and checked wherever the package is. PITFALL: rc 0 means
     ignored, 1 not ignored, 128 a path git rejects (outside the checkout); only
     `== 0` passes, so a truthiness or `!= 1` check would pass on 128;
   - .clang-tidy's HeaderFilterRegex must match a tracked header, both repo-relative

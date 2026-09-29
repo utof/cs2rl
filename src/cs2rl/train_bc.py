@@ -255,7 +255,7 @@ def check_demo_sha(sha: str, allow_stale: bool = False, name: str = "demo") -> s
         cannot diff against a commit we do not have.
       * Uncommitted edits to DEMO_RELEVANT_PATHS also make demos stale, and
         `git diff <sha> HEAD` cannot see them: we diff the WORKING TREE
-        (`git diff <sha> -- paths`), so a dirty c_env is caught too.
+        (`git diff <sha> -- paths`), so a dirty env/c is caught too.
       * `allow_stale=True` downgrades the error to a printed warning. It exists
         for deliberate experiments ("does the old demo set still transfer?"),
         not for silencing the check on the happy path.

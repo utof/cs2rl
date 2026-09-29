@@ -33,7 +33,7 @@ def parse_args(argv):
 def _load_play_lib(zig_out: Path = ZIG_OUT):
     """Load libcs2_play.so from $CS2_PLAY_LIB, then `zig_out`/lib and /bin; exit 2 if none loads.
 
-    `zig_out` defaults to the C package's own zig-out/ (cs2rl.c_env.ZIG_OUT), so the
+    `zig_out` defaults to the C package's own zig-out/ (cs2rl.env.c.ZIG_OUT), so the
     lookup follows the package wherever it moves; a test passes a tmp directory. A
     candidate that is absent or fails to load is skipped, so a stale location is not an
     error here: it only ends in the "build with" hint.

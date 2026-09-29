@@ -1,6 +1,6 @@
 """Performance profiler for the Dust2 simulation stack.
 
-This script is meant to be rerun whenever `env/nav.py`, `c_env`, or the binding
+This script is meant to be rerun whenever `env/nav.py`, `env/c`, or the binding
 changes. It benchmarks the same environment at several layers so regressions
 are easy to localize:
 

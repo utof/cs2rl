@@ -53,7 +53,7 @@ class ZigBuild(build_ext):
         # Imported here so numpy is only required at build time.
         import numpy
 
-        src = Path(ext.source_dir)     # src/cs2rl/c_env/ (absolute)
+        src = Path(ext.source_dir)     # src/cs2rl/env/c/ (absolute)
         zig = _find_zig()
         python_include = sysconfig.get_path("include")
         numpy_include = numpy.get_include()
@@ -80,9 +80,9 @@ class ZigBuild(build_ext):
                 "Check zig build output above for errors.")
 
         # ONE write, to the path setuptools owns for this extension:
-        # build_lib/cs2rl/c_env/binding<EXT_SUFFIX>. Placing it anywhere else is
+        # build_lib/cs2rl/env/c/binding<EXT_SUFFIX>. Placing it anywhere else is
         # setuptools' job, not ours: a wheel packs build_lib, and `--inplace` /
-        # an editable install copy it into src/cs2rl/c_env/ afterwards
+        # an editable install copy it into src/cs2rl/env/c/ afterwards
         # (build_ext.copy_extensions_to_source). PITFALL: get_ext_fullpath does
         # not create the directory, and `setup.py build_ext --inplace` runs no
         # build_py that would, so mkdir it here.

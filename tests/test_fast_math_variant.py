@@ -2,7 +2,7 @@
 
 WHAT: builds a scratch `binding` via `zig build -Dfast_math={true,false}`
 into a tmp prefix (NEVER through setup.py — that overwrites the production
-.so in src/cs2rl/c_env) and steps 500 ticks on two maps whose bombsite_dist
+.so in src/cs2rl/env/c) and steps 500 ticks on two maps whose bombsite_dist
 contains inf / a 4×max sentinel: bombsites=[] and a simple_map with an
 unreachable room. Every reward must be finite in both builds.
 

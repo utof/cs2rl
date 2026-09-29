@@ -72,10 +72,10 @@ it, and an enum member no call site can reach is a divergence trap — the next
 person adds a knob to it and nothing changes.
 
 WHY THE IMPORTS ARE FUNCTION-LOCAL, and it is no longer one reason. Since #165
-PR B2 `build_env_for` imports `c_env.cs2_env.make_env` DIRECTLY, so the module
+PR B2 `build_env_for` imports `env.c.cs2_env.make_env` DIRECTLY, so the module
 cycle that import used to break is gone — env construction has no L3 dependency
 at all and this module never names `train` on the env path. The import stays
-function-local anyway because `c_env.cs2_env` is HEAVY (ctypes plus the compiled
+function-local anyway because `env.c.cs2_env` is HEAVY (ctypes plus the compiled
 binding) and train.py imports this module at ITS module level: a module-scope
 import here would put the C env on `--dump-config`'s path and break the
 import-lightness invariant `tests/test_w1_modules.py` enforces, which is what
@@ -96,7 +96,7 @@ two sets of module constants, cross-copy `isinstance` silently False, and any
 both the alias and this paragraph.
 
 PITFALL — both imports are INSIDE their call, not cached at module scope, on
-purpose: `build_env_for` re-reads `c_env.cs2_env.make_env` every time, so a test
+purpose: `build_env_for` re-reads `env.c.cs2_env.make_env` every time, so a test
 that rebinds that attribute still sees its stand-in used, and
 tests/test_env_factory.py's `_construct` is built on exactly that.
 
@@ -124,7 +124,7 @@ here still hits it; the scan reads call nodes, not text.
 `make_env` belongs instead to `LOWER_LAYER_SITES`, the per-file DISCLOSURE census
 that `test_the_unbanned_lower_layer_census_is_accurate` asserts by exact
 equality. This file needs no entry there either: `build_env_for` imports
-`c_env.cs2_env.make_env` and hands it to the role builder as a VALUE
+`env.c.cs2_env.make_env` and hands it to the role builder as a VALUE
 (`builder(make_env, **kwargs)`), so no CALL node here names it. If the `_make`
 parameter is ever inlined into the builders, this file starts showing up in that
 census and the entry has to be added.
@@ -314,7 +314,7 @@ def _build_external(_make, /, *, team_spirit, map_data):
     Both parameters are REQUIRED even though the PUBLIC WRAPPER `train.make_env`
     declares its own two as optional. (Qualified deliberately: since #165 PR B2
     this module names two different `make_env`s — the wrapper, and the lower-layer
-    `c_env.cs2_env.make_env` that `build_env_for` now imports — and both default
+    `env.c.cs2_env.make_env` that `build_env_for` now imports — and both default
     those parameters, so an unqualified sentence would say nothing.) The
     defaulting belongs to the wrapper, because that is its published signature,
     and repeating it here would mean a caller that forgot to forward `map_data`
@@ -344,12 +344,12 @@ def build_env_for(role, **kwargs):
     exists because a reward key routed through the wrong channel once vanished
     and made an experiment arm train the baseline.
 
-    Import callers as ``from cs2rl.env_factory import build_env_for``, never
-    ``from cs2rl import env_factory``: three functions this factory is called from bind a
-    LOCAL named ``env_factory`` (the nested closures in `build_env_factory` and
-    `_build_trainer_for_test`, and ``env_factory = build_train_env_factory(...)``
-    in `train()`), and inside those an attribute access on the module name would
-    resolve to the local instead.
+    Import callers as ``from cs2rl.env.factory import build_env_for``, never
+    ``from cs2rl.env import factory as env_factory``: three functions this factory is
+    called from bind a LOCAL named ``env_factory`` (the nested closures in
+    `build_env_factory` and `_build_trainer_for_test`, and
+    ``env_factory = build_train_env_factory(...)`` in `train()`), and inside those
+    an attribute access on the module name would resolve to the local instead.
     """
     try:
         builder = _ROLE_BUILDERS[role]
@@ -358,7 +358,7 @@ def build_env_for(role, **kwargs):
 
     # Function-local and re-read per call. Two reasons, and the second is new:
     # the cycle THIS import used to break is gone (`build_env_for` no longer
-    # names `train` at all), but `c_env.cs2_env` is HEAVY — ctypes plus the
+    # names `train` at all), but `env.c.cs2_env` is HEAVY — ctypes plus the
     # compiled binding — and this module is imported at train.py's module
     # level, so a module-scope import here would put the C env on
     # `--dump-config`'s path and break the import-lightness invariant
@@ -366,7 +366,7 @@ def build_env_for(role, **kwargs):
     # `build_selfplay_manager` below imports `SelfPlayManager` function-locally,
     # so train.py's `__main__` self-alias remains a hard prerequisite here.
     # Re-reading per call also keeps a test that rebinds
-    # c_env.cs2_env.make_env able to see its stand-in used.
+    # env.c.cs2_env.make_env able to see its stand-in used.
     from cs2rl.env.c.cs2_env import make_env
 
     return builder(make_env, **kwargs)
@@ -406,7 +406,7 @@ def build_selfplay_manager(*, self_play_enabled, aim_log_std_max, pin_pitch, opp
     attached; they were identical across all three sites and are now stated once.
     """
     # Function-local, and it must stay so. It is an upward edge (train is a layer
-    # above this module), allowed only by the `cs2rl.env_factory -> cs2rl.train`
+    # above this module), allowed only by the `cs2rl.env.factory -> cs2rl.train`
     # ignore_imports entries in pyproject.toml, which #92 retires; the scope pin in
     # tests/test_import_layers.py fails if a site of that pair leaves a def. At module
     # scope it would also be a circular ImportError whenever train is imported first

@@ -214,13 +214,13 @@ def test_module_is_stdlib_only():
     Why a whitelist and not a blacklist of known-bad names: the stdlib-only
     import budget is this module's single hardest global constraint, and a
     blacklist of six names stays GREEN the day someone adds `import polars`,
-    `import yaml` or `from cs2rl import env_factory`. That is exactly the silent
+    `import yaml` or `from cs2rl.env import factory`. That is exactly the silent
     failure this test exists to prevent. So we diff sys.modules across the import
     and require every newly-added name to be exactly `cs2rl`, `cs2rl.env` or
     `cs2rl.env.config` (the packages and this module), or to have a TOP-LEVEL name
     in sys.stdlib_module_names (Python 3.10+). First-party names are compared in
     FULL: every one of them is top-level `cs2rl`, so a top-level allowance for
-    it would let `cs2rl.env_factory` and `cs2rl.c_env.cs2_env` through.
+    it would let `cs2rl.env.factory` and `cs2rl.env.c.cs2_env` through.
 
     Pitfall: this MUST stay in a subprocess. The parent pytest process has
     already imported numpy, torch and the whole src tree, so an in-process

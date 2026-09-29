@@ -166,7 +166,7 @@ def test_flag_on_emits_final_key_names():
 def test_row_mask_matches_obs_team_bit():
     """Spec §5 test 3: (segment % 10) < 5 ⇔ team T, pinned against the
     INDEPENDENT obs-side team bit obs[24] = (team == 0) the C env writes
-    (src/cs2rl/c_env/cs2_observations.h:96; spawn slots src/cs2rl/c_env/cs2_round.h:32).
+    (src/cs2rl/env/c/cs2_observations.h:96; spawn slots src/cs2rl/env/c/cs2_round.h:32).
     Fails if PufferLib segment ordering or the env's slot layout changes.
     """
     trainer, cleanup = _build(tag_on=False)

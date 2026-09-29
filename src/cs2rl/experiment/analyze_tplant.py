@@ -60,7 +60,7 @@ import sys
 from pathlib import Path
 
 BOMB_TIMER_DEFAULT = 640               # ticks; src/cs2rl/env/nav.py BOMB_TIMER — keep in sync
-CAP_DEFAULT = 640                      # ticks; src/cs2rl/c_env/nav_data.h CFG_ROUND_TIME
+CAP_DEFAULT = 640                      # ticks; src/cs2rl/env/c/nav_data.h CFG_ROUND_TIME
 
 
 def load_rows(run_dir: Path):

@@ -13,7 +13,7 @@ other new module may import this one, never the reverse. An import of ``train``
 here is a cycle: pyproject.toml's `cs2rl acyclic siblings` contract rejects it.
 
 IMPORT-LIGHTNESS INVARIANT (measured, load-bearing): module scope here must stay
-free of torch, nav and c_env. train.py imports this module at ITS module level,
+free of torch, nav and env.c. train.py imports this module at ITS module level,
 and ``train.py --dump-config`` guarantees no torch/nav import
 (tests/test_train_cli.py::test_dump_config_writes_json — "zero side-effects"),
 so a heavy import added here silently costs every --dump-config call ~30 s and
