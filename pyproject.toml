@@ -54,6 +54,7 @@ dev = [
     # resolves zig through setup.py's `python -m ziglang` route, and without the
     # wheel in .venv that test skipped in every session (#288).
     "ziglang>=0.14.0,<0.15",
+    "pytest-xdist>=3.8.0",
 ]
 # NON-DEFAULT group (RL-overhaul task 14, tracker #82): the Modal SDK is needed
 # only for the optional cloud training runner (scripts/run_modal.py). A plain
