@@ -2,15 +2,12 @@
 from __future__ import annotations
 
 import json
-import sys
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 import scripts.modal_runner as mrl                                     # noqa: E402, I001
 from scripts.modal_runner import checkpoint, state, training           # noqa: E402, I001

@@ -245,7 +245,11 @@ SEAM_GUARDS = frozenset({
 # `tests/test_modal_runner_package_shape.py` does.
 #
 # `ROOT` is `Path(__file__).resolve().parents[1]` -- module-header boilerplate
-# that every destination file defines for itself by construction. At 2bb32ac,
+# that every destination file defines for itself. Since #207 it is no longer
+# needed by construction: the header's `sys.path` insert that read it is gone
+# (pyproject.toml's pytest `pythonpath` makes `scripts.*` importable), and
+# several destinations no longer read it at all. It stays because the seam gate
+# requires every `SEAM_HEADER_NAMES` name in every destination (below). At 2bb32ac,
 # 6 files define a `ROOT` of their own (`test_modal_argv.py`,
 # `test_modal_client.py`, `test_modal_packaging.py`, `test_modal_protocol.py`,
 # `test_modal_runner.py`, `test_train_loop_timing.py`). `tests/modal_test_helpers.py`
@@ -409,8 +413,9 @@ def _defs_under_module_level_statements(tree):
     module-level compound statement", and a compound kind a later Python adds
     is covered without an edit. A def's own body is never walked: a nested def
     inside a module-level test is ordinary. Assignments and imports under a
-    statement are not reported: the header's `if str(ROOT) not in sys.path:`
-    and a `try: import X / except ImportError: X = None` fallback are legal.
+    statement are not reported: the `if str(ROOT) not in sys.path:` insert every
+    seam file's header held before #207 and a `try: import X / except
+    ImportError: X = None` fallback are legal.
     A constant bound there is ungoverned, like any non-def binding under a
     compound statement (0 in the ten seam files when this census landed).
     `keyword` is the statement's keyword (`try` for `try ... except*`).
@@ -813,10 +818,11 @@ def _names_defined_under_tests():
 
     Scope is `tests/test_*.py` plus the shared helper module: a stray file that
     pytest never collects is not the threat, and measured, widening past
-    `test_*.py` pulls in `tests/capture_dump_config_pre_165.py` and (until its
-    deletion; `git show 9878725:tests/capture_env_config_pre_165b.py`)
-    `tests/capture_env_config_pre_165b.py`, which each define a `_git` of their
-    own and would make a gate built on this red for an unrelated reason.
+    `test_*.py` pulled in `tests/capture_dump_config_pre_165.py` (until its
+    deletion in #207; `git show 6db06b5:tests/capture_dump_config_pre_165.py`)
+    and `tests/capture_env_config_pre_165b.py` (until its deletion; `git show
+    9878725:tests/capture_env_config_pre_165b.py`), which each defined a `_git`
+    of their own and made a gate built on this red for an unrelated reason.
 
     CONTRACT for the caller: the return value is a SUPERSET of the seam. It
     covers every `tests/test_*.py` in the repo, not just the four destination
@@ -2152,7 +2158,7 @@ _NESTED_DEFINITION_CASES = {
 # Module-level statements that hold no definition, and definitions that are not
 # under one: each must report nothing.
 _UNNESTED_DEFINITION_CASES = {
-    "every seam file's `sys.path` guard":
+    "a pre-#207 seam-file `sys.path` guard":
     "import sys\nif str(ROOT) not in sys.path:\n    sys.path.insert(0, str(ROOT))\n",
     "an import fallback that binds a name":
     "try:\n    import tomllib\nexcept ImportError:\n    tomllib = None\n",
@@ -2181,9 +2187,9 @@ def test_the_seam_rejects_a_definition_nested_under_a_module_level_statement():
     Green half: the same test at module level is classified by the existing
     rules (it stays in its file, and in the core file the floor and the core
     rule both object to its request name: the positive control), and
-    `_UNNESTED_DEFINITION_CASES` -- every seam file's `sys.path` guard, an
-    import fallback, a def nested in a module-level def or class -- report
-    nothing.
+    `_UNNESTED_DEFINITION_CASES` -- the `sys.path` guard every seam file held
+    before #207, an import fallback, a def nested in a module-level def or
+    class -- report nothing.
     """
     wrong: dict[str, object] = {}
     for label, (source, expected) in _NESTED_DEFINITION_CASES.items():
@@ -2200,8 +2206,7 @@ def test_the_seam_rejects_a_definition_nested_under_a_module_level_statement():
         f"case, nothing for a not-nested one): {wrong}")
 
     core_file = _floor_file("core")
-    header = ("import sys\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\n"
-              "if str(ROOT) not in sys.path:\n    sys.path.insert(0, str(ROOT))\n\n"
+    header = ("from pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\n\n"
               "import scripts.modal_runner as mrl\n\n")
     at = header.count("\n") + 1
     request_name = _owned("request")

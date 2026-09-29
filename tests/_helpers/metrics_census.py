@@ -63,7 +63,10 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# parents[2]: this file is tests/_helpers/metrics_census.py (#207 moved it from tests/).
+# tests/test_path_constants_exist.py pins it against the conftest's REPO_ROOT, because
+# a wrong root fails `census()` only by accident and leaves the SRC sweep vacuous.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 # The package root: every EMITTER_SITES / NON_ISLAND_WRITES path below is relative to it,
 # and the sweep walks it. src/ holds nothing else first-party.
 SRC = REPO_ROOT / "src" / "cs2rl"
@@ -448,7 +451,7 @@ def _find_qualname(tree, qualname):
     first = [n for n in ast.walk(tree) if isinstance(n, _DEFS) and n.name == parts[0]]
     if not first:
         raise AssertionError(f"emitter {qualname!r} not found — it was renamed or moved; "
-                             "update EMITTER_SITES in tests/metrics_census.py")
+                             "update EMITTER_SITES in tests/_helpers/metrics_census.py")
     if len(first) > 1:
         raise AssertionError(
             f"emitter {qualname!r}: {parts[0]!r} is defined {len(first)} times (lines "
@@ -461,7 +464,7 @@ def _find_qualname(tree, qualname):
         defs = [h for h in hits if isinstance(h, _DEFS)]
         if not defs:
             raise AssertionError(f"emitter {qualname!r} not found — it was renamed or moved; "
-                                 "update EMITTER_SITES in tests/metrics_census.py")
+                                 "update EMITTER_SITES in tests/_helpers/metrics_census.py")
         if len(hits) > 1:
             raise AssertionError(
                 f"emitter {qualname!r}: {part!r} is defined {len(hits)} times (lines "

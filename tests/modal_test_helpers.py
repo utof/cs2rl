@@ -53,17 +53,12 @@ not fit one header line, so it states the rule they meet instead.
 import io
 import json
 import subprocess
-import sys
 import threading
 from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    # scripts/ is a namespace package; tests import scripts.modal_runner
-    # the same way the later CLIs will. Do not rely on the editable install.
-    sys.path.insert(0, str(ROOT))
 
 # PITFALL: these runner imports are load-bearing for the seam gate, not only
 # for the helpers below. The reach floor (tests/test_modal_packaging.py)

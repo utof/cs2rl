@@ -10,7 +10,7 @@ lived in a comment next to its emitter, and the list of keys a gate script reads
 lived in the gate script. Neither side could notice the other drifting. The
 registry is the one place both are written down, and
 `tests/test_metrics_schema.py` checks it against the SOURCE of the emitters and
-of the readers (via the AST census in `tests/metrics_census.py`) in BOTH
+of the readers (via the AST census in `tests/_helpers/metrics_census.py`) in BOTH
 directions — an unregistered key fails, and a registered key nothing emits fails
 too. A registry that could only be wrong by omission would be a docstring again.
 
@@ -26,7 +26,7 @@ auto-generated from `cs2_types.h`.
 
 THE THREE KINDS
   emitted  — written by one of OUR emitters (the named island in
-             `tests/metrics_census.EMITTER_SITES`). The structural aggregation
+             `tests/_helpers/metrics_census.EMITTER_SITES`). The structural aggregation
              assert applies to these.
   family   — an f-string-built key template, placeholders written `*`. CLOSED
              families additionally declare `members` (the exact concrete keys),
@@ -46,7 +46,7 @@ THE THREE KINDS
              notes then explain.
 
 AGGREGATION IS STRUCTURAL, NOT EDITORIAL. The declared value must match the
-SHAPE of the write, per `tests/metrics_census.SHAPES`:
+SHAPE of the write, per `tests/_helpers/metrics_census.SHAPES`:
   `self.stats[k] = [scalar]`  one-element list  → `last`   (PufferLib's np.mean
                                                             over a 1-list is an
                                                             identity; this is
@@ -122,7 +122,7 @@ UNITS = frozenset({
 })
 
 # Named in-repo readers of a metrics row. Both frozen gate scripts plus the three
-# train-side consumers; `tests/metrics_census.consumer_key_reads()` derives the
+# train-side consumers; `tests/_helpers/metrics_census.consumer_key_reads()` derives the
 # actual reads from source and the test compares BOTH directions.
 CONSUMERS = frozenset({
     "rung1_gate",
@@ -707,7 +707,7 @@ REGISTRY["health/weight_norm_*"] = _f(
 #   label axis  `mb_label` is a PARAMETER; the single call site passes
 #               `mb_label="mb0" if _tag_mb0 else "mbL"` (mb0 = the epoch's first
 #               minibatch, mbL = the throttled later one).
-# tests/metrics_census.py resolves both from source and
+# tests/_helpers/metrics_census.py resolves both from source and
 # test_metrics_schema.test_tag_families_are_census_closed_on_both_axes pins that
 # they stay resolved — an OPEN tag/* template would alibi any `tag/...` entry the
 # registry cared to invent, which is the accumulation the reverse-completeness

@@ -79,6 +79,31 @@ override-dependencies = [
 # adds deprecated utilities and an import warning hook (via PufferLib).
 exclude-dependencies = ["pynvml"]
 
+# pytest 9's native table; it cannot coexist with [tool.pytest.ini_options].
+#
+# --import-mode=importlib is the mode pytest recommends for new projects. pytest itself
+# no longer inserts test directories into sys.path, so a module has one name: a test file
+# is imported as `tests.test_x`, derived from the rootdir. The flag has no ini key, hence
+# addopts.
+#
+# "." (resolved against this file's directory, the repo root) is the one sys.path entry
+# the suite needs. It makes `scripts.*` and `tests.*` importable in this process from any
+# test file run alone. Neither directory has an __init__.py, so both are namespace
+# packages; tests/conftest.py stops a session that could merge another tree's `tests/`
+# or `scripts/` into them (#207).
+#
+# pytest's docs recommend putting test utilities with the library code instead. They
+# stay under tests/ (tests/_helpers/) because cs2rl ships in the wheel (the
+# [tool.setuptools.packages.find] table above takes `cs2rl*` from src/), and test code
+# must not.
+#
+# The config is in-process only: pytest applies `pythonpath` to its own sys.path, and a
+# child interpreter never inherits that, so code that launches one keeps setting
+# PYTHONPATH and the cwd itself (tests/conftest.py:29-32).
+[tool.pytest]
+addopts = ["--import-mode=importlib"]
+pythonpath = ["."]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -142,6 +167,10 @@ ignore = ["E501"]
 "run_modal".msg = "import `scripts.run_modal`"
 "modal_artifacts".msg = "import `scripts.modal_artifacts`"
 "modal_backfill_sidecar".msg = "import `scripts.modal_backfill_sidecar`"
+# #207 moved the metrics census, a test helper, into tests/_helpers/. The bare spelling
+# (a sys.path insert of tests/) and the old dotted one are both banned.
+"metrics_census".msg = "import `tests._helpers.metrics_census` (#207 moved it)"
+"tests.metrics_census".msg = "import `tests._helpers.metrics_census` (#207 moved it)"
 
 [tool.ruff.format]
 quote-style = "double"

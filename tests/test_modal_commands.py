@@ -15,10 +15,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    # scripts/ is a namespace package; tests import scripts.modal_runner
-    # the same way the later CLIs will. Do not rely on the editable install.
-    sys.path.insert(0, str(ROOT))
 
 import scripts.modal_runner as mrl                                     # noqa: E402, I001
 from scripts.modal_runner import commands                              # noqa: E402, I001
