@@ -328,6 +328,22 @@ def test_control_a_module_without_a_layer_is_rejected(tmp_path):
     assert r.returncode == 1 and "- cs2rl.newmod" in r.stdout, r.stdout + r.stderr
 
 
+def test_control_a_module_without_a_layer_in_env_is_rejected(tmp_path):
+    """(h) `exhaustive` on `cs2rl.env layers`: a new env/ module in no layer.
+
+    WHY: (b) plants at the top level, so it exercises only `cs2rl layers`; without
+    this, deleting the env contract's `exhaustive = true` left every test green.
+    #205 part 2b adds env/c/ and env/factory.py, the modules it exists to catch.
+    PITFALL: import-linter's exhaustive check walks the container's DIRECT children
+    only, so env/c/ needs a layer here but its own modules are not checked by it.
+    """
+    tree, _ = _copy_package(tmp_path)
+    (tree / "src" / "cs2rl" / "env" / "newmod.py").write_text('"""Planted."""\n')
+    r = _lint(tree)
+    assert r.returncode == 1 and "- cs2rl.env.newmod" in r.stdout, r.stdout + r.stderr
+    assert "cs2rl.env layers BROKEN" in r.stdout, r.stdout
+
+
 def test_control_the_unplanted_copy_passes_every_check(tmp_path):
     """(c) The copy is complete: every check that the controls turn red passes on it.
 

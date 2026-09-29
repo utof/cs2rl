@@ -501,7 +501,7 @@ REGISTRY.update({
         "mean", "nats", tuple(f"losses/entropy/{h}" for h in ACTION_HEAD_NAMES), (),
         "Per-discrete-head entropy. OPEN in the AST census (the loop iterates the "
         "imported ACTION_HEAD_NAMES, not a literal), so the member list is taken from "
-        "_action_spec here — the same auto-generated tuple the emitter zips over, which "
+        "cs2rl.spec.action here — the same auto-generated tuple the emitter zips over, which "
         "is what makes a new head in cs2_types.h propagate instead of drifting."),
 })
 for _head in ACTION_HEAD_NAMES:

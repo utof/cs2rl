@@ -1,6 +1,5 @@
 # ── SECTION: NavGraph ──────────────────────────────────────────────────────
 
-import importlib.resources
 import math
 import os
 import pathlib
@@ -11,8 +10,8 @@ import numpy as np
 from awpy import Nav
 from shapely.geometry import Point
 from shapely.geometry import Polygon as ShapelyPolygon
-from shapely.strtree import STRtree
 
+import cs2rl
 from cs2rl.spec.obs import (           # noqa: F401  generated; re-exported (see Constants)
     OBS_BLOCKS, OBS_DIM,
 )
@@ -134,10 +133,8 @@ class NavGraph:
         graph        -- networkx Graph (nodes = area_ids, edges = connections)
         centroids    -- dict: area_id -> np.array([x, y])
         wall_segments-- list of ((x1,y1),(x2,y2)) boundary edge tuples
-        _wall_lines  -- list of shapely LineStrings for wall segments
-        _wall_strtree-- STRtree for wall lines
-        _area_polys  -- list of shapely Polygons (one per area, index = _id_to_idx)
-        _area_strtree-- STRtree for area bboxes
+        _area_polys  -- list of shapely Polygons (one per area, index = _id_to_idx);
+                        _build_pos_grid rasterises them
         vis_matrix   -- None (built in Task 2)
         _nav_path    -- stored nav file path
         _cache_path  -- stored vis cache path
@@ -192,12 +189,12 @@ class NavGraph:
         # ── Extract wall segments (kept for --test-navgraph) ──────────────
         self.wall_segments = self._extract_wall_segments()
 
-        # ── Build area spatial index ───────────────────────────────────────
-        self._area_polys, self._area_strtree = self._build_area_index()
+        # ── Area polygons (the position grid below rasterises them) ─────────
+        self._area_polys = self._build_area_polys()
 
         # ── Rasterized grid for O(1) position lookup ───────────────────────
         # env/map.py exports it to C, whose _raster_at (cs2_movement.h) does the per-step lookup.
-        self._grid_cache_path = cache_path.replace(".npy", "_grid.npy") if cache_path else None
+        self._grid_cache_path = cache_path.replace(".npy", "_grid.npy")
         self._build_pos_grid()
 
         # ── Visibility matrix (built in Task 2) ───────────────────────────
@@ -226,10 +223,14 @@ class NavGraph:
         wall_segments = [edge for edge, count in edge_count.items() if count == 1]
         return wall_segments
 
-    # ── Area spatial index ────────────────────────────────────────────────
+    # ── Area polygons ─────────────────────────────────────────────────────
 
-    def _build_area_index(self):
-        """Build shapely Polygons and STRtree for all areas."""
+    def _build_area_polys(self):
+        """Build one shapely Polygon per area, in area_ids order (index = _id_to_idx).
+
+        Only _build_pos_grid reads them. The STRtree that used to be built here fed
+        the nearest-area queries #205 deleted, and nothing read it afterwards.
+        """
         polys = []
         for aid in self.area_ids:
             area = self.areas[aid]
@@ -241,9 +242,7 @@ class NavGraph:
                 cx, cy = self.centroids[aid]
                 poly = Point(cx, cy).buffer(0.01)
             polys.append(poly)
-
-        strtree = STRtree(polys)
-        return polys, strtree
+        return polys
 
     def _build_pos_grid(self, cell_size: float = 4.0):
         """Build a rasterized 2D grid mapping (gx, gy) → area_idx for O(1) lookups.
@@ -525,7 +524,10 @@ NAV_PATH = _resolve_nav_path()
 # rebuilds the grid, then the vis matrix through a cpu_count() worker pool (~900 MB each,
 # orphaned on a kill). *.npy is gitignored, so a stray copy anywhere is invisible to git
 # status. tests/test_path_constants_exist.py pins this location.
-CACHE_PATH = str(importlib.resources.files("cs2rl") / "vis_cache.npy")
+# PITFALL: not importlib.resources.files("cs2rl"). It promises only a Traversable, whose str()
+# is a filesystem path for a regular on-disk package but not under zipimport or for a namespace
+# package, and it is framed as read-only package data, not a writable cache.
+CACHE_PATH = str(pathlib.Path(cs2rl.__file__).resolve().parent / "vis_cache.npy")
 
 
 def _areas_near(nav_graph: NavGraph, xy, radius: float):

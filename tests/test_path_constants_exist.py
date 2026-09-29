@@ -7,7 +7,8 @@ checked with `git ls-files --error-unmatch`, which also works for a directory
   - run_experiment's TRAIN_PY / REWARDS_H / ENV_C / C_ENV_DIR;
   - sync_action_spec's OUTPUT / OBS_OUTPUT, the generated spec modules (#205
     moved them into spec/; the generator would write a stray file at a stale
-    path and leave the real one unregenerated);
+    path and leave the real one unregenerated). Both are tracked, so a row
+    cannot tell them apart: test_sync_action_spec_outputs_are_not_swapped does;
   - tests/_helpers/metrics_census.py's SRC, which must be a DIRECTORY (the
     pathspec's trailing `/`): its sweeps walk `SRC.rglob("*.py")`, which yields
     nothing on a wrong SRC, so they would pass vacuously;
@@ -38,7 +39,8 @@ scripts/run_experiment.py is a CLI, not a library (#204), so its constants are
 read with `runpy.run_path(..., run_name=...)`: the module-level code is only path
 constants and imports, and a run_name other than "__main__" skips main().
 scripts/sync_action_spec.py is read the same way; #205 moved its side effects
-into main() so that reading it writes nothing.
+into main() so that reading it writes nothing, and
+test_sync_action_spec_module_body_runs_nothing keeps them there.
 
 Also here: nav.CACHE_PATH, the vis cache, is pinned to its one location
 (test_vis_cache_path_is_the_package_root_file). Its file is untracked, so it has
@@ -156,6 +158,50 @@ def test_vis_cache_path_is_the_package_root_file():
 
     assert Path(nav.CACHE_PATH).resolve() == REPO_ROOT / "src" / "cs2rl" / "vis_cache.npy", (
         f"nav.CACHE_PATH is {nav.CACHE_PATH}: anchor it on the cs2rl package root")
+
+
+def test_sync_action_spec_outputs_are_not_swapped():
+    """OUTPUT is spec/action.py and OBS_OUTPUT is spec/obs.py.
+
+    WHY: the tracked-path rows pass them swapped, since both files are tracked. The
+    generator would then write the obs layout into action.py and the action layout
+    into obs.py, and the next import of either would break far from the cause.
+    """
+    assert Path(sync_action_spec["OUTPUT"]).name == "action.py", sync_action_spec["OUTPUT"]
+    assert Path(sync_action_spec["OBS_OUTPUT"]).name == "obs.py", sync_action_spec["OBS_OUTPUT"]
+
+
+def test_sync_action_spec_module_body_runs_nothing():
+    """scripts/sync_action_spec.py's module body is its docstring, imports, assignments,
+    defs and the `if __name__ == "__main__":` guard, and no assignment calls one of
+    its own defs.
+
+    WHY: this file loads the script with runpy.run_path at COLLECTION, under a
+    run_name that skips main(). Any other top-level statement runs on every
+    collection, and a stray `main()` would regenerate spec/action.py and spec/obs.py.
+    PITFALL: an assignment is a statement kind this allows, so the call check is what
+    stops `X = main()`; a call through anything but a bare name of a top-level def
+    (an attribute, an alias) is not seen.
+    """
+    tree = ast.parse((REPO_ROOT / "scripts" / "sync_action_spec.py").read_text(encoding="utf-8"))
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    own = {node.name for node in tree.body if isinstance(node, defs)}
+    bad = []
+    for i, node in enumerate(tree.body):
+        docstring = (i == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                     and isinstance(node.value.value, str))
+        main_guard = (isinstance(node, ast.If) and not node.orelse
+                      and ast.unparse(node.test) == "__name__ == '__main__'")
+        if docstring or main_guard or isinstance(node, defs):
+            continue
+        if not isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign)):
+            bad.append(f":{node.lineno} {type(node).__name__}")
+        bad += [
+            f":{node.lineno} calls {call.func.id}()" for call in ast.walk(node) if
+            isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in own
+        ]
+    assert not bad, (f"scripts/sync_action_spec.py runs code when loaded: {bad}. Move it into "
+                     "main(); test collection loads this script.")
 
 
 def _collectable_files_under(directory: Path) -> list[str]:

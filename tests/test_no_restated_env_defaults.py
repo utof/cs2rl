@@ -325,16 +325,18 @@ def test_field_defaults_covers_every_declared_default():
     knobs = {k: getattr(cfg, k) for k in KNOB_FIELDS if getattr(cfg, k) is not None}
     sentinels = {k for k in KNOB_FIELDS if getattr(cfg, k) is None}
 
-    assert weights and knobs, ("env_config declares no reward weights, or no non-None knobs. The "
-                               "dataclass changed shape and every probe in this file now guards "
-                               "nothing.")
+    assert weights and knobs, (
+        "env/config.py declares no reward weights, or no non-None knobs. The "
+        "dataclass changed shape and every probe in this file now guards "
+        "nothing.")
     missing = sorted((set(weights) | set(knobs)) - set(FIELD_DEFAULTS))
     assert not missing, (f"FIELD_DEFAULTS does not cover {missing}. The probes cannot see a "
                          "restatement of a field they hold no value for, and blind reads as "
                          "green.")
     wrong = sorted(n for n, v in {**weights, **knobs}.items() if FIELD_DEFAULTS[n] != v)
-    assert not wrong, (f"FIELD_DEFAULTS holds a value env_config no longer declares for {wrong}. "
-                       "The probes are searching the tree for the wrong number.")
+    assert not wrong, (
+        f"FIELD_DEFAULTS holds a value env/config.py no longer declares for {wrong}. "
+        "The probes are searching the tree for the wrong number.")
     leaked = sorted(sentinels & set(FIELD_DEFAULTS))
     assert not leaked, (f"{leaked} are None in EnvConfig — the resolve-later sentinel, not a "
                         "default. `x = None` restates nothing, and searching for it would flag "
@@ -388,9 +390,9 @@ def test_the_probes_find_a_planted_restatement(tmp_path, monkeypatch, probe):
     `test_the_probes_can_actually_fail` does not close this: it exercises the
     PATTERNS against a scratch string and never touches the file walk.
     """
-    (tmp_path / "src" / "cs2rl").mkdir(parents=True)
+    (tmp_path / "src" / "cs2rl" / "env").mkdir(parents=True)
     (tmp_path / "scripts").mkdir()
-    declaration = tmp_path / "src" / "cs2rl" / "env_config.py"
+    declaration = tmp_path / "src" / "cs2rl" / "env" / "config.py"
     anchor = tmp_path / "src" / "cs2rl" / "train_config.py"
     name = "crouch_enabled"
     value = FIELD_DEFAULTS[name]

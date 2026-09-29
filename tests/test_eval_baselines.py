@@ -351,4 +351,4 @@ def test_hit_geometry_constants_match_cs2_combat_h():
     missing = sorted(set(expected) - set(found))
     assert not missing, f"not found as `static const float` in cs2_combat.h: {missing}"
     for name, py_val in expected.items():
-        assert found[name] == py_val, f"{name}: cs2_combat.h={found[name]} eval_baselines={py_val}"
+        assert found[name] == py_val, f"{name}: cs2_combat.h={found[name]} eval.baselines={py_val}"

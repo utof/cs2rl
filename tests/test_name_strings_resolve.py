@@ -1,15 +1,18 @@
-"""Every `cs2rl` module name, child-script import and `src/cs2rl/` path in a string resolves.
+"""Every dotted `cs2rl.` name, cs2rl import line and `src/cs2rl/` path in a .py string resolves.
 
 WHAT: one fail-closed scan over the string constants of every tracked .py file,
 docstrings excluded. An f-string is read whole, each replacement field kept as
 `{expr}`. Three clauses:
-  (a) a string that is exactly `cs2rl.<dotted>` names a module
-      (importlib.util.find_spec), or a module plus an attribute. The attribute is
-      looked up in the module file's top-level AST bindings, so no module is
-      imported except the packages find_spec imports as parents.
+  (a) a `cs2rl.<dotted>` name names a module (importlib.util.find_spec), or a
+      module plus an attribute, whether it is the whole string or sits inside a
+      longer one (a `sys.modules` check, an `-m` launch, a message). A name inside
+      an import line is left to (b). The attribute is looked up in the module
+      file's top-level AST bindings, so no module is imported except the packages
+      find_spec imports as parents.
   (b) every line inside a string that starts `from cs2rl... import` or
       `import cs2rl...` names a resolvable module, and each imported name is a
-      submodule or a top-level binding of it. Matched with a regex, never parsed:
+      submodule or a top-level binding of it. Every `;`-joined statement on the
+      line that imports from cs2rl counts. Matched with a regex, never parsed:
       some child scripts are str.format templates that do not parse
       (tests/test_arena_duel.py's `{out!r}`). A `{field}` in the name list is
       skipped; the module is still checked.
@@ -27,14 +30,26 @@ rot into a blanket allowance.
 WHY (#205 part 2a): a module move leaves these strings stale, and most go stale
 SILENTLY. With tests/test_w1_modules.py's HEAVY still naming `cs2rl.nav` after the
 move, the light-import guard for nav passed 21/21 with nav planted into
-train_shared. A child script's stale import fails only when that child runs, and
+train_shared. Moved into a child script as `assert "cs2rl.nav" not in sys.modules`,
+the same stale name passed the same way, which is why (a) reads names inside longer
+strings too. A child script's stale import fails only when that child runs, and
 test_fast_math_variant's runs only where zig is installed. A path token in a
 message or a provenance label is read by no test at all. A pin per table covers
-the tables someone thought of; this one covers every string.
+the tables someone thought of; this one covers every string's dotted names, import
+lines and `src/cs2rl/` tokens.
 
-LIMITS:
-  - A composed name (f"cs2rl.{x}", "cs2rl." + x, "%s") is invisible. None exists
-    today; spell module names whole.
+LIMITS (the shapes it cannot see, each with its reason):
+  - A bare module word (`_action_spec`, a label `eval_baselines=`) is invisible: a
+    live alias (`from cs2rl.env import config as env_config`) reads exactly like a
+    dead module word, so a bare-word clause could not tell a stale name from a live one.
+  - A composed name or path is invisible: f"cs2rl.{x}", "cs2rl." + x, "%s", and
+    `root / "src" / "cs2rl" / "env_config.py"`. Each piece is its own string and none
+    holds the whole name. Spell module names and paths whole.
+  - An import name after a backslash continuation is not read (only a parenthesised
+    list is followed onto the next lines), and a `cs2rl/...` path without the `src/`
+    prefix has no fixed root to look up in git ls-files. Neither occurs in a string today.
+  - Only .py files are scanned: CONTRIBUTING.md, TOML, C comments and other non-.py
+    text are not parsed for strings.
   - Comments and docstrings are prose, not checked here.
   - Clause (a) resolves at most a module attribute and, for a class, one member.
   - This file is not scanned: its EXEMPT keys, regexes and controls spell failing
@@ -51,6 +66,9 @@ from tests.conftest import REPO_ROOT
 
 # Exactly a dotted cs2rl name: clause (a).
 _DOTTED = re.compile(r"cs2rl(?:\.[A-Za-z_]\w*)+")
+# A cs2rl dotted name inside a longer string (a sys.modules check, an `-m` launch, a label):
+# clause (a). The lookbehind skips `x.cs2rl.y` and `my_cs2rl.y`, which are not cs2rl names.
+_EMBEDDED = re.compile(r"(?<![\w.])cs2rl(?:\.[A-Za-z_]\w*)+")
 # An import line inside a string: clause (b), after any leading indent.
 _IMPORT_LINE = re.compile(r"^[ \t]*(from|import)[ \t]+cs2rl\S*.*$", re.MULTILINE)
 # A src/cs2rl/ path token: clause (c). Stops at whitespace, quotes and closing brackets,
@@ -58,13 +76,17 @@ _IMPORT_LINE = re.compile(r"^[ \t]*(from|import)[ \t]+cs2rl\S*.*$", re.MULTILINE
 _PATH_TOKEN = re.compile(r"src/cs2rl/(?:\{[^{}\s]*\}|[^\s`'\",:;)\]{}])*")
 
 # (file, enclosing function, text) -> why this occurrence may fail its clause.
-# `text` is the offending text: the whole string for (a), the import line (stripped)
+# `text` is the offending text: the dotted name for (a), the import line (stripped)
 # for (b), the path token for (c).
 EXEMPT = {
     ("setup.py", "<module>", "cs2rl.c_env.binding"):
     "(a) the zig extension's module name. It has no Python source, and find_spec finds "
     "it only through the built, untracked .so; exempt by name so that #205 part 2b, "
     "which renames it, cannot pass on a leftover .so.",
+    ("tests/test_fast_math_variant.py", "<module>", "cs2rl.c_env.binding"):
+    "(a) the same extension name, which the CHECK child pre-seeds in sys.modules with a "
+    "scratch build. PITFALL: this text always fails, so the row never goes stale by itself; "
+    "#205 part 2b must rename this string and this key together.",
     ("src/cs2rl/play.py", "_load_play_lib", "src/cs2rl/c_env/zig-out/lib/libcs2_play.so"):
     "(c) a zig build output, never tracked; the loader skips a candidate that is absent.",
     ("src/cs2rl/play.py", "_load_play_lib", "src/cs2rl/c_env/zig-out/bin/libcs2_play.so"):
@@ -83,6 +105,10 @@ EXEMPT = {
     "(c) control (f)'s plant path, created only in a tmp copy of the package.",
     ("tests/test_import_layers.py", "test_control_a_directory_without_init_is_covered", "cs2rl.noinit.action"):
     "(a) control (f)'s plant, a module that must not exist in this checkout.",
+    ("tests/test_import_layers.py", "test_control_a_module_without_a_layer_is_rejected", "cs2rl.newmod"):
+    "(a) control (b)'s plant, a module that must not exist in this checkout.",
+    ("tests/test_import_layers.py", "test_control_a_module_without_a_layer_in_env_is_rejected", "cs2rl.env.newmod"):
+    "(a) control (h)'s plant, a module that must not exist in this checkout.",
     ("tests/test_one_module_object_per_file.py", "test_the_guard_is_silent_on_files_it_must_not_report", "cs2rl.paths"):
     "(a) a synthetic module name in the tmp layout the test builds.",
     ("tests/test_one_module_object_per_file.py", "test_the_guard_reports_a_repo_file_under_two_names_with_every_name", "cs2rl.paths"):
@@ -210,12 +236,28 @@ def dotted_problem(name: str) -> str | None:
 
 
 def import_line_problem(line: str, continuation: str) -> str | None:
-    """None if the import statement starting at `line` resolves; else why not.
+    """None if every cs2rl import statement on `line` resolves; else why not.
 
     `continuation` is the rest of the string after `line`, read only to finish a
-    parenthesised name list. Only the first statement of a `;`-joined line counts.
+    parenthesised name list. `line` starts with a cs2rl import; each later
+    `;`-joined statement is checked too if it is an `import` or a `from cs2rl`.
+    PITFALL: failures_in hands the WHOLE line to this clause and (a) skips it, so a
+    second statement checked nowhere else (`from cs2rl.env import nav; import
+    cs2rl.nav`) would be invisible.
     """
-    statement = line.split(";")[0].strip()
+    first, *rest = (s.strip() for s in line.split(";"))
+    for statement in [first] + [s for s in rest if re.match(r"import\s|from\s+cs2rl\b", s)]:
+        problem = _statement_problem(statement, continuation)
+        if problem:
+            return problem
+    return None
+
+
+def _statement_problem(statement: str, continuation: str) -> str | None:
+    """None if one `import ...`/`from ... import ...` statement resolves; else why not.
+
+    An `import` statement's non-cs2rl items (`import sys, time`) are skipped.
+    """
     if statement.startswith("import "):
         for item in statement[len("import "):].split(","):
             module = item.split(" as ")[0].strip()
@@ -308,9 +350,16 @@ def failures_in(relative: str, source: str):
     """Yield (key, clause, message) for every occurrence in `source` that fails a clause."""
     for scope, line, value in string_occurrences(source):
         found = []
+        imports = list(_IMPORT_LINE.finditer(value))
         if _DOTTED.fullmatch(value):
             found.append(("a", value, dotted_problem(value)))
-        for m in _IMPORT_LINE.finditer(value):
+        else:
+            # A name inside an import line is (b)'s: (a) would report it a second time,
+            # under a second EXEMPT key.
+            for m in _EMBEDDED.finditer(value):
+                if not any(i.start() <= m.start() < i.end() for i in imports):
+                    found.append(("a", m.group(0), dotted_problem(m.group(0))))
+        for m in imports:
             found.append(("b", m.group(0).strip(), import_line_problem(m.group(0),
                                                                        value[m.end():])))
         for token in _PATH_TOKEN.findall(value):
@@ -346,7 +395,8 @@ def test_every_cs2rl_name_in_a_string_resolves():
     """The pin itself: every tracked .py file but this one, against EXEMPT."""
     tracked = _git_ls_files("*.py")
     files = [f for f in tracked if f != _THIS_FILE]
-    # Only this file may drop out: a wrong _THIS_FILE would skip nothing, or the wrong file.
+    # Only this file may drop out. A wrong _THIS_FILE either skips nothing (the count check
+    # fails) or skips another file (this file is then scanned, and its planted names fail).
     assert len(tracked) - len(files) == 1, f"{_THIS_FILE} is not a tracked .py file"
     assert len(files) > 100, f"git ls-files found only {len(files)} .py files"
     report = scan(files, EXEMPT)
@@ -368,11 +418,15 @@ def _failing(source: str) -> list[tuple[str, str]]:
 
 def test_clause_a_fails_a_moved_name_a_deleted_member_and_an_untracked_module():
     """(a) fails a module name #205 moved, a member it deleted, and a name that
-    resolves only to an untracked file; it passes the new names and skips docstrings.
+    resolves only to an untracked file, whole or inside a longer string (a guard's
+    `sys.modules` check, an `-m` launch); it passes the new names, a word that only
+    ends in `cs2rl`, and skips docstrings. That (a) leaves import lines to (b) is
+    pinned by the single (b) entries in the next test.
 
     PITFALL: cs2rl.c_env.binding fails as untracked where the zig .so is built and
     as missing where it is not; either way it must fail, or a leftover .so could
-    resolve a stale name.
+    resolve a stale name. The embedded negative check is the case that matters most:
+    `assert "cs2rl.nav" not in sys.modules` is vacuously true once nav moves.
     """
     assert _failing('X = "cs2rl.nav"\n') == [("a", "cs2rl.nav")]
     assert _failing('X = "cs2rl.env.nav.NavGraph.can_see"\n') == [
@@ -382,12 +436,17 @@ def test_clause_a_fails_a_moved_name_a_deleted_member_and_an_untracked_module():
     assert _failing('X = "cs2rl.env.nav"\nY = "cs2rl.env.nav.NavGraph.path"\n'
                     'Z = "cs2rl.spec.action.ACTION_DIM"\n') == []
     assert _failing('"""cs2rl.nav"""\ndef f():\n    "cs2rl.nav"\n') == []
+    assert _failing("S = 'assert \"cs2rl.nav\" not in sys.modules'\n") == [("a", "cs2rl.nav")]
+    assert _failing("S = 'python -m cs2rl.bc_demo --out x'\n") == [("a", "cs2rl.bc_demo")]
+    assert _failing("S = 'assert \"cs2rl.env.nav\" not in sys.modules'\n"
+                    "T = 'python -m cs2rl.bc_demos'\nU = 'build/libcs2rl.so'\n") == []
 
 
 def test_clause_b_fails_a_stale_import_in_every_spelling():
     """(b) fails a stale module or name in a `from`/`import` line, indented or not,
-    including a name inside a parenthesised list and the module of an f-string
-    template; it passes the moved spellings and skips a `{field}` name.
+    including a name inside a parenthesised list, the module of an f-string template
+    and a later `;`-joined statement; it passes the moved spellings, skips a `{field}`
+    name and a later statement that is not a cs2rl import.
 
     PITFALL: an f-string is read whole. Read as literal parts, "from cs2rl.nav
     import " would end at the field, and the pin would check no name at all.
@@ -401,8 +460,12 @@ def test_clause_b_fails_a_stale_import_in_every_spelling():
                     "    NOPE,\\n)'\n") == [("b", "from cs2rl.env.nav import (")]
     assert _failing("S = f'from cs2rl.nav import {name}'\n") == [("b",
                                                                   "from cs2rl.nav import {name}")]
+    assert _failing("S = 'from cs2rl.env import nav; import cs2rl.nav'\n") == [
+        ("b", "from cs2rl.env import nav; import cs2rl.nav")
+    ]
     assert _failing("S = 'from cs2rl.env import nav, map as m'\n"
-                    "T = f'from cs2rl.env.nav import {name}'\n") == []
+                    "T = f'from cs2rl.env.nav import {name}'\n"
+                    "U = 'from cs2rl.env import nav; nav.f(); import time'\n") == []
 
 
 def test_clause_c_fails_an_untracked_path():

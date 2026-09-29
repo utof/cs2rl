@@ -6,7 +6,8 @@ Members:
   obs    -- the observation layout (OBS_DIM, OBS_BLOCKS, ...), generated the same way;
   paths  -- the output-directory constants (OUTPUTS_DIR, CHECKPOINTS_DIR, ...).
 
-None of them imports anything first-party, and the layers contract keeps it so.
+None of them imports anything first-party, and the layers contract keeps them from
+importing any other layer.
 
 WHY this file holds a docstring and nothing else: a package without __init__.py is
 invisible to grimp (so to every import-linter contract) and is silently dropped from

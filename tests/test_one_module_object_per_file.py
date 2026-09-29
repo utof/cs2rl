@@ -11,7 +11,7 @@ planted test, in a normal session with the imports in the test body and under
 --collect-only with the imports at module scope. The plant imports
 `src/cs2rl/spec/paths.py`, a light module, as `cs2rl.spec.paths` and, in the two-name
 case, also as bare `paths`. That second name is reachable because the child's
-PYTHONPATH carries `src/cs2rl` (prepended in both cases, so the two cases differ
+PYTHONPATH carries `src/cs2rl/spec` (prepended in both cases, so the two cases differ
 only in the plant): the same thing a script-path launch of a package module does
 to `sys.path[0]`, which is how the trap arises in practice.
 """
