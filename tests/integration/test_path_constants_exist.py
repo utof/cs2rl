@@ -14,6 +14,9 @@ checked with `git ls-files --error-unmatch`, which also works for a directory
   - every MANIFEST.in include;
   - setup.py's `source_dir`;
   - sync_action_spec's HEADER, the C header it generates from (read by no test run);
+  - modal_runner_tables.TABLES_FILE, the path every Modal gate's failure message names
+    to point at the tables (nothing else reads it, so a move that leaves it stale
+    changes only messages, and the messages send the reader to a file that is not there);
   - every `-I` directory in .clangd, which must be a tracked DIRECTORY.
 Two more sources are checked by behaviour, not by a tracked path, each in its own test:
   - .gitignore must ignore the C package's generated files, nav_data.h (baked by
@@ -78,6 +81,7 @@ from cs2rl.env.c import SOURCE_DIR
 from cs2rl.train_bc import DEMO_RELEVANT_PATHS
 from tests._helpers import metrics_census
 from tests.conftest import REPO_ROOT
+from tests.modal.modal_runner_tables import TABLES_FILE
 
 sync_action_spec = runpy.run_path(str(REPO_ROOT / "scripts" / "sync_action_spec.py"),
                                   run_name="sync_action_spec_constants")
@@ -138,6 +142,7 @@ CASES = [
     *[(f"sync_action_spec.{n}", _in_this_checkout(sync_action_spec[n]))
       for n in ("OUTPUT", "OBS_OUTPUT", "HEADER")],
     ("metrics_census.SRC", f"{_in_this_checkout(metrics_census.SRC)}/"),
+    ("modal_runner_tables.TABLES_FILE", TABLES_FILE),
     *[(f"MANIFEST.in:{p}", p) for p in _manifest_paths()],
     *[(f"setup.py:source_dir={p}", p) for p in _setup_source_dirs()],
     *[(f".clangd:-I{d}", f"{d}/") for d in _clangd_include_dirs()],
@@ -154,8 +159,8 @@ CLANG_TIDY_CASES = [(".clang-tidy:HeaderFilterRegex", _clang_tidy_header_filter(
 
 # Labels no other row may stand in for: a prefix shared by several rows would stay
 # satisfied after one of them is deleted.
-EXACT_LABELS = ("sync_action_spec.HEADER", ".gitignore:nav_data.h", ".gitignore:binding*.pyd",
-                ".clang-tidy:HeaderFilterRegex")
+EXACT_LABELS = ("sync_action_spec.HEADER", "modal_runner_tables.TABLES_FILE",
+                ".gitignore:nav_data.h", ".gitignore:binding*.pyd", ".clang-tidy:HeaderFilterRegex")
 
 # The roots the module constants above hang off, each read from its module.
 ROOTS = {
