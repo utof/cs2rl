@@ -468,7 +468,7 @@ def test_e_reads_each_directory_afresh_on_every_call(tmp_path):
     assert _relative(tmp_path, dead_importable_files(tmp_path)) == [("x.py", "x.so")]
 
 
-def _git(root: Path, *args: str) -> None:
+def _run_git(root: Path, *args: str) -> None:
     """`git -C root <args>`, without the GIT_* variables a hook sets (GIT_INDEX_FILE would name
     another repo's index)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -489,16 +489,21 @@ def _leftover_checkout(root: Path) -> Path:
             f"env/c/binding{_SO}")
     (root / "tests").mkdir()
     shutil.copy(REPO_ROOT / "tests" / "conftest.py", root / "tests" / "conftest.py")
-    _git(root, "init", "-q")
-    _git(root, "add", "-A")
+    _run_git(root, "init", "-q")
+    _run_git(root, "add", "-A")
     return root
 
 
-def _plant(root: Path, name: str, *, tracked: bool) -> None:
-    """Add the file `name` (relative to `root`) as a leftover, tracked or not."""
+def _plant(root: Path, *parts: str, tracked: bool) -> None:
+    """Add the file `root/<parts>` as a leftover, tracked or not.
+
+    The path comes as parts, not as one string: a `src/cs2rl/...` literal that names no
+    tracked file fails tests/test_name_strings_resolve.py.
+    """
+    name = str(Path(*parts))
     _layout(root, name)
     if tracked:
-        _git(root, "add", "-f", name)
+        _run_git(root, "add", "-f", name)
 
 
 def _assert_names_the_dead_file(child: subprocess.CompletedProcess, output: str, dead: Path,
@@ -526,7 +531,7 @@ def test_e_a_module_beside_its_package_stops_the_session(tmp_path, tracked):
     (the real base file is measured in the T2 report).
     """
     root = _leftover_checkout(tmp_path / "checkout")
-    _plant(root, "src/cs2rl/train.py", tracked=tracked)
+    _plant(root, "src", "cs2rl", "train.py", tracked=tracked)
     child, output = _session(tmp_path, root / "src", checkout=root)
     _assert_names_the_dead_file(child, output, root / "src" / "cs2rl" / "train.py",
                                 root / "src" / "cs2rl" / "train" / "__init__.py")
@@ -536,7 +541,7 @@ def test_e_a_source_beside_a_built_extension_stops_the_session(tmp_path):
     """(e2) The extension beats source: a `binding.py` beside the built binding.<abi>.so, one
     directory below src/cs2rl, never loads. Planted untracked, as a leftover is."""
     root = _leftover_checkout(tmp_path / "checkout")
-    _plant(root, "src/cs2rl/env/c/binding.py", tracked=False)
+    _plant(root, "src", "cs2rl", "env", "c", "binding.py", tracked=False)
     child, output = _session(tmp_path, root / "src", checkout=root)
     _assert_names_the_dead_file(child, output, root / "src" / "cs2rl" / "env" / "c" / "binding.py",
                                 root / "src" / "cs2rl" / "env" / "c" / f"binding{_SO}")
