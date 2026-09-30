@@ -136,8 +136,8 @@ class Cs2PuffeRL(PuffeRL):
 
     cont_action_view_main : np.ndarray or None
         Main-process view of the continuous-action shared array. train() allocates it and
-        passes it on BOTH backends (cs2rl.train.loop.train builds `_cont_action_view_main` before the
-        vecenv, unconditionally); only the harness passes None.
+        passes it on BOTH backends (cs2rl.train.loop.train builds `_cont_action_view_main`
+        before the vecenv, unconditionally); only the harness passes None.
     mask_view_main : np.ndarray
         Main-process view of the action-mask shared array (F8).
     participating_rows : np.ndarray

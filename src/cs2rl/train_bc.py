@@ -23,9 +23,8 @@ ticks and run the policy STATELESSLY — `policy(x, {})`, i.e. a T=1 sequence
 from a ZERO LSTM state on every tick. That premise is **stale**: it predates
 commit 456c361, which made PPO do true BPTT. Today
 
-  * PPO's rollout (`cs2rl.train.trainer.Cs2PuffeRL.evaluate` calling `forward_eval`) CARRIES
-    lstm_h/lstm_c from
-    tick to tick within an episode, and
+  * PPO's rollout (`cs2rl.train.trainer.Cs2PuffeRL.evaluate`) CARRIES lstm_h/lstm_c
+    from tick to tick within an episode (`forward_eval`), and
   * PPO's update (`cs2rl.policy.build_policy`'s `Dust2Policy.forward` → `_lstm_bptt`) unrolls a
     whole 64-tick segment through the LSTM in one call.
 
@@ -50,8 +49,7 @@ The fix, and the shape of this file:
     contaminate the hidden states that matter).
   * **The gate is a carried-state rollout.** `rollout_episode(..., carry_state=
     True)` drives the env with `forward_eval` and a persistent state dict,
-    byte-for-byte the loop `cs2rl.train.trainer.Cs2PuffeRL.evaluate`'s rollout runs. The
-    stateless number is
+    byte-for-byte the loop `cs2rl.train.trainer.Cs2PuffeRL.evaluate` runs. The stateless number is
     still printed, clearly labelled as a diagnostic — it is the quantity that
     lied, so it is worth watching, but it is NOT the gate.
 
@@ -536,8 +534,9 @@ def bc_loss(policy, obs_t, disc_t, cont_t, valid=None, entropy_coef: float = DEF
     the entropy bonus acts only on the discrete heads where it is wanted.
 
     No tanh/atanh change-of-variables: the head tanh-squashes the MEAN only
-    and samples a plain Normal (`cs2rl.policy.build_policy`'s `Dust2Policy.forward()`), so the density is the
-    plain Gaussian one — see spec D-6, verified against _hybrid_sample_logits.
+    and samples a plain Normal (`cs2rl.policy.build_policy`'s `Dust2Policy.forward()`),
+    so the density is the plain Gaussian one — see spec D-6, verified against
+    _hybrid_sample_logits.
     """
     import torch
 
@@ -717,8 +716,9 @@ def rollout_episode(policy,
 
     `carry_state=True` (the DEFAULT, and what the gate measures) threads one
     LSTM state dict through the whole episode, which is what
-    `cs2rl.train.trainer.Cs2PuffeRL.evaluate`'s rollout does and therefore what PPO inherits. `carry_state=False` resets to
-    zero state every tick; it exists only to print the historical stateless
+    `cs2rl.train.trainer.Cs2PuffeRL.evaluate`'s rollout does and therefore what PPO
+    inherits. `carry_state=False` resets to zero state every tick; it exists only to
+    print the historical stateless
     diagnostic alongside the real number. Never gate on the False variant.
 
     Returns a dict: planted (bool), ticks, and `first_obs` — the masked priming
