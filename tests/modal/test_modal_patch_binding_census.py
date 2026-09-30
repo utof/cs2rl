@@ -1,7 +1,7 @@
 """Static census of the original patch sites that install through `binding_target`.
 
-The campaign (tests/test_modal_patch_bindings.py and
-tests/modal_patch_binding_campaign.py) proves that `binding_target(site)`
+The campaign (tests/modal/test_modal_patch_bindings.py and
+tests/modal/modal_patch_binding_campaign.py) proves that `binding_target(site)`
 reaches each consumer at run time. This file proves, by reading source, that
 the ORIGINAL tests install their patches through `binding_target(site)` and
 not through a facade patch that would bypass it. It imports nothing from the
@@ -16,7 +16,7 @@ from tests.modal.modal_patch_binding_campaign import BINDING_SITES
 from tests.modal.modal_runner_tables import RUNNER_TEST_FILES
 
 # The seam's file-name constants, from the seam gate, as
-# tests/test_modal_runner_package_shape.py imports them: that module imports only
+# tests/modal/test_modal_runner_package_shape.py imports them: that module imports only
 # the stdlib, pytest, the tables and the campaign's data at module scope, so this
 # pulls in no runner module and keeps this file out of the runner's importers.
 from tests.modal.test_modal_packaging import CLIENT_FILE, SHARED_FILE
@@ -192,7 +192,7 @@ def _binding_site_violations(sources):
     for rel, source in sorted(sources.items()):
         tree = ast.parse(source)
         # The dotted `scripts.modal_runner` is always a facade spelling (see
-        # PITFALLS). `_production_package_surface` (tests/test_modal_client.py)
+        # PITFALLS). `_production_package_surface` (tests/modal/test_modal_client.py)
         # builds the same alias set its own way. Deliberately not shared: one
         # helper for both would be a new seam-governed name in a governed file,
         # so it is not a pure move.

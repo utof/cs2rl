@@ -4,12 +4,12 @@ WHY THIS FILE EXISTS. The transfer of StaticData from Python into C was
 rewritten (spec 2026-08-31 §2 W2): a 73-position PyArg_ParseTuple format string
 was replaced by a buffer Python packs field-by-field from StaticDataC. Every
 other guard around that boundary compares two DECLARATIONS — the layout hash
-(tests/test_static_data_layout.py), the sizeof/offsetof anchors
-(tests/test_struct_sizes.py) — and a declaration comparison is blind to the
+(tests/env/c/test_static_data_layout.py), the sizeof/offsetof anchors
+(tests/env/c/test_struct_sizes.py) — and a declaration comparison is blind to the
 thing a rewrite of the VALUE-ROUTING surface actually risks: the right number
 arriving in the wrong (correctly-described) field, or not arriving at all.
 
-The sentinel round trip in tests/test_struct_sizes.py covers the routing of
+The sentinel round trip in tests/env/c/test_struct_sizes.py covers the routing of
 every field make_env can set. What it cannot cover is the ~16 scalars make_env
 does NOT expose — the map-derived geometry (grid_x_min, inv_x_range, x_offset,
 ...) and the env/nav.py timing constants — which it checks by key presence only,
@@ -25,7 +25,7 @@ REGENERATING THE FIXTURE is legitimate when make_simple_map or an env/nav.py con
 changes on purpose, and at no other time. Regenerating it to make a failing
 packer change go green deletes the only evidence that the two transfers agree,
 which is the entire reason the file is committed. Command, from the repository
-root (`-m` so that `tests.test_struct_sizes`, the name pytest gives that module,
+root (`-m` so that `tests.env.c.test_struct_sizes`, the name pytest gives that module,
 resolves):
 
     UV_NO_SYNC=1 uv run python -m tests.env.c.test_static_data_pack --capture
@@ -87,7 +87,7 @@ def test_static_data_scalars_match_the_pre_w2_capture(simple_map):
     jump_enabled) cannot hold three distinct values inside a single env, so each
     is pinned by its vector of values across the two configs — the same
     pigeonhole argument spelled out at _BOOL_SENTINEL_CONFIGS in
-    tests/test_struct_sizes.py.
+    tests/env/c/test_struct_sizes.py.
 
     PITFALL: this reads the CURRENTLY BUILT .so. After editing src/cs2rl/env/c,
     rebuild before believing a pass OR a failure.
@@ -187,7 +187,7 @@ def test_spawn_array_tail_is_zeroed():
     The old transfer memcpy'd n_*_spawns elements into a calloc'd struct, so the
     slots past the count read as zero. static_data_scalars() excludes the array
     fields, so a packer that left garbage there would pass every other test in
-    this file and in tests/test_struct_sizes.py; only a byte-comparison of a
+    this file and in tests/env/c/test_struct_sizes.py; only a byte-comparison of a
     trained checkpoint would notice, and only if the sim happened to read those
     slots. Assert it directly instead.
     """
@@ -288,7 +288,7 @@ def test_init_rejects_a_short_buffer():
 def test_init_rejects_a_perturbed_layout_hash():
     """The hash must be CONSUMED, not merely accepted.
 
-    Nothing else checks this at RUNTIME: tests/test_static_data_layout.py
+    Nothing else checks this at RUNTIME: tests/env/c/test_static_data_layout.py
     compares the two sides at test time, so an implementation that took the
     argument and ignored it would pass every other check in the suite. What the
     runtime comparison catches is the case that actually happens — a .so built
@@ -324,7 +324,7 @@ def _capture():
     """Write the fixture from the CURRENT tree. Run via --capture, never by pytest.
 
     The kwarg sets are the distinct-sentinel configurations
-    tests/test_struct_sizes.py derives from the make_env signature; they are
+    tests/env/c/test_struct_sizes.py derives from the make_env signature; they are
     resolved once here and frozen into the fixture as literals, so the recorded
     values stay meaningful even if that generator is later changed.
     """

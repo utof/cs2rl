@@ -1,9 +1,9 @@
 """Behavior tests for scripts.modal_runner.request: run fields, resources, train args.
 
 One of the per-module runner test files (RUNNER_TEST_FILES in
-tests/modal_runner_tables.py). Before you add, move or delete a test here, or
+tests/modal/modal_runner_tables.py). Before you add, move or delete a test here, or
 add a helper, read THE PLACEMENT RULE FOR RUNNER TESTS in
-tests/test_modal_packaging.py: which file a test belongs in, what the change
+tests/modal/test_modal_packaging.py: which file a test belongs in, what the change
 costs in the seam manifest, and where helpers go.
 """
 import ast

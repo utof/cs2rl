@@ -1,4 +1,4 @@
-# tests/test_scripted_expert.py
+# tests/eval/test_scripted_expert.py
 """Regression tests for the extracted scripted bomber expert (Batch 6 Task 2).
 
 Contract under test (spec D-3/D-5 + Gate 0 measurement,

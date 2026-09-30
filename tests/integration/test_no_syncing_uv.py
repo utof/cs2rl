@@ -4,7 +4,7 @@ WHY: a git worktree here borrows main's .venv. A syncing `uv run` from it (one
 without --no-sync) re-installs the editable cs2rl pointing at the worktree and
 rebuilds main's binding .so in place, under the very pytest process that
 spawned it, which then segfaulted (#220). The defect has recurred: the W3b
-binding campaign, then tests/test_train_cli.py's --dump-config calls. Run
+binding campaign, then tests/train/test_train_cli.py's --dump-config calls. Run
 sys.executable instead (or `uv run --no-sync`).
 
 WHAT IS FLAGGED, by parsing each tests/**/*.py with `ast` (nothing is run):

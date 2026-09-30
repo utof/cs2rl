@@ -1086,7 +1086,7 @@ def test_prior_run_resume_sends_only_immutable_digest_path(fake_modal, tmp_path)
 # "ok" pseudo-case (success is `reason is None`; "ok" is never a token). gh#197:
 # this used to be a hand-written copy that nothing derived from
 # `verify_checkpoint`, so a token added there alone left every test here green.
-# Now the census in tests/test_modal_checkpoint.py
+# Now the census in tests/modal/test_modal_checkpoint.py
 # (`test_verify_checkpoint_fail_literals_are_exactly_the_reason_tokens`) ties the
 # function to the tuple, and the two parametrizes below grow with it.
 PROTOCOL_TOKENS = (*checkpoint.CHECKPOINT_REASON_TOKENS, "ok")
@@ -2387,7 +2387,7 @@ def test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe(fake_modal,
     take the other branch. An import smoke cannot see that. The module-shape
     gate is the sole objector, and its red half is
 
-        tests/test_modal_packaging.py::test_criterion_13_reddens_on_the_conditional_modal_probe
+        tests/modal/test_modal_packaging.py::test_criterion_13_reddens_on_the_conditional_modal_probe
 
     which names this test in return. Neither half means anything alone. This
     half lives here, next to `_container_equivalent_import`, because the
@@ -2561,7 +2561,7 @@ def test_gate_d_criterion_4_reddens_on_a_missing_src_and_on_an_undeclared_pin(fa
     the repository root, not a substring of the absolute path.
     """
     # Positive control, and the anchor that places this test: these two lines are
-    # its only reach into a `_CLIENT_BINDINGS` name (tests/test_modal_packaging.py).
+    # its only reach into a `_CLIENT_BINDINGS` name (tests/modal/test_modal_packaging.py).
     # Measured 2026-09-22 with classify_seam on the W3b tree: deleting them sends
     # this test to the runner half and `_mount_bijection_violations` and
     # `_scratch_package_mounts` to tests/modal_test_helpers.py, so the seam

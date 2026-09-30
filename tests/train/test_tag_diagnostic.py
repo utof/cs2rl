@@ -4,7 +4,7 @@ These tests exercise _hybrid_ppo_loss(return_pg_rows=True) and
 tag_grad_cossim on a real Dust2Policy via the bare make_puffer_env path (no
 trainer) — same fixture pattern as test_hybrid_loss_clip_applies_per_factor.
 Trainer-level contracts (inertness, row mask, no-perturbation) live in
-tests/test_tag_trainer.py.
+tests/train/test_tag_trainer.py.
 
 PITFALL: _flat_batch builds old logprobs with the SAME hand-rolled
 F.log_softmax / analytic-Normal forms _hybrid_ppo_loss uses — NOT

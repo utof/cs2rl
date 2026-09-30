@@ -11,7 +11,7 @@ outside any checkout the guard cannot tell, and main's copy runs silently (#242)
 
 WHY this file holds a docstring and nothing else (#204): it is in the import chain
 of every module below it, and `smoke_read` must run with no third-party import
-available (tests/test_rung1a_smoke_read.py launches it under `python -S`). A
+available (tests/experiment/test_rung1a_smoke_read.py launches it under `python -S`). A
 re-export here would put the re-exported module's imports into that chain, and
 would make runpy warn that the module was "found in sys.modules" before it ran as
 `__main__` under `-m`.

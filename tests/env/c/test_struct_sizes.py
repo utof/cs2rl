@@ -392,7 +392,7 @@ def test_static_data_scalars_round_trip(simple_map):
             # laser_range_sq is NOT a kwarg — it is derived from the laser_range
             # sentinel inside Cs2Env.__init__, so check the derivation rather than
             # a nav constant. The None ⇒ env/nav.py default path is covered by
-            # tests/test_env_knobs.py::test_default_knobs_match_nav_constants.
+            # tests/train/test_env_knobs.py::test_default_knobs_match_nav_constants.
             assert sc["laser_range_sq"] == pytest.approx(sentinels["laser_range"]**2)
             assert sc["laser_damage"] == nav.LASER_DAMAGE
             # Map-derived scalars. These are the only non-reward, non-nav values in

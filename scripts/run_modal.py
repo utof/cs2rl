@@ -315,7 +315,7 @@ def ensure_blob(volume: object, client_path: PurePosixPath, local_path: Path) ->
 #
 # This map stays TOTAL over `checkpoint.CHECKPOINT_REASON_TOKENS`, the
 # protocol's one source: `test_launch_checkpoint_errors_is_total`
-# (tests/test_modal_client.py) compares the two sets, and an AST census ties
+# (tests/modal/test_modal_client.py) compares the two sets, and an AST census ties
 # that tuple to `verify_checkpoint`'s own `fail("...")` literals, so a token
 # added to the protocol goes red until a row lands here (gh#197). Should one
 # slip through anyway, `prior_checkpoint_or_raise` falls back to

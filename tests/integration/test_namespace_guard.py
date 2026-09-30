@@ -10,7 +10,7 @@ sys.path, at the start, holds either name outside this checkout's root, and (d)
 fails a session that ends holding a `tests`/`scripts` module from anywhere but
 the place its dotted name implies in this checkout.
 
-1. Child pytest sessions, as in tests/test_checkout_resolution.py: each loads
+1. Child pytest sessions, as in tests/integration/test_checkout_resolution.py: each loads
 the real conftest as a plugin (`-p tests.conftest`) over one planted test, with
 a `pytest.ini` in its tmp dir so the repo's own config stays out of it.
   - (c) positive control: a tmp dir holding `tests/metrics_census_other.py` (no

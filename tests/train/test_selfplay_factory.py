@@ -529,7 +529,7 @@ def test_harness_given_manager_skips_the_builder(monkeypatch):
     """With ``self_play_mgr=`` given, the harness calls ``build_selfplay_manager`` 0 times.
 
     gh#168 W1.5 added the parameter so a test can seed a manager BEFORE construction the
-    way a resume does (tests/test_resume_state.py, tests/test_pitch_pin.py). The
+    way a resume does (tests/train/test_resume_state.py, tests/train/test_pitch_pin.py). The
     companion case above pins the 1-call path; without this one, a harness that built a
     second manager and silently discarded the given one would keep every test green
     (the trainer would carry the builder's manager, not the caller's). Same spy shape as

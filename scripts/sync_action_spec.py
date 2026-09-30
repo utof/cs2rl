@@ -41,7 +41,7 @@ def main() -> None:
 
     Every statement with a side effect (the header read, both writes, the prints)
     lives here, so loading the module binds only HEADER, OUTPUT and OBS_OUTPUT:
-    tests/test_path_constants_exist.py reads the two outputs with runpy.run_path
+    tests/integration/test_path_constants_exist.py reads the two outputs with runpy.run_path
     under a run_name other than __main__, which writes nothing.
     """
     text = HEADER.read_text()

@@ -284,7 +284,7 @@ def test_make_env_forwards_knobs(simple_map):
 def test_stance_knobs_reach_static_data_through_env_knobs(simple_map, flag):
     """Rung 1a T2b: --crouch-enabled / --jump-enabled reach StaticData through
     the PRODUCTION path (args → env_config_from_args → make_env), not just via a
-    direct make_env kwarg (that layer is covered by tests/test_pitch_pin.py).
+    direct make_env kwarg (that layer is covered by tests/train/test_pitch_pin.py).
 
     PITFALL: env_config_from_args stores these under EnvConfig FIELD names while
     the train() eval/driver agreement loop compares Cs2Env ATTRIBUTE names — the
@@ -312,7 +312,7 @@ def test_stance_knobs_reach_static_data_through_env_knobs(simple_map, flag):
 
 def test_jump_enabled_is_in_the_eval_driver_agreement_loop():
     """The loop lives in train.assert_eval_env_agreement, which
-    tests/test_env_factory.py::test_eval_env_agreement_two_directions calls
+    tests/env/test_env_factory.py::test_eval_env_agreement_two_directions calls
     directly — so the BEHAVIOUR (that a knob mismatch raises, from which check,
     with which message) is covered there, not here.
 
@@ -360,7 +360,7 @@ def test_cli_flags_declared_default_none():
     (⇒ env default) and has the matching dest. The modal arity mirror's flag
     names are checked against train.py by
     `test_live_train_option_mirror_matches_train_py` in
-    tests/test_modal_request.py."""
+    tests/modal/test_modal_request.py."""
     import re
     src = (REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py").read_text()
     for flag, dest, typ in (("--round-time-ticks", "round_time_ticks", "int"),

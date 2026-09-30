@@ -66,7 +66,7 @@ def test_opponent_is_mirrored_with_arity_one():
     """Rung 1a T3: `--opponent noop` is the whole point of the T4 launch, and it
     takes a VALUE — an arity-0 entry would make the runner treat "noop" as a
     stray positional and reject the launch (test_unconsumed_positional_tokens_
-    rejected). The name-set mirror is enforced in tests/test_modal_request.py
+    rejected). The name-set mirror is enforced in tests/modal/test_modal_request.py
     (`test_live_train_option_mirror_matches_train_py`)."""
     assert LIVE_TRAIN_OPTION_ARITY.get("--opponent") == 1
     assert validate_train_args(["--timesteps", "1000000", "--opponent", "noop",

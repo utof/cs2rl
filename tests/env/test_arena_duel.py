@@ -319,7 +319,7 @@ def test_config_env_label(tmp_path):
     every launch from this dump). --dust2 stays an alias; --map wins.
 
     Rung 1a T2b: `--jump-enabled` rides along on the arena-duel case. It is
-    otherwise pinned only at the args→knobs level (tests/test_env_knobs.py), so
+    otherwise pinned only at the args→knobs level (tests/train/test_env_knobs.py), so
     nothing covered the argparse→config.json leg — a flag that parsed but never
     reached the dump would launch T4 with jumping ON and the fingerprint would
     agree with itself.

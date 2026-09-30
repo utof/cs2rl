@@ -1,9 +1,9 @@
 """Behavior tests for scripts.modal_runner.preflight: prepare_remote_source, in order.
 
 One of the per-module runner test files (RUNNER_TEST_FILES in
-tests/modal_runner_tables.py). Before you add, move or delete a test here, or
+tests/modal/modal_runner_tables.py). Before you add, move or delete a test here, or
 add a helper, read THE PLACEMENT RULE FOR RUNNER TESTS in
-tests/test_modal_packaging.py: which file a test belongs in, what the change
+tests/modal/test_modal_packaging.py: which file a test belongs in, what the change
 costs in the seam manifest, and where helpers go.
 """
 import ast
@@ -208,12 +208,12 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
     reported as a problem, or the enumeration would not be evidence. Keep
     `routes` and the plants INSIDE this function: a module-level name in this
     file is a governed seam name and moves GOVERNED_NAME_COUNT
-    (tests/test_modal_packaging.py). The keys that are only READ back from the
+    (tests/modal/test_modal_packaging.py). The keys that are only READ back from the
     built kwargs and passed at no call site (`run_root`, `volume`,
     `archive_path`, `expected_tree`) are not here, by the same two-way rule:
     each would be an entry no call site passes. The enumerator (`last_name`,
     `call_site_keys`) is duplicated in `test_training_kwargs_routes_every_override`
-    (tests/test_modal_training.py), which asserts the two copies are AST-equal:
+    (tests/modal/test_modal_training.py), which asserts the two copies are AST-equal:
     change both together.
     """
     routes = {

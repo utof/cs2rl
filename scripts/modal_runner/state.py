@@ -471,7 +471,7 @@ def derive_run_view_from_bytes(
     test_path_derive_run_view_corrupt_status_is_validation_error pins it.
 
     Every spelling is pinned by the message table in
-    tests/test_modal_protocol.py. Adding or removing either clause silently
+    tests/modal/test_modal_protocol.py. Adding or removing either clause silently
     changes what an operator sees; change the pinned table first.
     """
     if status_bytes is not None:

@@ -36,7 +36,7 @@ _PREBUILT_LOAD_SOURCE = (
 # for each, and the protocol parametrizes in tests derive their cases from it.
 # Nothing at run time ties `verify_checkpoint`'s `fail("...")` literals to this
 # tuple, so `test_verify_checkpoint_fail_literals_are_exactly_the_reason_tokens`
-# (tests/test_modal_checkpoint.py) reads the function's AST and requires the two
+# (tests/modal/test_modal_checkpoint.py) reads the function's AST and requires the two
 # sets to be equal. Adding a token: add it here AND as a `fail("...")` literal,
 # then the launch sentence and a test case; every other pairing goes red on
 # its own. Success is `reason is None`, not a token: never add "ok".
@@ -64,7 +64,7 @@ class CheckpointVerdict:
     and `digest` are set; `ok=False` implies both are `None` and `reason` is
     one of `CHECKPOINT_REASON_TOKENS` (never `None`). `verify_checkpoint` builds
     every failure through its `fail("<token>")` closure, and the gh#197 census
-    in tests/test_modal_checkpoint.py rejects any other construction of a
+    in tests/modal/test_modal_checkpoint.py rejects any other construction of a
     failure verdict there; launch still falls back to "unknown" for a
     hand-built `reason=None` failure rather than trusting this. The payload field
     is the *checkpoint* bytes, never the sidecar's — launch uploads them under

@@ -50,7 +50,7 @@ OBS_VERSION = "v2-105dim"
 # deploy/CS2RLBot/CS2RLBot.cs loads. This file is
 # <repo>/src/cs2rl/deploy/export_mapdata.py, so parents[3] is the checkout root;
 # `Path(__file__).parent` would now be src/cs2rl/deploy/, which is not gitignored
-# (pinned by tests/test_export_mapdata.py).
+# (pinned by tests/deploy/test_export_mapdata.py).
 OUT_DIR = Path(__file__).resolve().parents[3] / "deploy" / "mapdata"
 
 

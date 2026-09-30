@@ -19,7 +19,7 @@ Contract pinned here (implemented in Cs2PuffeRL.train, src/cs2rl/trainer.py):
 
 Uses the minimal harness (src/cs2rl/train_test_harness.py), whose trainer is
 Cs2PuffeRL (gh#168 W1.5) whose train() is the return-norm body (a method since
-gh#168 W2a), same pattern as tests/test_train_env.py. One harness build serves all scenarios
+gh#168 W2a), same pattern as tests/train/test_train_env.py. One harness build serves all scenarios
 (builds cost ~5s each on the VM).
 """
 

@@ -34,7 +34,7 @@ from tests.modal.modal_runner_tables import (
 
 ROOT = REPO_ROOT
 # The one legal spelling of the runner package. The reach floor resolves a test
-# file's runner imports against it, and tests/test_modal_runner_package_shape.py
+# file's runner imports against it, and tests/modal/test_modal_runner_package_shape.py
 # records any absolute import of it from inside the package as an edge no table
 # allows. The bare spelling `modal_runner` is banned repo-wide by ruff's TID251
 # table in pyproject.toml.
@@ -72,29 +72,29 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 #
 # 287 is `len(classify_seam(_seam_sources(), RUNNER_TEST_FILES)[0])`, the count
 # after gh#211's signal-test fix. Against gh#163's 285: two runner-side tests
-# added in tests/test_modal_training.py
+# added in tests/modal/test_modal_training.py
 # (`test_publish_note_reaches_the_volume_in_the_right_commit`,
 # `test_a_signal_inside_finalize_does_not_finalize_again`), and one helper
 # renamed in place (`_record_hash_after_terminal` -> `_record_checkpoint_reads`,
 # a key rename that moves no count), nothing removed, no destination moves.
 # 285, after gh#163's W5 execute commit, against the W5 types fold's 283: two
-# runner-side tests added in tests/test_modal_training.py
+# runner-side tests added in tests/modal/test_modal_training.py
 # (`test_training_kwargs_routes_every_override`, the training builder's
 # self-test, and `test_process_control_tripwire_guards_the_resolution_path`, the
 # tripwire's resolution-path control), nothing removed, no destination moves.
 # 283, after the fold of the W5 types reviews, against the W5 prepare commit's
-# 282: one runner-side helper added in tests/test_modal_training.py
+# 282: one runner-side helper added in tests/modal/test_modal_training.py
 # (`_KillSeamClauses`, the static kill-seam clauses moved out of
 # `test_kill_seam_static_safety` so that each checker is measured on its own),
 # nothing removed, no destination moves. 282, after the W5 prepare commit,
 # against the W5 types commit's 281: one
-# runner-side test added in tests/test_modal_preflight.py
+# runner-side test added in tests/modal/test_modal_preflight.py
 # (`test_preflight_kwargs_routes_every_override`), and one renamed in place
 # (`test_prepare_records_install_dump_probe_then_launch` ->
 # `test_prepare_records_install_dump_probe_in_order`, a key rename that moves
 # no count), nothing removed, no destination moves. 281, after the types
 # commit, against the W4 per-module tree's 279: two
-# runner-side tests added in tests/test_modal_training.py
+# runner-side tests added in tests/modal/test_modal_training.py
 # (`test_kill_seam_static_safety`, `test_process_control_tripwire_poisons_system`),
 # nothing removed, no destination moves. 279 was the count after the
 # process-group guard commit (gh#163), when the declared runner set was still
@@ -116,14 +116,14 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 #
 # 295, after gh#238 on top of main's 291 (gh#197's census follow-up added
 # `_verify_checkpoint_census` and `test_verify_checkpoint_census_rejects_bypass_mutants`
-# in tests/test_modal_checkpoint.py to the earlier 289): four names in
-# tests/test_modal_training.py, the finalize kill-path pins:
+# in tests/modal/test_modal_checkpoint.py to the earlier 289): four names in
+# tests/modal/test_modal_training.py, the finalize kill-path pins:
 # `test_a_hung_heartbeat_does_not_strand_the_run_in_training` (P3),
 # `test_a_signal_while_taking_the_once_gate_returns_at_once` (P2),
 # `test_finalize_kills_the_child_before_joining_the_tees` (P1) and its stream
 # helper `_BlockingStream`. (The P2 lock double is a class nested in its test,
 # so it is not a governed name.) 299, after gh#243: four more names in
-# tests/test_modal_training.py, the production-order default for the signal
+# tests/modal/test_modal_training.py, the production-order default for the signal
 # tests: `_interrupt_in_production_order`, `_SIGNAL_HOOKS_RELEASE_ALLOWLIST`,
 # `_SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST` and the static census
 # `test_signal_tests_fire_handlers_in_production_order`.
@@ -134,7 +134,7 @@ GOVERNED_NAME_COUNT = 299
 #
 # A runner test lives in tests/test_modal_<m>.py, the file of the module m (in
 # `RUNNER_MODULES`) whose behaviour it tests; `RUNNER_TEST_FILES` in
-# tests/modal_runner_tables.py lists those files. Tests reach private library
+# tests/modal/modal_runner_tables.py lists those files. Tests reach private library
 # names through their owning submodules; the package facade exposes the
 # production caller surface. The seam manifest
 # (tests/fixtures/modal_test_seam_manifest.json) records each test's file, and
@@ -152,7 +152,7 @@ GOVERNED_NAME_COUNT = 299
 #     commit with the reason in the commit message; deleting one: the reverse;
 #     moving one to another runner file: its manifest value, and the count stays;
 #   * a helper goes where the tests that reach it are: to their file if they all
-#     sit in one seam file, else to tests/modal_test_helpers.py (THE MEMBERSHIP
+#     sit in one seam file, else to tests/modal/modal_test_helpers.py (THE MEMBERSHIP
 #     RULE FOR THE SHARED FILE, below). `classify_seam` computes it. A helper is
 #     a governed name too (any module-level def, class or constant of a seam
 #     file), so adding or deleting one costs the same manifest line and count
@@ -171,19 +171,19 @@ GOVERNED_NAME_COUNT = 299
 # THE KILL SEAM. A test that drives the training attempt, in any file, follows
 # the kill-seam rules as well as this one. It hands the attempt a
 # `training.ProcessControl` whose `spawn`, `getpgid` and `killpg` are fakes:
-# `_training_kwargs` in tests/test_modal_training.py always builds one, and a
+# `_training_kwargs` in tests/modal/test_modal_training.py always builds one, and a
 # client test's execute wrapper builds its own with all four fields as
 # keywords. No test passes the real OS functions, and none but the two
 # tripwire tests reads `ProcessControl.system`; a test that leaves `process`
 # out meets the autouse tripwire in tests/conftest.py, which makes `system()`
 # raise under pytest. `test_kill_seam_static_safety`
-# (tests/test_modal_training.py) checks the rules by AST, over tests/, every
+# (tests/modal/test_modal_training.py) checks the rules by AST, over tests/, every
 # module of the runner package and scripts/run_modal.py, and says why each
 # exists.
 #
 # THE DECLARED RUNNER SET is `RUNNER_TEST_FILES` itself, read under that one
 # name by `_seam_sources`, the live `classify_seam` calls, the reach floor and
-# the binding census (tests/test_modal_patch_binding_census.py). There is no
+# the binding census (tests/modal/test_modal_patch_binding_census.py). There is no
 # alias for it here any more: with the old one (`RUNNER_FILES`) widened by one
 # file and a request test moved into that file, the floor and the census
 # stopped reading the test with every gate green, because
@@ -197,7 +197,7 @@ GOVERNED_NAME_COUNT = 299
 CLIENT_FILE = "tests/modal/test_modal_client.py"
 PACKAGING_FILE = "tests/modal/test_modal_packaging.py"
 
-# THE MEMBERSHIP RULE FOR THE SHARED FILE. `tests/modal_test_helpers.py` exists
+# THE MEMBERSHIP RULE FOR THE SHARED FILE. `tests/modal/modal_test_helpers.py` exists
 # as of W2's split and carries these words in its own docstring, which is where a
 # reader opening that file will look for them. This copy is the one the
 # classifier sits next to; they must not drift.
@@ -214,7 +214,7 @@ PACKAGING_FILE = "tests/modal/test_modal_packaging.py"
 #
 # WHY write down a rule the classifier already computes. Spec §10 criterion 12
 # bans a module named `utils` / `helpers` / `common` / `misc`. Its instrument,
-# the `forbidden-name` clause in tests/test_modal_runner_package_shape.py, reads
+# the `forbidden-name` clause in tests/modal/test_modal_runner_package_shape.py, reads
 # only the `scripts/modal_runner/` submodules, so a test module is outside its
 # scope and there is no conflict here. But the criterion exists because a module
 # named for what it IS rather than for what it OWNS becomes a junk drawer, and
@@ -244,7 +244,7 @@ SEAM_GUARDS = frozenset({
 # measured at 2bb32ac, by AST over the module-level bindings of every collected
 # `tests/test_*.py`. They are that tree's values, not current ones: the file
 # counts rise whenever a new test file defines its own `ROOT`, which W3b's
-# `tests/test_modal_runner_package_shape.py` does.
+# `tests/modal/test_modal_runner_package_shape.py` does.
 #
 # `ROOT` is `Path(__file__).resolve().parents[1]` -- module-header boilerplate
 # that every destination file defines for itself. Since #207 it is no longer
@@ -254,7 +254,7 @@ SEAM_GUARDS = frozenset({
 # requires every `SEAM_HEADER_NAMES` name in every destination (below). At 2bb32ac,
 # 6 files define a `ROOT` of their own (`test_modal_argv.py`,
 # `test_modal_client.py`, `test_modal_packaging.py`, `test_modal_protocol.py`,
-# `test_modal_runner.py`, `test_train_loop_timing.py`). `tests/modal_test_helpers.py`
+# `test_modal_runner.py`, `test_train_loop_timing.py`). `tests/modal/modal_test_helpers.py`
 # defines one too and is correctly absent from that list: it is outside the
 # `test_*.py` glob this sentence scopes by.
 #
@@ -925,7 +925,7 @@ _REACH_EXEMPTIONS: dict[tuple[str, str], tuple[frozenset[str], str]] = {
 # aliases that runner imports bind unconditionally at module level, in the
 # test's file and in the file of each helper it reaches; move one into a
 # function or under an `if`/`try` and a test loses reach it really has
-# (tests/modal_test_helpers.py's imports carry the core file's manifest test to
+# (tests/modal/modal_test_helpers.py's imports carry the core file's manifest test to
 # `core`). A runner name imported by itself credits nothing either, but the
 # split test rejects that import before it runs the floor
 # (`_runner_imports_the_floor_cannot_resolve`), so on the real tree this remedy
@@ -1363,7 +1363,7 @@ def _binding_target_key(call):
     """The literal site key of a `binding_target("key")` call, else None.
 
     Only the bare-name spelling counts, as in the binding census
-    (tests/test_modal_patch_binding_census.py matches `func.id` the same way),
+    (tests/modal/test_modal_patch_binding_census.py matches `func.id` the same way),
     so the two instruments agree on what a `binding_target` call is.
     """
     if getattr(call.func, "id", None) != "binding_target" or not call.args:
@@ -2393,7 +2393,7 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
       come from `_module_level_names`, which is a DICT -- so two module-level
       definitions of one name inside ONE file collapse to a single entry and the
       list length stays 1. Appending a second `PINNED_CUDA_IMAGE` to
-      tests/test_modal_client.py gave `3 passed`. That is precisely the failure
+      tests/modal/test_modal_client.py gave `3 passed`. That is precisely the failure
       `duplicated`'s own message describes, in the only arrangement Python
       actually permits: you cannot have two live definitions across two files,
       but you can inside one, where the second silently shadows the first. Step
@@ -3582,8 +3582,8 @@ def _runner_module_population(repo_root):
     seven. `__init__.py` is excluded: it is the facade and declares nothing.
     Its module scope has a stricter rule of its own (docstring, one-dot
     relative imports, a literal `__all__`), `_facade_violations` in
-    tests/test_modal_runner_package_shape.py; the surface gates in
-    tests/test_modal_client.py pin the names it exports.
+    tests/modal/test_modal_runner_package_shape.py; the surface gates in
+    tests/modal/test_modal_client.py pin the names it exports.
     pathlib's `*` also matches dotfiles, and `*.py` matches a directory so
     named. The mount loop globs both too: a regular dotfile ships, while a
     dangling one (an Emacs `.#core.py` lock is a dangling symlink) and the
@@ -3606,7 +3606,7 @@ def _is_type_checking_test(test):
     The one definition of a `TYPE_CHECKING` block for every gate that reads
     one: gate (e) exempts its body from the purity check, gate (g) allows one
     imports-only block at module scope, and the package-shape dependency walk
-    (tests/test_modal_runner_package_shape.py) files its imports under
+    (tests/modal/test_modal_runner_package_shape.py) files its imports under
     ANNOTATION_DEPENDENCIES. They used to hold three copies of this test, and a
     copy that drifted would make one gate exempt a block another calls illegal.
 
@@ -3866,7 +3866,7 @@ def test_gate_e_criterion_5_reddens_on_plants_the_tree_body_instrument_misses(tm
         exemption's clothes.
       * the function-body `import torch` row is the NEGATIVE control that
         separates this instrument from bare `ast.walk`. It is the shape the stub
-        uses twice, so tests/test_modal_runner_package_shape.py's
+        uses twice, so tests/modal/test_modal_runner_package_shape.py's
         `test_package_import_purity_scans_every_module` already objects to
         descending -- this row says so where a reader of the
         instrument is standing.
@@ -4096,12 +4096,12 @@ def test_criterion_13_reddens_on_the_conditional_modal_probe(tmp_path):
     is the second block below. Criterion 3's half is a shipped test in the other
     file:
 
-        tests/test_modal_client.py::test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe
+        tests/modal/test_modal_client.py::test_gate_a_criterion_3_stays_green_on_a_conditional_modal_probe
 
     which names this test by node id in return. It lives there rather than here
-    because `tests/test_modal_packaging.py` imports no module under tests/ but
-    two it reads data from, tests/modal_runner_tables.py and the
-    `BINDING_SITES` dict of tests/modal_patch_binding_campaign.py, and that
+    because `tests/modal/test_modal_packaging.py` imports no module under tests/ but
+    two it reads data from, tests/modal/modal_runner_tables.py and the
+    `BINDING_SITES` dict of tests/modal/modal_patch_binding_campaign.py, and that
     exclusion is load-bearing -- `_seam_sources()` omits this file because
     self-feeding the classifier returns a poisoned destination count -- so
     duplicating that gate's subprocess helper into this file would put two copies
@@ -4293,7 +4293,7 @@ def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_b
     gate that simply rejects every one of them is observationally identical to
     a correct gate on all three red knock-outs. Row 1 says the construct is
     ALLOWED. On the live package, commands.py and preflight.py each hold one
-    such block, so tests/test_modal_runner_package_shape.py's
+    such block, so tests/modal/test_modal_runner_package_shape.py's
     `test_package_structure_contract` and
     `test_package_header_accepts_import_only_type_checking` say so as well.
 
@@ -4320,7 +4320,7 @@ def test_gate_g_criterion_13_allows_exactly_one_type_checking_block_recognised_b
     reddens here, which is row 6.
 
     The helper's no-else clause has no row here. Its control is
-    tests/test_modal_runner_package_shape.py's
+    tests/modal/test_modal_runner_package_shape.py's
     `test_package_ownership_and_header_controls[else]`, which plants into an
     in-memory copy of the live package's sources and runs the combined
     instrument over it; criterion 5

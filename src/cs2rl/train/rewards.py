@@ -186,7 +186,7 @@ def process_step_rewards(
          Python-float (float64) math matches neither. The association order
          (combat + objective) + positional is likewise preserved.
          If a future torch release changes this lowering,
-         tests/test_reward_loop_equivalence.py fails on the affected device —
+         tests/train/test_reward_loop_equivalence.py fails on the affected device —
          that is the intended tripwire, so fix the formula rather than the test.
       3. symlog is applied once on device to the assembled vector — never on the
          host scalars — so the log1p rounding matches the old path bit for bit.

@@ -6,7 +6,7 @@ symlink to main's, outside the worktree root, so there `<root>/.venv/bin/pytest`
 never resolves under the root at all.
 
 The hook is tested in child pytest sessions that load the real conftest as a
-plugin (`-p tests.conftest`, as tests/test_pytest_tmp_isolation.py does) over a
+plugin (`-p tests.conftest`, as tests/integration/test_pytest_tmp_isolation.py does) over a
 planted test, in a normal session with the imports in the test body and under
 --collect-only with the imports at module scope. The plant imports
 `src/cs2rl/spec/paths.py`, a light module, as `cs2rl.spec.paths` and, in the two-name

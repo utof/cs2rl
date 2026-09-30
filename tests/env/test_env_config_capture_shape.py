@@ -1,7 +1,7 @@
 """Shape self-check for `tests/fixtures/env_config_pre_165b.json` (spec Phase B §8.2).
 
 WHY THIS FILE EXISTS. That fixture is PR B2's entire oracle: B2 rewrites the six
-role builders and `tests/test_env_factory.py` compares the result against this
+role builders and `tests/env/test_env_factory.py` compares the result against this
 JSON. B1 captures and commits it and then never reads it, so between the two PRs
 a truncated, half-written or hand-edited fixture has NOTHING watching it — B2
 would be measured against a broken oracle, and would look green while migrating

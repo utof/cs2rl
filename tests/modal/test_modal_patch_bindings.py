@@ -636,7 +636,7 @@ def test_stimulus_describes_every_binding_site():
     The companion records `_STIMULUS[site]` for each parametrized site, so a
     missing entry is a KeyError there, but an entry left behind by a deleted
     site would never be read. The static census
-    (tests/test_modal_patch_binding_census.py) holds `_ORIGINAL_SITES` to the
+    (tests/modal/test_modal_patch_binding_census.py) holds `_ORIGINAL_SITES` to the
     same keys.
     """
     assert set(_STIMULUS) == set(BINDING_SITES)

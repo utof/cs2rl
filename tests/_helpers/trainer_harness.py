@@ -25,7 +25,7 @@ What's stripped vs. production ``src.train.train()``:
 Design contract:
     - Public API is ``_build_trainer_for_test(...)``, which returns
       ``(trainer, cleanup)`` with ``type(trainer) is trainer.Cs2PuffeRL``
-      (pinned by tests/test_trainer_composition.py), plus (gh#168 W1)
+      (pinned by tests/train/test_trainer_composition.py), plus (gh#168 W1)
       ``_harness_parts(...)``, which returns everything built BEFORE the
       trainer constructor so a test can construct ``Cs2PuffeRL(**parts)``
       itself. Tuple rather than contextmanager because
@@ -55,7 +55,7 @@ from cs2rl.train.selfplay import build_selfplay_manager
 
 # The harness's four env-knob defaults are the dataclass's, read once rather
 # than copied. Four literals here would be four more places #165 has to keep in
-# step with env/config.py, and tests/test_no_restated_env_defaults.py fails on
+# step with env/config.py, and tests/integration/test_no_restated_env_defaults.py fails on
 # exactly that shape — including the `: int = <literal>` spelling, which a
 # regex written for `name = value` alone cannot see.
 _ENV_DEFAULTS = EnvConfig()
@@ -91,7 +91,7 @@ def _harness_parts(
     vector and the (possibly pre-seeded) self-play manager BEFORE constructing the
     trainer, because Cs2PuffeRL.__init__ reads both at patch time. The harness used
     to build them after a bare PuffeRL and hand them to the patchers one by one. This
-    is the same hoist, so tests/test_trainer_composition.py can construct the
+    is the same hoist, so tests/train/test_trainer_composition.py can construct the
     production class from the harness's parts, and (W1.5) ``_build_trainer_for_test``
     itself returns that class with no further re-ordering.
     Measured neutral: build_participating_rows is pure and SelfPlayManager.__init__
@@ -102,9 +102,9 @@ def _harness_parts(
     The None is also explicit in ``parts`` for ``Cs2PuffeRL(**parts)``.
 
     ``self_play_mgr`` (gh#168 W1.5): a caller-built SelfPlayManager is used AS IS and
-    ``build_selfplay_manager`` is not called (tests/test_selfplay_factory.py spies on
+    ``build_selfplay_manager`` is not called (tests/train/test_selfplay_factory.py spies on
     that call and must see exactly one when nothing is given). The two tests that need
-    their own manager (tests/test_resume_state.py, tests/test_pitch_pin.py) used to
+    their own manager (tests/train/test_resume_state.py, tests/train/test_pitch_pin.py) used to
     apply the self-play monkey-patch a second time on top of the harness's; now
     ``Cs2PuffeRL._init_selfplay`` reads the manager once. Its pool is read only inside evaluate(),
     so a caller may seed it AFTER construction.
@@ -205,14 +205,14 @@ def _harness_parts(
             # test, and #165 PR B2 changed which.
             # tests/fixtures/env_config_pre_165b.json holds the config and runtime
             # kwargs this call produced before the builders were typed, and
-            # tests/test_env_factory.py drives this closure against both harness rows
+            # tests/env/test_env_factory.py drives this closure against both harness rows
             # (test_harness_call_site_forwards_the_captured_kwargs). Those two rows
             # differ from each other in n_active_per_team and jump_enabled, so the
             # fixture sees either of THOSE dropped from the mapping — but both rows
             # hold the FIELD DEFAULT for pin_pitch and for crouch_enabled, so it is
             # blind to either of those two going missing.
             #   pin_pitch     is caught outside this file, by
-            #                 tests/test_pitch_pin.py::test_env_trainer_pin_agreement_raises:
+            #                 tests/train/test_pitch_pin.py::test_env_trainer_pin_agreement_raises:
             #                 it builds a harness trainer with a non-default pin and
             #                 then calls assert_pin_pitch_agreement, which reads
             #                 StaticData.pin_pitch off the DRIVER ENV and compares it
@@ -222,7 +222,7 @@ def _harness_parts(
             #   crouch_enabled is caught by NOTHING ELSE — no test in the tree passes
             #                 it to _build_trainer_for_test. Its only cover is
             #                 test_harness_config_carries_the_knobs_no_fixture_row_varies
-            #                 in tests/test_env_factory.py, which drives this closure
+            #                 in tests/env/test_env_factory.py, which drives this closure
             #                 off-fixture with a non-default crouch. Delete that test
             #                 and this comment becomes false in the same edit.
             env = build_env_for("harness",
@@ -333,7 +333,7 @@ def _harness_parts(
         # build_selfplay_manager's, taking the FLAG, so all three sites collapse onto
         # one call and the branch disappears with them. The pre-migration shapes of
         # all three are frozen in tests/fixtures/selfplay_kwargs_pre_w3.json and
-        # tests/test_selfplay_factory.py asserts the builder still produces each —
+        # tests/train/test_selfplay_factory.py asserts the builder still produces each —
         # which is the only oracle here, since the §3 gate runs --no-self-play and
         # nothing on this branch reaches the harness at all.
         if self_play_mgr is None:
@@ -352,7 +352,7 @@ def _harness_parts(
             # above, before mkdtemp) is re-run on the manager here, not
             # replaced. `aim_log_std_max` is trusted: the
             # manager only forwards it to past-policy loading, which the two
-            # current callers (tests/test_resume_state.py, tests/test_pitch_pin.py)
+            # current callers (tests/train/test_resume_state.py, tests/train/test_pitch_pin.py)
             # never reach with a non-default cap.
             assert_opponent_self_play_compatible(opponent, self_play_mgr.p_past > 0)
             assert (self_play_mgr.opponent_mode == opponent
@@ -436,7 +436,7 @@ def _build_trainer_for_test(
         — full N-vs-N, i.e. an all-ones participation mask — which is what every
         pre-Rung-0 harness caller gets. Named, never spelled: a literal here is
         a second declaration of the value, and it sits on a different line from
-        the parameter so tests/test_no_restated_env_defaults.py's line probe
+        the parameter so tests/integration/test_no_restated_env_defaults.py's line probe
         cannot see it go stale.
     map_data : MapData or None
         R0-E: the map every env is built on. None ⇒ ``make_simple_map()`` (the
@@ -486,8 +486,8 @@ def _build_trainer_for_test(
         The production trainer class (gh#168 W1.5), fully composed: return-norm
         train(), hybrid-aim buffers, self-play evaluate(), full checkpointing
         save_checkpoint() and ``_timing`` are all present, exactly as train()
-        builds it (tests/test_trainer_composition.py pins the surface, and
-        tests/test_train_harness_smoke.py the stock attributes).
+        builds it (tests/train/test_trainer_composition.py pins the surface, and
+        tests/train/test_train_harness_smoke.py the stock attributes).
     cleanup : Callable[[], None]
         Idempotent teardown: closes the vecenv, wipes the scratch checkpoint
         dir. Tests MUST call this in a ``finally:`` to avoid leaking fd's /
@@ -506,7 +506,7 @@ def _build_trainer_for_test(
     # W1): trainer.py subclasses PuffeRL, so it imports torch, and train, at module
     # scope. At THIS module's scope, `from cs2rl import train_test_harness` would load
     # torch, cs2rl.train and cs2rl.trainer, none of which it loads today (the torch is
-    # what tests/test_w1_modules.py::test_import_train_test_harness_stays_light catches).
+    # what tests/train/test_w1_modules.py::test_import_train_test_harness_stays_light catches).
     # It would not be a cycle: with it at module scope, importing this module alone, or
     # train first and then this module, still succeeds.
     from cs2rl.train.trainer import Cs2PuffeRL
@@ -542,7 +542,7 @@ def _build_trainer_for_test(
     # NOT cover is the Utilization thread PuffeRL.__init__ starts: it is
     # non-daemon and only its own stop() ends it, so a raise AFTER
     # super().__init__ would hang the interpreter at exit. Cs2PuffeRL.__init__
-    # stops it itself on that path (tests/test_trainer_composition.py pins it).
+    # stops it itself on that path (tests/train/test_trainer_composition.py pins it).
     try:
         trainer = Cs2PuffeRL(**parts)
     except BaseException:

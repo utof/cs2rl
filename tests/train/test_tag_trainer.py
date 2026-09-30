@@ -2,7 +2,7 @@
 
 Uses train_test_harness._build_trainer_for_test, whose trainer is Cs2PuffeRL
 (gh#168 W1.5), whose train() is the return-norm body (a method since gh#168
-W2a), the same pattern as tests/test_warmstart_entropy_trainer.py. Config keys
+W2a), the same pattern as tests/train/test_warmstart_entropy_trainer.py. Config keys
 (target_kl, tag_*) are injected into trainer.config after construction; they
 are read per train() call, not at construction.
 

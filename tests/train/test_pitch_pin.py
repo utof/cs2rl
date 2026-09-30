@@ -97,7 +97,7 @@ def test_jump_masked_when_disabled(simple_map):
 
 def _place_duel(env):
     """Agent 0 (T) and agent 5 (CT) 40u apart in agent 0's spawn room, agent 0
-    facing agent 5 dead-on (same pattern as tests/test_stepstats_export.py)."""
+    facing agent 5 dead-on (same pattern as tests/env/c/test_stepstats_export.py)."""
     env.reset()
     ag = env._c_env.game.agents
     a0, a5 = ag[0], ag[5]

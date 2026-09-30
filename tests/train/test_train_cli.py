@@ -155,7 +155,7 @@ def test_warmstart_entropy_config_keys(tmp_path):
 def test_reward_weight_config_keys_default_to_make_env_values(tmp_path):
     """Every threaded weight lands in config.json at its make_env default.
 
-    Together with tests/test_env_config.py (which pins the declaration
+    Together with tests/env/test_env_config.py (which pins the declaration
     itself, on RewardWeights) this is the "unflagged run is identical to
     today" guarantee, verified through the REAL argparse surface: a typo'd
     dest= or a missing add_argument would leave the key at the getattr
@@ -341,7 +341,7 @@ def test_opponent_noop_without_no_self_play_is_refused_at_startup(tmp_path):
 
 def test_opponent_flag_declared_with_both_modes():
     """Source-scan pin, same rationale as test_cli_flags_declared_default_none
-    in tests/test_env_knobs.py (the parser is built inline under
+    in tests/train/test_env_knobs.py (the parser is built inline under
     `if __name__ == "__main__"` and cannot be imported): the flag must offer
     both modes and default to the historical one.
 

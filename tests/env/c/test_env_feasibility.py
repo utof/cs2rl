@@ -1,4 +1,4 @@
-# tests/test_env_feasibility.py
+# tests/env/c/test_env_feasibility.py
 import math
 
 import numpy as np

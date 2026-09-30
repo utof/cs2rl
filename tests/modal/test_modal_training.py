@@ -1,9 +1,9 @@
 """Behavior tests for scripts.modal_runner.training: the attempt, publication, supervision.
 
 One of the per-module runner test files (RUNNER_TEST_FILES in
-tests/modal_runner_tables.py). Before you add, move or delete a test here, or
+tests/modal/modal_runner_tables.py). Before you add, move or delete a test here, or
 add a helper, read THE PLACEMENT RULE FOR RUNNER TESTS in
-tests/test_modal_packaging.py: which file a test belongs in, what the change
+tests/modal/test_modal_packaging.py: which file a test belongs in, what the change
 costs in the seam manifest, and where helpers go.
 
 THE KILL SEAM. A test that drives the training attempt takes its arguments
@@ -250,9 +250,9 @@ def test_training_kwargs_routes_every_override(tmp_path):
     reported as a problem, or the enumeration would not be evidence. Keep
     `routes` and the plants INSIDE this function: a module-level name in this
     file is a governed seam name and moves GOVERNED_NAME_COUNT
-    (tests/test_modal_packaging.py). The enumerator (`last_name`,
+    (tests/modal/test_modal_packaging.py). The enumerator (`last_name`,
     `call_site_keys`) is duplicated in `test_preflight_kwargs_routes_every_override`
-    (tests/test_modal_preflight.py) for the same reason, so this test asserts
+    (tests/modal/test_modal_preflight.py) for the same reason, so this test asserts
     the two copies are AST-equal (`ast.dump`, docstrings included): change
     both together, or this goes red. A planted one-token edit of the other
     copy must make them differ, or the comparison would not be evidence.
@@ -1820,7 +1820,7 @@ def test_a_signal_while_taking_the_once_gate_returns_at_once(tmp_path, monkeypat
     the lock the outer finalize still holds.)
 
     The double replaces `training.threading.Lock` (the sanctioned shape:
-    tests/test_modal_patch_bindings.py's attempt rows), which training.py
+    tests/modal/test_modal_patch_bindings.py's attempt rows), which training.py
     builds once, for `cleanup_lock`. On the FIRST acquire that returns True,
     reached through `acquire(...)` or `__enter__` (the same instant on the old
     and the new code), it calls the attempt's SIGTERM handler nested, before
@@ -2288,7 +2288,7 @@ class _KillSeamClauses:
     count a nested def inside its parent (50 / 222 at the W5 types commit). As
     methods each is measured, and read, on its own. The class is ONE governed
     seam name (tests/fixtures/modal_test_seam_manifest.json and
-    GOVERNED_NAME_COUNT in tests/test_modal_packaging.py): module-level checker
+    GOVERNED_NAME_COUNT in tests/modal/test_modal_packaging.py): module-level checker
     functions or plant tables would each be another, so keep every checker,
     table and plant inside it.
 
@@ -2356,7 +2356,7 @@ class _KillSeamClauses:
     # makes a file that owns a row red on any import of `RUNNER_PACKAGES` (`_runner_imports`),
     # in every Import/ImportFrom spelling `_runner_imports` reads: `import
     # scripts.modal_runner.training`, `from scripts.modal_runner import training`, `from
-    # scripts import modal_runner`, and the same for tests/modal_test_helpers.py, which binds
+    # scripts import modal_runner`, and the same for tests/modal/modal_test_helpers.py, which binds
     # `training` and the package at module level (a one-hop re-export). WATCHED: (iv)'s population
     # requires every row here to have examined a banned load on the real tree, so a renamed
     # function, a deleted file or a dropped kill turns the test red, not silently green
@@ -2378,7 +2378,7 @@ class _KillSeamClauses:
     # one hop without spelling `scripts.`. PITFALL: the entry script's and the helper's
     # dotted names are DERIVED from their path constants, never spelled: any string constant
     # in this class or its test containing the entry script's dotted name is the
-    # `_CLIENT_MODULES` seed of tests/test_modal_packaging.py (`_reaches_client_directly`, a
+    # `_CLIENT_MODULES` seed of tests/modal/test_modal_packaging.py (`_reaches_client_directly`, a
     # substring match that reads docstrings too), which reclassifies both to the client file
     # and turns the split red. The helper's is derived the same way so the two stay alike.
     HELPERS = "tests/modal/modal_test_helpers.py"
@@ -2882,7 +2882,7 @@ class _KillSeamClauses:
     @classmethod
     def hygiene_kills_and_the_sigterm_test(cls, seen):
         """(iv)'s population. `seen` holds the real-SIGTERM test's allowed call, as
-        `tests/test_modal_training.py:<line>`, and one `<file>::<function>` per exempt load;
+        `tests/modal/test_modal_training.py:<line>`, and one `<file>::<function>` per exempt load;
         it must hold the first and every KILL_HYGIENE_EXEMPT row. A row whose function no
         longer loads a banned name (renamed, its file deleted, its kill dropped) fails here,
         so the allow-set cannot go stale and stay green. The line form is matched on digits,
@@ -3520,7 +3520,7 @@ def test_kill_seam_static_safety():
     `training`), the rest of the runner package from that file's directory,
     scripts/run_modal.py and every tests/*.py from disk. The "runner" source
     set (the package and scripts/run_modal.py) must hold every module that
-    tests/modal_runner_tables.py declares, so a new module is read from the
+    tests/modal/modal_runner_tables.py declares, so a new module is read from the
     day it is declared.
 
     THE CLAUSES, each a checker with its plants in `_KillSeamClauses` above.
@@ -3552,7 +3552,7 @@ def test_kill_seam_static_safety():
             not the seam, which is Modal's ProcessControl: because the exemption
             is per function, not per load, a file that owns a row is also red
             on any import of `scripts.modal_runner`, scripts/run_modal.py or
-            tests/modal_test_helpers.py, which re-exports the runner
+            tests/modal/modal_test_helpers.py, which re-exports the runner
             (`RUNNER_PACKAGES`, in every Import/ImportFrom spelling
             `_runner_imports` reads), so an exempt function cannot hand the
             real `os.killpg` to the runner.
@@ -3733,7 +3733,7 @@ def test_signal_tests_fire_handlers_in_production_order():
          passed through another def.
       3. Aliases that are not a bare `Name` load: `module._signal_hooks`, or
          `globals()["_signal_hooks"]` (rule 0 catches the bare-name alias only).
-      4. Other test files: this reads tests/test_modal_training.py only.
+      4. Other test files: this reads tests/modal/test_modal_training.py only.
       5. A parametrized test where one arm opts out is allow-listed whole (none
          after gh#243 rewrote the hung-heartbeat test's hooks).
     """

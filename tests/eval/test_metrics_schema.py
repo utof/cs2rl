@@ -46,7 +46,7 @@ from cs2rl.eval import metrics_schema as ms
 # code, so it lives in tests/_helpers/ rather than in the shipped package. It is
 # imported under its one name, through `tests`, which pyproject.toml's pytest
 # `pythonpath = ["."]` makes importable; `test_w1_modules` below is imported the same
-# way, as `tests.test_w1_modules`, the name pytest collects it under. A bare
+# way, as `tests.train.test_w1_modules`, the name pytest collects it under. A bare
 # `import metrics_census` would need tests/_helpers/ on sys.path and would load a
 # second copy; TID251 bans it and the old `tests.metrics_census`.
 from tests._helpers import metrics_census as census
@@ -961,7 +961,7 @@ def test_eval_baselines_imports_eval_keys_from_here_and_not_the_reverse():
     """The direction is load-bearing, not stylistic: eval.baselines imports torch and
     env.c.cs2_env at module scope, so `from cs2rl.eval.baselines import EVAL_KEYS` would make
     a tuple of eight strings cost a torch import and break metrics_schema's
-    import-lightness (tests/test_w1_modules.py). Checked from SOURCE — importing
+    import-lightness (tests/train/test_w1_modules.py). Checked from SOURCE — importing
     eval.baselines here to compare the objects would pull torch into this test."""
     tree = ast.parse((REPO_ROOT / "src" / "cs2rl" / "eval" / "baselines.py").read_text())
     imports_from_schema = any(

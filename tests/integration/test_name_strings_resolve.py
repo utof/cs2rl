@@ -16,7 +16,7 @@ comments excluded. An f-string is read whole, each replacement field kept as
       submodule or a top-level binding of it. Every `;`-joined statement on the
       line that imports from cs2rl counts. Matched with a regex, never parsed:
       some child scripts are str.format templates that do not parse
-      (tests/test_arena_duel.py's `{out!r}`). A `{field}` in the name list is
+      (tests/env/test_arena_duel.py's `{out!r}`). A `{field}` in the name list is
       skipped; the module is still checked.
   (c) every `src/cs2rl/...` path token is tracked: a file or a directory in
       `git ls-files`. A token that ends in `/` must be a directory. A token with a
@@ -40,7 +40,7 @@ move, so derive it from the package instead of exempting it (the masking class
 below).
 
 WHY (#205 part 2a): a module move leaves these strings stale, and most go stale
-SILENTLY. With tests/test_w1_modules.py's HEAVY still naming `cs2rl.nav` after the
+SILENTLY. With tests/train/test_w1_modules.py's HEAVY still naming `cs2rl.nav` after the
 move, the light-import guard for nav passed 21/21 with nav planted into
 train_shared. Moved into a child script as `assert "cs2rl.nav" not in sys.modules`,
 the same stale name passed the same way, which is why (a) reads names inside longer

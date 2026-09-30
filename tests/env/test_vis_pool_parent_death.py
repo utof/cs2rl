@@ -21,7 +21,7 @@ live and that the guard, not the kill itself, is what ends them.
 
 PITFALLS:
 - The child is started as its own session leader and the whole group is
-  SIGKILLed in `finally` (same shape as tests/test_arena_duel.py::_run_group), so
+  SIGKILLed in `finally` (same shape as tests/env/test_arena_duel.py::_run_group), so
   the control's deliberately orphaned workers never outlive the test. As a second
   fence the stub arms `signal.alarm(30)` in every worker: even if pytest itself
   is SIGKILLed mid-test, nothing survives 30 s.

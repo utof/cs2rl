@@ -301,8 +301,8 @@ def test_helpers_hold_no_collectable_file():
     """tests/_helpers/ holds no test file (#207).
 
     pytest would collect one there, but the gates that scan test files with a
-    flat, non-recursive `(ROOT / "tests").glob(...)` (tests/test_modal_packaging.py,
-    tests/test_modal_preflight.py, tests/test_modal_training.py) would miss it.
+    flat, non-recursive `(ROOT / "tests").glob(...)` (tests/modal/test_modal_packaging.py,
+    tests/modal/test_modal_preflight.py, tests/modal/test_modal_training.py) would miss it.
     """
     found = _collectable_files_under(REPO_ROOT / "tests" / "_helpers")
     assert not found, f"move these test files out of tests/_helpers/: {found}"

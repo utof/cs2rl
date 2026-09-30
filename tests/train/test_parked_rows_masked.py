@@ -249,7 +249,7 @@ def test_build_participating_rows_noop_marks_the_hero_team_only():
 
 def test_train_passes_the_resolved_opponent_mode_to_build_participating_rows():
     """AST pin of the PRODUCTION call site (same rationale as the source-scan in
-    tests/test_train_cli.py::test_opponent_flag_declared_with_both_modes:
+    tests/train/test_train_cli.py::test_opponent_flag_declared_with_both_modes:
     train() is a ~500-line function that cannot be imported and driven).
 
     WHY: every other noop test reaches the participation vector through

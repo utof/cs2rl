@@ -1,4 +1,4 @@
-"""tests/test_map.py — MapData verticality (Batch 5 prerequisite for Δpitch).
+"""tests/env/test_map.py — MapData verticality (Batch 5 prerequisite for Δpitch).
 
 Verifies the simple map's verticality fields (centroids_z, is_ramp) are coherent,
 the elevated bombsite is reachable on foot, vis matrix sees catwalk-bombsite, and

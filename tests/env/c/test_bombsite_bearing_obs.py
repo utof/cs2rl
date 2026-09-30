@@ -1,4 +1,4 @@
-"""tests/test_bombsite_bearing_obs.py — Batch 6 Task 2.5 (spec R9/D4, task 016).
+"""tests/env/c/test_bombsite_bearing_obs.py — Batch 6 Task 2.5 (spec R9/D4, task 016).
 
 Goal-direction observation: obs[OBS_SELF_BASE+25..27] =
     [sin(rel_bearing), cos(rel_bearing), xy_dist / map_diag]

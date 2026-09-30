@@ -1,4 +1,4 @@
-# tests/test_reward.py
+# tests/env/c/test_reward.py
 import math
 
 import numpy as np

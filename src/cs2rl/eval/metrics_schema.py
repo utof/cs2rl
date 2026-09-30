@@ -9,13 +9,13 @@ WHY it is here and not a docstring: before W4 the aggregation contract of a key
 lived in a comment next to its emitter, and the list of keys a gate script reads
 lived in the gate script. Neither side could notice the other drifting. The
 registry is the one place both are written down, and
-`tests/test_metrics_schema.py` checks it against the SOURCE of the emitters and
+`tests/eval/test_metrics_schema.py` checks it against the SOURCE of the emitters and
 of the readers (via the AST census in `tests/_helpers/metrics_census.py`) in BOTH
 directions — an unregistered key fails, and a registered key nothing emits fails
 too. A registry that could only be wrong by omission would be a docstring again.
 
 WHY THIS MODULE MUST STAY IMPORT-LIGHT (spec §2 W1, guarded by
-`tests/test_w1_modules.py`): `EVAL_KEYS` used to live in `src/cs2rl/eval/baselines.py`,
+`tests/train/test_w1_modules.py`): `EVAL_KEYS` used to live in `src/cs2rl/eval/baselines.py`,
 which imports torch and `env.c.cs2_env` at module scope. Any consumer that wanted
 those eight strings — including this registry — paid ~30 s of torch import for a
 tuple of strings. So the ownership is INVERTED: `EVAL_KEYS` lives here and
@@ -77,7 +77,7 @@ from cs2rl.spec.action import ACTION_HEAD_NAMES
 
 # ── Vocabularies ──────────────────────────────────────────────────────────
 #
-# Closed sets, asserted in tests/test_metrics_schema.py. A free-text `units`
+# Closed sets, asserted in tests/eval/test_metrics_schema.py. A free-text `units`
 # column is the part of a registry nobody can check and everybody stops
 # maintaining; making it a vocabulary means a new unit is a deliberate edit here.
 

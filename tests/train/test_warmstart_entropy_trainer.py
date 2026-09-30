@@ -2,7 +2,7 @@
 
 Uses the minimal harness, whose trainer is Cs2PuffeRL (gh#168 W1.5), whose
 train() is the return-norm body (a method since gh#168 W2a), same pattern as
-tests/test_kl_break_metrics.py. Config keys are injected into trainer.config
+tests/train/test_kl_break_metrics.py. Config keys are injected into trainer.config
 AFTER construction; that is fine because Cs2PuffeRL._init_return_norm only
 seeds attributes and the warmstart_* keys are read per train() call.
 
@@ -70,7 +70,7 @@ def _force_floor_above_entropy(trainer, floor=1e6):
     PITFALL: until gh#168 W2a the floor was a closure cell of the patched
     train() body and this helper rewrote it through `__closure__`; W2a made it
     the instance attribute `_entropy_floor` (declared in `_init_return_norm`,
-    pinned by tests/test_trainer_composition.py's derived constructor surface and the O4
+    pinned by tests/train/test_trainer_composition.py's derived constructor surface and the O4
     construction snapshot). The attribute must exist BEFORE the write: a
     renamed attribute would otherwise create a dead one and this helper would
     silently no-op, which is what the assert below turns into a failure.

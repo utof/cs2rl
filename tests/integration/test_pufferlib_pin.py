@@ -1,4 +1,4 @@
-# tests/test_pufferlib_pin.py
+# tests/integration/test_pufferlib_pin.py
 #
 # Canary tests for the PufferLib dependency surface (gh #85).
 #

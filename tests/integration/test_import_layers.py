@@ -208,7 +208,7 @@ def scope_pin_failures(tree: Path, facts: dict) -> list[str]:
     and every contract. That was the live case for the train -> viz.render ignore
     (#92). Train sits above viz now, so that edge is legal at any scope and the ignore
     is gone; what catches a viz.render import that RUNS at the CLI's module scope is
-    tests/test_w1_modules.py: it lists `rerun` in HEAVY, and
+    tests/train/test_w1_modules.py: it lists `rerun` in HEAVY, and
     test_cli_module_scope_stays_light imports `cs2rl.train.__main__`.
     """
     failures = []

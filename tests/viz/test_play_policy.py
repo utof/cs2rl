@@ -1,4 +1,4 @@
-# tests/test_play_policy.py
+# tests/viz/test_play_policy.py
 
 import numpy as np
 import pytest

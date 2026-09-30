@@ -93,7 +93,7 @@ from tests.modal.modal_runner_tables import (
 # imports and the package population by ONE definition; two copies could let the
 # gates disagree about the same package. Importing a collected test module does
 # not collect its tests twice: none of these names is a test. They are not
-# moved to tests/modal_test_helpers.py because that is not a pure move: that
+# moved to tests/modal/modal_test_helpers.py because that is not a pure move: that
 # file admits only names both halves of the runner/client test seam reach, and
 # `classify_seam` enforces it. PITFALL: `_module_level_names` also drives
 # `classify_seam`, and `_module_level_binding_counts` the seam's placement gate,
@@ -148,7 +148,7 @@ IMPORT_TIME_CALLS = frozenset({
 })
 # Where each name trusted by spelling must come from: every bare callee and
 # module prefix in IMPORT_TIME_CALLS, and the `TYPE_CHECKING` that
-# `_is_type_checking_test` (tests/test_modal_packaging.py) matches by name.
+# `_is_type_checking_test` (tests/modal/test_modal_packaging.py) matches by name.
 # "builtins" means nothing in the module may bind it.
 TRUSTED_NAMES = {
     "Path": "pathlib",
@@ -666,7 +666,7 @@ def _seam_violations(sources, seams=QUALIFIED_SEAMS):
 
     A read is `<name>.<attr>` where `_sibling_bindings` binds `<name>` to
     another package module. PITFALL: local shadowing is not modelled, as in
-    `_referenced_module_names` (tests/test_modal_packaging.py): a local
+    `_referenced_module_names` (tests/modal/test_modal_packaging.py): a local
     variable named like a module the file binds is read as that module. That
     fails closed, as a spurious `seam-undeclared` or reader, and no package
     module has such a local today (census, gh#221 review).
@@ -1028,7 +1028,7 @@ def test_package_facade_controls(plant, kinds):
       Before this clause existed it, and the bare `print`, turned no gate red:
       the population gates skip `__init__.py`, and the surface gates read names.
     * non-stdlib-import: the purity half. The container-equivalent import in
-      tests/test_modal_client.py also objects, but only by running the image.
+      tests/modal/test_modal_client.py also objects, but only by running the image.
     * conditional-import, definition, computed-all: the header half, a helper
       that belongs in its owning module, and an `__all__` that runs code.
     * absolute-import, parent-relative-import, stray-string, other-assign,

@@ -2,7 +2,7 @@
 
 WHY THIS FILE EXISTS. Spec §2 W3 assumed fork-safety of the factory's returned
 callables was "gated by the existing multiprocessing-backend tests". It is not:
-`tests/test_binding.py`'s MP test builds its own inline factory over
+`tests/env/c/test_binding.py`'s MP test builds its own inline factory over
 `env.c.cs2_env.make_env` and never touches `build_env_factory`, and every other
 `build_env_factory` test in the suite is Serial or in-process. So the one path
 where the migrated closure crosses a process boundary — and therefore the only
@@ -38,7 +38,7 @@ TWO TESTS, because fork and cold import are different failures:
      ITS LIMIT, stated because a reader will otherwise over-read it: the child
      exercises the `smoke` role only, so it proves THAT path is `train`-free,
      not all six. The other five are covered in-process by
-     tests/test_env_factory.py's `_construct`, which patches
+     tests/env/test_env_factory.py's `_construct`, which patches
      `env.c.cs2_env.make_env` and asserts exactly one call through it.
 
 Neither is a substitute for the other, and the pair is deliberately cheap: two

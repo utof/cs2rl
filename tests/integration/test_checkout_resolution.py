@@ -2,7 +2,7 @@
 
 1. The pytest tripwire in tests/conftest.py. Each case is a child pytest session
 that loads the real conftest as a plugin (`-p tests.conftest`, as
-tests/test_one_module_object_per_file.py does) over one
+tests/integration/test_one_module_object_per_file.py does) over one
 planted passing test, with a `pytest.ini` in its tmp dir so the repo's own config
 stays out of it. Only the child's PYTHONPATH differs between the cases:
 
@@ -498,7 +498,7 @@ def _plant(root: Path, *parts: str, tracked: bool) -> None:
     """Add the file `root/<parts>` as a leftover, tracked or not.
 
     The path comes as parts, not as one string: a `src/cs2rl/...` literal that names no
-    tracked file fails tests/test_name_strings_resolve.py.
+    tracked file fails tests/integration/test_name_strings_resolve.py.
     """
     name = str(Path(*parts))
     _layout(root, name)

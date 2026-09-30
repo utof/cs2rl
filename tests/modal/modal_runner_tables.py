@@ -1,10 +1,10 @@
 """The declared shape of scripts/modal_runner/: the one place a package module is declared.
 
 Every gate that needs the module list reads it from here: the package-shape
-gates (tests/test_modal_runner_package_shape.py), the packaging gates
-(tests/test_modal_packaging.py), the mount and surface gates
-(tests/test_modal_client.py) and the binding census
-(tests/test_modal_patch_binding_census.py). Before this file, RUNNER_MODULES, the MANIFEST
+gates (tests/modal/test_modal_runner_package_shape.py), the packaging gates
+(tests/modal/test_modal_packaging.py), the mount and surface gates
+(tests/modal/test_modal_client.py) and the binding census
+(tests/modal/test_modal_patch_binding_census.py). Before this file, RUNNER_MODULES, the MANIFEST
 keys and the DEPENDENCIES keys stated the list three times across two test
 files, and a new module turned most of those gates red with differently worded
 messages.
@@ -14,7 +14,7 @@ ADDING A MODULE, in this order (the facade docstring points here):
 DEPENDENCIES entry of each module that imports it (ANNOTATION_DEPENDENCIES for
 an import made only under TYPE_CHECKING); (2) add a line for it to MODULE MAP
 in the docstring of scripts/modal_runner/__init__.py; (3) `git add` the new
-file. The mount and package-population gates in tests/test_modal_client.py
+file. The mount and package-population gates in tests/modal/test_modal_client.py
 read `git ls-files`, so until step 3 they report the module missing although it
 is on disk. (4) Create its test file, tests/test_modal_<module>.py (the path
 RUNNER_TEST_FILES derives from this list), holding at least one test of the
@@ -23,12 +23,12 @@ binding census read RUNNER_TEST_FILES, so they expect the file from step (1)
 on: a missing one fails the seam gate's source reader,
 which names it, and one with no test in the seam manifest fails the floor's
 scope check. THE PLACEMENT RULE FOR RUNNER TESTS in
-tests/test_modal_packaging.py says what a test there must reach and what
+tests/modal/test_modal_packaging.py says what a test there must reach and what
 adding one costs.
 
 A MODULE THAT SPAWNS OR SIGNALS PROCESSES goes through
 `training.ProcessControl`, the kill seam: `test_kill_seam_static_safety` in
-tests/test_modal_training.py reads every module of the package (it too
+tests/modal/test_modal_training.py reads every module of the package (it too
 expects the new file from step (1) on) and fails on a real `os.killpg`,
 `os.getpgid`, `os.kill`, `signal.signal` or `subprocess.Popen` outside
 `ProcessControl.system()`, and on any `killpg`/`getpgid` outside the
@@ -137,7 +137,7 @@ ANNOTATION_DEPENDENCIES = {"commands": ["request"], "preflight": ["request"]}
 # as `owner.name` through the module object, at call time, instead of being
 # from-imported. A test that patches the owning module therefore reaches every
 # reader (QUALIFIED SEAMS in scripts/modal_runner/__init__.py, whose list must
-# match these keys). The `seam` clause in tests/test_modal_runner_package_shape.py
+# match these keys). The `seam` clause in tests/modal/test_modal_runner_package_shape.py
 # reports a from-import or an import-time read of a seam, a reader set that
 # differs from its entry here, an entry with no reader or whose owner does not
 # define its name, and any other `module.name` read across modules through a
@@ -163,8 +163,8 @@ RUNNER_MODULES = tuple(filename.removesuffix(".py") for filename in MANIFEST)
 RUNNER_PATHS = tuple(f"scripts/modal_runner/{module}.py" for module in RUNNER_MODULES)
 # Each module's test file, in the same order: tests/test_modal_<module>.py. This
 # is the one list of runner test files. The seam gate and its reach floor (both
-# in tests/test_modal_packaging.py) and the binding census
-# (tests/test_modal_patch_binding_census.py) read it under this
+# in tests/modal/test_modal_packaging.py) and the binding census
+# (tests/modal/test_modal_patch_binding_census.py) read it under this
 # name, so none of them holds a retyped copy, and a module added above brings
 # its test file into every one of them (ADDING A MODULE, step 4). A runner test
 # in a tests/test_modal_<x>.py that is not derived here is invisible to the

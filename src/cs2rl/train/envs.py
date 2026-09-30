@@ -210,7 +210,7 @@ def build_env_factory(*, shared_ts, map_data, config=None):
         # worker can never receive None.
         # tests/fixtures/env_config_pre_165b.json recorded this call before it
         # was typed — its three `train` rows ARE the three seed branches — and
-        # tests/test_env_factory.py drives this closure against each of them
+        # tests/env/test_env_factory.py drives this closure against each of them
         # (test_train_call_site_forwards_the_captured_kwargs) as well as
         # pinning its spelling against the recorded call source
         # (test_migrated_site_still_reads_what_the_old_site_read).
@@ -478,12 +478,12 @@ def assert_eval_env_agreement(eval_env, driver_env):
     asked for. So the check nobody could run was also the check nobody could
     test. assert_pin_pitch_agreement and assert_max_turn_speed_agreement above
     have the same shape — module-level, called from train(), and called
-    DIRECTLY by tests (tests/test_pitch_pin.py and
-    tests/test_env_knobs.py::test_policy_max_turn_speed_assert respectively).
+    DIRECTLY by tests (tests/train/test_pitch_pin.py and
+    tests/train/test_env_knobs.py::test_policy_max_turn_speed_assert respectively).
 
     PITFALL: check (a) runs FIRST, so a test that tries to prove (b) exists by
     differing one of the five names in the tuple below will raise from (a) and
-    prove nothing. tests/test_env_factory.py::test_eval_env_agreement_two_directions
+    prove nothing. tests/env/test_env_factory.py::test_eval_env_agreement_two_directions
     handles that by demanding the MESSAGE rather than just a raise: it differs
     EVERY EnvConfig field, one per parametrized case, and requires `on <knob>`
     (which is (a)'s spelling, and which (b)'s `on config.<knob>` does not contain)

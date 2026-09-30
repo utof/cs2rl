@@ -2,8 +2,8 @@
 
 NOT a test module: no `test_` prefix, so pytest does not collect it. The seam
 files are the per-module runner test files (tests/test_modal_<module>.py, listed
-by `RUNNER_TEST_FILES` in tests/modal_runner_tables.py) and
-tests/test_modal_client.py. This file exists because tests in different seam
+by `RUNNER_TEST_FILES` in tests/modal/modal_runner_tables.py) and
+tests/modal/test_modal_client.py. This file exists because tests in different seam
 files share fixtures. Measured at W4's split by module (fdd5ec9), it holds 13
 module-level names besides `ROOT`, and tests in two or more seam files reach
 each one. The 7 from `_git` to `FakeChild` are reached from both the client
@@ -11,7 +11,7 @@ file and runner files (`_aware`: 80 tests, 58 in four runner files and 22 in
 the client file); the 6 under the last section header are reached from two or
 more runner files only. Copying a helper into each file that uses it instead
 would let two definitions of the same fixture drift apart with every check in
-tests/test_modal_packaging.py green -- which is the failure mode this seam
+tests/modal/test_modal_packaging.py green -- which is the failure mode this seam
 exists to stop.
 
 THE 57/22 WAS SHIPPED TRANSPOSED and is corrected here, because the arithmetic
@@ -30,9 +30,9 @@ IN TWO OR MORE SEAM FILES. A helper that only one file's tests reach belongs in
 that file -- however generic it looks, and however well its name would read
 here. The rule this replaced at W4, "reached from both halves of the
 runner/client seam", is its special case with one runner file. A consumer
-outside the seam files (tests/test_modal_patch_bindings.py, say) does not count.
+outside the seam files (tests/modal/test_modal_patch_bindings.py, say) does not count.
 The same rule is written beside the classifier, as THE MEMBERSHIP RULE FOR THE
-SHARED FILE in tests/test_modal_packaging.py; the two copies must not drift. It
+SHARED FILE in tests/modal/test_modal_packaging.py; the two copies must not drift. It
 is written down because a module named for what it IS rather than for what it
 OWNS becomes a junk drawer: every future helper looks a little bit shared, and
 the file accretes until it is a second monolith. Spec §10 criterion 12 bans a
@@ -63,12 +63,12 @@ from tests.conftest import REPO_ROOT
 ROOT = REPO_ROOT
 
 # PITFALL: these runner imports are load-bearing for the seam gate, not only
-# for the helpers below. The reach floor (tests/test_modal_packaging.py)
+# for the helpers below. The reach floor (tests/modal/test_modal_packaging.py)
 # resolves `mrl.X`, `request.X` and the rest only through aliases bound
 # unconditionally at MODULE LEVEL, in a test's file and in the file of every
 # helper it reaches, and this file's are the only route by which
 # test_manifest_records_authoritative_simple_map_not_legacy_env (in
-# tests/test_modal_core.py) reaches `core`: through `_make_manifest`'s
+# tests/modal/test_modal_core.py) reaches `core`: through `_make_manifest`'s
 # `mrl.Manifest`. Move the `mrl` import into a function or under an `if`/`try`
 # and the floor goes red on that test (the other imports carry reach the same
 # way for the tests whose helpers use them). The floor's remedy says to check

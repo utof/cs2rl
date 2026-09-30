@@ -24,7 +24,7 @@ today pulls neither torch nor nav nor env.c, because the torch imports in the mo
 reaches are function-local ON PURPOSE (about 35 of them in the flat train.py, before
 #205 part 3). That is what makes `python -m cs2rl.train --dump-config` cost ~1 s instead
 of ~30 s, which in turn is what makes it usable as the Modal/run_rung1 fingerprint step
-(tests/test_train_cli.py's "--dump-config means zero side-effects"). The CLI module
+(tests/train/test_train_cli.py's "--dump-config means zero side-effects"). The CLI module
 imports each of these modules, or one that does, at ITS module level, so a single
 module-scope `import torch` added to any of them silently destroys that guarantee for
 every caller — and nothing else in the suite would notice.
@@ -81,8 +81,8 @@ W1_MODULES = ("cs2rl.policy", "cs2rl.train.resume", "cs2rl.train.config", "cs2rl
 # import any of the three; train.config -> env.config is the load-bearing edge between
 # a leaf and a spoke (env_config_from_args builds an EnvConfig). The reverse edges would
 # make "leaf" meaningless — pyproject.toml's `cs2rl layers` contract pins them (the
-# policy and env sit below the whole train package; tests/test_import_layers.py runs it),
-# and so does tests/test_env_config.py::test_module_is_stdlib_only for env.config.
+# policy and env sit below the whole train package; tests/integration/test_import_layers.py
+# runs it), and so does tests/env/test_env_config.py::test_module_is_stdlib_only for env.config.
 LEAVES = frozenset({"cs2rl.policy", "cs2rl.env.config", "cs2rl.env.factory"})
 
 # Imports whose presence in sys.modules means the import-lightness invariant is

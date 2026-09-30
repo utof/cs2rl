@@ -4,14 +4,14 @@ WHAT this module owns:
   * `BINDING_SITES` / `binding_target`: the one table that says which owning
     submodule attribute each at-risk patch site replaces. The original sites
     install their patch through `binding_target(site)`; `_ORIGINAL_SITES` in
-    tests/test_modal_patch_binding_census.py names each one's file and
-    installing function (since W4: tests/test_modal_training.py,
-    tests/test_modal_preflight.py, tests/modal_test_helpers.py and
-    tests/test_modal_client.py). So does the per-site companion
-    `test_patch_binding_observation` in tests/test_modal_patch_bindings.py, so the
+    tests/modal/test_modal_patch_binding_census.py names each one's file and
+    installing function (since W4: tests/modal/test_modal_training.py,
+    tests/modal/test_modal_preflight.py, tests/modal/modal_test_helpers.py and
+    tests/modal/test_modal_client.py). So does the per-site companion
+    `test_patch_binding_observation` in tests/modal/test_modal_patch_bindings.py, so the
     companion observes exactly the target the original site patches.
     `test_patch_binding_sites_route_through_binding_target`
-    (tests/test_modal_patch_binding_census.py) is the census
+    (tests/modal/test_modal_patch_binding_census.py) is the census
     that ties each key to the original function that installs it.
   * the campaign driver (`run_campaign`, `main`): for every site it runs the
     companion in fresh pytest children -- baseline, a single-binding defect
@@ -27,7 +27,7 @@ never imports it, and the Modal image mounts only scripts/run_modal.py,
 scripts/modal_runner/*.py and the /opt/cs2rl build inputs.
 
 Run from the repository root (`test_patch_binding_campaign` is the checked-in
-caller): python -m tests.modal_patch_binding_campaign --repo-root .
+caller): python -m tests.modal.modal_patch_binding_campaign --repo-root .
 --evidence-root <new directory> --matrix <JSON list of BINDING_SITES' keys, in order>
 
 PITFALLS:
@@ -35,7 +35,7 @@ PITFALLS:
     the `scripts.modal_runner.<owner>` spelling. No static reader sees that
     import, ruff's TID251 ban included. The module scope imports only
     importlib, concurrent.futures and typing, so importing `BINDING_SITES`
-    (tests/test_modal_packaging.py does) loads no runner module.
+    (tests/modal/test_modal_packaging.py does) loads no runner module.
   * Children run `sys.executable -m pytest` from `repo_root` with
     `-p no:cacheprovider`. `uv run` would depend on uv being on PATH and on the
     venv's console-script shebang, and could re-sync the shared venv; the cache
@@ -83,7 +83,7 @@ def binding_target(site):
 
 
 # RENAME HAZARD: `test_patch_binding_campaign_rejects_invalid_evidence`
-# (tests/test_modal_patch_bindings.py) replaces this function BY NAME inside a
+# (tests/modal/test_modal_patch_bindings.py) replaces this function BY NAME inside a
 # `python -c` program string (`campaign._run_probe = supplied_probe`). No call
 # graph, grep for a call, or rename tool sees that reach. Rename both together:
 # a renamed function leaves that assignment inert, and its supplied-evidence

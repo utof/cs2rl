@@ -15,14 +15,14 @@ loop to unit-test and the part most often edited when a metric is added.
 SCOPE BOUNDARY (deliberate, do not "finish the job"): ``self_play_used_past_metric``
 lives in ``cs2rl.train.selfplay``, beside the pool it reports on, and the
 ``logs["self_play/*"]`` assignments STAY in ``cs2rl.train.loop.train``. Those assignment
-lines and their order are pinned by tests/test_kl_break_metrics.py inside
+lines and their order are pinned by tests/train/test_kl_break_metrics.py inside
 ``inspect.getsource(cs2rl.train.loop)``, and they guard the key cs2rl/experiment/gate.py
 reads; keeping the call sites beside the pool bookkeeping is the lower-risk spelling.
 PufferLib's own ``self.mean_and_log()`` likewise stays out of this module — its
 single call site lives inside ``cs2rl.train.trainer.Cs2PuffeRL.train`` (gh#168 W2a).
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+reason spelled out in tests/train/test_w1_modules.py's docstring (WHY property 3 is
 load-bearing). Every torch import below is function-local ON PURPOSE.
 """
 

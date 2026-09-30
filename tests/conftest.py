@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # process's sys.path. Child interpreters (the many tests that launch
 # `-m cs2rl.train`, or code strings) do not inherit it and would import through
 # the .pth, i.e. possibly another checkout's code. PYTHONPATH reaches them.
-# tests/test_checkout_resolution.py pins (a), (b) and a negative control. At import,
+# tests/integration/test_checkout_resolution.py pins (a), (b) and a negative control. At import,
 # src/cs2rl/__init__.py's guard also refuses a script run by path, or else a cwd,
 # that sits in a checkout other than the one cs2rl came from.
 
@@ -151,14 +151,14 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
 #   3. A file with no same-named competitor is not dead, whatever it is: a leftover
 #      `train_shared.py` beside nothing imports silently under its old name, and this
 #      check cannot tell it from a live module. The session-start tripwire does not stop
-#      it; the full suite does: tests/test_import_layers.py's
+#      it; the full suite does: tests/integration/test_import_layers.py's
 #      test_every_tracked_module_is_in_the_graph and test_contracts_hold_on_this_checkout
 #      (the exhaustive `cs2rl layers` contract) both went red on that plant (#205 part 3).
 #   4. `_LOADER_DETAILS` writes out the loader order CPython installs (extension, source,
-#      sourceless). tests/test_checkout_resolution.py compares the winner with
+#      sourceless). tests/integration/test_checkout_resolution.py compares the winner with
 #      importlib.machinery.PathFinder's on this interpreter, so a change of order fails
 #      there rather than here.
-# tests/test_checkout_resolution.py pins the walk, the dead-file cases, the git failure
+# tests/integration/test_checkout_resolution.py pins the walk, the dead-file cases, the git failure
 # and the wiring.
 _LEFTOVER_SUFFIXES = (".py", *importlib.machinery.EXTENSION_SUFFIXES)
 # CPython's own loaders and suffixes, in the order it installs them
@@ -294,7 +294,7 @@ def leftover_package_problems(package_root: Path) -> list[str]:
 #       reached sys.path after (c) ran, wherever that tree sits, inside tests/
 #       or scripts/ included, as long as a module it served is still loaded at
 #       the end (LIMIT 1).
-# tests/test_namespace_guard.py pins both halves, with positive controls
+# tests/integration/test_namespace_guard.py pins both halves, with positive controls
 # (including the nested layout) and a negative control.
 #
 # PITFALLS.
@@ -455,7 +455,7 @@ def simple_map(make_map):
 # whose every field raises, so that mistake fails loudly instead of spawning or
 # signalling. `test_process_control_tripwire_poisons_system` and
 # `test_process_control_tripwire_guards_the_resolution_path`
-# (tests/test_modal_training.py) pin it.
+# (tests/modal/test_modal_training.py) pin it.
 #
 # It covers every OTHER test only because it is `autouse`: dropped, or moved
 # into a narrower conftest or a test file, the fixture still reaches a test
@@ -474,7 +474,7 @@ def simple_map(make_map):
 #   * The patch goes through the fixture's OWN `pytest.MonkeyPatch.context()`,
 #     never the test's `monkeypatch`: a test body that calls
 #     `monkeypatch.undo()` would otherwise restore the real `system` for the rest
-#     of that test (tests/test_no_restated_env_defaults.py calls it).
+#     of that test (tests/integration/test_no_restated_env_defaults.py calls it).
 #   * RESIDUAL: three windows are not poisoned, because the fixture is
 #     function-scoped and needs the module already loaded.
 #       1. A test whose own body is the first thing in the process to import the
@@ -554,7 +554,7 @@ def process_control_tripwire_error():
 # The process-group guard in `_signal_process_group` refuses to signal the
 # runner's OWN process group. Every modal test that hands the attempt a
 # recording killpg -- the training test builder's default, `_signal_hooks`
-# (tests/test_modal_training.py), the client tests' execute wrappers, the
+# (tests/modal/test_modal_training.py), the client tests' execute wrappers, the
 # binding campaign -- pairs it with an identity getpgid and a FakeChild whose
 # pid is FakeChild's default. In a session whose process group is that pid,
 # the guard would refuse every one of their kills: a test asserting a kill
@@ -566,7 +566,7 @@ def process_control_tripwire_error():
 #
 # PITFALLS.
 #   * FakeChild's default pid is stated here AND read from FakeChild whenever
-#     tests/modal_test_helpers.py is loaded: a changed default fails the
+#     tests/modal/modal_test_helpers.py is loaded: a changed default fails the
 #     comparison instead of leaving this check stale. The helpers are LOOKED
 #     UP in sys.modules, like the runner above: importing them would import the
 #     runner.
@@ -624,7 +624,7 @@ def pytest_configure(config):
     # $HOME is the user's primary partition, with persistent free space. Keep
     # it on $HOME, not in the repo: on the main dev machine the repo drive is
     # fuseblk/NTFS, where chmod is a no-op, and chmod-based tests (e.g.
-    # tests/test_pyrefly_gate.py) break there.
+    # tests/integration/test_pyrefly_gate.py) break there.
     #
     # Move the ROOT, never basetemp itself. Setting config.option.basetemp puts
     # pytest on its explicit-basetemp path, which rm_rf's that exact directory
@@ -648,7 +648,7 @@ def pytest_configure(config):
     # ~/.cache is the XDG default cache directory, and no old conftest touches
     # cs2rl-pytest. Nothing is created when PYTEST_DEBUG_TEMPROOT is already
     # set, so an explicitly redirected run leaves $HOME alone.
-    # tests/test_pytest_tmp_isolation.py pins the per-session basetemp, the
+    # tests/integration/test_pytest_tmp_isolation.py pins the per-session basetemp, the
     # default root and the explicit override.
     if not config.option.basetemp and "PYTEST_DEBUG_TEMPROOT" not in os.environ:
         temproot = Path(os.path.expanduser("~/.cache/cs2rl-pytest"))
@@ -659,7 +659,7 @@ def pytest_configure(config):
 def pytest_collection_modifyitems(config, items):
     explicit_targets = {Path(str(arg)).as_posix() for arg in config.invocation_params.args}
     run_performance = any(
-        target.endswith("tests/smoke_test.py") or target.endswith("smoke_test.py")
+        target.endswith("tests/env/c/smoke_test.py") or target.endswith("smoke_test.py")
         for target in explicit_targets)
     if run_performance:
         return
@@ -736,7 +736,7 @@ def assert_child_had_xdist(child: subprocess.CompletedProcess) -> None:
 # file held under two names and fails if it finds one, the way pytest-cov fails
 # a session on coverage: `session.testsfailed += 1` in a `pytest_runtestloop`
 # wrapper. The static half is ruff's TID251 banned-api table in pyproject.toml.
-# tests/test_one_module_object_per_file.py pins both the function and the hook.
+# tests/integration/test_one_module_object_per_file.py pins both the function and the hook.
 #
 # LIMITS.
 #   (a) ruff cannot see a literal `importlib.import_module("...")` or
@@ -748,7 +748,7 @@ def assert_child_had_xdist(child: subprocess.CompletedProcess) -> None:
 #       is invisible if it is evicted before then, registered only while it
 #       runs (an in-process `runpy.run_path`), or never registered at all
 #       (`importlib.util.module_from_spec` + `exec_module`). `fake_modal` in
-#       tests/test_modal_client.py pops `scripts.run_modal`,
+#       tests/modal/test_modal_client.py pops `scripts.run_modal`,
 #       `scripts.modal_artifacts` and `scripts.modal_backfill_sidecar`, so for
 #       those three the ruff ban on their bare names is the only check.
 #   (d) imports made in a child process are invisible to both: ruff reads a
@@ -816,8 +816,9 @@ def _files_under_two_names(pairs: Iterable[tuple[str, str]], root: Path,
 #
 # Fail closed: a node that went down with an error, or finished without the key, is
 # itself a red finding, since its modules were never checked.
-# tests/test_one_module_object_per_file.py and tests/test_namespace_guard.py pin this
-# with `-n 2` child sessions; their other child sessions are serial and cannot see it.
+# tests/integration/test_one_module_object_per_file.py and
+# tests/integration/test_namespace_guard.py pin this with `-n 2` child sessions; their other
+# child sessions are serial and cannot see it.
 _WORKER_GUARD_KEY = "cs2rl_session_guards"
 _worker_findings = pytest.StashKey[list]()
 

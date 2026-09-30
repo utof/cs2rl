@@ -60,7 +60,7 @@ passes against a mutilated factory is measuring nothing, and nothing else in the
 suite would tell us.
 
 SCOPE. All six roles' call sites are migrated, and none of them names
-`make_puffer_env`; `tests/test_env_construction_enforcement.py` asserts that
+`make_puffer_env`; `tests/integration/test_env_construction_enforcement.py` asserts that
 permanently. Since PR B2 `build_env_for` imports `env.c.cs2_env.make_env`
 directly, so the stub in `_construct` is installed there.
 
@@ -908,7 +908,7 @@ class _Captured(Exception):
 
     Used only for sites where nothing has been CONSTRUCTED yet at the moment the
     factory is called, so aborting leaks nothing. (The self-play manager sites
-    are not like that — see the spy in tests/test_selfplay_factory.py.)
+    are not like that — see the spy in tests/train/test_selfplay_factory.py.)
     """
 
 
@@ -1525,7 +1525,7 @@ def test_env_factory_never_names_train_make_env():
 # What survives it is everything DOWNSTREAM of the declaration: that the env
 # factory actually injects the config it is handed, and that the seam between
 # train()'s args and the factory carries it. The three "the last boundary
-# rejects a bad key/value" tests went to tests/test_env_config.py, where the
+# rejects a bad key/value" tests went to tests/env/test_env_config.py, where the
 # validator they exercise now lives.
 
 

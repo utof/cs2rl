@@ -4,7 +4,7 @@ WHAT: a no-import, source-only extractor. Given the NAMED island of emitter
 functions (``EMITTER_SITES``) it returns, for every metrics key those functions
 write, the key itself plus the *shape* of the write — which is what
 ``src/cs2rl/eval/metrics_schema.py``'s declared ``aggregation`` is checked against in
-tests/test_metrics_schema.py.
+tests/eval/test_metrics_schema.py.
 
 WHY AST and not import-and-run: the emitters are gated on flags
 (``--tag-diagnostic``), on architecture (split heads), on epoch parity
@@ -64,7 +64,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 # parents[2]: this file is tests/_helpers/metrics_census.py (#207 moved it from tests/).
-# tests/test_path_constants_exist.py pins it against the conftest's REPO_ROOT, because
+# tests/integration/test_path_constants_exist.py pins it against the conftest's REPO_ROOT, because
 # a wrong root fails `census()` only by accident and leaves the SRC sweep vacuous.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # The package root: every EMITTER_SITES / NON_ISLAND_WRITES path below is relative to it,
@@ -386,7 +386,7 @@ def _bindings_in_scope(scope, name):
     Recurses through if/for/while/try/with/match blocks (same scope) but never into a
     nested def/class body, which is its own scope. The same rule as
     ast_oracle._scope_bindings in the gh#168 SDD folder and
-    tests/test_trainer_composition.py::_bindings_in_scope: a `train = None` after the def
+    tests/train/test_trainer_composition.py::_bindings_in_scope: a `train = None` after the def
     is a binding Python honours, so it must count.
     """
     hits: list[ast.stmt] = []          # annotated: pyrefly infers list[def] from the first append

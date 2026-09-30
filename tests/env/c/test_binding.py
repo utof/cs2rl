@@ -92,7 +92,7 @@ def test_agentstate_has_punch_fields():
     # break a `names[-2:]` assert again. What this test actually guards is that
     # the pair was APPENDED and never reordered relative to each other or moved
     # into the middle of the struct; the absolute layout is pinned by the
-    # compiler's own offsetof in tests/test_struct_sizes.py.
+    # compiler's own offsetof in tests/env/c/test_struct_sizes.py.
     assert names.index("punch_yaw") == names.index("punch_pitch") + 1
     assert "recoil_enabled" in [n for n, _ in Dust2EnvC._fields_]
     assert hasattr(AgentStateC, "punch_pitch")
@@ -100,7 +100,7 @@ def test_agentstate_has_punch_fields():
     assert hasattr(Dust2EnvC, "recoil_enabled")
     # Sizes come from binding.struct_sizes() — the C compiler's own sizeof —
     # not from literals measured by hand with a printf TU (see
-    # tests/test_struct_sizes.py).
+    # tests/env/c/test_struct_sizes.py).
     sizes = binding.struct_sizes()
     assert ctypes.sizeof(AgentStateC) == sizes["AgentState"]
     assert ctypes.sizeof(GameStateC) == sizes["GameState"]

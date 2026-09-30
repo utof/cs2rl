@@ -198,7 +198,7 @@ def test_to_config_dict_key_set_matches_the_pinned_literal():
     Renamed from "..._is_exactly_todays", which overclaimed: this compares the
     dict to a hand-written list in this file, so it cannot see a key that a real
     `config.json` needs and neither side has. That check is
-    tests/test_train_cli.py::test_dump_config_matches_the_pre_165_fixture, which
+    tests/train/test_train_cli.py::test_dump_config_matches_the_pre_165_fixture, which
     compares against a config.json captured from the real CLI.
     """
     d = EnvConfig().to_config_dict()

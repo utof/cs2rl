@@ -4,7 +4,7 @@ WHY THIS EXISTS: the C struct in cs2_types.h and StaticDataC in cs2_env.py are
 two independent declarations of the same bytes, and until now the only thing
 tying them together field-by-field was the 73-position PyArg_ParseTuple format
 string in py_init — a mechanism that agrees by POSITION and says nothing about
-names or types. tests/test_struct_sizes.py adds sizeof and three offsetof
+names or types. tests/env/c/test_struct_sizes.py adds sizeof and three offsetof
 anchors on top, which catch a size change and a tail shift but are blind to two
 same-width fields swapped, or to an `int` in C described as a float in the
 mirror.
@@ -25,7 +25,7 @@ HONEST SCOPE. This compares DECLARATIONS, so it cannot see a value-routing
 mistake: Python assigning jump_enabled's value into the crouch_enabled field
 puts the wrong number into a correctly-described slot and every quadruple below
 still matches. That is what the sentinel round trip and the two-env pigeonhole
-scheme in tests/test_struct_sizes.py cover, and why neither is retired here.
+scheme in tests/env/c/test_struct_sizes.py cover, and why neither is retired here.
 
 PITFALL: like every other check against binding, this reads the CURRENTLY BUILT
 .so. After editing anything in src/cs2rl/env/c, rebuild
@@ -155,7 +155,7 @@ def test_layout_table_tiles_the_whole_prefix():
     """No field of the prefix may be missing from the table.
 
     The hash compares two lists; it cannot notice a field that BOTH lists omit.
-    The sizeof(StaticData) guard in tests/test_struct_sizes.py catches most of
+    The sizeof(StaticData) guard in tests/env/c/test_struct_sizes.py catches most of
     that, but not all of it — cs2_types.h records jump_enabled landing inside
     padding that already existed, leaving sizeof and both offset anchors
     unchanged. So walk the offsets instead: consecutive entries may be separated
