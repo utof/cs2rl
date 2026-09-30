@@ -29,7 +29,8 @@ def c_string_literals(source: str):
     `preproc_arg` node, and pygments' CLexer yields it as Comment.Preproc; pycparser
     and libclang need preprocessed input or a new dependency.
     PITFALL: a `'"'` char literal must not open a string, and `//` or `/*` inside a
-    string must not open a comment; the C controls below pin both.
+    string must not open a comment; the C controls in
+    tests/integration/test_name_strings_resolve.py pin both.
     """
     i, n, line = 0, len(source), 1
     while i < n:
