@@ -2066,7 +2066,7 @@ def test_the_seam_classifier_places_runner_tests_by_their_declared_file():
     # `test_defined_in_two_files` is defined in a declared file FIRST and in the
     # undeclared file second: a stray check that read only a test's first
     # defining file would miss it.
-    undeclared = "tests/test_modal_undeclared_probe.py"
+    undeclared = "tests/modal/test_modal_undeclared_probe.py"
     twice = "def test_defined_in_two_files():\n    return 6\n"
     stray = {
         **sources,
@@ -3385,7 +3385,7 @@ def test_reach_floor_scope_counts_every_runner_half_test_in_the_manifest():
       equality clause names it. The filter this replaced, "valued at a file of
       `RUNNER_TEST_FILES`", counted it on neither side and passed. Three such
       files: one named like a runner test file, one outside the
-      `tests/test_modal_` prefix (a population re-narrowed by that pattern
+      `tests/modal/test_modal_` prefix (a population re-narrowed by that pattern
       passes the first), and the shared file;
     - each runner test file in turn with no test in the manifest, and none
       examined: the empty-file clause alone, saying the file holds no test,
@@ -3406,8 +3406,8 @@ def test_reach_floor_scope_counts_every_runner_half_test_in_the_manifest():
     assert real_shape == [], f"the real shape failed: {real_shape}"
 
     req, core_file = _floor_file("request"), _floor_file("core")
-    undeclared = "tests/test_modal_undeclared_probe.py"
-    # Outside the `tests/test_modal_` prefix too, so a population re-narrowed
+    undeclared = "tests/modal/test_modal_undeclared_probe.py"
+    # Outside the `tests/modal/test_modal_` prefix too, so a population re-narrowed
     # by that name pattern counts it on neither side and is red here.
     unprefixed = "tests/test_request_extra.py"
     assert undeclared not in RUNNER_TEST_FILES and unprefixed not in RUNNER_TEST_FILES
