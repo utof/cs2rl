@@ -267,10 +267,10 @@ def test_every_tracked_module_is_in_the_graph():
     assert not failures, "\n".join(failures)
 
 
-# The contracts of pyproject.toml, by name. Pinned so that the ban below always has a
-# subject: a renamed or deleted contract would otherwise take its `ignore_imports` out
-# of the loop unseen, and a new contract has to be looked at (does it need an ignore?
-# no: see the test) before it is added here.
+# The contracts of pyproject.toml, by name. The ban below reads every contract it finds,
+# so a new contract's ignores are seen without this list. The pin keeps the ban from going
+# vacuous: a config with no contract under this table (a moved table, a rename) has no
+# `ignore_imports` to find and would pass.
 CONTRACT_NAMES = frozenset({
     "cs2rl layers",
     "cs2rl.env layers",

@@ -3518,7 +3518,7 @@ def test_local_entrypoints_do_not_import_modal():
     # checkout's files, not those of whichever checkout the shared venv's .pth names.
     # The entry point checked is the CLI module `cs2rl.train.__main__`, not the package:
     # `from cs2rl import train` loads only the package's __init__ (thread-count defaults,
-    # no imports), so it passes whatever the CLI imports. Importing the module runs its
+    # no cs2rl import), so it passes whatever the CLI imports. Importing the module runs its
     # module scope, which is all `python -m cs2rl.train` loads before its main block.
     # It is imported once, by its one dotted name: the one-module-object guards cannot
     # see a child process (tests/conftest.py, limit (d)), so a second spelling here would
