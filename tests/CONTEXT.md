@@ -60,9 +60,7 @@ root of its own, which `test_path_constants_exist.py` compares with the conftest
 
 ## The guard
 
-`tests/integration/test_tests_layout.py` walks the real `tests/` on disk. It prunes what pytest
-prunes by name (`__pycache__` and the `norecursedirs` patterns), and a test file is one that
-matches `python_files`; both lists come from pytest's config. It checks four rules:
+`tests/integration/test_tests_layout.py` walks the real `tests/` on disk and checks four rules:
 
 - (a) every directory it walks into has a twin package, whatever it holds, unless its top
   directory is in `NO_TWIN`;
@@ -73,10 +71,12 @@ matches `python_files`; both lists come from pytest's config. It checks four rul
 
 Rules 1 to 5 above are convention: the guard checks that a directory has a twin, not that a test
 file sits in the right one, apart from (c) at the root. Where a non-test module goes is convention
-too. The guard pins its known limits, each as a case that passes today:
+too. The guard's known limits, each pinned as a case that passes today except the last:
 
 - (c) does not ask where a root test belongs: a package's test that also imports a flat module
   passes at the root.
 - No rule places a non-test module: a helper at the root or in a mirror directory passes.
 - (d) sees neither `os.path.dirname` nor a root built in two steps
   (`HERE = Path(__file__).resolve()`, then `HERE.parents[2]`).
+- The walk skips a directory whose name is not a Python identifier, such as `tests/env-c/`, which
+  pytest collects from; its test-file patterns are pytest's defaults, copied by hand.

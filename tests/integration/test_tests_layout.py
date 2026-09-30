@@ -1,6 +1,6 @@
 """tests/ mirrors src/cs2rl/ (#207 part 2): where a test file may live, checked on the real tree.
 
-WHAT. `layout_problems(tests_dir, package_dir, ...)` returns one problem per:
+WHAT. `layout_problems(tests_dir, package_dir)` returns one problem per:
   (a) directory under tests/ that the walk enters and that has no twin: tests/<a>/<b> needs
       the package src/cs2rl/<a>/<b>/__init__.py, unless its top directory is in NO_TWIN (an
       entry covers its whole subtree). What the directory holds does not matter;
@@ -20,7 +20,8 @@ WHY each is a failure and not a convention:
       (a); an entry for a directory that does not exist is red by (b). Neither can go quiet.
   (d): #207 measured 56 file-relative roots. After a move most fail loudly, but the ones that
       only feed a child's cwd or a skip stay green in the wrong directory (#207 part 2 M8(a)).
-KNOWN LIMITS, each pinned as a row of test_each_rule_reports_its_plant that expects no problem:
+KNOWN LIMITS; all but the last are pinned as rows of test_each_rule_reports_its_plant that
+expect no problem:
   * (c) does not ask where a root test file belongs. A test that belongs in a package's
     directory passes at the root if it also imports a flat module (`cs2rl.policy`, ...).
   * No rule places a non-test module. A helper module at the root or in a mirror directory
@@ -28,9 +29,12 @@ KNOWN LIMITS, each pinned as a row of test_each_rule_reports_its_plant that expe
   * (d) reads Path's `.parent`/`.parents` chained onto `__file__` in one expression. A root
     built with `os.path.dirname`, or in two steps (`HERE = Path(__file__).resolve()`, then
     `HERE.parents[2]`), passes. No test file uses either.
+  * The walk skips `__pycache__` and every directory whose name is not a Python identifier.
+    pytest collects from such a directory unless a `norecursedirs` pattern (`.*`, `*.egg`, ...)
+    matches it, so a test in `tests/env-c/` escapes (a) and (d). `_TEST_FILE` is pytest's
+    default `python_files`, copied by hand (pyproject.toml sets none).
 PITFALLS.
   * A disk walk, not `git ls-files`: pytest collects an untracked file just the same.
-    __pycache__ and directories whose name is not an identifier are skipped.
   * (a) reads directories, not files, so a directory that a pull leaves holding only
     `__pycache__` is red once its package is gone too. Delete it.
   * (c) reads imports by AST in every spelling (`import cs2rl.policy`, `from cs2rl import
@@ -217,8 +221,9 @@ def test_a_clean_tree_has_no_problem(tmp_path):
 def test_each_rule_reports_its_plant(tmp_path, plant, rule):
     """Positive controls: one plant per rule, each reported by the rule that owns it.
 
-    The rows whose rule is None are the KNOWN LIMITS of the module docstring, pinned so they
-    cannot be mistaken for coverage: a fix that closes one turns its row red, on purpose.
+    The rows whose rule is None pin the KNOWN LIMITS of the module docstring (all but the
+    walk's scope), so that they cannot be mistaken for coverage: a fix that closes one turns
+    its row red, on purpose.
     """
     tests_dir, package_dir = _tree(tmp_path, plant)
     problems = layout_problems(tests_dir, package_dir)
