@@ -40,9 +40,6 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-# The CLI of `python -m cs2rl.train` (#205 part 3): the module-level reads of moved names
-# that train.py's `if __name__ == "__main__":` block made now happen here.
-MAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py"
 
 # Modules split out of train.py (W1, spec 2026-08-31), plus env.config, which
 # owns the env contract that used to live partly in train_shared (spec
@@ -76,28 +73,6 @@ MAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py"
 W1_MODULES = ("cs2rl.policy", "cs2rl.train.resume", "cs2rl.train.config", "cs2rl.train.metrics",
               "cs2rl.train.update", "cs2rl.env.factory", "cs2rl.eval.metrics_schema",
               "cs2rl.env.config")
-
-
-def _cli_module_level_imports():
-    """The cs2rl modules `src/cs2rl/train/__main__.py` imports at its MODULE level.
-
-    Only `tree.body` is scanned, never the `if __name__ == "__main__":` block: these are
-    the imports every `python -m cs2rl.train` launch runs before it parses a flag, so
-    they are what `--dump-config` pays for.
-    """
-    import ast
-    tree = ast.parse(MAIN_PY.read_text())
-    imported = set()
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None \
-                and node.module.startswith("cs2rl"):
-            imported.add(node.module)
-        elif isinstance(node, ast.Import):
-            imported.update(a.name for a in node.names if a.name.startswith("cs2rl"))
-    return tuple(sorted(imported))
-
-
-CLI_MODULE_LEVEL_IMPORTS = _cli_module_level_imports()
 
 # THREE leaves. cs2rl.policy owns the network and the names train_shared used to hold
 # (log-std constants, action masks); env.config owns the env contract; env.factory
@@ -180,22 +155,24 @@ assert not siblings, (
 
 
 def test_cli_module_scope_stays_light():
-    """The CLI's module scope pulls nothing heavy, and really imports what it reads.
+    """The CLI's module scope pulls nothing heavy.
 
     `import cs2rl.train.__main__` runs `__main__.py`'s module scope under its own name, so
     its `if __name__ == "__main__":` block is skipped: what loads is exactly what every
     launch loads before argparse. One module-scope `import torch` in any module it imports
     (loop, envs, record, evaluate, config, policy) would make `--dump-config` pay for torch.
-    The second half is the anti-vacuity check: the parsed import list is non-empty and
-    every entry really loaded.
+
+    NOT checked here: that every name the main block reads is bound at module scope. The
+    old train.py's shim test guarded that, because the block read names its shims
+    imported. It is ruff F821's job now (`select` in pyproject.toml includes "F"; the
+    pre-commit hook runs it on every commit): an unbound name in the block is an
+    undefined-name error, and a copy of that scope analysis here would be a second one
+    to keep right.
     """
-    assert CLI_MODULE_LEVEL_IMPORTS, "parsed no cs2rl import at __main__.py's module level"
     r = _run_child(f"""
 import cs2rl.train.__main__
 heavy = [m for m in {HEAVY!r} if m in sys.modules]
 assert not heavy, f"the CLI's module scope pulled {{heavy}} — --dump-config is no longer cheap"
-missing = [m for m in {CLI_MODULE_LEVEL_IMPORTS!r} if m not in sys.modules]
-assert not missing, f"__main__.py's module-level imports did not load {{missing}}"
 """)
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
 
@@ -203,13 +180,13 @@ assert not missing, f"__main__.py's module-level imports did not load {{missing}
 def test_import_train_test_harness_stays_light():
     """`from tests._helpers import trainer_harness` pulls nothing heavy either.
 
-    The harness is not a W1 module (it is test-only and imports train function-locally),
-    so the probes above never import it. Its lightness is what lets a test import it
-    without paying for torch, and it rests on `_build_trainer_for_test` importing
-    `cs2rl.trainer` function-locally: trainer subclasses PuffeRL and imports torch at
-    module scope, so one module-scope trainer import here loads torch, cs2rl.train and
-    cs2rl.trainer, and neither import-linter contract nor the scope pin objects to that
-    same-layer (L2) edge, which forms no cycle. This probe is the check that does.
+    The harness is not a W1 module (it is test-only and imports the train modules
+    function-locally), so the probes above never import it. Its lightness is what lets a
+    test import it without paying for torch, and it rests on `_harness_parts` and
+    `_build_trainer_for_test` importing `cs2rl.train.trainer` function-locally: the
+    trainer subclasses PuffeRL and imports torch at module scope, so one module-scope
+    trainer import here loads torch. No import-linter contract sees the harness (it
+    lives under tests/, outside `cs2rl`), so this probe is the check that does.
     """
     r = _run_child(f"""
 from tests._helpers import trainer_harness

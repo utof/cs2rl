@@ -71,9 +71,10 @@ modal = [
 # One package, cs2rl, under src/. Explicit because automatic src-layout discovery
 # also scans PEP 420 namespace directories (src/cs2rl/env/c/demo_assets, zig-out,
 # zig-pkg); namespaces = false keeps the wheel to the real packages (cs2rl and its
-# subpackages deploy, env, env.c, eval, experiment, spec and viz). The flip side: a new
-# subpackage without an __init__.py is dropped from the wheel silently. grimp skips it
-# too, so tests/test_import_layers.py's coverage check is what fails on one.
+# subpackages deploy, env, env.c, eval, experiment, spec, train and viz). The flip
+# side: a new subpackage without an __init__.py is dropped from the wheel silently.
+# grimp skips it too, so tests/test_import_layers.py's coverage check is what fails on
+# one.
 where = ["src"]
 include = ["cs2rl*"]
 namespaces = false
@@ -336,9 +337,10 @@ indent_width            = 4
 #
 # import-linter counts function-local imports as edges, and an ignore_imports entry names
 # a module PAIR, never a line or a scope: it hides every site of that pair, a future
-# module-scope one included. tests/test_import_layers.py therefore pins every ignored
-# pair's sites inside a def (the scope pin), and fails if a module is invisible to the
-# graph (a directory without __init__.py).
+# module-scope one included. No contract has one since #205 part 3, and
+# tests/test_import_layers.py::test_no_contract_ignores_imports fails if one is added.
+# The same file fails if a module is invisible to the graph (a directory without
+# __init__.py).
 [tool.importlinter]
 root_package = "cs2rl"
 
