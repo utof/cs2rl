@@ -1,32 +1,25 @@
-"""Pure helpers for Batch 1 reward-architecture changes.
+"""Reward channels: how a vecenv tick's raw rewards become the trainer's normalised reward.
 
-Separate module so unit tests can import without pulling in the full
-PufferLib trainer. These functions are imported by the monkey-patches in
-src/cs2rl/train.py.
+Split from the trainer so unit tests can import these helpers without the PufferLib
+trainer (`cs2rl.train.trainer`, which imports this module). The entropy schedules that used
+to sit beside them live in `cs2rl.train.entropy`.
 
 Functions:
     symlog(x):           sign-preserving log compression; bounds scale without hard cutoff
     symexp(x):           inverse of symlog
-    target_entropy_schedule(step, max_entropy, warmup_end=10_000_000,
-                             warmup_high_frac=0.5, base_frac=0.35):
-                         linear ramp from warmup_high_frac*max_entropy to base_frac*max_entropy
-                         over warmup_end steps; held constant after.
     split_into_channels(step_stats_view):
                          route StepStats reward fields into combat/objective/positional channels
                          using win_by_detonation / win_by_defuse flags
-    warmstart_entropy_state(step, grace_steps, ramp_steps, h_anchor, base_target):
-                         two-phase warm-start entropy schedule: GRACE (alpha ceilinged,
-                         floor disabled) -> RAMP (target h_anchor -> base_target,
-                         floor still disabled) -> OFF (steady state, floor active).
+    process_step_rewards(info, r, agents_per_env, welford_*, scratch, ...):
+                         per-channel Welford normalisation plus one symlog for a whole tick,
+                         batched (float32, reproducing torch's per-device division lowering)
 
 Classes:
     WelfordStd:          scalar online-std estimator with prior_std warmup fallback;
-                         Task 6 instantiates three (one per reward channel).
-    WarmstartEntropyState: frozen dataclass result of warmstart_entropy_state
-                         (phase, target, floor_active).
+                         one instance per reward channel.
 
-All free functions are stateless and deterministic. WelfordStd carries
-per-instance running statistics — each channel needs its own instance.
+The free functions are stateless and deterministic. WelfordStd carries per-instance
+running statistics — each channel needs its own instance.
 """
 
 from __future__ import annotations

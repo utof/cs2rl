@@ -19,25 +19,25 @@ policy's LSTM state and the ``_batch1_*`` reward state, and ``evaluate`` is a me
 ``_init_selfplay``; callers install ``HybridAimVecEnv`` first. The checkpoint body is
 ``save_checkpoint`` on the class. Construction keeps the state setup order.
 
-WHY a module of its own and not a class inside train.py: this module subclasses
+WHY a module of its own and not a class inside cs2rl.train.loop: this module subclasses
 ``PuffeRL``, so it imports torch and pufferlib at module scope and is HEAVY by
-construction. ``from cs2rl import train`` must stay torch-free (tests/test_w1_modules.py: it is what
-keeps ``--dump-config`` at ~1 s), so train.py imports this module function-locally, inside
-``train()``. train_test_harness.py (gh#168 W1.5) imports it the same way, function-locally
-inside ``_build_trainer_for_test``, so ``from cs2rl import train_test_harness`` stays as light
-as ``from cs2rl import train`` (tests/test_w1_modules.py::test_import_train_test_harness_stays_light);
+construction. The CLI module's scope (``cs2rl.train.__main__``, which imports
+``cs2rl.train.loop`` at its module level) must stay torch-free
+(tests/test_w1_modules.py::test_cli_module_scope_stays_light: it is what keeps
+``--dump-config`` at ~1 s), so ``cs2rl.train.loop`` imports this module function-locally,
+inside ``train()``. tests/_helpers/trainer_harness.py (gh#168 W1.5) imports it the same
+way, function-locally inside ``_build_trainer_for_test``, so
+``from tests._helpers import trainer_harness`` stays as light as the CLI module
+(tests/test_w1_modules.py::test_import_train_test_harness_stays_light);
 tests/test_trainer_composition.py imports it inside a fixture. Never add
-``from cs2rl.trainer import ...`` at train.py's module level (knock-out W1-K3 in the spec:
-test_import_train_stays_light_and_really_imports_the_shims goes red: with the import next
-to the other module-level imports it is a circular-import ImportError, after all defs it
-is the guard naming torch).
+``from cs2rl.train.trainer import ...`` at ``cs2rl.train.loop``'s module level (knock-out
+W1-K3 in the spec: test_cli_module_scope_stays_light goes red naming torch).
 
-IMPORT DIRECTION: this module imports ``train`` at module scope; ``train`` imports this
-module only inside ``train()``. That is acyclic at import time: by the time ``train()``
-runs, ``train`` is fully initialised. When train.py runs as ``python -m cs2rl.train``, its
-main block aliases ``sys.modules["cs2rl.train"]`` to ``__main__`` as its first statement,
-before ``train()`` is called, so ``from cs2rl.train import ...`` here does not re-execute
-train.py.
+IMPORT DIRECTION: ``cs2rl.train.loop`` imports this module, inside ``train()``; this
+module imports nothing from ``loop`` or ``__main__``, at any scope. pyproject.toml's
+``cs2rl.train layers`` contract enforces that (``__main__`` and ``loop`` sit above
+``trainer``), so there is no import cycle to order and no ``__main__`` aliasing to get
+right.
 """
 
 from __future__ import annotations

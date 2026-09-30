@@ -285,8 +285,11 @@ def train(args):
     torch.distributions.Distribution.set_default_validate_args(False)
 
     # Load .env from repo root if present (sets WANDB_* vars picked up by wandb)
-    # This file is <repo>/src/cs2rl/train.py, so the repo root is parents[2].
-    _env_file = Path(__file__).parents[2] / ".env"
+    # This file is <repo>/src/cs2rl/train/loop.py, so the repo root is parents[3].
+    # PITFALL: parents[2] is src/. It was the repo root in the flat src/cs2rl/train.py,
+    # and moving this code one directory deeper without this index would silently make
+    # a local --wandb run read <repo>/src/.env and lose every WANDB_* setting.
+    _env_file = Path(__file__).parents[3] / ".env"
     if _env_file.exists():
         for _line in _env_file.read_text().splitlines():
             _line = _line.strip()
@@ -587,8 +590,8 @@ def train(args):
     self_play_enabled = bool(getattr(args, "self_play", True))
     # W3 (#154): the pool constants (15 / 25 / 0.6 / 50) and the
     # `0.3 if <on> else 0.0` p_past rule now live in
-    # env.factory.build_selfplay_manager, which is also what the two harness
-    # sites call — they used to spell the same construction out twice more.
+    # cs2rl.train.selfplay.build_selfplay_manager, which is also what the test
+    # harness calls (once) — its two constructions used to spell the same thing out twice more.
     # `self_play_enabled` is passed as the FLAG, not a p_past value, so no caller
     # can set a different mixing probability at one site than another.
     self_play_mgr = build_selfplay_manager(
@@ -613,9 +616,10 @@ def train(args):
     # used to be set on the instance after construction (run_id, weight_decay,
     # the aim-σ param group, the GC pins) stays below it, because no patch
     # reads it at patch time (spec §W1 table; both byte gates pin this order).
-    # Function-local import ON PURPOSE: trainer.py subclasses PuffeRL and so
-    # imports torch at module scope; `from cs2rl import train` must stay torch-free
-    # (tests/test_w1_modules.py).
+    # Function-local import ON PURPOSE: cs2rl.train.trainer subclasses PuffeRL and so
+    # imports torch at module scope, and cs2rl.train.__main__ imports THIS module at its
+    # module level: a module-scope import here would put torch on the CLI's module scope,
+    # which must stay torch-free (tests/test_w1_modules.py::test_cli_module_scope_stays_light).
     from cs2rl.train.trainer import Cs2PuffeRL, HybridAimVecEnv
     vecenv = HybridAimVecEnv(vecenv, _cont_action_view_main)
     trainer = Cs2PuffeRL(train_config,

@@ -1473,10 +1473,12 @@ def test_env_factory_never_names_train_make_env():
     Names are compared in FULL: every first-party module is top-level `cs2rl`, so
     a first-component check could no longer tell `train` from `env.config`.
 
-    Scoped to module-level imports plus the name `make_env`, deliberately:
-    `build_selfplay_manager`'s FUNCTION-LOCAL `from cs2rl.train import SelfPlayManager`
-    is legitimate — it is why train.py's `__main__` self-alias is still a hard
-    prerequisite of this module — and must not be flagged.
+    Scoped to module-level imports plus the name `make_env`, deliberately: this module
+    no longer has a function-local `cs2rl.train` import to leave alone (#205 part 3 moved
+    `build_selfplay_manager`, which carried the last one, to `cs2rl.train.selfplay`), and
+    `lint-imports` rejects an upward import at ANY scope now that `cs2rl layers` has no
+    `ignore_imports` entry, so function bodies need no scan for it here. Only the name
+    `make_env` is searched everywhere in the file.
     """
     from cs2rl.env import factory as env_factory
 

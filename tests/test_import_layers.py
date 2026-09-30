@@ -192,9 +192,11 @@ def scope_pin_failures(tree: Path, facts: dict) -> list[str]:
 
     BLIND SPOT, stated: this checks where an import STATEMENT sits, not when it
     RUNS. `def f(): import cs2rl.viz.render` followed by a module-level `f()` passes the
-    pin and both contracts. For train -> viz.render, the one pair nothing else would
-    notice, tests/test_w1_modules.py lists `rerun` in HEAVY, so `from cs2rl import
-    train` loading viz.render fails there.
+    pin and every contract. That was the live case for the train -> viz.render ignore
+    (#92). Train sits above viz now, so that edge is legal at any scope and no ignore
+    is left; what still catches a viz.render import that RUNS at the CLI's module scope
+    is tests/test_w1_modules.py: it lists `rerun` in HEAVY, and
+    test_cli_module_scope_stays_light imports `cs2rl.train.__main__`.
     """
     failures = []
     for importer, imported, lines in facts["sites"]:

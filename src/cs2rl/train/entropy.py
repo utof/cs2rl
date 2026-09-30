@@ -1,4 +1,15 @@
-"""cs2rl.train.entropy.
+"""The entropy targets: how much policy entropy the PPO update steers toward, and when.
+
+Owns two pure schedules and nothing else:
+  target_entropy_schedule      -- the normal linear ramp from `warmup_high_frac * max_entropy`
+                                  down to `base_frac * max_entropy`, held after `warmup_end`;
+  warmstart_entropy_state      -- the override for BC-warm-started runs (GRACE -> RAMP -> OFF),
+                                  its frozen result `WarmstartEntropyState` and the WS_GRACE /
+                                  WS_RAMP / WS_OFF phase constants.
+
+Both are stateless and torch-free (stdlib only): the trainer decides when to call them and
+what to latch. `cs2rl.train.update._scheduled_target_entropy` feeds the first the config's
+values, and `cs2rl.train.trainer` reads the second's phase and `floor_active`.
 """
 
 from __future__ import annotations

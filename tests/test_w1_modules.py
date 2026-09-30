@@ -5,27 +5,29 @@ FRESH interpreter, one subprocess per case:
 
   1. it imports at all, standalone (no "works only because train.py imported it
      first" ordering luck);
-  2. it does not pull `cs2rl.train` back in — the dependency graph stays acyclic, so
-     the leaf really is a leaf;
+  2. it does not pull the run driver or the CLI (`cs2rl.train.loop`,
+     `cs2rl.train.__main__`) back in — the dependency graph stays acyclic, so the leaf
+     really is a leaf;
   3. its module scope stays free of torch / nav / env.c.cs2_env / rerun;
-  4. the only sibling edge any of them has is into a LEAF, and the leaves
-     import no sibling except each other in the one allowed direction
-     (train_shared -> env.config). The shape spec §2 W1 fixes: leaves at the
-     bottom, everything else a spoke off them, never spoke-to-spoke.
+  4. the only sibling edge any of them has is into a LEAF, and the leaves import no
+     sibling except each other in the one allowed direction (policy -> env.factory ->
+     env.config). The shape spec §2 W1 fixes: leaves at the bottom, everything else a
+     spoke off them, never spoke-to-spoke.
 
 WHY a subprocess and not a plain import: pytest's session has already imported
 half the repo by the time any test body runs, so `"torch" not in sys.modules`
 in-process measures the session, not the module. Every assert here has to start
 from an empty sys.modules or it silently passes forever.
 
-WHY property 3 is load-bearing (measured, not stylistic): `from cs2rl import train`
-today pulls neither torch nor nav nor env.c, because all ~35 torch imports in train.py
-are function-local ON PURPOSE. That is what makes `train.py --dump-config`
-cost ~1 s instead of ~30 s, which in turn is what makes it usable as the
-Modal/run_rung1 fingerprint step (tests/test_train_cli.py's "--dump-config means
-zero side-effects"). train.py imports each of these modules at ITS module level,
-so a single module-scope `import torch` added to any of them silently destroys
-that guarantee for every caller — and nothing else in the suite would notice.
+WHY property 3 is load-bearing (measured, not stylistic): `import cs2rl.train.__main__`
+today pulls neither torch nor nav nor env.c, because the torch imports in the modules it
+reaches are function-local ON PURPOSE (about 35 of them in the flat train.py, before
+#205 part 3). That is what makes `python -m cs2rl.train --dump-config` cost ~1 s instead
+of ~30 s, which in turn is what makes it usable as the Modal/run_rung1 fingerprint step
+(tests/test_train_cli.py's "--dump-config means zero side-effects"). The CLI module
+imports each of these modules, or one that does, at ITS module level, so a single
+module-scope `import torch` added to any of them silently destroys that guarantee for
+every caller — and nothing else in the suite would notice.
 
 EXTENDING THIS FILE: the split proceeds in several tasks. Add each new module's
 name to W1_MODULES as it lands — the spec makes adding it part of the SAME task
@@ -52,11 +54,11 @@ MAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py"
 #
 # `env.factory` (W3) is here for a reason beyond bookkeeping: it is the module
 # whose module scope is MOST tempting to make heavy, since its whole job is
-# constructing envs. Two function-local imports carry the two reasons: `from
-# cs2rl.env.c.cs2_env import make_env` in `build_env_for` stays function-local so
-# `from cs2rl import train` stays free of torch/nav/env.c, and `from cs2rl.train import
-# SelfPlayManager` in `build_selfplay_manager` stays function-local to break
-# the cycle (train.py imports env.factory at module level).
+# constructing envs. Its one function-local import, `from cs2rl.env.c.cs2_env import
+# make_env` in `build_env_for`, stays function-local so `import cs2rl.train.__main__`
+# stays free of torch/nav/env.c. (It had a second, `from cs2rl.train import
+# SelfPlayManager` in `build_selfplay_manager`, which broke a cycle; that builder moved
+# to cs2rl.train.selfplay in #205 part 3 and the cycle went with it.)
 #
 # `metrics_schema` (W4) is here for the mirror-image reason: it is a registry of
 # STRINGS whose whole value is being cheap to import, and it took ownership of
@@ -65,12 +67,12 @@ MAIN_PY = REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py"
 # class to spell a type hint, eight string constants would start costing a torch
 # import, and only this test would say so.
 #
-# `trainer` (gh#168 W1) is deliberately NOT here: it subclasses PuffeRL, so it
-# imports pufferlib (and through it torch) at module scope and is heavy by
-# construction. It cannot pass property 3, and train.py / train_test_harness.py
-# import it function-locally for exactly that reason (knock-out W1-K3: a
-# module-level `from cs2rl.trainer import Cs2PuffeRL` in train.py turns
-# test_import_train_stays_light_and_really_imports_the_shims red naming torch).
+# `cs2rl.train.trainer` (gh#168 W1) is deliberately NOT here: it subclasses PuffeRL, so
+# it imports pufferlib (and through it torch) at module scope and is heavy by
+# construction. It cannot pass property 3, and cs2rl.train.loop and
+# tests/_helpers/trainer_harness.py import it function-locally for exactly that reason
+# (knock-out W1-K3: a module-level `from cs2rl.train.trainer import Cs2PuffeRL` in
+# cs2rl/train/loop.py turns test_cli_module_scope_stays_light red naming torch).
 W1_MODULES = ("cs2rl.policy", "cs2rl.train.resume", "cs2rl.train.config", "cs2rl.train.metrics",
               "cs2rl.train.update", "cs2rl.env.factory", "cs2rl.eval.metrics_schema",
               "cs2rl.env.config")
@@ -97,29 +99,26 @@ def _cli_module_level_imports():
 
 CLI_MODULE_LEVEL_IMPORTS = _cli_module_level_imports()
 
-# TWO leaves. train_shared owns the names moved out of train.py; env.config owns
-# the env contract. train_config -> env.config is the load-bearing edge between
-# the leaves and the spokes (env_config_from_args builds an EnvConfig); train.py
-# imports both. The reverse edge would make "leaf" meaningless — pyproject.toml's
-# `cs2rl layers` contract pins it (env.config is in the env layer, train_shared one
-# above; tests/test_import_layers.py runs it), and so does
-# tests/test_env_config.py::test_module_is_stdlib_only.
-# #205 part 3: train_shared dissolved; its policy half (log-std constants, action masks)
-# is in cs2rl.policy, which sits a layer below train and imports env.factory for
-# load_policy_from_checkpoint's env, so env.factory (L1, itself importing only env.config)
-# is a leaf here too.
+# THREE leaves. cs2rl.policy owns the network and the names train_shared used to hold
+# (log-std constants, action masks); env.config owns the env contract; env.factory
+# (L1, importing only env.config at module scope) builds envs from it, and the policy
+# imports it for load_policy_from_checkpoint's env. Every cs2rl.train.* spoke may
+# import any of the three; train.config -> env.config is the load-bearing edge between
+# a leaf and a spoke (env_config_from_args builds an EnvConfig). The reverse edges would
+# make "leaf" meaningless — pyproject.toml's `cs2rl layers` contract pins them (the
+# policy and env sit below the whole train package; tests/test_import_layers.py runs it),
+# and so does tests/test_env_config.py::test_module_is_stdlib_only for env.config.
 LEAVES = frozenset({"cs2rl.policy", "cs2rl.env.config", "cs2rl.env.factory"})
 
 # Imports whose presence in sys.modules means the import-lightness invariant is
 # gone. `cs2rl.env.c.cs2_env` rather than `cs2rl.env.c` on purpose: the package
 # itself is cheap, the ctypes/binding module underneath it is not.
 #
-# `rerun` stands in for `cs2rl.viz.render`, which imports it at module scope and which train.py
-# reaches only inside record_episode (`--record`). The layers contract ignores the
-# train -> viz.render pair and the scope pin in tests/test_import_layers.py keeps its import
-# statements inside a def, but neither sees a function-local import that is CALLED at
-# module scope; test_import_train_stays_light_and_really_imports_the_shims, through
-# this entry, does.
+# `rerun` stands in for `cs2rl.viz.render`, which imports it at module scope and which
+# cs2rl.train.record reaches only inside record_episode (`--record`). The layers
+# contract lets train import viz at ANY scope (train sits above viz, and no
+# ignore_imports entry is left to pin), so it cannot see a function-local import that is
+# CALLED at module scope; test_cli_module_scope_stays_light, through this entry, does.
 HEAVY = ("torch", "cs2rl.env.nav", "cs2rl.env.c.cs2_env", "rerun")
 
 
@@ -317,12 +316,14 @@ def test_mask_head_slices_is_complete_in_a_leaf_only_interpreter():
     WHY this needs its own subprocess, and why that subprocess must NEVER have
     imported `cs2rl.train`: _MASK_HEAD_SLICES is not a single assignment but a
     three-statement construct (empty list, a `for` loop appending slices, a
-    `del`). If the loop were left behind in train.py while the list moved to the
-    leaf, `from cs2rl import train_shared` would still succeed and hand out an EMPTY
-    list, while `from cs2rl import train` would run the leftover loop and fill THE SAME list
-    object — so any interpreter that has imported `cs2rl.train` sees a correct length
-    and this assert becomes vacuous. Importing train_shared alone is the only
-    arrangement that can observe the half-move.
+    `del`). If the loop were ever left behind in a module that imports the policy
+    (cs2rl.train.loop, say) while the list lives in policy.py, `import cs2rl.policy`
+    alone would still succeed and hand out an EMPTY list, while an interpreter that had
+    imported that module would run the leftover loop and fill THE SAME list object — so
+    any interpreter that has imported that module sees a correct length and this assert
+    becomes vacuous. Importing policy alone, with no `cs2rl.train.*` module loaded
+    (importing any of them loads the package `cs2rl.train` first, which the child asserts
+    absent), is the only arrangement that can observe the half-move.
 
     Consequence if it ever regresses: `_apply_action_masks` zips with
     strict=True, so a short list raises at the first forward pass rather than

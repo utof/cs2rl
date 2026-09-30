@@ -1034,7 +1034,7 @@ def _hybrid_sample_logits(policy_out,
 # floors entropy without flooding the policy with noise; tanh+max_turn_speed
 # clamp dominates the per-tick range regardless of σ. σ_max = 0.5 rad ≈ 28.6°
 # — symmetric bound prevents explosion that would mask μ.
-# Module-level so tests can `from cs2rl import train; train.LOG_STD_MIN` without poking
+# Module-level so tests can `from cs2rl.policy import LOG_STD_MIN` without poking
 # at the inner Dust2Policy class. Used in build_policy() forward paths and
 # in the max_entropy calc that drives the SAC-α dual loop.
 LOG_STD_INIT = math.log(0.1)

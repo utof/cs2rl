@@ -1,10 +1,17 @@
-"""`python -m cs2rl.train`: the command line.
+"""CS2 RL Sim: the training entry point, `python -m cs2rl.train`.
 
-Parses the flags, validates them torch-free (so `--dump-config` stays cheap), then
-dispatches one mode: --dump-config, --smoke, --train, --record or --eval.
-A package `__main__` runs under the name `__main__` and is imported by no module,
-so the old train.py self-alias (`sys.modules.setdefault("cs2rl.train", ...)`)
-has nothing left to protect.
+Usage:
+  python -m cs2rl.train --smoke     # sanity check: 20k native-env steps, no crash, print steps/sec
+  python -m cs2rl.train --train     # full PPO self-play training (PufferLib 3.0)
+  python -m cs2rl.train --record    # run 1 episode, save rerun recording (random policy)
+  python -m cs2rl.train --eval      # evaluate a checkpoint across many seeds
+
+This module is the command line only: it parses the flags, validates them torch-free
+(so `--dump-config` stays cheap), then dispatches one mode: --dump-config, --smoke,
+--train (cs2rl.train.loop.train), --record (cs2rl.train.record) or --eval
+(cs2rl.train.evaluate). A package `__main__` runs under the name `__main__` and is
+imported by no module, so the old train.py self-alias
+(`sys.modules.setdefault("cs2rl.train", ...)`) has nothing left to protect.
 """
 
 import argparse
@@ -39,7 +46,8 @@ if __name__ == "__main__":
     # a second place to look when a default changes.
     _ENV_DEFAULTS = EnvConfig()
 
-    parser = argparse.ArgumentParser()
+    # prog is spelled out: as a package __main__ argparse would print `usage: __main__.py`.
+    parser = argparse.ArgumentParser(prog="python -m cs2rl.train")
     parser.add_argument(
         "--dust2",
         action="store_true",
