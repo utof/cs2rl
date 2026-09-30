@@ -19,7 +19,7 @@ here, the location moves with the package.
 
 PITFALL: importing this package must stay light, pathlib only. Never import binding
 (it loads the .so) or cs2_env (numpy, the ctypes layer) here: viz/play.py, the scripts and
-test collection import these constants. tests/test_w1_modules.py pins that
+test collection import these constants. tests/train/test_w1_modules.py pins that
 `import cs2rl.env.c` loads no submodule and no numpy.
 """
 from pathlib import Path

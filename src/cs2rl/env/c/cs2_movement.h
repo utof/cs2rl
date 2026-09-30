@@ -219,7 +219,7 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
          * would poison that reading. Zeroing after the is_crouching write would
          * green the histogram while leaving the agent crouched; zeroing after
          * count_action would stop the crouch but keep counting attempts. Both
-         * are covered by tests/test_stance_flags.py. */
+         * are covered by tests/env/c/test_stance_flags.py. */
         if (!sd->crouch_enabled)
             crouch_act = 0;
         a->is_crouching = (crouch_act == 1) ? 1 : 0;
@@ -233,7 +233,7 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
          * effects" would therefore admit an insertion just above that impulse,
          * which is AFTER this count_action and would leave the jump histogram
          * counting ATTEMPTED jumps forever. Hence: zero at the READ, above the
-         * feed. tests/test_stance_flags.py asserts action_jump_1 == 0 under a
+         * feed. tests/env/c/test_stance_flags.py asserts action_jump_1 == 0 under a
          * forced jump at jump_enabled=0 precisely to keep that placement
          * observable — a vel_z-only test passes with the weak placement. */
         if (!sd->jump_enabled)

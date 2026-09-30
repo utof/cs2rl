@@ -79,7 +79,7 @@ static int sd_layout_digest(char out_hex[65], PyObject* fields);
  *      only RUNTIME check that the .so and the installed cs2_env.py describe
  *      the same struct. It matters because the extension is a gitignored local
  *      artifact, so "headers edited, .so not rebuilt" is the realistic failure,
- *      and tests/test_static_data_layout.py only compares the two at TEST time.
+ *      and tests/env/c/test_static_data_layout.py only compares the two at TEST time.
  *      It runs FIRST because a buffer packed against a different declaration
  *      has an unknown prefix size, which would make check 2 compare the length
  *      against the wrong number.
@@ -160,7 +160,7 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
                      "different structs; rebuild with "
                      "`uv run --with \"ziglang>=0.14.0,<0.15\" python setup.py build_ext "
                      "--inplace`, and if that does not fix it, run "
-                     "tests/test_static_data_layout.py to see which field disagrees.",
+                     "tests/env/c/test_static_data_layout.py to see which field disagrees.",
                      c_layout_hash,
                      layout_hash);
         return NULL;
@@ -347,7 +347,7 @@ static PyObject* py_get_masks(PyObject* self, PyObject* args) {
  * The converse is enforced, not just asked
  * for: every key published here MUST be consumed by the _C_SIZES guard in
  * cs2_env.py, because test_struct_sizes_keys_are_all_consumed (in
- * tests/test_struct_sizes.py) asserts set(struct_sizes()) == _C_SIZE_KEYS_CHECKED.
+ * tests/env/c/test_struct_sizes.py) asserts set(struct_sizes()) == _C_SIZE_KEYS_CHECKED.
  * A key added here and never compared there fails that test instead of sitting
  * unguarded. Sizes use the "n" (Py_ssize_t) format because sizeof yields size_t;
  * the macros use "i" (plain int). */
@@ -440,7 +440,7 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
  * crouch_enabled field packs the wrong number into a correctly-described slot,
  * and every quadruple here still matches. That failure mode belongs to
  * static_data_scalars() and the two-env sentinel scheme in
- * tests/test_struct_sizes.py, which is why neither is retired.
+ * tests/env/c/test_struct_sizes.py, which is why neither is retired.
  * It also covers the PREFIX ONLY (up to wall_list): the tail is held by the
  * three offset anchors in py_struct_sizes above.
  *
@@ -673,7 +673,7 @@ static PyObject* py_static_data_layout(PyObject* self, PyObject* Py_UNUSED(ignor
  *
  * That completeness is ENFORCED, not merely documented:
  * test_static_data_scalars_covers_every_scalar_field in
- * tests/test_struct_sizes.py compares this dict's key set against the
+ * tests/env/c/test_struct_sizes.py compares this dict's key set against the
  * scalar-typed fields of the StaticDataC ctypes mirror. Appending a field to
  * cs2_types.h + the mirror and forgetting this function fails that test.
  *
@@ -833,7 +833,7 @@ fail:
  * WHAT: the ONE Python entry into cs2_solids.h's bake. The training path never
  *       bakes (env_step does not query solids today; only make_client in
  *       cs2_render.h does), so without this a Python test cannot ask "does this
- *       map survive the solids bake?" (spec 2026-08-29 §8, tests/test_arena_duel.py).
+ *       map survive the solids bake?" (spec 2026-08-29 §8, tests/env/test_arena_duel.py).
  * WHY:  build_solids_from_rooms is static inline in a header — not reachable by
  *       ctypes — and the alternative (re-deriving the face rules in Python)
  *       would test a copy, not the bake.
