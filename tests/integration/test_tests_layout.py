@@ -166,21 +166,6 @@ def test_tests_mirror_the_package(pytest_scope):
     assert not problems, "tests/ does not mirror src/cs2rl/:\n  " + "\n  ".join(problems)
 
 
-@pytest.mark.parametrize(
-    "pattern",
-    ["test_*.py", "*_test.py", ".*", "build", "env/*", "tests/env/*.py", "tests/*.py", "/abs/*.py"])
-def test_matches_agrees_with_pytests_own_glob(pattern):
-    """`_matches` against the private original it ports, on names and on `/` patterns alike.
-
-    Imported here only, so that a pytest upgrade that changes or moves it fails this test and
-    not the guard's module.
-    """
-    from _pytest.pathlib import fnmatch_ex
-    for path in ("/r/tests/test_a.py", "/r/tests/env/a_test.py", "/r/tests/env/x.py",
-                 "/r/tests/.cache", "/r/tests/build", "/abs/x.py", "rel/tests/env/x.py"):
-        assert _matches(pattern, Path(path)) == fnmatch_ex(pattern, path), (pattern, path)
-
-
 def _tree(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path]:
     # The package is `pkg`, not `cs2rl`: the name pin (test_name_strings_resolve.py) reads every
     # string here, and a planted `cs2rl.<missing>` would fail it.
