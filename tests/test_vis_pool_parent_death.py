@@ -42,7 +42,8 @@ import time
 
 import pytest
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
+
 N_WORKERS = 3
 N_AREAS = 8
 

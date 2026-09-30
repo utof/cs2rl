@@ -25,7 +25,9 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
+
+ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                                     # noqa: E402, I001
 from scripts.modal_runner import checkpoint, core, preflight, state, training          # noqa: E402, I001

@@ -40,7 +40,6 @@ otherwise catch.
 import ctypes
 import json
 import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -51,8 +50,9 @@ from cs2rl.env.c.cs2_env import (
     StaticDataC,
     make_env,
 )
+from tests.conftest import REPO_ROOT
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "static_data_scalars_pre_w2.json"
+_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "static_data_scalars_pre_w2.json"
 
 # Bumped if the fixture's own shape changes, so a stale file fails on the tag
 # rather than on a confusing KeyError deep inside a comparison.

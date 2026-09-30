@@ -15,6 +15,8 @@ below is the assertion that fails when that happens.
 import numpy as np
 import pytest
 
+from tests.conftest import REPO_ROOT
+
 N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
 
 
@@ -331,8 +333,7 @@ def test_jump_enabled_is_in_the_eval_driver_agreement_loop():
     and the mismatch would never surface in metrics. Mirrors
     test_cli_flags_declared_default_none's source-scan rationale."""
     import re
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train" / "envs.py").read_text()
+    src = (REPO_ROOT / "src" / "cs2rl" / "train" / "envs.py").read_text()
     m = re.search(r"for _k in \((.*?)\):", src, re.S)
     assert m, "eval/driver agreement loop not found in train/envs.py"
     keys = m.group(1)
@@ -361,9 +362,7 @@ def test_cli_flags_declared_default_none():
     `test_live_train_option_mirror_matches_train_py` in
     tests/test_modal_request.py."""
     import re
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train" /
-           "__main__.py").read_text()
+    src = (REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py").read_text()
     for flag, dest, typ in (("--round-time-ticks", "round_time_ticks", "int"),
                             ("--laser-range", "laser_range", "float"), ("--max-turn-speed",
                                                                         "max_turn_speed", "float")):
@@ -387,9 +386,7 @@ def test_stance_flags_declared_default_on():
     the parser) rather than written as `1`, so the flag and the env cannot
     drift; R11's argparse probe is what enforces that direction."""
     import re
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train" /
-           "__main__.py").read_text()
+    src = (REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py").read_text()
     for flag, dest in (("--crouch-enabled", "crouch_enabled"), ("--jump-enabled", "jump_enabled")):
         m = re.search(rf'add_argument\(\s*"{flag}",(.*?)\)\n', src, re.S)
         assert m, flag

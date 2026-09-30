@@ -9,11 +9,13 @@ costs in the seam manifest, and where helpers go.
 import json
 import threading
 from datetime import UTC, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
+
+ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                                 # noqa: E402, I001
 from scripts.modal_runner import core, state                                       # noqa: E402, I001

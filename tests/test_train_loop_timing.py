@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import ast
 import time
-from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
+
+ROOT = REPO_ROOT
 TRAIN_PY = ROOT / "src" / "cs2rl" / "train" / "loop.py"
 
 # The ONE helper name allowed to stand in for an inline perf_counter at a call

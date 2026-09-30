@@ -20,6 +20,7 @@ from cs2rl.train.update import (
     masked_normalize_adv,
     masked_std_unbiased,
 )
+from tests.conftest import REPO_ROOT
 
 
 @pytest.fixture
@@ -261,10 +262,8 @@ def test_train_passes_the_resolved_opponent_mode_to_build_participating_rows():
     from: a literal would satisfy the keyword check alone.
     """
     import ast
-    from pathlib import Path
 
-    tree = ast.parse(
-        (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train" / "loop.py").read_text())
+    tree = ast.parse((REPO_ROOT / "src" / "cs2rl" / "train" / "loop.py").read_text())
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "train")
     calls = [
         c for c in ast.walk(fn) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)

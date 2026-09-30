@@ -35,7 +35,8 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from tests.conftest import REPO_ROOT
+
 SCRIPT = REPO_ROOT / "scripts" / "run_rung1.sh"
 
 # Fake train.py. Modes (FAKE_MODE env): ok | crash_after_ckpt | crash_no_ckpt | always_fail_after_ckpt.

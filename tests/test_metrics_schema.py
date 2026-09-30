@@ -50,8 +50,7 @@ from cs2rl.eval import metrics_schema as ms
 # `import metrics_census` would need tests/_helpers/ on sys.path and would load a
 # second copy; TID251 bans it and the old `tests.metrics_census`.
 from tests._helpers import metrics_census as census
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
 
 # One census per session: every test below reads the same extraction, so a
 # disagreement between two tests is a registry fact, never a re-parse artifact.

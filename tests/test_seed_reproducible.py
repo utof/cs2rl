@@ -15,12 +15,12 @@ import json
 import subprocess
 import sys
 from multiprocessing import Value
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
+
 EXCLUDE_PREFIX = ("uptime", "SPS", "timing/", "performance/", "run_id")
 
 

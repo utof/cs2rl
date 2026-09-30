@@ -29,7 +29,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
 
-REPO = Path(__file__).resolve().parent.parent
+from tests.conftest import REPO_ROOT
+
+REPO = REPO_ROOT
 CONFTEST = REPO / "tests" / "conftest.py"
 
 # Generous next to a child's ~1 s runtime, and shared by all the children of one

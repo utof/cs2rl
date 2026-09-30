@@ -8,7 +8,8 @@ embeds at runtime — any drift breaks observation normalization in the C# plugi
 """
 
 import math
-from pathlib import Path
+
+from tests.conftest import REPO_ROOT
 
 
 def test_out_dir_is_the_deploy_mapdata_dir_the_plugin_reads():
@@ -21,7 +22,7 @@ def test_out_dir_is_the_deploy_mapdata_dir_the_plugin_reads():
     """
     from cs2rl.deploy.export_mapdata import OUT_DIR
 
-    repo = Path(__file__).resolve().parents[1]
+    repo = REPO_ROOT
     assert OUT_DIR == repo / "deploy" / "mapdata", (
         f"export_mapdata would write to {OUT_DIR}, not {repo / 'deploy' / 'mapdata'}")
 

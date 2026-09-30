@@ -58,7 +58,9 @@ from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
+
+ROOT = REPO_ROOT
 
 # PITFALL: these runner imports are load-bearing for the seam gate, not only
 # for the helpers below. The reach floor (tests/test_modal_packaging.py)

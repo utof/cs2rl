@@ -73,6 +73,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import REPO_ROOT
+
 # The package's declared shape: MANIFEST, the import tables, and the module list
 # derived from them. Every gate here reads it; the file itself is data only.
 from tests.modal_runner_tables import (
@@ -107,7 +109,7 @@ from tests.test_modal_packaging import (
     _runner_module_population,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 # Module names that say what a module IS rather than what it owns, which is how
 # a module becomes a junk drawer; the `forbidden-name` clause and its message
 # both read this.

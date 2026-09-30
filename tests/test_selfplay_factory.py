@@ -31,13 +31,13 @@ the same construction" is asserted from the pre-migration source, not assumed.
 import ast
 import copy
 import json
-from pathlib import Path
 
 import pytest
 
 from cs2rl.train.selfplay import build_selfplay_manager
+from tests.conftest import REPO_ROOT
 
-FIXTURE = Path(__file__).parent / "fixtures" / "selfplay_kwargs_pre_w3.json"
+FIXTURE = REPO_ROOT / "tests" / "fixtures" / "selfplay_kwargs_pre_w3.json"
 
 # Must match CAPTURE_FORMAT in the capture script (`git show
 # 9878725:tests/capture_selfplay_kwargs_pre_w3.py`). Duplicated rather
@@ -408,7 +408,7 @@ def _factory_call_in(path, qualname, func_name):
     return found[0]
 
 
-PACKAGE = Path(__file__).resolve().parents[1] / "src" / "cs2rl"
+PACKAGE = REPO_ROOT / "src" / "cs2rl"
 
 
 def test_train_call_site_forwards_the_same_expressions_it_used_to():

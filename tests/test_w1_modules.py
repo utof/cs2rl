@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
 
 # Modules split out of train.py (W1, spec 2026-08-31), plus env.config, which
 # owns the env contract that used to live partly in train_shared (spec

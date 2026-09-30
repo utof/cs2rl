@@ -37,9 +37,10 @@ import ast
 import re
 from collections.abc import Iterator
 from itertools import pairwise
-from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+from tests.conftest import REPO_ROOT
+
+REPO = REPO_ROOT
 
 # Callees whose positional string arguments are run, or split into an argv, as a command line.
 _RUNNERS = frozenset({

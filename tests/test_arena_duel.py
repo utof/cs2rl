@@ -19,16 +19,16 @@ import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import numpy as np
 import pytest
+
+from tests.conftest import REPO_ROOT
 
 N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
 H_SHOOT = 1                            # cs2_types.h head order (same pin as test_pitch_pin)
 AGENT_HULL_RADIUS = 12.0               # cs2_types.h:26
 EYE_STAND = 48.0                       # cs2_combat.h standing eye height
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_group(argv, *, timeout, **kw) -> subprocess.CompletedProcess:

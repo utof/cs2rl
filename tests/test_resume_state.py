@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
 
 
 def _make(num_envs=16, seed=3):

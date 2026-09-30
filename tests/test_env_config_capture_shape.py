@@ -40,11 +40,9 @@ genuinely changed. The two cases that actually come up:
   fixture. Find out which builder started sending something different, and why.
 """
 import json
-from pathlib import Path
 
 from cs2rl.env.config import KNOB_FIELDS, REWARD_FIELDS
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
 
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "env_config_pre_165b.json"
 

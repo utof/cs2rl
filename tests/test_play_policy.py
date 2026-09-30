@@ -1,5 +1,4 @@
 # tests/test_play_policy.py
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,6 +11,7 @@ from cs2rl.viz.play_actions import (
     play_reset_round,
     resolve_policy_path,
 )
+from tests.conftest import REPO_ROOT
 
 
 def test_fill_then_human_same_buffers_to_step():
@@ -147,7 +147,7 @@ def test_env_scripted_movers_not_statues(make_map):
 def test_play_cli_missing_pt_exits_2():
     import subprocess
     import sys
-    root = Path(__file__).resolve().parents[1]
+    root = REPO_ROOT
     r = subprocess.run(
         [sys.executable, "-m", "cs2rl.viz.play", "--policy", "/no/such/cs2rl-policy.pt"],
         cwd=str(root),
@@ -176,7 +176,7 @@ def test_load_play_lib_unloadable_so_exits_2(tmp_path, monkeypatch, capsys):
 def test_cs2_demo_relative_venv_is_realpathd(tmp_path):
     import os
     import subprocess
-    repo = Path(__file__).resolve().parents[1]
+    repo = REPO_ROOT
     demo = ZIG_OUT / "bin" / "cs2_demo"
     if not demo.is_file():
         pytest.skip("cs2_demo not built")

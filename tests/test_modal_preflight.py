@@ -20,7 +20,9 @@ from typing import Any
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
+
+ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                                       # noqa: E402, I001
 from scripts.modal_runner import checkpoint, commands, core, preflight, state            # noqa: E402, I001
@@ -290,7 +292,7 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
         path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
         for pattern in ("test_modal_*.py", "modal_test_helpers.py",
                         "modal_patch_binding_campaign.py")
-        for path in sorted((ROOT / "tests").glob(pattern))
+        for path in sorted((ROOT / "tests").rglob(pattern))
     }
     assert {
         "tests/test_modal_preflight.py", "tests/modal_test_helpers.py",

@@ -19,11 +19,11 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
 from cs2rl.experiment.smoke_read import EXIT_CODES, main, read_run
+from tests.conftest import REPO_ROOT
 
 STEP = 16384                           # hero steps per epoch row (256 envs x 64 bptt x 1 active)
 N_ROWS = 61                            # 61 * 16384 = 999,424 — the T4 budget as delivered
@@ -436,7 +436,7 @@ def test_script_runs_as_a_subprocess(tmp_path):
     Traceback and stdout assertions are the ones that catch it.
     """
     run = _write(tmp_path, _rows())
-    src = Path(__file__).resolve().parent.parent / "src"
+    src = REPO_ROOT / "src"
     proc = subprocess.run([sys.executable, "-S", "-m", "cs2rl.experiment.smoke_read",
                            str(run)],
                           env={

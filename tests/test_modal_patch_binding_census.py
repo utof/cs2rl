@@ -8,10 +8,10 @@ not through a facade patch that would bypass it. It imports nothing from the
 runner package, so it is not one of the runner's importers.
 """
 import ast
-from pathlib import Path
 
 import pytest
 
+from tests.conftest import REPO_ROOT
 from tests.modal_patch_binding_campaign import BINDING_SITES
 from tests.modal_runner_tables import RUNNER_TEST_FILES
 
@@ -23,7 +23,6 @@ from tests.test_modal_packaging import CLIENT_FILE, SHARED_FILE
 
 # Repository root: the census reads the original sites' files by repo-relative
 # path.
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The ORIGINAL installer of each BINDING_SITES key: the test file, and the
 # module-level function whose body calls `binding_target(site)`. The campaign

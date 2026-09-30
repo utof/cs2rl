@@ -10,12 +10,12 @@ import pytest
 
 from scripts.modal_runner import checkpoint as checkpoints
 from scripts.modal_runner import core, preflight, state, training
+from tests.conftest import REPO_ROOT
 from tests.modal_patch_binding_campaign import BINDING_SITES, binding_target
 from tests.modal_test_helpers import FakeChild, _aware, _noop_heartbeat
 from tests.test_modal_training import _consume_training_kwargs, _prepared_source, _training_kwargs
 
 # Repository root: the campaign's children read files by repo-relative path.
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # What each site's companion observation drives, recorded as the `stimulus`
 # field of the campaign's per-site record (`_record_observation`), and kept true

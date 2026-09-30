@@ -115,7 +115,7 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
 
 # The two symbols whose construction W3 centralises.
 CONSTRUCTED = ("make_puffer_env", "SelfPlayManager")

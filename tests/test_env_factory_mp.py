@@ -46,12 +46,11 @@ envs, three ticks, a simple 5-room map instead of dust2.
 """
 import subprocess
 import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
 
 NUM_ENVS = 2
 TICKS = 3

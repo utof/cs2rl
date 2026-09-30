@@ -10,11 +10,12 @@ Also pins: the runner owns `--map` (emits `--map <effective_map>` first, never
 `--dust2`), `--resume-run` is not a Modal flag (the runner owns paths/ids), and
 the small-budget guard compares --timesteps against a RAW batch (conservative).
 """
-from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
+
+ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                     # noqa: E402, I001
 from scripts.modal_runner import commands, request     # noqa: E402, I001

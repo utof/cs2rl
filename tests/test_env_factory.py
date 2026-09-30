@@ -93,8 +93,9 @@ import pytest
 
 from cs2rl.env.config import KNOB_FIELDS, REWARD_FIELDS, EnvConfig, RewardWeights
 from cs2rl.env.factory import ROLES, UNSET, build_env_for
+from tests.conftest import REPO_ROOT
 
-FIXTURE = Path(__file__).parent / "fixtures" / "env_config_pre_165b.json"
+FIXTURE = REPO_ROOT / "tests" / "fixtures" / "env_config_pre_165b.json"
 
 # Must match CAPTURE_FORMAT in the capture script (`git show
 # 9878725:tests/capture_env_config_pre_165b.py`). Duplicated rather than
@@ -1306,7 +1307,7 @@ def _migrated_sites():
         top = enclosing.split(".")[0]
         assert (relpath, top) in MOVED_SITE_FILE, (
             f"{relpath}::{top} has no live file in MOVED_SITE_FILE; say where #205 part 3 put it")
-        live = Path(__file__).resolve().parents[1] / MOVED_SITE_FILE[(relpath, top)]
+        live = REPO_ROOT / MOVED_SITE_FILE[(relpath, top)]
         out.append((role, enclosing, live, sources.pop()))
     return out
 

@@ -13,11 +13,12 @@ evaluate and save_checkpoint to Cs2PuffeRL, with no instance bindings.
 from __future__ import annotations
 
 import ast
-from pathlib import Path
 
 import pytest
 
-PACKAGE = Path(__file__).resolve().parents[1] / "src" / "cs2rl"
+from tests.conftest import REPO_ROOT
+
+PACKAGE = REPO_ROOT / "src" / "cs2rl"
 
 # (file, qualname) of each moved body and checkpoint helper whose self/trainer
 # reads must be backed by constructor state. The save body moved to the class

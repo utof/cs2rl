@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import REPO_ROOT
+
 # BINDING_SITES is a data dict, and the campaign module imports only importlib
 # and typing at module scope (it reaches the runner package only inside
 # `binding_target`, from a formatted string). So this import pulls in no runner
@@ -30,7 +32,7 @@ from tests.modal_runner_tables import (
     RUNNER_TEST_FILES,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 # The one legal spelling of the runner package. The reach floor resolves a test
 # file's runner imports against it, and tests/test_modal_runner_package_shape.py
 # records any absolute import of it from inside the package as an edge no table
@@ -835,9 +837,24 @@ def _names_defined_under_tests():
     here could only ever skip `SHARED_FILE`, a declared seam file, and a
     declared seam file must fail when it is missing, never be skipped. A
     missing shared file fails at `read_text`, naming the path.
+
+    RECURSIVE (#207 part 2): tests/ mirrors src/cs2rl/, so a flat `glob` would
+    see only the root's test files and pass on a stray name one directory down.
+    The floor below makes a narrower scan red: every tracked test file must be
+    in it.
     """
     found = {}
-    paths = sorted(set((ROOT / "tests").glob("test_*.py")) | {ROOT / SHARED_FILE})
+    paths = sorted(set((ROOT / "tests").rglob("test_*.py")) | {ROOT / SHARED_FILE})
+    tracked = subprocess.run(["git", "ls-files", "-z", "--", "tests"],
+                             cwd=ROOT,
+                             capture_output=True,
+                             text=True,
+                             check=True).stdout.split("\0")
+    unscanned = sorted(
+        rel for rel in tracked
+        if Path(rel).name.startswith("test_") and rel.endswith(".py") and ROOT / rel not in paths)
+    assert tracked and not unscanned, (
+        f"the scan for module-level names misses tracked test files: {unscanned[:5]}")
     for path in paths:
         rel = path.relative_to(ROOT).as_posix()
         for name in _module_level_names(ast.parse(path.read_text(encoding="utf-8"))):

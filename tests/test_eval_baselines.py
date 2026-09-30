@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 from cs2rl.env.c.cs2_env import N_AGENTS, TEAM_SIZE
+from tests.conftest import REPO_ROOT
 
 
 def _arena_env(**kw):
@@ -299,11 +300,9 @@ def test_scheduled_eval_interval_gating():
 def test_eval_interval_cli_config_and_modal_mirror():
     import re
     import types
-    from pathlib import Path
 
     from cs2rl.train.config import build_train_config, compute_batch_dims
-    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train" /
-           "__main__.py").read_text()
+    src = (REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py").read_text()
     m = re.search(r'add_argument\(\s*"--eval-interval",(.*?)\)\n', src, re.S)
     assert m and "type=int" in m.group(1) and "default=0" in m.group(1) \
         and 'dest="eval_interval"' in m.group(1)
@@ -334,12 +333,10 @@ def test_hit_geometry_constants_match_cs2_combat_h():
     PITFALL: the header is the source of truth; fix eval/baselines.py, not the
     regex, when this trips."""
     import re
-    from pathlib import Path
 
     from cs2rl.eval import baselines as eb
 
-    header = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "env" / "c" /
-              "cs2_combat.h").read_text()
+    header = (REPO_ROOT / "src" / "cs2rl" / "env" / "c" / "cs2_combat.h").read_text()
     pattern = re.compile(r"static const float\s+(EYE_HEIGHT_STAND|EYE_HEIGHT_CROUCH|"
                          r"TORSO_OFFSET_STAND|TORSO_OFFSET_CROUCH)\s*=\s*([0-9.]+)f")
     found = {name: float(val) for name, val in pattern.findall(header)}

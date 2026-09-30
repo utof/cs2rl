@@ -6,7 +6,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from tests.conftest import REPO_ROOT
+
+ROOT = REPO_ROOT
 OFFICIAL_MODULE = Path(str(
     importlib.metadata.distribution("nvidia-ml-py").locate_file("pynvml.py")))
 

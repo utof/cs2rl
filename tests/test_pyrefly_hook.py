@@ -25,7 +25,9 @@ import re
 import subprocess
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+from tests.conftest import REPO_ROOT
+
+REPO = REPO_ROOT
 REAL_PYTHON = REPO / ".venv" / "bin" / "python"
 REAL_PYREFLY = REPO / ".venv" / "bin" / "pyrefly"
 HOOK = REPO / ".githooks" / "pre-commit"

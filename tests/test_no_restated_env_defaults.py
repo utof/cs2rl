@@ -49,13 +49,12 @@ import re
 import sys
 import textwrap
 from collections import Counter, defaultdict
-from pathlib import Path
 
 import pytest
 
 from cs2rl.env.config import KNOB_FIELDS, EnvConfig, RewardWeights
+from tests.conftest import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 DECLARATION = REPO_ROOT / "src" / "cs2rl" / "env" / "config.py"
 
 # name -> default, for the 23 weights and the seven non-None knobs. The three
