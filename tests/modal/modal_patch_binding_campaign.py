@@ -134,8 +134,8 @@ def _run_probe(repo_root, evidence_root, site, mode, label):
         result = subprocess.run(
             [
                 sys.executable, "-m", "pytest",
-                f"tests/test_modal_patch_bindings.py::test_patch_binding_observation[{site}]", "-q",
-                "--tb=short", "-p", "no:cacheprovider", "-o", "junit_family=legacy",
+                f"tests/modal/test_modal_patch_bindings.py::test_patch_binding_observation[{site}]",
+                "-q", "--tb=short", "-p", "no:cacheprovider", "-o", "junit_family=legacy",
                 f'--basetemp={directory / "pytest"}', f"--junitxml={report}"
             ],
             cwd=repo_root,
@@ -189,7 +189,8 @@ def _run_probe(repo_root, evidence_root, site, mode, label):
             raise RuntimeError(f"{probe} reported a failure with an empty message; output in {log}")
         record["exception_type"] = head[0]
         record["rejecting_assertion"] = message
-        locations = re.findall(r"tests/test_modal_patch_bindings\.py:(\d+)", failure.text or "")
+        locations = re.findall(r"tests/modal/test_modal_patch_bindings\.py:(\d+)", failure.text
+                               or "")
         if locations:
             record["source_line"] = int(locations[-1])
     return record
@@ -199,7 +200,7 @@ def run_campaign(repo_root, evidence_root, sites):
     """Require two own-observation bites and restorations for all declared sites."""
     if sites != list(BINDING_SITES):
         raise ValueError("declared matrix must equal BINDING_SITES, in order "
-                         f"(tests/modal_patch_binding_campaign.py): got {sites}, "
+                         f"(tests/modal/modal_patch_binding_campaign.py): got {sites}, "
                          f"expected {list(BINDING_SITES)}")
     # The sites are independent, so each site's sequential probes run as one task on a
     # THREAD pool. Never processes: the rejection test replaces `_run_probe` by name in its

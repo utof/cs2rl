@@ -17,9 +17,9 @@ from tests.conftest import REPO_ROOT
 
 ROOT = REPO_ROOT
 
-import scripts.modal_runner as mrl                                                 # noqa: E402, I001
-from scripts.modal_runner import core, state                                       # noqa: E402, I001
-from tests.modal_test_helpers import FakeRegistry, _aware, _minimal_completed_tree # noqa: E402
+import scripts.modal_runner as mrl                                                       # noqa: E402, I001
+from scripts.modal_runner import core, state                                             # noqa: E402, I001
+from tests.modal.modal_test_helpers import FakeRegistry, _aware, _minimal_completed_tree # noqa: E402
 
 # ── Run state: atomic writes, transitions, heartbeat, status, artifacts ────
 

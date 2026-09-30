@@ -21,12 +21,12 @@ from tests.conftest import REPO_ROOT
 # `binding_target`, from a formatted string). So this import pulls in no runner
 # module. The reach floor reads it to resolve `binding_target("key")` to the
 # key's owning module.
-from tests.modal_patch_binding_campaign import BINDING_SITES
+from tests.modal.modal_patch_binding_campaign import BINDING_SITES
 
 # `MANIFEST` is renamed on import because this file's own `MANIFEST` is the seam
 # manifest's path; the tables' one is {"<module>.py": [the names it owns]}.
-from tests.modal_runner_tables import MANIFEST as RUNNER_OWNERS
-from tests.modal_runner_tables import (
+from tests.modal.modal_runner_tables import MANIFEST as RUNNER_OWNERS
+from tests.modal.modal_runner_tables import (
     RUNNER_MODULES,
     RUNNER_PATHS,
     RUNNER_TEST_FILES,
@@ -194,8 +194,8 @@ GOVERNED_NAME_COUNT = 299
 # examined with EVERY runner-half test in the manifest, not only those in
 # `RUNNER_TEST_FILES`. A widened list in the binding census is caught by the
 # census's own scope assertion instead.
-CLIENT_FILE = "tests/test_modal_client.py"
-PACKAGING_FILE = "tests/test_modal_packaging.py"
+CLIENT_FILE = "tests/modal/test_modal_client.py"
+PACKAGING_FILE = "tests/modal/test_modal_packaging.py"
 
 # THE MEMBERSHIP RULE FOR THE SHARED FILE. `tests/modal_test_helpers.py` exists
 # as of W2's split and carries these words in its own docstring, which is where a
@@ -224,7 +224,7 @@ PACKAGING_FILE = "tests/test_modal_packaging.py"
 # halves of the runner/client seam, and the 6 that tests in two or more runner
 # test files reach -- and every one of them is reached from two or more seam
 # files.
-SHARED_FILE = "tests/modal_test_helpers.py"
+SHARED_FILE = "tests/modal/modal_test_helpers.py"
 
 # The three module-level guards that lived above line 100 of the monolith. They
 # are about packaging and dependencies, so they belong to neither half of the
@@ -904,11 +904,11 @@ def _names_defined_under_tests():
 # own exemptions; for the grant that means wider, narrower, and an empty grant
 # against a test that reaches a module (an empty grant is not a wildcard).
 _REACH_EXEMPTIONS: dict[tuple[str, str], tuple[frozenset[str], str]] = {
-    ("tests/test_modal_preflight.py", "test_recording_volume_reload_restores_committed_run_root"):
+    ("tests/modal/test_modal_preflight.py", "test_recording_volume_reload_restores_committed_run_root"):
     (frozenset({"core"}),
      "it tests the RecordingVolume test double, which lives with its only consumers, the "
      "preflight tests; it reaches only core (at exemption time, through mrl.STATUS_FILENAME)"),
-    ("tests/test_modal_training.py", "test_signal_tests_fire_handlers_in_production_order"):
+    ("tests/modal/test_modal_training.py", "test_signal_tests_fire_handlers_in_production_order"):
     (frozenset(), "gh#243: it is a static census of the training tests' own signal-seam doubles "
      "(`_signal_hooks`, `_interrupt_in_production_order` and the two allow-lists), read from "
      "its own file by AST; it never imports or reaches a runner module, and it lives here "
@@ -2704,10 +2704,10 @@ _SHADOWING_CASES = {
     ("def test_shadowed(value):\n    if (found := (request := value)):\n"
      "        return found, request.anything\n"),
     "a nested `from ... import ... as`":
-    ("def test_shadowed():\n    from tests import modal_test_helpers as request\n"
+    ("def test_shadowed():\n    from tests.modal import modal_test_helpers as request\n"
      "    return request.anything\n"),
     "a nested `import ... as`":
-    ("def test_shadowed():\n    import tests.modal_test_helpers as request\n"
+    ("def test_shadowed():\n    import tests.modal.modal_test_helpers as request\n"
      "    return request.anything\n"),
     "a nested `import` of a dotted name, which binds its first component":
     "def test_shadowed():\n    import request.helpers\n    return request.anything\n",
@@ -2732,10 +2732,10 @@ _SHADOWING_CASES = {
     "a type parameter":
     "def test_shadowed[request]():\n    return request.anything\n",
     "a later module-level `from ... import ... as` of the same name":
-    ("from tests import modal_test_helpers as request\n\n"
+    ("from tests.modal import modal_test_helpers as request\n\n"
      "def test_shadowed():\n    return request.anything\n"),
     "a later module-level `import ... as` of the same name":
-    ("import tests.modal_test_helpers as request\n\n"
+    ("import tests.modal.modal_test_helpers as request\n\n"
      "def test_shadowed():\n    return request.anything\n"),
     "a later module-level relative import spelled like the runner":
     ("from .scripts.modal_runner import request\n\n"
@@ -2744,7 +2744,7 @@ _SHADOWING_CASES = {
     ("from scripts.modal_runner import request, build_run_request as request\n\n"
      "def test_shadowed():\n    return request.anything\n"),
     "one `import` binding the name twice, the last not a runner module":
-    ("import scripts.modal_runner.request as request, tests.modal_test_helpers as request\n\n"
+    ("import scripts.modal_runner.request as request, tests.modal.modal_test_helpers as request\n\n"
      "def test_shadowed():\n    return request.anything\n"),
     "a later module-level binding under an if":
     ("if True:\n    request = None\n\n"
@@ -3071,7 +3071,7 @@ def test_reach_floor_resolves_binding_target_through_binding_sites():
     key = "attempt-watcher"
     owner = BINDING_SITES[key][0]
     other = next(module for module in RUNNER_MODULES if module not in (owner, "core"))
-    header = "from tests.modal_patch_binding_campaign import binding_target\n\n"
+    header = "from tests.modal.modal_patch_binding_campaign import binding_target\n\n"
     sources = {
         _floor_file(owner):
         header + (f'def test_installs_the_site():\n    return binding_target("{key}")\n\n'
@@ -3163,7 +3163,7 @@ def test_reach_floor_applies_the_core_rule_to_the_core_file():
     assert BINDING_SITES[site][0] != "core", f"{site} no longer names a non-core module"
     header = ("import scripts.modal_runner as mrl\n"
               "from scripts.modal_runner import training\n"
-              "from tests.modal_patch_binding_campaign import binding_target\n\n")
+              "from tests.modal.modal_patch_binding_campaign import binding_target\n\n")
     core_name, request_name = _owned("core"), _owned("request")
     sources = {
         core_file:
@@ -3473,9 +3473,9 @@ _RUNNER_IMPORT_CASES = {
     ("from .scripts.modal_runner import build_run_request\n", []),
     "a package whose name extends the runner's":
     ("import scripts.modal_runner_extra\nfrom scripts.modal_runner_extra import thing\n", []),
-    "imports of other packages": ("import os\nfrom scripts import run_modal\n"
-                                  "from tests.modal_patch_binding_campaign import binding_target\n",
-                                  []),
+    "imports of other packages":
+    ("import os\nfrom scripts import run_modal\n"
+     "from tests.modal.modal_patch_binding_campaign import binding_target\n", []),
 }
 
 

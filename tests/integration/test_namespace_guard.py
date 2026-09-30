@@ -139,7 +139,7 @@ def _check_own_modules_pass(tmp_path: Path, extra_args: tuple[str, ...]) -> None
     """Neither half fires on this checkout's own `tests.*` and `scripts.*` modules."""
     plant = ("def test_plant():\n"
              "    import scripts.modal_runner.training\n"
-             "    import tests.modal_test_helpers\n")
+             "    import tests.modal.modal_test_helpers\n")
     child, output = _session(tmp_path, plant, extra_args=extra_args)
     assert child.returncode == 0, f"the session failed\n{output}"
     assert "1 passed" in child.stdout, f"the planted test did not run\n{output}"

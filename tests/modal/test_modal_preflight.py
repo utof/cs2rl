@@ -26,8 +26,8 @@ ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                                       # noqa: E402, I001
 from scripts.modal_runner import checkpoint, commands, core, preflight, state            # noqa: E402, I001
-from tests.modal_patch_binding_campaign import binding_target                            # noqa: E402, I001
-from tests.modal_test_helpers import (                                                   # noqa: E402
+from tests.modal.modal_patch_binding_campaign import binding_target                      # noqa: E402, I001
+from tests.modal.modal_test_helpers import (                                             # noqa: E402
     _aware, _git, _init_source_repo, _make_manifest, _noop_heartbeat, _valid_run_kwargs,
     _write_dumped_config)
 
@@ -295,8 +295,8 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
         for path in sorted((ROOT / "tests").rglob(pattern))
     }
     assert {
-        "tests/test_modal_preflight.py", "tests/modal_test_helpers.py",
-        "tests/modal_patch_binding_campaign.py"
+        "tests/modal/test_modal_preflight.py", "tests/modal/modal_test_helpers.py",
+        "tests/modal/modal_patch_binding_campaign.py"
     } <= set(sources), sorted(sources)[:5]
     keys, problems = call_site_keys(sources)
     assert problems == [], (
@@ -316,8 +316,9 @@ def test_preflight_kwargs_routes_every_override(tmp_path):
         "_preflight_kwargs(tmp_path, on_ready=f)\n",
         "an attribute":
         "preflight_tests._preflight_kwargs(tmp_path, on_ready=f)\n",
-        "an import alias": ("from tests.test_modal_preflight import _preflight_kwargs as build\n"
-                            "build(tmp_path, on_ready=f)\n"),
+        "an import alias":
+        ("from tests.modal.test_modal_preflight import _preflight_kwargs as build\n"
+         "build(tmp_path, on_ready=f)\n"),
         "an assignment alias":
         "build = _preflight_kwargs\nbuild(tmp_path, on_ready=f)\n",
         "functools.partial":

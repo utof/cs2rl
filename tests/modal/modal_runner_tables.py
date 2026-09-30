@@ -149,7 +149,7 @@ QUALIFIED_SEAMS = {
     "checkpoint.validate_local_checkpoint": ("preflight", "training"),
 }
 # This file's repo-relative path, for failure messages that name it.
-TABLES_FILE = "tests/modal_runner_tables.py"
+TABLES_FILE = "tests/modal/modal_runner_tables.py"
 # Where a package module is declared, as every gate's failure message names it,
 # so the remedy reads the same wherever it fires.
 TABLES = ("MANIFEST and DEPENDENCIES (and ANNOTATION_DEPENDENCIES for an import made only under "
@@ -172,4 +172,4 @@ RUNNER_PATHS = tuple(f"scripts/modal_runner/{module}.py" for module in RUNNER_MO
 # PITFALL: derive a module from a test file name through this tuple and
 # RUNNER_MODULES, never through a `tests/test_modal_*.py` glob, which also
 # matches test files that belong to no module.
-RUNNER_TEST_FILES = tuple(f"tests/test_modal_{module}.py" for module in RUNNER_MODULES)
+RUNNER_TEST_FILES = tuple(f"tests/modal/test_modal_{module}.py" for module in RUNNER_MODULES)

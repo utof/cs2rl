@@ -20,7 +20,7 @@ ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                     # noqa: E402, I001
 from scripts.modal_runner import commands                              # noqa: E402, I001
-from tests.modal_test_helpers import _valid_run_kwargs                 # noqa: E402
+from tests.modal.modal_test_helpers import _valid_run_kwargs           # noqa: E402
 
 # ── Argv builders: dump-config argv shares the runner-owned flags ──────────
 

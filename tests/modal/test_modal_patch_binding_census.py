@@ -12,14 +12,14 @@ import ast
 import pytest
 
 from tests.conftest import REPO_ROOT
-from tests.modal_patch_binding_campaign import BINDING_SITES
-from tests.modal_runner_tables import RUNNER_TEST_FILES
+from tests.modal.modal_patch_binding_campaign import BINDING_SITES
+from tests.modal.modal_runner_tables import RUNNER_TEST_FILES
 
 # The seam's file-name constants, from the seam gate, as
 # tests/test_modal_runner_package_shape.py imports them: that module imports only
 # the stdlib, pytest, the tables and the campaign's data at module scope, so this
 # pulls in no runner module and keeps this file out of the runner's importers.
-from tests.test_modal_packaging import CLIENT_FILE, SHARED_FILE
+from tests.modal.test_modal_packaging import CLIENT_FILE, SHARED_FILE
 
 # Repository root: the census reads the original sites' files by repo-relative
 # path.
@@ -29,21 +29,21 @@ from tests.test_modal_packaging import CLIENT_FILE, SHARED_FILE
 # certifies `binding_target(site)` through the companion; this table ties that
 # certificate to the original sites. `_binding_site_violations` checks it.
 _ORIGINAL_SITES = {
-    "prepare-validator":
-    ("tests/test_modal_preflight.py", "test_prepare_validates_resume_then_dumps_and_hashes_config"),
-    "fallback-loader": ("tests/modal_test_helpers.py", "_no_torch"),
-    "fallback-python": ("tests/modal_test_helpers.py", "_no_torch"),
-    "interrupt-loader":
-    ("tests/test_modal_training.py", "test_interrupt_commits_status_even_if_prebuilt_load_hangs"),
-    "watcher-publisher": ("tests/test_modal_training.py",
+    "prepare-validator": ("tests/modal/test_modal_preflight.py",
+                          "test_prepare_validates_resume_then_dumps_and_hashes_config"),
+    "fallback-loader": ("tests/modal/modal_test_helpers.py", "_no_torch"),
+    "fallback-python": ("tests/modal/modal_test_helpers.py", "_no_torch"),
+    "interrupt-loader": ("tests/modal/test_modal_training.py",
+                         "test_interrupt_commits_status_even_if_prebuilt_load_hangs"),
+    "watcher-publisher": ("tests/modal/test_modal_training.py",
                           "test_checkpoint_watcher_threads_generation_into_last_published"),
-    "terminal-validator": ("tests/test_modal_training.py", "_record_checkpoint_reads"),
-    "terminal-hasher": ("tests/test_modal_training.py", "_record_checkpoint_reads"),
+    "terminal-validator": ("tests/modal/test_modal_training.py", "_record_checkpoint_reads"),
+    "terminal-hasher": ("tests/modal/test_modal_training.py", "_record_checkpoint_reads"),
     "attempt-watcher":
-    ("tests/test_modal_training.py", "test_checkpoint_watcher_stops_before_terminal_status"),
+    ("tests/modal/test_modal_training.py", "test_checkpoint_watcher_stops_before_terminal_status"),
     "attempt-transition":
-    ("tests/test_modal_training.py", "test_checkpoint_watcher_stops_before_terminal_status"),
-    "client-mount": ("tests/test_modal_client.py",
+    ("tests/modal/test_modal_training.py", "test_checkpoint_watcher_stops_before_terminal_status"),
+    "client-mount": ("tests/modal/test_modal_client.py",
                      "test_train_remote_completes_against_post_dump_manifest_hash"),
 }
 
@@ -292,9 +292,9 @@ def test_patch_binding_sites_route_through_binding_target():
 # `binding_target("terminal-hasher")` call to a runner test file that installs
 # nothing: it is reported only if the census reads that file, so it is the plant
 # that bites on a census narrowed back to the installers' own files.
-_TRAINING_FILE = "tests/test_modal_training.py"
-_PREFLIGHT_FILE = "tests/test_modal_preflight.py"
-_REQUEST_FILE = "tests/test_modal_request.py"
+_TRAINING_FILE = "tests/modal/test_modal_training.py"
+_PREFLIGHT_FILE = "tests/modal/test_modal_preflight.py"
+_REQUEST_FILE = "tests/modal/test_modal_request.py"
 _SITE_CENSUS_PLANTS = {
     "package-revert":
     (_TRAINING_FILE,

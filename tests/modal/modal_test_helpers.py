@@ -75,7 +75,7 @@ ROOT = REPO_ROOT
 # this route before moving the test: moving it would misplace a core test.
 import scripts.modal_runner as mrl                                     # noqa: E402, I001
 from scripts.modal_runner import checkpoint, request, training         # noqa: E402, I001
-from tests.modal_patch_binding_campaign import binding_target          # noqa: E402, I001
+from tests.modal.modal_patch_binding_campaign import binding_target    # noqa: E402, I001
 
 # ── _git / _init_source_repo: a real tiny repo for HEAD and diff checks ────
 

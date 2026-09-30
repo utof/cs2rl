@@ -11,9 +11,13 @@ import pytest
 from scripts.modal_runner import checkpoint as checkpoints
 from scripts.modal_runner import core, preflight, state, training
 from tests.conftest import REPO_ROOT
-from tests.modal_patch_binding_campaign import BINDING_SITES, binding_target
-from tests.modal_test_helpers import FakeChild, _aware, _noop_heartbeat
-from tests.test_modal_training import _consume_training_kwargs, _prepared_source, _training_kwargs
+from tests.modal.modal_patch_binding_campaign import BINDING_SITES, binding_target
+from tests.modal.modal_test_helpers import FakeChild, _aware, _noop_heartbeat
+from tests.modal.test_modal_training import (
+    _consume_training_kwargs,
+    _prepared_source,
+    _training_kwargs,
+)
 
 # Repository root: the campaign's children read files by repo-relative path.
 
@@ -397,7 +401,7 @@ def test_patch_binding_campaign(tmp_path):
     evidence = tmp_path / "campaign"
     process = subprocess.run(
         [
-            sys.executable, "-m", "tests.modal_patch_binding_campaign", "--repo-root",
+            sys.executable, "-m", "tests.modal.modal_patch_binding_campaign", "--repo-root",
             str(REPO_ROOT), "--evidence-root",
             str(evidence), "--matrix",
             str(matrix)
@@ -536,7 +540,7 @@ def test_patch_binding_campaign_rejects_invalid_evidence(fault, tmp_path):
 import subprocess
 import sys
 from pathlib import Path
-from tests import modal_patch_binding_campaign as campaign
+from tests.modal import modal_patch_binding_campaign as campaign
 fault = sys.argv.pop(1)
 BROKEN_FIELD = {
     'baseline-exit': ('baseline', {'exit_code': 1}),

@@ -31,11 +31,11 @@ ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                                     # noqa: E402, I001
 from scripts.modal_runner import checkpoint, core, preflight, state, training          # noqa: E402, I001
-from tests.modal_patch_binding_campaign import binding_target                          # noqa: E402, I001
-from tests.modal_test_helpers import (                                                 # noqa: E402
+from tests.modal.modal_patch_binding_campaign import binding_target                    # noqa: E402, I001
+from tests.modal.modal_test_helpers import (                                           # noqa: E402
     FakeChild, _aware, _git, _init_source_repo, _noop_heartbeat, _write_dumped_config,
     _write_metrics)
-from tests.modal_runner_tables import RUNNER_MODULES, TABLES                           # noqa: E402
+from tests.modal.modal_runner_tables import RUNNER_MODULES, TABLES                     # noqa: E402
 
 # ── Launch app: import-time purity, image build, object declarations ───────
 

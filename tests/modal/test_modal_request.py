@@ -15,9 +15,9 @@ from tests.conftest import REPO_ROOT
 
 ROOT = REPO_ROOT
 
-import scripts.modal_runner as mrl                                       # noqa: E402, I001
-from scripts.modal_runner import commands, request                       # noqa: E402, I001
-from tests.modal_test_helpers import _live_batch_size, _valid_run_kwargs # noqa: E402
+import scripts.modal_runner as mrl                                             # noqa: E402, I001
+from scripts.modal_runner import commands, request                             # noqa: E402, I001
+from tests.modal.modal_test_helpers import _live_batch_size, _valid_run_kwargs # noqa: E402
 
 # ── Run request: run id, secret, map, resource and action fields ───────────
 

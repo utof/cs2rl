@@ -49,8 +49,8 @@ ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                                       # noqa: E402, I001
 from scripts.modal_runner import core, state, training                                   # noqa: E402, I001
-from tests.modal_patch_binding_campaign import binding_target                            # noqa: E402, I001
-from tests.modal_test_helpers import (                                                   # noqa: E402
+from tests.modal.modal_patch_binding_campaign import binding_target                      # noqa: E402, I001
+from tests.modal.modal_test_helpers import (                                             # noqa: E402
     FakeChild, FakeRegistry, _aware, _make_manifest, _minimal_completed_tree, _no_torch,
     _noop_heartbeat)
 
@@ -336,10 +336,10 @@ def test_training_kwargs_routes_every_override(tmp_path):
                         "modal_patch_binding_campaign.py")
         for path in sorted((ROOT / "tests").rglob(pattern))
     }
-    assert {"tests/test_modal_training.py",
-            "tests/test_modal_patch_bindings.py"} <= set(sources), sorted(sources)[:5]
+    assert {"tests/modal/test_modal_training.py",
+            "tests/modal/test_modal_patch_bindings.py"} <= set(sources), sorted(sources)[:5]
 
-    mirror_file = "tests/test_modal_preflight.py"
+    mirror_file = "tests/modal/test_modal_preflight.py"
     mirror_test = "test_preflight_kwargs_routes_every_override"
 
     def enumerator_dumps(text, test_name):
@@ -352,7 +352,7 @@ def test_training_kwargs_routes_every_override(tmp_path):
             if isinstance(node, ast.FunctionDef) and node.name in ("last_name", "call_site_keys")
         }
 
-    ours = enumerator_dumps(sources["tests/test_modal_training.py"], this_test)
+    ours = enumerator_dumps(sources["tests/modal/test_modal_training.py"], this_test)
     assert set(ours) == {"last_name", "call_site_keys"}, sorted(ours)
     assert enumerator_dumps(sources[mirror_file], mirror_test) == ours, (
         f"the enumerator in {mirror_file}::{mirror_test} is no longer AST-equal to this test's "
@@ -382,8 +382,9 @@ def test_training_kwargs_routes_every_override(tmp_path):
         "_training_kwargs(tmp_path, start_heartbeat=f)\n",
         "an attribute":
         "training_tests._training_kwargs(tmp_path, start_heartbeat=f)\n",
-        "an import alias": ("from tests.test_modal_training import _training_kwargs as build\n"
-                            "build(tmp_path, start_heartbeat=f)\n"),
+        "an import alias":
+        ("from tests.modal.test_modal_training import _training_kwargs as build\n"
+         "build(tmp_path, start_heartbeat=f)\n"),
         "an assignment alias":
         "build = _training_kwargs\nbuild(tmp_path, start_heartbeat=f)\n",
         "functools.partial":
@@ -2340,8 +2341,8 @@ class _KillSeamClauses:
     RESOLUTION_CONTROL = "test_process_control_tripwire_guards_the_resolution_path"
     # (iii)'s exemptions, keyed (file, test): the only tests that may read `.system`.
     SYSTEM_READERS = (
-        ("tests/test_modal_training.py", "test_process_control_tripwire_poisons_system"),
-        ("tests/test_modal_training.py", RESOLUTION_CONTROL),
+        ("tests/modal/test_modal_training.py", "test_process_control_tripwire_poisons_system"),
+        ("tests/modal/test_modal_training.py", RESOLUTION_CONTROL),
     )
     # (iv)'s exemptions, keyed (file, enclosing function): the only functions under tests/
     # that may load os/posix `killpg`, `getpgid` or `kill`. WHAT: each spawns its own child
@@ -2379,7 +2380,7 @@ class _KillSeamClauses:
     # `_CLIENT_MODULES` seed of tests/test_modal_packaging.py (`_reaches_client_directly`, a
     # substring match that reads docstrings too), which reclassifies both to the client file
     # and turns the split red. The helper's is derived the same way so the two stay alike.
-    HELPERS = "tests/modal_test_helpers.py"
+    HELPERS = "tests/modal/modal_test_helpers.py"
     RUNNER_PACKAGES = tuple(
         ["scripts.modal_runner"] +
         [path.removesuffix(".py").replace("/", ".") for path in (RUNNER_ENTRY, HELPERS)])
@@ -2669,7 +2670,7 @@ class _KillSeamClauses:
                                                                   "    training.ProcessControl.system()\n"),
                     }),
                 "an exempt test that no longer calls it": {
-                    "tests/test_modal_training.py":
+                    "tests/modal/test_modal_training.py":
                     ("def test_process_control_tripwire_poisons_system():\n"
                      "    pass\n\n\n"
                      f"def {cls.RESOLUTION_CONTROL}():\n"
@@ -2775,7 +2776,7 @@ class _KillSeamClauses:
     @classmethod
     def clause_iv(cls):
         rows = sorted(f"{file}::{function}" for file, function in cls.KILL_HYGIENE_EXEMPT)
-        sigterm = "tests/test_modal_training.py:1"
+        sigterm = "tests/modal/test_modal_training.py:1"
         assert rows, "KILL_HYGIENE_EXEMPT is empty: delete the exemption machinery and its plants"
         # The exempt-file plants stand in one exempt (file, function): the first row, sorted.
         exempt_file, exempt_function = rows[0].split("::")
@@ -2795,7 +2796,7 @@ class _KillSeamClauses:
                 "the exempt rows without the SIGTERM test":
                 rows,
                 "an exempt row as the SIGTERM test's file":
-                [sigterm] + rows[1:] + [f"tests/test_modal_training.py::{exempt_function}"],
+                [sigterm] + rows[1:] + [f"tests/modal/test_modal_training.py::{exempt_function}"],
             },
             plants={
                 **cls._at(
@@ -2823,7 +2824,8 @@ class _KillSeamClauses:
                         "an exempt file importing the runner through the helper module":
                         f"from {cls.RUNNER_PACKAGES[2]} import training\n",
                         "an exempt file importing the helper module from tests":
-                        f"from tests import {cls.RUNNER_PACKAGES[2].split('.')[1]}\n",
+                        f"from {cls.RUNNER_PACKAGES[2].rpartition('.')[0]} import "
+                        f"{cls.RUNNER_PACKAGES[2].rpartition('.')[2]}\n",
                         "an exempt function importing the runner inside its body":
                         f"def {exempt_function}():\n    from scripts.modal_runner import training\n",
                     }),
@@ -2884,7 +2886,7 @@ class _KillSeamClauses:
         longer loads a banned name (renamed, its file deleted, its kill dropped) fails here,
         so the allow-set cannot go stale and stay green. The line form is matched on digits,
         so a `<file>::<function>` row in this file cannot stand in for the SIGTERM call."""
-        prefix = "tests/test_modal_training.py:"
+        prefix = "tests/modal/test_modal_training.py:"
         sigterm = any(where.startswith(prefix) and where[len(prefix):].isdigit() for where in seen)
         rows = {f"{file}::{function}" for file, function in cls.KILL_HYGIENE_EXEMPT}
         return sigterm and rows <= set(seen)
@@ -3447,7 +3449,7 @@ class _KillSeamClauses:
             populated=lambda seen: len(seen) == 1 and seen[0].startswith(f"{cls.CONFTEST}:"),
             unpopulated={
                 "no definition": [],
-                "one definition outside conftest": ["tests/test_modal_training.py:1"],
+                "one definition outside conftest": ["tests/modal/test_modal_training.py:1"],
                 "two definitions": [f"{cls.CONFTEST}:1", f"{cls.CONFTEST}:9"],
             },
             plants={
@@ -3464,7 +3466,7 @@ class _KillSeamClauses:
                     }),
                 "moved into a test file": {
                     cls.CONFTEST: "",
-                    "tests/test_modal_training.py": autouse + fixture,
+                    "tests/modal/test_modal_training.py": autouse + fixture,
                 },
                 "shadowed by a narrower conftest": {
                     cls.CONFTEST: autouse + fixture,
@@ -3635,10 +3637,10 @@ def test_kill_seam_static_safety():
             for path in sorted((ROOT / "tests").rglob("*.py"))
         },
     }
-    assert {"tests/conftest.py",
-            "tests/test_modal_training.py"} <= set(sources["tests"]), sorted(sources["tests"])[:5]
+    assert {"tests/conftest.py", "tests/modal/test_modal_training.py"
+            } <= set(sources["tests"]), sorted(sources["tests"])[:5]
     # The declared module list: every module in it must be in the runner set (iii) and (vii) read.
-    from tests.modal_runner_tables import RUNNER_PATHS
+    from tests.modal.modal_runner_tables import RUNNER_PATHS
     declared = {*RUNNER_PATHS, "scripts/modal_runner/__init__.py", _KillSeamClauses.RUNNER_ENTRY}
     assert declared <= set(sources["runner"]), (
         f"the runner source set lacks {sorted(declared - set(sources['runner']))}, so (iii) and "

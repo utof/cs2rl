@@ -77,7 +77,7 @@ from tests.conftest import REPO_ROOT
 
 # The package's declared shape: MANIFEST, the import tables, and the module list
 # derived from them. Every gate here reads it; the file itself is data only.
-from tests.modal_runner_tables import (
+from tests.modal.modal_runner_tables import (
     ANNOTATION_DEPENDENCIES,
     DEPENDENCIES,
     MANIFEST,
@@ -99,7 +99,7 @@ from tests.modal_runner_tables import (
 # `classify_seam`, and `_module_level_binding_counts` the seam's placement gate,
 # so a change made to either for the seam's sake changes the membership and
 # duplicates clauses here as well.
-from tests.test_modal_packaging import (
+from tests.modal.test_modal_packaging import (
     PACKAGED,
     _is_type_checking_test,
     _module_level_binding_counts,
@@ -267,7 +267,7 @@ def _structure_violations(sources, manifest=MANIFEST):
         assert examined == len(tree.body), (
             f"the header instrument examined {examined} of {len(tree.body)} module-scope "
             f"statements in {filename}, so its verdict does not cover the file. This is a "
-            "defect in `_module_scope_shape_violations` (tests/test_modal_packaging.py), not in "
+            "defect in `_module_scope_shape_violations` (tests/modal/test_modal_packaging.py), not in "
             "the package: make it examine every statement in `tree.body` exactly once.")
         violations.extend(("header", filename, item) for item in shape)
         names = _module_level_names(tree)
@@ -862,7 +862,7 @@ def _explain(violations):
                     "the work into a function, "
                     "and keep `from __future__ import annotations` in every module that "
                     "annotates. A new pure constructor goes in IMPORT_TIME_CALLS "
-                    "(tests/test_modal_runner_package_shape.py) in the same commit.")
+                    "(tests/modal/test_modal_runner_package_shape.py) in the same commit.")
         elif kind == "trusted-binding":
             name = v[4]
             source = TRUSTED_NAMES.get(name or "")
@@ -1200,7 +1200,7 @@ def test_trusted_names_cover_every_spelling_the_gates_trust():
     spelled = {callee.split(".")[0] for callee in IMPORT_TIME_CALLS if not callee.startswith("<")}
     expected = spelled | {"TYPE_CHECKING"}
     assert set(TRUSTED_NAMES) == expected, (
-        "TRUSTED_NAMES (tests/test_modal_runner_package_shape.py) must list exactly the bare "
+        "TRUSTED_NAMES (tests/modal/test_modal_runner_package_shape.py) must list exactly the bare "
         "callees and module prefixes of IMPORT_TIME_CALLS, plus TYPE_CHECKING. Missing: "
         f"{sorted(expected - set(TRUSTED_NAMES))}; extra: {sorted(set(TRUSTED_NAMES) - expected)}.")
 

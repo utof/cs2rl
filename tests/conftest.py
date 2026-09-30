@@ -583,7 +583,7 @@ def _kill_path_own_group_precondition():
     """Fail every test of a session whose process group is FakeChild's default pid."""
     if _TRAINING_MODULE not in sys.modules:
         return
-    helpers = sys.modules.get("tests.modal_test_helpers")
+    helpers = sys.modules.get("tests.modal.modal_test_helpers")
     if helpers is not None:
         default = helpers.FakeChild.__init__.__kwdefaults__["pid"]
         assert default == _FAKE_CHILD_PID, (

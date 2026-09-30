@@ -17,7 +17,7 @@ ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                     # noqa: E402, I001
 from scripts.modal_runner import core, source                          # noqa: E402, I001
-from tests.modal_test_helpers import _git, _init_source_repo           # noqa: E402
+from tests.modal.modal_test_helpers import _git, _init_source_repo     # noqa: E402
 
 # ── Run preconditions: clean-HEAD validation ───────────────────────────────
 

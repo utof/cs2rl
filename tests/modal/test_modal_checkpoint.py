@@ -21,7 +21,7 @@ ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                     # noqa: E402, I001
 from scripts.modal_runner import checkpoint, core, request             # noqa: E402, I001
-from tests.modal_test_helpers import (                                 # noqa: E402
+from tests.modal.modal_test_helpers import (                           # noqa: E402
     _live_batch_size, _minimal_completed_tree, _no_torch, _write_metrics)
 
 # ── Resume input: local checkpoint hash + weights-only load ────────────────
