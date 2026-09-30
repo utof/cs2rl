@@ -52,8 +52,8 @@ behaviour on.
   `train()`, so that `--dump-config` stays light; `test_cli_module_scope_stays_light`
   (`tests/train/test_w1_modules.py`) fails on a module-level import.
 - The package exports nothing: import a name from the module that owns it. `pyproject.toml`'s
-  banned-api table bans, by name, every name the old flat train module bound; it does not say
-  where each went.
+  banned-api table bans, by name, every name the old flat train module bound except its
+  standard-library and numpy imports and `__all__`; it does not say where each went.
 - `__init__.py` sets `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS` and `OMP_NUM_THREADS` to 1
   unless they are already set.
 - In a worktree, put its own `src/` first: `env PYTHONPATH=<worktree>/src python -m cs2rl.train`.
