@@ -150,9 +150,10 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
 #   2. A snapshot at session start: a directory or file that appears later is not seen.
 #   3. A file with no same-named competitor is not dead, whatever it is: a leftover
 #      `train_shared.py` beside nothing imports silently under its old name, and this
-#      check cannot tell it from a live module. Only the import-layer coverage check
-#      (tests/test_import_layers.py::test_every_tracked_module_is_in_the_graph) went
-#      red on that plant, when the #205 part 3 prototype measured it.
+#      check cannot tell it from a live module. The session-start tripwire does not stop
+#      it; the full suite does: tests/test_import_layers.py's
+#      test_every_tracked_module_is_in_the_graph and test_contracts_hold_on_this_checkout
+#      (the exhaustive `cs2rl layers` contract) both went red on that plant (#205 part 3).
 #   4. `_LOADER_DETAILS` writes out the loader order CPython installs (extension, source,
 #      sourceless). tests/test_checkout_resolution.py compares the winner with
 #      importlib.machinery.PathFinder's on this interpreter, so a change of order fails

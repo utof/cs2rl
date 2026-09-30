@@ -131,11 +131,12 @@ ROOTS = (REPO_ROOT / "src", REPO_ROOT / "scripts", REPO_ROOT / "tests" / "_helpe
 # The one file allowed to construct. Everything else routes through it.
 FACTORY = REPO_ROOT / "src" / "cs2rl" / "env" / "factory.py"
 # #205 part 3 (#92): `build_selfplay_manager` moved up beside the class it builds, so the one
-# SelfPlayManager construction lives here now. The factory is exempt for every symbol it
-# may construct; this file only for SelfPlayManager.
+# SelfPlayManager construction lives here now. Each home is exempt only for what it builds:
+# the factory for make_puffer_env, this file for SelfPlayManager. An exemption for a symbol a
+# home no longer builds would let a new construction there pass unseen.
 SELFPLAY = REPO_ROOT / "src" / "cs2rl" / "train" / "selfplay.py"
 CONSTRUCTION_HOMES = {
-    FACTORY: frozenset({"make_puffer_env", "SelfPlayManager"}),
+    FACTORY: frozenset({"make_puffer_env"}),
     SELFPLAY: frozenset({"SelfPlayManager"})
 }
 

@@ -518,8 +518,8 @@ def episode_outcome(kills_for: int, kills_against: int) -> float:
     """Win = opposing participating agent eliminated and own agent alive.
 
     Timeouts score 0 (the C `winner_ct` counts them as CT wins — that is why
-    the self-play feed in `cs2rl.train.loop.train` subtracts `timed_out`, see
-    elimination_only_win_rates). Trade = 0.5 (unreachable at n=1: the round
+    `cs2rl.train.metrics.elimination_only_win_rates` subtracts `timed_out` from
+    the self-play feed). Trade = 0.5 (unreachable at n=1: the round
     ends on the first death). PITFALL: at n_active_per_team>1 the inputs are
     TEAM kill counts, so this is team credit, not the policy agent's own.
     """
