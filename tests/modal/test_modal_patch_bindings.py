@@ -19,8 +19,6 @@ from tests.modal.test_modal_training import (
     _training_kwargs,
 )
 
-# Repository root: the campaign's children read files by repo-relative path.
-
 # What each site's companion observation drives, recorded as the `stimulus`
 # field of the campaign's per-site record (`_record_observation`), and kept true
 # of `test_patch_binding_observation`'s branch for that site.

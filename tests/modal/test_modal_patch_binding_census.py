@@ -21,9 +21,6 @@ from tests.modal.modal_runner_tables import RUNNER_TEST_FILES
 # pulls in no runner module and keeps this file out of the runner's importers.
 from tests.modal.test_modal_packaging import CLIENT_FILE, SHARED_FILE
 
-# Repository root: the census reads the original sites' files by repo-relative
-# path.
-
 # The ORIGINAL installer of each BINDING_SITES key: the test file, and the
 # module-level function whose body calls `binding_target(site)`. The campaign
 # certifies `binding_target(site)` through the companion; this table ties that
