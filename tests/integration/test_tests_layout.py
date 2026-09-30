@@ -25,7 +25,9 @@ KNOWN LIMITS, each pinned as a row of test_each_rule_reports_its_plant that expe
     directory passes at the root if it also imports a flat module (`cs2rl.policy`, ...).
   * No rule places a non-test module. A helper module at the root or in a mirror directory
     passes; tests/CONTEXT.md says where one goes.
-  * (d) reads Path's `.parent`/`.parents`, not `os.path.dirname`, and no test file uses dirname.
+  * (d) reads Path's `.parent`/`.parents` chained onto `__file__` in one expression. A root
+    built with `os.path.dirname`, or in two steps (`HERE = Path(__file__).resolve()`, then
+    `HERE.parents[2]`), passes. No test file uses either.
 PITFALLS.
   * A disk walk, not `git ls-files`: pytest collects an untracked file just the same.
   * The walk's scope is pytest's, read from its config (`python_files`, `norecursedirs`) and
@@ -237,6 +239,10 @@ def test_a_clean_tree_has_no_problem(tmp_path, pytest_scope):
     }, None),
     ({
         "tests/integration/test_i.py": "import os\nR = os.path.dirname(__file__)\n"
+    }, None),
+    ({
+        "tests/env/test_e.py":
+        "from pathlib import Path\nHERE = Path(__file__).resolve()\nROOT = HERE.parents[2]\n"
     }, None),
 ])
 def test_each_rule_reports_its_plant(tmp_path, pytest_scope, plant, rule):
