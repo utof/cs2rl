@@ -7,7 +7,7 @@ WHAT. `layout_problems(tests_dir, package_dir, ...)` returns one problem per:
   (b) NO_TWIN entry that is not a directory of tests/ (a stale entry);
   (c) test file directly in tests/ that imports no flat module of cs2rl (a src/cs2rl/<m>.py
       other than __init__.py). The root mirrors src/cs2rl/ itself, so only the flat modules'
-      tests sit there, and a new test that belongs in a package's directory is refused;
+      tests sit there. (c) asks only whether a flat module is imported: see KNOWN LIMITS;
   (d) .py file under tests/, other than tests/conftest.py and tests/_helpers/, that builds a
       path from its own `__file__` with `.parent` or `.parents`: a file-relative repo root is
       right only at the depth it was written for, and a move re-arms it. Import `REPO_ROOT`
@@ -20,6 +20,12 @@ WHY each is a failure and not a convention:
       (a); an entry for a directory that does not exist is red by (b). Neither can go quiet.
   (d): #207 measured 56 file-relative roots. After a move most fail loudly, but the ones that
       only feed a child's cwd or a skip stay green in the wrong directory (#207 part 2 M8(a)).
+KNOWN LIMITS, each pinned as a row of test_each_rule_reports_its_plant that expects no problem:
+  * (c) does not ask where a root test file belongs. A test that belongs in a package's
+    directory passes at the root if it also imports a flat module (`cs2rl.policy`, ...).
+  * No rule places a non-test module. A helper module at the root or in a mirror directory
+    passes; tests/CONTEXT.md says where one goes.
+  * (d) reads Path's `.parent`/`.parents`, not `os.path.dirname`, and no test file uses dirname.
 PITFALLS.
   * A disk walk, not `git ls-files`: pytest collects an untracked file just the same.
   * The walk's scope is pytest's, read from its config (`python_files`, `norecursedirs`) and
@@ -221,14 +227,23 @@ def test_a_clean_tree_has_no_problem(tmp_path, pytest_scope):
         "tests/env/test_e.py": "import pathlib\nR = pathlib.Path(__file__).parent.parent\n"
     }, "(d) tests/env/test_e.py:2"),
     ({
+        "tests/test_env_x.py": "from pkg import policy\nfrom pkg.env import world\n"
+    }, None),
+    ({
+        "tests/env/env_helpers.py": "X = 1\n"
+    }, None),
+    ({
+        "tests/helpers.py": "X = 1\n"
+    }, None),
+    ({
         "tests/integration/test_i.py": "import os\nR = os.path.dirname(__file__)\n"
     }, None),
 ])
 def test_each_rule_reports_its_plant(tmp_path, pytest_scope, plant, rule):
     """Positive controls: one plant per rule, each reported by the rule that owns it.
 
-    The last row is a KNOWN LIMIT, pinned so it cannot be mistaken for coverage: rule (d)
-    reads Path's `.parent`/`.parents`, not `os.path.dirname`, and no test file uses dirname.
+    The rows whose rule is None are the KNOWN LIMITS of the module docstring, pinned so they
+    cannot be mistaken for coverage: a fix that closes one turns its row red, on purpose.
     """
     tests_dir, package_dir = _tree(tmp_path, plant)
     problems = layout_problems(tests_dir, package_dir, **pytest_scope)
