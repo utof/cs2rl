@@ -28,6 +28,7 @@ control for the terminal-validator patch (gh#211).
 """
 import ast
 import dataclasses
+import importlib.util
 import inspect
 import io
 import json
@@ -3618,6 +3619,13 @@ def test_kill_seam_static_safety():
     resolution-path control's first statement checks the behaviour. They are a
     backstop for the mistakes this branch has seen, not a sandbox.
     """
+    # A path constant a move leaves stale (HELPERS) derives a module name nothing imports, and
+    # (iv) then bans the wrong name while its plants, derived the same way, still pass
+    # (#207 part 2 M5). Every RUNNER_PACKAGES module must resolve.
+    unresolved = [
+        p for p in _KillSeamClauses.RUNNER_PACKAGES if importlib.util.find_spec(p) is None
+    ]
+    assert not unresolved, f"RUNNER_PACKAGES names modules that do not resolve: {unresolved}"
     training_file = Path(training.__file__).resolve()
     assert training_file.is_relative_to(ROOT), (
         f"scripts.modal_runner.training was imported from {training_file}, outside this checkout "

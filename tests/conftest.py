@@ -576,6 +576,10 @@ def process_control_tripwire_error():
 #     attempt imports the runner at module scope (the tripwire's RESIDUAL 1), so
 #     a session that can reach a recording killpg is always checked.
 _FAKE_CHILD_PID = 4242
+# The helper module FakeChild lives in, looked up by name. A move leaves this string stale
+# silently (the lookup returns None and the drift check goes quiet, #207 part 2 M5), so the
+# fixture below fails when the name no longer resolves.
+_HELPERS_MODULE = "tests.modal.modal_test_helpers"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -583,7 +587,10 @@ def _kill_path_own_group_precondition():
     """Fail every test of a session whose process group is FakeChild's default pid."""
     if _TRAINING_MODULE not in sys.modules:
         return
-    helpers = sys.modules.get("tests.modal.modal_test_helpers")
+    assert importlib.util.find_spec(_HELPERS_MODULE) is not None, (
+        f"tests/conftest.py looks FakeChild up in {_HELPERS_MODULE!r}, which no longer resolves: "
+        "update `_HELPERS_MODULE` to the helper module's dotted name")
+    helpers = sys.modules.get(_HELPERS_MODULE)
     if helpers is not None:
         default = helpers.FakeChild.__init__.__kwdefaults__["pid"]
         assert default == _FAKE_CHILD_PID, (
