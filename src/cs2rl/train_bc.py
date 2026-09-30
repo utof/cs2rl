@@ -23,9 +23,10 @@ ticks and run the policy STATELESSLY — `policy(x, {})`, i.e. a T=1 sequence
 from a ZERO LSTM state on every tick. That premise is **stale**: it predates
 commit 456c361, which made PPO do true BPTT. Today
 
-  * PPO's rollout (src/cs2rl/train.py `forward_eval`) CARRIES lstm_h/lstm_c from
+  * PPO's rollout (`cs2rl.train.trainer.Cs2PuffeRL.evaluate` calling `forward_eval`) CARRIES
+    lstm_h/lstm_c from
     tick to tick within an episode, and
-  * PPO's update (src/cs2rl/train.py `Dust2Policy.forward` → `_lstm_bptt`) unrolls a
+  * PPO's update (`cs2rl.policy.build_policy`'s `Dust2Policy.forward` → `_lstm_bptt`) unrolls a
     whole 64-tick segment through the LSTM in one call.
 
 So a stateless clone optimises a function PPO never evaluates. Measured on the
@@ -49,7 +50,8 @@ The fix, and the shape of this file:
     contaminate the hidden states that matter).
   * **The gate is a carried-state rollout.** `rollout_episode(..., carry_state=
     True)` drives the env with `forward_eval` and a persistent state dict,
-    byte-for-byte the loop src/cs2rl/train.py's rollout runs. The stateless number is
+    byte-for-byte the loop `cs2rl.train.trainer.Cs2PuffeRL.evaluate`'s rollout runs. The
+    stateless number is
     still printed, clearly labelled as a diagnostic — it is the quantity that
     lied, so it is worth watching, but it is NOT the gate.
 
@@ -106,7 +108,7 @@ PITFALLS (each one cost time; do not "simplify" them away)
 """
 import os
 
-# Match src/cs2rl/train.py: BLAS thread caps must be set before torch/numpy spin up
+# Match cs2rl.train (its __init__): BLAS thread caps must be set before torch/numpy spin up
 # their pools, or a CPU BC run oversubscribes every core on this box.
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -465,7 +467,7 @@ def make_bc_env(seed: int = 0):
 
 
 def build_bc_policy(device="cpu", seed: int = 0):
-    """Build the RL policy architecture (src/train.build_policy) for BC.
+    """Build the RL policy architecture (cs2rl.policy.build_policy) for BC.
 
     Arch-identical to training is the entire point of the warm-start: the
     saved state_dict must load into the policy `--resume` constructs. We build
@@ -534,7 +536,7 @@ def bc_loss(policy, obs_t, disc_t, cont_t, valid=None, entropy_coef: float = DEF
     the entropy bonus acts only on the discrete heads where it is wanted.
 
     No tanh/atanh change-of-variables: the head tanh-squashes the MEAN only
-    and samples a plain Normal (train.py forward()), so the density is the
+    and samples a plain Normal (`cs2rl.policy.build_policy`'s `Dust2Policy.forward()`), so the density is the
     plain Gaussian one — see spec D-6, verified against _hybrid_sample_logits.
     """
     import torch
@@ -666,14 +668,15 @@ def greedy_carrier_action(policy, obs_row, state=None, action_mask=None, device=
     of the module docstring:
       * dict  → `policy.forward_eval(x, state)`, which READS and WRITES
         state["lstm_h"]/["lstm_c"] — the LSTM state is carried tick-to-tick,
-        exactly as src/cs2rl/train.py's rollout does. This is what the gate uses.
+        exactly as `cs2rl.train.trainer.Cs2PuffeRL.evaluate`'s rollout does. This is what the
+        gate uses.
       * None  → `policy(x, {})`, a T=1 unroll from ZERO state every tick. Kept
         ONLY as the labelled diagnostic; it is the number that read 1.000 while
         the carried-state truth was 0.200.
 
     `action_mask` is the C-computed (ACTION_MASK_DIM,) validity row for this
     agent (env._masks_view). When given, invalid bins are pushed to
-    finfo.min/2 by train._apply_action_masks BEFORE the argmax, so greedy eval
+    finfo.min/2 by cs2rl.policy._apply_action_masks BEFORE the argmax, so greedy eval
     can never pick a bin the env would reject — the same masking PPO's sampler
     applies (review finding 7).
 
@@ -713,8 +716,8 @@ def rollout_episode(policy,
     at all-zero actions — the same frozen-idle world the demos recorded.
 
     `carry_state=True` (the DEFAULT, and what the gate measures) threads one
-    LSTM state dict through the whole episode, which is what src/cs2rl/train.py's
-    rollout does and therefore what PPO inherits. `carry_state=False` resets to
+    LSTM state dict through the whole episode, which is what
+    `cs2rl.train.trainer.Cs2PuffeRL.evaluate`'s rollout does and therefore what PPO inherits. `carry_state=False` resets to
     zero state every tick; it exists only to print the historical stateless
     diagnostic alongside the real number. Never gate on the False variant.
 
@@ -923,7 +926,9 @@ def main(argv=None):
 
     if args.eval_only is not None:
         policy = build_bc_policy(device=args.device, seed=args.seed)
-        # weights_only=True matches src/cs2rl/train.py's load sites: a checkpoint is
+        # weights_only=True matches the load sites in cs2rl.policy.load_policy_from_checkpoint,
+        # cs2rl.train.resume.resolve_resume_split and
+        # cs2rl.train.selfplay.SelfPlayManager.load_past_policy: a checkpoint is
         # data, and unpickling arbitrary objects out of one is a code-execution
         # surface we have no reason to keep open.
         policy.load_state_dict(

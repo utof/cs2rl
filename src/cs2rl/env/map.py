@@ -158,7 +158,7 @@ def make_cs2_map(nav_path: str, cache_path: str, *, build_vis: bool = True) -> M
 
     ``build_vis=False`` (gh#251) skips NavGraph.build_vis_matrix and returns an
     UNCACHED MapData whose ``vis_matrix`` is None. It exists for
-    `train.py --dump-config`, which only reads geometry (centroids_z → pin_pitch)
+    `python -m cs2rl.train --dump-config`, which only reads geometry (centroids_z → pin_pitch)
     and must never fork: on a cold `src/cs2rl/vis_cache.npy` (nav.CACHE_PATH; every
     fresh worktree — it is gitignored) build_vis_matrix spawns a cpu_count()-worker
     ProcessPoolExecutor for minutes, and a killed dump orphaned all 12 workers
@@ -555,7 +555,7 @@ def make_arena_duel_map() -> MapData:
     """R0-H: build ARENA_DUEL_V1 (see the preset comment for what/why/pitfalls).
 
     Returns a MapData exactly as make_simple_map produces it — flat (centroids_z
-    ≡ 0 ⇒ train.pin_pitch_for_map == 1), all 24 areas mutually visible, no
+    ≡ 0 ⇒ cs2rl.train.envs.pin_pitch_for_map == 1), all 24 areas mutually visible, no
     bombsite. Raises RuntimeError (not assert: python -O strips asserts) if the
     preset ever drifts from the 6×4 / 4+4-spawn contract the sim and tests pin.
     """

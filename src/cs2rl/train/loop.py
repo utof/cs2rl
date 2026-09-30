@@ -565,8 +565,8 @@ def train(args):
     # major (10 rows per env: T at 0-4, CT at 5-9). Under --opponent self it
     # selects slots 0..n-1 of BOTH teams — the exact slots the C env spawns
     # (cs2_env.py, n_active_per_team); under --opponent noop, the hero team's
-    # slots only. THE SAME helper backs train_test_harness, so a harness test
-    # can never be green against a formula production does not run.
+    # slots only. THE SAME helper backs `tests._helpers.trainer_harness._harness_parts`,
+    # so a harness test can never be green against a formula production does not run.
     # The assert is the agreement check: the vector is derived from args while
     # the envs were built from build_train_env_factory, and a disagreement
     # would mask the wrong rows silently rather than crash.
@@ -582,8 +582,9 @@ def train(args):
     # is the ONLY rollout path that understands the hybrid 4-tuple policy
     # contract — stock PuffeRL.evaluate crashes on the forward_eval tuple
     # unpack at its first call, so --no-self-play was broken in production.
-    # The patch is now applied UNCONDITIONALLY (mirroring train_test_harness,
-    # which adopted this shape at T5); --no-self-play means "no past-policy
+    # The patch is now applied UNCONDITIONALLY (mirroring
+    # tests._helpers.trainer_harness._build_trainer_for_test, which adopted this shape at
+    # T5); --no-self-play means "no past-policy
     # mixing": p_past=0.0 with an empty, never-seeded pool ⇒ should_use_past()
     # is always False, and the pool save / team-switch bookkeeping in the
     # main loop is skipped via self_play_enabled below.

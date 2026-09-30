@@ -10,8 +10,8 @@ Members:
              lives with its class, in cs2rl.train.selfplay).
 
 Inside the package, `cs2rl.env layers` orders factory above c, c above map and nav, and
-those above config, so config may import none of them: `c.cs2_env` and `train.py
---dump-config` rely on config staying stdlib-only.
+those above config, so config may import none of them: `c.cs2_env` and
+`python -m cs2rl.train --dump-config` rely on config staying stdlib-only.
 
 WHY this file holds a docstring and nothing else: a re-export here would put nav's
 imports (awpy, shapely) into the import chain of every `cs2rl.env.config` importer.

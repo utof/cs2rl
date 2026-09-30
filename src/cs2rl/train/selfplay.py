@@ -15,7 +15,7 @@ from cs2rl.policy import (
 from cs2rl.train.config import OPPONENT_MODES
 
 if TYPE_CHECKING:
-    # Only the `-> "torch.Tensor"` annotation reads it; train.py got the name from the
+    # Only the `-> "torch.Tensor"` annotation reads it; the flat train.py got the name from the
     # `import torch` in its __main__ block, and a module-scope import would load torch.
     import torch
 
@@ -27,7 +27,7 @@ def self_play_used_past_metric(trainer) -> float:
 
     WHAT: expose whether this epoch's evaluate() rollout used a past-policy
       opponent (`trainer._selfplay_used_past`, set in
-      `Cs2PuffeRL.evaluate`, src/cs2rl/trainer.py).
+      `cs2rl.train.trainer.Cs2PuffeRL.evaluate`).
     WHY: the persist filter on the outer logs dict drops non-floats, so a
       bool never reaches metrics.jsonl. Callers write the returned float
       onto the outer dict next to self_play/pool_size — never under

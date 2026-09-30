@@ -420,7 +420,7 @@ def _thread_cap_records() -> list[str]:
 
 
 def _seed_from_train_args(train_args: tuple[str, ...]) -> int:
-    """Return the live --seed, defaulting to train.py's default of 1."""
+    """Return the live --seed, defaulting to `cs2rl.train.__main__`'s default of 1."""
     seed = 1
     index = 0
     tokens = list(train_args)

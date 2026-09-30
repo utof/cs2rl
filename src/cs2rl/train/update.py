@@ -1,29 +1,31 @@
-"""PPO update helpers (#140), split out of train.py.
+"""PPO update helpers (#140), split out of the flat train.py.
 
 WHAT: the loss/reduction surface of the trainer update — the masked reductions
 every trainer statistic goes through, the hybrid discrete+continuous PPO loss,
 the TAG gradient-cosine diagnostic and its parameter partition, and the
 entropy-target schedule. Moved here VERBATIM by the 2026-08-31 post-rung1a
-refactor; ``train.py`` re-exports every name below (see its ``__all__``), so
-existing ``from cs2rl.train import X`` call sites keep working unchanged.
+refactor; the flat ``train.py`` re-exported every name below (see its ``__all__``)
+until #205 part 3 removed the re-exports: ``cs2rl.train`` exports nothing now, so
+import from this module.
 
 HISTORY (gh#168 W2a, 2026-09-25): this module also held the 911-line
 return-norm patcher whose inner 713-line ``train()`` replacement closed over 15
-freevars. That body is now ``Cs2PuffeRL.train`` in src/cs2rl/trainer.py (its
+freevars. That body is now ``cs2rl.train.trainer.Cs2PuffeRL.train`` (its
 construction-time state is ``Cs2PuffeRL._init_return_norm``, the closure
-locals are ``self._*`` attributes), and trainer.py imports the helpers below
+locals are ``self._*`` attributes), and cs2rl.train.trainer imports the helpers below
 at module scope. Nothing here touches a trainer instance any more.
 
 PITFALL (runtime rebinding): a test that wants to intercept ``tag_grad_cossim``
-at its call site must patch it on ``trainer`` (src/cs2rl/trainer.py), NOT on this
-module and NOT on ``train`` — the call site inside ``Cs2PuffeRL.train`` resolves
-the name through trainer.py's globals, so a patch here is silently unreachable
+at its call site must patch it on ``cs2rl.train.trainer``, NOT on this module —
+the call site inside ``Cs2PuffeRL.train`` resolves the name through
+cs2rl.train.trainer's globals, so a patch here is silently unreachable
 and the assertion becomes vacuous. See tests/test_tag_trainer.py, whose
 positive control pins the reachable module.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in train_shared.py's header. Every torch, pufferlib and
-train_helpers_batch1 import below is function-local ON PURPOSE.
+reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+load-bearing). Every torch, pufferlib and cs2rl.train.entropy import below is
+function-local ON PURPOSE.
 """
 
 from cs2rl.policy import _LOG_2PI, _aim_dim_weight, _apply_action_masks
@@ -107,7 +109,7 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
     """Config-driven entropy target for the SAC-style α controller.
 
     Single source for both the construction-time seed (Cs2PuffeRL._init_return_norm)
-    and the per-call recompute in Cs2PuffeRL.train (src/cs2rl/trainer.py) — keeping them identical
+    and the per-call recompute in cs2rl.train.trainer.Cs2PuffeRL.train — keeping them identical
     means a checkpoint-resumed trainer seeds at its true scheduled value
     instead of a hardcoded warmup constant. `config` is anything with
     .get() (PuffeRL config or a plain dict); missing keys fall back to the

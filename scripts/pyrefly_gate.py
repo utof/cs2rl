@@ -8,7 +8,8 @@ not usable as a gate here. Its suppression key is `(path, kind, start-column)` -
 line-insensitive, message-insensitive, and with UNLIMITED MULTIPLICITY. One
 baselined entry is a standing licence for that (file, kind, column), not a
 budget: five distinct new `missing-attribute` errors planted at src/cs2rl/train.py
-column 14 were all swallowed in a single run, reporting `0 errors`, exit 0.
+(a flat module then; #205 part 3 made it a package) column 14 were all swallowed in a
+single run, reporting `0 errors`, exit 0.
 
 Measured leave-one-out over this repo's own 752 errors: 488/752 = 64.9% would be
 invisible if they were new. Python's 4-space indents make column collisions

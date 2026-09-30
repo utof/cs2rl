@@ -11,8 +11,8 @@ seven call sites that drifted independently: the training closure, two
 "legacy defaults" eval sites, the eval driver, the smoke test, the public
 `make_env` wrapper and the test harness. Nothing tied them together, so a knob
 added to one silently skipped the rest — `--smoke --reward-ct-survival 0.0`
-running the DEFAULT weights is the documented instance (build_env_factory's
-docstring in train.py), and #143 is the still-open one. Naming the roles turns
+running the DEFAULT weights is the documented instance (`cs2rl.train.envs.build_env_factory`'s
+docstring), and #143 is the still-open one. Naming the roles turns
 "which sites did I forget" into a list this module owns.
 
 THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
@@ -32,7 +32,7 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
                training knobs. #143 tracks that; this module is not the fix, it
                just reduces the future fix to one role's config source.
   smoke        `smoke_test`, fixed seed 42.
-  harness      `train_test_harness._build_trainer_for_test`, whose contract is
+  harness      `tests._helpers.trainer_harness._build_trainer_for_test`, whose contract is
                "shaped exactly like production" — hence its own role rather
                than a reuse of `train`, since it adds
                `include_step_stats_in_info=True` and builds its config from
@@ -40,11 +40,11 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
   external     the public `make_env(team_spirit, map_data)` wrapper.
 
 There is deliberately NO `record` role, and the reason is NOT that `--record`
-reuses one of the roles above — it does not. `train.record_episode` builds its
+reuses one of the roles above — it does not. `cs2rl.train.record.record_episode` builds its
 own env with a bare `make_c_env(...)`, the LOWER-layer constructor, which W3
 never banned, and THAT is the env every recorded tick comes from: both its
 `log_tick` calls take `env.snapshot_state()`, and the name `policy_env` never
-appears in it. The `eval_legacy` env `train.load_policy_from_checkpoint` builds
+appears in it. The `eval_legacy` env `cs2rl.policy.load_policy_from_checkpoint` builds
 on the way in is a SECOND, separate env, and it is only ever read — never reset,
 never stepped. Read twice, and it is the second read that surprises people: once
 for its obs_dim, which the checkpoint's must match, and once inside
@@ -86,9 +86,9 @@ which is what makes `--dump-config` cost ~1 s instead of ~30 s (measured on the 
 train.py, before #205 part 3). Only `env.config` is imported at module scope, and it
 is the stdlib-only leaf.
 
-NO `cs2rl.train` IMPORT, AT ANY SCOPE. This module used to need train.py's `__main__`
+NO `cs2rl.train` IMPORT, AT ANY SCOPE. This module used to need the flat train.py's `__main__`
 self-alias: `build_selfplay_manager` did a function-local `from cs2rl.train import
-SelfPlayManager`, and a script run (`python -m cs2rl.train`) holds train.py in
+SelfPlayManager`, and a script run (`python -m cs2rl.train`) held the flat train.py in
 `sys.modules` as `__main__`, so that import would have EXECUTED TRAIN.PY A SECOND TIME
 under the name `cs2rl.train`. Both halves are gone: the builder moved to
 `cs2rl.train.selfplay`, and a package `__main__` is imported by no module, so there is
@@ -102,7 +102,7 @@ that rebinds that attribute still sees its stand-in used, and
 tests/test_env_factory.py's `_construct` is built on exactly that.
 
 `cs2rl.train.selfplay.build_selfplay_manager` (moved there from this module) covers
-the three pre-migration `SelfPlayManager` sites (train.py's `train()` plus two in
+the three pre-migration `SelfPlayManager` sites (`train()` plus two in
 `_build_trainer_for_test`); they are two calls now, `cs2rl.train.loop.train()` and
 the one in tests/_helpers/trainer_harness.py's `_harness_parts`. Its own pre-migration
 capture is `tests/fixtures/selfplay_kwargs_pre_w3.json`, recorded one commit before
@@ -230,7 +230,7 @@ def _build_eval(_make, /, *, map_data, config):
     ``config`` is required, with no None default: the call site derives it from
     `env_config_from_args`, which always returns an EnvConfig, and the eval env's
     config is cross-checked against the driver env's immediately after
-    construction (`train.assert_eval_env_agreement`). Accepting None here would
+    construction (`cs2rl.train.envs.assert_eval_env_agreement`). Accepting None here would
     let that check compare a default eval env against a knobbed driver.
     """
     return _make(config=config.replace(reward_symmetrize=False),
@@ -282,7 +282,7 @@ def _build_smoke(_make, /):
 
 
 def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
-    """`train_test_harness._build_trainer_for_test`'s per-env construction.
+    """`tests._helpers.trainer_harness._build_trainer_for_test`'s per-env construction.
 
     ``0 if seed is None else seed`` — an explicit None check, NOT ``seed or 0``:
     pufferlib forwards seed=None for the first reset, and a falsy-remap would
@@ -297,7 +297,7 @@ def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
     carries used to be four separate parameters here; since #165 PR B2 the
     mapping from `_build_trainer_for_test`'s plain arguments into an EnvConfig
     lives at the CALL SITE, and that is where the coverage question moved with
-    it — see the closure comment in `src/cs2rl/train_test_harness.py` for which knob
+    it — see the closure comment in `tests/_helpers/trainer_harness.py` for which knob
     each test can and cannot see going missing.
 
     NOTE the mask view is NOT attached here. `env._attach_mask_view(mask_shm,
@@ -316,7 +316,7 @@ def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
 def _build_external(_make, /, *, team_spirit, map_data):
     """The public `make_env(team_spirit, map_data)` wrapper's env.
 
-    Both parameters are REQUIRED even though the PUBLIC WRAPPER `train.make_env`
+    Both parameters are REQUIRED even though the PUBLIC WRAPPER `cs2rl.train.envs.make_env`
     declares its own two as optional. (Qualified deliberately: since #165 PR B2
     this module names two different `make_env`s — the wrapper, and the lower-layer
     `env.c.cs2_env.make_env` that `build_env_for` now imports — and both default

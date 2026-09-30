@@ -32,7 +32,7 @@ def target_entropy_schedule(
     policy near-uniform indefinitely. These defaults are FALLBACK mirrors
     of build_train_config's entropy_target_{warmup,base}_frac /
     entropy_target_warmup_steps — production threads the config values
-    through train._scheduled_target_entropy, so tune there, not here.
+    through cs2rl.train.update._scheduled_target_entropy, so tune there, not here.
     Keep base_frac > 0.3: the trainer's hard entropy floor (clamp α ≥ 0.5
     when H < 0.3·max) must stay strictly below the scheduled target."""
     # Single branch: clamp t to [0, 1] so the linear formula yields

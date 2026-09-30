@@ -41,7 +41,7 @@ _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 # Reuse the run-id grammar so a value cannot smuggle path/shell syntax.
 _SECRET_NAME_RE = _RUN_ID_RE
 
-# Exact live train.py long-option names and their arities. Prefixes are NOT
+# Exact live `cs2rl.train.__main__` long-option names and their arities. Prefixes are NOT
 # listed: argparse would resolve `--devi` → `--device`, which is exactly the
 # footgun this table exists to close. `--num-envs` is the runner spelling and
 # is intentionally absent so train-args using it fail as unknown.
@@ -101,8 +101,8 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--tct-split-heads": 0,
     "--tct-split-trunk": 0,
                                                        # Reward weights: dest is underscore, CLI is hyphen. Mirror the generator
-                                                       # in src/cs2rl/train.py (`--{_rw_name.replace('_', '-')}`) so a new weight is a
-                                                       # one-line add here, not a silent "unknown option" after a train.py bump.
+                                                       # in `cs2rl.train.__main__` (`--{_rw_name.replace('_', '-')}`) so a new weight is a
+                                                       # one-line add here, not a silent "unknown option" after a `cs2rl.train.__main__` bump.
     "--reward-win": 1,
     "--reward-kill": 1,
     "--reward-death": 1,

@@ -2,7 +2,7 @@
 
 It exports nothing: import the module that owns a name.
 The three thread-count defaults below are set before any submodule imports
-numpy, as train.py's module scope did.
+numpy, as the flat train.py's module scope did.
 """
 
 import os

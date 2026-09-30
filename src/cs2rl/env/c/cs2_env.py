@@ -342,7 +342,7 @@ class StepStatsView:
     Cs2Env.step() returns a reference to this wrapper in info[0]["step_stats"]
     when include_step_stats_in_info=True. The wrapper proxies __getitem__ to
     attribute access on the underlying struct, so downstream consumers (e.g.
-    split_into_channels in src/cs2rl/train_helpers_batch1.py) can read fields by
+    `cs2rl.train.rewards.split_into_channels`) can read fields by
     name with zero per-tick allocation.
 
     ndim is set to 0 so split_into_channels's length-1 squeeze (which only
@@ -1228,7 +1228,7 @@ class Cs2Env(pufferlib.PufferEnv):
         # instead of the (always-zero) scratch — so MP workers actually see
         # the policy's Δyaw sample. Serial backend continues to bypass this
         # via the per-env step wrapper and a Python attr stash on the
-        # vecenv (see HybridAimVecEnv.send in src/cs2rl/trainer.py).
+        # vecenv (see cs2rl.train.trainer.HybridAimVecEnv.send).
         self._cont_action_view = None
         # Hold the parent-process RawArray to keep it from being GC'd if the
         # caller passes it transiently (it is also kept alive on the trainer
@@ -1413,8 +1413,8 @@ class Cs2Env(pufferlib.PufferEnv):
         ``(env_idx + 1) * N_AGENTS * AIM_DIM`` float32 slots. We do NOT
         revalidate the global length here (we don't know num_envs); a too-
         small allocation will manifest as np.frombuffer raising or as
-        out-of-range data. The caller (env factory in src/cs2rl/train.py) owns
-        the sizing.
+        out-of-range data. The caller (the env factory `cs2rl.train.envs.build_env_factory`
+        builds) owns the sizing.
         """
         if raw_shm is None:
             return

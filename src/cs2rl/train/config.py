@@ -1,12 +1,12 @@
-"""Config + CLI-resolution seam (#144), split out of train.py.
+"""Config + CLI-resolution seam (#144), split out of the flat train.py.
 
 WHAT: ``build_train_config`` (the config.json / provenance dict), the
 args-to-env-knob and args-to-mode resolvers, the batch-dimension formula, the
 opponent-mode vocabulary and the static participating-rows vector. Moved here
 VERBATIM by the 2026-08-31 post-rung1a refactor: no renames, no signature
-changes, no behaviour change. ``train.py`` re-exports every name below (see its
-``__all__``), so existing ``from cs2rl.train import X`` call sites keep working
-unchanged.
+changes, no behaviour change. The flat ``train.py`` re-exported every name below
+(see its ``__all__``) until #205 part 3 removed the re-exports: ``cs2rl.train`` exports
+nothing now, so import from this module.
 
 WHY its own module: the Modal runner hashes the config.json that --dump-config
 writes from build_train_config's dict (its config_hash), so this surface is
@@ -14,15 +14,16 @@ PROVENANCE, not plumbing. Silent drift here changes every future run's recorded
 hash, which is much easier to review in one small file than inside the entry
 point.
 
-PITFALL: the argparse parser itself stays in train.py (it is built inline under
-``if __name__ == "__main__"`` and is not importable). Several tests source-scan
-train.py for ``add_argument`` literals and source-scan THIS file for
+PITFALL: the argparse parser itself stays in ``cs2rl.train.__main__`` (it is built inline
+under ``if __name__ == "__main__"`` and is not importable). Several tests source-scan
+``cs2rl/train/__main__.py`` for ``add_argument`` literals and source-scan THIS file for
 ``OPPONENT_MODES`` / ``compute_batch_dims`` — the two halves of the CLI contract
 now live in two files and both are pinned.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in train_shared.py's header — ``--dump-config`` reaches
-build_train_config and must still cost no torch/nav import.
+reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+load-bearing) — ``--dump-config`` reaches build_train_config and must still cost no
+torch/nav import.
 """
 
 import numpy as np
@@ -30,9 +31,9 @@ import numpy as np
 from cs2rl.env.config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
 from cs2rl.policy import LOG_STD_MAX, resolve_aim_log_std_init
 
-# Agents per team. A bare literal ON PURPOSE: this leaf and train.py must both
-# stay import-light (`--dump-config` guarantees no torch/nav import — see
-# _atomic_save_state_dict's docstring below), and `nav` pulls
+# Agents per team. A bare literal ON PURPOSE: this leaf and cs2rl.train.__main__ must
+# both stay import-light (`--dump-config` guarantees no torch/nav import — see
+# cs2rl.train.resume._atomic_save_state_dict's docstring), and `nav` pulls
 # awpy/polars/shapely (+0.6 s and a polars warning) just to read one 5.
 # Cross-checked against nav.TEAM_SIZE and cs2_env.TEAM_SIZE by
 # tests/test_train_env.py::test_obs_dim_constant_consistency.
@@ -56,7 +57,7 @@ def resolve_gammas(args) -> tuple[float, float]:
     discount) and env_config_from_args (the env's PBRS discount, stored on the
     EnvConfig every env is built from), must agree on the SAME resolution rule
     — PBRS is only policy-invariant (Ng et al.) when
-    γ_pbrs == γ, and before R0-J the two lived as unrelated literals (train.py
+    γ_pbrs == γ, and before R0-J the two lived as unrelated literals (the flat train.py
     0.999 vs cs2_env.py 0.999, now one field default in env/config.py) held
     together by a single drift test.
     ``--pbrs-gamma`` exists ONLY for experiments that deliberately break the
@@ -83,7 +84,7 @@ def resolve_gammas(args) -> tuple[float, float]:
 # pairs AND build_train_config's provenance keys (which record the value under
 # the ARGS attr name), so a knob added to one cannot be missed by the other
 # (config.json would then silently under-record the experiment). Paired with
-# train_config._ARGS_KNOB_FIELDS; see its comment for the coverage rule.
+# cs2rl.train.config._ARGS_KNOB_FIELDS; see its comment for the coverage rule.
 _R0G_KNOBS = (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
               ("max_turn_speed", "max_turn_speed"))
 
@@ -174,7 +175,8 @@ def build_participating_rows(num_envs: int,
         team neither learns nor is counted.
 
     WHY a shared helper: this vector used to be built by two copies of the same
-    expression (train() and train_test_harness), and it sits UPSTREAM of
+    expression (`cs2rl.train.loop.train` and
+    `tests._helpers.trainer_harness._harness_parts`), and it sits UPSTREAM of
     global_step, the buffer scatter, every masked loss and
     losses/participating_rows. Patching one copy would have left the headline
     harness test green while production still trained on both teams — precisely
@@ -457,7 +459,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
 
 
 # Knobs whose CLI dest IS the field name. Hand-written on purpose, and paired
-# with train_shared._R0G_KNOBS (which maps DIFFERENT names, e.g.
+# with cs2rl.train.config._R0G_KNOBS (which maps DIFFERENT names, e.g.
 # --round-time-ticks → round_time): together they are the CLI-name ↔ field-name
 # map, and tests/test_env_knobs.py::test_args_knob_coverage_is_exhaustive asserts
 # the two cover every EnvConfig knob except pbrs_gamma (resolved through

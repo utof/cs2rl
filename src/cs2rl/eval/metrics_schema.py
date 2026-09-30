@@ -85,7 +85,7 @@ KINDS = frozenset({"emitted", "derived", "family"})
 
 # The spec's five, plus ONE documented extension. `dropped-non-numeric` is not an
 # aggregation — it records that the value is not a number at all, so PufferLib's
-# `mean_and_log` np.mean raises, and train.py's `isinstance(v, (int, float))`
+# `mean_and_log` np.mean raises, and `cs2rl.train.loop.train`'s `isinstance(v, (int, float))`
 # persist filter drops it before metrics.jsonl. Exactly one key is in this class
 # (`environment/step_stats`). Declaring it `window-mean-pufferlib` instead would
 # be the registry telling an analyst to interpret a ctypes view as a mean.
@@ -197,7 +197,7 @@ EVAL_KEYS = (
 )
 
 # ScheduledEval stamps these two ON TOP of EVAL_KEYS before handing the buffer to
-# the next logged row (train_metrics.ScheduledEval.after_train). The registry's
+# the next logged row (cs2rl.train.metrics.ScheduledEval.after_train). The registry's
 # eval/* surface is the union — EVAL_KEYS alone would under-declare it by two.
 EVAL_EXTRA_KEYS = ("eval/epoch", "eval/wall_s")
 EVAL_SURFACE = EVAL_KEYS + EVAL_EXTRA_KEYS
@@ -219,7 +219,7 @@ REGISTRY = {}
 # `logs = {...}` literal, so a PufferLib rename of `agent_steps` — which both
 # frozen gate scripts key their window on — fails rather than silently emptying
 # every gate window. `epoch` is NOT here: mean_and_log writes it, but so does
-# train.py's log_entry literal, and ours is the one that lands in the row.
+# the `log_entry` literal in `cs2rl.train.loop.train`, and ours is the one that lands in the row.
 PUFFERLIB_OWNED = ("agent_steps", "SPS", "uptime", "learning_rate", "performance/*")
 
 REGISTRY.update({
@@ -243,9 +243,10 @@ REGISTRY.update({
         "member list is whatever profile() was called with. Dropped by the §3 filter."),
 })
 
-# ── train.py's persisted row literals ─────────────────────────────────────
+# ── cs2rl.train.loop.train's persisted row literals ───────────────────────
 # Written straight into `log_entry`, never through PufferLib. `epoch` is also a
-# mean_and_log key; train.py's literal overwrites it with the same value.
+# mean_and_log key; the `log_entry` literal in `cs2rl.train.loop.train` overwrites it
+# with the same value.
 REGISTRY.update({
     "run_id":
     _e(
@@ -267,9 +268,10 @@ REGISTRY.update({
 })
 
 # ── environment/* — Cs2Env._build_terminal_info, one entry per episode ────
-# Every key here is appended into `self.stats` by train.py's info-collection loop
-# and np.mean'd over the collection window by mean_and_log, hence
-# window-mean-pufferlib. `environment/episodes` is the one exception (below).
+# Every key here is appended into `self.stats` by the info-collection loop in
+# `cs2rl.train.trainer.Cs2PuffeRL.evaluate` and np.mean'd over the collection window by
+# mean_and_log, hence window-mean-pufferlib. `environment/episodes` is the one exception
+# (below).
 _GAME_METRICS = ("compute_game_metrics", )
 REGISTRY.update({
     "environment/bomb_planted":
@@ -380,7 +382,7 @@ REGISTRY.update({
     _e("window-mean-pufferlib", "flag", _GAME_METRICS,
        "Denominator of the game/min_enemy_distance conditional mean."),
                                                                                            # The one non-window key on this path, and the one the aggregation assert has
-                                                                                           # an explicit case for: train_update.py writes it as a ONE-ELEMENT LIST so
+                                                                                           # an explicit case for: cs2rl.train.trainer.Cs2PuffeRL.train writes it as a ONE-ELEMENT LIST so
                                                                                            # PufferLib's np.mean is an identity. It is the denominator of every
                                                                                            # weighted_sum(...)/episodes ratio in both gate scripts.
     "environment/episodes":
@@ -391,7 +393,8 @@ REGISTRY.update({
         "Turning it into a bare write would silently divide every gate ratio by the "
         "window length; that is the case the aggregation assert pins by name."),
                                                                                            # Not a metric: a ctypes view merged into the terminal info when
-                                                                                           # include_step_stats_in_info=True (the test harness; train.py passes False).
+                                                                                           # include_step_stats_in_info=True (the test harness; `cs2rl.train.envs.build_env_factory`
+                                                                                           # never sets it, so it stays False).
     "environment/step_stats":
     _e(
         "dropped-non-numeric", "struct", (),
@@ -696,7 +699,7 @@ REGISTRY["health/weight_norm_*"] = _f(
     "Gated on epoch % 5 at the call site, so it is absent from most rows.")
 
 # ── tag/* — TAG gradient diagnostics (--tag-diagnostic) ───────────────────
-# tag_grad_cossim (train_update.py) builds these; _inject_tag_metrics merges its
+# cs2rl.train.update.tag_grad_cossim builds these; _inject_tag_metrics merges its
 # dict into logs after mean_and_log and emits NO keys of its own — so a census
 # built from the merging helper alone would register zero tag/* entries and still
 # pass. The families are CLOSED on both placeholders, and neither axis is visible
@@ -778,7 +781,7 @@ for _lbl in TAG_MB_LABELS:
         "normalized return is -mean/std rather than 0, so it adds a common-mode residual to "
         "both team value gradients. " + _TAG_NOTE)
 
-# ── self_play/* — train.py, next to the pool bookkeeping ──────────────────
+# ── self_play/* — cs2rl.train.loop.train, next to the pool bookkeeping ────
 REGISTRY.update({
     "self_play/pool_size":
     _e("last", "count", ()),

@@ -1,28 +1,29 @@
-"""Training-loop metrics (#144 seam 2), split out of train.py.
+"""Training-loop metrics (#144 seam 2), split out of the flat train.py.
 
 WHAT: the pure ``logs``/policy readers — network-health weight norms, the aim-σ
 emitter, the TCT head/trunk divergence probes, the scheduled fixed-baseline eval
 wrapper, the game-metrics dashboard derivation, and the TAG metrics hand-off.
 Moved here VERBATIM by the 2026-08-31 post-rung1a refactor: no renames, no
-signature changes, no behaviour change. ``train.py`` re-exports every name below
-(see its ``__all__``), so existing ``from cs2rl.train import X`` call sites keep
-working unchanged.
+signature changes, no behaviour change. The flat ``train.py`` re-exported every name
+below (see its ``__all__``) until #205 part 3 removed the re-exports: ``cs2rl.train``
+exports nothing now, so import from this module.
 
 WHY its own module: these are read-only derivations over a dict or a policy —
 they own no state and mutate no trainer — so they are the cheapest part of the
 loop to unit-test and the part most often edited when a metric is added.
 
 SCOPE BOUNDARY (deliberate, do not "finish the job"): ``self_play_used_past_metric``
-and the ``logs["self_play/*"]`` assignments STAY in train.py. Those two call
+lives in ``cs2rl.train.selfplay``, beside the pool it reports on, and the
+``logs["self_play/*"]`` assignments STAY in ``cs2rl.train.loop.train``. Those assignment
 lines and their order are pinned by tests/test_kl_break_metrics.py inside
-``inspect.getsource(train)``, and they guard the key cs2rl/experiment/gate.py reads;
-keeping definition and call sites together is the lower-risk spelling.
+``inspect.getsource(cs2rl.train.loop)``, and they guard the key cs2rl/experiment/gate.py
+reads; keeping the call sites beside the pool bookkeeping is the lower-risk spelling.
 PufferLib's own ``self.mean_and_log()`` likewise stays out of this module — its
-single call site lives inside ``Cs2PuffeRL.train`` (src/cs2rl/trainer.py, gh#168 W2a).
+single call site lives inside ``cs2rl.train.trainer.Cs2PuffeRL.train`` (gh#168 W2a).
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in train_shared.py's header. Every torch import below is
-function-local ON PURPOSE.
+reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+load-bearing). Every torch import below is function-local ON PURPOSE.
 """
 
 import time
@@ -171,7 +172,7 @@ def log_aim_log_std(policy, logs):
     never from config — config.json is rewritten every launch and lies after a
     flag-less resume (spec §3.4).
     """
-    # train.py imports torch lazily inside functions (module import stays cheap
+    # cs2rl.train.loop imports torch lazily inside functions (module import stays cheap
     # for the CLI/help paths) — keep that convention here.
     import torch
 
@@ -321,9 +322,9 @@ def compute_trunk_divergence(policy):
 
 
 # ── SECTION: R0-I fixed-baseline evaluation hooks ─────────────────────────
-# The banner of this name in train.py stayed there with elimination_only_win_rates,
-# which did not move; restated here so the "Network Health Monitoring" banner above
-# does not appear to cover this class.
+# The banner of this name also sits above elimination_only_win_rates, at the top of
+# this file; restated here so the "Network Health Monitoring" banner above does not
+# appear to cover this class.
 
 
 class ScheduledEval:

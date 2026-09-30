@@ -29,7 +29,7 @@ done in seed_metrics), a missing `self_play/used_past` reading as 0.0
 
 WHY EPISODE WEIGHTING (the single most important thing in this file): every
 `game/*` value on a row is the MEAN OVER THE EPISODES THAT FINISHED INSIDE THAT
-ROW's WINDOW (src/cs2rl/train.py compute_game_metrics + pufferl's window flush), and
+ROW's WINDOW (`cs2rl.train.metrics.compute_game_metrics` + pufferl's window flush), and
 the per-row episode count is wildly non-uniform — all 256 envs stay round-
 synchronised, so consecutive rows carry e.g. 257, 4, 252, 8 episodes. A plain
 mean over rows therefore gives a near-empty 4-episode row the same weight as a
@@ -55,7 +55,7 @@ PITFALLS
     came alive at epoch 3 must invalidate the smoke even if it was inert at the
     end. Pre-flight 5 is window-only, as written. Pre-flight 1 skips the run's
     first row on purpose — `mean_and_log()` runs before `self.losses` is set
-    (`Cs2PuffeRL.train`, src/cs2rl/trainer.py) so row 0 carries no `losses/*` at all; the rule is
+    (`cs2rl.train.trainer.Cs2PuffeRL.train`) so row 0 carries no `losses/*` at all; the rule is
     "every row CARRYING the key".
   - A key missing from EVERY row is a harness/key-drift finding, not a passing
     assertion: those paths report SMOKE INVALID rather than vacuously ok.
@@ -379,7 +379,7 @@ def read_run(run_dir):
 
     # Provenance the routing needs. Both are written by train() into config.json
     # (`aim_log_std_init` is DERIVED from the cap — never re-derive it here, or
-    # config and reader can drift; src/cs2rl/train.py resolve_aim_log_std_init).
+    # config and reader can drift; cs2rl.policy.resolve_aim_log_std_init).
     rep["cap"] = cfg.get("aim_log_std_max")
     rep["init"] = cfg.get("aim_log_std_init")
     if rep["cap"] is None:

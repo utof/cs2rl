@@ -1,11 +1,11 @@
-"""Full-state checkpoint / resume surface (R0-C #134), split out of train.py.
+"""Full-state checkpoint / resume surface (R0-C #134), split out of the flat train.py.
 
 WHAT: RNG snapshot/restore + seeding, the ``train_state.pt`` sidecar
 (collect_train_state / restore_train_state), and the ``--resume-run`` resolution
 and guard chain. Moved here VERBATIM by the 2026-08-31 post-rung1a refactor: no
-renames, no signature changes, no behaviour change. ``train.py`` re-exports
-every name below (see its ``__all__``), so existing ``from cs2rl.train import X`` call
-sites keep working unchanged.
+renames, no signature changes, no behaviour change. The flat ``train.py``
+re-exported every name below (see its ``__all__``) until #205 part 3 removed the
+re-exports: ``cs2rl.train`` exports nothing now, so import from this module.
 
 WHY its own module: this is the one surface whose silent breakage a training run
 cannot detect from its own metrics — a resumed run that quietly diverges looks
@@ -13,12 +13,12 @@ exactly like a healthy run. It earns a file and a test file of its own rather
 than sitting 800 lines into a 7,000-line entry point.
 
 PICKLE COMPAT: collect_train_state stores only ints, tensors and state_dicts —
-never a class defined in train.py — so moving these definitions cannot
+never a class defined in the flat train.py — so moving these definitions cannot
 invalidate an existing ``train_state.pt``.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in train_shared.py's header. Every torch import below is
-function-local ON PURPOSE.
+reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+load-bearing). Every torch import below is function-local ON PURPOSE.
 """
 
 import json
@@ -258,9 +258,9 @@ def _atomic_save_state_dict(state_dict, path):
     os.replace() is an atomic rename on POSIX, so ``path`` always holds a
     complete checkpoint — old or new, never partial.
 
-    PITFALL: torch is imported lazily — this module's level (and train.py's,
-    which imports it) must stay torch-free so --dump-config keeps its
-    no-heavy-imports guarantee.
+    PITFALL: torch is imported lazily — this module's level (and
+    cs2rl.train.__main__'s, which reaches it through cs2rl.train.loop) must stay
+    torch-free so --dump-config keeps its no-heavy-imports guarantee.
     """
     import torch
 
@@ -272,7 +272,7 @@ def _atomic_save_state_dict(state_dict, path):
 
 # ── R0-C (#134): full-state checkpoint / resume ───────────────────────────
 # PufferLib 3.0 saves model + optimizer + step counters (pufferl.py
-# save_checkpoint) and ships NO loader. Everything train.py layers on top
+# save_checkpoint) and ships NO loader. Everything cs2rl.train.trainer.Cs2PuffeRL layers on top
 # (SAC-α, LR scheduler, return normaliser, warm-start machine, self-play pool,
 # RNGs) lives here in a third file, train_state.pt, next to PufferLib's two.
 # Budget keys are allowlisted ON PURPOSE: the whole point of --resume-run is
@@ -290,7 +290,7 @@ def _atomic_save_state_dict(state_dict, path):
 RESUME_CONFIG_ALLOWLIST = frozenset(
     {"data_dir", "device", "run_id", "total_timesteps", "participating_timesteps"})
 # Trainer attrs of the warm-start entropy machine + SAC target (all set in
-# Cs2PuffeRL._init_return_norm, src/cs2rl/trainer.py). Plain Python scalars/None — pickled as-is.
+# cs2rl.train.trainer.Cs2PuffeRL._init_return_norm). Plain Python scalars/None — pickled as-is.
 _WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
                     "_batch1_log_alpha_reset_done", "_batch1_current_target_entropy",
                     "_batch1_warmstart_h_anchor", "_batch1_warmstart_h0",
@@ -389,8 +389,7 @@ def restore_train_state(trainer, self_play_mgr, state: dict):
     # Function-local ON PURPOSE: this module's scope stays torch-free.
     # (The comment sits on its own line, not after the import: a trailing
     # comment there makes yapf's column aligner and ruff's isort fight
-    # forever over I001 — gh#97, the same trap train.py's import block
-    # documents.)
+    # forever over I001 — gh#97.)
     import torch
     with torch.no_grad():
         trainer._log_alpha_tensor.data.copy_(state["log_alpha"].to(

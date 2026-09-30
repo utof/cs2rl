@@ -37,7 +37,7 @@ CHECKPOINT_SIDECAR_NAME = "dust2_policy.pt.meta.json"
 CHECKPOINT_PUBLISH_REASON_NAME = "dust2_policy.pt.publish_reason.json"
 DEAD_CHECKPOINT_NAME = "dust2_policy_dead.pt"
 
-# The image venv that holds torch/numpy/PufferLib and runs train.py. It is NOT
+# The image venv that holds torch/numpy/PufferLib and runs cs2rl.train.__main__. It is NOT
 # the interpreter this module runs under on the container: a Modal function runs
 # on the image's standalone python (/usr/local/bin/python from add_python=), which
 # has only uv + the modal client. checkpoint.py's `_assert_weights_only_loadable`
@@ -110,9 +110,10 @@ class Manifest:
     """Minimum manifest.json contract from design §5.
 
     effective_map is authoritative. Do not store live config's `env` field: it
-    is only a label, which src/cs2rl/train_config.py derives as `cs2-<map>` from
-    train.py's resolved `--map` (`cs2-dust2` when the `map` attribute is
-    missing or empty). The map the runner validated is effective_map.
+    is only a label, which `cs2rl.train.config.build_train_config` derives as
+    `cs2-<map>` from the `--map` that `cs2rl.train.__main__` resolves (`cs2-dust2`
+    when the `map` attribute is missing or empty). The map the runner validated is
+    effective_map.
     """
 
     schema_version: int

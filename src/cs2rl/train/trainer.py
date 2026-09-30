@@ -127,7 +127,7 @@ class Cs2PuffeRL(PuffeRL):
     train()'s order, so an instance is attribute-for-attribute the trainer train() built at
     2a3573f. W2a moved the return-norm step in as well: ``_init_return_norm`` (state) and
     ``train`` / ``_normalize_returns`` / ``_update_return_stats`` (bodies) are methods now, and
-    the return-norm patcher is gone from train_update.py. The self-play evaluate body (W2b), the
+    the return-norm patcher is gone from cs2rl.train.update. The self-play evaluate body (W2b), the
     checkpoint override is also a class method (W2c); hybrid action transport
     lives in the vecenv wrapper (W3).
 
@@ -136,7 +136,7 @@ class Cs2PuffeRL(PuffeRL):
 
     cont_action_view_main : np.ndarray or None
         Main-process view of the continuous-action shared array. train() allocates it and
-        passes it on BOTH backends (src/cs2rl/train.py builds `_cont_action_view_main` before the
+        passes it on BOTH backends (cs2rl.train.loop.train builds `_cont_action_view_main` before the
         vecenv, unconditionally); only the harness passes None.
     mask_view_main : np.ndarray
         Main-process view of the action-mask shared array (F8).
@@ -293,7 +293,7 @@ class Cs2PuffeRL(PuffeRL):
 
     def _init_return_norm(self):
         """Return-normalisation + adaptive-entropy state; was the patch-time body of
-        the return-norm patcher (src/cs2rl/train_update.py) until gh#168 W2a.
+        the return-norm patcher (in cs2rl.train.update) until gh#168 W2a.
 
         WHAT: asserts the BPTT segment invariant (gh#85), creates the Welford running
         stats (``_ret_mean/_ret_var/_ret_count``), the SAC-style ``_log_alpha_tensor`` +
@@ -484,7 +484,7 @@ class Cs2PuffeRL(PuffeRL):
 
     def _init_selfplay(self, self_play_mgr):
         """Self-play state for evaluate() (the patch-time half of the former self-play
-        patcher in train.py; W2b of gh#168). Called from __init__ right after
+        patcher in the flat train.py; W2b of gh#168). Called from __init__ right after
         hybrid-aim buffer setup and before ``_timing``, where the patch call stood.
 
         Stores the manager, the past policy's own LSTM state (the same dict structure as
@@ -556,7 +556,7 @@ class Cs2PuffeRL(PuffeRL):
 
     def evaluate(self):
         """Rollout collection with the self-play opponent override (the body of the
-        former self-play patcher's closure in train.py; W2b of gh#168).
+        former self-play patcher's closure in the flat train.py; W2b of gh#168).
 
         For each evaluation epoch ``SelfPlayManager.should_use_past()`` decides (once)
         whether to activate self-play. When active, a random past checkpoint is loaded
@@ -831,8 +831,8 @@ class Cs2PuffeRL(PuffeRL):
                 self.actions[batch_rows, seq_pos] = action
                 self.logprobs[batch_rows, seq_pos] = logprob
                 # Batch 3 (T5): parallel writes for the new buffers allocated
-                # by _init_hybrid_aim. The PPO update (`Cs2PuffeRL.train`
-                # in src/cs2rl/trainer.py, gh#168 W2a:
+                # by _init_hybrid_aim. The PPO update (`cs2rl.train.trainer.Cs2PuffeRL.train`,
+                # gh#168 W2a:
                 # `mb_cont_actions = self.cont_actions[idx]` and the two logprob
                 # reads beside it) reads these by the same idx; missing this write would
                 # silently feed zeros to _hybrid_ppo_loss → ratio_c always
@@ -923,7 +923,7 @@ class Cs2PuffeRL(PuffeRL):
 
     def train(self):
         """One PPO update over the rollout buffer; the return-norm patcher's inner train()
-        replacement (src/cs2rl/train_update.py) until gh#168 W2a, moved verbatim.
+        replacement (in cs2rl.train.update) until gh#168 W2a, moved verbatim.
 
         WHAT: return-normalised value targets, the hybrid discrete+continuous PPO loss
         (``_hybrid_ppo_loss``), the SAC-style α dual loop, the warm-start entropy mode,
@@ -932,7 +932,7 @@ class Cs2PuffeRL(PuffeRL):
 
         WHY this replaces ``PuffeRL.train`` outright (it never calls ``super().train``):
         the stock loop cannot unpack the policy's 4-tuple output (see the F11 note in
-        src/cs2rl/train.py::train). The AST oracle in
+        cs2rl.train.loop.train). The AST oracle in
         .superpowers/sdd/2026-09-24-168-trainer-subclass/ast_oracle.py pins this body
         to the pre-move closure node for node (N1-N5); the byte gates pin the arms the
         2-epoch run executes.
