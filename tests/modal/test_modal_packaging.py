@@ -845,15 +845,20 @@ def _names_defined_under_tests():
     """
     found = {}
     paths = sorted(set((ROOT / "tests").rglob("test_*.py")) | {ROOT / SHARED_FILE})
-    tracked = subprocess.run(["git", "ls-files", "-z", "--", "tests"],
-                             cwd=ROOT,
-                             capture_output=True,
-                             text=True,
-                             check=True).stdout.split("\0")
+    # `-z` ends its output with a NUL, so the split leaves a trailing "": drop it, or an
+    # empty listing would still be a non-empty list and the assert below could not fail.
+    tracked = [
+        rel for rel in subprocess.run(["git", "ls-files", "-z", "--", "tests"],
+                                      cwd=ROOT,
+                                      capture_output=True,
+                                      text=True,
+                                      check=True).stdout.split("\0") if rel
+    ]
     unscanned = sorted(
         rel for rel in tracked
         if Path(rel).name.startswith("test_") and rel.endswith(".py") and ROOT / rel not in paths)
-    assert tracked and not unscanned, (
+    assert tracked, "`git ls-files tests` listed no file, so the floor below would check nothing"
+    assert not unscanned, (
         f"the scan for module-level names misses tracked test files: {unscanned[:5]}")
     for path in paths:
         rel = path.relative_to(ROOT).as_posix()
