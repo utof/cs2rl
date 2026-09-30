@@ -32,14 +32,24 @@ checkout's; the cases differ in the child's cwd and in what it runs.
     checkout (the shapes of `.venv/bin/pytest` and `python -m pytest`, whose
     files resolve into main's .venv), which must go by the cwd.
 
-3. The leftover-directory check, clause (e) of the tripwire: a directory under
-src/cs2rl/ that Python would import as a namespace package (an importable file,
-no tracked __init__.py) stops the session. Walks on tmp layouts (positive,
-negatives, an unstaged __init__.py), the fail-closed git failure, and
-pytest_sessionstart itself for the wiring and the production root.
+3. The leftover checks, clause (e) of the tripwire. A directory under src/cs2rl/
+that Python would import as a namespace package (an importable file, no tracked
+__init__.py) stops the session: walks on tmp layouts (positive, negatives, an
+unstaged __init__.py), the fail-closed git failure, and pytest_sessionstart itself
+for the wiring and the production root. So does a DEAD file, an importable file
+that the import system never loads because its name resolves to another file in the
+same directory (#205 part 3): a table of tmp layouts, checked against the
+interpreter's own PathFinder, and child sessions in a tmp checkout, each running a
+copy of the real conftest over its own tree:
+
+  (e1) the old `train.py` beside the new package `train/`, in src/cs2rl itself
+       (KO2(a): every other guard stayed green with it planted), untracked and tracked;
+  (e2) a source file beside a built extension of the same name, one directory down;
+  negative control: the same checkout without the plant, and the session passes.
 """
 import importlib.machinery
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -56,14 +66,26 @@ _CHILD_TIMEOUT_S = 120
 _TRIPWIRE = "checkout tripwire (tests/conftest.py)"
 
 
-def _session(tmp_path: Path, *first_on_path: Path) -> tuple[subprocess.CompletedProcess, str]:
-    """Run a child session over one passing test with `first_on_path` ahead of PYTHONPATH."""
+def _session(tmp_path: Path,
+             *first_on_path: Path,
+             checkout: Path | None = None) -> tuple[subprocess.CompletedProcess, str]:
+    """Run a child session over one passing test with `first_on_path` ahead of PYTHONPATH.
+
+    `checkout` stands in for this checkout's root on the child's PYTHONPATH: the child
+    imports `tests.conftest` from there, so the tripwire it runs judges that tree.
+    """
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     plant = tmp_path / "test_plant.py"
     plant.write_text("def test_plant():\n    pass\n")
     env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
-    # REPO_ROOT makes `tests.conftest` importable.
-    entries = [*map(str, first_on_path), str(REPO_ROOT), os.environ.get("PYTHONPATH")]
+    inherited = os.environ.get("PYTHONPATH", "")
+    if checkout is not None:
+        # An inherited entry for THIS root would put the real `tests` beside the child's own,
+        # which the child's namespace guard (c) refuses.
+        inherited = os.pathsep.join(e for e in inherited.split(os.pathsep)
+                                    if e and Path(e).resolve() != REPO_ROOT)
+    # The checkout's root makes `tests.conftest` importable.
+    entries = [*map(str, first_on_path), str(checkout or REPO_ROOT), inherited]
     env["PYTHONPATH"] = os.pathsep.join(filter(None, entries))
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     child = subprocess.run([
@@ -338,3 +360,169 @@ def test_e_walks_the_production_package_root(monkeypatch):
     monkeypatch.setattr(os, "walk", recording_walk)
     assert real_check(roots[0]) == []
     assert {"env", "spec", "eval"} <= set(walked), walked
+
+
+# ── Dead importable files: the second half of (e) (#205 part 3) ──
+#
+# A file that a same-named package directory, extension or source file outranks is dead
+# and looks live: with the base `train.py` planted beside the new `train/`, every guard
+# stayed green (83 passed, measured on the prototype). The real tree has none, so the
+# session passes whether or not the check works; these are its controls. The table
+# runs `dead_importable_files` on tmp layouts; the child sessions run the whole tripwire.
+
+_SO = importlib.machinery.EXTENSION_SUFFIXES[0]
+# Another interpreter's ABI tag: PyPy's is never CPython's, whatever runs this test.
+_PYPY_SO = ".pypy39-pp73-x86_64-linux-gnu.so"
+
+# (layout, [(stem, dead file, the file its name loads)]), each path relative to the layout's root.
+_DEAD_LAYOUTS = [
+    pytest.param(["train/__init__.py", "train.py"], [("train", "train.py", "train/__init__.py")],
+                 id="a module beside a package, at the root"),
+    pytest.param([f"env/binding{_SO}", "env/binding.py"],
+                 [("binding", "env/binding.py", f"env/binding{_SO}")],
+                 id="source beside an extension, one directory down"),
+    pytest.param(["x.so", "x.py"], [("x", "x.py", "x.so")], id="source beside a bare .so"),
+    pytest.param([f"x/__init__{_SO}", "x.py"], [("x", "x.py", f"x/__init__{_SO}")],
+                 id="a module beside a package whose __init__ is an extension"),
+    pytest.param(["x/__init__.py", f"x{_SO}"], [("x", f"x{_SO}", "x/__init__.py")],
+                 id="an extension beside a package"),
+    pytest.param(["x.py", "x.pyc"], [("x", "x.pyc", "x.py")],
+                 id="sourceless bytecode beside source"),
+]
+_BUILD_OUTPUTS = [
+    "c/x.py", "c/zig-out/y.py", "c/zig-out/y.pyc", "c/.zig-cache/o/z.py", "c/.zig-cache/o/z.pyc"
+]
+# Layouts in which nothing is dead. A module file beats a namespace directory of the same name,
+# so `z.py` beside `z/` is fine. In `__pycache__/` and in `zig-out/` (not an identifier), the
+# `y.pyc` would lose to `y.py` if the walk entered the directory.
+_LIVE_LAYOUTS = [
+    pytest.param(["x.py"], id="a lone module"),
+    pytest.param(["p/__init__.py", "p/m.py"], id="a package and its modules"),
+    pytest.param(["z.py", "z/inner.py"], id="a module beside a namespace directory"),
+    pytest.param(["x.py", f"x{_PYPY_SO}"], id="a .so whose stem is not a name"),
+    pytest.param(["x.py", "__pycache__/y.py", "__pycache__/y.pyc"], id="bytecode in __pycache__"),
+    pytest.param(_BUILD_OUTPUTS, id="build outputs in directories Python cannot name"),
+]
+
+
+def _relative(root: Path, pairs) -> list[tuple[str, str]]:
+    """(dead file, winner) pairs from `dead_importable_files`, each path relative to `root`."""
+    return [(p.relative_to(root).as_posix(), w.relative_to(root).as_posix()) for p, w in pairs]
+
+
+@pytest.mark.parametrize("files, expected", _DEAD_LAYOUTS)
+def test_e_flags_a_file_its_own_name_never_loads(tmp_path, files, expected):
+    """Each importable file that loses to another of its name is dead, and only that one is.
+
+    The winner is also what the interpreter's own PathFinder loads on this machine: that is
+    the control on `_LOADER_DETAILS`, the loader order conftest writes out by hand.
+    """
+    from tests.conftest import dead_importable_files
+    _layout(tmp_path, *files)
+    assert _relative(tmp_path, dead_importable_files(tmp_path)) == [(d, w) for _, d, w in expected]
+    for stem, dead, winner in expected:
+        # Fresh directory, so PathFinder's own per-directory cache has not seen it.
+        spec = importlib.machinery.PathFinder.find_spec(stem, [str((tmp_path / dead).parent)])
+        assert spec is not None and spec.origin == str(tmp_path / winner), (spec, winner)
+
+
+@pytest.mark.parametrize("files", _LIVE_LAYOUTS)
+def test_e_does_not_flag_a_file_that_loads_or_is_not_a_module(tmp_path, files):
+    """Negatives: nothing is dead in a layout whose every file loads, is no module, or sits in
+    a directory the walk never enters (__pycache__, zig-out/, .zig-cache/)."""
+    from tests.conftest import dead_importable_files
+    _layout(tmp_path, *files)
+    assert dead_importable_files(tmp_path) == []
+
+
+def test_e_a_dangling_symlink_loads_nothing_and_is_no_competitor(tmp_path):
+    """A `y.py` that points nowhere is not importable (the finder skips it), so it is neither
+    dead nor a reason to fail: the finder finds no `y` at all, and the check must not ask."""
+    from tests.conftest import dead_importable_files
+    (tmp_path / "y.py").symlink_to(tmp_path / "no-such-target.py")
+    _layout(tmp_path, "x.py")
+    (tmp_path / "x.so").symlink_to(tmp_path / "no-such-target.so")
+    assert dead_importable_files(tmp_path) == []
+
+
+def _git(root: Path, *args: str) -> None:
+    """`git -C root <args>`, without the GIT_* variables a hook sets (GIT_INDEX_FILE would name
+    another repo's index)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(["git", "-C", str(root), *args],
+                   check=True,
+                   capture_output=True,
+                   env=env,
+                   timeout=_CHILD_TIMEOUT_S)
+
+
+def _leftover_checkout(root: Path) -> Path:
+    """A tmp checkout the real tripwire passes in: a git repo with a copy of THIS checkout's
+    tests/conftest.py (so the child's REPO_ROOT is the tmp tree) and the package `cs2rl`
+    holding `train/` and `env/c/` with a built binding beside its tracked __init__.py.
+    Everything is tracked. Returns its resolved root."""
+    root = _fake_checkout(root)
+    _layout(root / "src" / "cs2rl", "train/__init__.py", "env/__init__.py", "env/c/__init__.py",
+            f"env/c/binding{_SO}")
+    (root / "tests").mkdir()
+    shutil.copy(REPO_ROOT / "tests" / "conftest.py", root / "tests" / "conftest.py")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    return root
+
+
+def _plant(root: Path, name: str, *, tracked: bool) -> None:
+    """Add the file `name` (relative to `root`) as a leftover, tracked or not."""
+    _layout(root, name)
+    if tracked:
+        _git(root, "add", "-f", name)
+
+
+def _assert_names_the_dead_file(child: subprocess.CompletedProcess, output: str, dead: Path,
+                                winner: Path) -> None:
+    """The child stopped at the tripwire, and for the dead-file check alone: its message names
+    `dead` and the `winner` its name loads."""
+    _assert_stopped_before_collection(child, output)
+    assert f"(e) {dead} is importable but never loaded" in child.stderr, (
+        f"the message does not name the dead file\n{output}")
+    assert f"resolves that name to {winner} instead" in child.stderr, (
+        f"the message does not name the file the name loads\n{output}")
+    assert "(a)" not in child.stderr and "(b)" not in child.stderr, (
+        f"the session stopped for another reason too\n{output}")
+
+
+@pytest.mark.parametrize("tracked", [False, True], ids=["untracked", "tracked"])
+def test_e_a_module_beside_its_package_stops_the_session(tmp_path, tracked):
+    """(e1) KO2(a) of #205 part 3: the old `train.py` left at src/cs2rl/train.py beside the new
+    package src/cs2rl/train/. The package wins, so the file never loads, and before this
+    check the whole suite stayed green with it planted.
+
+    The plant sits in src/cs2rl ITSELF, the one directory the leftover-directory check skips:
+    a plant one level deeper would pass its pin while missing this case. Tracked and untracked
+    both stop the session. The plant's content is a stand-in; the check reads names only
+    (the real base file is measured in the T2 report).
+    """
+    root = _leftover_checkout(tmp_path / "checkout")
+    _plant(root, "src/cs2rl/train.py", tracked=tracked)
+    child, output = _session(tmp_path, root / "src", checkout=root)
+    _assert_names_the_dead_file(child, output, root / "src" / "cs2rl" / "train.py",
+                                root / "src" / "cs2rl" / "train" / "__init__.py")
+
+
+def test_e_a_source_beside_a_built_extension_stops_the_session(tmp_path):
+    """(e2) The extension beats source: a `binding.py` beside the built binding.<abi>.so, one
+    directory below src/cs2rl, never loads. Planted untracked, as a leftover is."""
+    root = _leftover_checkout(tmp_path / "checkout")
+    _plant(root, "src/cs2rl/env/c/binding.py", tracked=False)
+    child, output = _session(tmp_path, root / "src", checkout=root)
+    _assert_names_the_dead_file(child, output, root / "src" / "cs2rl" / "env" / "c" / "binding.py",
+                                root / "src" / "cs2rl" / "env" / "c" / f"binding{_SO}")
+
+
+def test_e_negative_control_the_same_checkout_without_a_plant_passes(tmp_path):
+    """The two plants' checkout, unplanted: its session runs, and the tripwire is silent."""
+    root = _leftover_checkout(tmp_path / "checkout")
+    child, output = _session(tmp_path, root / "src", checkout=root)
+    assert child.returncode == 0, f"the session failed\n{output}"
+    assert "1 passed" in child.stdout, f"the planted test did not run\n{output}"
+    assert _TRIPWIRE not in child.stderr, f"the tripwire fired\n{output}"
