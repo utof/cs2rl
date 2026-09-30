@@ -579,6 +579,10 @@ _FAKE_CHILD_PID = 4242
 # The helper module FakeChild lives in, looked up by name. A move leaves this string stale
 # silently (the lookup returns None and the drift check goes quiet, #207 part 2 M5), so the
 # fixture below fails when the name no longer resolves.
+# LIMIT: this pin and the RUNNER_PACKAGES pin in test_kill_seam_static_safety
+# (tests/modal/test_modal_training.py) use a bare find_spec, so an untracked leftover module at
+# the pinned name satisfies them. The name pin (tests/integration/test_name_strings_resolve.py)
+# also requires the file to be tracked, but it reads only `cs2rl.` names.
 _HELPERS_MODULE = "tests.modal.modal_test_helpers"
 
 
