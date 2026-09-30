@@ -156,7 +156,7 @@ class ProcessControl:
 
     Tests build all four fields as keywords, never through a `*`/`**` splat,
     which a static check cannot read. `test_kill_seam_static_safety`
-    (tests/test_modal_training.py) enforces that and the rest of the kill-seam
+    (tests/modal/test_modal_training.py) enforces that and the rest of the kill-seam
     rules by AST; under pytest the tests/conftest.py tripwire makes `system()`
     return a control whose every field raises, so a test that forgets its own
     control fails loudly instead of spawning or signalling.
@@ -212,7 +212,7 @@ def execute_training_attempt(
     None resolves to `ProcessControl.system()`, the real functions, inside
     `train()`: after the claim, at call time. Tests pass a control whose
     `spawn`, `getpgid` and `killpg` are fakes (`_training_kwargs` in
-    tests/test_modal_training.py builds one); its `install_signal` may be the
+    tests/modal/test_modal_training.py builds one); its `install_signal` may be the
     real `signal.signal`, which only installs this attempt's own handlers.
 
     PITFALL: that `ProcessControl.system()` call is the module's one read of
@@ -994,7 +994,7 @@ def _run_training_attempt(
     PITFALLS.
       * Keep the TRAINING `state.transition_status(...)` and the
         `_start_checkpoint_watcher(...)` call in THIS function, each reference
-        on one line: the binding campaign (tests/test_modal_patch_bindings.py,
+        on one line: the binding campaign (tests/modal/test_modal_patch_bindings.py,
         `_capture_consumer`) rewrites those loads in this function's source.
       * That rewrite recompiles this function without the module's `from
         __future__ import annotations`, so every annotation in its signature

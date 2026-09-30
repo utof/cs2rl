@@ -619,8 +619,8 @@ def train(args):
     # reads it at patch time (spec §W1 table; both byte gates pin this order).
     # Function-local import ON PURPOSE: cs2rl.train.trainer subclasses PuffeRL and so
     # imports torch at module scope, and cs2rl.train.__main__ imports THIS module at its
-    # module level: a module-scope import here would put torch on the CLI's module scope,
-    # which must stay torch-free (tests/test_w1_modules.py::test_cli_module_scope_stays_light).
+    # module level: a module-scope import here would put torch on the CLI's module scope, which
+    # must stay torch-free (tests/train/test_w1_modules.py::test_cli_module_scope_stays_light).
     from cs2rl.train.trainer import Cs2PuffeRL, HybridAimVecEnv
     vecenv = HybridAimVecEnv(vecenv, _cont_action_view_main)
     trainer = Cs2PuffeRL(train_config,

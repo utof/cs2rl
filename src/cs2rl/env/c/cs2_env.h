@@ -102,7 +102,7 @@ static void compute_masks(Dust2Env* env) {
          * observe (there is still no stance bit in the enemy block). Since
          * v1c (gh #150) the hitbox is an ellipsoid with a 27u crouched / 36u
          * standing vertical semi-axis, so 24 ≤ 27 CONNECTS and the mismatch is
-         * a margin cost, not a wall (tests/test_pitch_pin.py asserts exactly
+         * a margin cost, not a wall (tests/train/test_pitch_pin.py asserts exactly
          * that). The mask STAYS anyway: Rung 1 deliberately keeps the action
          * space minimal, and stance still eats parity margin the policy cannot
          * see. 5v5 keeps crouch (crouch_enabled defaults to 1, cs2_demo.c
@@ -134,7 +134,7 @@ static void compute_masks(Dust2Env* env) {
          * (pre-refill) clip, NOT clip_next. On the refill tick process_combat
          * would actually accept a shot (refill precedes its dry-fire check),
          * but spec §3 R0-B pins empty-mag first shot at T+40 vs partial-mag
-         * T+39 (tests/test_fire_mask.py) — the mask is one tick conservative
+         * T+39 (tests/env/c/test_fire_mask.py) — the mask is one tick conservative
          * there by decision, not by equivalence; do not "fix" it to clip_next.
          * jump_cd is never set (cs2_movement.h); crouch_cd is not read here. */
         int              fire_cd_next = a->fire_cd > 0 ? a->fire_cd - 1 : 0;

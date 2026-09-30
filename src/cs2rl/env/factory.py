@@ -27,7 +27,7 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
   eval_legacy  `load_policy_from_checkpoint` and `evaluate_checkpoint`. Both
                build `config=EnvConfig()`, so every knob they get is the field
                default `src/cs2rl/env/config.py` DECLARES — that module is the one
-               declaration, and tests/test_env_config.py pins those fields
+               declaration, and tests/env/test_env_config.py pins those fields
                against the trained baseline. They deliberately do NOT get the
                training knobs. #143 tracks that; this module is not the fix, it
                just reduces the future fix to one role's config source.
@@ -68,7 +68,7 @@ rename, and a rename that breaks it is the one case where being wrong is loud.
 So the recording path is genuinely uncovered by this module, by
 the same deliberate scope decision that leaves the other eleven lower-layer sites
 uncovered — the census and the reasoning are in
-`tests/test_env_construction_enforcement.py`'s LOWER_LAYER_SITES. Adding a role
+`tests/integration/test_env_construction_enforcement.py`'s LOWER_LAYER_SITES. Adding a role
 here would not change that: `record_episode` would still have to be migrated onto
 it, and an enum member no call site can reach is a divergence trap — the next
 person adds a knob to it and nothing changes.
@@ -81,7 +81,7 @@ The import stays function-local anyway because `env.c.cs2_env` is HEAVY (ctypes 
 the compiled binding) and this module is imported at module scope by `cs2rl.policy`,
 `cs2rl.train.envs` and `cs2rl.train.evaluate`, which `cs2rl.train.__main__` imports at
 ITS module level: a module-scope import here would put the C env on `--dump-config`'s
-path and break the import-lightness invariant `tests/test_w1_modules.py` enforces,
+path and break the import-lightness invariant `tests/train/test_w1_modules.py` enforces,
 which is what makes `--dump-config` cost ~1 s instead of ~30 s (measured on the flat
 train.py, before #205 part 3). Only `env.config` is imported at module scope, and it
 is the stdlib-only leaf.
@@ -92,14 +92,14 @@ SelfPlayManager`, and a script run (`python -m cs2rl.train`) held the flat train
 `sys.modules` as `__main__`, so that import would have EXECUTED TRAIN.PY A SECOND TIME
 under the name `cs2rl.train`. Both halves are gone: the builder moved to
 `cs2rl.train.selfplay`, and a package `__main__` is imported by no module, so there is
-nothing to alias (`tests/test_w1_modules.py::test_script_run_has_exactly_one_cli_module`
+nothing to alias (`tests/train/test_w1_modules.py::test_script_run_has_exactly_one_cli_module`
 pins that no module body runs twice). `env` sits below `train` in pyproject.toml's
 `cs2rl layers` contract, which has no `ignore_imports` entry left to hide an import back.
 
 PITFALL — the `make_env` import is INSIDE `build_env_for`, not cached at module scope,
 on purpose: `build_env_for` re-reads `env.c.cs2_env.make_env` every time, so a test
 that rebinds that attribute still sees its stand-in used, and
-tests/test_env_factory.py's `_construct` is built on exactly that.
+tests/env/test_env_factory.py's `_construct` is built on exactly that.
 
 `cs2rl.train.selfplay.build_selfplay_manager` (moved there from this module) covers
 the three pre-migration `SelfPlayManager` sites (`train()` plus two in
@@ -112,7 +112,7 @@ transcribed from the sites it is meant to check asserts nothing.
 WHY NEITHER GUARD FLAGS `make_env` IN THIS FILE — and they are two
 DIFFERENT guards, which is the part that is easy to get wrong.
 
-`tests/test_env_construction_enforcement.py`'s enforcement scan bans exactly two
+`tests/integration/test_env_construction_enforcement.py`'s enforcement scan bans exactly two
 symbols in `src/`, `scripts/` and `tests/_helpers/`: `make_puffer_env` and
 `SelfPlayManager`. `make_env` is not one of them. That scan no longer has a subject in
 this file: the `SelfPlayManager(...)` it used to find here moved with
@@ -138,7 +138,7 @@ census and the entry has to be added.
 # `build_env_for`):
 # `env.config` is the stdlib-only leaf of the config graph — it imports nothing
 # heavier than `dataclasses` — so this costs nothing on `--dump-config`'s path.
-# tests/test_w1_modules.py::test_only_sibling_edge_is_to_the_leaf
+# tests/train/test_w1_modules.py::test_only_sibling_edge_is_to_the_leaf
 # lets a split-out module import only the LEAVES (`cs2rl.policy`, `env.config` and
 # `env.factory`, this module) — and `env.config` is one of them.
 from cs2rl.env.config import EnvConfig
@@ -194,7 +194,7 @@ def _build_train(_make, /, *, shared_ts, buf, seed, _seed, map_data, config):
     that: build_env_factory resolves the default ABOVE its closure, so a forked
     worker can never be handed a None to guard against — pinned by the BARE
     `build_env_factory(...)` call in
-    tests/test_env_factory.py::test_build_train_env_factory_carries_args_config,
+    tests/env/test_env_factory.py::test_build_train_env_factory_carries_args_config,
     which reads the resolved config back out of the closure's cell. Five bare
     calls in tests/ REACH that resolution (AST census, 2026-09-04) and only that
     one can SEE it: a None in the cell would arrive here and be forwarded to
@@ -221,7 +221,7 @@ def _build_eval(_make, /, *, map_data, config):
     reports RAW rewards so its numbers stay comparable across runs and against a
     ``--reward-symmetrize`` training run; the zero-sum transform is a
     training-time device. The line would read the same if the field default were
-    the other way round, which is why `tests/test_no_restated_env_defaults.py`
+    the other way round, which is why `tests/integration/test_no_restated_env_defaults.py`
     ALLOWLISTS it instead of counting it as a restatement. Before #165 this fell
     out of `make_puffer_env`'s own parameter default, i.e. eval got raw rewards
     by ACCIDENT of the caller not passing the flag; stating it here is the point
@@ -253,7 +253,7 @@ def _build_eval_legacy(_make, /, *, seed=UNSET):
     object moved no value, and that is asserted rather than asserted-by-hand:
     the pre-migration capture's two `eval_legacy` rows record an
     `expected_config` equal to `EnvConfig()` field for field, and
-    tests/test_env_factory.py compares this builder's output against them.
+    tests/env/test_env_factory.py compares this builder's output against them.
 
     ``team_spirit=None`` is spelled explicitly, and the two defaults it sits
     between genuinely differ: the old chain reached the env through
@@ -365,7 +365,7 @@ def build_env_for(role, **kwargs):
     # ctypes plus the compiled binding — and this module is imported at module scope
     # by cs2rl.policy and by train modules the CLI imports at its module level, so a
     # module-scope import here would put the C env on `--dump-config`'s path and break
-    # the import-lightness invariant tests/test_w1_modules.py enforces; and
+    # the import-lightness invariant tests/train/test_w1_modules.py enforces; and
     # re-reading per call keeps a test that rebinds env.c.cs2_env.make_env able to see
     # its stand-in used. (The cycle this import used to break is gone, and so is the
     # last `train` import in this module: see the NO `cs2rl.train` IMPORT paragraph in

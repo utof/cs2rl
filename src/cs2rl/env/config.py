@@ -14,7 +14,7 @@ IMPORT BUDGET: stdlib ONLY. `env.c.cs2_env` (layer L1) imports this module, and
 `python -m cs2rl.train --dump-config` must stay free of torch/nav/env.c, so nothing
 heavier than `dataclasses` may ever be imported here. `TEAM_SIZE` is a literal for
 the same reason `cs2rl.train.config.TEAM_SIZE` is one: `nav` costs awpy/polars to read a 5.
-tests/test_train_env.py cross-checks it against nav.TEAM_SIZE.
+tests/train/test_train_env.py cross-checks it against nav.TEAM_SIZE.
 
 PITFALL: the values below ARE the trained baseline. An unflagged run must stay
 byte-identical to the pre-#165 env; do not "tidy" a number here.
@@ -30,7 +30,7 @@ import math
 import numbers
 from dataclasses import dataclass, field, fields
 
-TEAM_SIZE = 5                          # cross-checked against nav.TEAM_SIZE by tests/test_train_env.py
+TEAM_SIZE = 5                          # cross-checked against nav.TEAM_SIZE by tests/train/test_train_env.py
 
 
 class _Unset:
@@ -85,7 +85,7 @@ def _check_weight(name, value):
 @dataclass(frozen=True)
 class RewardWeights:
     """The 23 reward/PBRS coefficients. Field order is load-bearing twice over:
-    tests/test_env_config.py::test_reward_field_census_is_23_with_6_pbrs pins it
+    tests/env/test_env_config.py::test_reward_field_census_is_23_with_6_pbrs pins it
     name-by-name against that file's `DEFAULTS_AT_139a3a3` literal (the pre-#165
     declaration order), and the parser loop in `cs2rl.train.__main__` GENERATES one CLI
     flag per field here from `as_dict()`, so flag and `--help` order FOLLOW this order
@@ -224,7 +224,7 @@ class EnvConfig:
 
 # DERIVED, never hand-listed, and therefore defined below the class: every
 # EnvConfig field except the nested `rewards` object, in declaration order.
-# tests/test_struct_sizes.py builds its sentinel partition from this tuple; a
+# tests/env/c/test_struct_sizes.py builds its sentinel partition from this tuple; a
 # hand-written tuple would let EnvConfig grow an eleventh knob that the
 # partition never sees, leaving the env on the default with every test green.
 KNOB_FIELDS: tuple[str, ...] = tuple(f.name for f in fields(EnvConfig) if f.name != "rewards")

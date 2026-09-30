@@ -2,12 +2,12 @@
 
 Spec: docs/superpowers/specs/2026-08-13-batch7-tct-heads-split-design.md
 (tests 1, 2, 3, 4a, 6, 7, 9, 10 land in this file; the trainer-level
-invariant re-pin is test 4b in tests/test_tag_trainer.py, the TAG param-group
-partition is test 5a in tests/test_tag_diagnostic.py, the analyzer labeling is
-test 5b in tests/test_analyze_tag.py, and the CLI round-trip is test 8 in
-tests/test_train_cli.py).
+invariant re-pin is test 4b in tests/train/test_tag_trainer.py, the TAG param-group
+partition is test 5a in tests/train/test_tag_diagnostic.py, the analyzer labeling is
+test 5b in tests/experiment/test_analyze_tag.py, and the CLI round-trip is test 8 in
+tests/train/test_train_cli.py).
 
-Fixture pattern mirrors tests/test_tag_diagnostic.py: one real
+Fixture pattern mirrors tests/train/test_tag_diagnostic.py: one real
 make_puffer_env, policies built off it on CPU. The env is module-scoped
 because make_puffer_env loads the nav graph / visibility matrix (~seconds)
 and every test here only needs its observation space + static data.
@@ -226,8 +226,8 @@ def test_log_std_is_clamped_per_copy_then_blended(env):
 def test_get_action_and_value_routes_by_team(env):
     """Spec §3.1: get_action_and_value is split for consistency even though no
     production path calls it — every in-tree caller is a test
-    (test_hybrid_sample_writes_two_buffers in tests/test_train_env.py, plus
-    tests/test_aim_log_std_max.py and tests/test_pitch_pin.py); train_bc.py
+    (test_hybrid_sample_writes_two_buffers in tests/train/test_train_env.py, plus
+    tests/train/test_aim_log_std_max.py and tests/train/test_pitch_pin.py); train_bc.py
     uses forward_eval. Same marker trick as the forward test, read off the
     returned value/continuous action.
     """

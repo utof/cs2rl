@@ -43,14 +43,14 @@ dev = [
     # wholesale and turns the next commit into an unreadable wall of diffs.
     "pyrefly==1.2.0",
     # Enforces the package's layering: the contracts are [tool.importlinter] below,
-    # and tests/test_import_layers.py runs them on every suite run. Dev-only (no
+    # and tests/integration/test_import_layers.py runs them on every suite run. Dev-only (no
     # runtime import), so the Modal image, built from the runtime graph alone, does
     # not change. The CLI is the `lint-imports` console script; 2.15 ships no
     # `python -m importlinter`. The floor is the version the contracts were measured
     # on (`broken_contract_guidance` and `--no-logo` need 2.14).
     "import-linter>=2.15,<3",
     # Same range as [build-system].requires. The build gets zig from its isolated
-    # build env; the test suite needs its own: tests/test_fast_math_variant.py (#136)
+    # build env; the test suite needs its own: tests/env/c/test_fast_math_variant.py (#136)
     # resolves zig through setup.py's `python -m ziglang` route, and without the
     # wheel in .venv that test skipped in every session (#288).
     "ziglang>=0.14.0,<0.15",
@@ -73,7 +73,7 @@ modal = [
 # zig-pkg); namespaces = false keeps the wheel to the real packages (cs2rl and its
 # subpackages deploy, env, env.c, eval, experiment, spec, train and viz). The flip
 # side: a new subpackage without an __init__.py is dropped from the wheel silently.
-# grimp skips it too, so tests/test_import_layers.py's coverage check is what fails on
+# grimp skips it too, so tests/integration/test_import_layers.py's coverage check is what fails on
 # one.
 where = ["src"]
 include = ["cs2rl*"]
@@ -329,7 +329,7 @@ column_limit            = 100
 spaces_before_comment   = "40, 56, 72"
 indent_width            = 4
 
-# The package's layering (#205), checked by tests/test_import_layers.py on every suite
+# The package's layering (#205), checked by tests/integration/test_import_layers.py on every suite
 # run; by hand: `lint-imports --no-cache --no-logo` from the repo root with
 # PYTHONPATH=<checkout>/src. Without that PYTHONPATH a worktree checks MAIN's tree and
 # passes: import-linter finds cs2rl with find_spec, which never runs the package's
@@ -338,7 +338,7 @@ indent_width            = 4
 # import-linter counts function-local imports as edges, and an ignore_imports entry names
 # a module PAIR, never a line or a scope: it hides every site of that pair, a future
 # module-scope one included. No contract has one since #205 part 3, and
-# tests/test_import_layers.py::test_no_contract_ignores_imports fails if one is added.
+# tests/integration/test_import_layers.py::test_no_contract_ignores_imports fails if one is added.
 # The same file fails if a module is invisible to the graph (a directory without
 # __init__.py).
 [tool.importlinter]
@@ -361,7 +361,7 @@ layers = [
     # --eval-interval BaselineEvaluator) and viz (--record), so it sits above them.
     # eval, viz and BC use only the policy, which sits below them. Every edge that
     # needed an ignore_imports entry before (#92) points down now;
-    # tests/test_import_layers.py::test_train_sits_above_eval_and_viz_and_policy_below_them
+    # tests/integration/test_import_layers.py::test_train_sits_above_eval_and_viz_and_policy_below_them
     # pins the order.
     "train",
     "train_bc : bc_demos : profile_step : viz : eval",
@@ -388,7 +388,7 @@ broken_contract_guidance = "Keep cs2rl.env.config stdlib-only: move the import i
 # Inside train/: the CLI on top, then the run driver, then the three things it composes
 # (the --record and --eval modes and the PuffeRL trainer), then the parts, then config.
 # The imports of trainer (torch, pufferlib) and of eval/viz stay function-local for
-# `--dump-config`'s lightness (tests/test_w1_modules.py), not for this contract.
+# `--dump-config`'s lightness (tests/train/test_w1_modules.py), not for this contract.
 # exhaustive: a new module in train/ fails until it gets a layer here.
 [[tool.importlinter.contracts]]
 name = "cs2rl.train layers"

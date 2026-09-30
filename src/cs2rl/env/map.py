@@ -340,7 +340,7 @@ SIMPLE_BOMBSITES = [6]
 # WHY the row randomisation is LOAD-BEARING: with one fixed spawn per side the
 # opening obs is bit-identical every round and a constant Δyaw — reachable
 # through the aim head's bias alone — would pass every §5 gate without ever
-# reading the obs. tests/test_arena_duel.py pins this with a bias-only search.
+# reading the obs. tests/env/test_arena_duel.py pins this with a bias-only search.
 # PITFALLS: cell_size=20 divides 100 exactly; the default 16 does not and
 # make_simple_map's floor/ceil raster would overlap adjacent areas by a cell.
 # spawn_team's `n_spawns < TEAM_SIZE` branch draws `xorshift32 % n_spawns` per

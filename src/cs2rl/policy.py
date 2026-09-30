@@ -147,7 +147,7 @@ def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, p
     # bare EnvConfig(), and env/config.py declares those fields to be the
     # trained baseline, which is exactly the pre-Rung-0 env (full 5v5, pitch
     # live, crouch and jump enabled); test_defaults_equal_the_139a3a3_values in
-    # tests/test_env_config.py pins them. Passing no knobs is the behaviour, not
+    # tests/env/test_env_config.py pins them. Passing no knobs is the behaviour, not
     # an oversight; #143 tracks whether it should change, and the factory reduces
     # that future fix to one role's knob source.
     policy_env = build_env_for("eval_legacy")

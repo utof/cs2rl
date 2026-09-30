@@ -94,7 +94,7 @@ class StaticDataC(ctypes.Structure):
         #     fields only; scalars travel in the packed buffer
         # A mismatch with the C struct changes this side's layout hash only, so
         # binding.init refuses to copy anything. A missing SD_PREFIX_FIELDS row
-        # fails tests/test_static_data_layout.py. Order still decides which
+        # fails tests/env/c/test_static_data_layout.py. Order still decides which
         # numpy array each POINTER field receives — _SD_POINTER_FIELDS below
         # derives that order from this list, so a reordering here moves the
         # arguments with it, but py_init's hand-written list does NOT follow and
@@ -409,7 +409,7 @@ class Dust2EnvC(ctypes.Structure):
 #   - key in binding.c, never consumed here ->
 #     test_struct_sizes_keys_are_all_consumed asserts
 #     set(binding.struct_sizes()) == _C_SIZE_KEYS_CHECKED.
-# Both live in tests/test_struct_sizes.py.
+# Both live in tests/env/c/test_struct_sizes.py.
 #
 # Pitfall: struct_sizes() reads the CURRENTLY BUILT .so. Editing src/cs2rl/env/c/*.h
 # without rebuilding (`python setup.py build_ext --inplace`) compares a new
@@ -497,7 +497,7 @@ del _macro, _py_value
 
 # Every struct_sizes() key this module actually compares, derived from the three
 # tuples above rather than re-listed by hand (a hand-written copy would be the
-# next thing to rot). tests/test_struct_sizes.py asserts
+# next thing to rot). tests/env/c/test_struct_sizes.py asserts
 # set(binding.struct_sizes()) == _C_SIZE_KEYS_CHECKED, which turns "published a
 # key in binding.c and forgot to consume it here" from a silent unguarded field
 # into a failing test. Exported for that test; nothing in the sim reads it.
@@ -510,7 +510,7 @@ _C_SIZE_KEYS_CHECKED = (frozenset(_n for _n, _ in _C_SIZE_MIRRORS)
 # The counterpart of binding.static_data_layout(). Both sides describe the same
 # StaticData prefix — everything before wall_list — as an ordered list of
 # (name, offset, size, canonical type name), serialise it identically, and
-# sha256 it. tests/test_static_data_layout.py asserts the two agree.
+# sha256 it. tests/env/c/test_static_data_layout.py asserts the two agree.
 #
 # The point is that the two operands come from DIFFERENT sources. C reads the
 # compiler's offsetof/sizeof over the SD_PREFIX_FIELDS table in cs2_types.h;
@@ -523,7 +523,7 @@ _C_SIZE_KEYS_CHECKED = (frozenset(_n for _n, _ in _C_SIZE_MIRRORS)
 # Honest scope, same as the C-side doc block: this compares DECLARATIONS. A
 # packing mistake that puts the right number in the wrong (correctly described)
 # field is invisible here and is caught by the sentinel round trip in
-# tests/test_struct_sizes.py instead.
+# tests/env/c/test_struct_sizes.py instead.
 _LAYOUT_FORMAT = "cs2rl-static-data-layout-v1"
 
 # The scalar canonical names binding.c's SD_TYPE_NAMES can emit. Introspection
@@ -637,7 +637,7 @@ def static_data_layout():
 # jump_enabled's value under the "crouch_enabled" key puts the wrong number into
 # a correctly-named, correctly-typed, correctly-offset slot and every check here
 # stays green. That is what the two-env pigeonhole scheme in
-# tests/test_struct_sizes.py is for, and why W2 retires none of it.
+# tests/env/c/test_struct_sizes.py is for, and why W2 retires none of it.
 
 _SD_PREFIX_END = [_n for _n, _ in StaticDataC._fields_].index("wall_list")
 
@@ -837,7 +837,7 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
     # default n == TEAM_SIZE, rewards[TEAM_SIZE:TEAM_SIZE + n] is the identical
     # view to the old rewards[TEAM_SIZE:], so .mean() reduces in the same order
     # and the pre-Rung-0 float results are reproduced bit for bit
-    # (tests/test_parked_agents.py::test_symmetrize_default_matches_pre_rung0_bitwise).
+    # (tests/env/c/test_parked_agents.py::test_symmetrize_default_matches_pre_rung0_bitwise).
     mean_t = rewards[:n].mean()
     mean_ct = rewards[TEAM_SIZE:TEAM_SIZE + n].mean()
     rewards[:n] = 0.5 * (rewards[:n] - mean_ct)
@@ -1041,7 +1041,7 @@ class Cs2Env(pufferlib.PufferEnv):
         # it. A swap between two keys — "crouch_enabled": self.jump_enabled — is
         # the one error class no layout check can see, because it puts a wrong
         # number into a correctly described slot. That is what the two-env
-        # sentinel scheme in tests/test_struct_sizes.py is for.
+        # sentinel scheme in tests/env/c/test_struct_sizes.py is for.
 
         # fmt: off  -- same reason as StaticDataC._fields_ above: YAPF aligns standalone comments to the trailing-comment column
         static_data = {

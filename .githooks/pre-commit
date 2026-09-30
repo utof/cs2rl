@@ -113,7 +113,7 @@ done
 if [ "$pyrefly_trigger" -eq 1 ]; then
     # A dependency change is checked against the .venv as it is NOW (#220: no hook
     # syncs). Advisory only; keep the echo a plain double-quoted literal with no
-    # `$` or backtick, or tests/test_pyrefly_hook.py reads its `uv sync` as a call.
+    # `$` or backtick, or tests/integration/test_pyrefly_hook.py reads its `uv sync` as a call.
     for file in "${staged_all[@]}"; do
         case "$file" in
             pyproject.toml|uv.lock)

@@ -91,7 +91,7 @@ class ZigBuild(build_ext):
         shutil.copy2(candidates[0], dest)
 
 
-# Guarded so tests/test_fast_math_variant.py can import _find_zig (#146, #288); an
+# Guarded so tests/env/c/test_fast_math_variant.py can import _find_zig (#146, #288); an
 # unguarded import runs setuptools on pytest's argv and exits. Every build path still
 # reaches setup(): `python setup.py ...` runs as __main__, and so does setuptools'
 # PEP 517 backend (build_meta execs this file with __name__ == "__main__"), which is

@@ -17,7 +17,7 @@ never a class defined in the flat train.py — so moving these definitions canno
 invalidate an existing ``train_state.pt``.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+reason spelled out in tests/train/test_w1_modules.py's docstring (WHY property 3 is
 load-bearing). Every torch import below is function-local ON PURPOSE.
 """
 

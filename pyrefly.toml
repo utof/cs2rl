@@ -17,7 +17,7 @@ preset = "default"
 # unlimited licence for that (file, kind, column), not a budget. The gate keys on
 # (path, name, concise_description, source_line) instead.
 
-# Every tracked .py must be reachable from this list — tests/test_pyrefly_gate.py
+# Every tracked .py must be reachable from this list — tests/integration/test_pyrefly_gate.py
 # asserts set equality against `git ls-files '*.py'`, so adding a top-level
 # directory of Python without adding it here is a test failure, not a silent gap.
 # setup.py is listed explicitly because it is a file, not a directory; it
@@ -38,7 +38,7 @@ python-version = "3.12"
 # No "scripts" or "deploy": those roots served bare `import exp_lib` / `import
 # export_policy` spellings, which #204 removed with the libraries themselves (they are
 # `cs2rl.experiment.*` / `cs2rl.deploy.*` now). No "tests" either: it served the last
-# bare import, tests/test_metrics_schema.py's `import metrics_census`, which #207
+# bare import, tests/eval/test_metrics_schema.py's `import metrics_census`, which #207
 # replaced with `tests._helpers.metrics_census`. "." serves `scripts.X` and `tests.X`,
 # as pyproject.toml's pytest `pythonpath = ["."]` does at run time.
 search-path = ["src", "."]

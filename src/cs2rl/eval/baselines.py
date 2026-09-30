@@ -34,7 +34,7 @@ enemy reads invisible on its death tick). Edits after vendoring are limited to
 
 * Geometry constants below MIRROR cs2_combat.h; the header is not exported
   through the binding. If EYE_* / TORSO_* change there, the
-  oracle silently drifts — ``tests/test_eval_baselines.py::test_oracle_never_blind``
+  oracle silently drifts — ``tests/eval/test_eval_baselines.py::test_oracle_never_blind``
   and ``test_oracle_beats_random`` are the tripwires.
 * ``vis_from_obs`` MUST be threaded tick-to-tick (``vis_prev``): the oracle
   only fires when the target was visible on the previous tick's obs. Feeding
@@ -57,7 +57,7 @@ from cs2rl.env.c.cs2_env import N_AGENTS, TEAM_SIZE
 # env.c.cs2_env at module scope (just above), so a registry that did
 # `from cs2rl.eval.baselines import EVAL_KEYS` would make a tuple of eight strings cost
 # a torch import and break the import-lightness invariant every new module is
-# held to (tests/test_w1_modules.py). metrics_schema imports nothing from src
+# held to (tests/train/test_w1_modules.py). metrics_schema imports nothing from src
 # except `spec.action`, so this edge is acyclic and cheap in the one direction
 # that matters.
 from cs2rl.eval.metrics_schema import EVAL_KEYS        # noqa: F401  (re-export)
@@ -75,7 +75,7 @@ H_SHOOT = ACTION_HEAD_NAMES.index("shoot")
 H_RELOAD = ACTION_HEAD_NAMES.index("reload")
 
 # Geometry MIRRORS of cs2_combat.h's EYE_HEIGHT_* / TORSO_OFFSET_* (silent-drift
-# hazard): tests/test_eval_baselines.py::test_hit_geometry_constants_match_cs2_combat_h
+# hazard): tests/eval/test_eval_baselines.py::test_hit_geometry_constants_match_cs2_combat_h
 # pins them equal.
 EYE_STAND, EYE_CROUCH = 48.0, 24.0
 TORSO_STAND, TORSO_CROUCH = 48.0, 24.0

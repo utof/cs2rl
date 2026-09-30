@@ -8,7 +8,7 @@
  * source on every developer box with only `ziglang` installed. Adding OpenSSL
  * would put a system dependency in front of `pip install`, for one hash of one
  * ~3 KB string computed once per call. The only consumer is the W2 layout hash
- * (binding.static_data_layout), which tests/test_static_data_layout.py compares
+ * (binding.static_data_layout), which tests/env/c/test_static_data_layout.py compares
  * against the digest Python's hashlib produces for the same serialisation. That
  * cross-implementation comparison IS this file's test: a padding, endianness or
  * length-field bug here cannot agree with hashlib by accident, so it surfaces as

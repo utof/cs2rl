@@ -17,7 +17,7 @@ common, which is why the number is so high.
 
 If you are reading this because a hand-rolled comparison beside a built-in flag
 looks like wheel-reinvention: it is not. Run
-tests/test_pyrefly_gate.py::test_a_new_error_at_a_column_the_baseline_would_blind_is_caught
+tests/integration/test_pyrefly_gate.py::test_a_new_error_at_a_column_the_baseline_would_blind_is_caught
 -- it freezes the same fixture both ways and asserts --baseline goes GREEN while
 this gate goes RED.
 

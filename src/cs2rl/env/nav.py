@@ -523,7 +523,7 @@ NAV_PATH = _resolve_nav_path()
 # silently moved the cache with it. A moved path is a cold cache, and a cold cache on dust2
 # rebuilds the grid, then the vis matrix through a cpu_count() worker pool (~900 MB each,
 # orphaned on a kill). *.npy is gitignored, so a stray copy anywhere is invisible to git
-# status. tests/test_path_constants_exist.py pins this location.
+# status. tests/integration/test_path_constants_exist.py pins this location.
 # PITFALL: not importlib.resources.files("cs2rl"). It promises only a Traversable, whose str()
 # is a filesystem path for a regular on-disk package but not under zipimport or for a namespace
 # package, and it is framed as read-only package data, not a writable cache.

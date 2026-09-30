@@ -186,7 +186,7 @@ typedef struct {
      *     fields only; scalars travel in the packed buffer
      * A mismatch between the first two changes the layout hash on one side
      * only, so binding.init refuses to copy anything (spec 2026-08-31 §2 W2);
-     * a missing SD_PREFIX_FIELDS row fails tests/test_static_data_layout.py.
+     * a missing SD_PREFIX_FIELDS row fails tests/env/c/test_static_data_layout.py.
      * For the ten POINTER fields the order also decides which numpy array each
      * one receives. cs2_env.py derives the order it PASSES from the mirror
      * (_SD_POINTER_FIELDS), so the call site follows a reorder on its own —
@@ -329,7 +329,7 @@ typedef struct {
  * the "prefix", i.e. everything Python publishes through binding.init — in
  * declaration order. Consumed by py_static_data_layout() in binding.c, which
  * turns each row into (name, offset, size, canonical type name) and hashes the
- * result. tests/test_static_data_layout.py compares that hash against the same
+ * result. tests/env/c/test_static_data_layout.py compares that hash against the same
  * quadruples derived by ctypes introspection of StaticDataC in cs2_env.py.
  *
  * X(type, name, is_array):
@@ -361,7 +361,7 @@ typedef struct {
  * one pair of hand-quoted offsets go stale; see the wall_list comment above.)
  *
  * PITFALL: adding a prefix field here but not to StaticDataC in cs2_env.py (or
- * vice versa) fails tests/test_static_data_layout.py. Adding it to the struct
+ * vice versa) fails tests/env/c/test_static_data_layout.py. Adding it to the struct
  * and to NEITHER is caught by the sizeof(StaticData) guard — unless the new
  * field fits entirely inside existing padding, which has happened once already
  * (jump_enabled, see the wall_list comment). So: struct, mirror, and this table,

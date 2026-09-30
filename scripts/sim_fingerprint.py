@@ -271,7 +271,7 @@ def main():
     # PITFALL: `--n-active` omitted must build the SAME env as before, so the
     # None arm is a bare `EnvConfig()`, never `EnvConfig(n_active_per_team=<the
     # field default>)`. Spelling the default here would also be a restated
-    # default that tests/test_no_restated_env_defaults.py fails on — as the
+    # default that tests/integration/test_no_restated_env_defaults.py fails on — as the
     # first draft of this very comment was, by writing the number.
     config = EnvConfig() if a.n_active is None else EnvConfig(n_active_per_team=a.n_active)
     env = make_env(config=config, seed=a.seed, map_data=build_map(a.aim_mode))

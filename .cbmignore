@@ -14,3 +14,8 @@
 # virtualenv named env/ that someone creates inside the checkout.
 !src/cs2rl/env/
 !src/cs2rl/deploy/
+# #207 part 2: tests/ mirrors src/cs2rl/, so its env/ (with env/c/) and deploy/ are skipped the
+# same way. Measured on the prototype: without these two lines 27 of 106 test files were
+# missing from the graph.
+!tests/env/
+!tests/deploy/

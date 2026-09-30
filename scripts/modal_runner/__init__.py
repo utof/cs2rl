@@ -8,7 +8,7 @@ module scope. Torch is imported lazily, inside `checkpoint._import_torch` and
 `checkpoint._load_checkpoint_weights`, and Modal is never imported here.
 
 MODULE MAP (each module's exact symbols are its MANIFEST entry in
-tests/modal_runner_tables.py):
+tests/modal/modal_runner_tables.py):
   core        the Volume and run-directory layout, the Status enum,
               ValidationError, the path and hash helpers, and the protocols
               and records two or more modules share (see WHERE A NEW NAME GOES)
@@ -33,14 +33,14 @@ as one contract. A name this facade re-exports goes in the module that reads
 it, like any other: production reads the facade, not the module. A name no
 package module reads goes in the module whose concern it is (a layout name in
 core). A new cross-module import needs a DEPENDENCIES entry in
-tests/modal_runner_tables.py.
+tests/modal/modal_runner_tables.py.
 
 ADDING A MODULE: follow the checklist in the docstring of
-tests/modal_runner_tables.py, which every gate reads the module list from.
+tests/modal/modal_runner_tables.py, which every gate reads the module list from.
 
 THIS FACADE IS DELIBERATELY NARROW. It re-exports exactly the names that
 production code reads from the package, and nothing more.
-`_production_package_surface` in tests/test_modal_client.py derives that set
+`_production_package_surface` in tests/modal/test_modal_client.py derives that set
 from every tracked scripts/*.py outside this package, and the surface gates pin
 `__all__` and the module's attributes to it. Never widen the facade to satisfy
 a test; import the owning submodule instead.
@@ -58,9 +58,9 @@ from at call time.
     SEAM below, sees a patch on the owning submodule
     (`scripts.modal_runner.state.X`). A caller that from-imports the name from
     a sibling reads its own copy, so patch the importing module instead. For a
-    site in BINDING_SITES (tests/modal_patch_binding_campaign.py), install the
+    site in BINDING_SITES (tests/modal/modal_patch_binding_campaign.py), install the
     patch through `binding_target(site)`, which names the module to patch.
-  `test_patch_target_dichotomy` (tests/test_modal_patch_bindings.py) shows both
+  `test_patch_target_dichotomy` (tests/modal/test_modal_patch_bindings.py) shows both
   cases on `validate_local_checkpoint`.
 
 QUALIFIED SEAMS. These names, and only these, are read across the submodules
@@ -76,7 +76,7 @@ from-imported, so patching it on its owning module does NOT reach the
 importing module (training.py and preflight.py hold both `state` and
 from-imported `state` names). This facade's own re-export of
 `validate_local_checkpoint` is such a copy by design (see PATCHING IN TESTS).
-QUALIFIED_SEAMS in tests/modal_runner_tables.py lists them with their readers;
+QUALIFIED_SEAMS in tests/modal/modal_runner_tables.py lists them with their readers;
 the package-shape `seam` clause enforces it over the submodules, and
 `test_package_seam_contract` checks that this list matches it.
 

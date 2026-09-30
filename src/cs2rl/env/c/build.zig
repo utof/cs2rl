@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
         "Link libpython — required on Windows, wrong on Linux/macOS") orelse false;
 
     // fast_math: R0-F (#136). Default true = production flags. `-Dfast_math=false`
-    // builds a diagnostic variant WITHOUT -ffast-math so tests/test_fast_math_variant.py
+    // builds a diagnostic variant WITHOUT -ffast-math so tests/env/c/test_fast_math_variant.py
     // runs the reward guards in both builds (the strict one catches removed guards; the
     // #136 isfinite() shape is caught by -Werror=nan-infinity-disabled below, #288).
     // PITFALL: never build the production .so with false — setup.py does not
@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
         // #136/#288: under -ffast-math, isfinite()/isinf()/INFINITY fold away, so a
         // guard written with them is dead code. Make clang's diagnostic for that an
         // ERROR: a plain warning is not enough, because zig prints no warnings for a
-        // compile that succeeds (#294). tests/test_fast_math_variant.py cannot see
+        // compile that succeeds (#294). tests/env/c/test_fast_math_variant.py cannot see
         // the #136 shape at runtime (the reward clamp scrubs the NaN); this flag can.
         "-Werror=nan-infinity-disabled",
         "-Wall",

@@ -1,6 +1,6 @@
 """Synthetic module text for the gate (e) and gate (g) knock-outs. Never imported.
 
-tests/test_modal_packaging.py splices each plant in after line 19, the
+tests/modal/test_modal_packaging.py splices each plant in after line 19, the
 `from __future__ import annotations` below, and asserts violation line numbers
 counted from there. The knock-outs argue that a row is inert on the unplanted
 text because this module has none of the shapes their rows plant.

@@ -19,11 +19,11 @@ PITFALL (runtime rebinding): a test that wants to intercept ``tag_grad_cossim``
 at its call site must patch it on ``cs2rl.train.trainer``, NOT on this module —
 the call site inside ``Cs2PuffeRL.train`` resolves the name through
 cs2rl.train.trainer's globals, so a patch here is silently unreachable
-and the assertion becomes vacuous. See tests/test_tag_trainer.py, whose
+and the assertion becomes vacuous. See tests/train/test_tag_trainer.py, whose
 positive control pins the reachable module.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+reason spelled out in tests/train/test_w1_modules.py's docstring (WHY property 3 is
 load-bearing). Every torch, pufferlib and cs2rl.train.entropy import below is
 function-local ON PURPOSE.
 """
@@ -435,7 +435,7 @@ def tag_grad_cossim(policy,
     * Never touches .grad, self.ratio, KL bookkeeping, or the Welford
       return-norm state — mb_returns_norm arrives already normalized.
       Training with the flag on is bitwise-identical (pinned by
-      tests/test_tag_trainer.py).
+      tests/train/test_tag_trainer.py).
     * Zero-norm subsets (subset advantage exactly 0 after shared
       normalization) yield a DELIBERATE NaN cos-sim (0/0) and gnorm 0 —
       analysis drops them; do not "fix" with an epsilon. These NaNs are

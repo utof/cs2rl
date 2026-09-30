@@ -122,7 +122,7 @@ static void compute_rewards(Dust2Env* env,
          * has a chance to fire, so bomb_just_defused stays 0 and we correctly
          * classify as elimination — NOT defuse. Tests that want to exercise
          * defuse MUST drive process_bomb naturally (see test_natural_defuse
-         * in tests/test_reward.py).
+         * in tests/env/c/test_reward.py).
          *
          * Sets StepStats.win_by_detonation / win_by_defuse for Python-side
          * channel routing: objective channel for detonation/defuse, combat

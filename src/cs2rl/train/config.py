@@ -21,7 +21,7 @@ under ``if __name__ == "__main__"`` and is not importable). Several tests source
 now live in two files and both are pinned.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+reason spelled out in tests/train/test_w1_modules.py's docstring (WHY property 3 is
 load-bearing) — ``--dump-config`` reaches build_train_config and must still cost no
 torch/nav import.
 """
@@ -36,7 +36,7 @@ from cs2rl.policy import LOG_STD_MAX, resolve_aim_log_std_init
 # cs2rl.train.resume._atomic_save_state_dict's docstring), and `nav` pulls
 # awpy/polars/shapely (+0.6 s and a polars warning) just to read one 5.
 # Cross-checked against nav.TEAM_SIZE and cs2_env.TEAM_SIZE by
-# tests/test_train_env.py::test_obs_dim_constant_consistency.
+# tests/train/test_train_env.py::test_obs_dim_constant_consistency.
 TEAM_SIZE = 5
 # R0-C: epochs between full-state checkpoint sets. ONE constant for the CLI
 # default and build_train_config's getattr fallback (harness / SimpleNamespace
@@ -461,7 +461,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
 # Knobs whose CLI dest IS the field name. Hand-written on purpose, and paired
 # with cs2rl.train.config._R0G_KNOBS (which maps DIFFERENT names, e.g.
 # --round-time-ticks → round_time): together they are the CLI-name ↔ field-name
-# map, and tests/test_env_knobs.py::test_args_knob_coverage_is_exhaustive asserts
+# map, and tests/train/test_env_knobs.py::test_args_knob_coverage_is_exhaustive asserts
 # the two cover every EnvConfig knob except pbrs_gamma (resolved through
 # resolve_gammas) and recoil (no flag). Kept separate from _R0G_KNOBS so the
 # R0-G "None is the stored value" rule is never applied to a flag knob.
@@ -484,7 +484,7 @@ def env_config_from_args(args) -> EnvConfig:
     default in env/config.py is the only declaration of the value. Spelling a
     fallback as `getattr(args, "<knob>", <the field default>)` instead would put
     a second copy of six defaults in this file, which is the duplication #165
-    exists to remove and which tests/test_no_restated_env_defaults.py fails on.
+    exists to remove and which tests/integration/test_no_restated_env_defaults.py fails on.
     That probe reads PROSE as well as code, so this paragraph names no value
     either.
 
@@ -500,7 +500,7 @@ def env_config_from_args(args) -> EnvConfig:
     the field default (0.999) would silently disagree with a non-default --gamma.
 
     `recoil` is deliberately never read: there is no CLI flag, and inventing one
-    here would be new behaviour (tests/test_recoil.py pins that).
+    here would be new behaviour (tests/env/c/test_recoil.py pins that).
     """
     weights = {}
     for name in REWARD_FIELDS:

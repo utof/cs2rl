@@ -23,13 +23,13 @@ WHY a module of its own and not a class inside cs2rl.train.loop: this module sub
 ``PuffeRL``, so it imports torch and pufferlib at module scope and is HEAVY by
 construction. The CLI module's scope (``cs2rl.train.__main__``, which imports
 ``cs2rl.train.loop`` at its module level) must stay torch-free
-(tests/test_w1_modules.py::test_cli_module_scope_stays_light: it is what keeps
+(tests/train/test_w1_modules.py::test_cli_module_scope_stays_light: it is what keeps
 ``--dump-config`` at ~1 s), so ``cs2rl.train.loop`` imports this module function-locally,
 inside ``train()``. tests/_helpers/trainer_harness.py (gh#168 W1.5) imports it the same
 way, function-locally inside ``_build_trainer_for_test``, so
 ``from tests._helpers import trainer_harness`` stays as light as the CLI module
-(tests/test_w1_modules.py::test_import_train_test_harness_stays_light);
-tests/test_trainer_composition.py imports it inside a fixture. Never add
+(tests/train/test_w1_modules.py::test_import_train_test_harness_stays_light);
+tests/train/test_trainer_composition.py imports it inside a fixture. Never add
 ``from cs2rl.train.trainer import ...`` at ``cs2rl.train.loop``'s module level (knock-out
 W1-K3 in the spec: test_cli_module_scope_stays_light goes red naming torch).
 
@@ -200,7 +200,7 @@ class Cs2PuffeRL(PuffeRL):
         # patcher refuses) leaves a half-built instance nobody can close(), so the thread
         # keeps the interpreter alive at exit: pytest prints its summary and then
         # hangs (gh#168 W1.5 review, MAJOR-1; pinned by
-        # tests/test_trainer_composition.py::test_a_raise_inside_init_stops_the_utilization_thread).
+        # tests/train/test_trainer_composition.py::test_a_raise_inside_init_stops_the_utilization_thread).
         # PITFALLS: this is the ONE line of PuffeRL.close() that must run on the
         # failure path; vecenv.close() is the caller's (the vecenv was theirs before
         # this constructor), and save_checkpoint() would write a half-built trainer.
@@ -306,7 +306,7 @@ class Cs2PuffeRL(PuffeRL):
         .superpowers/sdd/2026-09-24-168-trainer-subclass/construct_snapshot.py (O4).
 
         PITFALLS: two names that were closure variables before W2a are now attributes,
-        ``_entropy_floor`` and ``_ret_device``; ``tests/test_trainer_composition.py``'s
+        ``_entropy_floor`` and ``_ret_device``; ``tests/train/test_trainer_composition.py``'s
         derived constructor-surface test and the O4 snapshot both expect them. Everything else is set on
         ``self`` exactly as the patcher set it on ``trainer`` (relocation, not a rewrite).
         """
@@ -380,7 +380,7 @@ class Cs2PuffeRL(PuffeRL):
         # self._batch1_current_target_entropy.
         entropy_floor = 0.3 * max_entropy              # collapse threshold
                                                        # W2a (gh#168): the floor used to be a closure variable of the train body;
-                                                       # tests/test_warmstart_entropy_trainer.py sets it directly to force the
+                                                       # tests/train/test_warmstart_entropy_trainer.py sets it directly to force the
                                                        # clamp arm.
         self._entropy_floor = entropy_floor
 

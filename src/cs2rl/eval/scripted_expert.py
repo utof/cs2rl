@@ -1,6 +1,6 @@
 """Scripted walk-to-bombsite-and-plant expert (Batch 6 Task 2, spec D-3/D-5).
 
-Extracted from tests/test_env_feasibility.py + the Gate 0 measurement script
+Extracted from tests/env/c/test_env_feasibility.py + the Gate 0 measurement script
 (deleted; `git show 9b9bf2f:scripts/measure_budget.py`) so that (a) the
 feasibility tests import one canonical implementation and (b) the BC demo
 generator (Task 3) can replay the expert through the REAL action interface and
