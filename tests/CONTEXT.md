@@ -80,3 +80,37 @@ too. The guard's known limits, each pinned as a case that passes today except th
   (`HERE = Path(__file__).resolve()`, then `HERE.parents[2]`).
 - The walk skips a directory whose name is not a Python identifier, such as `tests/env-c/`, which
   pytest collects from; its test-file patterns are pytest's defaults, copied by hand.
+
+## Running the tests
+
+Run pytest from the repository root and pass `tests` or files under it (`CONTRIBUTING.md`,
+"Tests"). A process that imports pufferlib plants a `resources` symlink in its working
+directory; `.gitignore` hides it, so after a run from `tests/` or another subdirectory, delete
+the one left there. In a worktree, put its own `src/` first:
+`env PYTHONPATH=<worktree>/src UV_NO_SYNC=1 .venv/bin/python -m pytest ...`.
+
+## The session guards (`tests/conftest.py`)
+
+Three guards stop a session that would test the wrong code. `--noconftest` switches all three
+off, because they are hooks in `tests/conftest.py`.
+
+- The checkout tripwire (#199), before collection: (a) `cs2rl` resolves to this checkout's
+  `src/`; (b) no checkout's `src/` on `sys.path` holds another importable name (a leftover
+  module, a stale `.so`, pufferlib's `resources` symlink); (e), added by #205, no directory
+  under `src/cs2rl/` imports as a namespace package, and no file there is shadowed by a
+  same-named package, extension or source file. Limits: (b) reads only the direct children of
+  each `src/`; (e) is a snapshot at session start, and a leftover file with no same-named
+  competitor imports silently (import-linter's tests in `tests/integration/test_import_layers.py`
+  catch that one).
+- One module object per file (#201), at session end: no repo file is loaded under two module
+  names. Limits: it reads `sys.modules` at the end, so a copy evicted before then, or one never
+  registered, is invisible; imports in a child process are invisible; ruff's banned-api table,
+  its static half, runs only on staged files at commit time.
+- The namespace guard (#207): (c) before collection, no `sys.path` entry but the root holds a
+  `tests` or `scripts` directory or module; (d) at session end, every `tests.*` and `scripts.*`
+  module loaded from its own place. Limits: (d) sees only modules still loaded at the end; (c)
+  reads `sys.path` once; a child process is invisible to both.
+
+The session-end checks do not run under `-x` after a failure or after a collection error; that
+session fails anyway. Under `-n 2` each worker ships its facts to the controller, which judges
+them.
