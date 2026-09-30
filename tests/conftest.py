@@ -582,7 +582,8 @@ _FAKE_CHILD_PID = 4242
 # LIMIT: this pin and the RUNNER_PACKAGES pin in test_kill_seam_static_safety
 # (tests/modal/test_modal_training.py) use a bare find_spec, so an untracked leftover module at
 # the pinned name satisfies them. The name pin (tests/integration/test_name_strings_resolve.py)
-# also requires the file to be tracked, but it reads only `cs2rl.` names.
+# also requires the file to be tracked, but it reads only `cs2rl.` names and `src/cs2rl/`
+# paths, never a `tests.` name.
 _HELPERS_MODULE = "tests.modal.modal_test_helpers"
 
 
