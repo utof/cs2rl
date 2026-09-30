@@ -132,7 +132,7 @@ GOVERNED_NAME_COUNT = 299
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.
 #
-# A runner test lives in tests/test_modal_<m>.py, the file of the module m (in
+# A runner test lives in tests/modal/test_modal_<m>.py, the file of the module m (in
 # `RUNNER_MODULES`) whose behaviour it tests; `RUNNER_TEST_FILES` in
 # tests/modal/modal_runner_tables.py lists those files. Tests reach private library
 # names through their owning submodules; the package facade exposes the
@@ -165,7 +165,7 @@ GOVERNED_NAME_COUNT = 299
 # rule read only module-level definitions, so `classify_seam` rejects it
 # (`_defs_under_module_level_statements`); skip a conditional test with
 # `pytest.mark.skipif` instead. And a runner test never goes in a new
-# tests/test_modal_<x>.py: a file outside `RUNNER_TEST_FILES` is invisible to
+# tests/modal/test_modal_<x>.py: a file outside `RUNNER_TEST_FILES` is invisible to
 # the seam, the floor and the binding census (gh#233). A new runner test file
 # comes only with a new module in the tables.
 # THE KILL SEAM. A test that drives the training attempt, in any file, follows
@@ -246,9 +246,9 @@ SEAM_GUARDS = frozenset({
 # counts rise whenever a new test file defines its own `ROOT`, which W3b's
 # `tests/modal/test_modal_runner_package_shape.py` does.
 #
-# `ROOT` is `Path(__file__).resolve().parents[1]` -- module-header boilerplate
-# that every destination file defines for itself. Since #207 it is no longer
-# needed by construction: the header's `sys.path` insert that read it is gone
+# `ROOT` is `REPO_ROOT` from tests/conftest.py (`ROOT = REPO_ROOT`) -- module-header
+# boilerplate that every destination file defines for itself. Since #207 it is no
+# longer needed by construction: the header's `sys.path` insert that read it is gone
 # (pyproject.toml's pytest `pythonpath` makes `scripts.*` importable), and
 # several destinations no longer read it at all. It stays because the seam gate
 # requires every `SEAM_HEADER_NAMES` name in every destination (below). At 2bb32ac,
@@ -712,9 +712,9 @@ def _test_destinations(tests, client, defined_in, runner_files):
             f"runner-half tests defined outside the declared runner files {sorted(runner_files)}: "
             f"{stray}. A test is runner-half when nothing it reaches, directly or through "
             "helpers, names a client signal (_CLIENT_BINDINGS, _CLIENT_MODULES). If it IS a "
-            "runner test, move it into a declared runner file -- the tests/test_modal_<m>.py of "
-            "the module it tests (RUNNER_TEST_FILES) -- and set its value in the seam manifest "
-            "to that file; a move changes "
+            "runner test, move it into a declared runner file -- the "
+            "tests/modal/test_modal_<m>.py of the module it tests (RUNNER_TEST_FILES) -- and set "
+            "its value in the seam manifest to that file; a move changes "
             "no key, so GOVERNED_NAME_COUNT stays. If it is meant to be a CLIENT test, it lacks "
             "a client signal: make it reach one (or a helper that does); it then classifies to "
             "the client file, so move it there (the placement check names the manifest edit).")
@@ -795,9 +795,9 @@ def _seam_sources(root=ROOT, runner_files=RUNNER_TEST_FILES):
     if missing:
         raise FileNotFoundError(
             f"declared seam file(s) missing: {missing}. The seam never skips a declared file: "
-            "restore it; or, if you are ADDING A MODULE (its tests/test_modal_<m>.py is declared "
-            "through RUNNER_TEST_FILES before it exists), create the file with its first test; "
-            "or remove it from the declaration in the same commit that removes the file.")
+            "restore it; or, if you are ADDING A MODULE (its tests/modal/test_modal_<m>.py is "
+            "declared through RUNNER_TEST_FILES before it exists), create the file with its first "
+            "test; or remove it from the declaration in the same commit that removes the file.")
     return {rel: (root / rel).read_text(encoding="utf-8") for rel in rels}
 
 
@@ -818,7 +818,7 @@ def _names_defined_under_tests():
     gitignored script. Task 4's placement gate is the other caller. If you are
     about to remove the last caller, delete the function with it.
 
-    Scope is `tests/test_*.py` plus the shared helper module: a stray file that
+    Scope is every `tests/**/test_*.py` plus the shared helper module: a stray file that
     pytest never collects is not the threat, and measured, widening past
     `test_*.py` pulled in `tests/capture_dump_config_pre_165.py` (until its
     deletion in #207; `git show 6db06b5:tests/capture_dump_config_pre_165.py`)
@@ -827,7 +827,7 @@ def _names_defined_under_tests():
     of their own and made a gate built on this red for an unrelated reason.
 
     CONTRACT for the caller: the return value is a SUPERSET of the seam. It
-    covers every `tests/test_*.py` in the repo, not just the four destination
+    covers every `tests/**/test_*.py` in the repo, not just the four destination
     files, which is exactly what makes a fourth file visible -- and exactly why
     a caller comparing it against the manifest must scope the disk-to-manifest
     direction to names it actually governs rather than flagging every unrelated
@@ -862,7 +862,7 @@ def _names_defined_under_tests():
     return found
 
 
-# ── The reach floor: a test in tests/test_modal_<m>.py reaches module m ─────
+# ── The reach floor: a test in tests/modal/test_modal_<m>.py reaches module m ─────
 #
 # `classify_seam` decides runner versus client versus shared. It cannot decide
 # WHICH runner file a runner test belongs in: that is a judgement about what
@@ -1539,7 +1539,7 @@ def reach_floor_violations(sources, manifest, exemptions):
     it on synthetic maps whose paths need not exist.
 
     WHAT IS EXAMINED: every module-level `test_` function in a file of
-    `RUNNER_TEST_FILES` (tests/test_modal_<m>.py for m in RUNNER_MODULES). No
+    `RUNNER_TEST_FILES` (tests/modal/test_modal_<m>.py for m in RUNNER_MODULES). No
     other file is: not the client file, and not the shared file, which name no
     module. `examined` is that set of (file, test) pairs, returned so the gate
     can assert its scope (`_floor_scope_problems`) -- a floor that iterates a
@@ -1648,7 +1648,7 @@ def _floor_scope_problems(examined, manifest):
             f"{sorted(examined - runner_tests)[:10]} manifest-only="
             f"{sorted(runner_tests - examined)[:10]}. A manifest-only test in a file outside "
             "RUNNER_TEST_FILES is read by the seam and not by the floor: runner tests go in "
-            "tests/test_modal_<m>.py, one file per module in the tables")
+            "tests/modal/test_modal_<m>.py, one file per module in the tables")
     empty = sorted(set(RUNNER_TEST_FILES) - {rel for rel, _ in runner_tests})
     if empty:
         problems.append(
@@ -2312,7 +2312,7 @@ def test_no_governed_name_is_defined_outside_the_seams_own_files():
     WHAT IT DELIBERATELY DOES NOT CATCH: a BRAND-NEW name in a stray file. That
     name is not governed, and an unrelated new test module is legal. Only
     `governed` is in scope -- which is also why the scan's superset (every
-    `tests/test_*.py` plus the shared helper module) does not turn this red for
+    `tests/**/test_*.py` plus the shared helper module) does not turn this red for
     every helper in those files.
 
     PITFALL, and it is the one this repo keeps paying for: a scan that reached
@@ -2330,8 +2330,8 @@ def test_no_governed_name_is_defined_outside_the_seams_own_files():
     outside = {f for files in found.values() for f in files} - seam_files
     assert outside, ("the scan reached no file outside the seam's own four, so it could not "
                      "report a strayed name even if one existed. `_names_defined_under_tests` "
-                     "globs `tests/test_*.py`; if that returned only seam files the glob is "
-                     "broken, not the tree.")
+                     "rglobs `test_*.py` under tests/; if that returned only seam files the glob "
+                     "is broken, not the tree.")
     unseen = governed - set(found)
     assert not unseen, ("names the manifest governs are defined nowhere the scan can see, so the "
                         "check below would pass by looking at nothing. Either the scan lost a "

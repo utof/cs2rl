@@ -16,7 +16,7 @@ an import made only under TYPE_CHECKING); (2) add a line for it to MODULE MAP
 in the docstring of scripts/modal_runner/__init__.py; (3) `git add` the new
 file. The mount and package-population gates in tests/modal/test_modal_client.py
 read `git ls-files`, so until step 3 they report the module missing although it
-is on disk. (4) Create its test file, tests/test_modal_<module>.py (the path
+is on disk. (4) Create its test file, tests/modal/test_modal_<module>.py (the path
 RUNNER_TEST_FILES derives from this list), holding at least one test of the
 module with its seam-manifest line. The seam gate, the reach floor and the
 binding census read RUNNER_TEST_FILES, so they expect the file from step (1)
@@ -161,15 +161,15 @@ RUNNER_MODULES = tuple(filename.removesuffix(".py") for filename in MANIFEST)
 # Each module's repo-relative path, in the same order: the population the
 # module-scope gates must read.
 RUNNER_PATHS = tuple(f"scripts/modal_runner/{module}.py" for module in RUNNER_MODULES)
-# Each module's test file, in the same order: tests/test_modal_<module>.py. This
+# Each module's test file, in the same order: tests/modal/test_modal_<module>.py. This
 # is the one list of runner test files. The seam gate and its reach floor (both
 # in tests/modal/test_modal_packaging.py) and the binding census
 # (tests/modal/test_modal_patch_binding_census.py) read it under this
 # name, so none of them holds a retyped copy, and a module added above brings
 # its test file into every one of them (ADDING A MODULE, step 4). A runner test
-# in a tests/test_modal_<x>.py that is not derived here is invisible to the
+# in a tests/modal/test_modal_<x>.py that is not derived here is invisible to the
 # seam gate, the floor and the binding census (gh#233).
 # PITFALL: derive a module from a test file name through this tuple and
-# RUNNER_MODULES, never through a `tests/test_modal_*.py` glob, which also
+# RUNNER_MODULES, never through a `tests/modal/test_modal_*.py` glob, which also
 # matches test files that belong to no module.
 RUNNER_TEST_FILES = tuple(f"tests/modal/test_modal_{module}.py" for module in RUNNER_MODULES)

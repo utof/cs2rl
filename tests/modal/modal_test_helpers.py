@@ -1,7 +1,7 @@
 """Helpers reached by tests in two or more files of the modal test seam.
 
 NOT a test module: no `test_` prefix, so pytest does not collect it. The seam
-files are the per-module runner test files (tests/test_modal_<module>.py, listed
+files are the per-module runner test files (tests/modal/test_modal_<module>.py, listed
 by `RUNNER_TEST_FILES` in tests/modal/modal_runner_tables.py) and
 tests/modal/test_modal_client.py. This file exists because tests in different seam
 files share fixtures. Measured at W4's split by module (fdd5ec9), it holds 13

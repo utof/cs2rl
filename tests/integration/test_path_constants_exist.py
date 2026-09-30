@@ -300,9 +300,10 @@ def _collectable_files_under(directory: Path) -> list[str]:
 def test_helpers_hold_no_collectable_file():
     """tests/_helpers/ holds no test file (#207).
 
-    pytest would collect one there, but the gates that scan test files with a
-    flat, non-recursive `(ROOT / "tests").glob(...)` (tests/modal/test_modal_packaging.py,
-    tests/modal/test_modal_preflight.py, tests/modal/test_modal_training.py) would miss it.
+    pytest would collect one there, but `_helpers/` is exempt from the layout guard's
+    twin rule (`NO_TWIN` in tests/integration/test_tests_layout.py), so a test file
+    there would sit outside the src/cs2rl mirror with nothing to object.
+    tests/CONTEXT.md calls `_helpers/` shared code that is never collected.
     """
     found = _collectable_files_under(REPO_ROOT / "tests" / "_helpers")
     assert not found, f"move these test files out of tests/_helpers/: {found}"

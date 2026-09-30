@@ -481,7 +481,7 @@ def simple_map(make_map):
 #          package: the fixture found nothing to patch. Every test file that
 #          drives the attempt imports the package at module scope, so collection
 #          has loaded it before any fixture runs. Not every modal test file
-#          does: three tests/test_modal_*.py files import it only inside test
+#          does: three tests/modal/test_modal_*.py files import it only inside test
 #          bodies or not at all, and none of those reaches the attempt.
 #       2. Code that runs at collection: module level, parametrize arguments.
 #       3. Module-, class- and session-scoped fixtures, setup and teardown.

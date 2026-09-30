@@ -3518,10 +3518,10 @@ def test_kill_seam_static_safety():
     It NEVER imports or calls what it checks: training.py is read through
     `training.__file__` (which is also how the reach floor credits this test to
     `training`), the rest of the runner package from that file's directory,
-    scripts/run_modal.py and every tests/*.py from disk. The "runner" source
-    set (the package and scripts/run_modal.py) must hold every module that
-    tests/modal/modal_runner_tables.py declares, so a new module is read from the
-    day it is declared.
+    scripts/run_modal.py and every .py file under tests/ (at any depth) from disk.
+    The "runner" source set (the package and scripts/run_modal.py) must hold every
+    module that tests/modal/modal_runner_tables.py declares, so a new module is read
+    from the day it is declared.
 
     THE CLAUSES, each a checker with its plants in `_KillSeamClauses` above.
     A plant is source text that is parsed and never run, and must fail its
