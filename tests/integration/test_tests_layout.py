@@ -1,8 +1,9 @@
 """tests/ mirrors src/cs2rl/ (#207 part 2): where a test file may live, checked on the real tree.
 
-WHAT. `layout_problems(tests_dir, package_dir)` returns one problem per:
-  (a) directory under tests/ that holds a .py file and has no twin: tests/<a>/<b> needs the
-      package src/cs2rl/<a>/<b>/__init__.py, unless its top directory is in NO_TWIN;
+WHAT. `layout_problems(tests_dir, package_dir, ...)` returns one problem per:
+  (a) directory under tests/ that the walk enters and that has no twin: tests/<a>/<b> needs
+      the package src/cs2rl/<a>/<b>/__init__.py, unless its top directory is in NO_TWIN (an
+      entry covers its whole subtree). What the directory holds does not matter;
   (b) NO_TWIN entry that is not a directory of tests/ (a stale entry);
   (c) test file directly in tests/ that imports no flat module of cs2rl (a src/cs2rl/<m>.py
       other than __init__.py). The root mirrors src/cs2rl/ itself, so only the flat modules'
@@ -27,6 +28,8 @@ PITFALLS.
     is not an identifier (`tests/env-c/`) is walked, because pytest collects from it. pytest's
     other skips (`--ignore`, `collect_ignore`, a virtualenv) are not applied: `--ignore` only
     splits a run, and tests/ has neither of the others.
+  * (a) reads directories, not files, so a directory that a pull leaves holding only
+    `__pycache__` is red once its package is gone too. Delete it.
   * (c) reads imports by AST in every spelling (`import cs2rl.policy`, `from cs2rl import
     policy`, `from cs2rl.policy import X`), module-level or inside a function.
   * The flat modules are read from src/cs2rl/ on disk, never listed here, so a new flat module
@@ -117,7 +120,7 @@ def layout_problems(tests_dir: Path, package_dir: Path, python_files: list[str],
             if d != "__pycache__" and not any(_matches(p, here / d) for p in norecursedirs))
         rel = here.relative_to(tests_dir)
         top = rel.parts[0] if rel.parts else ""
-        if rel.parts and top not in NO_TWIN and any(f.endswith(".py") for f in files):
+        if rel.parts and top not in NO_TWIN:
             if not (package_dir.joinpath(*rel.parts) / "__init__.py").is_file():
                 problems.append(f"(a) tests/{rel.as_posix()}/ has no twin package "
                                 f"src/cs2rl/{rel.as_posix()}/: move its files to the directory "
@@ -200,6 +203,9 @@ def test_a_clean_tree_has_no_problem(tmp_path, pytest_scope):
         "tests/env/c/test_c.py": ""
     }, "(a) tests/env/c/"),
     ({
+        "tests/viz/__pycache__/test_v.cpython-312.pyc": ""
+    }, "(a) tests/viz/"),
+    ({
         "tests/env-c/test_c.py": ""
     }, "(a) tests/env-c/"),
     ({
@@ -232,14 +238,17 @@ def test_each_rule_reports_its_plant(tmp_path, pytest_scope, plant, rule):
         assert len(problems) == 1 and problems[0].startswith(rule), problems
 
 
-def test_no_twin_entries_are_watched(tmp_path, monkeypatch, pytest_scope):
-    """(b) and (a) together: a stale NO_TWIN entry is red, and so is a deleted live one."""
+# Listed here, not read from NO_TWIN: deleting an entry must not delete its own case.
+@pytest.mark.parametrize("entry", ["_helpers", "fixtures", "integration", "modal"])
+def test_no_twin_entries_are_watched(tmp_path, monkeypatch, pytest_scope, entry):
+    """(b) and (a) together: a stale NO_TWIN entry is red, and so is each deleted live one,
+    `fixtures` included, although it holds no .py file."""
     tests_dir, package_dir = _tree(tmp_path, {})
     monkeypatch.setitem(NO_TWIN, "gone", "a directory that does not exist")
     assert layout_problems(tests_dir, package_dir, **pytest_scope) == [
         "(b) NO_TWIN names tests/gone/, which does not exist: drop the entry"
     ]
     monkeypatch.delitem(NO_TWIN, "gone")
-    monkeypatch.delitem(NO_TWIN, "integration")
+    monkeypatch.delitem(NO_TWIN, entry)
     problems = layout_problems(tests_dir, package_dir, **pytest_scope)
-    assert len(problems) == 1 and problems[0].startswith("(a) tests/integration/"), problems
+    assert len(problems) == 1 and problems[0].startswith(f"(a) tests/{entry}/"), problems
