@@ -445,6 +445,29 @@ def test_e_a_dangling_symlink_loads_nothing_and_is_no_competitor(tmp_path):
     assert dead_importable_files(tmp_path) == []
 
 
+def test_e_reads_each_directory_afresh_on_every_call(tmp_path):
+    """A second call sees what the first did not: the check keeps no FileFinder between calls.
+
+    A FileFinder caches a directory's listing until the directory's mtime changes, and a
+    coarse clock (or a restored mtime) can leave it unchanged after a file is added. Here the
+    mtime is pinned by hand, so the case is deterministic: `x.py` alone, then `x.so` added
+    beside it. A finder kept from the first call still resolves `x` to `x.py` and would flag
+    the wrong file.
+    """
+    from tests.conftest import dead_importable_files
+    pinned_ns = 10**18
+
+    def pin_mtime():
+        os.utime(tmp_path, ns=(pinned_ns, pinned_ns))
+
+    _layout(tmp_path, "x.py")
+    pin_mtime()
+    assert dead_importable_files(tmp_path) == []
+    _layout(tmp_path, "x.so")
+    pin_mtime()
+    assert _relative(tmp_path, dead_importable_files(tmp_path)) == [("x.py", "x.so")]
+
+
 def _git(root: Path, *args: str) -> None:
     """`git -C root <args>`, without the GIT_* variables a hook sets (GIT_INDEX_FILE would name
     another repo's index)."""
