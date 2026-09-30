@@ -25,8 +25,10 @@ uv run python -m cs2rl.experiment.smoke_read outputs/checkpoints/rung1a/s0
 
 - A new gate or analysis: a module here with a `main(argv=None)`, launched as
   `python -m cs2rl.experiment.<module>`. If it reads metric columns, add it to `CONSUMERS` in
-  `cs2rl.eval.metrics_schema` and name it on each column it reads; `tests/eval/` compares the
-  registry with the keys each consumer reads, in both directions.
+  `cs2rl.eval.metrics_schema`, name it on each column it reads, and add its (name, path) pair
+  to the list in `consumer_key_reads` in `tests/_helpers/metrics_census.py`, where `tests/eval/`
+  reads each consumer's keys from; `tests/eval/` compares the registry with the keys each
+  consumer reads, in both directions.
 - A script that launches runs is not a module here: `scripts/run_rung1.sh` is the pattern.
 - Its tests: `tests/experiment/`.
 

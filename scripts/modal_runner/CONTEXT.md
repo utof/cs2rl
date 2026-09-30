@@ -31,7 +31,8 @@ container extracts, so a copy under `src/` would make the archived one importabl
   hand-kept mirror of `python -m cs2rl.train`'s long options.
 - Tests: `tests/modal/test_modal_<module>.py` for the module they test. THE PLACEMENT RULE FOR
   RUNNER TESTS in `tests/modal/test_modal_packaging.py` says what a test there must reach; each
-  test also needs its line in `tests/fixtures/modal_test_seam_manifest.json`.
+  test also needs its line in `tests/fixtures/modal_test_seam_manifest.json` and
+  `GOVERNED_NAME_COUNT` +1 in `tests/modal/test_modal_packaging.py`.
 
 ## Traps
 

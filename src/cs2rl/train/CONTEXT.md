@@ -16,7 +16,8 @@ every flag.
 | parts | `selfplay`, `envs`, `update`, `rewards`, `entropy`, `resume`, `metrics` | the self-play pool, env wiring and `--smoke`, the PPO loss, reward normalisation, the entropy schedule, full-state resume, metric rows |
 | base | `config` | `build_train_config` (the run's `config.json`), `env_config_from_args` |
 
-The policy network is `cs2rl.policy`, one layer below; the env is `cs2rl.env`.
+The policy network is `cs2rl.policy`, two layers below, under eval, viz and BC; the env is
+`cs2rl.env`.
 
 ## The trainer
 
@@ -51,7 +52,8 @@ behaviour on.
   `train()`, so that `--dump-config` stays light; `test_cli_module_scope_stays_light`
   (`tests/train/test_w1_modules.py`) fails on a module-level import.
 - The package exports nothing: import a name from the module that owns it. `pyproject.toml`'s
-  banned-api table names the new home of every name the old flat train module bound.
+  banned-api table bans, by name, every name the old flat train module bound; it does not say
+  where each went.
 - `__init__.py` sets `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS` and `OMP_NUM_THREADS` to 1
   unless they are already set.
 - In a worktree, put its own `src/` first: `env PYTHONPATH=<worktree>/src python -m cs2rl.train`.
