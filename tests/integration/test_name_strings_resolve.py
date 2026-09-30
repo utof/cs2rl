@@ -924,6 +924,26 @@ def test_c_string_literals_reports_each_string_at_its_line():
     assert list(c_string_literals(source)) == [(4, "x"), (5, "y")]
 
 
+@pytest.mark.parametrize("escape, value", [
+    pytest.param("\\n", "\n", id="newline"),
+    pytest.param("\\t", "\t", id="tab"),
+    pytest.param("\\r", "\r", id="carriage return"),
+    pytest.param("\\0", "\0", id="nul"),
+    pytest.param("\\\\", "\\", id="backslash"),
+    pytest.param('\\"', '"', id="double quote"),
+])
+def test_c_string_literals_decodes_an_escape_to_the_character_c_sees(escape, value):
+    """Each escape reads as the character C sees, so the text around it is judged whole.
+
+    A lexer that kept the raw character would read `"src/cs2rl/nope.py\\n"` as
+    `src/cs2rl/nope.pyn` (#287, measured with the escape lookup removed: the other C
+    controls all stayed green). One case per escape: the backslash and quote cases also
+    pin the fallback, where any other escaped character stands for itself.
+    """
+    source = f'const char* s = "a{escape}b";\n'
+    assert list(c_string_literals(source)) == [(1, f"a{value}b")]
+
+
 # Every (a)/(c) occurrence in the tracked C files at this commit, resolving or not:
 # cs2_demo.c's find_repo marker (:162), its borrow hint (:203) and its `-m` argv (:251).
 _C_OCCURRENCES = [
