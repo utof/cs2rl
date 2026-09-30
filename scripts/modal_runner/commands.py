@@ -100,7 +100,7 @@ def assemble_train_argv(
     never reaches this function.
 
     R0-J (Task 14): the map is ALWAYS emitted as `--map` (never the `--dust2`
-    alias): train.py resolves `--map` over `--dust2`, so an alias here would
+    alias): `cs2rl.train.__main__` resolves `--map` over `--dust2`, so an alias here would
     be the one flag whose presence changes nothing — and `simple` was the
     implicit no-flag default, which is exactly the kind of silent default the
     runner exists to pin. A user --map/--dust2 in train-args is rejected by

@@ -68,7 +68,7 @@ def load_rows(run_dir: Path):
     deduped ONCE here (dedupe_resume_rows) so every consumer — analyze_run
     and main's --tag section — sees the identical row list.
 
-    File order == chronological order across resume seams (train.py appends);
+    File order == chronological order across resume seams (`cs2rl.train.loop.train` appends);
     malformed lines are skipped loudly on stderr rather than crashing — a
     hard power cut can tear the final line of the previous segment.
     """

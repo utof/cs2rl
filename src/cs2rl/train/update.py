@@ -1,32 +1,34 @@
-"""PPO update helpers (#140), split out of train.py.
+"""PPO update helpers (#140), split out of the flat train.py.
 
 WHAT: the loss/reduction surface of the trainer update — the masked reductions
 every trainer statistic goes through, the hybrid discrete+continuous PPO loss,
 the TAG gradient-cosine diagnostic and its parameter partition, and the
 entropy-target schedule. Moved here VERBATIM by the 2026-08-31 post-rung1a
-refactor; ``train.py`` re-exports every name below (see its ``__all__``), so
-existing ``from cs2rl.train import X`` call sites keep working unchanged.
+refactor; the flat ``train.py`` re-exported every name below (see its ``__all__``)
+until #205 part 3 removed the re-exports: ``cs2rl.train`` exports nothing now, so
+import from this module.
 
 HISTORY (gh#168 W2a, 2026-09-25): this module also held the 911-line
 return-norm patcher whose inner 713-line ``train()`` replacement closed over 15
-freevars. That body is now ``Cs2PuffeRL.train`` in src/cs2rl/trainer.py (its
+freevars. That body is now ``cs2rl.train.trainer.Cs2PuffeRL.train`` (its
 construction-time state is ``Cs2PuffeRL._init_return_norm``, the closure
-locals are ``self._*`` attributes), and trainer.py imports the helpers below
+locals are ``self._*`` attributes), and cs2rl.train.trainer imports the helpers below
 at module scope. Nothing here touches a trainer instance any more.
 
 PITFALL (runtime rebinding): a test that wants to intercept ``tag_grad_cossim``
-at its call site must patch it on ``trainer`` (src/cs2rl/trainer.py), NOT on this
-module and NOT on ``train`` — the call site inside ``Cs2PuffeRL.train`` resolves
-the name through trainer.py's globals, so a patch here is silently unreachable
+at its call site must patch it on ``cs2rl.train.trainer``, NOT on this module —
+the call site inside ``Cs2PuffeRL.train`` resolves the name through
+cs2rl.train.trainer's globals, so a patch here is silently unreachable
 and the assertion becomes vacuous. See tests/test_tag_trainer.py, whose
 positive control pins the reachable module.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in train_shared.py's header. Every torch, pufferlib and
-train_helpers_batch1 import below is function-local ON PURPOSE.
+reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+load-bearing). Every torch, pufferlib and cs2rl.train.entropy import below is
+function-local ON PURPOSE.
 """
 
-from cs2rl.train_shared import _LOG_2PI, _apply_action_masks
+from cs2rl.policy import _LOG_2PI, _aim_dim_weight, _apply_action_masks
 
 # ── Masked reductions over participating rows (Rung 0, spec 2026-08-29 §2.2) ──
 # WHY these are free functions and not methods on the trainer: the trainer is a
@@ -107,14 +109,14 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
     """Config-driven entropy target for the SAC-style α controller.
 
     Single source for both the construction-time seed (Cs2PuffeRL._init_return_norm)
-    and the per-call recompute in Cs2PuffeRL.train (src/cs2rl/trainer.py) — keeping them identical
+    and the per-call recompute in cs2rl.train.trainer.Cs2PuffeRL.train — keeping them identical
     means a checkpoint-resumed trainer seeds at its true scheduled value
     instead of a hardcoded warmup constant. `config` is anything with
     .get() (PuffeRL config or a plain dict); missing keys fall back to the
     build_train_config defaults so harness/older-checkpoint configs keep
     working.
     """
-    from cs2rl.train_helpers_batch1 import target_entropy_schedule
+    from cs2rl.train.entropy import target_entropy_schedule
     return target_entropy_schedule(
         global_step,
         max_entropy,
@@ -122,23 +124,6 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
         warmup_high_frac=config.get("entropy_target_warmup_frac", 0.5),
         base_frac=config.get("entropy_target_base_frac", 0.35),
     )
-
-
-def _aim_dim_weight(aim_dim_mask, mu_aim):
-    """(AIM_DIM,) weight for the per-dim Gaussian terms (R0-E.2, #131).
-
-    WHAT: ``aim_dim_mask`` moved to mu_aim's device/dtype, or all-ones when
-    None. Shared by _hybrid_sample_logits and _hybrid_ppo_loss so the rollout
-    and the update can never disagree on which dims are live — that
-    disagreement would be an importance-ratio bug no single-site test sees.
-    PITFALL: returns ones (not None) on the None path so callers can multiply
-    unconditionally; the multiply by ones is exact in fp32.
-    """
-    import torch
-
-    if aim_dim_mask is None:
-        return torch.ones(mu_aim.shape[-1], device=mu_aim.device, dtype=mu_aim.dtype)
-    return aim_dim_mask.to(device=mu_aim.device, dtype=mu_aim.dtype)
 
 
 def _hybrid_ppo_loss(policy,

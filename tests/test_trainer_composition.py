@@ -23,11 +23,11 @@ PACKAGE = Path(__file__).resolve().parents[1] / "src" / "cs2rl"
 # reads must be backed by constructor state. The save body moved to the class
 # in W2c; all three public bodies now resolve from trainer.py.
 ANCHOR_FUNCTIONS = (
-    ("trainer.py", "Cs2PuffeRL.train"),
-    ("trainer.py", "Cs2PuffeRL.evaluate"),
-    ("trainer.py", "Cs2PuffeRL.save_checkpoint"),
-    ("resume_state.py", "collect_train_state"),
-    ("resume_state.py", "restore_train_state"),
+    ("train/trainer.py", "Cs2PuffeRL.train"),
+    ("train/trainer.py", "Cs2PuffeRL.evaluate"),
+    ("train/trainer.py", "Cs2PuffeRL.save_checkpoint"),
+    ("train/resume.py", "collect_train_state"),
+    ("train/resume.py", "restore_train_state"),
 )
 # 22 required data names: 19 after W2a plus three self-play fields after W2b.
 # W2c uses the already-anchored `_self_play_mgr`, so this count stays 22.
@@ -159,7 +159,7 @@ def composed(monkeypatch):
     """
     from pufferlib.pufferl import PuffeRL
 
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     stock = {}
     orig_init = PuffeRL.__init__
@@ -184,7 +184,7 @@ def composed(monkeypatch):
 def test_harness_returns_a_direct_pufferl_subclass(composed):
     from pufferlib.pufferl import PuffeRL
 
-    from cs2rl.trainer import Cs2PuffeRL
+    from cs2rl.train.trainer import Cs2PuffeRL
     trainer, stock = composed
     assert type(trainer) is Cs2PuffeRL, (
         f"_build_trainer_for_test returned a {type(trainer).__name__}; since gh#168 W1.5 the "
@@ -282,7 +282,7 @@ def derive_constructor_surface():
 
     The constructor and called initializers own every added runtime field.
     """
-    trainer_tree = ast.parse((PACKAGE / "trainer.py").read_text())
+    trainer_tree = ast.parse((PACKAGE / "train" / "trainer.py").read_text())
     cls = next(n for n in trainer_tree.body
                if isinstance(n, ast.ClassDef) and n.name == "Cs2PuffeRL")
     methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
@@ -313,7 +313,7 @@ def test_constructed_surface_equals_declared_constructor_surface(composed):
 
 
 def test_every_attribute_the_bodies_read_is_declared(composed):
-    from cs2rl.train_shared import _WARMSTART_ATTRS
+    from cs2rl.train.resume import _WARMSTART_ATTRS
     trainer, stock = composed
     # Class attributes are excluded through the INSTANCE's class, not PuffeRL: at W1 the
     # two agree (the 18-name count below asserts it), and from W2a on Cs2PuffeRL's own
@@ -334,7 +334,7 @@ def test_save_checkpoint_is_the_class_method(composed):
     """The full-state checkpoint body belongs to the subclass and has no instance binding."""
     from pufferlib.pufferl import PuffeRL
 
-    from cs2rl.trainer import Cs2PuffeRL
+    from cs2rl.train.trainer import Cs2PuffeRL
     trainer, _ = composed
     cls = type(trainer)
     assert cls.save_checkpoint is Cs2PuffeRL.save_checkpoint
@@ -357,7 +357,7 @@ def test_train_is_the_class_method(composed):
     """
     from pufferlib.pufferl import PuffeRL
 
-    from cs2rl.trainer import Cs2PuffeRL
+    from cs2rl.train.trainer import Cs2PuffeRL
     trainer, _ = composed
     cls = type(trainer)
     assert cls.train is Cs2PuffeRL.train and cls.train is not PuffeRL.train, (
@@ -384,7 +384,7 @@ def test_evaluate_is_the_class_method(composed):
     """
     from pufferlib.pufferl import PuffeRL
 
-    from cs2rl.trainer import Cs2PuffeRL
+    from cs2rl.train.trainer import Cs2PuffeRL
     trainer, _ = composed
     cls = type(trainer)
     assert cls.evaluate is Cs2PuffeRL.evaluate and cls.evaluate is not PuffeRL.evaluate, (
@@ -426,8 +426,8 @@ def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path)
 
     from pufferlib.pufferl import Utilization
 
-    from cs2rl import trainer as trainer_mod
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.train import trainer as trainer_mod
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     def _boom(self, self_play_mgr):
         raise RuntimeError("simulated patch-time failure")

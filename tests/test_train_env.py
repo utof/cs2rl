@@ -8,30 +8,33 @@ self-play state (``Cs2PuffeRL._init_selfplay`` / ``evaluate``, gh#168 W2b).
 """
 import numpy as np
 
-from cs2rl import train
+from cs2rl import policy as policy_mod
 from cs2rl.env.c.cs2_env import make_env
+from cs2rl.spec import action as spec_action
+from cs2rl.spec import obs as spec_obs
+from cs2rl.train import envs as train_envs
 
 
 def test_make_env_reset_returns_expected_batch():
     env = make_env(seed=123)
     try:
         obs, info = env.reset(seed=123)
-        assert obs.shape == (10, train.OBS_DIM)
-        assert env.single_observation_space.shape == (train.OBS_DIM, )
+        assert obs.shape == (10, spec_obs.OBS_DIM)
+        assert env.single_observation_space.shape == (spec_obs.OBS_DIM, )
         assert np.isfinite(obs).all(), "reset returned NaN/Inf obs"
     finally:
         env.close()
 
 
 def test_make_env_alias_steps_without_nan():
-    env = train.make_env()
+    env = train_envs.make_env()
     try:
         obs, _ = env.reset(seed=7)
-        actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        actions = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
         next_obs, rewards, terms, truncs, info = env.step(actions)
 
-        assert obs.shape == (10, train.OBS_DIM)
-        assert next_obs.shape == (10, train.OBS_DIM)
+        assert obs.shape == (10, spec_obs.OBS_DIM)
+        assert next_obs.shape == (10, spec_obs.OBS_DIM)
         assert rewards.shape == (10, )
         assert terms.shape == (10, )
         assert truncs.shape == (10, )
@@ -42,7 +45,7 @@ def test_make_env_alias_steps_without_nan():
 
 
 def test_compute_game_metrics_surfaces_new_keys_without_backfilling_plant_tick():
-    from cs2rl.train import compute_game_metrics
+    from cs2rl.train.metrics import compute_game_metrics
     old = {
         "environment/winner_t": 0.4,
         "environment/winner_ct": 0.6,
@@ -112,8 +115,8 @@ def test_make_env_default_keeps_step_stats_off():
 def test_selfplay_init_attaches_welford_and_event_mask():
     """Task 6c: Cs2PuffeRL._init_selfplay must attach three WelfordStd
     instances and two event-mask buffers to the trainer object."""
-    from cs2rl.train_helpers_batch1 import WelfordStd
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.train.rewards import WelfordStd
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         # Pin config values too — a silent change to prior_std or min_count
@@ -149,8 +152,8 @@ def test_rewards_not_clamped_to_unit_range():
     """
     import inspect
 
-    from cs2rl.train_test_harness import _build_trainer_for_test
-    from cs2rl.trainer import Cs2PuffeRL
+    from cs2rl.train.trainer import Cs2PuffeRL
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     src = inspect.getsource(Cs2PuffeRL)
     assert "torch.clamp(r, -1, 1)" not in src, (
@@ -199,7 +202,7 @@ def test_event_mask_flushed_and_reset_at_segment_boundary():
     Independent of bomb_planted plumbing — this exercises only the flush.
     """
 
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         # Force accumulator True for agent row 0 BEFORE evaluate() runs.
@@ -243,7 +246,7 @@ def test_event_mask_detects_injected_bomb_planted():
     which works on any Mapping. This avoids driving the C env to plant a bomb.
     """
 
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         # Baseline — ensure no stale event bits.
@@ -258,11 +261,7 @@ def test_event_mask_detects_injected_bomb_planted():
         # event trigger. Anything else raises KeyError so that if Task 4's
         # routed-field list ever grows, this test fails loudly instead of
         # silently returning 0 and painting a false-green picture.
-        from cs2rl.train_helpers_batch1 import (
-            _COMBAT_FIELDS,
-            _OBJECTIVE_FIELDS,
-            _POSITIONAL_FIELDS,
-        )
+        from cs2rl.train.rewards import _COMBAT_FIELDS, _OBJECTIVE_FIELDS, _POSITIONAL_FIELDS
         _ALLOWED_STUB_FIELDS = frozenset(_COMBAT_FIELDS + _OBJECTIVE_FIELDS + _POSITIONAL_FIELDS +
                                          ("reward_win", "win_by_detonation", "win_by_defuse",
                                           "bomb_planted"))
@@ -371,7 +370,7 @@ def test_prio_probs_event_oversample():
         so a +20pp lift can only come from the boost actually running."""
     import torch
 
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -420,7 +419,7 @@ def test_prio_probs_no_events_fallback():
     metric must be 0.0."""
     import torch
 
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -448,7 +447,7 @@ def test_event_oversample_fraction_exposed():
     """Task 8: the metric reports the RAW event-segment fraction (mask mean),
     not the post-boost sampled fraction. With half the mask True the metric
     must land in [0.4, 0.6]."""
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -504,12 +503,9 @@ def test_target_entropy_schedule_applied():
     """
     import math
 
-    from cs2rl.train import (
-        ACTION_HEAD_SIZES,
-        AIM_DIM,
-        LOG_STD_MAX,
-    )
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.policy import LOG_STD_MAX
+    from cs2rl.spec.action import ACTION_HEAD_SIZES, AIM_DIM
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -579,7 +575,7 @@ def test_log_alpha_reset_at_batch_start():
     re-reset (idempotent via the _batch1_log_alpha_reset_done flag)."""
     import math
 
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -614,7 +610,7 @@ def test_batch1_metrics_exposed():
     (set by Task 8), and grad_norm (pre-clip)."""
     import math
 
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -653,7 +649,7 @@ def test_return_norm_stats_reset_on_batch_start():
     Reading them BEFORE any train() call pins the patch-time invariant —
     this is what guarantees a fresh start in symlog space when Batch 1 is
     enabled on a previously-trained checkpoint."""
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -673,7 +669,7 @@ def test_ret_var_reflects_symlog_scale():
     return std lands well under 10. The 10.0 threshold is a soft sanity
     bound: anything much higher would indicate the symlog/normalise
     pipeline isn't actually feeding the value head."""
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -726,7 +722,7 @@ def test_round_designated_carrier_stable_through_drop():
         rid_at_start = g.round_designated_carrier_id
         g.agents[rid_at_start].hp = 0
         g.agents[rid_at_start].alive = 0
-        actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        actions = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
         for _ in range(20):
             env.step(actions)
             assert g.round_designated_carrier_id == rid_at_start, (
@@ -750,7 +746,7 @@ def test_round_designated_carrier_property_50_seeds():
     Cheap; catches accidental writes from any code path (combat, bomb,
     movement, etc.).
     """
-    actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+    actions = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
     for seed in range(50):
         env = make_env(seed=seed)
         try:
@@ -796,7 +792,7 @@ def test_obs_designated_carrier_bit_t_side():
         rid = g.round_designated_carrier_id
         # Take one step to populate observations (env_reset zeroes the buffer;
         # compute_observations only runs inside env_step).
-        actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        actions = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
         obs, *_ = env.step(actions)
 
         # T side
@@ -847,7 +843,7 @@ def test_post_pickup_plant_mask_unmasked():
         env.reset(seed=21)
         g = env._c_env.game
         rid = g.round_designated_carrier_id
-        actions = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        actions = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
 
         # Step 1: kill the carrier; env_step performs drop-on-death and (if a
         # teammate is within 32 units) the auto-pickup atomically in the same
@@ -907,8 +903,8 @@ def test_post_pickup_plant_mask_unmasked():
         # agents, so the test was vacuously green. Derive the offset from the
         # head-name index instead of a hardcoded count so a future head
         # reorder can't silently re-vacuous it.
-        use_head_idx = train.ACTION_HEAD_NAMES.index("use")
-        use_mask_offset = sum(train.ACTION_HEAD_SIZES[:use_head_idx])
+        use_head_idx = spec_action.ACTION_HEAD_NAMES.index("use")
+        use_mask_offset = sum(spec_action.ACTION_HEAD_SIZES[:use_head_idx])
         assert use_mask_offset == 16, "USE head offset drifted; check ACTION_HEAD_SIZES order"
         masks_open = False
         steps_taken = 0
@@ -945,16 +941,16 @@ def test_obs_dim_constant_consistency():
     against the env by test_make_env_reset_returns_expected_batch. The
     TEAM_SIZE literals are cross-checked here too.
     """
-    from cs2rl import train as t
     from cs2rl.env import nav
+    from cs2rl.train import config as train_config
     assert nav.OBS_DIM == 110, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 110 for Batch 6 Task 2.5"
     # Rung 0 (spec 2026-08-29 §2.2): train.TEAM_SIZE is a bare literal (train_shared
     # must stay free of the nav import), so it needs a drift guard —
     # it divides the participating-step budget and builds the per-row
     # participation vector.
     from cs2rl.env.c import cs2_env
-    assert t.TEAM_SIZE == nav.TEAM_SIZE == cs2_env.TEAM_SIZE, (
-        f"train.TEAM_SIZE ({t.TEAM_SIZE}) / nav.TEAM_SIZE ({nav.TEAM_SIZE}) / "
+    assert train_config.TEAM_SIZE == nav.TEAM_SIZE == cs2_env.TEAM_SIZE, (
+        f"train.TEAM_SIZE ({train_config.TEAM_SIZE}) / nav.TEAM_SIZE ({nav.TEAM_SIZE}) / "
         f"cs2_env.TEAM_SIZE ({cs2_env.TEAM_SIZE}) disagree")
     env = make_env(seed=0)
     try:
@@ -969,11 +965,11 @@ def test_team_size_literals_agree():
     """env_config.TEAM_SIZE and train_shared.TEAM_SIZE are literals (both leaves
     refuse to import nav just to read a 5). This is the cross-check that makes
     the literals safe (spec 2026-09-03 §2.1)."""
-    from cs2rl import train_shared
     from cs2rl.env import config as env_config
     from cs2rl.env import nav
     from cs2rl.env.c.cs2_env import TEAM_SIZE as c_team
-    assert env_config.TEAM_SIZE == train_shared.TEAM_SIZE == nav.TEAM_SIZE == c_team
+    from cs2rl.train import config as train_config
+    assert env_config.TEAM_SIZE == train_config.TEAM_SIZE == nav.TEAM_SIZE == c_team
 
 
 def test_obs_blocks_tile_obs_dim():
@@ -1163,8 +1159,8 @@ def test_policy_forward_emits_mu_and_logstd():
     from cs2rl.spec import action as spec
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
-        x = torch.zeros((1, train.OBS_DIM))
+        policy = policy_mod.build_policy(env, device='cpu')
+        x = torch.zeros((1, spec_obs.OBS_DIM))
         logits, mu_aim, log_std, value = policy.forward(x, state={})
         assert len(logits) == spec.ACTION_DIM == 7, (
             f"got {len(logits)} discrete heads, expected 7")
@@ -1189,13 +1185,13 @@ def test_logstd_clamp_lower():
     import torch
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
+        policy = policy_mod.build_policy(env, device='cpu')
         with torch.no_grad():
-            policy.aim_log_std.fill_(-100.0)                           # exp(-100) ≈ 0
-        x = torch.zeros((1, train.OBS_DIM))
+            policy.aim_log_std.fill_(-100.0)                            # exp(-100) ≈ 0
+        x = torch.zeros((1, spec_obs.OBS_DIM))
         _, _, log_std, _ = policy.forward(x, state={})
-        assert log_std.min().item() >= train.LOG_STD_MIN - 1e-6, (
-            f"log_std={log_std.min().item()} below LOG_STD_MIN={train.LOG_STD_MIN}")
+        assert log_std.min().item() >= policy_mod.LOG_STD_MIN - 1e-6, (
+            f"log_std={log_std.min().item()} below LOG_STD_MIN={policy_mod.LOG_STD_MIN}")
     finally:
         env.close()
 
@@ -1207,13 +1203,13 @@ def test_logstd_clamp_upper():
     import torch
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
+        policy = policy_mod.build_policy(env, device='cpu')
         with torch.no_grad():
             policy.aim_log_std.fill_(100.0)
-        x = torch.zeros((1, train.OBS_DIM))
+        x = torch.zeros((1, spec_obs.OBS_DIM))
         _, _, log_std, _ = policy.forward(x, state={})
-        assert log_std.max().item() <= train.LOG_STD_MAX + 1e-6, (
-            f"log_std={log_std.max().item()} above LOG_STD_MAX={train.LOG_STD_MAX}")
+        assert log_std.max().item() <= policy_mod.LOG_STD_MAX + 1e-6, (
+            f"log_std={log_std.max().item()} above LOG_STD_MAX={policy_mod.LOG_STD_MAX}")
     finally:
         env.close()
 
@@ -1246,8 +1242,8 @@ def test_hybrid_sample_writes_two_buffers():
     from cs2rl.spec.action import AIM_DIM
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
-        x = torch.zeros((1, train.OBS_DIM))
+        policy = policy_mod.build_policy(env, device='cpu')
+        x = torch.zeros((1, spec_obs.OBS_DIM))
         action, cont_action, lp, ent, val, _ = policy.get_action_and_value(x)
         assert action.shape == (1, 7), f"action.shape={action.shape}"
         assert action.dtype in (torch.int64, torch.long), \
@@ -1285,7 +1281,7 @@ def test_hybrid_sample_logits_returns_per_factor_halves():
     """
     import torch
 
-    from cs2rl.train import _hybrid_sample_logits
+    from cs2rl.policy import _hybrid_sample_logits
 
     torch.manual_seed(42)
     B = 16
@@ -1340,9 +1336,9 @@ def test_hybrid_loss_clip_applies_per_factor():
 
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
+        policy = policy_mod.build_policy(env, device='cpu')
         B = 4
-        mb_obs = torch.zeros((B, train.OBS_DIM))
+        mb_obs = torch.zeros((B, spec_obs.OBS_DIM))
         mb_actions = torch.zeros((B, 7), dtype=torch.int64)
         mb_cont_actions = torch.zeros((B, 1), dtype=torch.float32)
         mb_advantages = torch.ones(B)
@@ -1362,7 +1358,7 @@ def test_hybrid_loss_clip_applies_per_factor():
         mb_old_logp_d = new_logp_d_seed - 1.0          # ratio_d = e^1 ≈ 2.72 → outside clip
         mb_old_logp_c = new_logp_c_seed - 0.05         # ratio_c ≈ 1.05 → inside clip
 
-        from cs2rl.train import _hybrid_ppo_loss
+        from cs2rl.train.update import _hybrid_ppo_loss
         pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c, _lg = _hybrid_ppo_loss(
             policy,
             mb_obs,
@@ -1395,21 +1391,22 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
     """
     import torch
 
-    from cs2rl import train
+    from cs2rl import policy as policy_mod
+    from cs2rl.spec import obs as spec_obs
 
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
+        policy = policy_mod.build_policy(env, device='cpu')
         torch.manual_seed(13)
         B = 8
-        mb_obs = torch.randn((B, train.OBS_DIM)) * 0.5
+        mb_obs = torch.randn((B, spec_obs.OBS_DIM)) * 0.5
         mb_actions = torch.randint(0, 2, (B, 7), dtype=torch.int64)
         mb_cont_actions = (torch.rand(B, 1) - 0.5) * 0.4               # within ±π/4
         mb_advantages = torch.randn(B)
         mb_old_logp_d = torch.zeros(B)
         mb_old_logp_c = torch.zeros(B)
 
-        from cs2rl.train import _hybrid_ppo_loss
+        from cs2rl.train.update import _hybrid_ppo_loss
         pg_loss, entropy, new_value, new_logp_total, ratio_d, ratio_c, _lg = (_hybrid_ppo_loss(
             policy,
             mb_obs,
@@ -1473,11 +1470,12 @@ def test_pbrs_gamma_matches_training_gamma():
 
     import pytest
 
-    from cs2rl import train
     from cs2rl.env.config import EnvConfig
+    from cs2rl.train import config as train_config
+    from cs2rl.train import resume as train_resume
 
     args = SimpleNamespace(seed=0, timesteps=1_000, checkpoint_dir="/tmp/unused", device="cpu")
-    cfg = train.build_train_config(args, batch_size=1024, bptt_horizon=64)
+    cfg = train_config.build_train_config(args, batch_size=1024, bptt_horizon=64)
 
     env = make_env(seed=0)
     try:
@@ -1500,7 +1498,7 @@ def test_pbrs_gamma_matches_training_gamma():
                             device="cpu",
                             gamma=0.999,
                             pbrs_gamma=0.99)
-    cfg2 = train.build_train_config(args2, batch_size=1024, bptt_horizon=64)
+    cfg2 = train_config.build_train_config(args2, batch_size=1024, bptt_horizon=64)
     assert cfg2["gamma"] == 0.999 and cfg2["pbrs_gamma"] == 0.99
     args3 = SimpleNamespace(seed=0,
                             timesteps=1_000,
@@ -1508,11 +1506,11 @@ def test_pbrs_gamma_matches_training_gamma():
                             device="cpu",
                             gamma=0.99,
                             pbrs_gamma=None)
-    cfg3 = train.build_train_config(args3, batch_size=1024, bptt_horizon=64)
+    cfg3 = train_config.build_train_config(args3, batch_size=1024, bptt_horizon=64)
     assert cfg3["gamma"] == 0.99 and cfg3["pbrs_gamma"] == 0.99
-    assert train.env_config_from_args(args3).pbrs_gamma == 0.99
-    assert "gamma" not in train.RESUME_CONFIG_ALLOWLIST
-    assert "pbrs_gamma" not in train.RESUME_CONFIG_ALLOWLIST
+    assert train_config.env_config_from_args(args3).pbrs_gamma == 0.99
+    assert "gamma" not in train_resume.RESUME_CONFIG_ALLOWLIST
+    assert "pbrs_gamma" not in train_resume.RESUME_CONFIG_ALLOWLIST
 
     # N3 fix: make_puffer_env must expose pbrs_gamma for per-experiment
     # overrides (previously the training γ could not be threaded through
@@ -1540,10 +1538,11 @@ def test_entropy_target_config_threading():
 
     import pytest
 
-    from cs2rl import train
+    from cs2rl.train import config as train_config
+    from cs2rl.train import update as train_update
 
     args = SimpleNamespace(seed=0, timesteps=1_000, checkpoint_dir="/tmp/unused", device="cpu")
-    cfg = train.build_train_config(args, batch_size=1024, bptt_horizon=64)
+    cfg = train_config.build_train_config(args, batch_size=1024, bptt_horizon=64)
     assert cfg["entropy_target_warmup_frac"] == 0.5
     assert cfg["entropy_target_base_frac"] == 0.35
     assert cfg["entropy_target_warmup_steps"] == 10_000_000
@@ -1551,10 +1550,10 @@ def test_entropy_target_config_threading():
     assert cfg["entropy_target_base_frac"] > 0.3
 
     max_ent = 8.0
-    assert train._scheduled_target_entropy(cfg, 0, max_ent) == pytest.approx(0.5 * max_ent)
-    assert train._scheduled_target_entropy(cfg, 10_000_000, max_ent) == \
+    assert train_update._scheduled_target_entropy(cfg, 0, max_ent) == pytest.approx(0.5 * max_ent)
+    assert train_update._scheduled_target_entropy(cfg, 10_000_000, max_ent) == \
         pytest.approx(0.35 * max_ent)
-    assert train._scheduled_target_entropy(cfg, 30_000_000, max_ent) == \
+    assert train_update._scheduled_target_entropy(cfg, 30_000_000, max_ent) == \
         pytest.approx(0.35 * max_ent)
 
     custom = {
@@ -1562,12 +1561,12 @@ def test_entropy_target_config_threading():
         "entropy_target_base_frac": 0.21,
         "entropy_target_warmup_steps": 100,
     }
-    assert train._scheduled_target_entropy(custom, 0, 10.0) == pytest.approx(4.2)
-    assert train._scheduled_target_entropy(custom, 50, 10.0) == pytest.approx(3.15)
-    assert train._scheduled_target_entropy(custom, 100, 10.0) == pytest.approx(2.1)
+    assert train_update._scheduled_target_entropy(custom, 0, 10.0) == pytest.approx(4.2)
+    assert train_update._scheduled_target_entropy(custom, 50, 10.0) == pytest.approx(3.15)
+    assert train_update._scheduled_target_entropy(custom, 100, 10.0) == pytest.approx(2.1)
 
     # Missing keys → same defaults as build_train_config (config .get fallback).
-    assert train._scheduled_target_entropy({}, 0, max_ent) == pytest.approx(0.5 * max_ent)
+    assert train_update._scheduled_target_entropy({}, 0, max_ent) == pytest.approx(0.5 * max_ent)
 
 
 def test_hybrid_ppo_loss_normalizes_advantages():
@@ -1588,21 +1587,22 @@ def test_hybrid_ppo_loss_normalizes_advantages():
     """
     import torch
 
-    from cs2rl import train
+    from cs2rl import policy as policy_mod
+    from cs2rl.spec import obs as spec_obs
 
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
+        policy = policy_mod.build_policy(env, device='cpu')
         torch.manual_seed(7)
         B = 32
-        mb_obs = torch.randn((B, train.OBS_DIM)) * 0.5
+        mb_obs = torch.randn((B, spec_obs.OBS_DIM)) * 0.5
         mb_actions = torch.randint(0, 2, (B, 7), dtype=torch.int64)
         mb_cont_actions = (torch.rand(B, 1) - 0.5) * 0.4
         mb_advantages = torch.randn(B)
         mb_old_logp_d = torch.zeros(B)
         mb_old_logp_c = torch.zeros(B)
 
-        from cs2rl.train import _hybrid_ppo_loss
+        from cs2rl.train.update import _hybrid_ppo_loss
 
         def loss_of(adv, prio=None):
             pg_loss, *_ = _hybrid_ppo_loss(
@@ -1668,11 +1668,11 @@ def test_policy_forward_bptt_matches_stepwise_rollout():
 
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
+        policy = policy_mod.build_policy(env, device='cpu')
         policy.eval()
         torch.manual_seed(0)
         B, T = 3, 6
-        x_seq = torch.randn(B, T, train.OBS_DIM)
+        x_seq = torch.randn(B, T, spec_obs.OBS_DIM)
 
         # Stepwise rollout path: forward_eval threads lstm_h/lstm_c via state.
         state = {"done": torch.zeros(B)}
@@ -1712,13 +1712,13 @@ def test_policy_forward_bptt_carries_memory():
 
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
+        policy = policy_mod.build_policy(env, device='cpu')
         policy.eval()
         torch.manual_seed(1)
         T = 5
-        last_obs = torch.randn(1, train.OBS_DIM)
-        hist_a = torch.zeros(1, T - 1, train.OBS_DIM)
-        hist_b = torch.randn(1, T - 1, train.OBS_DIM)
+        last_obs = torch.randn(1, spec_obs.OBS_DIM)
+        hist_a = torch.zeros(1, T - 1, spec_obs.OBS_DIM)
+        hist_b = torch.randn(1, T - 1, spec_obs.OBS_DIM)
         seq_a = torch.cat([hist_a, last_obs.unsqueeze(1)], dim=1)      # (1, T, OBS)
         seq_b = torch.cat([hist_b, last_obs.unsqueeze(1)], dim=1)
 
@@ -1744,11 +1744,11 @@ def test_policy_forward_bptt_resets_on_terminal():
 
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
+        policy = policy_mod.build_policy(env, device='cpu')
         policy.eval()
         torch.manual_seed(2)
         B, T, k = 2, 6, 3
-        x_seq = torch.randn(B, T, train.OBS_DIM)
+        x_seq = torch.randn(B, T, spec_obs.OBS_DIM)
         terminals = torch.zeros(B, T)
         terminals[0, k] = 1.0          # row 0 episode ends before tick k
 
@@ -1780,8 +1780,8 @@ def test_train_path_logprobs_match_rollout():
     pre-fix the stateless training forward breaks it by construction."""
     import torch
 
-    from cs2rl.train import _hybrid_ppo_loss
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.train.update import _hybrid_ppo_loss
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=False)
     try:
@@ -1838,11 +1838,11 @@ def test_hybrid_sample_logits_respects_masks():
     entropy NaN-free — same distribution, different fill)."""
     import torch
 
-    from cs2rl.train import _MASK_HEAD_SLICES, _hybrid_sample_logits
+    from cs2rl.policy import _MASK_HEAD_SLICES, _hybrid_sample_logits
 
     torch.manual_seed(7)
     B = 64
-    head_sizes = train.ACTION_HEAD_SIZES
+    head_sizes = spec_action.ACTION_HEAD_SIZES
     mask_dim = sum(head_sizes)
     logits_list = [torch.randn(B, n) for n in head_sizes]
     mu_aim = torch.zeros(B, 2)
@@ -1897,18 +1897,19 @@ def test_sampler_and_loss_mask_consistency():
     side only (the failure mode the F8 docstrings warn about)."""
     import torch
 
-    from cs2rl.train import _hybrid_ppo_loss, _hybrid_sample_logits
+    from cs2rl.policy import _hybrid_sample_logits
+    from cs2rl.train.update import _hybrid_ppo_loss
 
     torch.manual_seed(11)
     B = 32
-    head_sizes = train.ACTION_HEAD_SIZES
+    head_sizes = spec_action.ACTION_HEAD_SIZES
     mask_dim = sum(head_sizes)
     logits_list = [torch.randn(B, n) for n in head_sizes]
     mu_aim = torch.randn(B, 2) * 0.1
     log_std_aim = torch.full((2, ), -2.30)
     value = torch.zeros(B, 1)
 
-    from cs2rl.train import _MASK_HEAD_SLICES
+    from cs2rl.policy import _MASK_HEAD_SLICES
     mask = (torch.rand(B, mask_dim) > 0.3)
     for (lo, _hi) in _MASK_HEAD_SLICES:
         mask[:, lo] = True
@@ -1943,7 +1944,7 @@ def test_sampler_and_loss_mask_consistency():
                                                                                                 # F16: the loss returns the logits it computed (7th element) so the
                                                                                                 # trainer skips the redundant diagnostic forward. With mb_masks given
                                                                                                 # they must be the MASKED logits — masked bins pushed to huge negatives.
-    from cs2rl.train import _MASK_HEAD_SLICES as _slices
+    from cs2rl.policy import _MASK_HEAD_SLICES as _slices
     for h, (lo, hi) in enumerate(_slices):
         head_mask = mask[:, lo:hi]
         if (~head_mask).any():
@@ -1996,12 +1997,12 @@ def test_env_publishes_masks_after_reset_and_step():
         g = env._c_env.game
         g.agents[0].hp = 0
         g.agents[0].alive = 0
-        actions = np.zeros((n_agents, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        actions = np.zeros((n_agents, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
         env.step(actions)
         assert (view == env._masks_view).all(), "shm != _masks_view after step"
-        offs = np.cumsum((0, ) + tuple(train.ACTION_HEAD_SIZES))[:-1]
+        offs = np.cumsum((0, ) + tuple(spec_action.ACTION_HEAD_SIZES))[:-1]
         dead = view[0]
-        assert dead.sum() == len(train.ACTION_HEAD_SIZES), (
+        assert dead.sum() == len(spec_action.ACTION_HEAD_SIZES), (
             f"dead agent should have exactly one valid bin per head, got {dead.tolist()}")
         assert all(dead[o] == 1
                    for o in offs), (f"dead agent per-head no-ops not set: {dead.tolist()}")
@@ -2019,8 +2020,8 @@ def test_action_use_counter_wired():
     env = make_env(seed=0)
     try:
         env.reset()
-        use_head = list(train.ACTION_HEAD_NAMES).index("use")
-        acts = np.zeros((10, len(train.ACTION_HEAD_SIZES)), dtype=np.int32)
+        use_head = list(spec_action.ACTION_HEAD_NAMES).index("use")
+        acts = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
         acts[:, use_head] = 1
         for _ in range(5):
             env.step(acts)

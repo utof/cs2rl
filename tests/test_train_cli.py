@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TRAIN_SCRIPT = REPO_ROOT / "src" / "cs2rl" / "train.py"
+TRAIN_SCRIPT = REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py"
 
 
 # gh#95: 600s (not 180s) because the --smoke subprocess competes with a live GPU
@@ -354,11 +354,11 @@ def test_opponent_flag_declared_with_both_modes():
 
     src = TRAIN_SCRIPT.read_text()
     m = re.search(r'add_argument\(\s*"--opponent",(.*?)\)\n', src, re.S)
-    assert m, "--opponent not declared in train.py"
+    assert m, "--opponent not declared in train/__main__.py"
     body = m.group(1)
     assert "choices=OPPONENT_MODES" in body and 'default="self"' in body, body
     assert 'dest="opponent"' in body, body
-    config_src = (REPO_ROOT / "src" / "cs2rl" / "train_config.py").read_text()
+    config_src = (REPO_ROOT / "src" / "cs2rl" / "train" / "config.py").read_text()
     assert 'OPPONENT_MODES = ("self", "noop")' in config_src
 
 

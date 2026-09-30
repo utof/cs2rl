@@ -310,15 +310,17 @@ def test_knockout_the_three_island_interior_blind_shapes_are_now_reported(tmp_pa
     Deleting the setdefault branch of `site_write_targets`/`metrics_write_sites`,
     or the container check in `undeclared_container_writes`, fails here.
     """
-    (tmp_path / "train_metrics.py").write_text("def compute_game_metrics(logs):\n"
-                                               "    game_metrics = {}\n"
-                                               "    def _emit(out):\n"
-                                               "        out['game/probe_param'] = 1.0\n"
-                                               "    _emit(game_metrics)\n"
-                                               "    alias = game_metrics\n"
-                                               "    alias['game/probe_alias'] = 1.0\n"
-                                               "    game_metrics.setdefault('game/probe_sd', 1.0)\n"
-                                               "    return game_metrics\n")
+    (tmp_path / "train").mkdir()
+    (tmp_path / "train" / "metrics.py").write_text(
+        "def compute_game_metrics(logs):\n"
+        "    game_metrics = {}\n"
+        "    def _emit(out):\n"
+        "        out['game/probe_param'] = 1.0\n"
+        "    _emit(game_metrics)\n"
+        "    alias = game_metrics\n"
+        "    alias['game/probe_alias'] = 1.0\n"
+        "    game_metrics.setdefault('game/probe_sd', 1.0)\n"
+        "    return game_metrics\n")
     sweep = census.metrics_write_sites(src=tmp_path)
     assert {w.key
             for w in sweep} == {"game/probe_param", "game/probe_alias", "game/probe_sd"

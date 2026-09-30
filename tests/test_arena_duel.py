@@ -105,7 +105,7 @@ def test_preset_geometry():
     assert ARENA_DUEL_V1["cell_size"] == 20.0
 
     # R0-E.2 geometry resolver (Task 9) agrees with the spec: flat ⇒ pinned.
-    from cs2rl.train import pin_pitch_for_map
+    from cs2rl.train.envs import pin_pitch_for_map
     assert pin_pitch_for_map(md) == 1
 
 
@@ -284,7 +284,7 @@ def test_check_spawn_counts_raises_not_asserts():
     cs2_types.h t_spawns[15] / ct_spawns[5]; the arena pins 4/4."""
     from types import SimpleNamespace
 
-    from cs2rl.train import check_spawn_counts
+    from cs2rl.train.envs import check_spawn_counts
 
     def fake(nt, nct):
         sd = SimpleNamespace(n_t_spawns=nt, n_ct_spawns=nct)
@@ -303,7 +303,7 @@ def test_check_spawn_counts_raises_not_asserts():
 
 
 def test_build_map_data_names():
-    from cs2rl.train import MAP_NAMES, build_map_data
+    from cs2rl.train.envs import MAP_NAMES, build_map_data
     assert MAP_NAMES == ("simple", "dust2", "arena-duel")
     assert build_map_data("dust2") is None             # make_env(None) loads the nav map
     assert build_map_data("arena-duel").N == 24

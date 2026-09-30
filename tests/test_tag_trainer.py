@@ -21,7 +21,7 @@ import torch
 
 
 def _build(tag_on, seed=0):
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     torch.manual_seed(seed)            # identical policy init both arms
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True, seed=seed)
     trainer.config["target_kl"] = None
@@ -48,7 +48,7 @@ def test_flag_off_is_inert(monkeypatch):
     # this test would pass while asserting nothing — the positive control below
     # (test_monkeypatch_target_actually_reaches_the_hook) goes red if the patch
     # point drifts again.
-    from cs2rl import trainer as tag_mod
+    from cs2rl.train import trainer as tag_mod
     calls = []
     real = tag_mod.tag_grad_cossim
     monkeypatch.setattr(tag_mod, "tag_grad_cossim",
@@ -88,7 +88,7 @@ def test_monkeypatch_target_actually_reaches_the_hook(monkeypatch):
     not swap in a stub trainer, which would stop exercising the real call
     site and reintroduce exactly the vacuity this test exists to prevent.
     """
-    from cs2rl import trainer as tag_mod
+    from cs2rl.train import trainer as tag_mod
     calls = []
     real = tag_mod.tag_grad_cossim
     monkeypatch.setattr(tag_mod, "tag_grad_cossim",
@@ -111,7 +111,7 @@ def test_inject_tag_metrics_lifecycle():
     logs=None (throttled epoch: the top-of-loop reset drops the
     measurement; injecting here would mislabel its epoch).
     """
-    from cs2rl.train import _inject_tag_metrics
+    from cs2rl.train.metrics import _inject_tag_metrics
     trainer = SimpleNamespace(_tag_metrics={
         "tag/cossim_cross/trunk/mb0": 0.4,
         "tag/cossim_within_ct/trunk/mb0": float("nan"),
@@ -225,7 +225,7 @@ def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
     pin is test_row_mask_matches_obs_team_bit above; this one proves the
     invariant survives building the trainer with a split policy.
     """
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     torch.manual_seed(0)
     trainer, cleanup = _build_trainer_for_test(num_envs=32,
                                                with_selfplay=True,
@@ -264,7 +264,7 @@ def test_row_mask_matches_obs_team_bit_on_a_both_flags_trainer():
     PITFALL: do not probe t=0 on the first evaluate() — that slot is
     still the zero-initialized pre-step obs.
     """
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     torch.manual_seed(0)
     trainer, cleanup = _build_trainer_for_test(num_envs=32,
                                                with_selfplay=True,

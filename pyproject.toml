@@ -71,9 +71,10 @@ modal = [
 # One package, cs2rl, under src/. Explicit because automatic src-layout discovery
 # also scans PEP 420 namespace directories (src/cs2rl/env/c/demo_assets, zig-out,
 # zig-pkg); namespaces = false keeps the wheel to the real packages (cs2rl and its
-# subpackages deploy, env, env.c, eval, experiment, spec and viz). The flip side: a new
-# subpackage without an __init__.py is dropped from the wheel silently. grimp skips it
-# too, so tests/test_import_layers.py's coverage check is what fails on one.
+# subpackages deploy, env, env.c, eval, experiment, spec, train and viz). The flip
+# side: a new subpackage without an __init__.py is dropped from the wheel silently.
+# grimp skips it too, so tests/test_import_layers.py's coverage check is what fails on
+# one.
 where = ["src"]
 include = ["cs2rl*"]
 namespaces = false
@@ -196,6 +197,124 @@ ignore = ["E501"]
 "cs2rl.viz.log_navmesh".msg = "import it from `cs2rl.viz.render` (#205 moved viz.py)"
 "cs2rl.viz.log_simple_map".msg = "import it from `cs2rl.viz.render` (#205 moved viz.py)"
 "cs2rl.viz.log_tick".msg = "import it from `cs2rl.viz.render` (#205 moved viz.py)"
+# #205 part 3 moved the trainer family into the train/ package and the policy into
+# cs2rl.policy. The eight flat modules are banned whole. `cs2rl.train` is the new package
+# and cannot be banned, so every name the old train.py bound is banned by name: a stale
+# `from cs2rl.train import build_policy` inside a function fails only when it runs.
+"cs2rl.trainer".msg = "import from `cs2rl.train.trainer` (#205 part 3 moved it)"
+"cs2rl.train_shared".msg = "import from `cs2rl.policy, cs2rl.train.config, .resume or .envs (it was dissolved)` (#205 part 3 moved it)"
+"cs2rl.train_config".msg = "import from `cs2rl.train.config` (#205 part 3 moved it)"
+"cs2rl.train_metrics".msg = "import from `cs2rl.train.metrics` (#205 part 3 moved it)"
+"cs2rl.train_update".msg = "import from `cs2rl.train.update` (#205 part 3 moved it)"
+"cs2rl.resume_state".msg = "import from `cs2rl.train.resume` (#205 part 3 moved it)"
+"cs2rl.train_helpers_batch1".msg = "import from `cs2rl.train.rewards or cs2rl.train.entropy` (#205 part 3 moved it)"
+"cs2rl.train_test_harness".msg = "import from `tests._helpers.trainer_harness` (#205 part 3 moved it)"
+"cs2rl.train.ACTION_HEAD_NAMES".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.ACTION_HEAD_SIZES".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.ACTION_MASK_DIM".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.AGENT_IDS".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.AIM_DIM".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.AIM_LOG_STD_CAP_MIN_HEADROOM".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.AIM_LOG_STD_INIT_MARGIN".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.AIM_LOG_STD_RESUME_INIT".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.CHECKPOINTS_DIR".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.DEFAULT_CHECKPOINT_INTERVAL".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.DEFAULT_GAMMA".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.DeadRunDetector".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.EnvConfig".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.LOG_STD_INIT".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.LOG_STD_MAX".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.LOG_STD_MIN".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.MAP_NAMES".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.OBS_DIM".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.OPPONENT_MODES".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.RECORDINGS_DIR".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.RESUME_CONFIG_ALLOWLIST".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.RewardWeights".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.ScheduledEval".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.SelfPlayManager".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.TEAM_SIZE".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._LOG_2PI".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._MASK_HEAD_SLICES".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._MAX_SEED".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._R0G_KNOBS".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._WARMSTART_ATTRS".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._aim_dim_weight".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._apply_action_masks".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._atomic_save_state_dict".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._hybrid_ppo_loss".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._hybrid_sample_logits".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._inject_tag_metrics".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._kill_reward_is_active".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._rng_load_state_dict".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._rng_state_dict".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._scheduled_target_entropy".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._tag_param_groups".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.assert_eval_env_agreement".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.assert_max_turn_speed_agreement".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.assert_opponent_self_play_compatible".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.assert_pin_pitch_agreement".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.auto_vec_workers".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.build_env_factory".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.build_env_for".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.build_map_data".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.build_participating_rows".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.build_policy".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.build_selfplay_manager".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.build_train_config".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.build_train_env_factory".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.check_checkpoint_set".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.check_resume_config".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.check_resume_metrics_bound".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.check_spawn_counts".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.collect_train_state".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.compute_batch_dims".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.compute_game_metrics".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.compute_head_divergence".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.compute_network_health".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.compute_trunk_divergence".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.convert_legacy_state_dict_to_split".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.convert_shared_trunk_to_split".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.elimination_only_win_rates".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.env_config_from_args".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.env_seed_base".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.evaluate_checkpoint".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.extract_env_info".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.format_histogram_line".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.format_train_status".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.init_policy_state".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.isolate_aim_log_std_param_group".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.load_full_resume".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.load_policy_from_checkpoint".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.load_state_dict_arch_checked".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.log_aim_log_std".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.make_env".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.masked_explained_variance".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.masked_mean".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.masked_normalize_adv".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.masked_std_unbiased".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.pin_pitch_for_map".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.record_episode".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.reinit_frozen_aim_log_std".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.resolve_aim_log_std_init".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.resolve_gammas".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.resolve_opponent_mode".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.resolve_pin_pitch".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.resolve_policy_mode".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.resolve_resume_run".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.resolve_resume_split".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.resolve_run_name".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.restore_train_state".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.rewards_array_to_dict".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.seed_everything".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.select_policy_actions_native".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.self_play_used_past_metric".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.smoke_test".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.state_dict_is_split".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.state_dict_is_trunk_split".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.tag_grad_cossim".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.train".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.validate_aim_log_std_max".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 
 [tool.ruff.format]
 quote-style = "double"
@@ -218,9 +337,10 @@ indent_width            = 4
 #
 # import-linter counts function-local imports as edges, and an ignore_imports entry names
 # a module PAIR, never a line or a scope: it hides every site of that pair, a future
-# module-scope one included. tests/test_import_layers.py therefore pins every ignored
-# pair's sites inside a def (the scope pin), and fails if a module is invisible to the
-# graph (a directory without __init__.py).
+# module-scope one included. No contract has one since #205 part 3, and
+# tests/test_import_layers.py::test_no_contract_ignores_imports fails if one is added.
+# The same file fails if a module is invisible to the graph (a directory without
+# __init__.py).
 [tool.importlinter]
 root_package = "cs2rl"
 
@@ -228,8 +348,8 @@ root_package = "cs2rl"
 # directly under cs2rl must be named here, so a new module fails until it gets a layer.
 # `|` members may not import each other; `:` members may, so this contract does not
 # reject a cycle among them. The acyclic contract below does. A package (spec, env,
-# eval, viz) is one member here; the `cs2rl.env layers` contract orders env's own
-# modules.
+# eval, viz, train) is one member here; the `cs2rl.env layers` and `cs2rl.train layers`
+# contracts order their own modules.
 [[tool.importlinter.contracts]]
 name = "cs2rl layers"
 type = "layers"
@@ -237,33 +357,22 @@ containers = ["cs2rl"]
 exhaustive = true
 layers = [
     "experiment | deploy",
-    # eval (baselines, metrics_schema, scripted_expert) sits above train, so train ->
-    # eval.metrics_schema is an upward edge; tests/test_w1_modules.py's
-    # NOT_IMPORTED_BY_TRAIN relies on that, and tests/test_import_layers.py's
-    # test_metrics_schema_sits_above_train pins it.
+    # train is the run application (#205 part 3): its driver uses eval (the
+    # --eval-interval BaselineEvaluator) and viz (--record), so it sits above them.
+    # eval, viz and BC use only the policy, which sits below them. Every edge that
+    # needed an ignore_imports entry before (#92) points down now;
+    # tests/test_import_layers.py::test_train_sits_above_eval_and_viz_and_policy_below_them
+    # pins the order.
+    "train",
     "train_bc : bc_demos : profile_step : viz : eval",
-    "train : trainer : train_shared : train_config : train_metrics : train_update : resume_state : train_helpers_batch1 : train_test_harness",
+    "policy",
     "env",
     "spec",
 ]
-ignore_imports = [
-    # env/factory.py:416, in build_selfplay_manager: SelfPlayManager lives in train.py.
-    # Function-local because train.py imports env.factory at module scope (a module-scope
-    # import back would cycle) and runs as `__main__` (factory's docstring). #92
-    # removes it.
-    "cs2rl.env.factory -> cs2rl.train",
-    # train.py:3048, in train(), only under --eval-interval: eval/baselines.py imports
-    # torch at module scope and `from cs2rl import train` must stay torch-free. #92
-    # removes it.
-    "cs2rl.train -> cs2rl.eval.baselines",
-    # train.py:904 and :917, in record_episode (--record): viz/render.py imports rerun at
-    # module scope. #92 removes it.
-    "cs2rl.train -> cs2rl.viz.render",
-]
-broken_contract_guidance = "Give a new module a layer in pyproject.toml. Move an upward import down, or into the function that needs it. Never widen ignore_imports: #92 retires its entries."
+broken_contract_guidance = "Give a new module a layer in pyproject.toml. Move an upward import down: never add an ignore_imports entry (#205 part 3 retired the last ones)."
 
 # Inside env/: config is the stdlib-only contract that env.c.cs2_env and
-# `train.py --dump-config` import, so it may import neither nav (awpy, shapely) nor map.
+# `python -m cs2rl.train --dump-config` import, so it may import neither nav (awpy, shapely) nor map.
 # The package-wide contract above cannot say so: all of env is one member there. c (the C
 # env's Python side) imports config, map and nav at module scope; factory imports
 # c.cs2_env inside build_env_for, so factory sits above c.
@@ -276,31 +385,32 @@ exhaustive = true
 layers = ["factory", "c", "map : nav", "config"]
 broken_contract_guidance = "Keep cs2rl.env.config stdlib-only: move the import into its caller. Give a new env/ module a layer here."
 
+# Inside train/: the CLI on top, then the run driver, then the three things it composes
+# (the --record and --eval modes and the PuffeRL trainer), then the parts, then config.
+# The imports of trainer (torch, pufferlib) and of eval/viz stay function-local for
+# `--dump-config`'s lightness (tests/test_w1_modules.py), not for this contract.
+# exhaustive: a new module in train/ fails until it gets a layer here.
+[[tool.importlinter.contracts]]
+name = "cs2rl.train layers"
+type = "layers"
+containers = ["cs2rl.train"]
+exhaustive = true
+layers = [
+    "__main__",
+    "loop",
+    "record : evaluate : trainer",
+    "selfplay : envs : update : rewards : entropy : resume : metrics",
+    "config",
+]
+broken_contract_guidance = "Give a new train/ module a layer here. Move an upward import down, or the shared code to a lower module."
+
 # No cycles among the children of cs2rl, or of any package inside it (env.nav and
 # env.map included), at any scope (import-linter sees function-local imports too).
-# Cycles exist among cs2rl's children today through {env, eval, train, trainer, viz};
-# each ignored pair below is a function-local edge of one, and ignoring them is what
-# breaks them. (eval -> train, PolicyActor.__init__'s function-local import in
-# eval/baselines.py, closes one with train -> eval.baselines; viz -> train,
-# viz/play_actions.py's module-scope import, closes another with train -> viz.render.)
+# #205 part 3 removed the last cycles (through {env, eval, train, trainer, viz}): the policy
+# moved below eval and viz, build_selfplay_manager moved up from env.factory into
+# train.selfplay, and trainer became train.trainer, which imports no module above it.
 [[tool.importlinter.contracts]]
 name = "cs2rl acyclic siblings"
 type = "acyclic_siblings"
 ancestors = ["cs2rl"]
-ignore_imports = [
-    # env/factory.py:416, as in the layers contract above. #92 removes it.
-    "cs2rl.env.factory -> cs2rl.train",
-    # train.py:3048, as in the layers contract above. #92 removes it.
-    "cs2rl.train -> cs2rl.eval.baselines",
-    # train.py:2952, in train(): trainer subclasses PuffeRL, so it imports torch at module
-    # scope, and `from cs2rl import train` must stay torch-free (train.py:2949-2951). Not
-    # #92's: it stays while trainer.py imports train at module scope.
-    "cs2rl.train -> cs2rl.trainer",
-    # train.py:904 and :917: the same function-local edge the layers contract above
-    # ignores. NEW in #205 part 2b: as the siblings viz and play_actions, train -> viz
-    # and play_actions -> train closed no loop; grouped into one viz package they close a
-    # package cycle, through viz.play_actions -> train at module scope
-    # (viz/play_actions.py:7). #92 retires it.
-    "cs2rl.train -> cs2rl.viz.render",
-]
-broken_contract_guidance = "Break the cycle: move one of its imports into the function that needs it, or move the shared code down a layer. Never widen ignore_imports: #92 retires its entries."
+broken_contract_guidance = "Break the cycle: move the shared code down a layer. Never add an ignore_imports entry (#205 part 3 retired the last ones)."

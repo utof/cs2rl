@@ -85,7 +85,7 @@ REPORT_ONLY = ("on_target_per_facing", "hit_per_on_target", "shots_fired", "epis
 #   median  median of the raw row value over W rows that carry the key
 #   p90     90th percentile of the raw row value over W rows that carry the key
 #   last    the last W row carrying the key
-# Keys are the ones train.py emits: compute_game_metrics `game/<counter>`
+# Keys are the ones `cs2rl.train.loop.train` emits: compute_game_metrics `game/<counter>`
 # window means, pufferl's `losses/<k>` prefix over trainer losses
 # (`entropy/shoot` is the per-head entropy of ACTION_HEAD_NAMES[1]), the
 # `policy/aim_log_std_yaw` diagnostic, eval.baselines' `eval/win_vs_oracle`.

@@ -124,20 +124,40 @@ _CONSTRUCTED_NAMES = frozenset({"make_puffer_env", "SelfPlayManager"})
 # Explicit roots, per spec §2 W3 — never a walk from the repo root, which would
 # visit `.worktrees/` (checkouts of this same repo, with their own copies of
 # every site) and report findings that belong to another branch.
-ROOTS = (REPO_ROOT / "src", REPO_ROOT / "scripts")
+# tests/_helpers/ holds the trainer harness (#205 part 3 moved it out of src/): it
+# builds a SelfPlayManager through build_selfplay_manager, so it stays in scope.
+ROOTS = (REPO_ROOT / "src", REPO_ROOT / "scripts", REPO_ROOT / "tests" / "_helpers")
 
 # The one file allowed to construct. Everything else routes through it.
 FACTORY = REPO_ROOT / "src" / "cs2rl" / "env" / "factory.py"
+# #205 part 3 (#92): `build_selfplay_manager` moved up beside the class it builds, so the one
+# SelfPlayManager construction lives here now. Each home is exempt only for what it builds:
+# the factory for make_puffer_env, this file for SelfPlayManager. An exemption for a symbol a
+# home no longer builds would let a new construction there pass unseen.
+SELFPLAY = REPO_ROOT / "src" / "cs2rl" / "train" / "selfplay.py"
+CONSTRUCTION_HOMES = {
+    FACTORY: frozenset({"make_puffer_env"}),
+    SELFPLAY: frozenset({"SelfPlayManager"})
+}
+
+
+def _exempt(path, symbol) -> bool:
+    """Whether `symbol` may be constructed in `path` (its one construction home)."""
+    return symbol in CONSTRUCTION_HOMES.get(path, frozenset())
+
 
 # Sanity floors for the "the root is real" guard. Deliberately far below the
 # current counts (37 and 21 files after #204) so ordinary churn never touches them; they
 # exist to catch a root that resolved to nothing, not to pin a file count.
 MIN_FILES_PER_ROOT = 8
+# tests/_helpers/ holds two modules (the metrics census and the trainer harness).
+MIN_FILES_BY_ROOT = {REPO_ROOT / "tests" / "_helpers": 2}
 
 # Anchors that must be among the scanned files. A root can exist, contain .py
 # files and still be the WRONG directory; naming the files whose contents this
 # test is actually about removes that.
-ANCHORS = ("src/cs2rl/train.py", "src/cs2rl/train_test_harness.py", "src/cs2rl/env/factory.py")
+ANCHORS = ("src/cs2rl/train/loop.py", "tests/_helpers/trainer_harness.py",
+           "src/cs2rl/env/factory.py", "src/cs2rl/train/selfplay.py")
 
 # ── The lower layer this file deliberately does NOT ban ─────────────────────
 #
@@ -198,7 +218,7 @@ LOWER_LAYER_SITES = {
     "src/cs2rl/env/c/cs2_env.py": 1,                   # `make_env`'s own `return Cs2Env(...)`
     "src/cs2rl/viz/play.py": 1,                        # the interactive viewer
     "src/cs2rl/profile_step.py": 3,                    # three step-timing harnesses
-    "src/cs2rl/train.py": 1,                           # `record_episode`
+    "src/cs2rl/train/record.py": 1,                    # `record_episode`
     "src/cs2rl/train_bc.py": 1,                        # BC demo replay env
     "src/cs2rl/bc_demos.py": 1,                        # BC demo generation (#204: was scripts/)
     "src/cs2rl/experiment/oracle_statue.py": 1,        # oracle-vs-statue check (#204: was scripts/)
@@ -228,7 +248,7 @@ LOWER_LAYER_SITES = {
 # changes that entry and nothing else.
 ALIASED_LOWER_LAYER_SITES = {
     "src/cs2rl/profile_step.py": 3,
-    "src/cs2rl/train.py": 1,
+    "src/cs2rl/train/record.py": 1,
     "src/cs2rl/train_bc.py": 1,
 }
 
@@ -326,7 +346,7 @@ def test_the_scan_roots_resolve_to_real_populated_directories():
     for root in ROOTS:
         assert root.is_dir(), f"scan root {root} does not exist"
         in_root = [p for p in scanned if root in p.parents or p.parent == root]
-        assert len(in_root) >= MIN_FILES_PER_ROOT, (
+        assert len(in_root) >= MIN_FILES_BY_ROOT.get(root, MIN_FILES_PER_ROOT), (
             f"scan root {root} yielded only {len(in_root)} .py files — the walk is not reaching "
             "its contents, and every assertion below it would pass vacuously")
 
@@ -352,7 +372,7 @@ def test_the_matcher_finds_every_spelling_in_this_repos_own_source():
     this will fail — correctly, because it will mean the positive control has
     evaporated and needs a new source, not that the scan is fine.
     """
-    _, found = scan([REPO_ROOT / "tests", FACTORY])
+    _, found = scan([REPO_ROOT / "tests", SELFPLAY])
     combos = {(symbol, spelling) for _, symbol, _, spelling in found}
     expected = {("SelfPlayManager", "name"), ("SelfPlayManager", "attribute")}
     assert combos >= expected, (
@@ -378,11 +398,14 @@ def test_the_factory_itself_is_where_the_construction_lives():
     shape as an empty root: it would mean the constructions moved somewhere the
     scan cannot see rather than into the factory.
     """
+    _, found = scan([SELFPLAY])
+    assert "SelfPlayManager" in {
+        symbol
+        for _, symbol, _, _ in found
+    }, ("train/selfplay.py no longer constructs a SelfPlayManager; either build_selfplay_manager "
+        "moved out, or it stopped calling the class directly")
     _, found = scan([FACTORY])
     symbols = {symbol for _, symbol, _, _ in found}
-    assert "SelfPlayManager" in symbols, (
-        "env/factory.py no longer constructs a SelfPlayManager; either build_selfplay_manager "
-        "moved out, or it stopped calling the class directly")
     # And the documented asymmetry, pinned so the docstrings above stay true:
     # build_env_for passes make_env as a VALUE, so no call node names make_puffer_env.
     assert "make_puffer_env" not in symbols, (
@@ -697,7 +720,7 @@ def test_knockout_the_enforcement_assertion_fails_on_a_planted_offender(tmp_path
     """
     (tmp_path / "offender.py").write_text("env = make_puffer_env(seed=1)\n")
     _, found = scan([tmp_path])
-    offenders = [f for f in found if f[0] != FACTORY]
+    offenders = [f for f in found if not _exempt(f[0], f[1])]
     assert offenders, "the exemption filter swallowed a finding in a file that is not the factory"
 
 
@@ -733,7 +756,7 @@ def test_an_unimported_local_of_the_same_name_is_not_a_construction():
     is an ordinary local function; the file has no aliasing import, so nothing is
     flagged. The `as` form of an UNRELATED symbol must not bind either.
     """
-    source = ("from cs2rl.train import build_env_factory as _aliased\n"
+    source = ("from cs2rl.train.envs import build_env_factory as _aliased\n"
               "from cs2rl.train import make_puffer_env\n"
               "a = _aliased(seed=1)\n"
               "b = make_puffer_env(seed=1)\n")
@@ -781,8 +804,8 @@ def test_the_real_classmethod_call_sites_still_exist_and_are_not_flagged():
     that the scan leaves them alone.
     """
     live = []
-    for path in (REPO_ROOT / "src" / "cs2rl" / "train.py",
-                 REPO_ROOT / "src" / "cs2rl" / "train_test_harness.py"):
+    for path in (REPO_ROOT / "src" / "cs2rl" / "train" / "loop.py",
+                 REPO_ROOT / "tests" / "_helpers" / "trainer_harness.py"):
         tree = ast.parse(path.read_text())
         live += [(path.name, n.lineno) for n in ast.walk(tree)
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
@@ -819,7 +842,7 @@ def test_no_make_puffer_env_or_selfplaymanager_call_outside_the_factory():
     """
     _, found = scan(ROOTS)
     offenders = [(str(p.relative_to(REPO_ROOT)), symbol, lineno, spelling)
-                 for p, symbol, lineno, spelling in found if p != FACTORY]
+                 for p, symbol, lineno, spelling in found if not _exempt(p, symbol)]
     assert not offenders, ("constructions found outside src/cs2rl/env/factory.py:\n" +
                            "\n".join(f"  {p}:{ln} {sym} ({sp})" for p, sym, ln, sp in offenders) +
                            "\nRoute them through build_env_for / build_selfplay_manager.")

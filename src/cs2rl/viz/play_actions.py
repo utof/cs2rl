@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 
 from cs2rl.env.map import make_simple_map
-from cs2rl.train import init_policy_state
+from cs2rl.policy import init_policy_state
 
 
 def play_fill_actions(act_buf, cont_buf, pa, pc):

@@ -14,12 +14,7 @@ import numpy as np
 import pytest
 import torch
 
-from cs2rl.train_helpers_batch1 import (
-    WelfordStd,
-    process_step_rewards,
-    split_into_channels,
-    symlog,
-)
+from cs2rl.train.rewards import WelfordStd, process_step_rewards, split_into_channels, symlog
 
 _SS_DTYPE = [
     ("reward_kills", "f4"),

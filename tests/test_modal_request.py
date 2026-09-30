@@ -303,7 +303,7 @@ def _live_train_long_options_from_source() -> set[str]:
 
     from cs2rl.env.config import RewardWeights
     names.update(f"--{f.name.replace('_', '-')}" for f in dataclasses.fields(RewardWeights))
-    for rel in ("src/cs2rl/train.py", ):
+    for rel in ("src/cs2rl/train/__main__.py", ):
         tree = ast.parse((ROOT / rel).read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):

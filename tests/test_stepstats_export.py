@@ -6,8 +6,8 @@ import pytest
 
 from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig, RewardWeights
-from cs2rl.train import compute_game_metrics
-from cs2rl.train_helpers_batch1 import split_into_channels
+from cs2rl.train.metrics import compute_game_metrics
+from cs2rl.train.rewards import split_into_channels
 
 N_AGENTS, AIM_DIM, ACTION_DIM = 10, 2, 7
 H_SHOOT = 1
@@ -184,7 +184,7 @@ def test_environment_episodes_counts_terminal_infos():
     ("inject after mean_and_log returns"): pufferl.py logs INSIDE
     mean_and_log, so a post-hoc write reaches metrics.jsonl but not the
     logger; writing self.stats first satisfies both. Same observable result."""
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=16)
     try:
         trainer.evaluate()

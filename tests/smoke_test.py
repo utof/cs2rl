@@ -57,7 +57,7 @@ def test_batch1_smoke_runs_without_nan():
     """
     import math
 
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:

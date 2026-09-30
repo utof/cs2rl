@@ -19,25 +19,25 @@ policy's LSTM state and the ``_batch1_*`` reward state, and ``evaluate`` is a me
 ``_init_selfplay``; callers install ``HybridAimVecEnv`` first. The checkpoint body is
 ``save_checkpoint`` on the class. Construction keeps the state setup order.
 
-WHY a module of its own and not a class inside train.py: this module subclasses
+WHY a module of its own and not a class inside cs2rl.train.loop: this module subclasses
 ``PuffeRL``, so it imports torch and pufferlib at module scope and is HEAVY by
-construction. ``from cs2rl import train`` must stay torch-free (tests/test_w1_modules.py: it is what
-keeps ``--dump-config`` at ~1 s), so train.py imports this module function-locally, inside
-``train()``. train_test_harness.py (gh#168 W1.5) imports it the same way, function-locally
-inside ``_build_trainer_for_test``, so ``from cs2rl import train_test_harness`` stays as light
-as ``from cs2rl import train`` (tests/test_w1_modules.py::test_import_train_test_harness_stays_light);
+construction. The CLI module's scope (``cs2rl.train.__main__``, which imports
+``cs2rl.train.loop`` at its module level) must stay torch-free
+(tests/test_w1_modules.py::test_cli_module_scope_stays_light: it is what keeps
+``--dump-config`` at ~1 s), so ``cs2rl.train.loop`` imports this module function-locally,
+inside ``train()``. tests/_helpers/trainer_harness.py (gh#168 W1.5) imports it the same
+way, function-locally inside ``_build_trainer_for_test``, so
+``from tests._helpers import trainer_harness`` stays as light as the CLI module
+(tests/test_w1_modules.py::test_import_train_test_harness_stays_light);
 tests/test_trainer_composition.py imports it inside a fixture. Never add
-``from cs2rl.trainer import ...`` at train.py's module level (knock-out W1-K3 in the spec:
-test_import_train_stays_light_and_really_imports_the_shims goes red: with the import next
-to the other module-level imports it is a circular-import ImportError, after all defs it
-is the guard naming torch).
+``from cs2rl.train.trainer import ...`` at ``cs2rl.train.loop``'s module level (knock-out
+W1-K3 in the spec: test_cli_module_scope_stays_light goes red naming torch).
 
-IMPORT DIRECTION: this module imports ``train`` at module scope; ``train`` imports this
-module only inside ``train()``. That is acyclic at import time: by the time ``train()``
-runs, ``train`` is fully initialised. When train.py runs as ``python -m cs2rl.train``, its
-main block aliases ``sys.modules["cs2rl.train"]`` to ``__main__`` as its first statement,
-before ``train()`` is called, so ``from cs2rl.train import ...`` here does not re-execute
-train.py.
+IMPORT DIRECTION: ``cs2rl.train.loop`` imports this module, inside ``train()``; this
+module imports nothing from ``loop`` or ``__main__``, at any scope. pyproject.toml's
+``cs2rl.train layers`` contract enforces that (``__main__`` and ``loop`` sit above
+``trainer``), so there is no import cycle to order and no ``__main__`` aliasing to get
+right.
 """
 
 from __future__ import annotations
@@ -49,40 +49,16 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-
-# Heavy by construction (module docstring): pufferl imports torch at ITS module scope.
-# `pufferlib` is read by the self-play evaluate body (gh#168 W2b) at exactly one site,
-# `pufferlib.unroll_nested_dict`. `import pufferlib.pytorch` has NO use in this module:
-# the old closure imported both forms and never touched `.pytorch`, and ast_oracle.py
-# check S2 passes only if this module binds `pufferlib` through every import form the
-# old closure used (extra forms are fine) or re-imports the name from train.py. Measured
-# in the #262 fold: without this line O1 fails S2 on `pufferlib`. Carried for that check
-# only; it can go once `--moves evaluate` is no longer run as a gate.
 import pufferlib
-import pufferlib.pytorch
 import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
-from cs2rl.resume_state import collect_train_state
+from cs2rl.policy import LOG_STD_MAX, _hybrid_sample_logits
 from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
-from cs2rl.train import _hybrid_sample_logits
-
-# W2a (gh#168): everything train() reads that used to be a function-local import of
-# the patcher, or a global of train_update.py, is a module-level import HERE, of the
-# same object from its defining module. ast_oracle.py check S2 fails on a shadowing
-# definition or a missing import; tests/test_tag_trainer.py patches tag_grad_cossim
-# on THIS module because the body resolves it through these globals. W2b added
-# `WelfordStd` / `process_step_rewards` (the self-play state and evaluate body) and
-# `_hybrid_sample_logits` above, under the same rule.
-from cs2rl.train_helpers_batch1 import (
-    WS_GRACE,
-    WS_OFF,
-    WelfordStd,
-    process_step_rewards,
-    warmstart_entropy_state,
-)
-from cs2rl.train_shared import LOG_STD_MAX, _atomic_save_state_dict
-from cs2rl.train_update import (
+from cs2rl.train.entropy import WS_GRACE, WS_OFF, warmstart_entropy_state
+from cs2rl.train.resume import _atomic_save_state_dict, collect_train_state
+from cs2rl.train.rewards import WelfordStd, process_step_rewards
+from cs2rl.train.update import (
     _hybrid_ppo_loss,
     _scheduled_target_entropy,
     masked_explained_variance,
@@ -151,7 +127,7 @@ class Cs2PuffeRL(PuffeRL):
     train()'s order, so an instance is attribute-for-attribute the trainer train() built at
     2a3573f. W2a moved the return-norm step in as well: ``_init_return_norm`` (state) and
     ``train`` / ``_normalize_returns`` / ``_update_return_stats`` (bodies) are methods now, and
-    the return-norm patcher is gone from train_update.py. The self-play evaluate body (W2b), the
+    the return-norm patcher is gone from cs2rl.train.update. The self-play evaluate body (W2b), the
     checkpoint override is also a class method (W2c); hybrid action transport
     lives in the vecenv wrapper (W3).
 
@@ -160,8 +136,8 @@ class Cs2PuffeRL(PuffeRL):
 
     cont_action_view_main : np.ndarray or None
         Main-process view of the continuous-action shared array. train() allocates it and
-        passes it on BOTH backends (src/cs2rl/train.py builds `_cont_action_view_main` before the
-        vecenv, unconditionally); only the harness passes None.
+        passes it on BOTH backends (cs2rl.train.loop.train builds `_cont_action_view_main`
+        before the vecenv, unconditionally); only the harness passes None.
     mask_view_main : np.ndarray
         Main-process view of the action-mask shared array (F8).
     participating_rows : np.ndarray
@@ -317,7 +293,7 @@ class Cs2PuffeRL(PuffeRL):
 
     def _init_return_norm(self):
         """Return-normalisation + adaptive-entropy state; was the patch-time body of
-        the return-norm patcher (src/cs2rl/train_update.py) until gh#168 W2a.
+        the return-norm patcher (in cs2rl.train.update) until gh#168 W2a.
 
         WHAT: asserts the BPTT segment invariant (gh#85), creates the Welford running
         stats (``_ret_mean/_ret_var/_ret_count``), the SAC-style ``_log_alpha_tensor`` +
@@ -508,7 +484,7 @@ class Cs2PuffeRL(PuffeRL):
 
     def _init_selfplay(self, self_play_mgr):
         """Self-play state for evaluate() (the patch-time half of the former self-play
-        patcher in train.py; W2b of gh#168). Called from __init__ right after
+        patcher in the flat train.py; W2b of gh#168). Called from __init__ right after
         hybrid-aim buffer setup and before ``_timing``, where the patch call stood.
 
         Stores the manager, the past policy's own LSTM state (the same dict structure as
@@ -580,7 +556,7 @@ class Cs2PuffeRL(PuffeRL):
 
     def evaluate(self):
         """Rollout collection with the self-play opponent override (the body of the
-        former self-play patcher's closure in train.py; W2b of gh#168).
+        former self-play patcher's closure in the flat train.py; W2b of gh#168).
 
         For each evaluation epoch ``SelfPlayManager.should_use_past()`` decides (once)
         whether to activate self-play. When active, a random past checkpoint is loaded
@@ -855,8 +831,8 @@ class Cs2PuffeRL(PuffeRL):
                 self.actions[batch_rows, seq_pos] = action
                 self.logprobs[batch_rows, seq_pos] = logprob
                 # Batch 3 (T5): parallel writes for the new buffers allocated
-                # by _init_hybrid_aim. The PPO update (`Cs2PuffeRL.train`
-                # in src/cs2rl/trainer.py, gh#168 W2a:
+                # by _init_hybrid_aim. The PPO update (`cs2rl.train.trainer.Cs2PuffeRL.train`,
+                # gh#168 W2a:
                 # `mb_cont_actions = self.cont_actions[idx]` and the two logprob
                 # reads beside it) reads these by the same idx; missing this write would
                 # silently feed zeros to _hybrid_ppo_loss → ratio_c always
@@ -947,7 +923,7 @@ class Cs2PuffeRL(PuffeRL):
 
     def train(self):
         """One PPO update over the rollout buffer; the return-norm patcher's inner train()
-        replacement (src/cs2rl/train_update.py) until gh#168 W2a, moved verbatim.
+        replacement (in cs2rl.train.update) until gh#168 W2a, moved verbatim.
 
         WHAT: return-normalised value targets, the hybrid discrete+continuous PPO loss
         (``_hybrid_ppo_loss``), the SAC-style α dual loop, the warm-start entropy mode,
@@ -956,7 +932,7 @@ class Cs2PuffeRL(PuffeRL):
 
         WHY this replaces ``PuffeRL.train`` outright (it never calls ``super().train``):
         the stock loop cannot unpack the policy's 4-tuple output (see the F11 note in
-        src/cs2rl/train.py::train). The AST oracle in
+        cs2rl.train.loop.train). The AST oracle in
         .superpowers/sdd/2026-09-24-168-trainer-subclass/ast_oracle.py pins this body
         to the pre-move closure node for node (N1-N5); the byte gates pin the arms the
         2-epoch run executes.

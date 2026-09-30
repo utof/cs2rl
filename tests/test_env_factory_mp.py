@@ -92,8 +92,8 @@ def test_train_closure_builds_envs_in_forked_workers():
     import pufferlib.vector
 
     from cs2rl.env.map import make_simple_map
-    from cs2rl.train import build_env_factory
-    from cs2rl.train_config import env_config_from_args
+    from cs2rl.train.config import env_config_from_args
+    from cs2rl.train.envs import build_env_factory
 
     args = Namespace(reward_ct_survival=0.0,
                      n_active_per_team=3,

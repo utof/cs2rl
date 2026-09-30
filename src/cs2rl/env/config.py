@@ -7,13 +7,13 @@ validate in `__post_init__`. `Cs2Env` reads its scalars off an `EnvConfig`;
 
 WHY (gh#165, ADR 0003): before this module the same 23 defaults were declared in
 `make_env`, `Cs2Env.__init__` and a module-level defaults dict in
-`train_shared.py`, agreeing only because a test compared them. One declaration,
-here, is the fix.
+`train_shared.py` (since dissolved, #205 part 3), agreeing only because a test compared
+them. One declaration, here, is the fix.
 
 IMPORT BUDGET: stdlib ONLY. `env.c.cs2_env` (layer L1) imports this module, and
-`train.py --dump-config` must stay free of torch/nav/env.c, so nothing heavier
-than `dataclasses` may ever be imported here. `TEAM_SIZE` is a literal for the
-same reason `train_shared.py` carries one: `nav` costs awpy/polars to read a 5.
+`python -m cs2rl.train --dump-config` must stay free of torch/nav/env.c, so nothing
+heavier than `dataclasses` may ever be imported here. `TEAM_SIZE` is a literal for
+the same reason `cs2rl.train.config.TEAM_SIZE` is one: `nav` costs awpy/polars to read a 5.
 tests/test_train_env.py cross-checks it against nav.TEAM_SIZE.
 
 PITFALL: the values below ARE the trained baseline. An unflagged run must stay
@@ -87,8 +87,8 @@ class RewardWeights:
     """The 23 reward/PBRS coefficients. Field order is load-bearing twice over:
     tests/test_env_config.py::test_reward_field_census_is_23_with_6_pbrs pins it
     name-by-name against that file's `DEFAULTS_AT_139a3a3` literal (the pre-#165
-    declaration order), and train.py's parser loop GENERATES one CLI flag per
-    field here from `as_dict()`, so flag and `--help` order FOLLOW this order
+    declaration order), and the parser loop in `cs2rl.train.__main__` GENERATES one CLI
+    flag per field here from `as_dict()`, so flag and `--help` order FOLLOW this order
     rather than merely agreeing with it — reordering a field silently reorders
     the CLI and reddens that pin. (Generated, not hand-listed, pre-#165 too: the
     dict this class replaced was iterated the same way.) Measured, 25 flags match

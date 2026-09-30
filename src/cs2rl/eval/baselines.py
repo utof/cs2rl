@@ -18,7 +18,7 @@ as T and half as CT, and reports elimination-only win rates under ``eval/*``.
 
 WHY a separate module
 ---------------------
-train.py's self-play win rate is a moving target (opponent = past self) and
+`cs2rl.train.loop.train`'s self-play win rate is a moving target (opponent = past self) and
 ``environment/winner_ct`` counts timeouts. A fixed opponent on a fixed map with
 ``episode_outcome`` (kills only) is the one number that is comparable across
 runs and across the Rung-1 ladder.
@@ -231,9 +231,10 @@ class RandomActor:
 class PolicyActor:
     """Trained checkpoint, driven exactly like the PPO rollout.
 
-    Same call shape as train.py's rollout: forward_eval with the carried
-    LSTM state + done flags, then _hybrid_sample_logits with the C action
-    masks. Not select_policy_actions_native, because that helper does NOT
+    Same call shape as the rollout in `cs2rl.train.trainer.Cs2PuffeRL.evaluate`:
+    forward_eval with the carried LSTM state + done flags, then
+    _hybrid_sample_logits with the C action masks. Not select_policy_actions_native,
+    because that helper does NOT
     pass masks — sampling an invalid bin (e.g. shoot while on cooldown) is
     a no-op in C but shifts the discrete distribution away from what
     training actually saw.
@@ -244,11 +245,11 @@ class PolicyActor:
     def __init__(self, policy, device):
         # Post-vendoring edit (Task 13): takes a LIVE policy module — the
         # training loop hands its own `policy` in; to evaluate a checkpoint, load it
-        # with train.load_policy_from_checkpoint first. Late import, though not for a
-        # module-level cycle: train.py imports this module only inside train(), so
-        # the pair cycles only through function-local imports, which pyproject.toml's
-        # acyclic contract records as its `train -> eval.baselines` ignore entry.
-        from cs2rl.train import _hybrid_sample_logits, init_policy_state
+        # with cs2rl.policy.load_policy_from_checkpoint first. The import below is
+        # function-local from before #205 part 3, when these helpers lived in `train`,
+        # which imported this module: a cycle that only function-local imports could
+        # hold together. `cs2rl.policy` sits below eval now, so that cycle is gone.
+        from cs2rl.policy import _hybrid_sample_logits, init_policy_state
         self.torch = torch
         self._sample = _hybrid_sample_logits
         self._init_state = init_policy_state
@@ -517,8 +518,8 @@ def episode_outcome(kills_for: int, kills_against: int) -> float:
     """Win = opposing participating agent eliminated and own agent alive.
 
     Timeouts score 0 (the C `winner_ct` counts them as CT wins — that is why
-    train.py's self-play feed subtracts `timed_out`, see
-    elimination_only_win_rates). Trade = 0.5 (unreachable at n=1: the round
+    `cs2rl.train.metrics.elimination_only_win_rates` subtracts `timed_out` from
+    the self-play feed). Trade = 0.5 (unreachable at n=1: the round
     ends on the first death). PITFALL: at n_active_per_team>1 the inputs are
     TEAM kill counts, so this is team credit, not the policy agent's own.
     """

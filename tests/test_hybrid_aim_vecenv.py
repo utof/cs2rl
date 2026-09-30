@@ -4,7 +4,7 @@ import pytest
 
 
 def test_serial_forwards_each_env_slice_and_discrete_actions():
-    from cs2rl.trainer import HybridAimVecEnv
+    from cs2rl.train.trainer import HybridAimVecEnv
 
     class Env:
         num_agents = 2
@@ -44,7 +44,7 @@ def test_serial_forwards_each_env_slice_and_discrete_actions():
 
 
 def test_shared_view_is_float32_zeroed_for_bare_send_and_validates_shape():
-    from cs2rl.trainer import HybridAimVecEnv
+    from cs2rl.train.trainer import HybridAimVecEnv
 
     class Backend:
 

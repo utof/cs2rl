@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from cs2rl.env.factory import build_selfplay_manager
+from cs2rl.train.selfplay import build_selfplay_manager
 
 FIXTURE = Path(__file__).parent / "fixtures" / "selfplay_kwargs_pre_w3.json"
 
@@ -91,10 +91,10 @@ def _construct(monkeypatch, **kwargs):
     import reads from — so this also proves that import is a per-call attribute
     read rather than something cached at module scope.
     """
-    from cs2rl import train
+    from cs2rl.train import selfplay as train_selfplay
 
     rec = _Recorder()
-    monkeypatch.setattr(train, "SelfPlayManager", rec)
+    monkeypatch.setattr(train_selfplay, "SelfPlayManager", rec)
     build_selfplay_manager(**kwargs)
     assert len(rec.calls) == 1, f"build_selfplay_manager called SelfPlayManager {len(rec.calls)}x"
     return rec.calls[0]
@@ -178,12 +178,12 @@ def test_builder_passes_every_parameter_explicitly(monkeypatch, site, scenario, 
     """
     import inspect
 
-    from cs2rl import train
+    from cs2rl.train import selfplay as train_selfplay
 
     # Read the signature BEFORE _construct swaps in the stub; afterwards it would
     # be the recorder's `**kwargs` and this would collapse to comparing an empty
     # default set against itself.
-    sig = inspect.signature(train.SelfPlayManager)
+    sig = inspect.signature(train_selfplay.SelfPlayManager)
     got = _construct(monkeypatch, **_inputs_for(site, capture))
     bound = sig.bind(**got)
     bound.apply_defaults()
@@ -205,9 +205,9 @@ def test_builder_kwargs_bind_to_the_real_signature(monkeypatch):
     """
     import inspect
 
-    from cs2rl import train
+    from cs2rl.train import selfplay as train_selfplay
 
-    sig = inspect.signature(train.SelfPlayManager)
+    sig = inspect.signature(train_selfplay.SelfPlayManager)
     for site, scenario, capture in _cases():
         got = _construct(monkeypatch, **_inputs_for(site, capture))
         try:
@@ -311,7 +311,7 @@ def test_knockout_dropping_one_kwarg_fails_that_sites_capture(monkeypatch, site)
     never passed it. That keeps the knock-out reproducible in CI instead of a
     procedure someone has to remember to perform by hand.
     """
-    from cs2rl import train
+    from cs2rl.train import selfplay as train_selfplay
 
     dropped = _KNOCKOUT_KWARG[site]
     captures = [c for s, _, c in _cases() if s == site and dropped in c["explicit_kwargs"]]
@@ -326,7 +326,7 @@ def test_knockout_dropping_one_kwarg_fails_that_sites_capture(monkeypatch, site)
 
     for capture in captures:
         rec = _Dropping()
-        monkeypatch.setattr(train, "SelfPlayManager", rec)
+        monkeypatch.setattr(train_selfplay, "SelfPlayManager", rec)
         build_selfplay_manager(**_inputs_for(site, capture))
         assert rec.calls[0] != capture["explicit_kwargs"], (
             f"{site}/{capture['scenario']}: dropping {dropped!r} from the construction still "
@@ -430,7 +430,8 @@ def test_train_call_site_forwards_the_same_expressions_it_used_to():
     capture = FIXTURE_DATA["sites"]["train"][0]
     old = _routing(capture["call_source"])
     new = _routing(
-        ast.unparse(_factory_call_in(PACKAGE / "train.py", "train", "build_selfplay_manager")))
+        ast.unparse(
+            _factory_call_in(PACKAGE / "train" / "loop.py", "train", "build_selfplay_manager")))
 
     for kwarg in ("aim_log_std_max", "opponent_mode"):
         assert new.get(kwarg) == old[kwarg], (
@@ -482,7 +483,8 @@ def test_harness_call_site_builds_the_captured_manager(monkeypatch, with_selfpla
     NON-default at this site, so a builder that dropped it (falling back to
     SelfPlayManager's own "self") is caught here rather than nowhere.
     """
-    from cs2rl import train_test_harness
+    from cs2rl.train import selfplay as train_selfplay
+    from tests._helpers import trainer_harness
 
     site = "harness_selfplay" if with_selfplay else "harness_no_selfplay"
     capture = FIXTURE_DATA["sites"][site][0]
@@ -494,19 +496,18 @@ def test_harness_call_site_builds_the_captured_manager(monkeypatch, with_selfpla
     opponent = "self" if with_selfplay else "noop"
 
     recorded = []
-    real_builder = train_test_harness.build_selfplay_manager
+    real_builder = train_selfplay.build_selfplay_manager
 
     def _spy(**kwargs):
         recorded.append(kwargs)
         return real_builder(**kwargs)
 
-    monkeypatch.setattr(train_test_harness, "build_selfplay_manager", _spy)
-    _, cleanup = train_test_harness._build_trainer_for_test(
-        num_envs=2,
-        with_selfplay=with_selfplay,
-        opponent=opponent,
-        aim_log_std_max=aim_cap,
-        pin_pitch=capture["bindings"]["pin_pitch"])
+    monkeypatch.setattr(trainer_harness, "build_selfplay_manager", _spy)
+    _, cleanup = trainer_harness._build_trainer_for_test(num_envs=2,
+                                                         with_selfplay=with_selfplay,
+                                                         opponent=opponent,
+                                                         aim_log_std_max=aim_cap,
+                                                         pin_pitch=capture["bindings"]["pin_pitch"])
     cleanup()
 
     assert len(recorded) == 1
@@ -539,21 +540,22 @@ def test_harness_given_manager_skips_the_builder(monkeypatch):
     SelfPlayManager's own default coinciding with the env default), with ``p_past=0.0``
     (no self-play).
     """
-    from cs2rl import train_test_harness
-    from cs2rl.train import SelfPlayManager
+    from cs2rl.train import selfplay as train_selfplay
+    from cs2rl.train.selfplay import SelfPlayManager
+    from tests._helpers import trainer_harness
 
     recorded = []
-    real_builder = train_test_harness.build_selfplay_manager
+    real_builder = train_selfplay.build_selfplay_manager
 
     def _spy(**kwargs):
         recorded.append(kwargs)
         return real_builder(**kwargs)
 
-    monkeypatch.setattr(train_test_harness, "build_selfplay_manager", _spy)
+    monkeypatch.setattr(trainer_harness, "build_selfplay_manager", _spy)
     mgr = SelfPlayManager(p_past=0.0,
                           opponent_mode="self",
-                          pin_pitch=bool(train_test_harness._ENV_DEFAULTS.pin_pitch))
-    _, cleanup = train_test_harness._build_trainer_for_test(num_envs=2, self_play_mgr=mgr)
+                          pin_pitch=bool(trainer_harness._ENV_DEFAULTS.pin_pitch))
+    _, cleanup = trainer_harness._build_trainer_for_test(num_envs=2, self_play_mgr=mgr)
     try:
         assert recorded == [], (
             f"the harness called build_selfplay_manager {len(recorded)}x although a manager "
@@ -570,11 +572,11 @@ def test_harness_no_longer_branches_on_with_selfplay_to_construct():
     this file would stay green, and the next knob would go into one arm only,
     which is the drift W3 exists to end.
     """
-    tree = ast.parse((PACKAGE / "train_test_harness.py").read_text())
+    tree = ast.parse((PACKAGE.parents[1] / "tests" / "_helpers" / "trainer_harness.py").read_text())
     calls = [
         n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
         and n.func.id == "build_selfplay_manager"
     ]
     assert len(calls) == 1, (
-        f"train_test_harness.py has {len(calls)} build_selfplay_manager call sites; the two "
+        f"trainer_harness.py has {len(calls)} build_selfplay_manager call sites; the two "
         "pre-migration branches were identical apart from p_past and must stay collapsed")

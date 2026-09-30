@@ -59,6 +59,10 @@ Also here: nav.CACHE_PATH, the vis cache, is pinned to its one location
 (test_vis_cache_path_is_the_package_root_file). Its file is untracked, so it has
 no row above.
 
+Also here: train()'s `.env` lookup is pinned to the repo root
+(test_train_reads_dotenv_from_the_repo_root). It is a local inside train(), not a
+module constant, so it has no row above.
+
 Also here, because it is a rule about where test code may live: tests/_helpers/
 holds no collectable file (test_helpers_hold_no_collectable_file).
 """
@@ -204,6 +208,38 @@ def test_vis_cache_path_is_the_package_root_file():
 
     assert Path(nav.CACHE_PATH).resolve() == REPO_ROOT / "src" / "cs2rl" / "vis_cache.npy", (
         f"nav.CACHE_PATH is {nav.CACHE_PATH}: anchor it on the cs2rl package root")
+
+
+def test_train_reads_dotenv_from_the_repo_root():
+    """train()'s `.env` lookup is `Path(__file__).parents[N] / ".env"` with parents[N] this checkout's root.
+
+    WHY: #205 part 3 moved train() from src/cs2rl/train.py to src/cs2rl/train/loop.py, one
+    level deeper. The unchanged `parents[2]` then named src/, and a local `--wandb` run lost
+    its WANDB_* settings without an error. Nothing else reads .env, so no other test sees it.
+    The chain is found by AST, so this never runs train(). Exactly one chain is required: a
+    rewrite of the lookup fails here, instead of leaving nothing to check.
+    PITFALL: the file is located with find_spec, not by a path typed here, so a later move of
+    the module is measured where the module really is; find_spec does not import it (torch).
+    """
+    import importlib.util
+
+    spec = importlib.util.find_spec("cs2rl.train.loop")
+    assert spec is not None and spec.origin is not None, "cs2rl.train.loop is not importable"
+    loop_py = Path(spec.origin)
+    chains = [
+        node.left.slice.value for node in ast.walk(ast.parse(loop_py.read_text()))
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+        and isinstance(node.right, ast.Constant) and node.right.value == ".env"
+        and isinstance(node.left, ast.Subscript) and isinstance(node.left.value, ast.Attribute)
+        and node.left.value.attr == "parents" and ast.unparse(
+            node.left.value.value) == "Path(__file__)" and isinstance(node.left.slice, ast.Constant)
+    ]
+    assert len(chains) == 1 and isinstance(chains[0], int), (
+        f"expected one `Path(__file__).parents[N] / \".env\"` in {loop_py}, found {chains}")
+    level: int = chains[0]
+    root = loop_py.resolve().parents[level]
+    assert root == REPO_ROOT, (f"{loop_py} reads .env from parents[{level}] = {root}, not this "
+                               f"checkout's root {REPO_ROOT}. Fix its `parents[N]`.")
 
 
 def test_sync_action_spec_outputs_are_not_swapped():

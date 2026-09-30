@@ -1,12 +1,12 @@
-"""Config + CLI-resolution seam (#144), split out of train.py.
+"""Config + CLI-resolution seam (#144), split out of the flat train.py.
 
 WHAT: ``build_train_config`` (the config.json / provenance dict), the
 args-to-env-knob and args-to-mode resolvers, the batch-dimension formula, the
 opponent-mode vocabulary and the static participating-rows vector. Moved here
 VERBATIM by the 2026-08-31 post-rung1a refactor: no renames, no signature
-changes, no behaviour change. ``train.py`` re-exports every name below (see its
-``__all__``), so existing ``from cs2rl.train import X`` call sites keep working
-unchanged.
+changes, no behaviour change. The flat ``train.py`` re-exported every name below
+(see its ``__all__``) until #205 part 3 removed the re-exports: ``cs2rl.train`` exports
+nothing now, so import from this module.
 
 WHY its own module: the Modal runner hashes the config.json that --dump-config
 writes from build_train_config's dict (its config_hash), so this surface is
@@ -14,67 +14,79 @@ PROVENANCE, not plumbing. Silent drift here changes every future run's recorded
 hash, which is much easier to review in one small file than inside the entry
 point.
 
-PITFALL: the argparse parser itself stays in train.py (it is built inline under
-``if __name__ == "__main__"`` and is not importable). Several tests source-scan
-train.py for ``add_argument`` literals and source-scan THIS file for
+PITFALL: the argparse parser itself stays in ``cs2rl.train.__main__`` (it is built inline
+under ``if __name__ == "__main__"`` and is not importable). Several tests source-scan
+``cs2rl/train/__main__.py`` for ``add_argument`` literals and source-scan THIS file for
 ``OPPONENT_MODES`` / ``compute_batch_dims`` — the two halves of the CLI contract
 now live in two files and both are pinned.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in train_shared.py's header — ``--dump-config`` reaches
-build_train_config and must still cost no torch/nav import.
+reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+load-bearing) — ``--dump-config`` reaches build_train_config and must still cost no
+torch/nav import.
 """
-import math
 
 import numpy as np
 
 from cs2rl.env.config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
-from cs2rl.train_shared import (
-    _R0G_KNOBS,
-    AIM_LOG_STD_CAP_MIN_HEADROOM,
-    AIM_LOG_STD_INIT_MARGIN,
-    DEFAULT_CHECKPOINT_INTERVAL,
-    LOG_STD_MAX,
-    LOG_STD_MIN,
-    TEAM_SIZE,
-    resolve_aim_log_std_init,
-    resolve_gammas,
-)
+from cs2rl.policy import LOG_STD_MAX, resolve_aim_log_std_init
+
+# Agents per team. A bare literal ON PURPOSE: this leaf and cs2rl.train.__main__ must
+# both stay import-light (`--dump-config` guarantees no torch/nav import — see
+# cs2rl.train.resume._atomic_save_state_dict's docstring), and `nav` pulls
+# awpy/polars/shapely (+0.6 s and a polars warning) just to read one 5.
+# Cross-checked against nav.TEAM_SIZE and cs2_env.TEAM_SIZE by
+# tests/test_train_env.py::test_obs_dim_constant_consistency.
+TEAM_SIZE = 5
+# R0-C: epochs between full-state checkpoint sets. ONE constant for the CLI
+# default and build_train_config's getattr fallback (harness / SimpleNamespace
+# callers without the flag) — two literals drifted once (final review #7).
+DEFAULT_CHECKPOINT_INTERVAL = 200
+
+DEFAULT_GAMMA = 0.999                  # R0-J: the historical PPO discount; --gamma default
 
 
-def validate_aim_log_std_max(aim_log_std_max) -> float:
-    """Resolve + range-check the run's aim σ cap (R0-E.3, #131).
+def resolve_gammas(args) -> tuple[float, float]:
+    """Return ``(gamma, pbrs_gamma)`` from the args object.
 
-    Returns the float cap (LOG_STD_MAX when None). Raises ValueError unless
-    LOG_STD_MIN + 0.4 < cap <= LOG_STD_MAX, i.e. σ in (0.0149, 0.5].
+    WHAT: ``gamma`` is ``args.gamma`` (default DEFAULT_GAMMA for harness /
+    dump-config args objects that predate the flag); ``pbrs_gamma`` is
+    ``args.pbrs_gamma`` when given, else ``gamma``.
 
-    WHY a separate torch-free helper: build_policy() only runs after the env
-    and torch are up, so a bad --aim-log-std-max used to surface ~30 s into a
-    launch AND slip past `--dump-config` (the Modal/run_rung1 fingerprint
-    step). main() now calls this right after parse_args(), above the
-    --dump-config exit, so the fingerprint catches it.
-    PITFALL (2026-08-30, rung1 sweep): the bound is INCLUSIVE at LOG_STD_MAX =
-    log 0.5 = -0.693147..., so a hand-rounded "-0.6931" is > the cap by 5e-5
-    and is REJECTED — pass -0.69315 (or omit the flag) for "σ cap 0.5".
-    PITFALL (Rung 1a T1): the LOWER bound is no longer LOG_STD_MIN itself but
-    LOG_STD_MIN + AIM_LOG_STD_CAP_MIN_HEADROOM — caps that narrow leave no room
-    for the strictly-inside-the-band init (see resolve_aim_log_std_init) and
-    would hand the run a gradient-dead σ. This NARROWS the accepted CLI range;
-    σ caps below ~0.0149 rad (0.85°) have no experimental use (the recoil/
-    hitbox scale alone is larger), so nothing legitimate is lost.
+    WHY one helper: its two callers, build_train_config (provenance + the PPO
+    discount) and env_config_from_args (the env's PBRS discount, stored on the
+    EnvConfig every env is built from), must agree on the SAME resolution rule
+    — PBRS is only policy-invariant (Ng et al.) when
+    γ_pbrs == γ, and before R0-J the two lived as unrelated literals (the flat train.py
+    0.999 vs cs2_env.py 0.999, now one field default in env/config.py) held
+    together by a single drift test.
+    ``--pbrs-gamma`` exists ONLY for experiments that deliberately break the
+    pairing; a run that omits it always gets γ_pbrs = γ.
+
+    PITFALL: both values are config.json keys and NOT in
+    RESUME_CONFIG_ALLOWLIST — changing either on --resume-run is refused.
     """
-    cap = float(LOG_STD_MAX if aim_log_std_max is None else aim_log_std_max)
-    lo = LOG_STD_MIN + AIM_LOG_STD_CAP_MIN_HEADROOM
-    if not (lo < cap <= LOG_STD_MAX):
-        raise ValueError(
-            f"aim_log_std_max={cap} must lie in ({lo}, {LOG_STD_MAX}] "
-            f"(σ in ({math.exp(lo):.4f}, 0.5]). The lower bound is "
-            f"LOG_STD_MIN + {AIM_LOG_STD_CAP_MIN_HEADROOM} rather than LOG_STD_MIN: the aim σ "
-            f"is initialised {AIM_LOG_STD_INIT_MARGIN} below the cap so it starts strictly "
-            f"inside the clamp band, and a cap this close to the σ floor would "
-            f"put that init at or under LOG_STD_MIN={LOG_STD_MIN}, where clamp "
-            f"back-propagates zero gradient and σ can never train.")
-    return cap
+    gamma = getattr(args, "gamma", None)
+    gamma = DEFAULT_GAMMA if gamma is None else float(gamma)
+    if not (0.0 < gamma < 1.0):
+        raise ValueError(f"--gamma must be in (0, 1), got {gamma}")
+    pbrs_gamma = getattr(args, "pbrs_gamma", None)
+    pbrs_gamma = gamma if pbrs_gamma is None else float(pbrs_gamma)
+    if not (0.0 < pbrs_gamma <= 1.0):
+        raise ValueError(f"--pbrs-gamma must be in (0, 1], got {pbrs_gamma}")
+    if pbrs_gamma != gamma:
+        print(f"WARNING: --pbrs-gamma {pbrs_gamma} != --gamma {gamma}: PBRS shaping is no "
+              "longer policy-invariant (Ng et al.); only do this on purpose.")
+    return gamma, pbrs_gamma
+
+
+# (args attr, EnvConfig field) — single source for env_config_from_args's R0-G
+# pairs AND build_train_config's provenance keys (which record the value under
+# the ARGS attr name), so a knob added to one cannot be missed by the other
+# (config.json would then silently under-record the experiment). Paired with
+# cs2rl.train.config._ARGS_KNOB_FIELDS; see its comment for the coverage rule.
+_R0G_KNOBS = (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
+              ("max_turn_speed", "max_turn_speed"))
 
 
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
@@ -163,7 +175,8 @@ def build_participating_rows(num_envs: int,
         team neither learns nor is counted.
 
     WHY a shared helper: this vector used to be built by two copies of the same
-    expression (train() and train_test_harness), and it sits UPSTREAM of
+    expression (`cs2rl.train.loop.train` and
+    `tests._helpers.trainer_harness._harness_parts`), and it sits UPSTREAM of
     global_step, the buffer scatter, every masked loss and
     losses/participating_rows. Patching one copy would have left the headline
     harness test green while production still trained on both teams — precisely
@@ -446,7 +459,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
 
 
 # Knobs whose CLI dest IS the field name. Hand-written on purpose, and paired
-# with train_shared._R0G_KNOBS (which maps DIFFERENT names, e.g.
+# with cs2rl.train.config._R0G_KNOBS (which maps DIFFERENT names, e.g.
 # --round-time-ticks → round_time): together they are the CLI-name ↔ field-name
 # map, and tests/test_env_knobs.py::test_args_knob_coverage_is_exhaustive asserts
 # the two cover every EnvConfig knob except pbrs_gamma (resolved through

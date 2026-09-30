@@ -1,34 +1,79 @@
-"""Training-loop metrics (#144 seam 2), split out of train.py.
+"""Training-loop metrics (#144 seam 2), split out of the flat train.py.
 
 WHAT: the pure ``logs``/policy readers — network-health weight norms, the aim-σ
 emitter, the TCT head/trunk divergence probes, the scheduled fixed-baseline eval
 wrapper, the game-metrics dashboard derivation, and the TAG metrics hand-off.
 Moved here VERBATIM by the 2026-08-31 post-rung1a refactor: no renames, no
-signature changes, no behaviour change. ``train.py`` re-exports every name below
-(see its ``__all__``), so existing ``from cs2rl.train import X`` call sites keep
-working unchanged.
+signature changes, no behaviour change. The flat ``train.py`` re-exported every name
+below (see its ``__all__``) until #205 part 3 removed the re-exports: ``cs2rl.train``
+exports nothing now, so import from this module.
 
 WHY its own module: these are read-only derivations over a dict or a policy —
 they own no state and mutate no trainer — so they are the cheapest part of the
 loop to unit-test and the part most often edited when a metric is added.
 
 SCOPE BOUNDARY (deliberate, do not "finish the job"): ``self_play_used_past_metric``
-and the ``logs["self_play/*"]`` assignments STAY in train.py. Those two call
+lives in ``cs2rl.train.selfplay``, beside the pool it reports on, and the
+``logs["self_play/*"]`` assignments STAY in ``cs2rl.train.loop.train``. Those assignment
 lines and their order are pinned by tests/test_kl_break_metrics.py inside
-``inspect.getsource(train)``, and they guard the key cs2rl/experiment/gate.py reads;
-keeping definition and call sites together is the lower-risk spelling.
+``inspect.getsource(cs2rl.train.loop)``, and they guard the key cs2rl/experiment/gate.py
+reads; keeping the call sites beside the pool bookkeeping is the lower-risk spelling.
 PufferLib's own ``self.mean_and_log()`` likewise stays out of this module — its
-single call site lives inside ``Cs2PuffeRL.train`` (src/cs2rl/trainer.py, gh#168 W2a).
+single call site lives inside ``cs2rl.train.trainer.Cs2PuffeRL.train`` (gh#168 W2a).
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
-reason spelled out in train_shared.py's header. Every torch import below is
-function-local ON PURPOSE.
+reason spelled out in tests/test_w1_modules.py's docstring (WHY property 3 is
+load-bearing). Every torch import below is function-local ON PURPOSE.
 """
+
 import time
 
 import numpy as np
 
-from cs2rl.train_shared import LOG_STD_MAX, LOG_STD_MIN
+from cs2rl.policy import LOG_STD_MAX, LOG_STD_MIN
+
+
+def format_train_status(epoch, ts_val, logs):
+    sps = logs.get("SPS", 0.0)
+    timeout = logs.get("environment/timed_out", 0.0)
+    t_win = logs.get("environment/winner_t", 0.0)
+    ct_win = logs.get("environment/winner_ct", 0.0)
+    plant = logs.get("environment/bomb_planted", 0.0)
+    kills_t = logs.get("environment/kills_t", 0.0)
+    kills_ct = logs.get("environment/kills_ct", 0.0)
+    round_len = logs.get("environment/round_length", 0.0)
+    move_1 = logs.get("environment/action_move_1", 0.0)
+    # Batch 3.5: per-axis aim log_std (clamped). Defaults to 0.0 if missing.
+    # T7 acceptance gate 2 greps for aim_log_std_pitch= — keep this substring.
+    aim_log_std_yaw = logs.get("policy/aim_log_std_yaw", 0.0)
+    aim_log_std_pitch = logs.get("policy/aim_log_std_pitch", 0.0)
+    return (f"Epoch {epoch} | SPS: {sps:.0f} | Timeout: {timeout:.3f} | "
+            f"TWin: {t_win:.3f} | CTWin: {ct_win:.3f} | Plant: {plant:.3f} | "
+            f"Kills(T/CT): {kills_t:.2f}/{kills_ct:.2f} | RoundLen: {round_len:.1f} | "
+            f"Move1: {move_1:.1f} | TS: {ts_val:.3f} | "
+            f"aim_log_std_yaw={aim_log_std_yaw:.4f} aim_log_std_pitch={aim_log_std_pitch:.4f}")
+
+
+# ── SECTION: R0-I fixed-baseline evaluation hooks ─────────────────────────
+
+
+def elimination_only_win_rates(logs):
+    """R0-I: (win_rate_t, win_rate_ct) with timeouts removed from the CT side.
+
+    WHY: cs2_rewards.h scores a timeout as a CT win (`winner_ct`), so on a
+    bombsite-less duel map a CT that never engages "wins" every round and
+    SelfPlayManager.win_threshold would pool-save a statue. `winner_t` is
+    elimination-only on bombsites=[] maps. All three keys are window means
+    over the same episode set, so the subtraction is exact; clamped at 0 for
+    the float-noise case. Missing keys (first epoch) → 0.0, never KeyError.
+    """
+    wt = float(logs.get("environment/winner_t", 0.0))
+    wct = max(
+        0.0,
+        float(logs.get("environment/winner_ct", 0.0)) -
+        float(logs.get("environment/timed_out", 0.0)))
+    return wt, wct
+
 
 # ── SECTION: Network Health Monitoring ────────────────────────────────────
 
@@ -127,7 +172,7 @@ def log_aim_log_std(policy, logs):
     never from config — config.json is rewritten every launch and lies after a
     flag-less resume (spec §3.4).
     """
-    # train.py imports torch lazily inside functions (module import stays cheap
+    # cs2rl.train.loop imports torch lazily inside functions (module import stays cheap
     # for the CLI/help paths) — keep that convention here.
     import torch
 
@@ -277,9 +322,9 @@ def compute_trunk_divergence(policy):
 
 
 # ── SECTION: R0-I fixed-baseline evaluation hooks ─────────────────────────
-# The banner of this name in train.py stayed there with elimination_only_win_rates,
-# which did not move; restated here so the "Network Health Monitoring" banner above
-# does not appear to cover this class.
+# The banner of this name also sits above elimination_only_win_rates, at the top of
+# this file; restated here so the "Network Health Monitoring" banner above does not
+# appear to cover this class.
 
 
 class ScheduledEval:

@@ -8,7 +8,7 @@
 #                (default outputs/checkpoints/rung1, relative to the CWD)
 #   MAX_RETRIES  --resume-run attempts per seed after the fresh run (default 5)
 # Env overrides (all optional):
-#   RUNG1_EXTRA      extra train.py tokens appended LAST — argparse keeps the last
+#   RUNG1_EXTRA      extra cs2rl.train.__main__ tokens appended LAST — argparse keeps the last
 #                    occurrence, so "--timesteps 10240 --num_envs 16 --device cpu
 #                    --vec-backend serial" turns this into a CPU smoke run.
 #                    Unquoted on purpose: word-split into tokens (no spaces in values).
@@ -22,7 +22,7 @@
 # Per-seed state machine (all decisions are on files, so re-running the script
 # after a crash of the script itself is safe):
 #   <dir>/DONE                          -> finished: skip.  Written by THIS script
-#                                          after train.py exits 0 and holds the
+#                                          after cs2rl.train.__main__ exits 0 and holds the
 #                                          PARTICIPATING --timesteps budget that run
 #                                          used. If the budget now requested (last
 #                                          --timesteps in the argv, i.e. RUNG1_EXTRA
@@ -46,7 +46,7 @@
 # at the end (exit 1).
 # The retry counter is PER INVOCATION: a seed that exhausted MAX_RETRIES leaves
 # no DONE, so re-running the script grants it MAX_RETRIES more resumes.
-# Every train.py leg's stdout+stderr is appended to <dir>/train.log (tee'd, so
+# Every cs2rl.train.__main__ leg's stdout+stderr is appended to <dir>/train.log (tee'd, so
 # it still streams to the console) — the crash traceback that justified a
 # retry survives a 7-seed sweep.
 set -euo pipefail
@@ -95,7 +95,7 @@ last_flag_value() {   # $1 = flag, rest = argv; prints the LAST value (argparse 
   printf '%s' "$v"
 }
 
-run_train() {   # $1 = log file, rest = train.py argv. Tees output; returns train.py's status.
+run_train() {   # $1 = log file, rest = cs2rl.train.__main__ argv. Tees output; returns its status.
   local log=$1; shift
   # PITFALL: under `pipefail` the pipeline's status is tee's unless we read
   # PIPESTATUS[0] right after it. Safe under `set -e` only because every caller
@@ -151,9 +151,10 @@ for s in $SEEDS; do
   run_seed "rung1-s$s" "$s" --aim-entropy-bonus off --aim-log-std-max -2.9957 \
     || failed+=("rung1-s$s")                    # one dead seed must not abort the sweep (set -e)
 done
-# Negative control (spec §4): bonus on, sigma cap log 0.5. PITFALL: train.py's
-# bound is INCLUSIVE at log 0.5 = -0.693147..., so the rounded "-0.6931" is
-# ABOVE the cap and rejected (burned 2026-08-30) — -0.69315 sits just inside.
+# Negative control (spec §4): bonus on, sigma cap log 0.5. PITFALL: the bound that
+# cs2rl.policy.validate_aim_log_std_max checks is INCLUSIVE at log 0.5 = -0.693147...,
+# so the rounded "-0.6931" is ABOVE the cap and rejected (burned 2026-08-30) —
+# -0.69315 sits just inside.
 for s in $NEG_SEEDS; do
   run_seed "rung1-neg-s$s" "$s" --aim-entropy-bonus on --aim-log-std-max -0.69315 \
     || failed+=("rung1-neg-s$s")

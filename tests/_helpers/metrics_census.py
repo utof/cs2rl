@@ -107,24 +107,24 @@ class EmitterSite(NamedTuple):
 # `trainer._tag_metrics` container became `self._tag_metrics` with the trainer->self
 # rename. The site's key multiset is pinned identical across the move (ledger W2a, O6).
 EMITTER_SITES = (
-    EmitterSite("train_metrics.py", "compute_network_health", {"metrics": ""}),
-    EmitterSite("train_metrics.py", "log_aim_log_std", {"logs": ""}),
-    EmitterSite("train_metrics.py", "compute_head_divergence", {"out": ""}),
-    EmitterSite("train_metrics.py", "compute_trunk_divergence", {"out": ""}),
-    EmitterSite("train_metrics.py", "ScheduledEval.after_train", {"self.pending": ""}),
-    EmitterSite("train_metrics.py", "compute_game_metrics", {"game_metrics": ""}),
-    EmitterSite("train_metrics.py", "_inject_tag_metrics", {"logs": ""}),
-    EmitterSite("trainer.py", "Cs2PuffeRL.train", {
+    EmitterSite("train/metrics.py", "compute_network_health", {"metrics": ""}),
+    EmitterSite("train/metrics.py", "log_aim_log_std", {"logs": ""}),
+    EmitterSite("train/metrics.py", "compute_head_divergence", {"out": ""}),
+    EmitterSite("train/metrics.py", "compute_trunk_divergence", {"out": ""}),
+    EmitterSite("train/metrics.py", "ScheduledEval.after_train", {"self.pending": ""}),
+    EmitterSite("train/metrics.py", "compute_game_metrics", {"game_metrics": ""}),
+    EmitterSite("train/metrics.py", "_inject_tag_metrics", {"logs": ""}),
+    EmitterSite("train/trainer.py", "Cs2PuffeRL.train", {
         "losses": "losses/",
         "self.stats": "environment/",
         "self._tag_metrics": "",
     }),
-    EmitterSite("train_update.py", "tag_grad_cossim", {"out": ""}),
-    EmitterSite("train.py", "train", {
+    EmitterSite("train/update.py", "tag_grad_cossim", {"out": ""}),
+    EmitterSite("train/loop.py", "train", {
         "logs": "",
         "log_entry": ""
     }),
-    EmitterSite("train.py", "self_play_used_past_metric", {"logs": ""}),
+    EmitterSite("train/selfplay.py", "self_play_used_past_metric", {"logs": ""}),
     EmitterSite("env/c/cs2_env.py", "Cs2Env._build_terminal_info", {"summary": "environment/"}),
     EmitterSite("env/c/cs2_env.py", "Cs2Env.step", {"summary": "environment/"}),
 )
@@ -168,12 +168,12 @@ NON_ISLAND_WRITES = (
         "shots_with_enemy_in_los, timed_out), consumed by evaluate() to build the eval/* "
         "numbers. Never written into a row itself."),
     NonIslandWrite(
-        "train.py", "evaluate_checkpoint",
+        "train/evaluate.py", "evaluate_checkpoint",
         "`--eval` mode's local Counter, PRINTED TO STDOUT. Its 13 bare keys are the same "
         "names cs2_env's terminal info uses, which is why a grep-based audit reads it as "
         "an emitter; nothing here reaches metrics.jsonl."),
     NonIslandWrite(
-        "train.py", "convert_legacy_state_dict_to_split",
+        "train/resume.py", "convert_legacy_state_dict_to_split",
         "state_dict TENSOR names (`aim_log_std_t`/`_ct`), not metrics keys — checkpoint "
         "surgery for the legacy→split migration."),
     NonIslandWrite(
@@ -1581,9 +1581,9 @@ def reader_report_columns(rel_path="src/cs2rl/experiment/gate.py"):
 # `compute_game_metrics` reads through its own `_get` helper, which tries
 # `environment/<k>` before the bare `<k>` — hence the prefix.
 IN_REPO_CONSUMERS = (
-    ("format_train_status", "train.py", "format_train_status", "logs", ""),
-    ("elimination_only_win_rates", "train.py", "elimination_only_win_rates", "logs", ""),
-    ("compute_game_metrics", "train_metrics.py", "compute_game_metrics", "_get", "environment/"),
+    ("format_train_status", "train/metrics.py", "format_train_status", "logs", ""),
+    ("elimination_only_win_rates", "train/metrics.py", "elimination_only_win_rates", "logs", ""),
+    ("compute_game_metrics", "train/metrics.py", "compute_game_metrics", "_get", "environment/"),
 )
 
 
@@ -1673,7 +1673,7 @@ def losses_entropy_head_source():
     name, so re-pointing the emitter at a different head list fails the test
     instead of silently leaving the registry describing the old heads.
     """
-    fn = _find_qualname(_module_ast("trainer.py"), "Cs2PuffeRL.train")
+    fn = _find_qualname(_module_ast("train/trainer.py"), "Cs2PuffeRL.train")
     # The write we are anchored on: `losses[f"entropy/{_hn}"] += ...` inside a
     # `for ... in zip(<names>, ...)`. Walk outwards from the write to its loop.
     loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
@@ -1715,7 +1715,7 @@ def tag_key_axes():
     An axis that stops resolving comes back as `()`, which is a failure for the
     caller rather than something to paper over here.
     """
-    fn = _find_qualname(_module_ast("train_update.py"), "tag_grad_cossim")
+    fn = _find_qualname(_module_ast("train/update.py"), "tag_grad_cossim")
     site = next(s for s in EMITTER_SITES if s.qualname == "tag_grad_cossim")
     literals = _local_literal_bindings(fn)
     loops = [
@@ -1740,7 +1740,7 @@ def stats_collection_is_append_shaped():
     ever rewritten to `self.stats[k] = v`, every one of those declarations
     would become wrong at once — and nothing else in the suite would notice.
     """
-    tree = _module_ast("trainer.py")
+    tree = _module_ast("train/trainer.py")
     fn = _find_qualname(tree, "Cs2PuffeRL.evaluate")
     for node in ast.walk(fn):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)

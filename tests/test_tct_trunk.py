@@ -8,8 +8,12 @@ tests 6 and 10 so that file stays under the plan's ~800-line cap.
 import pytest
 import torch
 
-from cs2rl import train
+from cs2rl import policy as policy_mod
 from cs2rl.env.c.cs2_env import make_env
+from cs2rl.spec import obs as spec_obs
+from cs2rl.train import metrics as train_metrics
+from cs2rl.train import resume as train_resume
+from cs2rl.train import selfplay as train_selfplay
 
 
 @pytest.fixture(scope="module")
@@ -24,7 +28,7 @@ def env():
 def _obs(n_t, n_ct, seed=0):
     """(n_t + n_ct, OBS_DIM) batch: first n_t rows are T (obs[24] == 1)."""
     torch.manual_seed(seed)
-    x = torch.randn(n_t + n_ct, train.OBS_DIM) * 0.5
+    x = torch.randn(n_t + n_ct, spec_obs.OBS_DIM) * 0.5
     x[:n_t, 24] = 1.0
     x[n_t:, 24] = 0.0
     return x
@@ -39,10 +43,10 @@ def test_trunk_l2_rel_emitted_and_grows_with_asymmetric_step(env):
     the warm-split-identical condition (convert_shared_trunk_to_split),
     matching test_head_divergence_zero_at_warm_split_and_keys_present.
     """
-    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
-    heads_only = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=False)
-    p.load_state_dict(train.convert_shared_trunk_to_split(heads_only.state_dict()))
-    d0 = train.compute_trunk_divergence(p)
+    p = policy_mod.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+    heads_only = policy_mod.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=False)
+    p.load_state_dict(train_resume.convert_shared_trunk_to_split(heads_only.state_dict()))
+    d0 = train_metrics.compute_trunk_divergence(p)
     assert set(d0) == {"split/trunk_l2_rel/encoder", "split/trunk_l2_rel/lstm"}
     assert d0["split/trunk_l2_rel/encoder"] < 1e-6
     assert d0["split/trunk_l2_rel/lstm"] < 1e-6
@@ -51,9 +55,9 @@ def test_trunk_l2_rel_emitted_and_grows_with_asymmetric_step(env):
     logits, mu, ls, v = p.forward(x, {})
     (sum(t.sum() for t in logits) + mu.sum() + v.sum()).backward()
     opt.step()
-    d1 = train.compute_trunk_divergence(p)
+    d1 = train_metrics.compute_trunk_divergence(p)
     assert d1["split/trunk_l2_rel/encoder"] > d0["split/trunk_l2_rel/encoder"]
-    assert train.compute_trunk_divergence(train.build_policy(env, "cpu")) == {}
+    assert train_metrics.compute_trunk_divergence(policy_mod.build_policy(env, "cpu")) == {}
 
 
 def test_self_play_loads_three_checkpoint_vintages(env, tmp_path):
@@ -77,21 +81,21 @@ def test_self_play_loads_three_checkpoint_vintages(env, tmp_path):
     pool = tmp_path / "pool"
     pool.mkdir()
     vintages = (
-        (pool / "past_legacy.pt", False, False, train.build_policy(env, device="cpu")),
+        (pool / "past_legacy.pt", False, False, policy_mod.build_policy(env, device="cpu")),
         (pool / "past_heads.pt", True, False,
-         train.build_policy(env, device="cpu", tct_split_heads=True)),
+         policy_mod.build_policy(env, device="cpu", tct_split_heads=True)),
         (pool / "past_both.pt", True, True,
-         train.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)),
+         policy_mod.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)),
     )
     for path, _heads, _trunk, src in vintages:
         torch.save(src.state_dict(), path)
 
-    current = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+    current = policy_mod.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
     x = _obs(2, 2)
     with torch.no_grad():
         current.forward(x, {})
     for path, expect_heads, expect_trunk, _src in vintages:
-        mgr = train.SelfPlayManager()
+        mgr = train_selfplay.SelfPlayManager()
         mgr.pool = [path]
         past = mgr.load_past_policy("cpu", env)
         assert past is not None, path
@@ -119,11 +123,11 @@ def test_trunk_split_lstm_bptt_resets_on_terminal(env):
     PITFALL: do not change _lstm_bptt to return (h,c). A T-only batch
     would miss a CT leftover; mixed rows cover both copies.
     """
-    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+    p = policy_mod.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
     p.eval()
     torch.manual_seed(2)
     B, T, k = 4, 6, 2
-    x_seq = torch.randn(B, T, train.OBS_DIM)
+    x_seq = torch.randn(B, T, spec_obs.OBS_DIM)
     # rows 0,1 T (obs[24]==1); rows 2,3 CT (obs[24]==0)
     x_seq[:2, :, 24] = 1.0
     x_seq[2:, :, 24] = 0.0

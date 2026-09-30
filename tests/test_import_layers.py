@@ -4,10 +4,13 @@ WHAT runs here:
   1. `lint-imports` over this checkout: every contract in [tool.importlinter] holds.
   2. The checkout check: the linter's child resolved `cs2rl` to THIS checkout.
   3. The coverage check: every tracked `src/cs2rl/*.py` is a module in grimp's graph.
-  4. The scope pin: every site of every ignore_imports pair sits inside a def.
-  5. Positive controls on a tmp copy of the package, one plant each, so every check
-     above has been seen to reject something.
-  6. The one layer placement a test elsewhere relies on: eval (metrics_schema) above train.
+  4. No contract has an ignore_imports entry: an upward import moves down a layer.
+  5. Positive controls on a tmp copy of the package, one plant each, so the checks
+     above that read a tree have been seen to reject something. Item 4 reads the
+     config, not a tree, so it has none; (e) keeps the scope pin, the tool that
+     guarded ignores while they existed, and the fact the ban rests on.
+  6. The one layer placement #92's retired ignores rest on: train above eval/viz/bc,
+     the policy below them.
 
 WHY 2: import-linter and grimp find `cs2rl` with importlib.util.find_spec, which
 never executes src/cs2rl/__init__.py, so the package's foreign-checkout guard cannot
@@ -24,11 +27,15 @@ covered. An untracked module fails here as "extra in grimp" only where grimp can
 its directory; an untracked one in a directory without __init__.py is on neither
 side and passes until it is tracked (or `git add -N`).
 
-WHY 4: grimp counts a function-local import as an edge, and an ignore_imports entry
-names a module PAIR, never a line or a scope. So an ignored pair hides every future
-site of that pair, a module-scope one included, and adding a second site does not
-trip import-linter's unmatched-ignore alert (only deleting the last one does). The
-pin reads the pairs from the config, so a new entry is pinned the day it lands.
+WHY 4: an ignore_imports entry names a module PAIR, never a line or a scope. So an
+ignored pair hides every future site of that pair, a module-scope one included, and
+adding a second site does not trip import-linter's unmatched-ignore alert (only
+deleting the last one does). While #92's ignores lived, a scope pin kept their sites
+function-local. #205 part 3 moved the code down instead and no contract has an entry
+left, so the pin iterated an empty set and passed a re-added ignore; the guard is the
+ban itself, `test_no_contract_ignores_imports`. `scope_pin_failures` stays for the
+controls in (e), which keep under test the premise the ban rests on: import-linter
+accepts a module-scope site of an ignored pair.
 
 HOW to run the linter by hand: `lint-imports --no-cache --no-logo` from the repo root,
 with PYTHONPATH=<checkout>/src. `--no-cache` because a bare run writes
@@ -56,6 +63,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -72,9 +80,11 @@ _CHILD_TIMEOUT_S = 120
 # One grimp graph per tree, built in a child with the tree's src/ first on
 # PYTHONPATH. It reports where `cs2rl` resolved, the module set, and the line of
 # every site of every ignore_imports pair of every contract (grimp resolves every
-# spelling: `from . import x`, `import cs2rl.x`, aliases). The entries are raw
-# "a -> b" strings; a wildcard entry matches no module, so it reports no sites and
-# fails the pin loudly until someone expands it (grimp's find_matching_direct_imports).
+# spelling: `from . import x`, `import cs2rl.x`, aliases). This checkout's config has
+# no such pair, so its "sites" is empty; the tmp config of control (e) has one. The
+# entries are raw "a -> b" strings; a wildcard entry matches no module, so it reports
+# no sites and fails the pin loudly until someone expands it (grimp's
+# find_matching_direct_imports).
 _GRAPH_CHILD = """
 import importlib.util, json, sys
 import grimp
@@ -102,7 +112,7 @@ def _child_env(src: Path) -> dict[str, str]:
     return dict(os.environ, PYTHONPATH=pythonpath, COLUMNS="200")
 
 
-def _lint(tree: Path) -> subprocess.CompletedProcess:
+def _lint(tree: Path, config: Path = PYPROJECT) -> subprocess.CompletedProcess:
     """`lint-imports --no-cache --no-logo --config <PYPROJECT>` over `tree`/src, cwd = `tree`.
 
     `--config` is passed for this checkout too, not only for the tmp copies (which
@@ -114,7 +124,7 @@ def _lint(tree: Path) -> subprocess.CompletedProcess:
     """
     assert LINT_IMPORTS.is_file(), f"{_MISSING_TOOLS} (no {LINT_IMPORTS})"
     argv = [sys.executable, str(LINT_IMPORTS), "--no-cache", "--no-logo"]
-    return subprocess.run([*argv, "--config", str(PYPROJECT)],
+    return subprocess.run([*argv, "--config", str(config)],
                           cwd=tree,
                           env=_child_env(tree / "src"),
                           capture_output=True,
@@ -122,7 +132,7 @@ def _lint(tree: Path) -> subprocess.CompletedProcess:
                           timeout=_CHILD_TIMEOUT_S)
 
 
-def _graph_facts(tree: Path) -> dict:
+def _graph_facts(tree: Path, config: Path = PYPROJECT) -> dict:
     """The graph child's report for `tree`: {"origin", "modules", "sites"}.
 
     Asserts the child resolved `cs2rl` to `tree` itself. Every consumer maps grimp's
@@ -130,7 +140,7 @@ def _graph_facts(tree: Path) -> dict:
     the editable .pth, when `tree`'s own package is broken) must never reach them.
     """
     r = subprocess.run(
-        [sys.executable, "-c", _GRAPH_CHILD, str(PYPROJECT)],
+        [sys.executable, "-c", _GRAPH_CHILD, str(config)],
         cwd=tree,
         env=_child_env(tree / "src"),
         capture_output=True,
@@ -184,16 +194,22 @@ def coverage_failures(facts: dict, expected_files: Iterable[str]) -> list[str]:
 def scope_pin_failures(tree: Path, facts: dict) -> list[str]:
     """Every site of every ignored pair is inside a FunctionDef or AsyncFunctionDef.
 
+    NOT RUN ON THIS CHECKOUT since #205 part 3: no contract has an ignore_imports entry,
+    so the real config gives it nothing to check. Only controls (e) call it, on a tmp
+    config that ignores one pair.
+
     A method counts (a FunctionDef inside a ClassDef); a class body, an `if` at
     module level (`if TYPE_CHECKING:` included), or a `try:` at module level does not:
     control (e) plants one site of each shape. grimp reports a multi-line import at
     its first line, which is inside the def whenever the statement is.
 
     BLIND SPOT, stated: this checks where an import STATEMENT sits, not when it
-    RUNS. `def f(): import cs2rl.viz.render` followed by a module-level `f()` passes the
-    pin and both contracts. For train -> viz.render, the one pair nothing else would
-    notice, tests/test_w1_modules.py lists `rerun` in HEAVY, so `from cs2rl import
-    train` loading viz.render fails there.
+    RUNS. `def f(): import cs2rl.viz.render` followed by a module-level `f()` passes it
+    and every contract. That was the live case for the train -> viz.render ignore
+    (#92). Train sits above viz now, so that edge is legal at any scope and the ignore
+    is gone; what catches a viz.render import that RUNS at the CLI's module scope is
+    tests/test_w1_modules.py: it lists `rerun` in HEAVY, and
+    test_cli_module_scope_stays_light imports `cs2rl.train.__main__`.
     """
     failures = []
     for importer, imported, lines in facts["sites"]:
@@ -251,18 +267,60 @@ def test_every_tracked_module_is_in_the_graph():
     assert not failures, "\n".join(failures)
 
 
-def test_every_ignored_import_stays_function_local():
-    failures = scope_pin_failures(REPO_ROOT, _graph_facts(REPO_ROOT))
-    assert not failures, "\n".join(failures)
+# The contracts of pyproject.toml, by name. The ban below reads every contract it finds,
+# so a new contract's ignores are seen without this list. The pin keeps the ban from going
+# vacuous: a config with no contract under this table (a moved table, a rename) has no
+# `ignore_imports` to find and would pass.
+CONTRACT_NAMES = frozenset({
+    "cs2rl layers",
+    "cs2rl.env layers",
+    "cs2rl.train layers",
+    "cs2rl acyclic siblings",
+})
 
 
-def test_metrics_schema_sits_above_train():
-    """The `cs2rl layers` contract puts eval, metrics_schema's package, above train.
+def test_no_contract_ignores_imports():
+    """No import-linter contract carries an `ignore_imports` entry (#205 part 3).
 
-    tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN says a train.py import of
-    metrics_schema is an upward edge lint-imports rejects. That is true only while this
-    holds: moving eval down into train's layer keeps every other check green and makes
-    that entry silently false.
+    An entry names a module PAIR, never a line or a scope, so it hides every current
+    and future site of that pair (WHY 4 in the module docstring), and import-linter
+    has no setting that forbids one. #92's ignores existed because the policy lived in
+    `train`; #205 part 3 moved it below eval and viz, and the ban keeps it that way:
+    an upward import moves DOWN a layer, it is not ignored.
+
+    Read straight from pyproject.toml with tomllib, not through import-linter's
+    `read_configuration`: what is asserted is the file's text, whatever import-linter
+    later makes of it. `_config_ignoring` (controls (e)) asserts the same about the two
+    contracts it edits, before it plants a pair.
+
+    PITFALL: this replaced a scope pin over the ignored pairs' sites. On the live
+    config that pin iterated an empty set, so it passed a re-added ignore whose site was
+    function-local. Asserting the ban itself is what turns that red.
+    """
+    config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    contracts = config["tool"]["importlinter"]["contracts"]
+    names = {c["name"] for c in contracts}
+    assert names == CONTRACT_NAMES and len(contracts) == len(CONTRACT_NAMES), (
+        f"pyproject.toml's import-linter contracts are {sorted(names)} ({len(contracts)} "
+        f"entries), not {sorted(CONTRACT_NAMES)}: update CONTRACT_NAMES in this test, and "
+        "give the new contract no ignore_imports entry")
+    ignoring = {c["name"]: c["ignore_imports"] for c in contracts if c.get("ignore_imports")}
+    assert not ignoring, (
+        f"ignore_imports entries are banned (#205 part 3), found {ignoring}. Move the code "
+        "down a layer instead: the shared code into a lower module, or the importer up. An "
+        "entry hides every future site of its pair, a module-scope one included.")
+
+
+def test_train_sits_above_eval_and_viz_and_policy_below_them():
+    """The placement that retired #92's ignore_imports entries (#205 part 3).
+
+    train's run driver and CLI use eval (the --eval-interval BaselineEvaluator) and viz
+    (--record); eval, viz and train_bc use only the policy. With the policy in its own
+    module below all three and train above them, every one of those edges points down,
+    and the four `ignore_imports` entries #92 owned have nothing left to hide. Putting
+    train back under eval (or the policy back into train) turns those edges upward again
+    and `lint-imports` fails, naming those upward imports; this pin names the placement
+    they follow from.
 
     PITFALL: the contract is selected by NAME. pyproject.toml holds more than one layers
     contract (`cs2rl.env layers` too), so picking "the" layers contract by type either
@@ -282,10 +340,9 @@ def test_metrics_schema_sits_above_train():
         for index, layer in enumerate(layers)
         for member in re.split(r"[|:]", layer)
     }
-    assert rank["eval"] < rank["train"], (
-        f"eval (metrics_schema's package) is in layer {layers[rank['eval']]!r}, not above "
-        f"train's {layers[rank['train']]!r}: tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN "
-        "entry for it is no longer true. Move it back up, or rewrite that entry.")
+    for app in ("eval", "viz", "train_bc"):
+        assert rank["train"] < rank[app] < rank["policy"], (
+            f"layers {layers!r}: train must sit above {app}, and {app} above policy")
 
 
 # ── positive controls: a tmp copy of the package, one plant each ─────────────────
@@ -345,15 +402,16 @@ def test_control_a_module_without_a_layer_in_env_is_rejected(tmp_path):
 
 
 def test_control_the_unplanted_copy_passes_every_check(tmp_path):
-    """(c) The copy is complete: every check that the controls turn red passes on it.
+    """(c) The copy is complete: the lint and the coverage check, which the controls turn red, pass on it.
 
-    `_graph_facts` also asserts the child resolved the copy, not this checkout.
+    `_graph_facts` also asserts the child resolved the copy, not this checkout. The scope
+    pin is not part of this: the real config has no ignored pair for it to look at, and
+    control (e) supplies one.
     """
     tree, files = _copy_package(tmp_path)
     r = _lint(tree)
     assert r.returncode == 0, r.stdout + r.stderr
-    facts = _graph_facts(tree)
-    failures = coverage_failures(facts, files) + scope_pin_failures(tree, facts)
+    failures = coverage_failures(_graph_facts(tree), files)
     assert not failures, "\n".join(failures)
 
 
@@ -385,6 +443,34 @@ def test_control_env_config_importing_nav_breaks_the_env_layers(tmp_path):
     assert "cs2rl layers KEPT" in r.stdout and "cs2rl acyclic siblings KEPT" in r.stdout, r.stdout
 
 
+# The pair control (e) ignores in its tmp copy of the config: env.nav (L1) -> viz.render (L3)
+# is upward in `cs2rl layers` and closes an env <-> viz package cycle, so both contracts
+# need the entry, exactly like the #92 entries #205 part 3 retired.
+_PLANT_PAIR = "cs2rl.env.nav -> cs2rl.viz.render"
+
+
+def _config_ignoring(tmp_path: Path, pair: str) -> Path:
+    """A copy of this checkout's pyproject.toml with `pair` ignored by the two cs2rl contracts.
+
+    PITFALL: it INSERTS an `ignore_imports` key, so a contract that already has one would
+    get a second and TOML would refuse the file ("Cannot overwrite a value"), which the
+    caller reports as a changed premise. It asserts first that neither contract has one;
+    `test_no_contract_ignores_imports` is what says why none may.
+    """
+    text = PYPROJECT.read_text(encoding="utf-8")
+    contracts = {c["name"]: c for c in tomllib.loads(text)["tool"]["importlinter"]["contracts"]}
+    for name in ("cs2rl layers", "cs2rl acyclic siblings"):
+        assert "ignore_imports" not in contracts[name], (
+            f"contract {name!r} already has an ignore_imports key in {PYPROJECT}: entries are "
+            "banned (test_no_contract_ignores_imports), so this control has nothing to plant into")
+        head = f'name = "{name}"\n'
+        assert text.count(head) == 1, f"contract {name!r} not found once in {PYPROJECT}"
+        text = text.replace(head, f'{head}ignore_imports = ["{pair}"]\n')
+    config = tmp_path / "pyproject.plant.toml"
+    config.write_text(text, encoding="utf-8")
+    return config
+
+
 # One module-scope `import cs2rl.viz.render` site per construct that is not a def. The pin's
 # docstring says none of them counts as function-local; a pin widened to exempt one
 # (say, `if TYPE_CHECKING:` blocks) fails the matching case.
@@ -405,15 +491,16 @@ def test_control_a_module_scope_site_of_an_ignored_pair(tmp_path, shape):
     site" failure carries the pair too, and would satisfy a pair-only check.
     """
     tree, _ = _copy_package(tmp_path)
+    config = _config_ignoring(tmp_path, _PLANT_PAIR)
     text = _MODULE_SCOPE_SHAPES[shape]
-    start = _append(tree, "src/cs2rl/train.py", text)
+    start = _append(tree, "src/cs2rl/env/nav.py", text)
     planted = start + next(i
                            for i, line in enumerate(text.split("\n")) if "cs2rl.viz.render" in line)
-    r = _lint(tree)
+    r = _lint(tree, config)
     assert r.returncode == 0, ("import-linter now rejects a module-scope site of an ignored "
                                "pair; the scope pin's premise changed.\n" + r.stdout + r.stderr)
-    failures = scope_pin_failures(tree, _graph_facts(tree))
-    assert any(f"train.py:{planted} is not inside a def" in f for f in failures), failures
+    failures = scope_pin_failures(tree, _graph_facts(tree, config))
+    assert any(f"nav.py:{planted} is not inside a def" in f for f in failures), failures
 
 
 def test_control_a_directory_without_init_is_covered(tmp_path):

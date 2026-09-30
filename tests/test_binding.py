@@ -262,19 +262,21 @@ def test_continuous_aim_nan_guard():
 
     import torch
 
-    from cs2rl import train
+    from cs2rl import policy as policy_mod
     from cs2rl.env.c.cs2_env import make_env
+    from cs2rl.spec import action as spec_action
+    from cs2rl.spec import obs as spec_obs
 
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device='cpu')
+        policy = policy_mod.build_policy(env, device='cpu')
 
         # Force the aim head to emit NaN so the loss path goes non-finite.
         # We don't need to run a full PPO update — replicating the guard's
         # control flow inline is enough to verify it does the right thing.
         # Batch 3.5: output AIM_DIM columns so expand_as(mu_aim) in forward
         # doesn't raise a size mismatch when AIM_DIM > 1.
-        _aim_dim = train.AIM_DIM
+        _aim_dim = spec_action.AIM_DIM
 
         class _NaNLayer(torch.nn.Module):
 
@@ -285,7 +287,7 @@ def test_continuous_aim_nan_guard():
         old_params = [p.detach().clone() for p in policy.parameters()]
         optimizer = torch.optim.Adam(policy.parameters(), lr=1e-3)
 
-        x = torch.zeros((1, train.OBS_DIM))
+        x = torch.zeros((1, spec_obs.OBS_DIM))
         logits, mu_aim, log_std_aim, value = policy.forward(x, state={})
         loss = mu_aim.sum() + value.sum()
         # Sanity: setup must yield a non-finite loss.
@@ -483,13 +485,13 @@ def test_onnx_export_output_order_pinned():
     import torch
     from torch import nn
 
-    from cs2rl import train
     from cs2rl.deploy.export_policy import LSTMPolicyONNXWrapper
     from cs2rl.env.c.cs2_env import make_env
+    from cs2rl.spec import obs as spec_obs
 
     env = make_env(seed=0)
     try:
-        obs_dim, hidden = train.OBS_DIM, 256
+        obs_dim, hidden = spec_obs.OBS_DIM, 256
         # Mirror the architecture build_model would produce. ACTION_HEAD_SIZES
         # is the head order MOVE/SHOOT/RELOAD/WEAPON/USE/CROUCH/JUMP per
         # spec/action.py — keep this list synced if those sizes ever change.

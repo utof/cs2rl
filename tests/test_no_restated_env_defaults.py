@@ -98,7 +98,7 @@ ALLOWLIST = ("config.replace(reward_symmetrize=False)", )
 # exist. A path that points at nothing is loud here, not silent: _scanned_files
 # asserts ANCHOR is among the scanned files.
 SCAN_ROOTS = ("src", "scripts")
-ANCHOR = REPO_ROOT / "src" / "cs2rl" / "train_config.py"
+ANCHOR = REPO_ROOT / "src" / "cs2rl" / "train" / "config.py"
 
 
 def _scanned_files():
@@ -391,9 +391,10 @@ def test_the_probes_find_a_planted_restatement(tmp_path, monkeypatch, probe):
     PATTERNS against a scratch string and never touches the file walk.
     """
     (tmp_path / "src" / "cs2rl" / "env").mkdir(parents=True)
+    (tmp_path / "src" / "cs2rl" / "train").mkdir()
     (tmp_path / "scripts").mkdir()
     declaration = tmp_path / "src" / "cs2rl" / "env" / "config.py"
-    anchor = tmp_path / "src" / "cs2rl" / "train_config.py"
+    anchor = tmp_path / "src" / "cs2rl" / "train" / "config.py"
     name = "crouch_enabled"
     value = FIELD_DEFAULTS[name]
     plant = (f"{name} = {value!r}\n"
@@ -412,7 +413,7 @@ def test_the_probes_find_a_planted_restatement(tmp_path, monkeypatch, probe):
     found = _hits(pattern)
     assert sorted((f, n) for f, _, n in found) == [
         ("scripts/planted.py", name),
-        ("src/cs2rl/train_config.py", name),
+        ("src/cs2rl/train/config.py", name),
     ], f"the walk did not report one hit under EACH root: {found}"
     # cross-probe negative: neither planted shape matches the other probe
     other = _getattr_pattern if probe == "line" else _line_pattern

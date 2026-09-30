@@ -13,7 +13,7 @@ tests/modal_runner_tables.py):
               ValidationError, the path and hash helpers, and the protocols
               and records two or more modules share (see WHERE A NEW NAME GOES)
   request     run and artifact-client requests with their limits and defaults;
-              train.py argument validation
+              `cs2rl.train.__main__` argument validation
   source      clean-HEAD check, deterministic source bundles, safe extraction
   checkpoint  checkpoint loading and validation; completed-run evidence
   state       run status and transitions, reservations, claims, heartbeats,
@@ -81,15 +81,15 @@ the package-shape `seam` clause enforces it over the submodules, and
 `test_package_seam_contract` checks that this list matches it.
 
 PITFALLS:
-  * Live train.py argparse accepts prefixes (`--devi` → `--device`). The runner
+  * Live `cs2rl.train.__main__` argparse accepts prefixes (`--devi` → `--device`). The runner
     must NOT. Only exact long-option names from the mirrored live set are legal.
   * Client Volume APIs take root-relative PurePosixPath (`runs/...`); the
     container sees the same object at `/artifacts/runs/...`. Mixing the two
     namespaces silently talks to the wrong path.
-  * config.json's `env` field is only a label: src/cs2rl/train_config.py writes
-    `cs2-<map>` from train.py's resolved `--map`, and the historical `cs2-dust2`
-    only for callers whose `map` attribute is missing or empty. effective_map is
-    the runner's source of truth and is never derived from that field.
+  * config.json's `env` field is only a label: `cs2rl.train.config.build_train_config`
+    writes `cs2-<map>` from the `--map` that `cs2rl.train.__main__` resolves, and the
+    historical `cs2-dust2` only for callers whose `map` attribute is missing or empty.
+    effective_map is the runner's source of truth and is never derived from that field.
 """
 from .checkpoint import validate_local_checkpoint, verify_checkpoint
 from .commands import THREAD_CAP_ENV

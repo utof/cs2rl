@@ -15,8 +15,9 @@ import torch
 
 
 def test_cap_applied_in_forward_and_metrics(simple_map):
-    from cs2rl.train import LOG_STD_MAX, log_aim_log_std
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.policy import LOG_STD_MAX
+    from cs2rl.train.metrics import log_aim_log_std
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     cap = math.log(0.05)
     trainer, cleanup = _build_trainer_for_test(num_envs=4, map_data=simple_map, aim_log_std_max=cap)
     try:
@@ -46,8 +47,8 @@ def test_cap_applied_in_forward_and_metrics(simple_map):
 
 
 def test_cap_outside_band_is_refused(simple_map):
-    from cs2rl.train import LOG_STD_MAX, LOG_STD_MIN
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.policy import LOG_STD_MAX, LOG_STD_MIN
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     for bad in (LOG_STD_MIN, LOG_STD_MAX + 0.1, LOG_STD_MIN - 1.0):
         with pytest.raises(ValueError):
             trainer, cleanup = _build_trainer_for_test(num_envs=4,
@@ -57,7 +58,8 @@ def test_cap_outside_band_is_refused(simple_map):
 
 
 def test_reinit_frozen_respects_cap():
-    from cs2rl.train import AIM_LOG_STD_RESUME_INIT, LOG_STD_INIT, reinit_frozen_aim_log_std
+    from cs2rl.policy import LOG_STD_INIT
+    from cs2rl.train.resume import AIM_LOG_STD_RESUME_INIT, reinit_frozen_aim_log_std
     sd = {"aim_log_std": torch.full((2, ), LOG_STD_INIT)}
     assert reinit_frozen_aim_log_std(sd, cap=math.log(0.05))
     assert torch.allclose(sd["aim_log_std"], torch.full((2, ), math.log(0.05)))
@@ -71,8 +73,8 @@ def test_reinit_frozen_respects_cap():
 
 
 def test_max_entropy_reflects_cap_pin_and_bonus(simple_map):
-    from cs2rl.train import ACTION_HEAD_SIZES
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.spec.action import ACTION_HEAD_SIZES
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     disc = sum(math.log(n) for n in ACTION_HEAD_SIZES)
     cap = math.log(0.05)
     for pin, bonus, n_dims in ((0, True, 2), (1, True, 1), (0, False, 0)):
@@ -95,8 +97,9 @@ def test_ppo_loss_entropy_bonus_switch():
     """aim_entropy_bonus=False ⇒ the entropy the loss returns is the DISCRETE
     entropy only; True (default) ⇒ discrete + Gaussian. Pure-function check on
     a fake 2D-input policy so it needs no env."""
+    from cs2rl.policy import _LOG_2PI
     from cs2rl.spec.action import ACTION_HEAD_SIZES, AIM_DIM
-    from cs2rl.train import _LOG_2PI, _hybrid_ppo_loss
+    from cs2rl.train.update import _hybrid_ppo_loss
     B = 5
 
     class _Pol:
@@ -142,7 +145,7 @@ def test_parked_rows_do_not_move_objective(simple_map):
     parked rows' stored advantages/logprobs by a huge amount, re-run the
     minibatch reductions through a second identical trainer and compare
     losses/policy_loss, losses/entropy, losses/approx_kl."""
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     def _one(perturb):
         torch.manual_seed(0)
@@ -195,11 +198,11 @@ def _policy_with_cap(cap, **kw):
     is the same pattern as tests/test_tct_split.py's `env` fixture usage and it
     keeps the policy-only tests below at ~env-construction cost.
     """
-    from cs2rl import train
+    from cs2rl import policy as policy_mod
     from cs2rl.env.c.cs2_env import make_env
     env = make_env(seed=0)
     try:
-        return train.build_policy(env, device="cpu", aim_log_std_max=cap, **kw)
+        return policy_mod.build_policy(env, device="cpu", aim_log_std_max=cap, **kw)
     finally:
         env.close()
 
@@ -212,7 +215,7 @@ def test_tight_cap_inits_below_the_cap_with_a_live_gradient():
     reproduces the Rung 1 defect exactly (σ one step past the cap) and shows
     the gradient is then identically zero, not merely small.
     """
-    from cs2rl.train import AIM_LOG_STD_INIT_MARGIN, LOG_STD_INIT
+    from cs2rl.policy import AIM_LOG_STD_INIT_MARGIN, LOG_STD_INIT
     cap = math.log(0.05)
     pol = _policy_with_cap(cap)
     init = cap - AIM_LOG_STD_INIT_MARGIN
@@ -246,8 +249,8 @@ def test_sigma_param_group_is_not_weight_decayed(simple_map):
     N·lr = 30 × 3e-4 ≈ 9e-3. Without it, a broken helper that moved nothing at
     all would still make the first half green.
     """
-    from cs2rl.train import isolate_aim_log_std_param_group
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.train.loop import isolate_aim_log_std_param_group
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     def _drift(isolate):
         trainer, cleanup = _build_trainer_for_test(num_envs=4,
@@ -281,8 +284,8 @@ def test_sigma_group_anneals_on_the_same_schedule(simple_map):
     base_lrs against param_groups non-strictly, so the σ group would keep its
     launch LR for the whole run while every other group anneals.
     """
-    from cs2rl.train import isolate_aim_log_std_param_group
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.train.loop import isolate_aim_log_std_param_group
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=4,
                                                map_data=simple_map,
                                                aim_log_std_max=math.log(0.05))
@@ -314,7 +317,7 @@ def test_raw_key_reports_a_sigma_pushed_past_the_cap():
     clamped key saturates at the cap — the only way to tell a healthy σ resting
     at the cap from a frozen one that overshot it (gate pre-flight 5).
     """
-    from cs2rl.train import log_aim_log_std
+    from cs2rl.train.metrics import log_aim_log_std
     cap = math.log(0.05)
     pol = _policy_with_cap(cap)
     # one entropy-maximising step, lr large enough to clear the 0.2 margin
@@ -343,7 +346,7 @@ def test_cap_too_close_to_the_sigma_floor_is_refused():
     has to say why (the operator picked the number; only the error can tell
     them the band moved).
     """
-    from cs2rl.train import (
+    from cs2rl.policy import (
         AIM_LOG_STD_CAP_MIN_HEADROOM,
         LOG_STD_MIN,
         resolve_aim_log_std_init,
@@ -362,7 +365,7 @@ def test_default_cap_leaves_the_init_at_log_std_init():
     """T1(e): no behaviour change for every run that does not pass a tight cap
     — the 5v5 default (and an omitted flag) still start at σ = 0.1.
     """
-    from cs2rl.train import LOG_STD_INIT, LOG_STD_MAX, resolve_aim_log_std_init
+    from cs2rl.policy import LOG_STD_INIT, LOG_STD_MAX, resolve_aim_log_std_init
     assert resolve_aim_log_std_init(LOG_STD_MAX) == pytest.approx(LOG_STD_INIT)
     for cap in (LOG_STD_MAX, None):
         pol = _policy_with_cap(cap)
@@ -376,7 +379,8 @@ def test_config_records_the_resolved_sigma_init():
     """
     import types
 
-    from cs2rl.train import build_train_config, compute_batch_dims, resolve_aim_log_std_init
+    from cs2rl.policy import resolve_aim_log_std_init
+    from cs2rl.train.config import build_train_config, compute_batch_dims
     _, bptt, bs = compute_batch_dims(16)
     for cap in (math.log(0.05), None):
         args = types.SimpleNamespace(device="cpu",

@@ -49,16 +49,9 @@ import shutil
 import tempfile
 import types
 
-# Module level for the same reason as env.factory below: env.config is the
-# stdlib-only leaf of the config graph, so importing it here pulls in nothing.
 from cs2rl.env.config import EnvConfig
-
-# Module level, unlike the `from cs2rl.train import ...` block inside the builder:
-# env.factory's own module scope pulls nothing (torch/nav/env.c stay behind its
-# function-local imports), so importing it here costs nothing.
-# `from ... import build_env_for`, never `from cs2rl.env import factory as env_factory` —
-# the builder below defines a LOCAL named env_factory, which would shadow the module.
-from cs2rl.env.factory import build_env_for, build_selfplay_manager
+from cs2rl.env.factory import build_env_for
+from cs2rl.train.selfplay import build_selfplay_manager
 
 # The harness's four env-knob defaults are the dataclass's, read once rather
 # than copied. Four literals here would be four more places #165 has to keep in
@@ -126,15 +119,15 @@ def _harness_parts(
     import pufferlib.vector
 
     from cs2rl.env.map import make_simple_map
-    from cs2rl.train import (
-        SelfPlayManager,
+    from cs2rl.policy import build_policy
+    from cs2rl.train.config import (
         assert_opponent_self_play_compatible,
         build_participating_rows,
-        build_policy,
         build_train_config,
         compute_batch_dims,
     )
-    from cs2rl.trainer import HybridAimVecEnv
+    from cs2rl.train.selfplay import SelfPlayManager
+    from cs2rl.train.trainer import HybridAimVecEnv
 
     # Rung 1a T3: mirror of train()'s startup guard. `with_selfplay` is the
     # harness's spelling of "self-play bookkeeping on" (it is what sets
@@ -516,7 +509,7 @@ def _build_trainer_for_test(
     # what tests/test_w1_modules.py::test_import_train_test_harness_stays_light catches).
     # It would not be a cycle: with it at module scope, importing this module alone, or
     # train first and then this module, still succeeds.
-    from cs2rl.trainer import Cs2PuffeRL
+    from cs2rl.train.trainer import Cs2PuffeRL
 
     parts, pins = _harness_parts(
         num_envs=num_envs,

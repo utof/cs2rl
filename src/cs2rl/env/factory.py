@@ -1,16 +1,18 @@
-"""The one place a Cs2Env or a SelfPlayManager is constructed.
+"""The one place a Cs2Env is constructed.
 
-Envs are keyed by the ROLE they are built for; the self-play manager has a single
-builder (`build_selfplay_manager`) because its three sites turned out to differ in
-exactly one argument.
+Envs are keyed by the ROLE they are built for. The self-play manager is NOT built
+here any more: its single builder, `cs2rl.train.selfplay.build_selfplay_manager`
+(one builder because its three sites turned out to differ in exactly one argument),
+moved up beside `SelfPlayManager` in #205 part 3 (#92). Left here, it had to import
+`cs2rl.train`, an upward edge the layers contract needed an ignore entry for.
 
 WHY THIS MODULE EXISTS (#154, spec 2026-08-31 §2 W3). `make_puffer_env` had
 seven call sites that drifted independently: the training closure, two
 "legacy defaults" eval sites, the eval driver, the smoke test, the public
 `make_env` wrapper and the test harness. Nothing tied them together, so a knob
 added to one silently skipped the rest — `--smoke --reward-ct-survival 0.0`
-running the DEFAULT weights is the documented instance (build_env_factory's
-docstring in train.py), and #143 is the still-open one. Naming the roles turns
+running the DEFAULT weights is the documented instance (`cs2rl.train.envs.build_env_factory`'s
+docstring), and #143 is the still-open one. Naming the roles turns
 "which sites did I forget" into a list this module owns.
 
 THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
@@ -30,7 +32,7 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
                training knobs. #143 tracks that; this module is not the fix, it
                just reduces the future fix to one role's config source.
   smoke        `smoke_test`, fixed seed 42.
-  harness      `train_test_harness._build_trainer_for_test`, whose contract is
+  harness      `tests._helpers.trainer_harness._build_trainer_for_test`, whose contract is
                "shaped exactly like production" — hence its own role rather
                than a reuse of `train`, since it adds
                `include_step_stats_in_info=True` and builds its config from
@@ -38,11 +40,11 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
   external     the public `make_env(team_spirit, map_data)` wrapper.
 
 There is deliberately NO `record` role, and the reason is NOT that `--record`
-reuses one of the roles above — it does not. `train.record_episode` builds its
+reuses one of the roles above — it does not. `cs2rl.train.record.record_episode` builds its
 own env with a bare `make_c_env(...)`, the LOWER-layer constructor, which W3
 never banned, and THAT is the env every recorded tick comes from: both its
 `log_tick` calls take `env.snapshot_state()`, and the name `policy_env` never
-appears in it. The `eval_legacy` env `train.load_policy_from_checkpoint` builds
+appears in it. The `eval_legacy` env `cs2rl.policy.load_policy_from_checkpoint` builds
 on the way in is a SECOND, separate env, and it is only ever read — never reset,
 never stepped. Read twice, and it is the second read that surprises people: once
 for its obs_dim, which the checkpoint's must match, and once inside
@@ -71,48 +73,51 @@ here would not change that: `record_episode` would still have to be migrated ont
 it, and an enum member no call site can reach is a divergence trap — the next
 person adds a knob to it and nothing changes.
 
-WHY THE IMPORTS ARE FUNCTION-LOCAL, and it is no longer one reason. Since #165
-PR B2 `build_env_for` imports `env.c.cs2_env.make_env` DIRECTLY, so the module
-cycle that import used to break is gone — env construction has no L3 dependency
-at all and this module never names `train` on the env path. The import stays
-function-local anyway because `env.c.cs2_env` is HEAVY (ctypes plus the compiled
-binding) and train.py imports this module at ITS module level: a module-scope
-import here would put the C env on `--dump-config`'s path and break the
-import-lightness invariant `tests/test_w1_modules.py` enforces, which is what
-makes `train.py --dump-config` cost ~1 s instead of ~30 s. Only `env.config` is
-imported at module scope, and it is the stdlib-only leaf.
+WHY THE IMPORT IS FUNCTION-LOCAL. Since #165 PR B2 `build_env_for` imports
+`env.c.cs2_env.make_env` DIRECTLY, so the module cycle that import used to break is
+gone — env construction has no L3 dependency at all and this module never names
+`train` (#205 part 3 moved the last such name out with `build_selfplay_manager`).
+The import stays function-local anyway because `env.c.cs2_env` is HEAVY (ctypes plus
+the compiled binding) and this module is imported at module scope by `cs2rl.policy`,
+`cs2rl.train.envs` and `cs2rl.train.evaluate`, which `cs2rl.train.__main__` imports at
+ITS module level: a module-scope import here would put the C env on `--dump-config`'s
+path and break the import-lightness invariant `tests/test_w1_modules.py` enforces,
+which is what makes `--dump-config` cost ~1 s instead of ~30 s (measured on the flat
+train.py, before #205 part 3). Only `env.config` is imported at module scope, and it
+is the stdlib-only leaf.
 
-PITFALL — THIS MODULE STILL NEEDS train.py's `__main__` SELF-ALIAS, and removing
-it because `build_env_for` stopped importing `cs2rl.train` would break every real
-run. `build_selfplay_manager` below still does `from cs2rl.train import
-SelfPlayManager`. Every real run executes train.py as `python -m cs2rl.train`, so
-the module sits in `sys.modules` as `__main__`, not `cs2rl.train`. Without the
-`sys.modules.setdefault("cs2rl.train", sys.modules["__main__"])` at the top of
-train.py's `if __name__ == "__main__":` block, that import would EXECUTE TRAIN.PY
-A SECOND TIME under the name `cs2rl.train`, leaving two live copies of it per process —
-two sets of module constants, cross-copy `isinstance` silently False, and any
-`train.<attr>` monkeypatch unreachable from script runs. The alias is pinned by
-`test_train_aliases_itself_into_sys_modules_first` and its behavioural twin; keep
-both the alias and this paragraph.
+NO `cs2rl.train` IMPORT, AT ANY SCOPE. This module used to need the flat train.py's `__main__`
+self-alias: `build_selfplay_manager` did a function-local `from cs2rl.train import
+SelfPlayManager`, and a script run (`python -m cs2rl.train`) held the flat train.py in
+`sys.modules` as `__main__`, so that import would have EXECUTED TRAIN.PY A SECOND TIME
+under the name `cs2rl.train`. Both halves are gone: the builder moved to
+`cs2rl.train.selfplay`, and a package `__main__` is imported by no module, so there is
+nothing to alias (`tests/test_w1_modules.py::test_script_run_has_exactly_one_cli_module`
+pins that no module body runs twice). `env` sits below `train` in pyproject.toml's
+`cs2rl layers` contract, which has no `ignore_imports` entry left to hide an import back.
 
-PITFALL — both imports are INSIDE their call, not cached at module scope, on
-purpose: `build_env_for` re-reads `env.c.cs2_env.make_env` every time, so a test
+PITFALL — the `make_env` import is INSIDE `build_env_for`, not cached at module scope,
+on purpose: `build_env_for` re-reads `env.c.cs2_env.make_env` every time, so a test
 that rebinds that attribute still sees its stand-in used, and
 tests/test_env_factory.py's `_construct` is built on exactly that.
 
-`build_selfplay_manager` covers the three `SelfPlayManager` sites (train.py's
-`train()` plus two in `_build_trainer_for_test`). Its own pre-migration capture is
-`tests/fixtures/selfplay_kwargs_pre_w3.json`, recorded one commit before the
-builder was written for the same reason the env capture was — a builder
+`cs2rl.train.selfplay.build_selfplay_manager` (moved there from this module) covers
+the three pre-migration `SelfPlayManager` sites (`train()` plus two in
+`_build_trainer_for_test`); they are two calls now, `cs2rl.train.loop.train()` and
+the one in tests/_helpers/trainer_harness.py's `_harness_parts`. Its own pre-migration
+capture is `tests/fixtures/selfplay_kwargs_pre_w3.json`, recorded one commit before
+the builder was written for the same reason the env capture was — a builder
 transcribed from the sites it is meant to check asserts nothing.
 
 WHY NEITHER GUARD FLAGS `make_env` IN THIS FILE — and they are two
 DIFFERENT guards, which is the part that is easy to get wrong.
 
 `tests/test_env_construction_enforcement.py`'s enforcement scan bans exactly two
-symbols in `src/` and `scripts/`: `make_puffer_env` and `SelfPlayManager`.
-`make_env` is not one of them. That scan DOES have a subject here — the
-`SelfPlayManager(...)` below, which is what this file's exemption exists for.
+symbols in `src/`, `scripts/` and `tests/_helpers/`: `make_puffer_env` and
+`SelfPlayManager`. `make_env` is not one of them. That scan no longer has a subject in
+this file: the `SelfPlayManager(...)` it used to find here moved with
+`build_selfplay_manager` to `cs2rl.train.selfplay` (#205 part 3), which is the home its
+CONSTRUCTION_HOMES table now names for that symbol.
 What #165 PR B2 changed is the CODE side, not this scan's: the function-local
 `from train import make_puffer_env` and `builder(make_puffer_env, **kwargs)`
 became `from c_env.cs2_env import make_env` and `builder(make_env, **kwargs)`.
@@ -129,13 +134,13 @@ equality. This file needs no entry there either: `build_env_for` imports
 parameter is ever inlined into the builders, this file starts showing up in that
 census and the entry has to be added.
 """
-# Module scope, unlike this module's two function-local imports (`make_env` in
-# `build_env_for` and `SelfPlayManager` in `build_selfplay_manager`):
+# Module scope, unlike this module's one function-local import (`make_env` in
+# `build_env_for`):
 # `env.config` is the stdlib-only leaf of the config graph — it imports nothing
 # heavier than `dataclasses` — so this costs nothing on `--dump-config`'s path.
 # tests/test_w1_modules.py::test_only_sibling_edge_is_to_the_leaf
-# lets a split-out module import only the two LEAVES — `train_shared` and
-# `env.config` — and this is one of them.
+# lets a split-out module import only the LEAVES (`cs2rl.policy`, `env.config` and
+# `env.factory`, this module) — and `env.config` is one of them.
 from cs2rl.env.config import EnvConfig
 
 # The role names, in the order the spec lists them. Callers pass one of these
@@ -225,7 +230,7 @@ def _build_eval(_make, /, *, map_data, config):
     ``config`` is required, with no None default: the call site derives it from
     `env_config_from_args`, which always returns an EnvConfig, and the eval env's
     config is cross-checked against the driver env's immediately after
-    construction (`train.assert_eval_env_agreement`). Accepting None here would
+    construction (`cs2rl.train.envs.assert_eval_env_agreement`). Accepting None here would
     let that check compare a default eval env against a knobbed driver.
     """
     return _make(config=config.replace(reward_symmetrize=False),
@@ -277,7 +282,7 @@ def _build_smoke(_make, /):
 
 
 def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
-    """`train_test_harness._build_trainer_for_test`'s per-env construction.
+    """`tests._helpers.trainer_harness._build_trainer_for_test`'s per-env construction.
 
     ``0 if seed is None else seed`` — an explicit None check, NOT ``seed or 0``:
     pufferlib forwards seed=None for the first reset, and a falsy-remap would
@@ -292,7 +297,7 @@ def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
     carries used to be four separate parameters here; since #165 PR B2 the
     mapping from `_build_trainer_for_test`'s plain arguments into an EnvConfig
     lives at the CALL SITE, and that is where the coverage question moved with
-    it — see the closure comment in `src/cs2rl/train_test_harness.py` for which knob
+    it — see the closure comment in `tests/_helpers/trainer_harness.py` for which knob
     each test can and cannot see going missing.
 
     NOTE the mask view is NOT attached here. `env._attach_mask_view(mask_shm,
@@ -311,7 +316,7 @@ def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
 def _build_external(_make, /, *, team_spirit, map_data):
     """The public `make_env(team_spirit, map_data)` wrapper's env.
 
-    Both parameters are REQUIRED even though the PUBLIC WRAPPER `train.make_env`
+    Both parameters are REQUIRED even though the PUBLIC WRAPPER `cs2rl.train.envs.make_env`
     declares its own two as optional. (Qualified deliberately: since #165 PR B2
     this module names two different `make_env`s — the wrapper, and the lower-layer
     `env.c.cs2_env.make_env` that `build_env_for` now imports — and both default
@@ -356,79 +361,15 @@ def build_env_for(role, **kwargs):
     except KeyError:
         raise ValueError(f"unknown env role {role!r}; expected one of {ROLES}") from None
 
-    # Function-local and re-read per call. Two reasons, and the second is new:
-    # the cycle THIS import used to break is gone (`build_env_for` no longer
-    # names `train` at all), but `env.c.cs2_env` is HEAVY — ctypes plus the
-    # compiled binding — and this module is imported at train.py's module
-    # level, so a module-scope import here would put the C env on
-    # `--dump-config`'s path and break the import-lightness invariant
-    # tests/test_w1_modules.py enforces. The MODULE still reaches `train`:
-    # `build_selfplay_manager` below imports `SelfPlayManager` function-locally,
-    # so train.py's `__main__` self-alias remains a hard prerequisite here.
-    # Re-reading per call also keeps a test that rebinds
-    # env.c.cs2_env.make_env able to see its stand-in used.
+    # Function-local and re-read per call. Two reasons: `env.c.cs2_env` is HEAVY —
+    # ctypes plus the compiled binding — and this module is imported at module scope
+    # by cs2rl.policy and by train modules the CLI imports at its module level, so a
+    # module-scope import here would put the C env on `--dump-config`'s path and break
+    # the import-lightness invariant tests/test_w1_modules.py enforces; and
+    # re-reading per call keeps a test that rebinds env.c.cs2_env.make_env able to see
+    # its stand-in used. (The cycle this import used to break is gone, and so is the
+    # last `train` import in this module: see the NO `cs2rl.train` IMPORT paragraph in
+    # the module docstring.)
     from cs2rl.env.c.cs2_env import make_env
 
     return builder(make_env, **kwargs)
-
-
-def build_selfplay_manager(*, self_play_enabled, aim_log_std_max, pin_pitch, opponent_mode):
-    """Construct the run's `SelfPlayManager`. The only `SelfPlayManager(...)` call site.
-
-    ONE BUILDER, NOT A ROLE ENUM, because the three pre-migration sites —
-    `train()` and both branches of `_build_trainer_for_test` — differed in
-    `p_past` and nothing else, and even that was the same rule twice:
-    ``0.3 if <self-play on> else 0.0``. train() wrote it as a conditional
-    expression, the harness spelled the two values out as separate constructions
-    under ``if not with_selfplay:``. Naming a role per site would have frozen a
-    distinction that does not exist and invited the next knob to be added to one
-    "role" only — the exact drift this module exists to stop.
-    `tests/fixtures/selfplay_kwargs_pre_w3.json` records all three shapes as they
-    stood before this function, so the collapse is asserted rather than assumed.
-
-    ``self_play_enabled`` is the flag, not ``p_past`` itself: p_past is derived
-    policy, and a caller that could pass it directly could set 0.15 at one site
-    and 0.3 at another without anything noticing.
-
-    ``bool(pin_pitch)`` here rather than at the callers, which is where both
-    pre-migration sites did it (`bool(args.pin_pitch)` / `bool(pin_pitch)`).
-    `SelfPlayManager.__init__` also coerces, so this is belt-and-braces on the
-    class's side — but it keeps the KWARG the callers produce identical to the
-    captured one, which is what the fixture compares.
-
-    ``aim_log_std_max`` is required rather than defaulted to None: train() reads
-    it as ``getattr(args, "aim_log_std_max", None)`` and the harness takes it as a
-    parameter, so both callers always have a value to pass, and a default here
-    would let a future caller silently un-pin the aim head's log-std cap on past
-    policies (R0-E, #131) — a divergence no gate on this branch can see.
-
-    The four pool constants are literals with the call sites' own comments
-    attached; they were identical across all three sites and are now stated once.
-    """
-    # Function-local, and it must stay so. It is an upward edge (train is a layer
-    # above this module), allowed only by the `cs2rl.env.factory -> cs2rl.train`
-    # ignore_imports entries in pyproject.toml, which #92 retires; the scope pin in
-    # tests/test_import_layers.py fails if a site of that pair leaves a def. At module
-    # scope it would also be a circular ImportError whenever train is imported first
-    # (every real run, and `from cs2rl import train`), because train.py imports this
-    # module at its module level. And it relies on train.py's `__main__` self-alias
-    # (the PITFALL in the module docstring).
-    from cs2rl.train import SelfPlayManager
-
-    return SelfPlayManager(
-        pool_size=15,
-        p_past=0.3 if self_play_enabled else 0.0,
-        save_every_epochs=25,                          # ~2M steps per save at batch_size=81920
-        win_threshold=0.6,
-        phase_length=50,                               # switch opponent team every ~4M steps
-        aim_log_std_max=aim_log_std_max,
-        pin_pitch=bool(pin_pitch),
-                                                       # Rung 1a T3: "noop" ⇒ the patched evaluate() drives opponent_team as a
-                                                       # statue. train() guards that it cannot combine with self-play, so
-                                                       # opponent_team stays INITIAL_OPPONENT_TEAM — the same team
-                                                       # build_participating_rows masked out. The harness mirrors that guard
-                                                       # (assert_opponent_self_play_compatible) and passes the mode anyway, so
-                                                       # the self-play and no-self-play paths cannot drift if the pairing is
-                                                       # ever allowed.
-        opponent_mode=opponent_mode,
-    )

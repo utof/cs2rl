@@ -41,7 +41,7 @@ def test_segments_equals_total_agents_invariant():
     this test guards the harness/config path and documents the invariant where
     reviewers look.
     """
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=False)
     try:

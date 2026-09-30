@@ -93,9 +93,10 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
     return problems
 
 
-# ── Leftover package directories under src/cs2rl (#205 part 2b) ──
+# ── Leftover package directories and dead files under src/cs2rl (#205 parts 2b and 3) ──
 #
-# (e) The session stops if a directory under src/cs2rl/ meets all three:
+# (e) is two checks, and either stops the session. First, a leftover DIRECTORY (#205
+# part 2b): the session stops if a directory under src/cs2rl/ meets all three:
 #   - it is reachable through identifier-named directories only (so Python can
 #     name it; zig-out/, .zig-cache/ and zig-pkg/ cannot be, and are skipped);
 #   - it holds a `.py` file or a file with an importlib.machinery.EXTENSION_SUFFIXES
@@ -110,19 +111,64 @@ def checkout_resolution_problems(own_src: Path, path_entries: Iterable[str]) -> 
 # The message names the directory: `git add` its __init__.py, or remove it. The
 # session also stops while a new package's __init__.py is written but not staged,
 # which is the point: an unstaged __init__.py is one `git commit -a` from missing.
+#
+# Second, a DEAD FILE (#205 part 3): the session stops if a directory under src/cs2rl/,
+# `src/cs2rl` ITSELF included, holds an importable file that the import system never
+# loads, because the same name resolves to another file in that directory. A package
+# directory beats a module (`train.py` beside `train/`), an extension beats source
+# (`binding.py` beside a built `binding.<abi>.so`), source beats sourceless bytecode.
+# WHY: a base `train.py` left beside the new package `train/` is dead and looks live,
+# and every guard stayed green with it planted (83 passed, measured on the #205 part 3
+# prototype): the directory check above never looks at files beside a package, and
+# import-linter sees one `cs2rl.train` node whichever file wins. Tracked or untracked
+# makes no difference, so `dead_importable_files` takes no `tracked` set.
+# HOW: the interpreter's own resolver answers, the precedence rules are not restated. Per
+# directory, `importlib.machinery.FileFinder` built with `_LOADER_DETAILS` resolves each
+# importable stem, and every other importable file with that stem is dead. The root
+# `src/cs2rl` is walked, unlike by the directory check (which reports only what is below
+# it): a leftover `train.py` sits exactly there.
+# The dead-file message names the file and the winner: remove the file.
 # PITFALLS.
 #   * __pycache__ is an identifier, so it is pruned by name. The suffixes are `.py`
 #     plus EXTENSION_SUFFIXES, never importlib.machinery.all_suffixes(): that
-#     includes `.pyc`, and on main it flagged 7 __pycache__ directories.
+#     includes `.pyc`, and on main it flagged 7 __pycache__ directories. (The dead-file
+#     half does count `.pyc`: a legacy sourceless `x.pyc` beside `x.py` never loads. It
+#     prunes __pycache__ by name too: nothing in it is a module of its own.)
 #   * `git ls-files` is the session's first git subprocess. If it fails (no git, not
 #     a checkout, a broken index), the check fails CLOSED with a message naming the
-#     failure; it never passes because it could not look.
+#     failure; it never passes because it could not look. The dead-file half then does
+#     not run: the session stops on the git failure anyway.
+#   * FileFinder caches the directory listing it reads, so the dead-file half builds a
+#     FRESH one per directory on every call; a reused one would judge a directory as it was.
+#   * A name counts only if it is an identifier with an importable suffix: a stem that is
+#     not an identifier (`x.cpython-311-x86_64-linux-gnu.so`, another interpreter's ABI
+#     tag, has the stem `x.cpython-311-x86_64-linux-gnu`) cannot be imported as `x`, so it
+#     neither wins nor is flagged.
 # LIMITS.
 #   1. A sourceless legacy `.pyc` directly in a leftover directory is importable,
 #      and not flagged.
-#   2. A snapshot at session start: a directory that appears later is not seen.
-# tests/test_checkout_resolution.py pins the walk, the git failure and the wiring.
+#   2. A snapshot at session start: a directory or file that appears later is not seen.
+#   3. A file with no same-named competitor is not dead, whatever it is: a leftover
+#      `train_shared.py` beside nothing imports silently under its old name, and this
+#      check cannot tell it from a live module. The session-start tripwire does not stop
+#      it; the full suite does: tests/test_import_layers.py's
+#      test_every_tracked_module_is_in_the_graph and test_contracts_hold_on_this_checkout
+#      (the exhaustive `cs2rl layers` contract) both went red on that plant (#205 part 3).
+#   4. `_LOADER_DETAILS` writes out the loader order CPython installs (extension, source,
+#      sourceless). tests/test_checkout_resolution.py compares the winner with
+#      importlib.machinery.PathFinder's on this interpreter, so a change of order fails
+#      there rather than here.
+# tests/test_checkout_resolution.py pins the walk, the dead-file cases, the git failure
+# and the wiring.
 _LEFTOVER_SUFFIXES = (".py", *importlib.machinery.EXTENSION_SUFFIXES)
+# CPython's own loaders and suffixes, in the order it installs them
+# (importlib._bootstrap_external._get_supported_file_loaders): the argument list of a
+# FileFinder that resolves a name the way `import` does.
+_LOADER_DETAILS = (
+    (importlib.machinery.ExtensionFileLoader, importlib.machinery.EXTENSION_SUFFIXES),
+    (importlib.machinery.SourceFileLoader, importlib.machinery.SOURCE_SUFFIXES),
+    (importlib.machinery.SourcelessFileLoader, importlib.machinery.BYTECODE_SUFFIXES),
+)
 
 
 def leftover_package_dirs(package_root: Path, tracked: Collection[Path]) -> list[Path]:
@@ -146,8 +192,46 @@ def leftover_package_dirs(package_root: Path, tracked: Collection[Path]) -> list
     return leftovers
 
 
+def dead_importable_files(package_root: Path) -> list[tuple[Path, Path]]:
+    """Each importable file under `package_root` that `import <its name>` never loads, paired with
+    the file that name loads instead.
+
+    `package_root` itself is walked, unlike by `leftover_package_dirs`. Per directory, one
+    FileFinder built with CPython's loader order resolves each importable stem (a package
+    directory beats a module file; among files, extension, then source, then bytecode), and
+    every other importable file with that stem is returned, tracked or not. A file counts
+    only if it is a file (a dangling symlink loads nothing) whose stem is an identifier.
+    The walk never enters a directory whose name is not an identifier, or __pycache__.
+
+    PITFALL: the FileFinder is built fresh here for every directory. It caches the listing it
+    reads and refreshes it by the directory's mtime, so one kept across calls would answer for
+    a directory as it was.
+    """
+    dead = []
+    for directory, subdirs, files in os.walk(package_root):
+        subdirs[:] = sorted(d for d in subdirs if d.isidentifier() and d != "__pycache__")
+        here = Path(directory)
+        finder = importlib.machinery.FileFinder(directory, *_LOADER_DETAILS)
+        by_stem: dict[str, list[Path]] = {}
+        for name in sorted(files):
+            suffix = next((s for s in _IMPORTABLE_SUFFIXES if name.endswith(s)), None)
+            stem = name[:len(name) - len(suffix)] if suffix else ""
+            if stem.isidentifier() and (here / name).is_file():
+                by_stem.setdefault(stem, []).append(here / name)
+        for stem, paths in by_stem.items():
+            spec = finder.find_spec(stem)
+            # A file with an importable suffix is one of the finder's own candidates, and a
+            # module file beats a namespace directory, so a spec always comes back.
+            assert spec is not None and spec.origin is not None, (
+                f"FileFinder found nothing for `{stem}` in {directory}, which lists {paths}")
+            winner = Path(spec.origin)
+            dead += [(path, winner) for path in paths if path != winner]
+    return dead
+
+
 def leftover_package_problems(package_root: Path) -> list[str]:
-    """(e): one problem per leftover directory under `package_root`, or one naming a git failure.
+    """(e): one problem per leftover directory and per dead file under `package_root`, or one
+    naming a git failure (then the dead-file check does not run).
 
     Lists the tracked files with `git ls-files -z -- .` run IN `package_root`, so
     git prints paths relative to it.
@@ -175,6 +259,11 @@ def leftover_package_problems(package_root: Path) -> list[str]:
         "tracked __init__.py), so a stale module there imports silently. `git add` its "
         "`__init__.py`, or remove the directory (a package move leaves its build outputs "
         "behind)." for d in leftover_package_dirs(package_root, tracked)
+    ] + [
+        f"(e) {dead} is importable but never loaded: `import` resolves that name to {winner} "
+        "instead (a package directory beats a module, an extension beats source, source beats "
+        "bytecode), so it is a leftover or a stale build output. Remove it."
+        for dead, winner in dead_importable_files(package_root)
     ]
 
 
@@ -325,7 +414,7 @@ def namespace_modules_outside_their_package(modules: Mapping[str, object],
 
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Stop the session, before collection, if it would import another checkout's code, or a
-    leftover directory's."""
+    leftover directory's, or if src/cs2rl holds a file no import loads."""
     problems = checkout_resolution_problems(REPO_ROOT / "src", sys.path)
     problems += leftover_package_problems(REPO_ROOT / "src" / "cs2rl")
     problems += namespace_entry_problems(REPO_ROOT, sys.path)

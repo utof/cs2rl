@@ -19,9 +19,14 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from cs2rl import train
+from cs2rl import policy as policy_mod
 from cs2rl.env.c.cs2_env import make_env
+from cs2rl.spec import obs as spec_obs
 from cs2rl.spec.action import AIM_DIM
+from cs2rl.train import loop as train_loop
+from cs2rl.train import metrics as train_metrics
+from cs2rl.train import resume as train_resume
+from cs2rl.train import selfplay as train_selfplay
 
 
 @pytest.fixture(scope="module")
@@ -72,7 +77,7 @@ LEGACY_PARAM_NAMES = {
 def _obs(n_t, n_ct, seed=0):
     """(n_t + n_ct, OBS_DIM) batch: first n_t rows are T (obs[24] == 1)."""
     torch.manual_seed(seed)
-    x = torch.randn(n_t + n_ct, train.OBS_DIM) * 0.5
+    x = torch.randn(n_t + n_ct, spec_obs.OBS_DIM) * 0.5
     x[:n_t, 24] = 1.0
     x[n_t:, 24] = 0.0
     return x
@@ -84,7 +89,7 @@ def test_flag_off_builds_exactly_the_legacy_modules(env):
     split marker is False. Behavioral coverage of the legacy path comes from
     the whole existing suite, which exercises it heavily.
     """
-    p = train.build_policy(env, device="cpu")
+    p = policy_mod.build_policy(env, device="cpu")
     assert {n for n, _ in p.named_parameters()} == LEGACY_PARAM_NAMES
     assert p.tct_split_heads is False
     assert p.tct_split_trunk is False
@@ -100,7 +105,7 @@ def test_flag_off_forward_equals_direct_legacy_head_application(env):
     also match numerically, so this asserts against the SAME module objects
     and is paired with the structural assertion above).
     """
-    p = train.build_policy(env, device="cpu")
+    p = policy_mod.build_policy(env, device="cpu")
     x = _obs(4, 4)
     logits, mu, log_std, value = p(x, state={})
     # Replicate forward's trunk with the IDENTICAL op sequence (reshape →
@@ -123,7 +128,7 @@ def test_split_constructor_shapes_and_names(env):
     """The split policy carries BOTH head copies and no shared copy — the
     shared trunk + value head are untouched (spec §3.1).
     """
-    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     names = {n for n, _ in p.named_parameters()}
     assert p.tct_split_heads is True
     for stem in ("action_heads_t.0.weight", "action_heads_ct.0.weight", "aim_mu_t.weight",
@@ -143,7 +148,7 @@ def test_pure_team_batch_leaves_other_copy_gradient_exactly_zero(env):
     both nonzero. This is the routing correctness proof — the blend weight is
     0 on the other team's copy, so autograd contributes literally nothing.
     """
-    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
 
     def _grads(x):
         p.zero_grad(set_to_none=True)
@@ -180,7 +185,7 @@ def test_obs_bit_selects_the_serving_copy_in_every_forward_path(env):
     the exact silent bug this test exists to catch, which is why the 3D case
     uses T > 1 with a per-row (not per-timestep) team assignment.
     """
-    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     with torch.no_grad():
         for m in (p.aim_mu_t, p.aim_mu_ct):
             m.weight.zero_()
@@ -194,7 +199,7 @@ def test_obs_bit_selects_the_serving_copy_in_every_forward_path(env):
         assert (mu[3:] < 0).all(), "CT rows must be served by the _ct copy"
 
     # 3D training path: 4 segments × 6 timesteps; segments 0/1 are T, 2/3 CT.
-    x3 = torch.randn(4, 6, train.OBS_DIM) * 0.5
+    x3 = torch.randn(4, 6, spec_obs.OBS_DIM) * 0.5
     x3[:2, :, 24] = 1.0
     x3[2:, :, 24] = 0.0
     _lg, mu3, _ls, _v = p(x3, state={})
@@ -209,13 +214,13 @@ def test_log_std_is_clamped_per_copy_then_blended(env):
     parameters — same result for a 0/1 mask either way, but this pins the
     order §3.6's per-team σ logs depend on.
     """
-    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     with torch.no_grad():
         p.aim_log_std_t.fill_(10.0)    # far above LOG_STD_MAX
-        p.aim_log_std_ct.fill_(train.LOG_STD_MIN)
+        p.aim_log_std_ct.fill_(policy_mod.LOG_STD_MIN)
     _lg, _mu, log_std, _v = p(_obs(2, 2), state={})
-    assert torch.allclose(log_std[:2], torch.full_like(log_std[:2], train.LOG_STD_MAX))
-    assert torch.allclose(log_std[2:], torch.full_like(log_std[2:], train.LOG_STD_MIN))
+    assert torch.allclose(log_std[:2], torch.full_like(log_std[:2], policy_mod.LOG_STD_MAX))
+    assert torch.allclose(log_std[2:], torch.full_like(log_std[2:], policy_mod.LOG_STD_MIN))
 
 
 def test_get_action_and_value_routes_by_team(env):
@@ -226,14 +231,14 @@ def test_get_action_and_value_routes_by_team(env):
     uses forward_eval. Same marker trick as the forward test, read off the
     returned value/continuous action.
     """
-    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     with torch.no_grad():
         for m in (p.aim_mu_t, p.aim_mu_ct):
             m.weight.zero_()
         p.aim_mu_t.bias.fill_(5.0)
         p.aim_mu_ct.bias.fill_(-5.0)
-        p.aim_log_std_t.fill_(train.LOG_STD_MIN)       # σ ≈ 0.01: sample ≈ μ
-        p.aim_log_std_ct.fill_(train.LOG_STD_MIN)
+        p.aim_log_std_t.fill_(policy_mod.LOG_STD_MIN)  # σ ≈ 0.01: sample ≈ μ
+        p.aim_log_std_ct.fill_(policy_mod.LOG_STD_MIN)
     torch.manual_seed(0)
     _a, cont, _lp, _ent, _v, _st = p.get_action_and_value(_obs(3, 3))
     assert (cont[:3] > 0).all()
@@ -247,18 +252,18 @@ def _legacy_frozen_state_dict(env):
     test runs on any checkout; the real file's σ-widening is asserted at
     launch time via the startup stdout check (plan Task 9.2).
     """
-    p = train.build_policy(env, device="cpu")
+    p = policy_mod.build_policy(env, device="cpu")
     with torch.no_grad():
-        p.aim_log_std.fill_(train.LOG_STD_INIT)
+        p.aim_log_std.fill_(policy_mod.LOG_STD_INIT)
     return {k: v.clone() for k, v in p.state_dict().items()}
 
 
 def test_state_dict_is_split_discriminates_both_vintages(env):
     """Spec §3.3: split-ness is read off the KEYS, at every load."""
-    legacy = train.build_policy(env, device="cpu").state_dict()
-    split = train.build_policy(env, device="cpu", tct_split_heads=True).state_dict()
-    assert train.state_dict_is_split(legacy) is False
-    assert train.state_dict_is_split(split) is True
+    legacy = policy_mod.build_policy(env, device="cpu").state_dict()
+    split = policy_mod.build_policy(env, device="cpu", tct_split_heads=True).state_dict()
+    assert policy_mod.state_dict_is_split(legacy) is False
+    assert policy_mod.state_dict_is_split(split) is True
 
 
 def test_state_dict_is_trunk_split_and_convert():
@@ -268,14 +273,14 @@ def test_state_dict_is_trunk_split_and_convert():
         "aim_log_std": torch.zeros(2),
         "value_head.weight": torch.ones(1, 2),
     }
-    assert train.state_dict_is_split(sd) is False
-    assert train.state_dict_is_trunk_split(sd) is False
-    out = train.convert_shared_trunk_to_split(sd)
+    assert policy_mod.state_dict_is_split(sd) is False
+    assert policy_mod.state_dict_is_trunk_split(sd) is False
+    out = train_resume.convert_shared_trunk_to_split(sd)
     assert "encoder_t.0.weight" in out and "encoder_ct.0.weight" in out
     assert "encoder.0.weight" not in out
     assert "lstm_t.weight_ih_l0" in out and "lstm_ct.weight_ih_l0" in out
     assert "aim_log_std" in out        # heads untouched
-    assert train.state_dict_is_trunk_split(out) is True
+    assert policy_mod.state_dict_is_trunk_split(out) is True
 
 
 def test_warm_split_duplicates_heads_and_reinits_sigma_in_both_copies(env):
@@ -290,12 +295,13 @@ def test_warm_split_duplicates_heads_and_reinits_sigma_in_both_copies(env):
     run with no error message.
     """
     legacy = _legacy_frozen_state_dict(env)
-    assert train.reinit_frozen_aim_log_std(legacy) is True
-    split_sd = train.convert_legacy_state_dict_to_split(legacy)
+    assert train_resume.reinit_frozen_aim_log_std(legacy) is True
+    split_sd = train_resume.convert_legacy_state_dict_to_split(legacy)
 
     for copy in ("aim_log_std_t", "aim_log_std_ct"):
         assert torch.allclose(split_sd[copy],
-                              torch.full_like(split_sd[copy], train.AIM_LOG_STD_RESUME_INIT)), copy
+                              torch.full_like(split_sd[copy],
+                                              train_resume.AIM_LOG_STD_RESUME_INIT)), copy
     assert "aim_log_std" not in split_sd
     for i in range(7):
         for suffix in ("weight", "bias"):
@@ -308,7 +314,7 @@ def test_warm_split_duplicates_heads_and_reinits_sigma_in_both_copies(env):
     assert torch.equal(split_sd["value_head.weight"], legacy["value_head.weight"])
 
     # and it actually loads
-    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     p.load_state_dict(split_sd)
 
 
@@ -317,14 +323,15 @@ def test_reinit_matcher_also_catches_split_sigma_keys(env):
     split-format warmstart by VALUE too, so a split checkpoint whose σ is
     still frozen at log(0.1) is widened on resume like a legacy one.
     """
-    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     with torch.no_grad():
-        p.aim_log_std_t.fill_(train.LOG_STD_INIT)
-        p.aim_log_std_ct.fill_(train.LOG_STD_INIT)
+        p.aim_log_std_t.fill_(policy_mod.LOG_STD_INIT)
+        p.aim_log_std_ct.fill_(policy_mod.LOG_STD_INIT)
     sd = {k: v.clone() for k, v in p.state_dict().items()}
-    assert train.reinit_frozen_aim_log_std(sd) is True
+    assert train_resume.reinit_frozen_aim_log_std(sd) is True
     for copy in ("aim_log_std_t", "aim_log_std_ct"):
-        assert torch.allclose(sd[copy], torch.full_like(sd[copy], train.AIM_LOG_STD_RESUME_INIT))
+        assert torch.allclose(sd[copy],
+                              torch.full_like(sd[copy], train_resume.AIM_LOG_STD_RESUME_INIT))
 
 
 def test_arch_mismatch_raises_naming_both_architectures(env):
@@ -332,22 +339,22 @@ def test_arch_mismatch_raises_naming_both_architectures(env):
     checkpoint is AND what the policy is — a bare load_state_dict KeyError
     tells the operator neither.
     """
-    legacy_p = train.build_policy(env, device="cpu")
-    split_p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    legacy_p = policy_mod.build_policy(env, device="cpu")
+    split_p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     split_sd = split_p.state_dict()
     legacy_sd = legacy_p.state_dict()
 
     with pytest.raises(ValueError, match=r"SPLIT.*LEGACY|LEGACY.*SPLIT"):
-        train.load_state_dict_arch_checked(legacy_p, split_sd, source="snap.pt")
+        policy_mod.load_state_dict_arch_checked(legacy_p, split_sd, source="snap.pt")
     with pytest.raises(ValueError, match=r"SPLIT.*LEGACY|LEGACY.*SPLIT"):
-        train.load_state_dict_arch_checked(split_p, legacy_sd, source="snap.pt")
+        policy_mod.load_state_dict_arch_checked(split_p, legacy_sd, source="snap.pt")
 
 
 def test_split_checkpoint_round_trips_bitwise(env):
     """Spec §5 test 3 (third clause): split → split is a plain load."""
-    a = train.build_policy(env, device="cpu", tct_split_heads=True)
-    b = train.build_policy(env, device="cpu", tct_split_heads=True)
-    train.load_state_dict_arch_checked(b, a.state_dict(), source="a")
+    a = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
+    b = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
+    policy_mod.load_state_dict_arch_checked(b, a.state_dict(), source="a")
     for (n, pa), (_, pb) in zip(a.named_parameters(), b.named_parameters(), strict=True):
         assert torch.equal(pa, pb), n
 
@@ -365,38 +372,43 @@ def test_resolve_resume_split_infers_and_never_narrows(env, tmp_path):
     """
     legacy_pt = tmp_path / "legacy.pt"
     split_pt = tmp_path / "split.pt"
-    torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
-    torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
+    torch.save(policy_mod.build_policy(env, device="cpu").state_dict(), legacy_pt)
+    torch.save(
+        policy_mod.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
 
-    heads, trunk, sd, path = train.resolve_resume_split(None, heads_flag=False, trunk_flag=False)
+    heads, trunk, sd, path = train_resume.resolve_resume_split(None,
+                                                               heads_flag=False,
+                                                               trunk_flag=False)
     assert (heads, trunk, sd, path) == (False, False, None, None)
-    heads, trunk, sd, _ = train.resolve_resume_split(None, heads_flag=True, trunk_flag=False)
+    heads, trunk, sd, _ = train_resume.resolve_resume_split(None, heads_flag=True, trunk_flag=False)
     assert heads is True and trunk is False and sd is None
 
-    heads, trunk, sd, path = train.resolve_resume_split(str(legacy_pt),
-                                                        heads_flag=False,
-                                                        trunk_flag=False)
+    heads, trunk, sd, path = train_resume.resolve_resume_split(str(legacy_pt),
+                                                               heads_flag=False,
+                                                               trunk_flag=False)
     assert heads is False and trunk is False and sd is not None and path == legacy_pt
-    heads, trunk, _sd, _ = train.resolve_resume_split(str(legacy_pt),
-                                                      heads_flag=True,
-                                                      trunk_flag=False)
+    heads, trunk, _sd, _ = train_resume.resolve_resume_split(str(legacy_pt),
+                                                             heads_flag=True,
+                                                             trunk_flag=False)
     assert heads is True, "flag must widen a legacy checkpoint to a warm split"
     assert trunk is False
 
-    heads, trunk, sd, _ = train.resolve_resume_split(str(split_pt),
-                                                     heads_flag=False,
-                                                     trunk_flag=False)
+    heads, trunk, sd, _ = train_resume.resolve_resume_split(str(split_pt),
+                                                            heads_flag=False,
+                                                            trunk_flag=False)
     assert heads is True, "split checkpoint must be detected without the flag"
     assert trunk is False, "heads-split fixtures have no encoder_t.0.weight"
     assert "aim_log_std_t" in sd, "the sniffed dict must be returned for reuse"
-    heads, trunk, _sd, _ = train.resolve_resume_split(str(split_pt),
-                                                      heads_flag=True,
-                                                      trunk_flag=False)
+    heads, trunk, _sd, _ = train_resume.resolve_resume_split(str(split_pt),
+                                                             heads_flag=True,
+                                                             trunk_flag=False)
     assert heads is True
     assert trunk is False
 
     with pytest.raises(FileNotFoundError, match="Resume checkpoint not found"):
-        train.resolve_resume_split(str(tmp_path / "nope.pt"), heads_flag=False, trunk_flag=False)
+        train_resume.resolve_resume_split(str(tmp_path / "nope.pt"),
+                                          heads_flag=False,
+                                          trunk_flag=False)
 
 
 def test_self_play_loads_both_checkpoint_vintages(env, tmp_path):
@@ -411,13 +423,14 @@ def test_self_play_loads_both_checkpoint_vintages(env, tmp_path):
     """
     legacy_pt = tmp_path / "past_legacy.pt"
     split_pt = tmp_path / "past_split.pt"
-    torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
-    torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
+    torch.save(policy_mod.build_policy(env, device="cpu").state_dict(), legacy_pt)
+    torch.save(
+        policy_mod.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
 
     for path, expect_split in ((legacy_pt, False), (split_pt, True)):
         # Constructor is all-default at HEAD, and Cs2PuffeRL.evaluate calls
         # `self._self_play_mgr.load_past_policy(dev, self.vecenv)` — mirrored here.
-        mgr = train.SelfPlayManager()
+        mgr = train_selfplay.SelfPlayManager()
         mgr.pool = [path]
         past = mgr.load_past_policy("cpu", env)
         assert past is not None, path
@@ -430,15 +443,16 @@ def test_load_policy_from_checkpoint_infers_split(env, tmp_path):
     it constructs from the keys, so no flag reaches it and none is needed.
     """
     split_pt = tmp_path / "eval_split.pt"
-    torch.save(train.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
-    p = train.load_policy_from_checkpoint(split_pt, "cpu")
+    torch.save(
+        policy_mod.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
+    p = policy_mod.load_policy_from_checkpoint(split_pt, "cpu")
     assert p.tct_split_heads is True
 
     # Legacy vintage through the same loader — this function has no other test
     # coverage in the repo, so pin both directions here.
     legacy_pt = tmp_path / "eval_legacy.pt"
-    torch.save(train.build_policy(env, device="cpu").state_dict(), legacy_pt)
-    p = train.load_policy_from_checkpoint(legacy_pt, "cpu")
+    torch.save(policy_mod.build_policy(env, device="cpu").state_dict(), legacy_pt)
+    p = policy_mod.load_policy_from_checkpoint(legacy_pt, "cpu")
     assert p.tct_split_heads is False
 
 
@@ -451,11 +465,11 @@ def test_log_aim_log_std_legacy_keys_unchanged(env):
     the assert is unchanged: a legacy policy must not emit `_t`/`_ct` keys.
     Both σ values here are inside the band, so raw == clamped.
     """
-    p = train.build_policy(env, device="cpu")
+    p = policy_mod.build_policy(env, device="cpu")
     with torch.no_grad():
         p.aim_log_std.copy_(torch.tensor([-1.5, -2.0]))
     logs = {}
-    train.log_aim_log_std(p, logs)
+    train_metrics.log_aim_log_std(p, logs)
     assert set(logs) == {
         "policy/aim_log_std_yaw", "policy/aim_log_std_pitch", "policy/aim_log_std_yaw_raw",
         "policy/aim_log_std_pitch_raw"
@@ -483,12 +497,12 @@ def test_log_aim_log_std_split_emits_mean_plus_per_team(env):
     log_aim_log_std's docstring) — and yaw_t above the cap is the one setup
     where raw != clamped, so both conventions are exercised here.
     """
-    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     with torch.no_grad():
         p.aim_log_std_t.copy_(torch.tensor([10.0, -2.0]))              # yaw above LOG_STD_MAX
         p.aim_log_std_ct.copy_(torch.tensor([-3.0, -1.0]))
     logs = {}
-    train.log_aim_log_std(p, logs)
+    train_metrics.log_aim_log_std(p, logs)
     assert set(logs) == {
         "policy/aim_log_std_yaw",
         "policy/aim_log_std_pitch",
@@ -503,11 +517,11 @@ def test_log_aim_log_std_split_emits_mean_plus_per_team(env):
         "policy/aim_log_std_pitch_t_raw",
         "policy/aim_log_std_pitch_ct_raw",
     }
-    assert logs["policy/aim_log_std_yaw_t"] == pytest.approx(train.LOG_STD_MAX)
+    assert logs["policy/aim_log_std_yaw_t"] == pytest.approx(policy_mod.LOG_STD_MAX)
     assert logs["policy/aim_log_std_yaw_ct"] == pytest.approx(-3.0)
     assert logs["policy/aim_log_std_pitch_t"] == pytest.approx(-2.0)
     assert logs["policy/aim_log_std_pitch_ct"] == pytest.approx(-1.0)
-    assert logs["policy/aim_log_std_yaw"] == pytest.approx(0.5 * (train.LOG_STD_MAX + -3.0))
+    assert logs["policy/aim_log_std_yaw"] == pytest.approx(0.5 * (policy_mod.LOG_STD_MAX + -3.0))
     assert logs["policy/aim_log_std_pitch"] == pytest.approx(-1.5)
                                                                        # Per-team raws are the untouched parameters, cap or no cap.
     assert logs["policy/aim_log_std_yaw_t_raw"] == pytest.approx(10.0)
@@ -532,12 +546,12 @@ def test_log_aim_log_std_split_raw_key_exposes_a_single_capped_copy(env):
     check fails, which is the honest answer.
     """
     cap = math.log(0.05)
-    p = train.build_policy(env, device="cpu", tct_split_heads=True, aim_log_std_max=cap)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True, aim_log_std_max=cap)
     with torch.no_grad():
         p.aim_log_std_t.copy_(torch.tensor([cap + 0.5, -4.0]))         # yaw: above the cap
         p.aim_log_std_ct.copy_(torch.tensor([-4.0, -4.0]))             # healthy on both dims
     logs = {}
-    train.log_aim_log_std(p, logs)
+    train_metrics.log_aim_log_std(p, logs)
                                                                        # The dead copy is visible per-team...
     assert logs["policy/aim_log_std_yaw_t_raw"] == pytest.approx(cap + 0.5)
     assert logs["policy/aim_log_std_yaw_ct_raw"] == pytest.approx(-4.0)
@@ -556,14 +570,14 @@ def test_status_line_keeps_the_t7_gate_substring(env):
     """Spec §5 test 10 (last clause): T7 acceptance gate 2 greps stdout for
     'aim_log_std_pitch=' — a split run must still print it.
     """
-    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     logs = {}
-    train.log_aim_log_std(p, logs)
+    train_metrics.log_aim_log_std(p, logs)
     # Verified at HEAD: format_train_status(epoch, ts_val, logs) — the exact
     # signature the outer loop calls. The contract under test is only that the
     # formatted line still contains the 'aim_log_std_pitch=' substring the T7
     # gate greps.
-    line = train.format_train_status(7, 0.5, logs)
+    line = train_metrics.format_train_status(7, 0.5, logs)
     assert "aim_log_std_pitch=" in line
 
 
@@ -573,16 +587,16 @@ def test_head_divergence_zero_at_warm_split_and_keys_present(env):
     Legacy policies emit nothing (the metric is undefined without two copies).
     """
     legacy = _legacy_frozen_state_dict(env)
-    split_sd = train.convert_legacy_state_dict_to_split(legacy)
-    p = train.build_policy(env, device="cpu", tct_split_heads=True)
+    split_sd = train_resume.convert_legacy_state_dict_to_split(legacy)
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     p.load_state_dict(split_sd)
-    d = train.compute_head_divergence(p)
+    d = train_metrics.compute_head_divergence(p)
     assert set(d) == {
         "split/head_l2_rel/action_heads", "split/head_l2_rel/aim_mu",
         "split/head_l2_rel/aim_log_std"
     }
     assert all(v == 0.0 for v in d.values()), d
-    assert train.compute_head_divergence(train.build_policy(env, device="cpu")) == {}
+    assert train_metrics.compute_head_divergence(policy_mod.build_policy(env, device="cpu")) == {}
 
 
 def test_head_divergence_exceeds_the_decay_aware_null(env):
@@ -603,7 +617,7 @@ def test_head_divergence_exceeds_the_decay_aware_null(env):
 
     def _arm(asymmetric):
         torch.manual_seed(0)
-        p = train.build_policy(env, device="cpu", tct_split_heads=True)
+        p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
         with torch.no_grad():          # identical seeded gap in both arms
             p.aim_mu_ct.bias.add_(0.05)
             p.action_heads_ct[0].bias.add_(0.05)
@@ -616,7 +630,7 @@ def test_head_divergence_exceeds_the_decay_aware_null(env):
             opt.zero_grad(set_to_none=True)
             (-(adv * logp).mean()).backward()
             opt.step()
-        return train.compute_head_divergence(p)
+        return train_metrics.compute_head_divergence(p)
 
     treated = _arm(asymmetric=True)
     null = _arm(asymmetric=False)
@@ -641,7 +655,7 @@ def test_pure_team_batch_zeros_other_trunk_grad(env):
     the input is stacked to T>1. 2D `_obs(4, 0)` would leave lstm_t.weight_hh
     at exactly 0 and fail a correct implementation.
     """
-    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+    p = policy_mod.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
     # T>1 so lstm.weight_hh is in the graph (T=1 zero-state zeroes it).
     x = _obs(4, 0).unsqueeze(1).expand(-1, 3, -1).contiguous()
     state = {}
@@ -672,7 +686,7 @@ def test_mixed_batch_nonzero_both_trunk_grads(env):
     PITFALL: T=1 zero-state zeroes weight_hh; the 3D case uses T>1 so the
     recurrent weights are actually in the graph.
     """
-    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+    p = policy_mod.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
 
     def _assert_both_trunks(x):
         p.zero_grad(set_to_none=True)
@@ -714,7 +728,7 @@ def test_obs24_flip_switches_trunk(env):
     that form would IndexError; T is still >1 so a silent wrong-timestep
     mask on a longer horizon is the class of bug the 3D assert pins.
     """
-    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
+    p = policy_mod.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True)
     assert p.tct_split_trunk is True
     assert "tct_split_trunk" not in p.state_dict()
 
@@ -729,7 +743,7 @@ def test_obs24_flip_switches_trunk(env):
     assert not torch.allclose(v, v_flip), "2D forward: flipping obs[24] must switch trunks"
     assert not torch.allclose(v_eval, v_eval_flip), "forward_eval must inherit trunk routing"
 
-    x3 = torch.randn(2, 6, train.OBS_DIM) * 0.5
+    x3 = torch.randn(2, 6, spec_obs.OBS_DIM) * 0.5
     x3[:, :, 24] = 1.0
     x3_flip = x3.clone()
     x3_flip[:, :, 24] = 0.0
@@ -742,19 +756,19 @@ def test_obs24_flip_switches_trunk(env):
 def test_resolve_resume_split_two_bits(tmp_path, env):
     import torch
     # heads-only ckpt + both flags omitted → heads on, trunk off
-    p = train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=False)
+    p = policy_mod.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=False)
     path = tmp_path / "heads.pt"
     torch.save(p.state_dict(), path)
-    h, t, sd, rp = train.resolve_resume_split(path, heads_flag=False, trunk_flag=False)
+    h, t, sd, rp = train_resume.resolve_resume_split(path, heads_flag=False, trunk_flag=False)
     assert (h, t) == (True, False)
     # trunk-only + omitted flags → trunk on, heads off
-    p2 = train.build_policy(env, "cpu", tct_split_heads=False, tct_split_trunk=True)
+    p2 = policy_mod.build_policy(env, "cpu", tct_split_heads=False, tct_split_trunk=True)
     path2 = tmp_path / "trunk.pt"
     torch.save(p2.state_dict(), path2)
-    h, t, _, _ = train.resolve_resume_split(path2, heads_flag=False, trunk_flag=False)
+    h, t, _, _ = train_resume.resolve_resume_split(path2, heads_flag=False, trunk_flag=False)
     assert (h, t) == (False, True)
     # heads-only + trunk_flag True → both on (widen)
-    h, t, _, _ = train.resolve_resume_split(path, heads_flag=False, trunk_flag=True)
+    h, t, _, _ = train_resume.resolve_resume_split(path, heads_flag=False, trunk_flag=True)
     assert (h, t) == (True, True)
 
 
@@ -771,12 +785,12 @@ def test_legacy_warm_split_both_axes_sigma_then_heads_then_trunk(env):
     legacy = _legacy_frozen_state_dict(env)
     enc = {k: v.clone() for k, v in legacy.items() if k.startswith("encoder.")}
     lstm = {k: v.clone() for k, v in legacy.items() if k.startswith("lstm.")}
-    assert train.reinit_frozen_aim_log_std(legacy) is True
-    sd = train.convert_legacy_state_dict_to_split(legacy)
-    sd = train.convert_shared_trunk_to_split(sd)
+    assert train_resume.reinit_frozen_aim_log_std(legacy) is True
+    sd = train_resume.convert_legacy_state_dict_to_split(legacy)
+    sd = train_resume.convert_shared_trunk_to_split(sd)
     for copy in ("aim_log_std_t", "aim_log_std_ct"):
-        assert torch.allclose(sd[copy], torch.full_like(sd[copy],
-                                                        train.AIM_LOG_STD_RESUME_INIT)), copy
+        assert torch.allclose(sd[copy],
+                              torch.full_like(sd[copy], train_resume.AIM_LOG_STD_RESUME_INIT)), copy
     assert "encoder.0.weight" not in sd
     assert "encoder_t.0.weight" in sd
     for suf, src in enc.items():
@@ -795,18 +809,23 @@ def test_trunk_split_into_heads_only_policy_raises_naming_trunk(env):
     WHAT/WHY: the message must name trunk. Heads is SPLIT on both sides
     here, so a SPLIT/LEGACY-only regex would miss this case.
     """
-    heads_only = train.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=False)
-    trunk_sd = train.build_policy(env, device="cpu", tct_split_heads=True,
-                                  tct_split_trunk=True).state_dict()
+    heads_only = policy_mod.build_policy(env,
+                                         device="cpu",
+                                         tct_split_heads=True,
+                                         tct_split_trunk=False)
+    trunk_sd = policy_mod.build_policy(env,
+                                       device="cpu",
+                                       tct_split_heads=True,
+                                       tct_split_trunk=True).state_dict()
     with pytest.raises(ValueError, match=r"trunk"):
-        train.load_state_dict_arch_checked(heads_only, trunk_sd, source="trunk.pt")
+        policy_mod.load_state_dict_arch_checked(heads_only, trunk_sd, source="trunk.pt")
 
 
 def test_trunk_split_checkpoint_round_trips_bitwise(env):
     """Trunk-split → trunk-split is a plain load_state_dict."""
-    a = train.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)
-    b = train.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)
-    train.load_state_dict_arch_checked(b, a.state_dict(), source="a")
+    a = policy_mod.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)
+    b = policy_mod.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)
+    policy_mod.load_state_dict_arch_checked(b, a.state_dict(), source="a")
     for (n, pa), (_, pb) in zip(a.named_parameters(), b.named_parameters(), strict=True):
         assert torch.equal(pa, pb), n
 
@@ -826,45 +845,45 @@ def test_loaders_infer_both_bits_and_warm_split_trunk_only(env, tmp_path):
     both_pt = tmp_path / "both.pt"
     trunk_pt = tmp_path / "trunk.pt"
     torch.save(
-        train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=False).state_dict(),
-        heads_pt)
+        policy_mod.build_policy(env, "cpu", tct_split_heads=True,
+                                tct_split_trunk=False).state_dict(), heads_pt)
     torch.save(
-        train.build_policy(env, "cpu", tct_split_heads=True, tct_split_trunk=True).state_dict(),
-        both_pt)
+        policy_mod.build_policy(env, "cpu", tct_split_heads=True,
+                                tct_split_trunk=True).state_dict(), both_pt)
     torch.save(
-        train.build_policy(env, "cpu", tct_split_heads=False, tct_split_trunk=True).state_dict(),
-        trunk_pt)
+        policy_mod.build_policy(env, "cpu", tct_split_heads=False,
+                                tct_split_trunk=True).state_dict(), trunk_pt)
 
     # Heads-only + trunk_flag=True → both on; warm-split trunk only.
-    h, t, sd, _ = train.resolve_resume_split(heads_pt, heads_flag=False, trunk_flag=True)
+    h, t, sd, _ = train_resume.resolve_resume_split(heads_pt, heads_flag=False, trunk_flag=True)
     assert (h, t) == (True, True)
-    assert train.state_dict_is_split(sd) and not train.state_dict_is_trunk_split(sd)
-    warm = train.convert_shared_trunk_to_split(sd)
-    assert train.state_dict_is_trunk_split(warm)
+    assert policy_mod.state_dict_is_split(sd) and not policy_mod.state_dict_is_trunk_split(sd)
+    warm = train_resume.convert_shared_trunk_to_split(sd)
+    assert policy_mod.state_dict_is_trunk_split(warm)
     assert "aim_log_std_t" in warm and "aim_log_std" not in warm
     assert "encoder.0.weight" not in warm and "encoder_t.0.weight" in warm
 
     # both-split + flags omitted → both bits; build_policy accepts them.
-    h, t, _, _ = train.resolve_resume_split(both_pt, heads_flag=False, trunk_flag=False)
+    h, t, _, _ = train_resume.resolve_resume_split(both_pt, heads_flag=False, trunk_flag=False)
     assert (h, t) == (True, True)
-    p = train.build_policy(env, "cpu", tct_split_heads=h, tct_split_trunk=t)
+    p = policy_mod.build_policy(env, "cpu", tct_split_heads=h, tct_split_trunk=t)
     assert p.tct_split_heads is True and p.tct_split_trunk is True
 
     # load_policy_from_checkpoint on a trunk-split file (no encoder.0.weight).
-    loaded = train.load_policy_from_checkpoint(trunk_pt, "cpu")
+    loaded = policy_mod.load_policy_from_checkpoint(trunk_pt, "cpu")
     assert loaded.tct_split_trunk is True
     assert loaded.tct_split_heads is False
-    loaded_both = train.load_policy_from_checkpoint(both_pt, "cpu")
+    loaded_both = policy_mod.load_policy_from_checkpoint(both_pt, "cpu")
     assert loaded_both.tct_split_heads is True and loaded_both.tct_split_trunk is True
 
     # self-play pool has no config — must infer both bits from keys.
-    mgr = train.SelfPlayManager()
+    mgr = train_selfplay.SelfPlayManager()
     mgr.pool = [trunk_pt]
     past = mgr.load_past_policy("cpu", env)
     assert past is not None and past.tct_split_trunk is True and past.tct_split_heads is False
 
     # Train-main must not discard the resolved trunk bit.
-    src = inspect.getsource(train.train)
+    src = inspect.getsource(train_loop.train)
     assert "tct_split_trunk=tct_split_trunk" in src
     assert ", _tct_split_trunk," not in src
     assert "duplicated the shared encoder+LSTM into per-team" in src
