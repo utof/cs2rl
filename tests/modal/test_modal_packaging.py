@@ -264,9 +264,10 @@ SEAM_GUARDS = frozenset({
 # names that any other collected test file also defines". After the split that is
 # false by 86: the client half is itself a collected test file and defines 84 of
 # those names, and the three relocated `SEAM_GUARDS` are defined here. The claim
-# the sentence was making survives once the seam's own four files are excluded
-# from "any other", which is what it always meant -- measured that way, `ROOT` is
-# still the ONLY collision, and the files it collides with are
+# the sentence was making survives once the seam's own files (`RUNNER_TEST_FILES`,
+# `CLIENT_FILE`, `SHARED_FILE` and `PACKAGING_FILE`) are excluded from "any
+# other", which is what it always meant -- measured that way, `ROOT` is still the
+# ONLY collision, and the files it collides with are
 # `test_modal_argv.py`, `test_modal_protocol.py` and `test_train_loop_timing.py`,
 # 3 of them.
 #
@@ -827,9 +828,10 @@ def _names_defined_under_tests():
     of their own and made a gate built on this red for an unrelated reason.
 
     CONTRACT for the caller: the return value is a SUPERSET of the seam. It
-    covers every `tests/**/test_*.py` in the repo, not just the four destination
-    files, which is exactly what makes a fourth file visible -- and exactly why
-    a caller comparing it against the manifest must scope the disk-to-manifest
+    covers every `tests/**/test_*.py` in the repo, not just the seam's destination
+    files (`RUNNER_TEST_FILES`, `CLIENT_FILE`, `SHARED_FILE` and `PACKAGING_FILE`),
+    which is exactly what makes an undeclared file visible -- and exactly why a
+    caller comparing it against the manifest must scope the disk-to-manifest
     direction to names it actually governs rather than flagging every unrelated
     test file's helpers.
 
@@ -2333,10 +2335,11 @@ def test_no_governed_name_is_defined_outside_the_seams_own_files():
     found = _names_defined_under_tests()
 
     outside = {f for files in found.values() for f in files} - seam_files
-    assert outside, ("the scan reached no file outside the seam's own four, so it could not "
-                     "report a strayed name even if one existed. `_names_defined_under_tests` "
-                     "rglobs `test_*.py` under tests/; if that returned only seam files the glob "
-                     "is broken, not the tree.")
+    assert outside, ("the scan reached no file outside the seam's own files (`RUNNER_TEST_FILES`, "
+                     "`CLIENT_FILE`, `SHARED_FILE` and `PACKAGING_FILE`), so it could not report "
+                     "a strayed name even if one existed. `_names_defined_under_tests` rglobs "
+                     "`test_*.py` under tests/; if that returned only seam files the glob is "
+                     "broken, not the tree.")
     unseen = governed - set(found)
     assert not unseen, ("names the manifest governs are defined nowhere the scan can see, so the "
                         "check below would pass by looking at nothing. Either the scan lost a "
