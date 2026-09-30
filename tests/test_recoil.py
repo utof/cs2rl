@@ -162,7 +162,7 @@ def test_recoil_is_not_reachable_from_the_cli():
     import textwrap
     from argparse import Namespace
 
-    from cs2rl import train_config
+    from cs2rl.train import config as train_config
     assert train_config.env_config_from_args(Namespace(recoil=True)).recoil is False
     # AST, not a raw getsource scan: getsource INCLUDES the docstring, and that
     # docstring is where the rule is explained — a plain substring pin would

@@ -107,7 +107,7 @@ def test_config_json_records_the_effective_knobs():
     """
     import types
 
-    from cs2rl.train import build_train_config, compute_batch_dims
+    from cs2rl.train.config import build_train_config, compute_batch_dims
     args = types.SimpleNamespace(device="cpu",
                                  seed=1,
                                  timesteps=100_000,
@@ -141,7 +141,7 @@ def test_env_config_from_args_reads_every_channel():
     import types
 
     from cs2rl.env.config import EnvConfig
-    from cs2rl.train import env_config_from_args
+    from cs2rl.train.config import env_config_from_args
     args = types.SimpleNamespace(reward_ct_survival=0.0,
                                  pbrs_nav_weight_t=0.07,
                                  n_active_per_team=1,
@@ -185,7 +185,7 @@ def test_env_config_from_args_pbrs_gamma_follows_gamma_unless_overridden():
     import types
 
     from cs2rl.env.config import EnvConfig
-    from cs2rl.train import env_config_from_args
+    from cs2rl.train.config import env_config_from_args
     field_default = EnvConfig().pbrs_gamma
     carried, explicit = 0.97, 0.95
     # Both probe values must sit off the field default, or a resolver that never
@@ -207,7 +207,7 @@ def test_env_config_from_args_on_a_bare_namespace_is_the_default_config():
     import types
 
     from cs2rl.env.config import EnvConfig
-    from cs2rl.train import env_config_from_args
+    from cs2rl.train.config import env_config_from_args
     assert env_config_from_args(types.SimpleNamespace()) == EnvConfig()
 
 
@@ -224,7 +224,7 @@ def test_env_config_from_args_coerces_and_rejects_weights():
 
     import pytest as _pytest
 
-    from cs2rl.train import env_config_from_args
+    from cs2rl.train.config import env_config_from_args
     cfg = env_config_from_args(types.SimpleNamespace(reward_kill=1))   # int on purpose
     assert type(cfg.rewards.reward_kill) is float and cfg.rewards.reward_kill == 1.0
     for bad in (float("nan"), float("inf"), float("-inf")):
@@ -242,7 +242,7 @@ def test_env_config_from_args_takes_exactly_one_positional_parameter():
     """
     import inspect
 
-    from cs2rl.train_config import env_config_from_args
+    from cs2rl.train.config import env_config_from_args
     params = list(inspect.signature(env_config_from_args).parameters.values())
     assert [p.name for p in params] == ["args"]
     assert params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
@@ -258,8 +258,7 @@ def test_args_knob_coverage_is_exhaustive():
     is no flag and reading one would be new behaviour.
     """
     from cs2rl.env.config import KNOB_FIELDS
-    from cs2rl.train_config import _ARGS_KNOB_FIELDS
-    from cs2rl.train_shared import _R0G_KNOBS
+    from cs2rl.train.config import _ARGS_KNOB_FIELDS, _R0G_KNOBS
     routed = set(_ARGS_KNOB_FIELDS) | {f for _, f in _R0G_KNOBS} | {"pbrs_gamma", "recoil"}
     assert routed == set(KNOB_FIELDS)
 
@@ -298,7 +297,7 @@ def test_stance_knobs_reach_static_data_through_env_knobs(simple_map, flag):
 
     from cs2rl.env.c import binding
     from cs2rl.env.c.cs2_env import make_env
-    from cs2rl.train import env_config_from_args
+    from cs2rl.train.config import env_config_from_args
     args = types.SimpleNamespace(crouch_enabled=flag, jump_enabled=flag)
     env = make_env(config=env_config_from_args(args), map_data=simple_map)
     try:
@@ -333,17 +332,17 @@ def test_jump_enabled_is_in_the_eval_driver_agreement_loop():
     test_cli_flags_declared_default_none's source-scan rationale."""
     import re
     from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train.py").read_text()
+    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train" / "envs.py").read_text()
     m = re.search(r"for _k in \((.*?)\):", src, re.S)
-    assert m, "eval/driver agreement loop not found in train.py"
+    assert m, "eval/driver agreement loop not found in train/envs.py"
     keys = m.group(1)
     for knob in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled", "round_time"):
         assert f'"{knob}"' in keys, f"{knob} missing from the eval/driver agreement loop"
 
 
 def test_policy_max_turn_speed_assert(simple_map):
-    from cs2rl.train import assert_max_turn_speed_agreement
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.train.envs import assert_max_turn_speed_agreement
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=4, map_data=simple_map)
     try:
         assert_max_turn_speed_agreement(trainer.vecenv, trainer.policy)
@@ -363,7 +362,8 @@ def test_cli_flags_declared_default_none():
     tests/test_modal_request.py."""
     import re
     from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train.py").read_text()
+    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train" /
+           "__main__.py").read_text()
     for flag, dest, typ in (("--round-time-ticks", "round_time_ticks", "int"),
                             ("--laser-range", "laser_range", "float"), ("--max-turn-speed",
                                                                         "max_turn_speed", "float")):
@@ -388,7 +388,8 @@ def test_stance_flags_declared_default_on():
     drift; R11's argparse probe is what enforces that direction."""
     import re
     from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train.py").read_text()
+    src = (Path(__file__).resolve().parents[1] / "src" / "cs2rl" / "train" /
+           "__main__.py").read_text()
     for flag, dest in (("--crouch-enabled", "crouch_enabled"), ("--jump-enabled", "jump_enabled")):
         m = re.search(rf'add_argument\(\s*"{flag}",(.*?)\)\n', src, re.S)
         assert m, flag

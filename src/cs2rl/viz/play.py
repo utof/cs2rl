@@ -97,7 +97,7 @@ def main(argv=None):
         print(e, file=sys.stderr)
         return 2
 
-    from cs2rl.train import (
+    from cs2rl.policy import (
         init_policy_state,
         load_policy_from_checkpoint,
         select_policy_actions_native,

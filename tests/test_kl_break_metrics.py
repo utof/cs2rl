@@ -34,7 +34,7 @@ def _run_train_once(trainer):
 
 
 def test_kl_break_metrics_and_granularity():
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -81,7 +81,7 @@ def test_kl_break_metrics_and_granularity():
 
 
 def test_clipfrac_halves_and_event_fraction_are_logged():
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
@@ -107,7 +107,7 @@ def test_clipfrac_halves_and_event_fraction_are_logged():
 
 
 def test_self_play_used_past_metric():
-    from cs2rl.train import self_play_used_past_metric
+    from cs2rl.train.selfplay import self_play_used_past_metric
 
     class _T:
         _selfplay_used_past = True
@@ -131,7 +131,7 @@ def test_self_play_used_past_is_assigned_on_outer_logs():
     """The persist site is the outer logs dict, not trainer.losses."""
     import inspect
 
-    from cs2rl import train
-    src = inspect.getsource(train)
+    from cs2rl.train import loop as train_loop
+    src = inspect.getsource(train_loop)
     assert 'logs["self_play/used_past"] = self_play_used_past_metric(trainer)' in src
     assert src.index('logs["self_play/pool_size"]') < src.index('logs["self_play/used_past"]')

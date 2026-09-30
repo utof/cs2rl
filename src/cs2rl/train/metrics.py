@@ -24,11 +24,55 @@ IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in train_shared.py's header. Every torch import below is
 function-local ON PURPOSE.
 """
+
 import time
 
 import numpy as np
 
-from cs2rl.train_shared import LOG_STD_MAX, LOG_STD_MIN
+from cs2rl.policy import LOG_STD_MAX, LOG_STD_MIN
+
+
+def format_train_status(epoch, ts_val, logs):
+    sps = logs.get("SPS", 0.0)
+    timeout = logs.get("environment/timed_out", 0.0)
+    t_win = logs.get("environment/winner_t", 0.0)
+    ct_win = logs.get("environment/winner_ct", 0.0)
+    plant = logs.get("environment/bomb_planted", 0.0)
+    kills_t = logs.get("environment/kills_t", 0.0)
+    kills_ct = logs.get("environment/kills_ct", 0.0)
+    round_len = logs.get("environment/round_length", 0.0)
+    move_1 = logs.get("environment/action_move_1", 0.0)
+    # Batch 3.5: per-axis aim log_std (clamped). Defaults to 0.0 if missing.
+    # T7 acceptance gate 2 greps for aim_log_std_pitch= — keep this substring.
+    aim_log_std_yaw = logs.get("policy/aim_log_std_yaw", 0.0)
+    aim_log_std_pitch = logs.get("policy/aim_log_std_pitch", 0.0)
+    return (f"Epoch {epoch} | SPS: {sps:.0f} | Timeout: {timeout:.3f} | "
+            f"TWin: {t_win:.3f} | CTWin: {ct_win:.3f} | Plant: {plant:.3f} | "
+            f"Kills(T/CT): {kills_t:.2f}/{kills_ct:.2f} | RoundLen: {round_len:.1f} | "
+            f"Move1: {move_1:.1f} | TS: {ts_val:.3f} | "
+            f"aim_log_std_yaw={aim_log_std_yaw:.4f} aim_log_std_pitch={aim_log_std_pitch:.4f}")
+
+
+# ── SECTION: R0-I fixed-baseline evaluation hooks ─────────────────────────
+
+
+def elimination_only_win_rates(logs):
+    """R0-I: (win_rate_t, win_rate_ct) with timeouts removed from the CT side.
+
+    WHY: cs2_rewards.h scores a timeout as a CT win (`winner_ct`), so on a
+    bombsite-less duel map a CT that never engages "wins" every round and
+    SelfPlayManager.win_threshold would pool-save a statue. `winner_t` is
+    elimination-only on bombsites=[] maps. All three keys are window means
+    over the same episode set, so the subtraction is exact; clamped at 0 for
+    the float-noise case. Missing keys (first epoch) → 0.0, never KeyError.
+    """
+    wt = float(logs.get("environment/winner_t", 0.0))
+    wct = max(
+        0.0,
+        float(logs.get("environment/winner_ct", 0.0)) -
+        float(logs.get("environment/timed_out", 0.0)))
+    return wt, wct
+
 
 # ── SECTION: Network Health Monitoring ────────────────────────────────────
 

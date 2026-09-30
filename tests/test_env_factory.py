@@ -390,7 +390,7 @@ def test_factory_builds_the_captured_config(monkeypatch, role, scenario, capture
     if role == "eval":
         from argparse import Namespace
 
-        from cs2rl.train_config import env_config_from_args
+        from cs2rl.train.config import env_config_from_args
 
         assert env_config_from_args(Namespace(**capture["args"])) == _config_from(
             capture["input_config"]), (
@@ -441,11 +441,11 @@ def test_train_closure_still_rejects_stray_kwargs(monkeypatch):
     resolved above the closure, so this call is legal and the guard is still the
     only thing that can fire.
     """
-    from cs2rl import train
     from cs2rl.env.c import cs2_env
+    from cs2rl.train import envs as train_envs
 
     monkeypatch.setattr(cs2_env, "make_env", _Recorder())
-    factory = train.build_env_factory(shared_ts=None, map_data=None)
+    factory = train_envs.build_env_factory(shared_ts=None, map_data=None)
     with pytest.raises(TypeError, match="unexpected kwargs.*reward_ct_survival"):
         factory(buf=None, seed=0, reward_ct_survival=0.0)
 
@@ -622,7 +622,7 @@ def _real_harness_env_factory(monkeypatch, tmp_path, shared_ts, **harness_kwargs
 
     import pufferlib.vector
 
-    from cs2rl import train_test_harness
+    from tests._helpers import trainer_harness
 
     captured = []
 
@@ -634,12 +634,12 @@ def _real_harness_env_factory(monkeypatch, tmp_path, shared_ts, **harness_kwargs
         raise _Captured
 
     monkeypatch.setattr(pufferlib.vector, "make", _fake_make)
-    monkeypatch.setattr(train_test_harness, "mp",
+    monkeypatch.setattr(trainer_harness, "mp",
                         types.SimpleNamespace(Value=lambda *_a, **_kw: shared_ts))
-    monkeypatch.setattr(train_test_harness, "tempfile",
+    monkeypatch.setattr(trainer_harness, "tempfile",
                         types.SimpleNamespace(mkdtemp=lambda **_kw: str(tmp_path)))
     with pytest.raises(_Captured):
-        train_test_harness._build_trainer_for_test(**harness_kwargs)
+        trainer_harness._build_trainer_for_test(**harness_kwargs)
     assert len(captured) == 1, "pufferlib.vector.make was not reached exactly once"
     return captured[0]
 
@@ -665,15 +665,15 @@ def test_train_call_site_forwards_the_captured_kwargs(monkeypatch, capture):
     """
     from argparse import Namespace
 
-    from cs2rl import train
     from cs2rl.env.c import cs2_env
+    from cs2rl.train import envs as train_envs
 
     b, rt = capture["bindings"], capture["runtime_kwargs"]
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
-    factory = train.build_train_env_factory(Namespace(**capture["args"]),
-                                            shared_ts=rt["team_spirit"],
-                                            map_data=rt["map_data"])
+    factory = train_envs.build_train_env_factory(Namespace(**capture["args"]),
+                                                 shared_ts=rt["team_spirit"],
+                                                 map_data=rt["map_data"])
     factory(buf=b["buf"], seed=b["seed"], _seed=b["_seed"])
     assert len(rec.calls) == 1, f"the train closure called make_env {len(rec.calls)} times"
 
@@ -941,9 +941,9 @@ def test_smoke_test_call_site_asks_for_the_smoke_role(monkeypatch):
     The `env.reset(seed=42)` on the next line is NOT part of construction and
     must stay — the two 42s are a coincidence, not one value.
     """
-    from cs2rl import train
+    from cs2rl.train import envs as train_envs
 
-    role, kwargs = _drive(monkeypatch, train, train.smoke_test)
+    role, kwargs = _drive(monkeypatch, train_envs, train_envs.smoke_test)
     assert (role, kwargs) == ("smoke", {})
 
 
@@ -954,17 +954,17 @@ def test_make_env_delegates_to_the_external_role(monkeypatch):
     parameters of the same shape, so crossing them is a one-character edit that
     every value-based comparison in this file would accept.
     """
-    from cs2rl import train
+    from cs2rl.train import envs as train_envs
 
     seen = []
-    monkeypatch.setattr(train, "build_env_for", lambda role, **kw: seen.append((role, kw)))
-    train.make_env("<team_spirit>", "<map_data>")
+    monkeypatch.setattr(train_envs, "build_env_for", lambda role, **kw: seen.append((role, kw)))
+    train_envs.make_env("<team_spirit>", "<map_data>")
     assert seen == [("external", {"team_spirit": "<team_spirit>", "map_data": "<map_data>"})]
 
     # The wrapper's own optional defaults stay on the wrapper — `_build_external`
     # requires both, so a forwarding bug is a TypeError rather than a dust2 env.
     seen.clear()
-    train.make_env()
+    train_envs.make_env()
     assert seen == [("external", {"team_spirit": None, "map_data": None})]
 
 
@@ -1002,7 +1002,7 @@ def test_load_policy_from_checkpoint_asks_for_bare_eval_legacy(monkeypatch, tmp_
 
     import torch
 
-    from cs2rl import train
+    from cs2rl import policy as policy_mod
 
     ckpt = tmp_path / "fake.pt"
     ckpt.write_bytes(b"")
@@ -1010,7 +1010,8 @@ def test_load_policy_from_checkpoint_asks_for_bare_eval_legacy(monkeypatch, tmp_
         torch, "load",
         lambda *_a, **_kw: {"encoder.0.weight": types.SimpleNamespace(shape=(64, 105))})
 
-    role, kwargs = _drive(monkeypatch, train, train.load_policy_from_checkpoint, ckpt, "cpu")
+    role, kwargs = _drive(monkeypatch, policy_mod, policy_mod.load_policy_from_checkpoint, ckpt,
+                          "cpu")
     assert (role, kwargs) == ("eval_legacy", {}), (
         "load_policy_from_checkpoint must pass NO seed — make_env's own default is 0, and "
         "forwarding None instead would build a different env that scalars cannot see")
@@ -1026,11 +1027,11 @@ def test_evaluate_checkpoint_threads_its_episode_seed(monkeypatch):
     expression; this pins that the seed reaches the factory at all, under the
     right role.
     """
-    from cs2rl import train
+    from cs2rl.train import evaluate as train_evaluate
 
     role, kwargs = _drive(monkeypatch,
-                          train,
-                          train.evaluate_checkpoint,
+                          train_evaluate,
+                          train_evaluate.evaluate_checkpoint,
                           checkpoint_path=None,
                           policy_mode="random",
                           start_seed=7717,
@@ -1136,20 +1137,20 @@ def test_eval_env_agreement_two_directions(simple_map, field_name):
     reusing a pair is what forced the old two-case shape that produced the
     finding.
     """
-    from cs2rl import train
     from cs2rl.env.c.cs2_env import make_env
+    from cs2rl.train import envs as train_envs
 
     base = make_env(config=EnvConfig(), map_data=simple_map, seed=0)
     try:
         other = make_env(config=_differing_config(base, field_name), map_data=simple_map, seed=0)
         try:
             if field_name == "reward_symmetrize":
-                train.assert_eval_env_agreement(base, other)           # must not raise
+                train_envs.assert_eval_env_agreement(base, other)      # must not raise
                 return
             wanted = (f"on {field_name}"
                       if field_name in _CHECK_A_KNOBS else f"on config.{field_name}")
             with pytest.raises(RuntimeError, match=re.escape(wanted)):
-                train.assert_eval_env_agreement(base, other)
+                train_envs.assert_eval_env_agreement(base, other)
         finally:
             other.close()
     finally:
@@ -1166,9 +1167,9 @@ def test_train_calls_assert_eval_env_agreement():
     """
     import inspect
 
-    from cs2rl import train
+    from cs2rl.train import loop as train_loop
 
-    assert "assert_eval_env_agreement(" in inspect.getsource(train.train)
+    assert "assert_eval_env_agreement(" in inspect.getsource(train_loop.train)
 
 
 # ── AST: every migrated site still reads what the old site read ─────────────
@@ -1262,6 +1263,17 @@ MOVED_ENCLOSING = {
     "_build_trainer_for_test.env_factory": "_harness_parts.env_factory",
 }
 
+# (fixture site path, top-level function) -> the file it lives in now (#205 part 3).
+MOVED_SITE_FILE = {
+    ("src/train.py", "train"): "src/cs2rl/train/loop.py",
+    ("src/train.py", "evaluate_checkpoint"): "src/cs2rl/train/evaluate.py",
+    ("src/train.py", "load_policy_from_checkpoint"): "src/cs2rl/policy.py",
+    ("src/train.py", "make_env"): "src/cs2rl/train/envs.py",
+    ("src/train.py", "smoke_test"): "src/cs2rl/train/envs.py",
+    ("src/train.py", "build_env_factory"): "src/cs2rl/train/envs.py",
+    ("src/train_test_harness.py", "_harness_parts"): "tests/_helpers/trainer_harness.py",
+}
+
 
 def _migrated_sites():
     """(role, enclosing qualname, source file, one pre-migration call_source).
@@ -1289,9 +1301,12 @@ def _migrated_sites():
         assert len(sources) == 1, (f"{role}/{enclosing} was captured with {len(sources)} different "
                                    f"call sources: {sources}")
         # The fixture's `site` paths are pre-#199 labels (`src/train.py`), kept byte for
-        # byte; the file now lives in the package, by the one rule src/X -> src/cs2rl/X.
-        package = Path(__file__).resolve().parents[1] / "src" / "cs2rl"
-        live = package / Path(relpath).relative_to("src")
+        # byte. #205 part 3 split train.py by owner and moved the harness to tests/, so the
+        # live file is looked up by the site's top-level function; an unmapped one fails.
+        top = enclosing.split(".")[0]
+        assert (relpath, top) in MOVED_SITE_FILE, (
+            f"{relpath}::{top} has no live file in MOVED_SITE_FILE; say where #205 part 3 put it")
+        live = Path(__file__).resolve().parents[1] / MOVED_SITE_FILE[(relpath, top)]
         out.append((role, enclosing, live, sources.pop()))
     return out
 
@@ -1481,7 +1496,7 @@ def test_env_factory_never_names_train_make_env():
     for node in ast.walk(tree):
         if (isinstance(node, ast.ImportFrom) and node.module == "cs2rl.train"
                 and any(a.name == "make_env" for a in node.names)):
-            offenders.append(f"line {node.lineno}: from cs2rl.train import make_env")
+            offenders.append(f"line {node.lineno}: from cs2rl.train.envs import make_env")
         if (isinstance(node, ast.Attribute) and node.attr == "make_env"
                 and isinstance(node.value, ast.Name) and node.value.id == "train"):
             offenders.append(f"line {node.lineno}: train.make_env")
@@ -1509,13 +1524,13 @@ def test_env_factory_injects_reward_overrides():
     """
     import multiprocessing as mp
 
-    from cs2rl import train
+    from cs2rl.train import envs as train_envs
 
     # PARTIAL RewardWeights on purpose (review fix 5): naming all 23 would set
     # reward_kill to its default explicitly, so the "untouched" assertion below
     # would pass even with the omitted-field fallback broken. Naming three and
     # letting the dataclass supply the rest is what keeps that assertion live.
-    factory = train.build_env_factory(
+    factory = train_envs.build_env_factory(
         shared_ts=mp.Value("f", 0.3),
         map_data=None,
         config=EnvConfig(rewards=RewardWeights(
@@ -1536,9 +1551,9 @@ def test_env_factory_without_overrides_keeps_defaults():
     """`config=None` must reproduce today's env exactly."""
     import multiprocessing as mp
 
-    from cs2rl import train
+    from cs2rl.train import envs as train_envs
 
-    factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
+    factory = train_envs.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
     env = factory(seed=0)
     try:
         sd = env._c_env.sd.contents
@@ -1557,9 +1572,9 @@ def test_env_factory_rejects_unexpected_kwargs():
     """
     import multiprocessing as mp
 
-    from cs2rl import train
+    from cs2rl.train import envs as train_envs
 
-    factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
+    factory = train_envs.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
     with pytest.raises(TypeError, match="reward_ct_survival"):
         factory(seed=0, reward_ct_survival=0.0)
 
@@ -1606,16 +1621,16 @@ def test_build_train_env_factory_carries_args_config():
     import multiprocessing as mp
     from argparse import Namespace
 
-    from cs2rl import train
-    from cs2rl.train_config import env_config_from_args
+    from cs2rl.train import envs as train_envs
+    from cs2rl.train.config import env_config_from_args
 
     args = Namespace(reward_ct_survival=0.0)
-    factory = train.build_train_env_factory(args, shared_ts=mp.Value("f", 0.3), map_data=None)
+    factory = train_envs.build_train_env_factory(args, shared_ts=mp.Value("f", 0.3), map_data=None)
     cells = _closure_cells(factory)
     assert cells["config"] == env_config_from_args(args)
     assert cells["config"].rewards.reward_ct_survival == 0.0
 
-    bare = train.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
+    bare = train_envs.build_env_factory(shared_ts=mp.Value("f", 0.3), map_data=None)
     bare_cells = _closure_cells(bare)
     assert bare_cells["config"] == EnvConfig(), (
         f"build_env_factory(config=None) captured {bare_cells['config']!r}; the "
@@ -1633,7 +1648,7 @@ def test_train_uses_build_train_env_factory():
     """
     import inspect
 
-    from cs2rl import train
+    from cs2rl.train import loop as train_loop
 
-    src = inspect.getsource(train.train)
+    src = inspect.getsource(train_loop.train)
     assert "build_train_env_factory(" in src, "train() no longer builds envs through the seam"

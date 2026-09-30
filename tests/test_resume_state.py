@@ -29,8 +29,8 @@ def _make(num_envs=16, seed=3):
     the same object. Before W1.5 this helper applied the self-play and
     checkpointing patches a second time on top of the harness's own.
     """
-    from cs2rl.train import SelfPlayManager
-    from cs2rl.train_test_harness import _build_trainer_for_test
+    from cs2rl.train.selfplay import SelfPlayManager
+    from tests._helpers.trainer_harness import _build_trainer_for_test
     mgr = SelfPlayManager(pool_size=15,
                           p_past=0.0,
                           save_every_epochs=25,
@@ -42,7 +42,7 @@ def _make(num_envs=16, seed=3):
 
 
 def _snapshot(trainer, mgr):
-    from cs2rl.train import _WARMSTART_ATTRS                                       # defined beside collect/restore_train_state
+    from cs2rl.train.resume import _WARMSTART_ATTRS                                # defined beside collect/restore_train_state
     return {
         "global_step": trainer.global_step,
         "epoch": trainer.epoch,
@@ -114,7 +114,7 @@ def test_round_trip_restores_everything():
         before = _snapshot(trainer, mgr)
     finally:
         cleanup_a = cleanup
-    from cs2rl.train import load_full_resume, resolve_resume_run
+    from cs2rl.train.resume import load_full_resume, resolve_resume_run
     trainer2, mgr2, cleanup2 = _make(seed=99)                                                  # different seed ⇒ different RNG streams
     try:
         paths = resolve_resume_run(Path(data_dir), run_id="rid-test")
@@ -152,7 +152,7 @@ def test_resumed_schedule_matches_uninterrupted():
     schedule-derived quantity (LR after the step, step counter, epoch, SAC
     target entropy, team-spirit input) is a pure function of the restored
     state and must be equal."""
-    from cs2rl.train import load_full_resume, resolve_resume_run
+    from cs2rl.train.resume import load_full_resume, resolve_resume_run
     t_a, mgr_a, cleanup_a = _make(seed=3)
     try:
         for _ in range(3):
@@ -190,7 +190,7 @@ def test_scheduler_restore_adopts_new_t_max():
     that epoch; a same-horizon restore must not touch the optimizer lr."""
     import math
 
-    from cs2rl.train import collect_train_state, restore_train_state
+    from cs2rl.train.resume import collect_train_state, restore_train_state
     trainer, mgr, cleanup = _make()
     try:
         for _ in range(2):
@@ -216,7 +216,7 @@ def test_scheduler_restore_adopts_new_t_max():
 
 
 def test_config_guard_allowlist(tmp_path, capsys):
-    from cs2rl.train import RESUME_CONFIG_ALLOWLIST, check_resume_config
+    from cs2rl.train.resume import RESUME_CONFIG_ALLOWLIST, check_resume_config
     old = {"a": 1, "seed": 1, "device": "cpu", "data_dir": "x", "run_id": "r", "gamma": 0.99}
     (tmp_path / "config.json").write_text(json.dumps(old))
     new = dict(old, device="cuda", data_dir="y", run_id="q")
@@ -266,7 +266,7 @@ def test_resolve_uses_trainer_state_model_name_not_max(tmp_path):
     """model_000010.pt orphaned by a crash after the model write: the set is
     trainer_state@9 + train_state@9 → resume from 9, and the orphan is
     reported, not silently paired with epoch-9 optimizer state."""
-    from cs2rl.train import check_checkpoint_set, resolve_resume_run
+    from cs2rl.train.resume import check_checkpoint_set, resolve_resume_run
     _fake_set(tmp_path / "rid", model_epochs=(9, 10), ts_epoch=9, st_epoch=9)
     paths = resolve_resume_run(tmp_path)               # run_id discovered
     assert paths["run_id"] == "rid" and paths["model_path"].name == "model_000009.pt"
@@ -279,7 +279,7 @@ def test_mismatched_set_is_refused(tmp_path):
     """trainer_state@10 (names model_000010) + train_state@9: a stale sidecar
     next to a newer model/optimizer (e.g. a torn write, or files copied by
     hand). Must be refused, naming all three epochs."""
-    from cs2rl.train import check_checkpoint_set, resolve_resume_run
+    from cs2rl.train.resume import check_checkpoint_set, resolve_resume_run
     _fake_set(tmp_path / "rid", model_epochs=(9, 10), ts_epoch=10, st_epoch=9)
     paths = resolve_resume_run(tmp_path, run_id="rid")
     ts = torch.load(paths["trainer_state_path"], weights_only=False)
@@ -293,7 +293,7 @@ def test_mismatched_set_is_refused(tmp_path):
 
 
 def test_resolve_refuses_incomplete_dirs(tmp_path):
-    from cs2rl.train import resolve_resume_run
+    from cs2rl.train.resume import resolve_resume_run
     d = tmp_path / "rid"
     # model named by trainer_state.pt missing (only the orphan exists)
     _fake_set(d, model_epochs=(10, ), ts_epoch=9, st_epoch=9)
@@ -310,7 +310,7 @@ def test_metrics_bound_is_checkpoint_interval_wide_both_sides():
     """Rows are throttled to ≥0.25 s (pufferl.py) while checkpoints fire every
     checkpoint_interval epochs unconditionally, so the last row may trail the
     checkpoint by up to checkpoint_interval-1 epochs."""
-    from cs2rl.train import check_resume_metrics_bound as bound
+    from cs2rl.train.resume import check_resume_metrics_bound as bound
     B, ci, last = 1000, 5, 50_000
     assert bound(last, last, ci, B) == (last - ci * B, last + ci * B)  # row exactly at the checkpoint
     bound(last + (ci - 1) * B, last, ci, B)                            # row ci-1 epochs behind: accepted
@@ -322,7 +322,7 @@ def test_metrics_bound_is_checkpoint_interval_wide_both_sides():
 
 
 def test_selfplay_pool_paths_persist_absolute(tmp_path, monkeypatch, capsys):
-    from cs2rl.train import SelfPlayManager
+    from cs2rl.train.selfplay import SelfPlayManager
     monkeypatch.chdir(tmp_path)
     (tmp_path / "ckpt").mkdir()
     for n in ("a.pt", "b.pt"):

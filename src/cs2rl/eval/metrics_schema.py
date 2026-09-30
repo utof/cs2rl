@@ -395,7 +395,7 @@ REGISTRY.update({
     "environment/step_stats":
     _e(
         "dropped-non-numeric", "struct", (),
-        "StepStatsView, not a scalar: mean_and_log's np.mean raises and train.py's "
+        "StepStatsView, not a scalar: mean_and_log's np.mean raises and train/loop.py's "
         "isinstance(v, (int, float)) persist filter drops it, so it never reaches "
         "metrics.jsonl. Registered because it IS written to the info dict — an "
         "unregistered write is exactly what this file exists to make impossible."),

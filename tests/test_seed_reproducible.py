@@ -57,7 +57,7 @@ def test_env_seed_ranges_of_adjacent_seeds_disjoint():
     """Env i of --seed s gets env_seed_base(s) + i (train()'s _per_env_kwargs)
     — no pufferlib composition is involved. This only pins the 100_000 spacing:
     the (s, i) -> seed map stays injective for any num_envs below it."""
-    from cs2rl.train import env_seed_base
+    from cs2rl.train.envs import env_seed_base
     seen = {}
     for s in (0, 1):
         base = env_seed_base(s)
@@ -74,7 +74,7 @@ def test_eval_seed_cannot_collide_with_worker_seeds():
     i=3. For --seed<=4 with any num_envs < 100_000 there is no collision.
     (The original ruling assumed pufferlib's (base+w)*E+j composition, under
     which --seed 4 / E=25 / j=3 DID collide — that path is not used.)"""
-    from cs2rl.train import env_seed_base
+    from cs2rl.train.envs import env_seed_base
     hits = [(s, i) for s in range(5) for i in range(100_000) if env_seed_base(s) + i == 10_000_003]
     assert not hits, hits
     assert env_seed_base(100) + 3 == 10_000_003        # documents the one reachable collision
@@ -84,7 +84,7 @@ def test_env_seed_base_rejects_uint32_overflow():
     """py_init masks the C seed with & 0xFFFFFFFF; base + i must fit uint32.
     The first overflowing --seed (42_950, i=0) is refused, the last fitting
     one (42_949) is not, and negatives are refused too."""
-    from cs2rl.train import env_seed_base
+    from cs2rl.train.envs import env_seed_base
     assert env_seed_base(42_949) < 2**32
     with pytest.raises(ValueError):
         env_seed_base(42_950)
@@ -102,7 +102,7 @@ def test_seed_everything_is_deterministic():
 
     import torch
 
-    from cs2rl.train import seed_everything
+    from cs2rl.train.resume import seed_everything
 
     def draw():
         return torch.rand(3).tolist(), np.random.random(), random.random()
@@ -124,8 +124,8 @@ def test_train_routes_seed_via_per_env_kwargs():
     no-op (vector.make never forwards its own `seed` parameter)."""
     import inspect
 
-    from cs2rl import train
-    src = inspect.getsource(train.train)
+    from cs2rl.train import loop as train_loop
+    src = inspect.getsource(train_loop.train)
     assert "seed_everything(args.seed)" in src, \
         "train() no longer seeds python/numpy/torch via seed_everything"
     assert '"_seed": env_seed_base(args.seed) + i' in src, \
@@ -142,7 +142,7 @@ def test_serial_vecenv_envs_get_distinct_rng_streams(simple_map):
     catch the seed falling back to pufferlib's default base (env i -> i)."""
     import pufferlib.vector
 
-    from cs2rl.train import build_env_factory, env_seed_base
+    from cs2rl.train.envs import build_env_factory, env_seed_base
     n = 4
     factory = build_env_factory(shared_ts=Value("f", 0.3), map_data=simple_map)
     vecenv = pufferlib.vector.make([factory] * n,

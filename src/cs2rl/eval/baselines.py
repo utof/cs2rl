@@ -248,7 +248,7 @@ class PolicyActor:
         # module-level cycle: train.py imports this module only inside train(), so
         # the pair cycles only through function-local imports, which pyproject.toml's
         # acyclic contract records as its `train -> eval.baselines` ignore entry.
-        from cs2rl.train import _hybrid_sample_logits, init_policy_state
+        from cs2rl.policy import _hybrid_sample_logits, init_policy_state
         self.torch = torch
         self._sample = _hybrid_sample_logits
         self._init_state = init_policy_state

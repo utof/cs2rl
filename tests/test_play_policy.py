@@ -67,7 +67,7 @@ class _TinyPol:
 def test_mark_done_is_torch_float_tensor():
     import torch
 
-    from cs2rl.train import init_policy_state
+    from cs2rl.policy import init_policy_state
     policy = _TinyPol()
     st = init_policy_state(policy, "cpu")
     terms = np.zeros(10, dtype=np.bool_)
@@ -82,7 +82,7 @@ def test_mark_done_is_torch_float_tensor():
 def test_reset_round_zeros_hidden():
     import torch
 
-    from cs2rl.train import init_policy_state
+    from cs2rl.policy import init_policy_state
     policy = _TinyPol()
     st = init_policy_state(policy, "cpu")
     st["lstm_h"] += 3

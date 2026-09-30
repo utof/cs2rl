@@ -20,14 +20,281 @@ IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in train_shared.py's header. Every torch import below is
 function-local ON PURPOSE.
 """
+
 import json
 import math
+import os
 import random
 from pathlib import Path
 
 import numpy as np
 
-from cs2rl.train_shared import _WARMSTART_ATTRS, RESUME_CONFIG_ALLOWLIST
+from cs2rl.policy import LOG_STD_INIT, state_dict_is_split, state_dict_is_trunk_split
+from cs2rl.spec.paths import CHECKPOINTS_DIR
+
+# gh#91: σ to widen a BC-frozen aim head to at PPO resume. BC detaches
+# aim_log_std (spec D-6) so bc_warmstart.pt carries σ=0.1 while fitting
+# obs-dependent |μ| up to ~0.63 rad — one lr=3e-4 Adam step then moves μ a
+# full σ and continuous approx_kl (~1.4) blows past target_kl (0.03),
+# throttling every update to ~1 minibatch. σ=0.3 drops that per-step KL ~9×
+# while staying inside [σ_min, σ_max]. Applied by reinit_frozen_aim_log_std.
+AIM_LOG_STD_RESUME_INIT = math.log(0.3)
+
+
+def reinit_frozen_aim_log_std(state_dict, *, atol=1e-6, cap=None):
+    """gh#91: widen a BC-frozen aim head before PPO resumes from it.
+
+    WHAT: if ``state_dict`` carries an ``aim_log_std`` tensor still sitting
+    exactly at LOG_STD_INIT (every element, within ``atol``), overwrite it
+    in-place with AIM_LOG_STD_RESUME_INIT (σ 0.1 → 0.3) and return True.
+    Any other value — i.e. a checkpoint whose aim head actually trained —
+    is left untouched (returns False).
+
+    WHY: BC detaches aim_log_std (spec D-6), so bc_warmstart.pt pairs a
+    near-deterministic σ=0.1 with large obs-dependent aim means. Resuming
+    PPO from that puts one Adam step a full σ away → continuous approx_kl
+    ~1.4 ≫ target_kl 0.03 → the KL early-stop throttles updates to ~1
+    minibatch/epoch for ~85 epochs (root-caused 2026-08-01, run
+    checkpoints-20260801-022606; companion metrics bug gh#90).
+
+    PITFALLS:
+      * Detection is by VALUE, not filename — any un-trained aim_log_std is
+        the BC signature (an RL run moves it within its first updates). A
+        trained checkpoint landing back on exactly log(0.1) elementwise is
+        measure-zero.
+      * Mutates ``state_dict`` (pre-``load_state_dict``), matching dtype/
+        device of the stored tensor via full_like.
+      * Matches any key ENDING in "aim_log_std" so a future wrapper prefix
+        (e.g. "policy.aim_log_std") keeps working.
+      * Batch 7: the matcher covers aim_log_std, aim_log_std_t and
+        aim_log_std_ct. The legacy→split warm conversion must still call this
+        FIRST, on the legacy dict — see convert_legacy_state_dict_to_split.
+      * R0-E.3 (#131): ``cap`` is the run's --aim-log-std-max. The fill value
+        is min(AIM_LOG_STD_RESUME_INIT, cap) — widening to log(0.3) under a
+        log(0.05) cap would be clamped away in every forward anyway, but the
+        stored parameter would sit outside the band and the σ gradient would
+        be dead (clamp has zero gradient outside its range). None = no cap.
+    """
+    import re as _re
+
+    import torch as _torch
+
+    changed = False
+    for key, val in state_dict.items():
+        # Batch 7 (spec §3.3): also match the split copies. The bare
+        # endswith("aim_log_std") this replaces is FALSE for "aim_log_std_t"
+        # and "aim_log_std_ct" — belt-and-braces so a future split-format
+        # warmstart is widened by VALUE too. It does NOT relieve the caller of
+        # the ordering rule: on a legacy→split resume this helper must run on
+        # the LEGACY dict, before convert_legacy_state_dict_to_split.
+        if _re.search(r"aim_log_std(_t|_ct)?$", key) and _torch.allclose(
+                val, _torch.full_like(val, LOG_STD_INIT), atol=atol):
+            fill = AIM_LOG_STD_RESUME_INIT if cap is None else min(AIM_LOG_STD_RESUME_INIT,
+                                                                   float(cap))
+            state_dict[key] = _torch.full_like(val, fill)
+            changed = True
+    return changed
+
+
+def convert_legacy_state_dict_to_split(state_dict):
+    """Warm split: duplicate a legacy checkpoint's heads into both team copies.
+
+    WHAT: returns a NEW dict where `action_heads.*` → `action_heads_t.*` +
+    `action_heads_ct.*`, `aim_mu.*` → `aim_mu_t.*` + `aim_mu_ct.*`,
+    `aim_log_std` → `aim_log_std_t` + `aim_log_std_ct`. Everything else
+    (encoder, lstm, value_head) passes through untouched — the trunk and the
+    critic stay shared.
+
+    WHY duplicate rather than re-initialize one side: the BC warmstart heads
+    encode "how to act at all". Starting CT from random heads would confound
+    the experiment with a relearning phase. Warm split means both teams start
+    IDENTICAL and the divergence itself is the treatment.
+
+    PITFALLS:
+      * ORDER (spec §3.3, the gh#91 trap): call reinit_frozen_aim_log_std on
+        the LEGACY dict BEFORE this function. The un-widened matcher used to
+        miss the `_t`/`_ct` keys entirely; running the re-init afterwards
+        would silently leave σ=0.1 and throttle every PPO update of the run
+        through the KL early-stop, with no error and no log line. The matcher
+        is now widened as belt-and-braces, but the ordering is still the
+        contract — pinned by
+        test_warm_split_duplicates_heads_and_reinits_sigma_in_both_copies.
+      * Keys are matched strictly (no wrapper prefix like "policy."). Every
+        checkpoint this project writes is bare-keyed; a prefixed dict would
+        pass through unconverted and then fail loudly at
+        load_state_dict_arch_checked rather than half-loading.
+      * Tensors are cloned so the two copies never alias — an in-place
+        optimizer step on one would otherwise move the other.
+    """
+    out = {}
+    for key, val in state_dict.items():
+        if key.startswith("action_heads."):
+            suffix = key[len("action_heads."):]
+            out[f"action_heads_t.{suffix}"] = val.clone()
+            out[f"action_heads_ct.{suffix}"] = val.clone()
+        elif key.startswith("aim_mu."):
+            suffix = key[len("aim_mu."):]
+            out[f"aim_mu_t.{suffix}"] = val.clone()
+            out[f"aim_mu_ct.{suffix}"] = val.clone()
+        elif key == "aim_log_std":
+            out["aim_log_std_t"] = val.clone()
+            out["aim_log_std_ct"] = val.clone()
+        else:
+            out[key] = val
+    return out
+
+
+def convert_shared_trunk_to_split(state_dict):
+    """Warm split: duplicate a shared encoder+LSTM into both team copies.
+
+    WHAT: returns a NEW dict where `encoder.*` → `encoder_t.*` +
+    `encoder_ct.*` and `lstm.*` → `lstm_t.*` + `lstm_ct.*`. Everything else
+    (`aim_log_std`, already-split `encoder_t.*`/`lstm_t.*`, `value_head`,
+    action heads) passes through untouched — this convert is the trunk axis
+    only.
+
+    WHY duplicate rather than re-initialize one side: same as the heads
+    warm split. The BC/legacy trunk encodes "how to see at all"; starting
+    CT from a random encoder+LSTM would confound the experiment with a
+    relearning phase. Both teams start IDENTICAL and the divergence is the
+    treatment.
+
+    PITFALLS:
+      * ORDER (spec §3.3): `reinit_frozen_aim_log_std` on the LEGACY dict
+        FIRST, then `convert_legacy_state_dict_to_split` (needs bare
+        `aim_log_std`), THEN this function. This helper does not touch σ
+        keys, but running it first is still wrong if a later heads convert
+        is expected to see `encoder.*`/`lstm.*` or bare `aim_log_std`.
+      * Keys are matched strictly (`encoder.` / `lstm.` prefixes, no
+        wrapper). Already-split `encoder_t.*` / `lstm_t.*` do not match
+        those prefixes and pass through — a second convert is a no-op on
+        a trunk-split dict.
+      * Tensors are cloned so the two copies never alias — an in-place
+        optimizer step on one would otherwise move the other.
+    """
+    out = {}
+    for key, val in state_dict.items():
+        if key.startswith("encoder."):
+            suf = key[len("encoder."):]
+            out[f"encoder_t.{suf}"] = val.clone()
+            out[f"encoder_ct.{suf}"] = val.clone()
+        elif key.startswith("lstm."):
+            suf = key[len("lstm."):]
+            out[f"lstm_t.{suf}"] = val.clone()
+            out[f"lstm_ct.{suf}"] = val.clone()
+        else:
+            # aim_log_std, value_head, heads, already-split encoder_t/lstm_t.
+            out[key] = val
+    return out
+
+
+def resolve_resume_split(resume_path, *, heads_flag, trunk_flag, map_location="cpu"):
+    """Decide heads- and trunk-split-ness BEFORE build_policy, from resume.
+
+    Returns ``(heads_split, trunk_split, state_dict_or_None, Path_or_None)``.
+
+    WHY this shape (spec §3.3 ordering constraint): in train() the policy is
+    constructed before train_config is built and before the resume
+    checkpoint is otherwise read — at construction time neither flag's
+    config key nor the checkpoint's keys are in scope. So the checkpoint
+    is sniffed once here, both decisions are passed into build_policy, and
+    the already-loaded dict is handed back for reuse at the load site
+    (no double I/O on a 2.5 MB file, and no chance of the two reads
+    disagreeing).
+
+    Decision (each bit independently; omitted flags never narrow):
+      no resume            → (bool(heads_flag), bool(trunk_flag), None, None)
+      ckpt bit off + flag  → flag WIDENS that axis (warm split at load)
+      ckpt bit on + flag   → inference WINS (True regardless of flag)
+
+    Each flag can only WIDEN its axis 0→1; it can never narrow a split
+    checkpoint back to a shared policy. That asymmetry is what makes a
+    flag-less crash-resume of a split run correct — the routine reality on
+    this box, not an edge case.
+
+    PITFALL: loads with map_location="cpu" regardless of the training device.
+    load_state_dict copies into the policy's own (possibly CUDA) tensors, so
+    this is safe and avoids allocating a second copy on the GPU during
+    startup. Do not keep a 3-tuple / singular ``flag=`` shim — a leftover
+    ``flag=`` call would TypeError, which is the intended tripwire.
+    """
+    import torch as _torch
+
+    if not resume_path:
+        return bool(heads_flag), bool(trunk_flag), None, None
+    resume_path = Path(resume_path)
+    if not resume_path.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+    state_dict = _torch.load(resume_path, map_location=map_location, weights_only=True)
+    # Omitted flags never narrow: flag can only OR the ckpt bit to True.
+    heads = bool(heads_flag) or state_dict_is_split(state_dict)
+    trunk = bool(trunk_flag) or state_dict_is_trunk_split(state_dict)
+    return heads, trunk, state_dict, resume_path
+
+
+def resolve_run_name(name: str) -> str:
+    """Return a run name prefixed with DDMMYY-N- where N is the count of existing
+    checkpoint dirs that already start with today's date prefix."""
+    from datetime import date
+
+    today = date.today()
+    date_prefix = today.strftime("%d%m%y")                             # e.g. "200326"
+    checkpoints_dir = CHECKPOINTS_DIR
+    count = 0
+    if checkpoints_dir.exists():
+        prefix = date_prefix + "-"
+        count = sum(1 for d in checkpoints_dir.iterdir()
+                    if d.is_dir() and d.name.startswith(prefix))
+    return f"{date_prefix}-{count}-{name}"
+
+
+def _atomic_save_state_dict(state_dict, path):
+    """torch.save via sibling .tmp + os.replace so a crash never corrupts ``path``.
+
+    WHY: the periodic save in train() overwrites ONE file (dust2_policy.pt)
+    every --save_every_sec. The training box's GPU is known to fall off the
+    PCI bus under thermal load (hard crash, 2026-08-13); a plain torch.save
+    interrupted mid-write would leave the ONLY recovery checkpoint torn.
+    os.replace() is an atomic rename on POSIX, so ``path`` always holds a
+    complete checkpoint — old or new, never partial.
+
+    PITFALL: torch is imported lazily — this module's level (and train.py's,
+    which imports it) must stay torch-free so --dump-config keeps its
+    no-heavy-imports guarantee.
+    """
+    import torch
+
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(state_dict, tmp)
+    os.replace(tmp, path)
+
+
+# ── R0-C (#134): full-state checkpoint / resume ───────────────────────────
+# PufferLib 3.0 saves model + optimizer + step counters (pufferl.py
+# save_checkpoint) and ships NO loader. Everything train.py layers on top
+# (SAC-α, LR scheduler, return normaliser, warm-start machine, self-play pool,
+# RNGs) lives here in a third file, train_state.pt, next to PufferLib's two.
+# Budget keys are allowlisted ON PURPOSE: the whole point of --resume-run is
+# `while trainer.epoch < trainer.total_epochs` (train()) continuing past a
+# crash, and run_rung1.sh's retry loop must be able to extend --timesteps.
+# check_resume_config prints a WARN line for every allowlisted key that changed.
+# PITFALL: n_active_per_team is deliberately NOT allowlisted — it changes the
+# unit of global_step (participating agent-steps) and the participating buffer
+# layout, so a resumed run under a different value would be nonsense.
+# PITFALL (R0-D #135): `seed` is NOT allowlisted either. A resumed run's RNG
+# streams come back from train_state.pt (restore_train_state), so a changed
+# --seed would be silently ignored for python/numpy/torch yet still re-seed
+# the freshly built envs — an inconsistent, unlabelled run. Refuse instead;
+# pass the original --seed (config.json has it) when resuming.
+RESUME_CONFIG_ALLOWLIST = frozenset(
+    {"data_dir", "device", "run_id", "total_timesteps", "participating_timesteps"})
+# Trainer attrs of the warm-start entropy machine + SAC target (all set in
+# Cs2PuffeRL._init_return_norm, src/cs2rl/trainer.py). Plain Python scalars/None — pickled as-is.
+_WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
+                    "_batch1_log_alpha_reset_done", "_batch1_current_target_entropy",
+                    "_batch1_warmstart_h_anchor", "_batch1_warmstart_h0",
+                    "_batch1_warmstart_warn_epoch")
 
 
 def _rng_state_dict():

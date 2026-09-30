@@ -171,12 +171,12 @@ def test_symmetrization_holds_on_the_external_buffer_vecenv_path():
 
     import pufferlib.vector
 
-    from cs2rl import train
+    from cs2rl.train import envs as train_envs
 
     def _make(symmetrize):
-        factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3),
-                                          map_data=None,
-                                          config=EnvConfig(reward_symmetrize=symmetrize))
+        factory = train_envs.build_env_factory(shared_ts=mp.Value("f", 0.3),
+                                               map_data=None,
+                                               config=EnvConfig(reward_symmetrize=symmetrize))
         return pufferlib.vector.make([factory],
                                      env_args=[[]],
                                      env_kwargs=[{}],
@@ -228,10 +228,10 @@ def test_make_env_threads_the_flag():
 def test_env_factory_threads_the_flag():
     import multiprocessing as mp
 
-    from cs2rl import train
-    factory = train.build_env_factory(shared_ts=mp.Value("f", 0.3),
-                                      map_data=None,
-                                      config=EnvConfig(reward_symmetrize=True))
+    from cs2rl.train import envs as train_envs
+    factory = train_envs.build_env_factory(shared_ts=mp.Value("f", 0.3),
+                                           map_data=None,
+                                           config=EnvConfig(reward_symmetrize=True))
     env = factory(seed=0)
     try:
         assert env._reward_symmetrize is True

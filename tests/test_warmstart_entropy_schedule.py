@@ -11,7 +11,7 @@ Phase semantics pinned here:
              ~500x alpha discontinuity at an unplotted step — spec finding 2).
   OFF   (2): steady state, identical to no-warmstart behavior; floor active.
 """
-from cs2rl.train_helpers_batch1 import WS_GRACE, WS_OFF, WS_RAMP, warmstart_entropy_state
+from cs2rl.train.entropy import WS_GRACE, WS_OFF, WS_RAMP, warmstart_entropy_state
 
 
 def test_grace_phase_before_grace_end():

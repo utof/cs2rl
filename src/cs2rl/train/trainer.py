@@ -49,40 +49,16 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-
-# Heavy by construction (module docstring): pufferl imports torch at ITS module scope.
-# `pufferlib` is read by the self-play evaluate body (gh#168 W2b) at exactly one site,
-# `pufferlib.unroll_nested_dict`. `import pufferlib.pytorch` has NO use in this module:
-# the old closure imported both forms and never touched `.pytorch`, and ast_oracle.py
-# check S2 passes only if this module binds `pufferlib` through every import form the
-# old closure used (extra forms are fine) or re-imports the name from train.py. Measured
-# in the #262 fold: without this line O1 fails S2 on `pufferlib`. Carried for that check
-# only; it can go once `--moves evaluate` is no longer run as a gate.
 import pufferlib
-import pufferlib.pytorch
 import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
-from cs2rl.resume_state import collect_train_state
+from cs2rl.policy import LOG_STD_MAX, _hybrid_sample_logits
 from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
-from cs2rl.train import _hybrid_sample_logits
-
-# W2a (gh#168): everything train() reads that used to be a function-local import of
-# the patcher, or a global of train_update.py, is a module-level import HERE, of the
-# same object from its defining module. ast_oracle.py check S2 fails on a shadowing
-# definition or a missing import; tests/test_tag_trainer.py patches tag_grad_cossim
-# on THIS module because the body resolves it through these globals. W2b added
-# `WelfordStd` / `process_step_rewards` (the self-play state and evaluate body) and
-# `_hybrid_sample_logits` above, under the same rule.
-from cs2rl.train_helpers_batch1 import (
-    WS_GRACE,
-    WS_OFF,
-    WelfordStd,
-    process_step_rewards,
-    warmstart_entropy_state,
-)
-from cs2rl.train_shared import LOG_STD_MAX, _atomic_save_state_dict
-from cs2rl.train_update import (
+from cs2rl.train.entropy import WS_GRACE, WS_OFF, warmstart_entropy_state
+from cs2rl.train.resume import _atomic_save_state_dict, collect_train_state
+from cs2rl.train.rewards import WelfordStd, process_step_rewards
+from cs2rl.train.update import (
     _hybrid_ppo_loss,
     _scheduled_target_entropy,
     masked_explained_variance,

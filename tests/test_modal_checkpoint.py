@@ -63,7 +63,7 @@ def test_validate_completed_run_accepts_representative_metrics(tmp_path):
     # compute_batch_dims moved train.py -> train_config.py in the post-rung1a
     # refactor (2026-08-31); the runner's AGENTS_PER_ENV/BPTT_HORIZON mirror is
     # pinned against wherever it actually lives, not against train.py by habit.
-    train_src = (ROOT / "src" / "cs2rl" / "train_config.py").read_text()
+    train_src = (ROOT / "src" / "cs2rl" / "train" / "config.py").read_text()
     fn = ast.parse(train_src)
     for node in ast.walk(fn):
         if isinstance(node, ast.FunctionDef) and node.name == "compute_batch_dims":
@@ -74,7 +74,7 @@ def test_validate_completed_run_accepts_representative_metrics(tmp_path):
             assert "num_envs * agents_per_env * bptt_horizon" in body
             break
     else:
-        raise AssertionError("live compute_batch_dims not found in src/cs2rl/train_config.py")
+        raise AssertionError("live compute_batch_dims not found in src/cs2rl/train/config.py")
     assert request.AGENTS_PER_ENV == 10
     assert request.BPTT_HORIZON == 64
     run_root, manifest, effective, ckpt = _minimal_completed_tree(tmp_path)

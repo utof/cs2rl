@@ -485,7 +485,7 @@ def build_bc_policy(device="cpu", seed: int = 0):
     """
     import torch
 
-    from cs2rl.train import build_policy
+    from cs2rl.policy import build_policy
     torch.manual_seed(seed)
     env = make_bc_env(seed=seed)
     try:
@@ -539,7 +539,7 @@ def bc_loss(policy, obs_t, disc_t, cont_t, valid=None, entropy_coef: float = DEF
     """
     import torch
 
-    from cs2rl.train import _hybrid_sample_logits
+    from cs2rl.policy import _hybrid_sample_logits
 
     flat_disc = disc_t.reshape(-1, disc_t.shape[-1])
     flat_cont = cont_t.reshape(-1, cont_t.shape[-1])
@@ -681,7 +681,7 @@ def greedy_carrier_action(policy, obs_row, state=None, action_mask=None, device=
     """
     import torch
 
-    from cs2rl.train import _apply_action_masks
+    from cs2rl.policy import _apply_action_masks
 
     with torch.no_grad():
         x = torch.as_tensor(obs_row, dtype=torch.float32, device=device).unsqueeze(0)

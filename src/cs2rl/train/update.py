@@ -26,7 +26,7 @@ reason spelled out in train_shared.py's header. Every torch, pufferlib and
 train_helpers_batch1 import below is function-local ON PURPOSE.
 """
 
-from cs2rl.train_shared import _LOG_2PI, _apply_action_masks
+from cs2rl.policy import _LOG_2PI, _aim_dim_weight, _apply_action_masks
 
 # ── Masked reductions over participating rows (Rung 0, spec 2026-08-29 §2.2) ──
 # WHY these are free functions and not methods on the trainer: the trainer is a
@@ -114,7 +114,7 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
     build_train_config defaults so harness/older-checkpoint configs keep
     working.
     """
-    from cs2rl.train_helpers_batch1 import target_entropy_schedule
+    from cs2rl.train.entropy import target_entropy_schedule
     return target_entropy_schedule(
         global_step,
         max_entropy,
@@ -122,23 +122,6 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
         warmup_high_frac=config.get("entropy_target_warmup_frac", 0.5),
         base_frac=config.get("entropy_target_base_frac", 0.35),
     )
-
-
-def _aim_dim_weight(aim_dim_mask, mu_aim):
-    """(AIM_DIM,) weight for the per-dim Gaussian terms (R0-E.2, #131).
-
-    WHAT: ``aim_dim_mask`` moved to mu_aim's device/dtype, or all-ones when
-    None. Shared by _hybrid_sample_logits and _hybrid_ppo_loss so the rollout
-    and the update can never disagree on which dims are live — that
-    disagreement would be an importance-ratio bug no single-site test sees.
-    PITFALL: returns ones (not None) on the None path so callers can multiply
-    unconditionally; the multiply by ones is exact in fp32.
-    """
-    import torch
-
-    if aim_dim_mask is None:
-        return torch.ones(mu_aim.shape[-1], device=mu_aim.device, dtype=mu_aim.dtype)
-    return aim_dim_mask.to(device=mu_aim.device, dtype=mu_aim.dtype)
 
 
 def _hybrid_ppo_loss(policy,

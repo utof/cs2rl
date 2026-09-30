@@ -16,16 +16,18 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from cs2rl import train
+from cs2rl import policy as policy_mod
 from cs2rl.env.c.cs2_env import make_env
+from cs2rl.spec import obs as spec_obs
 from cs2rl.spec.action import AIM_DIM
+from cs2rl.train import update as train_update
 
 
 @pytest.fixture()
 def env_policy():
     env = make_env(seed=0)
     try:
-        yield env, train.build_policy(env, device="cpu")
+        yield env, policy_mod.build_policy(env, device="cpu")
     finally:
         env.close()
 
@@ -45,7 +47,7 @@ def _flat_batch(policy, B, adv, row_map=None):
     ±1 cosine targets EXACT rather than approximate.
     """
     torch.manual_seed(7)
-    mb_obs = torch.randn(B, train.OBS_DIM) * 0.5
+    mb_obs = torch.randn(B, spec_obs.OBS_DIM) * 0.5
     mb_actions = torch.randint(0, 2, (B, 7), dtype=torch.int64)
     mb_cont = (torch.rand(B, AIM_DIM) - 0.5) * 0.4
     if row_map is not None:                            # tie row identities together
@@ -59,7 +61,7 @@ def _flat_batch(policy, B, adv, row_map=None):
         sigma = torch.exp(log_std_aim).expand_as(mu_aim)
         log_std_b = log_std_aim.expand_as(mu_aim)
         diff = (mb_cont - mu_aim) / sigma
-        lp_c = (-0.5 * diff * diff - log_std_b - 0.5 * train._LOG_2PI).sum(-1)
+        lp_c = (-0.5 * diff * diff - log_std_b - 0.5 * policy_mod._LOG_2PI).sum(-1)
     return dict(mb_obs=mb_obs,
                 mb_actions=mb_actions,
                 mb_cont_actions=mb_cont,
@@ -78,9 +80,9 @@ def test_return_pg_rows_default_is_bitwise_identical_7_tuple(env_policy):
     _, policy = env_policy
     B = 16
     kw = _flat_batch(policy, B, torch.randn(B))
-    ret_default = train._hybrid_ppo_loss(policy, **kw)
+    ret_default = train_update._hybrid_ppo_loss(policy, **kw)
     assert len(ret_default) == 7
-    ret_rows = train._hybrid_ppo_loss(policy, **kw, return_pg_rows=True)
+    ret_rows = train_update._hybrid_ppo_loss(policy, **kw, return_pg_rows=True)
     assert len(ret_rows) == 8
     assert torch.equal(ret_default[0], ret_rows[0])
     pg_rows = ret_rows[7]
@@ -101,7 +103,7 @@ def test_pg_rows_subset_mean_hits_analytic_target(env_policy):
     B = 16
     adv = torch.arange(B, dtype=torch.float32)                         # asymmetric on purpose
     kw = _flat_batch(policy, B, adv)
-    *_, pg_rows = train._hybrid_ppo_loss(policy, **kw, return_pg_rows=True)
+    *_, pg_rows = train_update._hybrid_ppo_loss(policy, **kw, return_pg_rows=True)
     mask = (torch.arange(B) < 4).float()                               # subset mean != full mean
     subset_loss = (pg_rows * mask).sum() / mask.sum()
     adv_norm = (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -119,7 +121,7 @@ def test_tag_param_groups_partition_the_policy(env_policy):
     unnoticed).
     """
     _, policy = env_policy
-    groups = train._tag_param_groups(policy)
+    groups = train_update._tag_param_groups(policy)
     assert set(groups) == {"trunk", "policy_heads", "value_head"}
     n_grouped = sum(len(ps) for ps in groups.values())
     n_policy = sum(1 for _, p in policy.named_parameters() if p.requires_grad)
@@ -131,7 +133,7 @@ def test_tag_param_groups_partition_the_policy(env_policy):
 
 def _tag_call(policy, kw, idx):
     B = kw["mb_advantages"].shape[0]
-    return train.tag_grad_cossim(
+    return train_update.tag_grad_cossim(
         policy,
         idx=idx,
         mb_returns_norm=torch.zeros(B),
@@ -265,10 +267,10 @@ def test_tag_param_groups_partition_a_split_policy():
     """
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device="cpu", tct_split_heads=True)
+        policy = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
     finally:
         env.close()
-    groups = train._tag_param_groups(policy)
+    groups = train_update._tag_param_groups(policy)
     assert set(groups) == {"trunk", "policy_heads", "value_head"}
     n_grouped = sum(len(ps) for ps in groups.values())
     assert n_grouped == sum(1 for _, p in policy.named_parameters() if p.requires_grad)
@@ -304,10 +306,13 @@ def test_tag_param_groups_partition_a_both_flags_policy():
     """
     env = make_env(seed=0)
     try:
-        policy = train.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)
+        policy = policy_mod.build_policy(env,
+                                         device="cpu",
+                                         tct_split_heads=True,
+                                         tct_split_trunk=True)
     finally:
         env.close()
-    groups = train._tag_param_groups(policy)
+    groups = train_update._tag_param_groups(policy)
     assert set(groups) == {"trunk", "policy_heads", "value_head"}
     n_grouped = sum(len(ps) for ps in groups.values())
     assert n_grouped == sum(1 for _, p in policy.named_parameters() if p.requires_grad)

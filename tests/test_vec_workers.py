@@ -13,7 +13,7 @@ for a deliberate choice; only the automatic default must never crash.
 
 
 def test_auto_vec_workers_picks_largest_divisor_within_cores():
-    from cs2rl.train import auto_vec_workers
+    from cs2rl.train.envs import auto_vec_workers
 
     assert auto_vec_workers(256, 6) == 4               # the 6-core VM case that kept crashing
     assert auto_vec_workers(256, 8) == 8               # exact divisor cap is kept
@@ -23,7 +23,7 @@ def test_auto_vec_workers_picks_largest_divisor_within_cores():
 
 
 def test_auto_vec_workers_degenerate_inputs_never_crash():
-    from cs2rl.train import auto_vec_workers
+    from cs2rl.train.envs import auto_vec_workers
 
     assert auto_vec_workers(7, 3) == 1                 # prime env count → serial-ish but valid
     assert auto_vec_workers(1, 64) == 1

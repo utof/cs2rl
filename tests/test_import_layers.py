@@ -7,7 +7,8 @@ WHAT runs here:
   4. The scope pin: every site of every ignore_imports pair sits inside a def.
   5. Positive controls on a tmp copy of the package, one plant each, so every check
      above has been seen to reject something.
-  6. The one layer placement a test elsewhere relies on: eval (metrics_schema) above train.
+  6. The one layer placement #92's retired ignores rest on: train above eval/viz/bc,
+     the policy below them.
 
 WHY 2: import-linter and grimp find `cs2rl` with importlib.util.find_spec, which
 never executes src/cs2rl/__init__.py, so the package's foreign-checkout guard cannot
@@ -102,7 +103,7 @@ def _child_env(src: Path) -> dict[str, str]:
     return dict(os.environ, PYTHONPATH=pythonpath, COLUMNS="200")
 
 
-def _lint(tree: Path) -> subprocess.CompletedProcess:
+def _lint(tree: Path, config: Path = PYPROJECT) -> subprocess.CompletedProcess:
     """`lint-imports --no-cache --no-logo --config <PYPROJECT>` over `tree`/src, cwd = `tree`.
 
     `--config` is passed for this checkout too, not only for the tmp copies (which
@@ -114,7 +115,7 @@ def _lint(tree: Path) -> subprocess.CompletedProcess:
     """
     assert LINT_IMPORTS.is_file(), f"{_MISSING_TOOLS} (no {LINT_IMPORTS})"
     argv = [sys.executable, str(LINT_IMPORTS), "--no-cache", "--no-logo"]
-    return subprocess.run([*argv, "--config", str(PYPROJECT)],
+    return subprocess.run([*argv, "--config", str(config)],
                           cwd=tree,
                           env=_child_env(tree / "src"),
                           capture_output=True,
@@ -122,7 +123,7 @@ def _lint(tree: Path) -> subprocess.CompletedProcess:
                           timeout=_CHILD_TIMEOUT_S)
 
 
-def _graph_facts(tree: Path) -> dict:
+def _graph_facts(tree: Path, config: Path = PYPROJECT) -> dict:
     """The graph child's report for `tree`: {"origin", "modules", "sites"}.
 
     Asserts the child resolved `cs2rl` to `tree` itself. Every consumer maps grimp's
@@ -130,7 +131,7 @@ def _graph_facts(tree: Path) -> dict:
     the editable .pth, when `tree`'s own package is broken) must never reach them.
     """
     r = subprocess.run(
-        [sys.executable, "-c", _GRAPH_CHILD, str(PYPROJECT)],
+        [sys.executable, "-c", _GRAPH_CHILD, str(config)],
         cwd=tree,
         env=_child_env(tree / "src"),
         capture_output=True,
@@ -256,13 +257,16 @@ def test_every_ignored_import_stays_function_local():
     assert not failures, "\n".join(failures)
 
 
-def test_metrics_schema_sits_above_train():
-    """The `cs2rl layers` contract puts eval, metrics_schema's package, above train.
+def test_train_sits_above_eval_and_viz_and_policy_below_them():
+    """The placement that retired #92's ignore_imports entries (#205 part 3).
 
-    tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN says a train.py import of
-    metrics_schema is an upward edge lint-imports rejects. That is true only while this
-    holds: moving eval down into train's layer keeps every other check green and makes
-    that entry silently false.
+    train's run driver and CLI use eval (the --eval-interval BaselineEvaluator) and viz
+    (--record); eval, viz and train_bc use only the policy. With the policy in its own
+    module below all three and train above them, every one of those edges points down,
+    and the four `ignore_imports` entries #92 owned have nothing left to hide. Putting
+    train back under eval (or the policy back into train) turns those edges upward again
+    and `lint-imports` fails, but with "move the import into a function" guidance that
+    would put the ignores back: this pin names the real reason.
 
     PITFALL: the contract is selected by NAME. pyproject.toml holds more than one layers
     contract (`cs2rl.env layers` too), so picking "the" layers contract by type either
@@ -282,10 +286,9 @@ def test_metrics_schema_sits_above_train():
         for index, layer in enumerate(layers)
         for member in re.split(r"[|:]", layer)
     }
-    assert rank["eval"] < rank["train"], (
-        f"eval (metrics_schema's package) is in layer {layers[rank['eval']]!r}, not above "
-        f"train's {layers[rank['train']]!r}: tests/test_w1_modules.py's NOT_IMPORTED_BY_TRAIN "
-        "entry for it is no longer true. Move it back up, or rewrite that entry.")
+    for app in ("eval", "viz", "train_bc"):
+        assert rank["train"] < rank[app] < rank["policy"], (
+            f"layers {layers!r}: train must sit above {app}, and {app} above policy")
 
 
 # ── positive controls: a tmp copy of the package, one plant each ─────────────────
@@ -385,6 +388,24 @@ def test_control_env_config_importing_nav_breaks_the_env_layers(tmp_path):
     assert "cs2rl layers KEPT" in r.stdout and "cs2rl acyclic siblings KEPT" in r.stdout, r.stdout
 
 
+# The pair control (e) ignores in its tmp copy of the config: env.nav (L1) -> viz.render (L3)
+# is upward in `cs2rl layers` and closes an env <-> viz package cycle, so both contracts
+# need the entry, exactly like the #92 entries #205 part 3 retired.
+_PLANT_PAIR = "cs2rl.env.nav -> cs2rl.viz.render"
+
+
+def _config_ignoring(tmp_path: Path, pair: str) -> Path:
+    """A copy of this checkout's pyproject.toml with `pair` ignored by the two cs2rl contracts."""
+    text = PYPROJECT.read_text(encoding="utf-8")
+    for name in ("cs2rl layers", "cs2rl acyclic siblings"):
+        head = f'name = "{name}"\n'
+        assert text.count(head) == 1, f"contract {name!r} not found once in {PYPROJECT}"
+        text = text.replace(head, f'{head}ignore_imports = ["{pair}"]\n')
+    config = tmp_path / "pyproject.plant.toml"
+    config.write_text(text, encoding="utf-8")
+    return config
+
+
 # One module-scope `import cs2rl.viz.render` site per construct that is not a def. The pin's
 # docstring says none of them counts as function-local; a pin widened to exempt one
 # (say, `if TYPE_CHECKING:` blocks) fails the matching case.
@@ -405,15 +426,16 @@ def test_control_a_module_scope_site_of_an_ignored_pair(tmp_path, shape):
     site" failure carries the pair too, and would satisfy a pair-only check.
     """
     tree, _ = _copy_package(tmp_path)
+    config = _config_ignoring(tmp_path, _PLANT_PAIR)
     text = _MODULE_SCOPE_SHAPES[shape]
-    start = _append(tree, "src/cs2rl/train.py", text)
+    start = _append(tree, "src/cs2rl/env/nav.py", text)
     planted = start + next(i
                            for i, line in enumerate(text.split("\n")) if "cs2rl.viz.render" in line)
-    r = _lint(tree)
+    r = _lint(tree, config)
     assert r.returncode == 0, ("import-linter now rejects a module-scope site of an ignored "
                                "pair; the scope pin's premise changed.\n" + r.stdout + r.stderr)
-    failures = scope_pin_failures(tree, _graph_facts(tree))
-    assert any(f"train.py:{planted} is not inside a def" in f for f in failures), failures
+    failures = scope_pin_failures(tree, _graph_facts(tree, config))
+    assert any(f"nav.py:{planted} is not inside a def" in f for f in failures), failures
 
 
 def test_control_a_directory_without_init_is_covered(tmp_path):

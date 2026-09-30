@@ -6,8 +6,7 @@ import pytest
 
 from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig, RewardWeights
-from cs2rl.spec.action import ACTION_DIM
-from cs2rl.train import ACTION_HEAD_SIZES
+from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES
 
 
 def test_pbrs_rewards_are_finite():
