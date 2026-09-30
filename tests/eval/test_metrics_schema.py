@@ -1038,5 +1038,5 @@ def test_is_back_edge_sees_every_spelling():
 def test_metrics_schema_is_in_the_import_lightness_test():
     """Creating a module and adding it to the subprocess guard is ONE task, by spec —
     a module that slips in unguarded is how the invariant dies."""
-    from tests.test_w1_modules import W1_MODULES
+    from tests.train.test_w1_modules import W1_MODULES
     assert "cs2rl.eval.metrics_schema" in W1_MODULES

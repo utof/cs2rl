@@ -106,7 +106,7 @@ def smoke_test():
         sps = step_count / elapsed
 
         print(f"[Smoke] Completed {step_count} steps at {sps:.0f} steps/sec")
-        print("[Smoke] Throughput gate lives in: uv run pytest tests/smoke_test.py -q -s")
+        print("[Smoke] Throughput gate lives in: uv run pytest tests/env/c/smoke_test.py -q -s")
     finally:
         env.close()
 

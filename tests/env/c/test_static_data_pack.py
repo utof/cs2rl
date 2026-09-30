@@ -28,7 +28,7 @@ which is the entire reason the file is committed. Command, from the repository
 root (`-m` so that `tests.test_struct_sizes`, the name pytest gives that module,
 resolves):
 
-    UV_NO_SYNC=1 uv run python -m tests.test_static_data_pack --capture
+    UV_NO_SYNC=1 uv run python -m tests.env.c.test_static_data_pack --capture
 
 The second half of the module covers binding.init's three preconditions (layout
 hash, buffer length, and the order of the two) plus the packing invariants that
@@ -95,7 +95,7 @@ def test_static_data_scalars_match_the_pre_w2_capture(simple_map):
     fixture = _load_fixture()
     for i, config in enumerate(fixture["configs"]):
         expected = config["scalars"]
-        from tests.test_struct_sizes import _config_from_field_kwargs
+        from tests.env.c.test_struct_sizes import _config_from_field_kwargs
         env = make_env(map_data=simple_map, config=_config_from_field_kwargs(config["kwargs"]))
         try:
             got = binding.static_data_scalars(env._capsule)
@@ -331,7 +331,7 @@ def _capture():
     import subprocess
 
     from cs2rl.env.map import make_simple_map
-    from tests.test_struct_sizes import _SENTINEL_CONFIGS, _config_from_field_kwargs
+    from tests.env.c.test_struct_sizes import _SENTINEL_CONFIGS, _config_from_field_kwargs
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     simple_map = make_simple_map()
@@ -346,7 +346,7 @@ def _capture():
 
     why = ("pre-W2 baseline for the StaticData transfer rewrite (spec 2026-08-31 §2 W2); "
            "a snapshot taken after the rewrite would compare the packer to itself")
-    regenerate = "UV_NO_SYNC=1 uv run python -m tests.test_static_data_pack --capture"
+    regenerate = "UV_NO_SYNC=1 uv run python -m tests.env.c.test_static_data_pack --capture"
     provenance = {
         "format": _CAPTURE_FORMAT,
         "captured_at_commit": head,

@@ -2365,9 +2365,9 @@ class _KillSeamClauses:
     # `from os import killpg` is red even inside an exempt function. Never exempt by file.
     # A runner test that needs a hygiene kill cannot be listed here: give it a fake.
     KILL_HYGIENE_EXEMPT = frozenset({
-        ("tests/test_arena_duel.py", "_run_group"),
-        ("tests/test_arena_duel.py", "test_run_group_leaves_no_survivor"),
-        ("tests/test_vis_pool_parent_death.py", "_kill_child_and_count_survivors"),
+        ("tests/env/test_arena_duel.py", "_run_group"),
+        ("tests/env/test_arena_duel.py", "test_run_group_leaves_no_survivor"),
+        ("tests/env/test_vis_pool_parent_death.py", "_kill_child_and_count_survivors"),
     })
     # The runner, as import targets: a file owning a KILL_HYGIENE_EXEMPT row may import
     # neither the package (any module of it), nor the Modal entry script, nor the shared

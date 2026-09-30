@@ -290,7 +290,7 @@ if __name__ == "__main__":
                         dest="tag_diagnostic",
                         help="Measure T-vs-CT policy-gradient cosine similarity per parameter "
                         "group during PPO updates (tag/* metrics). Zero behavioral effect on "
-                        "training — pinned bitwise by tests/test_tag_trainer.py.")
+                        "training — pinned bitwise by tests/train/test_tag_trainer.py.")
     parser.add_argument("--tag-every",
                         type=int,
                         default=5,

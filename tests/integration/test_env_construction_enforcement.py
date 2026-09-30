@@ -630,7 +630,7 @@ def test_alias_resolution_is_exercised_by_real_source_not_only_by_a_plant():
         "aliased call site appeared, which is allowed; write it down.\n"
         "Then update EVERY place stating a figure for this population, not only the dict. "
         "Enumerated 2026-09-11 by what each carrier DESCRIBES rather than by the word or number "
-        "it happens to use, because `grep -nw six tests/test_env_construction_enforcement.py` "
+        "it happens to use, because `grep -nw six tests/integration/test_env_construction_enforcement.py` "
         "gets this population wrong in BOTH directions. Measured on that command: it lands "
         "inside three of the five carriers below and misses the other two entirely — "
         "`import_aliases`' docstring and `constructions`' docstring never write the word, "

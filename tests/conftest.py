@@ -658,7 +658,8 @@ def pytest_collection_modifyitems(config, items):
         return
 
     skip_performance = pytest.mark.skip(
-        reason="performance test; run explicitly with `uv run pytest tests/smoke_test.py -q -s`")
+        reason=
+        "performance test; run explicitly with `uv run pytest tests/env/c/smoke_test.py -q -s`")
     for item in items:
         if "performance" in item.keywords:
             item.add_marker(skip_performance)

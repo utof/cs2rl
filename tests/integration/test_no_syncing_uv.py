@@ -141,7 +141,7 @@ def test_no_test_shells_out_to_a_syncing_uv():
     """No file under tests/ runs a syncing uv (#220); see the module docstring for scope."""
     paths = sorted((REPO / "tests").rglob("*.py"))
     # Population: the scan must read the file that carried the #220 defect.
-    assert REPO / "tests" / "test_train_cli.py" in paths, paths[:5]
+    assert REPO / "tests" / "train" / "test_train_cli.py" in paths, paths[:5]
     hits = [
         f"{path.relative_to(REPO)}:{line}" for path in paths
         for line in syncing_uv_sites(path.read_text(encoding="utf-8"), str(path))

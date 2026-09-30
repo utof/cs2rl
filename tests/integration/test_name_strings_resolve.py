@@ -122,23 +122,23 @@ _PATH_TOKEN = re.compile(r"src/cs2rl/(?:\{[^{}\s]*\}|[^\s`'\",:;)\]{}])*")
 # for (b), the path token for (c). A string in a .c or .h file has "<c>" as its
 # enclosing function. A (c) row under a subpackage fails (see scan()).
 EXEMPT = {
-    ("tests/test_import_layers.py", "_tracked_package_files", "src/cs2rl/*.py"):
+    ("tests/integration/test_import_layers.py", "_tracked_package_files", "src/cs2rl/*.py"):
     "(c) a git pathspec glob, not a path.",
-    ("tests/test_import_layers.py", "test_control_a_directory_without_init_is_covered", "src/cs2rl/noinit/action.py"):
+    ("tests/integration/test_import_layers.py", "test_control_a_directory_without_init_is_covered", "src/cs2rl/noinit/action.py"):
     "(c) control (f)'s plant path, created only in a tmp copy of the package.",
-    ("tests/test_import_layers.py", "test_control_a_directory_without_init_is_covered", "cs2rl.noinit.action"):
+    ("tests/integration/test_import_layers.py", "test_control_a_directory_without_init_is_covered", "cs2rl.noinit.action"):
     "(a) control (f)'s plant, a module that must not exist in this checkout.",
-    ("tests/test_import_layers.py", "test_control_a_module_without_a_layer_is_rejected", "cs2rl.newmod"):
+    ("tests/integration/test_import_layers.py", "test_control_a_module_without_a_layer_is_rejected", "cs2rl.newmod"):
     "(a) control (b)'s plant, a module that must not exist in this checkout.",
-    ("tests/test_import_layers.py", "test_control_a_module_without_a_layer_in_env_is_rejected", "cs2rl.env.newmod"):
+    ("tests/integration/test_import_layers.py", "test_control_a_module_without_a_layer_in_env_is_rejected", "cs2rl.env.newmod"):
     "(a) control (h)'s plant, a module that must not exist in this checkout.",
-    ("tests/test_one_module_object_per_file.py", "test_the_guard_is_silent_on_files_it_must_not_report", "cs2rl.paths"):
+    ("tests/integration/test_one_module_object_per_file.py", "test_the_guard_is_silent_on_files_it_must_not_report", "cs2rl.paths"):
     "(a) a synthetic module name in the tmp layout the test builds.",
-    ("tests/test_one_module_object_per_file.py", "test_the_guard_reports_a_repo_file_under_two_names_with_every_name", "cs2rl.paths"):
+    ("tests/integration/test_one_module_object_per_file.py", "test_the_guard_reports_a_repo_file_under_two_names_with_every_name", "cs2rl.paths"):
     "(a) a synthetic module name in the tmp layout the test builds.",
-    ("tests/test_env_construction_enforcement.py", "test_an_unimported_local_of_the_same_name_is_not_a_construction", "from cs2rl.train import make_puffer_env"):
+    ("tests/integration/test_env_construction_enforcement.py", "test_an_unimported_local_of_the_same_name_is_not_a_construction", "from cs2rl.train import make_puffer_env"):
     "(b) synthetic source for the construction scanner, parsed and never run.",
-    ("tests/test_metrics_schema.py", "test_is_back_edge_sees_every_spelling", "from cs2rl.eval.baselinesx import y"):
+    ("tests/eval/test_metrics_schema.py", "test_is_back_edge_sees_every_spelling", "from cs2rl.eval.baselinesx import y"):
     "(b) is_back_edge's negative control: a module that must not exist.",
 }
 
