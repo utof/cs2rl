@@ -37,7 +37,8 @@ from tests.conftest import REPO_ROOT
 
 # Top-level directories of tests/ with no src/cs2rl twin, each with the reason.
 NO_TWIN = {
-    "_helpers": "shared test code; never collected (tests/test_path_constants_exist.py pins it)",
+    "_helpers":
+    "shared test code; never collected (tests/integration/test_path_constants_exist.py pins it)",
     "fixtures": "data files the tests read",
     "integration":
     "repo-wide guards, dependency pins and tooling tests: their subject is the checkout",
