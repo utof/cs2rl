@@ -976,6 +976,19 @@ def test_package_structure_contract(live_sources):
     _assert_no_violations(_structure_violations(live_sources), "the live package")
 
 
+def test_the_tables_file_path_the_messages_name_exists():
+    """`TABLES_FILE` names a file of this checkout.
+
+    Every gate's failure message points the reader at TABLES_FILE and nothing else reads
+    it, so a move that leaves it stale changes only messages (#207 part 2, knock-out: the
+    whole file stayed green with the pre-move path). A stale one would send the reader
+    to a file that is not there.
+    """
+    assert (ROOT / TABLES_FILE).is_file(), (
+        f"TABLES_FILE = {TABLES_FILE!r} names no file in this checkout: update it where it is "
+        "defined, in modal_runner_tables.py, to that file's repo-relative path")
+
+
 def test_package_facade_contract():
     """The facade's module-scope rule (`_facade_violations`) on the live `__init__.py`."""
     facade = _facade_source()
