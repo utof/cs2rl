@@ -1,7 +1,8 @@
 # tests/
 
 `tests/` mirrors `src/cs2rl/`: a test file lives in the directory that mirrors the `src/cs2rl`
-package it is about. `tests/integration/test_tests_layout.py` enforces the directory rules below.
+package it is about. `tests/integration/test_tests_layout.py` checks which directories may exist
+("The guard" below); which of them a new test goes to is convention.
 
 ## Where a new test goes
 
@@ -21,7 +22,8 @@ Find the file's subject, the `src/cs2rl` package it is about, then take the firs
    sits with the Rung 1 gate code in `experiment/`.
 
 Rules 2 to 4 can also name a flat module of `src/cs2rl/` (`policy`, `train_bc`, `bc_demos`,
-`profile_step`). Those tests stay at the `tests/` root, and nothing else does but `conftest.py`.
+`profile_step`). Those tests stay at the `tests/` root, and no other `.py` file does but
+`conftest.py`.
 
 ## Layout
 
@@ -29,18 +31,22 @@ Rules 2 to 4 can also name a flat module of `src/cs2rl/` (`policy`, `train_bc`, 
 |-----------|----------------------|-------|
 | `tests/` (root) | the flat modules | `conftest.py` and the flat modules' tests |
 | `env/` | `env/` | tests of the env package |
-| `env/c/` | `env/c/` | tests of the C env and its binding; `smoke_test.py` runs only if named |
+| `env/c/` | `env/c/` | tests of the C env and its binding |
 | `train/` `eval/` `experiment/` `viz/` `deploy/` | the package of that name | its tests |
 
-`tests/<a>` and `tests/<a>/<b>` each need `src/cs2rl/<a>/` or `src/cs2rl/<a>/<b>/` with an
-`__init__.py`, unless `<a>` is one of the four below. A test of a package that has no directory yet
-creates it (`spec/` has none today).
+`env/c/smoke_test.py` holds a performance test that runs only when the file is named on the
+command line.
+
+Every directory under `tests/` that pytest walks into needs its twin, whatever it holds:
+`tests/<a>/<b>` needs `src/cs2rl/<a>/<b>/__init__.py`, unless `<a>` is one of the four below. A test
+of a package that has no directory yet creates it (`spec/` has none today).
 
 ## The four directories with no twin (`NO_TWIN` in the guard)
 
 - `_helpers/`: shared test code, never collected. It holds importable Python
   (`tests._helpers.<module>`); `test_helpers_hold_no_collectable_file` in
-  `tests/integration/test_path_constants_exist.py` fails on a test file there.
+  `tests/integration/test_path_constants_exist.py` fails on a test file there. A new non-test
+  module goes here; the Modal tests' own helpers sit beside them (`modal/modal_*.py`).
 - `fixtures/`: data files the tests read (JSON and text).
 - `integration/`: repo-wide guards, pins and tooling tests; their subject is the checkout.
 - `modal/`: the Modal runner's tests; the runner lives in `scripts/modal_runner/` (#274).
@@ -54,10 +60,23 @@ root of its own, which `test_path_constants_exist.py` compares with the conftest
 
 ## The guard
 
-`tests/integration/test_tests_layout.py` checks four rules on the real tree:
+`tests/integration/test_tests_layout.py` walks the real `tests/` on disk. It prunes what pytest
+prunes by name (`__pycache__` and the `norecursedirs` patterns), and a test file is one that
+matches `python_files`; both lists come from pytest's config. It checks four rules:
 
-- (a) a directory of `tests/` that holds a `.py` file has a twin package, unless it is in `NO_TWIN`;
+- (a) every directory it walks into has a twin package, whatever it holds, unless its top
+  directory is in `NO_TWIN`;
 - (b) every `NO_TWIN` entry is a directory of `tests/`;
 - (c) a test file at the root imports a flat module of `cs2rl`;
-- (d) no file but `conftest.py` and `_helpers/` builds a path from its own `__file__` with
-  `.parent` or `.parents`. `os.path.dirname` is not read; the guard pins that limit.
+- (d) no file but the root `conftest.py` and `_helpers/` builds a path from its own `__file__`
+  with `.parent` or `.parents`.
+
+Rules 1 to 5 above are convention: the guard checks that a directory has a twin, not that a test
+file sits in the right one, apart from (c) at the root. Where a non-test module goes is convention
+too. The guard pins its known limits, each as a case that passes today:
+
+- (c) does not ask where a root test belongs: a package's test that also imports a flat module
+  passes at the root.
+- No rule places a non-test module: a helper at the root or in a mirror directory passes.
+- (d) sees neither `os.path.dirname` nor a root built in two steps
+  (`HERE = Path(__file__).resolve()`, then `HERE.parents[2]`).
