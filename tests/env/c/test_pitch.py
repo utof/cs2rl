@@ -108,7 +108,7 @@ def test_pitch_clamps_at_pi_over_2_up():
     try:
         env.reset(seed=42)
         actions, cont = _zero_actions()
-        cont[0, 1] = 100.0                                             # massive Δpitch — per-tick clamp + bounded clamp both fire
+        cont[0, 1] = 100.0                                             # massive positive absolute pitch target — bounded clamp fires
         for _ in range(100):
             env.step(actions, cont)
         assert env._c_env.game.agents[0].pitch == pytest.approx(
@@ -145,7 +145,7 @@ def test_welford_pitch_accumulates():
     try:
         obs, info = env.reset(seed=42)
         actions, cont = _zero_actions()
-        cont[:, 1] = 0.1               # +0.1 Δpitch every alive agent
+        cont[:, 1] = 0.1               # +0.1 absolute pitch target for every alive agent
         for _ in range(5):
             obs, rew, term, trunc, info = env.step(actions, cont)
 
@@ -571,7 +571,7 @@ def test_pitch_clamps_at_pi_over_2_down():
     try:
         env.reset(seed=42)
         actions, cont = _zero_actions()
-        cont[0, 1] = -100.0                                            # massive negative Δpitch
+        cont[0, 1] = -100.0                                            # massive negative absolute pitch target
         for _ in range(100):
             env.step(actions, cont)
         assert env._c_env.game.agents[0].pitch == pytest.approx(

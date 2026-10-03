@@ -32,8 +32,7 @@ guides describe where new code goes. Tests mirror the owning package;
   as seed, buffers and map data are supplied separately by the env factory.
 - `HybridAimVecEnv` carries continuous aim beside discrete actions; `Cs2PuffeRL`
   owns trainer state and overrides rollout, update and checkpoint methods.
-- The metrics registry owns emitted/derived keys; consumers preserve episode
-  weighting and distinguish absent measurements from zero values.
+- The metrics registry owns emitted/derived keys. Smoke-reader aggregation defaults missing counters to zero; sigma has separate missing-value checks.
 - Full resume checks a consistent checkpoint set and run configuration. It does
   not restore the simulator RNG. Optional Modal execution has its own artifact
   verification protocol; it never starts merely because local training runs.

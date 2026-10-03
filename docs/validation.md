@@ -35,7 +35,7 @@ Preflights check participating rows, opponent provenance, final budget, statue
 inertia and sigma measurability. Move histograms are counts divided by their total.
 
 Episode means are weighted by episode counts; ratios pool numerator and
-denominator separately. PASS requires kills/episode ≥0.5 and hit rate ≥0.4.
+denominator separately. Counter aggregation defaults absent keys to zero; a missing counter is not distinguished from measured zero. PASS requires kills/episode ≥0.5 and hit rate ≥0.4.
 Sigma-cap breaches void sigma routing but can still PASS; missing sigma is
 invalid. Other branches distinguish aim failure, an untrained aim head and
 unrouted results. Exit codes are 0 PASS, 1 FAIL, 2 SMOKE INVALID. A verdict is a
