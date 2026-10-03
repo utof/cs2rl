@@ -160,8 +160,9 @@ ignore = ["E501"]
 # The Modal runner STAYS under scripts/: the owner's carve-out, recorded here as that
 # comment asked ("the Modal runner must stay under `scripts/`",
 # https://github.com/utof/cs2rl/issues/204#issuecomment-5654424835). It is baked into the
-# runner image AND shipped inside the source archive the container extracts, so a copy
-# under src/ would make the archived one importable. Part 2 (#274) re-measures that.
+# runner image AND shipped inside the source archive the container extracts. Training
+# uses the installed cs2rl wheel and excludes inherited PYTHONPATH from its child env;
+# archived scripts remain importable through the extracted source-root cwd (#274).
 "modal_runner".msg = "import `scripts.modal_runner`"
 "run_modal".msg = "import `scripts.run_modal`"
 "modal_artifacts".msg = "import `scripts.modal_artifacts`"

@@ -17,9 +17,12 @@ downloads work without importing the Modal App. Torch is imported inside two fun
   `checkpoint`, `state`, `commands`, `preflight`, `training`) and the rules for new names.
 - The Modal SDK is in the non-default `modal` dependency group: `uv sync --group modal`.
 
-The runner stays under `scripts/` by the owner's decision, recorded in `pyproject.toml`'s
-banned-api table: it is baked into the runner image and shipped inside the source archive the
-container extracts, so a copy under `src/` would make the archived one importable.
+The runner stays under `scripts/` by the owner's deliberate layout decision, recorded in
+`pyproject.toml`'s banned-api table. It is baked into the runner image and shipped inside the
+source archive the container extracts. Training uses the installed `cs2rl` wheel; inherited
+`PYTHONPATH` is excluded from the install, probe and training child environment. The archived
+`scripts/` remains importable through the extracted source-root working directory. The runner
+image keeps its own `PYTHONPATH` for its baked modules.
 
 ## Where new code goes
 

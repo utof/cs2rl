@@ -14,6 +14,7 @@ import dataclasses
 import importlib
 import io
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -426,6 +427,47 @@ def fake_modal():
 
 def _import_run_modal():
     return importlib.import_module("scripts.run_modal")
+
+
+@pytest.mark.parametrize("module_name",
+                         ["scripts.modal_artifacts", "scripts.modal_backfill_sidecar"])
+def test_imported_artifact_clis_leave_sys_path_unchanged(fake_modal, monkeypatch, module_name):
+    """Import through an equivalent root spelling that would trigger an unconditional insert."""
+    equivalent_root = str(ROOT) + "/."
+    monkeypatch.setattr(sys, "path",
+                        [equivalent_root if entry == str(ROOT) else entry for entry in sys.path])
+    assert str(ROOT) not in sys.path
+    before = list(sys.path)
+    importlib.import_module(module_name)
+    assert sys.path == before
+    assert fake_modal.apps == []
+    assert fake_modal.volume_lookups == []
+    assert fake_modal.volume_creates == []
+
+
+@pytest.mark.parametrize("module_name",
+                         ["scripts.modal_artifacts", "scripts.modal_backfill_sidecar"])
+@pytest.mark.parametrize("mode", ["path", "module"])
+def test_artifact_clis_help_in_path_and_module_modes(tmp_path, module_name, mode):
+    """The documented CLI launches parse --help before touching any Modal object."""
+    sdk = tmp_path / "sdk"
+    sdk.mkdir()
+    (sdk / "modal.py").write_text(
+        "def __getattr__(name):\n"
+        "    raise AssertionError('help must not access a Modal object: ' + name)\n")
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(sdk)}
+    command = ([sys.executable, str(ROOT / (module_name.replace(".", "/") + ".py"))]
+               if mode == "path" else [sys.executable, "-m", module_name])
+    result = subprocess.run([*command, "--help"],
+                            cwd=tmp_path if mode == "path" else ROOT,
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            check=False)
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout
+    assert "--help" in result.stdout
 
 
 def test_importing_app_creates_no_function_call_or_gpu_work(fake_modal):

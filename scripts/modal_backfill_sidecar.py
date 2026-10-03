@@ -36,7 +36,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
+# Bootstrap only the documented direct path launch; importing the client must
+# leave the caller's namespace path untouched.
+if __name__ == "__main__" and not __package__ and str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import scripts.modal_artifacts as arts                 # noqa: E402, I001
