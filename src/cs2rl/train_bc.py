@@ -256,8 +256,9 @@ def _demo_source_roots(entries: list[tuple[str, str, str]]) -> set[str]:
 
     A surviving member with the same relative suffix identifies a moved directory.
     Historical rename entries also cover a destination deleted after the move.
-    Changed suffixes cannot identify the old directory's depth, so include its
-    entire top-level tree (or repository root) to retain every possible ancestor.
+    Changed suffixes use the old top-level tree, or repository root for a
+    root-level old file. KNOWN LIMIT: these inferred bounds do not recover every
+    possible historical directory owner.
     This can cause regeneration for unrelated edits; exact file-root moves stay
     narrow. Root discovery still depends on Git detecting a surviving rename.
     """
