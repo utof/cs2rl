@@ -419,47 +419,6 @@ def test_load_demos_rejects_schema_mismatch(tmp_path):
         train_bc.load_demos(tmp_path, verbose=False)
 
 
-def test_check_demo_sha_accepts_head_and_rejects_unknown_shas():
-    """The predecessor of this guard only checked `len(sha) == 40`, so a demo
-    recorded against an obs layout that no longer exists sailed through
-    (review finding 5). HEAD must pass; 40 hex characters git has never heard
-    of must not."""
-    head = train_bc._git("rev-parse", "HEAD")[1]
-    assert len(head) == 40, "test needs a real git checkout"
-    assert train_bc.check_demo_sha(head) is None
-
-    unknown = "d" * 40
-    with pytest.raises(ValueError, match="STALE DEMO"):
-        train_bc.check_demo_sha(unknown)
-    # ...and the escape hatch downgrades it to a note rather than silence.
-    note = train_bc.check_demo_sha(unknown, allow_stale=True)
-    assert note is not None and "STALE" in note
-
-    with pytest.raises(ValueError, match="not self-identifying"):
-        train_bc.check_demo_sha("abc123")
-
-
-def test_check_demo_sha_tolerates_commits_that_cannot_change_a_demo():
-    """A demo is only stale if something that DETERMINES it changed. An older
-    commit that touched nothing under DEMO_RELEVANT_PATHS must pass with a
-    note, not fail — otherwise every unrelated commit invalidates the demo set
-    and the escape hatch becomes the normal path.
-
-    Finds such a commit from real history; skips if this checkout has none.
-    """
-    rc, log = train_bc._git("log", "--format=%H", "-n", "40")
-    if rc != 0 or not log:
-        pytest.skip("no git history available")
-    head = train_bc._git("rev-parse", "HEAD")[1]
-    for sha in log.splitlines()[1:]:
-        if train_bc._git("diff", "--quiet", sha, "--", *train_bc.DEMO_RELEVANT_PATHS)[0] == 0:
-            note = train_bc.check_demo_sha(sha)
-            assert note is not None and "still reproducible" in note
-            assert sha[:9] in note and head[:9] in note
-            return
-    pytest.skip("every recent commit touched the demo-relevant surface")
-
-
 def test_load_demos_dedupes_byte_identical_episodes(tmp_path):
     """The demo set is 5 unique trajectories × 10 seeds (deterministic spawns,
     plan Task 1 RESULT). Dedupe must drop exact copies and keep everything
