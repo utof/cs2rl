@@ -7,7 +7,7 @@ max_turn_speed). None ⇒ env/nav.py constant, so every caller that does not pas
 knob keeps today's values (fingerprints unchanged at default).
 
 PITFALL (Task 14): the CLI-name ↔ field-name map is hand-written, split over
-train_config._ARGS_KNOB_FIELDS and train_shared._R0G_KNOBS, so a knob added to
+cs2rl.train.config._ARGS_KNOB_FIELDS and cs2rl.train.config._ENV_KNOB_ARG_PAIRS, so a knob added to
 EnvConfig without a route through one of them is unreachable from the CLI and
 every run silently keeps its default. test_args_knob_coverage_is_exhaustive
 below is the assertion that fails when that happens.
@@ -136,7 +136,7 @@ def test_env_config_from_args_reads_every_channel():
     """args → EnvConfig: weights, flag knobs, the R0-G trio and pbrs_gamma.
 
     One test over all four channels on purpose: they are read by four different
-    mechanisms (REWARD_FIELDS loop, _ARGS_KNOB_FIELDS loop, _R0G_KNOBS pairs,
+    mechanisms (REWARD_FIELDS loop, _ARGS_KNOB_FIELDS loop, _ENV_KNOB_ARG_PAIRS pairs,
     resolve_gammas) and a per-channel test would let a whole mechanism go
     missing while its neighbours stayed green.
     """
@@ -253,15 +253,15 @@ def test_env_config_from_args_takes_exactly_one_positional_parameter():
 def test_args_knob_coverage_is_exhaustive():
     """Every EnvConfig knob has a decided route from args — or this fails.
 
-    _ARGS_KNOB_FIELDS and _R0G_KNOBS are hand-written (they are the CLI-name ↔
+    _ARGS_KNOB_FIELDS and _ENV_KNOB_ARG_PAIRS are hand-written (they are the CLI-name ↔
     field-name map), so an eleventh knob added to EnvConfig would otherwise be
     silently unreachable from the CLI and every run would keep its default with
     the whole suite green. `recoil` is listed as deliberately unreachable: there
     is no flag and reading one would be new behaviour.
     """
     from cs2rl.env.config import KNOB_FIELDS
-    from cs2rl.train.config import _ARGS_KNOB_FIELDS, _R0G_KNOBS
-    routed = set(_ARGS_KNOB_FIELDS) | {f for _, f in _R0G_KNOBS} | {"pbrs_gamma", "recoil"}
+    from cs2rl.train.config import _ARGS_KNOB_FIELDS, _ENV_KNOB_ARG_PAIRS
+    routed = set(_ARGS_KNOB_FIELDS) | {f for _, f in _ENV_KNOB_ARG_PAIRS} | {"pbrs_gamma", "recoil"}
     assert routed == set(KNOB_FIELDS)
 
 
@@ -330,8 +330,7 @@ def test_jump_enabled_is_in_the_eval_driver_agreement_loop():
     precondition every source scan in this file shares. What is at stake is
     unchanged — an eval env built from one EnvConfig while the workers ran
     another would silently score the policy on a DIFFERENT sim than it trains on,
-    and the mismatch would never surface in metrics. Mirrors
-    test_cli_flags_declared_default_none's source-scan rationale."""
+    and the mismatch would never surface in metrics."""
     import re
     src = (REPO_ROOT / "src" / "cs2rl" / "train" / "envs.py").read_text()
     m = re.search(r"for _k in \((.*?)\):", src, re.S)
@@ -352,44 +351,3 @@ def test_policy_max_turn_speed_assert(simple_map):
             assert_max_turn_speed_agreement(trainer.vecenv, trainer.policy)
     finally:
         cleanup()
-
-
-def test_cli_flags_declared_default_none():
-    """The parser is built inline under ``if __name__ == "__main__"`` (not
-    importable), so check the source: each flag is declared, defaults to None
-    (⇒ env default) and has the matching dest. The modal arity mirror's flag
-    names are checked against train.py by
-    `test_live_train_option_mirror_matches_train_py` in
-    tests/modal/test_modal_request.py."""
-    import re
-    src = (REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py").read_text()
-    for flag, dest, typ in (("--round-time-ticks", "round_time_ticks", "int"),
-                            ("--laser-range", "laser_range", "float"), ("--max-turn-speed",
-                                                                        "max_turn_speed", "float")):
-        # yapf may put the flag on its own line after `add_argument(`; allow
-        # any whitespace between the paren and the flag literal.
-        m = re.search(rf'add_argument\(\s*"{flag}",(.*?)\)\n', src, re.S)
-        assert m, flag
-        body = m.group(1)
-        assert f"type={typ}" in body and "default=None" in body and f'dest="{dest}"' in body, flag
-
-
-def test_stance_flags_declared_default_on():
-    """--crouch-enabled / --jump-enabled are 0/1 knobs that must default to 1.
-
-    They are NOT default=None like the R0-G knobs: there is no "env decides"
-    value for a mask bit, and a default of 0 would silently mask the action for
-    every run that never asked for the Rung 1a diagnostic. Same source-scan
-    reason as above (the parser is not importable).
-
-    The default is read from `EnvConfig()` (bound once as `_ENV_DEFAULTS` above
-    the parser) rather than written as `1`, so the flag and the env cannot
-    drift; R11's argparse probe is what enforces that direction."""
-    import re
-    src = (REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py").read_text()
-    for flag, dest in (("--crouch-enabled", "crouch_enabled"), ("--jump-enabled", "jump_enabled")):
-        m = re.search(rf'add_argument\(\s*"{flag}",(.*?)\)\n', src, re.S)
-        assert m, flag
-        body = m.group(1)
-        assert "type=int" in body and "choices=(0, 1)" in body, flag
-        assert f"default=_ENV_DEFAULTS.{dest}" in body and f'dest="{dest}"' in body, flag

@@ -85,8 +85,8 @@ def resolve_gammas(args) -> tuple[float, float]:
 # the ARGS attr name), so a knob added to one cannot be missed by the other
 # (config.json would then silently under-record the experiment). Paired with
 # cs2rl.train.config._ARGS_KNOB_FIELDS; see its comment for the coverage rule.
-_R0G_KNOBS = (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
-              ("max_turn_speed", "max_turn_speed"))
+_ENV_KNOB_ARG_PAIRS = (("round_time_ticks", "round_time"), ("laser_range", "laser_range"),
+                       ("max_turn_speed", "max_turn_speed"))
 
 
 def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
@@ -364,7 +364,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
                                                                        # directly under their CLI names — env_cfg renames and coerces.
         **{
             a: getattr(args, a, None)
-            for a, _ in _R0G_KNOBS
+            for a, _ in _ENV_KNOB_ARG_PAIRS
         },
         "aim_entropy_bonus": aim_entropy_bonus,
         "aim_log_std_max": aim_log_std_max,
@@ -459,11 +459,11 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
 
 
 # Knobs whose CLI dest IS the field name. Hand-written on purpose, and paired
-# with cs2rl.train.config._R0G_KNOBS (which maps DIFFERENT names, e.g.
+# with cs2rl.train.config._ENV_KNOB_ARG_PAIRS (which pairs CLI and field names, e.g.
 # --round-time-ticks → round_time): together they are the CLI-name ↔ field-name
 # map, and tests/train/test_env_knobs.py::test_args_knob_coverage_is_exhaustive asserts
 # the two cover every EnvConfig knob except pbrs_gamma (resolved through
-# resolve_gammas) and recoil (no flag). Kept separate from _R0G_KNOBS so the
+# resolve_gammas) and recoil (no flag). Kept separate from _ENV_KNOB_ARG_PAIRS so the
 # R0-G "None is the stored value" rule is never applied to a flag knob.
 _ARGS_KNOB_FIELDS = ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled",
                      "reward_symmetrize")
@@ -517,6 +517,6 @@ def env_config_from_args(args) -> EnvConfig:
         if v is not UNSET:
             knobs[name] = v
     knobs["pbrs_gamma"] = resolve_gammas(args)[1]
-    for arg_name, field_name in _R0G_KNOBS:
+    for arg_name, field_name in _ENV_KNOB_ARG_PAIRS:
         knobs[field_name] = getattr(args, arg_name, None)
     return EnvConfig(rewards=RewardWeights(**weights), **knobs)
