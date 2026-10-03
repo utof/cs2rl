@@ -132,6 +132,78 @@ def _dump_config(tmp_path, *extra_args):
     return json.loads((ckpt / "config.json").read_text())
 
 
+def test_env_knob_cli_defaults(tmp_path):
+    """An unflagged run keeps env-selected numeric knobs and enabled stance actions.
+
+    A parser default of zero would silently mask stance actions; a concrete
+    numeric knob default would replace the env's choice in every run.
+    """
+    cfg = _dump_config(tmp_path)
+    for key in ("round_time_ticks", "laser_range", "max_turn_speed"):
+        assert cfg[key] is None, key
+    for key in ("crouch_enabled", "jump_enabled"):
+        assert cfg[key] == 1 and type(cfg[key]) is int, key
+
+
+@pytest.mark.parametrize("flag,key,field,value,expected", [
+    ("--round-time-ticks", "round_time_ticks", "round_time", "160", 160),
+    ("--laser-range", "laser_range", "laser_range", "300.5", 300.5),
+    ("--max-turn-speed", "max_turn_speed", "max_turn_speed", "0.375", 0.375),
+    ("--crouch-enabled", "crouch_enabled", "crouch_enabled", "0", 0),
+    ("--jump-enabled", "jump_enabled", "jump_enabled", "0", 0),
+],
+                         ids=["round-time", "laser-range", "max-turn-speed", "crouch", "jump"])
+def test_env_knob_cli_overrides_round_trip(tmp_path, flag, key, field, value, expected):
+    """A missing flag, wrong dest or coercion cannot hide behind resolver defaults.
+
+    Numeric knob provenance is read directly from args, so also resolve the
+    dumped values through the production EnvConfig funnel: a correct JSON key
+    alone cannot detect a miswired field such as round_time_ticks -> round_time.
+    """
+    from types import SimpleNamespace
+
+    from cs2rl.train.config import env_config_from_args
+
+    cfg = _dump_config(tmp_path, flag, value)
+    assert cfg[key] == expected, key
+    assert type(cfg[key]) is type(expected), key
+    env_cfg = env_config_from_args(SimpleNamespace(**cfg))
+    actual = getattr(env_cfg, field)
+    assert actual == expected, field
+    assert type(actual) is type(expected), field
+
+
+@pytest.mark.parametrize("flag,value,error", [
+    ("--round-time-ticks", "160.5", "invalid int value"),
+    ("--laser-range", "not-a-number", "invalid float value"),
+    ("--max-turn-speed", "not-a-number", "invalid float value"),
+    ("--crouch-enabled", "0.0", "invalid int value"),
+    ("--jump-enabled", "0.0", "invalid int value"),
+    ("--crouch-enabled", "2", "invalid choice"),
+    ("--jump-enabled", "2", "invalid choice"),
+],
+                         ids=[
+                             "round-time-decimal", "laser-range-text", "max-turn-speed-text",
+                             "crouch-decimal", "jump-decimal", "crouch-choice", "jump-choice"
+                         ])
+def test_env_knob_cli_rejects_invalid_values(tmp_path, flag, value, error):
+    """Parser rejection precedes config casting and never writes a fingerprint.
+
+    EnvConfig normalizes stance bits with int(bool(value)), which would hide a
+    parser changed to float or str. Decimal integer inputs and out-of-domain
+    stance values must therefore fail at the real argparse boundary.
+    """
+    result = run_train_command("--dump-config",
+                               "--checkpoint-dir",
+                               str(tmp_path),
+                               flag,
+                               value,
+                               timeout=120)
+    assert result.returncode == 2, result.stderr
+    assert f"argument {flag}: {error}" in result.stderr, result.stderr
+    assert not (tmp_path / "config.json").exists()
+
+
 def test_warmstart_entropy_config_keys(tmp_path):
     cfg = _dump_config(tmp_path)
     assert cfg["warmstart_entropy"] is False
@@ -340,14 +412,13 @@ def test_opponent_noop_without_no_self_play_is_refused_at_startup(tmp_path):
 
 
 def test_opponent_flag_declared_with_both_modes():
-    """Source-scan pin, same rationale as test_cli_flags_declared_default_none
-    in tests/train/test_env_knobs.py (the parser is built inline under
+    """Source-scan pin for the opponent choices and default (the parser is built inline under
     `if __name__ == "__main__"` and cannot be imported): the flag must offer
     both modes and default to the historical one.
 
     TWO FILES since the post-rung1a refactor (2026-08-31): the parser (and so
-    the `choices=OPPONENT_MODES` reference) stays in src/cs2rl/train.py, while the
-    OPPONENT_MODES tuple itself moved to src/cs2rl/train_config.py. Both halves are
+    the `choices=OPPONENT_MODES` reference) stays in src/cs2rl/train/__main__.py, while the
+    OPPONENT_MODES tuple itself lives in src/cs2rl/train/config.py. Both halves are
     pinned — a `choices=` naming a vocabulary that no longer holds both modes
     is exactly the silent narrowing this test exists to catch."""
     import re
