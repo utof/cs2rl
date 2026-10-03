@@ -1793,11 +1793,15 @@ def test_download_stages_renames_and_refuses_overwrite(fake_modal, tmp_path):
     volume = _named_volume(fake_modal)
     volume.files["runs/ok-id/STATUS.json"] = b'{"status":"completed"}\n'
     volume.files["runs/ok-id/checkpoints/config.json"] = b"{}\n"
+    volume.files["runs/ok-id/checkpoints/notes.txt"] = b"keep me\n"
+    volume.files["runs/ok-id/checkpoints/extra/weird.bin"] = b"\x00\x01"
     dest_root = tmp_path / "outputs" / "modal"
     dest = module.download_run("ok-id", dest_root=dest_root)
     assert dest == dest_root / "ok-id"
     assert (dest / "STATUS.json").read_bytes() == b'{"status":"completed"}\n'
     assert (dest / "checkpoints" / "config.json").read_bytes() == b"{}\n"
+    assert (dest / "checkpoints" / "notes.txt").read_bytes() == b"keep me\n"
+    assert (dest / "checkpoints" / "extra" / "weird.bin").read_bytes() == b"\x00\x01"
     assert list(dest_root.glob(".ok-id.tmp-*")) == []
     assert fake_modal.iterdir_calls == [("runs/ok-id", True)]
     assert all(not path.startswith("/artifacts") for path, _rec in fake_modal.iterdir_calls)

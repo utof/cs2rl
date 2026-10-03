@@ -63,11 +63,10 @@ MANIFEST = {
         "DEFAULT_TIMEOUT_MINUTES", "DEFAULT_SAVE_EVERY_SECONDS", "MIN_MEMORY_MIB", "MAX_MEMORY_MIB",
         "MIN_TIMEOUT_MINUTES", "MAX_TIMEOUT_MINUTES", "MIN_SAVE_EVERY_SECONDS",
         "MAX_SAVE_EVERY_SECONDS", "AGENTS_PER_ENV", "BPTT_HORIZON", "MIN_BATCH_SIZE", "_RUN_ID_RE",
-        "_SECRET_NAME_RE", "LIVE_TRAIN_OPTION_ARITY", "LIVE_TRAIN_OPTIONS",
-        "RUNNER_OWNED_TRAIN_FLAGS", "RUN_ONLY_OPTIONS", "Action", "ResumeRequest",
-        "ArtifactClientRequest", "RunRequest", "validate_run_id", "validate_secret_name",
-        "parse_train_args", "_split_long_option", "_option_value", "validate_train_args",
-        "build_run_request", "parse_artifact_client_request"
+        "_SECRET_NAME_RE", "LIVE_TRAIN_OPTION_ARITY", "RUNNER_OWNED_TRAIN_FLAGS",
+        "RUN_ONLY_OPTIONS", "Action", "ResumeRequest", "ArtifactClientRequest", "RunRequest",
+        "validate_run_id", "validate_secret_name", "parse_train_args", "_split_long_option",
+        "_option_value", "validate_train_args", "build_run_request", "parse_artifact_client_request"
     ],
     "source.py": [
         "_COMMIT_SHA_RE", "_SAFE_TAR_TYPES", "SourceProvenance", "_run_git", "validate_clean_head",
@@ -88,7 +87,7 @@ MANIFEST = {
         "_reservation_path", "_manifest_path", "_volume_has_run", "record_run_failure",
         "finish_reservation", "reserve_run", "claim_attempt", "deliver_attempt", "write_heartbeat",
         "load_volume_json", "_parse_iso8601", "derive_status", "derive_run_view_from_bytes",
-        "derive_run_view", "list_run_artifacts", "start_heartbeat_worker", "stop_heartbeat"
+        "start_heartbeat_worker", "stop_heartbeat"
     ],
     "commands.py": [
         "UV_BIN", "TRAIN_MODULE", "_PRESERVED_CHILD_ENV_KEYS", "THREAD_CAP_ENV",

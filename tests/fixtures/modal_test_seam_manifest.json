@@ -168,7 +168,6 @@
   "test_launch_reports_an_unmapped_reason_token_as_validation_error": "tests/modal/test_modal_client.py",
   "test_launch_run_spawns_async_so_client_death_does_not_cancel_training": "tests/modal/test_modal_client.py",
   "test_launch_upload_failure_records_failure_code_without_freeing_id": "tests/modal/test_modal_client.py",
-  "test_list_run_artifacts_keeps_unknown_trainer_files": "tests/modal/test_modal_state.py",
   "test_live_option_mirror_contains_exact_long_names_only": "tests/modal/test_modal_request.py",
   "test_live_train_option_mirror_matches_train_py": "tests/modal/test_modal_request.py",
   "test_local_and_prior_resume_are_mutually_exclusive": "tests/modal/test_modal_request.py",
