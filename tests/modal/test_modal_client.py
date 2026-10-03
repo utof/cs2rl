@@ -1499,13 +1499,23 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
     def fake_run(cmd, **kwargs):
         if "--dump-config" in list(cmd):
             _write_dumped_config(Path(captured["run_root"]))
+        assert kwargs["env"] is not None
+        assert "PYTHONPATH" not in kwargs["env"]
         return subprocess.CompletedProcess(cmd, 0)
 
     def prepare_with_real_hash_rewrite(**kwargs):
         captured["prepare_in_manifest"] = kwargs["manifest"]
         captured["run_root"] = Path(kwargs["attempt"].run_root)
-        kwargs["host"] = preflight.PreflightHost(run=fake_run, start_heartbeat=_noop_heartbeat)
+        kwargs["host"] = preflight.PreflightHost(
+            run=fake_run,
+            parent_env={
+                "PATH": "/usr/bin",
+                "PYTHONPATH": "/opt/app:/opt/app/scripts:/root:/checkout/src",
+            },
+            start_heartbeat=_noop_heartbeat,
+        )
         prepared = real_prepare(**kwargs)
+        assert "PYTHONPATH" not in prepared.child_env
         captured["prepared"] = prepared
         return prepared
 
@@ -1517,7 +1527,14 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
         captured["execute_manifest"] = kwargs["manifest"]
         run_root = Path(kwargs["attempt"].run_root)
 
-        def factory(*_args, **_kwargs):
+        def factory(*args, **options):
+            prepared = kwargs["prepared"]
+            assert args[0] == prepared.train_command
+            assert options["env"] == prepared.child_env
+            assert "PYTHONPATH" not in options["env"]
+            assert options["cwd"] == str(prepared.source_dir)
+            assert options["start_new_session"] is True
+            assert options["shell"] is False
             ckpt_dir = run_root / "checkpoints"
             torch.save({"weight": torch.tensor([1.0])}, ckpt_dir / "dust2_policy.pt")
             effective = (request.timesteps // request.batch_size) * request.batch_size

@@ -49,7 +49,7 @@ from tests.conftest import REPO_ROOT
 ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                                       # noqa: E402, I001
-from scripts.modal_runner import core, state, training                                   # noqa: E402, I001
+from scripts.modal_runner import commands, core, state, training                         # noqa: E402, I001
 from tests.modal.modal_patch_binding_campaign import binding_target                      # noqa: E402, I001
 from tests.modal.modal_test_helpers import (                                             # noqa: E402
     FakeChild, FakeRegistry, _aware, _make_manifest, _minimal_completed_tree, _no_torch,
@@ -422,6 +422,12 @@ def test_training_kwargs_routes_every_override(tmp_path):
 
 def test_training_child_starts_in_new_session_without_shell(tmp_path):
     kwargs = _training_kwargs(tmp_path)
+    kwargs["prepared"].child_env = commands.build_child_env({
+        "PATH":
+        "/usr/bin",
+        "PYTHONPATH":
+        "/opt/app:/opt/app/scripts:/root:/checkout/src",
+    })
     launches = kwargs.pop("_launches")
     kwargs.pop("_child")
     kills = kwargs.pop("_kills")
@@ -435,6 +441,7 @@ def test_training_child_starts_in_new_session_without_shell(tmp_path):
     assert kw["shell"] is False
     assert kw["cwd"] == os.fspath(prepared.source_dir)
     assert kw["env"] == prepared.child_env
+    assert "PYTHONPATH" not in kw["env"]
     # A normal exit must signal nothing: the child has already exited. A finalize that killed
     # on every path would record a SIGTERM to the fake pid here.
     assert kills == []
