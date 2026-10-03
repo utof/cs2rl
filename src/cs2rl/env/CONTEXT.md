@@ -39,7 +39,7 @@ torch, awpy or the C env.
 
 - A new env knob: the `StaticData` field in `cs2_types.h`, its mirror in `StaticDataC`, a line
   in the `static_data` mapping in `Cs2Env.__init__`, a field on `EnvConfig`, and the CLI route
-  in `cs2rl.train.config` (`_ARGS_KNOB_FIELDS` or `_R0G_KNOBS`);
+  in `cs2rl.train.config` (`_ARGS_KNOB_FIELDS` or `_ENV_KNOB_ARG_PAIRS`);
   `test_args_knob_coverage_is_exhaustive` fails on a missing route.
 - A new reward term: its weight in `cs2_types.h`, the term in `cs2_rewards.h`, a field on
   `RewardWeights` (its CLI flag is generated from the field), and a line in the `static_data`
