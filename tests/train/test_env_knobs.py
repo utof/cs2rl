@@ -7,7 +7,7 @@ max_turn_speed). None ⇒ env/nav.py constant, so every caller that does not pas
 knob keeps today's values (fingerprints unchanged at default).
 
 PITFALL (Task 14): the CLI-name ↔ field-name map is hand-written, split over
-train_config._ARGS_KNOB_FIELDS and train_shared._R0G_KNOBS, so a knob added to
+cs2rl.train.config._ARGS_KNOB_FIELDS and cs2rl.train.config._ENV_KNOB_ARG_PAIRS, so a knob added to
 EnvConfig without a route through one of them is unreachable from the CLI and
 every run silently keeps its default. test_args_knob_coverage_is_exhaustive
 below is the assertion that fails when that happens.
@@ -136,7 +136,7 @@ def test_env_config_from_args_reads_every_channel():
     """args → EnvConfig: weights, flag knobs, the R0-G trio and pbrs_gamma.
 
     One test over all four channels on purpose: they are read by four different
-    mechanisms (REWARD_FIELDS loop, _ARGS_KNOB_FIELDS loop, _R0G_KNOBS pairs,
+    mechanisms (REWARD_FIELDS loop, _ARGS_KNOB_FIELDS loop, _ENV_KNOB_ARG_PAIRS pairs,
     resolve_gammas) and a per-channel test would let a whole mechanism go
     missing while its neighbours stayed green.
     """
@@ -253,15 +253,15 @@ def test_env_config_from_args_takes_exactly_one_positional_parameter():
 def test_args_knob_coverage_is_exhaustive():
     """Every EnvConfig knob has a decided route from args — or this fails.
 
-    _ARGS_KNOB_FIELDS and _R0G_KNOBS are hand-written (they are the CLI-name ↔
+    _ARGS_KNOB_FIELDS and _ENV_KNOB_ARG_PAIRS are hand-written (they are the CLI-name ↔
     field-name map), so an eleventh knob added to EnvConfig would otherwise be
     silently unreachable from the CLI and every run would keep its default with
     the whole suite green. `recoil` is listed as deliberately unreachable: there
     is no flag and reading one would be new behaviour.
     """
     from cs2rl.env.config import KNOB_FIELDS
-    from cs2rl.train.config import _ARGS_KNOB_FIELDS, _R0G_KNOBS
-    routed = set(_ARGS_KNOB_FIELDS) | {f for _, f in _R0G_KNOBS} | {"pbrs_gamma", "recoil"}
+    from cs2rl.train.config import _ARGS_KNOB_FIELDS, _ENV_KNOB_ARG_PAIRS
+    routed = set(_ARGS_KNOB_FIELDS) | {f for _, f in _ENV_KNOB_ARG_PAIRS} | {"pbrs_gamma", "recoil"}
     assert routed == set(KNOB_FIELDS)
 
 

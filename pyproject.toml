@@ -238,6 +238,7 @@ ignore = ["E501"]
 "cs2rl.train._LOG_2PI".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train._MASK_HEAD_SLICES".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train._MAX_SEED".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train._ENV_KNOB_ARG_PAIRS".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train._R0G_KNOBS".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train._WARMSTART_ATTRS".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train._aim_dim_weight".msg = "import it from the module that owns it (#205 part 3 split train.py)"
