@@ -1,8 +1,8 @@
 """cs2rl/experiment/smoke_read.py — the frozen Rung 1a smoke rules on synthetic rows.
 
-Rules source: docs/science-superpowers/preregistrations/2026-08-31-rung1a-smoke.md
-(the pre-registration is frozen by sha256; if an expectation here disagrees with
-it, the READER is wrong, never the prereg).
+Historical rules: the 2026-08-31 Rung 1a registration (gh#152).
+Current public summary: docs/validation.md#rung-1a-smoke-reader.
+The synthetic expectations retain those rules; the summary does not redefine them.
 
 Every number below is hand-derivable from the fixture builders at the top. The
 fixtures imitate the real metrics stream: 61 rows at 16,384 hero steps each

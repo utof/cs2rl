@@ -42,8 +42,7 @@ def target_entropy_schedule(
     return frac * max_entropy
 
 
-# Warm-start entropy mode phases (spec docs/superpowers/specs/
-# 2026-08-01-warmstart-entropy-control-design.md). Ints (not Enum) so the
+# Warm-start entropy phases (gh#98; docs/glossary.md). Ints (not Enum) so the
 # value can go straight into the losses/* dict as a plottable metric.
 WS_GRACE, WS_RAMP, WS_OFF = 0, 1, 2
 

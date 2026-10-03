@@ -1,7 +1,7 @@
 """tests/env/c/test_pitch.py — Batch 3.5 (#24) — Δpitch + 3D combat hit-test.
 
-Spec: docs/superpowers/specs/2026-05-03-batch-3.5-pitch-3d-combat-design.md
-Plan: docs/superpowers/plans/2026-05-03-batch-3.5-pitch-3d-combat.md
+Historical design: Batch 3.5, gh#24; current contract:
+docs/formats.md#observation-and-action
 Tests are split across T1 (constants + AgentState), T2 (consumption + Welford),
 T4 (obs slots), T5 (3D combat). Each test_X is tagged with the task that owns it.
 """
