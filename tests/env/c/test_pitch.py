@@ -1,7 +1,7 @@
 """tests/env/c/test_pitch.py — Batch 3.5 (#24) — Δpitch + 3D combat hit-test.
 
-Spec: docs/superpowers/specs/2026-05-03-batch-3.5-pitch-3d-combat-design.md
-Plan: docs/superpowers/plans/2026-05-03-batch-3.5-pitch-3d-combat.md
+Historical design: Batch 3.5, gh#24; current contract:
+docs/formats.md#observation-and-action
 Tests are split across T1 (constants + AgentState), T2 (consumption + Welford),
 T4 (obs slots), T5 (3D combat). Each test_X is tagged with the task that owns it.
 """
@@ -108,7 +108,7 @@ def test_pitch_clamps_at_pi_over_2_up():
     try:
         env.reset(seed=42)
         actions, cont = _zero_actions()
-        cont[0, 1] = 100.0                                             # massive Δpitch — per-tick clamp + bounded clamp both fire
+        cont[0, 1] = 100.0                                             # massive positive absolute pitch target — bounded clamp fires
         for _ in range(100):
             env.step(actions, cont)
         assert env._c_env.game.agents[0].pitch == pytest.approx(
@@ -145,7 +145,7 @@ def test_welford_pitch_accumulates():
     try:
         obs, info = env.reset(seed=42)
         actions, cont = _zero_actions()
-        cont[:, 1] = 0.1               # +0.1 Δpitch every alive agent
+        cont[:, 1] = 0.1               # +0.1 absolute pitch target for every alive agent
         for _ in range(5):
             obs, rew, term, trunc, info = env.step(actions, cont)
 
@@ -571,7 +571,7 @@ def test_pitch_clamps_at_pi_over_2_down():
     try:
         env.reset(seed=42)
         actions, cont = _zero_actions()
-        cont[0, 1] = -100.0                                            # massive negative Δpitch
+        cont[0, 1] = -100.0                                            # massive negative absolute pitch target
         for _ in range(100):
             env.step(actions, cont)
         assert env._c_env.game.agents[0].pitch == pytest.approx(

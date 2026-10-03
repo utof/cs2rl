@@ -1,6 +1,6 @@
 """Batch 7 T/CT policy-heads split — policy-level contracts.
 
-Spec: docs/superpowers/specs/2026-08-13-batch7-tct-heads-split-design.md
+Historical design: Batch 7, gh#112; current checkpoint contract: docs/formats.md#checkpoints
 (tests 1, 2, 3, 4a, 6, 7, 9, 10 land in this file; the trainer-level
 invariant re-pin is test 4b in tests/train/test_tag_trainer.py, the TAG param-group
 partition is test 5a in tests/train/test_tag_diagnostic.py, the analyzer labeling is

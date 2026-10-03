@@ -4,9 +4,8 @@ WHAT: ``Cs2PuffeRL`` is the trainer ``train()`` builds. Before gh#168 W1, ``trai
 constructed a stock ``PuffeRL`` and then mutated the INSTANCE four times: replace
 ``train`` (return-norm), extend the rollout buffers + wrap ``vecenv.send`` (hybrid aim),
 replace ``evaluate`` (self-play), replace ``save_checkpoint`` (full checkpointing), plus a
-``_timing`` dict. ADR 0002 (docs/adr/0002-subclass-pufferl-do-not-mutate.md, a LOCAL file:
-docs/ is under .git/info/exclude and is in no clone; the decision is restated in gh#168 and
-in the spec at .superpowers/sdd/2026-09-24-168-trainer-subclass/spec.md) says that
+``_timing`` dict. ADR 0002 (docs/adr/0002-subclass-pufferl-do-not-mutate.md;
+implemented under gh#168) says that
 composition belongs in a subclass. W1 moved ONLY the composition here: ``__init__`` called
 the same four patch functions, in ``train()``'s order, so an instance is
 attribute-for-attribute the trainer ``train()`` built before (the byte gates and the

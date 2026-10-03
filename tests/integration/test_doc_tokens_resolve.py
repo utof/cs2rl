@@ -23,7 +23,7 @@ placeholder in it is read as `*`. Each token is judged by kind:
 OUT, counted and never checked: an absolute or home path, a URL, a path that climbs out of
 the checkout, and a path with a component the tracked .gitignore ignores by plain name
 (`.venv`, `outputs`, `zig-out`). The local .git/info/exclude is never read: it differs
-between clones, and it is what hides the owner's docs/ here.
+between clones and may hide private local files.
 ALLOW: the (doc, token) pairs that name nothing in the repository by design, each with its
 reason; the same token in another doc is still judged. The set is watched: an entry no token
 uses fails test_every_allow_entry_is_used, so a doc edit cannot leave a dead allowance behind,

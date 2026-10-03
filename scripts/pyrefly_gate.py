@@ -44,7 +44,7 @@ WHY IT READS THE INDEX AND NOT THE WORKING TREE
 `git checkout-index -a --prefix=` materialises exactly what is about to be
 committed, in ~0.06s, moving nothing and stashing nothing -- no `git stash
 --keep-index`, which would be reckless in a repo with a permanently dirty tree
-containing a nested git repo (docs/). A working-tree-reading gate ships broken
+containing a private nested documentation repo. A working-tree-reading gate ships broken
 staged code green whenever the author has already fixed their copy.
 
 This also makes the gate hermetic: a developer's in-progress error no longer reds

@@ -41,6 +41,8 @@ Always pass `tests` or files under it: `pyproject.toml` names no test paths. `CO
 says why 2 workers, what the fast `-m "not slow"` loop drops, and how to add an action head.
 `tests/CONTEXT.md` says where a new test goes and what the session guards check.
 
+See the [public documentation index](docs/README.md) for architecture, ADRs, format contracts and validation limits.
+
 ## Training
 
 `python -m cs2rl.train --help` lists every flag. `--train` runs PPO self-play training,

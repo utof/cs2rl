@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Rung 1a smoke gate reader — the FROZEN pre-registration of 2026-08-31.
 
-Rules source (verbatim, do not re-derive):
-  docs/science-superpowers/preregistrations/2026-08-31-rung1a-smoke.md
-  (= spec docs/superpowers/specs/2026-08-30-rung1a-stationary-opponent.md §3)
+Historical rules: 2026-08-31 Rung 1a registration (gh#152).
+Current public summary: docs/validation.md#rung-1a-smoke-reader.
+The constants and synthetic-row tests retain the frozen decision rules.
 
 WHAT: reads ONE run dir (`metrics.jsonl` + `config.json`), prints the five
 pre-flight assertions with their observed values, the episode-weighted window
