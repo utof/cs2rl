@@ -471,8 +471,8 @@ def test_event_oversample_fraction_exposed():
 # ── Task 9: target_entropy schedule + log_alpha reset + Batch 1 metrics ────
 # These tests cover three sub-features of the return-norm machinery
 # (Cs2PuffeRL._init_return_norm + Cs2PuffeRL.train, src/cs2rl/train/trainer.py, gh#168 W2a):
-#   (A) target_entropy schedule — linear ramp 0.7→0.5 * max_entropy across
-#       global_step ∈ [0, 10_000_000]; constant after.
+#   (A) target_entropy schedule — config-driven linear ramp (defaults
+#       0.5→0.35 * max_entropy) over entropy_target_warmup_steps; constant after.
 #   (B) log_alpha reset — first train() after construction sets log_alpha to
 #       log(ent_coef); idempotent thereafter.
 #   (C) Metric exposure — log_alpha, effective_alpha, per-channel std,
@@ -604,10 +604,10 @@ def test_log_alpha_reset_at_batch_start():
 
 
 def test_training_metrics_exposed():
-    """Task 9C: after evaluate() + train() the trainer must expose every
-    Batch 1 metric the wandb log layer reads: log_alpha, effective_alpha,
-    per-channel std (combat/objective/positional), event_oversample_fraction
-    (set by Task 8), and grad_norm (pre-clip)."""
+    """Task 9C: evaluate() + train() expose finite numeric trainer attributes
+    for inspection: log_alpha, effective_alpha, per-channel std
+    (combat/objective/positional), event_oversample_fraction (set by Task 8),
+    and grad_norm (pre-clip)."""
     import math
 
     from tests._helpers.trainer_harness import _build_trainer_for_test
