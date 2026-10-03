@@ -1024,7 +1024,7 @@ def test_step_stats_in_info_flag_on_populates_view():
     assert len(info) == 1, f"flag-on expects one info dict per step, got {len(info)}"
     assert "step_stats" in info[0]
     ss = info[0]["step_stats"]
-    # Field surface required by split_into_channels (see train_helpers_batch1.py).
+    # Field surface required by split_into_channels (see cs2rl.train.rewards).
     # After one step() the PBRS delta may be non-zero, so we assert readability + type
     # rather than a specific value. Do NOT use `hasattr(ss, "_ss")` here: it is always
     # True (StepStatsView.__slots__ guarantees _ss exists post-init), so an `or`-chained
