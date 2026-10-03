@@ -113,6 +113,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse                                        # noqa: E402
+import ast                                             # noqa: E402
 import math                                            # noqa: E402
 import subprocess                                      # noqa: E402
 from dataclasses import dataclass, field               # noqa: E402
@@ -226,39 +227,128 @@ def _git(*args, cwd=REPO_ROOT):
     training run."""
     try:
         p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-    except (OSError, ValueError):
+    except (OSError, ValueError, UnicodeError):
         return 1, ""
     return p.returncode, p.stdout.strip()
 
 
+def _demo_diff_entries(raw: str) -> list[tuple[str, str, str]]:
+    """Decode Git's NUL-delimited names before selecting the provenance surface.
+
+    Unlike a path-filtered diff, this keeps both sides of renames and deletions.
+    Log records can have intervening newlines before their raw headers. NUL
+    delimiters keep decoded path fields separate, including embedded newlines.
+    """
+    tokens = iter(raw.split("\0"))
+    entries = []
+    for header in tokens:
+        if not header.strip():
+            continue
+        status = header.lstrip("\n").split()[-1]
+        old = next(tokens)
+        new = next(tokens) if status.startswith(("R", "C")) else old
+        entries.append((status, old, new))
+    return entries
+
+
+def _demo_source_roots(entries: list[tuple[str, str, str]]) -> set[str]:
+    """Trace current roots back through discovered renames, including deleted members.
+
+    A surviving member with the same relative suffix identifies a moved directory.
+    Historical rename entries also cover a destination deleted after the move.
+    The inferred roots are conservative: an ambiguous move can cause regeneration.
+    """
+    roots = set(DEMO_RELEVANT_PATHS)
+    while True:
+        previous = roots.copy()
+        for status, old, new in entries:
+            if not status.startswith("R"):
+                continue
+            for root in previous:
+                if new == root or new.startswith(root + "/"):
+                    suffix = new[len(root):]
+                    roots.add(old[:-len(suffix)] if suffix and old.endswith(suffix) else old)
+        if roots == previous:
+            return roots
+
+
+def _python_demo_ast(source: str | bytes) -> str:
+    """Normalize Python documentation while preserving runtime literals and code.
+
+    Only actual module/class/function docstrings are removed. Explicit local
+    __doc__ / getdoc reads keep all docstrings significant. KNOWN LIMIT: external
+    reflection, dynamic docstring lookup, source/line introspection and import-path
+    effects are not proven equivalent; this is a bounded AST source heuristic.
+    """
+    tree = ast.parse(source)
+    reads_docs = any(
+        isinstance(node, ast.Name) and node.id in ("__doc__", "getdoc")
+        or isinstance(node, ast.Attribute) and node.attr in ("__doc__", "getdoc")
+        or isinstance(node, ast.Constant) and node.value == "__doc__"
+        or isinstance(node, ast.ImportFrom) and any(a.name == "getdoc" for a in node.names)
+        for node in ast.walk(tree))
+    if not reads_docs:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                if ast.get_docstring(node, clean=False) is not None:
+                    node.body.pop(0)
+    # ast.compare is Python 3.14+, outside the project's supported 3.12-3.13.
+    return ast.dump(tree, include_attributes=False)
+
+
+def _demo_sources_unchanged(sha: str) -> bool:
+    """Compare a recorded snapshot to tracked and untracked working source.
+
+    Git discovers renames globally; only then do we select current/historical
+    relevant roots. Failed commands, unreadable files and syntax errors stay stale.
+    C and other non-Python members compare exact blobs, never stripped comments.
+    """
+    rc, raw = _git("diff", "--raw", "-z", "--find-renames=1%", "--no-ext-diff", "--no-textconv",
+                   sha, "--")
+    if rc:
+        return False
+    try:
+        entries = _demo_diff_entries(raw)
+        rc, history = _git("log", "--format=", "--raw", "-z", "--find-renames=1%",
+                           "--diff-filter=R", "--full-history", "-m", f"{sha}..HEAD", "--")
+        if rc:
+            return False
+        roots = _demo_source_roots(entries + _demo_diff_entries(history))
+
+        def relevant(path):
+            return any(path == root or path.startswith(root + "/") for root in roots)
+
+        rc, untracked = _git("ls-files", "--others", "--exclude-standard", "-z")
+        if rc or any(relevant(path) for path in untracked.split("\0") if path):
+            return False
+        for status, old, new in entries:
+            if not (relevant(old) or relevant(new)):
+                continue
+            if status == "R100":
+                continue
+            if status != "M" and not status.startswith("R"):
+                return False
+            if not (old.endswith(".py") and new.endswith(".py")):
+                return False
+            rc, before = _git("show", f"{sha}:{old}")
+            if rc or _python_demo_ast(before) != _python_demo_ast((REPO_ROOT / new).read_bytes()):
+                return False
+        return True
+    except (OSError, SyntaxError, ValueError, StopIteration, IndexError, RecursionError):
+        return False
+
+
 def check_demo_sha(sha: str, allow_stale: bool = False, name: str = "demo") -> str | None:
-    """Verify a demo's recorded git sha against the working tree. Returns a
-    human-readable note when the demo is off-HEAD but still trustworthy, None
-    when it is exactly current; raises ValueError when it is genuinely stale.
+    """Check old-format git_sha demos against the actual working source surface.
 
-    WHY not a plain `sha == HEAD` equality: every commit to this repo — a
-    docstring fix, a test tweak — would invalidate a demo set that is still
-    bit-for-bit reproducible, and the escape hatch would become the normal
-    path (at which point it guards nothing). Instead we ask the question that
-    actually matters: *did anything that determines the demo's contents change
-    between then and now?* That surface is DEMO_RELEVANT_PATHS — the C env,
-    the obs/action layouts, the map, and the expert. `git diff --quiet` over
-    exactly those paths answers it exactly.
-
-    The predecessor of this function checked `len(sha) != 40` and nothing else,
-    which passed any 40-character string including the sha of an env revision
-    whose obs layout no longer exists (review finding 5).
-
-    PITFALLS:
-      * A sha git does not know (foreign checkout, shallow clone, demos copied
-        from another machine) is treated as STALE, not as "probably fine" — we
-        cannot diff against a commit we do not have.
-      * Uncommitted edits to DEMO_RELEVANT_PATHS also make demos stale, and
-        `git diff <sha> HEAD` cannot see them: we diff the WORKING TREE
-        (`git diff <sha> -- paths`), so a dirty env/c is caught too.
-      * `allow_stale=True` downgrades the error to a printed warning. It exists
-        for deliberate experiments ("does the old demo set still transfer?"),
-        not for silencing the check on the happy path.
+    Byte-identical renames and Python comment/docstring edits are accepted by a
+    bounded AST heuristic; regular literals/code and C/non-Python bytes remain
+    significant. This does not establish byte-for-byte rollout equivalence.
+    Unknown history (including a shallow checkout missing the recorded commit)
+    fails closed. A missing checkout yields an explicit unverifiable note.
+    Staged and unstaged edits plus non-ignored untracked members are checked even
+    when the recorded SHA equals HEAD. allow_stale retains the explicit warning.
+    DEMO_RELEVANT_PATHS completeness is a separate concern (#281).
     """
     if len(sha) != 40:
         raise ValueError(f"{name}: missing/short git_sha {sha!r} — demo is not self-identifying.")
@@ -266,17 +356,16 @@ def check_demo_sha(sha: str, allow_stale: bool = False, name: str = "demo") -> s
     rc, head = _git("rev-parse", "HEAD")
     if rc != 0:
         return f"{name}: not a git checkout — demo provenance unverifiable"
-    if sha == head and _git("diff", "--quiet", "--", *DEMO_RELEVANT_PATHS)[0] == 0:
-        return None
-
     known = _git("cat-file", "-e", f"{sha}^{{commit}}")[0] == 0
-    if known and _git("diff", "--quiet", sha, "--", *DEMO_RELEVANT_PATHS)[0] == 0:
-        return (f"{name}: recorded at {sha[:9]}, HEAD is {head[:9]} — but nothing under "
-                f"{', '.join(DEMO_RELEVANT_PATHS)} changed since, so the demos are still "
-                f"reproducible byte-for-byte.")
+    if known and _demo_sources_unchanged(sha):
+        if sha == head:
+            return None
+        return (f"{name}: recorded at {sha[:9]}, HEAD is {head[:9]} — demos are still "
+                f"reproducible under the source comparison heuristic "
+                f"(renames and Python documentation ignored).")
 
     why = ("that commit is unknown to this checkout"
-           if not known else "the env/obs/map/expert sources changed since then")
+           if not known else "the env/obs/map/expert sources changed or could not be compared")
     if allow_stale:
         return (f"{name}: STALE (recorded at {sha[:9]}, HEAD {head[:9]}; {why}) — "
                 f"proceeding because --allow-stale-demos was given.")
