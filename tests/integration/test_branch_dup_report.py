@@ -190,6 +190,39 @@ def test_exact_bodies_keep_docstrings_identifiers_and_literals(repo):
     assert _report(repo, base)["identical_bodies"]["head"] == []
 
 
+@pytest.mark.parametrize("explicit_repo", [False, True])
+def test_subdirectory_launch_censuses_the_enclosing_repository(repo, explicit_repo):
+    """A subdirectory path must not hide outside blobs or substitute a same-name root blob."""
+    base = _commit(repo, {
+        "one.py": "def root():\n    return 7\n",
+        "nested/one.py": "def nested():\n    return 8\n"
+    })
+    _commit(
+        repo, {
+            "outside/duplicate.py": "def duplicate():\n    return 7\n",
+            "outside/wide.py": "def wide(a,b,c,d,e,f,g,h,i,j,k,l,m):\n    return 13\n",
+            "outside/large.txt": "x\n" * 301
+        })
+    root_report = _report(repo, base)
+    assert root_report["python_scan"]["head"]["tracked_files"] == 5
+    assert root_report["python_scan"]["head"]["functions"] == 4
+    assert root_report["identical_bodies"]["new"] == [[
+        "one.py:root", "outside/duplicate.py:duplicate"
+    ]]
+    assert root_report["python_arity"] == [{
+        "symbol": "outside/wide.py:wide",
+        "parameters": 13,
+        "new": True
+    }]
+    assert root_report["growth_over_300"][0]["path"] == "outside/large.txt"
+    command = [sys.executable, str(REPO_ROOT / "scripts/branch_dup_report.py"), "--base", base]
+    if explicit_repo:
+        command.extend(["--repo", str(repo / "nested")])
+    result = subprocess.run(command, cwd=repo / "nested", capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == root_report
+
+
 def test_growth_boundary_rename_deletion_and_binary_are_explicit(repo):
     """A rename-as-add parser, >=300 threshold, or binary coercion must fail."""
     base = _commit(
@@ -246,7 +279,8 @@ def test_graph_delta_normalizes_project_and_direction_and_discloses_partial_cove
 
 @pytest.mark.parametrize("damage", [
     "revision", "generation", "pagination", "rows", "foreign", "stale", "missing_path", "mode",
-    "error", "incomplete", "untracked", "row_limit", "query_limit", "no_requests"
+    "error", "incomplete", "untracked", "row_limit", "query_limit", "no_requests",
+    "similarity_null", "similarity_list", "arity_null", "arity_list"
 ])
 def test_graph_evidence_is_rejected_when_it_cannot_support_the_revision(repo, damage):
     """Never accept stale, foreign, truncated, incomplete or absent coverage as a clean zero."""
@@ -285,9 +319,15 @@ def test_graph_evidence_is_rejected_when_it_cannot_support_the_revision(repo, da
         snap["requests"]["similarity"]["query"] += " LIMIT 1"
     elif damage == "no_requests":
         del snap["requests"]
+    elif damage in ("similarity_null", "similarity_list", "arity_null", "arity_list"):
+        kind, shape = damage.split("_")
+        snap[kind] = None if shape == "null" else []
     result = _cli(repo, base, *_exports(repo, _snapshot(repo, base, "base"), snap))
     assert result.returncode == 2
     assert "graph" in result.stderr.lower()
+    assert "export" in result.stderr.lower()
+    assert "Traceback" not in result.stderr
+    assert not result.stdout
 
 
 def test_parse_failures_and_unsupported_sources_are_disclosed(repo):

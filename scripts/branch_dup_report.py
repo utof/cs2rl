@@ -118,6 +118,8 @@ def _delta(old, new):
 
 def _query_rows(result, columns):
     """Validate native query row totals; the known hard ceiling cannot establish completeness."""
+    if not isinstance(result, dict):
+        raise ValueError("graph query result must be an object")
     if result.get("isError"):
         raise ValueError("graph query returned an error")
     raw = result["content"][0]["text"]
@@ -276,6 +278,8 @@ def main(argv=None):
     parser.add_argument("--head-graph")
     args = parser.parse_args(argv)
     try:
+        # Git tree paths and revision:path blobs must share the enclosing root.
+        args.repo = Path(_git(args.repo, "rev-parse", "--show-toplevel").decode().strip()).resolve()
         base, head = [
             _git(args.repo, "rev-parse", "--verify", "--end-of-options",
                  f"{ref}^{{commit}}").decode().strip() for ref in (args.base, args.head)
