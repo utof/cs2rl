@@ -95,6 +95,24 @@ def _snapshot(repo, revision, project, pairs=()) -> dict[str, Any]:
     return {
         "version": 1,
         "project": project,
+        "requests": {
+            "similarity": {
+                "project":
+                project,
+                "max_rows":
+                100000,
+                "query":
+                "MATCH (a)-[:SIMILAR_TO]->(b) RETURN a.qualified_name, b.qualified_name, a.file_path, b.file_path ORDER BY a.qualified_name, b.qualified_name"
+            },
+            "arity": {
+                "project":
+                project,
+                "max_rows":
+                100000,
+                "query":
+                "MATCH (f) WHERE f.param_count > 12 RETURN f.qualified_name, f.file_path, f.param_count ORDER BY f.qualified_name"
+            },
+        },
         "status_before": status,
         "status_after": status,
         "coverage_before": [coverage],
@@ -228,7 +246,7 @@ def test_graph_delta_normalizes_project_and_direction_and_discloses_partial_cove
 
 @pytest.mark.parametrize("damage", [
     "revision", "generation", "pagination", "rows", "foreign", "stale", "missing_path", "mode",
-    "error", "incomplete", "untracked"
+    "error", "incomplete", "untracked", "row_limit", "query_limit", "no_requests"
 ])
 def test_graph_evidence_is_rejected_when_it_cannot_support_the_revision(repo, damage):
     """Never accept stale, foreign, truncated, incomplete or absent coverage as a clean zero."""
@@ -261,6 +279,12 @@ def test_graph_evidence_is_rejected_when_it_cannot_support_the_revision(repo, da
         snap["similarity"]["content"][0]["text"] = (
             'rows: 1  (cols: a.qualified_name b.qualified_name a.file_path b.file_path)\n'
             '  project.one.a project.one.b one.py untracked.py\ntotal: 1\n')
+    elif damage == "row_limit":
+        snap["requests"]["similarity"]["max_rows"] = 1
+    elif damage == "query_limit":
+        snap["requests"]["similarity"]["query"] += " LIMIT 1"
+    elif damage == "no_requests":
+        del snap["requests"]
     result = _cli(repo, base, *_exports(repo, _snapshot(repo, base, "base"), snap))
     assert result.returncode == 2
     assert "graph" in result.stderr.lower()

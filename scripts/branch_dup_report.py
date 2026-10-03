@@ -5,10 +5,13 @@ Optional --base-graph/--head-graph accept version-1 JSON envelopes of native
 codebase-memory-mcp results: project, status_before/status_after (index_status
 with verbose=True), coverage_before/coverage_after (arrays of coverage pages
 checking ALL tracked paths, at most 128 per page, and the complete '.' scope),
-similarity and arity (query_graph results). Capture coverage/status around the
-queries without editing the checkout. Use full indexing and these queries:
-  MATCH (a)-[:SIMILAR_TO]->(b) RETURN a.qualified_name, b.qualified_name, a.file_path, b.file_path
-  MATCH (f) WHERE f.param_count > 12 RETURN f.qualified_name, f.file_path, f.param_count
+similarity and arity (query_graph results), and requests (the exact arguments
+passed to those two calls). Capture coverage/status around the queries without
+editing the checkout. Use full indexing, max_rows=100000 and these exact queries:
+  MATCH (a)-[:SIMILAR_TO]->(b) RETURN a.qualified_name, b.qualified_name, a.file_path, b.file_path ORDER BY a.qualified_name, b.qualified_name
+  MATCH (f) WHERE f.param_count > 12 RETURN f.qualified_name, f.file_path, f.param_count ORDER BY f.qualified_name
+Native total counts returned rows, so totals alone do not prove an unfiltered
+query. Export producers must record actual requests; provenance is trusted data.
 No MCP transport or similarity algorithm is embedded here. Missing exports are
 UNMEASURED. Native schemas are validated, not guessed or silently coerced.
 
@@ -136,6 +139,16 @@ def _graph_snapshot(path, revision, paths, repo):
         if data["version"] != 1:
             raise ValueError("unsupported graph export version")
         project = data["project"]
+        for kind, query in (
+            ("similarity",
+             "MATCH (a)-[:SIMILAR_TO]->(b) RETURN a.qualified_name, b.qualified_name, a.file_path, b.file_path ORDER BY a.qualified_name, b.qualified_name"
+             ),
+            ("arity",
+             "MATCH (f) WHERE f.param_count > 12 RETURN f.qualified_name, f.file_path, f.param_count ORDER BY f.qualified_name"
+             ),
+        ):
+            if data["requests"][kind] != {"project": project, "query": query, "max_rows": 100000}:
+                raise ValueError("graph export requires the exact complete query request")
         for phase in ("before", "after"):
             result = data[f"status_{phase}"]
             status = result["structuredContent"]
