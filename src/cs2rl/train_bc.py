@@ -297,7 +297,7 @@ def _python_demo_ast(source: str | bytes) -> str:
 
 
 def _demo_sources_unchanged(sha: str) -> bool:
-    """Compare a recorded snapshot to tracked and untracked working source.
+    """Compare a recorded snapshot independently to index and working source.
 
     Git discovers renames globally; only then do we select current/historical
     relevant roots. Failed commands, unreadable files and syntax errors stay stale.
@@ -309,11 +309,16 @@ def _demo_sources_unchanged(sha: str) -> bool:
         return False
     try:
         entries = _demo_diff_entries(raw)
+        rc, cached = _git("diff", "--cached", "--raw", "-z", "--find-renames=1%", "--no-ext-diff",
+                          "--no-textconv", sha, "--")
+        if rc:
+            return False
+        cached_entries = _demo_diff_entries(cached)
         rc, history = _git("log", "--format=", "--raw", "-z", "--find-renames=1%",
                            "--diff-filter=R", "--full-history", "-m", f"{sha}..HEAD", "--")
         if rc:
             return False
-        roots = _demo_source_roots(entries + _demo_diff_entries(history))
+        roots = _demo_source_roots(entries + cached_entries + _demo_diff_entries(history))
 
         def relevant(path):
             return any(path == root or path.startswith(root + "/") for root in roots)
@@ -321,25 +326,43 @@ def _demo_sources_unchanged(sha: str) -> bool:
         rc, untracked = _git("ls-files", "--others", "--exclude-standard", "-z")
         if rc or any(relevant(path) for path in untracked.split("\0") if path):
             return False
-        for status, old, new in entries:
-            if not (relevant(old) or relevant(new)):
-                continue
-            if status == "R100":
-                continue
-            if status != "M" and not status.startswith("R"):
-                return False
-            if not (old.endswith(".py") and new.endswith(".py")):
-                return False
-            rc, before = _git("show", f"{sha}:{old}")
-            if rc or _python_demo_ast(before) != _python_demo_ast((REPO_ROOT / new).read_bytes()):
-                return False
+        # A staged edit can be reverted on disk while remaining in the index.
+        # Compare each tree separately; cached renames also identify deleted roots.
+        for changes, index in ((entries, False), (cached_entries, True)):
+            for status, old, new in changes:
+                if not (relevant(old) or relevant(new)):
+                    continue
+                if status == "R100" and not index:
+                    continue
+                if status != "M" and not status.startswith("R"):
+                    return False
+                # _git's text decoding/strip is for discovery, not exact blob bytes.
+                before = subprocess.run(["git", "show", f"{sha}:{old}"],
+                                        cwd=REPO_ROOT,
+                                        capture_output=True)
+                if before.returncode:
+                    return False
+                if index:
+                    staged = subprocess.run(["git", "show", f":{new}"],
+                                            cwd=REPO_ROOT,
+                                            capture_output=True)
+                    if staged.returncode:
+                        return False
+                    after = staged.stdout
+                else:
+                    after = (REPO_ROOT / new).read_bytes()
+                if old.endswith(".py") and new.endswith(".py"):
+                    if _python_demo_ast(before.stdout) != _python_demo_ast(after):
+                        return False
+                elif before.stdout != after:
+                    return False
         return True
     except (OSError, SyntaxError, ValueError, StopIteration, IndexError, RecursionError):
         return False
 
 
 def check_demo_sha(sha: str, allow_stale: bool = False, name: str = "demo") -> str | None:
-    """Check old-format git_sha demos against the actual working source surface.
+    """Check old-format git_sha demos against index and working source.
 
     Byte-identical renames and Python comment/docstring edits are accepted by a
     bounded AST heuristic; regular literals/code and C/non-Python bytes remain

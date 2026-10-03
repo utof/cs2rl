@@ -133,6 +133,99 @@ def test_deleted_destination_after_a_root_move_is_stale(demo_repo):
         train_bc.check_demo_sha(sha)
 
 
+def test_staged_root_move_then_unstaged_delete_is_stale(demo_repo):
+    """Cached rename roots must expose a deleted destination before any commit."""
+    root, git, write = demo_repo
+    old = "old_env/dynamics.c"
+    new = C_ROOT + "/dynamics.c"
+    write(old, "int value = 1;\n")
+    sha = _record(git)
+    (root / "src/cs2rl/env").mkdir(parents=True)
+    git("mv", "old_env", "src/cs2rl/env/c")
+    (root / new).unlink()
+    cached = git("diff", "--cached", "--raw", "-z", "--find-renames=1%", sha, "--")
+    working = git("diff", "--raw", "-z", "--find-renames=1%", sha, "--")
+    assert cached.split("\0")[0].rsplit(" ", 1)[-1] == "R100", cached
+    assert cached.split("\0")[1:3] == [old, new], cached
+    assert working.split("\0")[0].rsplit(" ", 1)[-1] == "D", working
+    assert working.split("\0")[1:2] == [old], working
+    assert git("status", "--porcelain").startswith("RD ")
+    with pytest.raises(ValueError, match="STALE DEMO"):
+        train_bc.check_demo_sha(sha)
+
+
+@pytest.mark.parametrize("path,original,indexed", [
+    ("src/cs2rl/env/map.py", b"VALUE = 1\n", b"VALUE = 2\n"),
+    (C_ROOT + "/dynamics.c", b"int value = 1;\n", b"int value = 2;\n"),
+    (C_ROOT + "/dynamics.c", b"int value = 1;\n", b"int value = 1;\n\n"),
+    (C_ROOT + "/asset.dat", b"\xff\x01\n", b"\xff\x02\n"),
+])
+def test_index_edits_are_stale_when_working_bytes_are_restored(demo_repo, path, original, indexed):
+    """MM can hide staged Python code or exact non-Python edits in the working diff."""
+    root, git, write = demo_repo
+    target = write(path, "")
+    target.write_bytes(original)
+    sha = _record(git)
+    target.write_bytes(indexed)
+    git("add", path)
+    target.write_bytes(original)
+    assert git("status", "--porcelain") == "MM " + path
+    assert git("diff", "--raw", "-z", sha, "--") == ""
+    cached = git("diff", "--cached", "--raw", "-z", sha, "--")
+    assert cached.split("\0")[0].rsplit(" ", 1)[-1] == "M", cached
+    assert cached.split("\0")[1:2] == [path], cached
+    actual_index = subprocess.run(["git", "show", ":" + path],
+                                  cwd=root,
+                                  check=True,
+                                  capture_output=True).stdout
+    assert actual_index == indexed and target.read_bytes() == original
+    with pytest.raises(ValueError, match="STALE DEMO"):
+        train_bc.check_demo_sha(sha)
+
+
+@pytest.mark.parametrize("mutation", ["docstrings", "python-move", "c-move", "binary-move"])
+def test_index_documentation_and_pure_moves_are_current(demo_repo, mutation):
+    """Index blob comparisons apply normalization without rejecting staged moves."""
+    root, git, write = demo_repo
+    source = '"""Old documentation."""\nVALUE = 1\n'
+    old = "src/cs2rl/env/map.py" if mutation == "docstrings" else "old_env/member.py"
+    if mutation == "c-move":
+        old = "old_env/member.c"
+        source = "int value = 1;\n"
+    elif mutation == "binary-move":
+        old = "old_env/member.dat"
+    target = write(old, source)
+    source_bytes = source.encode()
+    if mutation == "binary-move":
+        source_bytes = b"\xff\x01\n"
+        target.write_bytes(source_bytes)
+    sha = _record(git)
+    if mutation == "docstrings":
+        write(old, source.replace("Old", "New"))
+        git("add", old)
+        target.write_text(source)
+        new = old
+        expected_index = source.replace("Old", "New").encode()
+        assert git("status", "--porcelain") == "MM " + old
+        assert git("diff", "--raw", "-z", sha, "--") == ""
+    else:
+        (root / "src/cs2rl/env").mkdir(parents=True)
+        git("mv", "old_env", "src/cs2rl/env/c")
+        new = C_ROOT + "/" + target.name
+        expected_index = source_bytes
+    cached = git("diff", "--cached", "--raw", "-z", "--find-renames=1%", sha, "--")
+    status = cached.split("\0")[0].rsplit(" ", 1)[-1]
+    assert status == ("M" if mutation == "docstrings" else "R100"), cached
+    assert cached.split("\0")[1:3] == ([old, new] if status == "R100" else [old, ""])
+    actual_index = subprocess.run(["git", "show", ":" + new],
+                                  cwd=root,
+                                  check=True,
+                                  capture_output=True).stdout
+    assert actual_index == expected_index
+    assert (root / new).read_bytes() == source_bytes
+    assert train_bc.check_demo_sha(sha) is None
+
+
 @pytest.mark.parametrize("state", ["commit", "index", "working"])
 def test_python_documentation_edits_are_current(demo_repo, state):
     """Only AST docstring positions are ignored; runtime string literals are retained."""
